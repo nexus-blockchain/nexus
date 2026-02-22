@@ -48,6 +48,7 @@ pub mod pallet {
     use pallet_entity_common::{GovernanceMode, EntityProvider, EntityTokenProvider, ShopProvider, TokenType};
     use pallet_entity_commission::{CommissionProvider, MemberProvider};
     use sp_runtime::traits::{Saturating, Zero};
+    use sp_runtime::SaturatedConversion;
 
     // ==================== 类型定义 ====================
 
@@ -451,6 +452,14 @@ pub mod pallet {
         /// 委员会最大成员数
         #[pallet::constant]
         type MaxCommitteeSize: Get<u32>;
+
+        /// 时间加权：达到最大乘数所需的持有区块数（0 = 禁用时间加权）
+        #[pallet::constant]
+        type TimeWeightFullPeriod: Get<BlockNumberFor<Self>>;
+
+        /// 时间加权：最大投票权乘数（万分比，10000 = 1x 无加成，30000 = 3x）
+        #[pallet::constant]
+        type TimeWeightMaxMultiplier: Get<u32>;
     }
 
     #[pallet::pallet]
@@ -1244,16 +1253,46 @@ pub mod pallet {
         }
 
         /// 计算投票权重（时间加权）
+        ///
+        /// 公式: voting_power = balance * multiplier / 10000
+        /// 其中 multiplier = 10000 + min(holding_blocks * bonus_range / full_period, bonus_range)
+        /// bonus_range = max_multiplier - 10000
+        ///
+        /// 当 TimeWeightFullPeriod == 0 时，禁用时间加权，直接返回余额。
         pub fn calculate_voting_power(shop_id: u64, holder: &T::AccountId) -> BalanceOf<T> {
             let balance = T::TokenProvider::token_balance(shop_id, holder);
-            
+
             if balance.is_zero() {
                 return Zero::zero();
             }
 
-            // 简单实现：直接返回余额
-            // TODO: 实现时间加权
-            balance
+            let full_period: u128 = T::TimeWeightFullPeriod::get().saturated_into();
+            let max_multiplier: u128 = T::TimeWeightMaxMultiplier::get().into();
+
+            // 禁用时间加权或配置无效时直接返回余额
+            if full_period == 0 || max_multiplier <= 10000 {
+                return balance;
+            }
+
+            let now: u128 = <frame_system::Pallet<T>>::block_number().saturated_into();
+
+            // 未记录首次持有时间的用户按 1x 计算
+            let multiplier: u128 = match FirstHoldTime::<T>::get(shop_id, holder) {
+                Some(first_hold) => {
+                    let first_hold_u128: u128 = first_hold.saturated_into();
+                    let holding_blocks = now.saturating_sub(first_hold_u128);
+                    let bonus_range = max_multiplier.saturating_sub(10000);
+                    let bonus = holding_blocks
+                        .saturating_mul(bonus_range)
+                        / full_period;
+                    10000u128.saturating_add(bonus.min(bonus_range))
+                }
+                None => 10000u128,
+            };
+
+            let balance_u128: u128 = balance.into();
+            let weighted = balance_u128.saturating_mul(multiplier) / 10000u128;
+            weighted.into()
         }
 
         /// 从活跃提案列表移除，并清理投票权快照

@@ -73,7 +73,7 @@ pallet-entity-kyc = { workspace = true }
 pallet-entity-tokensale = { workspace = true }
 # GroupRobot pallets
 pallet-grouprobot-primitives = { workspace = true }
-pallet-grouprobot-registry = { workspace = true }
+pallet-grouprobot-registry = { workspace = true, features = ["dcap-verify"] }
 pallet-grouprobot-consensus = { workspace = true }
 pallet-grouprobot-community = { workspace = true }
 pallet-grouprobot-ceremony = { workspace = true }

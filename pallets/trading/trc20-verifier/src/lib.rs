@@ -530,9 +530,25 @@ fn parse_tron_response(
     result.expected_amount = Some(expected_amount);
 
     // 检查是否包含成功状态
+    // ⚠️ 安全说明 (H4/H5): 字符串包含匹配在 OCW 安全边界内可接受，
+    // 但需注意恶意 API 端点可能注入匹配字符串。生产环境应限制可信端点。
     if !response_str.contains("\"contractRet\":\"SUCCESS\"")
         && !response_str.contains("\"contractRet\": \"SUCCESS\"") {
         result.error = Some(b"Transaction not successful".to_vec());
+        return Ok(result);
+    }
+
+    // 🆕 M6修复: 验证 USDT 合约地址，防止其他 TRC20 代币交易冒充
+    if !response_str.contains(USDT_CONTRACT) {
+        result.error = Some(b"Not a USDT TRC20 transaction".to_vec());
+        return Ok(result);
+    }
+
+    // 🆕 L1修复: 检查确认数
+    let confirmations = extract_confirmations(response_str).unwrap_or(0);
+    result.confirmations = confirmations;
+    if confirmations < MIN_CONFIRMATIONS {
+        result.error = Some(b"Insufficient confirmations".to_vec());
         return Ok(result);
     }
 
@@ -601,6 +617,27 @@ fn parse_tron_response(
     result.is_valid = true;
 
     Ok(result)
+}
+
+/// 🆕 L1: 从响应中提取确认数
+fn extract_confirmations(response: &str) -> Option<u32> {
+    let patterns = ["\"confirmations\":", "\"confirmations\": "];
+
+    for pattern in patterns {
+        if let Some(start) = response.find(pattern) {
+            let after_key = &response[start + pattern.len()..];
+            let trimmed = after_key.trim_start();
+            let num_str: String = trimmed.chars()
+                .take_while(|c| c.is_numeric())
+                .collect();
+            if !num_str.is_empty() {
+                if let Ok(count) = num_str.parse::<u32>() {
+                    return Some(count);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// 从响应中提取金额

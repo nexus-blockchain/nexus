@@ -50,7 +50,7 @@ pub mod pallet {
     }
 
     /// 多级分销配置
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     #[scale_info(skip_type_params(MaxLevels))]
     pub struct MultiLevelConfig<MaxLevels: Get<u32>> {
         pub levels: BoundedVec<MultiLevelTier, MaxLevels>,
@@ -102,7 +102,7 @@ pub mod pallet {
     }
 
     /// 推荐链返佣总配置（per-shop）
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     #[scale_info(skip_type_params(MaxLevels))]
     pub struct ReferralConfig<Balance, MaxLevels: Get<u32>> {
         pub direct_reward: DirectRewardConfig,
@@ -183,13 +183,13 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// 设置直推奖励配置
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(20_000, 0))]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_direct_reward_config(
             origin: OriginFor<T>,
             shop_id: u64,
             rate: u16,
         ) -> DispatchResult {
-            let _who = ensure_signed(origin)?;
+            ensure_root(origin)?;
             ensure!(rate <= 10000, Error::<T>::InvalidRate);
 
             ReferralConfigs::<T>::mutate(shop_id, |maybe| {
@@ -203,14 +203,14 @@ pub mod pallet {
 
         /// 设置多级分销配置
         #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(25_000, 0))]
+        #[pallet::weight(Weight::from_parts(45_000_000, 4_000))]
         pub fn set_multi_level_config(
             origin: OriginFor<T>,
             shop_id: u64,
             levels: BoundedVec<MultiLevelTier, T::MaxMultiLevels>,
             max_total_rate: u16,
         ) -> DispatchResult {
-            let _who = ensure_signed(origin)?;
+            ensure_root(origin)?;
             for tier in levels.iter() {
                 ensure!(tier.rate <= 10000, Error::<T>::InvalidRate);
             }
@@ -227,13 +227,13 @@ pub mod pallet {
 
         /// 设置固定金额配置
         #[pallet::call_index(2)]
-        #[pallet::weight(Weight::from_parts(20_000, 0))]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_fixed_amount_config(
             origin: OriginFor<T>,
             shop_id: u64,
             amount: BalanceOf<T>,
         ) -> DispatchResult {
-            let _who = ensure_signed(origin)?;
+            ensure_root(origin)?;
 
             ReferralConfigs::<T>::mutate(shop_id, |maybe| {
                 let config = maybe.get_or_insert_with(ReferralConfig::default);
@@ -246,7 +246,7 @@ pub mod pallet {
 
         /// 设置首单奖励配置
         #[pallet::call_index(3)]
-        #[pallet::weight(Weight::from_parts(20_000, 0))]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_first_order_config(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -254,7 +254,7 @@ pub mod pallet {
             rate: u16,
             use_amount: bool,
         ) -> DispatchResult {
-            let _who = ensure_signed(origin)?;
+            ensure_root(origin)?;
 
             ReferralConfigs::<T>::mutate(shop_id, |maybe| {
                 let config = maybe.get_or_insert_with(ReferralConfig::default);
@@ -267,14 +267,14 @@ pub mod pallet {
 
         /// 设置复购奖励配置
         #[pallet::call_index(4)]
-        #[pallet::weight(Weight::from_parts(20_000, 0))]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_repeat_purchase_config(
             origin: OriginFor<T>,
             shop_id: u64,
             rate: u16,
             min_orders: u32,
         ) -> DispatchResult {
-            let _who = ensure_signed(origin)?;
+            ensure_root(origin)?;
 
             ReferralConfigs::<T>::mutate(shop_id, |maybe| {
                 let config = maybe.get_or_insert_with(ReferralConfig::default);

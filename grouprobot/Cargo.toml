@@ -51,8 +51,9 @@ anyhow = "1.0"
 # Environment
 dotenvy = "0.15"
 
-# Hex
+# Hex + Base64
 hex = "0.4"
+base64 = "0.22"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }

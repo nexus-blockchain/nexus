@@ -297,6 +297,7 @@ docker run -p 9944:9944 -p 30333:30333 nexus-node --dev --rpc-external
 | Discord 群管设计 | `docs/NEXUS_DISCORD_GROUP_MANAGEMENT.md` | Discord 平台适配设计 |
 | 节点奖励设计 | `docs/NEXUS_NODE_REWARD_DESIGN.md` | 订阅费+通胀混合奖励模型 |
 | 社区积分治理 | `docs/COMMUNITY_POINTS_GOVERNANCE.md` | CRM + 积分系统设计 |
+| **Pallet 安全审计** | `docs/PALLET_AUDIT_REPORT.md` | Entity + Commission 全面安全审计报告 |
 | Agent 威胁模型 | `docs/AGENT_THREAT_MODEL.md` | 安全威胁分析与对策 |
 | AI 自主运行 | `docs/AI_AUTONOMOUS_OPERATION.md` | AI 驱动的自动化运维方案 |
 | 前端技术栈 | `docs/TECH_STACK.md` | 前端技术选型 |

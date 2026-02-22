@@ -1,7 +1,7 @@
 //! 代币发售模块测试
 
 use crate::{mock::*, pallet::*};
-use frame_support::{assert_noop, assert_ok};
+use frame_support::{assert_noop, assert_ok, BoundedVec};
 use frame_system::RawOrigin;
 
 /// 创建标准发售轮次的辅助函数
@@ -218,7 +218,7 @@ fn whitelist_uses_separate_storage() {
         let round_id = setup_round();
         assert_ok!(EntityTokenSale::add_to_whitelist(
             RuntimeOrigin::signed(CREATOR), round_id,
-            vec![BUYER, BUYER2],
+            BoundedVec::try_from(vec![BUYER, BUYER2]).unwrap(),
         ));
         assert!(RoundWhitelist::<Test>::get(round_id, BUYER));
         assert!(RoundWhitelist::<Test>::get(round_id, BUYER2));
@@ -226,7 +226,8 @@ fn whitelist_uses_separate_storage() {
 
         // 重复添加不增加计数
         assert_ok!(EntityTokenSale::add_to_whitelist(
-            RuntimeOrigin::signed(CREATOR), round_id, vec![BUYER],
+            RuntimeOrigin::signed(CREATOR), round_id,
+            BoundedVec::try_from(vec![BUYER]).unwrap(),
         ));
         assert_eq!(WhitelistCount::<Test>::get(round_id), 2);
     });
@@ -238,7 +239,8 @@ fn whitelist_rejects_non_not_started() {
         let round_id = setup_active_round();
         assert_noop!(
             EntityTokenSale::add_to_whitelist(
-                RuntimeOrigin::signed(CREATOR), round_id, vec![BUYER],
+                RuntimeOrigin::signed(CREATOR), round_id,
+                BoundedVec::try_from(vec![BUYER]).unwrap(),
             ),
             Error::<Test>::InvalidRoundStatus
         );
@@ -374,7 +376,8 @@ fn subscribe_checks_whitelist() {
         ));
         // 只添加 BUYER 到白名单
         assert_ok!(EntityTokenSale::add_to_whitelist(
-            RuntimeOrigin::signed(CREATOR), 0, vec![BUYER],
+            RuntimeOrigin::signed(CREATOR), 0,
+            BoundedVec::try_from(vec![BUYER]).unwrap(),
         ));
         assert_ok!(EntityTokenSale::start_sale(RuntimeOrigin::signed(CREATOR), 0));
         frame_system::Pallet::<Test>::set_block_number(10);
@@ -399,6 +402,8 @@ fn end_sale_releases_unsold_tokens() {
         assert_ok!(EntityTokenSale::subscribe(
             RuntimeOrigin::signed(BUYER), round_id, 100u128, None,
         ));
+        // H2-audit: 须在 end_block 之后才能结束
+        frame_system::Pallet::<Test>::set_block_number(101);
         assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
         let round = SaleRounds::<Test>::get(round_id).unwrap();
         assert_eq!(round.status, RoundStatus::Ended);
@@ -415,6 +420,7 @@ fn claim_tokens_distributes_entity_tokens() {
         assert_ok!(EntityTokenSale::subscribe(
             RuntimeOrigin::signed(BUYER), round_id, 100u128, None,
         ));
+        frame_system::Pallet::<Test>::set_block_number(101);
         assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
 
         // claim（无锁仓 → 全额解锁）
@@ -430,6 +436,7 @@ fn claim_tokens_rejects_double_claim() {
     new_test_ext().execute_with(|| {
         let round_id = setup_active_round();
         assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+        frame_system::Pallet::<Test>::set_block_number(101);
         assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
         assert_ok!(EntityTokenSale::claim_tokens(RuntimeOrigin::signed(BUYER), round_id));
         assert_noop!(
@@ -491,6 +498,7 @@ fn withdraw_funds_works() {
     new_test_ext().execute_with(|| {
         let round_id = setup_active_round();
         assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+        frame_system::Pallet::<Test>::set_block_number(101);
         assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
 
         let entity_before = Balances::free_balance(ENTITY_ACCOUNT);
@@ -561,5 +569,152 @@ fn subscribe_rejects_overflow() {
             EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), 0, 1000u128, None),
             Error::<Test>::ArithmeticOverflow
         );
+    });
+}
+
+// ==================== H2-audit: end_sale time window enforcement ====================
+
+#[test]
+fn end_sale_rejects_premature_end() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        // block=10, end_block=100, remaining > 0 → 不允许提前结束
+        assert_noop!(
+            EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id),
+            Error::<Test>::SaleNotInTimeWindow
+        );
+    });
+}
+
+#[test]
+fn end_sale_allows_when_sold_out() {
+    new_test_ext().execute_with(|| {
+        // 创建供应量为 100 的轮次
+        assert_ok!(EntityTokenSale::create_sale_round(
+            RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+            SaleMode::FixedPrice, 100u128,
+            10u64.into(), 100u64.into(), false, 0,
+        ));
+        assert_ok!(EntityTokenSale::add_payment_option(
+            RuntimeOrigin::signed(CREATOR), 0, None, 1u128, 100u128, 100u128,
+        ));
+        assert_ok!(EntityTokenSale::start_sale(RuntimeOrigin::signed(CREATOR), 0));
+        frame_system::Pallet::<Test>::set_block_number(10);
+
+        // 买光所有代币
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), 0, 100u128, None));
+        let round = SaleRounds::<Test>::get(0).unwrap();
+        assert_eq!(round.remaining_amount, 0u128);
+
+        // 未到 end_block 但已售罄 → 允许结束
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), 0));
+        let round = SaleRounds::<Test>::get(0).unwrap();
+        assert_eq!(round.status, RoundStatus::Ended);
+    });
+}
+
+#[test]
+fn end_sale_allows_after_end_block() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        // 推进到 end_block 之后
+        frame_system::Pallet::<Test>::set_block_number(101);
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.status, RoundStatus::Ended);
+    });
+}
+
+// ==================== M1-audit: cliff vesting with unlock_interval ====================
+
+#[test]
+fn cliff_vesting_unlock_interval_step_function() {
+    new_test_ext().execute_with(|| {
+        // 直接测试 calculate_unlockable 的阶梯解锁逻辑
+        let vesting = VestingConfig {
+            vesting_type: VestingType::Cliff,
+            initial_unlock_bps: 2000, // 20%
+            cliff_duration: 100u64,
+            total_duration: 1000u64,
+            unlock_interval: 200u64,
+        };
+        let total = 1_000_000u128;
+        let start = 10u64;
+
+        // 在 cliff 之前 → 报错
+        let result = crate::pallet::Pallet::<Test>::calculate_unlockable(
+            &vesting, total, 0u128, start, 50u64,
+        );
+        assert!(result.is_err());
+
+        // cliff 刚过 (elapsed=0 from cliff_end) → 只有初始解锁 200_000
+        let result = crate::pallet::Pallet::<Test>::calculate_unlockable(
+            &vesting, total, 200_000u128, start, 110u64,
+        ).unwrap();
+        // elapsed = 110 - 110 = 0, effective_elapsed = 0 → vesting_unlocked = 0
+        assert_eq!(result, 0u128);
+
+        // elapsed = 150 blocks from cliff_end (< interval 200) → effective_elapsed = 0
+        let result = crate::pallet::Pallet::<Test>::calculate_unlockable(
+            &vesting, total, 200_000u128, start, 260u64,
+        ).unwrap();
+        // elapsed = 260 - 110 = 150, interval=200 → 150/200=0 steps → effective=0
+        assert_eq!(result, 0u128);
+
+        // elapsed = 200 blocks → 1 step → effective_elapsed = 200
+        // vesting_duration = 1000 - 100 = 900
+        // vesting_amount = 1_000_000 * 8000 / 10000 = 800_000
+        // unlocked = 800_000 * 200 / 900 = 177_777
+        let result = crate::pallet::Pallet::<Test>::calculate_unlockable(
+            &vesting, total, 200_000u128, start, 310u64,
+        ).unwrap();
+        // elapsed = 310 - 110 = 200, interval=200 → 1 step → effective=200
+        // total_unlockable = 200_000 + 177_777 = 377_777
+        // unlockable = 377_777 - 200_000 = 177_777
+        assert_eq!(result, 177_777u128);
+
+        // elapsed = 350 blocks → still 1 step (350/200=1)
+        let result = crate::pallet::Pallet::<Test>::calculate_unlockable(
+            &vesting, total, 200_000u128, start, 460u64,
+        ).unwrap();
+        // elapsed = 460 - 110 = 350, interval=200 → 1 step → effective=200
+        assert_eq!(result, 177_777u128);
+
+        // elapsed = 400 blocks → 2 steps → effective=400
+        let result = crate::pallet::Pallet::<Test>::calculate_unlockable(
+            &vesting, total, 200_000u128, start, 510u64,
+        ).unwrap();
+        // elapsed = 510 - 110 = 400, 400/200=2 → effective=400
+        // unlocked = 800_000 * 400 / 900 = 355_555
+        // total_unlockable = 200_000 + 355_555 = 555_555
+        // result = 555_555 - 200_000 = 355_555
+        assert_eq!(result, 355_555u128);
+    });
+}
+
+#[test]
+fn linear_vesting_continuous_unlock() {
+    new_test_ext().execute_with(|| {
+        let vesting = VestingConfig {
+            vesting_type: VestingType::Linear,
+            initial_unlock_bps: 1000, // 10%
+            cliff_duration: 50u64,
+            total_duration: 500u64,
+            unlock_interval: 100u64, // 不影响 Linear 类型
+        };
+        let total = 1_000_000u128;
+        let start = 0u64;
+
+        // elapsed = 100 from cliff_end (block 50+100=150)
+        let result = crate::pallet::Pallet::<Test>::calculate_unlockable(
+            &vesting, total, 100_000u128, start, 150u64,
+        ).unwrap();
+        // vesting_duration = 500 - 50 = 450
+        // vesting_amount = 1_000_000 * 9000 / 10000 = 900_000
+        // elapsed = 150 - 50 = 100
+        // unlocked_vesting = 900_000 * 100 / 450 = 200_000
+        // total = 100_000 + 200_000 = 300_000
+        // result = 300_000 - 100_000 = 200_000
+        assert_eq!(result, 200_000u128);
     });
 }

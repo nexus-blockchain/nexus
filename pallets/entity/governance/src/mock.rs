@@ -187,6 +187,8 @@ parameter_types! {
     pub const PassThreshold: u8 = 50;
     pub const QuorumThreshold: u8 = 10;
     pub const MinProposalThreshold: u16 = 100; // 1%
+    pub const TimeWeightFullPeriod: u64 = 1000; // 1000 blocks to reach max multiplier
+    pub const TimeWeightMaxMultiplier: u32 = 30000; // 3x max voting power
 }
 
 impl pallet_entity_governance::Config for Test {
@@ -205,6 +207,8 @@ impl pallet_entity_governance::Config for Test {
     type MaxCidLength = ConstU32<64>;
     type MaxActiveProposals = ConstU32<10>;
     type MaxCommitteeSize = ConstU32<10>;
+    type TimeWeightFullPeriod = TimeWeightFullPeriod;
+    type TimeWeightMaxMultiplier = TimeWeightMaxMultiplier;
 }
 
 // ==================== 构建器 ====================

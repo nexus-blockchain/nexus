@@ -166,6 +166,7 @@ sp-std = { version = "14.0.0", default-features = false }
 log = { version = "0.4.22", default-features = false }
 lite-json = { version = "0.2", default-features = false }
 serde = { version = "1.0.215", default-features = false, features = ["derive"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 
 [profile.release]
 opt-level = 3

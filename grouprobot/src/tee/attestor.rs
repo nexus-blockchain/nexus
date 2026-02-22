@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use base64::Engine;
 use sha2::{Sha256, Digest};
 use tracing::{info, warn};
 
@@ -86,7 +87,19 @@ impl Attestor {
         let mrtd = Self::extract_mrtd(&tdx_quote);
         let mrenclave = Self::extract_mrenclave(&sgx_quote);
 
-        info!("硬件双证明生成成功 (nonce={})", nonce.is_some());
+        // Level 4: 从 Quote 尾部提取证书链 (PEM→DER)
+        let (pck_cert_der, intermediate_cert_der) = match Self::extract_cert_chain_from_quote(&tdx_quote) {
+            Ok((pck, inter)) => {
+                info!(pck_len = pck.len(), inter_len = inter.len(), "证书链提取成功 (Level 4 就绪)");
+                (Some(pck), Some(inter))
+            }
+            Err(e) => {
+                warn!(error = %e, "证书链提取失败, 将降级到 Level 1");
+                (None, None)
+            }
+        };
+
+        info!("硬件双证明生成成功 (nonce={}, level4={})", nonce.is_some(), pck_cert_der.is_some());
 
         Ok(AttestationBundle {
             tdx_quote_hash,
@@ -96,6 +109,8 @@ impl Attestor {
             is_simulated: false,
             tdx_quote_raw: Some(tdx_quote),
             nonce,
+            pck_cert_der,
+            intermediate_cert_der,
         })
     }
 
@@ -127,6 +142,8 @@ impl Attestor {
             is_simulated: true,
             tdx_quote_raw: None,
             nonce: None,
+            pck_cert_der: None,
+            intermediate_cert_der: None,
         }
     }
 
@@ -163,6 +180,90 @@ impl Attestor {
             mrtd.copy_from_slice(&tdx_quote[184..232]);
         }
         mrtd
+    }
+
+    /// 从 TDX Quote v4 尾部提取 Certification Data 中的 PEM 证书链
+    ///
+    /// Quote 结构 (QE Auth Data 之后):
+    /// ```text
+    /// [QE Auth Len: 2] [QE Auth Data: variable]
+    /// [CertDataType: 2 LE] [CertDataSize: 4 LE] [CertData: variable]
+    /// ```
+    /// CertDataType=5 → CertData 是 PEM 拼接的证书链:
+    /// PCK Cert + Intermediate CA + (可选) Root CA
+    fn extract_cert_chain_from_quote(raw: &[u8]) -> BotResult<(Vec<u8>, Vec<u8>)> {
+        // QE Auth Data 偏移量 (与 pallet dcap.rs 一致)
+        const QE_AUTH_LEN_OFFSET: usize = 1212;
+
+        if raw.len() < QE_AUTH_LEN_OFFSET + 2 {
+            return Err(BotError::AttestationFailed("quote too short for QE auth".into()));
+        }
+
+        let qe_auth_len = u16::from_le_bytes([raw[QE_AUTH_LEN_OFFSET], raw[QE_AUTH_LEN_OFFSET + 1]]) as usize;
+        let cert_data_start = QE_AUTH_LEN_OFFSET + 2 + qe_auth_len;
+
+        // CertDataType (2) + CertDataSize (4) = 6 bytes header
+        if raw.len() < cert_data_start + 6 {
+            return Err(BotError::AttestationFailed("quote too short for cert data header".into()));
+        }
+
+        let cert_data_type = u16::from_le_bytes([raw[cert_data_start], raw[cert_data_start + 1]]);
+        let cert_data_size = u32::from_le_bytes([
+            raw[cert_data_start + 2], raw[cert_data_start + 3],
+            raw[cert_data_start + 4], raw[cert_data_start + 5],
+        ]) as usize;
+
+        if cert_data_type != 5 {
+            return Err(BotError::AttestationFailed(
+                format!("unsupported CertDataType: {} (expected 5=PEM chain)", cert_data_type)
+            ));
+        }
+
+        let cert_data_end = cert_data_start + 6 + cert_data_size;
+        if raw.len() < cert_data_end {
+            return Err(BotError::AttestationFailed("cert data truncated".into()));
+        }
+
+        let pem_chain = std::str::from_utf8(&raw[cert_data_start + 6..cert_data_end])
+            .map_err(|_| BotError::AttestationFailed("cert data not valid UTF-8".into()))?;
+
+        // 拆分 PEM 证书: 按 "-----BEGIN CERTIFICATE-----" 分割
+        let certs_der = Self::split_pem_to_der(pem_chain)?;
+
+        if certs_der.len() < 2 {
+            return Err(BotError::AttestationFailed(
+                format!("expected ≥2 certs in chain, got {}", certs_der.len())
+            ));
+        }
+
+        // 顺序: certs_der[0]=PCK, certs_der[1]=Intermediate CA, [2]=Root CA(可选)
+        Ok((certs_der[0].clone(), certs_der[1].clone()))
+    }
+
+    /// 将 PEM 拼接的证书链拆分并逐个转换为 DER
+    fn split_pem_to_der(pem_chain: &str) -> BotResult<Vec<Vec<u8>>> {
+        let mut certs = Vec::new();
+        let mut in_cert = false;
+        let mut b64_buf = String::new();
+
+        for line in pem_chain.lines() {
+            let trimmed = line.trim();
+            if trimmed == "-----BEGIN CERTIFICATE-----" {
+                in_cert = true;
+                b64_buf.clear();
+            } else if trimmed == "-----END CERTIFICATE-----" {
+                in_cert = false;
+                let der = base64::engine::general_purpose::STANDARD.decode(&b64_buf)
+                    .map_err(|e| BotError::AttestationFailed(
+                        format!("PEM base64 decode failed: {}", e)
+                    ))?;
+                certs.push(der);
+            } else if in_cert {
+                b64_buf.push_str(trimmed);
+            }
+        }
+
+        Ok(certs)
     }
 
     fn extract_mrenclave(sgx_quote: &[u8]) -> [u8; 32] {

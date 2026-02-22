@@ -84,6 +84,45 @@ impl ChainClient {
         self.submit_and_watch(tx, "submit_verified_attestation").await
     }
 
+    /// 提交 DCAP Level 4 全证书链证明 (硬件模式, 最高安全级别)
+    ///
+    /// 链上验证: Intel Root CA → Intermediate CA → PCK → QE Report → AK → Body
+    /// 4 层 ECDSA P-256 签名全部验证, 不依赖治理注册
+    pub async fn submit_dcap_full_attestation(
+        &self,
+        bot_id_hash: [u8; 32],
+        bundle: &AttestationBundle,
+    ) -> BotResult<()> {
+        let tdx_quote_raw = bundle.tdx_quote_raw.as_ref().ok_or_else(|| {
+            BotError::AttestationFailed("tdx_quote_raw required for Level 4".into())
+        })?;
+        let pck_cert_der = bundle.pck_cert_der.as_ref().ok_or_else(|| {
+            BotError::AttestationFailed("pck_cert_der required for Level 4".into())
+        })?;
+        let intermediate_cert_der = bundle.intermediate_cert_der.as_ref().ok_or_else(|| {
+            BotError::AttestationFailed("intermediate_cert_der required for Level 4".into())
+        })?;
+
+        let mrenclave_val = if bundle.mrenclave == [0u8; 32] {
+            Value::unnamed_variant("None", vec![])
+        } else {
+            Value::unnamed_variant("Some", vec![Value::from_bytes(bundle.mrenclave)])
+        };
+
+        let tx = subxt::dynamic::tx(
+            "GroupRobotRegistry", "submit_dcap_full_attestation",
+            vec![
+                Value::from_bytes(bot_id_hash),
+                Value::from_bytes(tdx_quote_raw),
+                Value::from_bytes(pck_cert_der),
+                Value::from_bytes(intermediate_cert_der),
+                mrenclave_val,
+            ],
+        );
+
+        self.submit_and_watch(tx, "submit_dcap_full_attestation").await
+    }
+
     /// 请求证明 Nonce (防重放, 硬件模式专用)
     ///
     /// 返回的 nonce 必须嵌入 TDX report_data[32..64]

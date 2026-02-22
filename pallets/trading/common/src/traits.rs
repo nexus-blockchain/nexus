@@ -322,12 +322,13 @@ where
         // 尝试使用实时汇率计算
         if let Some(rate) = P::get_cos_to_usd_rate() {
             if rate > Balance::zero() {
-                // nex_amount = usd_amount * 10^18 / rate
+                // 🆕 M7修复: NEX 精度为 10^12（UNIT = 1_000_000_000_000）
+                // nex_amount = usd_amount * 10^12 / rate
                 // 其中 usd_amount 精度 10^6，rate 精度 10^6
-                // 结果精度 10^18（NEX 标准精度）
+                // 结果精度 10^12（NEX 标准精度）
                 let usd_u128 = usd_amount as u128;
                 let rate_u128: u128 = rate.into();
-                let cos_precision: u128 = 1_000_000_000_000_000_000u128; // 10^18
+                let cos_precision: u128 = 1_000_000_000_000u128; // 10^12
                 let nex_amount_u128 = usd_u128.saturating_mul(cos_precision) / rate_u128;
                 
                 if let Ok(amount) = Balance::try_from(nex_amount_u128) {
@@ -398,12 +399,13 @@ mod tests {
         
         // 5 USDT = 5_000_000 (精度 10^6)
         // rate = 100_000 (0.1 USD/NEX)
-        // 预期: 5_000_000 * 10^18 / 100_000 = 50 * 10^18 = 50 NEX
+        // 🆕 M7修复: 精度 10^12
+        // 预期: 5_000_000 * 10^12 / 100_000 = 50 * 10^12 = 50 NEX
         let usd_amount: u64 = 5_000_000;
-        let fallback: u128 = 10_000_000_000_000_000_000; // 10 NEX
+        let fallback: u128 = 10_000_000_000_000; // 10 NEX (10^13)
         
         let result = Calculator::calculate_deposit(usd_amount, fallback);
-        let expected: u128 = 50_000_000_000_000_000_000; // 50 NEX
+        let expected: u128 = 50_000_000_000_000; // 50 NEX (50 * 10^12)
         assert_eq!(result, expected);
     }
 
@@ -412,7 +414,7 @@ mod tests {
         type Calculator = DepositCalculatorImpl<NoPricePricingProvider, u128>;
         
         let usd_amount: u64 = 5_000_000;
-        let fallback: u128 = 10_000_000_000_000_000_000;
+        let fallback: u128 = 10_000_000_000_000; // 10 NEX
         
         let result = Calculator::calculate_deposit(usd_amount, fallback);
         assert_eq!(result, fallback);
@@ -423,7 +425,7 @@ mod tests {
         type Calculator = DepositCalculatorImpl<ZeroPricePricingProvider, u128>;
         
         let usd_amount: u64 = 5_000_000;
-        let fallback: u128 = 10_000_000_000_000_000_000;
+        let fallback: u128 = 10_000_000_000_000; // 10 NEX
         
         let result = Calculator::calculate_deposit(usd_amount, fallback);
         assert_eq!(result, fallback);
@@ -432,7 +434,7 @@ mod tests {
     #[test]
     fn test_deposit_calculator_empty_impl() {
         let usd_amount: u64 = 5_000_000;
-        let fallback: u128 = 10_000_000_000_000_000_000;
+        let fallback: u128 = 10_000_000_000_000; // 10 NEX
         
         let result = <() as DepositCalculator<u128>>::calculate_deposit(usd_amount, fallback);
         assert_eq!(result, fallback);
@@ -442,17 +444,18 @@ mod tests {
     fn test_deposit_calculator_various_amounts() {
         type Calculator = DepositCalculatorImpl<MockPricingProvider, u128>;
         
-        // 1 USDT -> 10 NEX
+        // 🆕 M7修复: NEX 精度 10^12
+        // 1 USDT -> 10 NEX (rate=0.1 USD/NEX)
         let result_1 = Calculator::calculate_deposit(1_000_000, 0);
-        assert_eq!(result_1, 10_000_000_000_000_000_000u128);
+        assert_eq!(result_1, 10_000_000_000_000u128); // 10 * 10^12
         
         // 100 USDT -> 1000 NEX
         let result_100 = Calculator::calculate_deposit(100_000_000, 0);
-        assert_eq!(result_100, 1_000_000_000_000_000_000_000u128);
+        assert_eq!(result_100, 1_000_000_000_000_000u128); // 1000 * 10^12
         
         // 0.01 USDT -> 0.1 NEX
         let result_001 = Calculator::calculate_deposit(10_000, 0);
-        assert_eq!(result_001, 100_000_000_000_000_000u128);
+        assert_eq!(result_001, 100_000_000_000u128); // 0.1 * 10^12
     }
 
     #[test]

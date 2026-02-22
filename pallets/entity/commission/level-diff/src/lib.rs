@@ -55,7 +55,7 @@ pub mod pallet {
     }
 
     /// 自定义等级极差配置
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     #[scale_info(skip_type_params(MaxLevels))]
     pub struct CustomLevelDiffConfig<MaxLevels: Get<u32>> {
         pub level_rates: BoundedVec<u16, MaxLevels>,
@@ -137,7 +137,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// 设置全局等级差价配置
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(20_000, 0))]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_level_diff_config(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -147,7 +147,13 @@ pub mod pallet {
             platinum_rate: u16,
             diamond_rate: u16,
         ) -> DispatchResult {
-            let _who = ensure_signed(origin)?;
+            ensure_root(origin)?;
+
+            ensure!(normal_rate <= 10000, Error::<T>::InvalidRate);
+            ensure!(silver_rate <= 10000, Error::<T>::InvalidRate);
+            ensure!(gold_rate <= 10000, Error::<T>::InvalidRate);
+            ensure!(platinum_rate <= 10000, Error::<T>::InvalidRate);
+            ensure!(diamond_rate <= 10000, Error::<T>::InvalidRate);
 
             LevelDiffConfigs::<T>::insert(shop_id, LevelDiffConfig {
                 normal_rate,
@@ -163,14 +169,14 @@ pub mod pallet {
 
         /// 设置自定义等级极差配置
         #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(25_000, 0))]
+        #[pallet::weight(Weight::from_parts(45_000_000, 4_000))]
         pub fn set_custom_level_diff_config(
             origin: OriginFor<T>,
             shop_id: u64,
             level_rates: BoundedVec<u16, T::MaxCustomLevels>,
             max_depth: u8,
         ) -> DispatchResult {
-            let _who = ensure_signed(origin)?;
+            ensure_root(origin)?;
 
             for rate in level_rates.iter() {
                 ensure!(*rate <= 10000, Error::<T>::InvalidRate);

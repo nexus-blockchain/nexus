@@ -80,7 +80,7 @@ pub mod pallet {
     ///
     /// `voluntary_bonus_rate`: 自愿多复购的奖励加成（万分比），
     /// 超出强制最低线的部分 × bonus_rate 额外计入购物余额。
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     #[scale_info(skip_type_params(MaxLevels))]
     pub struct EntityWithdrawalConfig<MaxLevels: Get<u32>> {
         /// 提现模式
@@ -351,7 +351,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// 设置启用的返佣模式（Entity 级）
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(25_000, 0))]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_commission_modes(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -371,7 +371,7 @@ pub mod pallet {
 
         /// 设置返佣来源和上限（Entity 级）
         #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(20_000, 0))]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_commission_source(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -394,7 +394,7 @@ pub mod pallet {
 
         /// 启用/禁用返佣（Entity 级）
         #[pallet::call_index(2)]
-        #[pallet::weight(Weight::from_parts(15_000, 0))]
+        #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
         pub fn enable_commission(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -421,7 +421,7 @@ pub mod pallet {
         ///   - 目标为非会员：自动注册，推荐人 = 出资人
         ///   - 目标为已有会员：推荐人必须是出资人，否则拒绝
         #[pallet::call_index(3)]
-        #[pallet::weight(Weight::from_parts(35_000, 0))]
+        #[pallet::weight(Weight::from_parts(80_000_000, 6_000))]
         pub fn withdraw_commission(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -526,7 +526,7 @@ pub mod pallet {
 
         /// 设置提现配置（Entity 级，四种模式 + 自愿复购奖励）
         #[pallet::call_index(4)]
-        #[pallet::weight(Weight::from_parts(25_000, 0))]
+        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
         pub fn set_withdrawal_config(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -581,7 +581,7 @@ pub mod pallet {
 
         /// 一键初始化佣金方案（Entity 级）
         #[pallet::call_index(6)]
-        #[pallet::weight(Weight::from_parts(30_000, 0))]
+        #[pallet::weight(Weight::from_parts(60_000_000, 5_000))]
         pub fn init_commission_plan(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -670,7 +670,7 @@ pub mod pallet {
 
         /// 使用购物余额支付（需 Entity owner 授权，由订单流程触发）
         #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(20_000, 0))]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn use_shopping_balance(
             origin: OriginFor<T>,
             shop_id: u64,

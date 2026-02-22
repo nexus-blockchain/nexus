@@ -91,7 +91,7 @@ pub enum CommissionStatus {
 // ============================================================================
 
 /// 返佣记录
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
 pub struct CommissionRecord<AccountId, Balance, BlockNumber> {
     pub entity_id: u64,
     pub shop_id: u64,

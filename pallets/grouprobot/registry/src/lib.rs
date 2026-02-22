@@ -17,6 +17,8 @@ extern crate alloc;
 
 pub use pallet::*;
 
+pub mod dcap;
+
 #[cfg(test)]
 mod mock;
 
@@ -81,6 +83,12 @@ pub struct AttestationRecord<T: Config> {
 	pub is_dual_attestation: bool,
 	/// 证明是否从原始 Quote 验证 (防 MRTD 伪造)
 	pub quote_verified: bool,
+	/// DCAP 验证级别: 0=无, 2=Body签名+AK绑定, 3=+QE Report签名
+	pub dcap_level: u8,
+	/// API Server MRTD (双 Quote 证明, 可选)
+	pub api_server_mrtd: Option<[u8; 48]>,
+	/// API Server Quote 哈希 (双 Quote 证明, 可选)
+	pub api_server_quote_hash: Option<[u8; 32]>,
 }
 
 #[frame_support::pallet]
@@ -164,6 +172,17 @@ pub mod pallet {
 	pub type AttestationNonces<T: Config> =
 		StorageMap<_, Blake2_128Concat, BotIdHash, ([u8; 32], BlockNumberFor<T>)>;
 
+	/// 审批的 API Server MRTD 白名单 (双 Quote 证明)
+	#[pallet::storage]
+	pub type ApprovedApiServerMrtd<T: Config> =
+		StorageMap<_, Blake2_128Concat, [u8; 48], u32>;
+
+	/// 注册的 PCK 公钥: platform_id → (pck_pubkey_64bytes, registered_at_block)
+	/// PCK (Provisioning Certification Key) 用于 DCAP Level 3 验证
+	#[pallet::storage]
+	pub type RegisteredPckKeys<T: Config> =
+		StorageMap<_, Blake2_128Concat, [u8; 32], ([u8; 64], BlockNumberFor<T>)>;
+
 	// ========================================================================
 	// Events
 	// ========================================================================
@@ -186,6 +205,9 @@ pub mod pallet {
 		NonceIssued { bot_id_hash: BotIdHash, nonce: [u8; 32] },
 		MrtdApproved { mrtd: [u8; 48], version: u32 },
 		MrenclaveApproved { mrenclave: [u8; 32], version: u32 },
+		ApiServerMrtdApproved { mrtd: [u8; 48], version: u32 },
+		PckKeyRegistered { platform_id: [u8; 32] },
+		DcapAttestationSubmitted { bot_id_hash: BotIdHash, dcap_level: u8, has_api_server: bool },
 	}
 
 	// ========================================================================
@@ -238,6 +260,28 @@ pub mod pallet {
 		NonceExpired,
 		/// Quote 中的 nonce 与链上存储的不匹配 (疑似重放攻击)
 		NonceMismatch,
+		/// DCAP 验证失败: Quote 结构无效
+		DcapQuoteInvalid,
+		/// DCAP 验证失败: Body ECDSA 签名无效 (Quote 被篡改或伪造)
+		DcapBodySignatureInvalid,
+		/// DCAP 验证失败: Attestation Key 未绑定到 QE Report
+		DcapAkBindingFailed,
+		/// DCAP 验证失败: QE Report 签名无效
+		DcapQeSignatureInvalid,
+		/// PCK 公钥未注册 (DCAP Level 3 需要)
+		PckKeyNotRegistered,
+		/// API Server MRTD 未在白名单中
+		ApiServerMrtdNotApproved,
+		/// API Server MRTD 已在白名单中
+		ApiServerMrtdAlreadyApproved,
+		/// API Server Quote report_data 与 Bot 公钥不匹配
+		ApiServerReportDataMismatch,
+		/// DCAP 证书链验证失败 (DER 解析或签名验证)
+		DcapCertChainInvalid,
+		/// Intel Root CA 签名 Intermediate CA 验证失败
+		DcapRootCaVerificationFailed,
+		/// Intermediate CA 签名 PCK 证书验证失败
+		DcapIntermediateCaVerificationFailed,
 	}
 
 	// ========================================================================
@@ -341,8 +385,14 @@ pub mod pallet {
 				ensure!(bot.owner == who, Error::<T>::NotBotOwner);
 				ensure!(bot.public_key != new_key, Error::<T>::SamePublicKey);
 				bot.public_key = new_key;
+				// H1-fix: 公钥变更后, 旧 attestation 的 report_data 绑定已失效
+				// 必须重置为 StandardNode, 要求重新证明
+				bot.node_type = NodeType::StandardNode;
 				Ok(())
 			})?;
+			// H1-fix: 移除旧的 attestation 记录
+			Attestations::<T>::remove(&bot_id_hash);
+			AttestationNonces::<T>::remove(&bot_id_hash);
 			Self::deposit_event(Event::PublicKeyUpdated { bot_id_hash, new_key });
 			Ok(())
 		}
@@ -459,6 +509,7 @@ pub mod pallet {
 			let who = ensure_signed(origin)?;
 			let mut bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
 			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+			ensure!(bot.status == BotStatus::Active, Error::<T>::BotNotActive);
 
 			// 检查 MRTD 白名单
 			ensure!(ApprovedMrtd::<T>::contains_key(&mrtd), Error::<T>::MrtdNotApproved);
@@ -483,6 +534,9 @@ pub mod pallet {
 				expires_at,
 				is_dual_attestation: is_dual,
 				quote_verified: false,
+				dcap_level: 0,
+				api_server_mrtd: None,
+				api_server_quote_hash: None,
 			};
 
 			Attestations::<T>::insert(&bot_id_hash, record);
@@ -518,6 +572,7 @@ pub mod pallet {
 			let who = ensure_signed(origin)?;
 			let bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
 			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+			ensure!(bot.status == BotStatus::Active, Error::<T>::BotNotActive);
 			ensure!(Attestations::<T>::contains_key(&bot_id_hash), Error::<T>::AttestationNotFound);
 
 			ensure!(ApprovedMrtd::<T>::contains_key(&mrtd), Error::<T>::MrtdNotApproved);
@@ -540,6 +595,9 @@ pub mod pallet {
 				expires_at,
 				is_dual_attestation: is_dual,
 				quote_verified: false,
+				dcap_level: 0,
+				api_server_mrtd: None,
+				api_server_quote_hash: None,
 			};
 			Attestations::<T>::insert(&bot_id_hash, record);
 
@@ -578,7 +636,11 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// 提交经过 Quote 结构验证的 TEE 证明 (硬件节点专用)
+		/// 提交经过 Quote 结构验证的 TEE 证明
+		///
+		/// ⚠️ **安全级别低**: 此 extrinsic 仅解析 Quote 结构 + nonce 绑定,
+		/// **不验证任何 ECDSA 签名**。攻击者可在非 TEE 环境下构造通过验证的 Quote。
+		/// 生产环境应使用 `submit_dcap_attestation` (Level 3+) 或 `submit_dcap_full_attestation` (Level 4)。
 		///
 		/// MRTD 从原始 TDX Quote 字节中解析, 不由调用者提供。
 		/// report_data[0..32] = SHA256(bot.public_key), report_data[32..64] = 链上 nonce
@@ -596,6 +658,7 @@ pub mod pallet {
 			let who = ensure_signed(origin)?;
 			let mut bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
 			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+			ensure!(bot.status == BotStatus::Active, Error::<T>::BotNotActive);
 
 			// ── 解析 TDX Quote 结构 ──
 			let quote = tdx_quote_raw.as_slice();
@@ -644,7 +707,10 @@ pub mod pallet {
 				attested_at: now,
 				expires_at,
 				is_dual_attestation: is_dual,
-				quote_verified: true,
+				quote_verified: false, // C1-fix: 无 ECDSA 签名验证, 不可信
+				dcap_level: 1, // C1-fix: 仅结构解析, 非 DCAP 密码学验证
+				api_server_mrtd: None,
+				api_server_quote_hash: None,
 			};
 			Attestations::<T>::insert(&bot_id_hash, record);
 
@@ -678,6 +744,7 @@ pub mod pallet {
 			let who = ensure_signed(origin)?;
 			let bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
 			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+			ensure!(bot.status == BotStatus::Active, Error::<T>::BotNotActive);
 
 			let now = frame_system::Pallet::<T>::block_number();
 			let parent_hash = <frame_system::Pallet<T>>::parent_hash();
@@ -711,6 +778,367 @@ pub mod pallet {
 			Self::deposit_event(Event::MrenclaveApproved { mrenclave, version });
 			Ok(())
 		}
+
+		/// 审批 API Server MRTD 到白名单 (双 Quote 证明)
+		#[pallet::call_index(12)]
+		#[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+		pub fn approve_api_server_mrtd(
+			origin: OriginFor<T>,
+			mrtd: [u8; 48],
+			version: u32,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			ensure!(
+				!ApprovedApiServerMrtd::<T>::contains_key(&mrtd),
+				Error::<T>::ApiServerMrtdAlreadyApproved
+			);
+			ApprovedApiServerMrtd::<T>::insert(&mrtd, version);
+			Self::deposit_event(Event::ApiServerMrtdApproved { mrtd, version });
+			Ok(())
+		}
+
+		/// 注册 PCK 公钥 (用于 DCAP Level 3 验证)
+		///
+		/// PCK (Provisioning Certification Key) 由 Intel 证书链认证。
+		/// 通过治理注册到链上后，用于验证 QE Report 签名。
+		#[pallet::call_index(13)]
+		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		pub fn register_pck_key(
+			origin: OriginFor<T>,
+			platform_id: [u8; 32],
+			pck_public_key: [u8; 64],
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			let now = frame_system::Pallet::<T>::block_number();
+			RegisteredPckKeys::<T>::insert(&platform_id, (pck_public_key, now));
+			Self::deposit_event(Event::PckKeyRegistered { platform_id });
+			Ok(())
+		}
+
+		/// 提交 DCAP 验证的 TEE 证明 (单 Quote, Level 2 或 Level 3)
+		///
+		/// 与 `submit_verified_attestation` 的区别:
+		/// - 验证 ECDSA P-256 签名 (防止手工构造假 Quote)
+		/// - 验证 Attestation Key 绑定到 QE Report
+		/// - 如果提供 platform_id, 额外验证 QE Report 签名 (Level 3)
+		///
+		/// 修改代码 → MRTD 改变 → 签名不匹配 → 拒绝
+		/// 手工构造 Quote → AK 私钥不在 CPU 外 → 签名无效 → 拒绝
+		#[pallet::call_index(14)]
+		#[pallet::weight(Weight::from_parts(200_000_000, 30_000))]
+		pub fn submit_dcap_attestation(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			tdx_quote_raw: BoundedVec<u8, T::MaxQuoteLen>,
+			mrenclave: Option<[u8; 32]>,
+			platform_id: Option<[u8; 32]>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let mut bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
+			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+			ensure!(bot.status == BotStatus::Active, Error::<T>::BotNotActive);
+
+			let quote = tdx_quote_raw.as_slice();
+
+			// ── DCAP 验证 ──
+			let (dcap_result, dcap_level) = if let Some(ref pid) = platform_id {
+				// Level 3: Body sig + AK binding + QE Report sig
+				let (pck_key, _) = RegisteredPckKeys::<T>::get(pid)
+					.ok_or(Error::<T>::PckKeyNotRegistered)?;
+				let result = dcap::verify_quote_level3(quote, &pck_key)
+					.map_err(|e| Self::dcap_error_to_dispatch(e))?;
+				(result, 3u8)
+			} else {
+				// Level 2: Body sig + AK binding
+				let result = dcap::verify_quote_level2(quote)
+					.map_err(|e| Self::dcap_error_to_dispatch(e))?;
+				(result, 2u8)
+			};
+
+			let mrtd = dcap_result.mrtd;
+			let report_data = dcap_result.report_data;
+
+			// ── report_data[0..32] == SHA256(bot.public_key) ──
+			let expected_hash = sp_core::hashing::sha2_256(&bot.public_key);
+			ensure!(report_data[..32] == expected_hash[..], Error::<T>::QuoteReportDataMismatch);
+
+			// ── Nonce 验证 (防重放) ──
+			let now = frame_system::Pallet::<T>::block_number();
+			let (stored_nonce, issued_at) = AttestationNonces::<T>::get(&bot_id_hash)
+				.ok_or(Error::<T>::NonceMissing)?;
+			let nonce_deadline = issued_at.saturating_add(T::AttestationValidityBlocks::get());
+			ensure!(now <= nonce_deadline, Error::<T>::NonceExpired);
+			ensure!(report_data[32..64] == stored_nonce[..], Error::<T>::NonceMismatch);
+			AttestationNonces::<T>::remove(&bot_id_hash);
+
+			// ── MRTD 白名单 ──
+			ensure!(ApprovedMrtd::<T>::contains_key(&mrtd), Error::<T>::MrtdNotApproved);
+			if let Some(ref mre) = mrenclave {
+				ensure!(ApprovedMrenclave::<T>::contains_key(mre), Error::<T>::MrenclaveNotApproved);
+			}
+
+			let tdx_quote_hash = sp_core::hashing::blake2_256(quote);
+			let expires_at = now.saturating_add(T::AttestationValidityBlocks::get());
+
+			// X1-fix: Level 2 攻击者控制 AK 私钥, ECDSA 验证无意义 → quote_verified=false
+			// Level 3+ PCK 私钥不可获取 → quote_verified=true
+			let quote_verified = dcap_level >= 3;
+			let record = AttestationRecord::<T> {
+				bot_id_hash,
+				tdx_quote_hash,
+				sgx_quote_hash: None,
+				mrtd,
+				mrenclave,
+				attester: who,
+				attested_at: now,
+				expires_at,
+				is_dual_attestation: false,
+				quote_verified,
+				dcap_level,
+				api_server_mrtd: None,
+				api_server_quote_hash: None,
+			};
+			Attestations::<T>::insert(&bot_id_hash, record);
+
+			let now_u64: u64 = now.unique_saturated_into();
+			let expires_u64: u64 = expires_at.unique_saturated_into();
+			bot.node_type = NodeType::TeeNode {
+				mrtd,
+				mrenclave,
+				tdx_attested_at: now_u64,
+				sgx_attested_at: None,
+				expires_at: expires_u64,
+			};
+			Bots::<T>::insert(&bot_id_hash, bot);
+
+			Self::deposit_event(Event::DcapAttestationSubmitted {
+				bot_id_hash, dcap_level, has_api_server: false,
+			});
+			Ok(())
+		}
+
+		/// 提交 DCAP 双 Quote 证明 (GroupRobot + API Server)
+		///
+		/// 同时验证两个 TDX Quote:
+		/// 1. Bot Quote: MRTD 在 ApprovedMrtd 白名单
+		/// 2. API Server Quote: MRTD 在 ApprovedApiServerMrtd 白名单
+		///
+		/// 两个 Quote 的 report_data[0..32] 必须都绑定到同一个 bot.public_key,
+		/// 证明两个进程运行在同一节点上。
+		#[pallet::call_index(15)]
+		#[pallet::weight(Weight::from_parts(350_000_000, 50_000))]
+		pub fn submit_dcap_dual_attestation(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			bot_quote_raw: BoundedVec<u8, T::MaxQuoteLen>,
+			api_server_quote_raw: BoundedVec<u8, T::MaxQuoteLen>,
+			mrenclave: Option<[u8; 32]>,
+			platform_id: Option<[u8; 32]>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let mut bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
+			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+			ensure!(bot.status == BotStatus::Active, Error::<T>::BotNotActive);
+
+			let bot_quote = bot_quote_raw.as_slice();
+			let api_quote = api_server_quote_raw.as_slice();
+
+			// ── DCAP 验证 Bot Quote ──
+			let (bot_result, dcap_level) = if let Some(ref pid) = platform_id {
+				let (pck_key, _) = RegisteredPckKeys::<T>::get(pid)
+					.ok_or(Error::<T>::PckKeyNotRegistered)?;
+				let result = dcap::verify_quote_level3(bot_quote, &pck_key)
+					.map_err(|e| Self::dcap_error_to_dispatch(e))?;
+				(result, 3u8)
+			} else {
+				let result = dcap::verify_quote_level2(bot_quote)
+					.map_err(|e| Self::dcap_error_to_dispatch(e))?;
+				(result, 2u8)
+			};
+
+			// ── DCAP 验证 API Server Quote ──
+			let api_result = if let Some(ref pid) = platform_id {
+				let (pck_key, _) = RegisteredPckKeys::<T>::get(pid)
+					.ok_or(Error::<T>::PckKeyNotRegistered)?;
+				dcap::verify_quote_level3(api_quote, &pck_key)
+					.map_err(|e| Self::dcap_error_to_dispatch(e))?
+			} else {
+				dcap::verify_quote_level2(api_quote)
+					.map_err(|e| Self::dcap_error_to_dispatch(e))?
+			};
+
+			let mrtd = bot_result.mrtd;
+			let report_data = bot_result.report_data;
+			let api_server_mrtd = api_result.mrtd;
+
+			// ── Bot Quote: report_data 绑定 ──
+			let expected_hash = sp_core::hashing::sha2_256(&bot.public_key);
+			ensure!(report_data[..32] == expected_hash[..], Error::<T>::QuoteReportDataMismatch);
+
+			// ── API Server Quote: report_data 也必须绑定到同一 public_key ──
+			ensure!(
+				api_result.report_data[..32] == expected_hash[..],
+				Error::<T>::ApiServerReportDataMismatch
+			);
+
+			// ── Nonce 验证 (Bot Quote) ──
+			let now = frame_system::Pallet::<T>::block_number();
+			let (stored_nonce, issued_at) = AttestationNonces::<T>::get(&bot_id_hash)
+				.ok_or(Error::<T>::NonceMissing)?;
+			let nonce_deadline = issued_at.saturating_add(T::AttestationValidityBlocks::get());
+			ensure!(now <= nonce_deadline, Error::<T>::NonceExpired);
+			ensure!(report_data[32..64] == stored_nonce[..], Error::<T>::NonceMismatch);
+			AttestationNonces::<T>::remove(&bot_id_hash);
+
+			// ── MRTD 白名单 ──
+			ensure!(ApprovedMrtd::<T>::contains_key(&mrtd), Error::<T>::MrtdNotApproved);
+			ensure!(
+				ApprovedApiServerMrtd::<T>::contains_key(&api_server_mrtd),
+				Error::<T>::ApiServerMrtdNotApproved
+			);
+			if let Some(ref mre) = mrenclave {
+				ensure!(ApprovedMrenclave::<T>::contains_key(mre), Error::<T>::MrenclaveNotApproved);
+			}
+
+			let tdx_quote_hash = sp_core::hashing::blake2_256(bot_quote);
+			let api_server_quote_hash = sp_core::hashing::blake2_256(api_quote);
+			let expires_at = now.saturating_add(T::AttestationValidityBlocks::get());
+
+			// X1-fix: 同单 Quote 逻辑, Level 2 不可信
+			let quote_verified = dcap_level >= 3;
+			let record = AttestationRecord::<T> {
+				bot_id_hash,
+				tdx_quote_hash,
+				sgx_quote_hash: None,
+				mrtd,
+				mrenclave,
+				attester: who,
+				attested_at: now,
+				expires_at,
+				is_dual_attestation: true,
+				quote_verified,
+				dcap_level,
+				api_server_mrtd: Some(api_server_mrtd),
+				api_server_quote_hash: Some(api_server_quote_hash),
+			};
+			Attestations::<T>::insert(&bot_id_hash, record);
+
+			let now_u64: u64 = now.unique_saturated_into();
+			let expires_u64: u64 = expires_at.unique_saturated_into();
+			bot.node_type = NodeType::TeeNode {
+				mrtd,
+				mrenclave,
+				tdx_attested_at: now_u64,
+				sgx_attested_at: None,
+				expires_at: expires_u64,
+			};
+			Bots::<T>::insert(&bot_id_hash, bot);
+
+			Self::deposit_event(Event::DcapAttestationSubmitted {
+				bot_id_hash, dcap_level, has_api_server: true,
+			});
+			Ok(())
+		}
+
+		/// 提交 DCAP Level 4 证明 (完整证书链验证)
+		///
+		/// 与 Level 3 的区别:
+		/// - Level 3: 信任治理注册的 PCK 公钥
+		/// - Level 4: 通过 Intel Root CA 证书链验证 PCK 公钥的合法性
+		///
+		/// 提交者需提供:
+		/// - TDX Quote 原始字节
+		/// - PCK 证书 (DER 编码)
+		/// - Intermediate CA 证书 (DER 编码)
+		///
+		/// 链上验证:
+		/// ```text
+		/// Intel Root CA (硬编码) → Intermediate CA → PCK → QE Report → AK → Body
+		/// ```
+		#[pallet::call_index(16)]
+		#[pallet::weight(Weight::from_parts(300_000_000, 40_000))]
+		pub fn submit_dcap_full_attestation(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			tdx_quote_raw: BoundedVec<u8, T::MaxQuoteLen>,
+			pck_cert_der: BoundedVec<u8, T::MaxQuoteLen>,
+			intermediate_cert_der: BoundedVec<u8, T::MaxQuoteLen>,
+			mrenclave: Option<[u8; 32]>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let mut bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
+			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+			ensure!(bot.status == BotStatus::Active, Error::<T>::BotNotActive);
+
+			let quote = tdx_quote_raw.as_slice();
+
+			// ── DCAP Level 4 验证: 证书链 + Quote ──
+			let dcap_result = dcap::verify_quote_with_cert_chain(
+				quote,
+				pck_cert_der.as_slice(),
+				intermediate_cert_der.as_slice(),
+			)
+			.map_err(|e| Self::dcap_error_to_dispatch(e))?;
+
+			let dcap_level = 4u8;
+			let mrtd = dcap_result.mrtd;
+			let report_data = dcap_result.report_data;
+
+			// ── report_data[0..32] == SHA256(bot.public_key) ──
+			let expected_hash = sp_core::hashing::sha2_256(&bot.public_key);
+			ensure!(report_data[..32] == expected_hash[..], Error::<T>::QuoteReportDataMismatch);
+
+			// ── Nonce 验证 (防重放) ──
+			let now = frame_system::Pallet::<T>::block_number();
+			let (stored_nonce, issued_at) = AttestationNonces::<T>::get(&bot_id_hash)
+				.ok_or(Error::<T>::NonceMissing)?;
+			let nonce_deadline = issued_at.saturating_add(T::AttestationValidityBlocks::get());
+			ensure!(now <= nonce_deadline, Error::<T>::NonceExpired);
+			ensure!(report_data[32..64] == stored_nonce[..], Error::<T>::NonceMismatch);
+			AttestationNonces::<T>::remove(&bot_id_hash);
+
+			// ── MRTD 白名单 ──
+			ensure!(ApprovedMrtd::<T>::contains_key(&mrtd), Error::<T>::MrtdNotApproved);
+			if let Some(ref mre) = mrenclave {
+				ensure!(ApprovedMrenclave::<T>::contains_key(mre), Error::<T>::MrenclaveNotApproved);
+			}
+
+			let tdx_quote_hash = sp_core::hashing::blake2_256(quote);
+			let expires_at = now.saturating_add(T::AttestationValidityBlocks::get());
+
+			let record = AttestationRecord::<T> {
+				bot_id_hash,
+				tdx_quote_hash,
+				sgx_quote_hash: None,
+				mrtd,
+				mrenclave,
+				attester: who,
+				attested_at: now,
+				expires_at,
+				is_dual_attestation: false,
+				quote_verified: true,
+				dcap_level,
+				api_server_mrtd: None,
+				api_server_quote_hash: None,
+			};
+			Attestations::<T>::insert(&bot_id_hash, record);
+
+			let now_u64: u64 = now.unique_saturated_into();
+			let expires_u64: u64 = expires_at.unique_saturated_into();
+			bot.node_type = NodeType::TeeNode {
+				mrtd,
+				mrenclave,
+				tdx_attested_at: now_u64,
+				sgx_attested_at: None,
+				expires_at: expires_u64,
+			};
+			Bots::<T>::insert(&bot_id_hash, bot);
+
+			Self::deposit_event(Event::DcapAttestationSubmitted {
+				bot_id_hash, dcap_level, has_api_server: false,
+			});
+			Ok(())
+		}
 	}
 
 	// ========================================================================
@@ -718,6 +1146,28 @@ pub mod pallet {
 	// ========================================================================
 
 	impl<T: Config> Pallet<T> {
+		/// 将 DCAP 错误转换为 DispatchError
+		fn dcap_error_to_dispatch(e: dcap::DcapError) -> DispatchError {
+			match e {
+				dcap::DcapError::QuoteTooShort
+				| dcap::DcapError::InvalidVersion
+				| dcap::DcapError::InvalidAttKeyType
+				| dcap::DcapError::InvalidTeeType
+				| dcap::DcapError::InvalidVendorId
+				| dcap::DcapError::InvalidSigDataLen
+				| dcap::DcapError::InvalidPublicKey
+				| dcap::DcapError::InvalidSignature => Error::<T>::DcapQuoteInvalid.into(),
+				dcap::DcapError::BodySignatureInvalid => Error::<T>::DcapBodySignatureInvalid.into(),
+				dcap::DcapError::AttestationKeyBindingFailed => Error::<T>::DcapAkBindingFailed.into(),
+					dcap::DcapError::QeReportSignatureInvalid => Error::<T>::DcapQeSignatureInvalid.into(),
+				dcap::DcapError::CertParsingFailed
+				| dcap::DcapError::CertSignatureInvalid
+				| dcap::DcapError::CertChainInvalid => Error::<T>::DcapCertChainInvalid.into(),
+				dcap::DcapError::RootCaVerificationFailed => Error::<T>::DcapRootCaVerificationFailed.into(),
+				dcap::DcapError::IntermediateCaVerificationFailed => Error::<T>::DcapIntermediateCaVerificationFailed.into(),
+			}
+		}
+
 		/// Bot 是否已注册且活跃
 		pub fn is_bot_active(bot_id_hash: &BotIdHash) -> bool {
 			Bots::<T>::get(bot_id_hash)

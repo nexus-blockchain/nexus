@@ -691,7 +691,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// 发起仲裁：记录争议，证据 CID 存链（仅登记摘要/CID，不碰业务存储）
         #[pallet::call_index(0)]
-        #[pallet::weight(T::WeightInfo::dispute(_evidence.len() as u32))]
+        #[pallet::weight(<T as Config>::WeightInfo::dispute(_evidence.len() as u32))]
         pub fn dispute(
             origin: OriginFor<T>,
             domain: [u8; 8],
@@ -718,7 +718,7 @@ pub mod pallet {
         }
         /// 仲裁者裁决（治理起源：Root/委员会）。
         #[pallet::call_index(1)]
-        #[pallet::weight(T::WeightInfo::arbitrate())]
+        #[pallet::weight(<T as Config>::WeightInfo::arbitrate())]
         pub fn arbitrate(
             origin: OriginFor<T>,
             domain: [u8; 8],
@@ -783,7 +783,7 @@ pub mod pallet {
         ///   1) 校验可发起（通过 Router.can_dispute）；2) 确保未被登记；3) 登记 Disputed；
         ///   4) 将 evidence_id 追加到本案的证据引用列表；5) 触发 Disputed 事件。
         #[pallet::call_index(2)]
-        #[pallet::weight(T::WeightInfo::dispute(1))]
+        #[pallet::weight(<T as Config>::WeightInfo::dispute(1))]
         pub fn dispute_with_evidence_id(
             origin: OriginFor<T>,
             domain: [u8; 8],
@@ -817,7 +817,7 @@ pub mod pallet {
         /// - 行为：
         ///   1) 确认本案已登记；2) 追加 evidence_id 到引用列表。
         #[pallet::call_index(3)]
-        #[pallet::weight(T::WeightInfo::dispute(1))]
+        #[pallet::weight(<T as Config>::WeightInfo::dispute(1))]
         pub fn append_evidence_id(
             origin: OriginFor<T>,
             domain: [u8; 8],
@@ -842,7 +842,7 @@ pub mod pallet {
         /// - 获取应诉方（卖家）信息
         /// - 设置应诉截止期限
         #[pallet::call_index(4)]
-        #[pallet::weight(T::WeightInfo::dispute(1))]
+        #[pallet::weight(<T as Config>::WeightInfo::dispute(1))]
         pub fn dispute_with_two_way_deposit(
             origin: OriginFor<T>,
             domain: [u8; 8],
@@ -938,7 +938,7 @@ pub mod pallet {
 
         /// 🆕 函数级中文注释：应诉方从托管锁定押金并提交反驳证据
         #[pallet::call_index(5)]
-        #[pallet::weight(T::WeightInfo::dispute(1))]
+        #[pallet::weight(<T as Config>::WeightInfo::dispute(1))]
         pub fn respond_to_dispute(
             origin: OriginFor<T>,
             domain: [u8; 8],
@@ -1013,7 +1013,7 @@ pub mod pallet {
 
         /// 发起投诉（需缴纳押金防止恶意投诉）
         #[pallet::call_index(10)]
-        #[pallet::weight(T::WeightInfo::dispute(1))]
+        #[pallet::weight(<T as Config>::WeightInfo::dispute(1))]
         pub fn file_complaint(
             origin: OriginFor<T>,
             domain: [u8; 8],
@@ -1124,7 +1124,7 @@ pub mod pallet {
 
         /// 响应/申诉投诉
         #[pallet::call_index(11)]
-        #[pallet::weight(T::WeightInfo::dispute(1))]
+        #[pallet::weight(<T as Config>::WeightInfo::dispute(1))]
         pub fn respond_to_complaint(
             origin: OriginFor<T>,
             complaint_id: u64,
@@ -1167,7 +1167,7 @@ pub mod pallet {
 
         /// 撤销投诉
         #[pallet::call_index(12)]
-        #[pallet::weight(T::WeightInfo::dispute(0))]
+        #[pallet::weight(<T as Config>::WeightInfo::dispute(0))]
         pub fn withdraw_complaint(
             origin: OriginFor<T>,
             complaint_id: u64,
@@ -1196,7 +1196,7 @@ pub mod pallet {
 
         /// 达成和解
         #[pallet::call_index(13)]
-        #[pallet::weight(T::WeightInfo::dispute(0))]
+        #[pallet::weight(<T as Config>::WeightInfo::dispute(0))]
         pub fn settle_complaint(
             origin: OriginFor<T>,
             complaint_id: u64,
@@ -1239,7 +1239,7 @@ pub mod pallet {
 
         /// 提交仲裁（升级到仲裁委员会）
         #[pallet::call_index(14)]
-        #[pallet::weight(T::WeightInfo::dispute(0))]
+        #[pallet::weight(<T as Config>::WeightInfo::dispute(0))]
         pub fn escalate_to_arbitration(
             origin: OriginFor<T>,
             complaint_id: u64,
@@ -1271,7 +1271,7 @@ pub mod pallet {
 
         /// 仲裁裁决（仅仲裁委员会/Root）
         #[pallet::call_index(15)]
-        #[pallet::weight(T::WeightInfo::arbitrate())]
+        #[pallet::weight(<T as Config>::WeightInfo::arbitrate())]
         pub fn resolve_complaint(
             origin: OriginFor<T>,
             complaint_id: u64,

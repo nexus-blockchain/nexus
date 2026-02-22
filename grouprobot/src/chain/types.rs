@@ -49,8 +49,12 @@ pub struct AttestationBundle {
     pub mrtd: [u8; 48],
     pub mrenclave: [u8; 32],
     pub is_simulated: bool,
-    /// 原始 TDX Quote 字节 (硬件模式, 用于 submit_verified_attestation)
+    /// 原始 TDX Quote 字节 (硬件模式)
     pub tdx_quote_raw: Option<Vec<u8>>,
     /// 链上 nonce (嵌入 report_data[32..64])
     pub nonce: Option<[u8; 32]>,
+    /// PCK 证书 DER (Level 4, 从 Quote Certification Data 提取)
+    pub pck_cert_der: Option<Vec<u8>>,
+    /// Intermediate CA 证书 DER (Level 4, 从 Quote Certification Data 提取)
+    pub intermediate_cert_der: Option<Vec<u8>>,
 }

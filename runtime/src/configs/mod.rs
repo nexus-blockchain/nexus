@@ -451,7 +451,9 @@ impl pallet_escrow::Config for Runtime {
 	type AuthorizedOrigin = frame_system::EnsureSigned<AccountId>;
 	type AdminOrigin = frame_system::EnsureRoot<AccountId>;
 	type MaxExpiringPerBlock = ConstU32<100>;
+	type MaxSplitEntries = ConstU32<20>;
 	type ExpiryPolicy = DefaultExpiryPolicy;
+	type WeightInfo = pallet_escrow::weights::SubstrateWeight<Runtime>;
 }
 
 // -------------------- Storage Service (存储服务) --------------------
@@ -1277,6 +1279,8 @@ impl pallet_entity_governance::Config for Runtime {
 	type MaxCidLength = ConstU32<64>;
 	type MaxActiveProposals = ConstU32<10>;
 	type MaxCommitteeSize = ConstU32<20>;
+	type TimeWeightFullPeriod = ConstU32<{ 30 * DAYS }>;  // 30 天达到最大乘数
+	type TimeWeightMaxMultiplier = ConstU32<30000>;        // 最大 3x 投票权
 }
 
 impl pallet_entity_member::Config for Runtime {

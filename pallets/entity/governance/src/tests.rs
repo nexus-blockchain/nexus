@@ -664,3 +664,117 @@ fn full_governance_lifecycle() {
         assert_eq!(proposal.status, ProposalStatus::Executed);
     });
 }
+
+// ==================== 时间加权投票权测试 ====================
+
+#[test]
+fn time_weight_no_first_hold_returns_base_balance() {
+    // 未记录 FirstHoldTime 的用户，投票权 = 原始余额（1x）
+    ExtBuilder::build().execute_with(|| {
+        // ALICE has 20_000 tokens, no FirstHoldTime recorded
+        let power = EntityGovernance::calculate_voting_power(SHOP_ID, &ALICE);
+        assert_eq!(power, 20_000); // 1x, no bonus
+    });
+}
+
+#[test]
+fn time_weight_zero_holding_returns_base_balance() {
+    // 刚刚记录 FirstHoldTime（持有 0 区块），投票权 = 原始余额（1x）
+    ExtBuilder::build().execute_with(|| {
+        let now = System::block_number(); // block 1
+        FirstHoldTime::<Test>::insert(SHOP_ID, &ALICE, now);
+        let power = EntityGovernance::calculate_voting_power(SHOP_ID, &ALICE);
+        assert_eq!(power, 20_000); // 1x, 0 blocks held
+    });
+}
+
+#[test]
+fn time_weight_half_period_gives_half_bonus() {
+    // 持有 full_period/2 区块 → multiplier = 10000 + 20000/2 = 20000 → 2x
+    ExtBuilder::build().execute_with(|| {
+        // mock: TimeWeightFullPeriod = 1000, TimeWeightMaxMultiplier = 30000 (3x)
+        // bonus_range = 30000 - 10000 = 20000
+        // at half period (500 blocks): bonus = 500 * 20000 / 1000 = 10000
+        // multiplier = 10000 + 10000 = 20000 → 2x
+        FirstHoldTime::<Test>::insert(SHOP_ID, &ALICE, 1u64);
+        advance_blocks(500); // now = 501
+        let power = EntityGovernance::calculate_voting_power(SHOP_ID, &ALICE);
+        // 20_000 * 20000 / 10000 = 40_000
+        assert_eq!(power, 40_000);
+    });
+}
+
+#[test]
+fn time_weight_full_period_gives_max_bonus() {
+    // 持有 >= full_period 区块 → multiplier = max_multiplier → 3x
+    ExtBuilder::build().execute_with(|| {
+        FirstHoldTime::<Test>::insert(SHOP_ID, &BOB, 1u64);
+        advance_blocks(1000); // now = 1001, holding = 1000 = full_period
+        let power = EntityGovernance::calculate_voting_power(SHOP_ID, &BOB);
+        // 150_000 * 30000 / 10000 = 450_000
+        assert_eq!(power, 450_000);
+    });
+}
+
+#[test]
+fn time_weight_beyond_full_period_caps_at_max() {
+    // 持有超过 full_period 的区块 → multiplier 不超过 max_multiplier
+    ExtBuilder::build().execute_with(|| {
+        FirstHoldTime::<Test>::insert(SHOP_ID, &CHARLIE, 1u64);
+        advance_blocks(5000); // 远超 full_period(1000)
+        let power = EntityGovernance::calculate_voting_power(SHOP_ID, &CHARLIE);
+        // 50_000 * 30000 / 10000 = 150_000 (capped at 3x)
+        assert_eq!(power, 150_000);
+    });
+}
+
+#[test]
+fn time_weight_zero_balance_returns_zero() {
+    // 余额为 0 的用户投票权始终为 0
+    ExtBuilder::build().execute_with(|| {
+        let nobody: u64 = 999;
+        FirstHoldTime::<Test>::insert(SHOP_ID, &nobody, 1u64);
+        advance_blocks(1000);
+        let power = EntityGovernance::calculate_voting_power(SHOP_ID, &nobody);
+        assert_eq!(power, 0);
+    });
+}
+
+#[test]
+fn time_weight_quarter_period() {
+    // 持有 250 区块 (1/4 period) → bonus = 250 * 20000 / 1000 = 5000
+    // multiplier = 10000 + 5000 = 15000 → 1.5x
+    ExtBuilder::build().execute_with(|| {
+        FirstHoldTime::<Test>::insert(SHOP_ID, &ALICE, 1u64);
+        advance_blocks(250); // now = 251
+        let power = EntityGovernance::calculate_voting_power(SHOP_ID, &ALICE);
+        // 20_000 * 15000 / 10000 = 30_000
+        assert_eq!(power, 30_000);
+    });
+}
+
+#[test]
+fn time_weight_vote_uses_weighted_power() {
+    // 投票时使用时间加权后的投票权重
+    ExtBuilder::build().execute_with(|| {
+        // BOB holds since block 1, now advance to block 1001 (full period)
+        FirstHoldTime::<Test>::insert(SHOP_ID, &BOB, 1u64);
+        advance_blocks(999); // now = 1000
+
+        // Create proposal at block 1000
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Weighted Vote Test".to_vec(), None,
+        ));
+
+        // BOB votes — should get 3x power
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        // BOB balance = 150_000, holding = 999 blocks (just under full period)
+        // bonus = 999 * 20000 / 1000 = 19980
+        // multiplier = 10000 + 19980 = 29980
+        // weight = 150_000 * 29980 / 10000 = 449_700
+        assert_eq!(proposal.yes_votes, 449_700);
+    });
+}

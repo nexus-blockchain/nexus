@@ -1,6 +1,4 @@
 #![cfg_attr(not(feature = "std"), no_std)]
-//! 说明：临时全局允许 `deprecated`，仅为通过工作区 `-D warnings`；后续将以基准权重替换常量权重
-#![allow(deprecated)]
 
 extern crate alloc;
 
@@ -9,17 +7,15 @@ pub use pallet::*;
 pub mod weights;
 pub use weights::WeightInfo;
 
-// TODO: 测试文件待创建
-// #[cfg(test)]
-// mod mock;
+#[cfg(test)]
+mod mock;
 
-// #[cfg(test)]
-// mod tests;
+#[cfg(test)]
+mod tests;
 
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
-    use alloc::vec::Vec;
     use frame_support::weights::Weight;
     use frame_support::{
         pallet_prelude::*,
@@ -71,17 +67,19 @@ pub mod pallet {
         type Currency: Currency<Self::AccountId>;
         type EscrowPalletId: Get<PalletId>;
         /// 函数级中文注释：授权外部入口的 Origin（白名单 Origin）。
-        /// - 用于允许少数可信主体（如 Root/Collective/白名单 Pallet）调用外部 extrinsic；
-        /// - 常规业务应通过内部 trait 接口调用，避免扩大攻击面。
         type AuthorizedOrigin: EnsureOrigin<Self::RuntimeOrigin>;
         /// 函数级中文注释：管理员 Origin（治理/应急）。
-        /// - 可设置全局暂停与参数；默认 Root 或内容委员会阈值。
         type AdminOrigin: EnsureOrigin<Self::RuntimeOrigin>;
         /// 函数级中文注释：每块最多处理的到期项（防御性限制）。
         #[pallet::constant]
         type MaxExpiringPerBlock: Get<u32>;
-        /// 函数级中文注释：到期处理策略，由 runtime 注入；可按业务域决定 Release/Refund/Noop。
+        /// 🆕 M4修复: release_split 最大分账条目数（防止区块超重）
+        #[pallet::constant]
+        type MaxSplitEntries: Get<u32>;
+        /// 函数级中文注释：到期处理策略，由 runtime 注入。
         type ExpiryPolicy: ExpiryPolicy<Self::AccountId, BlockNumberFor<Self>>;
+        /// 🆕 M2修复: 权重信息
+        type WeightInfo: crate::weights::WeightInfo;
     }
 
     #[pallet::pallet]
@@ -173,6 +171,8 @@ pub mod pallet {
         DisputeActive,
         /// 托管已关闭
         AlreadyClosed,
+        /// 全局暂停中
+        GloballyPaused,
     }
 
     /// 函数级中文注释：到期处理策略接口（由 runtime 实现）。
@@ -197,7 +197,7 @@ pub mod pallet {
         /// 函数级中文注释：断言未暂停。
         #[inline]
         fn ensure_not_paused() -> DispatchResult {
-            ensure!(!Paused::<T>::get(), Error::<T>::NoLock); // 复用错误枚举以减少破坏性变更
+            ensure!(!Paused::<T>::get(), Error::<T>::GloballyPaused);
             Ok(())
         }
         /// 函数级中文注释：统一授权校验（AuthorizedOrigin | Root）。
@@ -221,6 +221,9 @@ pub mod pallet {
             // 函数级详细中文注释：从指定付款人向托管账户划转指定金额，并累加到 Locked[id]
             // - 余额校验：Currency::transfer 失败即返回 Error::Insufficient
             // - 原子性：任意一步失败会使外层事务回滚，避免脏写
+            // 🆕 C2修复: 拒绝已关闭的托管重新注入资金
+            let state = LockStateOf::<T>::get(id);
+            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
             let escrow = Self::account();
             T::Currency::transfer(payer, &escrow, amount, ExistenceRequirement::KeepAlive)
                 .map_err(|_| Error::<T>::Insufficient)?;
@@ -236,6 +239,10 @@ pub mod pallet {
         ) -> DispatchResult {
             // 函数级详细中文注释：从 Locked[id] 对应的托管余额中转出部分至目标账户
             // - 风险控制：禁止透支（amount 必须 ≤ 当前托管余额），避免逃逸
+            // 🆕 C1修复: 检查状态 - 争议中(1)禁止操作，已关闭(3)禁止操作
+            let state = LockStateOf::<T>::get(id);
+            ensure!(state != 1u8, Error::<T>::DisputeActive);
+            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
             let cur = Locked::<T>::get(id);
             ensure!(!cur.is_zero(), Error::<T>::NoLock);
             ensure!(amount <= cur, Error::<T>::Insufficient);
@@ -266,7 +273,8 @@ pub mod pallet {
             ensure!(!amount.is_zero(), Error::<T>::NoLock);
             
             let escrow = Self::account();
-            T::Currency::transfer(&escrow, to, amount, ExistenceRequirement::KeepAlive)
+            // 🆕 H1修复: 全额释放使用 AllowDeath，避免小额 dust 永久卡住
+            T::Currency::transfer(&escrow, to, amount, ExistenceRequirement::AllowDeath)
                 .map_err(|_| Error::<T>::NoLock)?;
             
             // 🆕 P2修复: 更新状态为 Closed(3)
@@ -290,7 +298,8 @@ pub mod pallet {
             ensure!(!amount.is_zero(), Error::<T>::NoLock);
             
             let escrow = Self::account();
-            T::Currency::transfer(&escrow, to, amount, ExistenceRequirement::KeepAlive)
+            // 🆕 H1修复: 全额退款使用 AllowDeath，避免小额 dust 永久卡住
+            T::Currency::transfer(&escrow, to, amount, ExistenceRequirement::AllowDeath)
                 .map_err(|_| Error::<T>::NoLock)?;
             
             // 🆕 P2修复: 更新状态为 Closed(3)
@@ -355,15 +364,11 @@ pub mod pallet {
         }
     }
 
-    // 说明：临时允许 warnings 以通过全局 -D warnings；后续将以 WeightInfo 基准权重替换常量权重
-    #[allow(warnings)]
-    #[allow(deprecated)]
     #[pallet::call]
     impl<T: Config> Pallet<T> {
         /// 锁定：从付款人划转到托管账户并记录
         #[pallet::call_index(0)]
-        #[allow(deprecated)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::lock())]
         pub fn lock(
             origin: OriginFor<T>,
             id: u64,
@@ -382,8 +387,7 @@ pub mod pallet {
         }
         /// 释放：将托管金额转给收款人
         #[pallet::call_index(1)]
-        #[allow(deprecated)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::release())]
         pub fn release(origin: OriginFor<T>, id: u64, to: T::AccountId) -> DispatchResult {
             // 函数级详细中文注释（安全）：仅 AuthorizedOrigin | Root；暂停时拒绝；争议状态下拒绝普通释放。
             Self::ensure_auth(origin)?;
@@ -393,8 +397,7 @@ pub mod pallet {
         }
         /// 退款：退回付款人
         #[pallet::call_index(2)]
-        #[allow(deprecated)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::refund())]
         pub fn refund(origin: OriginFor<T>, id: u64, to: T::AccountId) -> DispatchResult {
             // 函数级详细中文注释（安全）：仅 AuthorizedOrigin | Root；暂停时拒绝；争议状态下拒绝普通退款。
             Self::ensure_auth(origin)?;
@@ -405,7 +408,7 @@ pub mod pallet {
 
         /// 函数级详细中文注释：幂等锁定（带 nonce）。相同 id 下 nonce 必须严格递增；否则忽略以防重放。
         #[pallet::call_index(3)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::lock_with_nonce())]
         pub fn lock_with_nonce(
             origin: OriginFor<T>,
             id: u64,
@@ -429,11 +432,11 @@ pub mod pallet {
 
         /// 函数级详细中文注释：分账释放（原子）。校验合计不超过托管余额，逐笔转账，剩余为 0 则清键。
         #[pallet::call_index(4)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::release_split())]
         pub fn release_split(
             origin: OriginFor<T>,
             id: u64,
-            entries: Vec<(T::AccountId, BalanceOf<T>)>,
+            entries: BoundedVec<(T::AccountId, BalanceOf<T>), T::MaxSplitEntries>,
         ) -> DispatchResult {
             Self::ensure_auth(origin)?;
             Self::ensure_not_paused()?;
@@ -454,7 +457,13 @@ pub mod pallet {
                 cur = cur.saturating_sub(amt);
                 Locked::<T>::insert(id, cur);
                 let escrow = Self::account();
-                T::Currency::transfer(&escrow, &to, amt, ExistenceRequirement::KeepAlive)
+                // 最后一笔（余额为零）使用 AllowDeath，避免 ED 问题
+                let existence = if cur.is_zero() {
+                    ExistenceRequirement::AllowDeath
+                } else {
+                    ExistenceRequirement::KeepAlive
+                };
+                T::Currency::transfer(&escrow, &to, amt, existence)
                     .map_err(|_| Error::<T>::NoLock)?;
                 Self::deposit_event(Event::Transfered {
                     id,
@@ -472,7 +481,7 @@ pub mod pallet {
 
         /// 函数级中文注释：进入争议（仅授权/Root）。设置状态为 Disputed 并记录事件。
         #[pallet::call_index(5)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::dispute())]
         pub fn dispute(origin: OriginFor<T>, id: u64, reason: u16) -> DispatchResult {
             Self::ensure_auth(origin)?;
             if Locked::<T>::get(id).is_zero() {
@@ -485,37 +494,40 @@ pub mod pallet {
 
         /// 函数级中文注释：仲裁决议-全额释放。
         #[pallet::call_index(6)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::apply_decision_release())]
         pub fn apply_decision_release_all(
             origin: OriginFor<T>,
             id: u64,
             to: T::AccountId,
         ) -> DispatchResult {
             Self::ensure_auth(origin)?;
+            // 🆕 H2修复: 仂裁前先解除争议状态，允许 release_all 执行
+            // release_all 内部会设置 Closed(3)，不再覆盖为 Resolved(2)
+            LockStateOf::<T>::insert(id, 0u8);
             <Self as Escrow<T::AccountId, BalanceOf<T>>>::release_all(id, &to)?;
-            LockStateOf::<T>::insert(id, 2u8);
             Self::deposit_event(Event::DecisionApplied { id, decision: 0 });
             Ok(())
         }
 
         /// 函数级中文注释：仲裁决议-全额退款。
         #[pallet::call_index(7)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::apply_decision_refund())]
         pub fn apply_decision_refund_all(
             origin: OriginFor<T>,
             id: u64,
             to: T::AccountId,
         ) -> DispatchResult {
             Self::ensure_auth(origin)?;
+            // 🆕 H2修复: 仂裁前先解除争议状态，允许 refund_all 执行
+            LockStateOf::<T>::insert(id, 0u8);
             <Self as Escrow<T::AccountId, BalanceOf<T>>>::refund_all(id, &to)?;
-            LockStateOf::<T>::insert(id, 2u8);
             Self::deposit_event(Event::DecisionApplied { id, decision: 1 });
             Ok(())
         }
 
         /// 函数级中文注释：仲裁决议-按 bps 部分释放，其余退款给 refund_to。
         #[pallet::call_index(8)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::apply_decision_partial())]
         pub fn apply_decision_partial_bps(
             origin: OriginFor<T>,
             id: u64,
@@ -533,6 +545,8 @@ pub mod pallet {
             let rel_u128 = (cur_u128.saturating_mul(bps as u128)) / 10_000u128;
             let rel_amt: BalanceOf<T> =
                 sp_runtime::traits::SaturatedConversion::saturated_into::<BalanceOf<T>>(rel_u128);
+            // 🆕 H2修复: 仂裁前先解除争议状态，允许内部函数执行
+            LockStateOf::<T>::insert(id, 0u8);
             if !rel_amt.is_zero() {
                 <Self as Escrow<T::AccountId, BalanceOf<T>>>::transfer_from_escrow(
                     id,
@@ -543,15 +557,17 @@ pub mod pallet {
             let after = Locked::<T>::get(id);
             if !after.is_zero() {
                 <Self as Escrow<T::AccountId, BalanceOf<T>>>::refund_all(id, &refund_to)?;
+            } else {
+                // transfer_from_escrow 已转完全部，手动设置 Closed
+                LockStateOf::<T>::insert(id, 3u8);
             }
-            LockStateOf::<T>::insert(id, 2u8);
             Self::deposit_event(Event::DecisionApplied { id, decision: 2 });
             Ok(())
         }
 
         /// 函数级中文注释：设置全局暂停（Admin）。
         #[pallet::call_index(9)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::set_pause())]
         pub fn set_pause(origin: OriginFor<T>, paused: bool) -> DispatchResult {
             T::AdminOrigin::ensure_origin(origin)?;
             Paused::<T>::put(paused);
@@ -561,7 +577,7 @@ pub mod pallet {
         /// 函数级中文注释：安排到期处理（仅 AuthorizedOrigin）。当处于 Disputed 时不生效。
         /// H-1修复：同时更新 ExpiringAt 索引
         #[pallet::call_index(10)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::schedule_expiry())]
         pub fn schedule_expiry(
             origin: OriginFor<T>,
             id: u64,
@@ -597,7 +613,7 @@ pub mod pallet {
         /// 函数级中文注释：取消到期处理（仅 AuthorizedOrigin）。
         /// H-1修复：同时从 ExpiringAt 索引中移除
         #[pallet::call_index(11)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::cancel_expiry())]
         pub fn cancel_expiry(origin: OriginFor<T>, id: u64) -> DispatchResult {
             Self::ensure_auth(origin)?;
             
@@ -631,17 +647,29 @@ pub mod pallet {
                     continue;
                 }
                 
-                // 执行到期策略
+                // 🆕 H3修复: 仅在成功时才更新状态，失败时记录日志
                 match T::ExpiryPolicy::on_expire(*id) {
                     Ok(ExpiryAction::ReleaseAll(to)) => {
-                        let _ = <Self as Escrow<T::AccountId, BalanceOf<T>>>::release_all(*id, &to);
-                        LockStateOf::<T>::insert(id, 2u8);
-                        Self::deposit_event(Event::Expired { id: *id, action: 0 });
+                        match <Self as Escrow<T::AccountId, BalanceOf<T>>>::release_all(*id, &to) {
+                            Ok(_) => {
+                                // release_all 内部已设置 Closed(3)
+                                Self::deposit_event(Event::Expired { id: *id, action: 0 });
+                            }
+                            Err(_) => {
+                                log::warn!(target: "escrow", "Expiry release failed for id={}", id);
+                            }
+                        }
                     }
                     Ok(ExpiryAction::RefundAll(to)) => {
-                        let _ = <Self as Escrow<T::AccountId, BalanceOf<T>>>::refund_all(*id, &to);
-                        LockStateOf::<T>::insert(id, 2u8);
-                        Self::deposit_event(Event::Expired { id: *id, action: 1 });
+                        match <Self as Escrow<T::AccountId, BalanceOf<T>>>::refund_all(*id, &to) {
+                            Ok(_) => {
+                                // refund_all 内部已设置 Closed(3)
+                                Self::deposit_event(Event::Expired { id: *id, action: 1 });
+                            }
+                            Err(_) => {
+                                log::warn!(target: "escrow", "Expiry refund failed for id={}", id);
+                            }
+                        }
                     }
                     _ => {
                         Self::deposit_event(Event::Expired { id: *id, action: 2 });

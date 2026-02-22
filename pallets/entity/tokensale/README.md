@@ -44,7 +44,7 @@ pallet-entity-tokensale (pallet_index = 132)
 │   ├── calculate_payment_amount    checked_mul 防溢出
 │   ├── calculate_dutch_price       线性递减（SaturatedConversion）
 │   ├── calculate_initial_unlock    基点计算
-│   └── calculate_unlockable        悬崖期 + 线性释放
+│   └── calculate_unlockable        悬崖期 + 线性/阶梯释放
 │
 └── 查询函数
     ├── pallet_account              托管账户地址
@@ -218,10 +218,10 @@ impl pallet_entity_tokensale::Config for Runtime {
 | 1 | `add_payment_option` | 创建者 | NotStarted | 添加支付选项（price > 0, max >= min） |
 | 2 | `set_vesting_config` | 创建者 | NotStarted | 锁仓配置（total >= cliff） |
 | 3 | `configure_dutch_auction` | 创建者 | NotStarted + DutchAuction | 价格曲线（start > end） |
-| 4 | `add_to_whitelist` | 创建者 | NotStarted | 独立存储白名单 |
+| 4 | `add_to_whitelist` | 创建者 | NotStarted | 独立存储白名单（BoundedVec 输入） |
 | 5 | `start_sale` | 创建者 | NotStarted | 锁定 Entity 代币 + 需 ≥1 支付选项 |
 | 6 | `subscribe` | signed | Active | NEX → 托管（时间窗口+KYC+白名单校验） |
-| 7 | `end_sale` | 创建者 | Active | 释放未售代币 |
+| 7 | `end_sale` | 创建者 | Active | 释放未售代币（须 ≥ end_block 或已售罄） |
 | 8 | `claim_tokens` | 认购者 | Ended/Completed | Entity 代币 → 用户（初始解锁） |
 | 9 | `unlock_tokens` | 认购者 | 已 claimed | Entity 代币 → 用户（后续解锁） |
 | 10 | `cancel_sale` | 创建者 | NotStarted/Active | 释放未售代币 → Cancelled |
@@ -251,20 +251,27 @@ current_price = start_price - (start_price - end_price) × elapsed / total_durat
 ## 锁仓解锁
 
 ```
-subscribe ──→ claim_tokens (初始解锁) ──→ [悬崖期] ──→ unlock_tokens (线性释放)
+subscribe ──→ claim_tokens (初始解锁) ──→ [悬崖期] ──→ unlock_tokens (线性/阶梯释放)
 ```
 
 | 类型 | 说明 |
 |------|------|
 | `None` | 无锁仓，claim 即全额 |
-| `Linear` | 初始解锁 + 悬崖期后线性释放 |
-| `Cliff` | 悬崖期结束后阶梯解锁 |
+| `Linear` | 初始解锁 + 悬崖期后连续线性释放 |
+| `Cliff` | 悬崖期结束后按 `unlock_interval` 阶梯释放 |
 | `Custom` | 自定义（预留） |
 
 ```
 initial_unlock = total × initial_unlock_bps / 10000
 vesting_amount = total × (10000 - initial_unlock_bps) / 10000
-unlocked = vesting_amount × elapsed_since_cliff / vesting_duration
+
+# Linear: 连续线性
+effective_elapsed = elapsed_since_cliff
+
+# Cliff: 按 unlock_interval 阶梯取整
+effective_elapsed = (elapsed_since_cliff / unlock_interval) × unlock_interval
+
+unlocked = vesting_amount × effective_elapsed / vesting_duration
 new_unlock = (initial_unlock + unlocked) - already_unlocked
 ```
 
@@ -303,7 +310,7 @@ new_unlock = (initial_unlock + unlocked) - already_unlocked
 | `InvalidDutchAuctionConfig` | start_price <= end_price |
 | `NoPaymentOptions` | start_sale 时无支付选项 |
 | `InsufficientTokenSupply` | Entity 代币余额不足 |
-| `SaleNotInTimeWindow` | 认购时不在 [start, end] |
+| `SaleNotInTimeWindow` | 认购时不在 [start, end]；或提前结束发售 |
 | `InsufficientKycLevel` | KYC 级别 < min_kyc_level |
 | `NotInWhitelist` | 白名单模式下不在名单 |
 | `ArithmeticOverflow` | amount × price 溢出 u128 |
@@ -325,7 +332,7 @@ new_unlock = (initial_unlock + unlocked) - already_unlocked
 | `add_to_whitelist` | 轮次创建者 | NotStarted |
 | `start_sale` | 轮次创建者 | NotStarted + ≥1 支付选项 |
 | `subscribe` | signed | Active + 时间窗口 + KYC + 白名单 |
-| `end_sale` | 轮次创建者 | Active |
+| `end_sale` | 轮次创建者 | Active + (now ≥ end_block 或 已售罄) |
 | `claim_tokens` | 认购者 | Ended/Completed + 未 claimed |
 | `unlock_tokens` | 认购者 | 已 claimed + 悬崖期后 |
 | `cancel_sale` | 轮次创建者 | NotStarted/Active |
@@ -336,7 +343,7 @@ new_unlock = (initial_unlock + unlocked) - already_unlocked
 
 ```bash
 cargo test -p pallet-entity-tokensale
-# 32 tests passed
+# 37 tests passed
 ```
 
 | 测试 | 覆盖 |
@@ -371,6 +378,11 @@ cargo test -p pallet-entity-tokensale
 | `calculate_initial_unlock_works` | 20% 初始解锁 |
 | `calculate_initial_unlock_no_vesting_returns_total` | 无锁仓全额 |
 | `subscribe_rejects_overflow` | checked_mul 溢出保护 |
+| `end_sale_rejects_premature_end` | 提前结束发售被拒绝 |
+| `end_sale_allows_when_sold_out` | 售罄时可提前结束 |
+| `end_sale_allows_after_end_block` | 超过 end_block 后正常结束 |
+| `cliff_vesting_unlock_interval_step_function` | Cliff 阶梯解锁各阶段验证 |
+| `linear_vesting_continuous_unlock` | Linear 连续线性不受 interval 影响 |
 
 ## 版本历史
 
@@ -379,6 +391,7 @@ cargo test -p pallet-entity-tokensale
 | v0.1.0 | 2026-02-03 | Phase 8 初始版本 |
 | v0.1.1 | 2026-02-09 | 模块文件夹从 `sale` 重命名为 `tokensale`，更新 README |
 | v0.2.0 | 2026-02-09 | 深度审计修复（20 项），详见下方 |
+| v0.3.0 | 2026-02-23 | 二次深度审计（4 项修复 + 5 新测试），详见下方 |
 
 ### v0.2.0 审计修复详情
 
@@ -401,6 +414,21 @@ cargo test -p pallet-entity-tokensale
 - 新增 `withdraw_funds`(12) 提取募集 NEX
 - SaleRound 新增 `funds_withdrawn` 字段
 - Subscription 新增 `refunded` 字段
+
+### v0.3.0 二次深度审计
+
+- **C1**: `add_to_whitelist` 参数从 `Vec<T::AccountId>` 改为 `BoundedVec<T::AccountId, T::MaxWhitelistSize>`，防止无界输入 DoS
+- **H1**: `subscribe` 在 NEX 转账前预检 `RoundParticipants` 容量（fail-fast），避免浪费计算
+- **H2**: `end_sale` 新增时间窗口强制检查：`now >= end_block || remaining_amount == 0`，防止创建者提前截止损害参与者权益
+- **M1**: `calculate_unlockable` 实现 `VestingType::Cliff` 的 `unlock_interval` 阶梯解锁（原实现忽略 interval，全部按线性处理）
+- 新增 5 个测试覆盖上述修复
+- 已有 4 个测试适配 H2 变更（end_sale 前需推进到 end_block）
+
+**已知设计局限（标记未修）：**
+- L1: 无 `on_initialize` 自动结束机制，过期发售需手动调用 `end_sale`
+- L2: `SaleRound` 结构体较大（含 `BoundedVec<PaymentConfig>`），频繁读写开销高
+- L3: 未领取退款会导致 Entity 代币永久锁定（设计如此，用户自负）
+- L4: DutchAuction 模式下 `payment_option.price` 被荷兰公式覆盖，该字段冗余
 
 ## 许可证
 

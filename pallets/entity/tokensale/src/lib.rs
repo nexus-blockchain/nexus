@@ -719,7 +719,7 @@ pub mod pallet {
         pub fn add_to_whitelist(
             origin: OriginFor<T>,
             round_id: u64,
-            accounts: Vec<T::AccountId>,
+            accounts: BoundedVec<T::AccountId, T::MaxWhitelistSize>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -806,6 +806,15 @@ pub mod pallet {
                 ensure!(RoundWhitelist::<T>::get(round_id, &who), Error::<T>::NotInWhitelist);
             }
 
+            // H1-audit: 预检参与者容量，避免转账后才发现已满
+            {
+                let participants = RoundParticipants::<T>::get(round_id);
+                ensure!(
+                    (participants.len() as u32) < T::MaxSubscriptionsPerRound::get(),
+                    Error::<T>::ParticipantsFull
+                );
+            }
+
             // 查找支付选项（当前仅支持 None = NEX）
             let payment_option = round.payment_options.iter()
                 .find(|o| o.asset_id == payment_asset && o.enabled)
@@ -873,6 +882,8 @@ pub mod pallet {
         }
 
         /// 结束发售（释放未售 Entity 代币）
+        ///
+        /// 要求 `now >= end_block` 或已售罄（remaining == 0），防止创建者提前截止。
         #[pallet::call_index(7)]
         #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
         pub fn end_sale(
@@ -885,6 +896,13 @@ pub mod pallet {
                 let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
                 ensure!(round.creator == who, Error::<T>::Unauthorized);
                 ensure!(round.status == RoundStatus::Active, Error::<T>::InvalidRoundStatus);
+
+                // H2-audit: 必须超过结束时间 或 已售罄，才能结束
+                let now = <frame_system::Pallet<T>>::block_number();
+                ensure!(
+                    now >= round.end_block || round.remaining_amount.is_zero(),
+                    Error::<T>::SaleNotInTimeWindow
+                );
 
                 // 释放未售 Entity 代币
                 if !round.remaining_amount.is_zero() {
@@ -1183,7 +1201,7 @@ pub mod pallet {
         }
 
         /// 计算可解锁量
-        fn calculate_unlockable(
+        pub(crate) fn calculate_unlockable(
             vesting: &VestingConfig<BlockNumberFor<T>>,
             total: BalanceOf<T>,
             already_unlocked: BalanceOf<T>,
@@ -1207,7 +1225,7 @@ pub mod pallet {
                 return Ok(total.saturating_sub(already_unlocked));
             }
 
-            // 计算线性解锁
+            // 计算线性/阶梯解锁
             let vesting_duration: u128 = Self::block_to_u128(vesting.total_duration.saturating_sub(vesting.cliff_duration));
             let elapsed: u128 = Self::block_to_u128(now.saturating_sub(cliff_end));
 
@@ -1217,8 +1235,22 @@ pub mod pallet {
             let total_u128: u128 = total.saturated_into();
             let vesting_amount = total_u128.saturating_mul(vesting_bps) / 10000;
 
+            // M1-audit: Cliff 类型使用 unlock_interval 做阶梯解锁
+            let effective_elapsed = if vesting.vesting_type == VestingType::Cliff {
+                let interval: u128 = Self::block_to_u128(vesting.unlock_interval);
+                if interval > 0 {
+                    // 按 interval 取整（阶梯）
+                    (elapsed / interval).saturating_mul(interval)
+                } else {
+                    elapsed
+                }
+            } else {
+                // Linear / Custom：连续线性
+                elapsed
+            };
+
             let unlocked_vesting = if vesting_duration > 0 {
-                vesting_amount.saturating_mul(elapsed) / vesting_duration
+                vesting_amount.saturating_mul(effective_elapsed) / vesting_duration
             } else {
                 vesting_amount
             };

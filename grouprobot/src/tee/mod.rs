@@ -12,4 +12,4 @@ pub mod vault_client;
 pub mod peer_client;
 pub mod mem_security;
 pub mod dcap_verify;
-
+pub mod ra_tls;

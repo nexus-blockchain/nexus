@@ -147,7 +147,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// 设置单线收益配置
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(20_000, 0))]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_single_line_config(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -159,7 +159,7 @@ pub mod pallet {
             max_upline_levels: u8,
             max_downline_levels: u8,
         ) -> DispatchResult {
-            let _who = ensure_signed(origin)?;
+            ensure_root(origin)?;
             ensure!(upline_rate <= 1000 && downline_rate <= 1000, Error::<T>::InvalidRate);
 
             SingleLineConfigs::<T>::insert(shop_id, SingleLineConfig {

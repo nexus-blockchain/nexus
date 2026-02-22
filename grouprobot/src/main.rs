@@ -442,6 +442,9 @@ async fn main() -> anyhow::Result<()> {
     // shared_chain 已在前面声明, 链客户端异步连接后注入
     let ceremony_router = tee::ceremony::ceremony_routes(enclave.clone(), shared_chain.clone());
 
+    // ── RA-TLS Provision 路由 (DApp → TEE 端到端加密 Token 注入) ──
+    let provision_router = tee::ra_tls::provision_routes(enclave.clone(), None);
+
     // ── HTTP 路由 ──
     let app = Router::new()
         .route("/webhook", post(webhook::handle_webhook))
@@ -450,7 +453,8 @@ async fn main() -> anyhow::Result<()> {
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
         .with_state(state)
         .merge(metrics_router)
-        .merge(ceremony_router);
+        .merge(ceremony_router)
+        .merge(provision_router);
 
     // ── Ceremony 独立端口 (可选) ──
     if cfg.ceremony_port > 0 && cfg.ceremony_port != cfg.webhook_port {
@@ -475,12 +479,13 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Hardware 模式证明刷新: nonce 防重放流程
+/// Hardware 模式证明刷新: nonce 防重放 + DCAP Level 4 全证书链验证
 ///
 /// 1. request_attestation_nonce → 链上存储 nonce
 /// 2. 等待 + 读取 nonce
-/// 3. generate_attestation_with_nonce(nonce)
-/// 4. submit_verified_attestation (链上从 raw quote 解析 MRTD + 验证 nonce)
+/// 3. generate_attestation_with_nonce(nonce) — 同时提取证书链 (PEM→DER)
+/// 4. submit_dcap_full_attestation (Level 4: 4 层 ECDSA 签名验证)
+///    ↳ 证书链提取失败时降级到 submit_verified_attestation (Level 1)
 async fn refresh_hardware_attestation(
     client: &Arc<ChainClient>,
     attestor: &Arc<tee::attestor::Attestor>,
@@ -499,7 +504,7 @@ async fn refresh_hardware_attestation(
         .ok_or_else(|| anyhow::anyhow!("nonce not found on chain after request"))?;
     info!(nonce = %hex::encode(&nonce[..8]), "链上 Nonce 已获取");
 
-    // Step 3: 生成带 nonce 的 TDX Quote
+    // Step 3: 生成带 nonce 的 TDX Quote (同时提取证书链)
     let bundle = attestor.generate_attestation_with_nonce(Some(nonce))
         .map_err(|e| anyhow::anyhow!("generate_with_nonce: {}", e))?;
 
@@ -507,9 +512,19 @@ async fn refresh_hardware_attestation(
         return Err(anyhow::anyhow!("hardware attestation missing tdx_quote_raw"));
     }
 
-    // Step 4: 提交 verified attestation (链上解析 MRTD + 验证 nonce)
-    client.submit_verified_attestation(bot_id_hash, &bundle).await
-        .map_err(|e| anyhow::anyhow!("submit_verified: {}", e))?;
+    // Step 4: 优先 Level 4, 降级到 Level 1
+    if bundle.pck_cert_der.is_some() && bundle.intermediate_cert_der.is_some() {
+        // Level 4: Intel Root CA → Intermediate → PCK → QE Report → AK → Body
+        info!("提交 DCAP Level 4 全证书链证明...");
+        client.submit_dcap_full_attestation(bot_id_hash, &bundle).await
+            .map_err(|e| anyhow::anyhow!("submit_dcap_full (L4): {}", e))?;
+        info!("✅ DCAP Level 4 证明已上链 (quote_verified=true, dcap_level=4)");
+    } else {
+        // Level 1 降级: 仅结构解析 + nonce 验证
+        warn!("证书链不可用, 降级到 Level 1 (quote_verified=false)");
+        client.submit_verified_attestation(bot_id_hash, &bundle).await
+            .map_err(|e| anyhow::anyhow!("submit_verified (L1): {}", e))?;
+    }
 
     Ok(())
 }

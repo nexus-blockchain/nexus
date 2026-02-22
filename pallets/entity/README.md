@@ -188,6 +188,7 @@ cargo test -p pallet-entity-sale
 | v0.3.0 | 2026-02-02 | Phase 5: 治理增强 |
 | v0.4.0 | 2026-02-03 | Phase 6-8: 披露/KYC/发售 |
 | v0.5.0 | 2026-02-04 | Phase 8+: 转账限制、KYC 集成、投票权检查 |
+| v0.6.0 | 2026-02-23 | 全面安全审计：commission 授权修复、治理时间加权投票、tokensale 深度修复 |
 
 ## 许可证
 
