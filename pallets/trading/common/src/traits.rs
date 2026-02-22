@@ -12,7 +12,7 @@ use crate::types::MakerApplicationInfo;
 /// 函数级详细中文注释：定价服务接口
 ///
 /// ## 说明
-/// 提供 NXS/USD 实时汇率查询功能
+/// 提供 NEX/USD 实时汇率查询功能
 ///
 /// ## 使用者
 /// - `pallet-trading-p2p`: 计算订单金额、上报成交价
@@ -23,10 +23,10 @@ use crate::types::MakerApplicationInfo;
 /// ## 实现者
 /// - `pallet-trading-pricing`: 提供聚合价格
 pub trait PricingProvider<Balance> {
-    /// 获取 NXS/USD 汇率（精度 10^6）
+    /// 获取 NEX/USD 汇率（精度 10^6）
     ///
     /// ## 返回
-    /// - `Some(rate)`: 当前汇率（如 1_000_000 表示 1 NXS = 1 USD）
+    /// - `Some(rate)`: 当前汇率（如 1_000_000 表示 1 NEX = 1 USD）
     /// - `None`: 价格不可用（冷启动期或无数据）
     fn get_cos_to_usd_rate() -> Option<Balance>;
     
@@ -35,17 +35,17 @@ pub trait PricingProvider<Balance> {
     /// ## 参数
     /// - `timestamp`: 交易时间戳（Unix 毫秒）
     /// - `price_usdt`: USDT 单价（精度 10^6）
-    /// - `nxs_qty`: NXS 数量（精度 10^12）
+    /// - `nex_qty`: NEX 数量（精度 10^12）
     ///
     /// ## 返回
     /// - `Ok(())`: 成功
     /// - `Err`: 失败
-    fn report_p2p_trade(timestamp: u64, price_usdt: u64, nxs_qty: u128) -> sp_runtime::DispatchResult;
+    fn report_p2p_trade(timestamp: u64, price_usdt: u64, nex_qty: u128) -> sp_runtime::DispatchResult;
 
     /// 🔄 向后兼容：原 report_swap_order，转发到 report_p2p_trade
     #[deprecated(note = "use report_p2p_trade instead")]
-    fn report_swap_order(timestamp: u64, price_usdt: u64, nxs_qty: u128) -> sp_runtime::DispatchResult {
-        Self::report_p2p_trade(timestamp, price_usdt, nxs_qty)
+    fn report_swap_order(timestamp: u64, price_usdt: u64, nex_qty: u128) -> sp_runtime::DispatchResult {
+        Self::report_p2p_trade(timestamp, price_usdt, nex_qty)
     }
 }
 
@@ -124,7 +124,7 @@ pub trait MakerInterface<AccountId, Balance> {
     /// 🆕 罚没做市商保证金（Swap 严重少付场景）
     ///
     /// ## 说明
-    /// 当做市商在 NXS → USDT 兑换中严重少付（< 50%）时，
+    /// 当做市商在 NEX → USDT 兑换中严重少付（< 50%）时，
     /// 从其保证金中扣除 10% 作为惩罚，转入国库。
     ///
     /// ## 参数
@@ -209,7 +209,7 @@ impl<Balance> PricingProvider<Balance> for () {
         None
     }
     
-    fn report_p2p_trade(_timestamp: u64, _price_usdt: u64, _nxs_qty: u128) -> sp_runtime::DispatchResult {
+    fn report_p2p_trade(_timestamp: u64, _price_usdt: u64, _nex_qty: u128) -> sp_runtime::DispatchResult {
         Ok(())
     }
 }
@@ -287,20 +287,20 @@ impl MakerCreditInterface for () {
 /// ## 实现者
 /// - 各模块通过 `DepositCalculatorImpl` 实现
 pub trait DepositCalculator<Balance> {
-    /// 计算 USD 等值的 NXS 保证金
+    /// 计算 USD 等值的 NEX 保证金
     ///
     /// ## 参数
     /// - `usd_amount`: USD 金额（精度 10^6，如 5_000_000 = 5 USDT）
-    /// - `fallback`: 汇率不可用时的兜底金额（NXS）
+    /// - `fallback`: 汇率不可用时的兜底金额（NEX）
     ///
     /// ## 返回
-    /// - 计算后的 NXS 金额
+    /// - 计算后的 NEX 金额
     ///
     /// ## 计算公式
     /// ```text
-    /// nxs_amount = usd_amount * 10^18 / rate
+    /// nex_amount = usd_amount * 10^18 / rate
     /// ```
-    /// 其中 rate 是 NXS/USD 汇率（精度 10^6）
+    /// 其中 rate 是 NEX/USD 汇率（精度 10^6）
     fn calculate_deposit(usd_amount: u64, fallback: Balance) -> Balance;
 }
 
@@ -322,15 +322,15 @@ where
         // 尝试使用实时汇率计算
         if let Some(rate) = P::get_cos_to_usd_rate() {
             if rate > Balance::zero() {
-                // nxs_amount = usd_amount * 10^18 / rate
+                // nex_amount = usd_amount * 10^18 / rate
                 // 其中 usd_amount 精度 10^6，rate 精度 10^6
-                // 结果精度 10^18（NXS 标准精度）
+                // 结果精度 10^18（NEX 标准精度）
                 let usd_u128 = usd_amount as u128;
                 let rate_u128: u128 = rate.into();
                 let cos_precision: u128 = 1_000_000_000_000_000_000u128; // 10^18
-                let nxs_amount_u128 = usd_u128.saturating_mul(cos_precision) / rate_u128;
+                let nex_amount_u128 = usd_u128.saturating_mul(cos_precision) / rate_u128;
                 
-                if let Ok(amount) = Balance::try_from(nxs_amount_u128) {
+                if let Ok(amount) = Balance::try_from(nex_amount_u128) {
                     return amount;
                 }
             }
@@ -353,15 +353,15 @@ impl<Balance: Default> DepositCalculator<Balance> for () {
 mod tests {
     use super::*;
 
-    /// Mock PricingProvider: 1 NXS = 0.1 USD (rate = 100_000)
+    /// Mock PricingProvider: 1 NEX = 0.1 USD (rate = 100_000)
     pub struct MockPricingProvider;
 
     impl PricingProvider<u128> for MockPricingProvider {
         fn get_cos_to_usd_rate() -> Option<u128> {
-            Some(100_000) // 0.1 USD/NXS
+            Some(100_000) // 0.1 USD/NEX
         }
         
-        fn report_p2p_trade(_timestamp: u64, _price_usdt: u64, _nxs_qty: u128) -> sp_runtime::DispatchResult {
+        fn report_p2p_trade(_timestamp: u64, _price_usdt: u64, _nex_qty: u128) -> sp_runtime::DispatchResult {
             Ok(())
         }
     }
@@ -374,7 +374,7 @@ mod tests {
             None
         }
         
-        fn report_p2p_trade(_timestamp: u64, _price_usdt: u64, _nxs_qty: u128) -> sp_runtime::DispatchResult {
+        fn report_p2p_trade(_timestamp: u64, _price_usdt: u64, _nex_qty: u128) -> sp_runtime::DispatchResult {
             Ok(())
         }
     }
@@ -387,7 +387,7 @@ mod tests {
             Some(0)
         }
         
-        fn report_p2p_trade(_timestamp: u64, _price_usdt: u64, _nxs_qty: u128) -> sp_runtime::DispatchResult {
+        fn report_p2p_trade(_timestamp: u64, _price_usdt: u64, _nex_qty: u128) -> sp_runtime::DispatchResult {
             Ok(())
         }
     }
@@ -397,13 +397,13 @@ mod tests {
         type Calculator = DepositCalculatorImpl<MockPricingProvider, u128>;
         
         // 5 USDT = 5_000_000 (精度 10^6)
-        // rate = 100_000 (0.1 USD/NXS)
-        // 预期: 5_000_000 * 10^18 / 100_000 = 50 * 10^18 = 50 NXS
+        // rate = 100_000 (0.1 USD/NEX)
+        // 预期: 5_000_000 * 10^18 / 100_000 = 50 * 10^18 = 50 NEX
         let usd_amount: u64 = 5_000_000;
-        let fallback: u128 = 10_000_000_000_000_000_000; // 10 NXS
+        let fallback: u128 = 10_000_000_000_000_000_000; // 10 NEX
         
         let result = Calculator::calculate_deposit(usd_amount, fallback);
-        let expected: u128 = 50_000_000_000_000_000_000; // 50 NXS
+        let expected: u128 = 50_000_000_000_000_000_000; // 50 NEX
         assert_eq!(result, expected);
     }
 
@@ -442,15 +442,15 @@ mod tests {
     fn test_deposit_calculator_various_amounts() {
         type Calculator = DepositCalculatorImpl<MockPricingProvider, u128>;
         
-        // 1 USDT -> 10 NXS
+        // 1 USDT -> 10 NEX
         let result_1 = Calculator::calculate_deposit(1_000_000, 0);
         assert_eq!(result_1, 10_000_000_000_000_000_000u128);
         
-        // 100 USDT -> 1000 NXS
+        // 100 USDT -> 1000 NEX
         let result_100 = Calculator::calculate_deposit(100_000_000, 0);
         assert_eq!(result_100, 1_000_000_000_000_000_000_000u128);
         
-        // 0.01 USDT -> 0.1 NXS
+        // 0.01 USDT -> 0.1 NEX
         let result_001 = Calculator::calculate_deposit(10_000, 0);
         assert_eq!(result_001, 100_000_000_000_000_000u128);
     }

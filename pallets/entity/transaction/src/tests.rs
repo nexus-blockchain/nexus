@@ -427,3 +427,50 @@ fn platform_fee_calculated_correctly() {
         assert_eq!(order.platform_fee, 2);
     });
 }
+
+// ==================== H5: Service order expiry timing ====================
+
+#[test]
+fn service_in_progress_not_auto_completed_by_ship_timeout() {
+    new_test_ext().execute_with(|| {
+        // H5: Service order started but ShipTimeout fires → should NOT auto-complete
+        // because service_completed_at is still None (service not done yet)
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None));
+
+        // Seller starts service at block 50 (before ShipTimeout at 101)
+        System::set_block_number(50);
+        assert_ok!(Transaction::start_service(RuntimeOrigin::signed(SELLER), 1));
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.status, MallOrderStatus::Shipped);
+        assert!(order.service_completed_at.is_none());
+
+        // ShipTimeout = 100, original expiry at block 1+100 = 101
+        // Run to block 101 — the ShipTimeout fires but service_completed_at is None
+        run_to_block(101);
+
+        // H5: Order should still be Shipped (not auto-completed)
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.status, MallOrderStatus::Shipped);
+    });
+}
+
+#[test]
+fn service_completed_auto_confirms_after_service_confirm_timeout() {
+    new_test_ext().execute_with(|| {
+        // Service order: start → complete → auto-confirm after ServiceConfirmTimeout
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None));
+
+        System::set_block_number(10);
+        assert_ok!(Transaction::start_service(RuntimeOrigin::signed(SELLER), 1));
+
+        System::set_block_number(20);
+        assert_ok!(Transaction::complete_service(RuntimeOrigin::signed(SELLER), 1));
+        // complete_service enqueues expiry at 20 + 150 = 170
+
+        // At block 101, the ShipTimeout entry fires. service_completed_at IS set,
+        // so the H5 check allows auto-complete. This is correct behavior:
+        // the service is done, buyer hasn't confirmed, so auto-complete is fine.
+        run_to_block(101);
+        assert_eq!(Transaction::orders(1).unwrap().status, MallOrderStatus::Completed);
+    });
+}

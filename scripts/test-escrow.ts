@@ -12,8 +12,8 @@ import {
   logSuccess, 
   logError,
   logInfo,
-  formatNxs,
-  toNxsWei,
+  formatNex,
+  toNexWei,
 } from './utils/helpers.js';
 
 async function main() {
@@ -50,8 +50,8 @@ async function main() {
     // ========================================
     logStep(2, '创建托管');
     
-    const amount = toNxsWei(100);
-    console.log(`   托管金额: ${formatNxs(amount)}`);
+    const amount = toNexWei(100);
+    console.log(`   托管金额: ${formatNex(amount)}`);
     console.log(`   收款方: Bob`);
     
     try {
@@ -85,7 +85,7 @@ async function main() {
         console.log(`   托管 ID: ${escrowId}`);
         console.log(`   付款方: ${e.payer?.toString().slice(0, 16)}...`);
         console.log(`   收款方: ${e.payee?.toString().slice(0, 16)}...`);
-        console.log(`   金额: ${formatNxs(e.amount?.toString() || '0')}`);
+        console.log(`   金额: ${formatNex(e.amount?.toString() || '0')}`);
         console.log(`   状态: ${e.status?.toString() || 'Unknown'}`);
       } else {
         console.log(`   托管 ${escrowId} 不存在`);

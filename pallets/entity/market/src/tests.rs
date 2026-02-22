@@ -2,7 +2,7 @@ use crate::mock::*;
 use crate::pallet::*;
 use frame_support::{assert_noop, assert_ok};
 
-// ==================== NXS 通道：挂单 ====================
+// ==================== NEX 通道：挂单 ====================
 
 #[test]
 fn place_sell_order_works() {
@@ -72,20 +72,20 @@ fn place_sell_order_fails_insufficient_token() {
 fn place_buy_order_works() {
     ExtBuilder::build().execute_with(|| {
         configure_market_enabled(SHOP_ID);
-        // price=100, amount=1000 → total NXS = 100_000
+        // price=100, amount=1000 → total NEX = 100_000
         assert_ok!(EntityMarket::place_buy_order(
             RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 100
         ));
         let order = Orders::<Test>::get(0).expect("order exists");
         assert_eq!(order.maker, ALICE);
         assert_eq!(order.side, OrderSide::Buy);
-        // NXS should be reserved
+        // NEX should be reserved
         assert_eq!(Balances::reserved_balance(ALICE), 100_000);
     });
 }
 
 #[test]
-fn place_buy_order_fails_insufficient_nxs() {
+fn place_buy_order_fails_insufficient_nex() {
     ExtBuilder::build().execute_with(|| {
         configure_market_enabled(SHOP_ID);
         // price=1_000_000_000, amount=1000 → overflow or insufficient
@@ -96,19 +96,19 @@ fn place_buy_order_fails_insufficient_nxs() {
     });
 }
 
-// ==================== NXS 通道：吃单 ====================
+// ==================== NEX 通道：吃单 ====================
 
 #[test]
 fn take_sell_order_works() {
     ExtBuilder::build().execute_with(|| {
         configure_market_enabled(SHOP_ID);
 
-        // ALICE 挂卖单: 1000 Token @ 100 NXS
+        // ALICE 挂卖单: 1000 Token @ 100 NEX
         assert_ok!(EntityMarket::place_sell_order(
             RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 100
         ));
 
-        let bob_nxs_before = Balances::free_balance(BOB);
+        let bob_nex_before = Balances::free_balance(BOB);
 
         // BOB 吃单
         assert_ok!(EntityMarket::take_order(
@@ -120,8 +120,8 @@ fn take_sell_order_works() {
         // ALICE 的 reserved Token 应减少
         assert_eq!(get_token_reserved(SHOP_ID, ALICE), 0);
 
-        // BOB 支付 NXS: net_amount(99_000) to maker + fee(1_000) to shop_owner = 100_000 total
-        let total_paid = bob_nxs_before - Balances::free_balance(BOB);
+        // BOB 支付 NEX: net_amount(99_000) to maker + fee(1_000) to shop_owner = 100_000 total
+        let total_paid = bob_nex_before - Balances::free_balance(BOB);
         assert_eq!(total_paid, 100_000);
 
         // 订单应该是 Filled
@@ -138,7 +138,7 @@ fn take_buy_order_works() {
     ExtBuilder::build().execute_with(|| {
         configure_market_enabled(SHOP_ID);
 
-        // ALICE 挂买单: 1000 Token @ 100 NXS
+        // ALICE 挂买单: 1000 Token @ 100 NEX
         assert_ok!(EntityMarket::place_buy_order(
             RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 100
         ));
@@ -154,8 +154,8 @@ fn take_buy_order_works() {
         assert_eq!(get_token_balance(SHOP_ID, ALICE), 10_000_000 + 1000);
         // BOB 的 Token 应减少
         assert_eq!(get_token_balance(SHOP_ID, BOB), bob_token_before - 1000);
-        // BOB 应收到 NXS (扣除手续费)
-        // ALICE 的 reserved NXS 应已释放
+        // BOB 应收到 NEX (扣除手续费)
+        // ALICE 的 reserved NEX 应已释放
         assert_eq!(Balances::reserved_balance(ALICE), 0);
 
         let order = Orders::<Test>::get(0).expect("order exists");
@@ -168,7 +168,7 @@ fn take_order_partial_fill() {
     ExtBuilder::build().execute_with(|| {
         configure_market_enabled(SHOP_ID);
 
-        // ALICE 挂卖单: 2000 Token @ 100 NXS
+        // ALICE 挂卖单: 2000 Token @ 100 NEX
         assert_ok!(EntityMarket::place_sell_order(
             RuntimeOrigin::signed(ALICE), SHOP_ID, 2000, 100
         ));
@@ -201,7 +201,7 @@ fn take_order_fails_own_order() {
     });
 }
 
-// ==================== NXS 通道：取消订单 ====================
+// ==================== NEX 通道：取消订单 ====================
 
 #[test]
 fn cancel_sell_order_works() {
@@ -423,7 +423,7 @@ fn market_buy_works() {
     ExtBuilder::build().execute_with(|| {
         configure_market_enabled(SHOP_ID);
 
-        // ALICE 挂卖单: 2000 Token @ 100 NXS
+        // ALICE 挂卖单: 2000 Token @ 100 NEX
         assert_ok!(EntityMarket::place_sell_order(
             RuntimeOrigin::signed(ALICE), SHOP_ID, 2000, 100
         ));
@@ -454,12 +454,12 @@ fn market_sell_works() {
     ExtBuilder::build().execute_with(|| {
         configure_market_enabled(SHOP_ID);
 
-        // ALICE 挂买单: 2000 Token @ 100 NXS
+        // ALICE 挂买单: 2000 Token @ 100 NEX
         assert_ok!(EntityMarket::place_buy_order(
             RuntimeOrigin::signed(ALICE), SHOP_ID, 2000, 100
         ));
 
-        let bob_nxs_before = Balances::free_balance(BOB);
+        let bob_nex_before = Balances::free_balance(BOB);
 
         // BOB 市价卖 1000 Token, min_receive = 50_000
         assert_ok!(EntityMarket::market_sell(
@@ -468,8 +468,8 @@ fn market_sell_works() {
 
         // H5: BOB Token 应减少
         assert_eq!(get_token_balance(SHOP_ID, BOB), 10_000_000 - 1000);
-        // BOB 应收到 NXS
-        assert!(Balances::free_balance(BOB) > bob_nxs_before);
+        // BOB 应收到 NEX
+        assert!(Balances::free_balance(BOB) > bob_nex_before);
     });
 }
 
@@ -539,7 +539,7 @@ fn trade_updates_stats_and_twap() {
 
         let stats = MarketStatsStorage::<Test>::get(SHOP_ID);
         assert_eq!(stats.total_trades, 1);
-        assert!(stats.total_volume_nxs > 0);
+        assert!(stats.total_volume_nex > 0);
 
         // TWAP 累积器应该更新
         let twap = TwapAccumulators::<Test>::get(SHOP_ID);

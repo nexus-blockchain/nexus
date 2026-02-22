@@ -40,7 +40,7 @@ parameter_types! {
     pub const SubjectPalletId: frame_support::PalletId = frame_support::PalletId(*b"ipfs/sub");
     pub IpfsPoolPalletId: frame_support::PalletId = frame_support::PalletId(*b"py/ipfs+");
     pub OperatorEscrowPalletId: frame_support::PalletId = frame_support::PalletId(*b"py/opesc");
-    pub const MonthlyPublicFeeQuota: Balance = 100_000_000_000_000; // 100 NXS
+    pub const MonthlyPublicFeeQuota: Balance = 100_000_000_000_000; // 100 NEX
     pub const QuotaResetPeriod: BlockNumber = 100; // 简化为 100 块用于测试
 }
 
@@ -137,7 +137,7 @@ fn new_test_ext() -> sp_io::TestExternalities {
         .unwrap();
     pallet_balances::GenesisConfig::<Test> {
         balances: vec![
-            (1, 10_000_000_000_000_000u128), // 10000 NXS for testing
+            (1, 10_000_000_000_000_000u128), // 10000 NEX for testing
             (2, 1_000_000_000_000u128),
         ],
         dev_accounts: None,
@@ -323,7 +323,7 @@ fn charge_due_enters_grace_on_insufficient_balance() {
 //         let cid = H256::repeat_byte(99);
 //         let size: u64 = 1_073_741_824; // 1 GiB
 //         let replicas: u32 = 3;
-//         let price: Balance = 10_000_000_000_000; // 10 NXS
+//         let price: Balance = 10_000_000_000_000; // 10 NEX
 
 //         // 给IpfsPool充值
 //         let pool = IpfsPoolAccount::get();
@@ -466,13 +466,13 @@ fn charge_due_enters_grace_on_insufficient_balance() {
 //         let caller: AccountId = 1;
 //         let subject_id: u64 = 1;
 //         let cid = H256::repeat_byte(55);
-//         let amount: Balance = 50_000_000_000_000; // 50 NXS
+//         let amount: Balance = 50_000_000_000_000; // 50 NEX
 
 //         // 给pool充值
 //         let pool = IpfsPoolAccount::get();
 //         let _ = <Test as crate::Config>::Currency::deposit_creating(&pool, 1_000_000_000_000_000);
 
-//         // 设置配额已用95 NXS（剩余5 NXS，不足50）
+//         // 设置配额已用95 NEX（剩余5 NEX，不足50）
 //         let reset_block = System::block_number() + QuotaResetPeriod::get();
 //         crate::PublicFeeQuotaUsage::<Test>::insert(subject_id, (95_000_000_000_000u128, reset_block));
 
@@ -589,7 +589,7 @@ fn charge_due_enters_grace_on_insufficient_balance() {
 
 //         // 验证配额已重置
 //         let (used, reset_block) = crate::PublicFeeQuotaUsage::<Test>::get(subject_id);
-//         assert_eq!(used, amount); // 重置后只用了50 NXS
+//         assert_eq!(used, amount); // 重置后只用了50 NEX
 //         assert_eq!(reset_block, current_block + QuotaResetPeriod::get());
 //     });
 // }
@@ -783,7 +783,7 @@ fn four_layer_charge_from_ipfs_pool() {
         
         let subject_id: u64 = 1;
         let cid_hash = H256::repeat_byte(99);
-        let amount: Balance = 10_000_000_000_000; // 10 NXS
+        let amount: Balance = 10_000_000_000_000; // 10 NEX
         
         // 场景1：IpfsPool充足
         let pool = IpfsPoolAccount::get();
@@ -834,7 +834,7 @@ fn four_layer_charge_fallback_to_subject_funding() {
         
         // IpfsPool余额不足
         let pool = IpfsPoolAccount::get();
-        let _ = <Test as crate::Config>::Currency::deposit_creating(&pool, 1_000_000_000); // 只有1 NXS
+        let _ = <Test as crate::Config>::Currency::deposit_creating(&pool, 1_000_000_000); // 只有1 NEX
         
         // UserFunding充足（第2层使用 PinSubjectOf 获取 owner，然后派生 user_funding_account）
         let user_funding_account = crate::Pallet::<Test>::derive_user_funding_account(&owner);

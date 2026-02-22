@@ -6,18 +6,18 @@
 //! - 多种发售模式（固定价格、荷兰拍卖、白名单分配）
 //! - 多轮发售支持
 //! - 代币锁仓和线性解锁
-//! - 多资产支付支持（当前仅支持原生 NXS）
+//! - 多资产支付支持（当前仅支持原生 NEX）
 //! - KYC 集成
 //! - 实际资金转账（认购扣款、代币发放、退款）
 //!
 //! ## 资金流
 //!
-//! - subscribe: 认购者 NXS → Pallet 托管账户
+//! - subscribe: 认购者 NEX → Pallet 托管账户
 //! - start_sale: Entity 代币 reserve (锁定)
 //! - claim_tokens / unlock_tokens: Entity 代币 → 认购者
 //! - end_sale: 释放未售代币
-//! - cancel_sale + claim_refund: NXS 退还认购者 + 释放代币
-//! - withdraw_funds: NXS → Entity 派生账户
+//! - cancel_sale + claim_refund: NEX 退还认购者 + 释放代币
+//! - withdraw_funds: NEX → Entity 派生账户
 //!
 //! ## 版本历史
 //!
@@ -68,7 +68,7 @@ pub mod pallet {
     /// 发售托管 PalletId
     const SALE_PALLET_ID: PalletId = PalletId(*b"et/sale/");
 
-    /// NXS 余额类型别名（从 Currency 派生）
+    /// NEX 余额类型别名（从 Currency 派生）
     pub type BalanceOf<T> =
         <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
     /// 资产 ID 类型别名
@@ -146,9 +146,9 @@ pub mod pallet {
     /// 支付配置
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     pub struct PaymentConfig<AssetId, Balance> {
-        /// 支付资产 ID（None = 原生代币 NXS）
+        /// 支付资产 ID（None = 原生代币 NEX）
         pub asset_id: Option<AssetId>,
-        /// 单价（NXS 计价）
+        /// 单价（NEX 计价）
         pub price: Balance,
         /// 最小购买量
         pub min_purchase: Balance,
@@ -222,7 +222,7 @@ pub mod pallet {
         pub amount: Balance,
         /// 支付资产
         pub payment_asset: Option<AssetId>,
-        /// 支付金额（NXS）
+        /// 支付金额（NEX）
         pub payment_amount: Balance,
         /// 认购时间
         pub subscribed_at: BlockNumber,
@@ -251,7 +251,7 @@ pub mod pallet {
         /// 运行时事件类型
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
 
-        /// NXS 货币类型（用于认购支付和退款）
+        /// NEX 货币类型（用于认购支付和退款）
         type Currency: Currency<Self::AccountId>;
 
         /// 资产 ID 类型（多资产支付预留）
@@ -351,7 +351,7 @@ pub mod pallet {
         Blake2_128Concat,
         u64,  // round_id
         Blake2_128Concat,
-        Option<AssetIdOf<T>>,  // None = native NXS
+        Option<AssetIdOf<T>>,  // None = native NEX
         BalanceOf<T>,
         ValueQuery,
     >;
@@ -413,7 +413,7 @@ pub mod pallet {
         SaleRoundCancelled {
             round_id: u64,
         },
-        /// 用户已认购（NXS 已转入托管）
+        /// 用户已认购（NEX 已转入托管）
         Subscribed {
             round_id: u64,
             subscriber: T::AccountId,
@@ -437,13 +437,13 @@ pub mod pallet {
             round_id: u64,
             count: u32,
         },
-        /// 募集资金已提取（NXS → Entity 账户）
+        /// 募集资金已提取（NEX → Entity 账户）
         FundsWithdrawn {
             round_id: u64,
             recipient: T::AccountId,
             amount: BalanceOf<T>,
         },
-        /// 退款已领取（NXS → 认购者）
+        /// 退款已领取（NEX → 认购者）
         RefundClaimed {
             round_id: u64,
             subscriber: T::AccountId,
@@ -477,7 +477,7 @@ pub mod pallet {
         NotInWhitelist,
         /// KYC 级别不足
         InsufficientKycLevel,
-        /// 无效的支付资产（当前仅支持原生 NXS）
+        /// 无效的支付资产（当前仅支持原生 NEX）
         InvalidPaymentAsset,
         /// 已认购
         AlreadySubscribed,
@@ -771,7 +771,7 @@ pub mod pallet {
             })
         }
 
-        /// 认购（扣除 NXS 到托管账户）
+        /// 认购（扣除 NEX 到托管账户）
         #[pallet::call_index(6)]
         #[pallet::weight(Weight::from_parts(300_000_000, 14_000))]
         pub fn subscribe(
@@ -806,7 +806,7 @@ pub mod pallet {
                 ensure!(RoundWhitelist::<T>::get(round_id, &who), Error::<T>::NotInWhitelist);
             }
 
-            // 查找支付选项（当前仅支持 None = NXS）
+            // 查找支付选项（当前仅支持 None = NEX）
             let payment_option = round.payment_options.iter()
                 .find(|o| o.asset_id == payment_asset && o.enabled)
                 .ok_or(Error::<T>::InvalidPaymentAsset)?;
@@ -818,7 +818,7 @@ pub mod pallet {
             // H10: checked_mul 替代 saturating_mul
             let payment_amount = Self::calculate_payment_amount(&round, amount, payment_option)?;
 
-            // H4: 实际 NXS 转账到 Pallet 托管账户
+            // H4: 实际 NEX 转账到 Pallet 托管账户
             let pallet_account = Self::pallet_account();
             T::Currency::transfer(
                 &who,
@@ -1026,7 +1026,7 @@ pub mod pallet {
             })
         }
 
-        /// 认购者领取退款（仅 Cancelled 状态，释放对应 Entity 代币 + 退还 NXS）
+        /// 认购者领取退款（仅 Cancelled 状态，释放对应 Entity 代币 + 退还 NEX）
         #[pallet::call_index(11)]
         #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
         pub fn claim_refund(
@@ -1046,7 +1046,7 @@ pub mod pallet {
                 let entity_account = T::EntityProvider::entity_account(round.entity_id);
                 T::TokenProvider::unreserve(round.entity_id, &entity_account, sub.amount);
 
-                // 退还 NXS
+                // 退还 NEX
                 let pallet_account = Self::pallet_account();
                 T::Currency::transfer(
                     &pallet_account,
@@ -1066,7 +1066,7 @@ pub mod pallet {
             })
         }
 
-        /// 提取募集资金（NXS → Entity 派生账户，仅 Ended/Completed）
+        /// 提取募集资金（NEX → Entity 派生账户，仅 Ended/Completed）
         #[pallet::call_index(12)]
         #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
         pub fn withdraw_funds(
@@ -1084,7 +1084,7 @@ pub mod pallet {
                 );
                 ensure!(!round.funds_withdrawn, Error::<T>::FundsAlreadyWithdrawn);
 
-                // 计算 NXS 总募集额（仅原生 NXS）
+                // 计算 NEX 总募集额（仅原生 NEX）
                 let total_raised = RaisedFunds::<T>::get(round_id, Option::<AssetIdOf<T>>::None);
 
                 if !total_raised.is_zero() {

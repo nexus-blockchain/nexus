@@ -489,6 +489,8 @@ pub mod pallet {
                 
                 // 检查权限
                 ensure!(Self::can_manage_shop(shop, &who), Error::<T>::NotAuthorized);
+                // H2: 关闭的店铺不允许充值
+                ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
                 
                 // 转移资金
                 let shop_account = Self::shop_account_id(shop_id);

@@ -144,7 +144,7 @@ EntityShop::create_shop(
     b"北京旗舰店".to_vec().try_into().unwrap(),
     ShopType::PhysicalStore,
     MemberMode::Inherit, // 继承 Entity 会员
-    100_000_000_000,     // 100 NXS 运营资金
+    100_000_000_000,     // 100 NEX 运营资金
 )?;
 ```
 

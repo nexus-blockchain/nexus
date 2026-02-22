@@ -6,8 +6,8 @@ use frame_support::{assert_noop, assert_ok};
 
 // ==================== Helper Functions ====================
 
-/// 函数级中文注释：1 NXS = 1,000,000,000,000 单位（精度10^12）
-const NXS: u128 = 1_000_000_000_000;
+/// 函数级中文注释：1 NEX = 1,000,000,000,000 单位（精度10^12）
+const NEX: u128 = 1_000_000_000_000;
 
 /// 函数级中文注释：1 USDT = 1,000,000 单位（精度10^6）
 const USDT: u64 = 1_000_000;
@@ -21,15 +21,15 @@ fn add_buy_trade_works() {
         System::set_block_number(1);
         
         let timestamp = 1000u64;
-        let price = 50 * USDT; // 50 USDT/NXS
-        let qty = 100 * NXS;  // 100 NXS
+        let price = 50 * USDT; // 50 USDT/NEX
+        let qty = 100 * NEX;  // 100 NEX
 
         // 添加成交
         assert_ok!(Pricing::add_buy_trade(timestamp, price, qty));
 
         // 验证聚合数据
         let agg = Pricing::buy_aggregate();
-        assert_eq!(agg.total_nxs, qty);
+        assert_eq!(agg.total_nex, qty);
         assert_eq!(agg.order_count, 1);
 
         // 验证平均价格
@@ -41,7 +41,7 @@ fn add_buy_trade_works() {
             Event::BuyTradeAdded {
                 timestamp,
                 price_usdt: price,
-                nxs_qty: qty,
+                nex_qty: qty,
                 new_avg_price: price,
             }
             .into(),
@@ -53,17 +53,17 @@ fn add_buy_trade_works() {
 #[test]
 fn buy_multiple_trades_average_price() {
     new_test_ext().execute_with(|| {
-        // 成交1: 100 NXS @ 50 USDT = 5000 USDT
-        assert_ok!(Pricing::add_buy_trade(1000, 50 * USDT, 100 * NXS));
+        // 成交1: 100 NEX @ 50 USDT = 5000 USDT
+        assert_ok!(Pricing::add_buy_trade(1000, 50 * USDT, 100 * NEX));
 
-        // 成交2: 200 NXS @ 60 USDT = 12000 USDT
-        assert_ok!(Pricing::add_buy_trade(2000, 60 * USDT, 200 * NXS));
+        // 成交2: 200 NEX @ 60 USDT = 12000 USDT
+        assert_ok!(Pricing::add_buy_trade(2000, 60 * USDT, 200 * NEX));
 
-        // 总计: 300 NXS, 17000 USDT
-        // 平均价格: 17000 / 300 = 56.67 USDT/NXS (约)
+        // 总计: 300 NEX, 17000 USDT
+        // 平均价格: 17000 / 300 = 56.67 USDT/NEX (约)
 
         let agg = Pricing::buy_aggregate();
-        assert_eq!(agg.total_nxs, 300 * NXS);
+        assert_eq!(agg.total_nex, 300 * NEX);
         assert_eq!(agg.order_count, 2);
 
         let avg_price = Pricing::get_buy_average_price();
@@ -73,22 +73,22 @@ fn buy_multiple_trades_average_price() {
     });
 }
 
-/// Test 3: 超过1M NXS限制时删除最旧订单
+/// Test 3: 超过1M NEX限制时删除最旧订单
 #[test]
 fn buy_trades_exceed_limit_removes_oldest() {
     new_test_ext().execute_with(|| {
-        // 添加 1,000,000 NXS
-        assert_ok!(Pricing::add_buy_trade(1000, 50 * USDT, 1_000_000 * NXS));
+        // 添加 1,000,000 NEX
+        assert_ok!(Pricing::add_buy_trade(1000, 50 * USDT, 1_000_000 * NEX));
 
         let agg_before = Pricing::buy_aggregate();
         assert_eq!(agg_before.order_count, 1);
 
-        // 再添加 100,000 NXS（超过限制）
-        assert_ok!(Pricing::add_buy_trade(2000, 60 * USDT, 100_000 * NXS));
+        // 再添加 100,000 NEX（超过限制）
+        assert_ok!(Pricing::add_buy_trade(2000, 60 * USDT, 100_000 * NEX));
 
         // 验证最旧的订单被部分或全部删除
         let agg_after = Pricing::buy_aggregate();
-        assert!(agg_after.total_nxs <= 1_000_000 * NXS);
+        assert!(agg_after.total_nex <= 1_000_000 * NEX);
         
         // 新订单应该存在
         let avg_price = Pricing::get_buy_average_price();
@@ -105,15 +105,15 @@ fn add_sell_trade_works() {
         System::set_block_number(1);
         
         let timestamp = 1000u64;
-        let price = 55 * USDT; // 55 USDT/NXS
-        let qty = 50 * NXS;   // 50 NXS
+        let price = 55 * USDT; // 55 USDT/NEX
+        let qty = 50 * NEX;   // 50 NEX
 
         // 添加成交
         assert_ok!(Pricing::add_sell_trade(timestamp, price, qty));
 
         // 验证聚合数据
         let agg = Pricing::sell_aggregate();
-        assert_eq!(agg.total_nxs, qty);
+        assert_eq!(agg.total_nex, qty);
         assert_eq!(agg.order_count, 1);
 
         // 验证平均价格
@@ -125,7 +125,7 @@ fn add_sell_trade_works() {
             Event::SellTradeAdded {
                 timestamp,
                 price_usdt: price,
-                nxs_qty: qty,
+                nex_qty: qty,
                 new_avg_price: price,
             }
             .into(),
@@ -137,14 +137,14 @@ fn add_sell_trade_works() {
 #[test]
 fn sell_multiple_trades_average_price() {
     new_test_ext().execute_with(|| {
-        // 成交1: 100 NXS @ 55 USDT
-        assert_ok!(Pricing::add_sell_trade(1000, 55 * USDT, 100 * NXS));
+        // 成交1: 100 NEX @ 55 USDT
+        assert_ok!(Pricing::add_sell_trade(1000, 55 * USDT, 100 * NEX));
 
-        // 成交2: 150 NXS @ 58 USDT
-        assert_ok!(Pricing::add_sell_trade(2000, 58 * USDT, 150 * NXS));
+        // 成交2: 150 NEX @ 58 USDT
+        assert_ok!(Pricing::add_sell_trade(2000, 58 * USDT, 150 * NEX));
 
         let agg = Pricing::sell_aggregate();
-        assert_eq!(agg.total_nxs, 250 * NXS);
+        assert_eq!(agg.total_nex, 250 * NEX);
         assert_eq!(agg.order_count, 2);
 
         let avg_price = Pricing::get_sell_average_price();
@@ -164,26 +164,26 @@ fn get_market_stats_works() {
         crate::ColdStartExited::<Test>::put(true);
         
         // 添加Buy方向成交
-        assert_ok!(Pricing::add_buy_trade(1000, 50 * USDT, 100 * NXS));
+        assert_ok!(Pricing::add_buy_trade(1000, 50 * USDT, 100 * NEX));
 
         // 添加Sell方向成交
-        assert_ok!(Pricing::add_sell_trade(2000, 55 * USDT, 50 * NXS));
+        assert_ok!(Pricing::add_sell_trade(2000, 55 * USDT, 50 * NEX));
 
         // 获取市场统计
         let stats = Pricing::get_market_stats();
 
         // 验证Buy方向数据
         assert_eq!(stats.buy_price, 50 * USDT);
-        assert_eq!(stats.buy_volume, 100 * NXS);
+        assert_eq!(stats.buy_volume, 100 * NEX);
         assert_eq!(stats.buy_order_count, 1);
 
         // 验证Sell方向数据
         assert_eq!(stats.sell_price, 55 * USDT);
-        assert_eq!(stats.sell_volume, 50 * NXS);
+        assert_eq!(stats.sell_volume, 50 * NEX);
         assert_eq!(stats.sell_order_count, 1);
 
         // 验证总量
-        assert_eq!(stats.total_volume, 150 * NXS);
+        assert_eq!(stats.total_volume, 150 * NEX);
 
         // 验证加权平均价格（100*50 + 50*55）/ 150 = 51.67 USDT
         assert!(stats.weighted_price >= 51 * USDT);
@@ -198,11 +198,11 @@ fn get_cos_market_price_weighted_works() {
         // 跳过冷启动检查（测试环境）
         crate::ColdStartExited::<Test>::put(true);
         
-        // 添加Buy方向成交（200 NXS @ 50 USDT）
-        assert_ok!(Pricing::add_buy_trade(1000, 50 * USDT, 200 * NXS));
+        // 添加Buy方向成交（200 NEX @ 50 USDT）
+        assert_ok!(Pricing::add_buy_trade(1000, 50 * USDT, 200 * NEX));
 
-        // 添加Sell方向成交（100 NXS @ 60 USDT）
-        assert_ok!(Pricing::add_sell_trade(2000, 60 * USDT, 100 * NXS));
+        // 添加Sell方向成交（100 NEX @ 60 USDT）
+        assert_ok!(Pricing::add_sell_trade(2000, 60 * USDT, 100 * NEX));
 
         // 加权平均价格: (200*50 + 100*60) / 300 = 53.33 USDT
         let weighted_price = Pricing::get_cos_market_price_weighted();
@@ -222,7 +222,7 @@ fn check_price_deviation_within_range() {
         crate::ColdStartExited::<Test>::put(true);
         
         // 设置基准价格：50 USDT
-        assert_ok!(Pricing::add_buy_trade(1000, 50 * USDT, 100 * NXS));
+        assert_ok!(Pricing::add_buy_trade(1000, 50 * USDT, 100 * NEX));
 
         // 测试价格：55 USDT（偏离10%，在20%限制内）
         let test_price = 55 * USDT;
@@ -242,7 +242,7 @@ fn check_price_deviation_exceeds_range() {
         crate::ColdStartExited::<Test>::put(true);
         
         // 设置基准价格：50 USDT
-        assert_ok!(Pricing::add_buy_trade(1000, 50 * USDT, 100 * NXS));
+        assert_ok!(Pricing::add_buy_trade(1000, 50 * USDT, 100 * NEX));
 
         // 测试价格：65 USDT（偏离30%，超出20%限制）
         let test_price_high = 65 * USDT;
@@ -272,8 +272,8 @@ fn check_price_deviation_no_base_price() {
         // 调整测试：验证偏离检查正常工作
 
         let test_price = 50 * USDT;
-        // DefaultPrice = 1 (0.000001 USDT/NXS)
-        // test_price = 50,000,000 (50 USDT/NXS)
+        // DefaultPrice = 1 (0.000001 USDT/NEX)
+        // test_price = 50,000,000 (50 USDT/NEX)
         // deviation = (50,000,000 - 1) / 1 * 10000 ≈ 499,999,990,000 bps >>> 2000 bps
         assert_noop!(
             Pricing::check_price_deviation(test_price),

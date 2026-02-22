@@ -356,6 +356,33 @@ fn normal_shop_is_not_primary() {
 }
 
 // ============================================================================
+// H2: fund_operating fails on closed shop
+// ============================================================================
+
+#[test]
+fn fund_operating_fails_on_closed_shop() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1),
+            1,
+            bounded_name(b"Test Shop"),
+            ShopType::OnlineStore,
+            MemberMode::Inherit,
+            1000,
+        ));
+
+        // Close the shop
+        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
+
+        // H2: Funding a closed shop should fail
+        assert_noop!(
+            Shop::fund_operating(RuntimeOrigin::signed(1), 1, 500),
+            Error::<Test>::ShopAlreadyClosed
+        );
+    });
+}
+
+// ============================================================================
 // ShopProvider trait tests
 // ============================================================================
 

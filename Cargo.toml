@@ -41,13 +41,15 @@ members = [
     "pallets/entity/tokensale",
     "media-utils",
     "runtime",
-# Nexus Bot pallets
-    "pallets/nexus/bot-consensus",
-    "pallets/nexus/bot-registry",
-    "pallets/nexus/bot-group-mgmt",
+# GroupRobot pallets
+    "pallets/grouprobot/primitives",
+    "pallets/grouprobot/registry",
+    "pallets/grouprobot/consensus",
+    "pallets/grouprobot/community",
+    "pallets/grouprobot/ceremony",
 ]
 resolver = "2"
-exclude = ["node-operator", "nexus-agent", "nexus-node"]
+exclude = ["grouprobot"]
 
 [workspace.dependencies]
 nexus-runtime = { path = "./runtime", default-features = false }
@@ -89,10 +91,12 @@ pallet-entity-review = { path = "./pallets/entity/review", default-features = fa
 pallet-entity-disclosure = { path = "./pallets/entity/disclosure", default-features = false }
 pallet-entity-kyc = { path = "./pallets/entity/kyc", default-features = false }
 pallet-entity-tokensale = { path = "./pallets/entity/tokensale", default-features = false }
-# Nexus Bot pallets
-pallet-bot-consensus = { path = "./pallets/nexus/bot-consensus", default-features = false }
-pallet-bot-registry = { path = "./pallets/nexus/bot-registry", default-features = false }
-pallet-bot-group-mgmt = { path = "./pallets/nexus/bot-group-mgmt", default-features = false }
+# GroupRobot pallets
+pallet-grouprobot-primitives = { path = "./pallets/grouprobot/primitives", default-features = false }
+pallet-grouprobot-registry = { path = "./pallets/grouprobot/registry", default-features = false }
+pallet-grouprobot-consensus = { path = "./pallets/grouprobot/consensus", default-features = false }
+pallet-grouprobot-community = { path = "./pallets/grouprobot/community", default-features = false }
+pallet-grouprobot-ceremony = { path = "./pallets/grouprobot/ceremony", default-features = false }
 # Additional dependencies
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 sp-application-crypto = { version = "44.0.0", default-features = false }

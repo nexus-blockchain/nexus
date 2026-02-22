@@ -141,7 +141,7 @@ pub mod pallet {
     }
 
     /// 认证提供者
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     #[scale_info(skip_type_params(MaxNameLen))]
     pub struct KycProvider<AccountId, MaxNameLen: Get<u32>> {
         /// 提供者账户
@@ -167,7 +167,7 @@ pub mod pallet {
     >;
 
     /// 用户 KYC 记录
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     #[scale_info(skip_type_params(MaxCidLen))]
     pub struct KycRecord<AccountId, BlockNumber, MaxCidLen: Get<u32>> {
         /// 用户账户
@@ -204,7 +204,7 @@ pub mod pallet {
     >;
 
     /// 实体 KYC 要求配置
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
     pub struct EntityKycRequirement {
         /// 最低 KYC 级别要求
         pub min_level: KycLevel,
@@ -408,6 +408,8 @@ pub mod pallet {
         KycExpired,
         /// 提供者不支持此级别
         ProviderLevelNotSupported,
+        /// 高风险国家列表超出上限
+        TooManyCountries,
     }
 
     // ==================== Extrinsics ====================
@@ -416,7 +418,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// 提交 KYC 认证申请
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(50_000, 0))]
+        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
         pub fn submit_kyc(
             origin: OriginFor<T>,
             level: KycLevel,
@@ -428,7 +430,17 @@ pub mod pallet {
             // 检查是否已有待审核或已通过的 KYC
             if let Some(record) = KycRecords::<T>::get(&who) {
                 ensure!(record.status != KycStatus::Pending, Error::<T>::KycAlreadyPending);
-                // 允许已过期或已拒绝的重新提交
+                // H6: 已批准且未过期的 KYC 不允许覆盖提交
+                if record.status == KycStatus::Approved {
+                    if let Some(expires_at) = record.expires_at {
+                        let now = <frame_system::Pallet<T>>::block_number();
+                        ensure!(now > expires_at, Error::<T>::KycAlreadyApproved);
+                    } else {
+                        // 无过期时间的已批准记录不允许覆盖
+                        return Err(Error::<T>::KycAlreadyApproved.into());
+                    }
+                }
+                // 允许已过期、已拒绝、已撤销的重新提交
             }
 
             let data_bounded: BoundedVec<u8, T::MaxCidLength> = 
@@ -462,7 +474,7 @@ pub mod pallet {
 
         /// 批准 KYC（认证提供者调用）
         #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(40_000, 0))]
+        #[pallet::weight(Weight::from_parts(80_000_000, 6_000))]
         pub fn approve_kyc(
             origin: OriginFor<T>,
             account: T::AccountId,
@@ -510,7 +522,7 @@ pub mod pallet {
 
         /// 拒绝 KYC（认证提供者调用）
         #[pallet::call_index(2)]
-        #[pallet::weight(Weight::from_parts(40_000, 0))]
+        #[pallet::weight(Weight::from_parts(60_000_000, 6_000))]
         pub fn reject_kyc(
             origin: OriginFor<T>,
             account: T::AccountId,
@@ -550,7 +562,7 @@ pub mod pallet {
 
         /// 撤销 KYC（管理员调用）
         #[pallet::call_index(3)]
-        #[pallet::weight(Weight::from_parts(30_000, 0))]
+        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
         pub fn revoke_kyc(
             origin: OriginFor<T>,
             account: T::AccountId,
@@ -575,7 +587,7 @@ pub mod pallet {
 
         /// 注册认证提供者
         #[pallet::call_index(4)]
-        #[pallet::weight(Weight::from_parts(40_000, 0))]
+        #[pallet::weight(Weight::from_parts(60_000_000, 5_000))]
         pub fn register_provider(
             origin: OriginFor<T>,
             provider_account: T::AccountId,
@@ -616,7 +628,7 @@ pub mod pallet {
 
         /// 移除认证提供者
         #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(30_000, 0))]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn remove_provider(
             origin: OriginFor<T>,
             provider_account: T::AccountId,
@@ -636,7 +648,7 @@ pub mod pallet {
 
         /// 设置实体 KYC 要求
         #[pallet::call_index(6)]
-        #[pallet::weight(Weight::from_parts(25_000, 0))]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_entity_requirement(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -667,7 +679,7 @@ pub mod pallet {
 
         /// 更新高风险国家列表
         #[pallet::call_index(7)]
-        #[pallet::weight(Weight::from_parts(30_000, 0))]
+        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
         pub fn update_high_risk_countries(
             origin: OriginFor<T>,
             countries: Vec<[u8; 2]>,
@@ -675,7 +687,7 @@ pub mod pallet {
             T::AdminOrigin::ensure_origin(origin)?;
 
             let bounded: BoundedVec<[u8; 2], ConstU32<50>> = 
-                countries.try_into().map_err(|_| Error::<T>::NameTooLong)?;
+                countries.try_into().map_err(|_| Error::<T>::TooManyCountries)?;
 
             let count = bounded.len() as u32;
             HighRiskCountries::<T>::put(bounded);

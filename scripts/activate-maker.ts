@@ -15,7 +15,7 @@ import {
   logSuccess, 
   logError, 
   logInfo,
-  formatNxs,
+  formatNex,
 } from './utils/helpers.js';
 
 async function main() {
@@ -47,7 +47,7 @@ async function main() {
     let status = app.status.toString();
     console.log(`   当前状态: ${status}`);
     console.log(`   账户: ${app.owner.toString()}`);
-    console.log(`   押金: ${formatNxs(app.deposit.toString())}`);
+    console.log(`   押金: ${formatNex(app.deposit.toString())}`);
     
     // ========================================
     // 步骤 2: 如果是 DepositLocked，提交资料
@@ -129,7 +129,7 @@ async function main() {
       const finalApp = finalMakerApp.unwrap();
       console.log(`   做市商 ID: ${targetMakerId}`);
       console.log(`   状态: ${finalApp.status.toString()}`);
-      console.log(`   押金: ${formatNxs(finalApp.deposit.toString())}`);
+      console.log(`   押金: ${formatNex(finalApp.deposit.toString())}`);
       console.log(`   服务暂停: ${finalApp.servicePaused ? '是' : '否'}`);
       
       if (finalApp.tronAddress && finalApp.tronAddress.length > 0) {

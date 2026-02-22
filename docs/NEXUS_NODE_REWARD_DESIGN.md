@@ -10,7 +10,7 @@
 
 | 机制 | 类型 | 状态 |
 |---|---|---|
-| 质押 MinStake (100 NXS) | 经济安全 | ✅ 已实现 |
+| 质押 MinStake (100 NEX) | 经济安全 | ✅ 已实现 |
 | 信誉系统 (0-10000) | 质量追踪 | ✅ 已实现 |
 | Leader 成功 +1 信誉 | 微弱激励 | ✅ 已实现 |
 | 离线举报 -10/条 | 惩罚 | ✅ 已实现 |
@@ -86,19 +86,19 @@ pub enum SubscriptionTier {
 }
 ```
 
-| 层级 | 群数量 | 功能 | 月费 (NXS) |
+| 层级 | 群数量 | 功能 | 月费 (NEX) |
 |---|---|---|---|
-| **Basic** | 1 群 | 基础过滤 + 反垃圾 + 欢迎 | 10 NXS |
-| **Pro** | ≤5 群 | 全功能 + Captcha + 白名单 | 30 NXS |
-| **Enterprise** | 无限 | 全功能 + SLA + 优先 Leader | 100 NXS |
+| **Basic** | 1 群 | 基础过滤 + 反垃圾 + 欢迎 | 10 NEX |
+| **Pro** | ≤5 群 | 全功能 + Captcha + 白名单 | 30 NEX |
+| **Enterprise** | 无限 | 全功能 + SLA + 优先 Leader | 100 NEX |
 
-定价考虑 USD 锚定（治理可调），避免 NXS 价格波动影响。
+定价考虑 USD 锚定（治理可调），避免 NEX 价格波动影响。
 
 ### 3.3 付费周期
 
 ```
 支持: 月付 / 季付(9折) / 年付(8折)
-实现: 预付制 — 群主预存 NXS 到链上 Escrow，按 Era 扣费
+实现: 预付制 — 群主预存 NEX 到链上 Escrow，按 Era 扣费
 到期: 余额不足 → 1 Era 宽限 → BotStatus::Suspended → 节点停止服务
 ```
 
@@ -141,7 +141,7 @@ pub enum SubscriptionTier {
 ```rust
 parameter_types! {
     /// 每 Era 铸币量 (Phase 0)
-    pub const InflationPerEra: Balance = 100 * UNIT;  // 100 NXS/天
+    pub const InflationPerEra: Balance = 100 * UNIT;  // 100 NEX/天
     /// 通胀衰减率 (每 Phase 乘以此系数)
     pub const InflationDecayRate: Perbill = Perbill::from_percent(50);
     /// Era 长度 (区块数)
@@ -155,10 +155,10 @@ parameter_types! {
 
 | Phase | 每 Era 铸币 | 年通胀量 | 说明 |
 |---|---|---|---|
-| 0 (0-6月) | 100 NXS | 36,500 NXS | 冷启动保障 |
-| 1 (6-12月) | 50 NXS | 18,250 NXS | 订阅收入增长 |
-| 2 (12-24月) | 25 NXS | 9,125 NXS | 订阅为主 |
-| 3 (24+月) | 0 NXS | 0 | 纯订阅驱动 |
+| 0 (0-6月) | 100 NEX | 36,500 NEX | 冷启动保障 |
+| 1 (6-12月) | 50 NEX | 18,250 NEX | 订阅收入增长 |
+| 2 (12-24月) | 25 NEX | 9,125 NEX | 订阅为主 |
+| 3 (24+月) | 0 NEX | 0 | 纯订阅驱动 |
 
 ### 4.3 通胀发放条件
 
@@ -340,12 +340,12 @@ pub trait Config: frame_system::Config {
 ```rust
 parameter_types! {
     pub const EraLength: BlockNumber = DAYS;          // 1 天
-    pub const InflationPerEra: Balance = 100 * UNIT;  // 100 NXS/天
+    pub const InflationPerEra: Balance = 100 * UNIT;  // 100 NEX/天
     pub const MinUptimeForReward: Perbill = Perbill::from_percent(80);
     pub const MaxRewardShare: Perbill = Perbill::from_percent(30);
-    pub const BasicFeePerEra: Balance = 10 * UNIT / 30;      // ~0.33 NXS/天
-    pub const ProFeePerEra: Balance = 30 * UNIT / 30;        // 1 NXS/天
-    pub const EnterpriseFeePerEra: Balance = 100 * UNIT / 30; // ~3.33 NXS/天
+    pub const BasicFeePerEra: Balance = 10 * UNIT / 30;      // ~0.33 NEX/天
+    pub const ProFeePerEra: Balance = 30 * UNIT / 30;        // 1 NEX/天
+    pub const EnterpriseFeePerEra: Balance = 100 * UNIT / 30; // ~3.33 NEX/天
 }
 ```
 
@@ -502,31 +502,31 @@ fn on_era_end(era: u32) {
   VPS (2C4G):          ~$20
   带宽 (1TB):          ~$5
   运维:                ~$10
-  质押机会成本:        100 NXS × 5% / 12 ≈ 0.4 NXS
+  质押机会成本:        100 NEX × 5% / 12 ≈ 0.4 NEX
   ─────────────────────
-  总计:                ≈ $35 ≈ 70 NXS (假设 1 NXS ≈ $0.5)
+  总计:                ≈ $35 ≈ 70 NEX (假设 1 NEX ≈ $0.5)
 ```
 
 ### 7.2 各阶段收益预估 (3 节点)
 
 | 阶段 | 订阅数 | 订阅收入/Era | 通胀/Era | 节点池/Era | 节点月收益 |
 |---|---|---|---|---|---|
-| **Phase 0** | 0-5 | 0-5 NXS | 100 NXS | ~100 NXS | ~1000 NXS |
-| **Phase 1** | 10-30 | 10-30 NXS | 50 NXS | ~60-80 NXS | ~600-800 NXS |
-| **Phase 2** | 50-100 | 50-100 NXS | 25 NXS | ~65-105 NXS | ~650-1050 NXS |
-| **Phase 3** | 100+ | 100+ NXS | 0 | ~80+ NXS | ~800+ NXS |
+| **Phase 0** | 0-5 | 0-5 NEX | 100 NEX | ~100 NEX | ~1000 NEX |
+| **Phase 1** | 10-30 | 10-30 NEX | 50 NEX | ~60-80 NEX | ~600-800 NEX |
+| **Phase 2** | 50-100 | 50-100 NEX | 25 NEX | ~65-105 NEX | ~650-1050 NEX |
+| **Phase 3** | 100+ | 100+ NEX | 0 | ~80+ NEX | ~800+ NEX |
 
 ### 7.3 盈亏临界点
 
 ```
-Phase 0: 通胀 100 NXS/天 ÷ 3 节点 = 33 NXS/节点/天 = 1000 NXS/月
-         >> 成本 70 NXS/月  ✅ 始终盈利
+Phase 0: 通胀 100 NEX/天 ÷ 3 节点 = 33 NEX/节点/天 = 1000 NEX/月
+         >> 成本 70 NEX/月  ✅ 始终盈利
 
 Phase 3 (无通胀): 需要多少订阅?
-  3 节点成本 = 210 NXS/月 = 7 NXS/天
-  节点池占 80% → 总收入 = 7 / 0.8 = 8.75 NXS/天
-  Pro 费率 1 NXS/天 → 至少 9 个 Pro 订阅
-  Basic 费率 0.33 NXS/天 → 至少 27 个 Basic 订阅
+  3 节点成本 = 210 NEX/月 = 7 NEX/天
+  节点池占 80% → 总收入 = 7 / 0.8 = 8.75 NEX/天
+  Pro 费率 1 NEX/天 → 至少 9 个 Pro 订阅
+  Basic 费率 0.33 NEX/天 → 至少 27 个 Basic 订阅
 
   → Phase 3 最少 ~10 个付费群主即可盈亏平衡
 ```
@@ -534,11 +534,11 @@ Phase 3 (无通胀): 需要多少订阅?
 ### 7.4 通胀影响评估
 
 ```
-Phase 0 年通胀: 36,500 NXS
-假设初始总供应: 10,000,000 NXS
+Phase 0 年通胀: 36,500 NEX
+假设初始总供应: 10,000,000 NEX
 年通胀率: 0.365%  ← 极低，可忽略
 
-全周期 (0-24月) 累计通胀: 36,500 + 18,250 + 9,125 = 63,875 NXS
+全周期 (0-24月) 累计通胀: 36,500 + 18,250 + 9,125 = 63,875 NEX
 占总供应: 0.64%  ← 完全可接受
 ```
 
@@ -560,7 +560,7 @@ Phase 0 年通胀: 36,500 NXS
 │  └─ 目标: 积累 50+ 活跃 Bot                         │
 │                                                      │
 │  节点侧:                                             │
-│  ├─ 通胀 100 NXS/天 保证节点盈利                    │
+│  ├─ 通胀 100 NEX/天 保证节点盈利                    │
 │  ├─ 官方运营 3 个种子节点                            │
 │  └─ 目标: 吸引 3-5 个社区节点                        │
 │                                                      │
@@ -626,7 +626,7 @@ EraLength                — Era 长度
 
 | 维度 | Combot | Rose | Group Help | **Nexus** |
 |---|---|---|---|---|
-| 定价 | $10-50/月 | 免费 | $5-30/月 | **10-100 NXS/月** |
+| 定价 | $10-50/月 | 免费 | $5-30/月 | **10-100 NEX/月** |
 | 节点奖励 | N/A (中心化) | N/A | N/A | **订阅+通胀混合** |
 | 部署 | SaaS | SaaS | SaaS | **去中心化节点** |
 | 数据 | 第三方持有 | 第三方持有 | 第三方持有 | **群主自持** |

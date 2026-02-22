@@ -286,11 +286,11 @@ pub trait EntityTokenProvider<AccountId, Balance> {
 
 ### PricingProvider — 定价接口
 
-由 `pallet-trading-pricing` 实现，供 Entity/Shop 模块计算 USDT 等值 NXS。
+由 `pallet-trading-pricing` 实现，供 Entity/Shop 模块计算 USDT 等值 NEX。
 
 ```rust
 pub trait PricingProvider {
-    /// 获取 NXS/USDT 价格（精度 10^6）
+    /// 获取 NEX/USDT 价格（精度 10^6）
     fn get_cos_usdt_price() -> u64;
 }
 ```

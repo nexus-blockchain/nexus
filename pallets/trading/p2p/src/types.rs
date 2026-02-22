@@ -1,6 +1,6 @@
 //! # P2P 交易类型定义
 //!
-//! 统一 Buy（USDT→NXS，原 OTC）和 Sell（NXS→USDT，原 Swap）两方向的数据结构。
+//! 统一 Buy（USDT→NEX，原 OTC）和 Sell（NEX→USDT，原 Swap）两方向的数据结构。
 //!
 //! ## 设计原则
 //! - Buy 和 Sell 使用独立的 Order 结构（流程差异大）
@@ -18,9 +18,9 @@ use scale_info::TypeInfo;
 /// P2P 交易方向
 #[derive(Encode, Decode, Clone, Copy, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub enum TradeDirection {
-    /// Buy: USDT → NXS（原 OTC）
+    /// Buy: USDT → NEX（原 OTC）
     Buy,
-    /// Sell: NXS → USDT（原 Swap）
+    /// Sell: NEX → USDT（原 Swap）
     Sell,
 }
 
@@ -35,7 +35,7 @@ pub enum BuyOrderState {
     Created,
     /// 买家已标记付款或做市商已确认
     PaidOrCommitted,
-    /// NXS 已释放给买家
+    /// NEX 已释放给买家
     Released,
     /// 已退款
     Refunded,

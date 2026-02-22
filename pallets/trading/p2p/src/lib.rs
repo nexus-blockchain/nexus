@@ -3,18 +3,18 @@
 //! # P2P Trading Pallet (P2P 交易模块)
 //!
 //! ## 概述
-//! 统一 Buy（USDT→NXS）和 Sell（NXS→USDT）两方向的 P2P 交易。
+//! 统一 Buy（USDT→NEX）和 Sell（NEX→USDT）两方向的 P2P 交易。
 //! 合并原 `pallet-trading-otc` 和 `pallet-trading-swap` 的功能。
 //!
 //! ## Buy 流程（原 OTC）
-//! 1. 买家 create_buy_order → 做市商 NXS 锁定到托管
+//! 1. 买家 create_buy_order → 做市商 NEX 锁定到托管
 //! 2. 买家链下转 USDT → mark_paid
-//! 3. 做市商确认收款 → release_nxs
+//! 3. 做市商确认收款 → release_nex
 //!
 //! ## Sell 流程（原 Swap）
-//! 1. 用户 create_sell_order → 用户 NXS 锁定到托管
+//! 1. 用户 create_sell_order → 用户 NEX 锁定到托管
 //! 2. 做市商链下转 USDT → mark_sell_complete（提交 TRC20 tx hash）
-//! 3. OCW 验证 TRC20 → confirm_verification → NXS 释放给做市商
+//! 3. OCW 验证 TRC20 → confirm_verification → NEX 释放给做市商
 //!
 //! ## 版本历史
 //! - v0.1.0 (2026-02-08): 初始骨架
@@ -132,11 +132,11 @@ pub mod pallet {
         #[pallet::constant]
         type FirstPurchaseUsdValue: Get<u128>;
 
-        /// 首购订单最小 NXS 数量
+        /// 首购订单最小 NEX 数量
         #[pallet::constant]
         type MinFirstPurchaseCosAmount: Get<BalanceOf<Self>>;
 
-        /// 首购订单最大 NXS 数量
+        /// 首购订单最大 NEX 数量
         #[pallet::constant]
         type MaxFirstPurchaseCosAmount: Get<BalanceOf<Self>>;
 
@@ -497,9 +497,9 @@ pub mod pallet {
         pub maker: T::AccountId,
         /// 买家账户
         pub taker: T::AccountId,
-        /// 单价（USDT/NXS，精度 10^6）
+        /// 单价（USDT/NEX，精度 10^6）
         pub price: BalanceOf<T>,
-        /// NXS 数量
+        /// NEX 数量
         pub qty: BalanceOf<T>,
         /// USDT 总金额（精度 10^6，如 10_000_000 = 10 USD）
         pub amount: BalanceOf<T>,
@@ -566,8 +566,8 @@ pub mod pallet {
         pub maker: T::AccountId,
         /// 用户账户
         pub user: T::AccountId,
-        /// NXS 数量
-        pub nxs_amount: BalanceOf<T>,
+        /// NEX 数量
+        pub nex_amount: BalanceOf<T>,
         /// USDT 金额（精度 10^6）
         pub usdt_amount: u64,
         /// USDT 接收地址
@@ -622,7 +622,7 @@ pub mod pallet {
         pub sell_id: u64,
         pub maker_id: u64,
         pub user: T::AccountId,
-        pub nxs_amount: u64,
+        pub nex_amount: u64,
         pub usdt_amount: u64,
         pub status: SellOrderStatus,
         pub completed_at: u32,
@@ -642,7 +642,7 @@ pub mod pallet {
             order_id: u64,
             maker_id: u64,
             buyer: T::AccountId,
-            nxs_amount: BalanceOf<T>,
+            nex_amount: BalanceOf<T>,
             is_first_purchase: bool,
         },
         /// Buy 订单状态变更
@@ -658,14 +658,14 @@ pub mod pallet {
             buyer: T::AccountId,
             maker_id: u64,
             usd_value: u128,
-            nxs_amount: BalanceOf<T>,
+            nex_amount: BalanceOf<T>,
         },
         /// Buy 订单已自动过期
         BuyOrderAutoExpired {
             order_id: u64,
             buyer: T::AccountId,
             maker_id: u64,
-            nxs_amount: BalanceOf<T>,
+            nex_amount: BalanceOf<T>,
         },
         /// 买家押金已锁定
         BuyerDepositLocked {
@@ -698,7 +698,7 @@ pub mod pallet {
             sell_id: u64,
             maker_id: u64,
             user: T::AccountId,
-            nxs_amount: BalanceOf<T>,
+            nex_amount: BalanceOf<T>,
         },
         /// 做市商已标记 Sell 完成
         SellMarkedComplete {
@@ -750,8 +750,8 @@ pub mod pallet {
         /// 用户接受部分 USDT
         UserAcceptedPartialUsdt {
             sell_id: u64,
-            user_nxs: BalanceOf<T>,
-            maker_nxs: BalanceOf<T>,
+            user_nex: BalanceOf<T>,
+            maker_nex: BalanceOf<T>,
         },
         /// 用户要求退还 USDT
         UserRequestedUsdtRefund { sell_id: u64 },
@@ -894,19 +894,19 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         // ===== Buy-side Extrinsics（原 OTC）=====
 
-        /// 创建 Buy 订单（USDT→NXS）
+        /// 创建 Buy 订单（USDT→NEX）
         #[pallet::call_index(0)]
         #[pallet::weight(T::WeightInfo::create_buy_order())]
         pub fn create_buy_order(
             origin: OriginFor<T>,
             maker_id: u64,
-            nxs_amount: BalanceOf<T>,
+            nex_amount: BalanceOf<T>,
             payment_commit: H256,
             contact_commit: H256,
         ) -> DispatchResult {
             let buyer = ensure_signed(origin)?;
             let _order_id = Self::do_create_buy_order(
-                &buyer, maker_id, nxs_amount, payment_commit, contact_commit,
+                &buyer, maker_id, nex_amount, payment_commit, contact_commit,
             )?;
             Ok(())
         }
@@ -939,15 +939,15 @@ pub mod pallet {
             Self::do_mark_paid(&buyer, order_id, tron_tx_hash)
         }
 
-        /// 做市商释放 NXS 给买家
+        /// 做市商释放 NEX 给买家
         #[pallet::call_index(3)]
-        #[pallet::weight(T::WeightInfo::release_nxs())]
-        pub fn release_nxs(
+        #[pallet::weight(T::WeightInfo::release_nex())]
+        pub fn release_nex(
             origin: OriginFor<T>,
             order_id: u64,
         ) -> DispatchResult {
             let maker = ensure_signed(origin)?;
-            Self::do_release_nxs(&maker, order_id)
+            Self::do_release_nex(&maker, order_id)
         }
 
         /// 取消 Buy 订单
@@ -974,18 +974,18 @@ pub mod pallet {
 
         // ===== Sell-side Extrinsics（原 Swap）=====
 
-        /// 创建 Sell 订单（NXS→USDT）
+        /// 创建 Sell 订单（NEX→USDT）
         #[pallet::call_index(10)]
         #[pallet::weight(T::WeightInfo::create_sell_order())]
         pub fn create_sell_order(
             origin: OriginFor<T>,
             maker_id: u64,
-            nxs_amount: BalanceOf<T>,
+            nex_amount: BalanceOf<T>,
             usdt_address: sp_std::vec::Vec<u8>,
         ) -> DispatchResult {
             let user = ensure_signed(origin)?;
             let _sell_id = Self::do_create_sell_order(
-                &user, maker_id, nxs_amount, usdt_address,
+                &user, maker_id, nex_amount, usdt_address,
             )?;
             Ok(())
         }
@@ -1291,16 +1291,16 @@ pub mod pallet {
         }
 
         /// Buy 侧: 计算 USD 金额
-        pub fn calculate_usd_amount_from_nxs(
-            nxs_amount: BalanceOf<T>,
+        pub fn calculate_usd_amount_from_nex(
+            nex_amount: BalanceOf<T>,
             price: BalanceOf<T>,
         ) -> Result<u64, DispatchError> {
-            let nxs_u128: u128 = nxs_amount.saturated_into();
+            let nex_u128: u128 = nex_amount.saturated_into();
             let price_u128: u128 = price.saturated_into();
-            let usd = nxs_u128
+            let usd = nex_u128
                 .checked_mul(price_u128)
                 .ok_or(Error::<T>::CalculationOverflow)?
-                .checked_div(1_000_000_000_000u128) // NXS 精度
+                .checked_div(1_000_000_000_000u128) // NEX 精度
                 .ok_or(Error::<T>::CalculationOverflow)?;
             Ok(usd as u64)
         }
@@ -1308,7 +1308,7 @@ pub mod pallet {
         /// Buy 侧: 计算买家押金
         pub fn calculate_buyer_deposit(
             buyer: &T::AccountId,
-            nxs_amount: BalanceOf<T>,
+            nex_amount: BalanceOf<T>,
         ) -> BalanceOf<T> {
             // 首购免押金
             if !HasFirstPurchased::<T>::get(buyer) {
@@ -1321,7 +1321,7 @@ pub mod pallet {
             }
             // 按比例计算
             let rate = T::DepositRate::get() as u128;
-            let amount: u128 = nxs_amount.saturated_into();
+            let amount: u128 = nex_amount.saturated_into();
             let deposit = amount * rate / 10000;
             let deposit_balance: BalanceOf<T> = deposit.saturated_into();
             let min = T::MinDeposit::get();
@@ -1349,12 +1349,12 @@ pub mod pallet {
 
         /// Buy 侧: 验证订单金额
         pub fn validate_buy_order_amount(
-            nxs_amount: BalanceOf<T>,
+            nex_amount: BalanceOf<T>,
             is_first_purchase: bool,
         ) -> Result<u64, DispatchError> {
             let price = T::Pricing::get_cos_to_usd_rate()
                 .ok_or(Error::<T>::PricingUnavailable)?;
-            let usd_amount = Self::calculate_usd_amount_from_nxs(nxs_amount, price)?;
+            let usd_amount = Self::calculate_usd_amount_from_nex(nex_amount, price)?;
 
             if is_first_purchase {
                 // 首购使用固定金额
@@ -1376,7 +1376,7 @@ pub mod pallet {
         pub fn do_create_buy_order(
             buyer: &T::AccountId,
             maker_id: u64,
-            nxs_amount: BalanceOf<T>,
+            nex_amount: BalanceOf<T>,
             payment_commit: H256,
             contact_commit: H256,
         ) -> Result<u64, DispatchError> {
@@ -1386,7 +1386,7 @@ pub mod pallet {
             Self::enforce_kyc_requirement(buyer)?;
 
             // 验证金额
-            let _usd_amount = Self::validate_buy_order_amount(nxs_amount, false)?;
+            let _usd_amount = Self::validate_buy_order_amount(nex_amount, false)?;
 
             // 验证做市商
             let maker_app = T::MakerPallet::validate_maker(maker_id)
@@ -1405,7 +1405,7 @@ pub mod pallet {
                 .ok_or(Error::<T>::PricingUnavailable)?;
 
             // 计算 USD 金额（精度 10^6）
-            let amount_usd = Self::calculate_usd_amount_from_nxs(nxs_amount, price)?;
+            let amount_usd = Self::calculate_usd_amount_from_nex(nex_amount, price)?;
             let amount: BalanceOf<T> = (amount_usd as u128).saturated_into();
 
             // 额度检查和占用
@@ -1417,11 +1417,11 @@ pub mod pallet {
 
             let order_id = NextBuyOrderId::<T>::get();
 
-            // 锁定做市商 NXS 到托管
-            T::Escrow::lock_from(&maker_app.account, order_id, nxs_amount)?;
+            // 锁定做市商 NEX 到托管
+            T::Escrow::lock_from(&maker_app.account, order_id, nex_amount)?;
 
             // 计算买家押金
-            let buyer_deposit = Self::calculate_buyer_deposit(buyer, nxs_amount);
+            let buyer_deposit = Self::calculate_buyer_deposit(buyer, nex_amount);
             let deposit_status = if buyer_deposit.is_zero() {
                 DepositStatus::None
             } else {
@@ -1441,7 +1441,7 @@ pub mod pallet {
                 maker: maker_app.account.clone(),
                 taker: buyer.clone(),
                 price,
-                qty: nxs_amount,
+                qty: nex_amount,
                 amount,
                 created_at: now,
                 expire_at,
@@ -1470,7 +1470,7 @@ pub mod pallet {
                 order_id,
                 maker_id,
                 buyer: buyer.clone(),
-                nxs_amount,
+                nex_amount,
                 is_first_purchase: false,
             });
 
@@ -1506,31 +1506,31 @@ pub mod pallet {
                 Error::<T>::FirstPurchaseQuotaExhausted
             );
 
-            // 获取价格并计算 NXS 数量
+            // 获取价格并计算 NEX 数量
             let price = T::Pricing::get_cos_to_usd_rate()
                 .ok_or(Error::<T>::PricingUnavailable)?;
             let usd_value = T::FirstPurchaseUsdValue::get();
             let price_u128: u128 = price.saturated_into();
             ensure!(price_u128 > 0, Error::<T>::InvalidPrice);
 
-            let nxs_amount_u128 = usd_value
+            let nex_amount_u128 = usd_value
                 .checked_mul(1_000_000_000_000u128)
                 .and_then(|v| v.checked_div(price_u128))
                 .ok_or(Error::<T>::CalculationOverflow)?;
-            let nxs_amount: BalanceOf<T> = nxs_amount_u128.saturated_into();
+            let nex_amount: BalanceOf<T> = nex_amount_u128.saturated_into();
 
             ensure!(
-                nxs_amount >= T::MinFirstPurchaseCosAmount::get(),
+                nex_amount >= T::MinFirstPurchaseCosAmount::get(),
                 Error::<T>::InvalidPrice
             );
             ensure!(
-                nxs_amount <= T::MaxFirstPurchaseCosAmount::get(),
+                nex_amount <= T::MaxFirstPurchaseCosAmount::get(),
                 Error::<T>::InvalidPrice
             );
 
             // 验证做市商余额
             let maker_balance = T::Currency::free_balance(&maker_app.account);
-            ensure!(maker_balance >= nxs_amount, Error::<T>::MakerInsufficientBalance);
+            ensure!(maker_balance >= nex_amount, Error::<T>::MakerInsufficientBalance);
 
             // TRON 地址
             let maker_tron_address: TronAddress = maker_app.tron_address
@@ -1538,8 +1538,8 @@ pub mod pallet {
 
             let order_id = NextBuyOrderId::<T>::get();
 
-            // 锁定做市商 NXS 到托管
-            T::Escrow::lock_from(&maker_app.account, order_id, nxs_amount)?;
+            // 锁定做市商 NEX 到托管
+            T::Escrow::lock_from(&maker_app.account, order_id, nex_amount)?;
 
             // 时间
             let now = T::Timestamp::now().as_secs().saturated_into::<u64>();
@@ -1556,7 +1556,7 @@ pub mod pallet {
                 maker: maker_app.account.clone(),
                 taker: buyer.clone(),
                 price,
-                qty: nxs_amount,
+                qty: nex_amount,
                 amount,
                 created_at: now,
                 expire_at,
@@ -1594,7 +1594,7 @@ pub mod pallet {
                 buyer: buyer.clone(),
                 maker_id,
                 usd_value,
-                nxs_amount,
+                nex_amount,
             });
 
             Ok(order_id)
@@ -1643,7 +1643,7 @@ pub mod pallet {
             Ok(())
         }
 
-        pub fn do_release_nxs(
+        pub fn do_release_nex(
             maker: &T::AccountId,
             order_id: u64,
         ) -> DispatchResult {
@@ -1658,7 +1658,7 @@ pub mod pallet {
             );
             ensure!(order.maker == *maker, Error::<T>::NotAuthorized);
 
-            // 从托管释放 NXS 到买家
+            // 从托管释放 NEX 到买家
             T::Escrow::release_all(order_id, &order.taker)?;
 
             let old_state = Self::buy_state_to_u8(&order.state);
@@ -1674,7 +1674,7 @@ pub mod pallet {
             );
 
             // 释放买家额度
-            let amount_usd = Self::calculate_usd_amount_from_nxs(order.qty, order.price)?;
+            let amount_usd = Self::calculate_usd_amount_from_nex(order.qty, order.price)?;
             let _ = T::BuyerCredit::release_quota(&order.taker, amount_usd);
             let _ = T::BuyerCredit::record_order_completed(&order.taker, order_id);
 
@@ -1732,7 +1732,7 @@ pub mod pallet {
                 Error::<T>::InvalidBuyOrderStatus
             );
 
-            // 退还托管 NXS 给做市商
+            // 退还托管 NEX 给做市商
             T::Escrow::refund_all(order_id, &order.maker)?;
 
             let old_state = Self::buy_state_to_u8(&order.state);
@@ -1742,7 +1742,7 @@ pub mod pallet {
             BuyOrders::<T>::insert(order_id, order.clone());
 
             // 释放买家额度
-            let amount_usd = Self::calculate_usd_amount_from_nxs(order.qty, order.price)?;
+            let amount_usd = Self::calculate_usd_amount_from_nex(order.qty, order.price)?;
             let _ = T::BuyerCredit::release_quota(&order.taker, amount_usd);
             let _ = T::BuyerCredit::record_order_cancelled(&order.taker, order_id);
 
@@ -1866,11 +1866,11 @@ pub mod pallet {
         pub fn do_create_sell_order(
             user: &T::AccountId,
             maker_id: u64,
-            nxs_amount: BalanceOf<T>,
+            nex_amount: BalanceOf<T>,
             usdt_address: sp_std::vec::Vec<u8>,
         ) -> Result<u64, DispatchError> {
             // 验证最小金额
-            ensure!(nxs_amount >= T::MinSellAmount::get(), Error::<T>::SellAmountTooLow);
+            ensure!(nex_amount >= T::MinSellAmount::get(), Error::<T>::SellAmountTooLow);
 
             // 验证做市商
             let maker_app = T::MakerPallet::validate_maker(maker_id)
@@ -1888,8 +1888,8 @@ pub mod pallet {
                 .ok_or(Error::<T>::PricingUnavailable)?;
             let price_usdt: u64 = price_balance.saturated_into();
 
-            let nxs_u128: u128 = nxs_amount.saturated_into();
-            let usdt_amount_u128 = nxs_u128
+            let nex_u128: u128 = nex_amount.saturated_into();
+            let usdt_amount_u128 = nex_u128
                 .checked_mul(price_usdt as u128)
                 .ok_or(Error::<T>::AmountOverflow)?
                 .checked_div(1_000_000_000_000u128)
@@ -1899,8 +1899,8 @@ pub mod pallet {
 
             let sell_id = NextSellOrderId::<T>::get();
 
-            // 锁定用户 NXS 到托管
-            T::Escrow::lock_from(user, sell_id, nxs_amount)?;
+            // 锁定用户 NEX 到托管
+            T::Escrow::lock_from(user, sell_id, nex_amount)?;
 
             let current_block = frame_system::Pallet::<T>::block_number();
             let timeout_at = current_block + T::SellTimeoutBlocks::get();
@@ -1910,7 +1910,7 @@ pub mod pallet {
                 maker_id,
                 maker: maker_app.account,
                 user: user.clone(),
-                nxs_amount,
+                nex_amount,
                 usdt_amount,
                 usdt_address: usdt_addr,
                 created_at: current_block,
@@ -1937,7 +1937,7 @@ pub mod pallet {
                 sell_id,
                 user: user.clone(),
                 maker_id,
-                nxs_amount,
+                nex_amount,
             });
 
             Ok(sell_id)
@@ -2020,12 +2020,12 @@ pub mod pallet {
 
             if verified {
                 // 计算手续费
-                let fee_by_rate = record.nxs_amount
+                let fee_by_rate = record.nex_amount
                     .saturating_mul(T::SellFeeRateBps::get().into()) / 10000u32.into();
                 let min_fee = T::MinSellFee::get();
                 let fee = if fee_by_rate > min_fee { fee_by_rate } else { min_fee };
-                let fee = if fee > record.nxs_amount { record.nxs_amount } else { fee };
-                let net_amount = record.nxs_amount.saturating_sub(fee);
+                let fee = if fee > record.nex_amount { record.nex_amount } else { fee };
+                let net_amount = record.nex_amount.saturating_sub(fee);
 
                 if net_amount > BalanceOf::<T>::from(0u32) {
                     T::Escrow::transfer_from_escrow(sell_id, &record.maker, net_amount)?;
@@ -2048,8 +2048,8 @@ pub mod pallet {
 
                 // 上报交易数据
                 let timestamp = current_block.saturated_into::<u64>() * 6000;
-                let nxs_qty: u128 = record.nxs_amount.saturated_into();
-                let _ = T::Pricing::report_p2p_trade(timestamp, record.price_usdt, nxs_qty);
+                let nex_qty: u128 = record.nex_amount.saturated_into();
+                let _ = T::Pricing::report_p2p_trade(timestamp, record.price_usdt, nex_qty);
 
                 Self::deposit_event(Event::SellFeeCollected {
                     sell_id,
@@ -2143,7 +2143,7 @@ pub mod pallet {
                 }
             }
 
-            // 计算押金（托管的 1%，最低 1 NXS）
+            // 计算押金（托管的 1%，最低 1 NEX）
             let escrow_balance = T::Escrow::amount_of(sell_id);
             let one_percent = escrow_balance / 100u32.into();
             let min_deposit: BalanceOf<T> = 1_000_000_000_000u128.saturated_into();
@@ -2230,22 +2230,22 @@ pub mod pallet {
             let evidence = SellUnderpaidEvidences::<T>::get(sell_id)
                 .ok_or(Error::<T>::EvidenceNotFound)?;
 
-            // 按比例分配 NXS
+            // 按比例分配 NEX
             let maker_ratio = if evidence.expected_amount > 0 {
                 evidence.actual_amount * 10000 / evidence.expected_amount
             } else {
                 0
             };
-            let maker_nxs = record.nxs_amount
+            let maker_nex = record.nex_amount
                 .saturating_mul(BalanceOf::<T>::from(maker_ratio as u32))
                 / BalanceOf::<T>::from(10000u32);
-            let user_nxs = record.nxs_amount.saturating_sub(maker_nxs);
+            let user_nex = record.nex_amount.saturating_sub(maker_nex);
 
-            if maker_nxs > BalanceOf::<T>::from(0u32) {
-                T::Escrow::transfer_from_escrow(sell_id, &record.maker, maker_nxs)?;
+            if maker_nex > BalanceOf::<T>::from(0u32) {
+                T::Escrow::transfer_from_escrow(sell_id, &record.maker, maker_nex)?;
             }
-            if user_nxs > BalanceOf::<T>::from(0u32) {
-                T::Escrow::transfer_from_escrow(sell_id, user, user_nxs)?;
+            if user_nex > BalanceOf::<T>::from(0u32) {
+                T::Escrow::transfer_from_escrow(sell_id, user, user_nex)?;
             }
 
             // 罚没做市商保证金
@@ -2264,8 +2264,8 @@ pub mod pallet {
 
             Self::deposit_event(Event::UserAcceptedPartialUsdt {
                 sell_id,
-                user_nxs,
-                maker_nxs,
+                user_nex,
+                maker_nex,
             });
             if let Some(pid) = penalty_id {
                 Self::deposit_event(Event::MakerDepositSlashed {
@@ -2315,7 +2315,7 @@ pub mod pallet {
             let refund_hash: BoundedVec<u8, ConstU32<128>> = refund_tx_hash
                 .try_into().map_err(|_| Error::<T>::InvalidTxHash)?;
 
-            // NXS 全部退还用户
+            // NEX 全部退还用户
             T::Escrow::release_all(sell_id, &record.user)?;
 
             record.status = SellOrderStatus::Refunded;
@@ -2450,7 +2450,7 @@ pub mod pallet {
                 order_id,
                 buyer: order.taker.clone(),
                 maker_id: order.maker_id,
-                nxs_amount: order.qty,
+                nex_amount: order.qty,
             });
 
             Ok(())
@@ -2472,9 +2472,9 @@ pub mod pallet {
             );
 
             use pallet_arbitration::pallet::Decision;
-            // Buy 场景：托管的是做市商 NXS
-            // Release = 买家胜 → NXS 给买家(taker)
-            // Refund  = 做市商胜 → NXS 退回做市商(maker)
+            // Buy 场景：托管的是做市商 NEX
+            // Release = 买家胜 → NEX 给买家(taker)
+            // Refund  = 做市商胜 → NEX 退回做市商(maker)
             let maker_win = match decision {
                 Decision::Release => {
                     T::Escrow::release_all(order_id, &order.taker)?;
@@ -2566,7 +2566,7 @@ pub mod pallet {
                                 sell_id: cursor,
                                 maker_id: record.maker_id,
                                 user: record.user,
-                                nxs_amount: record.nxs_amount.saturated_into(),
+                                nex_amount: record.nex_amount.saturated_into(),
                                 usdt_amount: record.usdt_amount,
                                 status: record.status,
                                 completed_at: record.completed_at

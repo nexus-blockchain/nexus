@@ -495,7 +495,7 @@ Alice (推荐人: None)
 └── Carol (推荐人: Alice)
     └── Grace (推荐人: Carol)
 
-当 Frank 消费 1000 NXS 时，推荐关系将由 pallet-entity-commission 用于计算返佣。
+当 Frank 消费 1000 NEX 时，推荐关系将由 pallet-entity-commission 用于计算返佣。
 ```
 
 ## 📝 注意事项

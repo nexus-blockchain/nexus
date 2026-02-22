@@ -100,7 +100,7 @@ pub mod pallet {
         pub maker_id: u64,
         /// 扣除类型
         pub penalty_type: PenaltyType,
-        /// 扣除的NXS数量
+        /// 扣除的NEX数量
         pub deducted_amount: BalanceOf<T>,
         /// 扣除时的USD价值
         pub usd_value: u64,
@@ -1357,18 +1357,18 @@ pub mod pallet {
     // ===== 新增：动态押金管理和扣除机制 =====
 
     impl<T: Config> Pallet<T> {
-        /// 函数级详细中文注释：计算指定USD价值对应的NXS数量
-        pub fn calculate_nxs_amount_for_usd(usd_value: u64) -> Result<BalanceOf<T>, DispatchError> {
-            // 获取当前NXS/USD价格
+        /// 函数级详细中文注释：计算指定USD价值对应的NEX数量
+        pub fn calculate_nex_amount_for_usd(usd_value: u64) -> Result<BalanceOf<T>, DispatchError> {
+            // 获取当前NEX/USD价格
             let cos_to_usd_rate = T::Pricing::get_cos_to_usd_rate()
                 .ok_or(Error::<T>::PriceNotAvailable)?;
 
-            // 计算所需NXS数量
-            // NXS数量 = USD价值 / (NXS/USD价格)
+            // 计算所需NEX数量
+            // NEX数量 = USD价值 / (NEX/USD价格)
             Self::calculate_cos_from_usd_rate(usd_value, cos_to_usd_rate)
         }
 
-        /// 函数级详细中文注释：根据USD价值和汇率计算NXS数量
+        /// 函数级详细中文注释：根据USD价值和汇率计算NEX数量
         fn calculate_cos_from_usd_rate(
             usd_value: u64,
             cos_to_usd_rate: BalanceOf<T>
@@ -1377,19 +1377,19 @@ pub mod pallet {
             let usd_u128 = usd_value as u128;
             let rate_u128: u128 = cos_to_usd_rate.saturated_into();
 
-            // 计算NXS数量 = USD价值 × NXS精度 ÷ NXS/USD汇率
+            // 计算NEX数量 = USD价值 × NEX精度 ÷ NEX/USD汇率
             let cos_u128 = usd_u128
-                .checked_mul(1_000_000_000_000u128) // NXS精度10^12
+                .checked_mul(1_000_000_000_000u128) // NEX精度10^12
                 .ok_or(Error::<T>::CalculationOverflow)?
                 .checked_div(rate_u128)
                 .ok_or(Error::<T>::CalculationOverflow)?;
 
             // 转换为BalanceOf<T>
-            let nxs_amount: BalanceOf<T> = cos_u128
+            let nex_amount: BalanceOf<T> = cos_u128
                 .try_into()
                 .map_err(|_| Error::<T>::CalculationOverflow)?;
 
-            Ok(nxs_amount)
+            Ok(nex_amount)
         }
 
         /// 函数级详细中文注释：计算COS押金的USD价值
@@ -1401,11 +1401,11 @@ pub mod pallet {
             let deposit_u128: u128 = deposit.saturated_into();
             let rate_u128: u128 = cos_to_usd_rate.saturated_into();
 
-            // 计算USD价值 = NXS数量 × NXS/USD汇率 ÷ NXS精度
+            // 计算USD价值 = NEX数量 × NEX/USD汇率 ÷ NEX精度
             let usd_u128 = deposit_u128
                 .checked_mul(rate_u128)
                 .ok_or(Error::<T>::CalculationOverflow)?
-                .checked_div(1_000_000_000_000u128) // 除以NXS精度10^12
+                .checked_div(1_000_000_000_000u128) // 除以NEX精度10^12
                 .ok_or(Error::<T>::CalculationOverflow)?;
 
             // 转换为u64
@@ -1440,12 +1440,12 @@ pub mod pallet {
                 );
 
                 // 计算补充目标数量
-                let target_nxs_amount = Self::calculate_nxs_amount_for_usd(
+                let target_nex_amount = Self::calculate_nex_amount_for_usd(
                     T::DepositReplenishTarget::get()
                 )?;
 
                 // 计算需要补充的金额
-                let replenish_amount = target_nxs_amount
+                let replenish_amount = target_nex_amount
                     .saturating_sub(app.deposit);
 
                 if replenish_amount.is_zero() {
@@ -1489,7 +1489,7 @@ pub mod pallet {
 
             // 2. 计算扣除金额
             let (deduct_usd, reason) = Self::calculate_penalty_amount(&penalty_type)?;
-            let deduct_cos = Self::calculate_nxs_amount_for_usd(deduct_usd)?;
+            let deduct_cos = Self::calculate_nex_amount_for_usd(deduct_usd)?;
 
             // 3. 验证押金是否充足
             ensure!(

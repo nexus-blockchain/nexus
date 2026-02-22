@@ -12,7 +12,7 @@
 pallet-entity-service
 ├── EntityProvider          Entity 查询（保留，当前由 ShopProvider::is_shop_active 隐式检查）
 ├── ShopProvider            Shop 查询（shop_exists, shop_owner, shop_account, is_shop_active）
-├── PricingProvider         NXS/USDT 价格（get_cos_usdt_price，用于计算等值押金）
+├── PricingProvider         NEX/USDT 价格（get_cos_usdt_price，用于计算等值押金）
 └── ProductProvider trait   供 pallet-entity-transaction 调用库存/价格/类别查询
 ```
 
@@ -20,7 +20,7 @@ pallet-entity-service
 
 ## 押金机制
 
-创建商品时从**店铺派生账户**扣取 **1 USDT 等值 NXS** 押金，转入 Pallet 托管账户 `PalletId(*b"et/prod/")`。删除商品时原路退还。
+创建商品时从**店铺派生账户**扣取 **1 USDT 等值 NEX** 押金，转入 Pallet 托管账户 `PalletId(*b"et/prod/")`。删除商品时原路退还。
 
 ```
 创建商品:   Shop 派生账户 ──KeepAlive──→ Product Pallet 账户 (押金)
@@ -33,8 +33,8 @@ pallet-entity-service
 ### 押金计算公式
 
 ```
-NXS 押金 = ProductDepositUsdt × 10^12 / cos_usdt_price
-最终押金 = clamp(NXS 押金, MinProductDepositCos, MaxProductDepositCos)
+NEX 押金 = ProductDepositUsdt × 10^12 / cos_usdt_price
+最终押金 = clamp(NEX 押金, MinProductDepositCos, MaxProductDepositCos)
 ```
 
 ## Config 配置
@@ -49,8 +49,8 @@ impl pallet_entity_service::Config for Runtime {
     type MaxProductsPerShop = ConstU32<1000>;
     type MaxCidLength = ConstU32<64>;
     type ProductDepositUsdt = ConstU64<1_000_000>;       // 1 USDT (精度 10^6)
-    type MinProductDepositCos = ConstU128<{ UNIT / 100 }>; // 0.01 NXS
-    type MaxProductDepositCos = ConstU128<{ 10 * UNIT }>;  // 10 NXS
+    type MinProductDepositCos = ConstU128<{ UNIT / 100 }>; // 0.01 NEX
+    type MaxProductDepositCos = ConstU128<{ 10 * UNIT }>;  // 10 NEX
 }
 ```
 
@@ -59,12 +59,12 @@ impl pallet_entity_service::Config for Runtime {
 | `Currency` | 货币类型 |
 | `EntityProvider` | Entity 查询接口（保留，由 ShopProvider 隐式使用） |
 | `ShopProvider` | Shop 查询 + 派生账户 + 权限验证 |
-| `PricingProvider` | NXS/USDT 实时价格（`get_cos_usdt_price()`） |
+| `PricingProvider` | NEX/USDT 实时价格（`get_cos_usdt_price()`） |
 | `MaxProductsPerShop` | 每店铺最大商品数上限 |
 | `MaxCidLength` | IPFS CID 最大字节数 |
 | `ProductDepositUsdt` | 押金 USDT 金额（精度 10^6） |
-| `MinProductDepositCos` | 押金 NXS 下限 |
-| `MaxProductDepositCos` | 押金 NXS 上限 |
+| `MinProductDepositCos` | 押金 NEX 下限 |
+| `MaxProductDepositCos` | 押金 NEX 上限 |
 
 ## 数据结构
 
@@ -237,7 +237,7 @@ impl ProductProvider<AccountId, Balance> for Pallet<T> {
 | 函数 | 说明 |
 |------|------|
 | `pallet_account()` | 返回押金托管 Pallet 账户 `PalletId(*b"et/prod/")` |
-| `calculate_product_deposit()` | 计算当前 1 USDT 等值 NXS 押金（含 clamp） |
+| `calculate_product_deposit()` | 计算当前 1 USDT 等值 NEX 押金（含 clamp） |
 | `get_current_deposit()` | 供前端查询当前押金金额（调用 `calculate_product_deposit`） |
 
 ## Events
@@ -264,7 +264,7 @@ impl ProductProvider<AccountId, Balance> for Pallet<T> {
 | `CidTooLong` | `create_product`, `update_product` | CID 超过 `MaxCidLength` |
 | `InsufficientShopFund` | `create_product` | 店铺派生账户余额不足以支付押金 |
 | `DepositNotFound` | `delete_product`（未使用，代码中 fallback 为 0） | 押金记录不存在 |
-| `PriceUnavailable` | `calculate_product_deposit` | NXS/USDT 价格为 0 |
+| `PriceUnavailable` | `calculate_product_deposit` | NEX/USDT 价格为 0 |
 | `ArithmeticOverflow` | `calculate_product_deposit` | 押金计算溢出 |
 | `InvalidPrice` | `create_product` | 商品价格不能为 0 |
 

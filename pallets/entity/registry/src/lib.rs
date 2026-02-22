@@ -11,7 +11,7 @@
 //!
 //! ## 运营资金机制
 //!
-//! - 创建实体时转入 50 USDT 等值 NXS 到派生账户
+//! - 创建实体时转入 50 USDT 等值 NEX 到派生账户
 //! - 资金可用于支付 IPFS Pin、存储租金等运营费用
 //! - 资金不可提取，仅治理关闭后退还
 //! - 低于最低余额时实体自动暂停
@@ -163,18 +163,18 @@ pub mod pallet {
         /// 治理 Origin
         type GovernanceOrigin: EnsureOrigin<Self::RuntimeOrigin>;
 
-        /// 定价提供者（用于计算 USDT 等值 NXS 押金）
+        /// 定价提供者（用于计算 USDT 等值 NEX 押金）
         type PricingProvider: PricingProvider;
 
         /// 初始运营资金 USDT 金额（精度 10^6，即 50_000_000 = 50 USDT）
         #[pallet::constant]
         type InitialFundUsdt: Get<u64>;
 
-        /// 最小初始资金 NXS（防止价格过高时资金过低）
+        /// 最小初始资金 NEX（防止价格过高时资金过低）
         #[pallet::constant]
         type MinInitialFundCos: Get<BalanceOf<Self>>;
 
-        /// 最大初始资金 NXS（防止价格过低时资金过高）
+        /// 最大初始资金 NEX（防止价格过低时资金过高）
         #[pallet::constant]
         type MaxInitialFundCos: Get<BalanceOf<Self>>;
 
@@ -414,7 +414,7 @@ pub mod pallet {
         /// # 激活模型：付费即激活（Pay-to-Activate）
         /// 
         /// 新建 Entity 直接进入 `Active` 状态，不经过 `Pending` 审批。
-        /// 信任锚点是 50 USDT 等值 NXS 押金，构成经济层面的 Sybil 防护。
+        /// 信任锚点是 50 USDT 等值 NEX 押金，构成经济层面的 Sybil 防护。
         /// 
         /// `approve_entity`（call_index 4）**仅用于** `reopen_entity` 后的治理审批，
         /// 因为重开的 Entity 有历史关闭/封禁记录，需要额外的治理信任层。
@@ -451,7 +451,7 @@ pub mod pallet {
                 .map(|c| c.try_into().map_err(|_| Error::<T>::CidTooLong))
                 .transpose()?;
 
-            // 计算初始金库资金（50 USDT 等值 NXS）
+            // 计算初始金库资金（50 USDT 等值 NEX）
             let initial_fund = Self::calculate_initial_fund()?;
             
             // 生成 Entity ID 和金库账户
@@ -1145,7 +1145,7 @@ pub mod pallet {
             ensure!(entity.owner == who, Error::<T>::NotEntityOwner);
             ensure!(entity.status == EntityStatus::Closed, Error::<T>::InvalidEntityStatus);
 
-            // 重新计算并缴纳押金（50 USDT 等值 NXS）
+            // 重新计算并缴纳押金（50 USDT 等值 NEX）
             let initial_fund_amount = Self::calculate_initial_fund()?;
 
             let treasury_account = Self::entity_treasury_account(entity_id);
@@ -1189,11 +1189,11 @@ pub mod pallet {
             ENTITY_PALLET_ID.into_sub_account_truncating(entity_id)
         }
 
-        /// 计算初始运营资金（USDT 等值 NXS）
+        /// 计算初始运营资金（USDT 等值 NEX）
         /// 
         /// # 算法
-        /// 1. 获取 NXS/USDT 价格（精度 10^6）
-        /// 2. 计算所需 NXS 数量 = USDT 金额 * 10^12 / 价格
+        /// 1. 获取 NEX/USDT 价格（精度 10^6）
+        /// 2. 计算所需 NEX 数量 = USDT 金额 * 10^12 / 价格
         /// 3. 限制在 [MinInitialFundCos, MaxInitialFundCos] 范围内
         pub fn calculate_initial_fund() -> Result<BalanceOf<T>, sp_runtime::DispatchError> {
             let price = T::PricingProvider::get_cos_usdt_price();
@@ -1201,18 +1201,18 @@ pub mod pallet {
 
             let usdt_amount = T::InitialFundUsdt::get();
 
-            // nxs_amount = usdt_amount * 10^12 / price
-            let nxs_amount_u128 = (usdt_amount as u128)
+            // nex_amount = usdt_amount * 10^12 / price
+            let nex_amount_u128 = (usdt_amount as u128)
                 .checked_mul(1_000_000_000_000u128)
                 .ok_or(Error::<T>::ArithmeticOverflow)?
                 .checked_div(price as u128)
                 .ok_or(Error::<T>::ArithmeticOverflow)?;
 
-            let nxs_amount: BalanceOf<T> = nxs_amount_u128.saturated_into();
+            let nex_amount: BalanceOf<T> = nex_amount_u128.saturated_into();
 
             let min_fund = T::MinInitialFundCos::get();
             let max_fund = T::MaxInitialFundCos::get();
-            let final_fund = nxs_amount.max(min_fund).min(max_fund);
+            let final_fund = nex_amount.max(min_fund).min(max_fund);
 
             Ok(final_fund)
         }
@@ -1309,7 +1309,7 @@ pub mod pallet {
             let price = T::PricingProvider::get_cos_usdt_price();
             let usdt_amount = T::InitialFundUsdt::get();
 
-            let nxs_amount = if price > 0 {
+            let nex_amount = if price > 0 {
                 (usdt_amount as u128)
                     .saturating_mul(1_000_000_000_000u128)
                     .checked_div(price as u128)
@@ -1318,7 +1318,7 @@ pub mod pallet {
                 0
             };
 
-            (usdt_amount, price, nxs_amount)
+            (usdt_amount, price, nex_amount)
         }
 
         // ==================== Phase 3 新增辅助函数 ====================

@@ -4,19 +4,19 @@
 
 ## 概述
 
-`pallet-entity-tokensale` 实现 Entity 组织的代币公开发售（Token Sale / IEO）功能。Entity owner/admin 可配置多轮发售，支持 5 种发售模式、NXS 支付、灵活的锁仓解锁策略、KYC 准入控制和完整的资金托管流。
+`pallet-entity-tokensale` 实现 Entity 组织的代币公开发售（Token Sale / IEO）功能。Entity owner/admin 可配置多轮发售，支持 5 种发售模式、NEX 支付、灵活的锁仓解锁策略、KYC 准入控制和完整的资金托管流。
 
 ## 资金流
 
 ```
-subscribe:      认购者 NXS ──→ Pallet 托管账户
+subscribe:      认购者 NEX ──→ Pallet 托管账户
 start_sale:     Entity 代币 ──reserve──→ 锁定
 claim_tokens:   Entity 代币 ──repatriate──→ 认购者（初始解锁）
 unlock_tokens:  Entity 代币 ──repatriate──→ 认购者（后续解锁）
 end_sale:       未售代币 ──unreserve──→ Entity 账户
 cancel_sale:    未售代币 ──unreserve──→ Entity 账户
-claim_refund:   NXS ──→ 认购者 + Entity 代币 ──unreserve
-withdraw_funds: NXS ──→ Entity 派生账户
+claim_refund:   NEX ──→ 认购者 + Entity 代币 ──unreserve
+withdraw_funds: NEX ──→ Entity 派生账户
 ```
 
 ## 架构
@@ -26,7 +26,7 @@ pallet-entity-tokensale (pallet_index = 132)
 │
 ├── 外部依赖
 │   ├── EntityProvider       Entity 存在性 / 权限 / 派生账户
-│   ├── Currency (NXS)       认购支付 / 退款 / 提取
+│   ├── Currency (NEX)       认购支付 / 退款 / 提取
 │   ├── EntityTokenProvider  Entity 代币 reserve / unreserve / repatriate
 │   └── KycChecker           KYC 级别查询
 │
@@ -75,7 +75,7 @@ create_sale_round ──→ [NotStarted] ──┤
                          start_sale (锁定 Entity 代币)
                                 │
                                 ▼
-                           [Active] ←── subscribe (NXS → 托管)
+                           [Active] ←── subscribe (NEX → 托管)
                             │     │            │
                      end_sale  cancel_sale   时间窗口校验
                      (释放未售)  (释放未售)    + KYC 校验
@@ -84,11 +84,11 @@ create_sale_round ──→ [NotStarted] ──┤
                         [Ended]  [Cancelled]
                             │         │
                      claim_tokens  claim_refund
-                     (代币→用户)   (NXS→用户 + 释放代币)
+                     (代币→用户)   (NEX→用户 + 释放代币)
                             │
                      unlock_tokens (悬崖期后)
                             │
-                     withdraw_funds (NXS→Entity)
+                     withdraw_funds (NEX→Entity)
 ```
 
 ### 轮次状态 (RoundStatus)
@@ -139,8 +139,8 @@ pub struct Subscription<AccountId, Balance, BlockNumber, AssetId> {
     pub subscriber: AccountId,
     pub round_id: u64,
     pub amount: Balance,                       // 认购 Entity 代币数量
-    pub payment_asset: Option<AssetId>,        // None = 原生 NXS
-    pub payment_amount: Balance,               // 实际支付 NXS
+    pub payment_asset: Option<AssetId>,        // None = 原生 NEX
+    pub payment_amount: Balance,               // 实际支付 NEX
     pub subscribed_at: BlockNumber,
     pub claimed: bool,                         // 是否已领取初始解锁
     pub unlocked_amount: Balance,              // 累计已解锁
@@ -161,7 +161,7 @@ pub struct VestingConfig<BlockNumber> {
 }
 
 pub struct PaymentConfig<AssetId, Balance> {
-    pub asset_id: Option<AssetId>,             // None = NXS
+    pub asset_id: Option<AssetId>,             // None = NEX
     pub price: Balance,                        // 单价（须 > 0）
     pub min_purchase: Balance,                 // 最小购买量（须 > 0）
     pub max_purchase_per_account: Balance,     // 每人最大（须 >= min）
@@ -174,7 +174,7 @@ pub struct PaymentConfig<AssetId, Balance> {
 ```rust
 impl pallet_entity_tokensale::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
-    type Currency = Balances;                      // NXS 支付/退款
+    type Currency = Balances;                      // NEX 支付/退款
     type AssetId = u64;
     type EntityProvider = EntityRegistry;           // Entity 权限/账户
     type TokenProvider = EntityToken;               // Entity 代币操作
@@ -188,7 +188,7 @@ impl pallet_entity_tokensale::Config for Runtime {
 
 | 参数 | 说明 |
 |------|------|
-| `Currency` | NXS 货币（认购收款、退款、提取） |
+| `Currency` | NEX 货币（认购收款、退款、提取） |
 | `EntityProvider` | Entity 存在性/激活状态/权限/派生账户 |
 | `TokenProvider` | Entity 代币 reserve/unreserve/repatriate |
 | `KycChecker` | KYC 级别查询（0-4） |
@@ -220,13 +220,13 @@ impl pallet_entity_tokensale::Config for Runtime {
 | 3 | `configure_dutch_auction` | 创建者 | NotStarted + DutchAuction | 价格曲线（start > end） |
 | 4 | `add_to_whitelist` | 创建者 | NotStarted | 独立存储白名单 |
 | 5 | `start_sale` | 创建者 | NotStarted | 锁定 Entity 代币 + 需 ≥1 支付选项 |
-| 6 | `subscribe` | signed | Active | NXS → 托管（时间窗口+KYC+白名单校验） |
+| 6 | `subscribe` | signed | Active | NEX → 托管（时间窗口+KYC+白名单校验） |
 | 7 | `end_sale` | 创建者 | Active | 释放未售代币 |
 | 8 | `claim_tokens` | 认购者 | Ended/Completed | Entity 代币 → 用户（初始解锁） |
 | 9 | `unlock_tokens` | 认购者 | 已 claimed | Entity 代币 → 用户（后续解锁） |
 | 10 | `cancel_sale` | 创建者 | NotStarted/Active | 释放未售代币 → Cancelled |
-| 11 | `claim_refund` | 认购者 | Cancelled | NXS 退还 + 释放对应代币 |
-| 12 | `withdraw_funds` | 创建者 | Ended/Completed | NXS → Entity 派生账户 |
+| 11 | `claim_refund` | 认购者 | Cancelled | NEX 退还 + 释放对应代币 |
+| 12 | `withdraw_funds` | 创建者 | Ended/Completed | NEX → Entity 派生账户 |
 
 ### subscribe 详细流程
 
@@ -357,7 +357,7 @@ cargo test -p pallet-entity-tokensale
 | `whitelist_rejects_non_not_started` | Active 状态不可添加 |
 | `start_sale_requires_payment_options` | 无选项时拒绝 |
 | `start_sale_locks_entity_tokens` | 锁定代币 |
-| `subscribe_transfers_nxs` | NXS 实际转账到托管 |
+| `subscribe_transfers_nex` | NEX 实际转账到托管 |
 | `subscribe_rejects_outside_time_window` | 时间窗口校验 |
 | `subscribe_rejects_duplicate` | 重复认购 |
 | `subscribe_checks_kyc` | KYC 级别检查 |
@@ -367,7 +367,7 @@ cargo test -p pallet-entity-tokensale
 | `claim_tokens_rejects_double_claim` | 重复领取 |
 | `cancel_and_refund_works` | 取消+退款全流程 |
 | `claim_refund_rejects_non_cancelled` | 非 Cancelled 退款 |
-| `withdraw_funds_works` | NXS 提取到 Entity |
+| `withdraw_funds_works` | NEX 提取到 Entity |
 | `calculate_initial_unlock_works` | 20% 初始解锁 |
 | `calculate_initial_unlock_no_vesting_returns_total` | 无锁仓全额 |
 | `subscribe_rejects_overflow` | checked_mul 溢出保护 |
@@ -398,7 +398,7 @@ cargo test -p pallet-entity-tokensale
 - **L2**: `min_kyc_level <= 4` 校验
 - **L3**: 白名单拆分为 `RoundWhitelist` + `WhitelistCount` 独立存储
 - **L4**: 配置变更操作添加事件通知
-- 新增 `withdraw_funds`(12) 提取募集 NXS
+- 新增 `withdraw_funds`(12) 提取募集 NEX
 - SaleRound 新增 `funds_withdrawn` 字段
 - Subscription 新增 `refunded` 字段
 

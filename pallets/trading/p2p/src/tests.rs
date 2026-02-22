@@ -198,8 +198,8 @@ fn buy_flow_first_purchase_mark_paid_release() {
         let order = P2pTrading::buy_orders(order_id).unwrap();
         assert_eq!(order.state, BuyOrderState::PaidOrCommitted);
 
-        // 3. 做市商释放 NXS
-        assert_ok!(P2pTrading::release_nxs(
+        // 3. 做市商释放 NEX
+        assert_ok!(P2pTrading::release_nex(
             RuntimeOrigin::signed(MAKER_ACCOUNT),
             order_id,
         ));
@@ -232,7 +232,7 @@ fn mark_paid_wrong_buyer_fails() {
 }
 
 #[test]
-fn release_nxs_wrong_maker_fails() {
+fn release_nex_wrong_maker_fails() {
     new_test_ext().execute_with(|| {
         let order_id = create_first_purchase_order();
         assert_ok!(P2pTrading::mark_paid(
@@ -242,7 +242,7 @@ fn release_nxs_wrong_maker_fails() {
         ));
 
         assert_noop!(
-            P2pTrading::release_nxs(
+            P2pTrading::release_nex(
                 RuntimeOrigin::signed(BUYER), // not maker
                 order_id,
             ),
@@ -252,12 +252,12 @@ fn release_nxs_wrong_maker_fails() {
 }
 
 #[test]
-fn release_nxs_wrong_state_fails() {
+fn release_nex_wrong_state_fails() {
     new_test_ext().execute_with(|| {
         let order_id = create_first_purchase_order();
         // Still in Created state, not PaidOrCommitted
         assert_noop!(
-            P2pTrading::release_nxs(
+            P2pTrading::release_nex(
                 RuntimeOrigin::signed(MAKER_ACCOUNT),
                 order_id,
             ),
@@ -398,12 +398,12 @@ fn mark_paid_with_tron_tx_hash() {
 
 /// 辅助：创建 Sell 订单
 fn create_sell_order() -> u64 {
-    let nxs_amount: u128 = 10_000_000_000_000; // 10 NXS
+    let nex_amount: u128 = 10_000_000_000_000; // 10 NEX
     let usdt_address = vec![0x41u8; 34]; // mock TRON address
     assert_ok!(P2pTrading::create_sell_order(
         RuntimeOrigin::signed(BUYER),
         MAKER_ID,
-        nxs_amount,
+        nex_amount,
         usdt_address,
     ));
     0 // first sell_id
@@ -419,7 +419,7 @@ fn create_sell_order_works() {
         assert_eq!(record.maker_id, MAKER_ID);
         assert_eq!(record.user, BUYER);
         assert_eq!(record.status, SellOrderStatus::Pending);
-        assert_eq!(record.nxs_amount, 10_000_000_000_000u128);
+        assert_eq!(record.nex_amount, 10_000_000_000_000u128);
 
         assert_eq!(P2pTrading::next_sell_order_id(), 1);
         assert_eq!(P2pTrading::user_sell_list(BUYER).len(), 1);

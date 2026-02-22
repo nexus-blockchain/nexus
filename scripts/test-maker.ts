@@ -13,8 +13,8 @@ import {
   logError, 
   logInfo,
   logQuery,
-  formatNxs,
-  toNxsWei,
+  formatNex,
+  toNexWei,
   sleep
 } from './utils/helpers.js';
 
@@ -49,7 +49,7 @@ async function main() {
     
     // 查询 Bob 余额
     const bobBalance = await api.query.system.account(bob.address);
-    console.log(`   Bob 余额: ${formatNxs(bobBalance.data.free.toString())}`);
+    console.log(`   Bob 余额: ${formatNex(bobBalance.data.free.toString())}`);
     
     // ========================================
     // 步骤 2: 锁定押金
@@ -147,7 +147,7 @@ async function main() {
       console.log(`   做市商 ID: ${makerId}`);
       console.log(`   状态: ${app.status.toString()}`);
       console.log(`   账户: ${app.owner.toString()}`);
-      console.log(`   押金: ${formatNxs(app.deposit.toString())}`);
+      console.log(`   押金: ${formatNex(app.deposit.toString())}`);
       console.log(`   服务暂停: ${app.servicePaused ? '是' : '否'}`);
       console.log(`   已服务用户: ${app.usersServed.toNumber ? app.usersServed.toNumber() : app.usersServed}`);
       
@@ -168,7 +168,7 @@ async function main() {
     // 如需测试提现，取消下面的注释：
     /*
     // 申请提现
-    const withdrawAmount = toNxsWei(1000); // 提现 1000 NXS
+    const withdrawAmount = toNexWei(1000); // 提现 1000 NEX
     const requestWithdrawTx = (api.tx as any).tradingMaker.requestWithdrawal(withdrawAmount);
     await signAndSend(api, requestWithdrawTx, bob, 'Bob 申请提现');
     

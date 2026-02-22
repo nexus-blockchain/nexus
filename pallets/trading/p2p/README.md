@@ -2,7 +2,7 @@
 
 ## 概述
 
-`pallet-trading-p2p` 是 Nexus 交易系统的核心交易模块，统一 **Buy（USDT→NXS）** 和 **Sell（NXS→USDT）** 两方向的 P2P 交易。
+`pallet-trading-p2p` 是 Nexus 交易系统的核心交易模块，统一 **Buy（USDT→NEX）** 和 **Sell（NEX→USDT）** 两方向的 P2P 交易。
 
 > 本模块合并了原 `pallet-trading-otc`（Buy 方向）和 `pallet-trading-swap`（Sell 方向），于 2026-02-08 统一为单一模块。
 
@@ -10,8 +10,8 @@
 
 ### 主要功能
 
-- **Buy 订单**：买家用 USDT 购买做市商的 NXS（链下 USDT 转账 + 链上 NXS 托管释放）
-- **Sell 订单**：用户出售 NXS 换取做市商的 USDT（链上 NXS 托管 + OCW TRC20 验证）
+- **Buy 订单**：买家用 USDT 购买做市商的 NEX（链下 USDT 转账 + 链上 NEX 托管释放）
+- **Sell 订单**：用户出售 NEX 换取做市商的 USDT（链上 NEX 托管 + OCW TRC20 验证）
 - **首购机制**：新用户固定金额首购，免押金
 - **KYC 验证**：可选 KYC 要求，支持豁免账户
 - **买家押金**：基于信用的动态押金机制
@@ -24,14 +24,14 @@
 
 ## 交易流程
 
-### Buy 流程（USDT → NXS）
+### Buy 流程（USDT → NEX）
 
 ```
-买家 create_buy_order ──→ 做市商 NXS 锁定到托管
+买家 create_buy_order ──→ 做市商 NEX 锁定到托管
          │
 买家链下转 USDT ──→ mark_paid（标记已付款）
          │
-做市商确认收款 ──→ release_nxs（NXS 释放给买家）
+做市商确认收款 ──→ release_nex（NEX 释放给买家）
          │
     ┌────┴────┐
     ↓         ↓
@@ -40,10 +40,10 @@
 
 **状态流转**：`Created → PaidOrCommitted → Released / Disputed → Closed`
 
-### Sell 流程（NXS → USDT）
+### Sell 流程（NEX → USDT）
 
 ```
-用户 create_sell_order ──→ 用户 NXS 锁定到托管
+用户 create_sell_order ──→ 用户 NEX 锁定到托管
          │
 做市商链下转 USDT ──→ mark_sell_complete（提交 TRC20 tx hash）
          │
@@ -51,7 +51,7 @@ OCW 验证 TRC20 ──→ confirm_verification
          │
     ┌────┴────┐
     ↓         ↓
- NXS → 做市商  验证失败 → 争议/退款
+ NEX → 做市商  验证失败 → 争议/退款
 ```
 
 **状态流转**：`Pending → AwaitingVerification → Completed / VerificationFailed / Refunded`
@@ -77,8 +77,8 @@ OCW 验证 TRC20 ──→ confirm_verification
 | `maker_id` | `u64` | 做市商 ID |
 | `maker` | `AccountId` | 做市商账户 |
 | `taker` | `AccountId` | 买家账户 |
-| `price` | `BalanceOf<T>` | 单价（USDT/NXS，精度 10^6） |
-| `qty` | `BalanceOf<T>` | NXS 数量 |
+| `price` | `BalanceOf<T>` | 单价（USDT/NEX，精度 10^6） |
+| `qty` | `BalanceOf<T>` | NEX 数量 |
 | `amount` | `BalanceOf<T>` | USDT 总金额（精度 10^6） |
 | `state` | `BuyOrderState` | 订单状态 |
 | `buyer_deposit` | `BalanceOf<T>` | 买家押金 |
@@ -92,7 +92,7 @@ OCW 验证 TRC20 ──→ confirm_verification
 | `sell_id` | `u64` | 订单 ID |
 | `maker_id` | `u64` | 做市商 ID |
 | `user` | `AccountId` | 卖家账户 |
-| `nxs_amount` | `BalanceOf<T>` | NXS 数量 |
+| `nex_amount` | `BalanceOf<T>` | NEX 数量 |
 | `usdt_amount` | `u64` | USDT 金额（精度 10^6） |
 | `usdt_address` | `TronAddress` | USDT 接收地址 |
 | `status` | `SellOrderStatus` | 订单状态 |
@@ -155,10 +155,10 @@ OCW 验证 TRC20 ──→ confirm_verification
 
 | 函数 | 说明 |
 |------|------|
-| `create_buy_order` | 创建 Buy 订单（买家购买 NXS） |
+| `create_buy_order` | 创建 Buy 订单（买家购买 NEX） |
 | `create_first_purchase` | 创建首购订单（固定 $10 USD） |
 | `mark_paid` | 标记已付款（可附 TRON tx hash） |
-| `release_nxs` | 做市商释放 NXS 给买家 |
+| `release_nex` | 做市商释放 NEX 给买家 |
 | `cancel_buy_order` | 取消 Buy 订单 |
 | `dispute_buy_order` | 发起 Buy 争议 |
 
@@ -166,7 +166,7 @@ OCW 验证 TRC20 ──→ confirm_verification
 
 | 函数 | 说明 |
 |------|------|
-| `create_sell_order` | 创建 Sell 订单（用户出售 NXS） |
+| `create_sell_order` | 创建 Sell 订单（用户出售 NEX） |
 | `mark_sell_complete` | 做市商提交 TRC20 tx hash |
 | `report_sell` | 用户举报 Sell 订单 |
 | `file_sell_dispute` | 用户发起 Sell 争议 |
@@ -197,8 +197,8 @@ OCW 验证 TRC20 ──→ confirm_verification
 | `BuyOrderTimeout` | `u64` | 3,600,000 ms（1h） | Buy 订单超时时间 |
 | `EvidenceWindow` | `u64` | 86,400,000 ms（24h） | 证据窗口 |
 | `FirstPurchaseUsdValue` | `u128` | 10,000,000（$10） | 首购 USD 价值 |
-| `MinFirstPurchaseCosAmount` | `Balance` | 1 NXS | 首购最小 NXS |
-| `MaxFirstPurchaseCosAmount` | `Balance` | 100M NXS | 首购最大 NXS |
+| `MinFirstPurchaseCosAmount` | `Balance` | 1 NEX | 首购最小 NEX |
+| `MaxFirstPurchaseCosAmount` | `Balance` | 100M NEX | 首购最大 NEX |
 | `MaxOrderUsdAmount` | `u64` | 200,000,000（$200） | 最大订单金额 |
 | `MinOrderUsdAmount` | `u64` | 20,000,000（$20） | 最小订单金额 |
 | `DepositRate` | `u16` | 1000（10%） | 押金比例 |
@@ -213,11 +213,11 @@ OCW 验证 TRC20 ──→ confirm_verification
 |------|------|-----------|------|
 | `SellTimeoutBlocks` | `BlockNumber` | 1 HOURS | Sell 超时 |
 | `VerificationTimeoutBlocks` | `BlockNumber` | 2 HOURS | 验证超时 |
-| `MinSellAmount` | `Balance` | 10 NXS | 最小 Sell 金额 |
+| `MinSellAmount` | `Balance` | 10 NEX | 最小 Sell 金额 |
 | `TxHashTtlBlocks` | `BlockNumber` | 30 DAYS | TxHash TTL |
-| `VerificationReward` | `Balance` | 0.1 NXS | 验证奖励 |
+| `VerificationReward` | `Balance` | 0.1 NEX | 验证奖励 |
 | `SellFeeRateBps` | `u32` | 10（0.1%） | Sell 手续费率 |
-| `MinSellFee` | `Balance` | 0.1 NXS | 最低手续费 |
+| `MinSellFee` | `Balance` | 0.1 NEX | 最低手续费 |
 
 ---
 
@@ -240,7 +240,7 @@ OCW 验证 TRC20 ──→ confirm_verification
 
 | 模块 | 接口 | 用途 |
 |------|------|------|
-| `pallet-escrow` | `Escrow` trait | NXS 托管锁定/释放/退还 |
+| `pallet-escrow` | `Escrow` trait | NEX 托管锁定/释放/退还 |
 | `pallet-trading-credit` | `BuyerCreditInterface` + `BuyerQuotaInterface` | 买家信用和额度管理 |
 | `pallet-trading-common` | `PricingProvider` + `MakerInterface` + `MakerCreditInterface` | 定价、做市商、信用接口 |
 | `pallet-trading-trc20-verifier` | `verify_trc20_transaction` | TRC20 交易验证（Sell 侧 OCW） |
@@ -251,13 +251,13 @@ OCW 验证 TRC20 ──→ confirm_verification
 
 ## 安全考虑
 
-1. **托管保护**：所有 NXS 通过 `pallet-escrow` 托管，双方无法直接操作
+1. **托管保护**：所有 NEX 通过 `pallet-escrow` 托管，双方无法直接操作
 2. **KYC 验证**：Buy 侧可选 KYC 要求，防止未认证用户交易
 3. **押金机制**：基于信用的买家押金，超时/取消按比例扣除
 4. **TxHash 防重放**：Buy/Sell 双方向 TRON 交易哈希防重放
 5. **仲裁桥接**：争议通过 `pallet-arbitration` 统一处理
 6. **自动过期**：Buy 订单超时自动退还托管资金
-7. **手续费**：Sell 侧收取 0.1% 手续费（最低 0.1 NXS）
+7. **手续费**：Sell 侧收取 0.1% 手续费（最低 0.1 NEX）
 
 ---
 

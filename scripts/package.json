@@ -1,9 +1,16 @@
 {
   "name": "nexus-test-scripts",
-  "version": "1.0.0",
-  "description": "Nexus chain test scripts",
+  "version": "2.0.0",
+  "description": "Nexus chain test scripts + E2E testing framework",
   "type": "module",
   "scripts": {
+    "e2e": "tsx e2e/run-e2e.ts",
+    "e2e:t1": "tsx e2e/run-e2e.ts --flow T1",
+    "e2e:t2": "tsx e2e/run-e2e.ts --flow T2",
+    "e2e:t3": "tsx e2e/run-e2e.ts --flow T3",
+    "e2e:e1": "tsx e2e/run-e2e.ts --flow E1",
+    "e2e:trading": "tsx e2e/run-e2e.ts --flow T1 T2 T3",
+    "e2e:entity": "tsx e2e/run-e2e.ts --flow E1",
     "test:maker": "tsx test-maker.ts",
     "test:otc": "tsx test-otc.ts",
     "test:swap": "tsx test-swap.ts",

@@ -4,7 +4,7 @@
 //!
 //! ## 概述
 //! 本模块负责：
-//! 1. NXS/USDT 市场价格聚合（P2P Buy + Sell 两方向）
+//! 1. NEX/USDT 市场价格聚合（P2P Buy + Sell 两方向）
 //! 2. CNY/USDT 汇率获取（通过 Offchain Worker）
 //! 3. 价格偏离检查
 //!
@@ -100,16 +100,16 @@ pub mod pallet {
         pub timestamp: u64,
         /// USDT 单价（精度 10^6，即 1,000,000 = 1 USDT）
         pub price_usdt: u64,
-        /// NXS 数量（精度 10^12，即 1,000,000,000,000 = 1 NXS）
-        pub nxs_qty: u128,
+        /// NEX 数量（精度 10^12，即 1,000,000,000,000 = 1 NEX）
+        pub nex_qty: u128,
     }
 
     /// 函数级中文注释：价格聚合数据
-    /// 维护最近累计 1,000,000 NXS 的订单统计信息
+    /// 维护最近累计 1,000,000 NEX 的订单统计信息
     #[derive(Clone, Encode, Decode, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
     pub struct PriceAggregateData {
-        /// 累计 NXS 数量（精度 10^12）
-        pub total_nxs: u128,
+        /// 累计 NEX 数量（精度 10^12）
+        pub total_nex: u128,
         /// 累计 USDT 金额（精度 10^6）
         pub total_usdt: u128,
         /// 订单数量
@@ -120,7 +120,7 @@ pub mod pallet {
         pub newest_index: RingBufferIndex,
     }
 
-    /// 函数级中文注释：NXS 市场统计信息
+    /// 函数级中文注释：NEX 市场统计信息
     /// 综合 Buy 和 Sell 两方向的价格和交易数据
     #[derive(Clone, Encode, Decode, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
     pub struct MarketStats {
@@ -155,8 +155,8 @@ pub mod pallet {
         pub updated_at: u64,
     }
 
-    /// 函数级中文注释：Buy 方向（USDT→NXS）价格聚合数据
-    /// 维护最近累计 1,000,000 NXS 的 Buy 方向订单统计
+    /// 函数级中文注释：Buy 方向（USDT→NEX）价格聚合数据
+    /// 维护最近累计 1,000,000 NEX 的 Buy 方向订单统计
     #[pallet::storage]
     #[pallet::getter(fn buy_aggregate)]
     pub type BuyPriceAggregate<T> = StorageValue<_, PriceAggregateData, ValueQuery>;
@@ -171,8 +171,8 @@ pub mod pallet {
         OrderSnapshot,
     >;
 
-    /// 函数级中文注释：Sell 方向（NXS→USDT）价格聚合数据
-    /// 维护最近累计 1,000,000 NXS 的 Sell 方向订单统计
+    /// 函数级中文注释：Sell 方向（NEX→USDT）价格聚合数据
+    /// 维护最近累计 1,000,000 NEX 的 Sell 方向订单统计
     #[pallet::storage]
     #[pallet::getter(fn sell_aggregate)]
     pub type SellPriceAggregate<T> = StorageValue<_, PriceAggregateData, ValueQuery>;
@@ -189,20 +189,20 @@ pub mod pallet {
 
     /// 函数级中文注释：冷启动阈值（可治理调整）
     /// 当 Buy 和 Sell 两方向的交易量都低于此阈值时，使用默认价格
-    /// 默认值：1,000,000,000 NXS（10亿，精度 10^12）
+    /// 默认值：1,000,000,000 NEX（10亿，精度 10^12）
     #[pallet::storage]
     #[pallet::getter(fn cold_start_threshold)]
     pub type ColdStartThreshold<T> = StorageValue<_, u128, ValueQuery, DefaultColdStartThreshold>;
 
     #[pallet::type_value]
     pub fn DefaultColdStartThreshold() -> u128 {
-        // 冷启动阈值：10亿 NXS
-        1_000_000_000u128 * 1_000_000_000_000u128 // 10亿 NXS
+        // 冷启动阈值：10亿 NEX
+        1_000_000_000u128 * 1_000_000_000_000u128 // 10亿 NEX
     }
 
     /// 函数级中文注释：默认价格（可治理调整）
     /// 用于冷启动阶段的价格锚点
-    /// 默认值：1（0.000001 USDT/NXS，精度 10^6）
+    /// 默认值：1（0.000001 USDT/NEX，精度 10^6）
     /// 注：实际要求 0.0000007，但受精度限制，向上取整为 1
     #[pallet::storage]
     #[pallet::getter(fn default_price)]
@@ -210,7 +210,7 @@ pub mod pallet {
 
     #[pallet::type_value]
     pub fn DefaultPriceValue() -> u64 {
-        1u64 // 0.000001 USDT/NXS
+        1u64 // 0.000001 USDT/NEX
         // 注：用户要求 0.0000007，但精度 10^6 下为 0.7，向上取整为 1（最小精度单位）
     }
 
@@ -242,14 +242,14 @@ pub mod pallet {
         BuyTradeAdded {
             timestamp: u64,
             price_usdt: u64,
-            nxs_qty: u128,
+            nex_qty: u128,
             new_avg_price: u64,
         },
         /// 函数级中文注释：Sell 方向成交添加到价格聚合
         SellTradeAdded {
             timestamp: u64,
             price_usdt: u64,
-            nxs_qty: u128,
+            nex_qty: u128,
             new_avg_price: u64,
         },
         /// 函数级中文注释：冷启动参数更新事件
@@ -308,45 +308,45 @@ pub mod pallet {
 
     /// 函数级中文注释：Pallet 辅助方法（聚合数据管理）
     impl<T: Config> Pallet<T> {
-        /// 函数级详细中文注释：添加 Buy 方向（USDT→NXS）成交到价格聚合
+        /// 函数级详细中文注释：添加 Buy 方向（USDT→NEX）成交到价格聚合
         /// 
         /// # 参数
         /// - `timestamp`: 成交时间戳（Unix 毫秒）
         /// - `price_usdt`: USDT 单价（精度 10^6）
-        /// - `nxs_qty`: NXS 数量（精度 10^12）
+        /// - `nex_qty`: NEX 数量（精度 10^12）
         /// 
         /// # 逻辑
         /// 1. 读取当前聚合数据
-        /// 2. 如果累计超过 1,000,000 NXS，删除最旧的订单直到满足限制
+        /// 2. 如果累计超过 1,000,000 NEX，删除最旧的订单直到满足限制
         /// 3. 添加新订单到循环缓冲区
         /// 4. 更新聚合统计数据
         /// 5. 发出事件
-        /// P3修复：单笔订单最大 NXS 数量（1000万 NXS）
+        /// P3修复：单笔订单最大 NEX 数量（1000万 NEX）
         const MAX_SINGLE_ORDER_COS: u128 = 10_000_000u128 * 1_000_000_000_000u128;
         
         pub fn add_buy_trade(
             timestamp: u64,
             price_usdt: u64,
-            nxs_qty: u128,
+            nex_qty: u128,
         ) -> DispatchResult {
             // P1修复：输入验证
             ensure!(price_usdt > 0, Error::<T>::InvalidPrice);
-            ensure!(nxs_qty > 0, Error::<T>::InvalidQuantity);
+            ensure!(nex_qty > 0, Error::<T>::InvalidQuantity);
             // P3修复：单笔订单上限验证
-            ensure!(nxs_qty <= Self::MAX_SINGLE_ORDER_COS, Error::<T>::OrderTooLarge);
+            ensure!(nex_qty <= Self::MAX_SINGLE_ORDER_COS, Error::<T>::OrderTooLarge);
             
             let mut agg = BuyPriceAggregate::<T>::get();
-            let limit: u128 = 1_000_000u128 * 1_000_000_000_000u128; // 1,000,000 NXS（精度 10^12）
+            let limit: u128 = 1_000_000u128 * 1_000_000_000_000u128; // 1,000,000 NEX（精度 10^12）
             
             // 如果添加后超过限制，删除最旧的订单
-            let mut new_total = agg.total_nxs.saturating_add(nxs_qty);
+            let mut new_total = agg.total_nex.saturating_add(nex_qty);
             while new_total > limit && agg.order_count > 0 {
                 // P3修复：使用类型安全的索引
                 if let Some(oldest) = BuyOrderRingBuffer::<T>::take(agg.oldest_index.value()) {
                     // 从聚合数据中减去
-                    agg.total_nxs = agg.total_nxs.saturating_sub(oldest.nxs_qty);
+                    agg.total_nex = agg.total_nex.saturating_sub(oldest.nex_qty);
                     // P0修复：先乘后除，避免精度丢失
-                    let oldest_usdt = oldest.nxs_qty
+                    let oldest_usdt = oldest.nex_qty
                         .saturating_mul(oldest.price_usdt as u128)
                         / 1_000_000_000_000u128;
                     agg.total_usdt = agg.total_usdt.saturating_sub(oldest_usdt);
@@ -356,7 +356,7 @@ pub mod pallet {
                     agg.oldest_index = agg.oldest_index.next();
                     
                     // 重新计算新总量
-                    new_total = agg.total_nxs.saturating_add(nxs_qty);
+                    new_total = agg.total_nex.saturating_add(nex_qty);
                 } else {
                     break;
                 }
@@ -376,18 +376,18 @@ pub mod pallet {
             BuyOrderRingBuffer::<T>::insert(new_index.value(), OrderSnapshot {
                 timestamp,
                 price_usdt,
-                nxs_qty,
+                nex_qty,
             });
             
             // 更新聚合数据
             // P0修复：先乘后除，避免精度丢失
             // P2修复：使用 checked_mul/checked_add 防止溢出
-            let order_usdt = nxs_qty
+            let order_usdt = nex_qty
                 .checked_mul(price_usdt as u128)
                 .ok_or(Error::<T>::ArithmeticOverflow)?
                 / 1_000_000_000_000u128;
-            agg.total_nxs = agg.total_nxs
-                .checked_add(nxs_qty)
+            agg.total_nex = agg.total_nex
+                .checked_add(nex_qty)
                 .ok_or(Error::<T>::ArithmeticOverflow)?;
             agg.total_usdt = agg.total_usdt
                 .checked_add(order_usdt)
@@ -405,44 +405,44 @@ pub mod pallet {
             Self::deposit_event(Event::BuyTradeAdded {
                 timestamp,
                 price_usdt,
-                nxs_qty,
+                nex_qty,
                 new_avg_price,
             });
             
             Ok(())
         }
 
-        /// 函数级详细中文注释：添加 Sell 方向（NXS→USDT）成交到价格聚合
+        /// 函数级详细中文注释：添加 Sell 方向（NEX→USDT）成交到价格聚合
         /// 逻辑与 add_buy_trade 相同，但操作 Sell 方向的存储
         pub fn add_sell_trade(
             timestamp: u64,
             price_usdt: u64,
-            nxs_qty: u128,
+            nex_qty: u128,
         ) -> DispatchResult {
             // P1修复：输入验证
             ensure!(price_usdt > 0, Error::<T>::InvalidPrice);
-            ensure!(nxs_qty > 0, Error::<T>::InvalidQuantity);
+            ensure!(nex_qty > 0, Error::<T>::InvalidQuantity);
             // P3修复：单笔订单上限验证
-            ensure!(nxs_qty <= Self::MAX_SINGLE_ORDER_COS, Error::<T>::OrderTooLarge);
+            ensure!(nex_qty <= Self::MAX_SINGLE_ORDER_COS, Error::<T>::OrderTooLarge);
             
             let mut agg = SellPriceAggregate::<T>::get();
-            let limit: u128 = 1_000_000u128 * 1_000_000_000_000u128; // 1,000,000 NXS
+            let limit: u128 = 1_000_000u128 * 1_000_000_000_000u128; // 1,000,000 NEX
             
             // 删除旧订单直到满足限制
-            let mut new_total = agg.total_nxs.saturating_add(nxs_qty);
+            let mut new_total = agg.total_nex.saturating_add(nex_qty);
             while new_total > limit && agg.order_count > 0 {
                 // P3修复：使用类型安全的索引
                 if let Some(oldest) = SellOrderRingBuffer::<T>::take(agg.oldest_index.value()) {
-                    agg.total_nxs = agg.total_nxs.saturating_sub(oldest.nxs_qty);
+                    agg.total_nex = agg.total_nex.saturating_sub(oldest.nex_qty);
                     // P0修复：先乘后除，避免精度丢失
-                    let oldest_usdt = oldest.nxs_qty
+                    let oldest_usdt = oldest.nex_qty
                         .saturating_mul(oldest.price_usdt as u128)
                         / 1_000_000_000_000u128;
                     agg.total_usdt = agg.total_usdt.saturating_sub(oldest_usdt);
                     agg.order_count = agg.order_count.saturating_sub(1);
                     // P3修复：使用类型安全的索引移动
                     agg.oldest_index = agg.oldest_index.next();
-                    new_total = agg.total_nxs.saturating_add(nxs_qty);
+                    new_total = agg.total_nex.saturating_add(nex_qty);
                 } else {
                     break;
                 }
@@ -462,18 +462,18 @@ pub mod pallet {
             SellOrderRingBuffer::<T>::insert(new_index.value(), OrderSnapshot {
                 timestamp,
                 price_usdt,
-                nxs_qty,
+                nex_qty,
             });
             
             // 更新聚合数据
             // P0修复：先乘后除，避免精度丢失
             // P2修复：使用 checked_mul/checked_add 防止溢出
-            let order_usdt = nxs_qty
+            let order_usdt = nex_qty
                 .checked_mul(price_usdt as u128)
                 .ok_or(Error::<T>::ArithmeticOverflow)?
                 / 1_000_000_000_000u128;
-            agg.total_nxs = agg.total_nxs
-                .checked_add(nxs_qty)
+            agg.total_nex = agg.total_nex
+                .checked_add(nex_qty)
                 .ok_or(Error::<T>::ArithmeticOverflow)?;
             agg.total_usdt = agg.total_usdt
                 .checked_add(order_usdt)
@@ -488,67 +488,67 @@ pub mod pallet {
             Self::deposit_event(Event::SellTradeAdded {
                 timestamp,
                 price_usdt,
-                nxs_qty,
+                nex_qty,
                 new_avg_price,
             });
             
             Ok(())
         }
 
-        /// 函数级详细中文注释：获取 Buy 方向均价（USDT/NXS，精度 10^6）
+        /// 函数级详细中文注释：获取 Buy 方向均价（USDT/NEX，精度 10^6）
         /// 
         /// # 返回
         /// - `u64`: 均价（精度 10^6），0 表示无数据
         /// 
         /// # 计算公式
-        /// 均价 = 总 USDT / 总 NXS
-        ///      = total_usdt / (total_nxs / 10^12)
-        ///      = (total_usdt * 10^12) / total_nxs
+        /// 均价 = 总 USDT / 总 NEX
+        ///      = total_usdt / (total_nex / 10^12)
+        ///      = (total_usdt * 10^12) / total_nex
         pub fn get_buy_average_price() -> u64 {
             let agg = BuyPriceAggregate::<T>::get();
-            if agg.total_nxs == 0 {
+            if agg.total_nex == 0 {
                 return 0;
             }
-            // 均价 = (total_usdt * 10^12) / total_nxs
+            // 均价 = (total_usdt * 10^12) / total_nex
             let avg = agg.total_usdt
                 .saturating_mul(1_000_000_000_000u128)
-                .checked_div(agg.total_nxs)
+                .checked_div(agg.total_nex)
                 .unwrap_or(0);
             // P3修复：安全类型转换，避免截断
             avg.min(u64::MAX as u128) as u64
         }
 
-        /// 函数级详细中文注释：获取 Sell 方向均价（USDT/NXS，精度 10^6）
+        /// 函数级详细中文注释：获取 Sell 方向均价（USDT/NEX，精度 10^6）
         pub fn get_sell_average_price() -> u64 {
             let agg = SellPriceAggregate::<T>::get();
-            if agg.total_nxs == 0 {
+            if agg.total_nex == 0 {
                 return 0;
             }
             let avg = agg.total_usdt
                 .saturating_mul(1_000_000_000_000u128)
-                .checked_div(agg.total_nxs)
+                .checked_div(agg.total_nex)
                 .unwrap_or(0);
             // P3修复：安全类型转换，避免截断
             avg.min(u64::MAX as u128) as u64
         }
 
         /// 函数级详细中文注释：获取 Buy 方向聚合统计信息
-        /// 返回：(累计NXS, 累计USDT, 订单数, 均价)
+        /// 返回：(累计NEX, 累计USDT, 订单数, 均价)
         pub fn get_buy_stats() -> (u128, u128, u32, u64) {
             let agg = BuyPriceAggregate::<T>::get();
             let avg = Self::get_buy_average_price();
-            (agg.total_nxs, agg.total_usdt, agg.order_count, avg)
+            (agg.total_nex, agg.total_usdt, agg.order_count, avg)
         }
 
         /// 函数级详细中文注释：获取 Sell 方向聚合统计信息
-        /// 返回：(累计NXS, 累计USDT, 订单数, 均价)
+        /// 返回：(累计NEX, 累计USDT, 订单数, 均价)
         pub fn get_sell_stats() -> (u128, u128, u32, u64) {
             let agg = SellPriceAggregate::<T>::get();
             let avg = Self::get_sell_average_price();
-            (agg.total_nxs, agg.total_usdt, agg.order_count, avg)
+            (agg.total_nex, agg.total_usdt, agg.order_count, avg)
         }
 
-        /// 函数级详细中文注释：获取 NXS 市场参考价格（简单平均 + 冷启动保护）
+        /// 函数级详细中文注释：获取 NEX 市场参考价格（简单平均 + 冷启动保护）
         /// 
         /// # 算法
         /// - 冷启动阶段：如果两个市场交易量都未达阈值，返回默认价格
@@ -558,7 +558,7 @@ pub mod pallet {
         ///   - 如果都无数据：返回默认价格（兜底）
         /// 
         /// # 返回
-        /// - `u64`: USDT/NXS 价格（精度 10^6）
+        /// - `u64`: USDT/NEX 价格（精度 10^6）
         /// 
         /// # 用途
         /// - 前端显示参考价格
@@ -582,11 +582,11 @@ pub mod pallet {
             }
         }
 
-        /// 函数级详细中文注释：获取 NXS 市场价格（加权平均 + 冷启动保护）
+        /// 函数级详细中文注释：获取 NEX 市场价格（加权平均 + 冷启动保护）
         /// 
         /// # 算法
         /// - 冷启动阶段：如果两个市场交易量都未达阈值，返回默认价格
-        /// - 正常阶段：加权平均 = (Buy总USDT + Sell总USDT) / (Buy总NXS + Sell总NXS)
+        /// - 正常阶段：加权平均 = (Buy总USDT + Sell总USDT) / (Buy总NEX + Sell总NEX)
         /// 
         /// # 优点
         /// - 考虑交易量权重，更准确反映市场情况
@@ -595,7 +595,7 @@ pub mod pallet {
         /// - 冷启动保护避免初期价格为0或被操纵
         /// 
         /// # 返回
-        /// - `u64`: USDT/NXS 价格（精度 10^6）
+        /// - `u64`: USDT/NEX 价格（精度 10^6）
         /// 
         /// # 用途
         /// - 资产估值（钱包总值计算）
@@ -635,7 +635,7 @@ pub mod pallet {
             let sell_agg = SellPriceAggregate::<T>::get();
             
             // 未达阈值，仍在冷启动阶段
-            if buy_agg.total_nxs < threshold && sell_agg.total_nxs < threshold {
+            if buy_agg.total_nex < threshold && sell_agg.total_nex < threshold {
                 return true;
             }
             
@@ -646,8 +646,8 @@ pub mod pallet {
             let market_price = Self::calculate_weighted_average();
             Self::deposit_event(Event::ColdStartExited {
                 final_threshold: threshold,
-                buy_volume: buy_agg.total_nxs,
-                sell_volume: sell_agg.total_nxs,
+                buy_volume: buy_agg.total_nex,
+                sell_volume: sell_agg.total_nex,
                 market_price,
             });
             
@@ -660,23 +660,23 @@ pub mod pallet {
             let buy_agg = BuyPriceAggregate::<T>::get();
             let sell_agg = SellPriceAggregate::<T>::get();
             
-            let total_nxs = buy_agg.total_nxs.saturating_add(sell_agg.total_nxs);
-            if total_nxs == 0 {
+            let total_nex = buy_agg.total_nex.saturating_add(sell_agg.total_nex);
+            if total_nex == 0 {
                 return DefaultPrice::<T>::get(); // 无数据时返回默认价格
             }
             
-            // 加权平均 = 总USDT / 总NXS
+            // 加权平均 = 总USDT / 总NEX
             let total_usdt = buy_agg.total_usdt.saturating_add(sell_agg.total_usdt);
             let avg = total_usdt
                 .saturating_mul(1_000_000_000_000u128)
-                .checked_div(total_nxs)
+                .checked_div(total_nex)
                 .unwrap_or(0);
             
             // P3修复：安全类型转换，避免截断
             avg.min(u64::MAX as u128) as u64
         }
 
-        /// 函数级详细中文注释：获取完整的 NXS 市场统计信息
+        /// 函数级详细中文注释：获取完整的 NEX 市场统计信息
         /// 
         /// # 返回
         /// `MarketStats` 结构，包含：
@@ -704,9 +704,9 @@ pub mod pallet {
                 sell_price,
                 weighted_price,
                 simple_avg_price,
-                buy_volume: buy_agg.total_nxs,
-                sell_volume: sell_agg.total_nxs,
-                total_volume: buy_agg.total_nxs.saturating_add(sell_agg.total_nxs),
+                buy_volume: buy_agg.total_nex,
+                sell_volume: sell_agg.total_nex,
+                total_volume: buy_agg.total_nex.saturating_add(sell_agg.total_nex),
                 buy_order_count: buy_agg.order_count,
                 sell_order_count: sell_agg.order_count,
             }
@@ -729,11 +729,11 @@ pub mod pallet {
         /// 4. 检查偏离率是否超过 MaxPriceDeviation 配置的限制
         /// 
         /// # 示例
-        /// - 基准价格：1.0 USDT/NXS（1,000,000）
+        /// - 基准价格：1.0 USDT/NEX（1,000,000）
         /// - MaxPriceDeviation：2000 bps（20%）
-        /// - 允许范围：0.8 ~ 1.2 USDT/NXS
-        /// - 订单价格 1.1 USDT/NXS → 偏离 10% → 通过 ✅
-        /// - 订单价格 1.5 USDT/NXS → 偏离 50% → 拒绝 ❌
+        /// - 允许范围：0.8 ~ 1.2 USDT/NEX
+        /// - 订单价格 1.1 USDT/NEX → 偏离 10% → 通过 ✅
+        /// - 订单价格 1.5 USDT/NEX → 偏离 50% → 拒绝 ❌
         /// 
         /// # 用途
         /// - P2P Buy 订单创建时的价格合理性检查

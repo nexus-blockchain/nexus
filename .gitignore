@@ -136,38 +136,12 @@ media-utils/output/
 media-utils/temp/
 
 # =========================
-# Node Operator (LLM Agent)
+# GroupRobot Bot (standalone binary)
 # =========================
-node-operator/.env
-node-operator/target/
-node-operator/*.log
-# 审计日志
-node-operator/audit-*.json
-# 云服务器配置缓存
-node-operator/.cloud-cache/
-
-# =========================
-# Nexus Agent (Bot Agent)
-# =========================
-nexus-agent/.env
-nexus-agent/target/
-nexus-agent/*.log
-nexus-agent/data/
-
-# =========================
-# Nexus Node (Bot Node)
-# =========================
-nexus-node/.env
-nexus-node/target/
-nexus-node/*.log
-nexus-node/data/
-
-# =========================
-# Nexus Deploy (Docker)
-# =========================
-nexus-deploy/.env
-nexus-deploy/data/
-nexus-deploy/*.log
+grouprobot/.env
+grouprobot/target/
+grouprobot/*.log
+grouprobot/data/
 
 # =========================
 # Chain State (Local Dev)
@@ -194,7 +168,7 @@ frontend/app-example/
 # =========================
 # Telegram (Bot 测试数据)
 # =========================
-telegram/
+/telegram/
 
 # =========================
 # Misc

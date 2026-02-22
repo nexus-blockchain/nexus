@@ -3,7 +3,7 @@
 //! ## 概述
 //!
 //! 本模块实现店铺代币的 P2P 交易市场，支持：
-//! - NXS 通道：使用原生 NXS 代币买卖店铺代币（链上即时结算）
+//! - NEX 通道：使用原生 NEX 代币买卖店铺代币（链上即时结算）
 //! - USDT 通道：使用 TRC20 USDT 买卖店铺代币（需 OCW 验证）
 //!
 //! ## 交易模式
@@ -13,7 +13,7 @@
 //!
 //! ## 版本历史
 //!
-//! - v0.1.0 (2026-02-01): 初始版本，实现 NXS 通道限价单
+//! - v0.1.0 (2026-02-01): 初始版本，实现 NEX 通道限价单
 //! - v0.2.0 (2026-02-01): Phase 2，实现 USDT 通道 + OCW 验证
 
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -57,17 +57,17 @@ pub mod pallet {
     /// 订单方向
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     pub enum OrderSide {
-        /// 买单（用 NXS 买 Token）
+        /// 买单（用 NEX 买 Token）
         Buy,
-        /// 卖单（卖 Token 得 NXS）
+        /// 卖单（卖 Token 得 NEX）
         Sell,
     }
 
     /// 支付通道
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     pub enum PaymentChannel {
-        /// 原生 NXS
-        NXS,
+        /// 原生 NEX
+        NEX,
         /// TRC20 USDT（Phase 2）
         USDT,
     }
@@ -171,7 +171,7 @@ pub mod pallet {
         pub token_amount: T::TokenBalance,
         /// 已成交数量
         pub filled_amount: T::TokenBalance,
-        /// 价格（NXS 通道：每个 Token 的 NXS 价格；USDT 通道：每个 Token 的 USDT 价格，精度 10^6）
+        /// 价格（NEX 通道：每个 Token 的 NEX 价格；USDT 通道：每个 Token 的 USDT 价格，精度 10^6）
         /// 市价单时为 0
         pub price: BalanceOf<T>,
         /// USDT 价格（仅 USDT 通道使用，精度 10^6）
@@ -214,7 +214,7 @@ pub mod pallet {
         pub created_at: BlockNumberFor<T>,
         /// 超时区块
         pub timeout_at: BlockNumberFor<T>,
-        /// 🆕 买家保证金金额（NXS）
+        /// 🆕 买家保证金金额（NEX）
         pub buyer_deposit: BalanceOf<T>,
         /// 🆕 保证金状态
         pub deposit_status: BuyerDepositStatus,
@@ -223,7 +223,7 @@ pub mod pallet {
     /// 店铺市场配置
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
     pub struct MarketConfig<Balance> {
-        /// 是否启用 NXS 交易
+        /// 是否启用 NEX 交易
         pub cos_enabled: bool,
         /// 是否启用 USDT 交易
         pub usdt_enabled: bool,
@@ -246,11 +246,11 @@ pub mod pallet {
         pub total_orders: u64,
         /// 总成交数
         pub total_trades: u64,
-        /// NXS 总交易量
-        pub total_volume_nxs: u128,
+        /// NEX 总交易量
+        pub total_volume_nex: u128,
         /// USDT 总交易量（精度 10^6）
         pub total_volume_usdt: u64,
-        /// 总手续费（NXS）
+        /// 总手续费（NEX）
         pub total_fees_cos: u128,
         /// 总手续费（USDT，精度 10^6）
         pub total_fees_usdt: u64,
@@ -401,7 +401,7 @@ pub mod pallet {
         /// 运行时事件类型
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
 
-        /// 原生货币（NXS）
+        /// 原生货币（NEX）
         type Currency: Currency<Self::AccountId, Balance = Self::Balance> + ReservableCurrency<Self::AccountId>;
 
         /// Balance 类型（需要支持 u128 转换）
@@ -476,7 +476,7 @@ pub mod pallet {
         type CircuitBreakerDuration: Get<u32>;
 
         /// 验证确认奖励（激励任何人调用 claim_verification_reward）
-        /// 默认 0.1 NXS
+        /// 默认 0.1 NEX
         #[pallet::constant]
         type VerificationReward: Get<BalanceOf<Self>>;
 
@@ -486,11 +486,11 @@ pub mod pallet {
         // ==================== 🆕 买家保证金配置 ====================
 
         /// 买家保证金比例（bps，1000 = 10%）
-        /// USDT 金额 × 此比例 = 需锁定的 NXS 保证金
+        /// USDT 金额 × 此比例 = 需锁定的 NEX 保证金
         #[pallet::constant]
         type BuyerDepositRate: Get<u16>;
 
-        /// 最低买家保证金金额（NXS）
+        /// 最低买家保证金金额（NEX）
         /// 保证金 = max(MinBuyerDeposit, usdt_amount × BuyerDepositRate)
         #[pallet::constant]
         type MinBuyerDeposit: Get<BalanceOf<Self>>;
@@ -500,11 +500,11 @@ pub mod pallet {
         #[pallet::constant]
         type DepositForfeitRate: Get<u16>;
 
-        /// USDT 转 NXS 价格（精度 10^6，用于保证金计算）
-        /// 例如：100_000 表示 1 USDT = 0.1 NXS
+        /// USDT 转 NEX 价格（精度 10^6，用于保证金计算）
+        /// 例如：100_000 表示 1 USDT = 0.1 NEX
         /// 实际应从 pricing 模块获取，这里简化为常量
         #[pallet::constant]
-        type UsdtToNxsRate: Get<u64>;
+        type UsdtToNexRate: Get<u64>;
 
         /// 🆕 国库账户（没收的保证金归入国库）
         type TreasuryAccount: Get<Self::AccountId>;
@@ -702,7 +702,7 @@ pub mod pallet {
             order_id: u64,
             taker: T::AccountId,
             filled_amount: T::TokenBalance,
-            total_nxst: BalanceOf<T>,
+            total_next: BalanceOf<T>,
             fee: BalanceOf<T>,
         },
         /// 订单已取消
@@ -760,7 +760,7 @@ pub mod pallet {
             trader: T::AccountId,
             side: OrderSide,
             filled_amount: T::TokenBalance,
-            total_nxst: BalanceOf<T>,
+            total_next: BalanceOf<T>,
             total_fee: BalanceOf<T>,
         },
         /// TWAP 价格已更新
@@ -917,12 +917,12 @@ pub mod pallet {
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        /// 挂卖单（卖 Token 得 NXS）
+        /// 挂卖单（卖 Token 得 NEX）
         ///
         /// # 参数
         /// - `shop_id`: 店铺 ID
         /// - `token_amount`: 出售的 Token 数量
-        /// - `price`: 每个 Token 的 NXS 价格
+        /// - `price`: 每个 Token 的 NEX 价格
         #[pallet::call_index(0)]
         #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
         pub fn place_sell_order(
@@ -956,11 +956,11 @@ pub mod pallet {
                 who.clone(),
                 OrderSide::Sell,
                 OrderType::Limit,
-                PaymentChannel::NXS,
+                PaymentChannel::NEX,
                 token_amount,
                 price,
-                0,    // usdt_price (NXS 通道不使用)
-                None, // tron_address (NXS 通道不使用)
+                0,    // usdt_price (NEX 通道不使用)
+                None, // tron_address (NEX 通道不使用)
             )?;
 
             // 更新最优价格
@@ -978,12 +978,12 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 挂买单（用 NXS 买 Token）
+        /// 挂买单（用 NEX 买 Token）
         ///
         /// # 参数
         /// - `shop_id`: 店铺 ID
         /// - `token_amount`: 想购买的 Token 数量
-        /// - `price`: 每个 Token 愿意支付的 NXS 价格
+        /// - `price`: 每个 Token 愿意支付的 NEX 价格
         #[pallet::call_index(1)]
         #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
         pub fn place_buy_order(
@@ -1004,12 +1004,12 @@ pub mod pallet {
             // Phase 5: 价格偏离检查
             Self::check_price_deviation(shop_id, price)?;
 
-            // 计算需要锁定的 NXS 总量
+            // 计算需要锁定的 NEX 总量
             let token_u128: u128 = token_amount.into();
-            let total_nxst = Self::calculate_total_nxst(token_u128, price)?;
+            let total_next = Self::calculate_total_next(token_u128, price)?;
 
-            // 锁定 NXS
-            T::Currency::reserve(&who, total_nxst).map_err(|_| Error::<T>::InsufficientBalance)?;
+            // 锁定 NEX
+            T::Currency::reserve(&who, total_next).map_err(|_| Error::<T>::InsufficientBalance)?;
 
             // 创建订单
             let order_id = Self::do_create_order(
@@ -1017,11 +1017,11 @@ pub mod pallet {
                 who.clone(),
                 OrderSide::Buy,
                 OrderType::Limit,
-                PaymentChannel::NXS,
+                PaymentChannel::NEX,
                 token_amount,
                 price,
-                0,    // usdt_price (NXS 通道不使用)
-                None, // tron_address (NXS 通道不使用)
+                0,    // usdt_price (NEX 通道不使用)
+                None, // tron_address (NEX 通道不使用)
             )?;
 
             // 更新最优价格
@@ -1075,7 +1075,7 @@ pub mod pallet {
 
             // 计算成交金额
             let fill_u128: u128 = fill_amount.into();
-            let total_nxst = Self::calculate_total_nxst(fill_u128, order.price)?;
+            let total_next = Self::calculate_total_next(fill_u128, order.price)?;
 
             // 计算手续费
             let config = MarketConfigs::<T>::get(order.shop_id).unwrap_or_default();
@@ -1084,17 +1084,17 @@ pub mod pallet {
             } else {
                 T::DefaultFeeRate::get()
             };
-            let fee = total_nxst
+            let fee = total_next
                 .saturating_mul(fee_rate.into())
                 .checked_div(&10000u32.into())
                 .unwrap_or_else(Zero::zero);
-            let net_amount = total_nxst.saturating_sub(fee);
+            let net_amount = total_next.saturating_sub(fee);
 
             // 执行交易
             match order.side {
                 OrderSide::Sell => {
-                    // 卖单：taker 支付 NXS，获得 Token
-                    // taker (who) 支付 NXS → maker
+                    // 卖单：taker 支付 NEX，获得 Token
+                    // taker (who) 支付 NEX → maker
                     T::Currency::transfer(
                         &who,
                         &order.maker,
@@ -1123,7 +1123,7 @@ pub mod pallet {
                     )?;
                 }
                 OrderSide::Buy => {
-                    // 买单：taker 提供 Token，获得 NXS
+                    // 买单：taker 提供 Token，获得 NEX
                     // 检查 taker 的 Token 余额
                     let taker_balance = T::TokenProvider::token_balance(order.shop_id, &who);
                     ensure!(
@@ -1131,8 +1131,8 @@ pub mod pallet {
                         Error::<T>::InsufficientTokenBalance
                     );
 
-                    // NXS: 从 maker 的锁定中释放 → taker
-                    T::Currency::unreserve(&order.maker, total_nxst);
+                    // NEX: 从 maker 的锁定中释放 → taker
+                    T::Currency::unreserve(&order.maker, total_next);
                     T::Currency::transfer(
                         &order.maker,
                         &who,
@@ -1186,7 +1186,7 @@ pub mod pallet {
             // 更新统计
             MarketStatsStorage::<T>::mutate(order.shop_id, |stats| {
                 stats.total_trades = stats.total_trades.saturating_add(1);
-                stats.total_volume_nxs = stats.total_volume_nxs.saturating_add(total_nxst.into());
+                stats.total_volume_nex = stats.total_volume_nex.saturating_add(total_next.into());
                 stats.total_fees_cos = stats.total_fees_cos.saturating_add(fee.into());
             });
 
@@ -1198,7 +1198,7 @@ pub mod pallet {
                 order_id,
                 taker: who,
                 filled_amount: fill_amount,
-                total_nxst,
+                total_next,
                 fee,
             });
 
@@ -1235,9 +1235,9 @@ pub mod pallet {
                     T::TokenProvider::unreserve(order.shop_id, &who, unfilled);
                 }
                 OrderSide::Buy => {
-                    // 退还锁定的 NXS
+                    // 退还锁定的 NEX
                     let unfilled_u128: u128 = unfilled.into();
-                    let refund = Self::calculate_total_nxst(unfilled_u128, order.price)?;
+                    let refund = Self::calculate_total_next(unfilled_u128, order.price)?;
                     T::Currency::unreserve(&who, refund);
                 }
             }
@@ -1390,7 +1390,7 @@ pub mod pallet {
         ///
         /// # 参数
         /// - `shop_id`: 店铺 ID
-        /// - `initial_price`: 初始参考价格（每个 Token 的 NXS 价格）
+        /// - `initial_price`: 初始参考价格（每个 Token 的 NEX 价格）
         ///
         /// # 说明
         /// 初始价格用于 TWAP 冷启动期间的价格偏离检查。
@@ -1492,7 +1492,7 @@ pub mod pallet {
                 OrderType::Limit,
                 PaymentChannel::USDT,
                 token_amount,
-                Zero::zero(), // NXS price (USDT 通道不使用)
+                Zero::zero(), // NEX price (USDT 通道不使用)
                 usdt_price,
                 Some(tron_addr.clone()),
             )?;
@@ -1541,7 +1541,7 @@ pub mod pallet {
                 OrderType::Limit,
                 PaymentChannel::USDT,
                 token_amount,
-                Zero::zero(), // NXS price (USDT 通道不使用)
+                Zero::zero(), // NEX price (USDT 通道不使用)
                 usdt_price,
                 None, // 买单不需要 TRON 地址
             )?;
@@ -1561,7 +1561,7 @@ pub mod pallet {
         ///
         /// # 流程（两阶段安全模式）
         /// 1. 买家调用此函数预锁定订单份额
-        /// 2. 锁定买家的 NXS 保证金
+        /// 2. 锁定买家的 NEX 保证金
         /// 3. 锁定订单对应的 Token 份额
         /// 4. 创建 UsdtTrade (status: AwaitingPayment)
         /// 5. 买家链下支付 USDT
@@ -1663,7 +1663,7 @@ pub mod pallet {
         ///
         /// # 流程
         /// 1. 卖家看到买单，调用此函数接受
-        /// 2. 🆕 锁定买家的 NXS 保证金
+        /// 2. 🆕 锁定买家的 NEX 保证金
         /// 3. 锁定卖家的 Token
         /// 4. 创建 USDT 交易记录，等待买家支付
         #[pallet::call_index(8)]
@@ -1709,7 +1709,7 @@ pub mod pallet {
             // 🆕 计算并锁定买家保证金
             let buyer_deposit = Self::calculate_buyer_deposit(usdt_amount);
             if !buyer_deposit.is_zero() {
-                // 检查买家 NXS 余额
+                // 检查买家 NEX 余额
                 let buyer_balance = T::Currency::free_balance(&buyer);
                 ensure!(buyer_balance >= buyer_deposit, Error::<T>::InsufficientDepositBalance);
                 // 锁定保证金
@@ -2040,7 +2040,7 @@ pub mod pallet {
         /// # 参数
         /// - `shop_id`: 店铺 ID
         /// - `token_amount`: 想购买的 Token 数量
-        /// - `max_cost`: 最大愿意支付的 NXS 总额（滑点保护）
+        /// - `max_cost`: 最大愿意支付的 NEX 总额（滑点保护）
         #[pallet::call_index(12)]
         #[pallet::weight(Weight::from_parts(120_000_000, 12_000))]
         pub fn market_buy(
@@ -2063,7 +2063,7 @@ pub mod pallet {
             ensure!(!sell_orders.is_empty(), Error::<T>::NoOrdersAvailable);
 
             // 执行市价买入
-            let (filled, total_nxst, fees) = Self::do_market_buy(
+            let (filled, total_next, fees) = Self::do_market_buy(
                 &who,
                 shop_id,
                 token_amount,
@@ -2078,7 +2078,7 @@ pub mod pallet {
                 trader: who,
                 side: OrderSide::Buy,
                 filled_amount: filled,
-                total_nxst,
+                total_next,
                 total_fee: fees,
             });
 
@@ -2090,7 +2090,7 @@ pub mod pallet {
         /// # 参数
         /// - `shop_id`: 店铺 ID
         /// - `token_amount`: 想出售的 Token 数量
-        /// - `min_receive`: 最低愿意收到的 NXS 总额（滑点保护）
+        /// - `min_receive`: 最低愿意收到的 NEX 总额（滑点保护）
         #[pallet::call_index(13)]
         #[pallet::weight(Weight::from_parts(120_000_000, 12_000))]
         pub fn market_sell(
@@ -2131,7 +2131,7 @@ pub mod pallet {
                 trader: who,
                 side: OrderSide::Sell,
                 filled_amount: filled,
-                total_nxst: total_receive,
+                total_next: total_receive,
                 total_fee: fees,
             });
 
@@ -2248,7 +2248,7 @@ pub mod pallet {
         }
 
         /// 计算总成本
-        fn calculate_total_nxst(token_amount: u128, price: BalanceOf<T>) -> Result<BalanceOf<T>, DispatchError> {
+        fn calculate_total_next(token_amount: u128, price: BalanceOf<T>) -> Result<BalanceOf<T>, DispatchError> {
             let price_u128: u128 = price.into();
             let total = token_amount
                 .checked_mul(price_u128)
@@ -2773,7 +2773,7 @@ pub mod pallet {
                 .iter()
                 .filter_map(|&id| Orders::<T>::get(id))
                 .filter(|o| {
-                    o.channel == PaymentChannel::NXS &&
+                    o.channel == PaymentChannel::NEX &&
                     (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
                 })
                 .collect();
@@ -2787,7 +2787,7 @@ pub mod pallet {
                 .iter()
                 .filter_map(|&id| Orders::<T>::get(id))
                 .filter(|o| {
-                    o.channel == PaymentChannel::NXS &&
+                    o.channel == PaymentChannel::NEX &&
                     (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
                 })
                 .collect();
@@ -2804,7 +2804,7 @@ pub mod pallet {
             sell_orders: &mut Vec<TradeOrder<T>>,
         ) -> Result<(T::TokenBalance, BalanceOf<T>, BalanceOf<T>), DispatchError> {
             let mut total_filled: T::TokenBalance = Zero::zero();
-            let mut total_nxst: BalanceOf<T> = Zero::zero();
+            let mut total_next: BalanceOf<T> = Zero::zero();
             let mut total_fees: BalanceOf<T> = Zero::zero();
 
             let config = MarketConfigs::<T>::get(shop_id).unwrap_or_default();
@@ -2821,12 +2821,12 @@ pub mod pallet {
 
                 // 计算成本
                 let fill_u128: u128 = fill_amount.into();
-                let cost = Self::calculate_total_nxst(fill_u128, order.price)?;
+                let cost = Self::calculate_total_next(fill_u128, order.price)?;
 
                 // 检查滑点
-                if total_nxst.saturating_add(cost) > max_cost {
+                if total_next.saturating_add(cost) > max_cost {
                     // 计算在预算内能买多少
-                    let budget_left = max_cost.saturating_sub(total_nxst);
+                    let budget_left = max_cost.saturating_sub(total_next);
                     if budget_left.is_zero() {
                         break;
                     }
@@ -2841,7 +2841,7 @@ pub mod pallet {
                     .unwrap_or_else(Zero::zero);
 
                 // 执行转账
-                // buyer 支付 NXS → maker
+                // buyer 支付 NEX → maker
                 T::Currency::transfer(
                     buyer,
                     &order.maker,
@@ -2882,7 +2882,7 @@ pub mod pallet {
 
                 // 累计
                 total_filled = total_filled.saturating_add(fill_amount);
-                total_nxst = total_nxst.saturating_add(cost);
+                total_next = total_next.saturating_add(cost);
                 total_fees = total_fees.saturating_add(fee);
                 remaining = remaining.saturating_sub(fill_amount);
             }
@@ -2891,19 +2891,19 @@ pub mod pallet {
             if !total_filled.is_zero() {
                 MarketStatsStorage::<T>::mutate(shop_id, |stats| {
                     stats.total_trades = stats.total_trades.saturating_add(1);
-                    stats.total_volume_nxs = stats.total_volume_nxs.saturating_add(total_nxst.into());
+                    stats.total_volume_nex = stats.total_volume_nex.saturating_add(total_next.into());
                     stats.total_fees_cos = stats.total_fees_cos.saturating_add(total_fees.into());
                 });
 
                 // 更新最优价格和 TWAP（使用加权平均价格）
                 Self::update_best_prices(shop_id);
                 if !total_filled.is_zero() {
-                    let avg_price = total_nxst.checked_div(&total_filled.into().into()).unwrap_or_else(Zero::zero);
+                    let avg_price = total_next.checked_div(&total_filled.into().into()).unwrap_or_else(Zero::zero);
                     Self::on_trade_completed(shop_id, avg_price);
                 }
             }
 
-            Ok((total_filled, total_nxst, total_fees))
+            Ok((total_filled, total_next, total_fees))
         }
 
         /// 执行市价卖出
@@ -2932,7 +2932,7 @@ pub mod pallet {
 
                 // 计算收入
                 let fill_u128: u128 = fill_amount.into();
-                let gross = Self::calculate_total_nxst(fill_u128, order.price)?;
+                let gross = Self::calculate_total_next(fill_u128, order.price)?;
 
                 // 计算手续费
                 let fee = gross
@@ -2941,7 +2941,7 @@ pub mod pallet {
                     .unwrap_or_else(Zero::zero);
                 let net = gross.saturating_sub(fee);
 
-                // 从 maker 的锁定中释放 NXS → seller
+                // 从 maker 的锁定中释放 NEX → seller
                 T::Currency::unreserve(&order.maker, gross);
                 T::Currency::transfer(
                     &order.maker,
@@ -2998,7 +2998,7 @@ pub mod pallet {
             if !total_filled.is_zero() {
                 MarketStatsStorage::<T>::mutate(shop_id, |stats| {
                     stats.total_trades = stats.total_trades.saturating_add(1);
-                    stats.total_volume_nxs = stats.total_volume_nxs.saturating_add(total_receive.saturating_add(total_fees).into());
+                    stats.total_volume_nex = stats.total_volume_nex.saturating_add(total_receive.saturating_add(total_fees).into());
                     stats.total_fees_cos = stats.total_fees_cos.saturating_add(total_fees.into());
                 });
 
@@ -3489,7 +3489,7 @@ impl<T: Config> Pallet<T> {
             .iter()
             .filter_map(|&id| Orders::<T>::get(id))
             .filter(|o| {
-                o.channel == PaymentChannel::NXS &&
+                o.channel == PaymentChannel::NEX &&
                 (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
             })
             .map(|o| o.price)
@@ -3502,7 +3502,7 @@ impl<T: Config> Pallet<T> {
             .iter()
             .filter_map(|&id| Orders::<T>::get(id))
             .filter(|o| {
-                o.channel == PaymentChannel::NXS &&
+                o.channel == PaymentChannel::NEX &&
                 (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
             })
             .map(|o| o.price)
@@ -3531,7 +3531,7 @@ impl<T: Config> Pallet<T> {
         let total_ask_amount: T::TokenBalance = ShopSellOrders::<T>::get(shop_id)
             .iter()
             .filter_map(|&id| Orders::<T>::get(id))
-            .filter(|o| o.channel == PaymentChannel::NXS &&
+            .filter(|o| o.channel == PaymentChannel::NEX &&
                 (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled))
             .fold(Zero::zero(), |acc: T::TokenBalance, o| {
                 acc.saturating_add(o.token_amount.saturating_sub(o.filled_amount))
@@ -3541,7 +3541,7 @@ impl<T: Config> Pallet<T> {
         let total_bid_amount: T::TokenBalance = ShopBuyOrders::<T>::get(shop_id)
             .iter()
             .filter_map(|&id| Orders::<T>::get(id))
-            .filter(|o| o.channel == PaymentChannel::NXS &&
+            .filter(|o| o.channel == PaymentChannel::NEX &&
                 (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled))
             .fold(Zero::zero(), |acc: T::TokenBalance, o| {
                 acc.saturating_add(o.token_amount.saturating_sub(o.filled_amount))

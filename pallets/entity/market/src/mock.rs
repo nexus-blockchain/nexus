@@ -271,12 +271,12 @@ parameter_types! {
     pub const BlocksPerDay: u32 = 14400;
     pub const BlocksPerWeek: u32 = 100800;
     pub const CircuitBreakerDuration: u32 = 600;
-    pub const VerificationReward: u128 = 100_000; // 0.1 NXS
+    pub const VerificationReward: u128 = 100_000; // 0.1 NEX
     pub const RewardSourceAccount: u64 = REWARD_SOURCE;
     pub const BuyerDepositRate: u16 = 1000; // 10%
-    pub const MinBuyerDeposit: u128 = 10_000; // 0.01 NXS
+    pub const MinBuyerDeposit: u128 = 10_000; // 0.01 NEX
     pub const DepositForfeitRate: u16 = 10000; // 100%
-    pub const UsdtToNxsRate: u64 = 1_000_000; // 1 USDT = 1 NXS
+    pub const UsdtToNexRate: u64 = 1_000_000; // 1 USDT = 1 NEX
     pub const TreasuryAccountId: u64 = TREASURY;
 }
 
@@ -301,7 +301,7 @@ impl pallet_entity_market::Config for Test {
     type BuyerDepositRate = BuyerDepositRate;
     type MinBuyerDeposit = MinBuyerDeposit;
     type DepositForfeitRate = DepositForfeitRate;
-    type UsdtToNxsRate = UsdtToNxsRate;
+    type UsdtToNexRate = UsdtToNexRate;
     type TreasuryAccount = TreasuryAccountId;
 }
 
@@ -346,7 +346,7 @@ impl ExtBuilder {
     }
 }
 
-/// 配置市场（启用 NXS + USDT）
+/// 配置市场（启用 NEX + USDT）
 pub fn configure_market_enabled(shop_id: u64) {
     assert!(EntityMarket::configure_market(
         RuntimeOrigin::signed(if shop_id == SHOP_ID { SHOP_OWNER } else { SHOP_OWNER_2 }),

@@ -1742,7 +1742,7 @@ Response: → NexusMemberProfile (完整画像, 见 3.2)
 | **隐私模型** | ✅ 去中心化本地 | ⚠️ 中心化 | ✅ 无 Cookie | ⚠️ 中心化 | ⚠️ 中心化 | ⚠️ 中心化 |
 | **Token 经济集成** | ✅ Sale/Market/Dividend | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **去中心化** | ✅ Agent+Node 分布 | ❌ | ❌ | ❌ | ❌ | ❌ |
-| **定价** | 订阅 (10-100 NXS/月) | Enterprise | $0-299/月 | Enterprise | 免费+Pro | $0-1000+/月 |
+| **定价** | 订阅 (10-100 NEX/月) | Enterprise | $0-299/月 | Enterprise | 免费+Pro | $0-1000+/月 |
 
 #### 5.3 Nexus CRM 的 3 个不可复制优势
 
@@ -1949,16 +1949,16 @@ CRM 的切换成本:
 
 ```
 当前模式 (纯群管):
-  Basic: 10 NXS/月 (1群, 基础功能)
-  Pro:   30 NXS/月 (≤5群, 全功能)
-  Enterprise: 100 NXS/月 (无限群)
+  Basic: 10 NEX/月 (1群, 基础功能)
+  Pro:   30 NEX/月 (≤5群, 全功能)
+  Enterprise: 100 NEX/月 (无限群)
   → 功能定价, 群数量为限
 
 CRM 增强后:
-  Basic:      10 NXS/月  → 不变 (群管功能)
-  Pro:        30 NXS/月  → 50 NXS/月 (+CRM 分析)
-  Enterprise: 100 NXS/月 → 200 NXS/月 (+CRM 全套)
-  CRM Add-on: +30 NXS/月 (单独购买 CRM 能力)
+  Basic:      10 NEX/月  → 不变 (群管功能)
+  Pro:        30 NEX/月  → 50 NEX/月 (+CRM 分析)
+  Enterprise: 100 NEX/月 → 200 NEX/月 (+CRM 全套)
+  CRM Add-on: +30 NEX/月 (单独购买 CRM 能力)
 
   新增收入来源:
   ├── CRM 分析 API 调用费 (高频查询)
@@ -1967,8 +1967,8 @@ CRM 增强后:
   └── 数据导出费 (企业级)
 
 ARPU 变化:
-  群管 ARPU: ~30 NXS/月
-  CRM ARPU:  ~100 NXS/月
+  群管 ARPU: ~30 NEX/月
+  CRM ARPU:  ~100 NEX/月
   → ARPU 提升 3.3x
 ```
 
@@ -1983,14 +1983,14 @@ ARPU 变化:
 │  ├── CRM: /stats 基础统计 (群概览)                               │
 │  └── 限制: 无分群/无归因/无预警/无 API                           │
 │                                                                   │
-│  Pro Tier (50 NXS/月):                                           │
+│  Pro Tier (50 NEX/月):                                           │
 │  ├── 群管: 全功能 (≤5群)                                         │
 │  ├── CRM: /segment 分群 + /whois 画像 + /top 排行                │
 │  ├── CRM: engagement_score + churn_risk                          │
 │  ├── CRM: 基础预警 (鲸鱼减持/核心流失)                           │
 │  └── API: 基础分析 API (1000 req/day)                            │
 │                                                                   │
-│  Enterprise Tier (200 NXS/月):                                   │
+│  Enterprise Tier (200 NEX/月):                                   │
 │  ├── 群管: 无限群 + SLA                                          │
 │  ├── CRM: 全部 10 大功能                                         │
 │  ├── CRM: 归因分析 + Campaign 自动化 + 治理闭环                  │
@@ -2072,36 +2072,36 @@ ARPU 变化:
 
 ---
 
-### 四、TOKEN 经济好处 — NXS 价值捕获增强
+### 四、TOKEN 经济好处 — NEX 价值捕获增强
 
-#### 4.1 CRM 如何增强 NXS TOKEN 价值
+#### 4.1 CRM 如何增强 NEX TOKEN 价值
 
 ```
 没有 CRM:
-  NXS 用途:
-  ├── 节点质押 (MinStake = 100 NXS)
-  ├── 订阅费 (Basic 10 / Pro 30 / Enterprise 100 NXS/月)
+  NEX 用途:
+  ├── 节点质押 (MinStake = 100 NEX)
+  ├── 订阅费 (Basic 10 / Pro 30 / Enterprise 100 NEX/月)
   └── 链上交易手续费
-  → NXS 需求来源有限, 价值支撑单薄
+  → NEX 需求来源有限, 价值支撑单薄
 
 有 CRM:
-  NXS 新增用途:
-  ├── CRM 订阅 (Pro +20 / Enterprise +100 NXS/月)
+  NEX 新增用途:
+  ├── CRM 订阅 (Pro +20 / Enterprise +100 NEX/月)
   ├── 精准空投 Gas (每次 /airdrop → 链上 TOKEN 转账 → Gas)
   ├── Campaign 执行费 (自动化工作流 → 链上操作 → Gas)
   ├── 数据 API 查询费 (高频分析 → 微支付)
   ├── Token-Gate 验证费 (链上余额查询 → RPC)
   └── 治理操作费 (CRM驱动的提案/投票 → 链上)
 
-NXS 需求增长模型:
-  每个活跃社区的 NXS 消耗:
-  ├── 订阅: 50-200 NXS/月 (固定)
-  ├── 空投: ~10 NXS/月 Gas (变量)
-  ├── 治理: ~5 NXS/月 Gas (变量)
-  └── 合计: ~65-215 NXS/月/社区
+NEX 需求增长模型:
+  每个活跃社区的 NEX 消耗:
+  ├── 订阅: 50-200 NEX/月 (固定)
+  ├── 空投: ~10 NEX/月 Gas (变量)
+  ├── 治理: ~5 NEX/月 Gas (变量)
+  └── 合计: ~65-215 NEX/月/社区
 
-  1000 个活跃社区 → 65K-215K NXS/月需求
-  → CRM 使 NXS 从「质押+手续费」→「多维度消耗」
+  1000 个活跃社区 → 65K-215K NEX/月需求
+  → CRM 使 NEX 从「质押+手续费」→「多维度消耗」
   → 更多消耗 = 更强的价值支撑
 ```
 
@@ -2117,7 +2117,7 @@ NXS 需求增长模型:
   免费群管 → 用户看到 /stats 基础数据 → 想要更深分析
   → 升级 Pro → 看到 engagement_score → 想要 Campaign
   → 升级 Enterprise → 自动化运行 → 不可或缺
-  → 长期订阅 → 稳定 NXS 消耗
+  → 长期订阅 → 稳定 NEX 消耗
 
 飞轮 3: CRM 治理 → TOKEN 持有激励
   CRM 发现: "投票参与率低"
@@ -2126,7 +2126,7 @@ NXS 需求增长模型:
   → 治理质量↑ → 社区价值↑ → TOKEN 价格↑
   → 更多人愿意持有 → ...
 
-三个飞轮同时运转 → NXS 价值持续增强
+三个飞轮同时运转 → NEX 价值持续增强
 ```
 
 ---
@@ -2140,22 +2140,22 @@ NXS 需求增长模型:
 
 场景 A: 纯群管 (无 CRM)
   活跃社区: 500 个
-  Basic (60%): 300 × 10 NXS = 3,000 NXS/月
-  Pro (30%):   150 × 30 NXS = 4,500 NXS/月
-  Enterprise (10%): 50 × 100 NXS = 5,000 NXS/月
-  月收入: 12,500 NXS/月
-  年收入: 150,000 NXS/年
+  Basic (60%): 300 × 10 NEX = 3,000 NEX/月
+  Pro (30%):   150 × 30 NEX = 4,500 NEX/月
+  Enterprise (10%): 50 × 100 NEX = 5,000 NEX/月
+  月收入: 12,500 NEX/月
+  年收入: 150,000 NEX/年
 
 场景 B: 群管 + CRM
   活跃社区: 800 个 (CRM 吸引更多项目方)
   Free (30%):  240 × 0 = 0
-  Pro (40%):   320 × 50 NXS = 16,000 NXS/月
-  Enterprise (25%): 200 × 200 NXS = 40,000 NXS/月
-  DAO (5%):    40 × 500 NXS = 20,000 NXS/月
-  CRM API:     ~5,000 NXS/月 (高频查询)
-  空投 Gas:    ~3,000 NXS/月 (链上操作)
-  月收入: 84,000 NXS/月
-  年收入: 1,008,000 NXS/年
+  Pro (40%):   320 × 50 NEX = 16,000 NEX/月
+  Enterprise (25%): 200 × 200 NEX = 40,000 NEX/月
+  DAO (5%):    40 × 500 NEX = 20,000 NEX/月
+  CRM API:     ~5,000 NEX/月 (高频查询)
+  空投 Gas:    ~3,000 NEX/月 (链上操作)
+  月收入: 84,000 NEX/月
+  年收入: 1,008,000 NEX/年
 
 收入变化:
   场景 A → 场景 B: 6.7x 增长
@@ -2177,14 +2177,14 @@ CRM 开发投入:
   人力成本: 1 名全栈开发 × 6 周 ≈ $15,000-25,000
 
 CRM 回报 (Year 1):
-  增量收入: (84,000 - 12,500) × 12 = 858,000 NXS/年
-  假设 NXS = $0.10 → $85,800/年
-  假设 NXS = $0.50 → $429,000/年
-  假设 NXS = $1.00 → $858,000/年
+  增量收入: (84,000 - 12,500) × 12 = 858,000 NEX/年
+  假设 NEX = $0.10 → $85,800/年
+  假设 NEX = $0.50 → $429,000/年
+  假设 NEX = $1.00 → $858,000/年
 
 ROI:
-  保守 (NXS=$0.10): $85,800 / $25,000 = 3.4x (Year 1)
-  中等 (NXS=$0.50): $429,000 / $25,000 = 17.2x (Year 1)
+  保守 (NEX=$0.10): $85,800 / $25,000 = 3.4x (Year 1)
+  中等 (NEX=$0.50): $429,000 / $25,000 = 17.2x (Year 1)
   → CRM 是 Nexus 投资回报率最高的功能模块
 ```
 
@@ -2278,19 +2278,19 @@ Bot 命令 (/stats /segment)     🆕 需新建
 │  目标市场扩大 3.3x, 从个人用户 → 项目方/DAO                              │
 │                                                                           │
 │  好处 2: 商业模式升级                                                     │
-│  ARPU 从 30 → 105 NXS/月 (3.5x 提升)                                    │
+│  ARPU 从 30 → 105 NEX/月 (3.5x 提升)                                    │
 │  新增 API 费/空投 Gas/Campaign 费 多元收入                                │
 │                                                                           │
 │  好处 3: 四层竞争壁垒                                                     │
 │  数据护城河 + 架构护城河 + 治理护城河 + 网络效应                          │
 │  Formo/Combot/Guild 均无法复制完整能力                                    │
 │                                                                           │
-│  好处 4: NXS TOKEN 价值增强                                               │
-│  NXS 消耗从 2 个场景 → 6+ 个场景                                         │
+│  好处 4: NEX TOKEN 价值增强                                               │
+│  NEX 消耗从 2 个场景 → 6+ 个场景                                         │
 │  三个飞轮: 数据→交易 / 分群→升级 / 治理→持有                             │
 │                                                                           │
 │  好处 5: 收入 6.7x 增长                                                   │
-│  年收入从 150K NXS → 1M+ NXS                                             │
+│  年收入从 150K NEX → 1M+ NEX                                             │
 │  CRM 开发 ROI: 3.4x - 17.2x (Year 1)                                    │
 │                                                                           │
 │  好处 6: 生态乘数效应                                                     │
@@ -3567,7 +3567,7 @@ D 区 = 两者都不做的领域 (如 AI 内容审核)
 |---------|---------|---------|------|--------------|
 | 发现→注册 | 看到 Guild 页面并连接钱包 | Guild 原生 | 低 (单击连接) | Guild 品牌页 + 社交曝光 |
 | 注册→初级任务 | 完成关注 X、加入 TG | Guild Quest | 低 | 简单社交任务 + 即时奖励 |
-| 初级→进阶 | 购买 TOKEN | Guild Quest + Nexus tokensale | **中高** | 低门槛: 0.01 NXS/TOKEN |
+| 初级→进阶 | 购买 TOKEN | Guild Quest + Nexus tokensale | **中高** | 低门槛: 0.01 NEX/TOKEN |
 | 进阶→群内活跃 | 开始在 TG 群发言 | Nexus Bot 自动识别 | **中** | 欢迎消息 + /balance 提示 |
 | 群内→深度参与 | 投票/质押/打赏 | Nexus Bot 命令 | 中 | 群内 Inline Keyboard |
 | 深度→治理 | 发起提案/参与仲裁 | pallet-entity-governance | 低 (已是核心用户) | /propose 一键操作 |

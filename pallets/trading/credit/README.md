@@ -36,7 +36,7 @@
 
 ```rust
 pub fn calculate_asset_trust(account: &T::AccountId) -> u8 {
-    // NXS 余额信任分
+    // NEX 余额信任分
     let balance_score = if balance_multiplier >= 10000 {
         50  // >= 10000倍最小余额：高信任
     } else if balance_multiplier >= 1000 {
@@ -510,24 +510,24 @@ let dispute_loss_rate = dispute_loss_count * 100 / total_orders;
 
 #### 2.4 动态保证金机制
 
-**基础保证金**：1,000,000 NXS
+**基础保证金**：1,000,000 NEX
 
 **根据信用等级调整**：
 
 ```rust
 pub fn calculate_required_deposit(maker_id: u64) -> BalanceOf<T> {
-    let base_deposit = 1_000_000 * 1e18;  // 1,000,000 NXS
+    let base_deposit = 1_000_000 * 1e18;  // 1,000,000 NEX
 
     let credit_score = Self::query_maker_credit_score(maker_id).unwrap_or(820);
 
     let multiplier_percent = match credit_score {
-        950..=1000 => 50,   // Diamond: 0.5× = 500,000 NXS
-        900..=949  => 70,   // Platinum: 0.7× = 700,000 NXS
-        850..=899  => 80,   // Gold: 0.8× = 800,000 NXS
-        820..=849  => 90,   // Silver: 0.9× = 900,000 NXS
-        800..=819  => 100,  // Bronze: 1.0× = 1,000,000 NXS
-        750..=799  => 120,  // Warning: 1.2× = 1,200,000 NXS
-        _          => 200,  // Suspended: 2.0× = 2,000,000 NXS
+        950..=1000 => 50,   // Diamond: 0.5× = 500,000 NEX
+        900..=949  => 70,   // Platinum: 0.7× = 700,000 NEX
+        850..=899  => 80,   // Gold: 0.8× = 800,000 NEX
+        820..=849  => 90,   // Silver: 0.9× = 900,000 NEX
+        800..=819  => 100,  // Bronze: 1.0× = 1,000,000 NEX
+        750..=799  => 120,  // Warning: 1.2× = 1,200,000 NEX
+        _          => 200,  // Suspended: 2.0× = 2,000,000 NEX
     };
 
     base_deposit * multiplier_percent / 100
@@ -934,7 +934,7 @@ pub struct CreditScore<T: Config> {
     /// 完成订单数
     pub completed_orders: u32,
 
-    /// 累计交易量（NXS）
+    /// 累计交易量（NEX）
     pub total_volume: BalanceOf<T>,
 
     /// 违约次数
@@ -1599,7 +1599,7 @@ pub fn do_create_buy_order(
 **订单完成时更新信用**：
 
 ```rust
-pub fn do_release_nxs(order_id: u64) -> DispatchResult {
+pub fn do_release_nex(order_id: u64) -> DispatchResult {
     let order = BuyOrders::<T>::get(order_id)?;
 
     // 更新买家信用
@@ -1698,7 +1698,7 @@ pub fn do_create_buy_order(buyer: &T::AccountId, amount_usd: u64) -> DispatchRes
 }
 
 // 订单完成时释放额度并提升信用
-pub fn do_release_nxs(order_id: u64) -> DispatchResult {
+pub fn do_release_nex(order_id: u64) -> DispatchResult {
     let order = BuyOrders::<T>::get(order_id)?;
     T::BuyerCredit::release_quota(&order.taker, order.amount_usd)?;
     T::BuyerCredit::record_order_completed(&order.taker, order_id)?;

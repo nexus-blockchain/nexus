@@ -317,7 +317,7 @@ pub mod pallet {
         #[pallet::constant]
         type MaxPeerIdLen: Get<u32>;
 
-        /// 最小运营者保证金兜底值（NXS 最小单位，pricing不可用时使用）
+        /// 最小运营者保证金兜底值（NEX 最小单位，pricing不可用时使用）
         #[pallet::constant]
         type MinOperatorBond: Get<Self::Balance>;
 
@@ -357,7 +357,7 @@ pub mod pallet {
     /// 
     /// 说明：
     /// - 每个 subject 每月可使用的免费额度
-    /// - 默认：100 NXS（可治理调整）
+    /// - 默认：100 NEX（可治理调整）
     #[pallet::constant]
     type MonthlyPublicFeeQuota: Get<BalanceOf<Self>>;
     
@@ -3521,7 +3521,7 @@ pub mod pallet {
                 capacity_gib >= T::MinCapacityGiB::get(),
                 Error::<T>::InsufficientCapacity
             );
-            // 计算最小保证金（100 USDT 等值的 NXS）
+            // 计算最小保证金（100 USDT 等值的 NEX）
             let min_bond = Self::calculate_operator_bond();
             ensure!(
                 bond >= min_bond,
@@ -5830,7 +5830,7 @@ impl<T: Config> Pallet<T> {
         T::AccountId::decode(&mut &account_bytes[..]).ok()
     }
 
-    /// 计算运营者保证金金额（100 USDT 等值的 NXS）
+    /// 计算运营者保证金金额（100 USDT 等值的 NEX）
     /// 
     /// 使用统一的 DepositCalculator trait 计算
     pub fn calculate_operator_bond() -> BalanceOf<T> {

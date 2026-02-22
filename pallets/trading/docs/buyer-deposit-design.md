@@ -10,8 +10,8 @@
 
 ### 1.1 问题描述
 
-当前 OTC 流程中，买家下单后做市商立即锁定 NXS。如果买家不付款：
-- 做市商 NXS 被占用 1-2 小时
+当前 OTC 流程中，买家下单后做市商立即锁定 NEX。如果买家不付款：
+- 做市商 NEX 被占用 1-2 小时
 - 订单超时后才能解锁
 - 恶意买家可发起 DoS 攻击，占用做市商流动性
 
@@ -51,10 +51,10 @@
 
 | 优先级 | 资产类型 | 说明 |
 |--------|----------|------|
-| 1 | NXS | 优先使用 NXS 押金 |
-| 2 | 原生币 | NXS 不足时，可用原生币等值押金 |
+| 1 | NEX | 优先使用 NEX 押金 |
+| 2 | 原生币 | NEX 不足时，可用原生币等值押金 |
 
-> **注意**：如买家 NXS 余额不足，系统自动尝试使用原生币押金。
+> **注意**：如买家 NEX 余额不足，系统自动尝试使用原生币押金。
 
 ### 3.3 押金计算
 
@@ -62,10 +62,10 @@
 押金金额 = max(订单COS金额 × 押金比例, 最小押金)
 
 示例：
-- 订单金额: 1000 NXS
+- 订单金额: 1000 NEX
 - 买家信用分: 65
 - 押金比例: 3%
-- 押金金额: 1000 × 3% = 30 NXS
+- 押金金额: 1000 × 3% = 30 NEX
 ```
 
 ### 3.4 配置参数
@@ -73,7 +73,7 @@
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `FirstPurchaseFixedAmount` | Balance | 10 USDT | 首购固定金额 |
-| `MinDeposit` | Balance | 1 NXS | 最小押金金额 |
+| `MinDeposit` | Balance | 1 NEX | 最小押金金额 |
 | `DepositRateLow` | u16 | 300 (3%) | 低风险押金比例(bps) |
 | `DepositRateMedium` | u16 | 500 (5%) | 中风险押金比例(bps) |
 | `CancelPenaltyRate` | u16 | 3000 (30%) | 取消订单押金扣除比例(bps) |
@@ -120,7 +120,7 @@
                                          │
                                          ▼
                               ┌─────────────────┐
-                              │ 做市商锁定 NXS  │
+                              │ 做市商锁定 NEX  │
                               └────────┬────────┘
                                        │
                                        ▼
@@ -572,7 +572,7 @@ fn calculate_buyer_deposit(
 fn handle_buyer_cancel(order_id: u64) -> DispatchResult {
     let order = Orders::<T>::get(order_id)?;
     
-    // 1. 释放做市商锁定的 NXS
+    // 1. 释放做市商锁定的 NEX
     T::Escrow::refund_all(order_id, &order.maker)?;
     
     // 2. 处理买家押金
@@ -623,7 +623,7 @@ fn handle_buyer_cancel(order_id: u64) -> DispatchResult {
 fn handle_order_timeout(order_id: u64) -> DispatchResult {
     let order = Orders::<T>::get(order_id)?;
     
-    // 1. 释放做市商锁定的 NXS
+    // 1. 释放做市商锁定的 NEX
     T::Escrow::refund_all(order_id, &order.maker)?;
     
     // 2. 没收全部买家押金给做市商
@@ -712,7 +712,7 @@ fn deposit_account() -> T::AccountId {
 
 ### 10.2 防止做市商恶意不确认
 
-- 做市商不确认 → 订单超时 → NXS 自动退回做市商
+- 做市商不确认 → 订单超时 → NEX 自动退回做市商
 - 买家押金：如有证据表明已付款，走争议流程
 - 争议结果决定押金归属
 
@@ -754,9 +754,9 @@ impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
 |----------|----------|
 | 首购用户下单 | 押金 = 0，标记 is_first_purchase = true |
 | 信用分 85 用户下单（已完成 5 单） | 押金 = 0 |
-| 信用分 65 用户下单 1000 NXS | 押金 = 30 NXS (3%) |
-| 信用分 45 用户下单 1000 NXS | 押金 = 50 NXS (5%) |
-| 信用分 30 用户下单 1000 NXS | 押金 = 100 NXS (10%) |
+| 信用分 65 用户下单 1000 NEX | 押金 = 30 NEX (3%) |
+| 信用分 45 用户下单 1000 NEX | 押金 = 50 NEX (5%) |
+| 信用分 30 用户下单 1000 NEX | 押金 = 100 NEX (10%) |
 | 订单完成 | 押金全额退还 |
 | 买家主动取消 | 押金 50% 赔付做市商 |
 | 订单超时 | 押金 100% 赔付做市商 |
@@ -769,7 +769,7 @@ impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
 
 ```rust
 parameter_types! {
-    pub const MinDeposit: Balance = 1 * NXS;
+    pub const MinDeposit: Balance = 1 * NEX;
     pub const DepositRateLow: u16 = 300;      // 3%
     pub const DepositRateMedium: u16 = 500;   // 5%
     pub const DepositRateHigh: u16 = 1000;    // 10%

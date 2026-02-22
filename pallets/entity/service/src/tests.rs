@@ -685,7 +685,7 @@ fn add_sold_count_works() {
 #[test]
 fn deposit_calculation_respects_pricing() {
     new_test_ext().execute_with(|| {
-        // 默认价格 1 USDT/NXS => 1 USDT = 1 NXS = 1_000_000_000_000
+        // 默认价格 1 USDT/NEX => 1 USDT = 1 NEX = 1_000_000_000_000
         let deposit = EntityService::calculate_product_deposit().unwrap();
         // 1_000_000 * 10^12 / 1_000_000 = 1_000_000_000_000
         assert_eq!(deposit, 1_000_000_000_000u128);
@@ -696,8 +696,8 @@ fn deposit_calculation_respects_pricing() {
 fn deposit_respects_min_bound() {
     new_test_ext().execute_with(|| {
         // 设置极高价格 => 押金极小 => 应被 min 限制
-        // nxs = 1_000_000 * 10^12 / price, 需要 price 极大使 nxs < 100
-        // nxs < 100 => price > 1_000_000 * 10^12 / 100 = 10_000_000_000_000_000
+        // nex = 1_000_000 * 10^12 / price, 需要 price 极大使 nex < 100
+        // nex < 100 => price > 1_000_000 * 10^12 / 100 = 10_000_000_000_000_000
         set_pricing(100_000_000_000_000_000);
         let deposit = EntityService::calculate_product_deposit().unwrap();
         // min bound = 100
@@ -790,6 +790,27 @@ fn on_sale_products_stats_consistency() {
         assert_eq!(ProductStats::<Test>::get().on_sale_products, 1);
         assert_ok!(EntityService::delete_product(RuntimeOrigin::signed(1), 0));
         assert_eq!(ProductStats::<Test>::get().total_products, 2);
+    });
+}
+
+// ==================== M4: update_product zero price ====================
+
+#[test]
+fn update_product_fails_zero_price() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+
+        // M4: 更新价格为 0 应失败
+        assert_noop!(
+            EntityService::update_product(
+                RuntimeOrigin::signed(1),
+                0,
+                None, None, None,
+                Some(0u128),  // price = 0
+                None, None,
+            ),
+            Error::<Test>::InvalidPrice
+        );
     });
 }
 

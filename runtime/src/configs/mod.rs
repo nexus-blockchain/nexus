@@ -277,8 +277,8 @@ impl pallet_trading_common::PricingProvider<Balance> for TradingPricingProvider 
 		}
 	}
 	
-	fn report_p2p_trade(timestamp: u64, price_usdt: u64, nxs_qty: u128) -> sp_runtime::DispatchResult {
-		pallet_trading_pricing::Pallet::<Runtime>::add_sell_trade(timestamp, price_usdt, nxs_qty)
+	fn report_p2p_trade(timestamp: u64, price_usdt: u64, nex_qty: u128) -> sp_runtime::DispatchResult {
+		pallet_trading_pricing::Pallet::<Runtime>::add_sell_trade(timestamp, price_usdt, nex_qty)
 	}
 }
 
@@ -404,7 +404,7 @@ impl pallet_trading_p2p::Config for Runtime {
 	type FirstPurchaseUsdAmount = ConstU64<10_000_000>; // 10 USD
 	type AmountValidationTolerance = ConstU16<100>; // 1%
 	type MaxFirstPurchaseOrdersPerMaker = ConstU32<5>;
-	type MinDeposit = ConstU128<{ UNIT }>; // 1 NXS
+	type MinDeposit = ConstU128<{ UNIT }>; // 1 NEX
 	type DepositRate = ConstU16<1000>; // 10%
 	type CancelPenaltyRate = ConstU16<3000>; // 30%
 	type MinMakerDepositUsd = ConstU64<500_000_000>; // 500 USDT
@@ -413,11 +413,11 @@ impl pallet_trading_p2p::Config for Runtime {
 	// Sell-side 常量
 	type SellTimeoutBlocks = ConstU32<{ 1 * HOURS }>;
 	type VerificationTimeoutBlocks = ConstU32<{ 2 * HOURS }>;
-	type MinSellAmount = ConstU128<{ 10 * UNIT }>; // 10 NXS
+	type MinSellAmount = ConstU128<{ 10 * UNIT }>; // 10 NEX
 	type TxHashTtlBlocks = ConstU32<{ 30 * DAYS }>;
-	type VerificationReward = ConstU128<{ UNIT / 10 }>; // 0.1 NXS
+	type VerificationReward = ConstU128<{ UNIT / 10 }>; // 0.1 NEX
 	type SellFeeRateBps = ConstU32<10>; // 0.1%
-	type MinSellFee = ConstU128<{ UNIT / 10 }>; // 0.1 NXS
+	type MinSellFee = ConstU128<{ UNIT / 10 }>; // 0.1 NEX
 }
 
 // ============================================================================
@@ -617,7 +617,7 @@ impl pallet_arbitration::pallet::ArbitrationRouter<AccountId, Balance> for Unifi
 			d if d == domains::SWAP => {
 				let sell = pallet_trading_p2p::SellOrders::<Runtime>::get(id)
 					.ok_or(DispatchError::Other("SellOrderNotFound"))?;
-				Ok(sell.nxs_amount)
+				Ok(sell.nex_amount)
 			},
 			_ => {
 				Ok(10 * UNIT)
@@ -669,7 +669,7 @@ impl pallet_arbitration::pallet::Config for Runtime {
 	type ResponseDeadline = ConstU32<{ 7 * DAYS }>; // 7天应诉期限
 	type RejectedSlashBps = ConstU16<3000>; // 驳回时罚没30%
 	type PartialSlashBps = ConstU16<5000>; // 部分胜诉罚没50%
-	type ComplaintDeposit = ConstU128<{ UNIT / 10 }>; // 投诉押金兜底值 0.1 NXS
+	type ComplaintDeposit = ConstU128<{ UNIT / 10 }>; // 投诉押金兜底值 0.1 NEX
 	type ComplaintDepositUsd = ConstU64<1_000_000>; // 投诉押金 1 USDT（精度10^6，使用pricing换算）
 	type Pricing = TradingPricingProvider; // 定价接口
 	type ComplaintSlashBps = ConstU16<5000>; // 投诉败诉罚没50%
@@ -983,7 +983,7 @@ parameter_types! {
 	pub const AssetAccountDeposit: Balance = UNIT;
 	/// 元数据押金基础: 10 COS
 	pub const MetadataDepositBase: Balance = 10 * UNIT;
-	/// 元数据押金每字节: 0.1 NXS
+	/// 元数据押金每字节: 0.1 NEX
 	pub const MetadataDepositPerByte: Balance = UNIT / 10;
 	/// 授权押金: 1 COS
 	pub const ApprovalDeposit: Balance = UNIT;
@@ -1362,12 +1362,12 @@ impl pallet_entity_market::Config for Runtime {
 	type BlocksPerDay = ConstU32<{ 24 * 600 }>;
 	type BlocksPerWeek = ConstU32<{ 7 * 24 * 600 }>;
 	type CircuitBreakerDuration = ConstU32<600>;  // 1 小时
-	type VerificationReward = ConstU128<{ UNIT / 10 }>;  // 0.1 NXS
+	type VerificationReward = ConstU128<{ UNIT / 10 }>;  // 0.1 NEX
 	type RewardSource = MarketTreasuryAccount;
 	type BuyerDepositRate = ConstU16<1000>;  // 10%
 	type MinBuyerDeposit = ConstU128<{ UNIT }>;  // 1 COS
 	type DepositForfeitRate = ConstU16<5000>;  // 50%
-	type UsdtToNxsRate = ConstU64<100_000>;  // 1 USDT = 0.1 NXS
+	type UsdtToNexRate = ConstU64<100_000>;  // 1 USDT = 0.1 NEX
 	type TreasuryAccount = MarketTreasuryAccount;
 }
 
@@ -1438,70 +1438,94 @@ impl pallet_entity_tokensale::Config for Runtime {
 }
 
 // ============================================================================
-// Nexus Bot Pallets Config
+// GroupRobot Pallets Config
 // ============================================================================
 
 parameter_types! {
-	/// 节点最低质押: 100 COS
-	pub const BotConsensusMinStake: Balance = 100 * UNIT;
-	/// 节点退出冷却期: ~1 天 (14400 blocks @ 6s/block)
-	pub const BotConsensusExitCooldown: BlockNumber = DAYS;
+	/// TEE 证明有效期 ~24h @ 6s/block = 43200
+	pub const GrAttestationValidityBlocks: BlockNumber = 43_200;
+	/// 证明过期扫描间隔: 每 100 区块 (~10 分钟)
+	pub const GrAttestationCheckInterval: BlockNumber = 100;
+	/// 节点最低质押: 1000 NEX
+	pub const GrMinNodeStake: Balance = 1000 * UNIT;
+	/// 节点退出冷却期: 1 天
+	pub const GrExitCooldown: BlockNumber = DAYS;
 	/// Era 长度: 1 天
-	pub const BotEraLength: BlockNumber = DAYS;
-	/// 每 Era 通胀铸币: 100 NXS (Phase 0)
-	pub const BotInflationPerEra: Balance = 100 * UNIT;
-	/// 最低在线率: 80%
-	pub const BotMinUptimeForReward: Perbill = Perbill::from_percent(80);
-	/// 单节点奖励上限: 30%
-	pub const BotMaxRewardShare: Perbill = Perbill::from_percent(30);
-	/// Basic 层级每 Era 费用: ~0.33 NXS/天 (10 NXS/月 ÷ 30)
-	pub const BotBasicFeePerEra: Balance = 10 * UNIT / 30;
-	/// Pro 层级每 Era 费用: 1 NXS/天
-	pub const BotProFeePerEra: Balance = 30 * UNIT / 30;
-	/// Enterprise 层级每 Era 费用: ~3.33 NXS/天
-	pub const BotEnterpriseFeePerEra: Balance = 100 * UNIT / 30;
+	pub const GrEraLength: BlockNumber = DAYS;
+	/// 每 Era 通胀铸币: 100 NEX (Phase 0)
+	pub const GrInflationPerEra: Balance = 100 * UNIT;
+	/// Basic 层级每 Era 费用: ~0.33 NEX/天
+	pub const GrBasicFeePerEra: Balance = 10 * UNIT / 30;
+	/// Pro 层级每 Era 费用: 1 NEX/天
+	pub const GrProFeePerEra: Balance = 30 * UNIT / 30;
+	/// Enterprise 层级每 Era 费用: ~3.33 NEX/天
+	pub const GrEnterpriseFeePerEra: Balance = 100 * UNIT / 30;
+	/// 仪式有效期: 180 天
+	pub const GrCeremonyValidityBlocks: BlockNumber = 180 * DAYS;
+	/// 仪式检查间隔: 每 1000 区块 (~100 分钟)
+	pub const GrCeremonyCheckInterval: BlockNumber = 1000;
 }
 
-/// BotRegistry Bridge: 将 pallet-bot-registry 桥接到 BotRegistryProvider trait
-pub struct BotRegistryBridge;
-
-impl pallet_bot_consensus::BotRegistryProvider<AccountId> for BotRegistryBridge {
-	fn bot_exists(bot_id_hash: &[u8; 32]) -> bool {
-		pallet_bot_registry::Pallet::<Runtime>::get_bot_public_key(bot_id_hash).is_some()
-	}
-
-	fn is_bot_owner(bot_id_hash: &[u8; 32], who: &AccountId) -> bool {
-		pallet_bot_registry::Pallet::<Runtime>::get_bot_owner(bot_id_hash)
-			.map(|owner| &owner == who)
-			.unwrap_or(false)
-	}
-}
-
-impl pallet_bot_consensus::Config for Runtime {
-	type Currency = Balances;
-	type MinStake = BotConsensusMinStake;
-	type ExitCooldownPeriod = BotConsensusExitCooldown;
-	type MaxNodes = ConstU32<100>;
-	type SlashPercentage = ConstU32<10>;
-	type ReporterRewardPercentage = ConstU32<50>;
-	type SuspendThreshold = ConstU16<2000>;
-	type ForceExitThreshold = ConstU16<1000>;
-	type EraLength = BotEraLength;
-	type InflationPerEra = BotInflationPerEra;
-	type MinUptimeForReward = BotMinUptimeForReward;
-	type MaxRewardShare = BotMaxRewardShare;
-	type BasicFeePerEra = BotBasicFeePerEra;
-	type ProFeePerEra = BotProFeePerEra;
-	type EnterpriseFeePerEra = BotEnterpriseFeePerEra;
-	type BotRegistry = BotRegistryBridge;
-}
-
-impl pallet_bot_registry::Config for Runtime {
+impl pallet_grouprobot_registry::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
 	type MaxBotsPerOwner = ConstU32<20>;
 	type MaxPlatformsPerCommunity = ConstU32<5>;
 	type MaxPlatformBindingsPerUser = ConstU32<5>;
+	type AttestationValidityBlocks = GrAttestationValidityBlocks;
+	type AttestationCheckInterval = GrAttestationCheckInterval;
+	type MaxQuoteLen = ConstU32<8192>;
 }
 
-impl pallet_bot_group_mgmt::Config for Runtime {
+/// GroupRobot BotRegistry Bridge: 将 pallet-grouprobot-registry 桥接到 BotRegistryProvider trait
+pub struct GrBotRegistryBridge;
+
+impl pallet_grouprobot_primitives::BotRegistryProvider<AccountId> for GrBotRegistryBridge {
+	fn is_bot_active(bot_id_hash: &[u8; 32]) -> bool {
+		pallet_grouprobot_registry::Pallet::<Runtime>::is_bot_active(bot_id_hash)
+	}
+	fn is_tee_node(bot_id_hash: &[u8; 32]) -> bool {
+		pallet_grouprobot_registry::Pallet::<Runtime>::is_tee_node(bot_id_hash)
+	}
+	fn has_dual_attestation(bot_id_hash: &[u8; 32]) -> bool {
+		pallet_grouprobot_registry::Pallet::<Runtime>::has_dual_attestation(bot_id_hash)
+	}
+	fn is_attestation_fresh(bot_id_hash: &[u8; 32]) -> bool {
+		pallet_grouprobot_registry::Pallet::<Runtime>::is_attestation_fresh(bot_id_hash)
+	}
+	fn bot_owner(bot_id_hash: &[u8; 32]) -> Option<AccountId> {
+		pallet_grouprobot_registry::Pallet::<Runtime>::bot_owner(bot_id_hash)
+	}
+	fn bot_public_key(bot_id_hash: &[u8; 32]) -> Option<[u8; 32]> {
+		pallet_grouprobot_registry::Pallet::<Runtime>::bot_public_key(bot_id_hash)
+	}
+}
+
+impl pallet_grouprobot_consensus::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type Currency = Balances;
+	type MaxActiveNodes = ConstU32<100>;
+	type MinStake = GrMinNodeStake;
+	type ExitCooldownPeriod = GrExitCooldown;
+	type EraLength = GrEraLength;
+	type InflationPerEra = GrInflationPerEra;
+	type SlashPercentage = ConstU32<10>;
+	type BotRegistry = GrBotRegistryBridge;
+	type BasicFeePerEra = GrBasicFeePerEra;
+	type ProFeePerEra = GrProFeePerEra;
+	type EnterpriseFeePerEra = GrEnterpriseFeePerEra;
+}
+
+impl pallet_grouprobot_community::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
 	type MaxLogsPerCommunity = ConstU32<10000>;
+	type BotRegistry = GrBotRegistryBridge;
+}
+
+impl pallet_grouprobot_ceremony::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type MaxParticipants = ConstU32<20>;
+	type MaxCeremonyHistory = ConstU32<10>;
+	type CeremonyValidityBlocks = GrCeremonyValidityBlocks;
+	type CeremonyCheckInterval = GrCeremonyCheckInterval;
+	type BotRegistry = GrBotRegistryBridge;
 }

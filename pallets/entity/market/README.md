@@ -4,15 +4,15 @@
 
 ## 概述
 
-`pallet-entity-market` 实现实体代币的链上 P2P 交易市场。每个 Shop 可独立配置并运营自己的代币市场，支持 **NXS 链上即时结算** 和 **USDT 链下支付 + OCW 验证** 两种通道。
+`pallet-entity-market` 实现实体代币的链上 P2P 交易市场。每个 Shop 可独立配置并运营自己的代币市场，支持 **NEX 链上即时结算** 和 **USDT 链下支付 + OCW 验证** 两种通道。
 
 ### 核心能力
 
-- **双通道交易** — NXS（链上原子交换）+ USDT（TRC20 链下支付 + OCW 验证）
+- **双通道交易** — NEX（链上原子交换）+ USDT（TRC20 链下支付 + OCW 验证）
 - **限价单 + 市价单** — 挂单等待撮合 / 立即以最优价成交（滑点保护）
 - **三周期 TWAP 预言机** — 1h / 24h / 7d 时间加权平均价格，防操纵
 - **熔断机制** — 价格偏离 7d TWAP 超阈值自动暂停交易
-- **买家保证金** — USDT 通道锁定 NXS 保证金，防不付款风险
+- **买家保证金** — USDT 通道锁定 NEX 保证金，防不付款风险
 - **多档金额判定** — OCW 验证实际付款金额，按比例自动处理少付
 - **OCW 验证激励** — 任何人可触发验证确认并获取奖励
 
@@ -24,7 +24,7 @@
 │                     (pallet_index = 126)                         │
 ├──────────────────┬───────────────────────────────────────────────┤
 │                  │                                               │
-│  NXS 通道        │  USDT 通道                                   │
+│  NEX 通道        │  USDT 通道                                   │
 │  (链上即时结算)   │  (链下支付 + OCW 验证)                       │
 │                  │                                               │
 │  place_sell(0)   │  place_usdt_sell(5)   place_usdt_buy(6)      │
@@ -51,22 +51,22 @@
    (实体查询)           (店铺查询)          (代币余额/锁定/转账)
 ```
 
-## NXS 通道交易流程
+## NEX 通道交易流程
 
 链上原子交换，无需链下操作。
 
 ```
 Alice (卖家)                                 Bob (买家)
-    │ place_sell_order(shop, 1000, 0.1 NXS)      │
+    │ place_sell_order(shop, 1000, 0.1 NEX)      │
     │ → Token 锁定                                │
     │                                              │
     │                    take_order(order_id, None) │
-    │                    → NXS 支付                 │
+    │                    → NEX 支付                 │
     ▼                                              ▼
 ┌──────────────────────────────────────────────────┐
 │  原子交换                                        │
 │  Token: Alice → Bob                              │
-│  NXS:   Bob → Alice (扣除手续费)                 │
+│  NEX:   Bob → Alice (扣除手续费)                 │
 │  Fee:   → Shop Owner                             │
 └──────────────────────────────────────────────────┘
 ```
@@ -79,7 +79,7 @@ Alice (卖家)                                 Bob (买家)
 
 ```
 ① Alice 挂 USDT 卖单 (锁定 Token, 提供 TRON 地址)
-② Bob  → reserve_usdt_sell_order (锁定 NXS 保证金 + 锁定订单份额)
+② Bob  → reserve_usdt_sell_order (锁定 NEX 保证金 + 锁定订单份额)
 ③ Bob  链下转 USDT → Alice 的 TRON 地址
 ④ Bob  → confirm_usdt_payment (提交 tron_tx_hash)
 ⑤ OCW  → submit_ocw_result (验证 TRON 交易 + 多档判定)
@@ -149,10 +149,10 @@ pub struct TradeOrder<T: Config> {
     pub maker: T::AccountId,
     pub side: OrderSide,              // Buy / Sell
     pub order_type: OrderType,        // Limit / Market
-    pub channel: PaymentChannel,      // NXS / USDT
+    pub channel: PaymentChannel,      // NEX / USDT
     pub token_amount: T::TokenBalance,
     pub filled_amount: T::TokenBalance,
-    pub price: BalanceOf<T>,          // NXS 通道: NXS/Token
+    pub price: BalanceOf<T>,          // NEX 通道: NEX/Token
     pub usdt_price: u64,              // USDT 通道: USDT/Token (精度 10^6)
     pub tron_address: Option<TronAddress>,  // 仅 USDT 卖单
     pub status: OrderStatus,          // Open / PartiallyFilled / Filled / Cancelled / Expired
@@ -177,7 +177,7 @@ pub struct UsdtTrade<T: Config> {
     pub status: UsdtTradeStatus,             // AwaitingPayment → AwaitingVerification → Completed/Refunded
     pub created_at: BlockNumber,
     pub timeout_at: BlockNumber,
-    pub buyer_deposit: BalanceOf<T>,         // NXS 保证金
+    pub buyer_deposit: BalanceOf<T>,         // NEX 保证金
     pub deposit_status: BuyerDepositStatus,  // None / Locked / Released / Forfeited / PartiallyForfeited
 }
 ```
@@ -186,7 +186,7 @@ pub struct UsdtTrade<T: Config> {
 
 ```rust
 pub struct MarketConfig<Balance> {
-    pub cos_enabled: bool,        // 启用 NXS 交易
+    pub cos_enabled: bool,        // 启用 NEX 交易
     pub usdt_enabled: bool,       // 启用 USDT 交易
     pub fee_rate: u16,            // 手续费率 (bps, 100 = 1%)
     pub min_order_amount: u128,   // 最小订单 Token 数量
@@ -217,8 +217,8 @@ pub struct PriceProtectionConfig<Balance> {
 
 | Index | 函数 | 权限 | 说明 |
 |-------|------|------|------|
-| 0 | `place_sell_order(shop_id, token_amount, price)` | signed | NXS 卖单（锁定 Token） |
-| 1 | `place_buy_order(shop_id, token_amount, price)` | signed | NXS 买单（锁定 NXS） |
+| 0 | `place_sell_order(shop_id, token_amount, price)` | signed | NEX 卖单（锁定 Token） |
+| 1 | `place_buy_order(shop_id, token_amount, price)` | signed | NEX 买单（锁定 NEX） |
 | 2 | `take_order(order_id, amount)` | signed | 吃单（原子交换，收手续费） |
 | 3 | `cancel_order(order_id)` | maker | 取消订单（退还锁定资产） |
 | 12 | `market_buy(shop_id, token_amount, max_cost)` | signed | 市价买（滑点保护） |
@@ -279,7 +279,7 @@ pub struct PriceProtectionConfig<Balance> {
 | 事件 | 字段 | 说明 |
 |------|------|------|
 | `OrderCreated` | order_id, shop_id, maker, side, token_amount, price | 订单已创建 |
-| `OrderFilled` | order_id, taker, filled_amount, total_nxst, fee | 订单已成交 |
+| `OrderFilled` | order_id, taker, filled_amount, total_next, fee | 订单已成交 |
 | `OrderCancelled` | order_id | 订单已取消 |
 | `MarketConfigured` | shop_id | 市场配置已更新 |
 | `UsdtSellOrderCreated` | order_id, shop_id, maker, token_amount, usdt_price, tron_address | USDT 卖单 |
@@ -289,7 +289,7 @@ pub struct PriceProtectionConfig<Balance> {
 | `UsdtTradeCompleted` | trade_id, order_id | USDT 交易已完成 |
 | `UsdtTradeVerificationFailed` | trade_id, reason | 验证失败 |
 | `UsdtTradeRefunded` | trade_id | 超时退款 |
-| `MarketOrderExecuted` | shop_id, trader, side, filled_amount, total_nxst, total_fee | 市价单已执行 |
+| `MarketOrderExecuted` | shop_id, trader, side, filled_amount, total_next, total_fee | 市价单已执行 |
 | `TwapUpdated` | shop_id, new_price, twap_1h, twap_24h, twap_7d | TWAP 已更新 |
 | `CircuitBreakerTriggered` | shop_id, current_price, twap_7d, deviation_bps, until_block | 熔断已触发 |
 | `CircuitBreakerLifted` | shop_id | 熔断已解除 |
@@ -309,12 +309,12 @@ pub struct PriceProtectionConfig<Balance> {
 | `ShopNotFound` | 店铺不存在 |
 | `NotShopOwner` | 不是店主 |
 | `TokenNotEnabled` | 店铺代币未启用 |
-| `MarketNotEnabled` | NXS 市场未启用 |
+| `MarketNotEnabled` | NEX 市场未启用 |
 | `UsdtMarketNotEnabled` | USDT 市场未启用（需 `configure_market` 开启） |
 | `OrderNotFound` | 订单不存在 |
 | `NotOrderOwner` | 不是订单所有者 |
 | `OrderClosed` | 订单已关闭（Filled/Cancelled/Expired） |
-| `InsufficientBalance` | NXS 余额不足 |
+| `InsufficientBalance` | NEX 余额不足 |
 | `InsufficientTokenBalance` | Token 余额不足 |
 | `InsufficientDepositBalance` | 买家保证金余额不足 |
 | `AmountTooSmall` | 数量为零或过小 |
@@ -359,12 +359,12 @@ impl pallet_entity_market::Config for Runtime {
     type BlocksPerDay = ConstU32<14400>;
     type BlocksPerWeek = ConstU32<100800>;
     type CircuitBreakerDuration = ConstU32<600>;      // 1h
-    type VerificationReward = ConstU128<100_000_000_000>;  // 0.1 NXS
+    type VerificationReward = ConstU128<100_000_000_000>;  // 0.1 NEX
     type RewardSource = TreasuryAccountId;
     type BuyerDepositRate = ConstU16<1000>;           // 10%
-    type MinBuyerDeposit = ConstU128<{ 10 * UNIT }>;  // 10 NXS
+    type MinBuyerDeposit = ConstU128<{ 10 * UNIT }>;  // 10 NEX
     type DepositForfeitRate = ConstU16<10000>;        // 100%
-    type UsdtToNxsRate = ConstU64<10_000_000_000>;
+    type UsdtToNexRate = ConstU64<10_000_000_000>;
     type TreasuryAccount = TreasuryAccountId;
 }
 ```
@@ -395,9 +395,9 @@ impl<T: Config> Pallet<T> {
 
 ## 安全机制
 
-- **原子交换** — NXS 通道在单笔交易内完成 Token 和 NXS 的双向转移
+- **原子交换** — NEX 通道在单笔交易内完成 Token 和 NEX 的双向转移
 - **两阶段锁定** — USDT 通道先链上锁定份额/保证金，后链下支付
-- **NXS 保证金** — 防止 USDT 买家不付款（`MinBuyerDeposit` + `DepositForfeitRate`）
+- **NEX 保证金** — 防止 USDT 买家不付款（`MinBuyerDeposit` + `DepositForfeitRate`）
 - **ValidateUnsigned** — OCW 提交限制：交易存在 + AwaitingVerification 状态 + 无重复结果
 - **价格偏离检查** — 限价单价格不得偏离 TWAP/初始价格超过 `max_price_deviation`
 - **异常价格过滤** — TWAP 累积时偏离上次价格 >100% 的成交价被限幅至 ±50%
@@ -410,7 +410,7 @@ impl<T: Config> Pallet<T> {
 | 项目 | 状态 | 说明 |
 |------|------|------|
 | Weight benchmarking | 🟡 占位 | 所有 extrinsic 使用硬编码占位值（20k~150k ref_time, proof_size=0） |
-| Token 实际锁定 | 🟡 简化 | NXS 卖单的 Token 锁定通过注释标记，需接入 TokenProvider::reserve |
+| Token 实际锁定 | 🟡 简化 | NEX 卖单的 Token 锁定通过注释标记，需接入 TokenProvider::reserve |
 | 24h 高低价/成交量 | 🟡 TODO | `MarketSummary` 中的 high_24h / low_24h / volume_24h 返回 0 |
 | 订单过期清理 | 🟡 未实现 | 过期订单未自动清理，需 on_idle 或外部触发 |
 | mock.rs + tests.rs | 🔴 无 | 无单元测试覆盖 |
@@ -419,13 +419,13 @@ impl<T: Config> Pallet<T> {
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
-| v0.1.0 | 2026-02-01 | NXS 通道限价单（place_sell/buy, take, cancel） |
+| v0.1.0 | 2026-02-01 | NEX 通道限价单（place_sell/buy, take, cancel） |
 | v0.2.0 | 2026-02-01 | USDT 通道 + OCW 验证（TRC20 交易验证） |
 | v0.3.0 | 2026-02-01 | 市价单支持（market_buy, market_sell + 滑点保护） |
 | v0.4.0 | 2026-02-01 | 订单簿深度优化（价格聚合, BestAsk/BestBid 缓存） |
 | v0.5.0 | 2026-02-01 | 三周期 TWAP 预言机（1h/24h/7d + 异常过滤 + 熔断） |
 | v0.6.0 | 2026-02-04 | OCW 验证激励（submit_ocw_result + claim_verification_reward + ValidateUnsigned） |
-| v0.7.0 | 2026-02-04 | 买家保证金机制（NXS reserve + forfeit + release） |
+| v0.7.0 | 2026-02-04 | 买家保证金机制（NEX reserve + forfeit + release） |
 | v0.8.0 | 2026-02-04 | 付款金额多档判定（5 级结果 + 自动按比例处理） |
 
 ## 相关模块

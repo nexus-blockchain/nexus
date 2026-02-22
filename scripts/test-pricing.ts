@@ -1,10 +1,10 @@
 /**
  * Pricing 模块测试脚本
- * 测试 NXS 价格查询功能
+ * 测试 NEX 价格查询功能
  */
 
 import { getApi, disconnectApi } from './utils/api.js';
-import { logSection, logStep, logSuccess, logError, logQuery, formatNxs, formatUsdt } from './utils/helpers.js';
+import { logSection, logStep, logSuccess, logError, logQuery, formatNex, formatUsdt } from './utils/helpers.js';
 
 async function main() {
   logSection('Pricing 模块测试');
@@ -30,7 +30,7 @@ async function main() {
     console.log(`   冷启动已退出: ${coldStartExited.isTrue ? '是' : '否'}`);
     
     const coldStartThreshold = await (api.query as any).tradingPricing.coldStartThreshold();
-    console.log(`   冷启动阈值: ${formatNxs(coldStartThreshold.toString())}`);
+    console.log(`   冷启动阈值: ${formatNex(coldStartThreshold.toString())}`);
     
     // ========================================
     // 步骤 3: 查询 OTC 价格聚合数据
@@ -39,16 +39,16 @@ async function main() {
     
     const otcAggregate = await (api.query as any).tradingPricing.otcPriceAggregate();
     const otcData = {
-      totalNxs: otcAggregate.totalNxs.toString(),
+      totalNex: otcAggregate.totalNex.toString(),
       totalUsdt: otcAggregate.totalUsdt.toString(),
       orderCount: otcAggregate.orderCount.toNumber(),
     };
-    console.log(`   OTC 总 NXS: ${formatNxs(otcData.totalNxs)}`);
+    console.log(`   OTC 总 NEX: ${formatNex(otcData.totalNex)}`);
     console.log(`   OTC 总 USDT: ${formatUsdt(Number(otcData.totalUsdt))}`);
     console.log(`   OTC 订单数: ${otcData.orderCount}`);
     
-    if (BigInt(otcData.totalNxs) > 0n) {
-      const otcAvgPrice = (BigInt(otcData.totalUsdt) * BigInt(1e12)) / BigInt(otcData.totalNxs);
+    if (BigInt(otcData.totalNex) > 0n) {
+      const otcAvgPrice = (BigInt(otcData.totalUsdt) * BigInt(1e12)) / BigInt(otcData.totalNex);
       console.log(`   OTC 均价: ${formatUsdt(Number(otcAvgPrice))}`);
     }
     
@@ -59,16 +59,16 @@ async function main() {
     
     const bridgeAggregate = await (api.query as any).tradingPricing.bridgePriceAggregate();
     const bridgeData = {
-      totalNxs: bridgeAggregate.totalNxs.toString(),
+      totalNex: bridgeAggregate.totalNex.toString(),
       totalUsdt: bridgeAggregate.totalUsdt.toString(),
       orderCount: bridgeAggregate.orderCount.toNumber(),
     };
-    console.log(`   Bridge 总 NXS: ${formatNxs(bridgeData.totalNxs)}`);
+    console.log(`   Bridge 总 NEX: ${formatNex(bridgeData.totalNex)}`);
     console.log(`   Bridge 总 USDT: ${formatUsdt(Number(bridgeData.totalUsdt))}`);
     console.log(`   Bridge 兑换数: ${bridgeData.orderCount}`);
     
-    if (BigInt(bridgeData.totalNxs) > 0n) {
-      const bridgeAvgPrice = (BigInt(bridgeData.totalUsdt) * BigInt(1e12)) / BigInt(bridgeData.totalNxs);
+    if (BigInt(bridgeData.totalNex) > 0n) {
+      const bridgeAvgPrice = (BigInt(bridgeData.totalUsdt) * BigInt(1e12)) / BigInt(bridgeData.totalNex);
       console.log(`   Bridge 均价: ${formatUsdt(Number(bridgeAvgPrice))}`);
     }
     
@@ -83,18 +83,18 @@ async function main() {
       currentPrice = defaultPriceNum;
       console.log(`   状态: 冷启动阶段，使用默认价格`);
     } else {
-      const totalNxs = BigInt(otcData.totalNxs) + BigInt(bridgeData.totalNxs);
+      const totalNex = BigInt(otcData.totalNex) + BigInt(bridgeData.totalNex);
       const totalUsdt = BigInt(otcData.totalUsdt) + BigInt(bridgeData.totalUsdt);
       
-      if (totalNxs > 0n) {
-        currentPrice = Number((totalUsdt * BigInt(1e12)) / totalNxs);
+      if (totalNex > 0n) {
+        currentPrice = Number((totalUsdt * BigInt(1e12)) / totalNex);
       } else {
         currentPrice = defaultPriceNum;
       }
       console.log(`   状态: 正常市场定价`);
     }
     
-    console.log(`\n   💰 当前 NXS 价格: ${formatUsdt(currentPrice)}`);
+    console.log(`\n   💰 当前 NEX 价格: ${formatUsdt(currentPrice)}`);
     console.log(`   💰 原始值: ${currentPrice} (精度 10^6)`);
     
     // ========================================

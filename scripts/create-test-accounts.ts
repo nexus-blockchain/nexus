@@ -6,8 +6,8 @@
  *   npx tsx create-test-accounts.ts [amount]
  *   
  * 示例:
- *   npx tsx create-test-accounts.ts         # 每个账户转 10 NXS
- *   npx tsx create-test-accounts.ts 100     # 每个账户转 100 NXS
+ *   npx tsx create-test-accounts.ts         # 每个账户转 10 NEX
+ *   npx tsx create-test-accounts.ts 100     # 每个账户转 100 NEX
  */
 
 import { Keyring } from '@polkadot/keyring';
@@ -20,8 +20,8 @@ import {
   logStep, 
   logSuccess, 
   logError, 
-  formatNxs,
-  toNxsWei,
+  formatNex,
+  toNexWei,
 } from './utils/helpers.js';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -30,7 +30,7 @@ import * as path from 'path';
 await cryptoWaitReady();
 
 const ACCOUNT_COUNT = 20;
-const DEFAULT_AMOUNT = 10; // 默认每个账户转 10 NXS
+const DEFAULT_AMOUNT = 10; // 默认每个账户转 10 NEX
 
 interface AccountInfo {
   index: number;
@@ -118,17 +118,17 @@ async function main() {
   
   // 查询 Alice 余额
   const aliceBalance = await api.query.system.account(alice.address);
-  console.log(`   Alice 余额: ${formatNxs(aliceBalance.data.free.toString())}`);
+  console.log(`   Alice 余额: ${formatNex(aliceBalance.data.free.toString())}`);
   
   const totalAmount = amount * ACCOUNT_COUNT;
-  console.log(`   计划转账总额: ${totalAmount} NXS (每账户 ${amount} NXS)`);
+  console.log(`   计划转账总额: ${totalAmount} NEX (每账户 ${amount} NEX)`);
   
   // ========================================
   // 步骤 4: 批量转账
   // ========================================
   logStep(4, `向 ${ACCOUNT_COUNT} 个账户转账`);
   
-  const amountWei = toNxsWei(amount);
+  const amountWei = toNexWei(amount);
   let successCount = 0;
   let failCount = 0;
   
@@ -169,13 +169,13 @@ async function main() {
     if (idx < accounts.length) {
       const acc = accounts[idx];
       const balance = await api.query.system.account(acc.address);
-      console.log(`   账户 ${acc.index}: ${formatNxs(balance.data.free.toString())}`);
+      console.log(`   账户 ${acc.index}: ${formatNex(balance.data.free.toString())}`);
     }
   }
   
   // 查询 Alice 新余额
   const newAliceBalance = await api.query.system.account(alice.address);
-  console.log(`\n   Alice 新余额: ${formatNxs(newAliceBalance.data.free.toString())}`);
+  console.log(`\n   Alice 新余额: ${formatNex(newAliceBalance.data.free.toString())}`);
   
   logSection('完成');
   

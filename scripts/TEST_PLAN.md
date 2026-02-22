@@ -16,7 +16,7 @@
 
 | 测试项 | Extrinsic | 说明 |
 |--------|-----------|------|
-| 锁定押金 | `tradingMaker.lockDeposit()` | 锁定 10,000 NXS 押金 |
+| 锁定押金 | `tradingMaker.lockDeposit()` | 锁定 10,000 NEX 押金 |
 | 提交申请信息 | `tradingMaker.submitInfo(realName, idCard, birthday, tronAddr, wechatId)` | 提交做市商资料 |
 | 审批通过 | `tradingMaker.approveMaker(makerId)` | Root 权限审批 |
 | 审批拒绝 | `tradingMaker.rejectMaker(makerId)` | Root 权限拒绝 |
@@ -38,7 +38,7 @@
 | 创建订单 | `tradingOtc.createOrder(makerId, cosAmount, paymentCommit, contactCommit)` | 买家创建购买订单 |
 | 首购订单 | `tradingOtc.createFirstPurchase(makerId, paymentCommit, contactCommit)` | 新用户首购 $10 |
 | 标记已付款 | `tradingOtc.markPaid(orderId, tronTxHash?)` | 买家标记已付款 |
-| 释放 NXS | `tradingOtc.releaseCos(orderId)` | 做市商确认收款后释放 |
+| 释放 NEX | `tradingOtc.releaseCos(orderId)` | 做市商确认收款后释放 |
 | 取消订单 | `tradingOtc.cancelOrder(orderId)` | 买家取消未付款订单 |
 | 发起争议 | `tradingOtc.disputeOrder(orderId)` | 买家/做市商发起争议 |
 
@@ -52,7 +52,7 @@
 
 | 测试项 | Extrinsic | 说明 |
 |--------|-----------|------|
-| 创建兑换 | `tradingSwap.makerSwap(makerId, cosAmount, usdtAddress)` | 用户发起 NXS→USDT 兑换 |
+| 创建兑换 | `tradingSwap.makerSwap(makerId, cosAmount, usdtAddress)` | 用户发起 NEX→USDT 兑换 |
 | 提交交易哈希 | `tradingSwap.markSwapComplete(swapId, trc20TxHash)` | 做市商提交 USDT 转账哈希 |
 | 举报做市商 | `tradingSwap.reportSwap(swapId)` | 用户举报未履约 |
 | 处理验证超时 | `tradingSwap.handleVerificationTimeout(swapId)` | 触发超时退款 |
@@ -193,7 +193,7 @@ scripts/
 1. **做市商申请流程**: 锁定押金 → 提交信息 → 审批
 2. **OTC 完整流程**: 创建订单 → 付款 → 释放
 3. **Swap 完整流程**: 创建兑换 → 提交哈希 → 验证完成
-4. **价格查询**: 获取当前 NXS 价格
+4. **价格查询**: 获取当前 NEX 价格
 
 ### P1 - 重要功能
 5. **推荐系统**: 绑定推荐人 → 查询上下线

@@ -65,13 +65,13 @@ pallet-trading-p2p
 
 ## pallet-trading-p2p（核心交易模块）
 
-统一 Buy（USDT→NXS）和 Sell（NXS→USDT）两方向的 P2P 交易。
+统一 Buy（USDT→NEX）和 Sell（NEX→USDT）两方向的 P2P 交易。
 
 ### Buy 方向（原 OTC）
 
-买家用 USDT 购买 NXS，做市商 NXS 锁定到托管账户。
+买家用 USDT 购买 NEX，做市商 NEX 锁定到托管账户。
 
-**流程：** `create_buy_order` → 买家付款 `mark_buy_paid` → 做市商释放 `release_nxs` → 完成
+**流程：** `create_buy_order` → 买家付款 `mark_buy_paid` → 做市商释放 `release_nex` → 完成
 
 **状态机 (`BuyOrderState`)：**
 ```
@@ -88,16 +88,16 @@ Expired
 
 | call_index | 方法 | 说明 |
 |:---:|------|------|
-| 0 | `create_buy_order` | 买家创建购买订单，锁定做市商 NXS |
+| 0 | `create_buy_order` | 买家创建购买订单，锁定做市商 NEX |
 | 1 | `create_first_purchase` | 首购订单（固定 10 USD） |
 | 2 | `mark_buy_paid` | 买家标记已付款 |
-| 3 | `release_nxs` | 做市商确认收款，释放 NXS |
+| 3 | `release_nex` | 做市商确认收款，释放 NEX |
 | 4 | `cancel_buy_order` | 取消订单 |
 | 5 | `dispute_buy_order` | 发起争议 |
 
 ### Sell 方向（原 Swap）
 
-用户卖出 NXS 换取 USDT，做市商链下发送 USDT。
+用户卖出 NEX 换取 USDT，做市商链下发送 USDT。
 
 **流程：** `create_sell_order` → 做市商发送 USDT `submit_sell_tx_hash` → OCW 验证 → 完成
 
@@ -115,7 +115,7 @@ Timeout    VerificationFailed → UserReported → Arbitrating
 
 | call_index | 方法 | 说明 |
 |:---:|------|------|
-| 6 | `create_sell_order` | 用户锁定 NXS，等待做市商发 USDT |
+| 6 | `create_sell_order` | 用户锁定 NEX，等待做市商发 USDT |
 | 7 | `submit_sell_tx_hash` | 做市商提交 TRC20 交易哈希 |
 | 8 | `report_sell_order` | 用户举报做市商未发送 USDT |
 | 9 | `timeout_sell_order` | 超时自动退款 |
@@ -176,15 +176,15 @@ impl pallet_trading_p2p::Config for Runtime {
     type FirstPurchaseUsdAmount = ConstU64<10_000_000>;   // 10 USD
     type MinBuyUsdAmount = ConstU64<20_000_000>;          // 20 USD
     type MaxBuyUsdAmount = ConstU64<200_000_000>;         // 200 USD
-    type MinFirstPurchaseNxs = ConstU128<1_000_000_000_000>;
-    type MaxFirstPurchaseNxs = ConstU128<1_000_000_000_000_000>;
+    type MinFirstPurchaseNex = ConstU128<1_000_000_000_000>;
+    type MaxFirstPurchaseNex = ConstU128<1_000_000_000_000_000>;
     type MaxFirstPurchasePerMaker = ConstU32<5>;
     type AmountTolerance = ConstU16<100>;                 // 1%
 
     // Sell 方向参数
     type SellTimeoutBlocks = ConstU32<14_400>;            // 1 天（区块数）
     type TxHashTtlBlocks = ConstU32<432_000>;             // 30 天
-    type MinSellNxs = ConstU128<100_000_000_000>;         // 100 NXS
+    type MinSellNex = ConstU128<100_000_000_000>;         // 100 NEX
 
     // 通用参数
     type DepositRate = ConstU32<500>;                     // 5% 押金率
@@ -229,7 +229,7 @@ cargo test -p pallet-trading-p2p    # 40 个单元测试
 
 ## 前端调用示例
 
-### Buy 订单（USDT → NXS）
+### Buy 订单（USDT → NEX）
 
 ```typescript
 import { ApiPromise } from '@polkadot/api';
@@ -241,18 +241,18 @@ await tx.signAndSend(buyer);
 // 买家标记已付款
 await api.tx.tradingP2p.markBuyPaid(orderId, tronTxHash).signAndSend(buyer);
 
-// 做市商释放 NXS
-await api.tx.tradingP2p.releaseNxs(orderId).signAndSend(maker);
+// 做市商释放 NEX
+await api.tx.tradingP2p.releaseNex(orderId).signAndSend(maker);
 
 // 查询 Buy 订单
 const order = await api.query.tradingP2p.buyOrders(orderId);
 ```
 
-### Sell 订单（NXS → USDT）
+### Sell 订单（NEX → USDT）
 
 ```typescript
-// 用户锁定 NXS 发起卖出
-const tx = api.tx.tradingP2p.createSellOrder(makerId, nxsAmount, usdtAddress);
+// 用户锁定 NEX 发起卖出
+const tx = api.tx.tradingP2p.createSellOrder(makerId, nexAmount, usdtAddress);
 await tx.signAndSend(seller);
 
 // 做市商提交 TRC20 交易哈希

@@ -7,7 +7,7 @@ pub trait WeightInfo {
     // Buy-side
     fn create_buy_order() -> Weight;
     fn mark_paid() -> Weight;
-    fn release_nxs() -> Weight;
+    fn release_nex() -> Weight;
     fn cancel_buy_order() -> Weight;
     fn dispute_buy_order() -> Weight;
     // Sell-side
@@ -24,7 +24,7 @@ pub trait WeightInfo {
 impl WeightInfo for () {
     fn create_buy_order() -> Weight { Weight::from_parts(50_000, 0) }
     fn mark_paid() -> Weight { Weight::from_parts(30_000, 0) }
-    fn release_nxs() -> Weight { Weight::from_parts(40_000, 0) }
+    fn release_nex() -> Weight { Weight::from_parts(40_000, 0) }
     fn cancel_buy_order() -> Weight { Weight::from_parts(30_000, 0) }
     fn dispute_buy_order() -> Weight { Weight::from_parts(30_000, 0) }
     fn create_sell_order() -> Weight { Weight::from_parts(50_000, 0) }

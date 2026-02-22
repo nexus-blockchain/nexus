@@ -94,11 +94,11 @@ pub struct MakerApplicationInfo<AccountId, Balance> {
 
 ### PricingProvider
 
-定价服务接口，提供 NXS/USD 实时汇率查询功能。
+定价服务接口，提供 NEX/USD 实时汇率查询功能。
 
 ```rust
 pub trait PricingProvider<Balance> {
-    /// 获取 NXS/USD 汇率（精度 10^6）
+    /// 获取 NEX/USD 汇率（精度 10^6）
     /// 返回 Some(rate) 表示当前汇率，None 表示价格不可用
     fn get_cos_to_usd_rate() -> Option<Balance>;
     
@@ -106,7 +106,7 @@ pub trait PricingProvider<Balance> {
     fn report_p2p_trade(
         timestamp: u64,    // 交易时间戳（Unix 毫秒）
         price_usdt: u64,   // USDT 单价（精度 10^6）
-        cos_qty: u128,    // NXS 数量（精度 10^12）
+        cos_qty: u128,    // NEX 数量（精度 10^12）
     ) -> DispatchResult;
 }
 ```

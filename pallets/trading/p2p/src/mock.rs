@@ -127,11 +127,11 @@ impl pallet_trading_common::MakerCreditInterface for MockMakerCredit {
     fn record_maker_dispute_result(_maker_id: u64, _order_id: u64, _maker_win: bool) -> DispatchResult { Ok(()) }
 }
 
-/// Mock PricingProvider: 返回固定价格 0.1 USDT/NXS
+/// Mock PricingProvider: 返回固定价格 0.1 USDT/NEX
 pub struct MockPricing;
 impl pallet_trading_common::PricingProvider<u128> for MockPricing {
-    fn get_cos_to_usd_rate() -> Option<u128> { Some(100_000) } // 0.1 USDT/NXS (精度 10^6)
-    fn report_p2p_trade(_timestamp: u64, _price_usdt: u64, _nxs_qty: u128) -> DispatchResult { Ok(()) }
+    fn get_cos_to_usd_rate() -> Option<u128> { Some(100_000) } // 0.1 USDT/NEX (精度 10^6)
+    fn report_p2p_trade(_timestamp: u64, _price_usdt: u64, _nex_qty: u128) -> DispatchResult { Ok(()) }
 }
 
 /// Mock MakerInterface: 做市商 #1 已激活，账户为 10
@@ -186,14 +186,14 @@ parameter_types! {
     pub const BuyOrderTimeout: u64 = 3_600_000; // 1 hour in ms
     pub const EvidenceWindow: u64 = 86_400_000; // 24 hours in ms
     pub const FirstPurchaseUsdValue: u128 = 10_000_000; // 10 USD
-    pub const MinFirstPurchaseCosAmount: u128 = 1_000_000_000_000; // 1 NXS
-    pub const MaxFirstPurchaseCosAmount: u128 = 1_000_000_000_000_000; // 1000 NXS
+    pub const MinFirstPurchaseCosAmount: u128 = 1_000_000_000_000; // 1 NEX
+    pub const MaxFirstPurchaseCosAmount: u128 = 1_000_000_000_000_000; // 1000 NEX
     pub const MaxOrderUsdAmount: u64 = 200_000_000; // 200 USD
     pub const MinOrderUsdAmount: u64 = 20_000_000; // 20 USD
     pub const FirstPurchaseUsdAmount: u64 = 10_000_000; // 10 USD
     pub const AmountValidationTolerance: u16 = 100; // 1%
     pub const MaxFirstPurchaseOrdersPerMaker: u32 = 5;
-    pub const MinDeposit: u128 = 1_000_000_000_000; // 1 NXS
+    pub const MinDeposit: u128 = 1_000_000_000_000; // 1 NEX
     pub const DepositRate: u16 = 1000; // 10%
     pub const CancelPenaltyRate: u16 = 3000; // 30%
     pub const MinMakerDepositUsd: u64 = 800_000_000; // 800 USD
@@ -203,11 +203,11 @@ parameter_types! {
     // Sell-side 常量
     pub const SellTimeoutBlocks: u64 = 100;
     pub const VerificationTimeoutBlocks: u64 = 50;
-    pub const MinSellAmount: u128 = 1_000_000_000_000; // 1 NXS
+    pub const MinSellAmount: u128 = 1_000_000_000_000; // 1 NEX
     pub const TxHashTtlBlocks: u64 = 14400;
-    pub const VerificationReward: u128 = 100_000_000_000; // 0.1 NXS
+    pub const VerificationReward: u128 = 100_000_000_000; // 0.1 NEX
     pub const SellFeeRateBps: u32 = 30; // 0.3%
-    pub const MinSellFee: u128 = 100_000_000_000; // 0.1 NXS
+    pub const MinSellFee: u128 = 100_000_000_000; // 0.1 NEX
 }
 
 impl pallet_trading_p2p::Config for Test {
@@ -271,9 +271,9 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 
     pallet_balances::GenesisConfig::<Test> {
         balances: vec![
-            (BUYER, 1_000_000_000_000_000),       // buyer: 1000 NXS
-            (BUYER2, 1_000_000_000_000_000),       // buyer2: 1000 NXS
-            (MAKER_ACCOUNT, 10_000_000_000_000_000), // maker: 10000 NXS
+            (BUYER, 1_000_000_000_000_000),       // buyer: 1000 NEX
+            (BUYER2, 1_000_000_000_000_000),       // buyer2: 1000 NEX
+            (MAKER_ACCOUNT, 10_000_000_000_000_000), // maker: 10000 NEX
             (ESCROW_ACCOUNT, 100_000_000_000_000_000), // escrow
         ],
         dev_accounts: None,

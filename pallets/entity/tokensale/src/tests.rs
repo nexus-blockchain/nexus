@@ -276,7 +276,7 @@ fn start_sale_locks_entity_tokens() {
 // ==================== subscribe ====================
 
 #[test]
-fn subscribe_transfers_nxs() {
+fn subscribe_transfers_nex() {
     new_test_ext().execute_with(|| {
         let round_id = setup_active_round();
         let buyer_before = Balances::free_balance(BUYER);
@@ -284,14 +284,14 @@ fn subscribe_transfers_nxs() {
         assert_ok!(EntityTokenSale::subscribe(
             RuntimeOrigin::signed(BUYER), round_id,
             100u128, // 100 tokens
-            None,    // native NXS
+            None,    // native NEX
         ));
 
         let buyer_after = Balances::free_balance(BUYER);
         // price=100, amount=100 → payment = 10_000
         assert_eq!(buyer_before - buyer_after, 10_000u128);
 
-        // Pallet 账户收到 NXS
+        // Pallet 账户收到 NEX
         let pallet_account = EntityTokenSale::pallet_account();
         assert_eq!(Balances::free_balance(pallet_account), 10_000u128);
 

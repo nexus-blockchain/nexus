@@ -356,15 +356,18 @@ mod runtime {
 	pub type EntityTokenSale = pallet_entity_tokensale;
 
 	// ============================================================================
-	// Nexus Bot Pallets
+	// GroupRobot Pallets
 	// ============================================================================
 
-	#[runtime::pallet_index(140)]
-	pub type BotConsensus = pallet_bot_consensus;
+	#[runtime::pallet_index(150)]
+	pub type GroupRobotRegistry = pallet_grouprobot_registry;
 
-	#[runtime::pallet_index(141)]
-	pub type BotRegistry = pallet_bot_registry;
+	#[runtime::pallet_index(151)]
+	pub type GroupRobotConsensus = pallet_grouprobot_consensus;
 
-	#[runtime::pallet_index(142)]
-	pub type BotGroupMgmt = pallet_bot_group_mgmt;
+	#[runtime::pallet_index(152)]
+	pub type GroupRobotCommunity = pallet_grouprobot_community;
+
+	#[runtime::pallet_index(153)]
+	pub type GroupRobotCeremony = pallet_grouprobot_ceremony;
 }

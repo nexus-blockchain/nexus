@@ -19,7 +19,7 @@ import {
   logSuccess, 
   logError, 
   logInfo,
-  formatNxs,
+  formatNex,
 } from './utils/helpers.js';
 
 // 做市商状态枚举
@@ -82,7 +82,7 @@ async function main() {
     
     for (const maker of makers) {
       const statusDisplay = maker.status.padEnd(14);
-      const depositDisplay = formatNxs(maker.deposit).padEnd(18);
+      const depositDisplay = formatNex(maker.deposit).padEnd(18);
       const ownerShort = `${maker.owner.slice(0, 12)}...${maker.owner.slice(-6)}`;
       console.log(`   ${String(maker.id).padEnd(6)} ${statusDisplay} ${depositDisplay} ${ownerShort}`);
     }
@@ -153,7 +153,7 @@ async function main() {
         const app = finalApp.unwrap();
         console.log(`   做市商 ID: ${targetMakerId}`);
         console.log(`   最终状态: ${app.status.toString()}`);
-        console.log(`   押金: ${formatNxs(app.deposit.toString())}`);
+        console.log(`   押金: ${formatNex(app.deposit.toString())}`);
         console.log(`   服务暂停: ${app.servicePaused ? '是' : '否'}`);
         
         if (app.status.isActive) {

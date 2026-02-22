@@ -111,11 +111,11 @@ async function main() {
     });
     
     // ========================================
-    // 步骤 5: NXS 价格换算
+    // 步骤 5: NEX 价格换算
     // ========================================
-    logStep(5, 'NXS 价格换算（结合当前 NXS 价格）');
+    logStep(5, 'NEX 价格换算（结合当前 NEX 价格）');
     
-    // 获取当前 NXS 价格
+    // 获取当前 NEX 价格
     const defaultPrice = await (api.query as any).tradingPricing.defaultPrice();
     const coldStartExited = await (api.query as any).tradingPricing.coldStartExited();
     
@@ -125,11 +125,11 @@ async function main() {
     } else {
       const otcAgg = await (api.query as any).tradingPricing.otcPriceAggregate();
       const bridgeAgg = await (api.query as any).tradingPricing.bridgePriceAggregate();
-      const totalNxs = BigInt(otcAgg.totalNxs.toString()) + BigInt(bridgeAgg.totalNxs.toString());
+      const totalNex = BigInt(otcAgg.totalNex.toString()) + BigInt(bridgeAgg.totalNex.toString());
       const totalUsdt = BigInt(otcAgg.totalUsdt.toString()) + BigInt(bridgeAgg.totalUsdt.toString());
       
-      if (totalNxs > 0n) {
-        cosPrice = Number((totalUsdt * BigInt(1e12)) / totalNxs);
+      if (totalNex > 0n) {
+        cosPrice = Number((totalUsdt * BigInt(1e12)) / totalNex);
       } else {
         cosPrice = defaultPrice.toNumber();
       }
@@ -138,17 +138,17 @@ async function main() {
     const cosPriceUsdt = cosPrice / 1e6;
     const cosPriceCny = cosPriceUsdt * rateValue;
     
-    console.log(`\n   当前 NXS 价格:`);
+    console.log(`\n   当前 NEX 价格:`);
     console.log(`   - USDT: $${cosPriceUsdt.toFixed(6)}`);
     console.log(`   - CNY:  ¥${cosPriceCny.toFixed(6)}`);
     
-    // NXS 数量换算
-    const nxsAmounts = [1000, 10000, 100000, 1000000];
-    console.log('\n   NXS 价值换算:');
-    nxsAmounts.forEach(cos => {
+    // NEX 数量换算
+    const nexAmounts = [1000, 10000, 100000, 1000000];
+    console.log('\n   NEX 价值换算:');
+    nexAmounts.forEach(cos => {
       const valueUsdt = cos * cosPriceUsdt;
       const valueCny = cos * cosPriceCny;
-      console.log(`   ${cos.toLocaleString()} NXS = $${valueUsdt.toFixed(4)} USDT = ¥${valueCny.toFixed(4)}`);
+      console.log(`   ${cos.toLocaleString()} NEX = $${valueUsdt.toFixed(4)} USDT = ¥${valueCny.toFixed(4)}`);
     });
     
     // ========================================
@@ -160,8 +160,8 @@ async function main() {
     console.log('\n📊 汇率摘要:');
     console.log(`   - 当前汇率: ¥${rateValue.toFixed(4)} / USDT`);
     console.log(`   - 数据来源: ${cnyRate > 0 ? 'OCW 更新' : '默认值'}`);
-    console.log(`   - NXS/USDT: $${cosPriceUsdt.toFixed(6)}`);
-    console.log(`   - NXS/CNY:  ¥${cosPriceCny.toFixed(6)}`);
+    console.log(`   - NEX/USDT: $${cosPriceUsdt.toFixed(6)}`);
+    console.log(`   - NEX/CNY:  ¥${cosPriceCny.toFixed(6)}`);
     
   } catch (error: any) {
     logError(`查询失败: ${error.message}`);

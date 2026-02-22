@@ -2,13 +2,13 @@
 
 ## 📋 模块概述
 
-`pallet-pricing` 是 Nexus 区块链的 **动态定价与市场统计模块**，负责聚合 P2P Buy（USDT→NXS）和 Sell（NXS→USDT）两方向的交易数据，计算 NXS/USD 市场参考价格，并提供完整的市场统计信息。
+`pallet-pricing` 是 Nexus 区块链的 **动态定价与市场统计模块**，负责聚合 P2P Buy（USDT→NEX）和 Sell（NEX→USDT）两方向的交易数据，计算 NEX/USD 市场参考价格，并提供完整的市场统计信息。
 
 ### 核心特性
 
 - ✅ **双方向价格聚合**：同时聚合 P2P Buy 和 Sell 两方向的价格数据
 - ✅ **循环缓冲区设计**：最多存储 10,000 笔订单快照，自动滚动更新
-- ✅ **交易量限制**：维护最近累计 1,000,000 NXS 的订单统计
+- ✅ **交易量限制**：维护最近累计 1,000,000 NEX 的订单统计
 - ✅ **加权平均价格**：基于交易量的加权平均，更准确反映市场情况
 - ✅ **简单平均价格**：两个方向均价的简单平均，用于快速参考
 - ✅ **冷启动保护**：市场初期使用默认价格，达到阈值后自动退出
@@ -27,8 +27,8 @@
 │                                                                                 │
 │  ┌────────────────────┐                     ┌──────────────────┐               │
 │  │   pallet-p2p         │ ─ report_p2p_trade ─→│  pallet-pricing  │               │
-│  │  (Buy: USDT→NXS)    │                     │  ┌────────────┐  │               │
-│  │  (Sell: NXS→USDT)    │                     │  │ Buy 聚合    │  │               │
+│  │  (Buy: USDT→NEX)    │                     │  ┌────────────┐  │               │
+│  │  (Sell: NEX→USDT)    │                     │  │ Buy 聚合    │  │               │
 │  └────────────────────┘                     │  └────────────┘  │               │
 │         ↑                                   │  ┌────────────┐  │←─ 消费方:     │
 │         │                                   │  │ Sell 聚合   │  │  pallet-p2p    │
@@ -45,11 +45,11 @@
 
 ```rust
 pub trait PricingProvider<Balance> {
-    /// 获取 NXS/USD 汇率（精度 10^6）
+    /// 获取 NEX/USD 汇率（精度 10^6）
     fn get_cos_to_usd_rate() -> Option<Balance>;
     
     /// 上报 P2P 成交到价格聚合（统一 Buy/Sell 两方向）
-    fn report_p2p_trade(timestamp: u64, price_usdt: u64, nxs_qty: u128) -> DispatchResult;
+    fn report_p2p_trade(timestamp: u64, price_usdt: u64, nex_qty: u128) -> DispatchResult;
 }
 ```
 
@@ -61,13 +61,13 @@ pub trait PricingProvider<Balance> {
 
 #### 添加 Buy 方向成交（`add_buy_trade`）
 
-将 Buy 方向（USDT→NXS）成交添加到价格聚合数据。
+将 Buy 方向（USDT→NEX）成交添加到价格聚合数据。
 
 **流程：**
-1. 输入验证（价格 > 0，数量 > 0，单笔 ≤ 1000万 NXS）
-2. 如果累计超过 1,000,000 NXS，删除最旧的订单直到满足限制
+1. 输入验证（价格 > 0，数量 > 0，单笔 ≤ 1000万 NEX）
+2. 如果累计超过 1,000,000 NEX，删除最旧的订单直到满足限制
 3. 添加新订单到循环缓冲区（索引 0-9999）
-4. 更新聚合统计数据（总 NXS、总 USDT、订单数）
+4. 更新聚合统计数据（总 NEX、总 USDT、订单数）
 5. 发出 `BuyTradeAdded` 事件
 
 **调用者：** `pallet-p2p`（通过 runtime bridge 直接调用）
@@ -75,11 +75,11 @@ pub trait PricingProvider<Balance> {
 **参数：**
 - `timestamp`: 成交时间戳（Unix 毫秒）
 - `price_usdt`: USDT 单价（精度 10^6）
-- `nxs_qty`: NXS 数量（精度 10^12）
+- `nex_qty`: NEX 数量（精度 10^12）
 
 #### 添加 Sell 方向成交（`add_sell_trade`）
 
-将 Sell 方向（NXS→USDT）成交添加到价格聚合数据。
+将 Sell 方向（NEX→USDT）成交添加到价格聚合数据。
 
 **流程：** 与 `add_buy_trade` 相同，但操作 Sell 方向的存储。
 
@@ -88,7 +88,7 @@ pub trait PricingProvider<Balance> {
 **上报时机：**
 | 路径 | 函数 | 是否上报 |
 |------|------|---------|
-| P2P 正常完成 | 订单完成回调 | ✅ 上报 `nxs_amount` |
+| P2P 正常完成 | 订单完成回调 | ✅ 上报 `nex_amount` |
 | 部分付款接受 | 部分成交回调 | ⚠️ 应上报实际成交量 |
 | 超时/取消/退款 | - | ❌ 不上报（未成交） |
 
@@ -98,9 +98,9 @@ pub trait PricingProvider<Balance> {
 
 ### 2. 价格查询接口
 
-#### 获取 NXS 市场参考价格（`get_memo_reference_price`）
+#### 获取 NEX 市场参考价格（`get_memo_reference_price`）
 
-获取 NXS/USD 市场参考价格（简单平均 + 冷启动保护）。
+获取 NEX/USD 市场参考价格（简单平均 + 冷启动保护）。
 
 **算法：**
 - **冷启动阶段**：如果两个方向交易量都未达阈值，返回默认价格
@@ -109,20 +109,20 @@ pub trait PricingProvider<Balance> {
   - 如果只有一个方向有数据：使用该方向的均价
   - 如果都无数据：返回默认价格（兜底）
 
-**返回：** `u64`（USDT/NXS 价格，精度 10^6）
+**返回：** `u64`（USDT/NEX 价格，精度 10^6）
 
 **用途：**
 - 前端显示参考价格
 - 价格偏离度计算
 - 简单的市场概览
 
-#### 获取 NXS 市场价格（`get_cos_market_price_weighted`）
+#### 获取 NEX 市场价格（`get_cos_market_price_weighted`）
 
-获取 NXS/USD 市场价格（加权平均 + 冷启动保护）。
+获取 NEX/USD 市场价格（加权平均 + 冷启动保护）。
 
 **算法：**
 - **冷启动阶段**：如果两个方向交易量都未达阈值，返回默认价格
-- **正常阶段**：加权平均 = `(Buy 总 USDT + Sell 总 USDT) / (Buy 总 NXS + Sell 总 NXS)`
+- **正常阶段**：加权平均 = `(Buy 总 USDT + Sell 总 USDT) / (Buy 总 NEX + Sell 总 NEX)`
 
 **优点：**
 - 考虑交易量权重，更准确反映市场情况
@@ -130,7 +130,7 @@ pub trait PricingProvider<Balance> {
 - 符合市值加权指数的计算方式
 - 冷启动保护避免初期价格为 0 或被操纵
 
-**返回：** `u64`（USDT/NXS 价格，精度 10^6）
+**返回：** `u64`（USDT/NEX 价格，精度 10^6）
 
 **用途：**
 - 资产估值（钱包总值计算）
@@ -139,7 +139,7 @@ pub trait PricingProvider<Balance> {
 
 #### 获取市场统计信息（`get_market_stats`）
 
-获取完整的 NXS 市场统计信息。
+获取完整的 NEX 市场统计信息。
 
 **返回：** `MarketStats` 结构，包含：
 - Buy 和 Sell 各自的均价
@@ -168,11 +168,11 @@ pub trait PricingProvider<Balance> {
 4. 检查偏离率是否超过 `MaxPriceDeviation` 配置的限制
 
 **示例：**
-- 基准价格：1.0 USDT/NXS（1,000,000）
+- 基准价格：1.0 USDT/NEX（1,000,000）
 - `MaxPriceDeviation`：2000 bps（20%）
-- 允许范围：0.8 ~ 1.2 USDT/NXS
-- 订单价格 1.1 USDT/NXS → 偏离 10% → 通过 ✅
-- 订单价格 1.5 USDT/NXS → 偏离 50% → 拒绝 ❌
+- 允许范围：0.8 ~ 1.2 USDT/NEX
+- 订单价格 1.1 USDT/NEX → 偏离 10% → 通过 ✅
+- 订单价格 1.5 USDT/NEX → 偏离 50% → 拒绝 ❌
 
 **用途：**
 - P2P Buy 订单创建时的价格合理性检查
@@ -189,8 +189,8 @@ pub trait PricingProvider<Balance> {
 
 **机制：**
 1. **冷启动阶段**：
-   - 如果 Buy 和 Sell 两方向的交易量都低于 `ColdStartThreshold`（默认 1 亿 NXS）
-   - 返回 `DefaultPrice`（默认 0.000001 USDT/NXS）
+   - 如果 Buy 和 Sell 两方向的交易量都低于 `ColdStartThreshold`（默认 1 亿 NEX）
+   - 返回 `DefaultPrice`（默认 0.000001 USDT/NEX）
    
 2. **退出冷启动**：
    - 当任一方向交易量达到阈值时，自动退出冷启动
@@ -208,8 +208,8 @@ pub trait PricingProvider<Balance> {
 **权限：** Root（治理投票）
 
 **参数：**
-- `threshold`: 可选，新的冷启动阈值（NXS 数量，精度 10^12）
-- `default_price`: 可选，新的默认价格（USDT/NXS，精度 10^6）
+- `threshold`: 可选，新的冷启动阈值（NEX 数量，精度 10^12）
+- `default_price`: 可选，新的默认价格（USDT/NEX，精度 10^6）
 
 **限制：**
 - 只能在冷启动期间调整（`ColdStartExited = false`）
@@ -249,7 +249,7 @@ pub trait PricingProvider<Balance> {
 pub struct OrderSnapshot {
     pub timestamp: u64,     // 订单时间戳（Unix 毫秒）
     pub price_usdt: u64,    // USDT 单价（精度 10^6）
-    pub cos_qty: u128,     // NXS 数量（精度 10^12）
+    pub cos_qty: u128,     // NEX 数量（精度 10^12）
 }
 ```
 
@@ -257,7 +257,7 @@ pub struct OrderSnapshot {
 
 ```rust
 pub struct PriceAggregateData {
-    pub total_cos: u128,      // 累计 NXS 数量（精度 10^12）
+    pub total_cos: u128,      // 累计 NEX 数量（精度 10^12）
     pub total_usdt: u128,      // 累计 USDT 金额（精度 10^6）
     pub order_count: u32,      // 订单数量
     pub oldest_index: u32,     // 最旧订单索引（循环缓冲区指针，0-9999）
@@ -291,8 +291,8 @@ pub struct MarketStats {
 | `BuyOrderRingBuffer` | `Map<u32, OrderSnapshot>` | Buy 方向订单历史循环缓冲区（0-9999） |
 | `SellPriceAggregate` | `PriceAggregateData` | Sell 方向价格聚合数据 |
 | `SellOrderRingBuffer` | `Map<u32, OrderSnapshot>` | Sell 方向订单历史循环缓冲区（0-9999） |
-| `ColdStartThreshold` | `u128` | 冷启动阈值（默认 1 亿 NXS） |
-| `DefaultPrice` | `u64` | 默认价格（默认 0.000001 USDT/NXS） |
+| `ColdStartThreshold` | `u128` | 冷启动阈值（默认 1 亿 NEX） |
+| `DefaultPrice` | `u64` | 默认价格（默认 0.000001 USDT/NEX） |
 | `ColdStartExited` | `bool` | 冷启动退出标记（单向锁定） |
 
 ---
@@ -305,7 +305,7 @@ pub enum Event<T: Config> {
     BuyTradeAdded {
         timestamp: u64,
         price_usdt: u64,
-        nxs_qty: u128,
+        nex_qty: u128,
         new_avg_price: u64,
     },
     
@@ -313,7 +313,7 @@ pub enum Event<T: Config> {
     SellTradeAdded {
         timestamp: u64,
         price_usdt: u64,
-        nxs_qty: u128,
+        nex_qty: u128,
         new_avg_price: u64,
     },
     
@@ -383,13 +383,13 @@ import { ApiPromise } from '@polkadot/api';
 // 获取市场参考价格（简单平均）
 async function getReferencePrice(api: ApiPromise) {
   const price = await api.query.pricing.getRemarkablePrice();
-  console.log('NXS 市场参考价格:', price.toNumber() / 1_000_000, 'USDT');
+  console.log('NEX 市场参考价格:', price.toNumber() / 1_000_000, 'USDT');
 }
 
 // 获取市场价格（加权平均）
 async function getMarketPrice(api: ApiPromise) {
   const price = await api.query.pricing.getCosMarketPriceWeighted();
-  console.log('NXS 市场价格:', price.toNumber() / 1_000_000, 'USDT');
+  console.log('NEX 市场价格:', price.toNumber() / 1_000_000, 'USDT');
 }
 ```
 
@@ -422,7 +422,7 @@ async function getBuyStats(api: ApiPromise) {
   const aggregate = await api.query.pricing.buyAggregate();
   
   console.log('Buy 方向聚合数据:', {
-    totalNxs: aggregate.totalNxs.toString(),
+    totalNex: aggregate.totalNex.toString(),
     totalUsdt: aggregate.totalUsdt.toString(),
     orderCount: aggregate.orderCount.toNumber(),
     oldestIndex: aggregate.oldestIndex.toNumber(),
@@ -430,9 +430,9 @@ async function getBuyStats(api: ApiPromise) {
   });
   
   // 计算均价
-  const avgPrice = aggregate.totalNxs.isZero() 
+  const avgPrice = aggregate.totalNex.isZero() 
     ? 0 
-    : aggregate.totalUsdt.mul(1_000_000_000_000).div(aggregate.totalNxs).toNumber();
+    : aggregate.totalUsdt.mul(1_000_000_000_000).div(aggregate.totalNex).toNumber();
   console.log('Buy 方向均价:', avgPrice / 1_000_000, 'USDT');
 }
 
@@ -507,28 +507,28 @@ async function resetColdStart(
 ### 1. 单方向均价计算
 
 ```
-Buy/Sell 均价 = (总 USDT / 总 NXS)
-             = total_usdt / (total_nxs / 10^12)
-             = (total_usdt * 10^12) / total_nxs
+Buy/Sell 均价 = (总 USDT / 总 NEX)
+             = total_usdt / (total_nex / 10^12)
+             = (total_usdt * 10^12) / total_nex
 ```
 
 **示例：**
 - 总 USDT：1000（精度 10^6）= 0.001 USDT
-- 总 NXS：1,000,000,000,000（精度 10^12）= 1 NXS
-- 均价 = (1000 * 10^12) / 1,000,000,000,000 = 1,000,000（精度 10^6）= 1 USDT/NXS
+- 总 NEX：1,000,000,000,000（精度 10^12）= 1 NEX
+- 均价 = (1000 * 10^12) / 1,000,000,000,000 = 1,000,000（精度 10^6）= 1 USDT/NEX
 
 ### 2. 加权平均价格计算
 
 ```
-加权平均价格 = (Buy 总 USDT + Sell 总 USDT) / (Buy 总 NXS + Sell 总 NXS)
+加权平均价格 = (Buy 总 USDT + Sell 总 USDT) / (Buy 总 NEX + Sell 总 NEX)
 ```
 
 **示例：**
 - Buy 总 USDT：1000（0.001 USDT）
-- Buy 总 NXS：1,000,000,000,000（1 NXS）
+- Buy 总 NEX：1,000,000,000,000（1 NEX）
 - Sell 总 USDT：2000（0.002 USDT）
-- Sell 总 NXS：1,000,000,000,000（1 NXS）
-- 加权平均 = (1000 + 2000) * 10^12 / (1,000,000,000,000 + 1,000,000,000,000) = 1,500,000（1.5 USDT/NXS）
+- Sell 总 NEX：1,000,000,000,000（1 NEX）
+- 加权平均 = (1000 + 2000) * 10^12 / (1,000,000,000,000 + 1,000,000,000,000) = 1,500,000（1.5 USDT/NEX）
 
 ### 3. 简单平均价格计算
 
@@ -537,9 +537,9 @@ Buy/Sell 均价 = (总 USDT / 总 NXS)
 ```
 
 **示例：**
-- Buy 均价：1,000,000（1 USDT/NXS）
-- Sell 均价：2,000,000（2 USDT/NXS）
-- 简单平均 = (1,000,000 + 2,000,000) / 2 = 1,500,000（1.5 USDT/NXS）
+- Buy 均价：1,000,000（1 USDT/NEX）
+- Sell 均价：2,000,000（2 USDT/NEX）
+- 简单平均 = (1,000,000 + 2,000,000) / 2 = 1,500,000（1.5 USDT/NEX）
 
 ### 4. 价格偏离计算
 
@@ -548,8 +548,8 @@ Buy/Sell 均价 = (总 USDT / 总 NXS)
 ```
 
 **示例：**
-- 基准价格：1,000,000（1 USDT/NXS）
-- 订单价格：1,200,000（1.2 USDT/NXS）
+- 基准价格：1,000,000（1 USDT/NEX）
+- 订单价格：1,200,000（1.2 USDT/NEX）
 - 偏离率 = (1,200,000 - 1,000,000) / 1,000,000 × 10000 = 2000 bps = 20%
 
 ---
@@ -565,7 +565,7 @@ Buy/Sell 均价 = (总 USDT / 总 NXS)
 ### 2. 循环缓冲区
 
 - ✅ **自动滚动**：最多存储 10,000 笔订单，自动删除最旧的
-- ✅ **交易量限制**：维护最近累计 1,000,000 NXS 的订单
+- ✅ **交易量限制**：维护最近累计 1,000,000 NEX 的订单
 - ✅ **防止存储膨胀**：存储空间固定，不会无限增长
 
 ### 3. 价格偏离检查
@@ -614,7 +614,7 @@ Buy/Sell 均价 = (总 USDT / 总 NXS)
 ...
 
 添加第 10,001 笔订单：
-- 累计 NXS 超过 1,000,000 限制
+- 累计 NEX 超过 1,000,000 限制
 - 删除索引 0 的订单
 - oldest_index = 1
 - 写入索引 1（覆盖）
@@ -625,13 +625,13 @@ Buy/Sell 均价 = (总 USDT / 总 NXS)
 ### 限制机制
 
 ```rust
-// 当累计 NXS 超过 1,000,000 时
+// 当累计 NEX 超过 1,000,000 时
 while new_total > limit && agg.order_count > 0 {
     // 删除最旧的订单
     let oldest = BuyOrderRingBuffer::<T>::take(agg.oldest_index);
     // 从聚合数据中减去
-    agg.total_nxs -= oldest.nxs_qty;
-    agg.total_usdt -= oldest.nxs_qty / 10^12 * oldest.price_usdt;
+    agg.total_nex -= oldest.nex_qty;
+    agg.total_usdt -= oldest.nex_qty / 10^12 * oldest.price_usdt;
     agg.order_count -= 1;
     // 移动最旧索引
     agg.oldest_index = (agg.oldest_index + 1) % 10000;
@@ -714,4 +714,4 @@ ExchangeRateUpdated {
 - VWAP 计算可能存在偏差
 
 **建议修复：**
-在部分付款接受函数中添加 `T::Pricing::report_p2p_trade()` 调用，按实际成交的 NXS 数量上报。
+在部分付款接受函数中添加 `T::Pricing::report_p2p_trade()` 调用，按实际成交的 NEX 数量上报。

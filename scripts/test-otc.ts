@@ -12,9 +12,9 @@ import {
   logSuccess, 
   logError, 
   logInfo,
-  formatNxs,
+  formatNex,
   formatUsdt,
-  toNxsWei,
+  toNexWei,
   sleep
 } from './utils/helpers.js';
 import { blake2AsHex } from '@polkadot/util-crypto';
@@ -80,11 +80,11 @@ async function main() {
     orderId = nextOrderId.toNumber();
     console.log(`   预期订单 ID: ${orderId}`);
     
-    // 创建订单（购买 1000 NXS）
-    const nxsAmount = toNxsWei(1000);
+    // 创建订单（购买 1000 NEX）
+    const nexAmount = toNexWei(1000);
     const createOrderTx = (api.tx as any).tradingOtc.createOrder(
       makerId,
-      nxsAmount,
+      nexAmount,
       paymentCommit,
       contactCommit
     );
@@ -109,7 +109,7 @@ async function main() {
       console.log(`   订单 ID: ${orderId}`);
       console.log(`   做市商 ID: ${o.makerId.toNumber()}`);
       console.log(`   买家: ${o.taker.toString().slice(0, 16)}...`);
-      console.log(`   NXS 数量: ${formatNxs(o.qty.toString())}`);
+      console.log(`   NEX 数量: ${formatNex(o.qty.toString())}`);
       console.log(`   USDT 金额: ${formatUsdt(o.amount.toNumber())}`);
       console.log(`   状态: ${o.state.toString()}`);
       console.log(`   首购订单: ${o.isFirstPurchase.isTrue ? '是' : '否'}`);
@@ -141,19 +141,19 @@ async function main() {
     }
     
     // ========================================
-    // 步骤 6: 做市商释放 NXS
+    // 步骤 6: 做市商释放 NEX
     // ========================================
-    logStep(6, '做市商释放 NXS');
+    logStep(6, '做市商释放 NEX');
     
-    const releaseTx = (api.tx as any).tradingOtc.releaseNxs(orderId);
-    const releaseResult = await signAndSend(api, releaseTx, bob, 'Bob 释放 NXS');
+    const releaseTx = (api.tx as any).tradingOtc.releaseNex(orderId);
+    const releaseResult = await signAndSend(api, releaseTx, bob, 'Bob 释放 NEX');
     
     if (!releaseResult.success) {
       logError(`释放失败: ${releaseResult.error}`);
       return;
     }
     
-    logSuccess('NXS 已释放给买家');
+    logSuccess('NEX 已释放给买家');
     
     // 查询最终状态
     const orderFinal = await (api.query as any).tradingOtc.orders(orderId);
@@ -197,7 +197,7 @@ async function main() {
     console.log(`   - 订单 ID: ${orderId}`);
     console.log(`   - 做市商: Bob (ID: ${makerId})`);
     console.log(`   - 买家: Charlie`);
-    console.log(`   - 流程: 创建订单 → 标记付款 → 释放 NXS`);
+    console.log(`   - 流程: 创建订单 → 标记付款 → 释放 NEX`);
     console.log(`   - 最终状态: Released`);
     
   } catch (error: any) {

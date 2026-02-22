@@ -40,7 +40,7 @@ impl pallet_balances::Config for Test {
 pub struct MockPricingProvider;
 impl PricingProvider for MockPricingProvider {
     fn get_cos_usdt_price() -> u64 {
-        // 1 NXS = 0.5 USDT → price = 500_000 (precision 10^6)
+        // 1 NEX = 0.5 USDT → price = 500_000 (precision 10^6)
         500_000
     }
 }
@@ -135,7 +135,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 }
 
 /// 计算预期的初始资金
-/// price = 500_000 (0.5 USDT/NXS), usdt = 50_000_000 (50 USDT)
-/// nxs = 50_000_000 * 10^12 / 500_000 = 100 * 10^12 = 100 tokens
+/// price = 500_000 (0.5 USDT/NEX), usdt = 50_000_000 (50 USDT)
+/// nex = 50_000_000 * 10^12 / 500_000 = 100 * 10^12 = 100 tokens
 /// clamped to [1 token, 1000 tokens] → 100 tokens
 pub const EXPECTED_INITIAL_FUND: u128 = 100_000_000_000_000;

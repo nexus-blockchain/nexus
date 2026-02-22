@@ -6,8 +6,8 @@
  *   npx tsx transfer.ts <recipient> <amount>
  *   
  * 示例:
- *   npx tsx transfer.ts charlie 1000    # 转 1000 NXS 给 Charlie
- *   npx tsx transfer.ts dave 500        # 转 500 NXS 给 Dave
+ *   npx tsx transfer.ts charlie 1000    # 转 1000 NEX 给 Charlie
+ *   npx tsx transfer.ts dave 500        # 转 500 NEX 给 Dave
  */
 
 import { getApi, disconnectApi } from './utils/api.js';
@@ -18,8 +18,8 @@ import {
   logStep, 
   logSuccess, 
   logError, 
-  formatNxs,
-  toNxsWei,
+  formatNex,
+  toNexWei,
 } from './utils/helpers.js';
 
 const ACCOUNTS: Record<string, () => any> = {
@@ -70,14 +70,14 @@ async function main() {
     const aliceBalance = await api.query.system.account(alice.address);
     const recipientBalance = await api.query.system.account(recipient.address);
     
-    console.log(`   Alice 余额: ${formatNxs(aliceBalance.data.free.toString())}`);
-    console.log(`   ${recipientName} 余额: ${formatNxs(recipientBalance.data.free.toString())}`);
+    console.log(`   Alice 余额: ${formatNex(aliceBalance.data.free.toString())}`);
+    console.log(`   ${recipientName} 余额: ${formatNex(recipientBalance.data.free.toString())}`);
     
     // 转账
-    logStep(2, `转账 ${amount} NXS`);
+    logStep(2, `转账 ${amount} NEX`);
     
-    const amountWei = toNxsWei(amount);
-    console.log(`   转账金额: ${formatNxs(amountWei)}`);
+    const amountWei = toNexWei(amount);
+    console.log(`   转账金额: ${formatNex(amountWei)}`);
     
     const transferTx = api.tx.balances.transferKeepAlive(recipient.address, amountWei);
     const result = await signAndSend(api, transferTx, alice, `Alice 转账给 ${recipientName}`);
@@ -95,8 +95,8 @@ async function main() {
     const newAliceBalance = await api.query.system.account(alice.address);
     const newRecipientBalance = await api.query.system.account(recipient.address);
     
-    console.log(`   Alice 余额: ${formatNxs(newAliceBalance.data.free.toString())}`);
-    console.log(`   ${recipientName} 余额: ${formatNxs(newRecipientBalance.data.free.toString())}`);
+    console.log(`   Alice 余额: ${formatNex(newAliceBalance.data.free.toString())}`);
+    console.log(`   ${recipientName} 余额: ${formatNex(newRecipientBalance.data.free.toString())}`);
     
     logSection('完成');
     

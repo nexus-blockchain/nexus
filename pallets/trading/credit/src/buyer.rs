@@ -121,7 +121,7 @@ pub struct CreditScore<T: crate::pallet::Config> {
     pub new_user_tier: Option<NewUserTier>,
     /// 成功完成订单数
     pub completed_orders: u32,
-    /// 累计购买金额（NXS）
+    /// 累计购买金额（NEX）
     pub total_volume: crate::pallet::BalanceOf<T>,
     /// 违约次数（超时未付款）
     pub default_count: u32,

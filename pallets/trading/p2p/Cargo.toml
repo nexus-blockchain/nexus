@@ -1,7 +1,7 @@
 [package]
 name = "pallet-trading-p2p"
 version = "0.1.0"
-description = "P2P 交易模块 - 统一 Buy(USDT→NXS) 和 Sell(NXS→USDT) 交易"
+description = "P2P 交易模块 - 统一 Buy(USDT→NEX) 和 Sell(NEX→USDT) 交易"
 authors = ["Nexus Team"]
 edition = "2021"
 license = "Unlicense"

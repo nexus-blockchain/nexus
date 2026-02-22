@@ -365,11 +365,15 @@ pub mod pallet {
             // 计算金额
             let total_amount = price.saturating_mul(quantity.into());
             
+            // 获取 entity_id 用于积分/token 操作
+            let entity_id = T::ShopProvider::shop_entity_id(shop_id)
+                .ok_or(Error::<T>::ShopNotFound)?;
+
             // 积分抵扣
             let mut final_amount = total_amount;
             if let Some(tokens) = use_tokens {
-                if !tokens.is_zero() && T::EntityToken::is_token_enabled(shop_id) {
-                    let discount = T::EntityToken::redeem_for_discount(shop_id, &buyer, tokens)?;
+                if !tokens.is_zero() && T::EntityToken::is_token_enabled(entity_id) {
+                    let discount = T::EntityToken::redeem_for_discount(entity_id, &buyer, tokens)?;
                     final_amount = final_amount.saturating_sub(discount);
                 }
             }
@@ -735,12 +739,14 @@ pub mod pallet {
                 order.total_amount,
             );
 
-            // 发放购物积分奖励
-            let _ = T::EntityToken::reward_on_purchase(
-                order.shop_id,
-                &order.buyer,
-                order.total_amount,
-            );
+            // 发放购物积分奖励（需要 entity_id，不是 shop_id）
+            if let Some(entity_id) = T::ShopProvider::shop_entity_id(order.shop_id) {
+                let _ = T::EntityToken::reward_on_purchase(
+                    entity_id,
+                    &order.buyer,
+                    order.total_amount,
+                );
+            }
 
             OrderStats::<T>::mutate(|stats| {
                 stats.completed_orders = stats.completed_orders.saturating_add(1);
@@ -806,8 +812,16 @@ pub mod pallet {
                         }
                         // 确认超时：自动确认收货/服务
                         MallOrderStatus::Shipped => {
-                            let _ = Self::do_complete_order(order_id, &order);
-                            processed = processed.saturating_add(1);
+                            // H5: 服务类订单必须 service_completed_at 已设置才能自动完成
+                            // 否则这是来自 place_order 的 ShipTimeout 触发，应跳过
+                            if order.product_category == ProductCategory::Service
+                                && order.service_completed_at.is_none()
+                            {
+                                // 服务进行中，不自动完成，跳过
+                            } else {
+                                let _ = Self::do_complete_order(order_id, &order);
+                                processed = processed.saturating_add(1);
+                            }
                         }
                         // 已被手动处理（取消/退款/确认等），跳过
                         _ => {}

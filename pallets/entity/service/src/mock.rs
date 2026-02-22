@@ -40,7 +40,7 @@ thread_local! {
     static SHOP_EXISTS: RefCell<Vec<u64>> = RefCell::new(vec![1, 2]);
     static SHOP_ACTIVE: RefCell<Vec<u64>> = RefCell::new(vec![1]);
     static SHOP_OWNERS: RefCell<Vec<(u64, u64)>> = RefCell::new(vec![(1, 1), (2, 2)]);
-    static PRICING: RefCell<u64> = RefCell::new(1_000_000); // 1 USDT/NXS
+    static PRICING: RefCell<u64> = RefCell::new(1_000_000); // 1 USDT/NEX
 }
 
 pub struct MockShopProvider;

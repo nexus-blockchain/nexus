@@ -7,7 +7,7 @@ pub type ChainSpec = sc_service::GenericChainSpec;
 
 fn chain_properties() -> sc_service::Properties {
 	json!({
-		"tokenSymbol": "NXS",
+		"tokenSymbol": "NEX",
 		"tokenDecimals": 12,
 		"ss58Format": 42
 	})

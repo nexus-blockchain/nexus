@@ -47,7 +47,7 @@ fn committee_members() -> (AccountId, AccountId, AccountId) {
 	(member1, member2, member3)
 }
 
-/// Total initial supply: 100,000,000,000 NXS
+/// Total initial supply: 100,000,000,000 NEX
 const INITIAL_SUPPLY: u128 = 100_000_000_000 * UNIT;
 
 // Returns the genesis config presets populated with given parameters.

@@ -384,7 +384,7 @@ fn test_maker_calculate_required_deposit() {
         // Act - 计算所需保证金
         let deposit = Credit::calculate_required_deposit(maker_id);
         
-        // Assert - 应该返回基础保证金（1,000,000 NXS）
+        // Assert - 应该返回基础保证金（1,000,000 NEX）
         assert!(deposit > 0);
     });
 }

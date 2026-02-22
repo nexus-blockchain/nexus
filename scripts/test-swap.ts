@@ -1,6 +1,6 @@
 /**
  * Swap（兑换）模块测试脚本
- * 测试 NXS → USDT 兑换完整流程
+ * 测试 NEX → USDT 兑换完整流程
  */
 
 import { getApi, disconnectApi } from './utils/api.js';
@@ -12,9 +12,9 @@ import {
   logSuccess, 
   logError, 
   logInfo,
-  formatNxs,
+  formatNex,
   formatUsdt,
-  toNxsWei,
+  toNexWei,
 } from './utils/helpers.js';
 
 async function main() {
@@ -59,7 +59,7 @@ async function main() {
     logStep(2, '查询 Dave 余额');
     
     const daveBalance = await api.query.system.account(dave.address);
-    console.log(`   Dave 余额: ${formatNxs(daveBalance.data.free.toString())}`);
+    console.log(`   Dave 余额: ${formatNex(daveBalance.data.free.toString())}`);
     
     // ========================================
     // 步骤 3: 创建兑换请求
@@ -71,16 +71,16 @@ async function main() {
     swapId = nextSwapId.toNumber();
     console.log(`   预期兑换 ID: ${swapId}`);
     
-    // 创建兑换（兑换 500 NXS）
-    const nxsAmount = toNxsWei(500);
+    // 创建兑换（兑换 500 NEX）
+    const nexAmount = toNexWei(500);
     const usdtAddress = 'TYASr5UV6HEcXatwdFQfmLVUqQQQMUxHLS'; // 测试 TRON 地址 (Base58)
     
-    console.log(`   兑换数量: ${formatNxs(nxsAmount)}`);
+    console.log(`   兑换数量: ${formatNex(nexAmount)}`);
     console.log(`   USDT 地址: ${usdtAddress}`);
     
     const createSwapTx = (api.tx as any).tradingSwap.makerSwap(
       makerId,
-      nxsAmount,
+      nexAmount,
       usdtAddress
     );
     
@@ -104,7 +104,7 @@ async function main() {
       console.log(`   兑换 ID: ${swapId}`);
       console.log(`   做市商 ID: ${s.makerId.toNumber()}`);
       console.log(`   用户: ${s.user.toString().slice(0, 16)}...`);
-      console.log(`   NXS 数量: ${formatNxs(s.nxsAmount.toString())}`);
+      console.log(`   NEX 数量: ${formatNex(s.nexAmount.toString())}`);
       console.log(`   USDT 金额: ${formatUsdt(s.usdtAmount.toNumber())}`);
       console.log(`   状态: ${s.status.toString()}`);
       console.log(`   创建区块: ${s.createdAt.toNumber()}`);
@@ -173,7 +173,7 @@ async function main() {
       logInfo(`验证确认失败（可能权限不足）: ${confirmResult.error}`);
       logInfo('在实际环境中，OCW 会自动验证 TRC20 交易');
     } else {
-      logSuccess('验证已确认，NXS 已释放给做市商');
+      logSuccess('验证已确认，NEX 已释放给做市商');
     }
     
     // ========================================
