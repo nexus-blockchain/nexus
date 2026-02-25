@@ -50,7 +50,7 @@ pub mod pallet {
     /// 函数级中文注释：标识证据的内容类型
     /// - 用于前端渲染和验证
     /// - 支持单一类型和混合类型
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, Debug)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, Debug)]
     pub enum ContentType {
         /// 图片证据（单张或多张）
         Image,
@@ -70,7 +70,7 @@ pub mod pallet {
     /// - 原始 Evidence 结构约 200+ 字节
     /// - 归档后仅保留关键摘要信息
     /// - 存储降低约 75%
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, Debug, Default)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, Debug, Default)]
     pub struct ArchivedEvidence {
         /// 证据ID
         pub id: u64,
@@ -126,7 +126,7 @@ pub mod pallet {
     ///   }
     /// }
     /// ```
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
     #[scale_info(skip_type_params(MaxContentCidLen, MaxSchemeLen))]
     pub struct Evidence<
         AccountId,
@@ -245,6 +245,11 @@ pub mod pallet {
         /// 🆕 证据修改窗口（区块数，28800 ≈ 2天，按6秒/块计算）
         #[pallet::constant]
         type EvidenceEditWindow: Get<BlockNumberFor<Self>>;
+
+        /// 🆕 防膨胀: 归档记录 TTL（区块数，超过此值的归档记录将被清理）
+        /// 默认 2_592_000 ≈ 180天 (6s/block)
+        #[pallet::constant]
+        type ArchiveTtlBlocks: Get<u32>;
     }
 
     #[pallet::pallet]
@@ -296,7 +301,7 @@ pub mod pallet {
         StorageMap<_, Blake2_128Concat, ([u8; 8], u64), u32, ValueQuery>;
 
     /// 函数级中文注释：账户限频窗口存储（窗口起点与计数）。
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, Default)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, Default)]
     pub struct WindowInfo<BlockNumber> {
         pub window_start: BlockNumber,
         pub count: u32,
@@ -350,6 +355,11 @@ pub mod pallet {
         OptionQuery,
     >;
 
+    /// 🆕 VM1: 密钥轮换计数器（避免 iter_prefix O(N) 扫描）
+    #[pallet::storage]
+    pub type KeyRotationCounter<T: Config> =
+        StorageMap<_, Blake2_128Concat, u64, u32, ValueQuery>;
+
     // ==================== 存储膨胀防护：归档机制 ====================
 
     /// 归档证据存储（精简摘要，~50字节/条）
@@ -364,6 +374,10 @@ pub mod pallet {
     /// 归档统计
     #[pallet::storage]
     pub type ArchiveStats<T: Config> = StorageValue<_, ArchiveStatistics, ValueQuery>;
+
+    /// 🆕 防膨胀: 归档清理游标（记录已清理到的归档ID）
+    #[pallet::storage]
+    pub type ArchiveCleanupCursor<T: Config> = StorageValue<_, u64, ValueQuery>;
 
     // ==================== 证据追加链 ====================
 
@@ -384,7 +398,7 @@ pub mod pallet {
     >;
 
     /// 归档统计结构
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, Debug, Default)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, Debug, Default)]
     pub struct ArchiveStatistics {
         /// 已归档证据总数
         pub total_archived: u64,
@@ -397,7 +411,7 @@ pub mod pallet {
     // ==================== 🆕 待处理清单（2天修改窗口）====================
 
     /// 待处理清单状态
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, Debug, Default)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, Debug, Default)]
     pub enum ManifestStatus {
         /// 待处理（可修改）
         #[default]
@@ -411,7 +425,7 @@ pub mod pallet {
     }
 
     /// 待处理清单结构
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, Debug)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, Debug)]
     #[scale_info(skip_type_params(MaxCidLen, MaxMediaCount, MaxMemoLen))]
     pub struct PendingManifest<AccountId, BlockNumber, MaxCidLen: Get<u32>, MaxMediaCount: Get<u32>, MaxMemoLen: Get<u32>> {
         /// 证据ID
@@ -638,9 +652,9 @@ pub mod pallet {
             origin: OriginFor<T>,
             domain: u8,
             target_id: u64,
-            imgs: Vec<BoundedVec<u8, T::MaxCidLen>>,
-            vids: Vec<BoundedVec<u8, T::MaxCidLen>>,
-            docs: Vec<BoundedVec<u8, T::MaxCidLen>>,
+            imgs: BoundedVec<BoundedVec<u8, T::MaxCidLen>, T::MaxImg>,
+            vids: BoundedVec<BoundedVec<u8, T::MaxCidLen>, T::MaxVid>,
+            docs: BoundedVec<BoundedVec<u8, T::MaxCidLen>, T::MaxDoc>,
             _memo: Option<BoundedVec<u8, T::MaxMemoLen>>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
@@ -658,12 +672,13 @@ pub mod pallet {
                 cnt < T::MaxPerSubjectTarget::get(),
                 Error::<T>::TooManyForSubject
             );
+            // 🆕 V3: BoundedVec 已在 SCALE 解码层拦截超大载荷（MaxImg/MaxVid/MaxDoc）
             // 校验 CID（长度/格式/重复）与数量上限
             Self::validate_cid_vec(&imgs)?;
             Self::validate_cid_vec(&vids)?;
             Self::validate_cid_vec(&docs)?;
             // 可选全局去重
-            Self::ensure_global_cid_unique([&imgs, &vids, &docs])?;
+            Self::ensure_global_cid_unique([imgs.as_slice(), vids.as_slice(), docs.as_slice()])?;
             
             let id = NextEvidenceId::<T>::mutate(|n| {
                 let id = *n;
@@ -906,7 +921,7 @@ pub mod pallet {
 
         /// 注册用户公钥（用于加密密钥包）
         #[pallet::call_index(6)]
-        #[pallet::weight(10_000)] // TODO: 使用WeightInfo
+        #[pallet::weight(T::WeightInfo::register_public_key())]
         pub fn register_public_key(
             origin: OriginFor<T>,
             key_data: BoundedVec<u8, T::MaxKeyLen>,
@@ -954,7 +969,7 @@ pub mod pallet {
 
         /// 存储私密内容
         #[pallet::call_index(7)]
-        #[pallet::weight(10_000)] // TODO: 使用WeightInfo
+        #[pallet::weight(T::WeightInfo::store_private_content())]
         pub fn store_private_content(
             origin: OriginFor<T>,
             ns: [u8; 8],
@@ -1046,7 +1061,7 @@ pub mod pallet {
 
         /// 授予用户访问权限
         #[pallet::call_index(8)]
-        #[pallet::weight(10_000)] // TODO: 使用WeightInfo
+        #[pallet::weight(T::WeightInfo::grant_access())]
         pub fn grant_access(
             origin: OriginFor<T>,
             content_id: u64,
@@ -1103,7 +1118,7 @@ pub mod pallet {
 
         /// 撤销用户访问权限
         #[pallet::call_index(9)]
-        #[pallet::weight(10_000)] // TODO: 使用WeightInfo
+        #[pallet::weight(T::WeightInfo::revoke_access())]
         pub fn revoke_access(
             origin: OriginFor<T>,
             content_id: u64,
@@ -1138,7 +1153,7 @@ pub mod pallet {
 
         /// 轮换内容加密密钥
         #[pallet::call_index(10)]
-        #[pallet::weight(10_000)] // TODO: 使用WeightInfo
+        #[pallet::weight(T::WeightInfo::rotate_content_keys())]
         pub fn rotate_content_keys(
             origin: OriginFor<T>,
             content_id: u64,
@@ -1182,12 +1197,11 @@ pub mod pallet {
                 content.encrypted_keys = bounded_converted;
                 content.updated_at = <frame_system::Pallet<T>>::block_number();
 
-                // 记录轮换历史
-                let rotation_round = KeyRotationHistory::<T>::iter_prefix(content_id)
-                    .map(|(round, _)| round)
-                    .max()
-                    .unwrap_or(0)
-                    .saturating_add(1);
+                // 🆕 VM1修复: 使用计数器代替 O(N) iter_prefix 扫描
+                let rotation_round = KeyRotationCounter::<T>::mutate(content_id, |c| {
+                    *c = c.saturating_add(1);
+                    *c
+                });
 
                 let rotation_record = private_content::KeyRotationRecord {
                     content_id,
@@ -1227,9 +1241,9 @@ pub mod pallet {
         pub fn append_evidence(
             origin: OriginFor<T>,
             parent_id: u64,
-            imgs: Vec<BoundedVec<u8, T::MaxCidLen>>,
-            vids: Vec<BoundedVec<u8, T::MaxCidLen>>,
-            docs: Vec<BoundedVec<u8, T::MaxCidLen>>,
+            imgs: BoundedVec<BoundedVec<u8, T::MaxCidLen>, T::MaxImg>,
+            vids: BoundedVec<BoundedVec<u8, T::MaxCidLen>, T::MaxVid>,
+            docs: BoundedVec<BoundedVec<u8, T::MaxCidLen>, T::MaxDoc>,
             _memo: Option<BoundedVec<u8, T::MaxMemoLen>>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
@@ -1250,6 +1264,8 @@ pub mod pallet {
                 <T as Config>::Authorizer::is_authorized(ns, &who),
                 Error::<T>::NotAuthorized
             );
+
+            // 🆕 V3: BoundedVec 已在 SCALE 解码层拦截超大载荷（MaxImg/MaxVid/MaxDoc）
             
             // 4. 验证补充数量限制
             let children = EvidenceChildren::<T>::get(parent_id);
@@ -1351,9 +1367,9 @@ pub mod pallet {
         pub fn update_evidence_manifest(
             origin: OriginFor<T>,
             evidence_id: u64,
-            imgs: Vec<BoundedVec<u8, T::MaxCidLen>>,
-            vids: Vec<BoundedVec<u8, T::MaxCidLen>>,
-            docs: Vec<BoundedVec<u8, T::MaxCidLen>>,
+            imgs: BoundedVec<BoundedVec<u8, T::MaxCidLen>, T::MaxImg>,
+            vids: BoundedVec<BoundedVec<u8, T::MaxCidLen>, T::MaxVid>,
+            docs: BoundedVec<BoundedVec<u8, T::MaxCidLen>, T::MaxDoc>,
             memo: Option<BoundedVec<u8, T::MaxMemoLen>>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
@@ -1378,13 +1394,12 @@ pub mod pallet {
             Self::validate_cid_vec(&vids)?;
             Self::validate_cid_vec(&docs)?;
             
-            // 5. 转换媒体列表
-            let imgs_bounded: BoundedVec<BoundedVec<u8, T::MaxCidLen>, T::MaxImg> = 
-                imgs.try_into().map_err(|_| Error::<T>::TooManyImages)?;
+            // 5. 🆕 V3: BoundedVec 已在 SCALE 解码层拦截超大载荷，仅需转换类型以匹配 PendingManifest 存储
+            let imgs_bounded = imgs;
             let vids_bounded: BoundedVec<BoundedVec<u8, T::MaxCidLen>, T::MaxImg> = 
-                vids.try_into().map_err(|_| Error::<T>::TooManyVideos)?;
+                BoundedVec::try_from(vids.into_inner()).map_err(|_| Error::<T>::TooManyVideos)?;
             let docs_bounded: BoundedVec<BoundedVec<u8, T::MaxCidLen>, T::MaxImg> = 
-                docs.try_into().map_err(|_| Error::<T>::TooManyDocs)?;
+                BoundedVec::try_from(docs.into_inner()).map_err(|_| Error::<T>::TooManyDocs)?;
             
             // 6. 更新清单（保持原创建时间，不重置窗口）
             let updated = PendingManifest {
@@ -1597,7 +1612,7 @@ pub mod pallet {
         /// 函数级中文注释：校验一组 CID 的格式与去重要求。
         /// 规则：每个 CID 必须非空、符合IPFS格式规范；组内不得重复。
         /// 使用 nexus-media-common 的 IpfsHelper 进行规范验证。
-        fn validate_cid_vec(list: &Vec<BoundedVec<u8, T::MaxCidLen>>) -> Result<(), Error<T>> {
+        fn validate_cid_vec(list: &[BoundedVec<u8, T::MaxCidLen>]) -> Result<(), Error<T>> {
             let mut set: BTreeSet<Vec<u8>> = BTreeSet::new();
             for cid in list.iter() {
                 if cid.is_empty() {
@@ -1624,7 +1639,7 @@ pub mod pallet {
         /// 函数级中文注释：可选的全局 CID 去重检查（Plain 模式）。
         /// - EnableGlobalCidDedup=true 时，逐个 CID 计算 blake2_256 并查重；首次出现时在提交成功后写入索引。
         fn ensure_global_cid_unique(
-            list_groups: [&Vec<BoundedVec<u8, T::MaxCidLen>>; 3],
+            list_groups: [&[BoundedVec<u8, T::MaxCidLen>]; 3],
         ) -> Result<(), Error<T>> {
             if !T::EnableGlobalCidDedup::get() {
                 return Ok(());
@@ -1688,6 +1703,22 @@ pub mod pallet {
                         // 存储归档记录
                         ArchivedEvidences::<T>::insert(cursor, archived);
 
+                        // 🆕 VM2修复: 清理二级索引（防止存储泄漏）
+                        EvidenceByTarget::<T>::remove((evidence.domain, evidence.target_id), cursor);
+                        if let Some(ns) = &evidence.ns {
+                            EvidenceByNs::<T>::remove((*ns, evidence.target_id), cursor);
+                            EvidenceCountByNs::<T>::mutate((*ns, evidence.target_id), |c| {
+                                *c = c.saturating_sub(1);
+                            });
+                        }
+                        EvidenceCountByTarget::<T>::mutate(
+                            (evidence.domain, evidence.target_id), |c| {
+                                *c = c.saturating_sub(1);
+                            },
+                        );
+                        // 清理 CID 哈希索引
+                        CidHashIndex::<T>::remove(content_hash);
+
                         // 移除原始证据记录（释放存储）
                         Evidences::<T>::remove(cursor);
 
@@ -1713,21 +1744,61 @@ pub mod pallet {
             EvidenceArchiveCursor::<T>::put(cursor);
             archived_count
         }
+
+        /// 🆕 防膨胀: 清理过期归档记录
+        ///
+        /// 游标式: 从 ArchiveCleanupCursor 开始扫描 ArchivedEvidences,
+        /// 删除 archived_at + ArchiveTtlBlocks < current_block 的记录。
+        /// 每次最多清理 max_per_call 条。
+        fn cleanup_old_archives(current_block: u32, max_per_call: u32) -> u32 {
+            let ttl = T::ArchiveTtlBlocks::get();
+            if ttl == 0 {
+                return 0; // TTL=0 表示不清理
+            }
+            let mut cursor = ArchiveCleanupCursor::<T>::get();
+            let max_id = NextEvidenceId::<T>::get();
+            let mut cleaned = 0u32;
+
+            while cursor < max_id && cleaned < max_per_call {
+                if let Some(archived) = ArchivedEvidences::<T>::get(cursor) {
+                    if current_block.saturating_sub(archived.archived_at) > ttl {
+                        ArchivedEvidences::<T>::remove(cursor);
+                        cleaned += 1;
+                    } else {
+                        // 归档记录按时间单调递增, 遇到未过期的可以停止
+                        break;
+                    }
+                }
+                cursor = cursor.saturating_add(1);
+            }
+
+            ArchiveCleanupCursor::<T>::put(cursor);
+            cleaned
+        }
     }
 
     // ==================== 存储膨胀防护：Hooks 实现 ====================
 
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
-        /// 函数级中文注释：空闲时间归档旧证据
-        fn on_idle(_now: BlockNumberFor<T>, remaining_weight: Weight) -> Weight {
+        /// 函数级中文注释：空闲时间归档旧证据 + 清理过期归档
+        fn on_idle(now: BlockNumberFor<T>, remaining_weight: Weight) -> Weight {
             let mut weight_used = Weight::zero();
-            let base_weight = Weight::from_parts(15_000, 0);
+            // 🆕 V4修复: 每项归档涉及 Evidences(r) + ArchivedEvidences(w) + 二级索引清理(rw) ≈ 30M/项
+            let base_weight = Weight::from_parts(30_000_000, 2_500);
 
             // 确保有足够权重处理至少 1 条归档
             if remaining_weight.ref_time() > base_weight.ref_time() * 10 {
                 let archived = Self::archive_old_evidences(10);
                 weight_used = weight_used.saturating_add(base_weight.saturating_mul(archived as u64));
+            }
+
+            // 🆕 防膨胀: 清理过期归档记录
+            let remaining = remaining_weight.saturating_sub(weight_used);
+            if remaining.ref_time() > base_weight.ref_time() * 5 {
+                let current_block: u32 = now.saturated_into();
+                let cleaned = Self::cleanup_old_archives(current_block, 5);
+                weight_used = weight_used.saturating_add(base_weight.saturating_mul(cleaned as u64));
             }
 
             weight_used

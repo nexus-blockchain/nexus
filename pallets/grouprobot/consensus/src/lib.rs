@@ -127,6 +127,15 @@ pub mod pallet {
 		/// Enterprise 层级每 Era 费用
 		#[pallet::constant]
 		type EnterpriseFeePerEra: Get<BalanceOf<Self>>;
+		/// 🆕 防膨胀: ProcessedSequences 过期区块数 (超过此值的记录将被清理)
+		#[pallet::constant]
+		type SequenceTtlBlocks: Get<BlockNumberFor<Self>>;
+		/// 🆕 防膨胀: 每块最多清理的过期 Sequence 数
+		#[pallet::constant]
+		type MaxSequenceCleanupPerBlock: Get<u32>;
+		/// 🆕 防膨胀: EraRewards 保留窗口 (仅保留最近 N 个 Era 的奖励记录)
+		#[pallet::constant]
+		type MaxEraHistory: Get<u64>;
 	}
 
 	// ========================================================================
@@ -202,10 +211,20 @@ pub mod pallet {
 	#[pallet::storage]
 	pub type SgxEnclaveBonus<T: Config> = StorageValue<_, u32, ValueQuery>;
 
+	/// 节点→Bot 绑定: 记录节点通过哪个 Bot 的证明验证了 TEE 状态
+	#[pallet::storage]
+	pub type NodeBotBinding<T: Config> =
+		StorageMap<_, Blake2_128Concat, NodeId, BotIdHash>;
+
 	/// Era 奖励记录: era → EraRewardInfo
 	#[pallet::storage]
 	pub type EraRewards<T: Config> =
 		StorageMap<_, Blake2_128Concat, u64, EraRewardInfo<BalanceOf<T>>>;
+
+	/// 🆕 防膨胀: Era 奖励清理游标 (已清理到的 Era 编号)
+	/// NH4-fix: 重命名以匹配实际用途 (用于 EraRewards 而非 Sequences)
+	#[pallet::storage]
+	pub type EraCleanupCursor<T: Config> = StorageValue<_, u64, ValueQuery>;
 
 	// ========================================================================
 	// Events
@@ -220,6 +239,8 @@ pub mod pallet {
 		EquivocationReported { node_id: NodeId, reporter: T::AccountId, sequence: u64 },
 		NodeSlashed { node_id: NodeId, amount: BalanceOf<T> },
 		Subscribed { bot_id_hash: BotIdHash, tier: SubscriptionTier, owner: T::AccountId },
+		/// 订阅到期/暂停 → 降级为 Free
+		FreeTierFallback { bot_id_hash: BotIdHash },
 		SubscriptionDeposited { bot_id_hash: BotIdHash, amount: BalanceOf<T> },
 		SubscriptionCancelled { bot_id_hash: BotIdHash },
 		TierChanged { bot_id_hash: BotIdHash, old_tier: SubscriptionTier, new_tier: SubscriptionTier },
@@ -228,6 +249,7 @@ pub mod pallet {
 		SequenceDuplicate { bot_id_hash: BotIdHash, sequence: u64 },
 		NodeTeeStatusChanged { node_id: NodeId, is_tee: bool },
 		EraCompleted { era: u64, total_distributed: BalanceOf<T> },
+		TeeRewardParamsUpdated { tee_multiplier: u32, sgx_bonus: u32 },
 	}
 
 	// ========================================================================
@@ -274,8 +296,14 @@ pub mod pallet {
 		EquivocationAlreadyReported,
 		/// 序列已处理
 		SequenceAlreadyProcessed,
-		/// TEE 状态相同
-		SameTeeStatus,
+		/// Bot 所有者与节点操作者不匹配
+		BotOwnerMismatch,
+		/// TEE 证明无效或已过期
+		AttestationNotValid,
+		/// 节点已是 TEE 节点
+		AlreadyTeeVerified,
+		/// Free 层级无需订阅
+		CannotSubscribeFree,
 	}
 
 	// ========================================================================
@@ -285,22 +313,27 @@ pub mod pallet {
 	#[pallet::hooks]
 	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
 		fn on_initialize(n: BlockNumberFor<T>) -> Weight {
+			let mut weight = Weight::zero();
+
+			// 🆕 防膨胀: 清理过期 ProcessedSequences
+			weight = weight.saturating_add(Self::cleanup_expired_sequences(n));
+
 			let era_length = T::EraLength::get();
 			if era_length == BlockNumberFor::<T>::default() {
-				return Weight::zero();
+				return weight;
 			}
 
 			let era_start = EraStartBlock::<T>::get();
 			if era_start == BlockNumberFor::<T>::default() {
 				EraStartBlock::<T>::put(n);
-				return Weight::from_parts(5_000_000, 1_000);
+				return weight.saturating_add(Weight::from_parts(5_000_000, 1_000));
 			}
 
 			if n.saturating_sub(era_start) >= era_length {
 				Self::on_era_end(n);
-				Weight::from_parts(100_000_000, 20_000)
+				weight.saturating_add(Weight::from_parts(100_000_000, 20_000))
 			} else {
-				Weight::zero()
+				weight
 			}
 		}
 	}
@@ -459,11 +492,13 @@ pub mod pallet {
 			if let Some(node) = Nodes::<T>::get(&node_id) {
 				let slash_pct = T::SlashPercentage::get();
 				let slash_amount = node.stake * slash_pct.into() / 100u32.into();
-				let _ = T::Currency::slash_reserved(&node.operator, slash_amount);
+				// NH3-fix: 使用实际 slash 金额 (slash_reserved 可能只 slash 部分)
+				let (_, remaining) = T::Currency::slash_reserved(&node.operator, slash_amount);
+				let actual_slashed = slash_amount.saturating_sub(remaining);
 
 				Nodes::<T>::mutate(&node_id, |maybe_node| {
 					if let Some(n) = maybe_node {
-						n.stake = n.stake.saturating_sub(slash_amount);
+						n.stake = n.stake.saturating_sub(actual_slashed);
 						n.status = NodeStatus::Suspended;
 					}
 				});
@@ -472,7 +507,7 @@ pub mod pallet {
 					list.retain(|id| id != &node_id);
 				});
 
-				Self::deposit_event(Event::NodeSlashed { node_id, amount: slash_amount });
+				Self::deposit_event(Event::NodeSlashed { node_id, amount: actual_slashed });
 			}
 			Ok(())
 		}
@@ -487,6 +522,8 @@ pub mod pallet {
 			deposit: BalanceOf<T>,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
+			// Free 层级无需订阅 (默认即 Free)
+			ensure!(tier.is_paid(), Error::<T>::CannotSubscribeFree);
 			ensure!(T::BotRegistry::is_bot_active(&bot_id_hash), Error::<T>::BotNotRegistered);
 			ensure!(
 				T::BotRegistry::bot_owner(&bot_id_hash) == Some(who.clone()),
@@ -582,6 +619,8 @@ pub mod pallet {
 			new_tier: SubscriptionTier,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
+			// 不允许降级到 Free (应使用 cancel_subscription)
+			ensure!(new_tier.is_paid(), Error::<T>::CannotSubscribeFree);
 			Subscriptions::<T>::try_mutate(&bot_id_hash, |maybe_sub| -> DispatchResult {
 				let sub = maybe_sub.as_mut().ok_or(Error::<T>::SubscriptionNotFound)?;
 				ensure!(sub.owner == who, Error::<T>::NotBotOwner);
@@ -638,23 +677,59 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// 设置节点 TEE 状态
+		/// 验证节点 TEE 状态 (通过 Registry 证明验证)
+		///
+		/// 节点操作者必须同时是 Bot 所有者, 且 Bot 必须有有效的 TEE 证明。
+		/// 不接受自我声明, 仅信任 Registry 的证明记录。
 		#[pallet::call_index(11)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
-		pub fn set_node_tee_status(
+		#[pallet::weight(Weight::from_parts(40_000_000, 8_000))]
+		pub fn verify_node_tee(
 			origin: OriginFor<T>,
 			node_id: NodeId,
-			is_tee: bool,
+			bot_id_hash: BotIdHash,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
-			Nodes::<T>::try_mutate(&node_id, |maybe_node| -> DispatchResult {
-				let node = maybe_node.as_mut().ok_or(Error::<T>::NodeNotFound)?;
-				ensure!(node.operator == who, Error::<T>::NotOperator);
-				ensure!(node.is_tee_node != is_tee, Error::<T>::SameTeeStatus);
-				node.is_tee_node = is_tee;
-				Ok(())
-			})?;
-			Self::deposit_event(Event::NodeTeeStatusChanged { node_id, is_tee });
+			let node = Nodes::<T>::get(&node_id).ok_or(Error::<T>::NodeNotFound)?;
+			ensure!(node.operator == who, Error::<T>::NotOperator);
+			ensure!(!node.is_tee_node, Error::<T>::AlreadyTeeVerified);
+
+			// 验证 Bot 活跃且属于该操作者
+			ensure!(T::BotRegistry::is_bot_active(&bot_id_hash), Error::<T>::BotNotRegistered);
+			let bot_owner = T::BotRegistry::bot_owner(&bot_id_hash)
+				.ok_or(Error::<T>::BotNotRegistered)?;
+			ensure!(bot_owner == who, Error::<T>::BotOwnerMismatch);
+
+			// 验证 Bot 有有效的 TEE 证明 (Registry 的证明记录)
+			ensure!(T::BotRegistry::is_tee_node(&bot_id_hash), Error::<T>::AttestationNotValid);
+			ensure!(T::BotRegistry::is_attestation_fresh(&bot_id_hash), Error::<T>::AttestationNotValid);
+
+			// 设置 TEE 状态 + 绑定 Bot
+			Nodes::<T>::mutate(&node_id, |maybe_node| {
+				if let Some(n) = maybe_node {
+					n.is_tee_node = true;
+				}
+			});
+			NodeBotBinding::<T>::insert(&node_id, bot_id_hash);
+
+			Self::deposit_event(Event::NodeTeeStatusChanged { node_id, is_tee: true });
+			Ok(())
+		}
+
+		/// 治理设置 TEE 奖励参数
+		///
+		/// - `tee_multiplier`: TEE 节点奖励倍数 (basis points, 10000=1.0x, 15000=1.5x, 0=使用默认 1.0x)
+		/// - `sgx_bonus`: SGX 双证明额外奖励 (basis points, 叠加到 TEE 倍数上, 例如 2000=+0.2x)
+		#[pallet::call_index(12)]
+		#[pallet::weight(Weight::from_parts(10_000_000, 2_000))]
+		pub fn set_tee_reward_params(
+			origin: OriginFor<T>,
+			tee_multiplier: u32,
+			sgx_bonus: u32,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			TeeRewardMultiplier::<T>::put(tee_multiplier);
+			SgxEnclaveBonus::<T>::put(sgx_bonus);
+			Self::deposit_event(Event::TeeRewardParamsUpdated { tee_multiplier, sgx_bonus });
 			Ok(())
 		}
 	}
@@ -664,13 +739,88 @@ pub mod pallet {
 	// ========================================================================
 
 	impl<T: Config> Pallet<T> {
+		/// 🆕 防膨胀: 清理过期 ProcessedSequences
+		///
+		/// 游标式迭代: 每块最多清理 MaxSequenceCleanupPerBlock 条过期记录,
+		/// 避免单块计算量过大。过期标准: 记录的区块号 + SequenceTtlBlocks < 当前块。
+		///
+		/// NH1-fix: 扫描上限 = max_cleanup * 3, 防止全表 O(N) 迭代。
+		fn cleanup_expired_sequences(now: BlockNumberFor<T>) -> Weight {
+			let ttl = T::SequenceTtlBlocks::get();
+			let max_cleanup = T::MaxSequenceCleanupPerBlock::get();
+			let max_scan = max_cleanup.saturating_mul(3); // NH1-fix: 扫描上限
+			let mut cleaned = 0u32;
+			let mut scanned = 0u32;
+			let mut to_remove: alloc::vec::Vec<(BotIdHash, u64)> = alloc::vec::Vec::new();
+
+			for (bot_hash, seq, recorded_block) in ProcessedSequences::<T>::iter() {
+				scanned += 1;
+				if scanned > max_scan || cleaned >= max_cleanup {
+					break;
+				}
+				if now.saturating_sub(recorded_block) > ttl {
+					to_remove.push((bot_hash, seq));
+					cleaned += 1;
+				}
+			}
+
+			for (bot_hash, seq) in to_remove {
+				ProcessedSequences::<T>::remove(&bot_hash, seq);
+			}
+
+			// 1 read per scanned + 1 write per cleaned
+			Weight::from_parts(
+				5_000_000u64
+					.saturating_add(scanned as u64 * 5_000_000)
+					.saturating_add(cleaned as u64 * 10_000_000),
+				1_000u64
+					.saturating_add(scanned as u64 * 100)
+					.saturating_add(cleaned as u64 * 200),
+			)
+		}
+
+		/// 🆕 防膨胀: 清理过期 EraRewards
+		fn prune_old_era_rewards(current_era: u64) {
+			let max_history = T::MaxEraHistory::get();
+			if current_era <= max_history {
+				return;
+			}
+			let oldest_to_keep = current_era.saturating_sub(max_history);
+			// 只删一条最老的 (避免单块批量删除)
+			let cursor = EraCleanupCursor::<T>::get();
+			if cursor < oldest_to_keep {
+				let to_delete = cursor;
+				EraRewards::<T>::remove(to_delete);
+				EraCleanupCursor::<T>::put(to_delete.saturating_add(1));
+			}
+		}
+
 		/// 获取层级费用
 		pub fn tier_fee(tier: &SubscriptionTier) -> BalanceOf<T> {
 			match tier {
+				SubscriptionTier::Free => BalanceOf::<T>::zero(),
 				SubscriptionTier::Basic => T::BasicFeePerEra::get(),
 				SubscriptionTier::Pro => T::ProFeePerEra::get(),
 				SubscriptionTier::Enterprise => T::EnterpriseFeePerEra::get(),
 			}
+		}
+
+		/// 查询 Bot 的有效层级 (无订阅记录 = Free)
+		pub fn effective_tier(bot_id_hash: &BotIdHash) -> SubscriptionTier {
+			match Subscriptions::<T>::get(bot_id_hash) {
+				Some(sub) => match sub.status {
+					SubscriptionStatus::Active => sub.tier,
+					SubscriptionStatus::PastDue => sub.tier, // 宽限期内保持
+					// Suspended / Cancelled → 降级 Free
+					_ => SubscriptionTier::Free,
+				},
+				None => SubscriptionTier::Free,
+			}
+		}
+
+		/// 查询 Bot 的功能限制
+		pub fn effective_feature_gate(bot_id_hash: &BotIdHash) -> TierFeatureGate {
+			Self::effective_tier(bot_id_hash).feature_gate()
 		}
 
 		/// Era 结束处理
@@ -699,13 +849,16 @@ pub mod pallet {
 					T::Currency::unreserve(&sub.owner, sub.fee_per_era);
 					subscription_income = subscription_income.saturating_add(sub.fee_per_era);
 				} else {
-					// 余额不足 → PastDue
-					Subscriptions::<T>::mutate(&sub.bot_id_hash, |maybe_sub| {
+					// 余额不足 → PastDue → Suspended (降级 Free)
+					let bot_hash = sub.bot_id_hash;
+					Subscriptions::<T>::mutate(&bot_hash, |maybe_sub| {
 						if let Some(s) = maybe_sub {
 							if s.status == SubscriptionStatus::Active {
 								s.status = SubscriptionStatus::PastDue;
 							} else if s.status == SubscriptionStatus::PastDue {
 								s.status = SubscriptionStatus::Suspended;
+								// P4: 降级为 Free, 发出事件通知 Bot
+								Self::deposit_event(Event::FreeTierFallback { bot_id_hash: bot_hash });
 							}
 						}
 					});
@@ -722,13 +875,38 @@ pub mod pallet {
 			// 4. 可分配总额
 			let total_pool = node_share.saturating_add(inflation);
 
-			// 5. 按权重分配
+			// 5. 检查 TEE 证明有效性, 过期则降级
+			for node_id in active_nodes.iter() {
+				if let Some(node) = Nodes::<T>::get(node_id) {
+					if node.is_tee_node {
+						let still_valid = NodeBotBinding::<T>::get(node_id)
+							.map(|bot_hash| {
+								T::BotRegistry::is_tee_node(&bot_hash)
+									&& T::BotRegistry::is_attestation_fresh(&bot_hash)
+							})
+							.unwrap_or(false);
+						if !still_valid {
+							Nodes::<T>::mutate(node_id, |maybe_node| {
+								if let Some(n) = maybe_node {
+									n.is_tee_node = false;
+								}
+							});
+							NodeBotBinding::<T>::remove(node_id);
+							Self::deposit_event(Event::NodeTeeStatusChanged {
+								node_id: *node_id, is_tee: false,
+							});
+						}
+					}
+				}
+			}
+
+			// 6. 按权重分配 (非 TEE 节点权重为 0)
 			let mut total_weight: u128 = 0;
 			let mut weights: alloc::vec::Vec<(NodeId, u128)> = alloc::vec::Vec::new();
 
 			for node_id in active_nodes.iter() {
 				if let Some(node) = Nodes::<T>::get(node_id) {
-					let w = Self::compute_node_weight(&node);
+					let w = Self::compute_node_weight(&node, node_id);
 					total_weight = total_weight.saturating_add(w);
 					weights.push((*node_id, w));
 				}
@@ -762,21 +940,35 @@ pub mod pallet {
 			CurrentEra::<T>::put(era.saturating_add(1));
 			EraStartBlock::<T>::put(now);
 
+			// 🆕 防膨胀: 清理过期 EraRewards
+			Self::prune_old_era_rewards(era);
+
 			Self::deposit_event(Event::EraCompleted { era, total_distributed });
 		}
 
-		/// 计算节点权重
-		fn compute_node_weight(node: &ProjectNode<T>) -> u128 {
-			let base = (node.reputation as u128).saturating_mul(100); // 简化: rep * 100
+		/// 计算节点权重 (非 TEE 节点返回 0, 不参与 Era 奖励分配)
+		///
+		/// TEE 节点: base × tee_factor / 10000
+		/// SGX 双证明节点: base × (tee_factor + sgx_bonus) / 10000
+		fn compute_node_weight(node: &ProjectNode<T>, node_id: &NodeId) -> u128 {
+			if !node.is_tee_node {
+				return 0u128;
+			}
+			let base = (node.reputation as u128).saturating_mul(100);
 
-			let tee_factor = if node.is_tee_node {
-				let multiplier = TeeRewardMultiplier::<T>::get();
-				if multiplier == 0 { 10_000u128 } else { multiplier as u128 }
-			} else {
-				10_000u128
+			let tee_multiplier = {
+				let m = TeeRewardMultiplier::<T>::get();
+				if m == 0 { 10_000u128 } else { m as u128 }
 			};
 
-			base.saturating_mul(tee_factor) / 10_000
+			// 查询绑定 Bot 是否有 SGX 双证明
+			let sgx_bonus = NodeBotBinding::<T>::get(node_id)
+				.filter(|bot_hash| T::BotRegistry::has_dual_attestation(bot_hash))
+				.map(|_| SgxEnclaveBonus::<T>::get() as u128)
+				.unwrap_or(0u128);
+
+			let total_factor = tee_multiplier.saturating_add(sgx_bonus);
+			base.saturating_mul(total_factor) / 10_000
 		}
 
 		/// 查询序列是否已处理

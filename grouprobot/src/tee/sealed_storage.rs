@@ -2,8 +2,6 @@ use std::path::PathBuf;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use aes_gcm::aead::Aead;
 use sha2::{Sha256, Digest};
-use tracing::warn;
-
 use crate::error::{BotError, BotResult};
 
 /// AES-256-GCM 密封存储
@@ -17,25 +15,25 @@ pub struct SealedStorage {
 }
 
 impl SealedStorage {
-    pub fn new(data_dir: &str) -> Self {
+    pub fn new(data_dir: &str) -> Result<Self, BotError> {
         let is_hardware = std::path::Path::new("/dev/attestation/quote").exists();
         let key = if is_hardware {
-            Self::derive_hardware_key()
+            Self::derive_hardware_key()?
         } else {
             Self::derive_software_key()
         };
         let cipher = Aes256Gcm::new(&key.into());
-        Self {
+        Ok(Self {
             data_dir: PathBuf::from(data_dir),
             cipher,
-        }
+        })
     }
 
     /// Hardware 模式: 从 TDX/SGX 硬件密钥派生
     ///
     /// 使用 Gramine 暴露的 SGX seal key (/dev/attestation/keys/_sgx_mrenclave)
     /// 此密钥由 CPU 微码绑定到 MRENCLAVE, 修改代码后密钥不同 → 无法解密旧数据
-    fn derive_hardware_key() -> [u8; 32] {
+    fn derive_hardware_key() -> Result<[u8; 32], BotError> {
         // 优先: Gramine SGX MRENCLAVE-bound seal key
         if let Ok(hw_key) = std::fs::read("/dev/attestation/keys/_sgx_mrenclave") {
             if hw_key.len() >= 16 {
@@ -45,7 +43,7 @@ impl SealedStorage {
                 let result = hasher.finalize();
                 let mut key = [0u8; 32];
                 key.copy_from_slice(&result);
-                return key;
+                return Ok(key);
             }
         }
         // 回退: 从 TDX quote 的 MRTD 派生
@@ -57,11 +55,12 @@ impl SealedStorage {
                 let result = hasher.finalize();
                 let mut key = [0u8; 32];
                 key.copy_from_slice(&result);
-                return key;
+                return Ok(key);
             }
         }
-        warn!("⚠️ 硬件密钥读取失败, 回退到软件模式密钥派生");
-        Self::derive_software_key()
+        Err(BotError::EnclaveError(
+            "硬件密钥读取失败: 无法从 SGX seal key 或 TDX MRTD 派生, 拒绝降级到软件模式".into(),
+        ))
     }
 
     /// Software 模式: 从机器标识派生密钥 (⚠️ 不安全, 仅开发/测试)
@@ -100,6 +99,15 @@ impl SealedStorage {
 
         std::fs::write(&path, &output)
             .map_err(|e| BotError::EnclaveError(format!("seal write failed: {}", e)))?;
+
+        // 强制设置文件权限为 0600 (仅 owner 可读写), 防止同机其他用户读取
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(&path, perms)
+                .map_err(|e| BotError::EnclaveError(format!("seal chmod failed: {}", e)))?;
+        }
 
         Ok(())
     }
@@ -143,7 +151,7 @@ mod tests {
     #[test]
     fn seal_unseal_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = SealedStorage::new(dir.path().to_str().unwrap());
+        let storage = SealedStorage::new(dir.path().to_str().unwrap()).unwrap();
 
         let data = b"hello sealed world";
         storage.seal("test.sealed", data).unwrap();
@@ -154,14 +162,14 @@ mod tests {
     #[test]
     fn unseal_nonexistent_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = SealedStorage::new(dir.path().to_str().unwrap());
+        let storage = SealedStorage::new(dir.path().to_str().unwrap()).unwrap();
         assert!(storage.unseal("nonexistent").is_err());
     }
 
     #[test]
     fn exists_check() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = SealedStorage::new(dir.path().to_str().unwrap());
+        let storage = SealedStorage::new(dir.path().to_str().unwrap()).unwrap();
         assert!(!storage.exists("foo"));
         storage.seal("foo", b"bar").unwrap();
         assert!(storage.exists("foo"));
@@ -170,7 +178,7 @@ mod tests {
     #[test]
     fn different_data_different_ciphertext() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = SealedStorage::new(dir.path().to_str().unwrap());
+        let storage = SealedStorage::new(dir.path().to_str().unwrap()).unwrap();
         storage.seal("a.sealed", b"aaa").unwrap();
         storage.seal("b.sealed", b"bbb").unwrap();
         let a = std::fs::read(dir.path().join("a.sealed")).unwrap();

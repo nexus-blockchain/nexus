@@ -20,6 +20,8 @@ log = { workspace = true }
 pallet-entity-common = { workspace = true }
 pallet-entity-registry = { workspace = true }
 pallet-entity-token = { workspace = true }
+pallet-trading-trc20-verifier = { workspace = true }
+pallet-trading-common = { workspace = true }
 
 [dev-dependencies]
 sp-core = { workspace = true }
@@ -42,6 +44,8 @@ std = [
 	"pallet-entity-common/std",
 	"pallet-entity-registry/std",
 	"pallet-entity-token/std",
+	"pallet-trading-trc20-verifier/std",
+	"pallet-trading-common/std",
 	"pallet-balances/std",
 	"pallet-assets/std",
 ]

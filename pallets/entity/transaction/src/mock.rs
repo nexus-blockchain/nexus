@@ -38,6 +38,7 @@ use std::collections::HashMap;
 
 thread_local! {
     static ESCROW_BALANCES: RefCell<HashMap<u64, u64>> = RefCell::new(HashMap::new());
+    static ESCROW_STATES: RefCell<HashMap<u64, u8>> = RefCell::new(HashMap::new());
 }
 
 impl pallet_escrow::pallet::Escrow<u64, u64> for MockEscrow {
@@ -93,6 +94,16 @@ impl pallet_escrow::pallet::Escrow<u64, u64> for MockEscrow {
     }
 
     fn split_partial(_id: u64, _release_to: &u64, _refund_to: &u64, _bps: u16) -> sp_runtime::DispatchResult {
+        Ok(())
+    }
+
+    fn set_disputed(id: u64) -> sp_runtime::DispatchResult {
+        ESCROW_STATES.with(|s| s.borrow_mut().insert(id, 1));
+        Ok(())
+    }
+
+    fn set_resolved(id: u64) -> sp_runtime::DispatchResult {
+        ESCROW_STATES.with(|s| s.borrow_mut().insert(id, 0));
         Ok(())
     }
 }
@@ -456,6 +467,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         crate::NextOrderId::<Test>::put(1);
         // 清理 thread_local 状态
         ESCROW_BALANCES.with(|b| b.borrow_mut().clear());
+        ESCROW_STATES.with(|s| s.borrow_mut().clear());
         PRODUCT_STOCK.with(|s| s.borrow_mut().clear());
         CANCELLED_ORDERS.with(|c| c.borrow_mut().clear());
     });

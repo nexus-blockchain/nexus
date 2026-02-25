@@ -68,6 +68,20 @@ pub const TDX_REPORTDATA_LEN: usize = 64;
 /// 最小 TDX Quote 长度: Header(48) + TD Quote Body(584) = 632
 pub const TDX_MIN_QUOTE_LEN: usize = TDX_REPORTDATA_OFFSET + TDX_REPORTDATA_LEN;
 
+/// Peer 端点信息 (用于节点发现)
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, RuntimeDebug, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
+#[scale_info(skip_type_params(T))]
+pub struct PeerEndpoint<T: Config> {
+	/// Peer 公钥 (Ed25519, 32 bytes)
+	pub public_key: [u8; 32],
+	/// 端点 URL (例如 https://node-b:8443)
+	pub endpoint: BoundedVec<u8, T::MaxEndpointLen>,
+	/// 注册区块
+	pub registered_at: BlockNumberFor<T>,
+	/// 最后心跳区块
+	pub last_seen: BlockNumberFor<T>,
+}
+
 /// TEE 证明记录
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, RuntimeDebug, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
 #[scale_info(skip_type_params(T))]
@@ -88,6 +102,31 @@ pub struct AttestationRecord<T: Config> {
 	/// API Server MRTD (双 Quote 证明, 可选)
 	pub api_server_mrtd: Option<[u8; 48]>,
 	/// API Server Quote 哈希 (双 Quote 证明, 可选)
+	pub api_server_quote_hash: Option<[u8; 32]>,
+}
+
+/// TEE 证明记录 V2 (三模式统一)
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, RuntimeDebug, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
+#[scale_info(skip_type_params(T))]
+pub struct AttestationRecordV2<T: Config> {
+	pub bot_id_hash: BotIdHash,
+	/// 主 Quote hash (TDX v4 或 SGX v3)
+	pub primary_quote_hash: [u8; 32],
+	/// 补充 Quote hash (TDX+SGX 双证明时的第二个 Quote)
+	pub secondary_quote_hash: Option<[u8; 32]>,
+	/// 统一度量值: MRTD(48B) 或 MRENCLAVE(32B + 16B zero-pad)
+	pub primary_measurement: [u8; 48],
+	/// SGX MRENCLAVE (原始 32B)
+	pub mrenclave: Option<[u8; 32]>,
+	/// TEE 类型
+	pub tee_type: TeeType,
+	pub attester: T::AccountId,
+	pub attested_at: BlockNumberFor<T>,
+	pub expires_at: BlockNumberFor<T>,
+	pub is_dual_attestation: bool,
+	pub quote_verified: bool,
+	pub dcap_level: u8,
+	pub api_server_mrtd: Option<[u8; 48]>,
 	pub api_server_quote_hash: Option<[u8; 32]>,
 }
 
@@ -119,6 +158,15 @@ pub mod pallet {
 		/// TDX Quote 最大字节长度
 		#[pallet::constant]
 		type MaxQuoteLen: Get<u32>;
+		/// 单个 Bot 最大 Peer 数
+		#[pallet::constant]
+		type MaxPeersPerBot: Get<u32>;
+		/// Peer 端点 URL 最大长度
+		#[pallet::constant]
+		type MaxEndpointLen: Get<u32>;
+		/// Peer 心跳过期阈值 (区块数), 超过此时间未心跳则自动移除
+		#[pallet::constant]
+		type PeerHeartbeatTimeout: Get<BlockNumberFor<Self>>;
 	}
 
 	// ========================================================================
@@ -183,6 +231,19 @@ pub mod pallet {
 	pub type RegisteredPckKeys<T: Config> =
 		StorageMap<_, Blake2_128Concat, [u8; 32], ([u8; 64], BlockNumberFor<T>)>;
 
+	/// Peer 注册表: bot_id_hash → Vec<PeerEndpoint>
+	/// 同一 Bot 的所有 TEE 节点端点, 用于节点发现和 share recovery
+	#[pallet::storage]
+	pub type PeerRegistry<T: Config> = StorageMap<
+		_, Blake2_128Concat, BotIdHash,
+		BoundedVec<PeerEndpoint<T>, T::MaxPeersPerBot>, ValueQuery,
+	>;
+
+	/// TEE 证明记录 V2 (三模式统一): bot_id_hash → AttestationRecordV2
+	#[pallet::storage]
+	pub type AttestationsV2<T: Config> =
+		StorageMap<_, Blake2_128Concat, BotIdHash, AttestationRecordV2<T>>;
+
 	// ========================================================================
 	// Events
 	// ========================================================================
@@ -208,6 +269,12 @@ pub mod pallet {
 		ApiServerMrtdApproved { mrtd: [u8; 48], version: u32 },
 		PckKeyRegistered { platform_id: [u8; 32] },
 		DcapAttestationSubmitted { bot_id_hash: BotIdHash, dcap_level: u8, has_api_server: bool },
+		PeerRegistered { bot_id_hash: BotIdHash, public_key: [u8; 32], peer_count: u32 },
+		PeerDeregistered { bot_id_hash: BotIdHash, public_key: [u8; 32], peer_count: u32 },
+		PeerHeartbeat { bot_id_hash: BotIdHash, public_key: [u8; 32] },
+		PeerExpired { bot_id_hash: BotIdHash, public_key: [u8; 32], peer_count: u32 },
+		SgxAttestationSubmitted { bot_id_hash: BotIdHash, sgx_dcap_level: u8 },
+		TeeAttestationSubmitted { bot_id_hash: BotIdHash, tee_type: TeeType, dcap_level: u8 },
 	}
 
 	// ========================================================================
@@ -246,10 +313,7 @@ pub mod pallet {
 		MrenclaveAlreadyApproved,
 		/// 公钥不能与旧公钥相同
 		SamePublicKey,
-		/// Bot 已暂停
-		BotAlreadySuspended,
-		/// Bot 未暂停
-		BotNotSuspended,
+		// R1-fix: BotAlreadySuspended, BotNotSuspended 已移除 (无 extrinsic 使用)
 		/// TDX Quote 太短 (无法解析)
 		QuoteTooShort,
 		/// Quote 中 report_data 与 Bot 公钥不匹配 (代码可能被篡改)
@@ -282,6 +346,14 @@ pub mod pallet {
 		DcapRootCaVerificationFailed,
 		/// Intermediate CA 签名 PCK 证书验证失败
 		DcapIntermediateCaVerificationFailed,
+		/// Peer 已注册 (相同公钥)
+		PeerAlreadyRegistered,
+		/// Peer 不存在
+		PeerNotFound,
+		/// Peer 数量已满
+		MaxPeersReached,
+		/// 端点 URL 为空
+		EndpointEmpty,
 	}
 
 	// ========================================================================
@@ -323,6 +395,62 @@ pub mod pallet {
 				reads += 1;
 
 				Self::deposit_event(Event::AttestationExpired { bot_id_hash });
+			}
+
+			// ── AttestationsV2 过期清理 ──
+			let mut expired_v2: alloc::vec::Vec<BotIdHash> = alloc::vec::Vec::new();
+			for (bot_id_hash, record) in AttestationsV2::<T>::iter() {
+				reads += 1;
+				if n >= record.expires_at {
+					expired_v2.push(bot_id_hash);
+				}
+			}
+			for bot_id_hash in expired_v2 {
+				AttestationsV2::<T>::remove(&bot_id_hash);
+				writes += 1;
+
+				Bots::<T>::mutate(&bot_id_hash, |maybe_bot| {
+					if let Some(bot) = maybe_bot {
+						bot.node_type = NodeType::StandardNode;
+						writes += 1;
+					}
+				});
+				reads += 1;
+
+				Self::deposit_event(Event::AttestationExpired { bot_id_hash });
+			}
+
+			// ── Peer 心跳过期清理 ──
+			let peer_timeout = T::PeerHeartbeatTimeout::get();
+			if peer_timeout > BlockNumberFor::<T>::default() {
+				let mut stale: alloc::vec::Vec<(BotIdHash, alloc::vec::Vec<[u8; 32]>)> = alloc::vec::Vec::new();
+				for (bot_id_hash, peers) in PeerRegistry::<T>::iter() {
+					reads += 1;
+					let expired_pks: alloc::vec::Vec<[u8; 32]> = peers.iter()
+						.filter(|p| n.saturating_sub(p.last_seen) > peer_timeout)
+						.map(|p| p.public_key)
+						.collect();
+					if !expired_pks.is_empty() {
+						stale.push((bot_id_hash, expired_pks));
+					}
+				}
+
+				for (bot_id_hash, expired_pks) in stale {
+					PeerRegistry::<T>::mutate(&bot_id_hash, |peers| {
+						for pk in &expired_pks {
+							if let Some(idx) = peers.iter().position(|p| &p.public_key == pk) {
+								peers.swap_remove(idx);
+								writes += 1;
+								Self::deposit_event(Event::PeerExpired {
+									bot_id_hash,
+									public_key: *pk,
+									peer_count: peers.len() as u32,
+								});
+							}
+						}
+					});
+					reads += 1;
+				}
 			}
 
 			Weight::from_parts(
@@ -1139,6 +1267,292 @@ pub mod pallet {
 			});
 			Ok(())
 		}
+
+		/// 提交 SGX Enclave DCAP 证明 (补充现有 TDX 证明)
+		///
+		/// 要求: Bot 必须已有有效的 TDX 证明 (AttestationRecord)。
+		/// 此 extrinsic 验证 SGX Quote v3 并将 MRENCLAVE 写入现有证明记录,
+		/// 使 `is_dual_attestation = true`, 从而获得 `SgxEnclaveBonus` 奖励。
+		///
+		/// 验证内容:
+		/// 1. SGX Quote v3 结构解析 + ECDSA 签名验证 (Level 2+)
+		/// 2. report_data[0..32] == SHA256(bot.public_key)
+		/// 3. MRENCLAVE 在 ApprovedMrenclave 白名单中
+		/// 4. 可选: PCK 签名验证 (Level 3) 或证书链验证 (Level 4)
+		#[pallet::call_index(20)]
+		#[pallet::weight(Weight::from_parts(250_000_000, 35_000))]
+		pub fn submit_sgx_attestation(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			sgx_quote_raw: BoundedVec<u8, T::MaxQuoteLen>,
+			platform_id: Option<[u8; 32]>,
+			pck_cert_der: Option<BoundedVec<u8, T::MaxQuoteLen>>,
+			intermediate_cert_der: Option<BoundedVec<u8, T::MaxQuoteLen>>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
+			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+			ensure!(bot.status == BotStatus::Active, Error::<T>::BotNotActive);
+
+			// 必须已有 TDX 证明
+			let mut record = Attestations::<T>::get(&bot_id_hash)
+				.ok_or(Error::<T>::AttestationNotFound)?;
+
+			let quote = sgx_quote_raw.as_slice();
+
+			// ── SGX DCAP 验证 ──
+			let (sgx_result, sgx_dcap_level) = if let (Some(ref pck_der), Some(ref inter_der)) =
+				(&pck_cert_der, &intermediate_cert_der)
+			{
+				// Level 4: 证书链验证
+				let result = dcap::verify_sgx_quote_with_cert_chain(
+					quote,
+					pck_der.as_slice(),
+					inter_der.as_slice(),
+				)
+				.map_err(|e| Self::dcap_error_to_dispatch(e))?;
+				(result, 4u8)
+			} else if let Some(ref pid) = platform_id {
+				// Level 3: PCK 公钥验证
+				let (pck_key, _) = RegisteredPckKeys::<T>::get(pid)
+					.ok_or(Error::<T>::PckKeyNotRegistered)?;
+				let result = dcap::verify_sgx_quote_level3(quote, &pck_key)
+					.map_err(|e| Self::dcap_error_to_dispatch(e))?;
+				(result, 3u8)
+			} else {
+				// Level 2: Body 签名 + AK 绑定
+				let result = dcap::verify_sgx_quote_level2(quote)
+					.map_err(|e| Self::dcap_error_to_dispatch(e))?;
+				(result, 2u8)
+			};
+
+			let mrenclave = sgx_result.mrenclave;
+			let sgx_report_data = sgx_result.report_data;
+
+			// ── report_data[0..32] == SHA256(bot.public_key) ──
+			let expected_hash = sp_core::hashing::sha2_256(&bot.public_key);
+			ensure!(sgx_report_data[..32] == expected_hash[..], Error::<T>::QuoteReportDataMismatch);
+
+			// ── MRENCLAVE 白名单检查 ──
+			ensure!(ApprovedMrenclave::<T>::contains_key(&mrenclave), Error::<T>::MrenclaveNotApproved);
+
+			// ── 更新现有 AttestationRecord ──
+			let sgx_quote_hash = sp_core::hashing::blake2_256(quote);
+			record.mrenclave = Some(mrenclave);
+			record.sgx_quote_hash = Some(sgx_quote_hash);
+			record.is_dual_attestation = true;
+			Attestations::<T>::insert(&bot_id_hash, record);
+
+			// ── 更新 BotInfo.node_type 的 mrenclave + sgx_attested_at ──
+			let now = frame_system::Pallet::<T>::block_number();
+			let now_u64: u64 = now.unique_saturated_into();
+			Bots::<T>::mutate(&bot_id_hash, |maybe_bot| {
+				if let Some(bot) = maybe_bot {
+					if let NodeType::TeeNode { ref mrtd, mrenclave: _, tdx_attested_at, sgx_attested_at: _, expires_at } = bot.node_type {
+						bot.node_type = NodeType::TeeNode {
+							mrtd: *mrtd,
+							mrenclave: Some(mrenclave),
+							tdx_attested_at,
+							sgx_attested_at: Some(now_u64),
+							expires_at,
+						};
+					}
+				}
+			});
+
+			Self::deposit_event(Event::SgxAttestationSubmitted { bot_id_hash, sgx_dcap_level });
+			Ok(())
+		}
+
+		/// 提交 TEE 证明 (SGX v3 / TDX v4 自动检测, 三模式统一入口)
+		///
+		/// 自动检测 Quote 类型 (version 字段):
+		/// - version=3 → SGX Quote v3 → 提取 MRENCLAVE
+		/// - version=4 → TDX Quote v4 → 提取 MRTD
+		///
+		/// DCAP 验证级别:
+		/// - 无 platform_id, 无 certs → Level 2 (Body sig + AK binding)
+		/// - 有 platform_id          → Level 3 (+ QE Report sig via PCK)
+		/// - 有 certs                → Level 4 (+ Intel Root CA cert chain)
+		#[pallet::call_index(21)]
+		#[pallet::weight(Weight::from_parts(250_000_000, 40_000))]
+		pub fn submit_tee_attestation(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			quote_raw: BoundedVec<u8, T::MaxQuoteLen>,
+			platform_id: Option<[u8; 32]>,
+			pck_cert_der: Option<BoundedVec<u8, T::MaxQuoteLen>>,
+			intermediate_cert_der: Option<BoundedVec<u8, T::MaxQuoteLen>>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let mut bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
+			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+			ensure!(bot.status == BotStatus::Active, Error::<T>::BotNotActive);
+
+			let quote = quote_raw.as_slice();
+			ensure!(quote.len() >= 48, Error::<T>::QuoteTooShort);
+
+			// ── Step 1: 自动检测 Quote 类型 ──
+			let version = u16::from_le_bytes([quote[0], quote[1]]);
+			let (tee_type, primary_measurement, mrenclave, report_data, dcap_level, quote_verified)
+				= match version {
+				4 => Self::verify_tdx_quote_unified(quote, &platform_id, &pck_cert_der, &intermediate_cert_der)?,
+				3 => Self::verify_sgx_quote_unified(quote, &platform_id, &pck_cert_der, &intermediate_cert_der)?,
+				_ => return Err(Error::<T>::DcapQuoteInvalid.into()),
+			};
+
+			// ── Step 2: report_data binding ──
+			let expected_hash = sp_core::hashing::sha2_256(&bot.public_key);
+			ensure!(report_data[..32] == expected_hash[..], Error::<T>::QuoteReportDataMismatch);
+
+			// ── Step 3: Nonce 验证 (防重放) ──
+			let now = frame_system::Pallet::<T>::block_number();
+			let (stored_nonce, issued_at) = AttestationNonces::<T>::get(&bot_id_hash)
+				.ok_or(Error::<T>::NonceMissing)?;
+			let nonce_deadline = issued_at.saturating_add(T::AttestationValidityBlocks::get());
+			ensure!(now <= nonce_deadline, Error::<T>::NonceExpired);
+			ensure!(report_data[32..64] == stored_nonce[..], Error::<T>::NonceMismatch);
+			AttestationNonces::<T>::remove(&bot_id_hash);
+
+			// ── Step 4: 白名单检查 ──
+			Self::check_measurement_approved(&tee_type, &primary_measurement, &mrenclave)?;
+
+			// ── Step 5: 写入 AttestationRecordV2 ──
+			let quote_hash = sp_core::hashing::blake2_256(quote);
+			let expires_at = now.saturating_add(T::AttestationValidityBlocks::get());
+
+			let record = AttestationRecordV2::<T> {
+				bot_id_hash,
+				primary_quote_hash: quote_hash,
+				secondary_quote_hash: None,
+				primary_measurement,
+				mrenclave,
+				tee_type,
+				attester: who,
+				attested_at: now,
+				expires_at,
+				is_dual_attestation: matches!(tee_type, TeeType::TdxPlusSgx),
+				quote_verified,
+				dcap_level,
+				api_server_mrtd: None,
+				api_server_quote_hash: None,
+			};
+			AttestationsV2::<T>::insert(&bot_id_hash, record);
+
+			// ── Step 6: 更新 NodeType → TeeNodeV2 ──
+			let now_u64: u64 = now.unique_saturated_into();
+			let expires_u64: u64 = expires_at.unique_saturated_into();
+			bot.node_type = NodeType::TeeNodeV2 {
+				primary_measurement,
+				tee_type,
+				mrenclave,
+				attested_at: now_u64,
+				sgx_attested_at: None,
+				expires_at: expires_u64,
+			};
+			Bots::<T>::insert(&bot_id_hash, bot);
+
+			Self::deposit_event(Event::TeeAttestationSubmitted {
+				bot_id_hash,
+				tee_type,
+				dcap_level,
+			});
+			Ok(())
+		}
+
+		/// 注册 Peer 端点 (TEE 节点启动时调用)
+		///
+		/// 将本节点的公钥和端点 URL 注册到链上, 供其他节点发现。
+		/// 调用者必须是 Bot 所有者, Bot 必须已有 TEE 证明。
+		#[pallet::call_index(17)]
+		#[pallet::weight(Weight::from_parts(40_000_000, 8_000))]
+		pub fn register_peer(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			peer_public_key: [u8; 32],
+			endpoint: BoundedVec<u8, T::MaxEndpointLen>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
+			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+			ensure!(bot.status == BotStatus::Active, Error::<T>::BotNotActive);
+			ensure!(!endpoint.is_empty(), Error::<T>::EndpointEmpty);
+
+			PeerRegistry::<T>::try_mutate(&bot_id_hash, |peers| -> DispatchResult {
+				// 检查是否已注册 (相同公钥)
+				ensure!(
+					!peers.iter().any(|p| p.public_key == peer_public_key),
+					Error::<T>::PeerAlreadyRegistered
+				);
+
+				let now = frame_system::Pallet::<T>::block_number();
+				let peer = PeerEndpoint::<T> {
+					public_key: peer_public_key,
+					endpoint,
+					registered_at: now,
+					last_seen: now,
+				};
+				peers.try_push(peer).map_err(|_| Error::<T>::MaxPeersReached)?;
+
+				Self::deposit_event(Event::PeerRegistered {
+					bot_id_hash,
+					public_key: peer_public_key,
+					peer_count: peers.len() as u32,
+				});
+				Ok(())
+			})
+		}
+
+		/// 注销 Peer 端点 (节点下线时调用)
+		#[pallet::call_index(18)]
+		#[pallet::weight(Weight::from_parts(35_000_000, 6_000))]
+		pub fn deregister_peer(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			peer_public_key: [u8; 32],
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
+			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+
+			PeerRegistry::<T>::try_mutate(&bot_id_hash, |peers| -> DispatchResult {
+				let idx = peers.iter().position(|p| p.public_key == peer_public_key)
+					.ok_or(Error::<T>::PeerNotFound)?;
+				peers.swap_remove(idx);
+
+				Self::deposit_event(Event::PeerDeregistered {
+					bot_id_hash,
+					public_key: peer_public_key,
+					peer_count: peers.len() as u32,
+				});
+				Ok(())
+			})
+		}
+
+		/// Peer 心跳 (定期调用, 更新 last_seen)
+		#[pallet::call_index(19)]
+		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		pub fn heartbeat_peer(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			peer_public_key: [u8; 32],
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
+			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+
+			PeerRegistry::<T>::try_mutate(&bot_id_hash, |peers| -> DispatchResult {
+				let peer = peers.iter_mut().find(|p| p.public_key == peer_public_key)
+					.ok_or(Error::<T>::PeerNotFound)?;
+				peer.last_seen = frame_system::Pallet::<T>::block_number();
+
+				Self::deposit_event(Event::PeerHeartbeat {
+					bot_id_hash,
+					public_key: peer_public_key,
+				});
+				Ok(())
+			})
+		}
 	}
 
 	// ========================================================================
@@ -1168,6 +1582,99 @@ pub mod pallet {
 			}
 		}
 
+		/// TDX Quote v4 DCAP 验证 (统一入口用)
+		fn verify_tdx_quote_unified(
+			quote: &[u8],
+			platform_id: &Option<[u8; 32]>,
+			pck_cert_der: &Option<BoundedVec<u8, T::MaxQuoteLen>>,
+			intermediate_cert_der: &Option<BoundedVec<u8, T::MaxQuoteLen>>,
+		) -> Result<(TeeType, [u8; 48], Option<[u8; 32]>, [u8; 64], u8, bool), DispatchError> {
+			let (dcap_result, dcap_level) = if let (Some(pck), Some(inter)) =
+				(pck_cert_der, intermediate_cert_der)
+			{
+				let result = dcap::verify_quote_with_cert_chain(quote, pck.as_slice(), inter.as_slice())
+					.map_err(|e| Self::dcap_error_to_dispatch(e))?;
+				(result, 4u8)
+			} else if let Some(ref pid) = platform_id {
+				let (pck_key, _) = RegisteredPckKeys::<T>::get(pid)
+					.ok_or(Error::<T>::PckKeyNotRegistered)?;
+				let result = dcap::verify_quote_level3(quote, &pck_key)
+					.map_err(|e| Self::dcap_error_to_dispatch(e))?;
+				(result, 3u8)
+			} else {
+				let result = dcap::verify_quote_level2(quote)
+					.map_err(|e| Self::dcap_error_to_dispatch(e))?;
+				(result, 2u8)
+			};
+			let quote_verified = dcap_level >= 3;
+			Ok((TeeType::Tdx, dcap_result.mrtd, None, dcap_result.report_data, dcap_level, quote_verified))
+		}
+
+		/// SGX Quote v3 DCAP 验证 (统一入口用)
+		fn verify_sgx_quote_unified(
+			quote: &[u8],
+			platform_id: &Option<[u8; 32]>,
+			pck_cert_der: &Option<BoundedVec<u8, T::MaxQuoteLen>>,
+			intermediate_cert_der: &Option<BoundedVec<u8, T::MaxQuoteLen>>,
+		) -> Result<(TeeType, [u8; 48], Option<[u8; 32]>, [u8; 64], u8, bool), DispatchError> {
+			let (sgx_result, dcap_level) = if let (Some(pck), Some(inter)) =
+				(pck_cert_der, intermediate_cert_der)
+			{
+				let result = dcap::verify_sgx_quote_with_cert_chain(quote, pck.as_slice(), inter.as_slice())
+					.map_err(|e| Self::dcap_error_to_dispatch(e))?;
+				(result, 4u8)
+			} else if let Some(ref pid) = platform_id {
+				let (pck_key, _) = RegisteredPckKeys::<T>::get(pid)
+					.ok_or(Error::<T>::PckKeyNotRegistered)?;
+				let result = dcap::verify_sgx_quote_level3(quote, &pck_key)
+					.map_err(|e| Self::dcap_error_to_dispatch(e))?;
+				(result, 3u8)
+			} else {
+				let result = dcap::verify_sgx_quote_level2(quote)
+					.map_err(|e| Self::dcap_error_to_dispatch(e))?;
+				(result, 2u8)
+			};
+			// MRENCLAVE → padded to 48B as primary_measurement
+			let mut primary = [0u8; 48];
+			primary[..32].copy_from_slice(&sgx_result.mrenclave);
+			let mrenclave = Some(sgx_result.mrenclave);
+			let quote_verified = dcap_level >= 3;
+			Ok((TeeType::Sgx, primary, mrenclave, sgx_result.report_data, dcap_level, quote_verified))
+		}
+
+		/// 根据 TEE 类型检查度量值白名单
+		fn check_measurement_approved(
+			tee_type: &TeeType,
+			primary_measurement: &[u8; 48],
+			mrenclave: &Option<[u8; 32]>,
+		) -> DispatchResult {
+			match tee_type {
+				TeeType::Tdx | TeeType::TdxPlusSgx => {
+					ensure!(
+						ApprovedMrtd::<T>::contains_key(primary_measurement),
+						Error::<T>::MrtdNotApproved
+					);
+				}
+				TeeType::Sgx => {
+					let mut mre = [0u8; 32];
+					mre.copy_from_slice(&primary_measurement[..32]);
+					ensure!(
+						ApprovedMrenclave::<T>::contains_key(&mre),
+						Error::<T>::MrenclaveNotApproved
+					);
+				}
+			}
+			if let Some(ref mre) = mrenclave {
+				if matches!(tee_type, TeeType::TdxPlusSgx) {
+					ensure!(
+						ApprovedMrenclave::<T>::contains_key(mre),
+						Error::<T>::MrenclaveNotApproved
+					);
+				}
+			}
+			Ok(())
+		}
+
 		/// Bot 是否已注册且活跃
 		pub fn is_bot_active(bot_id_hash: &BotIdHash) -> bool {
 			Bots::<T>::get(bot_id_hash)
@@ -1184,6 +1691,9 @@ pub mod pallet {
 
 		/// Bot 是否有 SGX 双证明
 		pub fn has_dual_attestation(bot_id_hash: &BotIdHash) -> bool {
+			if let Some(v2) = AttestationsV2::<T>::get(bot_id_hash) {
+				return v2.is_dual_attestation;
+			}
 			Attestations::<T>::get(bot_id_hash)
 				.map(|a| a.is_dual_attestation)
 				.unwrap_or(false)
@@ -1192,6 +1702,9 @@ pub mod pallet {
 		/// TEE 证明是否在有效期内
 		pub fn is_attestation_fresh(bot_id_hash: &BotIdHash) -> bool {
 			let now = frame_system::Pallet::<T>::block_number();
+			if let Some(v2) = AttestationsV2::<T>::get(bot_id_hash) {
+				return now < v2.expires_at;
+			}
 			Attestations::<T>::get(bot_id_hash)
 				.map(|a| now < a.expires_at)
 				.unwrap_or(false)
@@ -1205,6 +1718,16 @@ pub mod pallet {
 		/// 获取 Bot 公钥
 		pub fn bot_public_key(bot_id_hash: &BotIdHash) -> Option<[u8; 32]> {
 			Bots::<T>::get(bot_id_hash).map(|b| b.public_key)
+		}
+
+		/// 获取 Bot 的 Peer 数量
+		pub fn peer_count(bot_id_hash: &BotIdHash) -> u32 {
+			PeerRegistry::<T>::get(bot_id_hash).len() as u32
+		}
+
+		/// 获取 Bot 的所有 Peer 端点
+		pub fn get_peers(bot_id_hash: &BotIdHash) -> BoundedVec<PeerEndpoint<T>, T::MaxPeersPerBot> {
+			PeerRegistry::<T>::get(bot_id_hash)
 		}
 	}
 
@@ -1230,6 +1753,9 @@ pub mod pallet {
 		}
 		fn bot_public_key(bot_id_hash: &BotIdHash) -> Option<[u8; 32]> {
 			Self::bot_public_key(bot_id_hash)
+		}
+		fn peer_count(bot_id_hash: &BotIdHash) -> u32 {
+			Self::peer_count(bot_id_hash)
 		}
 	}
 }

@@ -6,8 +6,7 @@ use frame_support::{
 };
 use frame_system as system;
 use pallet_entity_common::{
-    EntityProvider, EntityStatus, EntityTokenProvider, MemberMode,
-    ShopProvider, ShopType, TokenType,
+    EntityProvider, EntityStatus, EntityTokenProvider, TokenType,
 };
 use sp_core::H256;
 use sp_runtime::{
@@ -94,8 +93,8 @@ impl EntityProvider<u64> for MockEntityProvider {
     }
     fn entity_owner(entity_id: u64) -> Option<u64> {
         match entity_id {
-            1 => Some(SHOP_OWNER),
-            2 => Some(SHOP_OWNER_2),
+            1 => Some(ENTITY_OWNER),
+            2 => Some(ENTITY_OWNER_2),
             _ => None,
         }
     }
@@ -110,56 +109,6 @@ impl EntityProvider<u64> for MockEntityProvider {
     }
 }
 
-// ==================== Mock ShopProvider ====================
-
-pub struct MockShopProvider;
-impl ShopProvider<u64> for MockShopProvider {
-    fn shop_exists(shop_id: u64) -> bool {
-        shop_id == SHOP_ID || shop_id == SHOP_ID_2
-    }
-    fn is_shop_active(shop_id: u64) -> bool {
-        shop_id == SHOP_ID || shop_id == SHOP_ID_2
-    }
-    fn shop_entity_id(shop_id: u64) -> Option<u64> {
-        match shop_id {
-            SHOP_ID => Some(1),
-            SHOP_ID_2 => Some(2),
-            _ => None,
-        }
-    }
-    fn shop_owner(shop_id: u64) -> Option<u64> {
-        match shop_id {
-            SHOP_ID => Some(SHOP_OWNER),
-            SHOP_ID_2 => Some(SHOP_OWNER_2),
-            _ => None,
-        }
-    }
-    fn shop_account(shop_id: u64) -> u64 {
-        200 + shop_id
-    }
-    fn shop_type(_: u64) -> Option<ShopType> {
-        Some(ShopType::OnlineStore)
-    }
-    fn shop_member_mode(_: u64) -> MemberMode {
-        MemberMode::Inherit
-    }
-    fn is_shop_manager(shop_id: u64, account: &u64) -> bool {
-        Self::shop_owner(shop_id) == Some(*account)
-    }
-    fn update_shop_stats(_: u64, _: u128, _: u32) -> Result<(), DispatchError> {
-        Ok(())
-    }
-    fn update_shop_rating(_: u64, _: u8) -> Result<(), DispatchError> {
-        Ok(())
-    }
-    fn deduct_operating_fund(_: u64, _: u128) -> Result<(), DispatchError> {
-        Ok(())
-    }
-    fn operating_balance(_: u64) -> u128 {
-        1_000_000
-    }
-}
-
 // ==================== Mock EntityTokenProvider ====================
 
 use std::cell::RefCell;
@@ -171,20 +120,20 @@ thread_local! {
     static TOKEN_ENABLED: RefCell<HashMap<u64, bool>> = RefCell::new(HashMap::new());
 }
 
-pub fn set_token_balance(shop_id: u64, who: u64, amount: u128) {
-    TOKEN_BALANCES.with(|b| b.borrow_mut().insert((shop_id, who), amount));
+pub fn set_token_balance(entity_id: u64, who: u64, amount: u128) {
+    TOKEN_BALANCES.with(|b| b.borrow_mut().insert((entity_id, who), amount));
 }
 
-pub fn set_token_enabled(shop_id: u64, enabled: bool) {
-    TOKEN_ENABLED.with(|e| e.borrow_mut().insert(shop_id, enabled));
+pub fn set_token_enabled(entity_id: u64, enabled: bool) {
+    TOKEN_ENABLED.with(|e| e.borrow_mut().insert(entity_id, enabled));
 }
 
-pub fn get_token_balance(shop_id: u64, who: u64) -> u128 {
-    TOKEN_BALANCES.with(|b| *b.borrow().get(&(shop_id, who)).unwrap_or(&0))
+pub fn get_token_balance(entity_id: u64, who: u64) -> u128 {
+    TOKEN_BALANCES.with(|b| *b.borrow().get(&(entity_id, who)).unwrap_or(&0))
 }
 
-pub fn get_token_reserved(shop_id: u64, who: u64) -> u128 {
-    TOKEN_RESERVED.with(|b| *b.borrow().get(&(shop_id, who)).unwrap_or(&0))
+pub fn get_token_reserved(entity_id: u64, who: u64) -> u128 {
+    TOKEN_RESERVED.with(|b| *b.borrow().get(&(entity_id, who)).unwrap_or(&0))
 }
 
 pub struct MockTokenProvider;
@@ -252,13 +201,13 @@ impl EntityTokenProvider<u64, u128> for MockTokenProvider {
 
 // ==================== 测试常量 ====================
 
-pub const SHOP_OWNER: u64 = 1;
-pub const SHOP_OWNER_2: u64 = 2;
+pub const ENTITY_OWNER: u64 = 1;
+pub const ENTITY_OWNER_2: u64 = 2;
 pub const ALICE: u64 = 10;
 pub const BOB: u64 = 11;
 pub const CHARLIE: u64 = 12;
-pub const SHOP_ID: u64 = 1;
-pub const SHOP_ID_2: u64 = 2;
+pub const ENTITY_ID: u64 = 1;
+pub const ENTITY_ID_2: u64 = 2;
 pub const TREASURY: u64 = 99;
 pub const REWARD_SOURCE: u64 = 98;
 
@@ -286,7 +235,6 @@ impl pallet_entity_market::Config for Test {
     type Balance = u128;
     type TokenBalance = u128;
     type EntityProvider = MockEntityProvider;
-    type ShopProvider = MockShopProvider;
     type TokenProvider = MockTokenProvider;
     type DefaultOrderTTL = DefaultOrderTTL;
     type MaxActiveOrdersPerUser = MaxActiveOrdersPerUser;
@@ -303,6 +251,8 @@ impl pallet_entity_market::Config for Test {
     type DepositForfeitRate = DepositForfeitRate;
     type UsdtToNexRate = UsdtToNexRate;
     type TreasuryAccount = TreasuryAccountId;
+    type VerificationGracePeriod = ConstU32<600>;  // 1h 宽限期
+    type UnderpaidGracePeriod = ConstU32<1200>;    // 2h 补付窗口
 }
 
 // ==================== 测试构建器 ====================
@@ -317,8 +267,8 @@ impl ExtBuilder {
 
         pallet_balances::GenesisConfig::<Test> {
             balances: vec![
-                (SHOP_OWNER, 100_000_000_000),
-                (SHOP_OWNER_2, 100_000_000_000),
+                (ENTITY_OWNER, 100_000_000_000),
+                (ENTITY_OWNER_2, 100_000_000_000),
                 (ALICE, 100_000_000_000),
                 (BOB, 100_000_000_000),
                 (CHARLIE, 100_000_000_000),
@@ -334,23 +284,23 @@ impl ExtBuilder {
         ext.execute_with(|| {
             System::set_block_number(1);
             // 启用 Token
-            set_token_enabled(SHOP_ID, true);
-            set_token_enabled(SHOP_ID_2, true);
+            set_token_enabled(ENTITY_ID, true);
+            set_token_enabled(ENTITY_ID_2, true);
             // 给用户分配 Token
-            set_token_balance(SHOP_ID, ALICE, 10_000_000);
-            set_token_balance(SHOP_ID, BOB, 10_000_000);
-            set_token_balance(SHOP_ID, CHARLIE, 10_000_000);
-            set_token_balance(SHOP_ID, SHOP_OWNER, 10_000_000);
+            set_token_balance(ENTITY_ID, ALICE, 10_000_000);
+            set_token_balance(ENTITY_ID, BOB, 10_000_000);
+            set_token_balance(ENTITY_ID, CHARLIE, 10_000_000);
+            set_token_balance(ENTITY_ID, ENTITY_OWNER, 10_000_000);
         });
         ext
     }
 }
 
 /// 配置市场（启用 NEX + USDT）
-pub fn configure_market_enabled(shop_id: u64) {
+pub fn configure_market_enabled(entity_id: u64) {
     assert!(EntityMarket::configure_market(
-        RuntimeOrigin::signed(if shop_id == SHOP_ID { SHOP_OWNER } else { SHOP_OWNER_2 }),
-        shop_id,
+        RuntimeOrigin::signed(if entity_id == ENTITY_ID { ENTITY_OWNER } else { ENTITY_OWNER_2 }),
+        entity_id,
         true,  // cos_enabled
         true,  // usdt_enabled
         100,   // fee_rate = 1%

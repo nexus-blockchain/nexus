@@ -39,10 +39,12 @@ impl DiscordGateway {
         }
     }
 
-    /// 运行 Gateway 连接 (自动重连 + RESUME)
+    /// 运行 Gateway 连接 (自动重连 + RESUME + 指数退避)
     pub async fn run(&self) {
         let default_url = "wss://gateway.discord.gg/?v=10&encoding=json";
         let adapter = DiscordAdapter::new();
+        let mut backoff_secs: u64 = 5;
+        const MAX_BACKOFF: u64 = 60;
 
         loop {
             // 优先使用 resume_gateway_url (Discord 在 READY 中提供)
@@ -54,11 +56,17 @@ impl DiscordGateway {
 
             info!(url = %url, "连接 Discord Gateway...");
             match self.connect_and_listen(&url, &adapter).await {
-                Ok(()) => info!("Discord Gateway 正常断开"),
-                Err(e) => warn!(error = %e, "Discord Gateway 连接断开"),
+                Ok(()) => {
+                    info!("Discord Gateway 正常断开");
+                    backoff_secs = 5; // 正常断开重置退避
+                }
+                Err(e) => {
+                    warn!(error = %e, backoff = backoff_secs, "Discord Gateway 连接断开");
+                }
             }
-            info!("5 秒后重连...");
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            info!(delay = backoff_secs, "Discord Gateway 重连中...");
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
         }
     }
 

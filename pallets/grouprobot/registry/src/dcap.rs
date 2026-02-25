@@ -89,6 +89,52 @@ pub const ATT_KEY_TYPE_ECDSA_P256: u16 = 2;
 pub const QUOTE_VERSION_4: u16 = 4;
 
 // ============================================================================
+// SGX Quote v3 结构偏移量
+// ============================================================================
+
+/// SGX Header 长度 (48 bytes, 与 TDX v4 相同)
+pub const SGX_HEADER_LEN: usize = 48;
+/// SGX ISV Enclave Report Body 长度 (384 bytes)
+pub const SGX_BODY_LEN: usize = 384;
+/// SGX Header + Body 总长度 (432 bytes)
+pub const SGX_HEADER_PLUS_BODY: usize = SGX_HEADER_LEN + SGX_BODY_LEN;
+
+/// MRENCLAVE 在 SGX Quote 中的偏移 (Header 48 + cpu_svn 16 + misc_select 4 +
+/// reserved1 12 + isv_ext_prod_id 16 + attributes 16 = offset 112 in body → 48+64=112)
+pub const SGX_MRENCLAVE_OFFSET: usize = 112;
+pub const SGX_MRENCLAVE_LEN: usize = 32;
+
+/// MRSIGNER 在 SGX Quote 中的偏移 (112 + MRENCLAVE 32 + reserved2 32 = 176)
+pub const SGX_MRSIGNER_OFFSET: usize = 176;
+pub const SGX_MRSIGNER_LEN: usize = 32;
+
+/// SGX REPORTDATA 在 Quote 中的偏移 (Header 48 + Report Body 内偏移 320 = 368)
+pub const SGX_REPORTDATA_OFFSET: usize = 368;
+pub const SGX_REPORTDATA_LEN: usize = 64;
+
+// SGX Signature Data 偏移 (从 Quote 起始, 基于 Header+Body=432)
+/// sig_data_len (u32 LE) at offset 432
+pub const SGX_SIG_DATA_LEN_OFFSET: usize = SGX_HEADER_PLUS_BODY;
+/// ECDSA Signature over (Header || Body): 64 bytes at offset 436
+pub const SGX_BODY_SIG_OFFSET: usize = SGX_SIG_DATA_LEN_OFFSET + 4;
+/// Attestation Public Key: 64 bytes at offset 500
+pub const SGX_AK_OFFSET: usize = SGX_BODY_SIG_OFFSET + BODY_SIG_LEN;
+/// QE Report Body: 384 bytes at offset 564
+pub const SGX_QE_REPORT_OFFSET: usize = SGX_AK_OFFSET + AK_LEN;
+/// QE Report Signature: 64 bytes at offset 948
+pub const SGX_QE_REPORT_SIG_OFFSET: usize = SGX_QE_REPORT_OFFSET + QE_REPORT_LEN;
+/// QE Auth Data Length: 2 bytes (u16 LE) at offset 1012
+pub const SGX_QE_AUTH_LEN_OFFSET: usize = SGX_QE_REPORT_SIG_OFFSET + QE_REPORT_SIG_LEN;
+
+/// SGX 最小 Quote 长度 (到 QE Auth Data Length 字段)
+pub const SGX_MIN_QUOTE_LEN: usize = SGX_QE_AUTH_LEN_OFFSET + 2; // 1014
+
+/// SGX TEE Type (0x00000000)
+pub const TEE_TYPE_SGX: u32 = 0x00000000;
+/// SGX Quote Version 3
+pub const QUOTE_VERSION_3: u16 = 3;
+
+// ============================================================================
 // Intel Root CA Trust Anchor
 // ============================================================================
 
@@ -715,6 +761,235 @@ pub fn verify_quote_with_cert_chain(
 }
 
 // ============================================================================
+// SGX Quote v3 解析与验证
+// ============================================================================
+
+/// 解析后的 SGX Quote v3 结构
+#[derive(Debug)]
+pub struct ParsedSgxQuote<'a> {
+	/// 原始 Quote 字节
+	pub raw: &'a [u8],
+	// ── Header ──
+	pub version: u16,
+	pub att_key_type: u16,
+	pub tee_type: u32,
+	pub qe_vendor_id: [u8; 16],
+	// ── ISV Enclave Report Body ──
+	pub mrenclave: [u8; 32],
+	pub mrsigner: [u8; 32],
+	pub report_data: [u8; 64],
+	// ── Signature Data ──
+	pub body_signature: &'a [u8],
+	pub attestation_key: &'a [u8],
+	pub qe_report: &'a [u8],
+	pub qe_report_signature: &'a [u8],
+	pub qe_auth_data: &'a [u8],
+	// ── QE Report 内部字段 ──
+	pub qe_mrenclave: [u8; 32],
+	pub qe_mrsigner: [u8; 32],
+	pub qe_report_data: [u8; 64],
+}
+
+/// SGX DCAP 验证结果
+#[derive(Debug, Clone)]
+pub struct SgxVerifyResult {
+	/// SGX Enclave 度量值 (32 bytes)
+	pub mrenclave: [u8; 32],
+	/// SGX Enclave 签名者 (32 bytes)
+	pub mrsigner: [u8; 32],
+	/// report_data (64 bytes)
+	pub report_data: [u8; 64],
+	/// Quote 的 blake2_256 哈希
+	pub quote_hash: [u8; 32],
+	/// Body ECDSA 签名是否验证通过
+	pub body_sig_valid: bool,
+	/// Attestation Key 是否绑定到 QE Report
+	pub ak_binding_valid: bool,
+	/// QE Report 签名是否验证通过
+	pub qe_sig_valid: bool,
+	/// QE MRENCLAVE (32 bytes)
+	pub qe_mrenclave: [u8; 32],
+	/// QE MRSIGNER (32 bytes)
+	pub qe_mrsigner: [u8; 32],
+}
+
+/// 解析 SGX Quote v3 原始字节
+///
+/// 验证 Header 字段 (version=3, att_key_type=2, tee_type=0x00)
+/// 并提取所有关键字段。
+pub fn parse_sgx_quote(raw: &[u8]) -> Result<ParsedSgxQuote<'_>, DcapError> {
+	if raw.len() < SGX_MIN_QUOTE_LEN {
+		return Err(DcapError::QuoteTooShort);
+	}
+
+	// ── Header 验证 ──
+	let version = u16::from_le_bytes([raw[HEADER_VERSION_OFFSET], raw[HEADER_VERSION_OFFSET + 1]]);
+	if version != QUOTE_VERSION_3 {
+		return Err(DcapError::InvalidVersion);
+	}
+
+	let att_key_type = u16::from_le_bytes([
+		raw[HEADER_ATT_KEY_TYPE_OFFSET],
+		raw[HEADER_ATT_KEY_TYPE_OFFSET + 1],
+	]);
+	if att_key_type != ATT_KEY_TYPE_ECDSA_P256 {
+		return Err(DcapError::InvalidAttKeyType);
+	}
+
+	let tee_type = u32::from_le_bytes([
+		raw[HEADER_TEE_TYPE_OFFSET],
+		raw[HEADER_TEE_TYPE_OFFSET + 1],
+		raw[HEADER_TEE_TYPE_OFFSET + 2],
+		raw[HEADER_TEE_TYPE_OFFSET + 3],
+	]);
+	if tee_type != TEE_TYPE_SGX {
+		return Err(DcapError::InvalidTeeType);
+	}
+
+	let mut qe_vendor_id = [0u8; 16];
+	qe_vendor_id.copy_from_slice(&raw[HEADER_VENDOR_ID_OFFSET..HEADER_VENDOR_ID_OFFSET + 16]);
+	if qe_vendor_id != INTEL_QE_VENDOR_ID {
+		return Err(DcapError::InvalidVendorId);
+	}
+
+	// ── Signature Data Length 验证 ──
+	let sig_data_len = u32::from_le_bytes([
+		raw[SGX_SIG_DATA_LEN_OFFSET],
+		raw[SGX_SIG_DATA_LEN_OFFSET + 1],
+		raw[SGX_SIG_DATA_LEN_OFFSET + 2],
+		raw[SGX_SIG_DATA_LEN_OFFSET + 3],
+	]) as usize;
+	if raw.len() < SGX_HEADER_PLUS_BODY + 4 + sig_data_len {
+		return Err(DcapError::InvalidSigDataLen);
+	}
+
+	// ── Body 字段提取 ──
+	let mut mrenclave = [0u8; 32];
+	mrenclave.copy_from_slice(&raw[SGX_MRENCLAVE_OFFSET..SGX_MRENCLAVE_OFFSET + SGX_MRENCLAVE_LEN]);
+
+	let mut mrsigner = [0u8; 32];
+	mrsigner.copy_from_slice(&raw[SGX_MRSIGNER_OFFSET..SGX_MRSIGNER_OFFSET + SGX_MRSIGNER_LEN]);
+
+	let mut report_data = [0u8; 64];
+	report_data.copy_from_slice(&raw[SGX_REPORTDATA_OFFSET..SGX_REPORTDATA_OFFSET + SGX_REPORTDATA_LEN]);
+
+	// ── QE Auth Data ──
+	let qe_auth_len =
+		u16::from_le_bytes([raw[SGX_QE_AUTH_LEN_OFFSET], raw[SGX_QE_AUTH_LEN_OFFSET + 1]]) as usize;
+	let qe_auth_end = SGX_QE_AUTH_LEN_OFFSET + 2 + qe_auth_len;
+	if raw.len() < qe_auth_end {
+		return Err(DcapError::QuoteTooShort);
+	}
+
+	// ── QE Report 内部字段 ──
+	let qe_report = &raw[SGX_QE_REPORT_OFFSET..SGX_QE_REPORT_OFFSET + QE_REPORT_LEN];
+
+	let mut qe_mrenclave = [0u8; 32];
+	qe_mrenclave.copy_from_slice(&qe_report[QE_MRENCLAVE_OFFSET..QE_MRENCLAVE_OFFSET + 32]);
+
+	let mut qe_mrsigner = [0u8; 32];
+	qe_mrsigner.copy_from_slice(&qe_report[QE_MRSIGNER_OFFSET..QE_MRSIGNER_OFFSET + 32]);
+
+	let mut qe_report_data = [0u8; 64];
+	qe_report_data.copy_from_slice(&qe_report[QE_REPORTDATA_OFFSET..QE_REPORTDATA_OFFSET + 64]);
+
+	Ok(ParsedSgxQuote {
+		raw,
+		version,
+		att_key_type,
+		tee_type,
+		qe_vendor_id,
+		mrenclave,
+		mrsigner,
+		report_data,
+		body_signature: &raw[SGX_BODY_SIG_OFFSET..SGX_BODY_SIG_OFFSET + BODY_SIG_LEN],
+		attestation_key: &raw[SGX_AK_OFFSET..SGX_AK_OFFSET + AK_LEN],
+		qe_report,
+		qe_report_signature: &raw[SGX_QE_REPORT_SIG_OFFSET..SGX_QE_REPORT_SIG_OFFSET + QE_REPORT_SIG_LEN],
+		qe_auth_data: &raw[SGX_QE_AUTH_LEN_OFFSET + 2..qe_auth_end],
+		qe_mrenclave,
+		qe_mrsigner,
+		qe_report_data,
+	})
+}
+
+/// SGX Level 2 验证: Body 签名 + AK 绑定
+///
+/// 与 TDX Level 2 相同的验证逻辑，仅偏移量不同:
+/// 1. ECDSA P-256: AK 签名 (Header || Body)
+/// 2. AK 绑定: SHA-256(AK || auth_data) == QE Report.report_data[0..32]
+pub fn verify_sgx_quote_level2(raw: &[u8]) -> Result<SgxVerifyResult, DcapError> {
+	let quote = parse_sgx_quote(raw)?;
+	let quote_hash = sp_core::hashing::blake2_256(raw);
+
+	// ── Step 1: 验证 Body 签名 ──
+	let header_body = &raw[0..SGX_HEADER_PLUS_BODY];
+	verify_p256_ecdsa(quote.attestation_key, header_body, quote.body_signature)?;
+
+	// ── Step 2: 验证 AK 绑定到 QE Report ──
+	let mut ak_auth_preimage =
+		Vec::with_capacity(quote.attestation_key.len() + quote.qe_auth_data.len());
+	ak_auth_preimage.extend_from_slice(quote.attestation_key);
+	ak_auth_preimage.extend_from_slice(quote.qe_auth_data);
+	let ak_hash = sp_core::hashing::sha2_256(&ak_auth_preimage);
+
+	if quote.qe_report_data[..32] != ak_hash[..] {
+		return Err(DcapError::AttestationKeyBindingFailed);
+	}
+
+	Ok(SgxVerifyResult {
+		mrenclave: quote.mrenclave,
+		mrsigner: quote.mrsigner,
+		report_data: quote.report_data,
+		quote_hash,
+		body_sig_valid: true,
+		ak_binding_valid: true,
+		qe_sig_valid: false,
+		qe_mrenclave: quote.qe_mrenclave,
+		qe_mrsigner: quote.qe_mrsigner,
+	})
+}
+
+/// SGX Level 3 验证: Body 签名 + AK 绑定 + QE Report 签名
+pub fn verify_sgx_quote_level3(
+	raw: &[u8],
+	pck_public_key: &[u8; 64],
+) -> Result<SgxVerifyResult, DcapError> {
+	let mut result = verify_sgx_quote_level2(raw)?;
+
+	let quote = parse_sgx_quote(raw)?;
+
+	// ── Step 3: 验证 QE Report 签名 ──
+	verify_p256_ecdsa(pck_public_key, quote.qe_report, quote.qe_report_signature)
+		.map_err(|_| DcapError::QeReportSignatureInvalid)?;
+
+	result.qe_sig_valid = true;
+	Ok(result)
+}
+
+/// SGX Level 4 验证: Body 签名 + AK 绑定 + QE Report 签名 + 证书链验证
+#[cfg(any(feature = "dcap-verify", test))]
+pub fn verify_sgx_quote_with_cert_chain(
+	raw: &[u8],
+	pck_cert_der: &[u8],
+	intermediate_cert_der: &[u8],
+) -> Result<SgxVerifyResult, DcapError> {
+	let pck_pubkey = verify_cert_chain(pck_cert_der, intermediate_cert_der)?;
+	let mut result = verify_sgx_quote_level3(raw, &pck_pubkey)?;
+	result.qe_sig_valid = true;
+	Ok(result)
+}
+
+#[cfg(not(any(feature = "dcap-verify", test)))]
+pub fn verify_sgx_quote_with_cert_chain(
+	_raw: &[u8],
+	_pck_cert_der: &[u8],
+	_intermediate_cert_der: &[u8],
+) -> Result<SgxVerifyResult, DcapError> {
+	Err(DcapError::CertChainInvalid)
+}
+
+// ============================================================================
 // 辅助函数: 构建测试用 Quote
 // ============================================================================
 
@@ -865,6 +1140,153 @@ pub mod test_utils {
 			let mut key = [0u8; 64];
 			key.copy_from_slice(&point.as_bytes()[1..65]);
 			key
+		}
+
+		/// 获取 PCK 公钥 (64 bytes, x || y)
+		pub fn pck_public_key(&self) -> [u8; 64] {
+			let vk = VerifyingKey::from(&self.pck_signing_key);
+			let point = vk.to_encoded_point(false);
+			let mut key = [0u8; 64];
+			key.copy_from_slice(&point.as_bytes()[1..65]);
+			key
+		}
+	}
+
+	/// SGX Quote v3 测试构建器 (含有效 ECDSA 签名)
+	pub struct TestSgxQuoteBuilder {
+		pub mrenclave: [u8; 32],
+		pub mrsigner: [u8; 32],
+		pub report_data: [u8; 64],
+		pub ak_signing_key: SigningKey,
+		pub pck_signing_key: SigningKey,
+	}
+
+	impl TestSgxQuoteBuilder {
+		/// 使用确定性种子创建
+		pub fn new(seed: u8) -> Self {
+			let mut ak_seed = [0u8; 32];
+			ak_seed[0] = seed;
+			ak_seed[1] = 0xCC; // 区别于 TDX builder 的 0xAA
+			let ak_signing_key = SigningKey::from_slice(&ak_seed).unwrap();
+
+			let mut pck_seed = [0u8; 32];
+			pck_seed[0] = seed;
+			pck_seed[1] = 0xDD; // 区别于 TDX builder 的 0xBB
+			let pck_signing_key = SigningKey::from_slice(&pck_seed).unwrap();
+
+			Self {
+				mrenclave: [0u8; 32],
+				mrsigner: [0u8; 32],
+				report_data: [0u8; 64],
+				ak_signing_key,
+				pck_signing_key,
+			}
+		}
+
+		pub fn with_mrenclave(mut self, mrenclave: [u8; 32]) -> Self {
+			self.mrenclave = mrenclave;
+			self
+		}
+
+		pub fn with_mrsigner(mut self, mrsigner: [u8; 32]) -> Self {
+			self.mrsigner = mrsigner;
+			self
+		}
+
+		pub fn with_report_data(mut self, rd: [u8; 64]) -> Self {
+			self.report_data = rd;
+			self
+		}
+
+		/// 构建带有效签名的 SGX Quote v3 字节
+		pub fn build(&self) -> Vec<u8> {
+			let ak_vk = VerifyingKey::from(&self.ak_signing_key);
+			let ak_point = ak_vk.to_encoded_point(false);
+			let ak_bytes = &ak_point.as_bytes()[1..65];
+
+			let qe_auth_data: Vec<u8> = Vec::new();
+
+			// AK binding: SHA-256(AK || qe_auth_data)
+			let mut ak_auth_preimage = Vec::new();
+			ak_auth_preimage.extend_from_slice(ak_bytes);
+			ak_auth_preimage.extend_from_slice(&qe_auth_data);
+			let ak_hash = sp_core::hashing::sha2_256(&ak_auth_preimage);
+
+			// ── 构建 Header (48 bytes) ──
+			let mut quote = vec![0u8; 2048];
+			// version = 3 (SGX)
+			quote[0] = 3;
+			quote[1] = 0;
+			// att_key_type = 2
+			quote[2] = 2;
+			quote[3] = 0;
+			// tee_type = 0x00000000 (SGX)
+			quote[4] = 0;
+			quote[5] = 0;
+			quote[6] = 0;
+			quote[7] = 0;
+			// vendor_id
+			quote[HEADER_VENDOR_ID_OFFSET..HEADER_VENDOR_ID_OFFSET + 16]
+				.copy_from_slice(&INTEL_QE_VENDOR_ID);
+
+			// ── ISV Enclave Report Body (384 bytes at offset 48) ──
+			// MRENCLAVE at offset 112
+			quote[SGX_MRENCLAVE_OFFSET..SGX_MRENCLAVE_OFFSET + SGX_MRENCLAVE_LEN]
+				.copy_from_slice(&self.mrenclave);
+			// MRSIGNER at offset 176
+			quote[SGX_MRSIGNER_OFFSET..SGX_MRSIGNER_OFFSET + SGX_MRSIGNER_LEN]
+				.copy_from_slice(&self.mrsigner);
+			// REPORTDATA at offset 368
+			quote[SGX_REPORTDATA_OFFSET..SGX_REPORTDATA_OFFSET + SGX_REPORTDATA_LEN]
+				.copy_from_slice(&self.report_data);
+
+			// ── Sign Header+Body with AK ──
+			let header_body = &quote[0..SGX_HEADER_PLUS_BODY];
+			let body_sig: p256::ecdsa::Signature = self.ak_signing_key.sign(header_body);
+			let body_sig_bytes = body_sig.to_bytes();
+
+			// Body signature at SGX offset
+			quote[SGX_BODY_SIG_OFFSET..SGX_BODY_SIG_OFFSET + BODY_SIG_LEN]
+				.copy_from_slice(&body_sig_bytes);
+			// AK
+			quote[SGX_AK_OFFSET..SGX_AK_OFFSET + AK_LEN].copy_from_slice(ak_bytes);
+
+			// ── QE Report (384 bytes) ──
+			let qe_mrenclave = [0x61; 32]; // known test QE MRENCLAVE (SGX)
+			quote[SGX_QE_REPORT_OFFSET + QE_MRENCLAVE_OFFSET
+				..SGX_QE_REPORT_OFFSET + QE_MRENCLAVE_OFFSET + 32]
+				.copy_from_slice(&qe_mrenclave);
+			let qe_mrsigner = [0x62; 32]; // known test QE MRSIGNER (SGX)
+			quote[SGX_QE_REPORT_OFFSET + QE_MRSIGNER_OFFSET
+				..SGX_QE_REPORT_OFFSET + QE_MRSIGNER_OFFSET + 32]
+				.copy_from_slice(&qe_mrsigner);
+			// QE Report Data: [0..32] = SHA-256(AK || qe_auth_data)
+			quote[SGX_QE_REPORT_OFFSET + QE_REPORTDATA_OFFSET
+				..SGX_QE_REPORT_OFFSET + QE_REPORTDATA_OFFSET + 32]
+				.copy_from_slice(&ak_hash);
+
+			// ── Sign QE Report with PCK ──
+			let qe_report_bytes =
+				&quote[SGX_QE_REPORT_OFFSET..SGX_QE_REPORT_OFFSET + QE_REPORT_LEN];
+			let qe_sig: p256::ecdsa::Signature = self.pck_signing_key.sign(qe_report_bytes);
+			let qe_sig_bytes = qe_sig.to_bytes();
+			quote[SGX_QE_REPORT_SIG_OFFSET..SGX_QE_REPORT_SIG_OFFSET + QE_REPORT_SIG_LEN]
+				.copy_from_slice(&qe_sig_bytes);
+
+			// ── QE Auth Data Length (0) ──
+			quote[SGX_QE_AUTH_LEN_OFFSET] = 0;
+			quote[SGX_QE_AUTH_LEN_OFFSET + 1] = 0;
+
+			// ── sig_data_len ──
+			let sig_data_total = BODY_SIG_LEN + AK_LEN + QE_REPORT_LEN + QE_REPORT_SIG_LEN + 2;
+			let len_bytes = (sig_data_total as u32).to_le_bytes();
+			quote[SGX_SIG_DATA_LEN_OFFSET..SGX_SIG_DATA_LEN_OFFSET + 4]
+				.copy_from_slice(&len_bytes);
+
+			// 截断到实际使用长度
+			let total_len = SGX_QE_AUTH_LEN_OFFSET + 2;
+			quote.truncate(total_len);
+			quote
 		}
 
 		/// 获取 PCK 公钥 (64 bytes, x || y)
@@ -1364,5 +1786,111 @@ mod tests {
 		assert!(verify_cert_signature(&pck_cert, &extracted_intermediate).is_ok());
 		// 验证: PCK → QE Report 签名有效
 		assert_eq!(result3.mrtd, [0xDD; 48]);
+	}
+
+	// ── SGX Quote v3 Tests ──
+
+	#[test]
+	fn sgx_parse_valid_quote() {
+		use test_utils::TestSgxQuoteBuilder;
+		let builder = TestSgxQuoteBuilder::new(1).with_mrenclave([0xAA; 32]);
+		let quote_bytes = builder.build();
+		let parsed = parse_sgx_quote(&quote_bytes).unwrap();
+		assert_eq!(parsed.version, 3);
+		assert_eq!(parsed.att_key_type, 2);
+		assert_eq!(parsed.tee_type, TEE_TYPE_SGX);
+		assert_eq!(parsed.qe_vendor_id, INTEL_QE_VENDOR_ID);
+		assert_eq!(parsed.mrenclave, [0xAA; 32]);
+	}
+
+	#[test]
+	fn sgx_parse_rejects_short_quote() {
+		assert_eq!(parse_sgx_quote(&[0u8; 100]).unwrap_err(), DcapError::QuoteTooShort);
+	}
+
+	#[test]
+	fn sgx_parse_rejects_tdx_quote() {
+		// A TDX Quote v4 should be rejected by SGX parser
+		let tdx_builder = TestQuoteBuilder::new(1);
+		let tdx_quote = tdx_builder.build();
+		assert_eq!(parse_sgx_quote(&tdx_quote).unwrap_err(), DcapError::InvalidVersion);
+	}
+
+	#[test]
+	fn sgx_verify_level2_valid() {
+		use test_utils::TestSgxQuoteBuilder;
+		let mut rd = [0u8; 64];
+		rd[0] = 0x42;
+		let builder = TestSgxQuoteBuilder::new(1)
+			.with_mrenclave([0xBB; 32])
+			.with_mrsigner([0xCC; 32])
+			.with_report_data(rd);
+		let quote = builder.build();
+		let result = verify_sgx_quote_level2(&quote).unwrap();
+		assert_eq!(result.mrenclave, [0xBB; 32]);
+		assert_eq!(result.mrsigner, [0xCC; 32]);
+		assert_eq!(result.report_data, rd);
+		assert!(result.body_sig_valid);
+		assert!(result.ak_binding_valid);
+		assert!(!result.qe_sig_valid);
+	}
+
+	#[test]
+	fn sgx_verify_level2_rejects_tampered_body() {
+		use test_utils::TestSgxQuoteBuilder;
+		let builder = TestSgxQuoteBuilder::new(1).with_mrenclave([0xCC; 32]);
+		let mut quote = builder.build();
+		// Tamper with MRENCLAVE after signing
+		quote[SGX_MRENCLAVE_OFFSET] = 0xFF;
+		assert_eq!(
+			verify_sgx_quote_level2(&quote).unwrap_err(),
+			DcapError::BodySignatureInvalid
+		);
+	}
+
+	#[test]
+	fn sgx_verify_level2_rejects_wrong_ak_binding() {
+		use test_utils::TestSgxQuoteBuilder;
+		let builder = TestSgxQuoteBuilder::new(1);
+		let mut quote = builder.build();
+		// Tamper with QE Report's report_data (AK binding hash)
+		quote[SGX_QE_REPORT_OFFSET + QE_REPORTDATA_OFFSET] = 0xFF;
+		let err = verify_sgx_quote_level2(&quote).unwrap_err();
+		assert_eq!(err, DcapError::AttestationKeyBindingFailed);
+	}
+
+	#[test]
+	fn sgx_verify_level3_valid() {
+		use test_utils::TestSgxQuoteBuilder;
+		let builder = TestSgxQuoteBuilder::new(2).with_mrenclave([0xDD; 32]);
+		let quote = builder.build();
+		let pck_key = builder.pck_public_key();
+		let result = verify_sgx_quote_level3(&quote, &pck_key).unwrap();
+		assert!(result.body_sig_valid);
+		assert!(result.ak_binding_valid);
+		assert!(result.qe_sig_valid);
+		assert_eq!(result.qe_mrenclave, [0x61; 32]);
+		assert_eq!(result.qe_mrsigner, [0x62; 32]);
+	}
+
+	#[test]
+	fn sgx_verify_level3_rejects_wrong_pck() {
+		use test_utils::TestSgxQuoteBuilder;
+		let builder = TestSgxQuoteBuilder::new(3);
+		let quote = builder.build();
+		let wrong_pck = [0x99; 64];
+		assert!(verify_sgx_quote_level3(&quote, &wrong_pck).is_err());
+	}
+
+	#[test]
+	fn sgx_verify_level3_rejects_tampered_qe_report() {
+		use test_utils::TestSgxQuoteBuilder;
+		let builder = TestSgxQuoteBuilder::new(4);
+		let mut quote = builder.build();
+		let pck_key = builder.pck_public_key();
+		// Tamper with QE MRSIGNER
+		quote[SGX_QE_REPORT_OFFSET + QE_MRSIGNER_OFFSET] = 0xFF;
+		let err = verify_sgx_quote_level3(&quote, &pck_key).unwrap_err();
+		assert_eq!(err, DcapError::QeReportSignatureInvalid);
 	}
 }

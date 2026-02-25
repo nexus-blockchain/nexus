@@ -21,6 +21,16 @@ pub trait WeightInfo {
     fn unlink() -> Weight;
     /// 命名空间取消链接（常数级）
     fn unlink_by_ns() -> Weight;
+    /// 🆕 VC2: 注册用户公钥 (call_index 6)
+    fn register_public_key() -> Weight;
+    /// 🆕 VC2: 存储私密内容 (call_index 7)
+    fn store_private_content() -> Weight;
+    /// 🆕 VC2: 授予访问权限 (call_index 8)
+    fn grant_access() -> Weight;
+    /// 🆕 VC2: 撤销访问权限 (call_index 9)
+    fn revoke_access() -> Weight;
+    /// 🆕 VC2: 轮换加密密钥 (call_index 10)
+    fn rotate_content_keys() -> Weight;
 }
 
 /// 函数级中文注释：参照 Substrate 推荐的 RocksDb 权重，提供通用实现。
@@ -68,6 +78,37 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(1_u64))
             .saturating_add(T::DbWeight::get().writes(1_u64))
     }
+    fn register_public_key() -> Weight {
+        // 读：0；写：UserPublicKeys(w) = 1 write
+        Weight::from_parts(40_000_000, 4_000)
+            .saturating_add(T::DbWeight::get().writes(1_u64))
+    }
+    fn store_private_content() -> Weight {
+        // 读：PrivateContentByCid(r), UserPublicKeys(r) * N, NextPrivateContentId(r) = ~5 reads
+        // 写：PrivateContents(w), PrivateContentByCid(w), NextPrivateContentId(w) = 3 writes
+        Weight::from_parts(80_000_000, 6_000)
+            .saturating_add(T::DbWeight::get().reads(5_u64))
+            .saturating_add(T::DbWeight::get().writes(3_u64))
+    }
+    fn grant_access() -> Weight {
+        // 读：PrivateContents(r), UserPublicKeys(r) = 2 reads；写：PrivateContents(w) = 1 write
+        Weight::from_parts(50_000_000, 5_000)
+            .saturating_add(T::DbWeight::get().reads(2_u64))
+            .saturating_add(T::DbWeight::get().writes(1_u64))
+    }
+    fn revoke_access() -> Weight {
+        // 读：PrivateContents(r) = 1 read；写：PrivateContents(w) = 1 write
+        Weight::from_parts(45_000_000, 5_000)
+            .saturating_add(T::DbWeight::get().reads(1_u64))
+            .saturating_add(T::DbWeight::get().writes(1_u64))
+    }
+    fn rotate_content_keys() -> Weight {
+        // 读：PrivateContents(r), UserPublicKeys(r) * N, KeyRotationHistory iter = ~8 reads
+        // 写：PrivateContents(w), KeyRotationHistory(w) = 2 writes
+        Weight::from_parts(70_000_000, 6_000)
+            .saturating_add(T::DbWeight::get().reads(8_u64))
+            .saturating_add(T::DbWeight::get().writes(2_u64))
+    }
 }
 
 /// 函数级中文注释：为测试与未接线场景提供默认实现（基于 RocksDbWeight）。
@@ -103,5 +144,29 @@ impl WeightInfo for () {
         Weight::from_parts(4_000_000, 0)
             .saturating_add(RocksDbWeight::get().reads(1_u64))
             .saturating_add(RocksDbWeight::get().writes(1_u64))
+    }
+    fn register_public_key() -> Weight {
+        Weight::from_parts(40_000_000, 4_000)
+            .saturating_add(RocksDbWeight::get().writes(1_u64))
+    }
+    fn store_private_content() -> Weight {
+        Weight::from_parts(80_000_000, 6_000)
+            .saturating_add(RocksDbWeight::get().reads(5_u64))
+            .saturating_add(RocksDbWeight::get().writes(3_u64))
+    }
+    fn grant_access() -> Weight {
+        Weight::from_parts(50_000_000, 5_000)
+            .saturating_add(RocksDbWeight::get().reads(2_u64))
+            .saturating_add(RocksDbWeight::get().writes(1_u64))
+    }
+    fn revoke_access() -> Weight {
+        Weight::from_parts(45_000_000, 5_000)
+            .saturating_add(RocksDbWeight::get().reads(1_u64))
+            .saturating_add(RocksDbWeight::get().writes(1_u64))
+    }
+    fn rotate_content_keys() -> Weight {
+        Weight::from_parts(70_000_000, 6_000)
+            .saturating_add(RocksDbWeight::get().reads(8_u64))
+            .saturating_add(RocksDbWeight::get().writes(2_u64))
     }
 }

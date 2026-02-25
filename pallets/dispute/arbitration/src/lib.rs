@@ -21,7 +21,7 @@ pub mod pallet {
     use pallet_storage_lifecycle::block_to_year_month;
     // 基准模块在 pallet 外部声明；此处不在 proc-macro 输入中声明子模块，避免 E0658
 
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
     pub enum Decision {
         Release,
         Refund,
@@ -236,6 +236,8 @@ pub mod pallet {
         pub respondent: T::AccountId,
         /// 详情CID（指向IPFS完整内容）
         pub details_cid: BoundedVec<u8, T::MaxCidLen>,
+        /// 🆕 A2修复: 被投诉方响应CID（独立存储，不覆盖原始投诉详情）
+        pub response_cid: Option<BoundedVec<u8, T::MaxCidLen>>,
         /// 涉及金额
         pub amount: Option<BalanceOf<T>>,
         /// 当前状态
@@ -364,6 +366,11 @@ pub mod pallet {
         /// - 做市商败诉时扣除信用分
         /// - 做市商胜诉时可选加分
         type CreditUpdater: CreditUpdater;
+
+        /// 🆕 防膨胀: 归档记录 TTL（区块数，超过此值的归档记录将被清理）
+        /// 默认 2_592_000 ≈ 180天 (6s/block)。设为 0 禁用清理。
+        #[pallet::constant]
+        type ArchiveTtlBlocks: Get<u32>;
     }
     
     /// 信用分更新接口
@@ -397,7 +404,7 @@ pub mod pallet {
     }
 
     /// 🆕 存储膨胀防护：归档仲裁记录（精简版）
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
     pub struct ArchivedDispute {
         /// 域（业务类型）
         pub domain: [u8; 8],
@@ -414,7 +421,7 @@ pub mod pallet {
     }
 
     /// 🆕 存储膨胀防护：仲裁永久统计
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
     pub struct ArbitrationPermanentStats {
         /// 总仲裁数
         pub total_disputes: u64,
@@ -427,7 +434,7 @@ pub mod pallet {
     }
 
     /// 🆕 双向押金记录
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     #[scale_info(skip_type_params(T))]
     pub struct TwoWayDepositRecord<AccountId, Balance, BlockNumber> {
         /// 发起方账户
@@ -541,6 +548,14 @@ pub mod pallet {
         OptionQuery,
     >;
 
+    /// 🆕 防膨胀: 归档仲裁清理游标
+    #[pallet::storage]
+    pub type ArchiveDisputeCleanupCursor<T: Config> = StorageValue<_, u64, ValueQuery>;
+
+    /// 🆕 防膨胀: 归档投诉清理游标
+    #[pallet::storage]
+    pub type ArchiveComplaintCleanupCursor<T: Config> = StorageValue<_, u64, ValueQuery>;
+
     /// 用户活跃投诉索引（作为投诉人）
     #[pallet::storage]
     pub type UserActiveComplaints<T: Config> = StorageMap<
@@ -575,6 +590,10 @@ pub mod pallet {
     /// 投诉归档游标
     #[pallet::storage]
     pub type ComplaintArchiveCursor<T: Config> = StorageValue<_, u64, ValueQuery>;
+
+    /// 🆕 AH4: 投诉过期扫描游标（避免全表扫描）
+    #[pallet::storage]
+    pub type ComplaintExpiryCursor<T: Config> = StorageValue<_, u64, ValueQuery>;
 
     // ============================================================================
 
@@ -829,6 +848,14 @@ pub mod pallet {
                 Disputed::<T>::get(domain, id).is_some(),
                 Error::<T>::NotDisputed
             );
+            // 🆕 AH1修复: 校验调用者是否有权操作此案件
+            #[cfg(not(feature = "runtime-benchmarks"))]
+            {
+                ensure!(
+                    T::Router::can_dispute(domain, &_who, id),
+                    Error::<T>::NotAuthorized
+                );
+            }
             EvidenceIds::<T>::try_mutate(domain, id, |v| -> Result<(), Error<T>> {
                 v.try_push(evidence_id)
                     .map_err(|_| Error::<T>::AlreadyDisputed)?;
@@ -1013,7 +1040,7 @@ pub mod pallet {
 
         /// 发起投诉（需缴纳押金防止恶意投诉）
         #[pallet::call_index(10)]
-        #[pallet::weight(<T as Config>::WeightInfo::dispute(1))]
+        #[pallet::weight(<T as Config>::WeightInfo::file_complaint())]
         pub fn file_complaint(
             origin: OriginFor<T>,
             domain: [u8; 8],
@@ -1089,6 +1116,7 @@ pub mod pallet {
                 complainant: complainant.clone(),
                 respondent: respondent.clone(),
                 details_cid,
+                response_cid: None,
                 amount,
                 status: ComplaintStatus::Submitted,
                 created_at: now,
@@ -1124,7 +1152,7 @@ pub mod pallet {
 
         /// 响应/申诉投诉
         #[pallet::call_index(11)]
-        #[pallet::weight(<T as Config>::WeightInfo::dispute(1))]
+        #[pallet::weight(<T as Config>::WeightInfo::respond_to_complaint())]
         pub fn respond_to_complaint(
             origin: OriginFor<T>,
             complaint_id: u64,
@@ -1151,8 +1179,8 @@ pub mod pallet {
                     Error::<T>::ResponseDeadlinePassed
                 );
 
-                // 更新详情CID（包含申诉内容）
-                complaint.details_cid = response_cid;
+                // 🆕 A2修复: 使用独立的 response_cid 字段，保留原始投诉详情
+                complaint.response_cid = Some(response_cid);
                 complaint.status = ComplaintStatus::Responded;
                 complaint.updated_at = now;
 
@@ -1167,7 +1195,7 @@ pub mod pallet {
 
         /// 撤销投诉
         #[pallet::call_index(12)]
-        #[pallet::weight(<T as Config>::WeightInfo::dispute(0))]
+        #[pallet::weight(<T as Config>::WeightInfo::withdraw_complaint())]
         pub fn withdraw_complaint(
             origin: OriginFor<T>,
             complaint_id: u64,
@@ -1188,6 +1216,16 @@ pub mod pallet {
                 complaint.status = ComplaintStatus::Withdrawn;
                 complaint.updated_at = now;
 
+                // 🆕 AH5修复: 撤诉时退还投诉押金
+                if let Some(deposit_amount) = ComplaintDeposits::<T>::take(complaint_id) {
+                    let _ = T::Fungible::release(
+                        &T::RuntimeHoldReason::from(HoldReason::ComplaintDeposit),
+                        &complaint.complainant,
+                        deposit_amount,
+                        frame_support::traits::tokens::Precision::BestEffort,
+                    );
+                }
+
                 Self::deposit_event(Event::ComplaintWithdrawn { complaint_id });
 
                 Ok(())
@@ -1196,7 +1234,7 @@ pub mod pallet {
 
         /// 达成和解
         #[pallet::call_index(13)]
-        #[pallet::weight(<T as Config>::WeightInfo::dispute(0))]
+        #[pallet::weight(<T as Config>::WeightInfo::settle_complaint())]
         pub fn settle_complaint(
             origin: OriginFor<T>,
             complaint_id: u64,
@@ -1225,6 +1263,16 @@ pub mod pallet {
                 complaint.status = ComplaintStatus::ResolvedSettlement;
                 complaint.updated_at = now;
 
+                // 🆕 AH6修复: 和解时退还投诉押金
+                if let Some(deposit_amount) = ComplaintDeposits::<T>::take(complaint_id) {
+                    let _ = T::Fungible::release(
+                        &T::RuntimeHoldReason::from(HoldReason::ComplaintDeposit),
+                        &complaint.complainant,
+                        deposit_amount,
+                        frame_support::traits::tokens::Precision::BestEffort,
+                    );
+                }
+
                 // 更新统计
                 DomainStats::<T>::mutate(complaint.domain, |stats| {
                     stats.resolved_count = stats.resolved_count.saturating_add(1);
@@ -1239,7 +1287,7 @@ pub mod pallet {
 
         /// 提交仲裁（升级到仲裁委员会）
         #[pallet::call_index(14)]
-        #[pallet::weight(<T as Config>::WeightInfo::dispute(0))]
+        #[pallet::weight(<T as Config>::WeightInfo::escalate_to_arbitration())]
         pub fn escalate_to_arbitration(
             origin: OriginFor<T>,
             complaint_id: u64,
@@ -1405,56 +1453,62 @@ pub mod pallet {
                     Decision::Release => {
                         // 卖家胜诉：买家押金罚没30%，卖家押金全额返还到托管
                         Self::slash_and_release(
-                            &escrow_account,  // 从托管账户操作
+                            &escrow_account,
                             deposit_record.initiator_deposit,
                             T::RejectedSlashBps::get(),
                             &HoldReason::DisputeInitiator,
                             &treasury,
+                            domain, id,
                         )?;
 
                         if let Some(respondent_deposit) = deposit_record.respondent_deposit {
                             Self::release_deposit(
-                                &escrow_account,  // 返还到托管账户
+                                &escrow_account,
                                 respondent_deposit,
                                 &HoldReason::DisputeRespondent,
+                                domain, id,
                             )?;
                         }
                     }
                     Decision::Refund => {
                         // 买家胜诉：买家押金全额返还到托管，卖家押金罚没30%
                         Self::release_deposit(
-                            &escrow_account,  // 返还到托管账户
+                            &escrow_account,
                             deposit_record.initiator_deposit,
                             &HoldReason::DisputeInitiator,
+                            domain, id,
                         )?;
 
                         if let Some(respondent_deposit) = deposit_record.respondent_deposit {
                             Self::slash_and_release(
-                                &escrow_account,  // 从托管账户操作
+                                &escrow_account,
                                 respondent_deposit,
                                 T::RejectedSlashBps::get(),
                                 &HoldReason::DisputeRespondent,
                                 &treasury,
+                                domain, id,
                             )?;
                         }
                     }
                     Decision::Partial(_) => {
                         // 部分胜诉：双方各罚没50%
                         Self::slash_and_release(
-                            &escrow_account,  // 从托管账户操作
+                            &escrow_account,
                             deposit_record.initiator_deposit,
                             T::PartialSlashBps::get(),
                             &HoldReason::DisputeInitiator,
                             &treasury,
+                            domain, id,
                         )?;
 
                         if let Some(respondent_deposit) = deposit_record.respondent_deposit {
                             Self::slash_and_release(
-                                &escrow_account,  // 从托管账户操作
+                                &escrow_account,
                                 respondent_deposit,
                                 T::PartialSlashBps::get(),
                                 &HoldReason::DisputeRespondent,
                                 &treasury,
+                                domain, id,
                             )?;
                         }
                     }
@@ -1465,16 +1519,18 @@ pub mod pallet {
 
         /// 函数级中文注释：罚没并释放押金
         /// - slash_bps: 罚没比例（基点，如 3000 = 30%）
+        /// 🆕 AH3修复: 传入 domain/id 以准确记录事件
         fn slash_and_release(
             account: &T::AccountId,
             amount: BalanceOf<T>,
             slash_bps: u16,
             hold_reason: &HoldReason,
             treasury: &T::AccountId,
+            domain: [u8; 8],
+            object_id: u64,
         ) -> DispatchResult {
             use sp_runtime::traits::Zero;
 
-            // 修复 C-4: 使用 Permill 而非 Perbill
             let slash_amount = sp_runtime::Permill::from_parts((slash_bps as u32) * 100)
                 .mul_floor(amount);
             let release_amount = amount.saturating_sub(slash_amount);
@@ -1503,8 +1559,8 @@ pub mod pallet {
             }
 
             Self::deposit_event(Event::DepositProcessed {
-                domain: [0u8; 8], // 简化处理，实际应传入domain
-                id: 0,
+                domain,
+                id: object_id,
                 account: account.clone(),
                 released: release_amount,
                 slashed: slash_amount,
@@ -1518,6 +1574,8 @@ pub mod pallet {
             account: &T::AccountId,
             amount: BalanceOf<T>,
             hold_reason: &HoldReason,
+            domain: [u8; 8],
+            object_id: u64,
         ) -> DispatchResult {
             use sp_runtime::traits::Zero;
 
@@ -1529,8 +1587,8 @@ pub mod pallet {
             )?;
 
             Self::deposit_event(Event::DepositProcessed {
-                domain: [0u8; 8],
-                id: 0,
+                domain,
+                id: object_id,
                 account: account.clone(),
                 released: amount,
                 slashed: BalanceOf::<T>::zero(),
@@ -1707,36 +1765,97 @@ pub mod pallet {
             });
         }
 
-        /// 处理过期投诉（未响应的投诉自动过期）
+        /// 🆕 AH4修复: 使用游标代替全表扫描，处理过期投诉
         pub fn expire_old_complaints(max_count: u32) -> u32 {
             let now = frame_system::Pallet::<T>::block_number();
             let mut expired_count = 0u32;
+            let mut cursor = ComplaintExpiryCursor::<T>::get();
+            let max_id = NextComplaintId::<T>::get();
 
-            for (complaint_id, mut complaint) in Complaints::<T>::iter() {
-                if expired_count >= max_count {
-                    break;
+            while expired_count < max_count && cursor < max_id {
+                if let Some(mut complaint) = Complaints::<T>::get(cursor) {
+                    // 检查是否过期：状态为 Submitted 且已过响应截止时间
+                    if complaint.status == ComplaintStatus::Submitted 
+                        && now > complaint.response_deadline 
+                    {
+                        complaint.status = ComplaintStatus::Expired;
+                        complaint.updated_at = now;
+
+                        // AH7: 过期投诉退还押金
+                        if let Some(deposit_amount) = ComplaintDeposits::<T>::take(cursor) {
+                            let _ = T::Fungible::release(
+                                &T::RuntimeHoldReason::from(HoldReason::ComplaintDeposit),
+                                &complaint.complainant,
+                                deposit_amount,
+                                frame_support::traits::tokens::Precision::BestEffort,
+                            );
+                        }
+
+                        Complaints::<T>::insert(cursor, &complaint);
+
+                        // 更新统计
+                        DomainStats::<T>::mutate(complaint.domain, |stats| {
+                            stats.resolved_count = stats.resolved_count.saturating_add(1);
+                            stats.expired_count = stats.expired_count.saturating_add(1);
+                        });
+
+                        Self::deposit_event(Event::ComplaintExpired { complaint_id: cursor });
+                        expired_count = expired_count.saturating_add(1);
+                    }
                 }
-
-                // 检查是否过期：状态为 Submitted 且已过响应截止时间
-                if complaint.status == ComplaintStatus::Submitted 
-                    && now > complaint.response_deadline 
-                {
-                    complaint.status = ComplaintStatus::Expired;
-                    complaint.updated_at = now;
-                    Complaints::<T>::insert(complaint_id, &complaint);
-
-                    // 更新统计
-                    DomainStats::<T>::mutate(complaint.domain, |stats| {
-                        stats.resolved_count = stats.resolved_count.saturating_add(1);
-                        stats.expired_count = stats.expired_count.saturating_add(1);
-                    });
-
-                    Self::deposit_event(Event::ComplaintExpired { complaint_id });
-                    expired_count = expired_count.saturating_add(1);
-                }
+                cursor = cursor.saturating_add(1);
             }
 
+            ComplaintExpiryCursor::<T>::put(cursor);
             expired_count
+        }
+
+        /// 🆕 防膨胀: 清理过期归档仲裁记录
+        fn cleanup_old_archived_disputes(current_block: u32, max_per_call: u32) -> u32 {
+            let ttl = T::ArchiveTtlBlocks::get();
+            if ttl == 0 { return 0; }
+            let mut cursor = ArchiveDisputeCleanupCursor::<T>::get();
+            let max_id = NextArchivedId::<T>::get();
+            let mut cleaned = 0u32;
+
+            while cursor < max_id && cleaned < max_per_call {
+                if let Some(archived) = ArchivedDisputes::<T>::get(cursor) {
+                    if current_block.saturating_sub(archived.completed_at) > ttl {
+                        ArchivedDisputes::<T>::remove(cursor);
+                        cleaned += 1;
+                    } else {
+                        break;
+                    }
+                }
+                cursor = cursor.saturating_add(1);
+            }
+
+            ArchiveDisputeCleanupCursor::<T>::put(cursor);
+            cleaned
+        }
+
+        /// 🆕 防膨胀: 清理过期归档投诉记录
+        fn cleanup_old_archived_complaints(current_block: u32, max_per_call: u32) -> u32 {
+            let ttl = T::ArchiveTtlBlocks::get();
+            if ttl == 0 { return 0; }
+            let mut cursor = ArchiveComplaintCleanupCursor::<T>::get();
+            let next_complaint = NextComplaintId::<T>::get();
+            let mut cleaned = 0u32;
+
+            while cursor < next_complaint && cleaned < max_per_call {
+                if let Some(archived) = ArchivedComplaints::<T>::get(cursor) {
+                    if current_block.saturating_sub(archived.resolved_at) > ttl {
+                        ArchivedComplaints::<T>::remove(cursor);
+                        cleaned += 1;
+                    } else {
+                        break;
+                    }
+                }
+                cursor = cursor.saturating_add(1);
+            }
+
+            ArchiveComplaintCleanupCursor::<T>::put(cursor);
+            cleaned
         }
     }
 
@@ -1744,9 +1863,10 @@ pub mod pallet {
 
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
-        fn on_idle(_now: BlockNumberFor<T>, remaining_weight: Weight) -> Weight {
+        fn on_idle(now: BlockNumberFor<T>, remaining_weight: Weight) -> Weight {
             let mut weight_used = Weight::zero();
-            let base_weight = Weight::from_parts(10_000, 0);
+            // 🆕 A7修复: 每项处理涉及 DB 读写，权重从 10K 提升到 25M
+            let base_weight = Weight::from_parts(25_000_000, 2_000);
 
             // 阶段1：处理过期投诉（每次最多5个）
             if remaining_weight.ref_time() > base_weight.ref_time() * 5 {
@@ -1759,6 +1879,19 @@ pub mod pallet {
             if remaining.ref_time() > base_weight.ref_time() * 10 {
                 let archived = Self::archive_old_complaints(10);
                 weight_used = weight_used.saturating_add(base_weight.saturating_mul(archived as u64));
+            }
+
+            // 🆕 阶段3：清理过期归档记录
+            let current_block: u32 = now.saturated_into();
+            let remaining2 = remaining_weight.saturating_sub(weight_used);
+            if remaining2.ref_time() > base_weight.ref_time() * 5 {
+                let cleaned = Self::cleanup_old_archived_disputes(current_block, 5);
+                weight_used = weight_used.saturating_add(base_weight.saturating_mul(cleaned as u64));
+            }
+            let remaining3 = remaining_weight.saturating_sub(weight_used);
+            if remaining3.ref_time() > base_weight.ref_time() * 5 {
+                let cleaned = Self::cleanup_old_archived_complaints(current_block, 5);
+                weight_used = weight_used.saturating_add(base_weight.saturating_mul(cleaned as u64));
             }
 
             weight_used

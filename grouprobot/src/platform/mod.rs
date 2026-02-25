@@ -28,11 +28,18 @@ pub struct MessageContext {
     pub sender_id: String,
     pub sender_name: String,
     pub message_text: String,
+    pub message_id: Option<String>,
     pub is_command: bool,
     pub command: Option<String>,
     pub command_args: Vec<String>,
     pub is_join_request: bool,
     pub is_admin: bool,
+    /// 消息类型标记 (photo, video, audio, document, sticker, animation, voice, forward, contact, location, poll)
+    pub message_type: Option<String>,
+    /// CallbackQuery ID (Inline 键盘回调)
+    pub callback_query_id: Option<String>,
+    /// CallbackQuery data
+    pub callback_data: Option<String>,
 }
 
 /// 执行动作
@@ -44,6 +51,10 @@ pub struct ExecuteAction {
     pub reason: Option<String>,
     pub message: Option<String>,
     pub duration_secs: Option<u64>,
+    /// Inline 键盘 JSON (可选)
+    pub inline_keyboard: Option<serde_json::Value>,
+    /// CallbackQuery ID (用于 answerCallbackQuery)
+    pub callback_query_id: Option<String>,
 }
 
 /// 动作类型
@@ -60,6 +71,12 @@ pub enum ActionType {
     PinMessage = 8,
     ApproveJoin = 9,
     DeclineJoin = 10,
+    // Phase 4 新增
+    Promote = 11,
+    Demote = 12,
+    SetPermissions = 13,
+    EditMessage = 14,
+    AnswerCallback = 15,
 }
 
 impl ActionType {

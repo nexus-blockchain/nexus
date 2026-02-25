@@ -93,7 +93,7 @@ pub mod pallet {
     // Storage
     // ========================================================================
 
-    /// 单线配置 shop_id -> SingleLineConfig
+    /// 单线配置 entity_id -> SingleLineConfig
     #[pallet::storage]
     #[pallet::getter(fn single_line_config)]
     pub type SingleLineConfigs<T: Config> = StorageMap<
@@ -102,7 +102,7 @@ pub mod pallet {
         SingleLineConfig<BalanceOf<T>>,
     >;
 
-    /// 消费单链 shop_id -> Vec<AccountId>（按首次消费顺序）
+    /// 消费单链 entity_id -> Vec<AccountId>（按首次消费顺序）
     #[pallet::storage]
     #[pallet::getter(fn single_line)]
     pub type SingleLines<T: Config> = StorageMap<
@@ -112,7 +112,7 @@ pub mod pallet {
         ValueQuery,
     >;
 
-    /// 用户在单链中的位置 (shop_id, account) -> index
+    /// 用户在单链中的位置 (entity_id, account) -> index
     #[pallet::storage]
     #[pallet::getter(fn single_line_index)]
     pub type SingleLineIndex<T: Config> = StorageDoubleMap<
@@ -129,8 +129,10 @@ pub mod pallet {
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
-        SingleLineConfigUpdated { shop_id: u64 },
-        AddedToSingleLine { shop_id: u64, account: T::AccountId, index: u32 },
+        SingleLineConfigUpdated { entity_id: u64 },
+        AddedToSingleLine { entity_id: u64, account: T::AccountId, index: u32 },
+        /// 单链加入失败（可能链已满，需人工干预）
+        SingleLineJoinFailed { entity_id: u64, account: T::AccountId },
     }
 
     #[pallet::error]
@@ -146,11 +148,13 @@ pub mod pallet {
     #[pallet::call]
     impl<T: Config> Pallet<T> {
         /// 设置单线收益配置
+        ///
+        /// CSL-H1 审计修复: 参数统一为 entity_id，与插件查询键一致
         #[pallet::call_index(0)]
         #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_single_line_config(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             upline_rate: u16,
             downline_rate: u16,
             base_upline_levels: u8,
@@ -162,7 +166,7 @@ pub mod pallet {
             ensure_root(origin)?;
             ensure!(upline_rate <= 1000 && downline_rate <= 1000, Error::<T>::InvalidRate);
 
-            SingleLineConfigs::<T>::insert(shop_id, SingleLineConfig {
+            SingleLineConfigs::<T>::insert(entity_id, SingleLineConfig {
                 upline_rate,
                 downline_rate,
                 base_upline_levels,
@@ -172,7 +176,7 @@ pub mod pallet {
                 max_downline_levels,
             });
 
-            Self::deposit_event(Event::SingleLineConfigUpdated { shop_id });
+            Self::deposit_event(Event::SingleLineConfigUpdated { entity_id });
             Ok(())
         }
     }
@@ -183,15 +187,15 @@ pub mod pallet {
 
     impl<T: Config> Pallet<T> {
         /// 将用户加入单链（首次消费时调用）
-        pub fn add_to_single_line(shop_id: u64, account: &T::AccountId) -> DispatchResult {
-            if SingleLineIndex::<T>::contains_key(shop_id, account) {
+        pub fn add_to_single_line(entity_id: u64, account: &T::AccountId) -> DispatchResult {
+            if SingleLineIndex::<T>::contains_key(entity_id, account) {
                 return Ok(());
             }
 
-            SingleLines::<T>::try_mutate(shop_id, |line| {
+            SingleLines::<T>::try_mutate(entity_id, |line| {
                 let index = line.len() as u32;
                 line.try_push(account.clone()).map_err(|_| Error::<T>::SingleLineFull)?;
-                SingleLineIndex::<T>::insert(shop_id, account, index);
+                SingleLineIndex::<T>::insert(entity_id, account, index);
                 Ok(())
             })
         }
@@ -203,29 +207,31 @@ pub mod pallet {
             let threshold_u128: u128 = sp_runtime::SaturatedConversion::saturated_into(threshold);
             let earned_u128: u128 = sp_runtime::SaturatedConversion::saturated_into(total_earned);
             if threshold_u128 > 0 {
-                (earned_u128 / threshold_u128) as u8
+                // H4 审计修复: 防止 u8 溢出，限制最大值为 255
+                (earned_u128 / threshold_u128).min(255) as u8
             } else {
                 0
             }
         }
 
         pub fn process_upline(
-            shop_id: u64,
+            entity_id: u64,
             buyer: &T::AccountId,
+            order_amount: BalanceOf<T>,
             remaining: &mut BalanceOf<T>,
             config: &SingleLineConfig<BalanceOf<T>>,
             outputs: &mut Vec<CommissionOutput<T::AccountId, BalanceOf<T>>>,
         ) {
             if config.upline_rate == 0 { return; }
 
-            let buyer_index = match SingleLineIndex::<T>::get(shop_id, buyer) {
+            let buyer_index = match SingleLineIndex::<T>::get(entity_id, buyer) {
                 Some(idx) => idx,
                 None => return,
             };
             if buyer_index == 0 { return; }
 
-            let line = SingleLines::<T>::get(shop_id);
-            let buyer_stats = T::StatsProvider::get_member_stats(shop_id, buyer);
+            let line = SingleLines::<T>::get(entity_id);
+            let buyer_stats = T::StatsProvider::get_member_stats(entity_id, buyer);
             let extra_levels = Self::calc_extra_levels(config.level_increment_threshold, buyer_stats.total_earned);
             let max_levels = config.base_upline_levels
                 .saturating_add(extra_levels)
@@ -237,8 +243,8 @@ pub mod pallet {
                 if upline_index >= line.len() { break; }
                 let upline = &line[upline_index];
 
-                let upline_stats = T::StatsProvider::get_member_stats(shop_id, upline);
-                let commission = upline_stats.total_earned
+                // C2 审计修复: 佣金基于当前订单金额，而非受益人累计收益
+                let commission = order_amount
                     .saturating_mul(config.upline_rate.into())
                     / 10000u32.into();
                 let actual = commission.min(*remaining);
@@ -256,24 +262,25 @@ pub mod pallet {
         }
 
         pub fn process_downline(
-            shop_id: u64,
+            entity_id: u64,
             buyer: &T::AccountId,
+            order_amount: BalanceOf<T>,
             remaining: &mut BalanceOf<T>,
             config: &SingleLineConfig<BalanceOf<T>>,
             outputs: &mut Vec<CommissionOutput<T::AccountId, BalanceOf<T>>>,
         ) {
             if config.downline_rate == 0 { return; }
 
-            let buyer_index = match SingleLineIndex::<T>::get(shop_id, buyer) {
+            let buyer_index = match SingleLineIndex::<T>::get(entity_id, buyer) {
                 Some(idx) => idx,
                 None => return,
             };
 
-            let line = SingleLines::<T>::get(shop_id);
+            let line = SingleLines::<T>::get(entity_id);
             let line_len = line.len() as u32;
             if buyer_index >= line_len.saturating_sub(1) { return; }
 
-            let buyer_stats = T::StatsProvider::get_member_stats(shop_id, buyer);
+            let buyer_stats = T::StatsProvider::get_member_stats(entity_id, buyer);
             let extra_levels = Self::calc_extra_levels(config.level_increment_threshold, buyer_stats.total_earned);
             let max_levels = config.base_downline_levels
                 .saturating_add(extra_levels)
@@ -284,8 +291,8 @@ pub mod pallet {
                 if downline_index >= line.len() { break; }
                 let downline = &line[downline_index];
 
-                let downline_stats = T::StatsProvider::get_member_stats(shop_id, downline);
-                let commission = downline_stats.total_earned
+                // C2 审计修复: 佣金基于当前订单金额，而非受益人累计收益
+                let commission = order_amount
                     .saturating_mul(config.downline_rate.into())
                     / 10000u32.into();
                 let actual = commission.min(*remaining);
@@ -311,9 +318,9 @@ pub mod pallet {
 impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId, pallet::BalanceOf<T>> for pallet::Pallet<T> {
     fn calculate(
         entity_id: u64,
-        shop_id: u64,
+        _shop_id: u64,
         buyer: &T::AccountId,
-        _order_amount: pallet::BalanceOf<T>,
+        order_amount: pallet::BalanceOf<T>,
         remaining: pallet::BalanceOf<T>,
         enabled_modes: pallet_commission_common::CommissionModes,
         is_first_order: bool,
@@ -338,16 +345,21 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
         let mut outputs = alloc::vec::Vec::new();
 
         if has_upline {
-            pallet::Pallet::<T>::process_upline(entity_id, buyer, &mut remaining, &config, &mut outputs);
+            pallet::Pallet::<T>::process_upline(entity_id, buyer, order_amount, &mut remaining, &config, &mut outputs);
         }
 
         if has_downline {
-            pallet::Pallet::<T>::process_downline(entity_id, buyer, &mut remaining, &config, &mut outputs);
+            pallet::Pallet::<T>::process_downline(entity_id, buyer, order_amount, &mut remaining, &config, &mut outputs);
         }
 
-        // 首次消费加入单链（Entity 级）
+        // 首次消费加入单链（Entity 级，失败发事件）
         if is_first_order {
-            let _ = pallet::Pallet::<T>::add_to_single_line(entity_id, buyer);
+            if pallet::Pallet::<T>::add_to_single_line(entity_id, buyer).is_err() {
+                pallet::Pallet::<T>::deposit_event(pallet::Event::SingleLineJoinFailed {
+                    entity_id,
+                    account: buyer.clone(),
+                });
+            }
         }
 
         (outputs, remaining)

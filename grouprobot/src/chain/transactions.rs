@@ -123,6 +123,48 @@ impl ChainClient {
         self.submit_and_watch(tx, "submit_dcap_full_attestation").await
     }
 
+    /// 提交 TEE 证明 (三模式统一入口, 对应链上 call_index 21)
+    ///
+    /// 自动检测 Quote 类型 (SGX v3 / TDX v4), 链上验证 DCAP + 白名单
+    /// 支持 Level 2/3/4 自适应
+    pub async fn submit_tee_attestation(
+        &self,
+        bot_id_hash: [u8; 32],
+        bundle: &AttestationBundle,
+    ) -> BotResult<()> {
+        let quote_raw = bundle.tdx_quote_raw.as_ref().ok_or_else(|| {
+            BotError::AttestationFailed("quote_raw is required for submit_tee_attestation".into())
+        })?;
+
+        // platform_id: None (目前不支持 Level 3 via platform_id 在统一入口)
+        let platform_id_val = Value::unnamed_variant("None", vec![]);
+
+        // pck_cert_der: Option<Vec<u8>>
+        let pck_val = match &bundle.pck_cert_der {
+            Some(der) => Value::unnamed_variant("Some", vec![Value::from_bytes(der)]),
+            None => Value::unnamed_variant("None", vec![]),
+        };
+
+        // intermediate_cert_der: Option<Vec<u8>>
+        let inter_val = match &bundle.intermediate_cert_der {
+            Some(der) => Value::unnamed_variant("Some", vec![Value::from_bytes(der)]),
+            None => Value::unnamed_variant("None", vec![]),
+        };
+
+        let tx = subxt::dynamic::tx(
+            "GroupRobotRegistry", "submit_tee_attestation",
+            vec![
+                Value::from_bytes(bot_id_hash),
+                Value::from_bytes(quote_raw),
+                platform_id_val,
+                pck_val,
+                inter_val,
+            ],
+        );
+
+        self.submit_and_watch(tx, "submit_tee_attestation").await
+    }
+
     /// 请求证明 Nonce (防重放, 硬件模式专用)
     ///
     /// 返回的 nonce 必须嵌入 TDX report_data[32..64]
@@ -156,6 +198,57 @@ impl ChainClient {
         );
 
         self.submit_and_watch(tx, "refresh_attestation").await
+    }
+
+    // ========================================================================
+    // Ad System Transactions (广告系统)
+    // ========================================================================
+
+    /// 上报广告投放收据
+    pub async fn submit_delivery_receipt(
+        &self,
+        campaign_id: u64,
+        community_id_hash: [u8; 32],
+        delivery_type: u8,
+        audience_size: u32,
+        node_signature: [u8; 64],
+    ) -> BotResult<()> {
+        let delivery_type_val = match delivery_type {
+            0 => Value::unnamed_variant("ScheduledPost", vec![]),
+            1 => Value::unnamed_variant("ReplyFooter", vec![]),
+            2 => Value::unnamed_variant("WelcomeEmbed", vec![]),
+            _ => Value::unnamed_variant("ScheduledPost", vec![]),
+        };
+
+        let tx = subxt::dynamic::tx(
+            "GroupRobotAds", "submit_delivery_receipt",
+            vec![
+                Value::u128(campaign_id as u128),
+                Value::from_bytes(community_id_hash),
+                delivery_type_val,
+                Value::u128(audience_size as u128),
+                Value::from_bytes(node_signature),
+            ],
+        );
+
+        self.submit_and_watch(tx, "submit_delivery_receipt").await
+    }
+
+    /// 更新社区活跃成员数 (由 Bot 定期上报)
+    pub async fn update_active_members(
+        &self,
+        community_id_hash: [u8; 32],
+        active_members: u32,
+    ) -> BotResult<()> {
+        let tx = subxt::dynamic::tx(
+            "GroupRobotCommunity", "update_active_members",
+            vec![
+                Value::from_bytes(community_id_hash),
+                Value::u128(active_members as u128),
+            ],
+        );
+
+        self.submit_and_watch(tx, "update_active_members").await
     }
 
     /// 标记序列号已处理 (去重)
@@ -240,6 +333,60 @@ impl ChainClient {
         self.submit_and_watch(tx, "batch_submit_logs").await
     }
 
+    /// 注册 Peer 端点到链上 (节点启动时调用)
+    pub async fn register_peer(
+        &self,
+        bot_id_hash: [u8; 32],
+        peer_public_key: [u8; 32],
+        endpoint: &str,
+    ) -> BotResult<()> {
+        let endpoint_bytes: Vec<u8> = endpoint.as_bytes().to_vec();
+        let tx = subxt::dynamic::tx(
+            "GroupRobotRegistry", "register_peer",
+            vec![
+                Value::from_bytes(bot_id_hash),
+                Value::from_bytes(peer_public_key),
+                Value::from_bytes(endpoint_bytes),
+            ],
+        );
+
+        self.submit_and_watch(tx, "register_peer").await
+    }
+
+    /// 注销 Peer 端点 (节点下线时调用)
+    pub async fn deregister_peer(
+        &self,
+        bot_id_hash: [u8; 32],
+        peer_public_key: [u8; 32],
+    ) -> BotResult<()> {
+        let tx = subxt::dynamic::tx(
+            "GroupRobotRegistry", "deregister_peer",
+            vec![
+                Value::from_bytes(bot_id_hash),
+                Value::from_bytes(peer_public_key),
+            ],
+        );
+
+        self.submit_and_watch(tx, "deregister_peer").await
+    }
+
+    /// Peer 心跳 (定期调用, 更新 last_seen)
+    pub async fn heartbeat_peer(
+        &self,
+        bot_id_hash: [u8; 32],
+        peer_public_key: [u8; 32],
+    ) -> BotResult<()> {
+        let tx = subxt::dynamic::tx(
+            "GroupRobotRegistry", "heartbeat_peer",
+            vec![
+                Value::from_bytes(bot_id_hash),
+                Value::from_bytes(peer_public_key),
+            ],
+        );
+
+        self.submit_and_watch(tx, "heartbeat_peer").await
+    }
+
     /// 记录仪式到链上
     pub async fn record_ceremony(
         &self,
@@ -249,6 +396,7 @@ impl ChainClient {
         n: u8,
         bot_public_key: [u8; 32],
         participant_enclaves: Vec<[u8; 32]>,
+        bot_id_hash: [u8; 32],
     ) -> BotResult<()> {
         let participants: Vec<Value> = participant_enclaves.iter()
             .map(Value::from_bytes)
@@ -263,6 +411,7 @@ impl ChainClient {
                 Value::u128(n as u128),
                 Value::from_bytes(bot_public_key),
                 Value::unnamed_composite(participants),
+                Value::from_bytes(bot_id_hash),
             ],
         );
 

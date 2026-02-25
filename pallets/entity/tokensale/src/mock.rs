@@ -166,6 +166,10 @@ parameter_types! {
     pub const ExistentialDeposit: u128 = 1;
 }
 
+parameter_types! {
+    pub const RefundGracePeriod: u64 = 100; // 100 blocks grace period for tests
+}
+
 impl pallet_entity_tokensale::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
@@ -177,6 +181,8 @@ impl pallet_entity_tokensale::Config for Test {
     type MaxWhitelistSize = ConstU32<100>;
     type MaxRoundsHistory = ConstU32<50>;
     type MaxSubscriptionsPerRound = ConstU32<1000>;
+    type MaxActiveRounds = ConstU32<10>;
+    type RefundGracePeriod = RefundGracePeriod;
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

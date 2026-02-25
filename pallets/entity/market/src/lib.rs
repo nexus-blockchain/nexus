@@ -1,10 +1,10 @@
-//! # 店铺代币交易市场模块 (pallet-entity-market)
+//! # 实体代币交易市场模块 (pallet-entity-market)
 //!
 //! ## 概述
 //!
-//! 本模块实现店铺代币的 P2P 交易市场，支持：
-//! - NEX 通道：使用原生 NEX 代币买卖店铺代币（链上即时结算）
-//! - USDT 通道：使用 TRC20 USDT 买卖店铺代币（需 OCW 验证）
+//! 本模块实现实体代币的 P2P 交易市场，支持：
+//! - NEX 通道：使用原生 NEX 代币买卖实体代币（链上即时结算）
+//! - USDT 通道：使用 TRC20 USDT 买卖实体代币（需 OCW 验证）
 //!
 //! ## 交易模式
 //!
@@ -42,7 +42,7 @@ pub mod pallet {
         BoundedVec,
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{EntityProvider, EntityTokenProvider, ShopProvider};
+    use pallet_entity_common::{EntityProvider, EntityTokenProvider};
     use sp_runtime::traits::{CheckedAdd, CheckedMul, CheckedSub, Saturating, Zero};
     use sp_runtime::SaturatedConversion;
     use sp_runtime::transaction_validity::{
@@ -97,59 +97,16 @@ pub mod pallet {
         Expired,
     }
 
-    /// USDT 交易状态
-    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
-    pub enum UsdtTradeStatus {
-        /// 等待买家支付 USDT
-        AwaitingPayment,
-        /// 等待 OCW 验证
-        AwaitingVerification,
-        /// 已完成
-        Completed,
-        /// 争议中
-        Disputed,
-        /// 已取消
-        Cancelled,
-        /// 已退款（超时）
-        Refunded,
-    }
-
-    /// 🆕 买家保证金状态
-    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
-    pub enum BuyerDepositStatus {
-        /// 无保证金
-        #[default]
-        None,
-        /// 已锁定
-        Locked,
-        /// 已退还（交易完成）
-        Released,
-        /// 已没收（超时/违约）
-        Forfeited,
-        /// 🆕 部分没收（少付场景）
-        PartiallyForfeited,
-    }
-
-    /// 🆕 付款金额验证结果（多档判定）
-    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
-    pub enum PaymentVerificationResult {
-        /// 验证通过（≥99.5%）
-        Exact,
-        /// 多付（≥100.5%）
-        Overpaid,
-        /// 少付（50%-99.5%）→ 按比例处理
-        Underpaid,
-        /// 严重少付（<50%）→ 验证失败
-        SeverelyUnderpaid,
-        /// 无效（0 或交易失败）
-        Invalid,
-    }
+    // USDT 交易共享类型（从 pallet-trading-common 导入）
+    pub use pallet_trading_common::{
+        UsdtTradeStatus, BuyerDepositStatus, PaymentVerificationResult,
+    };
 
     /// TRON 地址类型（34 字节 Base58）
-    pub type TronAddress = BoundedVec<u8, ConstU32<34>>;
+    pub type TronAddress = pallet_trading_common::TronAddress;
 
     /// TRON 交易哈希类型（64 字节 hex）
-    pub type TronTxHash = BoundedVec<u8, ConstU32<64>>;
+    pub type TronTxHash = pallet_trading_common::TronTxHash;
 
     /// 交易订单
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
@@ -157,8 +114,8 @@ pub mod pallet {
     pub struct TradeOrder<T: Config> {
         /// 订单 ID
         pub order_id: u64,
-        /// 店铺 ID
-        pub shop_id: u64,
+        /// 实体 ID
+        pub entity_id: u64,
         /// 挂单者
         pub maker: T::AccountId,
         /// 订单方向
@@ -184,6 +141,8 @@ pub mod pallet {
         pub created_at: BlockNumberFor<T>,
         /// 过期区块
         pub expires_at: BlockNumberFor<T>,
+        /// 挂单保证金（USDT 买单锁定的 NEX 保证金，其他订单为 0）
+        pub maker_deposit: BalanceOf<T>,
     }
 
     /// USDT 交易记录（等待验证）
@@ -194,8 +153,8 @@ pub mod pallet {
         pub trade_id: u64,
         /// 关联订单 ID
         pub order_id: u64,
-        /// 店铺 ID
-        pub shop_id: u64,
+        /// 实体 ID
+        pub entity_id: u64,
         /// 卖家
         pub seller: T::AccountId,
         /// 买家
@@ -218,9 +177,15 @@ pub mod pallet {
         pub buyer_deposit: BalanceOf<T>,
         /// 🆕 保证金状态
         pub deposit_status: BuyerDepositStatus,
+        /// 首次检测到少付的区块
+        pub first_verified_at: Option<BlockNumberFor<T>>,
+        /// 首次检测到的实际金额
+        pub first_actual_amount: Option<u64>,
+        /// 补付窗口截止区块
+        pub underpaid_deadline: Option<BlockNumberFor<T>>,
     }
 
-    /// 店铺市场配置
+    /// 实体市场配置
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
     pub struct MarketConfig<Balance> {
         /// 是否启用 NEX 交易
@@ -235,7 +200,7 @@ pub mod pallet {
         pub order_ttl: u32,
         /// USDT 交易超时（区块数）
         pub usdt_timeout: u32,
-        /// 手续费接收账户（None = 店铺账户）
+        /// 手续费接收账户（None = 实体金库账户）
         pub fee_recipient: Option<Balance>,
     }
 
@@ -256,6 +221,15 @@ pub mod pallet {
         pub total_fees_usdt: u64,
     }
 
+    /// 市场操作类型（用于失败事件追踪）
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    pub enum MarketOperation {
+        /// 保证金没收转国库
+        DepositForfeit,
+        /// 验证奖励发放
+        VerificationReward,
+    }
+
     // ==================== Phase 4: 订单簿深度数据结构 ====================
 
     /// 价格档位（聚合同一价格的订单）
@@ -272,8 +246,8 @@ pub mod pallet {
     /// 订单簿深度（买卖盘）
     #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
     pub struct OrderBookDepth<Balance, TokenBalance> {
-        /// 店铺 ID
-        pub shop_id: u64,
+        /// 实体 ID
+        pub entity_id: u64,
         /// 卖盘（按价格升序，最优卖价在前）
         pub asks: Vec<PriceLevel<Balance, TokenBalance>>,
         /// 买盘（按价格降序，最优买价在前）
@@ -375,7 +349,7 @@ pub mod pallet {
         pub circuit_breaker_active: bool,
         /// 熔断结束区块
         pub circuit_breaker_until: u32,
-        /// 店主设定的初始参考价格（用于 TWAP 冷启动）
+        /// 实体主设定的初始参考价格（用于 TWAP 冷启动）
         pub initial_price: Option<Balance>,
     }
 
@@ -419,7 +393,7 @@ pub mod pallet {
             + Ord
             + sp_runtime::traits::CheckedDiv;
 
-        /// 店铺代币余额类型
+        /// 实体代币余额类型
         type TokenBalance: Member
             + Parameter
             + Copy
@@ -437,9 +411,6 @@ pub mod pallet {
         /// 实体查询接口
         type EntityProvider: EntityProvider<Self::AccountId>;
 
-        /// Shop 查询接口（Entity-Shop 分离架构）
-        type ShopProvider: ShopProvider<Self::AccountId>;
-
         /// 实体代币接口
         type TokenProvider: EntityTokenProvider<Self::AccountId, Self::TokenBalance>;
 
@@ -447,7 +418,7 @@ pub mod pallet {
         #[pallet::constant]
         type DefaultOrderTTL: Get<u32>;
 
-        /// 最大活跃订单数（每用户每店铺）
+        /// 最大活跃订单数（每用户每实体）
         #[pallet::constant]
         type MaxActiveOrdersPerUser: Get<u32>;
 
@@ -480,7 +451,7 @@ pub mod pallet {
         #[pallet::constant]
         type VerificationReward: Get<BalanceOf<Self>>;
 
-        /// 奖励来源账户（通常是店铺账户或财库）
+        /// 奖励来源账户（通常是实体账户或财库）
         type RewardSource: Get<Self::AccountId>;
 
         // ==================== 🆕 买家保证金配置 ====================
@@ -508,6 +479,14 @@ pub mod pallet {
 
         /// 🆕 国库账户（没收的保证金归入国库）
         type TreasuryAccount: Get<Self::AccountId>;
+
+        /// AwaitingVerification 超时宽限期（区块数）
+        #[pallet::constant]
+        type VerificationGracePeriod: Get<u32>;
+
+        /// 少付补付窗口（区块数）
+        #[pallet::constant]
+        type UnderpaidGracePeriod: Get<u32>;
     }
 
     #[pallet::pallet]
@@ -541,6 +520,78 @@ pub mod pallet {
                     }
                 }
             }
+
+            // ── 2. 扫描 UnderpaidPending（补付窗口内持续检查新转账）──
+            let underpaid = PendingUnderpaidTrades::<T>::get();
+            if !underpaid.is_empty() {
+                log::info!(target: "entity-market-ocw",
+                    "Checking {} underpaid trades for topup", underpaid.len());
+
+                for trade_id in underpaid.iter() {
+                    if let Some(trade) = UsdtTrades::<T>::get(trade_id) {
+                        if trade.status == UsdtTradeStatus::UnderpaidPending {
+                            if let Some(ref tx_hash) = trade.tron_tx_hash {
+                                Self::check_underpaid_topup(
+                                    *trade_id, &trade, tx_hash.as_slice(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /// P1 修复: on_idle 批量清理过期订单，释放 BoundedVec 名额
+        fn on_idle(_n: BlockNumberFor<T>, mut remaining_weight: Weight) -> Weight {
+            let base_weight = Weight::from_parts(5_000, 0);
+            let per_order_weight = Weight::from_parts(30_000, 0);
+            let now = <frame_system::Pallet<T>>::block_number();
+            let mut cleaned = 0u32;
+            const MAX_CLEAN_PER_BLOCK: u32 = 20;
+
+            let next_id = NextOrderId::<T>::get();
+            let start = next_id.saturating_sub(1000); // 最多回溯 1000 个
+
+            for order_id in start..next_id {
+                if cleaned >= MAX_CLEAN_PER_BLOCK { break; }
+                if remaining_weight.ref_time() < per_order_weight.ref_time() { break; }
+
+                if let Some(order) = Orders::<T>::get(order_id) {
+                    if (order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled)
+                        && now > order.expires_at
+                    {
+                        let unfilled = order.token_amount.saturating_sub(order.filled_amount);
+                        match order.side {
+                            OrderSide::Sell => {
+                                T::TokenProvider::unreserve(order.entity_id, &order.maker, unfilled);
+                            }
+                            OrderSide::Buy => {
+                                if let Ok(refund) = Self::calculate_total_next(unfilled.into(), order.price) {
+                                    T::Currency::unreserve(&order.maker, refund);
+                                }
+                            }
+                        }
+                        if !order.maker_deposit.is_zero() {
+                            T::Currency::unreserve(&order.maker, order.maker_deposit);
+                        }
+
+                        let mut expired_order = order.clone();
+                        expired_order.status = OrderStatus::Expired;
+                        Orders::<T>::insert(order_id, &expired_order);
+
+                        Self::remove_from_order_book(order.entity_id, order_id, order.side);
+                        UserOrders::<T>::mutate(&order.maker, |orders| {
+                            orders.retain(|&id| id != order_id);
+                        });
+
+                        cleaned += 1;
+                        remaining_weight = remaining_weight.saturating_sub(per_order_weight);
+                    }
+                }
+                remaining_weight = remaining_weight.saturating_sub(base_weight);
+            }
+
+            Weight::from_parts(base_weight.ref_time() * (cleaned as u64 + 1), 0)
         }
     }
 
@@ -556,24 +607,24 @@ pub mod pallet {
     #[pallet::getter(fn orders)]
     pub type Orders<T: Config> = StorageMap<_, Blake2_128Concat, u64, TradeOrder<T>>;
 
-    /// 店铺订单簿 - 卖单（按店铺索引）
+    /// 实体订单簿 - 卖单（按实体索引）
     #[pallet::storage]
-    #[pallet::getter(fn shop_sell_orders)]
-    pub type ShopSellOrders<T: Config> = StorageMap<
+    #[pallet::getter(fn entity_sell_orders)]
+    pub type EntitySellOrders<T: Config> = StorageMap<
         _,
         Blake2_128Concat,
-        u64, // shop_id
+        u64, // entity_id
         BoundedVec<u64, ConstU32<1000>>,
         ValueQuery,
     >;
 
-    /// 店铺订单簿 - 买单（按店铺索引）
+    /// 实体订单簿 - 买单（按实体索引）
     #[pallet::storage]
-    #[pallet::getter(fn shop_buy_orders)]
-    pub type ShopBuyOrders<T: Config> = StorageMap<
+    #[pallet::getter(fn entity_buy_orders)]
+    pub type EntityBuyOrders<T: Config> = StorageMap<
         _,
         Blake2_128Concat,
-        u64, // shop_id
+        u64, // entity_id
         BoundedVec<u64, ConstU32<1000>>,
         ValueQuery,
     >;
@@ -589,13 +640,13 @@ pub mod pallet {
         ValueQuery,
     >;
 
-    /// 店铺市场配置
+    /// 实体市场配置
     #[pallet::storage]
     #[pallet::getter(fn market_configs)]
     pub type MarketConfigs<T: Config> =
         StorageMap<_, Blake2_128Concat, u64, MarketConfig<BalanceOf<T>>>;
 
-    /// 店铺市场统计
+    /// 实体市场统计
     #[pallet::storage]
     #[pallet::getter(fn market_stats)]
     pub type MarketStatsStorage<T: Config> =
@@ -615,6 +666,11 @@ pub mod pallet {
     #[pallet::storage]
     #[pallet::getter(fn pending_usdt_trades)]
     pub type PendingUsdtTrades<T: Config> = StorageValue<_, BoundedVec<u64, ConstU32<100>>, ValueQuery>;
+
+    /// 少付补付跟踪队列（UnderpaidPending 状态，OCW 持续扫描）
+    #[pallet::storage]
+    #[pallet::getter(fn pending_underpaid_trades)]
+    pub type PendingUnderpaidTrades<T: Config> = StorageValue<_, BoundedVec<u64, ConstU32<100>>, ValueQuery>;
 
     /// OCW 验证结果（链上存储，用于 claim_verification_reward）
     /// 
@@ -636,22 +692,22 @@ pub mod pallet {
 
     // ==================== Phase 4: 订单簿深度存储 ====================
 
-    /// 店铺最优卖价
+    /// 实体最优卖价
     #[pallet::storage]
     #[pallet::getter(fn best_ask)]
     pub type BestAsk<T: Config> = StorageMap<_, Blake2_128Concat, u64, BalanceOf<T>>;
 
-    /// 店铺最优买价
+    /// 实体最优买价
     #[pallet::storage]
     #[pallet::getter(fn best_bid)]
     pub type BestBid<T: Config> = StorageMap<_, Blake2_128Concat, u64, BalanceOf<T>>;
 
-    /// 店铺最新成交价
+    /// 实体最新成交价
     #[pallet::storage]
     #[pallet::getter(fn last_trade_price)]
     pub type LastTradePrice<T: Config> = StorageMap<_, Blake2_128Concat, u64, BalanceOf<T>>;
 
-    /// 店铺市场摘要
+    /// 实体市场摘要
     #[pallet::storage]
     #[pallet::getter(fn market_summary)]
     pub type MarketSummaryStorage<T: Config> = StorageMap<
@@ -663,23 +719,23 @@ pub mod pallet {
 
     // ==================== Phase 5: TWAP 价格预言机存储 ====================
 
-    /// TWAP 累积器（每个店铺一个）
+    /// TWAP 累积器（每个实体一个）
     #[pallet::storage]
     #[pallet::getter(fn twap_accumulator)]
     pub type TwapAccumulators<T: Config> = StorageMap<
         _,
         Blake2_128Concat,
-        u64, // shop_id
+        u64, // entity_id
         TwapAccumulator<BalanceOf<T>>,
     >;
 
-    /// 价格保护配置（每个店铺一个）
+    /// 价格保护配置（每个实体一个）
     #[pallet::storage]
     #[pallet::getter(fn price_protection)]
     pub type PriceProtection<T: Config> = StorageMap<
         _,
         Blake2_128Concat,
-        u64, // shop_id
+        u64, // entity_id
         PriceProtectionConfig<BalanceOf<T>>,
     >;
 
@@ -691,7 +747,7 @@ pub mod pallet {
         /// 订单已创建
         OrderCreated {
             order_id: u64,
-            shop_id: u64,
+            entity_id: u64,
             maker: T::AccountId,
             side: OrderSide,
             token_amount: T::TokenBalance,
@@ -708,11 +764,11 @@ pub mod pallet {
         /// 订单已取消
         OrderCancelled { order_id: u64 },
         /// 市场配置已更新
-        MarketConfigured { shop_id: u64 },
+        MarketConfigured { entity_id: u64 },
         /// USDT 卖单已创建
         UsdtSellOrderCreated {
             order_id: u64,
-            shop_id: u64,
+            entity_id: u64,
             maker: T::AccountId,
             token_amount: T::TokenBalance,
             usdt_price: u64,
@@ -721,7 +777,7 @@ pub mod pallet {
         /// USDT 买单已创建
         UsdtBuyOrderCreated {
             order_id: u64,
-            shop_id: u64,
+            entity_id: u64,
             maker: T::AccountId,
             token_amount: T::TokenBalance,
             usdt_price: u64,
@@ -756,7 +812,7 @@ pub mod pallet {
         },
         /// 市价单已执行
         MarketOrderExecuted {
-            shop_id: u64,
+            entity_id: u64,
             trader: T::AccountId,
             side: OrderSide,
             filled_amount: T::TokenBalance,
@@ -765,7 +821,7 @@ pub mod pallet {
         },
         /// TWAP 价格已更新
         TwapUpdated {
-            shop_id: u64,
+            entity_id: u64,
             new_price: BalanceOf<T>,
             twap_1h: Option<BalanceOf<T>>,
             twap_24h: Option<BalanceOf<T>>,
@@ -773,7 +829,7 @@ pub mod pallet {
         },
         /// 熔断已触发
         CircuitBreakerTriggered {
-            shop_id: u64,
+            entity_id: u64,
             current_price: BalanceOf<T>,
             twap_7d: BalanceOf<T>,
             deviation_bps: u16,
@@ -781,18 +837,18 @@ pub mod pallet {
         },
         /// 熔断已解除
         CircuitBreakerLifted {
-            shop_id: u64,
+            entity_id: u64,
         },
         /// 价格保护配置已更新
         PriceProtectionConfigured {
-            shop_id: u64,
+            entity_id: u64,
             enabled: bool,
             max_deviation: u16,
             max_slippage: u16,
         },
         /// 初始价格已设置
         InitialPriceSet {
-            shop_id: u64,
+            entity_id: u64,
             initial_price: BalanceOf<T>,
         },
         /// 验证奖励已领取
@@ -835,17 +891,47 @@ pub mod pallet {
             forfeited: BalanceOf<T>,
             to_treasury: BalanceOf<T>,
         },
+        /// 市场操作失败（需人工干预）
+        MarketOperationFailed { trade_id: u64, operation: MarketOperation },
+        /// 少付检测到，进入补付窗口
+        UnderpaidDetected {
+            trade_id: u64,
+            expected_amount: u64,
+            actual_amount: u64,
+            payment_ratio: u16,
+            deadline: BlockNumberFor<T>,
+        },
+        /// 补付窗口内金额已更新
+        UnderpaidAmountUpdated {
+            trade_id: u64,
+            previous_amount: u64,
+            new_amount: u64,
+        },
+        /// 少付终裁完成
+        UnderpaidFinalized {
+            trade_id: u64,
+            final_amount: u64,
+            payment_ratio: u16,
+            deposit_forfeit_rate: u16,
+        },
+        /// AwaitingVerification 超时退款（宽限期后仍无结果）
+        VerificationTimeoutRefunded {
+            trade_id: u64,
+            buyer: T::AccountId,
+            seller: T::AccountId,
+            usdt_amount: u64,
+        },
     }
 
     // ==================== 错误 ====================
 
     #[pallet::error]
     pub enum Error<T> {
-        /// 店铺不存在
-        ShopNotFound,
-        /// 不是店主
-        NotShopOwner,
-        /// 店铺代币未启用
+        /// 实体不存在
+        EntityNotFound,
+        /// 不是实体所有者
+        NotEntityOwner,
+        /// 实体代币未启用
         TokenNotEnabled,
         /// 市场未启用
         MarketNotEnabled,
@@ -911,6 +997,12 @@ pub mod pallet {
         InvalidFeeRate,
         /// 基点参数无效（超过 10000）
         InvalidBasisPoints,
+        /// 仍在验证宽限期内，不允许超时
+        StillInGracePeriod,
+        /// 补付窗口尚未到期
+        UnderpaidGraceNotExpired,
+        /// 交易不在 UnderpaidPending 状态
+        NotUnderpaidPending,
     }
 
     // ==================== Extrinsics ====================
@@ -920,60 +1012,69 @@ pub mod pallet {
         /// 挂卖单（卖 Token 得 NEX）
         ///
         /// # 参数
-        /// - `shop_id`: 店铺 ID
+        /// - `entity_id`: 实体 ID
         /// - `token_amount`: 出售的 Token 数量
         /// - `price`: 每个 Token 的 NEX 价格
         #[pallet::call_index(0)]
         #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
         pub fn place_sell_order(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             token_amount: T::TokenBalance,
             price: BalanceOf<T>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证店铺和市场
-            Self::ensure_market_enabled(shop_id)?;
+            // 验证实体和市场
+            Self::ensure_market_enabled(entity_id)?;
 
             // 验证参数
             ensure!(!price.is_zero(), Error::<T>::ZeroPrice);
             ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);
 
             // Phase 5: 价格偏离检查
-            Self::check_price_deviation(shop_id, price)?;
+            Self::check_price_deviation(entity_id, price)?;
 
             // 检查用户 Token 余额
-            let balance = T::TokenProvider::token_balance(shop_id, &who);
+            let balance = T::TokenProvider::token_balance(entity_id, &who);
             ensure!(balance >= token_amount, Error::<T>::InsufficientTokenBalance);
 
             // 锁定 Token
-            T::TokenProvider::reserve(shop_id, &who, token_amount)?;
+            T::TokenProvider::reserve(entity_id, &who, token_amount)?;
 
-            // 创建订单
-            let order_id = Self::do_create_order(
-                shop_id,
-                who.clone(),
-                OrderSide::Sell,
-                OrderType::Limit,
-                PaymentChannel::NEX,
-                token_amount,
-                price,
-                0,    // usdt_price (NEX 通道不使用)
-                None, // tron_address (NEX 通道不使用)
+            // P0 修复: 自动撮合价格交叉的买单
+            let (crossed, _nex_received, _fees) = Self::do_cross_match(
+                &who, entity_id, OrderSide::Sell, price, token_amount,
             )?;
+            let remaining = token_amount.saturating_sub(crossed);
+
+            // 剩余部分挂为限价卖单
+            if !remaining.is_zero() {
+                let order_id = Self::do_create_order(
+                    entity_id,
+                    who.clone(),
+                    OrderSide::Sell,
+                    OrderType::Limit,
+                    PaymentChannel::NEX,
+                    remaining,
+                    price,
+                    0,
+                    None,
+                    Zero::zero(),
+                )?;
+
+                Self::deposit_event(Event::OrderCreated {
+                    order_id,
+                    entity_id,
+                    maker: who,
+                    side: OrderSide::Sell,
+                    token_amount: remaining,
+                    price,
+                });
+            }
 
             // 更新最优价格
-            Self::update_best_prices(shop_id);
-
-            Self::deposit_event(Event::OrderCreated {
-                order_id,
-                shop_id,
-                maker: who,
-                side: OrderSide::Sell,
-                token_amount,
-                price,
-            });
+            Self::update_best_prices(entity_id);
 
             Ok(())
         }
@@ -981,28 +1082,28 @@ pub mod pallet {
         /// 挂买单（用 NEX 买 Token）
         ///
         /// # 参数
-        /// - `shop_id`: 店铺 ID
+        /// - `entity_id`: 实体 ID
         /// - `token_amount`: 想购买的 Token 数量
         /// - `price`: 每个 Token 愿意支付的 NEX 价格
         #[pallet::call_index(1)]
         #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
         pub fn place_buy_order(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             token_amount: T::TokenBalance,
             price: BalanceOf<T>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证店铺和市场
-            Self::ensure_market_enabled(shop_id)?;
+            // 验证实体和市场
+            Self::ensure_market_enabled(entity_id)?;
 
             // 验证参数
             ensure!(!price.is_zero(), Error::<T>::ZeroPrice);
             ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);
 
             // Phase 5: 价格偏离检查
-            Self::check_price_deviation(shop_id, price)?;
+            Self::check_price_deviation(entity_id, price)?;
 
             // 计算需要锁定的 NEX 总量
             let token_u128: u128 = token_amount.into();
@@ -1011,30 +1112,51 @@ pub mod pallet {
             // 锁定 NEX
             T::Currency::reserve(&who, total_next).map_err(|_| Error::<T>::InsufficientBalance)?;
 
-            // 创建订单
-            let order_id = Self::do_create_order(
-                shop_id,
-                who.clone(),
-                OrderSide::Buy,
-                OrderType::Limit,
-                PaymentChannel::NEX,
-                token_amount,
-                price,
-                0,    // usdt_price (NEX 通道不使用)
-                None, // tron_address (NEX 通道不使用)
+            // P0 修复: 自动撮合价格交叉的卖单
+            let (crossed, nex_spent, _fees) = Self::do_cross_match(
+                &who, entity_id, OrderSide::Buy, price, token_amount,
             )?;
+            let remaining = token_amount.saturating_sub(crossed);
+
+            // 释放因价格改善节省的多余 NEX
+            // nex_spent 是以卖方价格成交的实际支出（<= crossed * buy_price）
+            // 剩余挂单需锁定 remaining * buy_price
+            let remaining_u128: u128 = remaining.into();
+            let nex_for_remaining = Self::calculate_total_next(remaining_u128, price)?;
+            let excess = total_next.saturating_sub(nex_spent).saturating_sub(nex_for_remaining);
+            if !excess.is_zero() {
+                T::Currency::unreserve(&who, excess);
+            }
+
+            // 剩余部分挂为限价买单
+            if !remaining.is_zero() {
+                let order_id = Self::do_create_order(
+                    entity_id,
+                    who.clone(),
+                    OrderSide::Buy,
+                    OrderType::Limit,
+                    PaymentChannel::NEX,
+                    remaining,
+                    price,
+                    0,
+                    None,
+                    Zero::zero(),
+                )?;
+
+                Self::deposit_event(Event::OrderCreated {
+                    order_id,
+                    entity_id,
+                    maker: who,
+                    side: OrderSide::Buy,
+                    token_amount: remaining,
+                    price,
+                });
+            } else if !excess.is_zero() || !nex_spent.is_zero() {
+                // 全部交叉撮合完成，多余 NEX 已退还
+            }
 
             // 更新最优价格
-            Self::update_best_prices(shop_id);
-
-            Self::deposit_event(Event::OrderCreated {
-                order_id,
-                shop_id,
-                maker: who,
-                side: OrderSide::Buy,
-                token_amount,
-                price,
-            });
+            Self::update_best_prices(entity_id);
 
             Ok(())
         }
@@ -1078,87 +1200,65 @@ pub mod pallet {
             let total_next = Self::calculate_total_next(fill_u128, order.price)?;
 
             // 计算手续费
-            let config = MarketConfigs::<T>::get(order.shop_id).unwrap_or_default();
-            let fee_rate = if config.fee_rate > 0 {
-                config.fee_rate
-            } else {
-                T::DefaultFeeRate::get()
-            };
-            let fee = total_next
-                .saturating_mul(fee_rate.into())
-                .checked_div(&10000u32.into())
-                .unwrap_or_else(Zero::zero);
+            let fee_rate = Self::get_fee_rate(order.entity_id);
+            let fee = Self::calculate_fee(total_next, fee_rate);
+
+            // P2 修复: 手续费买卖双方对称承担
+            // fee 从交易额 total_next 中扣除:
+            //   seller 净收入 = total_next - fee (seller 承担 fee 的一半体现在少收)
+            //   buyer 净支出 = total_next      (buyer 承担 fee 的一半体现在多付)
+            //   entity_owner 收入 = fee
+            // 两侧逻辑对称: buyer 付 total_next, seller 收 total_next - fee, fee 给 owner
             let net_amount = total_next.saturating_sub(fee);
 
             // 执行交易
             match order.side {
                 OrderSide::Sell => {
-                    // 卖单：taker 支付 NEX，获得 Token
-                    // taker (who) 支付 NEX → maker
+                    // 卖单：taker(买方) 支付 NEX，获得 Token
                     T::Currency::transfer(
-                        &who,
-                        &order.maker,
-                        net_amount,
+                        &who, &order.maker, net_amount,
                         ExistenceRequirement::KeepAlive,
                     )?;
-
-                    // 手续费转给店铺
                     if !fee.is_zero() {
-                        if let Some(shop_owner) = T::ShopProvider::shop_owner(order.shop_id) {
+                        if let Some(ref entity_owner) = T::EntityProvider::entity_owner(order.entity_id) {
                             T::Currency::transfer(
-                                &who,
-                                &shop_owner,
-                                fee,
+                                &who, entity_owner, fee,
                                 ExistenceRequirement::KeepAlive,
                             )?;
                         }
                     }
 
-                    // Token: maker → taker（从 maker 的 reserved 转出）
+                    // Token: maker(卖方) → taker(买方)
                     T::TokenProvider::repatriate_reserved(
-                        order.shop_id,
-                        &order.maker,
-                        &who,
-                        fill_amount,
+                        order.entity_id, &order.maker, &who, fill_amount,
                     )?;
                 }
                 OrderSide::Buy => {
-                    // 买单：taker 提供 Token，获得 NEX
-                    // 检查 taker 的 Token 余额
-                    let taker_balance = T::TokenProvider::token_balance(order.shop_id, &who);
+                    // 买单：taker(卖方) 提供 Token，获得 NEX
+                    let taker_balance = T::TokenProvider::token_balance(order.entity_id, &who);
                     ensure!(
                         taker_balance >= fill_amount,
                         Error::<T>::InsufficientTokenBalance
                     );
 
-                    // NEX: 从 maker 的锁定中释放 → taker
-                    T::Currency::unreserve(&order.maker, total_next);
-                    T::Currency::transfer(
-                        &order.maker,
-                        &who,
-                        net_amount,
-                        ExistenceRequirement::KeepAlive,
+                    // P2 修复: 使用 repatriate_reserved 替代 unreserve→transfer
+                    T::Currency::repatriate_reserved(
+                        &order.maker, &who, net_amount,
+                        frame_support::traits::BalanceStatus::Free,
                     )?;
-
-                    // 手续费
                     if !fee.is_zero() {
-                        if let Some(shop_owner) = T::ShopProvider::shop_owner(order.shop_id) {
-                            T::Currency::transfer(
-                                &order.maker,
-                                &shop_owner,
-                                fee,
-                                ExistenceRequirement::KeepAlive,
+                        if let Some(ref entity_owner) = T::EntityProvider::entity_owner(order.entity_id) {
+                            T::Currency::repatriate_reserved(
+                                &order.maker, entity_owner, fee,
+                                frame_support::traits::BalanceStatus::Free,
                             )?;
                         }
                     }
 
-                    // Token: taker → maker（先锁定 taker 的 Token，再转给 maker）
-                    T::TokenProvider::reserve(order.shop_id, &who, fill_amount)?;
+                    // Token: taker(卖方) → maker(买方)
+                    T::TokenProvider::reserve(order.entity_id, &who, fill_amount)?;
                     T::TokenProvider::repatriate_reserved(
-                        order.shop_id,
-                        &who,
-                        &order.maker,
-                        fill_amount,
+                        order.entity_id, &who, &order.maker, fill_amount,
                     )?;
                 }
             }
@@ -1172,7 +1272,7 @@ pub mod pallet {
             if order.filled_amount >= order.token_amount {
                 order.status = OrderStatus::Filled;
                 // 从订单簿移除
-                Self::remove_from_order_book(order.shop_id, order_id, order.side);
+                Self::remove_from_order_book(order.entity_id, order_id, order.side);
                 // M2: 从用户订单列表移除
                 UserOrders::<T>::mutate(&order.maker, |orders| {
                     orders.retain(|&id| id != order_id);
@@ -1184,15 +1284,15 @@ pub mod pallet {
             Orders::<T>::insert(order_id, &order);
 
             // 更新统计
-            MarketStatsStorage::<T>::mutate(order.shop_id, |stats| {
+            MarketStatsStorage::<T>::mutate(order.entity_id, |stats| {
                 stats.total_trades = stats.total_trades.saturating_add(1);
                 stats.total_volume_nex = stats.total_volume_nex.saturating_add(total_next.into());
                 stats.total_fees_cos = stats.total_fees_cos.saturating_add(fee.into());
             });
 
             // 更新最优价格和 TWAP
-            Self::update_best_prices(order.shop_id);
-            Self::on_trade_completed(order.shop_id, order.price);
+            Self::update_best_prices(order.entity_id);
+            Self::on_trade_completed(order.entity_id, order.price);
 
             Self::deposit_event(Event::OrderFilled {
                 order_id,
@@ -1232,7 +1332,7 @@ pub mod pallet {
             match order.side {
                 OrderSide::Sell => {
                     // 退还锁定的 Token
-                    T::TokenProvider::unreserve(order.shop_id, &who, unfilled);
+                    T::TokenProvider::unreserve(order.entity_id, &who, unfilled);
                 }
                 OrderSide::Buy => {
                     // 退还锁定的 NEX
@@ -1242,12 +1342,17 @@ pub mod pallet {
                 }
             }
 
+            // P0 修复: 退还 USDT 买单的 maker_deposit 保证金
+            if !order.maker_deposit.is_zero() {
+                T::Currency::unreserve(&who, order.maker_deposit);
+            }
+
             // 更新订单状态
             order.status = OrderStatus::Cancelled;
             Orders::<T>::insert(order_id, &order);
 
             // 从订单簿移除
-            Self::remove_from_order_book(order.shop_id, order_id, order.side);
+            Self::remove_from_order_book(order.entity_id, order_id, order.side);
 
             // M2: 从用户订单列表移除
             UserOrders::<T>::mutate(&who, |orders| {
@@ -1255,19 +1360,19 @@ pub mod pallet {
             });
 
             // 更新最优价格
-            Self::update_best_prices(order.shop_id);
+            Self::update_best_prices(order.entity_id);
 
             Self::deposit_event(Event::OrderCancelled { order_id });
 
             Ok(())
         }
 
-        /// 配置店铺市场
+        /// 配置实体市场
         #[pallet::call_index(4)]
         #[pallet::weight(Weight::from_parts(25_000_000, 3_000))]
         pub fn configure_market(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             cos_enabled: bool,
             usdt_enabled: bool,
             fee_rate: u16,
@@ -1277,10 +1382,10 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证店主
-            ensure!(T::ShopProvider::shop_exists(shop_id), Error::<T>::ShopNotFound);
-            let owner = T::ShopProvider::shop_owner(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
+            // 验证实体所有者
+            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
 
             // H8: 手续费率上限验证（最高 50%）
             ensure!(fee_rate <= 5000, Error::<T>::InvalidFeeRate);
@@ -1295,17 +1400,17 @@ pub mod pallet {
                 fee_recipient: None,
             };
 
-            MarketConfigs::<T>::insert(shop_id, config);
+            MarketConfigs::<T>::insert(entity_id, config);
 
-            Self::deposit_event(Event::MarketConfigured { shop_id });
+            Self::deposit_event(Event::MarketConfigured { entity_id });
 
             Ok(())
         }
 
-        /// 配置价格保护（店主调用）
+        /// 配置价格保护（实体所有者调用）
         ///
         /// # 参数
-        /// - `shop_id`: 店铺 ID
+        /// - `entity_id`: 实体 ID
         /// - `enabled`: 是否启用价格保护
         /// - `max_price_deviation`: 最大价格偏离（基点，2000 = 20%）
         /// - `max_slippage`: 最大滑点（基点，500 = 5%）
@@ -1315,7 +1420,7 @@ pub mod pallet {
         #[pallet::weight(Weight::from_parts(25_000_000, 3_000))]
         pub fn configure_price_protection(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             enabled: bool,
             max_price_deviation: u16,
             max_slippage: u16,
@@ -1324,9 +1429,9 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证店主
-            let owner = T::ShopProvider::shop_owner(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
+            // 验证实体所有者
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
 
             // M4: 参数验证（基点不超过 10000）
             ensure!(max_price_deviation <= 10000, Error::<T>::InvalidBasisPoints);
@@ -1334,7 +1439,7 @@ pub mod pallet {
             ensure!(circuit_breaker_threshold <= 10000, Error::<T>::InvalidBasisPoints);
 
             // 获取现有配置或创建新配置
-            let mut config = PriceProtection::<T>::get(shop_id).unwrap_or_default();
+            let mut config = PriceProtection::<T>::get(entity_id).unwrap_or_default();
 
             config.enabled = enabled;
             config.max_price_deviation = max_price_deviation;
@@ -1342,10 +1447,10 @@ pub mod pallet {
             config.circuit_breaker_threshold = circuit_breaker_threshold;
             config.min_trades_for_twap = min_trades_for_twap;
 
-            PriceProtection::<T>::insert(shop_id, config);
+            PriceProtection::<T>::insert(entity_id, config);
 
             Self::deposit_event(Event::PriceProtectionConfigured {
-                shop_id,
+                entity_id,
                 enabled,
                 max_deviation: max_price_deviation,
                 max_slippage,
@@ -1354,42 +1459,42 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 手动解除熔断（店主调用，仅在熔断时间到期后）
+        /// 手动解除熔断（实体所有者调用，仅在熔断时间到期后）
         #[pallet::call_index(16)]
         #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
         pub fn lift_circuit_breaker(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证店主
-            let owner = T::ShopProvider::shop_owner(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
+            // 验证实体所有者
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
 
             let current_block: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
 
             // M3: 检查熔断是否活跃且已到期
-            let config = PriceProtection::<T>::get(shop_id).unwrap_or_default();
+            let config = PriceProtection::<T>::get(entity_id).unwrap_or_default();
             ensure!(config.circuit_breaker_active, Error::<T>::MarketCircuitBreakerActive);
             ensure!(current_block >= config.circuit_breaker_until, Error::<T>::InvalidTradeStatus);
 
-            PriceProtection::<T>::mutate(shop_id, |maybe_config| {
+            PriceProtection::<T>::mutate(entity_id, |maybe_config| {
                 if let Some(config) = maybe_config {
                     config.circuit_breaker_active = false;
                     config.circuit_breaker_until = 0;
                 }
             });
 
-            Self::deposit_event(Event::CircuitBreakerLifted { shop_id });
+            Self::deposit_event(Event::CircuitBreakerLifted { entity_id });
 
             Ok(())
         }
 
-        /// 设置店铺代币初始价格（店主调用，用于 TWAP 冷启动）
+        /// 设置实体代币初始价格（实体所有者调用，用于 TWAP 冷启动）
         ///
         /// # 参数
-        /// - `shop_id`: 店铺 ID
+        /// - `entity_id`: 实体 ID
         /// - `initial_price`: 初始参考价格（每个 Token 的 NEX 价格）
         ///
         /// # 说明
@@ -1400,27 +1505,27 @@ pub mod pallet {
         #[pallet::weight(Weight::from_parts(30_000_000, 4_000))]
         pub fn set_initial_price(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             initial_price: BalanceOf<T>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证店主
-            let owner = T::ShopProvider::shop_owner(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
+            // 验证实体所有者
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
 
             // 验证价格
             ensure!(!initial_price.is_zero(), Error::<T>::ZeroPrice);
 
             // 更新价格保护配置中的初始价格
-            PriceProtection::<T>::mutate(shop_id, |maybe_config| {
+            PriceProtection::<T>::mutate(entity_id, |maybe_config| {
                 let config = maybe_config.get_or_insert_with(Default::default);
                 config.initial_price = Some(initial_price);
             });
 
             // 初始化 TWAP 累积器（如果不存在）
             let current_block: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
-            TwapAccumulators::<T>::mutate(shop_id, |maybe_acc| {
+            TwapAccumulators::<T>::mutate(entity_id, |maybe_acc| {
                 if maybe_acc.is_none() {
                     *maybe_acc = Some(TwapAccumulator {
                         current_cumulative: 0,
@@ -1438,9 +1543,9 @@ pub mod pallet {
             });
 
             // 设置最新成交价为初始价格
-            LastTradePrice::<T>::insert(shop_id, initial_price);
+            LastTradePrice::<T>::insert(entity_id, initial_price);
 
-            Self::deposit_event(Event::InitialPriceSet { shop_id, initial_price });
+            Self::deposit_event(Event::InitialPriceSet { entity_id, initial_price });
 
             Ok(())
         }
@@ -1450,7 +1555,7 @@ pub mod pallet {
         /// 挂 USDT 卖单（卖 Token 收 USDT）
         ///
         /// # 参数
-        /// - `shop_id`: 店铺 ID
+        /// - `entity_id`: 实体 ID
         /// - `token_amount`: 出售的 Token 数量
         /// - `usdt_price`: 每个 Token 的 USDT 价格（精度 10^6）
         /// - `tron_address`: 卖家的 TRON 收款地址
@@ -1458,7 +1563,7 @@ pub mod pallet {
         #[pallet::weight(Weight::from_parts(55_000_000, 6_000))]
         pub fn place_usdt_sell_order(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             token_amount: T::TokenBalance,
             usdt_price: u64,
             tron_address: Vec<u8>,
@@ -1466,27 +1571,24 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
 
             // 验证 USDT 市场
-            Self::ensure_usdt_market_enabled(shop_id)?;
+            Self::ensure_usdt_market_enabled(entity_id)?;
 
             // 验证参数
             ensure!(usdt_price > 0, Error::<T>::ZeroPrice);
             ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);
 
-            // 验证 TRON 地址格式（Base58，以 T 开头，34 字符）
-            ensure!(tron_address.len() == 34, Error::<T>::InvalidTronAddress);
-            ensure!(tron_address.first() == Some(&b'T'), Error::<T>::InvalidTronAddress);
-            let tron_addr: TronAddress = tron_address.try_into().map_err(|_| Error::<T>::InvalidTronAddress)?;
+            let tron_addr = Self::validate_tron_address(tron_address)?;
 
             // 检查用户 Token 余额
-            let balance = T::TokenProvider::token_balance(shop_id, &who);
+            let balance = T::TokenProvider::token_balance(entity_id, &who);
             ensure!(balance >= token_amount, Error::<T>::InsufficientTokenBalance);
 
             // 锁定 Token
-            T::TokenProvider::reserve(shop_id, &who, token_amount)?;
+            T::TokenProvider::reserve(entity_id, &who, token_amount)?;
 
             // 创建订单
             let order_id = Self::do_create_order(
-                shop_id,
+                entity_id,
                 who.clone(),
                 OrderSide::Sell,
                 OrderType::Limit,
@@ -1495,11 +1597,12 @@ pub mod pallet {
                 Zero::zero(), // NEX price (USDT 通道不使用)
                 usdt_price,
                 Some(tron_addr.clone()),
+                Zero::zero(), // maker_deposit (USDT 卖单已锁定 Token)
             )?;
 
             Self::deposit_event(Event::UsdtSellOrderCreated {
                 order_id,
-                shop_id,
+                entity_id,
                 maker: who,
                 token_amount,
                 usdt_price,
@@ -1512,30 +1615,40 @@ pub mod pallet {
         /// 挂 USDT 买单（用 USDT 买 Token）
         ///
         /// # 参数
-        /// - `shop_id`: 店铺 ID
+        /// - `entity_id`: 实体 ID
         /// - `token_amount`: 想购买的 Token 数量
         /// - `usdt_price`: 每个 Token 愿意支付的 USDT 价格（精度 10^6）
         #[pallet::call_index(6)]
         #[pallet::weight(Weight::from_parts(45_000_000, 5_000))]
         pub fn place_usdt_buy_order(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             token_amount: T::TokenBalance,
             usdt_price: u64,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
             // 验证 USDT 市场
-            Self::ensure_usdt_market_enabled(shop_id)?;
+            Self::ensure_usdt_market_enabled(entity_id)?;
 
             // 验证参数
             ensure!(usdt_price > 0, Error::<T>::ZeroPrice);
             ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);
 
-            // USDT 买单不需要锁定链上资产（USDT 在链下）
+            // P0 修复: USDT 买单必须锁定 NEX 保证金，防止零成本 DoS 订单簿
+            let token_u128: u128 = token_amount.into();
+            let total_usdt = token_u128
+                .checked_mul(usdt_price as u128)
+                .ok_or(Error::<T>::ArithmeticOverflow)?;
+            let maker_deposit = Self::calculate_buyer_deposit(total_usdt as u64);
+            if !maker_deposit.is_zero() {
+                T::Currency::reserve(&who, maker_deposit)
+                    .map_err(|_| Error::<T>::InsufficientDepositBalance)?;
+            }
+
             // 创建订单
             let order_id = Self::do_create_order(
-                shop_id,
+                entity_id,
                 who.clone(),
                 OrderSide::Buy,
                 OrderType::Limit,
@@ -1544,11 +1657,12 @@ pub mod pallet {
                 Zero::zero(), // NEX price (USDT 通道不使用)
                 usdt_price,
                 None, // 买单不需要 TRON 地址
+                maker_deposit,
             )?;
 
             Self::deposit_event(Event::UsdtBuyOrderCreated {
                 order_id,
-                shop_id,
+                entity_id,
                 maker: who,
                 token_amount,
                 usdt_price,
@@ -1617,7 +1731,7 @@ pub mod pallet {
             // 创建 USDT 交易记录（含保证金信息，状态为 AwaitingPayment）
             let trade_id = Self::do_create_usdt_trade_with_deposit(
                 order_id,
-                order.shop_id,
+                order.entity_id,
                 order.maker.clone(),
                 who.clone(),
                 fill_amount,
@@ -1689,10 +1803,7 @@ pub mod pallet {
             );
             ensure!(buyer != who, Error::<T>::CannotTakeOwnOrder);
 
-            // 验证 TRON 地址
-            ensure!(tron_address.len() == 34, Error::<T>::InvalidTronAddress);
-            ensure!(tron_address.first() == Some(&b'T'), Error::<T>::InvalidTronAddress);
-            let tron_addr: TronAddress = tron_address.try_into().map_err(|_| Error::<T>::InvalidTronAddress)?;
+            let tron_addr = Self::validate_tron_address(tron_address)?;
 
             // 计算成交数量
             let available = order.token_amount.checked_sub(&order.filled_amount)
@@ -1706,25 +1817,19 @@ pub mod pallet {
                 .checked_mul(order.usdt_price as u128)
                 .ok_or(Error::<T>::ArithmeticOverflow)? as u64;
 
-            // 🆕 计算并锁定买家保证金
-            let buyer_deposit = Self::calculate_buyer_deposit(usdt_amount);
-            if !buyer_deposit.is_zero() {
-                // 检查买家 NEX 余额
-                let buyer_balance = T::Currency::free_balance(&buyer);
-                ensure!(buyer_balance >= buyer_deposit, Error::<T>::InsufficientDepositBalance);
-                // 锁定保证金
-                T::Currency::reserve(&buyer, buyer_deposit)?;
-            }
+            // P0 修复: 买家在 place_usdt_buy_order 时已锁定 maker_deposit 保证金
+            // 此处直接使用已锁定的保证金，无需重复锁定
+            let buyer_deposit = order.maker_deposit;
 
             // 检查卖家 Token 余额并锁定
-            let seller_balance = T::TokenProvider::token_balance(order.shop_id, &who);
+            let seller_balance = T::TokenProvider::token_balance(order.entity_id, &who);
             ensure!(seller_balance >= fill_amount, Error::<T>::InsufficientTokenBalance);
-            T::TokenProvider::reserve(order.shop_id, &who, fill_amount)?;
+            T::TokenProvider::reserve(order.entity_id, &who, fill_amount)?;
 
             // 创建 USDT 交易记录（等待买家支付，含保证金信息）
             let trade_id = Self::do_create_usdt_trade_with_deposit(
                 order_id,
-                order.shop_id,
+                order.entity_id,
                 who.clone(),        // 卖家
                 buyer.clone(),      // 买家
                 fill_amount,
@@ -1838,17 +1943,29 @@ pub mod pallet {
                 // 验证通过，完成交易
                 // 将锁定的 Token 转给买家
                 T::TokenProvider::repatriate_reserved(
-                    trade.shop_id,
+                    trade.entity_id,
                     &trade.seller,
                     &trade.buyer,
                     trade.token_amount,
                 )?;
 
+                // C1 审计修复: 释放买家保证金（与 process_full_payment 逻辑一致）
+                if !trade.buyer_deposit.is_zero() && trade.deposit_status == BuyerDepositStatus::Locked {
+                    T::Currency::unreserve(&trade.buyer, trade.buyer_deposit);
+                    trade.deposit_status = BuyerDepositStatus::Released;
+
+                    Self::deposit_event(Event::BuyerDepositReleased {
+                        trade_id,
+                        buyer: trade.buyer.clone(),
+                        deposit: trade.buyer_deposit,
+                    });
+                }
+
                 trade.status = UsdtTradeStatus::Completed;
                 UsdtTrades::<T>::insert(trade_id, &trade);
 
                 // 更新统计
-                MarketStatsStorage::<T>::mutate(trade.shop_id, |stats| {
+                MarketStatsStorage::<T>::mutate(trade.entity_id, |stats| {
                     stats.total_trades = stats.total_trades.saturating_add(1);
                     stats.total_volume_usdt = stats.total_volume_usdt.saturating_add(trade.usdt_amount);
                 });
@@ -1859,7 +1976,7 @@ pub mod pallet {
                 });
             } else {
                 // 验证失败，退还 Token 给卖家
-                T::TokenProvider::unreserve(trade.shop_id, &trade.seller, trade.token_amount);
+                T::TokenProvider::unreserve(trade.entity_id, &trade.seller, trade.token_amount);
 
                 // H6 修复: 退还买家保证金（OCW 验证失败不是买家的过错）
                 if !trade.buyer_deposit.is_zero() && trade.deposit_status == BuyerDepositStatus::Locked {
@@ -1906,71 +2023,104 @@ pub mod pallet {
 
             let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
 
-            // 只能处理等待支付或等待验证状态的交易
             ensure!(
                 trade.status == UsdtTradeStatus::AwaitingPayment ||
-                trade.status == UsdtTradeStatus::AwaitingVerification,
+                trade.status == UsdtTradeStatus::AwaitingVerification ||
+                trade.status == UsdtTradeStatus::UnderpaidPending,
                 Error::<T>::InvalidTradeStatus
             );
 
-            // 检查是否已超时
             let now = <frame_system::Pallet<T>>::block_number();
+
+            // ── UnderpaidPending: 补付窗口到期后按最终金额终裁 ──
+            if trade.status == UsdtTradeStatus::UnderpaidPending {
+                let deadline = trade.underpaid_deadline.ok_or(Error::<T>::InvalidTradeStatus)?;
+                ensure!(now > deadline, Error::<T>::UnderpaidGraceNotExpired);
+
+                if let Some((_, final_amount)) = OcwVerificationResults::<T>::get(trade_id) {
+                    let final_result = Self::calculate_payment_verification_result(
+                        trade.usdt_amount, final_amount,
+                    );
+                    match final_result {
+                        PaymentVerificationResult::Exact | PaymentVerificationResult::Overpaid => {
+                            Self::process_full_payment(&mut trade, trade_id)?;
+                        }
+                        _ => {
+                            Self::process_underpaid(&mut trade, trade_id, final_amount)?;
+                        }
+                    }
+                    let payment_ratio = if trade.usdt_amount > 0 {
+                        ((final_amount as u128) * 10000 / (trade.usdt_amount as u128)) as u16
+                    } else { 0 };
+                    let deposit_forfeit_rate = Self::calculate_deposit_forfeit_rate(payment_ratio);
+
+                    PendingUnderpaidTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
+                    OcwVerificationResults::<T>::remove(trade_id);
+
+                    Self::deposit_event(Event::UnderpaidFinalized {
+                        trade_id, final_amount, payment_ratio, deposit_forfeit_rate,
+                    });
+                    return Ok(());
+                }
+                // 无 OCW 结果 → 走通用超时退款
+            }
+
             ensure!(now > trade.timeout_at, Error::<T>::InvalidTradeStatus);
 
-            // 退还锁定的 Token 给卖家
-            T::TokenProvider::unreserve(trade.shop_id, &trade.seller, trade.token_amount);
+            // ── AwaitingVerification: 宽限期 + 已有结果检查 ──
+            if trade.status == UsdtTradeStatus::AwaitingVerification {
+                let grace: BlockNumberFor<T> = T::VerificationGracePeriod::get().into();
+                let deadline_with_grace = trade.timeout_at.saturating_add(grace);
 
-            // H7 修复: 回滚父订单的 filled_amount
+                ensure!(now > deadline_with_grace, Error::<T>::StillInGracePeriod);
+
+                // 宽限期已过，但 OCW 已提交了验证结果 → 按正常流程结算
+                if let Some((verification_result, actual_amount)) = OcwVerificationResults::<T>::get(trade_id) {
+                    match verification_result {
+                        PaymentVerificationResult::Exact | PaymentVerificationResult::Overpaid => {
+                            Self::process_full_payment(&mut trade, trade_id)?;
+                        }
+                        PaymentVerificationResult::Underpaid |
+                        PaymentVerificationResult::SeverelyUnderpaid => {
+                            Self::process_underpaid(&mut trade, trade_id, actual_amount)?;
+                        }
+                        PaymentVerificationResult::Invalid => {
+                            Self::process_underpaid(&mut trade, trade_id, 0)?;
+                        }
+                    }
+                    PendingUsdtTrades::<T>::mutate(|pending| { pending.retain(|&id| id != trade_id); });
+                    OcwVerificationResults::<T>::remove(trade_id);
+                    return Ok(());
+                }
+            }
+
+            // ── 执行超时退款（AwaitingPayment 或 无结果）──
+            T::TokenProvider::unreserve(trade.entity_id, &trade.seller, trade.token_amount);
             Self::rollback_order_filled_amount(trade.order_id, trade.token_amount);
 
-            // 🆕 处理买家保证金没收
-            if !trade.buyer_deposit.is_zero() && trade.deposit_status == BuyerDepositStatus::Locked {
-                let forfeit_rate = T::DepositForfeitRate::get();  // bps, 10000 = 100%
-                
-                // 计算没收金额: deposit * forfeit_rate / 10000
-                // 使用 u128 中间计算（Balance 实现了 From<u128> 和 Into<u128>）
-                let deposit_u128: u128 = trade.buyer_deposit.into();
-                let forfeit_u128 = deposit_u128
-                    .saturating_mul(forfeit_rate as u128)
-                    .saturating_div(10000);
-                let forfeit_amount: BalanceOf<T> = forfeit_u128.into();
-                
-                // 🆕 将没收金额转入国库
-                if !forfeit_amount.is_zero() {
-                    let treasury = T::TreasuryAccount::get();
-                    let _ = T::Currency::repatriate_reserved(
-                        &trade.buyer,
-                        &treasury,
-                        forfeit_amount,
-                        frame_support::traits::BalanceStatus::Free,
-                    );
-                }
-                
-                // 剩余部分退还买家
-                let refund = trade.buyer_deposit.saturating_sub(forfeit_amount);
-                if !refund.is_zero() {
-                    T::Currency::unreserve(&trade.buyer, refund);
-                }
-                
-                trade.deposit_status = BuyerDepositStatus::Forfeited;
+            // 没收买家保证金
+            Self::forfeit_buyer_deposit(&mut trade, trade_id, T::DepositForfeitRate::get());
 
-                Self::deposit_event(Event::BuyerDepositForfeited {
-                    trade_id,
-                    buyer: trade.buyer.clone(),
-                    forfeited: forfeit_amount,
-                    to_treasury: forfeit_amount,
-                });
-            }
+            let is_verification_timeout = trade.status == UsdtTradeStatus::AwaitingVerification;
+            let buyer_clone = trade.buyer.clone();
+            let seller_clone = trade.seller.clone();
+            let usdt_amount = trade.usdt_amount;
 
             trade.status = UsdtTradeStatus::Refunded;
             UsdtTrades::<T>::insert(trade_id, &trade);
 
-            // 从待验证队列移除（如果存在）
-            PendingUsdtTrades::<T>::mutate(|pending| {
-                pending.retain(|&id| id != trade_id);
-            });
+            // 清理所有队列
+            PendingUsdtTrades::<T>::mutate(|pending| { pending.retain(|&id| id != trade_id); });
+            PendingUnderpaidTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
+            OcwVerificationResults::<T>::remove(trade_id);
 
-            Self::deposit_event(Event::UsdtTradeRefunded { trade_id });
+            if is_verification_timeout {
+                Self::deposit_event(Event::VerificationTimeoutRefunded {
+                    trade_id, buyer: buyer_clone, seller: seller_clone, usdt_amount,
+                });
+            } else {
+                Self::deposit_event(Event::UsdtTradeRefunded { trade_id });
+            }
 
             Ok(())
         }
@@ -1990,24 +2140,50 @@ pub mod pallet {
         ) -> DispatchResult {
             ensure_none(origin)?;
 
-            // 验证 trade 存在且状态正确
-            let trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
+            let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
             ensure!(trade.status == UsdtTradeStatus::AwaitingVerification, Error::<T>::InvalidTradeStatus);
 
-            // 🆕 计算多档判定结果
             let verification_result = Self::calculate_payment_verification_result(
-                trade.usdt_amount,
-                actual_amount,
+                trade.usdt_amount, actual_amount,
             );
 
-            // 存储验证结果
-            OcwVerificationResults::<T>::insert(trade_id, (verification_result, actual_amount));
+            match verification_result {
+                PaymentVerificationResult::Underpaid => {
+                    // 50%-99.5%: 进入补付窗口
+                    let now = <frame_system::Pallet<T>>::block_number();
+                    let grace: BlockNumberFor<T> = T::UnderpaidGracePeriod::get().into();
+                    let deadline = now.saturating_add(grace);
 
-            Self::deposit_event(Event::OcwResultSubmitted {
-                trade_id,
-                verification_result,
-                actual_amount,
-            });
+                    trade.status = UsdtTradeStatus::UnderpaidPending;
+                    trade.first_verified_at = Some(now);
+                    trade.first_actual_amount = Some(actual_amount);
+                    trade.underpaid_deadline = Some(deadline);
+                    UsdtTrades::<T>::insert(trade_id, &trade);
+
+                    // 从 PendingUsdtTrades 移到 PendingUnderpaidTrades
+                    PendingUsdtTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
+                    let _ = PendingUnderpaidTrades::<T>::try_mutate(|p| { p.try_push(trade_id) });
+
+                    OcwVerificationResults::<T>::insert(trade_id, (verification_result, actual_amount));
+
+                    let payment_ratio = ((actual_amount as u128) * 10000 / (trade.usdt_amount as u128)) as u16;
+                    Self::deposit_event(Event::UnderpaidDetected {
+                        trade_id,
+                        expected_amount: trade.usdt_amount,
+                        actual_amount,
+                        payment_ratio,
+                        deadline,
+                    });
+                }
+                _ => {
+                    // Exact/Overpaid/SeverelyUnderpaid/Invalid: 直接存储结果
+                    OcwVerificationResults::<T>::insert(trade_id, (verification_result, actual_amount));
+
+                    Self::deposit_event(Event::OcwResultSubmitted {
+                        trade_id, verification_result, actual_amount,
+                    });
+                }
+            }
 
             Ok(())
         }
@@ -2033,39 +2209,132 @@ pub mod pallet {
             Self::do_claim_verification_reward(&caller, trade_id)
         }
 
+        /// OCW 更新少付交易的累计金额（unsigned）
+        ///
+        /// 补付窗口内，OCW 持续扫描 TronGrid，发现新转账则更新金额。
+        /// 若累计金额达到 99.5%，直接升级为 Exact 结算。
+        #[pallet::call_index(20)]
+        #[pallet::weight(Weight::from_parts(30_000_000, 4_000))]
+        pub fn submit_underpaid_update(
+            origin: OriginFor<T>,
+            trade_id: u64,
+            new_actual_amount: u64,
+        ) -> DispatchResult {
+            ensure_none(origin)?;
+
+            let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
+            ensure!(trade.status == UsdtTradeStatus::UnderpaidPending, Error::<T>::NotUnderpaidPending);
+
+            let previous_amount = OcwVerificationResults::<T>::get(trade_id)
+                .map(|(_, amt)| amt).unwrap_or(0);
+
+            // 只接受递增的金额（防止恶意回退）
+            if new_actual_amount <= previous_amount {
+                return Ok(());
+            }
+
+            let new_result = Self::calculate_payment_verification_result(
+                trade.usdt_amount, new_actual_amount,
+            );
+
+            OcwVerificationResults::<T>::insert(trade_id, (new_result, new_actual_amount));
+
+            Self::deposit_event(Event::UnderpaidAmountUpdated {
+                trade_id, previous_amount, new_amount: new_actual_amount,
+            });
+
+            // 补齐了！直接升级回 AwaitingVerification
+            if matches!(new_result, PaymentVerificationResult::Exact | PaymentVerificationResult::Overpaid) {
+                trade.status = UsdtTradeStatus::AwaitingVerification;
+                UsdtTrades::<T>::insert(trade_id, &trade);
+
+                PendingUnderpaidTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
+                let _ = PendingUsdtTrades::<T>::try_mutate(|p| { p.try_push(trade_id) });
+            }
+
+            Ok(())
+        }
+
+        /// 少付终裁（任何人，补付窗口到期后）
+        #[pallet::call_index(21)]
+        #[pallet::weight(Weight::from_parts(80_000_000, 10_000))]
+        pub fn finalize_underpaid(
+            origin: OriginFor<T>,
+            trade_id: u64,
+        ) -> DispatchResult {
+            let _who = ensure_signed(origin)?;
+
+            let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
+            ensure!(trade.status == UsdtTradeStatus::UnderpaidPending, Error::<T>::NotUnderpaidPending);
+
+            let deadline = trade.underpaid_deadline.ok_or(Error::<T>::InvalidTradeStatus)?;
+            let now = <frame_system::Pallet<T>>::block_number();
+            ensure!(now > deadline, Error::<T>::UnderpaidGraceNotExpired);
+
+            let (_, final_amount) = OcwVerificationResults::<T>::get(trade_id)
+                .ok_or(Error::<T>::OcwResultNotFound)?;
+
+            let final_result = Self::calculate_payment_verification_result(
+                trade.usdt_amount, final_amount,
+            );
+
+            match final_result {
+                PaymentVerificationResult::Exact | PaymentVerificationResult::Overpaid => {
+                    Self::process_full_payment(&mut trade, trade_id)?;
+                }
+                _ => {
+                    Self::process_underpaid(&mut trade, trade_id, final_amount)?;
+                }
+            }
+
+            let payment_ratio = if trade.usdt_amount > 0 {
+                ((final_amount as u128) * 10000 / (trade.usdt_amount as u128)) as u16
+            } else { 0 };
+            let deposit_forfeit_rate = Self::calculate_deposit_forfeit_rate(payment_ratio);
+
+            PendingUnderpaidTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
+            OcwVerificationResults::<T>::remove(trade_id);
+
+            Self::deposit_event(Event::UnderpaidFinalized {
+                trade_id, final_amount, payment_ratio, deposit_forfeit_rate,
+            });
+
+            Ok(())
+        }
+
         // ==================== Phase 3: 市价单 ====================
 
         /// 市价买单（立即以最优卖价成交）
         ///
         /// # 参数
-        /// - `shop_id`: 店铺 ID
+        /// - `entity_id`: 实体 ID
         /// - `token_amount`: 想购买的 Token 数量
         /// - `max_cost`: 最大愿意支付的 NEX 总额（滑点保护）
         #[pallet::call_index(12)]
         #[pallet::weight(Weight::from_parts(120_000_000, 12_000))]
         pub fn market_buy(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             token_amount: T::TokenBalance,
             max_cost: BalanceOf<T>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
             // 验证市场
-            Self::ensure_market_enabled(shop_id)?;
+            Self::ensure_market_enabled(entity_id)?;
 
             // 验证参数
             ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);
             ensure!(!max_cost.is_zero(), Error::<T>::ZeroPrice);
 
             // 获取卖单列表（按价格升序排列）
-            let mut sell_orders = Self::get_sorted_sell_orders(shop_id);
+            let mut sell_orders = Self::get_sorted_sell_orders(entity_id);
             ensure!(!sell_orders.is_empty(), Error::<T>::NoOrdersAvailable);
 
             // 执行市价买入
             let (filled, total_next, fees) = Self::do_market_buy(
                 &who,
-                shop_id,
+                entity_id,
                 token_amount,
                 max_cost,
                 &mut sell_orders,
@@ -2074,7 +2343,7 @@ pub mod pallet {
             ensure!(!filled.is_zero(), Error::<T>::AmountTooSmall);
 
             Self::deposit_event(Event::MarketOrderExecuted {
-                shop_id,
+                entity_id,
                 trader: who,
                 side: OrderSide::Buy,
                 filled_amount: filled,
@@ -2088,37 +2357,37 @@ pub mod pallet {
         /// 市价卖单（立即以最优买价成交）
         ///
         /// # 参数
-        /// - `shop_id`: 店铺 ID
+        /// - `entity_id`: 实体 ID
         /// - `token_amount`: 想出售的 Token 数量
         /// - `min_receive`: 最低愿意收到的 NEX 总额（滑点保护）
         #[pallet::call_index(13)]
         #[pallet::weight(Weight::from_parts(120_000_000, 12_000))]
         pub fn market_sell(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             token_amount: T::TokenBalance,
             min_receive: BalanceOf<T>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
             // 验证市场
-            Self::ensure_market_enabled(shop_id)?;
+            Self::ensure_market_enabled(entity_id)?;
 
             // 验证参数
             ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);
 
             // 检查用户 Token 余额
-            let balance = T::TokenProvider::token_balance(shop_id, &who);
+            let balance = T::TokenProvider::token_balance(entity_id, &who);
             ensure!(balance >= token_amount, Error::<T>::InsufficientTokenBalance);
 
             // 获取买单列表（按价格降序排列）
-            let mut buy_orders = Self::get_sorted_buy_orders(shop_id);
+            let mut buy_orders = Self::get_sorted_buy_orders(entity_id);
             ensure!(!buy_orders.is_empty(), Error::<T>::NoOrdersAvailable);
 
             // 执行市价卖出
             let (filled, total_receive, fees) = Self::do_market_sell(
                 &who,
-                shop_id,
+                entity_id,
                 token_amount,
                 min_receive,
                 &mut buy_orders,
@@ -2127,7 +2396,7 @@ pub mod pallet {
             ensure!(!filled.is_zero(), Error::<T>::AmountTooSmall);
 
             Self::deposit_event(Event::MarketOrderExecuted {
-                shop_id,
+                entity_id,
                 trader: who,
                 side: OrderSide::Sell,
                 filled_amount: filled,
@@ -2148,12 +2417,13 @@ pub mod pallet {
         fn validate_unsigned(source: TransactionSource, call: &Self::Call) -> TransactionValidity {
             match call {
                 Call::verify_usdt_payment { trade_id, verified: _, actual_amount: _ } => {
-                    // 安全检查 1: 验证交易来源
+                    // H1 审计修复: 拒绝 External 来源，防止外部节点伪造验证结果
                     match source {
                         TransactionSource::Local | TransactionSource::InBlock => {},
                         TransactionSource::External => {
                             log::warn!(target: "entity-market-ocw", 
-                                "External unsigned tx for trade {}", trade_id);
+                                "Rejected external unsigned tx for trade {}", trade_id);
+                            return InvalidTransaction::BadSigner.into();
                         }
                     }
 
@@ -2183,7 +2453,7 @@ pub mod pallet {
                     let priority = match source {
                         TransactionSource::Local => 100,
                         TransactionSource::InBlock => 80,
-                        TransactionSource::External => 50,
+                        _ => 50,
                     };
 
                     ValidTransaction::with_tag_prefix("EntityMarketTRC20")
@@ -2194,6 +2464,14 @@ pub mod pallet {
                         .build()
                 },
                 Call::submit_ocw_result { trade_id, actual_amount: _ } => {
+                    // H1 审计修复: 拒绝 External 来源
+                    match source {
+                        TransactionSource::Local | TransactionSource::InBlock => {},
+                        TransactionSource::External => {
+                            return InvalidTransaction::BadSigner.into();
+                        }
+                    }
+
                     // 安全检查：验证 trade 存在且状态正确
                     let trade = match UsdtTrades::<T>::get(trade_id) {
                         Some(t) => t,
@@ -2214,13 +2492,41 @@ pub mod pallet {
                     let priority = match source {
                         TransactionSource::Local => 100,
                         TransactionSource::InBlock => 80,
-                        TransactionSource::External => 50,
+                        _ => 50,
                     };
 
                     ValidTransaction::with_tag_prefix("EntityMarketOcwResult")
                         .priority(priority)
                         .longevity(10)
                         .and_provides([&(b"ocw_result", trade_id)])
+                        .propagate(true)
+                        .build()
+                },
+                Call::submit_underpaid_update { trade_id, new_actual_amount: _ } => {
+                    match source {
+                        TransactionSource::Local | TransactionSource::InBlock => {},
+                        TransactionSource::External => {
+                            return InvalidTransaction::BadSigner.into();
+                        }
+                    }
+
+                    let trade = match UsdtTrades::<T>::get(trade_id) {
+                        Some(t) => t,
+                        None => return InvalidTransaction::Custom(30).into(),
+                    };
+                    if trade.status != UsdtTradeStatus::UnderpaidPending {
+                        return InvalidTransaction::Custom(31).into();
+                    }
+
+                    let priority = match source {
+                        TransactionSource::Local => 80,
+                        TransactionSource::InBlock => 60,
+                        _ => 30,
+                    };
+                    ValidTransaction::with_tag_prefix("EntityMarketUnderpaidUpdate")
+                        .priority(priority)
+                        .longevity(5)
+                        .and_provides([&(b"undp_upd", trade_id)])
                         .propagate(true)
                         .build()
                 },
@@ -2233,21 +2539,40 @@ pub mod pallet {
 
     impl<T: Config> Pallet<T> {
         /// 验证市场是否启用
-        fn ensure_market_enabled(shop_id: u64) -> DispatchResult {
-            ensure!(T::ShopProvider::shop_exists(shop_id), Error::<T>::ShopNotFound);
+        fn ensure_market_enabled(entity_id: u64) -> DispatchResult {
+            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
             ensure!(
-                T::TokenProvider::is_token_enabled(shop_id),
+                T::TokenProvider::is_token_enabled(entity_id),
                 Error::<T>::TokenNotEnabled
             );
 
             // M6: 检查市场配置（必须显式配置并启用，与 Default cos_enabled=false 一致）
-            let config = MarketConfigs::<T>::get(shop_id).unwrap_or_default();
+            let config = MarketConfigs::<T>::get(entity_id).unwrap_or_default();
             ensure!(config.cos_enabled, Error::<T>::MarketNotEnabled);
 
             Ok(())
         }
 
-        /// 计算总成本
+        /// 获取实体市场的手续费率 (bps, 10000 = 100%)
+        fn get_fee_rate(entity_id: u64) -> u16 {
+            let config = MarketConfigs::<T>::get(entity_id).unwrap_or_default();
+            if config.fee_rate > 0 { config.fee_rate } else { T::DefaultFeeRate::get() }
+        }
+
+        /// 计算手续费 = amount × fee_rate / 10000
+        fn calculate_fee(amount: BalanceOf<T>, fee_rate: u16) -> BalanceOf<T> {
+            amount
+                .saturating_mul(fee_rate.into())
+                .checked_div(&10000u32.into())
+                .unwrap_or_else(Zero::zero)
+        }
+
+        /// 计算总成本 (NEX) = token_amount × price
+        ///
+        /// P2 注意: price 为每单位 Token 的 NEX 价格（最小精度单位）
+        /// 例如: 买 1000 Token，每个 100 NEX → total = 100_000 NEX
+        /// 前端需注意: Token 和 NEX 均以最小单位（planck）表示
+        /// 如需支持小数价格，前端应将价格乘以精度因子后传入
         fn calculate_total_next(token_amount: u128, price: BalanceOf<T>) -> Result<BalanceOf<T>, DispatchError> {
             let price_u128: u128 = price.into();
             let total = token_amount
@@ -2256,9 +2581,105 @@ pub mod pallet {
             Ok(total.into())
         }
 
+        /// P0 修复: 挂单时自动撮合交叉订单
+        /// - taker_side=Sell → 与买单撮合（buy_price >= limit_price）
+        /// - taker_side=Buy  → 与卖单撮合（sell_price <= limit_price）
+        /// 返回 (已撮合数量, NEX 总额, 手续费)
+        fn do_cross_match(
+            taker: &T::AccountId,
+            entity_id: u64,
+            taker_side: OrderSide,
+            limit_price: BalanceOf<T>,
+            mut remaining: T::TokenBalance,
+        ) -> Result<(T::TokenBalance, BalanceOf<T>, BalanceOf<T>), DispatchError> {
+            let mut total_filled: T::TokenBalance = Zero::zero();
+            let mut total_nex: BalanceOf<T> = Zero::zero();
+            let mut total_fees: BalanceOf<T> = Zero::zero();
+
+            let fee_rate = Self::get_fee_rate(entity_id);
+
+            // 获取对手方订单（卖单时取买单，买单时取卖单）
+            let counter_orders = match taker_side {
+                OrderSide::Sell => Self::get_sorted_buy_orders(entity_id),
+                OrderSide::Buy => Self::get_sorted_sell_orders(entity_id),
+            };
+
+            for counter_order in counter_orders {
+                if remaining.is_zero() { break; }
+                // 交叉条件检查
+                let price_ok = match taker_side {
+                    OrderSide::Sell => counter_order.price >= limit_price,
+                    OrderSide::Buy => counter_order.price <= limit_price,
+                };
+                if !price_ok { break; }
+                if counter_order.maker == *taker { continue; }
+
+                let available = counter_order.token_amount.saturating_sub(counter_order.filled_amount);
+                let fill_amount = remaining.min(available);
+                if fill_amount.is_zero() { continue; }
+
+                // 以挂单方价格成交
+                let fill_u128: u128 = fill_amount.into();
+                let nex_amount = Self::calculate_total_next(fill_u128, counter_order.price)?;
+                let fee = Self::calculate_fee(nex_amount, fee_rate);
+                let net = nex_amount.saturating_sub(fee);
+
+                // NEX 转账: 买方(reserved) → 卖方(net) + entity_owner(fee)
+                let (nex_payer, nex_receiver) = match taker_side {
+                    OrderSide::Sell => (&counter_order.maker, taker),
+                    OrderSide::Buy => (taker, &counter_order.maker),
+                };
+                T::Currency::repatriate_reserved(
+                    nex_payer, nex_receiver, net,
+                    frame_support::traits::BalanceStatus::Free,
+                )?;
+                if !fee.is_zero() {
+                    if let Some(entity_owner) = T::EntityProvider::entity_owner(entity_id) {
+                        T::Currency::repatriate_reserved(
+                            nex_payer, &entity_owner, fee,
+                            frame_support::traits::BalanceStatus::Free,
+                        )?;
+                    }
+                }
+
+                // Token 转账: 卖方(reserved) → 买方
+                let (token_from, token_to) = match taker_side {
+                    OrderSide::Sell => (taker, &counter_order.maker),
+                    OrderSide::Buy => (&counter_order.maker, taker),
+                };
+                T::TokenProvider::repatriate_reserved(
+                    entity_id, token_from, token_to, fill_amount,
+                )?;
+
+                Self::update_order_fill(&counter_order, entity_id, fill_amount);
+
+                MarketStatsStorage::<T>::mutate(entity_id, |stats| {
+                    stats.total_trades = stats.total_trades.saturating_add(1);
+                    stats.total_volume_nex = stats.total_volume_nex.saturating_add(nex_amount.into());
+                    stats.total_fees_cos = stats.total_fees_cos.saturating_add(fee.into());
+                });
+
+                Self::deposit_event(Event::OrderFilled {
+                    order_id: counter_order.order_id,
+                    taker: taker.clone(),
+                    filled_amount: fill_amount,
+                    total_next: nex_amount,
+                    fee,
+                });
+                Self::on_trade_completed(entity_id, counter_order.price);
+
+                total_filled = total_filled.saturating_add(fill_amount);
+                total_nex = total_nex.saturating_add(nex_amount);
+                total_fees = total_fees.saturating_add(fee);
+                remaining = remaining.saturating_sub(fill_amount);
+            }
+
+            Ok((total_filled, total_nex, total_fees))
+        }
+
         /// 创建订单（通用）
         fn do_create_order(
-            shop_id: u64,
+            entity_id: u64,
             maker: T::AccountId,
             side: OrderSide,
             order_type: OrderType,
@@ -2267,12 +2688,13 @@ pub mod pallet {
             price: BalanceOf<T>,
             usdt_price: u64,
             tron_address: Option<TronAddress>,
+            maker_deposit: BalanceOf<T>,
         ) -> Result<u64, DispatchError> {
             let order_id = NextOrderId::<T>::get();
             NextOrderId::<T>::put(order_id.saturating_add(1));
 
             let now = <frame_system::Pallet<T>>::block_number();
-            let config = MarketConfigs::<T>::get(shop_id).unwrap_or_default();
+            let config = MarketConfigs::<T>::get(entity_id).unwrap_or_default();
             let ttl = if config.order_ttl > 0 {
                 config.order_ttl
             } else {
@@ -2282,7 +2704,7 @@ pub mod pallet {
 
             let order = TradeOrder {
                 order_id,
-                shop_id,
+                entity_id,
                 maker: maker.clone(),
                 side,
                 order_type,
@@ -2295,6 +2717,7 @@ pub mod pallet {
                 status: OrderStatus::Open,
                 created_at: now,
                 expires_at,
+                maker_deposit,
             };
 
             Orders::<T>::insert(order_id, order);
@@ -2302,12 +2725,12 @@ pub mod pallet {
             // 添加到订单簿
             match side {
                 OrderSide::Sell => {
-                    ShopSellOrders::<T>::try_mutate(shop_id, |orders| {
+                    EntitySellOrders::<T>::try_mutate(entity_id, |orders| {
                         orders.try_push(order_id).map_err(|_| Error::<T>::OrderBookFull)
                     })?;
                 }
                 OrderSide::Buy => {
-                    ShopBuyOrders::<T>::try_mutate(shop_id, |orders| {
+                    EntityBuyOrders::<T>::try_mutate(entity_id, |orders| {
                         orders.try_push(order_id).map_err(|_| Error::<T>::OrderBookFull)
                     })?;
                 }
@@ -2319,23 +2742,80 @@ pub mod pallet {
             })?;
 
             // 更新统计
-            MarketStatsStorage::<T>::mutate(shop_id, |stats| {
+            MarketStatsStorage::<T>::mutate(entity_id, |stats| {
                 stats.total_orders = stats.total_orders.saturating_add(1);
             });
 
             Ok(order_id)
         }
 
+        /// 没收买家保证金（通用）
+        /// 返回实际没收金额。forfeit_rate 为万分比 (10000 = 100%)
+        fn forfeit_buyer_deposit(
+            trade: &mut UsdtTrade<T>,
+            trade_id: u64,
+            forfeit_rate: u16,
+        ) -> BalanceOf<T> {
+            if trade.buyer_deposit.is_zero() || trade.deposit_status != BuyerDepositStatus::Locked {
+                return Zero::zero();
+            }
+
+            let deposit_u128: u128 = trade.buyer_deposit.into();
+            let forfeit_u128 = deposit_u128
+                .saturating_mul(forfeit_rate as u128)
+                .saturating_div(10000);
+            let forfeit_amount: BalanceOf<T> = forfeit_u128.into();
+
+            if !forfeit_amount.is_zero() {
+                let treasury = T::TreasuryAccount::get();
+                if T::Currency::repatriate_reserved(
+                    &trade.buyer, &treasury, forfeit_amount,
+                    frame_support::traits::BalanceStatus::Free,
+                ).is_err() {
+                    Self::deposit_event(Event::MarketOperationFailed { trade_id, operation: MarketOperation::DepositForfeit });
+                }
+            }
+
+            let refund = trade.buyer_deposit.saturating_sub(forfeit_amount);
+            if !refund.is_zero() {
+                T::Currency::unreserve(&trade.buyer, refund);
+            }
+
+            if forfeit_rate >= 10000 {
+                trade.deposit_status = BuyerDepositStatus::Forfeited;
+            } else if forfeit_rate > 0 {
+                trade.deposit_status = BuyerDepositStatus::PartiallyForfeited;
+            } else {
+                trade.deposit_status = BuyerDepositStatus::Released;
+            }
+
+            Self::deposit_event(Event::BuyerDepositForfeited {
+                trade_id,
+                buyer: trade.buyer.clone(),
+                forfeited: forfeit_amount,
+                to_treasury: forfeit_amount,
+            });
+
+            forfeit_amount
+        }
+
+        /// 验证并转换 TRON 地址
+        fn validate_tron_address(raw: Vec<u8>) -> Result<TronAddress, DispatchError> {
+            ensure!(raw.len() == 34, Error::<T>::InvalidTronAddress);
+            ensure!(raw.first() == Some(&b'T'), Error::<T>::InvalidTronAddress);
+            raw.try_into().map_err(|_| Error::<T>::InvalidTronAddress.into())
+        }
+
         /// 验证 USDT 市场是否启用
-        fn ensure_usdt_market_enabled(shop_id: u64) -> DispatchResult {
-            ensure!(T::ShopProvider::shop_exists(shop_id), Error::<T>::ShopNotFound);
+        fn ensure_usdt_market_enabled(entity_id: u64) -> DispatchResult {
+            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
             ensure!(
-                T::TokenProvider::is_token_enabled(shop_id),
+                T::TokenProvider::is_token_enabled(entity_id),
                 Error::<T>::TokenNotEnabled
             );
 
             // 检查 USDT 市场配置
-            if let Some(config) = MarketConfigs::<T>::get(shop_id) {
+            if let Some(config) = MarketConfigs::<T>::get(entity_id) {
                 ensure!(config.usdt_enabled, Error::<T>::UsdtMarketNotEnabled);
             } else {
                 // 默认不启用 USDT 市场
@@ -2346,8 +2826,8 @@ pub mod pallet {
         }
 
         /// 获取 USDT 交易超时区块数
-        fn get_usdt_timeout(shop_id: u64) -> u32 {
-            MarketConfigs::<T>::get(shop_id)
+        fn get_usdt_timeout(entity_id: u64) -> u32 {
+            MarketConfigs::<T>::get(entity_id)
                 .map(|c| if c.usdt_timeout > 0 { c.usdt_timeout } else { T::DefaultUsdtTimeout::get() })
                 .unwrap_or_else(|| T::DefaultUsdtTimeout::get())
         }
@@ -2400,6 +2880,48 @@ pub mod pallet {
         /// 生成 OCW 结果存储键
         fn ocw_result_key(trade_id: u64) -> alloc::vec::Vec<u8> {
             let mut key = b"entity_market_ocw_result::".to_vec();
+            key.extend_from_slice(&trade_id.to_le_bytes());
+            key
+        }
+
+        /// OCW: 补付窗口内重新查询 UnderpaidPending 交易的累计金额
+        fn check_underpaid_topup(trade_id: u64, trade: &UsdtTrade<T>, tx_hash: &[u8]) {
+            use crate::ocw;
+
+            log::info!(target: "entity-market-ocw",
+                "Checking underpaid topup for trade {} (expected={})",
+                trade_id, trade.usdt_amount);
+
+            match ocw::verify_trc20_transaction(
+                tx_hash,
+                trade.seller_tron_address.as_slice(),
+                trade.usdt_amount,
+            ) {
+                Ok(verification) => {
+                    let actual_amount = verification.actual_amount.unwrap_or(0);
+                    if actual_amount > 0 {
+                        // 写入 offchain storage，sidecar 调用 submit_underpaid_update
+                        let key = Self::ocw_underpaid_key(trade_id);
+                        let value = (true, actual_amount);
+                        sp_io::offchain::local_storage_set(
+                            sp_core::offchain::StorageKind::PERSISTENT,
+                            &key,
+                            &codec::Encode::encode(&value),
+                        );
+                        log::info!(target: "entity-market-ocw",
+                            "Underpaid trade {} updated amount: {}", trade_id, actual_amount);
+                    }
+                }
+                Err(e) => {
+                    log::warn!(target: "entity-market-ocw",
+                        "Underpaid check trade {} error: {}", trade_id, e);
+                }
+            }
+        }
+
+        /// 生成少付 OCW 结果存储键
+        fn ocw_underpaid_key(trade_id: u64) -> alloc::vec::Vec<u8> {
+            let mut key = b"entity_market_undp::".to_vec();
             key.extend_from_slice(&trade_id.to_le_bytes());
             key
         }
@@ -2464,20 +2986,22 @@ pub mod pallet {
             // 6. 清理 OCW 验证结果存储
             OcwVerificationResults::<T>::remove(trade_id);
 
-            // 7. 支付奖励给调用者
+            // 7. 支付奖励给调用者（失败发事件）
             let reward = T::VerificationReward::get();
             if reward > BalanceOf::<T>::zero() {
                 let reward_source = T::RewardSource::get();
                 
-                let _ = T::Currency::transfer(
+                if T::Currency::transfer(
                     &reward_source,
                     caller,
                     reward,
                     ExistenceRequirement::KeepAlive,
-                );
-
-                log::info!(target: "entity-market", 
-                    "Paid verification reward to {:?} for trade {}", caller, trade_id);
+                ).is_ok() {
+                    log::info!(target: "entity-market", 
+                        "Paid verification reward to {:?} for trade {}", caller, trade_id);
+                } else {
+                    Self::deposit_event(Event::MarketOperationFailed { trade_id, operation: MarketOperation::VerificationReward });
+                }
             }
 
             // 8. 发出事件
@@ -2497,7 +3021,7 @@ pub mod pallet {
         ) -> DispatchResult {
             // 全额释放 Token 给买家
             T::TokenProvider::repatriate_reserved(
-                trade.shop_id,
+                trade.entity_id,
                 &trade.seller,
                 &trade.buyer,
                 trade.token_amount,
@@ -2518,14 +3042,14 @@ pub mod pallet {
             trade.status = UsdtTradeStatus::Completed;
             
             // 先提取需要的值
-            let shop_id = trade.shop_id;
+            let entity_id = trade.entity_id;
             let usdt_amount = trade.usdt_amount;
             let order_id = trade.order_id;
             
             UsdtTrades::<T>::insert(trade_id, trade);
 
             // 更新统计
-            MarketStatsStorage::<T>::mutate(shop_id, |stats| {
+            MarketStatsStorage::<T>::mutate(entity_id, |stats| {
                 stats.total_trades = stats.total_trades.saturating_add(1);
                 stats.total_volume_usdt = stats.total_volume_usdt.saturating_add(usdt_amount);
             });
@@ -2563,7 +3087,7 @@ pub mod pallet {
             // 释放部分 Token 给买家
             if !token_to_release.is_zero() {
                 T::TokenProvider::repatriate_reserved(
-                    trade.shop_id,
+                    trade.entity_id,
                     &trade.seller,
                     &trade.buyer,
                     token_to_release,
@@ -2572,38 +3096,25 @@ pub mod pallet {
 
             // 退还剩余 Token 给卖家
             if !token_to_refund.is_zero() {
-                T::TokenProvider::unreserve(trade.shop_id, &trade.seller, token_to_refund);
+                T::TokenProvider::unreserve(trade.entity_id, &trade.seller, token_to_refund);
                 // H7 修复: 回滚父订单中未实际成交的部分
                 Self::rollback_order_filled_amount(trade.order_id, token_to_refund);
             }
 
-            // 🆕 少付时保证金全部没收归国库（不按比例，全额没收）
-            let mut deposit_forfeited = BalanceOf::<T>::zero();
-            if !trade.buyer_deposit.is_zero() && trade.deposit_status == BuyerDepositStatus::Locked {
-                deposit_forfeited = trade.buyer_deposit;
-                
-                // 保证金全部转入国库
-                let treasury = T::TreasuryAccount::get();
-                let _ = T::Currency::repatriate_reserved(
-                    &trade.buyer,
-                    &treasury,
-                    deposit_forfeited,
-                    frame_support::traits::BalanceStatus::Free,
-                );
-
-                trade.deposit_status = BuyerDepositStatus::Forfeited;
-            }
+            // 保证金按梯度没收
+            let forfeit_rate = Self::calculate_deposit_forfeit_rate(payment_ratio);
+            let deposit_forfeited = Self::forfeit_buyer_deposit(trade, trade_id, forfeit_rate);
 
             trade.status = UsdtTradeStatus::Completed;
             
             // 先提取需要的值
-            let shop_id = trade.shop_id;
+            let entity_id = trade.entity_id;
             let expected_amount = trade.usdt_amount;
             
             UsdtTrades::<T>::insert(trade_id, trade);
 
             // 更新统计（按实际付款金额）
-            MarketStatsStorage::<T>::mutate(shop_id, |stats| {
+            MarketStatsStorage::<T>::mutate(entity_id, |stats| {
                 stats.total_trades = stats.total_trades.saturating_add(1);
                 stats.total_volume_usdt = stats.total_volume_usdt.saturating_add(actual_amount);
             });
@@ -2620,32 +3131,15 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 创建 USDT 交易记录（无保证金版本，用于 take_usdt_sell_order）
-        fn do_create_usdt_trade(
-            order_id: u64,
-            shop_id: u64,
-            seller: T::AccountId,
-            buyer: T::AccountId,
-            token_amount: T::TokenBalance,
-            usdt_amount: u64,
-            seller_tron_address: TronAddress,
-        ) -> Result<u64, DispatchError> {
-            Self::do_create_usdt_trade_with_deposit(
-                order_id,
-                shop_id,
-                seller,
-                buyer,
-                token_amount,
-                usdt_amount,
-                seller_tron_address,
-                Zero::zero(), // 无保证金
-            )
+        /// 保证金没收梯度（委托给 pallet-trading-common）
+        fn calculate_deposit_forfeit_rate(payment_ratio: u16) -> u16 {
+            pallet_trading_common::calculate_deposit_forfeit_rate(payment_ratio)
         }
 
-        /// 🆕 创建 USDT 交易记录（含保证金版本，用于 accept_usdt_buy_order）
+        /// 创建 USDT 交易记录（含保证金）
         fn do_create_usdt_trade_with_deposit(
             order_id: u64,
-            shop_id: u64,
+            entity_id: u64,
             seller: T::AccountId,
             buyer: T::AccountId,
             token_amount: T::TokenBalance,
@@ -2657,7 +3151,7 @@ pub mod pallet {
             NextUsdtTradeId::<T>::put(trade_id.saturating_add(1));
 
             let now = <frame_system::Pallet<T>>::block_number();
-            let timeout = Self::get_usdt_timeout(shop_id);
+            let timeout = Self::get_usdt_timeout(entity_id);
             let timeout_at = now.saturating_add(timeout.into());
 
             let deposit_status = if buyer_deposit.is_zero() {
@@ -2669,7 +3163,7 @@ pub mod pallet {
             let trade = UsdtTrade {
                 trade_id,
                 order_id,
-                shop_id,
+                entity_id,
                 seller,
                 buyer,
                 token_amount,
@@ -2681,6 +3175,9 @@ pub mod pallet {
                 timeout_at,
                 buyer_deposit,
                 deposit_status,
+                first_verified_at: None,
+                first_actual_amount: None,
+                underpaid_deadline: None,
             };
 
             UsdtTrades::<T>::insert(trade_id, trade);
@@ -2698,38 +3195,12 @@ pub mod pallet {
             T::MinBuyerDeposit::get()
         }
 
-        /// 🆕 计算付款金额验证结果（多档判定）
-        /// 
-        /// | 实际金额        | 结果              |
-        /// |-----------------|-------------------|
-        /// | ≥ 100.5%        | Overpaid          |
-        /// | 99.5% ~ 100.5%  | Exact             |
-        /// | 50% ~ 99.5%     | Underpaid         |
-        /// | < 50%           | SeverelyUnderpaid |
-        /// | = 0             | Invalid           |
+        /// 计算付款金额验证结果（委托给 pallet-trading-common）
         fn calculate_payment_verification_result(
             expected_amount: u64,
             actual_amount: u64,
         ) -> PaymentVerificationResult {
-            if actual_amount == 0 {
-                return PaymentVerificationResult::Invalid;
-            }
-
-            if expected_amount == 0 {
-                return PaymentVerificationResult::Overpaid;
-            }
-
-            // 计算实际付款比例 (bps, 10000 = 100%)
-            let ratio = (actual_amount as u128)
-                .saturating_mul(10000)
-                .saturating_div(expected_amount as u128) as u16;
-
-            match ratio {
-                r if r >= 10050 => PaymentVerificationResult::Overpaid,      // ≥ 100.5%
-                r if r >= 9950 => PaymentVerificationResult::Exact,          // 99.5% ~ 100.5%
-                r if r >= 5000 => PaymentVerificationResult::Underpaid,      // 50% ~ 99.5%
-                _ => PaymentVerificationResult::SeverelyUnderpaid,           // < 50%
-            }
+            pallet_trading_common::calculate_payment_verification_result(expected_amount, actual_amount)
         }
 
         /// H7: 回滚父订单的 filled_amount（USDT 交易失败/超时时调用）
@@ -2751,25 +3222,49 @@ pub mod pallet {
             });
         }
 
+        /// 更新订单成交量，自动处理 Filled/PartiallyFilled 状态转换
+        fn update_order_fill(
+            order: &TradeOrder<T>,
+            entity_id: u64,
+            fill_amount: T::TokenBalance,
+        ) {
+            let mut updated = order.clone();
+            updated.filled_amount = updated.filled_amount.saturating_add(fill_amount);
+            if updated.filled_amount >= updated.token_amount {
+                updated.status = OrderStatus::Filled;
+                Self::remove_from_order_book(entity_id, order.order_id, order.side);
+                UserOrders::<T>::mutate(&order.maker, |orders| {
+                    orders.retain(|&id| id != order.order_id);
+                });
+            } else {
+                updated.status = OrderStatus::PartiallyFilled;
+            }
+            Orders::<T>::insert(order.order_id, &updated);
+        }
+
         /// 从订单簿移除订单
-        fn remove_from_order_book(shop_id: u64, order_id: u64, side: OrderSide) {
+        fn remove_from_order_book(entity_id: u64, order_id: u64, side: OrderSide) {
             match side {
                 OrderSide::Sell => {
-                    ShopSellOrders::<T>::mutate(shop_id, |orders| {
+                    EntitySellOrders::<T>::mutate(entity_id, |orders| {
                         orders.retain(|&id| id != order_id);
                     });
                 }
                 OrderSide::Buy => {
-                    ShopBuyOrders::<T>::mutate(shop_id, |orders| {
+                    EntityBuyOrders::<T>::mutate(entity_id, |orders| {
                         orders.retain(|&id| id != order_id);
                     });
                 }
             }
         }
 
-        /// 获取排序后的卖单列表（按价格升序）
-        pub fn get_sorted_sell_orders(shop_id: u64) -> Vec<TradeOrder<T>> {
-            let mut orders: Vec<TradeOrder<T>> = ShopSellOrders::<T>::get(shop_id)
+        /// 获取排序后的订单列表（Sell=升序, Buy=降序）
+        pub fn get_sorted_orders(entity_id: u64, side: OrderSide) -> Vec<TradeOrder<T>> {
+            let order_ids = match side {
+                OrderSide::Sell => EntitySellOrders::<T>::get(entity_id),
+                OrderSide::Buy => EntityBuyOrders::<T>::get(entity_id),
+            };
+            let mut orders: Vec<TradeOrder<T>> = order_ids
                 .iter()
                 .filter_map(|&id| Orders::<T>::get(id))
                 .filter(|o| {
@@ -2777,28 +3272,27 @@ pub mod pallet {
                     (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
                 })
                 .collect();
-            orders.sort_by(|a, b| a.price.cmp(&b.price));
+            match side {
+                OrderSide::Sell => orders.sort_by(|a, b| a.price.cmp(&b.price)),
+                OrderSide::Buy => orders.sort_by(|a, b| b.price.cmp(&a.price)),
+            }
             orders
         }
 
+        /// 获取排序后的卖单列表（按价格升序）
+        pub fn get_sorted_sell_orders(entity_id: u64) -> Vec<TradeOrder<T>> {
+            Self::get_sorted_orders(entity_id, OrderSide::Sell)
+        }
+
         /// 获取排序后的买单列表（按价格降序）
-        pub fn get_sorted_buy_orders(shop_id: u64) -> Vec<TradeOrder<T>> {
-            let mut orders: Vec<TradeOrder<T>> = ShopBuyOrders::<T>::get(shop_id)
-                .iter()
-                .filter_map(|&id| Orders::<T>::get(id))
-                .filter(|o| {
-                    o.channel == PaymentChannel::NEX &&
-                    (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
-                })
-                .collect();
-            orders.sort_by(|a, b| b.price.cmp(&a.price));
-            orders
+        pub fn get_sorted_buy_orders(entity_id: u64) -> Vec<TradeOrder<T>> {
+            Self::get_sorted_orders(entity_id, OrderSide::Buy)
         }
 
         /// 执行市价买入
         fn do_market_buy(
             buyer: &T::AccountId,
-            shop_id: u64,
+            entity_id: u64,
             mut remaining: T::TokenBalance,
             max_cost: BalanceOf<T>,
             sell_orders: &mut Vec<TradeOrder<T>>,
@@ -2807,8 +3301,7 @@ pub mod pallet {
             let mut total_next: BalanceOf<T> = Zero::zero();
             let mut total_fees: BalanceOf<T> = Zero::zero();
 
-            let config = MarketConfigs::<T>::get(shop_id).unwrap_or_default();
-            let fee_rate = if config.fee_rate > 0 { config.fee_rate } else { T::DefaultFeeRate::get() };
+            let fee_rate = Self::get_fee_rate(entity_id);
 
             for order in sell_orders.iter_mut() {
                 if remaining.is_zero() {
@@ -2823,22 +3316,28 @@ pub mod pallet {
                 let fill_u128: u128 = fill_amount.into();
                 let cost = Self::calculate_total_next(fill_u128, order.price)?;
 
-                // 检查滑点
-                if total_next.saturating_add(cost) > max_cost {
-                    // 计算在预算内能买多少
+                // P1 修复: 滑点边界时部分成交而非跳单
+                let (cost, fill_amount) = if total_next.saturating_add(cost) > max_cost {
                     let budget_left = max_cost.saturating_sub(total_next);
                     if budget_left.is_zero() {
                         break;
                     }
-                    // 简化：跳过这个订单
-                    continue;
-                }
+                    // 用剩余预算反算能买多少 Token
+                    let price_u128: u128 = order.price.into();
+                    if price_u128 == 0 { break; }
+                    let affordable_tokens: u128 = budget_left.into() / price_u128;
+                    if affordable_tokens == 0 { break; }
+                    let partial: T::TokenBalance = affordable_tokens.min(fill_amount.into()).into();
+                    let partial_cost = Self::calculate_total_next(partial.into(), order.price)?;
+                    (partial_cost, partial)
+                } else {
+                    (cost, fill_amount)
+                };
+
+                if fill_amount.is_zero() { break; }
 
                 // 计算手续费
-                let fee = cost
-                    .saturating_mul(fee_rate.into())
-                    .checked_div(&10000u32.into())
-                    .unwrap_or_else(Zero::zero);
+                let fee = Self::calculate_fee(cost, fee_rate);
 
                 // 执行转账
                 // buyer 支付 NEX → maker
@@ -2849,12 +3348,12 @@ pub mod pallet {
                     ExistenceRequirement::KeepAlive,
                 )?;
 
-                // 手续费转给店铺
+                // 手续费转给实体所有者
                 if !fee.is_zero() {
-                    if let Some(shop_owner) = T::ShopProvider::shop_owner(shop_id) {
+                    if let Some(entity_owner) = T::EntityProvider::entity_owner(entity_id) {
                         T::Currency::transfer(
                             buyer,
-                            &shop_owner,
+                            &entity_owner,
                             fee,
                             ExistenceRequirement::KeepAlive,
                         )?;
@@ -2863,22 +3362,14 @@ pub mod pallet {
 
                 // Token: maker → buyer（从 maker 的 reserved 转出）
                 T::TokenProvider::repatriate_reserved(
-                    shop_id,
+                    entity_id,
                     &order.maker,
                     buyer,
                     fill_amount,
                 )?;
 
                 // 更新订单
-                let mut updated_order = order.clone();
-                updated_order.filled_amount = updated_order.filled_amount.saturating_add(fill_amount);
-                if updated_order.filled_amount >= updated_order.token_amount {
-                    updated_order.status = OrderStatus::Filled;
-                    Self::remove_from_order_book(shop_id, order.order_id, OrderSide::Sell);
-                } else {
-                    updated_order.status = OrderStatus::PartiallyFilled;
-                }
-                Orders::<T>::insert(order.order_id, &updated_order);
+                Self::update_order_fill(order, entity_id, fill_amount);
 
                 // 累计
                 total_filled = total_filled.saturating_add(fill_amount);
@@ -2889,17 +3380,17 @@ pub mod pallet {
 
             // 更新统计和最优价格
             if !total_filled.is_zero() {
-                MarketStatsStorage::<T>::mutate(shop_id, |stats| {
+                MarketStatsStorage::<T>::mutate(entity_id, |stats| {
                     stats.total_trades = stats.total_trades.saturating_add(1);
                     stats.total_volume_nex = stats.total_volume_nex.saturating_add(total_next.into());
                     stats.total_fees_cos = stats.total_fees_cos.saturating_add(total_fees.into());
                 });
 
                 // 更新最优价格和 TWAP（使用加权平均价格）
-                Self::update_best_prices(shop_id);
+                Self::update_best_prices(entity_id);
                 if !total_filled.is_zero() {
                     let avg_price = total_next.checked_div(&total_filled.into().into()).unwrap_or_else(Zero::zero);
-                    Self::on_trade_completed(shop_id, avg_price);
+                    Self::on_trade_completed(entity_id, avg_price);
                 }
             }
 
@@ -2909,7 +3400,7 @@ pub mod pallet {
         /// 执行市价卖出
         fn do_market_sell(
             seller: &T::AccountId,
-            shop_id: u64,
+            entity_id: u64,
             mut remaining: T::TokenBalance,
             min_receive: BalanceOf<T>,
             buy_orders: &mut Vec<TradeOrder<T>>,
@@ -2918,8 +3409,7 @@ pub mod pallet {
             let mut total_receive: BalanceOf<T> = Zero::zero();
             let mut total_fees: BalanceOf<T> = Zero::zero();
 
-            let config = MarketConfigs::<T>::get(shop_id).unwrap_or_default();
-            let fee_rate = if config.fee_rate > 0 { config.fee_rate } else { T::DefaultFeeRate::get() };
+            let fee_rate = Self::get_fee_rate(entity_id);
 
             for order in buy_orders.iter_mut() {
                 if remaining.is_zero() {
@@ -2935,52 +3425,45 @@ pub mod pallet {
                 let gross = Self::calculate_total_next(fill_u128, order.price)?;
 
                 // 计算手续费
-                let fee = gross
-                    .saturating_mul(fee_rate.into())
-                    .checked_div(&10000u32.into())
-                    .unwrap_or_else(Zero::zero);
+                let fee = Self::calculate_fee(gross, fee_rate);
                 let net = gross.saturating_sub(fee);
 
-                // 从 maker 的锁定中释放 NEX → seller
-                T::Currency::unreserve(&order.maker, gross);
-                T::Currency::transfer(
-                    &order.maker,
-                    seller,
-                    net,
-                    ExistenceRequirement::KeepAlive,
-                )?;
+                // P1 修复: 滑点检查移到转账前（与 market_buy 一致）
+                // 预估成交后总收入是否满足 min_receive
+                let projected_receive = total_receive.saturating_add(net);
+                let projected_remaining = remaining.saturating_sub(fill_amount);
+                if projected_remaining.is_zero() && projected_receive < min_receive {
+                    // 最后一笔成交后仍不满足 min_receive，直接失败
+                    return Err(Error::<T>::SlippageExceeded.into());
+                }
 
-                // 手续费
+                // P2 修复: 使用 repatriate_reserved 替代 unreserve→transfer
+                // seller 收到 net (= gross - fee)
+                T::Currency::repatriate_reserved(
+                    &order.maker, seller, net,
+                    frame_support::traits::BalanceStatus::Free,
+                )?;
+                // fee 给 entity_owner
                 if !fee.is_zero() {
-                    if let Some(shop_owner) = T::ShopProvider::shop_owner(shop_id) {
-                        T::Currency::transfer(
-                            &order.maker,
-                            &shop_owner,
-                            fee,
-                            ExistenceRequirement::KeepAlive,
+                    if let Some(entity_owner) = T::EntityProvider::entity_owner(entity_id) {
+                        T::Currency::repatriate_reserved(
+                            &order.maker, &entity_owner, fee,
+                            frame_support::traits::BalanceStatus::Free,
                         )?;
                     }
                 }
 
                 // Token: seller → maker（先锁定 seller 的 Token，再转给 maker）
-                T::TokenProvider::reserve(shop_id, seller, fill_amount)?;
+                T::TokenProvider::reserve(entity_id, seller, fill_amount)?;
                 T::TokenProvider::repatriate_reserved(
-                    shop_id,
+                    entity_id,
                     seller,
                     &order.maker,
                     fill_amount,
                 )?;
 
                 // 更新订单
-                let mut updated_order = order.clone();
-                updated_order.filled_amount = updated_order.filled_amount.saturating_add(fill_amount);
-                if updated_order.filled_amount >= updated_order.token_amount {
-                    updated_order.status = OrderStatus::Filled;
-                    Self::remove_from_order_book(shop_id, order.order_id, OrderSide::Buy);
-                } else {
-                    updated_order.status = OrderStatus::PartiallyFilled;
-                }
-                Orders::<T>::insert(order.order_id, &updated_order);
+                Self::update_order_fill(order, entity_id, fill_amount);
 
                 // 累计
                 total_filled = total_filled.saturating_add(fill_amount);
@@ -2989,25 +3472,20 @@ pub mod pallet {
                 remaining = remaining.saturating_sub(fill_amount);
             }
 
-            // 滑点检查
-            if total_receive < min_receive && !total_filled.is_zero() {
-                return Err(Error::<T>::SlippageExceeded.into());
-            }
-
             // 更新统计和最优价格
             if !total_filled.is_zero() {
-                MarketStatsStorage::<T>::mutate(shop_id, |stats| {
+                MarketStatsStorage::<T>::mutate(entity_id, |stats| {
                     stats.total_trades = stats.total_trades.saturating_add(1);
                     stats.total_volume_nex = stats.total_volume_nex.saturating_add(total_receive.saturating_add(total_fees).into());
                     stats.total_fees_cos = stats.total_fees_cos.saturating_add(total_fees.into());
                 });
 
                 // 更新最优价格和 TWAP
-                Self::update_best_prices(shop_id);
+                Self::update_best_prices(entity_id);
                 let total_gross = total_receive.saturating_add(total_fees);
                 if !total_gross.is_zero() {
                     let avg_price = total_gross.checked_div(&total_filled.into().into()).unwrap_or_else(Zero::zero);
-                    Self::on_trade_completed(shop_id, avg_price);
+                    Self::on_trade_completed(entity_id, avg_price);
                 }
             }
 
@@ -3015,35 +3493,35 @@ pub mod pallet {
         }
 
         /// 更新最优买卖价格
-        fn update_best_prices(shop_id: u64) {
+        fn update_best_prices(entity_id: u64) {
             // 更新最优卖价
-            if let Some(best_ask) = Self::calculate_best_ask(shop_id) {
-                BestAsk::<T>::insert(shop_id, best_ask);
+            if let Some(best_ask) = Self::calculate_best_ask(entity_id) {
+                BestAsk::<T>::insert(entity_id, best_ask);
             } else {
-                BestAsk::<T>::remove(shop_id);
+                BestAsk::<T>::remove(entity_id);
             }
 
             // 更新最优买价
-            if let Some(best_bid) = Self::calculate_best_bid(shop_id) {
-                BestBid::<T>::insert(shop_id, best_bid);
+            if let Some(best_bid) = Self::calculate_best_bid(entity_id) {
+                BestBid::<T>::insert(entity_id, best_bid);
             } else {
-                BestBid::<T>::remove(shop_id);
+                BestBid::<T>::remove(entity_id);
             }
         }
 
         /// 更新最新成交价
-        fn update_last_trade_price(shop_id: u64, price: BalanceOf<T>) {
-            LastTradePrice::<T>::insert(shop_id, price);
+        fn update_last_trade_price(entity_id: u64, price: BalanceOf<T>) {
+            LastTradePrice::<T>::insert(entity_id, price);
         }
 
         // ==================== Phase 5: TWAP 价格预言机内部函数 ====================
 
         /// 更新 TWAP 累积器（每次成交时调用）
         /// P1 安全修复: 添加异常价格过滤，防止价格操纵
-        fn update_twap_accumulator(shop_id: u64, trade_price: BalanceOf<T>) {
+        fn update_twap_accumulator(entity_id: u64, trade_price: BalanceOf<T>) {
             let current_block: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
 
-            TwapAccumulators::<T>::mutate(shop_id, |maybe_acc| {
+            TwapAccumulators::<T>::mutate(entity_id, |maybe_acc| {
                 let acc = maybe_acc.get_or_insert_with(|| TwapAccumulator {
                     current_cumulative: 0,
                     current_block,
@@ -3138,8 +3616,8 @@ pub mod pallet {
         }
 
         /// 计算指定周期的 TWAP
-        pub fn calculate_twap(shop_id: u64, period: TwapPeriod) -> Option<BalanceOf<T>> {
-            let acc = TwapAccumulators::<T>::get(shop_id)?;
+        pub fn calculate_twap(entity_id: u64, period: TwapPeriod) -> Option<BalanceOf<T>> {
+            let acc = TwapAccumulators::<T>::get(entity_id)?;
             let current_block: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
 
             // 获取对应周期的快照
@@ -3174,7 +3652,7 @@ pub mod pallet {
         ///
         /// 参考价格优先级：
         /// 1. 如果三周期 TWAP 数据都充足，使用 1小时 TWAP
-        /// 2. 如果 TWAP 数据不足但有初始价格，使用店主设定的初始价格
+        /// 2. 如果 TWAP 数据不足但有初始价格，使用实体所有者设定的初始价格
         /// 3. 如果都没有，跳过检查
         ///
         /// 三周期 TWAP 充足条件：
@@ -3183,11 +3661,11 @@ pub mod pallet {
         /// - 24小时快照已更新（距离当前 >= 24小时）
         /// - 7天快照已更新（距离当前 >= 7天）
         pub fn check_price_deviation(
-            shop_id: u64,
+            entity_id: u64,
             price: BalanceOf<T>,
         ) -> Result<(), Error<T>> {
             // 获取价格保护配置
-            let config = PriceProtection::<T>::get(shop_id).unwrap_or_default();
+            let config = PriceProtection::<T>::get(entity_id).unwrap_or_default();
 
             // 如果未启用价格保护，直接通过
             if !config.enabled {
@@ -3203,15 +3681,15 @@ pub mod pallet {
             // 获取参考价格
             let reference_price: Option<BalanceOf<T>> = {
                 // 获取 TWAP 累积器
-                let acc = TwapAccumulators::<T>::get(shop_id);
+                let acc = TwapAccumulators::<T>::get(entity_id);
 
                 match acc {
                     Some(ref a) if Self::is_twap_data_sufficient(a, current_block, &config) => {
                         // 三周期 TWAP 数据充足，使用 1小时 TWAP
-                        Self::calculate_twap(shop_id, TwapPeriod::OneHour)
+                        Self::calculate_twap(entity_id, TwapPeriod::OneHour)
                     }
                     _ => {
-                        // TWAP 数据不足，使用店主设定的初始价格
+                        // TWAP 数据不足，使用实体所有者设定的初始价格
                         config.initial_price
                     }
                 }
@@ -3288,8 +3766,8 @@ pub mod pallet {
         }
 
         /// 检查并触发熔断机制
-        fn check_circuit_breaker(shop_id: u64, current_price: BalanceOf<T>) {
-            let config = match PriceProtection::<T>::get(shop_id) {
+        fn check_circuit_breaker(entity_id: u64, current_price: BalanceOf<T>) {
+            let config = match PriceProtection::<T>::get(entity_id) {
                 Some(c) => c,
                 None => return,
             };
@@ -3299,7 +3777,7 @@ pub mod pallet {
             }
 
             // 使用 7天 TWAP 判断熔断
-            let twap_7d = match Self::calculate_twap(shop_id, TwapPeriod::OneWeek) {
+            let twap_7d = match Self::calculate_twap(entity_id, TwapPeriod::OneWeek) {
                 Some(t) => t,
                 None => return,
             };
@@ -3322,7 +3800,7 @@ pub mod pallet {
                 let current_block: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
                 let until_block = current_block.saturating_add(T::CircuitBreakerDuration::get());
 
-                PriceProtection::<T>::mutate(shop_id, |maybe_config| {
+                PriceProtection::<T>::mutate(entity_id, |maybe_config| {
                     if let Some(c) = maybe_config {
                         c.circuit_breaker_active = true;
                         c.circuit_breaker_until = until_block;
@@ -3330,7 +3808,7 @@ pub mod pallet {
                 });
 
                 Self::deposit_event(Event::CircuitBreakerTriggered {
-                    shop_id,
+                    entity_id,
                     current_price,
                     twap_7d,
                     deviation_bps,
@@ -3340,19 +3818,19 @@ pub mod pallet {
         }
 
         /// 在成交后更新 TWAP 并检查熔断
-        fn on_trade_completed(shop_id: u64, trade_price: BalanceOf<T>) {
+        fn on_trade_completed(entity_id: u64, trade_price: BalanceOf<T>) {
             // 更新 TWAP 累积器
-            Self::update_twap_accumulator(shop_id, trade_price);
+            Self::update_twap_accumulator(entity_id, trade_price);
 
             // 更新最新成交价
-            Self::update_last_trade_price(shop_id, trade_price);
+            Self::update_last_trade_price(entity_id, trade_price);
 
             // L1: 发出 TwapUpdated 事件
-            let twap_1h = Self::calculate_twap(shop_id, TwapPeriod::OneHour);
-            let twap_24h = Self::calculate_twap(shop_id, TwapPeriod::OneDay);
-            let twap_7d = Self::calculate_twap(shop_id, TwapPeriod::OneWeek);
+            let twap_1h = Self::calculate_twap(entity_id, TwapPeriod::OneHour);
+            let twap_24h = Self::calculate_twap(entity_id, TwapPeriod::OneDay);
+            let twap_7d = Self::calculate_twap(entity_id, TwapPeriod::OneWeek);
             Self::deposit_event(Event::TwapUpdated {
-                shop_id,
+                entity_id,
                 new_price: trade_price,
                 twap_1h,
                 twap_24h,
@@ -3360,7 +3838,7 @@ pub mod pallet {
             });
 
             // 检查熔断
-            Self::check_circuit_breaker(shop_id, trade_price);
+            Self::check_circuit_breaker(entity_id, trade_price);
         }
     }
 }
@@ -3368,18 +3846,18 @@ pub mod pallet {
 // ==================== 公共查询接口 ====================
 
 impl<T: Config> Pallet<T> {
-    /// 获取店铺卖单列表
-    pub fn get_sell_orders(shop_id: u64) -> Vec<TradeOrder<T>> {
-        ShopSellOrders::<T>::get(shop_id)
+    /// 获取实体卖单列表
+    pub fn get_sell_orders(entity_id: u64) -> Vec<TradeOrder<T>> {
+        EntitySellOrders::<T>::get(entity_id)
             .iter()
             .filter_map(|&id| Orders::<T>::get(id))
             .filter(|o| o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
             .collect()
     }
 
-    /// 获取店铺买单列表
-    pub fn get_buy_orders(shop_id: u64) -> Vec<TradeOrder<T>> {
-        ShopBuyOrders::<T>::get(shop_id)
+    /// 获取实体买单列表
+    pub fn get_buy_orders(entity_id: u64) -> Vec<TradeOrder<T>> {
+        EntityBuyOrders::<T>::get(entity_id)
             .iter()
             .filter_map(|&id| Orders::<T>::get(id))
             .filter(|o| o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
@@ -3399,13 +3877,13 @@ impl<T: Config> Pallet<T> {
     /// 获取订单簿深度
     ///
     /// # 参数
-    /// - `shop_id`: 店铺 ID
+    /// - `entity_id`: 实体 ID
     /// - `depth`: 返回的档位数量（每边）
-    pub fn get_order_book_depth(shop_id: u64, depth: u32) -> OrderBookDepth<BalanceOf<T>, T::TokenBalance> {
+    pub fn get_order_book_depth(entity_id: u64, depth: u32) -> OrderBookDepth<BalanceOf<T>, T::TokenBalance> {
         use sp_runtime::traits::{Saturating, SaturatedConversion};
 
-        let asks = Self::aggregate_price_levels(shop_id, OrderSide::Sell, depth);
-        let bids = Self::aggregate_price_levels(shop_id, OrderSide::Buy, depth);
+        let asks = Self::aggregate_price_levels(entity_id, OrderSide::Sell, depth);
+        let bids = Self::aggregate_price_levels(entity_id, OrderSide::Buy, depth);
 
         let best_ask = asks.first().map(|l| l.price);
         let best_bid = bids.first().map(|l| l.price);
@@ -3418,7 +3896,7 @@ impl<T: Config> Pallet<T> {
         let block_number = <frame_system::Pallet<T>>::block_number();
 
         OrderBookDepth {
-            shop_id,
+            entity_id,
             asks,
             bids,
             best_ask,
@@ -3430,7 +3908,7 @@ impl<T: Config> Pallet<T> {
 
     /// 聚合价格档位
     fn aggregate_price_levels(
-        shop_id: u64,
+        entity_id: u64,
         side: OrderSide,
         max_levels: u32,
     ) -> Vec<PriceLevel<BalanceOf<T>, T::TokenBalance>> {
@@ -3438,8 +3916,8 @@ impl<T: Config> Pallet<T> {
         use sp_runtime::traits::{Saturating, Zero};
 
         let orders = match side {
-            OrderSide::Sell => Self::get_sorted_sell_orders(shop_id),
-            OrderSide::Buy => Self::get_sorted_buy_orders(shop_id),
+            OrderSide::Sell => Self::get_sorted_sell_orders(entity_id),
+            OrderSide::Buy => Self::get_sorted_buy_orders(entity_id),
         };
 
         // 按价格聚合
@@ -3477,15 +3955,15 @@ impl<T: Config> Pallet<T> {
     }
 
     /// 获取最优买卖价
-    pub fn get_best_prices(shop_id: u64) -> (Option<BalanceOf<T>>, Option<BalanceOf<T>>) {
-        let best_ask = Self::calculate_best_ask(shop_id);
-        let best_bid = Self::calculate_best_bid(shop_id);
+    pub fn get_best_prices(entity_id: u64) -> (Option<BalanceOf<T>>, Option<BalanceOf<T>>) {
+        let best_ask = Self::calculate_best_ask(entity_id);
+        let best_bid = Self::calculate_best_bid(entity_id);
         (best_ask, best_bid)
     }
 
     /// 计算最优卖价
-    fn calculate_best_ask(shop_id: u64) -> Option<BalanceOf<T>> {
-        ShopSellOrders::<T>::get(shop_id)
+    fn calculate_best_ask(entity_id: u64) -> Option<BalanceOf<T>> {
+        EntitySellOrders::<T>::get(entity_id)
             .iter()
             .filter_map(|&id| Orders::<T>::get(id))
             .filter(|o| {
@@ -3497,8 +3975,8 @@ impl<T: Config> Pallet<T> {
     }
 
     /// 计算最优买价
-    fn calculate_best_bid(shop_id: u64) -> Option<BalanceOf<T>> {
-        ShopBuyOrders::<T>::get(shop_id)
+    fn calculate_best_bid(entity_id: u64) -> Option<BalanceOf<T>> {
+        EntityBuyOrders::<T>::get(entity_id)
             .iter()
             .filter_map(|&id| Orders::<T>::get(id))
             .filter(|o| {
@@ -3510,10 +3988,10 @@ impl<T: Config> Pallet<T> {
     }
 
     /// 获取买卖价差
-    pub fn get_spread(shop_id: u64) -> Option<BalanceOf<T>> {
+    pub fn get_spread(entity_id: u64) -> Option<BalanceOf<T>> {
         use sp_runtime::traits::Saturating;
 
-        let (best_ask, best_bid) = Self::get_best_prices(shop_id);
+        let (best_ask, best_bid) = Self::get_best_prices(entity_id);
         match (best_ask, best_bid) {
             (Some(ask), Some(bid)) if ask > bid => Some(ask.saturating_sub(bid)),
             _ => None,
@@ -3521,14 +3999,14 @@ impl<T: Config> Pallet<T> {
     }
 
     /// 获取市场摘要
-    pub fn get_market_summary(shop_id: u64) -> MarketSummary<BalanceOf<T>, T::TokenBalance> {
+    pub fn get_market_summary(entity_id: u64) -> MarketSummary<BalanceOf<T>, T::TokenBalance> {
         use sp_runtime::traits::{Saturating, Zero};
 
-        let (best_ask, best_bid) = Self::get_best_prices(shop_id);
-        let last_price = LastTradePrice::<T>::get(shop_id);
+        let (best_ask, best_bid) = Self::get_best_prices(entity_id);
+        let last_price = LastTradePrice::<T>::get(entity_id);
 
         // 计算卖单总量
-        let total_ask_amount: T::TokenBalance = ShopSellOrders::<T>::get(shop_id)
+        let total_ask_amount: T::TokenBalance = EntitySellOrders::<T>::get(entity_id)
             .iter()
             .filter_map(|&id| Orders::<T>::get(id))
             .filter(|o| o.channel == PaymentChannel::NEX &&
@@ -3538,7 +4016,7 @@ impl<T: Config> Pallet<T> {
             });
 
         // 计算买单总量
-        let total_bid_amount: T::TokenBalance = ShopBuyOrders::<T>::get(shop_id)
+        let total_bid_amount: T::TokenBalance = EntityBuyOrders::<T>::get(entity_id)
             .iter()
             .filter_map(|&id| Orders::<T>::get(id))
             .filter(|o| o.channel == PaymentChannel::NEX &&
@@ -3560,8 +4038,8 @@ impl<T: Config> Pallet<T> {
     }
 
     /// 获取订单簿快照（简化版）
-    pub fn get_order_book_snapshot(shop_id: u64) -> (Vec<(BalanceOf<T>, T::TokenBalance)>, Vec<(BalanceOf<T>, T::TokenBalance)>) {
-        let depth = Self::get_order_book_depth(shop_id, 20);
+    pub fn get_order_book_snapshot(entity_id: u64) -> (Vec<(BalanceOf<T>, T::TokenBalance)>, Vec<(BalanceOf<T>, T::TokenBalance)>) {
+        let depth = Self::get_order_book_depth(entity_id, 20);
 
         let asks: Vec<(BalanceOf<T>, T::TokenBalance)> = depth.asks
             .into_iter()
@@ -3571,6 +4049,86 @@ impl<T: Config> Pallet<T> {
         let bids: Vec<(BalanceOf<T>, T::TokenBalance)> = depth.bids
             .into_iter()
             .map(|l| (l.price, l.total_amount))
+            .collect();
+
+        (asks, bids)
+    }
+
+    // ==================== P2 修复: USDT 订单簿查询接口 ====================
+
+    /// 获取 USDT 卖单列表（按 usdt_price 升序）
+    pub fn get_usdt_sell_orders(entity_id: u64) -> Vec<TradeOrder<T>> {
+        let mut orders: Vec<TradeOrder<T>> = EntitySellOrders::<T>::get(entity_id)
+            .iter()
+            .filter_map(|&id| Orders::<T>::get(id))
+            .filter(|o| {
+                o.channel == PaymentChannel::USDT &&
+                (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+            })
+            .collect();
+        orders.sort_by(|a, b| a.usdt_price.cmp(&b.usdt_price));
+        orders
+    }
+
+    /// 获取 USDT 买单列表（按 usdt_price 降序）
+    pub fn get_usdt_buy_orders(entity_id: u64) -> Vec<TradeOrder<T>> {
+        let mut orders: Vec<TradeOrder<T>> = EntityBuyOrders::<T>::get(entity_id)
+            .iter()
+            .filter_map(|&id| Orders::<T>::get(id))
+            .filter(|o| {
+                o.channel == PaymentChannel::USDT &&
+                (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+            })
+            .collect();
+        orders.sort_by(|a, b| b.usdt_price.cmp(&a.usdt_price));
+        orders
+    }
+
+    /// 获取 USDT 最优买卖价
+    pub fn get_usdt_best_prices(entity_id: u64) -> (Option<u64>, Option<u64>) {
+        let best_ask = Self::get_usdt_sell_orders(entity_id).first().map(|o| o.usdt_price);
+        let best_bid = Self::get_usdt_buy_orders(entity_id).first().map(|o| o.usdt_price);
+        (best_ask, best_bid)
+    }
+
+    /// 获取 USDT 订单簿深度（按 usdt_price 聚合）
+    pub fn get_usdt_order_book_depth(entity_id: u64, depth: u32)
+        -> (Vec<(u64, T::TokenBalance, u32)>, Vec<(u64, T::TokenBalance, u32)>)
+    {
+        use alloc::collections::BTreeMap;
+        use sp_runtime::traits::{Saturating, Zero};
+
+        // 卖单按价格聚合
+        let sell_orders = Self::get_usdt_sell_orders(entity_id);
+        let mut ask_map: BTreeMap<u64, (T::TokenBalance, u32)> = BTreeMap::new();
+        for o in sell_orders {
+            let available = o.token_amount.saturating_sub(o.filled_amount);
+            if !available.is_zero() {
+                let entry = ask_map.entry(o.usdt_price).or_insert((Zero::zero(), 0));
+                entry.0 = entry.0.saturating_add(available);
+                entry.1 += 1;
+            }
+        }
+        let asks: Vec<(u64, T::TokenBalance, u32)> = ask_map.into_iter()
+            .take(depth as usize)
+            .map(|(price, (amount, count))| (price, amount, count))
+            .collect();
+
+        // 买单按价格聚合（降序）
+        let buy_orders = Self::get_usdt_buy_orders(entity_id);
+        let mut bid_map: BTreeMap<u64, (T::TokenBalance, u32)> = BTreeMap::new();
+        for o in buy_orders {
+            let available = o.token_amount.saturating_sub(o.filled_amount);
+            if !available.is_zero() {
+                let entry = bid_map.entry(o.usdt_price).or_insert((Zero::zero(), 0));
+                entry.0 = entry.0.saturating_add(available);
+                entry.1 += 1;
+            }
+        }
+        let bids: Vec<(u64, T::TokenBalance, u32)> = bid_map.into_iter()
+            .rev()
+            .take(depth as usize)
+            .map(|(price, (amount, count))| (price, amount, count))
             .collect();
 
         (asks, bids)

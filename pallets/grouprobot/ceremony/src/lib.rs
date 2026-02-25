@@ -42,6 +42,10 @@ pub struct CeremonyRecord<T: Config> {
 	pub created_at: BlockNumberFor<T>,
 	pub status: CeremonyStatus,
 	pub expires_at: BlockNumberFor<T>,
+	/// 是否为 Re-ceremony (而非首次 Ceremony)
+	pub is_re_ceremony: bool,
+	/// 替代的旧仪式哈希 (Re-ceremony 时填写)
+	pub supersedes: Option<[u8; 32]>,
 }
 
 /// Ceremony Enclave 信息
@@ -173,6 +177,12 @@ pub mod pallet {
 		TooManyParticipants,
 		/// 仪式历史已满
 		CeremonyHistoryFull,
+		/// 不是 Bot 所有者
+		NotBotOwner,
+		/// Bot 不存在
+		BotNotFound,
+		/// Bot 公钥不匹配
+		BotPublicKeyMismatch,
 	}
 
 	// ========================================================================
@@ -193,12 +203,23 @@ pub mod pallet {
 			let mut reads: u64 = 0;
 			let mut writes: u64 = 0;
 			let mut expired: alloc::vec::Vec<([u8; 32], [u8; 32])> = alloc::vec::Vec::new();
+			let mut at_risk: alloc::vec::Vec<([u8; 32], u8)> = alloc::vec::Vec::new();
 
-			for (ceremony_hash, record) in Ceremonies::<T>::iter() {
+			// CH2-fix: 仅迭代 ActiveCeremony (O(A)) 而非全表 Ceremonies (O(N))
+			for (bot_pk, ceremony_hash) in ActiveCeremony::<T>::iter() {
 				reads += 1;
-				if matches!(record.status, CeremonyStatus::Active) {
+				if let Some(record) = Ceremonies::<T>::get(&ceremony_hash) {
+					reads += 1;
 					if n >= record.expires_at {
-						expired.push((ceremony_hash, record.bot_public_key));
+						expired.push((ceremony_hash, bot_pk));
+					} else {
+						// G5: CeremonyAtRisk 检测 — peer 数量 <= k 时触发风险事件
+						let bot_id_hash = sp_core::hashing::blake2_256(&bot_pk);
+						let peer_count = T::BotRegistry::peer_count(&bot_id_hash);
+						reads += 1;
+						if peer_count > 0 && peer_count <= record.k as u32 {
+							at_risk.push((ceremony_hash, record.k));
+						}
 					}
 				}
 			}
@@ -211,14 +232,15 @@ pub mod pallet {
 				});
 				writes += 1;
 
-				// Clear active ceremony if it matches
-				if ActiveCeremony::<T>::get(&bot_pk) == Some(ceremony_hash) {
-					ActiveCeremony::<T>::remove(&bot_pk);
-					writes += 1;
-				}
-				reads += 1;
+				ActiveCeremony::<T>::remove(&bot_pk);
+				writes += 1;
 
 				Self::deposit_event(Event::CeremonyExpired { ceremony_hash });
+			}
+
+			// G5: 发出 CeremonyAtRisk 事件
+			for (ceremony_hash, required_k) in at_risk {
+				Self::deposit_event(Event::CeremonyAtRisk { ceremony_hash, required_k });
 			}
 
 			Weight::from_parts(
@@ -234,7 +256,7 @@ pub mod pallet {
 
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
-		/// 记录仪式 (验证 Enclave 白名单 + Shamir 参数)
+		/// 记录仪式 (验证 Enclave 白名单 + Shamir 参数 + 调用者身份)
 		#[pallet::call_index(0)]
 		#[pallet::weight(Weight::from_parts(60_000_000, 12_000))]
 		pub fn record_ceremony(
@@ -245,8 +267,18 @@ pub mod pallet {
 			n: u8,
 			bot_public_key: [u8; 32],
 			participant_enclaves: alloc::vec::Vec<[u8; 32]>,
+			bot_id_hash: [u8; 32],
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
+
+			// G1: 验证调用者是 Bot 所有者
+			let owner = T::BotRegistry::bot_owner(&bot_id_hash)
+				.ok_or(Error::<T>::BotNotFound)?;
+			ensure!(owner == who, Error::<T>::NotBotOwner);
+			// 验证 bot_public_key 匹配
+			if let Some(registered_pk) = T::BotRegistry::bot_public_key(&bot_id_hash) {
+				ensure!(registered_pk == bot_public_key, Error::<T>::BotPublicKeyMismatch);
+			}
 
 			ensure!(!Ceremonies::<T>::contains_key(&ceremony_hash), Error::<T>::CeremonyAlreadyExists);
 			ensure!(k > 0 && k <= n && n <= 254, Error::<T>::InvalidShamirParams);
@@ -266,7 +298,7 @@ pub mod pallet {
 			let now = frame_system::Pallet::<T>::block_number();
 			let expires_at = now.saturating_add(T::CeremonyValidityBlocks::get());
 
-			let record = CeremonyRecord::<T> {
+			let mut record = CeremonyRecord::<T> {
 				ceremony_mrenclave,
 				k,
 				n,
@@ -277,10 +309,13 @@ pub mod pallet {
 				created_at: now,
 				status: CeremonyStatus::Active,
 				expires_at,
+				is_re_ceremony: false,
+				supersedes: None,
 			};
 
-			// 如果已有活跃仪式，标记为 Superseded
-			if let Some(old_hash) = ActiveCeremony::<T>::get(&bot_public_key) {
+			// G2: 如果已有活跃仪式，标记为 Superseded，记录 Re-ceremony 关系
+			let old_ceremony_hash = ActiveCeremony::<T>::get(&bot_public_key);
+			if let Some(old_hash) = old_ceremony_hash {
 				Ceremonies::<T>::mutate(&old_hash, |maybe_old| {
 					if let Some(old) = maybe_old {
 						old.status = CeremonyStatus::Superseded { replaced_by: ceremony_hash };
@@ -291,6 +326,9 @@ pub mod pallet {
 					new_hash: ceremony_hash,
 				});
 			}
+
+			record.is_re_ceremony = old_ceremony_hash.is_some();
+			record.supersedes = old_ceremony_hash;
 
 			Ceremonies::<T>::insert(&ceremony_hash, record);
 			ActiveCeremony::<T>::insert(&bot_public_key, ceremony_hash);
@@ -455,6 +493,14 @@ pub mod pallet {
 		}
 		fn ceremony_shamir_params(bot_public_key: &[u8; 32]) -> Option<(u8, u8)> {
 			Self::ceremony_shamir_params(bot_public_key)
+		}
+		fn active_ceremony_hash(bot_public_key: &[u8; 32]) -> Option<[u8; 32]> {
+			Self::get_active_ceremony(bot_public_key)
+		}
+		fn ceremony_participant_count(bot_public_key: &[u8; 32]) -> Option<u8> {
+			ActiveCeremony::<T>::get(bot_public_key)
+				.and_then(|hash| Ceremonies::<T>::get(&hash))
+				.map(|r| r.participant_count)
 		}
 	}
 }

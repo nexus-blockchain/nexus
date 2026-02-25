@@ -19,6 +19,7 @@ pub use pallet_commission_common::{
     ReferralPlanWriter, WithdrawalMode, WithdrawalTierConfig,
 };
 use pallet_entity_common::ShopProvider as ShopProviderT;
+use sp_runtime::traits::Zero;
 
 #[frame_support::pallet]
 pub mod pallet {
@@ -293,7 +294,8 @@ pub mod pallet {
             account: T::AccountId,
             amount: BalanceOf<T>,
         },
-        CommissionCancelled { order_id: u64 },
+        /// CC-M1 审计修复: 增加成功/失败计数，便于链上追踪部分退款
+        CommissionCancelled { order_id: u64, refund_succeeded: u32, refund_failed: u32 },
         CommissionPlanInitialized { entity_id: u64, plan: CommissionPlan },
         WithdrawalCooldownNotMet { entity_id: u64, account: T::AccountId, earliest_block: BlockNumberFor<T> },
         TieredWithdrawal {
@@ -311,6 +313,12 @@ pub mod pallet {
         },
         /// 佣金资金从 Shop 转入 Entity 账户
         CommissionFundsTransferred {
+            entity_id: u64,
+            shop_id: u64,
+            amount: BalanceOf<T>,
+        },
+        /// 佣金退款失败（Entity 账户余额不足，需人工干预）
+        CommissionRefundFailed {
             entity_id: u64,
             shop_id: u64,
             amount: BalanceOf<T>,
@@ -468,20 +476,24 @@ pub mod pallet {
                     entity_id, shop_id, &who, total_amount, requested_repurchase_rate,
                 );
 
+                // C1 审计修复: 偿付安全检查必须计入 repurchase+bonus 对 ShopShoppingTotal 的增量
+                // 提现后状态: pending -= total_amount, shopping += repurchase + bonus, entity -= withdrawal
+                // 需要: entity_balance - withdrawal >= (old_pending - total_amount) + (old_shopping + repurchase + bonus)
+                let entity_account = T::EntityProvider::entity_account(entity_id);
+                let entity_balance = T::Currency::free_balance(&entity_account);
+                let remaining_pending = ShopPendingTotal::<T>::get(entity_id)
+                    .saturating_sub(total_amount);
+                let total_to_shopping = split.repurchase.saturating_add(split.bonus);
+                let new_shopping_total = ShopShoppingTotal::<T>::get(entity_id)
+                    .saturating_add(total_to_shopping);
+                let required_reserve = remaining_pending.saturating_add(new_shopping_total);
+                ensure!(
+                    entity_balance >= split.withdrawal.saturating_add(required_reserve),
+                    Error::<T>::InsufficientCommission
+                );
+
                 // 从 Entity 账户转账提现部分到用户钱包
                 if !split.withdrawal.is_zero() {
-                    let entity_account = T::EntityProvider::entity_account(entity_id);
-                    let entity_balance = T::Currency::free_balance(&entity_account);
-                    // 偿付安全：确保提现后仍能覆盖其余已承诺资金
-                    let remaining_pending = ShopPendingTotal::<T>::get(entity_id)
-                        .saturating_sub(total_amount);
-                    let shopping_total = ShopShoppingTotal::<T>::get(entity_id);
-                    let required_reserve = remaining_pending.saturating_add(shopping_total);
-                    ensure!(
-                        entity_balance >= split.withdrawal.saturating_add(required_reserve),
-                        Error::<T>::InsufficientCommission
-                    );
-
                     T::Currency::transfer(
                         &entity_account,
                         &who,
@@ -490,8 +502,7 @@ pub mod pallet {
                     )?;
                 }
 
-                // 复购部分 + 奖励 转入目标账户的购物余额
-                let total_to_shopping = split.repurchase.saturating_add(split.bonus);
+                // 复购部分 + 奖励 转入目标账户的购物余额（total_to_shopping 已在偿付检查中计算）
                 if !total_to_shopping.is_zero() {
                     MemberShoppingBalance::<T>::mutate(entity_id, &target, |balance| {
                         *balance = balance.saturating_add(total_to_shopping);
@@ -994,12 +1005,55 @@ pub mod pallet {
         /// 取消订单返佣（Entity 级）
         ///
         /// 退还佣金资金：Entity 账户 → Shop 账户（原订单所属 Shop）
+        ///
+        /// H2 审计修复: 先尝试转账，成功后再取消记录和更新统计，
+        /// 防止转账失败但记录已被标记为 Cancelled 导致资金丢失。
         pub fn cancel_commission(order_id: u64) -> DispatchResult {
-            let mut total_refund_by_shop: alloc::vec::Vec<(u64, u64, BalanceOf<T>)> = alloc::vec::Vec::new(); // (entity_id, shop_id, amount)
+            // 第一步：收集待退还信息（只读，不修改状态）
+            let mut total_refund_by_shop: alloc::vec::Vec<(u64, u64, BalanceOf<T>)> = alloc::vec::Vec::new();
+            let mut refund_succeeded: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new(); // (entity_id, shop_id) 转账成功的
 
+            let records = OrderCommissionRecords::<T>::get(order_id);
+            for record in records.iter() {
+                if record.status == CommissionStatus::Pending {
+                    if let Some(entry) = total_refund_by_shop.iter_mut().find(|(e, s, _)| *e == record.entity_id && *s == record.shop_id) {
+                        entry.2 = entry.2.saturating_add(record.amount);
+                    } else {
+                        total_refund_by_shop.push((record.entity_id, record.shop_id, record.amount));
+                    }
+                }
+            }
+
+            // 第二步：尝试转账，记录成功的 (entity_id, shop_id)
+            for (entity_id, shop_id, refund_amount) in total_refund_by_shop.iter() {
+                if refund_amount.is_zero() {
+                    refund_succeeded.push((*entity_id, *shop_id));
+                    continue;
+                }
+                let entity_account = T::EntityProvider::entity_account(*entity_id);
+                let shop_account = T::ShopProvider::shop_account(*shop_id);
+                if T::Currency::transfer(
+                    &entity_account,
+                    &shop_account,
+                    *refund_amount,
+                    ExistenceRequirement::KeepAlive,
+                ).is_ok() {
+                    refund_succeeded.push((*entity_id, *shop_id));
+                } else {
+                    Self::deposit_event(Event::CommissionRefundFailed {
+                        entity_id: *entity_id,
+                        shop_id: *shop_id,
+                        amount: *refund_amount,
+                    });
+                }
+            }
+
+            // 第三步：仅取消转账成功的记录，更新统计
             OrderCommissionRecords::<T>::mutate(order_id, |records| {
                 for record in records.iter_mut() {
-                    if record.status == CommissionStatus::Pending {
+                    if record.status == CommissionStatus::Pending
+                        && refund_succeeded.iter().any(|(e, s)| *e == record.entity_id && *s == record.shop_id)
+                    {
                         MemberCommissionStats::<T>::mutate(record.entity_id, &record.beneficiary, |stats| {
                             stats.pending = stats.pending.saturating_sub(record.amount);
                             stats.total_earned = stats.total_earned.saturating_sub(record.amount);
@@ -1007,35 +1061,15 @@ pub mod pallet {
                         ShopPendingTotal::<T>::mutate(record.entity_id, |total| {
                             *total = total.saturating_sub(record.amount);
                         });
-
-                        // 累计需退还给 Shop 的金额
-                        if let Some(entry) = total_refund_by_shop.iter_mut().find(|(e, s, _)| *e == record.entity_id && *s == record.shop_id) {
-                            entry.2 = entry.2.saturating_add(record.amount);
-                        } else {
-                            total_refund_by_shop.push((record.entity_id, record.shop_id, record.amount));
-                        }
-
                         record.status = CommissionStatus::Cancelled;
                     }
                 }
             });
 
-            // 退还佣金资金从 Entity 账户回到 Shop 账户
-            for (entity_id, shop_id, refund_amount) in total_refund_by_shop {
-                if !refund_amount.is_zero() {
-                    let entity_account = T::EntityProvider::entity_account(entity_id);
-                    let shop_account = T::ShopProvider::shop_account(shop_id);
-                    // best-effort: 如果 Entity 账户余额不足则跳过（不阻塞取消）
-                    let _ = T::Currency::transfer(
-                        &entity_account,
-                        &shop_account,
-                        refund_amount,
-                        ExistenceRequirement::KeepAlive,
-                    );
-                }
-            }
-
-            Self::deposit_event(Event::CommissionCancelled { order_id });
+            // CC-M1: 汇总退款结果
+            let succeeded = refund_succeeded.len() as u32;
+            let failed = (total_refund_by_shop.len() as u32).saturating_sub(succeeded);
+            Self::deposit_event(Event::CommissionCancelled { order_id, refund_succeeded: succeeded, refund_failed: failed });
             Ok(())
         }
     }
@@ -1070,8 +1104,10 @@ impl<T: pallet::Config> CommissionProvider<T::AccountId, pallet::BalanceOf<T>> f
     }
 
     fn pending_commission(shop_id: u64, account: &T::AccountId) -> pallet::BalanceOf<T> {
-        let entity_id = <T::ShopProvider as ShopProviderT<T::AccountId>>::shop_entity_id(shop_id).unwrap_or(0);
-        pallet::MemberCommissionStats::<T>::get(entity_id, account).pending
+        match <T::ShopProvider as ShopProviderT<T::AccountId>>::shop_entity_id(shop_id) {
+            Some(entity_id) => pallet::MemberCommissionStats::<T>::get(entity_id, account).pending,
+            None => Zero::zero(),
+        }
     }
 
     fn set_commission_modes(shop_id: u64, modes: u16) -> sp_runtime::DispatchResult {
@@ -1130,8 +1166,10 @@ impl<T: pallet::Config> CommissionProvider<T::AccountId, pallet::BalanceOf<T>> f
     }
 
     fn shopping_balance(shop_id: u64, account: &T::AccountId) -> pallet::BalanceOf<T> {
-        let entity_id = <T::ShopProvider as ShopProviderT<T::AccountId>>::shop_entity_id(shop_id).unwrap_or(0);
-        pallet::MemberShoppingBalance::<T>::get(entity_id, account)
+        match <T::ShopProvider as ShopProviderT<T::AccountId>>::shop_entity_id(shop_id) {
+            Some(entity_id) => pallet::MemberShoppingBalance::<T>::get(entity_id, account),
+            None => Zero::zero(),
+        }
     }
 
     fn use_shopping_balance(shop_id: u64, account: &T::AccountId, amount: pallet::BalanceOf<T>) -> sp_runtime::DispatchResult {

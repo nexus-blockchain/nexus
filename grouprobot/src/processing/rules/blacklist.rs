@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 
 use crate::infra::local_store::LocalStore;
 use crate::platform::MessageContext;
@@ -13,20 +13,33 @@ pub struct BlacklistRule {
 }
 
 impl BlacklistRule {
-    pub fn new() -> Self {
-        Self { patterns: vec![] }
-    }
+    /// 最大模式数量
+    const MAX_PATTERNS: usize = 500;
+    /// 每个正则最大编译大小 (字节)
+    const REGEX_SIZE_LIMIT: usize = 8192;
 
     pub fn with_patterns(patterns: Vec<String>) -> Self {
         let compiled: Vec<Regex> = patterns.iter()
-            .filter_map(|p| Regex::new(p).ok())
+            .take(Self::MAX_PATTERNS)
+            .filter_map(|p| {
+                RegexBuilder::new(p)
+                    .size_limit(Self::REGEX_SIZE_LIMIT)
+                    .build()
+                    .ok()
+            })
             .collect();
         Self { patterns: compiled }
     }
 
     #[allow(dead_code)]
     pub fn add_pattern(&mut self, pattern: &str) {
-        if let Ok(re) = Regex::new(pattern) {
+        if self.patterns.len() >= Self::MAX_PATTERNS {
+            return;
+        }
+        if let Ok(re) = RegexBuilder::new(pattern)
+            .size_limit(Self::REGEX_SIZE_LIMIT)
+            .build()
+        {
             self.patterns.push(re);
         }
     }
@@ -64,19 +77,23 @@ mod tests {
             group_id: "g1".into(),
             sender_id: "u1".into(),
             sender_name: "test".into(),
-            message_text: text.into(),
+            message_text: text.to_string(),
+            message_id: None,
             is_command: false,
             command: None,
             command_args: vec![],
             is_join_request: false,
             is_admin: false,
+            message_type: None,
+            callback_query_id: None,
+            callback_data: None,
         }
     }
 
     #[tokio::test]
     async fn no_patterns_passes() {
         let store = LocalStore::new();
-        let rule = BlacklistRule::new();
+        let rule = BlacklistRule::with_patterns(vec![]);
         assert!(rule.evaluate(&make_ctx("hello"), &store).await.is_none());
     }
 

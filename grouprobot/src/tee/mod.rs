@@ -11,5 +11,6 @@ pub mod vault_server;
 pub mod vault_client;
 pub mod peer_client;
 pub mod mem_security;
+pub mod peer_monitor;
 pub mod dcap_verify;
 pub mod ra_tls;

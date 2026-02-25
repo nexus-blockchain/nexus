@@ -178,7 +178,7 @@ Token 保护的三种进程隔离模式:
 | `DATA_DIR` | `./data` | 数据目录 (密封密钥/share/序列号) |
 | `VAULT_MODE` | `inprocess` | Token 保险库模式: `inprocess` / `spawn` / `connect` |
 | `VAULT_SOCKET` | 自动 | Vault Unix socket 路径 |
-| `SHAMIR_THRESHOLD` | `1` | Shamir 门限 K |
+| `SHAMIR_THRESHOLD` | `2` | Shamir 门限 K (默认 K=2, N=4) |
 | `PEER_ENDPOINTS` | — | Peer TEE 节点端点 (逗号分隔) |
 | `CEREMONY_PORT` | `0` | Ceremony 独立端口 (0 = 共用主端口) |
 | `WEBHOOK_RATE_LIMIT` | `200` | Webhook 每分钟最大请求数 |

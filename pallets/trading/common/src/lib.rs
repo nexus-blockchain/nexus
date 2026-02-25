@@ -31,24 +31,27 @@ pub mod validation;
 pub mod time;
 pub mod macros;
 
-// ===== 🆕 v0.4.0: 重新导出公共类型 =====
+// ===== 重新导出公共类型 =====
 pub use types::{
     TronAddress,
+    TronTxHash,
     MomentOf,
     Cid,
     TxHash,
-    MakerApplicationInfo,
+    UsdtTradeStatus,
+    BuyerDepositStatus,
+    PaymentVerificationResult,
+    calculate_payment_verification_result,
+    calculate_deposit_forfeit_rate,
 };
 
-// ===== 🆕 v0.4.0: 重新导出公共 Trait =====
+// ===== 重新导出公共 Trait =====
 pub use traits::{
     PricingProvider,
-    MakerInterface,
-    MakerCreditInterface,
-    MakerValidationError,
-    // 🆕 v0.5.0: 统一保证金计算
     DepositCalculator,
     DepositCalculatorImpl,
+    PriceOracle,
+    TwapWindow,
 };
 
 // 重新导出工具函数

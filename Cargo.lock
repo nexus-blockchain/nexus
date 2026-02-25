@@ -5967,15 +5967,12 @@ dependencies = [
  "pallet-grouprobot-primitives",
  "pallet-grouprobot-registry",
  "pallet-membership",
+ "pallet-nex-market",
  "pallet-storage-lifecycle",
  "pallet-storage-service",
  "pallet-sudo",
  "pallet-timestamp",
  "pallet-trading-common",
- "pallet-trading-credit",
- "pallet-trading-maker",
- "pallet-trading-p2p",
- "pallet-trading-pricing",
  "pallet-transaction-payment",
  "pallet-transaction-payment-rpc-runtime-api",
  "parity-scale-codec",
@@ -6664,6 +6661,8 @@ dependencies = [
  "pallet-entity-common",
  "pallet-entity-registry",
  "pallet-entity-token",
+ "pallet-trading-common",
+ "pallet-trading-trc20-verifier",
  "parity-scale-codec",
  "scale-info",
  "sp-core",
@@ -6860,6 +6859,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-grouprobot-ads"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "log",
+ "pallet-balances",
+ "pallet-grouprobot-primitives",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+]
+
+[[package]]
 name = "pallet-grouprobot-ceremony"
 version = "0.1.0"
 dependencies = [
@@ -6980,6 +6995,24 @@ dependencies = [
  "polkadot-sdk-frame",
  "scale-info",
  "sp-mmr-primitives",
+]
+
+[[package]]
+name = "pallet-nex-market"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "log",
+ "pallet-balances",
+ "pallet-trading-common",
+ "pallet-trading-trc20-verifier",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+ "sp-std",
 ]
 
 [[package]]
@@ -7108,85 +7141,6 @@ dependencies = [
  "parity-scale-codec",
  "scale-info",
  "sp-core",
- "sp-runtime",
- "sp-std",
-]
-
-[[package]]
-name = "pallet-trading-credit"
-version = "0.1.0"
-dependencies = [
- "frame-benchmarking",
- "frame-support",
- "frame-system",
- "log",
- "pallet-balances",
- "pallet-timestamp",
- "pallet-trading-common",
- "parity-scale-codec",
- "scale-info",
- "sp-core",
- "sp-io",
- "sp-runtime",
- "sp-std",
-]
-
-[[package]]
-name = "pallet-trading-maker"
-version = "0.1.0"
-dependencies = [
- "frame-benchmarking",
- "frame-support",
- "frame-system",
- "pallet-storage-service",
- "pallet-timestamp",
- "pallet-trading-common",
- "pallet-trading-credit",
- "parity-scale-codec",
- "scale-info",
- "sp-core",
- "sp-io",
- "sp-runtime",
- "sp-std",
-]
-
-[[package]]
-name = "pallet-trading-p2p"
-version = "0.1.0"
-dependencies = [
- "frame-benchmarking",
- "frame-support",
- "frame-system",
- "log",
- "pallet-arbitration",
- "pallet-balances",
- "pallet-escrow",
- "pallet-storage-lifecycle",
- "pallet-storage-service",
- "pallet-timestamp",
- "pallet-trading-common",
- "pallet-trading-credit",
- "pallet-trading-trc20-verifier",
- "parity-scale-codec",
- "scale-info",
- "sp-core",
- "sp-io",
- "sp-runtime",
- "sp-std",
-]
-
-[[package]]
-name = "pallet-trading-pricing"
-version = "0.1.0"
-dependencies = [
- "frame-support",
- "frame-system",
- "log",
- "parity-scale-codec",
- "scale-info",
- "sp-arithmetic",
- "sp-core",
- "sp-io",
  "sp-runtime",
  "sp-std",
 ]

@@ -2,12 +2,12 @@
 
 ## 概述
 
-`pallet-trading-common` 是交易系统的公共工具库，提供共享类型定义、数据脱敏函数、验证工具和 Trait 接口。
+`pallet-trading-common` 是交易系统的公共工具库，提供共享 Trait 接口、类型定义、数据脱敏函数和验证工具。
 
 ### 特点
 
 - ✅ **纯 Rust crate**：无链上存储，仅提供工具函数和类型定义
-- ✅ **跨模块共享**：可被 P2P、Maker、Credit、Pricing 等多个 pallet 引用
+- ✅ **跨模块共享**：被 arbitration、storage-service、entity-* 等多个 pallet 引用
 - ✅ **no_std 兼容**：支持 WebAssembly 运行时环境
 
 ## 模块结构
@@ -17,12 +17,59 @@ pallets/trading/common/
 ├── src/
 │   ├── lib.rs          # 模块入口，重新导出公共 API
 │   ├── types.rs        # 公共类型定义
-│   ├── traits.rs       # 公共 Trait 接口
+│   ├── traits.rs       # 公共 Trait 接口（PricingProvider, DepositCalculator）
 │   ├── mask.rs         # 数据脱敏函数
 │   ├── validation.rs   # 验证函数
 │   └── time.rs         # 时间转换工具
 └── Cargo.toml
 ```
+
+## Trait 接口
+
+### PricingProvider
+
+NEX/USD 汇率查询接口。
+
+```rust
+pub trait PricingProvider<Balance> {
+    /// 获取 NEX/USD 汇率（精度 10^6）
+    /// 返回 Some(rate) 表示当前汇率，None 表示价格不可用
+    fn get_cos_to_usd_rate() -> Option<Balance>;
+    
+    /// 上报 P2P 成交到价格聚合（nex-market 内部自行更新 TWAP，此方法可空实现）
+    fn report_p2p_trade(
+        timestamp: u64,
+        price_usdt: u64,
+        nex_qty: u128,
+    ) -> sp_runtime::DispatchResult;
+}
+```
+
+**使用者**：
+- `pallet-arbitration`：投诉押金 USD 换算
+- `pallet-storage-service`：保证金 USD 换算
+- `pallet-entity-*`：Entity 定价
+
+**Runtime 实现**：
+- `TradingPricingProvider`：读取 `pallet-nex-market::LastTradePrice` / `PriceProtectionStore`
+
+### DepositCalculator
+
+统一保证金计算接口。
+
+```rust
+pub trait DepositCalculator<Balance> {
+    /// 根据 USD 金额和汇率计算保证金（NEX）
+    /// 如汇率不可用则返回 fallback 金额
+    fn calculate_deposit(usd_amount: u64, fallback: Balance) -> Balance;
+}
+```
+
+**使用者**：
+- `pallet-storage-service`：存储操作员保证金计算
+
+**默认实现**：
+- `DepositCalculatorImpl<P, Balance>`：基于 `PricingProvider<Balance>` 自动换算
 
 ## 类型定义
 
@@ -34,14 +81,6 @@ TRON 地址类型，固定 34 字节。
 pub type TronAddress = BoundedVec<u8, ConstU32<34>>;
 ```
 
-**说明**：
-- TRC20 地址以 `T` 开头，长度固定为 34 字符
-- 用于 P2P Buy 订单收款地址和 Sell 兑换地址
-
-**使用者**：
-- `pallet-trading-p2p`：做市商收款地址 / 用户 USDT 接收地址
-- `pallet-trading-maker`：做市商注册地址
-
 ### MomentOf
 
 时间戳类型，Unix 秒。
@@ -49,10 +88,6 @@ pub type TronAddress = BoundedVec<u8, ConstU32<34>>;
 ```rust
 pub type MomentOf = u64;
 ```
-
-**说明**：
-- 用于 P2P 订单的时间字段
-- 精度为秒（非毫秒）
 
 ### Cid
 
@@ -62,10 +97,6 @@ IPFS CID 类型，最大 64 字节。
 pub type Cid = BoundedVec<u8, ConstU32<64>>;
 ```
 
-**说明**：
-- 用于存储 IPFS 内容标识符
-- 如做市商的公开/私密资料
-
 ### TxHash
 
 交易哈希类型，最大 128 字节。
@@ -73,110 +104,6 @@ pub type Cid = BoundedVec<u8, ConstU32<64>>;
 ```rust
 pub type TxHash = BoundedVec<u8, ConstU32<128>>;
 ```
-
-**说明**：
-- 用于存储 TRON TRC20 交易哈希
-- P2P Sell 侧使用
-
-### MakerApplicationInfo
-
-做市商申请信息（简化版，用于跨模块传递）。
-
-```rust
-pub struct MakerApplicationInfo<AccountId, Balance> {
-    pub account: AccountId,        // 做市商账户
-    pub tron_address: TronAddress, // TRON 收款地址
-    pub is_active: bool,           // 是否激活
-}
-```
-
-## Trait 接口
-
-### PricingProvider
-
-定价服务接口，提供 NEX/USD 实时汇率查询功能。
-
-```rust
-pub trait PricingProvider<Balance> {
-    /// 获取 NEX/USD 汇率（精度 10^6）
-    /// 返回 Some(rate) 表示当前汇率，None 表示价格不可用
-    fn get_cos_to_usd_rate() -> Option<Balance>;
-    
-    /// 上报 P2P 成交到价格聚合
-    fn report_p2p_trade(
-        timestamp: u64,    // 交易时间戳（Unix 毫秒）
-        price_usdt: u64,   // USDT 单价（精度 10^6）
-        cos_qty: u128,    // NEX 数量（精度 10^12）
-    ) -> DispatchResult;
-}
-```
-
-**使用者**：
-- `pallet-trading-p2p`：计算 Buy/Sell 订单金额
-- `pallet-trading-maker`：计算押金价值
-
-**实现者**：
-- `pallet-trading-pricing`：提供聚合价格
-
-### MakerInterface
-
-做市商接口，提供做市商信息查询功能。
-
-```rust
-pub trait MakerInterface<AccountId, Balance> {
-    /// 查询做市商申请信息
-    fn get_maker_application(maker_id: u64) -> Option<MakerApplicationInfo<AccountId, Balance>>;
-    
-    /// 检查做市商是否激活
-    fn is_maker_active(maker_id: u64) -> bool;
-    
-    /// 获取做市商 ID（通过账户）
-    fn get_maker_id(who: &AccountId) -> Option<u64>;
-    
-    /// 获取做市商押金的 USD 价值（精度 10^6）
-    fn get_deposit_usd_value(maker_id: u64) -> Result<u64, DispatchError>;
-}
-```
-
-**使用者**：
-- `pallet-trading-p2p`：验证做市商和获取收款地址
-
-**实现者**：
-- `pallet-trading-maker`：提供做市商管理
-
-### MakerCreditInterface
-
-做市商信用接口，提供信用分管理功能。
-
-```rust
-pub trait MakerCreditInterface {
-    /// 记录做市商订单完成（提升信用分）
-    fn record_maker_order_completed(
-        maker_id: u64,
-        order_id: u64,
-        response_time_seconds: u32,
-    ) -> DispatchResult;
-    
-    /// 记录做市商订单超时（降低信用分）
-    fn record_maker_order_timeout(
-        maker_id: u64,
-        order_id: u64,
-    ) -> DispatchResult;
-    
-    /// 记录做市商争议结果
-    fn record_maker_dispute_result(
-        maker_id: u64,
-        order_id: u64,
-        maker_win: bool,  // true = 做市商胜诉
-    ) -> DispatchResult;
-}
-```
-
-**使用者**：
-- `pallet-trading-p2p`：Buy/Sell 订单完成/超时/争议时调用
-
-**实现者**：
-- `pallet-trading-credit`：提供信用分管理
 
 ## 工具函数
 
@@ -243,16 +170,6 @@ pub fn is_valid_tron_address(address: &[u8]) -> bool
 - 开头：`T`
 - 编码：Base58（字符集：`1-9, A-H, J-N, P-Z, a-k, m-z`）
 
-**示例**：
-```rust
-// 有效地址
-is_valid_tron_address(b"TYASr5UV6HEcXatwdFQfmLVUqQQQMUxHLS"); // true
-
-// 无效地址
-is_valid_tron_address(b"AYASr5UV6HEcXatwdFQfmLVUqQQQMUxHLS"); // false - 不是T开头
-is_valid_tron_address(b"TYASr5UV6HEcXatwdFQfmLVUqQQQMUxHL0"); // false - 包含0（非Base58）
-```
-
 ### 时间转换工具
 
 #### 常量
@@ -264,89 +181,15 @@ pub const BLOCKS_PER_HOUR: u64 = 600;        // 1小时的区块数
 pub const BLOCKS_PER_DAY: u64 = 14400;       // 1天的区块数
 ```
 
-#### blocks_to_seconds
+#### 函数
 
-区块数转换为秒数。
-
-```rust
-pub fn blocks_to_seconds(blocks: u64) -> u64
-```
-
-**示例**：
-```rust
-blocks_to_seconds(100);  // 600 秒 = 10 分钟
-blocks_to_seconds(600);  // 3600 秒 = 1 小时
-```
-
-#### seconds_to_blocks
-
-秒数转换为区块数（向上取整）。
-
-```rust
-pub fn seconds_to_blocks(seconds: u64) -> u64
-```
-
-**示例**：
-```rust
-seconds_to_blocks(60);    // 10 块
-seconds_to_blocks(3600);  // 600 块 = 1 小时
-```
-
-#### estimate_timestamp_from_block
-
-根据区块号预估 Unix 时间戳。
-
-```rust
-pub fn estimate_timestamp_from_block(
-    target_block: u64,
-    current_block: u64,
-    current_timestamp: u64,
-) -> u64
-```
-
-**示例**：
-```rust
-let future_ts = estimate_timestamp_from_block(
-    12345,      // 目标区块
-    12000,      // 当前区块
-    1705500000, // 当前时间戳
-);
-// 返回: 1705502070 (当前时间 + 345块 × 6秒)
-```
-
-#### estimate_remaining_seconds
-
-计算剩余秒数。
-
-```rust
-pub fn estimate_remaining_seconds(target_block: u64, current_block: u64) -> u64
-```
-
-**示例**：
-```rust
-estimate_remaining_seconds(1100, 1000);  // 600 秒
-estimate_remaining_seconds(900, 1000);   // 0（已过期）
-```
-
-#### format_duration
-
-格式化时间间隔为可读字符串。
-
-```rust
-pub fn format_duration(seconds: u64) -> Vec<u8>
-```
-
-**输出示例**：
-| 输入（秒） | 输出 |
-|-----------|------|
-| 0 | `< 1m` |
-| 59 | `< 1m` |
-| 60 | `1m` |
-| 300 | `5m` |
-| 3600 | `1h` |
-| 5400 | `1h 30m` |
-| 86400 | `1d` |
-| 90000 | `1d 1h` |
+| 函数 | 说明 |
+|------|------|
+| `blocks_to_seconds(blocks)` | 区块数 → 秒数 |
+| `seconds_to_blocks(seconds)` | 秒数 → 区块数（向上取整） |
+| `estimate_timestamp_from_block(target, current, timestamp)` | 预估目标区块的 Unix 时间戳 |
+| `estimate_remaining_seconds(target, current)` | 计算剩余秒数 |
+| `format_duration(seconds)` | 格式化为可读字符串（如 `1h 30m`） |
 
 ## 使用示例
 
@@ -363,33 +206,19 @@ std = [
 ]
 ```
 
-### 使用类型定义
-
-```rust
-use pallet_trading_common::{TronAddress, MomentOf, Cid};
-
-// 定义存储
-#[pallet::storage]
-pub type MakerAddress<T> = StorageMap<_, Blake2_128Concat, u64, TronAddress>;
-```
-
 ### 使用 Trait 接口
 
 ```rust
-use pallet_trading_common::{PricingProvider, MakerInterface};
+use pallet_trading_common::PricingProvider;
 
 #[pallet::config]
 pub trait Config: frame_system::Config {
-    type PricingProvider: PricingProvider<BalanceOf<Self>>;
-    type MakerProvider: MakerInterface<Self::AccountId, BalanceOf<Self>>;
+    type Pricing: PricingProvider<BalanceOf<Self>>;
 }
 
-// 在 dispatchable 中使用
 impl<T: Config> Pallet<T> {
-    fn calculate_cos_amount(usd_amount: u64) -> Option<BalanceOf<T>> {
-        let rate = T::PricingProvider::get_cos_to_usd_rate()?;
-        // 计算逻辑...
-        Some(cos_amount)
+    fn get_nex_price() -> Option<BalanceOf<T>> {
+        T::Pricing::get_cos_to_usd_rate()
     }
 }
 ```
@@ -398,32 +227,25 @@ impl<T: Config> Pallet<T> {
 
 ```rust
 use pallet_trading_common::{
-    mask_name, mask_id_card, mask_birthday,
-    is_valid_tron_address,
+    mask_name, is_valid_tron_address,
     blocks_to_seconds, estimate_remaining_seconds,
 };
 
-// 数据脱敏
 let masked = mask_name("张三");  // "×三"
-
-// 地址验证
-if !is_valid_tron_address(&tron_address) {
-    return Err(Error::<T>::InvalidTronAddress.into());
-}
-
-// 时间计算
-let remaining = estimate_remaining_seconds(timeout_block, current_block);
+let valid = is_valid_tron_address(b"TYASr5UV6HEcXatwdFQfmLVUqQQQMUxHLS"); // true
+let remaining = estimate_remaining_seconds(1100, 1000);  // 600 秒
 ```
 
 ## 版本历史
 
 | 版本 | 日期 | 变更内容 |
 |------|------|----------|
-| v0.1.0 | - | 初始版本 |
-| v0.2.0 | 2026-01-18 | 添加统一的 MakerCreditInterface trait |
-| v0.3.0 | 2026-01-18 | 添加时间转换工具函数 |
-| v0.4.0 | 2026-01-18 | 统一公共类型和 Trait 定义 |
+| v0.6.0 | 2026-02-23 | 移除 MakerInterface/MakerCreditInterface/MakerApplicationInfo，仅保留 PricingProvider + DepositCalculator |
 | v0.5.0 | 2026-02-08 | 适配 P2P 统一模型：report_swap_order → report_p2p_trade |
+| v0.4.0 | 2026-01-18 | 统一公共类型和 Trait 定义 |
+| v0.3.0 | 2026-01-18 | 添加时间转换工具函数 |
+| v0.2.0 | 2026-01-18 | 添加统一的 MakerCreditInterface trait |
+| v0.1.0 | - | 初始版本 |
 
 ## 依赖关系
 

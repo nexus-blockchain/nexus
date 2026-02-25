@@ -79,6 +79,22 @@ impl TelegramExecutor {
         Ok(body)
     }
 
+    /// 查询用户是否为群管理员或创建者
+    pub async fn is_admin_in_chat(&self, chat_id: &str, user_id: &str) -> BotResult<bool> {
+        let result = self.call_api("getChatMember", serde_json::json!({
+            "chat_id": chat_id,
+            "user_id": user_id,
+        })).await;
+
+        match result {
+            Ok(body) => {
+                let status = body["result"]["status"].as_str().unwrap_or("");
+                Ok(status == "administrator" || status == "creator")
+            }
+            Err(_) => Ok(false), // API 失败时默认非管理员 (安全侧)
+        }
+    }
+
     /// 发送消息
     pub async fn send_message(&self, chat_id: &str, text: &str) -> BotResult<()> {
         self.call_api("sendMessage", serde_json::json!({
@@ -180,6 +196,108 @@ impl TelegramExecutor {
         })).await?;
         Ok(())
     }
+
+    // ── Phase 4 新增 API 方法 ──
+
+    /// 解封用户
+    pub async fn unban_user(&self, chat_id: &str, user_id: &str) -> BotResult<()> {
+        self.call_api("unbanChatMember", serde_json::json!({
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "only_if_banned": true,
+        })).await?;
+        Ok(())
+    }
+
+    /// 提升为管理员
+    pub async fn promote_member(&self, chat_id: &str, user_id: &str) -> BotResult<()> {
+        self.call_api("promoteChatMember", serde_json::json!({
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "can_manage_chat": true,
+            "can_delete_messages": true,
+            "can_restrict_members": true,
+            "can_pin_messages": true,
+            "can_invite_users": true,
+        })).await?;
+        Ok(())
+    }
+
+    /// 降级管理员
+    pub async fn demote_member(&self, chat_id: &str, user_id: &str) -> BotResult<()> {
+        self.call_api("promoteChatMember", serde_json::json!({
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "can_manage_chat": false,
+            "can_delete_messages": false,
+            "can_restrict_members": false,
+            "can_pin_messages": false,
+            "can_invite_users": false,
+            "can_promote_members": false,
+            "can_change_info": false,
+            "can_manage_video_chats": false,
+        })).await?;
+        Ok(())
+    }
+
+    /// 发送消息 (带 Inline 键盘)
+    pub async fn send_message_with_keyboard(&self, chat_id: &str, text: &str, keyboard: &serde_json::Value) -> BotResult<()> {
+        self.call_api("sendMessage", serde_json::json!({
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "reply_markup": {
+                "inline_keyboard": keyboard,
+            },
+        })).await?;
+        Ok(())
+    }
+
+    /// 回答回调查询
+    pub async fn answer_callback_query(&self, callback_query_id: &str, text: &str) -> BotResult<()> {
+        self.call_api("answerCallbackQuery", serde_json::json!({
+            "callback_query_id": callback_query_id,
+            "text": text,
+        })).await?;
+        Ok(())
+    }
+
+    /// 编辑消息文本
+    pub async fn edit_message_text(&self, chat_id: &str, message_id: &str, text: &str) -> BotResult<()> {
+        self.call_api("editMessageText", serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "HTML",
+        })).await?;
+        Ok(())
+    }
+
+    /// 获取群管理员列表
+    pub async fn get_chat_administrators(&self, chat_id: &str) -> BotResult<Vec<serde_json::Value>> {
+        let body = self.call_api("getChatAdministrators", serde_json::json!({
+            "chat_id": chat_id,
+        })).await?;
+        Ok(body["result"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// 设置群权限
+    pub async fn set_chat_permissions(&self, chat_id: &str, permissions: serde_json::Value) -> BotResult<()> {
+        self.call_api("setChatPermissions", serde_json::json!({
+            "chat_id": chat_id,
+            "permissions": permissions,
+        })).await?;
+        Ok(())
+    }
+
+    /// 批量删除消息
+    pub async fn delete_messages(&self, chat_id: &str, message_ids: &[i64]) -> BotResult<()> {
+        self.call_api("deleteMessages", serde_json::json!({
+            "chat_id": chat_id,
+            "message_ids": message_ids,
+        })).await?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -197,7 +315,11 @@ impl PlatformExecutor for TelegramExecutor {
             ActionType::Unmute => self.unmute_user(&action.group_id, &action.target_user).await,
             ActionType::SendMessage => {
                 if let Some(ref msg) = action.message {
-                    self.send_message(&action.group_id, msg).await
+                    if let Some(ref kb) = action.inline_keyboard {
+                        self.send_message_with_keyboard(&action.group_id, msg, kb).await
+                    } else {
+                        self.send_message(&action.group_id, msg).await
+                    }
                 } else {
                     Ok(())
                 }
@@ -210,6 +332,32 @@ impl PlatformExecutor for TelegramExecutor {
             }
             ActionType::DeclineJoin => {
                 self.decline_join(&action.group_id, &action.target_user).await
+            }
+            ActionType::Unban => {
+                self.unban_user(&action.group_id, &action.target_user).await
+            }
+            ActionType::Promote => {
+                self.promote_member(&action.group_id, &action.target_user).await
+            }
+            ActionType::Demote => {
+                self.demote_member(&action.group_id, &action.target_user).await
+            }
+            ActionType::AnswerCallback => {
+                if let Some(ref cb_id) = action.callback_query_id {
+                    let text = action.message.as_deref().unwrap_or("");
+                    self.answer_callback_query(cb_id, text).await
+                } else {
+                    // target_user 存放 callback_query_id (from ActionDecision::answer_callback)
+                    let text = action.message.as_deref().unwrap_or("");
+                    self.answer_callback_query(&action.target_user, text).await
+                }
+            }
+            ActionType::EditMessage => {
+                if let Some(ref msg) = action.message {
+                    self.edit_message_text(&action.group_id, &action.target_user, msg).await
+                } else {
+                    Ok(())
+                }
             }
             _ => Ok(()),
         };

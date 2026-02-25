@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{Router, routing::{get, post}};
-use tracing::{info, warn, error};
+use tracing::{info, warn, error, debug};
 
 mod config;
 mod error;
@@ -47,7 +47,7 @@ pub struct AppState {
     pub enclave: Arc<EnclaveBridge>,
     pub attestor: Arc<Attestor>,
     pub metrics: SharedMetrics,
-    pub local_store: LocalStore,
+    pub local_store: Arc<LocalStore>,
     pub rate_limiter: RateLimiter,
     pub config_manager: Arc<ConfigManager>,
     pub start_time: Instant,
@@ -60,19 +60,6 @@ pub struct AppState {
 async fn main() -> anyhow::Result<()> {
     // ── 内存安全加固 (必须最先执行, 在任何 Token 操作之前) ──
     let harden_report = tee::mem_security::harden_process_memory();
-
-    // ── 配置 jemalloc zero-on-free ──
-    // jemalloc MALLOC_CONF: 释放内存时自动清零
-    // 通过环境变量 MALLOC_CONF 或编译时配置生效
-    #[cfg(not(test))]
-    {
-        // jemalloc 的 zero-on-free 通过 `opt.junk` 和 `opt.zero` 配置
-        // tikv-jemallocator 默认已启用安全配置
-        // 额外设置: MALLOC_CONF=abort_conf:true,zero:true
-        if std::env::var("MALLOC_CONF").is_err() {
-            std::env::set_var("MALLOC_CONF", "abort_conf:false,zero:true");
-        }
-    }
 
     // ── 初始化 ──
     dotenvy::dotenv().ok();
@@ -87,6 +74,21 @@ async fn main() -> anyhow::Result<()> {
     info!("║   GroupRobot Bot v{}          ║", env!("CARGO_PKG_VERSION"));
     info!("║   TEE Off-chain Executor             ║");
     info!("╚══════════════════════════════════════╝");
+
+    // ── jemalloc zero-on-free 检查 ──
+    // jemalloc 在进程启动时 (#[global_allocator]) 即初始化, 此时 main() 尚未执行,
+    // 因此 MALLOC_CONF 必须在进程启动 **前** 通过以下方式设置:
+    //   - Dockerfile: ENV MALLOC_CONF="abort_conf:false,zero:true"
+    //   - systemd:   Environment=MALLOC_CONF=abort_conf:false,zero:true
+    //   - shell:     MALLOC_CONF="abort_conf:false,zero:true" ./grouprobot
+    //
+    // ⚠️ 运行时 set_var("MALLOC_CONF", ...) 对已初始化的 jemalloc 无效, 不要在此处设置。
+    #[cfg(not(test))]
+    {
+        if std::env::var("MALLOC_CONF").is_err() {
+            warn!("MALLOC_CONF 未设置 — jemalloc zero-on-free 未启用, 建议在部署配置中设置 MALLOC_CONF=abort_conf:false,zero:true");
+        }
+    }
 
     // 记录加固状态
     info!(
@@ -104,6 +106,14 @@ async fn main() -> anyhow::Result<()> {
         port = cfg.webhook_port,
         "配置加载完成"
     );
+
+    // M2 修复: 安全配置缺失警告
+    if cfg.webhook_secret.is_empty() && cfg.platform.needs_telegram() {
+        warn!("⚠️ WEBHOOK_SECRET 未设置 — Telegram Webhook 鉴权已禁用, 任何人可伪造 Webhook 请求");
+    }
+    if cfg.provision_secret.is_empty() {
+        warn!("⚠️ PROVISION_SECRET 未设置 — /provision/* 路由已禁用 (无法通过 RA-TLS 注入 Token)");
+    }
 
     // ── Enclave 初始化 ──
     std::fs::create_dir_all(&cfg.data_dir).ok();
@@ -140,14 +150,49 @@ async fn main() -> anyhow::Result<()> {
     // ── ShareRecovery: 统一 Token 恢复 ──
     // 优先: 本地 Shamir share → K>1 peer 收集 → 环境变量 fallback (auto-seal)
     // 首次 env fallback 会 auto-seal, 后续启动直接从 share 恢复
+
+    // R3 修复: K>1 且无静态 peer 时, 提前连接链以支持链上 peer 自动发现
+    let early_chain: Option<Arc<ChainClient>> =
+        if cfg.shamir_threshold > 1 && cfg.peer_endpoints.is_empty() {
+            info!("K>1 且无静态 PEER_ENDPOINTS, 尝试提前连接链以发现 peer...");
+            let signer = chain::client::load_or_generate_signer(
+                &cfg.data_dir, cfg.chain_signer_seed.as_deref(),
+            );
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                ChainClient::connect(&cfg.chain_rpc, signer),
+            ).await {
+                Ok(Ok(client)) => {
+                    info!("提前链连接成功, 链上 peer 发现可用");
+                    Some(Arc::new(client))
+                }
+                Ok(Err(e)) => {
+                    warn!(error = %e, "提前链连接失败, 将使用静态 peer 或 env fallback");
+                    None
+                }
+                Err(_) => {
+                    warn!("提前链连接超时 (10s), 将使用静态 peer 或 env fallback");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
     let recovery_config = tee::share_recovery::RecoveryConfig {
         threshold: cfg.shamir_threshold,
         needs_telegram: cfg.platform.needs_telegram(),
         needs_discord: cfg.platform.needs_discord(),
         peer_endpoints: cfg.peer_endpoints.clone(),
         ceremony_hash: cfg.bot_id_hash,
+        chain_client: early_chain.clone(),
+        bot_id_hash: Some(cfg.bot_id_hash),
     };
 
+    // provision_vault: inprocess 模式下供 RA-TLS Provision 写入 Token 用
+    let mut provision_vault: Option<Arc<tokio::sync::RwLock<tee::token_vault::TokenVault>>> = None;
+    // provision_client: connect 模式下供 RA-TLS SGX 代理用 (Token 明文仅在 SGX enclave 内)
+    let mut provision_client: Option<Arc<tee::vault_client::VaultClient>> = None;
     let vault: Arc<dyn VaultProvider> = match cfg.vault_mode.as_str() {
         "connect" => {
             // 连接到外部 vault 进程 (Gramine SGX 模式, Token 在远端)
@@ -159,10 +204,11 @@ async fn main() -> anyhow::Result<()> {
             // 加载 IPC 加密密钥 (如果存在)
             let ipc_key = tee::vault_ipc::ensure_ipc_key(&cfg.data_dir)?;
             info!(socket = %sock, encrypted = true, "连接外部 Vault 进程...");
-            let client = tee::vault_client::VaultClient::connect_encrypted(&sock, ipc_key).await?;
+            let client = Arc::new(tee::vault_client::VaultClient::connect_encrypted(&sock, ipc_key).await?);
             client.ping().await?;
-            info!("✅ Vault IPC 连接成功 (加密通道, Token 在独立进程中)");
-            Arc::new(client)
+            info!("✅ Vault IPC 连接成功 (加密通道, SGX 代理模式)");
+            provision_client = Some(client.clone());
+            client as Arc<dyn VaultProvider>
         }
         "spawn" => {
             // 恢复 Token → 启动内嵌 vault 服务端 → IPC 连接
@@ -196,7 +242,9 @@ async fn main() -> anyhow::Result<()> {
             info!(source = %recovery.source, "Token 恢复完成 (inprocess 模式)");
             // 如果 recovery 包含签名密钥 (非零), 可注入 EnclaveBridge
             // 当前 EnclaveBridge 已有自己的密钥, 未来 Ceremony 恢复时会用到
-            Arc::new(recovery.vault) as Arc<dyn VaultProvider>
+            let vault_rw = Arc::new(tokio::sync::RwLock::new(recovery.vault));
+            provision_vault = Some(vault_rw.clone());
+            vault_rw as Arc<dyn VaultProvider>
         }
     };
     info!(mode = %cfg.vault_mode, "TokenVault 已初始化");
@@ -225,15 +273,16 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // ── 基础设施 ──
-    let local_store = LocalStore::new();
+    let local_store = Arc::new(LocalStore::new());
     let rate_limiter = RateLimiter::new(cfg.webhook_rate_limit, 60);
     let config_manager = Arc::new(ConfigManager::new(30));
 
     // ── 规则引擎 + 消息路由器 ──
-    let rule_engine = RuleEngine::new(Arc::new(LocalStore::new()), true, 10);
+    let rule_engine = RuleEngine::new(local_store.clone(), true, 10);
     let (log_tx, log_rx) = tokio::sync::mpsc::channel(1024);
+    let audit_logger = Arc::new(crate::processing::audit_logger::AuditLogger::new(1000));
     let router = Arc::new(MessageRouter::new(
-        rule_engine, key_manager.clone(), sequence.clone(), log_tx,
+        rule_engine, key_manager.clone(), sequence.clone(), log_tx, audit_logger,
     ));
 
     // ── 构建 AppState ──
@@ -242,7 +291,7 @@ async fn main() -> anyhow::Result<()> {
         enclave: enclave.clone(),
         attestor: attestor.clone(),
         metrics: tee_metrics.clone(),
-        local_store,
+        local_store: local_store.clone(),
         rate_limiter,
         config_manager: config_manager.clone(),
         start_time: Instant::now(),
@@ -259,6 +308,7 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 interval.tick().await;
                 state_gc.local_store.cleanup_expired();
+                state_gc.rate_limiter.cleanup(); // M8 修复: 清理 per-key 条目防止内存泄漏
             }
         });
     }
@@ -296,8 +346,42 @@ async fn main() -> anyhow::Result<()> {
                 let adapter = platform::discord::adapter::DiscordAdapter::new();
                 use crate::platform::PlatformAdapter;
                 while let Some(event) = event_rx.recv().await {
+                    // H2 修复: 全局限流 (与 Telegram webhook 对等)
+                    if !state_dc.rate_limiter.allow() {
+                        warn!("Discord 事件被全局限流");
+                        continue;
+                    }
+
+                    // H2 修复: per-group 限流
+                    if !state_dc.rate_limiter.allow_for(&event.group_id) {
+                        warn!(group = %event.group_id, "Discord 事件被 per-group 限流");
+                        continue;
+                    }
+
+                    // H2 修复: 指纹去重 (仅对有 message_id 的事件)
+                    if let Some(ref mid) = event.message_id {
+                        if !mid.is_empty() {
+                            let fingerprint = format!("discord:{}:{}", event.group_id, mid);
+                            if state_dc.local_store.check_fingerprint(&fingerprint, 300) {
+                                debug!("Discord 重复事件，跳过");
+                                continue;
+                            }
+                        }
+                    }
+
                     state_dc.metrics.record_message();
-                    let ctx = adapter.extract_context(&event);
+                    let mut ctx = adapter.extract_context(&event);
+
+                    // H1 修复: Discord 事件也需要查询管理员身份
+                    if ctx.is_command {
+                        if let Some(ref dc_exec) = state_dc.discord_executor {
+                            match dc_exec.is_admin_in_guild(&ctx.group_id, &ctx.sender_id).await {
+                                Ok(is_admin) => ctx.is_admin = is_admin,
+                                Err(e) => debug!(error = %e, "Discord 管理员身份查询失败"),
+                            }
+                        }
+                    }
+
                     if let Some(ref dc_exec) = state_dc.discord_executor {
                         if let Err(e) = state_dc.router.handle_event(&ctx, dc_exec.as_ref()).await {
                             warn!(error = %e, "Discord 事件处理失败");
@@ -326,14 +410,24 @@ async fn main() -> anyhow::Result<()> {
         let router_bg = router.clone();
         let shared_chain_bg = shared_chain.clone();
         let enclave_mode_bg = enclave.mode().clone();
+        let config_manager_bg = config_manager.clone();
+        // R3: 复用提前连接的链客户端 (如果有)
+        let early_chain_bg = early_chain;
 
         tokio::spawn(async move {
-            let signer = chain::client::load_or_generate_signer(
-                &data_dir, chain_signer_seed.as_deref(),
-            );
-            match ChainClient::connect(&chain_rpc, signer).await {
+            // R3: 优先复用 early_chain, 避免重复连接
+            let connect_result = if let Some(existing) = early_chain_bg {
+                info!("复用提前连接的链客户端");
+                Ok(existing)
+            } else {
+                let signer = chain::client::load_or_generate_signer(
+                    &data_dir, chain_signer_seed.as_deref(),
+                );
+                ChainClient::connect(&chain_rpc, signer).await
+                    .map(Arc::new)
+            };
+            match connect_result {
                 Ok(client) => {
-                    let client = Arc::new(client);
                     info!("链客户端连接成功");
 
                     // 注入到 router
@@ -346,11 +440,50 @@ async fn main() -> anyhow::Result<()> {
                     }
                     info!("链客户端已注入 Ceremony 路由 (AttestationGuard 启用)");
 
+                    // 启动 ConfigManager 链上同步循环
+                    {
+                        let cm = config_manager_bg.clone();
+                        let chain_sync = client.clone();
+                        tokio::spawn(async move {
+                            cm.sync_loop(chain_sync).await;
+                        });
+                        info!("ConfigManager 链上同步循环已启动");
+                    }
+
+                    // 检测 TEE 模式 (启动证明 + 刷新循环共用)
+                    let is_hardware = enclave_mode_bg.is_hardware();
+
                     // 启动时提交 TEE 证明
-                    if let Some(bundle) = attestor_bg.current_attestation() {
+                    if is_hardware {
+                        // Hardware 模式: 立即执行完整 nonce + DCAP Level 4 流程
+                        // 避免使用 submit_attestation (quote_verified=false) 导致启动后
+                        // 长时间处于未验证状态
+                        match refresh_hardware_attestation(
+                            &client, &attestor_bg, bot_id_hash,
+                        ).await {
+                            Ok(()) => {
+                                info!("启动时硬件证明已提交 (DCAP Level 4)");
+                                metrics_bg.record_chain_tx(true);
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "启动时硬件证明提交失败, 降级到软件证明");
+                                // 降级: 提交软件模式证明作为兜底
+                                if let Some(bundle) = attestor_bg.current_attestation() {
+                                    if let Err(e2) = client.submit_attestation(bot_id_hash, &bundle).await {
+                                        warn!(error = %e2, "降级软件证明也提交失败");
+                                        metrics_bg.record_chain_tx(false);
+                                    } else {
+                                        info!("降级软件证明已提交 (quote_verified=false)");
+                                        metrics_bg.record_chain_tx(true);
+                                    }
+                                }
+                            }
+                        }
+                    } else if let Some(bundle) = attestor_bg.current_attestation() {
+                        // Software 模式: 使用 submit_attestation
                         match client.submit_attestation(bot_id_hash, &bundle).await {
                             Ok(()) => {
-                                info!("TEE 证明已提交链上");
+                                info!("TEE 证明已提交链上 (软件模式)");
                                 metrics_bg.record_chain_tx(true);
                             }
                             Err(e) => {
@@ -376,7 +509,6 @@ async fn main() -> anyhow::Result<()> {
                         std::time::Duration::from_secs(refresh_secs)
                     );
                     refresh_interval.tick().await;
-                    let is_hardware = enclave_mode_bg == tee::enclave_bridge::TeeMode::Hardware;
                     loop {
                         refresh_interval.tick().await;
                         info!(hardware = is_hardware, "开始刷新 TEE 证明...");
@@ -443,7 +575,11 @@ async fn main() -> anyhow::Result<()> {
     let ceremony_router = tee::ceremony::ceremony_routes(enclave.clone(), shared_chain.clone());
 
     // ── RA-TLS Provision 路由 (DApp → TEE 端到端加密 Token 注入) ──
-    let provision_router = tee::ra_tls::provision_routes(enclave.clone(), None);
+    // connect 模式: SGX 代理 (provision_client), Token 明文仅在 SGX enclave
+    // inprocess 模式: TDX 本地 (provision_vault), Token 在 TDX 进程内存
+    let provision_router = tee::ra_tls::provision_routes(
+        enclave.clone(), provision_vault, provision_client, cfg.provision_secret.clone(),
+    );
 
     // ── HTTP 路由 ──
     let app = Router::new()

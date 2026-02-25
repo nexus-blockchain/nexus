@@ -19,6 +19,7 @@ impl frame_system::Config for Test {
 parameter_types! {
 	pub const AttestationValidityBlocks: u64 = 100;
 	pub const AttestationCheckInterval: u64 = 10;
+	pub const PeerHeartbeatTimeout: u64 = 50;
 }
 
 impl pallet_grouprobot_registry::Config for Test {
@@ -29,6 +30,9 @@ impl pallet_grouprobot_registry::Config for Test {
 	type AttestationValidityBlocks = AttestationValidityBlocks;
 	type AttestationCheckInterval = AttestationCheckInterval;
 	type MaxQuoteLen = frame_support::traits::ConstU32<8192>;
+	type MaxPeersPerBot = frame_support::traits::ConstU32<10>;
+	type MaxEndpointLen = frame_support::traits::ConstU32<256>;
+	type PeerHeartbeatTimeout = PeerHeartbeatTimeout;
 }
 
 pub const OWNER: u64 = 1;

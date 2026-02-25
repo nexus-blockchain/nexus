@@ -14,10 +14,10 @@
 
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use tracing::{info, warn, debug};
 
 use crate::error::{BotError, BotResult};
-use crate::tee::shamir::EncryptedShare;
 
 /// Share 请求
 #[derive(serde::Serialize)]
@@ -96,7 +96,7 @@ impl PeerClient {
         endpoint: &str,
         ceremony_hash: &[u8; 32],
         requester_pk: &[u8; 32],
-    ) -> BotResult<EncryptedShare> {
+    ) -> BotResult<crate::tee::shamir::EcdhEncryptedShare> {
         let url = format!("{}/share/request", endpoint.trim_end_matches('/'));
         let req_body = ShareRequest {
             ceremony_hash: hex::encode(ceremony_hash),
@@ -115,8 +115,8 @@ impl PeerClient {
             match self.try_request_share(&url, &req_body).await {
                 Ok(share) => {
                     info!(
-                        endpoint, share_id = share.id, attempt,
-                        "成功从 peer 获取 share"
+                        endpoint, share_id = share.encrypted.id, attempt,
+                        "成功从 peer 获取 ECDH share"
                     );
                     return Ok(share);
                 }
@@ -141,7 +141,7 @@ impl PeerClient {
         &self,
         url: &str,
         body: &ShareRequest,
-    ) -> BotResult<EncryptedShare> {
+    ) -> BotResult<crate::tee::shamir::EcdhEncryptedShare> {
         let resp = self.http.post(url)
             .json(body)
             .send()
@@ -160,25 +160,28 @@ impl PeerClient {
         let share_resp: ShareResponse = resp.json().await
             .map_err(|e| BotError::EnclaveError(format!("peer response parse: {}", e)))?;
 
-        // 解码 base64 share data
+        // 解码 base64 share data (ECDH 加密格式: [32 ephemeral_pk][EncryptedShare])
         let share_bytes = base64_decode(&share_resp.share_data)
             .map_err(|e| BotError::EnclaveError(format!("share base64 decode: {}", e)))?;
 
-        let encrypted = crate::tee::shamir::share_from_bytes(&share_bytes)
-            .map_err(|e| BotError::EnclaveError(format!("share parse: {}", e)))?;
+        let ecdh_share = crate::tee::shamir::ecdh_share_from_bytes(&share_bytes)
+            .map_err(|e| BotError::EnclaveError(format!("ecdh share parse: {}", e)))?;
 
-        debug!(peer_pk = %share_resp.peer_pk, share_id = encrypted.id, "share 解码成功");
-        Ok(encrypted)
+        debug!(peer_pk = %share_resp.peer_pk, share_id = ecdh_share.encrypted.id, "ECDH share 解码成功");
+        Ok(ecdh_share)
     }
 
-    /// 从多个 peer 收集 shares (并行请求, 收集到足够即返回)
+    /// 从多个 peer 收集 shares (并行请求, first-K-of-N 早返回)
+    ///
+    /// 使用 FuturesUnordered 实现真正的先到先得: 任意 K-1 个 peer 响应即返回,
+    /// 无需等待慢速/超时的 peer。每个 peer 请求包含指数退避重试。
     pub async fn collect_shares(
         &self,
         endpoints: &[String],
         ceremony_hash: &[u8; 32],
         requester_pk: &[u8; 32],
         needed: usize,
-    ) -> BotResult<Vec<EncryptedShare>> {
+    ) -> BotResult<Vec<crate::tee::shamir::EcdhEncryptedShare>> {
         if endpoints.is_empty() {
             return Err(BotError::EnclaveError("no peer endpoints configured".into()));
         }
@@ -188,43 +191,39 @@ impl PeerClient {
             "开始从 peer 收集 Shamir shares"
         );
 
-        // 并行请求所有 peer
-        let mut handles = Vec::new();
-        for endpoint in endpoints {
+        // 并行请求所有 peer (每个含重试), 用 FuturesUnordered 先到先得
+        let mut futures = futures_util::stream::FuturesUnordered::new();
+        for (idx, endpoint) in endpoints.iter().enumerate() {
             let client = self.http.clone();
-            let url = format!("{}/share/request", endpoint.trim_end_matches('/'));
-            let body = ShareRequest {
-                ceremony_hash: hex::encode(ceremony_hash),
-                requester_pk: hex::encode(requester_pk),
-            };
             let config = self.config.clone();
+            let ep = endpoint.clone();
+            let ch = *ceremony_hash;
+            let pk = *requester_pk;
 
-            handles.push(tokio::spawn(async move {
-                let peer_client = PeerClient {
-                    http: client,
-                    config,
-                };
-                peer_client.try_request_share(&url, &body).await
+            futures.push(tokio::spawn(async move {
+                let peer_client = PeerClient { http: client, config };
+                let result = peer_client.request_share(&ep, &ch, &pk).await;
+                (idx, result)
             }));
         }
 
         let mut collected = Vec::new();
         let mut errors = Vec::new();
 
-        for (i, handle) in handles.into_iter().enumerate() {
-            match handle.await {
-                Ok(Ok(share)) => {
+        while let Some(join_result) = futures.next().await {
+            match join_result {
+                Ok((idx, Ok(share))) => {
                     collected.push(share);
                     if collected.len() >= needed {
                         info!(collected = collected.len(), "已收集足够 shares");
                         return Ok(collected);
                     }
                 }
-                Ok(Err(e)) => {
-                    errors.push(format!("peer[{}]: {}", i, e));
+                Ok((idx, Err(e))) => {
+                    errors.push(format!("peer[{}]: {}", idx, e));
                 }
                 Err(e) => {
-                    errors.push(format!("peer[{}] task: {}", i, e));
+                    errors.push(format!("peer task join: {}", e));
                 }
             }
         }

@@ -65,9 +65,13 @@ pub struct BotConfig {
     /// Ceremony share 接收端口 (0 = 禁用)
     pub ceremony_port: u16,
 
+    // Provision 安全
+    /// RA-TLS Provision Bearer Token (PROVISION_SECRET)
+    /// 为空时 provision 路由完全禁用
+    pub provision_secret: String,
+
     // 性能
     pub webhook_rate_limit: u32,
-    pub execute_rate_limit: u32,
     pub chain_log_batch_interval: u64,
     pub chain_log_batch_size: usize,
 
@@ -92,6 +96,7 @@ impl std::fmt::Debug for BotConfig {
             .field("shamir_threshold", &self.shamir_threshold)
             .field("peer_endpoints", &self.peer_endpoints.len())
             .field("ceremony_port", &self.ceremony_port)
+            .field("provision_secret", &if self.provision_secret.is_empty() { "<disabled>" } else { "<REDACTED>" })
             .field("metrics_enabled", &self.metrics_enabled)
             .field("log_level", &self.log_level)
             .finish()
@@ -141,9 +146,9 @@ impl BotConfig {
             vault_mode: std::env::var("VAULT_MODE").unwrap_or_else(|_| "inprocess".into()),
             vault_socket: std::env::var("VAULT_SOCKET").unwrap_or_default(),
             shamir_threshold: std::env::var("SHAMIR_THRESHOLD")
-                .unwrap_or_else(|_| "1".into())
+                .unwrap_or_else(|_| "2".into())
                 .parse()
-                .unwrap_or(1),
+                .unwrap_or(2),
             peer_endpoints: std::env::var("PEER_ENDPOINTS")
                 .unwrap_or_default()
                 .split(',')
@@ -154,14 +159,11 @@ impl BotConfig {
                 .unwrap_or_else(|_| "0".into())
                 .parse()
                 .unwrap_or(0),
+            provision_secret: std::env::var("PROVISION_SECRET").unwrap_or_default(),
             webhook_rate_limit: std::env::var("WEBHOOK_RATE_LIMIT")
                 .unwrap_or_else(|_| "200".into())
                 .parse()
                 .unwrap_or(200),
-            execute_rate_limit: std::env::var("EXECUTE_RATE_LIMIT")
-                .unwrap_or_else(|_| "100".into())
-                .parse()
-                .unwrap_or(100),
             chain_log_batch_interval: std::env::var("CHAIN_LOG_BATCH_INTERVAL")
                 .unwrap_or_else(|_| "6".into())
                 .parse()
@@ -248,11 +250,11 @@ mod tests {
             data_dir: "./data".into(),
             vault_mode: "inprocess".into(),
             vault_socket: String::new(),
-            shamir_threshold: 1,
+            shamir_threshold: 2,
             peer_endpoints: vec![],
             ceremony_port: 0,
+            provision_secret: String::new(),
             webhook_rate_limit: 200,
-            execute_rate_limit: 100,
             chain_log_batch_interval: 6,
             chain_log_batch_size: 50,
             metrics_enabled: true,

@@ -891,40 +891,56 @@ fn entity_provider_is_entity_admin() {
 fn entity_provider_register_unregister_shop() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
-        // Entity starts with shop_id = 0, but MockShopProvider may not call register_shop.
+        // Entity starts with primary_shop_id = 0
         // Manually call register_shop
         assert_ok!(<EntityRegistry as EntityProvider<u64>>::register_shop(id, 42));
-        assert_eq!(Entities::<Test>::get(id).unwrap().shop_id, 42);
+        assert_eq!(Entities::<Test>::get(id).unwrap().primary_shop_id, 42);
         let shops = <EntityRegistry as EntityProvider<u64>>::entity_shops(id);
         assert_eq!(shops, vec![42]);
 
-        // Unregister with matching ID
+        // Register a second shop (1:N)
+        assert_ok!(<EntityRegistry as EntityProvider<u64>>::register_shop(id, 43));
+        let shops = <EntityRegistry as EntityProvider<u64>>::entity_shops(id);
+        assert_eq!(shops, vec![42, 43]);
+        // primary_shop_id remains 42 (first registered)
+        assert_eq!(Entities::<Test>::get(id).unwrap().primary_shop_id, 42);
+
+        // Unregister shop 42 (was primary)
         assert_ok!(<EntityRegistry as EntityProvider<u64>>::unregister_shop(id, 42));
-        assert_eq!(Entities::<Test>::get(id).unwrap().shop_id, 0);
+        // primary_shop_id should auto-reassign to 43
+        assert_eq!(Entities::<Test>::get(id).unwrap().primary_shop_id, 43);
+        let shops = <EntityRegistry as EntityProvider<u64>>::entity_shops(id);
+        assert_eq!(shops, vec![43]);
+
+        // Unregister last shop
+        assert_ok!(<EntityRegistry as EntityProvider<u64>>::unregister_shop(id, 43));
+        assert_eq!(Entities::<Test>::get(id).unwrap().primary_shop_id, 0);
+        assert!(<EntityRegistry as EntityProvider<u64>>::entity_shops(id).is_empty());
     });
 }
 
 #[test]
-fn entity_provider_unregister_shop_fails_mismatch() {
+fn entity_provider_unregister_shop_fails_not_registered() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
         assert_ok!(<EntityRegistry as EntityProvider<u64>>::register_shop(id, 42));
-        // Wrong shop_id
+        // Shop 99 not registered
         assert_noop!(
             <EntityRegistry as EntityProvider<u64>>::unregister_shop(id, 99),
-            Error::<Test>::ShopIdMismatch
+            Error::<Test>::ShopNotRegistered
         );
     });
 }
 
 #[test]
-fn entity_provider_register_shop_fails_already_has_shop() {
+fn entity_provider_register_shop_duplicate_rejected() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
         assert_ok!(<EntityRegistry as EntityProvider<u64>>::register_shop(id, 42));
+        // Duplicate shop_id rejected
         assert_noop!(
-            <EntityRegistry as EntityProvider<u64>>::register_shop(id, 43),
-            Error::<Test>::EntityAlreadyHasShop
+            <EntityRegistry as EntityProvider<u64>>::register_shop(id, 42),
+            Error::<Test>::ShopLimitReached
         );
     });
 }

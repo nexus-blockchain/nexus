@@ -115,9 +115,9 @@ pub mod pallet {
         pub verified: bool,
         /// 元数据 URI（链下扩展信息）
         pub metadata_uri: Option<BoundedVec<u8, MaxCidLen>>,
-        // ========== Entity-Shop 关联（1:1） ==========
-        /// 唯一 Shop ID（0 表示未创建）
-        pub shop_id: u64,
+        // ========== Entity-Shop 关联（1:N 多店铺） ==========
+        /// Primary Shop ID（0 表示未创建）
+        pub primary_shop_id: u64,
         // ========== 汇总统计 ===========
         /// 累计销售额
         pub total_sales: Balance,
@@ -201,6 +201,10 @@ pub mod pallet {
         /// Shop 模块（用于创建 Primary Shop）
         type ShopProvider: pallet_entity_common::ShopProvider<Self::AccountId>;
 
+        /// 每个 Entity 最大 Shop 数量
+        #[pallet::constant]
+        type MaxShopsPerEntity: Get<u32>;
+
         /// 平台账户（没收资金、运营费用的接收方）
         #[pallet::constant]
         type PlatformAccount: Get<Self::AccountId>;
@@ -245,6 +249,17 @@ pub mod pallet {
     /// 治理暂停标记（区分治理暂停 vs 资金不足暂停，防止 top_up_fund 绕过治理）
     #[pallet::storage]
     pub type GovernanceSuspended<T: Config> = StorageMap<_, Blake2_128Concat, u64, bool, ValueQuery>;
+
+    /// Entity 关联的所有 Shop IDs（1:N 多店铺）
+    #[pallet::storage]
+    #[pallet::getter(fn entity_shop_ids)]
+    pub type EntityShops<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // entity_id
+        BoundedVec<u64, T::MaxShopsPerEntity>,
+        ValueQuery,
+    >;
 
 
     // ==================== 事件 ====================
@@ -351,6 +366,11 @@ pub mod pallet {
             old_owner: T::AccountId,
             new_owner: T::AccountId,
         },
+        /// Shop 级联操作失败（需人工干预）
+        ShopCascadeFailed {
+            entity_id: u64,
+            shop_id: u64,
+        },
     }
 
     // ==================== 错误 ====================
@@ -395,12 +415,12 @@ pub mod pallet {
         /// 无效的实体类型升级
         InvalidEntityTypeUpgrade,
         // ========== Entity-Shop 分离架构错误 ==========
-        /// Entity 已有 Shop（每个 Entity 仅允许 1 个 Shop）
-        EntityAlreadyHasShop,
+        /// Entity Shop 数量已达上限
+        ShopLimitReached,
+        /// Shop 未注册在此 Entity
+        ShopNotRegistered,
         /// 充值金额为零
         ZeroAmount,
-        /// Shop ID 不匹配
-        ShopIdMismatch,
         /// 实体已验证
         AlreadyVerified,
     }
@@ -482,7 +502,7 @@ pub mod pallet {
                 governance_mode: GovernanceMode::None,
                 verified: false,
                 metadata_uri: None,
-                shop_id: 0,
+                primary_shop_id: 0,
                 total_sales: Zero::zero(),
                 total_orders: 0,
             };
@@ -679,9 +699,11 @@ pub mod pallet {
             });
 
             // reopen_entity 恢复路径：Shop 之前被 force_close（终态写入），
-            // 需要显式恢复为 Active
-            if entity.shop_id > 0 {
-                let _ = T::ShopProvider::resume_shop(entity.shop_id);
+            // 需要显式恢复为 Active（遍历所有关联 Shop）
+            for sid in EntityShops::<T>::get(entity_id).iter() {
+                if T::ShopProvider::resume_shop(*sid).is_err() {
+                    Self::deposit_event(Event::ShopCascadeFailed { entity_id, shop_id: *sid });
+                }
             }
 
             Self::deposit_event(Event::EntityStatusChanged {
@@ -729,9 +751,11 @@ pub mod pallet {
 
             // 注：active_entities 已在 request_close_entity 中递减，此处无需重复
 
-            // 级联关闭 Shop（绕过 is_primary 保护）
-            if entity.shop_id > 0 {
-                let _ = T::ShopProvider::force_close_shop(entity.shop_id);
+            // 级联关闭所有 Shop（绕过 is_primary 保护）
+            for sid in EntityShops::<T>::get(entity_id).iter() {
+                if T::ShopProvider::force_close_shop(*sid).is_err() {
+                    Self::deposit_event(Event::ShopCascadeFailed { entity_id, shop_id: *sid });
+                }
             }
 
             Self::deposit_event(Event::EntityClosed {
@@ -869,9 +893,11 @@ pub mod pallet {
                 });
             }
 
-            // 级联关闭 Shop（绕过 is_primary 保护）
-            if entity.shop_id > 0 {
-                let _ = T::ShopProvider::force_close_shop(entity.shop_id);
+            // 级联关闭所有 Shop（绕过 is_primary 保护）
+            for sid in EntityShops::<T>::get(entity_id).iter() {
+                if T::ShopProvider::force_close_shop(*sid).is_err() {
+                    Self::deposit_event(Event::ShopCascadeFailed { entity_id, shop_id: *sid });
+                }
             }
 
             Self::deposit_event(Event::EntityBanned {
@@ -1430,24 +1456,49 @@ pub mod pallet {
         }
 
         fn register_shop(entity_id: u64, shop_id: u64) -> Result<(), sp_runtime::DispatchError> {
-            Entities::<T>::try_mutate(entity_id, |maybe_entity| -> Result<(), sp_runtime::DispatchError> {
-                let entity = maybe_entity.as_mut().ok_or(Error::<T>::EntityNotFound)?;
-                ensure!(entity.shop_id == 0, Error::<T>::EntityAlreadyHasShop);
-                entity.shop_id = shop_id;
+            // 验证 Entity 存在
+            ensure!(Entities::<T>::contains_key(entity_id), Error::<T>::EntityNotFound);
+
+            // 添加到 EntityShops 列表
+            EntityShops::<T>::try_mutate(entity_id, |shops| -> Result<(), sp_runtime::DispatchError> {
+                ensure!(!shops.contains(&shop_id), Error::<T>::ShopLimitReached);
+                shops.try_push(shop_id).map_err(|_| Error::<T>::ShopLimitReached)?;
                 Ok(())
             })?;
+
+            // 如果是第一个 Shop，设为 primary
+            Entities::<T>::mutate(entity_id, |maybe_entity| {
+                if let Some(entity) = maybe_entity {
+                    if entity.primary_shop_id == 0 {
+                        entity.primary_shop_id = shop_id;
+                    }
+                }
+            });
+
             Self::deposit_event(Event::ShopAddedToEntity { entity_id, shop_id });
             Ok(())
         }
 
         fn unregister_shop(entity_id: u64, shop_id: u64) -> Result<(), sp_runtime::DispatchError> {
-            Entities::<T>::try_mutate(entity_id, |maybe_entity| -> Result<(), sp_runtime::DispatchError> {
-                let entity = maybe_entity.as_mut().ok_or(Error::<T>::EntityNotFound)?;
-                // M3: 验证 shop_id 匹配
-                ensure!(entity.shop_id == shop_id, Error::<T>::ShopIdMismatch);
-                entity.shop_id = 0;
+            EntityShops::<T>::try_mutate(entity_id, |shops| -> Result<(), sp_runtime::DispatchError> {
+                let pos = shops.iter().position(|&id| id == shop_id)
+                    .ok_or(Error::<T>::ShopNotRegistered)?;
+                shops.remove(pos);
                 Ok(())
-            })
+            })?;
+
+            // 如果移除的是 primary，重新指定（取列表第一个，或清零）
+            Entities::<T>::mutate(entity_id, |maybe_entity| {
+                if let Some(entity) = maybe_entity {
+                    if entity.primary_shop_id == shop_id {
+                        entity.primary_shop_id = EntityShops::<T>::get(entity_id)
+                            .first()
+                            .copied()
+                            .unwrap_or(0);
+                    }
+                }
+            });
+            Ok(())
         }
 
         fn is_entity_admin(entity_id: u64, account: &T::AccountId) -> bool {
@@ -1455,9 +1506,7 @@ pub mod pallet {
         }
 
         fn entity_shops(entity_id: u64) -> sp_std::vec::Vec<u64> {
-            Entities::<T>::get(entity_id)
-                .map(|e| if e.shop_id > 0 { sp_std::vec![e.shop_id] } else { sp_std::vec![] })
-                .unwrap_or_default()
+            EntityShops::<T>::get(entity_id).into_inner()
         }
     }
 }

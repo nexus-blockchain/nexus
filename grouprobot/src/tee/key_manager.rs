@@ -101,15 +101,21 @@ impl SequenceManager {
 
     pub fn next(&self) -> BotResult<u64> {
         let seq = self.current.fetch_add(1, Ordering::SeqCst) + 1;
-        self.persist(seq);
+        if let Err(e) = self.persist(seq) {
+            // 持久化失败 → 回退 atomic counter, 防止重启后序列号重复
+            self.current.fetch_sub(1, Ordering::SeqCst);
+            return Err(e);
+        }
         Ok(seq)
     }
 
-    fn persist(&self, seq: u64) {
+    fn persist(&self, seq: u64) -> BotResult<()> {
         let path = std::path::Path::new(&self.data_dir).join("sequence.dat");
-        if let Err(e) = std::fs::write(&path, seq.to_le_bytes()) {
-            warn!(error = %e, "序列号持久化失败");
-        }
+        std::fs::write(&path, seq.to_le_bytes())
+            .map_err(|e| {
+                warn!(error = %e, "序列号持久化失败");
+                BotError::EnclaveError(format!("sequence persist failed: {}", e))
+            })
     }
 }
 

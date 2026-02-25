@@ -68,11 +68,11 @@ fn set_node_requirement_works() {
 		assert_ok!(GroupRobotCommunity::set_node_requirement(
 			RuntimeOrigin::signed(OWNER),
 			community_hash(1),
-			NodeRequirement::TeeOnly,
+			NodeRequirement::Any,
 		));
 		assert_eq!(
 			CommunityNodeRequirement::<Test>::get(community_hash(1)),
-			NodeRequirement::TeeOnly
+			NodeRequirement::Any
 		);
 	});
 }
@@ -80,12 +80,12 @@ fn set_node_requirement_works() {
 #[test]
 fn set_node_requirement_fails_same() {
 	new_test_ext().execute_with(|| {
-		// Default is Any
+		// Default is TeeOnly
 		assert_noop!(
 			GroupRobotCommunity::set_node_requirement(
 				RuntimeOrigin::signed(OWNER),
 				community_hash(1),
-				NodeRequirement::Any,
+				NodeRequirement::TeeOnly,
 			),
 			Error::<Test>::SameNodeRequirement
 		);
@@ -109,6 +109,8 @@ fn update_community_config_works() {
 			5,     // warn_limit
 			WarnAction::Ban,
 			true,  // welcome_enabled
+			false, // ads_enabled
+			*b"en", // language
 		));
 		let config = CommunityConfigs::<Test>::get(community_hash(1)).unwrap();
 		assert_eq!(config.version, 1);
@@ -126,7 +128,7 @@ fn update_community_config_cas_conflict() {
 		assert_ok!(GroupRobotCommunity::update_community_config(
 			RuntimeOrigin::signed(OWNER),
 			community_hash(1),
-			0, true, 20, 5, WarnAction::Ban, true,
+			0, true, 20, 5, WarnAction::Ban, true, false, *b"en",
 		));
 
 		// Try with wrong version
@@ -135,7 +137,7 @@ fn update_community_config_cas_conflict() {
 				RuntimeOrigin::signed(OWNER),
 				community_hash(1),
 				0, // should be 1
-				false, 10, 3, WarnAction::Kick, false,
+				false, 10, 3, WarnAction::Kick, false, false, *b"en",
 			),
 			Error::<Test>::ConfigVersionConflict
 		);
@@ -144,7 +146,7 @@ fn update_community_config_cas_conflict() {
 		assert_ok!(GroupRobotCommunity::update_community_config(
 			RuntimeOrigin::signed(OWNER),
 			community_hash(1),
-			1, false, 10, 3, WarnAction::Kick, false,
+			1, false, 10, 3, WarnAction::Kick, false, false, *b"en",
 		));
 		assert_eq!(CommunityConfigs::<Test>::get(community_hash(1)).unwrap().version, 2);
 	});
@@ -243,7 +245,7 @@ fn clear_expired_logs_fails_none() {
 #[test]
 fn helper_get_node_requirement() {
 	new_test_ext().execute_with(|| {
-		assert_eq!(GroupRobotCommunity::get_node_requirement(&community_hash(1)), NodeRequirement::Any);
+		assert_eq!(GroupRobotCommunity::get_node_requirement(&community_hash(1)), NodeRequirement::TeeOnly);
 		assert_ok!(GroupRobotCommunity::set_node_requirement(
 			RuntimeOrigin::signed(OWNER),
 			community_hash(1),
@@ -265,8 +267,316 @@ fn community_provider_trait() {
 		assert_ok!(GroupRobotCommunity::update_community_config(
 			RuntimeOrigin::signed(OWNER),
 			community_hash(1),
-			0, true, 10, 3, WarnAction::Kick, false,
+			0, true, 10, 3, WarnAction::Kick, false, false, *b"en",
 		));
 		assert!(<GroupRobotCommunity as CommunityProvider<u64>>::is_community_bound(&community_hash(1)));
+	});
+}
+
+// ============================================================================
+// Reputation System
+// ============================================================================
+
+// ============================================================================
+// Ads fields
+// ============================================================================
+
+#[test]
+fn update_community_config_ads_enabled() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCommunity::update_community_config(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1),
+			0, true, 10, 3, WarnAction::Kick, false, true, *b"zh",
+		));
+		let config = CommunityConfigs::<Test>::get(community_hash(1)).unwrap();
+		assert!(config.ads_enabled);
+		assert_eq!(config.language, *b"zh");
+		assert_eq!(config.active_members, 0); // default, not set by config
+	});
+}
+
+#[test]
+fn update_active_members_works() {
+	new_test_ext().execute_with(|| {
+		// Must create config first
+		assert_ok!(GroupRobotCommunity::update_community_config(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1),
+			0, true, 10, 3, WarnAction::Kick, false, true, *b"en",
+		));
+
+		// Update active_members
+		assert_ok!(GroupRobotCommunity::update_active_members(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1),
+			150,
+		));
+		let config = CommunityConfigs::<Test>::get(community_hash(1)).unwrap();
+		assert_eq!(config.active_members, 150);
+	});
+}
+
+#[test]
+fn update_active_members_fails_no_config() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotCommunity::update_active_members(
+				RuntimeOrigin::signed(OWNER),
+				community_hash(99),
+				100,
+			),
+			Error::<Test>::CommunityNotFound
+		);
+	});
+}
+
+#[test]
+fn update_config_preserves_active_members() {
+	new_test_ext().execute_with(|| {
+		// Create config
+		assert_ok!(GroupRobotCommunity::update_community_config(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1),
+			0, true, 10, 3, WarnAction::Kick, false, true, *b"en",
+		));
+
+		// Bot sets active_members = 200
+		assert_ok!(GroupRobotCommunity::update_active_members(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1),
+			200,
+		));
+
+		// Admin updates config (should NOT reset active_members)
+		assert_ok!(GroupRobotCommunity::update_community_config(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1),
+			1, false, 20, 5, WarnAction::Ban, true, false, *b"zh",
+		));
+		let config = CommunityConfigs::<Test>::get(community_hash(1)).unwrap();
+		assert_eq!(config.active_members, 200); // preserved!
+		assert!(!config.ads_enabled); // updated
+		assert_eq!(config.language, *b"zh"); // updated
+	});
+}
+
+// ============================================================================
+// Reputation System
+// ============================================================================
+
+fn user_hash(n: u8) -> [u8; 32] {
+	let mut h = [0u8; 32];
+	h[0] = n;
+	h
+}
+
+#[test]
+fn award_reputation_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1),
+			user_hash(1),
+			10,
+		));
+		let rec = MemberReputation::<Test>::get(community_hash(1), user_hash(1));
+		assert_eq!(rec.score, 10);
+		assert_eq!(rec.awards, 1);
+		assert_eq!(rec.deductions, 0);
+		assert_eq!(GlobalReputation::<Test>::get(user_hash(1)), 10);
+	});
+}
+
+#[test]
+fn deduct_reputation_works() {
+	new_test_ext().execute_with(|| {
+		// Award first
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 20,
+		));
+
+		// Advance past cooldown
+		System::set_block_number(10);
+
+		assert_ok!(GroupRobotCommunity::deduct_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 5,
+		));
+		let rec = MemberReputation::<Test>::get(community_hash(1), user_hash(1));
+		assert_eq!(rec.score, 15);
+		assert_eq!(rec.awards, 1);
+		assert_eq!(rec.deductions, 1);
+		assert_eq!(GlobalReputation::<Test>::get(user_hash(1)), 15);
+	});
+}
+
+#[test]
+fn deduct_can_go_negative() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCommunity::deduct_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 10,
+		));
+		let rec = MemberReputation::<Test>::get(community_hash(1), user_hash(1));
+		assert_eq!(rec.score, -10);
+		assert_eq!(GlobalReputation::<Test>::get(user_hash(1)), -10);
+	});
+}
+
+#[test]
+fn reset_reputation_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 50,
+		));
+		assert_eq!(GlobalReputation::<Test>::get(user_hash(1)), 50);
+
+		assert_ok!(GroupRobotCommunity::reset_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1),
+		));
+		let rec = MemberReputation::<Test>::get(community_hash(1), user_hash(1));
+		assert_eq!(rec.score, 0);
+		assert_eq!(GlobalReputation::<Test>::get(user_hash(1)), 0);
+	});
+}
+
+#[test]
+fn cooldown_enforced() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 5,
+		));
+
+		// Same operator, same target, within cooldown → fail
+		assert_noop!(
+			GroupRobotCommunity::award_reputation(
+				RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 5,
+			),
+			Error::<Test>::ReputationOnCooldown
+		);
+
+		// Advance past cooldown (5 blocks)
+		System::set_block_number(7);
+
+		// Now should work
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 5,
+		));
+		assert_eq!(MemberReputation::<Test>::get(community_hash(1), user_hash(1)).score, 10);
+	});
+}
+
+#[test]
+fn cooldown_different_operator_independent() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 5,
+		));
+
+		// Different operator, same target → no cooldown
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OTHER), community_hash(1), user_hash(1), 5,
+		));
+		assert_eq!(MemberReputation::<Test>::get(community_hash(1), user_hash(1)).score, 10);
+	});
+}
+
+#[test]
+fn cooldown_different_target_independent() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 5,
+		));
+
+		// Same operator, different target → no cooldown
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(2), 5,
+		));
+	});
+}
+
+#[test]
+fn delta_too_large_rejected() {
+	new_test_ext().execute_with(|| {
+		// MaxReputationDelta = 100
+		assert_noop!(
+			GroupRobotCommunity::award_reputation(
+				RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 101,
+			),
+			Error::<Test>::ReputationDeltaTooLarge
+		);
+	});
+}
+
+#[test]
+fn delta_zero_rejected() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotCommunity::award_reputation(
+				RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 0,
+			),
+			Error::<Test>::ReputationDeltaZero
+		);
+		assert_noop!(
+			GroupRobotCommunity::deduct_reputation(
+				RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 0,
+			),
+			Error::<Test>::ReputationDeltaZero
+		);
+	});
+}
+
+#[test]
+fn global_reputation_aggregates_communities() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 10,
+		));
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(2), user_hash(1), 20,
+		));
+
+		assert_eq!(MemberReputation::<Test>::get(community_hash(1), user_hash(1)).score, 10);
+		assert_eq!(MemberReputation::<Test>::get(community_hash(2), user_hash(1)).score, 20);
+		assert_eq!(GlobalReputation::<Test>::get(user_hash(1)), 30);
+	});
+}
+
+#[test]
+fn reputation_provider_trait() {
+	new_test_ext().execute_with(|| {
+		use pallet_grouprobot_primitives::ReputationProvider;
+
+		assert_eq!(<GroupRobotCommunity as ReputationProvider>::get_reputation(&community_hash(1), &user_hash(1)), 0);
+		assert_eq!(<GroupRobotCommunity as ReputationProvider>::get_global_reputation(&user_hash(1)), 0);
+
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 15,
+		));
+
+		assert_eq!(<GroupRobotCommunity as ReputationProvider>::get_reputation(&community_hash(1), &user_hash(1)), 15);
+		assert_eq!(<GroupRobotCommunity as ReputationProvider>::get_global_reputation(&user_hash(1)), 15);
+	});
+}
+
+#[test]
+fn reset_reputation_adjusts_global() {
+	new_test_ext().execute_with(|| {
+		// Award in two communities
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 10,
+		));
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(2), user_hash(1), 20,
+		));
+		assert_eq!(GlobalReputation::<Test>::get(user_hash(1)), 30);
+
+		// Reset community 1
+		assert_ok!(GroupRobotCommunity::reset_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1),
+		));
+
+		// Global should now be 20 (only community 2 remains)
+		assert_eq!(GlobalReputation::<Test>::get(user_hash(1)), 20);
+		assert_eq!(MemberReputation::<Test>::get(community_hash(1), user_hash(1)).score, 0);
 	});
 }

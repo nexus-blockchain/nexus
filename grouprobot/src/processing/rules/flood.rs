@@ -8,11 +8,16 @@ use super::Rule;
 /// 防刷屏规则
 pub struct FloodRule {
     limit: u16,
+    mute_duration_secs: u64,
 }
 
 impl FloodRule {
     pub fn new(limit: u16) -> Self {
-        Self { limit }
+        Self { limit, mute_duration_secs: 300 }
+    }
+
+    pub fn with_mute_duration(limit: u16, mute_duration_secs: u64) -> Self {
+        Self { limit, mute_duration_secs: if mute_duration_secs == 0 { 300 } else { mute_duration_secs } }
     }
 }
 
@@ -31,7 +36,7 @@ impl Rule for FloodRule {
         if count > self.limit as u64 {
             Some(ActionDecision::mute(
                 &ctx.sender_id,
-                300, // 5 分钟
+                self.mute_duration_secs,
                 &format!("Flood detected: {} messages/min (limit: {})", count, self.limit),
             ))
         } else {
@@ -44,18 +49,22 @@ impl Rule for FloodRule {
 mod tests {
     use super::*;
 
-    fn make_ctx(group: &str, sender: &str) -> MessageContext {
+    fn make_ctx(group: &str, sender: &str, text: &str) -> MessageContext {
         MessageContext {
             platform: "telegram".into(),
             group_id: group.into(),
             sender_id: sender.into(),
             sender_name: "test".into(),
-            message_text: "hi".into(),
+            message_text: text.to_string(),
+            message_id: None,
             is_command: false,
             command: None,
             command_args: vec![],
             is_join_request: false,
             is_admin: false,
+            message_type: None,
+            callback_query_id: None,
+            callback_data: None,
         }
     }
 
@@ -63,7 +72,7 @@ mod tests {
     async fn under_limit_passes() {
         let store = LocalStore::new();
         let rule = FloodRule::new(10);
-        let ctx = make_ctx("g1", "u1");
+        let ctx = make_ctx("g1", "u1", "hello");
         assert!(rule.evaluate(&ctx, &store).await.is_none());
     }
 
@@ -71,7 +80,7 @@ mod tests {
     async fn over_limit_mutes() {
         let store = LocalStore::new();
         let rule = FloodRule::new(3);
-        let ctx = make_ctx("g1", "u1");
+        let ctx = make_ctx("g1", "u1", "hello");
         for _ in 0..3 {
             rule.evaluate(&ctx, &store).await;
         }
@@ -83,7 +92,7 @@ mod tests {
     async fn commands_skip_flood() {
         let store = LocalStore::new();
         let rule = FloodRule::new(1);
-        let mut ctx = make_ctx("g1", "u1");
+        let mut ctx = make_ctx("g1", "u1", "hello");
         ctx.is_command = true;
         // Even after many evaluations, commands shouldn't trigger flood
         for _ in 0..10 {

@@ -114,6 +114,25 @@ pub mod pallet {
         pub total_platform_fees: Balance,
     }
 
+    /// 订单附属操作类型（用于失败事件追踪）
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    pub enum OrderOperation {
+        /// Escrow 退款
+        EscrowRefund,
+        /// 库存恢复
+        StockRestore,
+        /// 佣金取消
+        CommissionCancel,
+        /// 佣金结算
+        CommissionComplete,
+        /// 店铺统计更新
+        ShopStatsUpdate,
+        /// 积分奖励
+        TokenReward,
+        /// 订单自动完成
+        AutoComplete,
+    }
+
     #[pallet::config]
     pub trait Config: frame_system::Config {
         /// 运行时事件类型
@@ -249,6 +268,8 @@ pub mod pallet {
         },
         /// 订单进入争议
         OrderDisputed { order_id: u64 },
+        /// 订单附属操作失败（主流程已完成，需人工干预）
+        OrderOperationFailed { order_id: u64, operation: OrderOperation },
         /// 服务已开始
         ServiceStarted { order_id: u64 },
         /// 服务已完成（卖家标记）
@@ -508,11 +529,15 @@ pub mod pallet {
             // 退款
             T::Escrow::refund_all(order_id, &order.buyer)?;
 
-            // 恢复库存
-            let _ = T::ProductProvider::restore_stock(order.product_id, order.quantity);
+            // 恢复库存（best-effort，失败发事件）
+            if T::ProductProvider::restore_stock(order.product_id, order.quantity).is_err() {
+                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::StockRestore });
+            }
 
-            // C3: 通知佣金系统订单已取消
-            let _ = T::CommissionHandler::on_order_cancelled(order_id);
+            // C3: 通知佣金系统订单已取消（best-effort，失败发事件）
+            if T::CommissionHandler::on_order_cancelled(order_id).is_err() {
+                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionCancel });
+            }
 
             Orders::<T>::mutate(order_id, |maybe_order| {
                 if let Some(o) = maybe_order {
@@ -600,6 +625,9 @@ pub mod pallet {
                 Ok(())
             })?;
 
+            // 通知 Escrow 进入争议状态，阻止未经仲裁的资金操作
+            T::Escrow::set_disputed(order_id)?;
+
             Self::deposit_event(Event::OrderDisputed { order_id });
             Ok(())
         }
@@ -614,14 +642,19 @@ pub mod pallet {
             ensure!(order.seller == who, Error::<T>::NotOrderSeller);
             ensure!(order.status == MallOrderStatus::Disputed, Error::<T>::InvalidOrderStatus);
 
-            // 退款给买家
+            // 解除争议锁定后退款给买家
+            T::Escrow::set_resolved(order_id)?;
             T::Escrow::refund_all(order_id, &order.buyer)?;
 
-            // 恢复库存
-            let _ = T::ProductProvider::restore_stock(order.product_id, order.quantity);
+            // 恢复库存（best-effort，失败发事件）
+            if T::ProductProvider::restore_stock(order.product_id, order.quantity).is_err() {
+                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::StockRestore });
+            }
 
-            // C3: 通知佣金系统订单已取消
-            let _ = T::CommissionHandler::on_order_cancelled(order_id);
+            // C3: 通知佣金系统订单已取消（best-effort，失败发事件）
+            if T::CommissionHandler::on_order_cancelled(order_id).is_err() {
+                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionCancel });
+            }
 
             Orders::<T>::mutate(order_id, |maybe_order| {
                 if let Some(o) = maybe_order {
@@ -724,28 +757,34 @@ pub mod pallet {
                 }
             });
 
-            // 更新店铺统计
-            let _ = T::ShopProvider::update_shop_stats(
+            // 更新店铺统计（best-effort，失败发事件）
+            if T::ShopProvider::update_shop_stats(
                 order.shop_id,
                 seller_amount.saturated_into(),
                 1,
-            );
+            ).is_err() {
+                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::ShopStatsUpdate });
+            }
 
-            // 触发佣金计算
-            let _ = T::CommissionHandler::on_order_completed(
+            // 触发佣金计算（best-effort，失败发事件）
+            if T::CommissionHandler::on_order_completed(
                 order.shop_id,
                 order_id,
                 &order.buyer,
                 order.total_amount,
-            );
+            ).is_err() {
+                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionComplete });
+            }
 
             // 发放购物积分奖励（需要 entity_id，不是 shop_id）
             if let Some(entity_id) = T::ShopProvider::shop_entity_id(order.shop_id) {
-                let _ = T::EntityToken::reward_on_purchase(
+                if T::EntityToken::reward_on_purchase(
                     entity_id,
                     &order.buyer,
                     order.total_amount,
-                );
+                ).is_err() {
+                    Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::TokenReward });
+                }
             }
 
             OrderStats::<T>::mutate(|stats| {
@@ -787,27 +826,41 @@ pub mod pallet {
                         // 发货超时：自动退款
                         MallOrderStatus::Paid => {
                             if order.requires_shipping {
-                                // 实物商品：未发货 → 退款
-                                let _ = T::Escrow::refund_all(order_id, &order.buyer);
-                                let _ = T::ProductProvider::restore_stock(order.product_id, order.quantity);
-                                let _ = T::CommissionHandler::on_order_cancelled(order_id);
-                                Orders::<T>::mutate(order_id, |o| {
-                                    if let Some(ord) = o {
-                                        ord.status = MallOrderStatus::Refunded;
+                                // 实物商品：未发货 → 退款（Escrow 失败则跳过，避免状态不一致）
+                                if T::Escrow::refund_all(order_id, &order.buyer).is_ok() {
+                                    if T::ProductProvider::restore_stock(order.product_id, order.quantity).is_err() {
+                                        Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::StockRestore });
                                     }
-                                });
-                                processed = processed.saturating_add(1);
+                                    if T::CommissionHandler::on_order_cancelled(order_id).is_err() {
+                                        Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionCancel });
+                                    }
+                                    Orders::<T>::mutate(order_id, |o| {
+                                        if let Some(ord) = o {
+                                            ord.status = MallOrderStatus::Refunded;
+                                        }
+                                    });
+                                    processed = processed.saturating_add(1);
+                                } else {
+                                    Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::EscrowRefund });
+                                }
                             } else if order.product_category == ProductCategory::Service {
-                                // 服务类商品：卖家未开始服务 → 退款
-                                let _ = T::Escrow::refund_all(order_id, &order.buyer);
-                                let _ = T::ProductProvider::restore_stock(order.product_id, order.quantity);
-                                let _ = T::CommissionHandler::on_order_cancelled(order_id);
-                                Orders::<T>::mutate(order_id, |o| {
-                                    if let Some(ord) = o {
-                                        ord.status = MallOrderStatus::Refunded;
+                                // 服务类商品：卖家未开始服务 → 退款（Escrow 失败则跳过）
+                                if T::Escrow::refund_all(order_id, &order.buyer).is_ok() {
+                                    if T::ProductProvider::restore_stock(order.product_id, order.quantity).is_err() {
+                                        Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::StockRestore });
                                     }
-                                });
-                                processed = processed.saturating_add(1);
+                                    if T::CommissionHandler::on_order_cancelled(order_id).is_err() {
+                                        Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionCancel });
+                                    }
+                                    Orders::<T>::mutate(order_id, |o| {
+                                        if let Some(ord) = o {
+                                            ord.status = MallOrderStatus::Refunded;
+                                        }
+                                    });
+                                    processed = processed.saturating_add(1);
+                                } else {
+                                    Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::EscrowRefund });
+                                }
                             }
                         }
                         // 确认超时：自动确认收货/服务
@@ -818,9 +871,10 @@ pub mod pallet {
                                 && order.service_completed_at.is_none()
                             {
                                 // 服务进行中，不自动完成，跳过
-                            } else {
-                                let _ = Self::do_complete_order(order_id, &order);
+                            } else if Self::do_complete_order(order_id, &order).is_ok() {
                                 processed = processed.saturating_add(1);
+                            } else {
+                                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::AutoComplete });
                             }
                         }
                         // 已被手动处理（取消/退款/确认等），跳过
@@ -851,6 +905,14 @@ pub mod pallet {
             Orders::<T>::get(order_id).map(|o| o.buyer)
         }
 
+        fn order_seller(order_id: u64) -> Option<T::AccountId> {
+            Orders::<T>::get(order_id).map(|o| o.seller)
+        }
+
+        fn order_amount(order_id: u64) -> Option<BalanceOf<T>> {
+            Orders::<T>::get(order_id).map(|o| o.total_amount)
+        }
+
         fn order_shop_id(order_id: u64) -> Option<u64> {
             Orders::<T>::get(order_id).map(|o| o.shop_id)
         }
@@ -858,6 +920,24 @@ pub mod pallet {
         fn is_order_completed(order_id: u64) -> bool {
             Orders::<T>::get(order_id)
                 .map(|o| o.status == MallOrderStatus::Completed)
+                .unwrap_or(false)
+        }
+
+        fn is_order_disputed(order_id: u64) -> bool {
+            Orders::<T>::get(order_id)
+                .map(|o| o.status == MallOrderStatus::Disputed)
+                .unwrap_or(false)
+        }
+
+        fn can_dispute(order_id: u64, who: &T::AccountId) -> bool {
+            Orders::<T>::get(order_id)
+                .map(|o| {
+                    // 必须是买家或卖家
+                    let is_party = o.buyer == *who || o.seller == *who;
+                    // 订单状态必须是 Paid 或 Shipped（未完成且未争议）
+                    let status_ok = matches!(o.status, MallOrderStatus::Paid | MallOrderStatus::Shipped);
+                    is_party && status_ok
+                })
                 .unwrap_or(false)
         }
     }

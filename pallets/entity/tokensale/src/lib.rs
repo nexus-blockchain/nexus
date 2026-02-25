@@ -158,10 +158,9 @@ pub mod pallet {
         pub enabled: bool,
     }
 
-    /// 发售轮次（白名单已拆分为独立存储）
+    /// 发售轮次（支付选项和白名单已拆分为独立存储）
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
-    #[scale_info(skip_type_params(MaxPaymentOptions))]
-    pub struct SaleRound<AccountId, Balance, BlockNumber, AssetId, MaxPaymentOptions: Get<u32>> {
+    pub struct SaleRound<AccountId, Balance, BlockNumber> {
         /// 轮次 ID
         pub id: u64,
         /// 实体 ID
@@ -178,8 +177,8 @@ pub mod pallet {
         pub remaining_amount: Balance,
         /// 参与人数
         pub participants_count: u32,
-        /// 支付选项
-        pub payment_options: BoundedVec<PaymentConfig<AssetId, Balance>, MaxPaymentOptions>,
+        /// 支付选项数（实际数据在 RoundPaymentOptions 独立存储）
+        pub payment_options_count: u32,
         /// 锁仓配置
         pub vesting_config: VestingConfig<BlockNumber>,
         /// 是否需要 KYC
@@ -200,6 +199,12 @@ pub mod pallet {
         pub created_at: BlockNumber,
         /// 募集资金是否已提取
         pub funds_withdrawn: bool,
+        /// 取消时间（用于退款宽限期计算）
+        pub cancelled_at: Option<BlockNumber>,
+        /// 累计已退回的 Entity 代币数
+        pub total_refunded_tokens: Balance,
+        /// 累计已退回的 NEX 数
+        pub total_refunded_nex: Balance,
     }
 
     /// 发售轮次类型别名
@@ -207,8 +212,6 @@ pub mod pallet {
         <T as frame_system::Config>::AccountId,
         BalanceOf<T>,
         BlockNumberFor<T>,
-        AssetIdOf<T>,
-        <T as Config>::MaxPaymentOptions,
     >;
 
     /// 认购记录
@@ -287,6 +290,14 @@ pub mod pallet {
         /// 最大认购人数（每轮次）
         #[pallet::constant]
         type MaxSubscriptionsPerRound: Get<u32>;
+
+        /// 最大同时活跃轮次数（on_initialize 扫描上限）
+        #[pallet::constant]
+        type MaxActiveRounds: Get<u32>;
+
+        /// 退款宽限期（取消后多少区块内可退款，之后创建者可回收未领代币）
+        #[pallet::constant]
+        type RefundGracePeriod: Get<BlockNumberFor<Self>>;
     }
 
     #[pallet::pallet]
@@ -353,6 +364,24 @@ pub mod pallet {
         Blake2_128Concat,
         Option<AssetIdOf<T>>,  // None = native NEX
         BalanceOf<T>,
+        ValueQuery,
+    >;
+
+    /// 支付选项存储（从 SaleRound 拆出，减少频繁读写开销）
+    #[pallet::storage]
+    pub type RoundPaymentOptions<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // round_id
+        BoundedVec<PaymentConfig<AssetIdOf<T>, BalanceOf<T>>, T::MaxPaymentOptions>,
+        ValueQuery,
+    >;
+
+    /// 当前活跃轮次 ID 列表（on_initialize 自动结束扫描用）
+    #[pallet::storage]
+    pub type ActiveRounds<T: Config> = StorageValue<
+        _,
+        BoundedVec<u64, T::MaxActiveRounds>,
         ValueQuery,
     >;
 
@@ -449,6 +478,18 @@ pub mod pallet {
             subscriber: T::AccountId,
             amount: BalanceOf<T>,
         },
+        /// 发售自动结束（on_initialize 触发）
+        SaleAutoEnded {
+            round_id: u64,
+            sold_amount: BalanceOf<T>,
+            participants_count: u32,
+        },
+        /// 过期未领退款已回收（创建者触发）
+        ExpiredRefundsReclaimed {
+            round_id: u64,
+            tokens_reclaimed: BalanceOf<T>,
+            nex_reclaimed: BalanceOf<T>,
+        },
     }
 
     // ==================== 错误 ====================
@@ -533,6 +574,45 @@ pub mod pallet {
         AlreadyRefunded,
         /// 购买量限额配置无效（max 须 >= min）
         InvalidPurchaseLimits,
+        /// 退款宽限期未到期
+        RefundPeriodNotExpired,
+        /// 荷兰拍卖未配置价格曲线
+        DutchAuctionNotConfigured,
+        /// 活跃轮次已满
+        ActiveRoundsFull,
+    }
+
+    // ==================== Hooks ====================
+
+    #[pallet::hooks]
+    impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        /// 每个区块自动检查并结束过期发售
+        fn on_initialize(now: BlockNumberFor<T>) -> Weight {
+            let mut weight = T::DbWeight::get().reads(1); // read ActiveRounds
+            let active = ActiveRounds::<T>::get();
+            if active.is_empty() {
+                return weight;
+            }
+
+            let mut remaining: BoundedVec<u64, T::MaxActiveRounds> = BoundedVec::default();
+
+            for &round_id in active.iter() {
+                weight = weight.saturating_add(T::DbWeight::get().reads(1));
+                let should_end = SaleRounds::<T>::get(round_id)
+                    .map(|r| r.status == RoundStatus::Active && now > r.end_block)
+                    .unwrap_or(false);
+
+                if should_end {
+                    Self::do_auto_end_sale(round_id);
+                    weight = weight.saturating_add(T::DbWeight::get().writes(1));
+                } else {
+                    let _ = remaining.try_push(round_id);
+                }
+            }
+
+            ActiveRounds::<T>::put(remaining);
+            weight.saturating_add(T::DbWeight::get().writes(1))
+        }
     }
 
     // ==================== Extrinsics ====================
@@ -579,7 +659,7 @@ pub mod pallet {
                 sold_amount: Zero::zero(),
                 remaining_amount: total_supply,
                 participants_count: 0,
-                payment_options: BoundedVec::default(),
+                payment_options_count: 0,
                 vesting_config: VestingConfig::default(),
                 kyc_required,
                 min_kyc_level,
@@ -590,6 +670,9 @@ pub mod pallet {
                 creator: who.clone(),
                 created_at: now,
                 funds_withdrawn: false,
+                cancelled_at: None,
+                total_refunded_tokens: Zero::zero(),
+                total_refunded_nex: Zero::zero(),
             };
 
             SaleRounds::<T>::insert(round_id, round);
@@ -610,6 +693,8 @@ pub mod pallet {
         }
 
         /// 添加支付选项（仅 NotStarted 状态）
+        ///
+        /// DutchAuction 模式下 price 可为 0（实际价格由荷兰公式决定）。
         #[pallet::call_index(1)]
         #[pallet::weight(Weight::from_parts(120_000_000, 6_000))]
         pub fn add_payment_option(
@@ -622,8 +707,6 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // H6: price > 0
-            ensure!(!price.is_zero(), Error::<T>::InvalidPrice);
             ensure!(!min_purchase.is_zero(), Error::<T>::InvalidPrice);
             ensure!(max_purchase_per_account >= min_purchase, Error::<T>::InvalidPurchaseLimits);
 
@@ -631,6 +714,11 @@ pub mod pallet {
                 let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
                 ensure!(round.creator == who, Error::<T>::Unauthorized);
                 ensure!(round.status == RoundStatus::NotStarted, Error::<T>::InvalidRoundStatus);
+
+                // L4: DutchAuction 模式下 price 由荷兰公式决定，允许为 0
+                if round.mode != SaleMode::DutchAuction {
+                    ensure!(!price.is_zero(), Error::<T>::InvalidPrice);
+                }
 
                 let option = PaymentConfig {
                     asset_id,
@@ -640,7 +728,12 @@ pub mod pallet {
                     enabled: true,
                 };
 
-                round.payment_options.try_push(option).map_err(|_| Error::<T>::PaymentOptionsFull)?;
+                // L2: 写入独立存储
+                RoundPaymentOptions::<T>::try_mutate(round_id, |options| -> DispatchResult {
+                    options.try_push(option).map_err(|_| Error::<T>::PaymentOptionsFull)?;
+                    Ok(())
+                })?;
+                round.payment_options_count = round.payment_options_count.saturating_add(1);
                 Ok(())
             })?;
 
@@ -745,6 +838,8 @@ pub mod pallet {
         }
 
         /// 开始发售（锁定 Entity 代币，需至少一个支付选项）
+        ///
+        /// DutchAuction 模式还需提前调用 configure_dutch_auction 设置价格曲线。
         #[pallet::call_index(5)]
         #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
         pub fn start_sale(
@@ -757,8 +852,16 @@ pub mod pallet {
                 let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
                 ensure!(round.creator == who, Error::<T>::Unauthorized);
                 ensure!(round.status == RoundStatus::NotStarted, Error::<T>::InvalidRoundStatus);
-                // L1: 必须有至少一个支付选项
-                ensure!(!round.payment_options.is_empty(), Error::<T>::NoPaymentOptions);
+                // L2: 检查独立存储中的支付选项数
+                ensure!(round.payment_options_count > 0, Error::<T>::NoPaymentOptions);
+
+                // L4: DutchAuction 必须已配置价格曲线
+                if round.mode == SaleMode::DutchAuction {
+                    ensure!(
+                        round.dutch_start_price.is_some() && round.dutch_end_price.is_some(),
+                        Error::<T>::DutchAuctionNotConfigured
+                    );
+                }
 
                 // 锁定 Entity 代币
                 let entity_account = T::EntityProvider::entity_account(round.entity_id);
@@ -766,6 +869,13 @@ pub mod pallet {
                     .map_err(|_| Error::<T>::InsufficientTokenSupply)?;
 
                 round.status = RoundStatus::Active;
+
+                // L1: 注册到活跃轮次列表（on_initialize 自动结束用）
+                ActiveRounds::<T>::try_mutate(|active| -> DispatchResult {
+                    active.try_push(round_id).map_err(|_| Error::<T>::ActiveRoundsFull)?;
+                    Ok(())
+                })?;
+
                 Self::deposit_event(Event::SaleRoundStarted { round_id });
                 Ok(())
             })
@@ -815,8 +925,9 @@ pub mod pallet {
                 );
             }
 
-            // 查找支付选项（当前仅支持 None = NEX）
-            let payment_option = round.payment_options.iter()
+            // L2: 从独立存储读取支付选项
+            let payment_options = RoundPaymentOptions::<T>::get(round_id);
+            let payment_option = payment_options.iter()
                 .find(|o| o.asset_id == payment_asset && o.enabled)
                 .ok_or(Error::<T>::InvalidPaymentAsset)?;
 
@@ -911,6 +1022,11 @@ pub mod pallet {
                 }
 
                 round.status = RoundStatus::Ended;
+
+                // L1: 从活跃列表移除
+                ActiveRounds::<T>::mutate(|active| {
+                    active.retain(|&id| id != round_id);
+                });
 
                 Self::deposit_event(Event::SaleRoundEnded {
                     round_id,
@@ -1039,6 +1155,13 @@ pub mod pallet {
                 }
 
                 round.status = RoundStatus::Cancelled;
+                round.cancelled_at = Some(<frame_system::Pallet<T>>::block_number());
+
+                // L1: 从活跃列表移除（如果是 Active 状态被取消）
+                ActiveRounds::<T>::mutate(|active| {
+                    active.retain(|&id| id != round_id);
+                });
+
                 Self::deposit_event(Event::SaleRoundCancelled { round_id });
                 Ok(())
             })
@@ -1075,10 +1198,75 @@ pub mod pallet {
 
                 sub.refunded = true;
 
+                // L3: 更新退款计数器
+                SaleRounds::<T>::mutate(round_id, |maybe_round| {
+                    if let Some(r) = maybe_round {
+                        r.total_refunded_tokens = r.total_refunded_tokens.saturating_add(sub.amount);
+                        r.total_refunded_nex = r.total_refunded_nex.saturating_add(sub.payment_amount);
+                    }
+                });
+
                 Self::deposit_event(Event::RefundClaimed {
                     round_id,
                     subscriber: who.clone(),
                     amount: sub.payment_amount,
+                });
+                Ok(())
+            })
+        }
+
+        /// 回收过期未领退款（宽限期后创建者可回收未领的 Entity 代币和 NEX）
+        ///
+        /// 防止未领取退款导致 Entity 代币永久锁定。
+        #[pallet::call_index(13)]
+        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        pub fn reclaim_unclaimed_tokens(
+            origin: OriginFor<T>,
+            round_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            SaleRounds::<T>::try_mutate(round_id, |maybe_round| -> DispatchResult {
+                let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
+                ensure!(round.creator == who, Error::<T>::Unauthorized);
+                ensure!(round.status == RoundStatus::Cancelled, Error::<T>::SaleNotCancelled);
+
+                // 检查宽限期是否已过
+                let cancelled_at = round.cancelled_at.ok_or(Error::<T>::SaleNotCancelled)?;
+                let now = <frame_system::Pallet<T>>::block_number();
+                let deadline = cancelled_at.saturating_add(T::RefundGracePeriod::get());
+                ensure!(now >= deadline, Error::<T>::RefundPeriodNotExpired);
+
+                // 计算未领取的代币和 NEX
+                let unclaimed_tokens = round.sold_amount.saturating_sub(round.total_refunded_tokens);
+                let total_raised = RaisedFunds::<T>::get(round_id, Option::<AssetIdOf<T>>::None);
+                let unclaimed_nex = total_raised.saturating_sub(round.total_refunded_nex);
+
+                let entity_account = T::EntityProvider::entity_account(round.entity_id);
+
+                // 释放未领取的 Entity 代币
+                if !unclaimed_tokens.is_zero() {
+                    T::TokenProvider::unreserve(round.entity_id, &entity_account, unclaimed_tokens);
+                }
+
+                // 将未领取的 NEX 转给 Entity
+                if !unclaimed_nex.is_zero() {
+                    let pallet_account = Self::pallet_account();
+                    T::Currency::transfer(
+                        &pallet_account,
+                        &entity_account,
+                        unclaimed_nex,
+                        ExistenceRequirement::AllowDeath,
+                    )?;
+                }
+
+                // 标记完成
+                round.status = RoundStatus::Completed;
+
+                Self::deposit_event(Event::ExpiredRefundsReclaimed {
+                    round_id,
+                    tokens_reclaimed: unclaimed_tokens,
+                    nex_reclaimed: unclaimed_nex,
                 });
                 Ok(())
             })
@@ -1270,10 +1458,34 @@ pub mod pallet {
             if round.mode == SaleMode::DutchAuction {
                 Self::calculate_dutch_price(&round).ok()
             } else {
-                round.payment_options.iter()
+                // L2: 从独立存储读取
+                let options = RoundPaymentOptions::<T>::get(round_id);
+                options.iter()
                     .find(|o| o.asset_id == asset_id && o.enabled)
                     .map(|o| o.price)
             }
+        }
+
+        /// L1: 自动结束过期发售（on_initialize 调用）
+        fn do_auto_end_sale(round_id: u64) {
+            SaleRounds::<T>::mutate(round_id, |maybe_round| {
+                if let Some(round) = maybe_round.as_mut() {
+                    // 释放未售 Entity 代币
+                    if !round.remaining_amount.is_zero() {
+                        let entity_account = T::EntityProvider::entity_account(round.entity_id);
+                        T::TokenProvider::unreserve(round.entity_id, &entity_account, round.remaining_amount);
+                    }
+                    let sold = round.sold_amount;
+                    let count = round.participants_count;
+                    round.status = RoundStatus::Ended;
+
+                    Self::deposit_event(Event::SaleAutoEnded {
+                        round_id,
+                        sold_amount: sold,
+                        participants_count: count,
+                    });
+                }
+            });
         }
 
         /// 获取用户认购信息

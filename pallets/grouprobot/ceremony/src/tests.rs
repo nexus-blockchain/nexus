@@ -88,6 +88,7 @@ fn record_ceremony_works() {
 			3, // n
 			bot_pk(1),
 			participants,
+			bot_id(1),
 		));
 
 		let record = Ceremonies::<Test>::get(ceremony_hash(1)).unwrap();
@@ -115,7 +116,7 @@ fn record_ceremony_fails_invalid_shamir() {
 		assert_noop!(
 			GroupRobotCeremony::record_ceremony(
 				RuntimeOrigin::signed(OWNER),
-				ceremony_hash(1), mrenclave(1), 0, 3, bot_pk(1), vec![[10u8; 32]],
+				ceremony_hash(1), mrenclave(1), 0, 3, bot_pk(1), vec![[10u8; 32]], bot_id(1),
 			),
 			Error::<Test>::InvalidShamirParams
 		);
@@ -124,7 +125,7 @@ fn record_ceremony_fails_invalid_shamir() {
 		assert_noop!(
 			GroupRobotCeremony::record_ceremony(
 				RuntimeOrigin::signed(OWNER),
-				ceremony_hash(1), mrenclave(1), 5, 3, bot_pk(1), vec![[10u8; 32]],
+				ceremony_hash(1), mrenclave(1), 5, 3, bot_pk(1), vec![[10u8; 32]], bot_id(1),
 			),
 			Error::<Test>::InvalidShamirParams
 		);
@@ -137,7 +138,7 @@ fn record_ceremony_fails_enclave_not_approved() {
 		assert_noop!(
 			GroupRobotCeremony::record_ceremony(
 				RuntimeOrigin::signed(OWNER),
-				ceremony_hash(1), mrenclave(99), 2, 3, bot_pk(1), vec![[10u8; 32]],
+				ceremony_hash(1), mrenclave(99), 2, 3, bot_pk(1), vec![[10u8; 32]], bot_id(1),
 			),
 			Error::<Test>::EnclaveNotApproved
 		);
@@ -152,12 +153,12 @@ fn record_ceremony_fails_duplicate() {
 		));
 		assert_ok!(GroupRobotCeremony::record_ceremony(
 			RuntimeOrigin::signed(OWNER),
-			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]],
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]], bot_id(1),
 		));
 		assert_noop!(
 			GroupRobotCeremony::record_ceremony(
 				RuntimeOrigin::signed(OWNER),
-				ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]],
+				ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]], bot_id(1),
 			),
 			Error::<Test>::CeremonyAlreadyExists
 		);
@@ -174,13 +175,13 @@ fn record_ceremony_supersedes_old() {
 		// First ceremony
 		assert_ok!(GroupRobotCeremony::record_ceremony(
 			RuntimeOrigin::signed(OWNER),
-			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]],
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]], bot_id(1),
 		));
 
 		// Second ceremony for same bot_pk
 		assert_ok!(GroupRobotCeremony::record_ceremony(
 			RuntimeOrigin::signed(OWNER),
-			ceremony_hash(2), mrenclave(1), 3, 5, bot_pk(1), vec![[10u8; 32], [11u8; 32]],
+			ceremony_hash(2), mrenclave(1), 3, 5, bot_pk(1), vec![[10u8; 32], [11u8; 32]], bot_id(1),
 		));
 
 		// Old should be Superseded
@@ -202,7 +203,7 @@ fn record_ceremony_fails_empty_participants() {
 		assert_noop!(
 			GroupRobotCeremony::record_ceremony(
 				RuntimeOrigin::signed(OWNER),
-				ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![],
+				ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![], bot_id(1),
 			),
 			Error::<Test>::EmptyParticipants
 		);
@@ -221,7 +222,7 @@ fn revoke_ceremony_works() {
 		));
 		assert_ok!(GroupRobotCeremony::record_ceremony(
 			RuntimeOrigin::signed(OWNER),
-			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]],
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]], bot_id(1),
 		));
 
 		assert_ok!(GroupRobotCeremony::revoke_ceremony(RuntimeOrigin::root(), ceremony_hash(1)));
@@ -250,7 +251,7 @@ fn revoke_ceremony_fails_already_revoked() {
 		));
 		assert_ok!(GroupRobotCeremony::record_ceremony(
 			RuntimeOrigin::signed(OWNER),
-			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]],
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]], bot_id(1),
 		));
 		assert_ok!(GroupRobotCeremony::revoke_ceremony(RuntimeOrigin::root(), ceremony_hash(1)));
 		assert_noop!(
@@ -272,7 +273,7 @@ fn force_re_ceremony_works() {
 		));
 		assert_ok!(GroupRobotCeremony::record_ceremony(
 			RuntimeOrigin::signed(OWNER),
-			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]],
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]], bot_id(1),
 		));
 
 		assert_ok!(GroupRobotCeremony::force_re_ceremony(RuntimeOrigin::root(), ceremony_hash(1)));
@@ -295,7 +296,7 @@ fn ceremony_expires_on_initialize() {
 		));
 		assert_ok!(GroupRobotCeremony::record_ceremony(
 			RuntimeOrigin::signed(OWNER),
-			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]],
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]], bot_id(1),
 		));
 		assert!(GroupRobotCeremony::is_ceremony_active(&bot_pk(1)));
 
@@ -317,7 +318,7 @@ fn ceremony_not_expired_before_time() {
 		));
 		assert_ok!(GroupRobotCeremony::record_ceremony(
 			RuntimeOrigin::signed(OWNER),
-			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]],
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]], bot_id(1),
 		));
 
 		advance_to(50);
@@ -339,7 +340,7 @@ fn helper_ceremony_shamir_params() {
 		));
 		assert_ok!(GroupRobotCeremony::record_ceremony(
 			RuntimeOrigin::signed(OWNER),
-			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]],
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]], bot_id(1),
 		));
 		assert_eq!(GroupRobotCeremony::ceremony_shamir_params(&bot_pk(1)), Some((2, 3)));
 	});
@@ -351,13 +352,15 @@ fn ceremony_provider_trait() {
 		use pallet_grouprobot_primitives::CeremonyProvider;
 
 		assert!(!<GroupRobotCeremony as CeremonyProvider>::is_ceremony_active(&bot_pk(1)));
+		assert_eq!(<GroupRobotCeremony as CeremonyProvider>::active_ceremony_hash(&bot_pk(1)), None);
+		assert_eq!(<GroupRobotCeremony as CeremonyProvider>::ceremony_participant_count(&bot_pk(1)), None);
 
 		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
 			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
 		));
 		assert_ok!(GroupRobotCeremony::record_ceremony(
 			RuntimeOrigin::signed(OWNER),
-			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]],
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]], bot_id(1),
 		));
 
 		assert!(<GroupRobotCeremony as CeremonyProvider>::is_ceremony_active(&bot_pk(1)));
@@ -365,5 +368,93 @@ fn ceremony_provider_trait() {
 			<GroupRobotCeremony as CeremonyProvider>::ceremony_shamir_params(&bot_pk(1)),
 			Some((2, 3))
 		);
+		assert_eq!(
+			<GroupRobotCeremony as CeremonyProvider>::active_ceremony_hash(&bot_pk(1)),
+			Some(ceremony_hash(1))
+		);
+		assert_eq!(
+			<GroupRobotCeremony as CeremonyProvider>::ceremony_participant_count(&bot_pk(1)),
+			Some(1)
+		);
+	});
+}
+
+// ============================================================================
+// G1: record_ceremony caller identity verification
+// ============================================================================
+
+#[test]
+fn record_ceremony_fails_not_bot_owner() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		// OTHER (account 2) tries to record for bot_id(1) owned by OWNER
+		assert_noop!(
+			GroupRobotCeremony::record_ceremony(
+				RuntimeOrigin::signed(OTHER),
+				ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]], bot_id(1),
+			),
+			Error::<Test>::NotBotOwner
+		);
+	});
+}
+
+#[test]
+fn record_ceremony_fails_bot_not_found() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		// bot_id(99) does not exist in MockBotRegistry
+		assert_noop!(
+			GroupRobotCeremony::record_ceremony(
+				RuntimeOrigin::signed(OWNER),
+				ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]], bot_id(99),
+			),
+			Error::<Test>::BotNotFound
+		);
+	});
+}
+
+// ============================================================================
+// G2: Re-ceremony marker fields
+// ============================================================================
+
+#[test]
+fn record_ceremony_first_is_not_re_ceremony() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]], bot_id(1),
+		));
+
+		let record = Ceremonies::<Test>::get(ceremony_hash(1)).unwrap();
+		assert!(!record.is_re_ceremony);
+		assert_eq!(record.supersedes, None);
+	});
+}
+
+#[test]
+fn record_ceremony_second_is_re_ceremony() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1), vec![[10u8; 32]], bot_id(1),
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(2), mrenclave(1), 3, 5, bot_pk(1), vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+
+		let record = Ceremonies::<Test>::get(ceremony_hash(2)).unwrap();
+		assert!(record.is_re_ceremony);
+		assert_eq!(record.supersedes, Some(ceremony_hash(1)));
 	});
 }

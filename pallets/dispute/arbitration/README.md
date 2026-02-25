@@ -1,55 +1,67 @@
 # pallet-arbitration
 
-> 路径：`pallets/dispute/arbitration/`
+> 路径：`pallets/dispute/arbitration/` · Runtime Index: 62
 
-仲裁争议处理系统，提供争议登记、证据管理、仲裁裁决、双向押金、统一投诉等功能，支持 12 个业务域。
+仲裁争议处理系统，提供争议登记、证据管理、仲裁裁决、双向押金、统一投诉等功能，支持 8 个业务域。
 
 ## 设计理念
 
 - **域路由架构**：8 字节域标识，多业务统一仲裁
-- **双向押金**：发起方/应诉方各锁 15% 订单金额
+- **双向押金**：发起方/应诉方各从托管锁定订单金额的 15%（`Fungible::hold`）
 - **两大子系统**：仲裁系统（资金争议）+ 投诉系统（行为投诉）
-
-## 核心功能
-
-### 仲裁系统（资金争议）
-| 功能 | 说明 |
-|------|------|
-| 争议登记 | 发起仲裁，锁定押金 |
-| 证据引用 | 通过 evidence_id 引用 pallet-evidence |
-| 应诉机制 | 设置应诉期限，超时视为弃权 |
-| 裁决执行 | Release / Refund / Partial 三种方式 |
-| 押金罚没 | 败诉罚 30%，部分胜诉各罚 50% |
-
-### 投诉系统（行为投诉）
-| 功能 | 说明 |
-|------|------|
-| 投诉类型 | 56 种类型，覆盖 12 业务域 |
-| 响应/申诉 | 被投诉方可提交申诉 |
-| 和解机制 | 双方可达成和解 |
-| 仲裁升级 | 调解失败可升级到仲裁委员会 |
+- **CID 锁定**：仲裁期间自动锁定相关证据 CID，防止删除
+- **信用集成**：裁决结果通过 `CreditUpdater` 反馈到做市商信用系统
 
 ## Extrinsics
 
 ### 仲裁相关
-| 方法 | call_index | 说明 |
-|------|-----------|------|
-| `dispute` | 0 | 发起仲裁（旧版） |
-| `arbitrate` | 1 | 仲裁员裁决（治理 Origin） |
-| `dispute_with_evidence_id` | 2 | 带证据ID发起仲裁 |
-| `append_evidence_id` | 3 | 追加证据引用 |
-| `dispute_with_two_way_deposit` | 4 | 双向押金仲裁（推荐） |
-| `respond_to_dispute` | 5 | 应诉（锁押金+提交证据） |
+| call_index | 方法 | 说明 |
+|:---:|------|------|
+| 0 | `dispute` | 发起仲裁（旧版，CID 存链） |
+| 1 | `arbitrate` | 治理裁决（DecisionOrigin）→ 分账 + 押金 + CID 解锁 + 信用分 + 归档 |
+| 2 | `dispute_with_evidence_id` | 带 evidence_id 引用发起仲裁 |
+| 3 | `append_evidence_id` | 追加证据引用（需权限校验） |
+| 4 | `dispute_with_two_way_deposit` | 双向押金仲裁（推荐）— 锁发起方 15% 押金 |
+| 5 | `respond_to_dispute` | 应诉 — 锁应诉方押金 + 提交反驳证据 |
 
 ### 投诉相关
-| 方法 | call_index | 说明 |
-|------|-----------|------|
-| `file_complaint` | 10 | 发起投诉（需押金） |
-| `respond_to_complaint` | 11 | 响应/申诉 |
-| `withdraw_complaint` | 12 | 撤销投诉 |
-| `settle_complaint` | 13 | 达成和解 |
-| `escalate_to_arbitration` | 14 | 升级到仲裁 |
-| `resolve_complaint` | 15 | 仲裁裁决投诉（治理 Origin） |
+| call_index | 方法 | 说明 |
+|:---:|------|------|
+| 10 | `file_complaint` | 发起投诉（锁 ~1 USDT 押金，Pricing 换算） |
+| 11 | `respond_to_complaint` | 被投诉方响应/申诉 |
+| 12 | `withdraw_complaint` | 撤诉（退还押金） |
+| 13 | `settle_complaint` | 和解（退还押金） |
+| 14 | `escalate_to_arbitration` | 升级到仲裁委员会 |
+| 15 | `resolve_complaint` | 治理裁决投诉（DecisionOrigin）— 胜诉退押金/败诉罚没 |
+
+## 存储
+
+### 仲裁存储
+| 存储项 | 类型 | 说明 |
+|--------|------|------|
+| `Disputed` | `DoubleMap<[u8;8], u64, ()>` | 争议登记 |
+| `EvidenceIds` | `DoubleMap<[u8;8], u64, BoundedVec<u64>>` | 证据引用列表 |
+| `LockedCidHashes` | `DoubleMap<[u8;8], u64, BoundedVec<Hash>>` | 锁定的 CID 哈希 |
+| `TwoWayDeposits` | `DoubleMap<[u8;8], u64, TwoWayDepositRecord>` | 双向押金记录 |
+
+### 归档存储
+| 存储项 | 类型 | 说明 |
+|--------|------|------|
+| `NextArchivedId` | `u64` | 归档 ID 计数器 |
+| `ArchivedDisputes` | `Map<u64, ArchivedDispute>` | 归档仲裁记录 |
+| `ArbitrationStats` | `ArbitrationPermanentStats` | 永久统计 |
+
+### 投诉存储
+| 存储项 | 类型 | 说明 |
+|--------|------|------|
+| `NextComplaintId` | `u64` | 投诉 ID 计数器 |
+| `Complaints` | `Map<u64, Complaint>` | 活跃投诉 |
+| `ArchivedComplaints` | `Map<u64, ArchivedComplaint>` | 归档投诉 |
+| `UserActiveComplaints` | `Map<AccountId, BoundedVec<u64, 50>>` | 用户活跃投诉索引 |
+| `ComplaintDeposits` | `Map<u64, Balance>` | 投诉押金记录 |
+| `DomainStats` | `Map<[u8;8], DomainStatistics>` | 域统计 |
+| `ComplaintArchiveCursor` | `u64` | 归档游标 |
+| `ComplaintExpiryCursor` | `u64` | 过期扫描游标（O(batch)） |
 
 ## 主要类型
 
@@ -59,6 +71,15 @@ pub enum Decision {
     Release,      // 全额释放（卖家胜）
     Refund,       // 全额退款（买家胜）
     Partial(u16), // 按比例分配，bps=0-10000
+}
+```
+
+### HoldReason（押金锁定原因）
+```rust
+pub enum HoldReason {
+    DisputeInitiator,   // 纠纷发起方押金
+    DisputeRespondent,  // 应诉方押金
+    ComplaintDeposit,   // 投诉押金
 }
 ```
 
@@ -77,54 +98,111 @@ pub enum ComplaintStatus {
 }
 ```
 
-### 投诉类型示例
+### ComplaintType（25 种，覆盖 8 业务域）
 
 | 业务域 | 投诉类型 |
 |-------|---------|
-| OTC | OtcSellerNotDeliver, OtcBuyerFalseClaim, OtcTradeFraud |
-| 直播 | LiveIllegalContent, LiveFalseAdvertising, LiveHarassment |
+| OTC | OtcSellerNotDeliver, OtcBuyerFalseClaim, OtcTradeFraud, OtcPriceDispute |
+| 直播 | LiveIllegalContent, LiveFalseAdvertising, LiveHarassment, LiveFraud, LiveGiftRefund, LiveOther |
 | 做市商 | MakerCreditDefault, MakerMaliciousOperation, MakerFalseQuote |
-| 聊天 | ChatHarassment, ChatFraud, ChatIllegalContent |
-| NFT | NftSellerNotDeliver, NftCounterfeit, NftTradeFraud |
+| NFT | NftSellerNotDeliver, NftCounterfeit, NftTradeFraud, NftAuctionDispute |
+| Swap | SwapMakerNotComplete, SwapVerificationTimeout, SwapFraud |
+| 会员 | MemberBenefitNotProvided, MemberServiceQuality |
+| 信用 | CreditScoreDispute, CreditPenaltyAppeal |
+| 其他 | Other |
+
+每种类型绑定：`domain()` 所属域、`penalty_rate()` 惩罚比例、`triggers_permanent_ban()` 是否永久封禁。
+
+## 错误
+
+| 错误 | 说明 |
+|------|------|
+| `AlreadyDisputed` | 重复争议登记 |
+| `NotDisputed` | 案件未登记 |
+| `InsufficientDeposit` | 押金不足 |
+| `AlreadyResponded` | 已经应诉 |
+| `ResponseDeadlinePassed` | 应诉期已过 |
+| `CounterpartyNotFound` | 无法获取对方账户 |
+| `ComplaintNotFound` | 投诉不存在 |
+| `NotAuthorized` | 无权操作 |
+| `InvalidComplaintType` | 投诉类型与域不匹配 |
+| `InvalidState` | 无效的状态转换 |
+| `TooManyComplaints` | 该对象投诉过多 |
+| `TooManyActiveComplaints` | 用户活跃投诉超限 |
 
 ## Trait 接口
 
 ### ArbitrationRouter（域路由）
 ```rust
-pub trait ArbitrationRouter<AccountId> {
-    fn can_dispute(domain: [u8; 8], object_id: u64, who: &AccountId) -> bool;
-    fn get_escrow_id(domain: [u8; 8], object_id: u64) -> Option<u64>;
-    fn get_parties(domain: [u8; 8], object_id: u64) -> Option<(AccountId, AccountId)>;
+pub trait ArbitrationRouter<AccountId, Balance> {
+    fn can_dispute(domain: [u8; 8], who: &AccountId, id: u64) -> bool;
+    fn apply_decision(domain: [u8; 8], id: u64, decision: Decision) -> DispatchResult;
+    fn get_counterparty(domain: [u8; 8], initiator: &AccountId, id: u64) -> Result<AccountId, DispatchError>;
+    fn get_order_amount(domain: [u8; 8], id: u64) -> Result<Balance, DispatchError>;
+    fn get_maker_id(domain: [u8; 8], id: u64) -> Option<u64> { None }
+}
+```
+
+### CreditUpdater（信用分更新）
+```rust
+pub trait CreditUpdater {
+    fn record_maker_dispute_result(maker_id: u64, order_id: u64, maker_win: bool) -> DispatchResult;
 }
 ```
 
 ## 配置参数
 
-| 参数 | 说明 | 默认值 |
-|------|------|-------|
-| `DisputeDepositRate` | 押金比例 | 1500 (15%) |
-| `ResponseDeadline` | 应诉期限 | 7 天 |
-| `ComplaintDeposit` | 投诉押金 | 10 UNIT |
-| `LoseDepositPenalty` | 败诉罚没比例 | 3000 (30%) |
-| `PartialPenalty` | 部分胜诉罚没 | 5000 (50%) |
+| 参数 | 说明 |
+|------|------|
+| `MaxEvidence` | 每案最大证据引用数 |
+| `MaxCidLen` | CID 最大长度 |
+| `Escrow` | 托管接口 |
+| `Router` | 域路由（runtime 注入） |
+| `DecisionOrigin` | 仲裁决策 Origin（治理/委员会） |
+| `Fungible` | Fungible 接口（`Inspect` + `Mutate` + `MutateHold`） |
+| `RuntimeHoldReason` | 押金锁定原因标识 |
+| `DepositRatioBps` | 押金比例（bps, 1500=15%） |
+| `ResponseDeadline` | 应诉期限（区块数） |
+| `RejectedSlashBps` | 败诉罚没比例（bps, 3000=30%） |
+| `PartialSlashBps` | 部分胜诉罚没（bps, 5000=50%） |
+| `ComplaintDeposit` | 投诉押金兜底金额 |
+| `ComplaintDepositUsd` | 投诉押金 USD 价值（精度 10^6） |
+| `Pricing` | 定价接口（`PricingProvider`，换算押金） |
+| `ComplaintSlashBps` | 投诉败诉罚没比例 |
+| `TreasuryAccount` | 国库账户 |
+| `CidLockManager` | CID 锁定管理器 |
+| `CreditUpdater` | 信用分更新器 |
+| `WeightInfo` | 权重信息（7 个独立函数） |
 
 ## 集成示例
 
 ```rust
-// OTC 模块实现 ArbitrationRouter
-impl<T: Config> ArbitrationRouter<T::AccountId> for Pallet<T> {
-    fn can_dispute(domain: [u8; 8], object_id: u64, who: &T::AccountId) -> bool {
+// 业务 pallet 实现 ArbitrationRouter
+impl<T: Config> ArbitrationRouter<T::AccountId, BalanceOf<T>> for Pallet<T> {
+    fn can_dispute(domain: [u8; 8], who: &T::AccountId, id: u64) -> bool {
         if domain != *b"otc_ord_" { return false; }
-        Self::is_order_participant(object_id, who)
+        Self::is_order_participant(id, who)
     }
     
-    fn get_escrow_id(domain: [u8; 8], object_id: u64) -> Option<u64> {
-        Orders::<T>::get(object_id).map(|o| o.escrow_id)
+    fn apply_decision(domain: [u8; 8], id: u64, decision: Decision) -> DispatchResult {
+        // 按裁决执行放款/退款
+        Ok(())
+    }
+    
+    fn get_counterparty(domain: [u8; 8], initiator: &T::AccountId, id: u64)
+        -> Result<T::AccountId, DispatchError> {
+        // 返回对方账户
+        Ok(Self::get_other_party(id, initiator))
+    }
+    
+    fn get_order_amount(domain: [u8; 8], id: u64) -> Result<BalanceOf<T>, DispatchError> {
+        Orders::<T>::get(id).map(|o| o.amount).ok_or(Error::<T>::NotFound.into())
     }
 }
 ```
 
 ## 相关模块
 
-- `@/home/xiaodong/桌面/cosmos/pallets/dispute/escrow/` - 资金托管
-- `@/home/xiaodong/桌面/cosmos/pallets/dispute/evidence/` - 证据管理
+- [escrow/](../escrow/) — 资金托管（裁决接口）
+- [evidence/](../evidence/) — 证据管理（证据引用）
+- [trading/common/](../../trading/common/) — PricingProvider（投诉押金换算）

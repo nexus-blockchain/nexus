@@ -1257,3 +1257,720 @@ fn submit_verified_attestation_level_is_1_not_0() {
 		assert_eq!(record.dcap_level, 1, "C1: structure-only parse → level 1");
 	});
 }
+
+// ============================================================================
+// PeerRegistry: register_peer / deregister_peer / heartbeat_peer
+// ============================================================================
+
+fn endpoint(s: &str) -> frame_support::BoundedVec<u8, frame_support::traits::ConstU32<256>> {
+	s.as_bytes().to_vec().try_into().unwrap()
+}
+
+#[test]
+fn register_peer_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://node-a:8443"),
+		));
+		let peers = PeerRegistry::<Test>::get(bot_hash(1));
+		assert_eq!(peers.len(), 1);
+		assert_eq!(peers[0].public_key, pk(10));
+		assert_eq!(GroupRobotRegistry::peer_count(&bot_hash(1)), 1);
+	});
+}
+
+#[test]
+fn register_peer_fails_duplicate() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://node-a:8443"),
+		));
+		assert_noop!(
+			GroupRobotRegistry::register_peer(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://node-b:8443"),
+			),
+			Error::<Test>::PeerAlreadyRegistered
+		);
+	});
+}
+
+#[test]
+fn register_peer_fails_not_owner() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::register_peer(
+				RuntimeOrigin::signed(OTHER), bot_hash(1), pk(10), endpoint("https://node-a:8443"),
+			),
+			Error::<Test>::NotBotOwner
+		);
+	});
+}
+
+#[test]
+fn register_peer_fails_endpoint_empty() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::register_peer(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint(""),
+			),
+			Error::<Test>::EndpointEmpty
+		);
+	});
+}
+
+#[test]
+fn register_peer_fails_max_peers() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		// MaxPeersPerBot = 10 in mock
+		for i in 0..10u8 {
+			assert_ok!(GroupRobotRegistry::register_peer(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), pk(100 + i),
+				endpoint("https://node:8443"),
+			));
+		}
+		assert_noop!(
+			GroupRobotRegistry::register_peer(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), pk(200),
+				endpoint("https://node:8443"),
+			),
+			Error::<Test>::MaxPeersReached
+		);
+	});
+}
+
+#[test]
+fn deregister_peer_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://node-a:8443"),
+		));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(11), endpoint("https://node-b:8443"),
+		));
+		assert_eq!(GroupRobotRegistry::peer_count(&bot_hash(1)), 2);
+
+		assert_ok!(GroupRobotRegistry::deregister_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10),
+		));
+		assert_eq!(GroupRobotRegistry::peer_count(&bot_hash(1)), 1);
+		let peers = PeerRegistry::<Test>::get(bot_hash(1));
+		assert_eq!(peers[0].public_key, pk(11));
+	});
+}
+
+#[test]
+fn deregister_peer_fails_not_found() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::deregister_peer(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10),
+			),
+			Error::<Test>::PeerNotFound
+		);
+	});
+}
+
+#[test]
+fn heartbeat_peer_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://node-a:8443"),
+		));
+		let peers = PeerRegistry::<Test>::get(bot_hash(1));
+		assert_eq!(peers[0].last_seen, 1); // block 1
+
+		System::set_block_number(50);
+		assert_ok!(GroupRobotRegistry::heartbeat_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10),
+		));
+		let peers = PeerRegistry::<Test>::get(bot_hash(1));
+		assert_eq!(peers[0].last_seen, 50);
+	});
+}
+
+#[test]
+fn heartbeat_peer_fails_not_found() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::heartbeat_peer(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10),
+			),
+			Error::<Test>::PeerNotFound
+		);
+	});
+}
+
+// ============================================================================
+// G4: Peer heartbeat expiry (on_initialize)
+// ============================================================================
+
+#[test]
+fn peer_expires_after_heartbeat_timeout() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		// Register peer at block 1
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://a:8443"),
+		));
+		assert_eq!(PeerRegistry::<Test>::get(bot_hash(1)).len(), 1);
+
+		// Advance past timeout (PeerHeartbeatTimeout=50, AttestationCheckInterval=10)
+		// Peer registered at block 1, last_seen=1. At block 60: 60-1=59 > 50 → expired
+		advance_to(60);
+
+		assert_eq!(PeerRegistry::<Test>::get(bot_hash(1)).len(), 0);
+		System::assert_has_event(RuntimeEvent::GroupRobotRegistry(
+			crate::Event::PeerExpired { bot_id_hash: bot_hash(1), public_key: pk(10), peer_count: 0 },
+		));
+	});
+}
+
+#[test]
+fn peer_survives_if_heartbeat_fresh() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://a:8443"),
+		));
+
+		// Heartbeat at block 40 → last_seen=40
+		System::set_block_number(40);
+		assert_ok!(GroupRobotRegistry::heartbeat_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10),
+		));
+
+		// At block 60: 60-40=20 < 50 → NOT expired
+		advance_to(60);
+		assert_eq!(PeerRegistry::<Test>::get(bot_hash(1)).len(), 1);
+
+		// At block 100: 100-40=60 > 50 → expired
+		advance_to(100);
+		assert_eq!(PeerRegistry::<Test>::get(bot_hash(1)).len(), 0);
+	});
+}
+
+#[test]
+fn peer_expiry_partial_removes_only_stale() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		// Peer A at block 1
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://a:8443"),
+		));
+		// Peer B at block 30
+		System::set_block_number(30);
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(11), endpoint("https://b:8443"),
+		));
+		assert_eq!(PeerRegistry::<Test>::get(bot_hash(1)).len(), 2);
+
+		// At block 60: Peer A (last_seen=1, 60-1=59>50) expires, Peer B (last_seen=30, 60-30=30<50) survives
+		advance_to(60);
+		let peers = PeerRegistry::<Test>::get(bot_hash(1));
+		assert_eq!(peers.len(), 1);
+		assert_eq!(peers[0].public_key, pk(11));
+	});
+}
+
+#[test]
+fn register_peer_fails_deactivated_bot() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::deactivate_bot(RuntimeOrigin::signed(OWNER), bot_hash(1)));
+		assert_noop!(
+			GroupRobotRegistry::register_peer(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://node:8443"),
+			),
+			Error::<Test>::BotNotActive
+		);
+	});
+}
+
+// ============================================================================
+// SGX DCAP 验证: submit_sgx_attestation
+// ============================================================================
+
+/// 构建 SGX Quote v3 (带真实 P-256 签名)
+/// report_data[0..32] = SHA256(bot_public_key)
+fn build_sgx_quote(
+	mrenclave_val: &[u8; 32],
+	public_key: &[u8; 32],
+) -> (Vec<u8>, [u8; 64]) {
+	use crate::dcap::test_utils::TestSgxQuoteBuilder;
+
+	let mut rd = [0u8; 64];
+	let pk_hash = sp_core::hashing::sha2_256(public_key);
+	rd[..32].copy_from_slice(&pk_hash);
+
+	let builder = TestSgxQuoteBuilder::new(1)
+		.with_mrenclave(*mrenclave_val)
+		.with_report_data(rd);
+
+	let pck_key = builder.pck_public_key();
+	let quote = builder.build();
+	(quote, pck_key)
+}
+
+#[test]
+fn sgx_attestation_works() {
+	new_test_ext().execute_with(|| {
+		// Setup: approve MRTD + MRENCLAVE, register bot, submit TDX attestation
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::approve_mrenclave(RuntimeOrigin::root(), mrenclave(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::submit_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			[1u8; 32], None, mrtd(1), None,
+		));
+
+		// Verify: no dual attestation yet
+		assert!(!GroupRobotRegistry::has_dual_attestation(&bot_hash(1)));
+
+		// Submit SGX attestation (Level 2)
+		let (sgx_quote, _pck) = build_sgx_quote(&mrenclave(1), &pk(1));
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			sgx_quote.try_into().unwrap();
+
+		assert_ok!(GroupRobotRegistry::submit_sgx_attestation(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			bounded,
+			None, None, None,
+		));
+
+		// Verify: now has dual attestation
+		let record = Attestations::<Test>::get(bot_hash(1)).unwrap();
+		assert!(record.is_dual_attestation);
+		assert_eq!(record.mrenclave, Some(mrenclave(1)));
+		assert!(record.sgx_quote_hash.is_some());
+		assert!(GroupRobotRegistry::has_dual_attestation(&bot_hash(1)));
+
+		// Verify: BotInfo updated
+		let bot = Bots::<Test>::get(bot_hash(1)).unwrap();
+		if let NodeType::TeeNode { mrenclave: sgx_mre, sgx_attested_at, .. } = bot.node_type {
+			assert_eq!(sgx_mre, Some(mrenclave(1)));
+			assert!(sgx_attested_at.is_some());
+		} else {
+			panic!("expected TeeNode");
+		}
+	});
+}
+
+#[test]
+fn sgx_attestation_fails_without_tdx() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrenclave(RuntimeOrigin::root(), mrenclave(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		// No TDX attestation submitted → AttestationNotFound
+		let (sgx_quote, _pck) = build_sgx_quote(&mrenclave(1), &pk(1));
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			sgx_quote.try_into().unwrap();
+
+		assert_noop!(
+			GroupRobotRegistry::submit_sgx_attestation(
+				RuntimeOrigin::signed(OWNER), bot_hash(1),
+				bounded, None, None, None,
+			),
+			Error::<Test>::AttestationNotFound
+		);
+	});
+}
+
+#[test]
+fn sgx_attestation_fails_mrenclave_not_approved() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::submit_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			[1u8; 32], None, mrtd(1), None,
+		));
+
+		// MRENCLAVE not approved → MrenclaveNotApproved
+		let (sgx_quote, _pck) = build_sgx_quote(&mrenclave(1), &pk(1));
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			sgx_quote.try_into().unwrap();
+
+		assert_noop!(
+			GroupRobotRegistry::submit_sgx_attestation(
+				RuntimeOrigin::signed(OWNER), bot_hash(1),
+				bounded, None, None, None,
+			),
+			Error::<Test>::MrenclaveNotApproved
+		);
+	});
+}
+
+#[test]
+fn sgx_attestation_fails_report_data_mismatch() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::approve_mrenclave(RuntimeOrigin::root(), mrenclave(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::submit_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			[1u8; 32], None, mrtd(1), None,
+		));
+
+		// Build SGX quote with WRONG public key → report_data mismatch
+		let (sgx_quote, _pck) = build_sgx_quote(&mrenclave(1), &pk(99));
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			sgx_quote.try_into().unwrap();
+
+		assert_noop!(
+			GroupRobotRegistry::submit_sgx_attestation(
+				RuntimeOrigin::signed(OWNER), bot_hash(1),
+				bounded, None, None, None,
+			),
+			Error::<Test>::QuoteReportDataMismatch
+		);
+	});
+}
+
+#[test]
+fn sgx_level3_attestation_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::approve_mrenclave(RuntimeOrigin::root(), mrenclave(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::submit_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			[1u8; 32], None, mrtd(1), None,
+		));
+
+		let (sgx_quote, pck_key) = build_sgx_quote(&mrenclave(1), &pk(1));
+
+		// Register PCK key for Level 3
+		let platform_id = [0x02u8; 32];
+		assert_ok!(GroupRobotRegistry::register_pck_key(
+			RuntimeOrigin::root(), platform_id, pck_key,
+		));
+
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			sgx_quote.try_into().unwrap();
+
+		assert_ok!(GroupRobotRegistry::submit_sgx_attestation(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			bounded,
+			Some(platform_id),
+			None, None,
+		));
+
+		let record = Attestations::<Test>::get(bot_hash(1)).unwrap();
+		assert!(record.is_dual_attestation);
+		assert_eq!(record.mrenclave, Some(mrenclave(1)));
+	});
+}
+
+#[test]
+fn sgx_attestation_tampered_quote_rejected() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::approve_mrenclave(RuntimeOrigin::root(), mrenclave(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::submit_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			[1u8; 32], None, mrtd(1), None,
+		));
+
+		let (mut sgx_quote, _pck) = build_sgx_quote(&mrenclave(1), &pk(1));
+		// Tamper with MRENCLAVE after signing → ECDSA sig invalid
+		sgx_quote[crate::dcap::SGX_MRENCLAVE_OFFSET] ^= 0xFF;
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			sgx_quote.try_into().unwrap();
+
+		assert_noop!(
+			GroupRobotRegistry::submit_sgx_attestation(
+				RuntimeOrigin::signed(OWNER), bot_hash(1),
+				bounded, None, None, None,
+			),
+			Error::<Test>::DcapBodySignatureInvalid
+		);
+	});
+}
+
+// ============================================================================
+// submit_tee_attestation (三模式统一入口, call_index 21)
+// ============================================================================
+
+/// 构建 SGX Quote v3 (带 nonce, 用于 submit_tee_attestation)
+fn build_sgx_quote_with_nonce(
+	mrenclave_val: &[u8; 32],
+	public_key: &[u8; 32],
+	nonce: &[u8; 32],
+) -> (Vec<u8>, [u8; 64]) {
+	use crate::dcap::test_utils::TestSgxQuoteBuilder;
+
+	let mut rd = [0u8; 64];
+	let pk_hash = sp_core::hashing::sha2_256(public_key);
+	rd[..32].copy_from_slice(&pk_hash);
+	rd[32..64].copy_from_slice(nonce);
+
+	let builder = TestSgxQuoteBuilder::new(1)
+		.with_mrenclave(*mrenclave_val)
+		.with_report_data(rd);
+
+	let pck_key = builder.pck_public_key();
+	let quote = builder.build();
+	(quote, pck_key)
+}
+
+#[test]
+fn tee_attestation_tdx_only_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_dcap_quote(&mrtd(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+
+		assert_ok!(GroupRobotRegistry::submit_tee_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			bounded, None, None, None,
+		));
+
+		// Verify AttestationRecordV2
+		let record = AttestationsV2::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(record.tee_type, TeeType::Tdx);
+		assert_eq!(record.primary_measurement, mrtd(1));
+		assert!(record.mrenclave.is_none());
+		assert!(!record.is_dual_attestation);
+		assert_eq!(record.dcap_level, 2);
+
+		// Verify NodeType is TeeNodeV2
+		let bot = Bots::<Test>::get(bot_hash(1)).unwrap();
+		match bot.node_type {
+			NodeType::TeeNodeV2 { tee_type, primary_measurement, mrenclave, .. } => {
+				assert_eq!(tee_type, TeeType::Tdx);
+				assert_eq!(primary_measurement, mrtd(1));
+				assert!(mrenclave.is_none());
+			}
+			_ => panic!("expected TeeNodeV2"),
+		}
+
+		// Event emitted
+		System::assert_has_event(Event::TeeAttestationSubmitted {
+			bot_id_hash: bot_hash(1),
+			tee_type: TeeType::Tdx,
+			dcap_level: 2,
+		}.into());
+	});
+}
+
+#[test]
+fn tee_attestation_sgx_only_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrenclave(RuntimeOrigin::root(), mrenclave(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_sgx_quote_with_nonce(&mrenclave(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+
+		assert_ok!(GroupRobotRegistry::submit_tee_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			bounded, None, None, None,
+		));
+
+		// Verify AttestationRecordV2
+		let record = AttestationsV2::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(record.tee_type, TeeType::Sgx);
+		assert_eq!(record.mrenclave, Some(mrenclave(1)));
+		// primary_measurement = MRENCLAVE padded to 48B
+		let mut expected_primary = [0u8; 48];
+		expected_primary[..32].copy_from_slice(&mrenclave(1));
+		assert_eq!(record.primary_measurement, expected_primary);
+		assert!(!record.is_dual_attestation);
+		assert_eq!(record.dcap_level, 2);
+
+		// Verify NodeType is TeeNodeV2 with Sgx
+		let bot = Bots::<Test>::get(bot_hash(1)).unwrap();
+		match bot.node_type {
+			NodeType::TeeNodeV2 { tee_type, mrenclave: mr_val, .. } => {
+				assert_eq!(tee_type, TeeType::Sgx);
+				assert_eq!(mr_val, Some(mrenclave(1)));
+			}
+			_ => panic!("expected TeeNodeV2"),
+		}
+
+		System::assert_has_event(Event::TeeAttestationSubmitted {
+			bot_id_hash: bot_hash(1),
+			tee_type: TeeType::Sgx,
+			dcap_level: 2,
+		}.into());
+	});
+}
+
+#[test]
+fn tee_attestation_rejects_invalid_version() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		let _nonce = request_nonce(OWNER, bot_hash(1));
+
+		// Quote with version=5 (unsupported)
+		let mut fake = vec![0u8; 700];
+		fake[0] = 5; // version LE low byte = 5
+		fake[1] = 0;
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			fake.try_into().unwrap();
+
+		assert_noop!(
+			GroupRobotRegistry::submit_tee_attestation(
+				RuntimeOrigin::signed(OWNER), bot_hash(1),
+				bounded, None, None, None,
+			),
+			Error::<Test>::DcapQuoteInvalid
+		);
+	});
+}
+
+#[test]
+fn tee_attestation_sgx_fails_mrenclave_not_approved() {
+	new_test_ext().execute_with(|| {
+		// No mrenclave approved
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_sgx_quote_with_nonce(&mrenclave(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+
+		assert_noop!(
+			GroupRobotRegistry::submit_tee_attestation(
+				RuntimeOrigin::signed(OWNER), bot_hash(1),
+				bounded, None, None, None,
+			),
+			Error::<Test>::MrenclaveNotApproved
+		);
+	});
+}
+
+#[test]
+fn tee_attestation_tdx_fails_mrtd_not_approved() {
+	new_test_ext().execute_with(|| {
+		// No mrtd approved
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_dcap_quote(&mrtd(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+
+		assert_noop!(
+			GroupRobotRegistry::submit_tee_attestation(
+				RuntimeOrigin::signed(OWNER), bot_hash(1),
+				bounded, None, None, None,
+			),
+			Error::<Test>::MrtdNotApproved
+		);
+	});
+}
+
+#[test]
+fn tee_attestation_v2_expires_on_initialize() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_dcap_quote(&mrtd(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+
+		assert_ok!(GroupRobotRegistry::submit_tee_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			bounded, None, None, None,
+		));
+
+		// V2 record exists
+		assert!(AttestationsV2::<Test>::get(bot_hash(1)).is_some());
+		assert!(GroupRobotRegistry::is_tee_node(&bot_hash(1)));
+
+		// Advance past expiry (AttestationValidityBlocks = 100, check interval = 10)
+		advance_to(110);
+
+		// V2 record should be cleared, NodeType reset
+		assert!(AttestationsV2::<Test>::get(bot_hash(1)).is_none());
+		let bot = Bots::<Test>::get(bot_hash(1)).unwrap();
+		assert!(matches!(bot.node_type, NodeType::StandardNode));
+	});
+}
+
+#[test]
+fn tee_attestation_mode_switch_tdx_to_sgx() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::approve_mrenclave(RuntimeOrigin::root(), mrenclave(2), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		// First: TDX attestation
+		let nonce1 = request_nonce(OWNER, bot_hash(1));
+		let (tdx_quote, _pck) = build_dcap_quote(&mrtd(1), &pk(1), &nonce1);
+		let bounded1: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			tdx_quote.try_into().unwrap();
+		assert_ok!(GroupRobotRegistry::submit_tee_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			bounded1, None, None, None,
+		));
+
+		let record1 = AttestationsV2::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(record1.tee_type, TeeType::Tdx);
+
+		// Second: Switch to SGX attestation (simulating hardware migration)
+		let nonce2 = request_nonce(OWNER, bot_hash(1));
+		let (sgx_quote, _pck) = build_sgx_quote_with_nonce(&mrenclave(2), &pk(1), &nonce2);
+		let bounded2: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			sgx_quote.try_into().unwrap();
+		assert_ok!(GroupRobotRegistry::submit_tee_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			bounded2, None, None, None,
+		));
+
+		// V2 record now reflects SGX
+		let record2 = AttestationsV2::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(record2.tee_type, TeeType::Sgx);
+		assert_eq!(record2.mrenclave, Some(mrenclave(2)));
+
+		// NodeType also switched
+		let bot = Bots::<Test>::get(bot_hash(1)).unwrap();
+		match bot.node_type {
+			NodeType::TeeNodeV2 { tee_type, .. } => assert_eq!(tee_type, TeeType::Sgx),
+			_ => panic!("expected TeeNodeV2"),
+		}
+	});
+}
+
+#[test]
+fn tee_attestation_fails_not_owner() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_dcap_quote(&mrtd(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+
+		assert_noop!(
+			GroupRobotRegistry::submit_tee_attestation(
+				RuntimeOrigin::signed(OTHER), bot_hash(1),
+				bounded, None, None, None,
+			),
+			Error::<Test>::NotBotOwner
+		);
+	});
+}

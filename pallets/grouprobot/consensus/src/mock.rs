@@ -29,20 +29,30 @@ impl pallet_balances::Config for Test {
 pub struct MockBotRegistry;
 impl BotRegistryProvider<u64> for MockBotRegistry {
 	fn is_bot_active(bot_id_hash: &BotIdHash) -> bool {
-		// bot_hash(1) and bot_hash(2) are active
-		bot_id_hash[0] == 1 || bot_id_hash[0] == 2
+		matches!(bot_id_hash[0], 1 | 2 | 10 | 11)
 	}
-	fn is_tee_node(_: &BotIdHash) -> bool { false }
-	fn has_dual_attestation(_: &BotIdHash) -> bool { false }
-	fn is_attestation_fresh(_: &BotIdHash) -> bool { false }
+	fn is_tee_node(bot_id_hash: &BotIdHash) -> bool {
+		// bot_hash(10) and bot_hash(11) have valid TEE attestation
+		matches!(bot_id_hash[0], 10 | 11)
+	}
+	fn has_dual_attestation(bot_id_hash: &BotIdHash) -> bool {
+		// bot_hash(10) has SGX dual attestation, bot_hash(11) is TDX-only
+		bot_id_hash[0] == 10
+	}
+	fn is_attestation_fresh(bot_id_hash: &BotIdHash) -> bool {
+		matches!(bot_id_hash[0], 10 | 11)
+	}
 	fn bot_owner(bot_id_hash: &BotIdHash) -> Option<u64> {
 		match bot_id_hash[0] {
 			1 => Some(OWNER),
 			2 => Some(OWNER2),
+			10 => Some(OPERATOR),
+			11 => Some(OPERATOR2),
 			_ => None,
 		}
 	}
 	fn bot_public_key(_: &BotIdHash) -> Option<[u8; 32]> { None }
+	fn peer_count(_: &BotIdHash) -> u32 { 0 }
 }
 
 parameter_types! {
@@ -54,6 +64,9 @@ parameter_types! {
 	pub const BasicFee: u128 = 10;
 	pub const ProFee: u128 = 30;
 	pub const EnterpriseFee: u128 = 100;
+	pub const SequenceTtl: u64 = 100;
+	pub const MaxSeqCleanup: u32 = 10;
+	pub const MaxEraHist: u64 = 10;
 }
 
 impl pallet_grouprobot_consensus::Config for Test {
@@ -69,6 +82,9 @@ impl pallet_grouprobot_consensus::Config for Test {
 	type BasicFeePerEra = BasicFee;
 	type ProFeePerEra = ProFee;
 	type EnterpriseFeePerEra = EnterpriseFee;
+	type SequenceTtlBlocks = SequenceTtl;
+	type MaxSequenceCleanupPerBlock = MaxSeqCleanup;
+	type MaxEraHistory = MaxEraHist;
 }
 
 pub const OWNER: u64 = 1;

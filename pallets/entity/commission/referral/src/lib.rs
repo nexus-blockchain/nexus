@@ -147,7 +147,7 @@ pub mod pallet {
     // Storage
     // ========================================================================
 
-    /// 推荐链返佣配置 shop_id -> ReferralConfig
+    /// 推荐链返佣配置 entity_id -> ReferralConfig
     #[pallet::storage]
     #[pallet::getter(fn referral_config)]
     pub type ReferralConfigs<T: Config> = StorageMap<
@@ -163,7 +163,7 @@ pub mod pallet {
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
-        ReferralConfigUpdated { shop_id: u64 },
+        ReferralConfigUpdated { entity_id: u64 },
     }
 
     // ========================================================================
@@ -186,18 +186,18 @@ pub mod pallet {
         #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_direct_reward_config(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             rate: u16,
         ) -> DispatchResult {
             ensure_root(origin)?;
             ensure!(rate <= 10000, Error::<T>::InvalidRate);
 
-            ReferralConfigs::<T>::mutate(shop_id, |maybe| {
+            ReferralConfigs::<T>::mutate(entity_id, |maybe| {
                 let config = maybe.get_or_insert_with(ReferralConfig::default);
                 config.direct_reward.rate = rate;
             });
 
-            Self::deposit_event(Event::ReferralConfigUpdated { shop_id });
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
             Ok(())
         }
 
@@ -206,7 +206,7 @@ pub mod pallet {
         #[pallet::weight(Weight::from_parts(45_000_000, 4_000))]
         pub fn set_multi_level_config(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             levels: BoundedVec<MultiLevelTier, T::MaxMultiLevels>,
             max_total_rate: u16,
         ) -> DispatchResult {
@@ -216,12 +216,12 @@ pub mod pallet {
             }
             ensure!(max_total_rate <= 10000, Error::<T>::InvalidRate);
 
-            ReferralConfigs::<T>::mutate(shop_id, |maybe| {
+            ReferralConfigs::<T>::mutate(entity_id, |maybe| {
                 let config = maybe.get_or_insert_with(ReferralConfig::default);
                 config.multi_level = MultiLevelConfig { levels, max_total_rate };
             });
 
-            Self::deposit_event(Event::ReferralConfigUpdated { shop_id });
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
             Ok(())
         }
 
@@ -230,17 +230,17 @@ pub mod pallet {
         #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_fixed_amount_config(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             amount: BalanceOf<T>,
         ) -> DispatchResult {
             ensure_root(origin)?;
 
-            ReferralConfigs::<T>::mutate(shop_id, |maybe| {
+            ReferralConfigs::<T>::mutate(entity_id, |maybe| {
                 let config = maybe.get_or_insert_with(ReferralConfig::default);
                 config.fixed_amount = FixedAmountConfig { amount };
             });
 
-            Self::deposit_event(Event::ReferralConfigUpdated { shop_id });
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
             Ok(())
         }
 
@@ -249,19 +249,21 @@ pub mod pallet {
         #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_first_order_config(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             amount: BalanceOf<T>,
             rate: u16,
             use_amount: bool,
         ) -> DispatchResult {
             ensure_root(origin)?;
+            // H1 审计修复: rate 用于比例模式计算，必须 <= 10000 基点
+            ensure!(rate <= 10000, Error::<T>::InvalidRate);
 
-            ReferralConfigs::<T>::mutate(shop_id, |maybe| {
+            ReferralConfigs::<T>::mutate(entity_id, |maybe| {
                 let config = maybe.get_or_insert_with(ReferralConfig::default);
                 config.first_order = FirstOrderConfig { amount, rate, use_amount };
             });
 
-            Self::deposit_event(Event::ReferralConfigUpdated { shop_id });
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
             Ok(())
         }
 
@@ -270,18 +272,20 @@ pub mod pallet {
         #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_repeat_purchase_config(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             rate: u16,
             min_orders: u32,
         ) -> DispatchResult {
             ensure_root(origin)?;
+            // H2 审计修复: rate 必须 <= 10000 基点
+            ensure!(rate <= 10000, Error::<T>::InvalidRate);
 
-            ReferralConfigs::<T>::mutate(shop_id, |maybe| {
+            ReferralConfigs::<T>::mutate(entity_id, |maybe| {
                 let config = maybe.get_or_insert_with(ReferralConfig::default);
                 config.repeat_purchase = RepeatPurchaseConfig { rate, min_orders };
             });
 
-            Self::deposit_event(Event::ReferralConfigUpdated { shop_id });
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
             Ok(())
         }
     }
@@ -532,54 +536,55 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
 // ============================================================================
 
 impl<T: pallet::Config> pallet_commission_common::ReferralPlanWriter<pallet::BalanceOf<T>> for pallet::Pallet<T> {
-    fn set_direct_rate(shop_id: u64, rate: u16) -> Result<(), sp_runtime::DispatchError> {
-        pallet::ReferralConfigs::<T>::mutate(shop_id, |maybe| {
+    fn set_direct_rate(entity_id: u64, rate: u16) -> Result<(), sp_runtime::DispatchError> {
+        pallet::ReferralConfigs::<T>::mutate(entity_id, |maybe| {
             let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
             config.direct_reward.rate = rate;
         });
         Ok(())
     }
 
-    fn set_multi_level(shop_id: u64, level_rates: alloc::vec::Vec<u16>, max_total_rate: u16) -> Result<(), sp_runtime::DispatchError> {
-        pallet::ReferralConfigs::<T>::mutate(shop_id, |maybe| {
+    fn set_multi_level(entity_id: u64, level_rates: alloc::vec::Vec<u16>, max_total_rate: u16) -> Result<(), sp_runtime::DispatchError> {
+        // H3 审计修复: 超过 MaxMultiLevels 时返回错误而非静默清空
+        let bounded: frame_support::BoundedVec<pallet::MultiLevelTier, T::MaxMultiLevels> = level_rates
+            .into_iter()
+            .map(|rate| pallet::MultiLevelTier { rate, required_directs: 0, required_team_size: 0, required_spent: 0 })
+            .collect::<alloc::vec::Vec<_>>()
+            .try_into()
+            .map_err(|_| sp_runtime::DispatchError::Other("TooManyLevels"))?;
+        pallet::ReferralConfigs::<T>::mutate(entity_id, |maybe| {
             let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
-            let bounded: frame_support::BoundedVec<pallet::MultiLevelTier, T::MaxMultiLevels> = level_rates
-                .into_iter()
-                .map(|rate| pallet::MultiLevelTier { rate, required_directs: 0, required_team_size: 0, required_spent: 0 })
-                .collect::<alloc::vec::Vec<_>>()
-                .try_into()
-                .unwrap_or_default();
             config.multi_level = pallet::MultiLevelConfig { levels: bounded, max_total_rate };
         });
         Ok(())
     }
 
-    fn set_fixed_amount(shop_id: u64, amount: pallet::BalanceOf<T>) -> Result<(), sp_runtime::DispatchError> {
-        pallet::ReferralConfigs::<T>::mutate(shop_id, |maybe| {
+    fn set_fixed_amount(entity_id: u64, amount: pallet::BalanceOf<T>) -> Result<(), sp_runtime::DispatchError> {
+        pallet::ReferralConfigs::<T>::mutate(entity_id, |maybe| {
             let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
             config.fixed_amount = pallet::FixedAmountConfig { amount };
         });
         Ok(())
     }
 
-    fn set_first_order(shop_id: u64, amount: pallet::BalanceOf<T>, rate: u16, use_amount: bool) -> Result<(), sp_runtime::DispatchError> {
-        pallet::ReferralConfigs::<T>::mutate(shop_id, |maybe| {
+    fn set_first_order(entity_id: u64, amount: pallet::BalanceOf<T>, rate: u16, use_amount: bool) -> Result<(), sp_runtime::DispatchError> {
+        pallet::ReferralConfigs::<T>::mutate(entity_id, |maybe| {
             let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
             config.first_order = pallet::FirstOrderConfig { amount, rate, use_amount };
         });
         Ok(())
     }
 
-    fn set_repeat_purchase(shop_id: u64, rate: u16, min_orders: u32) -> Result<(), sp_runtime::DispatchError> {
-        pallet::ReferralConfigs::<T>::mutate(shop_id, |maybe| {
+    fn set_repeat_purchase(entity_id: u64, rate: u16, min_orders: u32) -> Result<(), sp_runtime::DispatchError> {
+        pallet::ReferralConfigs::<T>::mutate(entity_id, |maybe| {
             let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
             config.repeat_purchase = pallet::RepeatPurchaseConfig { rate, min_orders };
         });
         Ok(())
     }
 
-    fn clear_config(shop_id: u64) -> Result<(), sp_runtime::DispatchError> {
-        pallet::ReferralConfigs::<T>::remove(shop_id);
+    fn clear_config(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
+        pallet::ReferralConfigs::<T>::remove(entity_id);
         Ok(())
     }
 }

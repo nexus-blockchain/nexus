@@ -258,17 +258,8 @@ mod runtime {
 	// Trading Pallets
 	// ============================================================================
 
-	#[runtime::pallet_index(50)]
-	pub type TradingPricing = pallet_trading_pricing;
-
-	#[runtime::pallet_index(51)]
-	pub type TradingCredit = pallet_trading_credit;
-
-	#[runtime::pallet_index(52)]
-	pub type TradingMaker = pallet_trading_maker;
-
-	#[runtime::pallet_index(55)]
-	pub type TradingP2p = pallet_trading_p2p;
+	#[runtime::pallet_index(56)]
+	pub type NexMarket = pallet_nex_market;
 
 	// ============================================================================
 	// Escrow, Referral, IPFS Pallets

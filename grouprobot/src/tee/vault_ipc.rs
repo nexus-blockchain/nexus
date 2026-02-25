@@ -34,6 +34,16 @@ pub enum VaultRequest {
     Ping,
     /// 安全关闭 (zeroize all tokens)
     Shutdown,
+    /// 创建 RA-TLS Provision 会话 (SGX vault 生成 Quote + X25519 密钥对)
+    CreateProvisionSession,
+    /// 消费 Provision 会话: SGX vault 内 ECDH 解密 + 注入 Token
+    ConsumeProvisionSession {
+        session_id: [u8; 16],
+        ephemeral_pk: [u8; 32],
+        ciphertext: Vec<u8>,
+        nonce: [u8; 12],
+        platform: String,
+    },
 }
 
 /// IPC 响应
@@ -49,6 +59,17 @@ pub enum VaultResponse {
     Pong,
     /// 已关闭
     ShutdownAck,
+    /// Provision 会话已创建 (SGX Quote + X25519 PK)
+    ProvisionSessionCreated {
+        session_id: [u8; 16],
+        quote: Vec<u8>,
+        x25519_pk: [u8; 32],
+        tee_measurement: Vec<u8>,
+    },
+    /// Token 已在 SGX 内解密并注入
+    TokenInjected {
+        bot_id_hash: Option<[u8; 32]>,
+    },
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -61,12 +82,16 @@ const MSG_BUILD_DC_IDENTIFY_PAYLOAD: u8 = 3;
 const MSG_DERIVE_TG_BOT_ID_HASH: u8 = 4;
 const MSG_PING: u8 = 10;
 const MSG_SHUTDOWN: u8 = 11;
+const MSG_CREATE_PROVISION_SESSION: u8 = 20;
+const MSG_CONSUME_PROVISION_SESSION: u8 = 21;
 
 const RESP_OK_STRING: u8 = 128;
 const RESP_OK_HASH: u8 = 129;
 const RESP_ERROR: u8 = 130;
 const RESP_PONG: u8 = 131;
 const RESP_SHUTDOWN_ACK: u8 = 132;
+const RESP_PROVISION_SESSION: u8 = 133;
+const RESP_TOKEN_INJECTED: u8 = 134;
 
 /// 最大消息长度 (64KB, 防止恶意超大消息)
 const MAX_MSG_LEN: u32 = 65536;
@@ -99,6 +124,20 @@ impl VaultRequest {
             }
             Self::Shutdown => {
                 payload.push(MSG_SHUTDOWN);
+            }
+            Self::CreateProvisionSession => {
+                payload.push(MSG_CREATE_PROVISION_SESSION);
+            }
+            Self::ConsumeProvisionSession { session_id, ephemeral_pk, ciphertext, nonce, platform } => {
+                payload.push(MSG_CONSUME_PROVISION_SESSION);
+                payload.extend_from_slice(session_id);
+                payload.extend_from_slice(ephemeral_pk);
+                payload.extend_from_slice(nonce);
+                // ciphertext length (4 bytes LE) + ciphertext
+                payload.extend_from_slice(&(ciphertext.len() as u32).to_le_bytes());
+                payload.extend_from_slice(ciphertext);
+                // platform as UTF-8
+                payload.extend_from_slice(platform.as_bytes());
             }
         }
         // 前缀: 4字节小端长度
@@ -134,6 +173,27 @@ impl VaultRequest {
             MSG_DERIVE_TG_BOT_ID_HASH => Ok(Self::DeriveTgBotIdHash),
             MSG_PING => Ok(Self::Ping),
             MSG_SHUTDOWN => Ok(Self::Shutdown),
+            MSG_CREATE_PROVISION_SESSION => Ok(Self::CreateProvisionSession),
+            MSG_CONSUME_PROVISION_SESSION => {
+                // layout: [type:1][session_id:16][ephemeral_pk:32][nonce:12][ct_len:4][ciphertext:N][platform:...]
+                if data.len() < 1 + 16 + 32 + 12 + 4 {
+                    return Err("ConsumeProvisionSession payload too short".into());
+                }
+                let mut session_id = [0u8; 16];
+                session_id.copy_from_slice(&data[1..17]);
+                let mut ephemeral_pk = [0u8; 32];
+                ephemeral_pk.copy_from_slice(&data[17..49]);
+                let mut nonce = [0u8; 12];
+                nonce.copy_from_slice(&data[49..61]);
+                let ct_len = u32::from_le_bytes([data[61], data[62], data[63], data[64]]) as usize;
+                if data.len() < 65 + ct_len {
+                    return Err("ciphertext truncated".into());
+                }
+                let ciphertext = data[65..65 + ct_len].to_vec();
+                let platform = String::from_utf8(data[65 + ct_len..].to_vec())
+                    .map_err(|e| format!("invalid platform UTF-8: {}", e))?;
+                Ok(Self::ConsumeProvisionSession { session_id, ephemeral_pk, ciphertext, nonce, platform })
+            }
             other => Err(format!("unknown request type: {}", other)),
         }
     }
@@ -161,6 +221,28 @@ impl VaultResponse {
             }
             Self::ShutdownAck => {
                 payload.push(RESP_SHUTDOWN_ACK);
+            }
+            Self::ProvisionSessionCreated { session_id, quote, x25519_pk, tee_measurement } => {
+                payload.push(RESP_PROVISION_SESSION);
+                payload.extend_from_slice(session_id);
+                payload.extend_from_slice(x25519_pk);
+                // tee_measurement length (1 byte) + tee_measurement
+                payload.push(tee_measurement.len() as u8);
+                payload.extend_from_slice(tee_measurement);
+                // quote (remaining bytes)
+                payload.extend_from_slice(quote);
+            }
+            Self::TokenInjected { bot_id_hash } => {
+                payload.push(RESP_TOKEN_INJECTED);
+                match bot_id_hash {
+                    Some(h) => {
+                        payload.push(1); // has_hash flag
+                        payload.extend_from_slice(h);
+                    }
+                    None => {
+                        payload.push(0);
+                    }
+                }
             }
         }
         let len = payload.len() as u32;
@@ -196,6 +278,36 @@ impl VaultResponse {
             }
             RESP_PONG => Ok(Self::Pong),
             RESP_SHUTDOWN_ACK => Ok(Self::ShutdownAck),
+            RESP_PROVISION_SESSION => {
+                // layout: [type:1][session_id:16][x25519_pk:32][meas_len:1][measurement:N][quote:...]
+                if data.len() < 1 + 16 + 32 + 1 {
+                    return Err("ProvisionSession response too short".into());
+                }
+                let mut session_id = [0u8; 16];
+                session_id.copy_from_slice(&data[1..17]);
+                let mut x25519_pk = [0u8; 32];
+                x25519_pk.copy_from_slice(&data[17..49]);
+                let meas_len = data[49] as usize;
+                if data.len() < 50 + meas_len {
+                    return Err("measurement truncated".into());
+                }
+                let tee_measurement = data[50..50 + meas_len].to_vec();
+                let quote = data[50 + meas_len..].to_vec();
+                Ok(Self::ProvisionSessionCreated { session_id, quote, x25519_pk, tee_measurement })
+            }
+            RESP_TOKEN_INJECTED => {
+                if data.len() < 2 {
+                    return Err("TokenInjected response too short".into());
+                }
+                let bot_id_hash = if data[1] == 1 && data.len() >= 34 {
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(&data[2..34]);
+                    Some(h)
+                } else {
+                    None
+                };
+                Ok(Self::TokenInjected { bot_id_hash })
+            }
             other => Err(format!("unknown response type: {}", other)),
         }
     }

@@ -94,7 +94,7 @@ pub mod pallet {
     // Storage
     // ========================================================================
 
-    /// 全局等级差价配置 shop_id -> LevelDiffConfig
+    /// 全局等级差价配置 entity_id -> LevelDiffConfig
     #[pallet::storage]
     #[pallet::getter(fn level_diff_config)]
     pub type LevelDiffConfigs<T: Config> = StorageMap<
@@ -103,7 +103,7 @@ pub mod pallet {
         LevelDiffConfig,
     >;
 
-    /// 自定义等级极差配置 shop_id -> CustomLevelDiffConfig
+    /// 自定义等级极差配置 entity_id -> CustomLevelDiffConfig
     #[pallet::storage]
     #[pallet::getter(fn custom_level_diff_config)]
     pub type CustomLevelDiffConfigs<T: Config> = StorageMap<
@@ -119,8 +119,8 @@ pub mod pallet {
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
-        LevelDiffConfigUpdated { shop_id: u64 },
-        CustomLevelDiffConfigUpdated { shop_id: u64 },
+        LevelDiffConfigUpdated { entity_id: u64 },
+        CustomLevelDiffConfigUpdated { entity_id: u64 },
     }
 
     #[pallet::error]
@@ -136,11 +136,13 @@ pub mod pallet {
     #[pallet::call]
     impl<T: Config> Pallet<T> {
         /// 设置全局等级差价配置
+        ///
+        /// CLD-H1 审计修复: 参数统一为 entity_id，与插件查询键一致
         #[pallet::call_index(0)]
         #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_level_diff_config(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             normal_rate: u16,
             silver_rate: u16,
             gold_rate: u16,
@@ -155,7 +157,7 @@ pub mod pallet {
             ensure!(platinum_rate <= 10000, Error::<T>::InvalidRate);
             ensure!(diamond_rate <= 10000, Error::<T>::InvalidRate);
 
-            LevelDiffConfigs::<T>::insert(shop_id, LevelDiffConfig {
+            LevelDiffConfigs::<T>::insert(entity_id, LevelDiffConfig {
                 normal_rate,
                 silver_rate,
                 gold_rate,
@@ -163,16 +165,18 @@ pub mod pallet {
                 diamond_rate,
             });
 
-            Self::deposit_event(Event::LevelDiffConfigUpdated { shop_id });
+            Self::deposit_event(Event::LevelDiffConfigUpdated { entity_id });
             Ok(())
         }
 
         /// 设置自定义等级极差配置
+        ///
+        /// CLD-H1 审计修复: 参数统一为 entity_id
         #[pallet::call_index(1)]
         #[pallet::weight(Weight::from_parts(45_000_000, 4_000))]
         pub fn set_custom_level_diff_config(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             level_rates: BoundedVec<u16, T::MaxCustomLevels>,
             max_depth: u8,
         ) -> DispatchResult {
@@ -183,12 +187,12 @@ pub mod pallet {
             }
             ensure!(max_depth > 0 && max_depth <= 20, Error::<T>::InvalidMaxDepth);
 
-            CustomLevelDiffConfigs::<T>::insert(shop_id, CustomLevelDiffConfig {
+            CustomLevelDiffConfigs::<T>::insert(entity_id, CustomLevelDiffConfig {
                 level_rates,
                 max_depth,
             });
 
-            Self::deposit_event(Event::CustomLevelDiffConfigUpdated { shop_id });
+            Self::deposit_event(Event::CustomLevelDiffConfigUpdated { entity_id });
             Ok(())
         }
     }
@@ -223,6 +227,8 @@ pub mod pallet {
             while let Some(ref referrer) = current_referrer {
                 level += 1;
                 if level > max_depth { break; }
+                // M2 审计修复: 额度耗尽后提前退出，避免无意义的 storage read
+                if remaining.is_zero() { break; }
 
                 let referrer_rate = if uses_custom {
                     let level_id = T::MemberProvider::custom_level_id(shop_id, referrer);
@@ -301,8 +307,8 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
 // ============================================================================
 
 impl<T: pallet::Config> pallet_commission_common::LevelDiffPlanWriter for pallet::Pallet<T> {
-    fn set_global_rates(shop_id: u64, normal: u16, silver: u16, gold: u16, platinum: u16, diamond: u16) -> Result<(), sp_runtime::DispatchError> {
-        pallet::LevelDiffConfigs::<T>::insert(shop_id, pallet::LevelDiffConfig {
+    fn set_global_rates(entity_id: u64, normal: u16, silver: u16, gold: u16, platinum: u16, diamond: u16) -> Result<(), sp_runtime::DispatchError> {
+        pallet::LevelDiffConfigs::<T>::insert(entity_id, pallet::LevelDiffConfig {
             normal_rate: normal,
             silver_rate: silver,
             gold_rate: gold,
@@ -312,9 +318,9 @@ impl<T: pallet::Config> pallet_commission_common::LevelDiffPlanWriter for pallet
         Ok(())
     }
 
-    fn clear_config(shop_id: u64) -> Result<(), sp_runtime::DispatchError> {
-        pallet::LevelDiffConfigs::<T>::remove(shop_id);
-        pallet::CustomLevelDiffConfigs::<T>::remove(shop_id);
+    fn clear_config(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
+        pallet::LevelDiffConfigs::<T>::remove(entity_id);
+        pallet::CustomLevelDiffConfigs::<T>::remove(entity_id);
         Ok(())
     }
 }

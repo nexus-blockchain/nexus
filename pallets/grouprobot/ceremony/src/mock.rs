@@ -27,6 +27,9 @@ impl BotRegistryProvider<u64> for MockBotRegistry {
 		if bot_id_hash[0] == 1 { Some(OWNER) } else { None }
 	}
 	fn bot_public_key(_: &BotIdHash) -> Option<[u8; 32]> { None }
+	fn peer_count(bot_id_hash: &BotIdHash) -> u32 {
+		if bot_id_hash[0] == 1 { 3 } else { 0 }
+	}
 }
 
 parameter_types! {
@@ -64,6 +67,12 @@ pub fn bot_pk(n: u8) -> [u8; 32] {
 	p[0] = n;
 	p[31] = 0xBB;
 	p
+}
+
+pub fn bot_id(n: u8) -> [u8; 32] {
+	let mut h = [0u8; 32];
+	h[0] = n;
+	h
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

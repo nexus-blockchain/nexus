@@ -7,9 +7,9 @@ use frame_support::{assert_noop, assert_ok};
 #[test]
 fn place_sell_order_works() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
         assert_ok!(EntityMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 100
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100
         ));
         let order = Orders::<Test>::get(0).expect("order exists");
         assert_eq!(order.maker, ALICE);
@@ -18,8 +18,8 @@ fn place_sell_order_works() {
         assert_eq!(order.price, 100u128);
         assert_eq!(order.status, OrderStatus::Open);
         // H1: Token 应已被锁定
-        assert_eq!(get_token_balance(SHOP_ID, ALICE), 10_000_000 - 1000);
-        assert_eq!(get_token_reserved(SHOP_ID, ALICE), 1000);
+        assert_eq!(get_token_balance(ENTITY_ID, ALICE), 10_000_000 - 1000);
+        assert_eq!(get_token_reserved(ENTITY_ID, ALICE), 1000);
     });
 }
 
@@ -28,7 +28,7 @@ fn place_sell_order_fails_market_not_enabled() {
     ExtBuilder::build().execute_with(|| {
         // M6: 未配置市场 → MarketNotEnabled
         assert_noop!(
-            EntityMarket::place_sell_order(RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 100),
+            EntityMarket::place_sell_order(RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100),
             Error::<Test>::MarketNotEnabled
         );
     });
@@ -37,9 +37,9 @@ fn place_sell_order_fails_market_not_enabled() {
 #[test]
 fn place_sell_order_fails_zero_price() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
         assert_noop!(
-            EntityMarket::place_sell_order(RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 0),
+            EntityMarket::place_sell_order(RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 0),
             Error::<Test>::ZeroPrice
         );
     });
@@ -48,9 +48,9 @@ fn place_sell_order_fails_zero_price() {
 #[test]
 fn place_sell_order_fails_zero_amount() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
         assert_noop!(
-            EntityMarket::place_sell_order(RuntimeOrigin::signed(ALICE), SHOP_ID, 0, 100),
+            EntityMarket::place_sell_order(RuntimeOrigin::signed(ALICE), ENTITY_ID, 0, 100),
             Error::<Test>::AmountTooSmall
         );
     });
@@ -59,10 +59,10 @@ fn place_sell_order_fails_zero_amount() {
 #[test]
 fn place_sell_order_fails_insufficient_token() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
         // ALICE has 10_000_000, try to sell 20_000_000
         assert_noop!(
-            EntityMarket::place_sell_order(RuntimeOrigin::signed(ALICE), SHOP_ID, 20_000_000, 100),
+            EntityMarket::place_sell_order(RuntimeOrigin::signed(ALICE), ENTITY_ID, 20_000_000, 100),
             Error::<Test>::InsufficientTokenBalance
         );
     });
@@ -71,10 +71,10 @@ fn place_sell_order_fails_insufficient_token() {
 #[test]
 fn place_buy_order_works() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
         // price=100, amount=1000 → total NEX = 100_000
         assert_ok!(EntityMarket::place_buy_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 100
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100
         ));
         let order = Orders::<Test>::get(0).expect("order exists");
         assert_eq!(order.maker, ALICE);
@@ -87,10 +87,10 @@ fn place_buy_order_works() {
 #[test]
 fn place_buy_order_fails_insufficient_nex() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
         // price=1_000_000_000, amount=1000 → overflow or insufficient
         assert_noop!(
-            EntityMarket::place_buy_order(RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 1_000_000_000_000),
+            EntityMarket::place_buy_order(RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 1_000_000_000_000),
             Error::<Test>::InsufficientBalance
         );
     });
@@ -101,11 +101,11 @@ fn place_buy_order_fails_insufficient_nex() {
 #[test]
 fn take_sell_order_works() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
 
         // ALICE 挂卖单: 1000 Token @ 100 NEX
         assert_ok!(EntityMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 100
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100
         ));
 
         let bob_nex_before = Balances::free_balance(BOB);
@@ -116,9 +116,9 @@ fn take_sell_order_works() {
         ));
 
         // H2: BOB 应该收到 Token
-        assert_eq!(get_token_balance(SHOP_ID, BOB), 10_000_000 + 1000);
+        assert_eq!(get_token_balance(ENTITY_ID, BOB), 10_000_000 + 1000);
         // ALICE 的 reserved Token 应减少
-        assert_eq!(get_token_reserved(SHOP_ID, ALICE), 0);
+        assert_eq!(get_token_reserved(ENTITY_ID, ALICE), 0);
 
         // BOB 支付 NEX: net_amount(99_000) to maker + fee(1_000) to shop_owner = 100_000 total
         let total_paid = bob_nex_before - Balances::free_balance(BOB);
@@ -136,14 +136,14 @@ fn take_sell_order_works() {
 #[test]
 fn take_buy_order_works() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
 
         // ALICE 挂买单: 1000 Token @ 100 NEX
         assert_ok!(EntityMarket::place_buy_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 100
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100
         ));
 
-        let bob_token_before = get_token_balance(SHOP_ID, BOB);
+        let bob_token_before = get_token_balance(ENTITY_ID, BOB);
 
         // BOB 吃买单 (卖 Token)
         assert_ok!(EntityMarket::take_order(
@@ -151,9 +151,9 @@ fn take_buy_order_works() {
         ));
 
         // H3: ALICE 应该收到 Token
-        assert_eq!(get_token_balance(SHOP_ID, ALICE), 10_000_000 + 1000);
+        assert_eq!(get_token_balance(ENTITY_ID, ALICE), 10_000_000 + 1000);
         // BOB 的 Token 应减少
-        assert_eq!(get_token_balance(SHOP_ID, BOB), bob_token_before - 1000);
+        assert_eq!(get_token_balance(ENTITY_ID, BOB), bob_token_before - 1000);
         // BOB 应收到 NEX (扣除手续费)
         // ALICE 的 reserved NEX 应已释放
         assert_eq!(Balances::reserved_balance(ALICE), 0);
@@ -166,11 +166,11 @@ fn take_buy_order_works() {
 #[test]
 fn take_order_partial_fill() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
 
         // ALICE 挂卖单: 2000 Token @ 100 NEX
         assert_ok!(EntityMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 2000, 100
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 2000, 100
         ));
 
         // BOB 只吃 1000
@@ -190,9 +190,9 @@ fn take_order_partial_fill() {
 #[test]
 fn take_order_fails_own_order() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
         assert_ok!(EntityMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 100
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100
         ));
         assert_noop!(
             EntityMarket::take_order(RuntimeOrigin::signed(ALICE), 0, None),
@@ -206,18 +206,18 @@ fn take_order_fails_own_order() {
 #[test]
 fn cancel_sell_order_works() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
         assert_ok!(EntityMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 100
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100
         ));
         // H4: Token 已锁定
-        assert_eq!(get_token_reserved(SHOP_ID, ALICE), 1000);
+        assert_eq!(get_token_reserved(ENTITY_ID, ALICE), 1000);
 
         assert_ok!(EntityMarket::cancel_order(RuntimeOrigin::signed(ALICE), 0));
 
         // H4: Token 应退还
-        assert_eq!(get_token_reserved(SHOP_ID, ALICE), 0);
-        assert_eq!(get_token_balance(SHOP_ID, ALICE), 10_000_000);
+        assert_eq!(get_token_reserved(ENTITY_ID, ALICE), 0);
+        assert_eq!(get_token_balance(ENTITY_ID, ALICE), 10_000_000);
 
         let order = Orders::<Test>::get(0).expect("order exists");
         assert_eq!(order.status, OrderStatus::Cancelled);
@@ -230,9 +230,9 @@ fn cancel_sell_order_works() {
 #[test]
 fn cancel_buy_order_works() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
         assert_ok!(EntityMarket::place_buy_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 100
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100
         ));
         assert_eq!(Balances::reserved_balance(ALICE), 100_000);
 
@@ -247,9 +247,9 @@ fn cancel_buy_order_works() {
 #[test]
 fn cancel_order_fails_not_owner() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
         assert_ok!(EntityMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 100
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100
         ));
         assert_noop!(
             EntityMarket::cancel_order(RuntimeOrigin::signed(BOB), 0),
@@ -264,10 +264,10 @@ fn cancel_order_fails_not_owner() {
 fn configure_market_works() {
     ExtBuilder::build().execute_with(|| {
         assert_ok!(EntityMarket::configure_market(
-            RuntimeOrigin::signed(SHOP_OWNER), SHOP_ID,
+            RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
             true, true, 200, 10, 500, 200,
         ));
-        let config = MarketConfigs::<Test>::get(SHOP_ID).expect("config exists");
+        let config = MarketConfigs::<Test>::get(ENTITY_ID).expect("config exists");
         assert!(config.cos_enabled);
         assert!(config.usdt_enabled);
         assert_eq!(config.fee_rate, 200);
@@ -279,10 +279,10 @@ fn configure_market_fails_not_owner() {
     ExtBuilder::build().execute_with(|| {
         assert_noop!(
             EntityMarket::configure_market(
-                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                RuntimeOrigin::signed(ALICE), ENTITY_ID,
                 true, true, 100, 1, 1000, 300,
             ),
-            Error::<Test>::NotShopOwner
+            Error::<Test>::NotEntityOwner
         );
     });
 }
@@ -293,7 +293,7 @@ fn configure_market_fails_invalid_fee_rate() {
         // H8: fee_rate > 5000 should fail
         assert_noop!(
             EntityMarket::configure_market(
-                RuntimeOrigin::signed(SHOP_OWNER), SHOP_ID,
+                RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
                 true, true, 5001, 1, 1000, 300,
             ),
             Error::<Test>::InvalidFeeRate
@@ -307,10 +307,10 @@ fn configure_market_fails_invalid_fee_rate() {
 fn configure_price_protection_works() {
     ExtBuilder::build().execute_with(|| {
         assert_ok!(EntityMarket::configure_price_protection(
-            RuntimeOrigin::signed(SHOP_OWNER), SHOP_ID,
+            RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
             true, 2000, 500, 5000, 100,
         ));
-        let config = PriceProtection::<Test>::get(SHOP_ID).expect("config exists");
+        let config = PriceProtection::<Test>::get(ENTITY_ID).expect("config exists");
         assert!(config.enabled);
         assert_eq!(config.max_price_deviation, 2000);
     });
@@ -322,21 +322,21 @@ fn configure_price_protection_fails_invalid_bps() {
         // M4: bps > 10000 should fail
         assert_noop!(
             EntityMarket::configure_price_protection(
-                RuntimeOrigin::signed(SHOP_OWNER), SHOP_ID,
+                RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
                 true, 10001, 500, 5000, 100,
             ),
             Error::<Test>::InvalidBasisPoints
         );
         assert_noop!(
             EntityMarket::configure_price_protection(
-                RuntimeOrigin::signed(SHOP_OWNER), SHOP_ID,
+                RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
                 true, 2000, 10001, 5000, 100,
             ),
             Error::<Test>::InvalidBasisPoints
         );
         assert_noop!(
             EntityMarket::configure_price_protection(
-                RuntimeOrigin::signed(SHOP_OWNER), SHOP_ID,
+                RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
                 true, 2000, 500, 10001, 100,
             ),
             Error::<Test>::InvalidBasisPoints
@@ -351,7 +351,7 @@ fn lift_circuit_breaker_fails_not_active() {
     ExtBuilder::build().execute_with(|| {
         // M3: 熔断未激活时调用应失败
         assert_noop!(
-            EntityMarket::lift_circuit_breaker(RuntimeOrigin::signed(SHOP_OWNER), SHOP_ID),
+            EntityMarket::lift_circuit_breaker(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID),
             Error::<Test>::MarketCircuitBreakerActive
         );
     });
@@ -363,9 +363,9 @@ fn lift_circuit_breaker_fails_not_active() {
 fn set_initial_price_works() {
     ExtBuilder::build().execute_with(|| {
         assert_ok!(EntityMarket::set_initial_price(
-            RuntimeOrigin::signed(SHOP_OWNER), SHOP_ID, 500
+            RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID, 500
         ));
-        let config = PriceProtection::<Test>::get(SHOP_ID).expect("config exists");
+        let config = PriceProtection::<Test>::get(ENTITY_ID).expect("config exists");
         assert_eq!(config.initial_price, Some(500u128));
     });
 }
@@ -375,28 +375,28 @@ fn set_initial_price_works() {
 #[test]
 fn place_usdt_sell_order_works() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
         let tron_addr = b"T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb".to_vec();
         assert_ok!(EntityMarket::place_usdt_sell_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 1_000_000, tron_addr,
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 1_000_000, tron_addr,
         ));
         let order = Orders::<Test>::get(0).expect("order exists");
         assert_eq!(order.channel, PaymentChannel::USDT);
         assert_eq!(order.usdt_price, 1_000_000);
         assert!(order.tron_address.is_some());
         // Token 应已锁定
-        assert_eq!(get_token_reserved(SHOP_ID, ALICE), 1000);
+        assert_eq!(get_token_reserved(ENTITY_ID, ALICE), 1000);
     });
 }
 
 #[test]
 fn place_usdt_sell_order_fails_invalid_tron_address() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
         // 过短的地址
         assert_noop!(
             EntityMarket::place_usdt_sell_order(
-                RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 1_000_000, b"short".to_vec(),
+                RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 1_000_000, b"short".to_vec(),
             ),
             Error::<Test>::InvalidTronAddress
         );
@@ -406,9 +406,9 @@ fn place_usdt_sell_order_fails_invalid_tron_address() {
 #[test]
 fn place_usdt_buy_order_works() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
         assert_ok!(EntityMarket::place_usdt_buy_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 1_000_000,
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 1_000_000,
         ));
         let order = Orders::<Test>::get(0).expect("order exists");
         assert_eq!(order.side, OrderSide::Buy);
@@ -421,29 +421,29 @@ fn place_usdt_buy_order_works() {
 #[test]
 fn market_buy_works() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
 
         // ALICE 挂卖单: 2000 Token @ 100 NEX
         assert_ok!(EntityMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 2000, 100
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 2000, 100
         ));
 
         // BOB 市价买 1000 Token, max_cost = 200_000
         assert_ok!(EntityMarket::market_buy(
-            RuntimeOrigin::signed(BOB), SHOP_ID, 1000, 200_000
+            RuntimeOrigin::signed(BOB), ENTITY_ID, 1000, 200_000
         ));
 
         // H5: BOB 应收到 Token
-        assert_eq!(get_token_balance(SHOP_ID, BOB), 10_000_000 + 1000);
+        assert_eq!(get_token_balance(ENTITY_ID, BOB), 10_000_000 + 1000);
     });
 }
 
 #[test]
 fn market_buy_fails_no_orders() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
         assert_noop!(
-            EntityMarket::market_buy(RuntimeOrigin::signed(BOB), SHOP_ID, 1000, 200_000),
+            EntityMarket::market_buy(RuntimeOrigin::signed(BOB), ENTITY_ID, 1000, 200_000),
             Error::<Test>::NoOrdersAvailable
         );
     });
@@ -452,22 +452,22 @@ fn market_buy_fails_no_orders() {
 #[test]
 fn market_sell_works() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
 
         // ALICE 挂买单: 2000 Token @ 100 NEX
         assert_ok!(EntityMarket::place_buy_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 2000, 100
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 2000, 100
         ));
 
         let bob_nex_before = Balances::free_balance(BOB);
 
         // BOB 市价卖 1000 Token, min_receive = 50_000
         assert_ok!(EntityMarket::market_sell(
-            RuntimeOrigin::signed(BOB), SHOP_ID, 1000, 50_000
+            RuntimeOrigin::signed(BOB), ENTITY_ID, 1000, 50_000
         ));
 
         // H5: BOB Token 应减少
-        assert_eq!(get_token_balance(SHOP_ID, BOB), 10_000_000 - 1000);
+        assert_eq!(get_token_balance(ENTITY_ID, BOB), 10_000_000 - 1000);
         // BOB 应收到 NEX
         assert!(Balances::free_balance(BOB) > bob_nex_before);
     });
@@ -480,7 +480,7 @@ fn market_not_enabled_by_default() {
     ExtBuilder::build().execute_with(|| {
         // 不调用 configure_market → 默认 cos_enabled=false
         assert_noop!(
-            EntityMarket::place_sell_order(RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 100),
+            EntityMarket::place_sell_order(RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100),
             Error::<Test>::MarketNotEnabled
         );
     });
@@ -491,16 +491,16 @@ fn market_not_enabled_by_default() {
 #[test]
 fn get_order_book_depth_works() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
 
         assert_ok!(EntityMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 100
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100
         ));
         assert_ok!(EntityMarket::place_buy_order(
-            RuntimeOrigin::signed(BOB), SHOP_ID, 500, 80
+            RuntimeOrigin::signed(BOB), ENTITY_ID, 500, 80
         ));
 
-        let depth = EntityMarket::get_order_book_depth(SHOP_ID, 10);
+        let depth = EntityMarket::get_order_book_depth(ENTITY_ID, 10);
         assert!(!depth.asks.is_empty());
         assert!(!depth.bids.is_empty());
         assert_eq!(depth.best_ask, Some(100u128));
@@ -511,13 +511,13 @@ fn get_order_book_depth_works() {
 #[test]
 fn get_market_summary_works() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
 
         assert_ok!(EntityMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 100
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100
         ));
 
-        let summary = EntityMarket::get_market_summary(SHOP_ID);
+        let summary = EntityMarket::get_market_summary(ENTITY_ID);
         assert_eq!(summary.best_ask, Some(100u128));
         assert_eq!(summary.total_ask_amount, 1000u128);
     });
@@ -528,21 +528,21 @@ fn get_market_summary_works() {
 #[test]
 fn trade_updates_stats_and_twap() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
 
         assert_ok!(EntityMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 100
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100
         ));
         assert_ok!(EntityMarket::take_order(
             RuntimeOrigin::signed(BOB), 0, None
         ));
 
-        let stats = MarketStatsStorage::<Test>::get(SHOP_ID);
+        let stats = MarketStatsStorage::<Test>::get(ENTITY_ID);
         assert_eq!(stats.total_trades, 1);
         assert!(stats.total_volume_nex > 0);
 
         // TWAP 累积器应该更新
-        let twap = TwapAccumulators::<Test>::get(SHOP_ID);
+        let twap = TwapAccumulators::<Test>::get(ENTITY_ID);
         assert!(twap.is_some());
     });
 }
@@ -552,12 +552,12 @@ fn trade_updates_stats_and_twap() {
 #[test]
 fn process_usdt_timeout_rollbacks_filled_amount() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
         let tron_addr = b"T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb".to_vec();
 
         // ALICE 挂 USDT 卖单: 2000 Token
         assert_ok!(EntityMarket::place_usdt_sell_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 2000, 1_000_000, tron_addr,
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 2000, 1_000_000, tron_addr,
         ));
 
         // BOB 预锁定 1000
@@ -590,11 +590,11 @@ fn process_usdt_timeout_rollbacks_filled_amount() {
 #[test]
 fn submit_ocw_result_works() {
     ExtBuilder::build().execute_with(|| {
-        configure_market_enabled(SHOP_ID);
+        configure_market_enabled(ENTITY_ID);
         let tron_addr = b"T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb".to_vec();
 
         assert_ok!(EntityMarket::place_usdt_sell_order(
-            RuntimeOrigin::signed(ALICE), SHOP_ID, 1000, 1_000_000, tron_addr,
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 1_000_000, tron_addr,
         ));
         assert_ok!(EntityMarket::reserve_usdt_sell_order(
             RuntimeOrigin::signed(BOB), 0, None
@@ -613,5 +613,229 @@ fn submit_ocw_result_works() {
 
         // 结果应存储
         assert!(OcwVerificationResults::<Test>::get(0).is_some());
+    });
+}
+
+// ==================== 少付处理 ====================
+
+/// 辅助：创建一个处于 AwaitingVerification 的 USDT 交易，返回 usdt_amount
+fn setup_awaiting_verification() -> u64 {
+    configure_market_enabled(ENTITY_ID);
+    let tron_addr = b"T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb".to_vec();
+
+    assert_ok!(EntityMarket::place_usdt_sell_order(
+        RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 1_000_000, tron_addr,
+    ));
+    assert_ok!(EntityMarket::reserve_usdt_sell_order(
+        RuntimeOrigin::signed(BOB), 0, None,
+    ));
+
+    let tx_hash = b"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_vec();
+    assert_ok!(EntityMarket::confirm_usdt_payment(
+        RuntimeOrigin::signed(BOB), 0, tx_hash,
+    ));
+
+    let trade = UsdtTrades::<Test>::get(0).unwrap();
+    assert_eq!(trade.status, UsdtTradeStatus::AwaitingVerification);
+    trade.usdt_amount
+}
+
+#[test]
+fn underpaid_enters_pending_then_finalize() {
+    ExtBuilder::build().execute_with(|| {
+        let expected = setup_awaiting_verification();
+
+        // 少付 90% → UnderpaidPending
+        let actual_90 = expected * 90 / 100;
+        assert_ok!(EntityMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_90));
+
+        let trade = UsdtTrades::<Test>::get(0).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::UnderpaidPending);
+        assert!(trade.underpaid_deadline.is_some());
+        assert!(EntityMarket::pending_underpaid_trades().contains(&0));
+
+        let deadline: u64 = trade.underpaid_deadline.unwrap();
+
+        // 窗口未到期 → finalize 失败
+        assert_noop!(
+            EntityMarket::finalize_underpaid(RuntimeOrigin::signed(CHARLIE), 0),
+            Error::<Test>::UnderpaidGraceNotExpired
+        );
+
+        // 推进到到期 → finalize 成功
+        System::set_block_number(deadline + 1);
+        assert_ok!(EntityMarket::finalize_underpaid(RuntimeOrigin::signed(CHARLIE), 0));
+
+        let trade = UsdtTrades::<Test>::get(0).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Completed);
+        assert!(!EntityMarket::pending_underpaid_trades().contains(&0));
+    });
+}
+
+#[test]
+fn underpaid_topup_upgrades_to_exact() {
+    ExtBuilder::build().execute_with(|| {
+        let expected = setup_awaiting_verification();
+
+        // 少付 80% → UnderpaidPending
+        let actual_80 = expected * 80 / 100;
+        assert_ok!(EntityMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_80));
+        assert_eq!(UsdtTrades::<Test>::get(0).unwrap().status, UsdtTradeStatus::UnderpaidPending);
+
+        // 补付到 100% → 自动升级为 AwaitingVerification
+        assert_ok!(EntityMarket::submit_underpaid_update(RuntimeOrigin::none(), 0, expected));
+
+        let trade = UsdtTrades::<Test>::get(0).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::AwaitingVerification);
+        assert!(!EntityMarket::pending_underpaid_trades().contains(&0));
+        assert!(EntityMarket::pending_usdt_trades().contains(&0));
+
+        // claim_verification_reward → Completed
+        assert_ok!(EntityMarket::claim_verification_reward(RuntimeOrigin::signed(CHARLIE), 0));
+        assert_eq!(UsdtTrades::<Test>::get(0).unwrap().status, UsdtTradeStatus::Completed);
+    });
+}
+
+#[test]
+fn graduated_deposit_forfeit_light_underpay() {
+    ExtBuilder::build().execute_with(|| {
+        let expected = setup_awaiting_verification();
+
+        // 少付 97% → UnderpaidPending（95%-99.5% 档位 → 20% 没收）
+        let actual_97 = expected * 97 / 100;
+        assert_ok!(EntityMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_97));
+
+        let trade = UsdtTrades::<Test>::get(0).unwrap();
+        let deposit = trade.buyer_deposit;
+        let deadline: u64 = trade.underpaid_deadline.unwrap();
+
+        let bob_reserved_before = Balances::reserved_balance(BOB);
+
+        System::set_block_number(deadline + 1);
+        assert_ok!(EntityMarket::finalize_underpaid(RuntimeOrigin::signed(CHARLIE), 0));
+
+        let trade = UsdtTrades::<Test>::get(0).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Completed);
+        // 20% 没收 → 保证金部分没收
+        assert_eq!(trade.deposit_status, BuyerDepositStatus::PartiallyForfeited);
+
+        // BOB 的锁定余额应全部释放（部分转国库，部分退还）
+        assert_eq!(Balances::reserved_balance(BOB), bob_reserved_before - deposit);
+    });
+}
+
+#[test]
+fn submit_underpaid_update_rejects_decrease() {
+    ExtBuilder::build().execute_with(|| {
+        let expected = setup_awaiting_verification();
+
+        let actual_80 = expected * 80 / 100;
+        assert_ok!(EntityMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_80));
+
+        // 尝试降低金额 → 静默忽略（不报错但不更新）
+        assert_ok!(EntityMarket::submit_underpaid_update(RuntimeOrigin::none(), 0, actual_80 - 1));
+
+        // 金额不变
+        let (_, stored_amount) = OcwVerificationResults::<Test>::get(0).unwrap();
+        assert_eq!(stored_amount, actual_80);
+    });
+}
+
+#[test]
+fn submit_underpaid_update_rejects_wrong_status() {
+    ExtBuilder::build().execute_with(|| {
+        setup_awaiting_verification();
+
+        // 交易仍在 AwaitingVerification（未提交 OCW 结果）
+        assert_noop!(
+            EntityMarket::submit_underpaid_update(RuntimeOrigin::none(), 0, 50_000_000),
+            Error::<Test>::NotUnderpaidPending
+        );
+    });
+}
+
+#[test]
+fn process_timeout_handles_underpaid_pending() {
+    ExtBuilder::build().execute_with(|| {
+        let expected = setup_awaiting_verification();
+
+        let actual_90 = expected * 90 / 100;
+        assert_ok!(EntityMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_90));
+        assert_eq!(UsdtTrades::<Test>::get(0).unwrap().status, UsdtTradeStatus::UnderpaidPending);
+
+        let trade = UsdtTrades::<Test>::get(0).unwrap();
+        let deadline: u64 = trade.underpaid_deadline.unwrap();
+
+        // 窗口未到期 → process_timeout 失败
+        assert_noop!(
+            EntityMarket::process_usdt_timeout(RuntimeOrigin::signed(CHARLIE), 0),
+            Error::<Test>::UnderpaidGraceNotExpired
+        );
+
+        // 窗口到期 → process_timeout 终裁
+        System::set_block_number(deadline + 1);
+        assert_ok!(EntityMarket::process_usdt_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+
+        assert_eq!(UsdtTrades::<Test>::get(0).unwrap().status, UsdtTradeStatus::Completed);
+        assert!(!EntityMarket::pending_underpaid_trades().contains(&0));
+    });
+}
+
+#[test]
+fn verification_grace_period_blocks_early_timeout() {
+    ExtBuilder::build().execute_with(|| {
+        setup_awaiting_verification();
+
+        let trade = UsdtTrades::<Test>::get(0).unwrap();
+        let timeout = trade.timeout_at;
+
+        // 超时后但宽限期内 → 拒绝
+        System::set_block_number(timeout + 1);
+        assert_noop!(
+            EntityMarket::process_usdt_timeout(RuntimeOrigin::signed(CHARLIE), 0),
+            Error::<Test>::StillInGracePeriod
+        );
+
+        // 超时 + 宽限期后 → 允许
+        System::set_block_number(timeout + 601);
+        assert_ok!(EntityMarket::process_usdt_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+        assert_eq!(UsdtTrades::<Test>::get(0).unwrap().status, UsdtTradeStatus::Refunded);
+    });
+}
+
+#[test]
+fn verification_timeout_settles_with_ocw_result() {
+    ExtBuilder::build().execute_with(|| {
+        let expected = setup_awaiting_verification();
+
+        // OCW 提交 exact 结果
+        assert_ok!(EntityMarket::submit_ocw_result(RuntimeOrigin::none(), 0, expected));
+
+        let trade = UsdtTrades::<Test>::get(0).unwrap();
+        let timeout = trade.timeout_at;
+
+        // 宽限期后调用 timeout → 应按 Exact 结算（不退款）
+        System::set_block_number(timeout + 601);
+        assert_ok!(EntityMarket::process_usdt_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+        assert_eq!(UsdtTrades::<Test>::get(0).unwrap().status, UsdtTradeStatus::Completed);
+    });
+}
+
+#[test]
+fn severely_underpaid_skips_grace_window() {
+    ExtBuilder::build().execute_with(|| {
+        let expected = setup_awaiting_verification();
+
+        // 严重少付 30% → 直接存储结果（不进入 UnderpaidPending）
+        let actual_30 = expected * 30 / 100;
+        assert_ok!(EntityMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_30));
+
+        let trade = UsdtTrades::<Test>::get(0).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::AwaitingVerification);
+        assert!(!EntityMarket::pending_underpaid_trades().contains(&0));
+
+        // 有 OCW 结果，claim → 直接处理
+        assert_ok!(EntityMarket::claim_verification_reward(RuntimeOrigin::signed(CHARLIE), 0));
+        assert_eq!(UsdtTrades::<Test>::get(0).unwrap().status, UsdtTradeStatus::Completed);
     });
 }

@@ -28,7 +28,7 @@ fn create_proposal_works() {
         ));
         let proposal = Proposals::<Test>::get(0).expect("proposal exists");
         assert_eq!(proposal.proposer, ALICE);
-        assert_eq!(proposal.shop_id, SHOP_ID);
+        assert_eq!(proposal.entity_id, SHOP_ID);
         assert_eq!(proposal.status, ProposalStatus::Voting);
         assert_eq!(proposal.voting_end, 1 + 100); // block 1 + VotingPeriod
     });
@@ -187,7 +187,7 @@ fn finalize_voting_passes() {
         assert!(proposal.execution_time.is_some());
 
         // H5: 通过的提案应从活跃列表移除
-        let active = ShopProposals::<Test>::get(SHOP_ID);
+        let active = EntityProposals::<Test>::get(SHOP_ID);
         assert!(!active.contains(&0));
     });
 }

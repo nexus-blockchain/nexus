@@ -74,11 +74,15 @@ impl PlatformAdapter for DiscordAdapter {
             sender_id: event.sender_id.clone(),
             sender_name: event.sender_name.clone(),
             message_text: text,
+            message_id: event.message_id.clone(),
             is_command,
             command,
             command_args: args,
             is_join_request: event.event_type == "member_join",
             is_admin: false,
+            message_type: None,
+            callback_query_id: None,
+            callback_data: None,
         }
     }
 }

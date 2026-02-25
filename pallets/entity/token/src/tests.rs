@@ -27,9 +27,9 @@ fn setup_token() {
 fn create_shop_token_works() {
     new_test_ext().execute_with(|| {
         setup_token();
-        assert!(EntityToken::shop_token_configs(SHOP_ID).is_some());
-        System::assert_has_event(RuntimeEvent::EntityToken(Event::ShopTokenCreated {
-            shop_id: SHOP_ID,
+        assert!(EntityToken::entity_token_configs(SHOP_ID).is_some());
+        System::assert_has_event(RuntimeEvent::EntityToken(Event::EntityTokenCreated {
+            entity_id: SHOP_ID,
             asset_id: 1_000_001,
             name: b"TestToken".to_vec(),
             symbol: b"TT".to_vec(),
@@ -171,7 +171,7 @@ fn update_token_config_works() {
             None,
             None,
         ));
-        let config = EntityToken::shop_token_configs(SHOP_ID).unwrap();
+        let config = EntityToken::entity_token_configs(SHOP_ID).unwrap();
         assert_eq!(config.reward_rate, 800);
     });
 }
@@ -327,7 +327,7 @@ fn configure_dividend_works() {
         assert_ok!(EntityToken::configure_dividend(
             RuntimeOrigin::signed(OWNER), SHOP_ID, true, 10,
         ));
-        let config = EntityToken::shop_token_configs(SHOP_ID).unwrap();
+        let config = EntityToken::entity_token_configs(SHOP_ID).unwrap();
         assert!(config.dividend_config.enabled);
         assert_eq!(config.dividend_config.min_period, 10);
     });
@@ -352,7 +352,7 @@ fn distribute_dividend_works() {
         assert_eq!(EntityToken::pending_dividends(SHOP_ID, &USER_A), 100);
         assert_eq!(EntityToken::pending_dividends(SHOP_ID, &USER_B), 200);
         // 检查累计金额
-        let config = EntityToken::shop_token_configs(SHOP_ID).unwrap();
+        let config = EntityToken::entity_token_configs(SHOP_ID).unwrap();
         assert_eq!(config.dividend_config.accumulated, 300);
     });
 }
@@ -552,7 +552,7 @@ fn change_token_type_updates_restrictions() {
         assert_ok!(EntityToken::change_token_type(
             RuntimeOrigin::signed(OWNER), SHOP_ID, TokenType::Equity,
         ));
-        let config = EntityToken::shop_token_configs(SHOP_ID).unwrap();
+        let config = EntityToken::entity_token_configs(SHOP_ID).unwrap();
         assert_eq!(config.token_type, TokenType::Equity);
         // Equity 的默认转账限制和 KYC 级别应被联动更新
         assert_eq!(config.transfer_restriction, TransferRestrictionMode::from_u8(TokenType::Equity.default_transfer_restriction()));
@@ -569,7 +569,7 @@ fn set_max_supply_works() {
         assert_ok!(EntityToken::set_max_supply(
             RuntimeOrigin::signed(OWNER), SHOP_ID, 10_000,
         ));
-        let config = EntityToken::shop_token_configs(SHOP_ID).unwrap();
+        let config = EntityToken::entity_token_configs(SHOP_ID).unwrap();
         assert_eq!(config.max_supply, 10_000);
     });
 }
@@ -598,7 +598,7 @@ fn set_transfer_restriction_clamped_kyc() {
             RuntimeOrigin::signed(OWNER), SHOP_ID,
             TransferRestrictionMode::KycRequired, 99,
         ));
-        let config = EntityToken::shop_token_configs(SHOP_ID).unwrap();
+        let config = EntityToken::entity_token_configs(SHOP_ID).unwrap();
         assert_eq!(config.min_receiver_kyc, 4); // clamped to 4
         // 事件也应该是 clamped 值
         System::assert_has_event(RuntimeEvent::EntityToken(Event::TransferRestrictionSet {

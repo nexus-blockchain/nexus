@@ -3,6 +3,18 @@ pub mod blacklist;
 pub mod command;
 pub mod join;
 pub mod default;
+pub mod duplicate;
+pub mod emoji;
+pub mod link_limit;
+pub mod stop_word;
+pub mod warn_tracker;
+pub mod similarity;
+pub mod classifier;
+pub mod antiphishing;
+pub mod lock;
+pub mod callback;
+pub mod text_utils;
+pub mod ad_footer;
 
 use async_trait::async_trait;
 

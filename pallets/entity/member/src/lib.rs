@@ -726,14 +726,14 @@ pub mod pallet {
                 if let Some(ref mut m) = maybe_member {
                     m.referrer = member.referrer.clone();
                 }
-            });
+            })?;
 
             // 更新推荐人的直接推荐人数
             Self::mutate_member_by_shop(shop_id, &referrer, |maybe_member| {
                 if let Some(ref mut m) = maybe_member {
                     m.direct_referrals = m.direct_referrals.saturating_add(1);
                 }
-            });
+            })?;
 
             // 更新推荐索引（entity 级别）
             DirectReferrals::<T>::try_mutate(entity_id, &referrer, |referrals| {
@@ -988,7 +988,7 @@ pub mod pallet {
                 });
 
                 Ok(())
-            })
+            })?
         }
 
         /// 切换等级系统模式
@@ -1384,15 +1384,16 @@ pub mod pallet {
 
         /// 通过 shop_id 更新会员数据
         ///
-        /// 注意: 如果 shop_id 无法解析为 entity_id，回退到 entity_id=0。
-        /// 这是安全的，因为 entity_id=0 不存在真实会员，closures 收到 None 后会正确处理。
+        /// 审计修复: 如果 shop_id 无法解析为 entity_id，返回错误，
+        /// 避免回退到 entity_id=0（0 是有效实体 ID，可能污染真实数据）。
         fn mutate_member_by_shop<R>(
             shop_id: u64,
             account: &T::AccountId,
             f: impl FnOnce(&mut Option<EntityMemberOf<T>>) -> R,
-        ) -> R {
-            let entity_id = Self::resolve_entity_id(shop_id).unwrap_or(0);
-            EntityMembers::<T>::mutate(entity_id, account, f)
+        ) -> Result<R, Error<T>> {
+            let entity_id = Self::resolve_entity_id(shop_id)
+                .ok_or(Error::<T>::ShopNotFound)?;
+            Ok(EntityMembers::<T>::mutate(entity_id, account, f))
         }
 
         /// 注册会员内部实现（统一写入 EntityMembers[entity_id]）

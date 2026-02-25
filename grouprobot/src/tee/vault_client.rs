@@ -189,6 +189,43 @@ impl VaultClient {
             _ => Ok(()), // 即使响应异常也不报错
         }
     }
+
+    /// 创建 SGX Provision 会话 (通过 IPC 委托 SGX vault)
+    ///
+    /// 返回 (session_id, quote, x25519_pk, tee_measurement)
+    pub async fn create_provision_session(&self) -> BotResult<(
+        [u8; 16], Vec<u8>, [u8; 32], Vec<u8>,
+    )> {
+        let resp = self.request(VaultRequest::CreateProvisionSession).await?;
+        match resp {
+            VaultResponse::ProvisionSessionCreated { session_id, quote, x25519_pk, tee_measurement } => {
+                Ok((session_id, quote, x25519_pk, tee_measurement))
+            }
+            VaultResponse::Error(e) => Err(BotError::EnclaveError(e)),
+            other => Err(BotError::EnclaveError(format!("unexpected provision response: {:?}", other))),
+        }
+    }
+
+    /// 消费 SGX Provision 会话: 将密文转发到 SGX vault 解密 + 注入
+    ///
+    /// Token 明文从不经过主进程, 仅在 SGX enclave 内解密
+    pub async fn consume_provision_session(
+        &self,
+        session_id: [u8; 16],
+        ephemeral_pk: [u8; 32],
+        ciphertext: Vec<u8>,
+        nonce: [u8; 12],
+        platform: String,
+    ) -> BotResult<Option<[u8; 32]>> {
+        let resp = self.request(VaultRequest::ConsumeProvisionSession {
+            session_id, ephemeral_pk, ciphertext, nonce, platform,
+        }).await?;
+        match resp {
+            VaultResponse::TokenInjected { bot_id_hash } => Ok(bot_id_hash),
+            VaultResponse::Error(e) => Err(BotError::EnclaveError(e)),
+            other => Err(BotError::EnclaveError(format!("unexpected inject response: {:?}", other))),
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -217,6 +254,21 @@ impl VaultProvider for crate::tee::token_vault::TokenVault {
     }
     async fn build_dc_identify_payload(&self, intents: u64) -> BotResult<Zeroizing<String>> {
         self.build_dc_identify_payload(intents)
+    }
+}
+
+/// In-process Arc<RwLock<TokenVault>> 实现 VaultProvider
+/// 用于 inprocess 模式: provision 路由需要写访问, executor 需要读访问
+#[async_trait::async_trait]
+impl VaultProvider for tokio::sync::RwLock<crate::tee::token_vault::TokenVault> {
+    async fn build_tg_api_url(&self, method: &str) -> BotResult<Zeroizing<String>> {
+        self.read().await.build_tg_api_url(method)
+    }
+    async fn build_dc_auth_header(&self) -> BotResult<Zeroizing<String>> {
+        self.read().await.build_dc_auth_header()
+    }
+    async fn build_dc_identify_payload(&self, intents: u64) -> BotResult<Zeroizing<String>> {
+        self.read().await.build_dc_identify_payload(intents)
     }
 }
 

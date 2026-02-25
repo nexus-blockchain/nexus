@@ -252,8 +252,8 @@ pub mod pallet {
     pub struct Proposal<T: Config> {
         /// 提案 ID
         pub id: ProposalId,
-        /// 店铺 ID
-        pub shop_id: u64,
+        /// 实体 ID（1:N 多店铺架构，提案绑定 Entity）
+        pub entity_id: u64,
         /// 提案者
         pub proposer: T::AccountId,
         /// 提案类型
@@ -443,7 +443,7 @@ pub mod pallet {
         #[pallet::constant]
         type MaxCidLength: Get<u32>;
 
-        /// 每个店铺最大活跃提案数
+        /// 每个实体最大活跃提案数
         #[pallet::constant]
         type MaxActiveProposals: Get<u32>;
 
@@ -482,16 +482,19 @@ pub mod pallet {
         ProposalOf<T>,
     >;
 
-    /// 店铺活跃提案列表
+    /// 实体活跃提案列表
     #[pallet::storage]
-    #[pallet::getter(fn shop_proposals)]
-    pub type ShopProposals<T: Config> = StorageMap<
+    #[pallet::getter(fn entity_proposals)]
+    pub type EntityProposals<T: Config> = StorageMap<
         _,
         Blake2_128Concat,
-        u64,  // shop_id
+        u64,  // entity_id
         BoundedVec<ProposalId, T::MaxActiveProposals>,
         ValueQuery,
     >;
+
+    /// 向后兼容别名
+    pub type ShopProposals<T> = EntityProposals<T>;
 
     /// 投票记录
     #[pallet::storage]
@@ -511,7 +514,7 @@ pub mod pallet {
     pub type FirstHoldTime<T: Config> = StorageDoubleMap<
         _,
         Blake2_128Concat,
-        u64,  // shop_id
+        u64,  // entity_id
         Blake2_128Concat,
         T::AccountId,
         BlockNumberFor<T>,
@@ -563,7 +566,7 @@ pub mod pallet {
         /// 提案已创建
         ProposalCreated {
             proposal_id: ProposalId,
-            shop_id: u64,
+            entity_id: u64,
             proposer: T::AccountId,
             title: Vec<u8>,
         },
@@ -673,6 +676,8 @@ pub mod pallet {
         TokenTypeNoVotingPower,
         /// 参数无效
         InvalidParameter,
+        /// 提案类型暂未实现链上执行（需链下工作者配合）
+        ProposalTypeNotImplemented,
     }
 
     // ==================== Extrinsics ====================
@@ -682,7 +687,7 @@ pub mod pallet {
         /// 创建提案
         ///
         /// # 参数
-        /// - `shop_id`: 店铺 ID
+        /// - `entity_id`: 实体 ID
         /// - `proposal_type`: 提案类型
         /// - `title`: 提案标题
         /// - `description_cid`: 提案描述 CID（可选）
@@ -690,42 +695,40 @@ pub mod pallet {
         #[pallet::weight(Weight::from_parts(50_000_000, 6_000))]
         pub fn create_proposal(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             proposal_type: ProposalType<BalanceOf<T>>,
             title: Vec<u8>,
             description_cid: Option<Vec<u8>>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证店铺存在
-            ensure!(T::ShopProvider::shop_exists(shop_id), Error::<T>::ShopNotFound);
+            // 验证实体存在
+            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::ShopNotFound);
 
             // H1: 检查治理模式，None 模式不允许创建提案
-            let entity_id = T::ShopProvider::shop_entity_id(shop_id).unwrap_or(shop_id);
             let gov_config = GovernanceConfigs::<T>::get(entity_id);
             if let Some(ref cfg) = gov_config {
                 ensure!(cfg.mode != GovernanceMode::None, Error::<T>::GovernanceModeNotAllowed);
             }
-            // 无配置时允许（向后兼容，使用全局默认参数）
 
             // H2: 验证提案参数有效性
             Self::validate_proposal_type(&proposal_type)?;
 
-            // 验证代币已启用
-            ensure!(T::TokenProvider::is_token_enabled(shop_id), Error::<T>::TokenNotEnabled);
+            // 验证代币已启用（Entity 级统一代币）
+            ensure!(T::TokenProvider::is_token_enabled(entity_id), Error::<T>::TokenNotEnabled);
 
             // 验证持有足够代币
-            let balance = T::TokenProvider::token_balance(shop_id, &who);
-            let total_supply = T::TokenProvider::total_supply(shop_id);
+            let balance = T::TokenProvider::token_balance(entity_id, &who);
+            let total_supply = T::TokenProvider::total_supply(entity_id);
             let min_threshold = total_supply
                 .saturating_mul(T::MinProposalThreshold::get().into())
                 / 10000u128.into();
             ensure!(balance >= min_threshold, Error::<T>::InsufficientTokensForProposal);
 
             // 检查活跃提案数量
-            let mut shop_proposals = ShopProposals::<T>::get(shop_id);
+            let mut entity_proposals = EntityProposals::<T>::get(entity_id);
             ensure!(
-                shop_proposals.len() < T::MaxActiveProposals::get() as usize,
+                entity_proposals.len() < T::MaxActiveProposals::get() as usize,
                 Error::<T>::TooManyActiveProposals
             );
 
@@ -743,14 +746,14 @@ pub mod pallet {
 
             let proposal = Proposal {
                 id: proposal_id,
-                shop_id,
+                entity_id,
                 proposer: who.clone(),
                 proposal_type,
                 title: title_bounded,
                 description_cid: description_bounded,
                 status: ProposalStatus::Voting,
                 created_at: now,
-                snapshot_block: now, // P1: 快照区块设置为创建时刻
+                snapshot_block: now,
                 voting_start: now,
                 voting_end,
                 execution_time: None,
@@ -761,13 +764,13 @@ pub mod pallet {
 
             // 保存
             Proposals::<T>::insert(proposal_id, proposal);
-            shop_proposals.try_push(proposal_id).map_err(|_| Error::<T>::TooManyActiveProposals)?;
-            ShopProposals::<T>::insert(shop_id, shop_proposals);
+            entity_proposals.try_push(proposal_id).map_err(|_| Error::<T>::TooManyActiveProposals)?;
+            EntityProposals::<T>::insert(entity_id, entity_proposals);
             NextProposalId::<T>::put(proposal_id.saturating_add(1));
 
             Self::deposit_event(Event::ProposalCreated {
                 proposal_id,
-                shop_id,
+                entity_id,
                 proposer: who,
                 title,
             });
@@ -807,27 +810,25 @@ pub mod pallet {
             );
 
             // Phase 8: 检查代币类型是否具有投票权
-            let token_type = T::TokenProvider::get_token_type(proposal.shop_id);
+            let token_type = T::TokenProvider::get_token_type(proposal.entity_id);
             ensure!(token_type.has_voting_power(), Error::<T>::TokenTypeNoVotingPower);
 
             // H1 修复: 获取当前投票权重
-            let current_balance = Self::calculate_voting_power(proposal.shop_id, &who);
+            let current_balance = Self::calculate_voting_power(proposal.entity_id, &who);
             ensure!(!current_balance.is_zero(), Error::<T>::NoVotingPower);
 
             // P1 安全: 使用快照机制防止闪电贷（首次投票时锁定权重）
             let weight = if let Some(snapshot) = VotingPowerSnapshot::<T>::get(proposal_id, &who) {
-                // 已有快照，取快照与当前余额的较小值
                 current_balance.min(snapshot)
             } else {
-                // 首次投票，保存快照
                 VotingPowerSnapshot::<T>::insert(proposal_id, &who, current_balance);
                 current_balance
             };
             ensure!(!weight.is_zero(), Error::<T>::NoVotingPower);
 
             // 懒写入 FirstHoldTime（便于未来时间加权）
-            if !FirstHoldTime::<T>::contains_key(proposal.shop_id, &who) {
-                FirstHoldTime::<T>::insert(proposal.shop_id, &who, now);
+            if !FirstHoldTime::<T>::contains_key(proposal.entity_id, &who) {
+                FirstHoldTime::<T>::insert(proposal.entity_id, &who, now);
             }
 
             // 记录投票
@@ -884,7 +885,7 @@ pub mod pallet {
             let total_votes = proposal.yes_votes
                 .saturating_add(proposal.no_votes)
                 .saturating_add(proposal.abstain_votes);
-            let total_supply = T::TokenProvider::total_supply(proposal.shop_id);
+            let total_supply = T::TokenProvider::total_supply(proposal.entity_id);
 
             // 检查法定人数
             let quorum_threshold: BalanceOf<T> = total_supply
@@ -893,7 +894,7 @@ pub mod pallet {
             
             if total_votes < quorum_threshold {
                 proposal.status = ProposalStatus::Failed;
-                Self::remove_from_active(proposal_id, proposal.shop_id);
+                Self::remove_from_active(proposal_id, proposal.entity_id);
                 Proposals::<T>::insert(proposal_id, proposal);
                 Self::deposit_event(Event::ProposalFailed { proposal_id });
                 return Ok(());
@@ -908,12 +909,12 @@ pub mod pallet {
                 proposal.status = ProposalStatus::Passed;
                 proposal.execution_time = Some(now.saturating_add(T::ExecutionDelay::get()));
                 // H5 修复: 通过的提案也从活跃列表移除，不阻塞新提案
-                Self::remove_from_active(proposal_id, proposal.shop_id);
+                Self::remove_from_active(proposal_id, proposal.entity_id);
                 Proposals::<T>::insert(proposal_id, proposal);
                 Self::deposit_event(Event::ProposalPassed { proposal_id });
             } else {
                 proposal.status = ProposalStatus::Failed;
-                Self::remove_from_active(proposal_id, proposal.shop_id);
+                Self::remove_from_active(proposal_id, proposal.entity_id);
                 Proposals::<T>::insert(proposal_id, proposal);
                 Self::deposit_event(Event::ProposalFailed { proposal_id });
             }
@@ -969,8 +970,8 @@ pub mod pallet {
             let mut proposal = Proposals::<T>::get(proposal_id)
                 .ok_or(Error::<T>::ProposalNotFound)?;
 
-            // 验证权限（提案者或店主）
-            let owner = T::ShopProvider::shop_owner(proposal.shop_id);
+            // 验证权限（提案者或实体所有者）
+            let owner = T::EntityProvider::entity_owner(proposal.entity_id);
             ensure!(
                 proposal.proposer == who || owner == Some(who.clone()),
                 Error::<T>::CannotCancel
@@ -984,9 +985,9 @@ pub mod pallet {
 
             // 取消
             proposal.status = ProposalStatus::Cancelled;
-            let shop_id = proposal.shop_id;
+            let eid = proposal.entity_id;
             Proposals::<T>::insert(proposal_id, proposal);
-            Self::remove_from_active(proposal_id, shop_id);
+            Self::remove_from_active(proposal_id, eid);
 
             Self::deposit_event(Event::ProposalCancelled { proposal_id });
 
@@ -1151,15 +1152,12 @@ pub mod pallet {
             let mut proposal = Proposals::<T>::get(proposal_id)
                 .ok_or(Error::<T>::ProposalNotFound)?;
 
-            // 验证管理员权限
-            let owner = T::ShopProvider::shop_owner(proposal.shop_id)
+            // 验证管理员权限（实体所有者）
+            let owner = T::EntityProvider::entity_owner(proposal.entity_id)
                 .ok_or(Error::<T>::ShopNotFound)?;
             ensure!(owner == who, Error::<T>::NoVetoRight);
 
-            // H3 修复: 通过 shop_id 解析 entity_id 查询治理配置
-            let entity_id = T::ShopProvider::shop_entity_id(proposal.shop_id)
-                .unwrap_or(proposal.shop_id);
-            let config = GovernanceConfigs::<T>::get(entity_id)
+            let config = GovernanceConfigs::<T>::get(proposal.entity_id)
                 .unwrap_or_default();
             ensure!(config.admin_veto_enabled, Error::<T>::NoVetoRight);
             ensure!(
@@ -1175,9 +1173,9 @@ pub mod pallet {
 
             // 否决
             proposal.status = ProposalStatus::Cancelled;
-            let shop_id = proposal.shop_id;
+            let eid = proposal.entity_id;
             Proposals::<T>::insert(proposal_id, proposal);
-            Self::remove_from_active(proposal_id, shop_id);
+            Self::remove_from_active(proposal_id, eid);
 
             Self::deposit_event(Event::ProposalVetoed {
                 proposal_id,
@@ -1259,8 +1257,8 @@ pub mod pallet {
         /// bonus_range = max_multiplier - 10000
         ///
         /// 当 TimeWeightFullPeriod == 0 时，禁用时间加权，直接返回余额。
-        pub fn calculate_voting_power(shop_id: u64, holder: &T::AccountId) -> BalanceOf<T> {
-            let balance = T::TokenProvider::token_balance(shop_id, holder);
+        pub fn calculate_voting_power(entity_id: u64, holder: &T::AccountId) -> BalanceOf<T> {
+            let balance = T::TokenProvider::token_balance(entity_id, holder);
 
             if balance.is_zero() {
                 return Zero::zero();
@@ -1277,7 +1275,7 @@ pub mod pallet {
             let now: u128 = <frame_system::Pallet<T>>::block_number().saturated_into();
 
             // 未记录首次持有时间的用户按 1x 计算
-            let multiplier: u128 = match FirstHoldTime::<T>::get(shop_id, holder) {
+            let multiplier: u128 = match FirstHoldTime::<T>::get(entity_id, holder) {
                 Some(first_hold) => {
                     let first_hold_u128: u128 = first_hold.saturated_into();
                     let holding_blocks = now.saturating_sub(first_hold_u128);
@@ -1296,8 +1294,8 @@ pub mod pallet {
         }
 
         /// 从活跃提案列表移除，并清理投票权快照
-        fn remove_from_active(proposal_id: ProposalId, shop_id: u64) {
-            ShopProposals::<T>::mutate(shop_id, |proposals| {
+        fn remove_from_active(proposal_id: ProposalId, entity_id: u64) {
+            EntityProposals::<T>::mutate(entity_id, |proposals| {
                 proposals.retain(|&id| id != proposal_id);
             });
             // M4: 清理 VotingPowerSnapshot 避免存储泄漏
@@ -1306,7 +1304,12 @@ pub mod pallet {
 
         /// 执行提案
         fn do_execute_proposal(proposal: &ProposalOf<T>) -> DispatchResult {
-            let shop_id = proposal.shop_id;
+            let entity_id = proposal.entity_id;
+            // 获取 primary shop_id 用于需要 shop 级操作的提案
+            let shop_id = T::EntityProvider::entity_shops(entity_id)
+                .first()
+                .copied()
+                .unwrap_or(entity_id);
             
             match &proposal.proposal_type {
                 // ==================== 商品管理类 ====================
@@ -1494,8 +1497,7 @@ pub mod pallet {
                 },
                 ProposalType::MultiLevelChange { levels_cid: _, max_total_rate: _ } => {
                     // 多级分销配置需要解析 CID，暂不支持链上直接执行
-                    // 可通过链下工作者或预言机解析后调用
-                    Ok(())
+                    Err(Error::<T>::ProposalTypeNotImplemented.into())
                 },
                 ProposalType::LevelDiffChange { normal_rate, silver_rate, gold_rate, platinum_rate, diamond_rate } => {
                     T::CommissionProvider::set_level_diff_config(
@@ -1509,7 +1511,7 @@ pub mod pallet {
                 },
                 ProposalType::CustomLevelDiffChange { rates_cid: _, max_depth: _ } => {
                     // 自定义等级极差配置需要解析 CID，暂不支持链上直接执行
-                    Ok(())
+                    Err(Error::<T>::ProposalTypeNotImplemented.into())
                 },
                 ProposalType::FixedAmountChange { amount } => {
                     T::CommissionProvider::set_fixed_amount(shop_id, *amount)
@@ -1522,8 +1524,7 @@ pub mod pallet {
                 },
                 ProposalType::SingleLineChange { upline_rate: _, downline_rate: _, base_upline_levels: _, base_downline_levels: _, max_upline_levels: _, max_downline_levels: _ } => {
                     // 单线收益配置较复杂，需要扩展 CommissionProvider trait
-                    // 暂时只记录提案，后续实现
-                    Ok(())
+                    Err(Error::<T>::ProposalTypeNotImplemented.into())
                 },
 
                 // ==================== 分级提现配置类 ====================

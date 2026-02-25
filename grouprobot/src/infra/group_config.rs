@@ -92,6 +92,43 @@ impl ConfigManager {
     pub fn cached_count(&self) -> usize {
         self.cache.len()
     }
+
+    /// M6 修复: 注册新群组 (触发下次 sync_loop 同步其配置)
+    /// 如果缓存中已存在则不覆盖
+    pub fn register_group(&self, community_id_hash: [u8; 32]) {
+        if !self.cache.contains_key(&community_id_hash) {
+            // 插入空配置占位，needs_sync 会返回 true 触发同步
+            self.cache.entry(community_id_hash).or_insert_with(|| {
+                (ChainCommunityConfig {
+                    node_requirement: 0, anti_flood_enabled: false,
+                    flood_limit: 10, warn_limit: 3, warn_action: 0,
+                    welcome_enabled: false, version: 0,
+                    anti_duplicate_enabled: false,
+                    duplicate_window_secs: 300, duplicate_threshold: 3,
+                    max_emoji: 0, max_links: 0,
+                    stop_words: String::new(),
+                    welcome_template: String::new(),
+                    goodbye_template: String::new(),
+                    warn_mute_duration: 3600,
+                    spam_samples: String::new(),
+                    similarity_threshold: 70,
+                    log_channel_id: String::new(),
+                    captcha_enabled: false,
+                    captcha_timeout_secs: 120,
+                    antiphishing_enabled: false,
+                    bayes_threshold: 80,
+                    custom_commands_csv: String::new(),
+                    locked_types_csv: String::new(),
+                    subscription_tier: 0,
+                    max_rules: 3,
+                    forced_ads_per_day: 2,
+                    can_disable_ads: false,
+                    community_id_hash: String::new(),
+                }, 0) // last_sync = 0 → needs_sync 立即返回 true
+            });
+            debug!(community = hex::encode(community_id_hash), "新群组已注册, 等待同步");
+        }
+    }
 }
 
 fn now_secs() -> u64 {
@@ -119,6 +156,29 @@ mod tests {
             warn_action: 0,
             welcome_enabled: false,
             version: 1,
+            anti_duplicate_enabled: false,
+            duplicate_window_secs: 300,
+            duplicate_threshold: 3,
+            max_emoji: 0,
+            max_links: 0,
+            stop_words: String::new(),
+            welcome_template: String::new(),
+            goodbye_template: String::new(),
+            warn_mute_duration: 3600,
+            spam_samples: String::new(),
+            similarity_threshold: 70,
+            log_channel_id: String::new(),
+            captcha_enabled: false,
+            captcha_timeout_secs: 120,
+            antiphishing_enabled: false,
+            bayes_threshold: 80,
+            custom_commands_csv: String::new(),
+            locked_types_csv: String::new(),
+            subscription_tier: 0,
+            max_rules: 50,
+            forced_ads_per_day: 0,
+            can_disable_ads: true,
+            community_id_hash: String::new(),
         });
 
         let config = mgr.get_config(&hash).unwrap();
@@ -140,6 +200,29 @@ mod tests {
             node_requirement: 0, anti_flood_enabled: false,
             flood_limit: 5, warn_limit: 3, warn_action: 0,
             welcome_enabled: false, version: 1,
+            anti_duplicate_enabled: false,
+            duplicate_window_secs: 300,
+            duplicate_threshold: 3,
+            max_emoji: 0,
+            max_links: 0,
+            stop_words: String::new(),
+            welcome_template: String::new(),
+            goodbye_template: String::new(),
+            warn_mute_duration: 3600,
+            spam_samples: String::new(),
+            similarity_threshold: 70,
+            log_channel_id: String::new(),
+            captcha_enabled: false,
+            captcha_timeout_secs: 120,
+            antiphishing_enabled: false,
+            bayes_threshold: 80,
+            custom_commands_csv: String::new(),
+            locked_types_csv: String::new(),
+            subscription_tier: 0,
+            max_rules: 50,
+            forced_ads_per_day: 0,
+            can_disable_ads: true,
+            community_id_hash: String::new(),
         });
         assert!(!mgr.needs_sync(&hash));
     }

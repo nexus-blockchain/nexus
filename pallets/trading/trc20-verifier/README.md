@@ -170,7 +170,8 @@ pub struct EndpointHealth {
 
 | 模块 | 用途 |
 |------|------|
-| `pallet-trading-p2p` | Sell 侧 OCW 验证 TRC20 USDT 转账 |
+| `pallet-nex-market` | NEX/USDT 交易 OCW 验证 TRC20 转账 |
+| `pallet-entity-market` | Entity Token/USDT 交易 OCW 验证 TRC20 转账 |
 
 ---
 

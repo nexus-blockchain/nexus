@@ -370,17 +370,17 @@ pub enum CommissionPlan {
 /// 推荐链插件写入接口（由 commission-referral 实现）
 pub trait ReferralPlanWriter<Balance> {
     /// 设置直推奖励比例
-    fn set_direct_rate(shop_id: u64, rate: u16) -> Result<(), DispatchError>;
+    fn set_direct_rate(entity_id: u64, rate: u16) -> Result<(), DispatchError>;
     /// 设置多级分销（每级比例列表 + 上限比例）
-    fn set_multi_level(shop_id: u64, level_rates: Vec<u16>, max_total_rate: u16) -> Result<(), DispatchError>;
+    fn set_multi_level(entity_id: u64, level_rates: Vec<u16>, max_total_rate: u16) -> Result<(), DispatchError>;
     /// 设置固定金额奖励
-    fn set_fixed_amount(shop_id: u64, amount: Balance) -> Result<(), DispatchError>;
+    fn set_fixed_amount(entity_id: u64, amount: Balance) -> Result<(), DispatchError>;
     /// 设置首单奖励
-    fn set_first_order(shop_id: u64, amount: Balance, rate: u16, use_amount: bool) -> Result<(), DispatchError>;
+    fn set_first_order(entity_id: u64, amount: Balance, rate: u16, use_amount: bool) -> Result<(), DispatchError>;
     /// 设置复购奖励
-    fn set_repeat_purchase(shop_id: u64, rate: u16, min_orders: u32) -> Result<(), DispatchError>;
+    fn set_repeat_purchase(entity_id: u64, rate: u16, min_orders: u32) -> Result<(), DispatchError>;
     /// 清除全部推荐链配置
-    fn clear_config(shop_id: u64) -> Result<(), DispatchError>;
+    fn clear_config(entity_id: u64) -> Result<(), DispatchError>;
 }
 
 /// 空 ReferralPlanWriter 实现
@@ -396,9 +396,9 @@ impl<Balance> ReferralPlanWriter<Balance> for () {
 /// 等级极差插件写入接口（由 commission-level-diff 实现）
 pub trait LevelDiffPlanWriter {
     /// 设置全局 5 级极差比例
-    fn set_global_rates(shop_id: u64, normal: u16, silver: u16, gold: u16, platinum: u16, diamond: u16) -> Result<(), DispatchError>;
+    fn set_global_rates(entity_id: u64, normal: u16, silver: u16, gold: u16, platinum: u16, diamond: u16) -> Result<(), DispatchError>;
     /// 清除等级极差配置
-    fn clear_config(shop_id: u64) -> Result<(), DispatchError>;
+    fn clear_config(entity_id: u64) -> Result<(), DispatchError>;
 }
 
 /// 空 LevelDiffPlanWriter 实现

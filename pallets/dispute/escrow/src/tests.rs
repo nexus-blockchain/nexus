@@ -232,13 +232,14 @@ fn dispute_blocks_release_and_refund() {
         assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
         assert_ok!(EscrowPallet::dispute(RuntimeOrigin::signed(1), 100, 1));
 
+        // 🆕 EM2修复: 争议中应返回 DisputeActive 而非 NoLock
         assert_noop!(
             EscrowPallet::release(RuntimeOrigin::signed(1), 100, 2),
-            Error::<Test>::NoLock
+            Error::<Test>::DisputeActive
         );
         assert_noop!(
             EscrowPallet::refund(RuntimeOrigin::signed(1), 100, 1),
-            Error::<Test>::NoLock
+            Error::<Test>::DisputeActive
         );
     });
 }
@@ -314,6 +315,116 @@ fn double_release_fails() {
         assert_noop!(
             EscrowPallet::release(RuntimeOrigin::signed(1), 100, 2),
             Error::<Test>::AlreadyClosed
+        );
+    });
+}
+
+// ============================================================================
+// 🆕 EH3: lock 不能重新打开已关闭的托管
+// ============================================================================
+
+#[test]
+fn lock_rejects_closed_id() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_ok!(EscrowPallet::release(RuntimeOrigin::signed(1), 100, 2));
+        assert_eq!(LockStateOf::<Test>::get(100), 3u8);
+
+        // 尝试重新 lock 已关闭的 id 应失败
+        assert_noop!(
+            EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 200),
+            Error::<Test>::AlreadyClosed
+        );
+    });
+}
+
+#[test]
+fn lock_with_nonce_rejects_closed_id() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_ok!(EscrowPallet::release(RuntimeOrigin::signed(1), 100, 2));
+        assert_eq!(LockStateOf::<Test>::get(100), 3u8);
+
+        // 尝试通过 nonce 重新打开已关闭的 id 应失败
+        assert_noop!(
+            EscrowPallet::lock_with_nonce(RuntimeOrigin::signed(1), 100, 1, 200, 99),
+            Error::<Test>::AlreadyClosed
+        );
+    });
+}
+
+// ============================================================================
+// 🆕 EM2: release/refund 在争议中返回 DisputeActive
+// ============================================================================
+
+#[test]
+fn release_returns_dispute_active_not_no_lock() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_ok!(EscrowPallet::dispute(RuntimeOrigin::signed(1), 100, 1));
+
+        assert_noop!(
+            EscrowPallet::release(RuntimeOrigin::signed(1), 100, 2),
+            Error::<Test>::DisputeActive
+        );
+    });
+}
+
+#[test]
+fn refund_returns_dispute_active_not_no_lock() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_ok!(EscrowPallet::dispute(RuntimeOrigin::signed(1), 100, 1));
+
+        assert_noop!(
+            EscrowPallet::refund(RuntimeOrigin::signed(1), 100, 1),
+            Error::<Test>::DisputeActive
+        );
+    });
+}
+
+// 🆕 E4修复测试: 争议中禁止通过 lock 追加锁定
+#[test]
+fn lock_blocked_during_dispute() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_ok!(EscrowPallet::dispute(RuntimeOrigin::signed(1), 100, 1));
+        assert_eq!(LockStateOf::<Test>::get(100), 1u8);
+
+        // lock 应该失败
+        assert_noop!(
+            EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 2, 200),
+            Error::<Test>::DisputeActive
+        );
+    });
+}
+
+// 🆕 E4修复测试: 争议中禁止通过 lock_with_nonce 追加锁定
+#[test]
+fn lock_with_nonce_blocked_during_dispute() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_ok!(EscrowPallet::dispute(RuntimeOrigin::signed(1), 100, 1));
+
+        assert_noop!(
+            EscrowPallet::lock_with_nonce(RuntimeOrigin::signed(1), 100, 2, 200, 1),
+            Error::<Test>::DisputeActive
+        );
+    });
+}
+
+#[test]
+fn release_split_returns_dispute_active() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 1000));
+        assert_ok!(EscrowPallet::dispute(RuntimeOrigin::signed(1), 100, 1));
+
+        let entries: BoundedVec<(u64, u128), <Test as crate::Config>::MaxSplitEntries> =
+            BoundedVec::try_from(vec![(2, 500), (3, 500)]).unwrap();
+
+        assert_noop!(
+            EscrowPallet::release_split(RuntimeOrigin::signed(1), 100, entries),
+            Error::<Test>::DisputeActive
         );
     });
 }

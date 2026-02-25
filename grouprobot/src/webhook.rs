@@ -29,9 +29,9 @@ pub async fn handle_webhook(
         }
     }
 
-    // 限流
+    // 全局限流 (防止总体过载)
     if !state.rate_limiter.allow() {
-        warn!("Webhook 请求被限流");
+        warn!("Webhook 请求被全局限流");
         return StatusCode::TOO_MANY_REQUESTS;
     }
 
@@ -45,17 +45,37 @@ pub async fn handle_webhook(
         }
     };
 
+    // per-group 限流 (防止单个群耗尽全局配额)
+    if !state.rate_limiter.allow_for(&event.group_id) {
+        warn!(group = %event.group_id, "Webhook 请求被 per-group 限流");
+        return StatusCode::TOO_MANY_REQUESTS;
+    }
+
     // 记录指标
     state.metrics.record_message();
 
     // 提取上下文
-    let ctx = adapter.extract_context(&event);
+    let mut ctx = adapter.extract_context(&event);
 
-    // 指纹去重
-    let fingerprint = format!("{}:{}:{}", ctx.platform, ctx.group_id, event.message_id.as_deref().unwrap_or(""));
-    if state.local_store.check_fingerprint(&fingerprint, 300) {
-        debug!("重复消息，跳过");
-        return StatusCode::OK;
+    // 查询管理员身份 (仅对命令消息查询, 减少 API 调用)
+    if ctx.is_command {
+        if let Some(ref tg_executor) = state.telegram_executor {
+            match tg_executor.is_admin_in_chat(&ctx.group_id, &ctx.sender_id).await {
+                Ok(is_admin) => ctx.is_admin = is_admin,
+                Err(e) => debug!(error = %e, "管理员身份查询失败, 默认非管理员"),
+            }
+        }
+    }
+
+    // 指纹去重 (M7 修复: 仅对有 message_id 的事件去重, 避免 join request 等无 ID 事件被误去重)
+    if let Some(ref mid) = event.message_id {
+        if !mid.is_empty() {
+            let fingerprint = format!("{}:{}:{}", ctx.platform, ctx.group_id, mid);
+            if state.local_store.check_fingerprint(&fingerprint, 300) {
+                debug!("重复消息，跳过");
+                return StatusCode::OK;
+            }
+        }
     }
 
     // 路由处理

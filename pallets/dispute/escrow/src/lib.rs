@@ -58,6 +58,13 @@ pub mod pallet {
         /// - release_to: 获得 bps/10000 比例的账户
         /// - refund_to: 获得剩余比例的账户
         fn split_partial(id: u64, release_to: &AccountId, refund_to: &AccountId, bps: u16) -> DispatchResult;
+        /// 将托管标记为争议状态（Disputed=1）
+        /// 函数级详细中文注释：供业务模块在订单进入争议时调用，
+        /// 设置后 release/refund/transfer 等操作将被阻止，仅允许仲裁决议接口处理
+        fn set_disputed(id: u64) -> DispatchResult;
+        /// 将托管从争议状态恢复为正常（Locked=0）
+        /// 函数级详细中文注释：供仲裁模块在裁决执行前调用，解除争议锁定以允许资金操作
+        fn set_resolved(id: u64) -> DispatchResult;
     }
 
     #[pallet::config]
@@ -173,6 +180,8 @@ pub mod pallet {
         AlreadyClosed,
         /// 全局暂停中
         GloballyPaused,
+        /// 🆕 到期队列已满
+        ExpiringAtFull,
     }
 
     /// 函数级中文注释：到期处理策略接口（由 runtime 实现）。
@@ -188,6 +197,13 @@ pub mod pallet {
         ReleaseAll(AccountId),
         RefundAll(AccountId),
         Noop,
+    }
+
+    impl<AccountId> ExpiryAction<AccountId> {
+        /// 用于日志/权重估算
+        pub fn is_noop(&self) -> bool {
+            matches!(self, Self::Noop)
+        }
     }
 
     impl<T: Config> Pallet<T> {
@@ -315,6 +331,21 @@ pub mod pallet {
         fn amount_of(id: u64) -> BalanceOf<T> {
             Locked::<T>::get(id)
         }
+        fn set_disputed(id: u64) -> DispatchResult {
+            let cur = Locked::<T>::get(id);
+            ensure!(!cur.is_zero(), Error::<T>::NoLock);
+            let state = LockStateOf::<T>::get(id);
+            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
+            LockStateOf::<T>::insert(id, 1u8);
+            Self::deposit_event(Event::Disputed { id, reason: 0 });
+            Ok(())
+        }
+        fn set_resolved(id: u64) -> DispatchResult {
+            let state = LockStateOf::<T>::get(id);
+            ensure!(state == 1u8, Error::<T>::NoLock);
+            LockStateOf::<T>::insert(id, 0u8);
+            Ok(())
+        }
         fn split_partial(
             id: u64,
             release_to: &T::AccountId,
@@ -378,11 +409,11 @@ pub mod pallet {
             // 函数级详细中文注释（安全）：仅允许 AuthorizedOrigin | Root 调用，防止冒用 payer 盗划资金；支持全局暂停。
             Self::ensure_auth(origin)?;
             Self::ensure_not_paused()?;
-            // 初始化状态为 Locked
-            if LockStateOf::<T>::get(id) == 0u8 { /* 已是 Locked */
-            } else {
-                LockStateOf::<T>::insert(id, 0u8);
-            }
+            // 🆕 EH3修复: 已关闭的托管不允许通过 extrinsic 重新打开
+            let state = LockStateOf::<T>::get(id);
+            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
+            // 🆕 E4修复: 争议中的托管禁止追加锁定（防止绕过争议保护）
+            ensure!(state != 1u8, Error::<T>::DisputeActive);
             <Self as Escrow<T::AccountId, BalanceOf<T>>>::lock_from(&payer, id, amount)
         }
         /// 释放：将托管金额转给收款人
@@ -392,7 +423,8 @@ pub mod pallet {
             // 函数级详细中文注释（安全）：仅 AuthorizedOrigin | Root；暂停时拒绝；争议状态下拒绝普通释放。
             Self::ensure_auth(origin)?;
             Self::ensure_not_paused()?;
-            ensure!(LockStateOf::<T>::get(id) != 1u8, Error::<T>::NoLock);
+            // 🆕 EM2修复: 争议中使用正确的错误码
+            ensure!(LockStateOf::<T>::get(id) != 1u8, Error::<T>::DisputeActive);
             <Self as Escrow<T::AccountId, BalanceOf<T>>>::release_all(id, &to)
         }
         /// 退款：退回付款人
@@ -402,7 +434,8 @@ pub mod pallet {
             // 函数级详细中文注释（安全）：仅 AuthorizedOrigin | Root；暂停时拒绝；争议状态下拒绝普通退款。
             Self::ensure_auth(origin)?;
             Self::ensure_not_paused()?;
-            ensure!(LockStateOf::<T>::get(id) != 1u8, Error::<T>::NoLock);
+            // 🆕 EM2修复: 争议中使用正确的错误码
+            ensure!(LockStateOf::<T>::get(id) != 1u8, Error::<T>::DisputeActive);
             <Self as Escrow<T::AccountId, BalanceOf<T>>>::refund_all(id, &to)
         }
 
@@ -423,10 +456,11 @@ pub mod pallet {
                 return Ok(());
             } // 幂等：忽略重放
             LockNonces::<T>::insert(id, nonce);
-            if LockStateOf::<T>::get(id) == 0u8 { /* 已是 Locked */
-            } else {
-                LockStateOf::<T>::insert(id, 0u8);
-            }
+            // 🆕 EH3修复: 已关闭的托管不允许通过 nonce 重新打开
+            let state = LockStateOf::<T>::get(id);
+            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
+            // 🆕 E4修复: 争议中的托管禁止追加锁定（防止绕过争议保护）
+            ensure!(state != 1u8, Error::<T>::DisputeActive);
             <Self as Escrow<T::AccountId, BalanceOf<T>>>::lock_from(&payer, id, amount)
         }
 
@@ -440,7 +474,8 @@ pub mod pallet {
         ) -> DispatchResult {
             Self::ensure_auth(origin)?;
             Self::ensure_not_paused()?;
-            ensure!(LockStateOf::<T>::get(id) != 1u8, Error::<T>::NoLock);
+            // 🆕 EM2修复: 争议中使用正确的错误码
+            ensure!(LockStateOf::<T>::get(id) != 1u8, Error::<T>::DisputeActive);
             let mut cur = Locked::<T>::get(id);
             ensure!(!cur.is_zero(), Error::<T>::NoLock);
             // 校验合计
@@ -601,8 +636,9 @@ pub mod pallet {
             ExpiryOf::<T>::insert(id, at);
             
             // 添加到新的索引
+            // 🆕 EM1修复: 使用专用错误码
             ExpiringAt::<T>::try_mutate(at, |ids| -> DispatchResult {
-                ids.try_push(id).map_err(|_| Error::<T>::NoLock)?;
+                ids.try_push(id).map_err(|_| Error::<T>::ExpiringAtFull)?;
                 Ok(())
             })?;
             
@@ -680,8 +716,11 @@ pub mod pallet {
                 ExpiryOf::<T>::remove(id);
             }
             
-            // 返回权重（每个到期项约 20_000 单位）
-            Weight::from_parts(20_000u64.saturating_mul(total as u64), 0)
+            // 🆕 E1修复: 每项到期处理涉及 LockStateOf(r) + ExpiryPolicy(r) + Currency::transfer(r+w)
+            // + Locked(rw) + LockStateOf(w) + ExpiryOf(w) + Event = ~3r+4w ≈ 50M ref_time/项
+            let per_item = Weight::from_parts(50_000_000, 3_500);
+            let base = Weight::from_parts(5_000_000, 1_000); // ExpiringAt::take 开销
+            base.saturating_add(per_item.saturating_mul(total as u64))
         }
     }
 }

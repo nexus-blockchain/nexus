@@ -81,6 +81,46 @@ impl ActionDecision {
         }
     }
 
+    pub fn unban(target: &str, reason: &str) -> Self {
+        Self {
+            action_type: ActionType::Unban,
+            target_user: target.to_string(),
+            reason: Some(reason.to_string()),
+            message: None,
+            duration_secs: None,
+        }
+    }
+
+    pub fn promote(target: &str, reason: &str) -> Self {
+        Self {
+            action_type: ActionType::Promote,
+            target_user: target.to_string(),
+            reason: Some(reason.to_string()),
+            message: None,
+            duration_secs: None,
+        }
+    }
+
+    pub fn demote(target: &str, reason: &str) -> Self {
+        Self {
+            action_type: ActionType::Demote,
+            target_user: target.to_string(),
+            reason: Some(reason.to_string()),
+            message: None,
+            duration_secs: None,
+        }
+    }
+
+    pub fn answer_callback(callback_query_id: &str, text: &str) -> Self {
+        Self {
+            action_type: ActionType::AnswerCallback,
+            target_user: callback_query_id.to_string(),
+            reason: None,
+            message: Some(text.to_string()),
+            duration_secs: None,
+        }
+    }
+
     /// 转换为平台执行动作
     pub fn to_execute_action(&self, group_id: &str) -> ExecuteAction {
         ExecuteAction {
@@ -90,6 +130,8 @@ impl ActionDecision {
             reason: self.reason.clone(),
             message: self.message.clone(),
             duration_secs: self.duration_secs,
+            inline_keyboard: None,
+            callback_query_id: None,
         }
     }
 }

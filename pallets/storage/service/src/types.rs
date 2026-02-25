@@ -922,8 +922,8 @@ impl<BlockNumber: Default> Default for OperatorPinHealth<BlockNumber> {
 /// 使用场景：
 /// - RPC方法 `memoIpfs_getOperatorMetrics`
 /// - 前端运营者Dashboard
-#[derive(Clone, Encode, Decode, TypeInfo)]
-pub struct OperatorMetrics<Balance, BlockNumber> {
+#[derive(Clone, Encode, Decode, TypeInfo, DecodeWithMemTracking, MaxEncodedLen)]
+pub struct OperatorMetrics<Balance: MaxEncodedLen, BlockNumber: MaxEncodedLen> {
     /// 运营者状态（0=Active, 1=Suspended）
     pub status: u8,
     /// 声明的存储容量（GiB）

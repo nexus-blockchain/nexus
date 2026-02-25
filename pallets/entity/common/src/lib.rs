@@ -788,11 +788,23 @@ pub trait OrderProvider<AccountId, Balance> {
     /// 获取订单买家
     fn order_buyer(order_id: u64) -> Option<AccountId>;
     
+    /// 获取订单卖家
+    fn order_seller(order_id: u64) -> Option<AccountId>;
+    
+    /// 获取订单总金额
+    fn order_amount(order_id: u64) -> Option<Balance>;
+    
     /// 获取订单店铺
     fn order_shop_id(order_id: u64) -> Option<u64>;
     
     /// 检查订单是否已完成
     fn is_order_completed(order_id: u64) -> bool;
+    
+    /// 检查订单是否处于争议状态
+    fn is_order_disputed(order_id: u64) -> bool;
+    
+    /// 检查用户是否可以对该订单发起争议（必须是买家或卖家，且订单状态允许）
+    fn can_dispute(order_id: u64, who: &AccountId) -> bool;
 }
 
 // ============================================================================
@@ -856,8 +868,12 @@ pub struct NullOrderProvider;
 impl<AccountId, Balance> OrderProvider<AccountId, Balance> for NullOrderProvider {
     fn order_exists(_order_id: u64) -> bool { false }
     fn order_buyer(_order_id: u64) -> Option<AccountId> { None }
+    fn order_seller(_order_id: u64) -> Option<AccountId> { None }
+    fn order_amount(_order_id: u64) -> Option<Balance> { None }
     fn order_shop_id(_order_id: u64) -> Option<u64> { None }
     fn is_order_completed(_order_id: u64) -> bool { false }
+    fn is_order_disputed(_order_id: u64) -> bool { false }
+    fn can_dispute(_order_id: u64, _who: &AccountId) -> bool { false }
 }
 
 // ============================================================================

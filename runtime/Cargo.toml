@@ -36,10 +36,7 @@ pallet-transaction-payment = { version = "45.0.0", workspace = true }
 pallet-contracts = { version = "45.0.1", workspace = true }
 # Trading pallets
 pallet-trading-common = { workspace = true }
-pallet-trading-pricing = { workspace = true }
-pallet-trading-credit = { workspace = true }
-pallet-trading-maker = { workspace = true }
-pallet-trading-p2p = { workspace = true }
+pallet-nex-market = { workspace = true }
 # Escrow, Referral, IPFS pallets
 pallet-escrow = { workspace = true }
 pallet-storage-service = { workspace = true }
@@ -123,10 +120,7 @@ std = [
 	"pallet-contracts/std",
 	# Trading pallets std
 	"pallet-trading-common/std",
-	"pallet-trading-pricing/std",
-	"pallet-trading-credit/std",
-	"pallet-trading-maker/std",
-	"pallet-trading-p2p/std",
+	"pallet-nex-market/std",
 	# Escrow, Referral, IPFS pallets std
 	"pallet-escrow/std",
 	"pallet-storage-service/std",
@@ -198,10 +192,7 @@ runtime-benchmarks = [
 	# Contracts pallet benchmarks
 	"pallet-contracts/runtime-benchmarks",
 	# Trading pallets benchmarks
-	"pallet-trading-pricing/runtime-benchmarks",
-	"pallet-trading-credit/runtime-benchmarks",
-	"pallet-trading-maker/runtime-benchmarks",
-	"pallet-trading-p2p/runtime-benchmarks",
+	"pallet-nex-market/runtime-benchmarks",
 	# Escrow, Referral pallets benchmarks
 	# Evidence pallet benchmarks
 	"pallet-evidence/runtime-benchmarks",
@@ -226,10 +217,7 @@ try-runtime = [
 	# Contracts pallet try-runtime
 	"pallet-contracts/try-runtime",
 	# Trading pallets try-runtime
-	"pallet-trading-pricing/try-runtime",
-	"pallet-trading-credit/try-runtime",
-	"pallet-trading-maker/try-runtime",
-	"pallet-trading-p2p/try-runtime",
+	"pallet-nex-market/try-runtime",
 	# Escrow, Referral pallets try-runtime
 	# Evidence pallet try-runtime
 	"pallet-evidence/try-runtime",

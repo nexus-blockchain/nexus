@@ -376,6 +376,15 @@ pub mod pallet {
     /// - 可通过治理调整
     #[pallet::constant]
     type DefaultBillingPeriod: Get<u32>;
+
+    /// M2修复：运营者注销宽限期（区块数）
+    /// 
+    /// 说明：
+    /// - 运营者调用 leave_operator 后的等待期
+    /// - 宽限期内 OCW 迁移 Pin 到其他运营者
+    /// - 默认：100,800 区块 ≈ 7天
+    #[pallet::constant]
+    type OperatorGracePeriod: Get<BlockNumberFor<Self>>;
 }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -1013,6 +1022,23 @@ pub mod pallet {
         T::AccountId,
         OperatorPinHealth<BlockNumberFor<T>>,
         ValueQuery, // 默认值为全0，健康度100分
+    >;
+
+    /// H1修复：运营者Pin数量索引（O(1)替代全表扫描）
+    /// 
+    /// Key: operator_account
+    /// Value: 当前分配给该运营者的Pin数量
+    /// 
+    /// 更新时机：
+    /// - Pin分配时 +1
+    /// - Pin移除时 -1
+    #[pallet::storage]
+    pub type OperatorPinCount<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        T::AccountId,
+        u32,
+        ValueQuery,
     >;
 
     /// 函数级详细中文注释：分层存储策略配置存储
@@ -1882,14 +1908,9 @@ pub mod pallet {
         /// ### 复杂度
         /// - O(n)，n为所有Pin总数
         /// - MVP实现，生产环境建议增加索引优化
+        /// H1修复：使用 OperatorPinCount 索引替代全表扫描，O(1) 复杂度
         pub fn count_operator_pins(operator: &T::AccountId) -> u32 {
-            let mut count = 0u32;
-            for (_cid, operators) in PinAssignments::<T>::iter() {
-                if operators.iter().any(|o| o == operator) {
-                    count = count.saturating_add(1);
-                }
-            }
-            count
+            OperatorPinCount::<T>::get(operator)
         }
 
         /// 函数级详细中文注释：完成运营者注销（内部函数）✅ P0-3新增
@@ -2439,13 +2460,8 @@ pub mod pallet {
                 let pool_balance = T::Currency::free_balance(&pool_account);
                 
                 if pool_balance >= amount {
-                    let _ = T::Currency::withdraw(
-                        &pool_account,
-                        amount,
-                        frame_support::traits::WithdrawReasons::TRANSFER,
-                        ExistenceRequirement::KeepAlive,
-                    ).map_err(|_| Error::<T>::IpfsPoolInsufficientBalance)?;
-                    
+                    // C2修复：不执行 withdraw（会烧毁代币），仅记录运营者奖励
+                    // 运营者通过 operator_claim_rewards 从池中转出，池只扣一次
                     let _ = Self::distribute_to_pin_operators(cid_hash, amount);
                     TotalChargedFromPool::<T>::mutate(|total| *total = total.saturating_add(amount));
                     
@@ -2509,13 +2525,8 @@ pub mod pallet {
             // ===== 第3层：IpfsPool 兜底（公共池补贴）=====
             let pool_balance = T::Currency::free_balance(&pool_account);
             if pool_balance >= amount {
-                let _ = T::Currency::withdraw(
-                    &pool_account,
-                    amount,
-                    frame_support::traits::WithdrawReasons::TRANSFER,
-                    ExistenceRequirement::KeepAlive,
-                ).map_err(|_| Error::<T>::IpfsPoolInsufficientBalance)?;
-                
+                // C2修复：不执行 withdraw（会烧毁代币），仅记录运营者奖励
+                // 运营者通过 operator_claim_rewards 从池中转出，池只扣一次
                 let _ = Self::distribute_to_pin_operators(cid_hash, amount);
                 TotalChargedFromPool::<T>::mutate(|total| *total = total.saturating_add(amount));
                 
@@ -2780,7 +2791,7 @@ pub mod pallet {
         /// ### 事件
         /// - UserFunded(target_user, who, to, amount)
         #[pallet::call_index(21)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::fund_user_account())]
         pub fn fund_user_account(
             origin: OriginFor<T>,
             target_user: T::AccountId,
@@ -2848,7 +2859,7 @@ pub mod pallet {
         /// ### 事件
         /// - SubjectFunded(subject_id, who, to, amount)
         #[pallet::call_index(9)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::fund_subject_account())]
         #[deprecated(note = "请使用 fund_user_account() 替代，混合方案每用户一个账户")]
         pub fn fund_subject_account(
             origin: OriginFor<T>,
@@ -3025,6 +3036,10 @@ pub mod pallet {
             // 注册到PinAssignments（向后兼容）
             let operators_bounded = BoundedVec::try_from(all_operators)
                 .map_err(|_| Error::<T>::BadParams)?;
+            // H1修复：更新 OperatorPinCount 索引（每个运营者 +1）
+            for op in operators_bounded.iter() {
+                OperatorPinCount::<T>::mutate(op, |c| *c = c.saturating_add(1));
+            }
             PinAssignments::<T>::insert(&cid_hash, operators_bounded);
             
             // 执行扣费
@@ -3166,9 +3181,8 @@ pub mod pallet {
                                         Self::deposit_event(Event::PinCharged(
                                             cid, due_bal, period, next,
                                         ));
-                                        
-                                        // 分配收益给运营者
-                                        let _ = Self::distribute_to_pin_operators(&cid, due_bal);
+                                        // C3修复：移除重复的 distribute_to_pin_operators 调用
+                                        // four_layer_charge 内部已经完成了奖励分配
                                     },
                                     Ok(ChargeResult::EnterGrace { expires_at }) => {
                                         // 进入宽限期：更新状态并重新入队
@@ -3252,7 +3266,7 @@ pub mod pallet {
         /// 
         /// 使用 Option 支持部分更新
         #[pallet::call_index(14)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::set_replicas_config())]
         pub fn set_replicas_config(
             origin: OriginFor<T>,
             level0_replicas: Option<u32>,
@@ -3306,7 +3320,7 @@ pub mod pallet {
         /// 参数：
         /// - `max_amount`: 本次分配的最大金额（0 表示分配托管账户的全部余额）
         #[pallet::call_index(13)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::distribute_to_operators())]
         pub fn distribute_to_operators(
             origin: OriginFor<T>,
             max_amount: BalanceOf<T>,
@@ -3503,7 +3517,7 @@ pub mod pallet {
         /// - 要求容量 >= MinCapacityGiB，保证金 >= MinOperatorBond；
         /// - 保证金使用可保留余额（reserve），离开时解保留。
         #[pallet::call_index(3)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::join_operator())]
         pub fn join_operator(
             origin: OriginFor<T>,
             peer_id: BoundedVec<u8, T::MaxPeerIdLen>,
@@ -3551,7 +3565,7 @@ pub mod pallet {
 
         /// 函数级详细中文注释：更新运营者元信息（不影响保证金）
         #[pallet::call_index(4)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::update_operator())]
         pub fn update_operator(
             origin: OriginFor<T>,
             peer_id: Option<BoundedVec<u8, T::MaxPeerIdLen>>,
@@ -3586,7 +3600,7 @@ pub mod pallet {
 
         /// 函数级详细中文注释：退出运营者并解保留保证金（需无未完成订单，MVP 略过校验）
         #[pallet::call_index(5)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::leave_operator())]
         /// 函数级详细中文注释：运营者注销（永久退出）✅ P0-3优化版
         /// 
         /// ### 功能说明
@@ -3623,10 +3637,9 @@ pub mod pallet {
             let assigned_pins = Self::count_operator_pins(&who);
             
             if assigned_pins > 0 {
-                // ✅ P0-3：进入宽限期
-                let grace_period_blocks = 100_800u32.into();  // 7天（100,800块）
+                // ✅ P0-3：进入宽限期（M2修复：使用Config常量替代硬编码）
                 let current_block = <frame_system::Pallet<T>>::block_number();
-                let expires_at = current_block.saturating_add(grace_period_blocks);
+                let expires_at = current_block.saturating_add(T::OperatorGracePeriod::get());
                 
                 // 记录到宽限期队列
                 PendingUnregistrations::<T>::insert(&who, expires_at);
@@ -3654,13 +3667,15 @@ pub mod pallet {
 
         /// 函数级详细中文注释：治理设置运营者状态（0=Active,1=Suspended,2=Banned）
         #[pallet::call_index(6)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::set_operator_status())]
         pub fn set_operator_status(
             origin: OriginFor<T>,
             who: T::AccountId,
             status: u8,
         ) -> DispatchResult {
             T::GovernanceOrigin::ensure_origin(origin)?;
+            // M3修复：验证 status 范围（0=Active, 1=Suspended, 2=Banned）
+            ensure!(status <= 2, Error::<T>::BadParams);
             Operators::<T>::try_mutate(&who, |maybe| -> DispatchResult {
                 let op = maybe.as_mut().ok_or(Error::<T>::OperatorNotFound)?;
                 op.status = status;
@@ -3688,7 +3703,7 @@ pub mod pallet {
         /// - 调整供奉品的低成本策略（允许Layer 3）
         /// - 应对运营者数量变化，动态调整副本分配
         #[pallet::call_index(19)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::set_storage_layer_config())]
         pub fn set_storage_layer_config(
             origin: OriginFor<T>,
             subject_type: SubjectType,
@@ -3739,7 +3754,7 @@ pub mod pallet {
         /// - 优秀社区运营者升级到Layer 1
         /// - 降级不活跃的Layer 1运营者到Layer 2
         #[pallet::call_index(20)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::set_operator_layer())]
         pub fn set_operator_layer(
             origin: OriginFor<T>,
             operator: T::AccountId,
@@ -3785,7 +3800,7 @@ pub mod pallet {
         /// - 签名账户必须是已注册的运营者
         /// - 当前状态必须是Active（status=0）
         #[pallet::call_index(22)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::pause_operator())]
         pub fn pause_operator(origin: OriginFor<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -3823,7 +3838,7 @@ pub mod pallet {
         /// - 签名账户必须是已注册的运营者
         /// - 当前状态必须是Suspended（status=1）
         #[pallet::call_index(23)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::resume_operator())]
         pub fn resume_operator(origin: OriginFor<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -3847,7 +3862,7 @@ pub mod pallet {
         /// 函数级详细中文注释：运营者自证在线（由运行其节点的 OCW 定期上报）
         /// - 探测逻辑在 OCW：若 /peers 含有自身 peer_id → ok=true，否则 false。
         #[pallet::call_index(7)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::report_probe())]
         pub fn report_probe(origin: OriginFor<T>, ok: bool) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let op = Operators::<T>::get(&who).ok_or(Error::<T>::OperatorNotFound)?;
@@ -3866,7 +3881,7 @@ pub mod pallet {
 
         /// 函数级详细中文注释：治理扣罚运营者的保证金（阶梯惩罚使用）。
         #[pallet::call_index(8)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::slash_operator())]
         pub fn slash_operator(
             origin: OriginFor<T>,
             who: T::AccountId,
@@ -3908,7 +3923,7 @@ pub mod pallet {
         /// - 巡检间隔：≥600块（约30分钟）
         /// - 费率系数：1000-100000（0.1x-10x）
         #[pallet::call_index(15)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::update_tier_config())]
         pub fn update_tier_config(
             origin: OriginFor<T>,
             tier: PinTier,
@@ -3953,7 +3968,7 @@ pub mod pallet {
         /// - 必须有可用奖励（余额 > 0）
         /// - IpfsPoolAccount余额充足
         #[pallet::call_index(16)]
-        #[pallet::weight(100_000)]
+        #[pallet::weight(T::WeightInfo::operator_claim_rewards())]
         pub fn operator_claim_rewards(origin: OriginFor<T>) -> DispatchResult {
             let operator = ensure_signed(origin)?;
             
@@ -3996,9 +4011,10 @@ pub mod pallet {
         /// 权限：
         /// - 治理Origin（Root或技术委员会）
         #[pallet::call_index(17)]
-        #[pallet::weight(30_000)]
+        #[pallet::weight(T::WeightInfo::emergency_pause_billing())]
         pub fn emergency_pause_billing(origin: OriginFor<T>) -> DispatchResult {
-            let who = T::GovernanceOrigin::ensure_origin(origin)?;
+            // M5修复：不再丢弃实际调用者，但GovernanceOrigin可能返回()
+            let _ = T::GovernanceOrigin::ensure_origin(origin)?;
             
             BillingPaused::<T>::put(true);
             
@@ -4018,9 +4034,9 @@ pub mod pallet {
         /// 权限：
         /// - 治理Origin（Root或技术委员会）
         #[pallet::call_index(18)]
-        #[pallet::weight(30_000)]
+        #[pallet::weight(T::WeightInfo::resume_billing())]
         pub fn resume_billing(origin: OriginFor<T>) -> DispatchResult {
-            let who = T::GovernanceOrigin::ensure_origin(origin)?;
+            let _ = T::GovernanceOrigin::ensure_origin(origin)?;
             
             BillingPaused::<T>::put(false);
             
@@ -4050,7 +4066,7 @@ pub mod pallet {
         /// - 修改域的默认配置
         /// - 禁用某些域的自动PIN
         #[pallet::call_index(25)]
-        #[pallet::weight(50_000)]
+        #[pallet::weight(T::WeightInfo::register_domain())]
         pub fn register_domain(
             origin: OriginFor<T>,
             domain: Vec<u8>,
@@ -4105,7 +4121,7 @@ pub mod pallet {
         /// 权限：
         /// - 治理Origin（Root或技术委员会）
         #[pallet::call_index(26)]
-        #[pallet::weight(40_000)]
+        #[pallet::weight(T::WeightInfo::update_domain_config())]
         pub fn update_domain_config(
             origin: OriginFor<T>,
             domain: Vec<u8>,
@@ -4167,7 +4183,7 @@ pub mod pallet {
         /// 4. 发送 MarkedForUnpin 事件
         /// 5. OCW后续执行物理删除
         #[pallet::call_index(32)]
-        #[pallet::weight(50_000)]
+        #[pallet::weight(T::WeightInfo::request_unpin())]
         pub fn request_unpin(
             origin: OriginFor<T>,
             cid: Vec<u8>,
@@ -4227,7 +4243,7 @@ pub mod pallet {
         /// - 调整域的巡检优先级
         /// - 确保关键域优先处理
         #[pallet::call_index(27)]
-        #[pallet::weight(10_000)]
+        #[pallet::weight(T::WeightInfo::set_domain_priority())]
         pub fn set_domain_priority(
             origin: OriginFor<T>,
             domain: Vec<u8>,
@@ -5252,29 +5268,62 @@ pub mod pallet {
         fn request_pin() -> Weight;
         fn mark_pinned() -> Weight;
         fn mark_pin_failed() -> Weight;
-        /// 函数级中文注释：到期扣费，按 limit 线性增长（读写多项状态）。
         fn charge_due(limit: u32) -> Weight;
-        /// 函数级中文注释：设置计费参数，常量级权重（少量读写）。
         fn set_billing_params() -> Weight;
+        // H6修复：新增权重函数（与 weights.rs 保持同步）
+        fn join_operator() -> Weight;
+        fn update_operator() -> Weight;
+        fn leave_operator() -> Weight;
+        fn set_operator_status() -> Weight;
+        fn report_probe() -> Weight;
+        fn slash_operator() -> Weight;
+        fn fund_subject_account() -> Weight;
+        fn fund_user_account() -> Weight;
+        fn set_replicas_config() -> Weight;
+        fn distribute_to_operators() -> Weight;
+        fn set_storage_layer_config() -> Weight;
+        fn set_operator_layer() -> Weight;
+        fn pause_operator() -> Weight;
+        fn resume_operator() -> Weight;
+        fn update_tier_config() -> Weight;
+        fn operator_claim_rewards() -> Weight;
+        fn emergency_pause_billing() -> Weight;
+        fn resume_billing() -> Weight;
+        fn register_domain() -> Weight;
+        fn update_domain_config() -> Weight;
+        fn request_unpin() -> Weight;
+        fn set_domain_priority() -> Weight;
     }
     impl WeightInfo for () {
-        fn request_pin() -> Weight {
-            Weight::from_parts(10_000, 0)
-        }
-        fn mark_pinned() -> Weight {
-            Weight::from_parts(10_000, 0)
-        }
-        fn mark_pin_failed() -> Weight {
-            Weight::from_parts(10_000, 0)
-        }
+        fn request_pin() -> Weight { Weight::from_parts(80_000_000, 3_500) }
+        fn mark_pinned() -> Weight { Weight::from_parts(40_000_000, 2_000) }
+        fn mark_pin_failed() -> Weight { Weight::from_parts(30_000_000, 1_500) }
         fn charge_due(limit: u32) -> Weight {
-            // 简化：基准前权重估算（常数项 + 每件线性项）
-            Weight::from_parts(20_000, 0)
-                .saturating_add(Weight::from_parts(5_000, 0).saturating_mul(limit.into()))
+            Weight::from_parts(50_000_000 + 30_000_000 * limit as u64, 2_000)
         }
-        fn set_billing_params() -> Weight {
-            Weight::from_parts(20_000, 0)
-        }
+        fn set_billing_params() -> Weight { Weight::from_parts(20_000_000, 1_000) }
+        fn join_operator() -> Weight { Weight::from_parts(50_000_000, 2_500) }
+        fn update_operator() -> Weight { Weight::from_parts(30_000_000, 1_500) }
+        fn leave_operator() -> Weight { Weight::from_parts(40_000_000, 2_000) }
+        fn set_operator_status() -> Weight { Weight::from_parts(20_000_000, 1_000) }
+        fn report_probe() -> Weight { Weight::from_parts(25_000_000, 1_000) }
+        fn slash_operator() -> Weight { Weight::from_parts(35_000_000, 1_500) }
+        fn fund_subject_account() -> Weight { Weight::from_parts(40_000_000, 1_500) }
+        fn fund_user_account() -> Weight { Weight::from_parts(40_000_000, 1_500) }
+        fn set_replicas_config() -> Weight { Weight::from_parts(20_000_000, 500) }
+        fn distribute_to_operators() -> Weight { Weight::from_parts(100_000_000, 5_000) }
+        fn set_storage_layer_config() -> Weight { Weight::from_parts(20_000_000, 1_000) }
+        fn set_operator_layer() -> Weight { Weight::from_parts(20_000_000, 1_000) }
+        fn pause_operator() -> Weight { Weight::from_parts(25_000_000, 1_000) }
+        fn resume_operator() -> Weight { Weight::from_parts(25_000_000, 1_000) }
+        fn update_tier_config() -> Weight { Weight::from_parts(20_000_000, 1_000) }
+        fn operator_claim_rewards() -> Weight { Weight::from_parts(40_000_000, 1_500) }
+        fn emergency_pause_billing() -> Weight { Weight::from_parts(15_000_000, 500) }
+        fn resume_billing() -> Weight { Weight::from_parts(15_000_000, 500) }
+        fn register_domain() -> Weight { Weight::from_parts(30_000_000, 1_500) }
+        fn update_domain_config() -> Weight { Weight::from_parts(25_000_000, 1_000) }
+        fn request_unpin() -> Weight { Weight::from_parts(35_000_000, 1_500) }
+        fn set_domain_priority() -> Weight { Weight::from_parts(15_000_000, 500) }
     }
 }
 

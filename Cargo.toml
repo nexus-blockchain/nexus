@@ -9,11 +9,8 @@ edition = "2021"
 members = [
     "node",
     "pallets/trading/common",
-    "pallets/trading/pricing",
-    "pallets/trading/credit",
-    "pallets/trading/maker",
-    "pallets/trading/p2p",
     "pallets/trading/trc20-verifier",
+    "pallets/trading/nex-market",
     "pallets/dispute/escrow",
     "pallets/storage/service",
     "pallets/dispute/evidence",
@@ -47,6 +44,7 @@ members = [
     "pallets/grouprobot/consensus",
     "pallets/grouprobot/community",
     "pallets/grouprobot/ceremony",
+    "pallets/grouprobot/ads",
 ]
 resolver = "2"
 exclude = ["grouprobot"]
@@ -55,11 +53,8 @@ exclude = ["grouprobot"]
 nexus-runtime = { path = "./runtime", default-features = false }
 # Trading pallets
 pallet-trading-common = { path = "./pallets/trading/common", default-features = false }
-pallet-trading-pricing = { path = "./pallets/trading/pricing", default-features = false }
-pallet-trading-credit = { path = "./pallets/trading/credit", default-features = false }
-pallet-trading-maker = { path = "./pallets/trading/maker", default-features = false }
-pallet-trading-p2p = { path = "./pallets/trading/p2p", default-features = false }
 pallet-trading-trc20-verifier = { path = "./pallets/trading/trc20-verifier", default-features = false }
+pallet-nex-market = { path = "./pallets/trading/nex-market", default-features = false }
 # Escrow, Referral, IPFS pallets
 pallet-escrow = { path = "./pallets/dispute/escrow", default-features = false }
 pallet-storage-service = { path = "./pallets/storage/service", default-features = false }
@@ -97,6 +92,7 @@ pallet-grouprobot-registry = { path = "./pallets/grouprobot/registry", default-f
 pallet-grouprobot-consensus = { path = "./pallets/grouprobot/consensus", default-features = false }
 pallet-grouprobot-community = { path = "./pallets/grouprobot/community", default-features = false }
 pallet-grouprobot-ceremony = { path = "./pallets/grouprobot/ceremony", default-features = false }
+pallet-grouprobot-ads = { path = "./pallets/grouprobot/ads", default-features = false }
 # Additional dependencies
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 sp-application-crypto = { version = "44.0.0", default-features = false }

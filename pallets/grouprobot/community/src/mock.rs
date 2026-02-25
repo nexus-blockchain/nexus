@@ -27,11 +27,14 @@ impl BotRegistryProvider<u64> for MockBotRegistry {
 		if bot_id_hash[0] == 1 { Some(OWNER) } else { None }
 	}
 	fn bot_public_key(_: &BotIdHash) -> Option<[u8; 32]> { None }
+	fn peer_count(_: &BotIdHash) -> u32 { 0 }
 }
 
 impl pallet_grouprobot_community::Config for Test {
 	type RuntimeEvent = RuntimeEvent;
 	type MaxLogsPerCommunity = frame_support::traits::ConstU32<10>;
+	type ReputationCooldown = frame_support::traits::ConstU64<5>;
+	type MaxReputationDelta = frame_support::traits::ConstU32<100>;
 	type BotRegistry = MockBotRegistry;
 }
 

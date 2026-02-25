@@ -39,7 +39,8 @@ impl Attestor {
         let public_key = self.enclave.public_key_bytes();
 
         let bundle = match self.enclave.mode() {
-            TeeMode::Hardware => self.generate_hardware_attestation(&public_key, nonce)?,
+            TeeMode::Tdx => self.generate_hardware_attestation(&public_key, nonce)?,
+            TeeMode::Sgx => self.generate_sgx_only_attestation(&public_key, nonce)?,
             TeeMode::Software => self.generate_simulated_attestation(&public_key),
         };
 
@@ -108,6 +109,64 @@ impl Attestor {
             mrenclave,
             is_simulated: false,
             tdx_quote_raw: Some(tdx_quote),
+            nonce,
+            pck_cert_der,
+            intermediate_cert_der,
+        })
+    }
+
+    /// SGX-Only 模式: 读取 SGX Quote v3
+    ///
+    /// report_data[0..32] = SHA256(public_key)
+    /// report_data[32..64] = nonce (如果提供) 或全零
+    /// primary_measurement = MRENCLAVE (32B) + 16B zero-pad → 48B
+    fn generate_sgx_only_attestation(
+        &self,
+        public_key: &[u8; 32],
+        nonce: Option<[u8; 32]>,
+    ) -> BotResult<AttestationBundle> {
+        let mut hasher = Sha256::new();
+        hasher.update(public_key);
+        let pk_hash: [u8; 32] = hasher.finalize().into();
+
+        let mut report_data_full = [0u8; 64];
+        report_data_full[..32].copy_from_slice(&pk_hash);
+        if let Some(ref n) = nonce {
+            report_data_full[32..64].copy_from_slice(n);
+        }
+
+        // SGX Quote v3 (通过 Gramine 统一接口 /dev/attestation)
+        let sgx_quote = Self::read_tdx_quote_full(&report_data_full)?;
+        let sgx_quote_hash = Self::hash_bytes(&sgx_quote);
+
+        // 提取 MRENCLAVE (SGX Quote v3 offset 112, 32 bytes)
+        let mrenclave = Self::extract_mrenclave(&sgx_quote);
+
+        // MRENCLAVE → padded to 48B as mrtd (primary_measurement)
+        let mut mrtd = [0u8; 48];
+        mrtd[..32].copy_from_slice(&mrenclave);
+
+        // Level 4: 证书链提取 (SGX Quote 也可能包含 CertData)
+        let (pck_cert_der, intermediate_cert_der) = match Self::extract_cert_chain_from_quote(&sgx_quote) {
+            Ok((pck, inter)) => {
+                info!(pck_len = pck.len(), inter_len = inter.len(), "SGX 证书链提取成功 (Level 4 就绪)");
+                (Some(pck), Some(inter))
+            }
+            Err(e) => {
+                warn!(error = %e, "SGX 证书链提取失败, 将降级到 Level 1");
+                (None, None)
+            }
+        };
+
+        info!("SGX-Only 证明生成成功 (nonce={}, level4={})", nonce.is_some(), pck_cert_der.is_some());
+
+        Ok(AttestationBundle {
+            tdx_quote_hash: sgx_quote_hash,
+            sgx_quote_hash,
+            mrtd,
+            mrenclave,
+            is_simulated: false,
+            tdx_quote_raw: Some(sgx_quote),
             nonce,
             pck_cert_der,
             intermediate_cert_der,

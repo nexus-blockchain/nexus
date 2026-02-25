@@ -21,6 +21,7 @@
 use std::sync::Arc;
 
 use axum::{routing::{get, post}, Json, Router};
+use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 use tokio::sync::RwLock;
@@ -31,6 +32,7 @@ use crate::error::{BotError, BotResult};
 use crate::tee::enclave_bridge::EnclaveBridge;
 use crate::tee::token_vault::TokenVault;
 use crate::tee::share_recovery;
+use crate::tee::vault_client::VaultClient;
 
 // ═══════════════════════════════════════════════════════════════
 // 协议类型
@@ -39,13 +41,13 @@ use crate::tee::share_recovery;
 /// GET /provision/attestation 响应
 #[derive(Serialize)]
 pub struct AttestationResponse {
-    /// TDX Quote (base64)
+    /// TEE Quote (base64) — SGX Quote (connect 模式) 或 TDX Quote (inprocess 模式)
     pub quote: String,
     /// Enclave X25519 公钥 (hex, 32 bytes) — 绑定在 Quote report_data[0..32]
     pub enclave_pk: String,
-    /// MRTD (hex, 48 bytes) — DApp 可用于链上白名单验证
-    pub mrtd: String,
-    /// TEE 模式
+    /// TEE 度量值 (hex) — MRENCLAVE (32B, SGX) 或 MRTD (48B, TDX)
+    pub tee_measurement: String,
+    /// TEE 模式: "sgx-proxy" | "hardware" | "software"
     pub tee_mode: String,
     /// 会话 ID (hex) — 用于关联后续 inject 请求
     pub session_id: String,
@@ -139,24 +141,77 @@ const MAX_SESSIONS: usize = 8;
 /// Provision 端点共享状态
 pub struct ProvisionState {
     enclave: Arc<EnclaveBridge>,
-    /// 活跃会话 (受 RwLock 保护)
+    /// 活跃会话 (受 RwLock 保护, 仅 inprocess/TDX 模式使用)
     sessions: RwLock<Vec<ProvisionSession>>,
     /// TokenVault (注入目标, 仅 inprocess 模式)
-    /// None = vault 在外部进程中 (需要通过 VaultClient IPC 注入)
     vault: Option<Arc<RwLock<TokenVault>>>,
+    /// SGX Vault IPC 客户端 (connect 模式: 委托 SGX vault 生成 Quote + 解密 Token)
+    /// Some = SGX 代理模式 (Token 明文从不经过主进程)
+    /// None = TDX 直连模式 (当前行为, 向后兼容)
+    vault_client: Option<Arc<VaultClient>>,
+    /// Bearer Token 鉴权 (C1 修复)
+    provision_secret: String,
 }
 
 impl ProvisionState {
-    pub fn new(enclave: Arc<EnclaveBridge>, vault: Option<Arc<RwLock<TokenVault>>>) -> Self {
+    pub fn new(
+        enclave: Arc<EnclaveBridge>,
+        vault: Option<Arc<RwLock<TokenVault>>>,
+        vault_client: Option<Arc<VaultClient>>,
+        provision_secret: String,
+    ) -> Self {
         Self {
             enclave,
             sessions: RwLock::new(Vec::new()),
             vault,
+            vault_client,
+            provision_secret,
         }
     }
 
-    /// 创建新会话, 返回 (session, Quote, MRTD)
-    async fn create_session(&self) -> BotResult<(String, Vec<u8>, [u8; 48])> {
+    /// C1 修复: 验证 Bearer Token
+    fn check_auth(&self, headers: &HeaderMap) -> bool {
+        let auth = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let expected = format!("Bearer {}", self.provision_secret);
+        // 使用 SHA256 比较防止时序攻击
+        let expected_hash = Sha256::digest(expected.as_bytes());
+        let actual_hash = Sha256::digest(auth.as_bytes());
+        expected_hash == actual_hash
+    }
+
+    /// 创建新会话
+    ///
+    /// SGX 代理模式: 委托 SGX vault 生成 SGX Quote + X25519 密钥对
+    /// TDX 直连模式: 本地生成 TDX Quote + X25519 密钥对 (向后兼容)
+    ///
+    /// 返回 (session_id_hex, quote, enclave_pk_hex, tee_measurement_hex, tee_mode_str)
+    async fn create_session(&self) -> BotResult<(String, Vec<u8>, String, String, String)> {
+        if let Some(ref client) = self.vault_client {
+            return self.create_session_via_sgx(client).await;
+        }
+        self.create_session_local().await
+    }
+
+    /// SGX 代理: 通过 IPC 委托 SGX vault 创建会话
+    async fn create_session_via_sgx(&self, client: &VaultClient) -> BotResult<(String, Vec<u8>, String, String, String)> {
+        let (session_id, quote, x25519_pk, tee_measurement) = client.create_provision_session().await?;
+        let session_id_hex = hex::encode(session_id);
+        let enclave_pk_hex = hex::encode(x25519_pk);
+        let tee_measurement_hex = hex::encode(&tee_measurement);
+        info!(
+            session_id = %session_id_hex,
+            x25519_pk = %enclave_pk_hex,
+            measurement = %tee_measurement_hex,
+            "SGX 代理: Provision 会话已创建 (Quote 来自 SGX vault)"
+        );
+        Ok((session_id_hex, quote, enclave_pk_hex, tee_measurement_hex, "sgx-proxy".into()))
+    }
+
+    /// TDX 本地: 直接生成 TDX Quote (向后兼容)
+    async fn create_session_local(&self) -> BotResult<(String, Vec<u8>, String, String, String)> {
         let mut sessions = self.sessions.write().await;
 
         // 清理过期会话
@@ -183,20 +238,94 @@ impl ProvisionState {
 
         let quote = self.generate_provision_quote(&pk_hash)?;
         let mrtd = Self::extract_mrtd_from_quote(&quote);
+        let enclave_pk_hex = hex::encode(pk_bytes);
+        let tee_measurement_hex = hex::encode(mrtd);
+        let tee_mode = self.enclave.mode().to_string();
 
         sessions.push(session);
 
         info!(
             session_id = %session_id_hex,
-            x25519_pk = %hex::encode(pk_bytes),
-            "Provision 会话已创建"
+            x25519_pk = %enclave_pk_hex,
+            "Provision 会话已创建 (TDX 本地)"
         );
 
-        Ok((session_id_hex, quote, mrtd))
+        Ok((session_id_hex, quote, enclave_pk_hex, tee_measurement_hex, tee_mode))
     }
 
-    /// 消费会话并解密 Token
-    async fn consume_session(
+    /// 消费会话并解密 + 注入 Token
+    ///
+    /// SGX 代理模式: 密文转发到 SGX vault, Token 明文从不经过主进程
+    /// TDX 直连模式: 本地 ECDH 解密 + 注入 inprocess vault
+    async fn consume_and_inject(
+        &self,
+        session_id_hex: &str,
+        ephemeral_pk_hex: &str,
+        ciphertext_b64: &str,
+        nonce_b64: &str,
+        platform: &str,
+    ) -> BotResult<Option<[u8; 32]>> {
+        if let Some(ref client) = self.vault_client {
+            return self.consume_and_inject_via_sgx(
+                client, session_id_hex, ephemeral_pk_hex, ciphertext_b64, nonce_b64, platform,
+            ).await;
+        }
+        // TDX 本地: 解密 + 注入
+        let token = self.consume_session_local(
+            session_id_hex, ephemeral_pk_hex, ciphertext_b64, nonce_b64,
+        ).await?;
+        self.inject_token(token, platform).await
+    }
+
+    /// SGX 代理: 将密文转发到 SGX vault 解密 + 注入
+    async fn consume_and_inject_via_sgx(
+        &self,
+        client: &VaultClient,
+        session_id_hex: &str,
+        ephemeral_pk_hex: &str,
+        ciphertext_b64: &str,
+        nonce_b64: &str,
+        platform: &str,
+    ) -> BotResult<Option<[u8; 32]>> {
+        // 解析原始字节
+        let session_id_bytes = hex::decode(session_id_hex)
+            .map_err(|_| BotError::EnclaveError("invalid session_id hex".into()))?;
+        if session_id_bytes.len() != 16 {
+            return Err(BotError::EnclaveError("session_id must be 16 bytes".into()));
+        }
+        let mut session_id = [0u8; 16];
+        session_id.copy_from_slice(&session_id_bytes);
+
+        let ephemeral_pk_bytes = hex::decode(ephemeral_pk_hex)
+            .map_err(|_| BotError::EnclaveError("invalid ephemeral_pk hex".into()))?;
+        if ephemeral_pk_bytes.len() != 32 {
+            return Err(BotError::EnclaveError("ephemeral_pk must be 32 bytes".into()));
+        }
+        let mut ephemeral_pk = [0u8; 32];
+        ephemeral_pk.copy_from_slice(&ephemeral_pk_bytes);
+
+        use base64::Engine;
+        let ciphertext = base64::engine::general_purpose::STANDARD.decode(ciphertext_b64)
+            .map_err(|_| BotError::EnclaveError("invalid ciphertext base64".into()))?;
+        let nonce_bytes = base64::engine::general_purpose::STANDARD.decode(nonce_b64)
+            .map_err(|_| BotError::EnclaveError("invalid nonce base64".into()))?;
+        if nonce_bytes.len() != 12 {
+            return Err(BotError::EnclaveError("nonce must be 12 bytes".into()));
+        }
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(&nonce_bytes);
+
+        // 通过 IPC 转发到 SGX vault (密文从未解密, Token 明文从不经过主进程)
+        let bot_id_hash = client.consume_provision_session(
+            session_id, ephemeral_pk, ciphertext, nonce, platform.to_string(),
+        ).await?;
+
+        info!(session = %session_id_hex, platform, "✅ Token 已通过 SGX 代理安全注入 (明文仅在 SGX enclave 内)");
+        Ok(bot_id_hash)
+    }
+
+    /// TDX 本地: 解密 Token (向后兼容)
+    async fn consume_session_local(
         &self,
         session_id_hex: &str,
         ephemeral_pk_hex: &str,
@@ -281,8 +410,8 @@ impl ProvisionState {
     fn generate_provision_quote(&self, pk_hash: &[u8; 32]) -> BotResult<Vec<u8>> {
         use crate::tee::enclave_bridge::TeeMode;
         match self.enclave.mode() {
-            TeeMode::Hardware => {
-                // 写入 report_data → 读取 TDX Quote
+            TeeMode::Tdx | TeeMode::Sgx => {
+                // 写入 report_data → 读取 TDX/SGX Quote (Gramine 统一接口)
                 let mut report_data = [0u8; 64];
                 report_data[..32].copy_from_slice(pk_hash);
                 // report_data[32..64] = 0 (无 nonce, provision 不需要)
@@ -313,17 +442,28 @@ impl ProvisionState {
         }
     }
 
-    /// 从 Quote 提取 MRTD (48 bytes)
+    /// 从 Quote 提取度量值 (48 bytes)
+    ///
+    /// TDX Quote v4: MRTD at offset 184 (48B)
+    /// SGX Quote v3: MRENCLAVE at offset 112 (32B) + 16B zero-pad
     fn extract_mrtd_from_quote(quote: &[u8]) -> [u8; 48] {
-        let mut mrtd = [0u8; 48];
-        // TDX Quote v4: Body starts at offset 48, MRTD at Body + 136 = offset 184
-        if quote.len() >= 232 {
-            mrtd.copy_from_slice(&quote[184..232]);
+        let mut measurement = [0u8; 48];
+        if quote.len() >= 2 {
+            let version = u16::from_le_bytes([quote[0], quote[1]]);
+            match version {
+                4 if quote.len() >= 232 => {
+                    measurement.copy_from_slice(&quote[184..232]);
+                }
+                3 if quote.len() >= 144 => {
+                    measurement[..32].copy_from_slice(&quote[112..144]);
+                }
+                _ => {}
+            }
         }
-        mrtd
+        measurement
     }
 
-    /// 注入 Token 到 Vault + auto-seal
+    /// 注入 Token 到 inprocess Vault + auto-seal (TDX 本地模式)
     async fn inject_token(
         &self,
         token: Zeroizing<String>,
@@ -337,16 +477,15 @@ impl ProvisionState {
             match platform {
                 "telegram" => {
                     v.set_telegram_token(token.to_string());
-                    // 计算 bot_id_hash
                     let mut hasher = Sha256::new();
                     hasher.update(token.as_bytes());
                     let hash: [u8; 32] = hasher.finalize().into();
                     bot_id_hash = Some(hash);
-                    info!("Telegram Token 已注入 TokenVault");
+                    info!("Telegram Token 已注入 TokenVault (inprocess)");
                 }
                 "discord" => {
                     v.set_discord_token(token.to_string());
-                    info!("Discord Token 已注入 TokenVault");
+                    info!("Discord Token 已注入 TokenVault (inprocess)");
                 }
                 _ => {
                     return Err(BotError::EnclaveError(
@@ -355,17 +494,17 @@ impl ProvisionState {
                 }
             }
         } else {
-            // IPC 模式: 通过 VaultClient 注入 (未来扩展)
-            // 当前返回错误, 需要在 VaultIPC 协议中增加 SetToken 请求类型
             return Err(BotError::EnclaveError(
-                "IPC vault mode: inject via provision not yet supported (use inprocess or spawn)".into()
+                "inprocess vault not available (use SGX proxy mode for IPC vault)".into()
             ));
         }
 
         // Auto-seal: 将 Token 保存为 Shamir share (后续启动无需再次注入)
-        let signing_key = [0u8; 32]; // 临时签名密钥, Ceremony 会覆盖
+        // R5: 使用 enclave 实际签名密钥, 避免存入零值
+        let signing_key = self.enclave.signing_key().to_bytes();
+        let zero_hash = [0u8; 32]; // auto-seal 无真实 ceremony
         if let Err(e) = share_recovery::create_and_save_share(
-            &self.enclave, token.as_str(), &signing_key, 1, 1, 0,
+            &self.enclave, token.as_str(), &signing_key, 1, 1, 0, &zero_hash,
         ) {
             warn!(error = %e, "Auto-seal 失败 (Token 已注入但未持久化)");
         } else {
@@ -388,58 +527,72 @@ impl ProvisionState {
 ///
 /// enclave: TEE Enclave 桥接
 /// vault: TokenVault (inprocess 模式), None = IPC 模式
+/// vault_client: SGX Vault IPC 客户端 (connect 模式), None = TDX 直连
+/// C1 修复: provision_secret 为空时禁用路由, 非空时要求 Bearer Token 鉴权
 pub fn provision_routes(
     enclave: Arc<EnclaveBridge>,
     vault: Option<Arc<RwLock<TokenVault>>>,
+    vault_client: Option<Arc<VaultClient>>,
+    provision_secret: String,
 ) -> Router {
-    let state = Arc::new(ProvisionState::new(enclave, vault));
+    if provision_secret.is_empty() {
+        warn!("⚠️ PROVISION_SECRET 未设置, /provision/* 路由已禁用");
+        return Router::new();
+    }
+
+    if vault_client.is_some() {
+        info!("RA-TLS Provision: SGX 代理模式 (Token 明文仅在 SGX enclave 内)");
+    } else if vault.is_some() {
+        info!("RA-TLS Provision: TDX 本地模式 (inprocess vault)");
+    } else {
+        warn!("RA-TLS Provision: 无 vault 可用, inject 将失败");
+    }
+
+    let state = Arc::new(ProvisionState::new(enclave, vault, vault_client, provision_secret));
 
     Router::new()
         .route("/provision/attestation", get({
             let st = state.clone();
-            move || {
+            move |headers: HeaderMap| {
                 let st = st.clone();
-                async move { handle_attestation(st).await }
+                async move { handle_attestation(st, headers).await }
             }
         }))
         .route("/provision/inject-token", post({
             let st = state.clone();
-            move |Json(req): Json<InjectTokenRequest>| {
+            move |headers: HeaderMap, Json(req): Json<InjectTokenRequest>| {
                 let st = st.clone();
-                async move { handle_inject_token(st, req).await }
+                async move { handle_inject_token(st, headers, req).await }
             }
         }))
 }
 
 /// GET /provision/attestation
 ///
-/// 返回 TDX Quote + Enclave X25519 公钥
-/// DApp 用此公钥加密 Token, 中间代理无法解密
+/// 返回 TEE Quote + Enclave X25519 公钥
+/// SGX 代理模式: Quote 来自 SGX vault (MRENCLAVE)
+/// TDX 本地模式: Quote 来自 TDX VM (MRTD)
 async fn handle_attestation(
     state: Arc<ProvisionState>,
+    headers: HeaderMap,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
-    match state.create_session().await {
-        Ok((session_id, quote, mrtd)) => {
-            // 找到刚创建的会话获取公钥
-            let sessions = state.sessions.read().await;
-            let session = sessions.iter().find(|s| s.session_id_hex() == session_id);
-            let enclave_pk = match session {
-                Some(s) => hex::encode(s.x25519_public.to_bytes()),
-                None => {
-                    return (
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!(ErrorResponse { error: "session lost".into() })),
-                    );
-                }
-            };
-            drop(sessions);
+    // C1 修复: Bearer Token 鉴权
+    if !state.check_auth(&headers) {
+        warn!("provision/attestation: 鉴权失败");
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!(ErrorResponse { error: "unauthorized: invalid or missing PROVISION_SECRET".into() })),
+        );
+    }
 
+    match state.create_session().await {
+        Ok((session_id, quote, enclave_pk, tee_measurement, tee_mode)) => {
             use base64::Engine;
             let resp = AttestationResponse {
                 quote: base64::engine::general_purpose::STANDARD.encode(&quote),
                 enclave_pk,
-                mrtd: hex::encode(mrtd),
-                tee_mode: state.enclave.mode().to_string(),
+                tee_measurement,
+                tee_mode,
                 session_id,
             };
             (axum::http::StatusCode::OK, Json(serde_json::json!(resp)))
@@ -460,8 +613,17 @@ async fn handle_attestation(
 /// Enclave 解密 → 注入 TokenVault → auto-seal
 async fn handle_inject_token(
     state: Arc<ProvisionState>,
+    headers: HeaderMap,
     req: InjectTokenRequest,
 ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    // C1 修复: Bearer Token 鉴权
+    if !state.check_auth(&headers) {
+        warn!("provision/inject-token: 鉴权失败");
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!(ErrorResponse { error: "unauthorized: invalid or missing PROVISION_SECRET".into() })),
+        );
+    }
     // 验证平台
     if req.platform != "telegram" && req.platform != "discord" {
         return (
@@ -482,54 +644,26 @@ async fn handle_inject_token(
         );
     }
 
-    // 解密 Token
-    let token = match state.consume_session(
+    // 解密 + 注入 (统一路径: SGX 代理 / TDX 本地)
+    match state.consume_and_inject(
         &req.session_id,
         &req.ephemeral_pk,
         &req.ciphertext,
         &req.nonce,
+        &req.platform,
     ).await {
-        Ok(t) => t,
-        Err(e) => {
-            warn!(error = %e, session = %req.session_id, "Token 注入失败");
-            return (
-                axum::http::StatusCode::FORBIDDEN,
-                Json(serde_json::json!(ErrorResponse { error: format!("{}", e) })),
-            );
-        }
-    };
-
-    // 基本 Token 格式验证
-    if token.is_empty() {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!(ErrorResponse { error: "token is empty".into() })),
-        );
-    }
-    if req.platform == "telegram" && !token.contains(':') {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!(ErrorResponse {
-                error: "invalid Telegram token format (expected 'id:secret')".into()
-            })),
-        );
-    }
-
-    // 注入 TokenVault + auto-seal
-    match state.inject_token(token, &req.platform).await {
         Ok(bot_id_hash) => {
             let resp = InjectTokenResponse {
                 success: true,
                 message: format!("{} token injected and sealed", req.platform),
                 bot_id_hash: bot_id_hash.map(|h| hex::encode(h)),
             };
-            info!(platform = %req.platform, "✅ Token 已通过 RA-TLS 安全注入");
             (axum::http::StatusCode::OK, Json(serde_json::json!(resp)))
         }
         Err(e) => {
-            error!(error = %e, platform = %req.platform, "Token 注入 Vault 失败");
+            warn!(error = %e, session = %req.session_id, platform = %req.platform, "Token 注入失败");
             (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::http::StatusCode::FORBIDDEN,
                 Json(serde_json::json!(ErrorResponse { error: format!("{}", e) })),
             )
         }
@@ -556,7 +690,7 @@ mod tests {
             EnclaveBridge::init(dir.path().to_str().unwrap(), "software").unwrap()
         );
         let vault = Arc::new(RwLock::new(TokenVault::new()));
-        let state = Arc::new(ProvisionState::new(enclave, Some(vault)));
+        let state = Arc::new(ProvisionState::new(enclave, Some(vault), None, "test-secret".into()));
         (state, dir)
     }
 
@@ -602,7 +736,7 @@ mod tests {
     #[tokio::test]
     async fn create_session_returns_valid_data() {
         let (state, _dir) = make_test_state();
-        let (session_id, quote, _mrtd) = state.create_session().await.unwrap();
+        let (session_id, quote, _pk, _meas, _mode) = state.create_session().await.unwrap();
 
         assert_eq!(session_id.len(), 32); // 16 bytes hex
         assert!(!quote.is_empty());
@@ -615,27 +749,15 @@ mod tests {
         let token = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ";
 
         // Step 1: 创建会话
-        let (session_id, _quote, _mrtd) = state.create_session().await.unwrap();
-
-        // 获取 enclave PK
-        let enclave_pk_hex = {
-            let sessions = state.sessions.read().await;
-            let s = sessions.iter().find(|s| s.session_id_hex() == session_id).unwrap();
-            hex::encode(s.x25519_public.to_bytes())
-        };
+        let (session_id, _quote, enclave_pk_hex, _meas, _mode) = state.create_session().await.unwrap();
 
         // Step 2: DApp 端加密 Token
         let (ephemeral_pk, ciphertext, nonce) = dapp_encrypt_token(&enclave_pk_hex, token);
 
-        // Step 3: 注入
-        let decrypted = state.consume_session(
-            &session_id, &ephemeral_pk, &ciphertext, &nonce,
+        // Step 3: 解密 + 注入 (TDX 本地模式)
+        let hash = state.consume_and_inject(
+            &session_id, &ephemeral_pk, &ciphertext, &nonce, "telegram",
         ).await.unwrap();
-
-        assert_eq!(decrypted.as_str(), token);
-
-        // Step 4: 注入 Vault
-        let hash = state.inject_token(decrypted, "telegram").await.unwrap();
         assert!(hash.is_some());
 
         // 验证 Vault 中有 Token
@@ -648,20 +770,13 @@ mod tests {
         let (state, _dir) = make_test_state();
         let token = "MTIzNDU2Nzg5MDEyMzQ1Njc4OQ.Gg1234.abcdefghijklmnop";
 
-        let (session_id, _quote, _mrtd) = state.create_session().await.unwrap();
-        let enclave_pk_hex = {
-            let sessions = state.sessions.read().await;
-            let s = sessions.iter().find(|s| s.session_id_hex() == session_id).unwrap();
-            hex::encode(s.x25519_public.to_bytes())
-        };
+        let (session_id, _quote, enclave_pk_hex, _meas, _mode) = state.create_session().await.unwrap();
 
         let (ephemeral_pk, ciphertext, nonce) = dapp_encrypt_token(&enclave_pk_hex, token);
 
-        let decrypted = state.consume_session(
-            &session_id, &ephemeral_pk, &ciphertext, &nonce,
+        let hash = state.consume_and_inject(
+            &session_id, &ephemeral_pk, &ciphertext, &nonce, "discord",
         ).await.unwrap();
-
-        let hash = state.inject_token(decrypted, "discord").await.unwrap();
         assert!(hash.is_none()); // Discord 无 bot_id_hash
 
         let vault = state.vault.as_ref().unwrap().read().await;
@@ -673,30 +788,27 @@ mod tests {
         let (state, _dir) = make_test_state();
         let token = "test:token";
 
-        let (session_id, _, _) = state.create_session().await.unwrap();
-        let enclave_pk_hex = {
-            let sessions = state.sessions.read().await;
-            hex::encode(sessions[0].x25519_public.to_bytes())
-        };
+        let (session_id, _, enclave_pk_hex, _, _) = state.create_session().await.unwrap();
 
         let (ephemeral_pk, ciphertext, nonce) = dapp_encrypt_token(&enclave_pk_hex, token);
 
         // 第一次使用成功
-        let _ = state.consume_session(&session_id, &ephemeral_pk, &ciphertext, &nonce).await.unwrap();
+        let _ = state.consume_and_inject(&session_id, &ephemeral_pk, &ciphertext, &nonce, "telegram").await.unwrap();
 
         // 第二次使用失败 (会话已销毁)
-        let result = state.consume_session(&session_id, &ephemeral_pk, &ciphertext, &nonce).await;
+        let result = state.consume_and_inject(&session_id, &ephemeral_pk, &ciphertext, &nonce, "telegram").await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn invalid_session_id_rejected() {
         let (state, _dir) = make_test_state();
-        let result = state.consume_session(
+        let result = state.consume_and_inject(
             "00000000000000000000000000000000",
             "0000000000000000000000000000000000000000000000000000000000000000",
             "AAAA",
             "AAAAAAAAAAAA",
+            "telegram",
         ).await;
         assert!(result.is_err());
     }
@@ -706,7 +818,7 @@ mod tests {
         let (state, _dir) = make_test_state();
         let token = "test:token";
 
-        let (session_id, _, _) = state.create_session().await.unwrap();
+        let (session_id, _, _, _, _) = state.create_session().await.unwrap();
 
         // 使用完全不同的密钥加密 (不是 Enclave PK)
         let wrong_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
@@ -715,7 +827,7 @@ mod tests {
             &hex::encode(wrong_pk.to_bytes()), token,
         );
 
-        let result = state.consume_session(&session_id, &ephemeral_pk, &ciphertext, &nonce).await;
+        let result = state.consume_and_inject(&session_id, &ephemeral_pk, &ciphertext, &nonce, "telegram").await;
         assert!(result.is_err());
     }
 
@@ -753,6 +865,6 @@ mod tests {
         // 确保路由可以正常构建
         let enclave = make_test_enclave();
         let vault = Arc::new(RwLock::new(TokenVault::new()));
-        let _router = provision_routes(enclave, Some(vault));
+        let _router = provision_routes(enclave, Some(vault), None, "test-secret".into());
     }
 }

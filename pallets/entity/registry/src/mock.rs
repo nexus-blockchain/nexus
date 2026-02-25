@@ -99,6 +99,7 @@ impl pallet_entity_registry::Config for Test {
     type MaxAdmins = ConstU32<3>;
     type MaxEntitiesPerUser = ConstU32<3>;
     type ShopProvider = MockShopProvider;
+    type MaxShopsPerEntity = ConstU32<16>;
     type PlatformAccount = PlatformAccountId;
 }
 

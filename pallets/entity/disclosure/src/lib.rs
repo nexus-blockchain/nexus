@@ -393,6 +393,8 @@ pub mod pallet {
         InsufficientDisclosureLevel,
         /// 披露间隔未到 — 预留，供外部模块检查披露频率
         DisclosureIntervalNotReached,
+        /// D-L2: 黑窗口期时长为零或超过上限
+        InvalidBlackoutDuration,
     }
 
     // ==================== Extrinsics ====================
@@ -419,6 +421,11 @@ pub mod pallet {
             let now = <frame_system::Pallet<T>>::block_number();
             let next_required = Self::calculate_next_disclosure(level, now);
 
+            // D-L1 审计修复: 保留已有 violation_count，防止通过重新配置清除违规记录
+            let existing_violations = DisclosureConfigs::<T>::get(entity_id)
+                .map(|c| c.violation_count)
+                .unwrap_or(0);
+
             DisclosureConfigs::<T>::insert(entity_id, DisclosureConfig {
                 level,
                 insider_trading_control,
@@ -426,7 +433,7 @@ pub mod pallet {
                 blackout_period_after: blackout_after,
                 next_required_disclosure: next_required,
                 last_disclosure: now,
-                violation_count: 0,
+                violation_count: existing_violations,
             });
 
             Self::deposit_event(Event::DisclosureConfigUpdated {
@@ -701,6 +708,10 @@ pub mod pallet {
 
             let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
             ensure!(owner == who, Error::<T>::NotAdmin);
+
+            // D-L2 审计修复: 限制黑窗口期最大时长（100800 blocks ≈ 7 天 @ 6s/block）
+            let max_blackout: BlockNumberFor<T> = 100_800u32.into();
+            ensure!(!duration.is_zero() && duration <= max_blackout, Error::<T>::InvalidBlackoutDuration);
 
             let now = <frame_system::Pallet<T>>::block_number();
             let end_block = now.saturating_add(duration);

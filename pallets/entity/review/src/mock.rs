@@ -71,12 +71,28 @@ impl OrderProvider<u64, u128> for MockOrderProvider {
         ORDERS.with(|o| o.borrow().get(&order_id).map(|(buyer, _, _)| *buyer))
     }
 
+    fn order_seller(_order_id: u64) -> Option<u64> {
+        None
+    }
+
+    fn order_amount(_order_id: u64) -> Option<u128> {
+        None
+    }
+
     fn order_shop_id(order_id: u64) -> Option<u64> {
         ORDERS.with(|o| o.borrow().get(&order_id).map(|(_, shop_id, _)| *shop_id))
     }
 
     fn is_order_completed(order_id: u64) -> bool {
         ORDERS.with(|o| o.borrow().get(&order_id).map(|(_, _, c)| *c).unwrap_or(false))
+    }
+
+    fn is_order_disputed(_order_id: u64) -> bool {
+        false
+    }
+
+    fn can_dispute(_order_id: u64, _who: &u64) -> bool {
+        false
     }
 }
 

@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
+use crate::chain::ChainClient;
 use crate::error::{BotError, BotResult};
 use crate::tee::enclave_bridge::EnclaveBridge;
 use crate::tee::shamir;
@@ -64,6 +65,10 @@ pub struct RecoveryConfig {
     pub peer_endpoints: Vec<String>,
     /// 仪式 hash (用于向 peer 请求对应 share)
     pub ceremony_hash: [u8; 32],
+    /// 链客户端 (用于从链上 PeerRegistry 自动发现 peer)
+    pub chain_client: Option<Arc<ChainClient>>,
+    /// Bot ID Hash (用于链上查询 PeerRegistry)
+    pub bot_id_hash: Option<[u8; 32]>,
 }
 
 /// 尝试从密封 share 恢复 Token
@@ -98,7 +103,7 @@ async fn try_share_recovery(
     let encrypted_share = enclave.load_local_share()?
         .ok_or_else(|| BotError::EnclaveError("No local share found".into()))?;
 
-    let seal_key = enclave.seal_key();
+    let seal_key = enclave.seal_key()?;
 
     // 解密本地 share
     let local_share = shamir::decrypt_share(&encrypted_share, &seal_key)
@@ -112,14 +117,22 @@ async fn try_share_recovery(
     } else {
         // K>1: 需要从 peer 收集 K-1 个额外 share
         let needed = (config.threshold - 1) as usize;
-        if config.peer_endpoints.is_empty() {
+
+        // 如果 peer_endpoints 为空, 尝试从链上 PeerRegistry 自动发现
+        let mut endpoints = config.peer_endpoints.clone();
+        if endpoints.is_empty() {
+            if let Some(discovered) = auto_discover_peers(config, enclave).await? {
+                endpoints = discovered;
+            }
+        }
+        if endpoints.is_empty() {
             return Err(BotError::EnclaveError(format!(
-                "K={} but no peer_endpoints configured", config.threshold
+                "K={} but no peer_endpoints configured and chain discovery found none", config.threshold
             )));
         }
 
         info!(
-            k = config.threshold, peers = config.peer_endpoints.len(),
+            k = config.threshold, peers = endpoints.len(),
             "K>1 恢复: 从 peer 收集 {} 个额外 share", needed
         );
 
@@ -128,31 +141,26 @@ async fn try_share_recovery(
 
         let requester_pk = enclave.public_key_bytes();
         let peer_encrypted = peer_client.collect_shares(
-            &config.peer_endpoints,
+            &endpoints,
             &config.ceremony_hash,
             &requester_pk,
             needed,
         ).await?;
 
-        // 解密 peer shares
+        // 解密 peer shares (ECDH: 用本节点 Ed25519 私钥 → X25519 解密)
         //
-        // ⚠️ 注意: 当前设计中, 所有 share 使用 ceremony 发起端的 seal_key 加密。
-        // Peer 节点将 EncryptedShare 原样存储 (外层由 sealed_storage 保护)。
-        // 因此所有参与节点必须使用相同的 ceremony 加密密钥才能互相解密 share。
-        //
-        // 如果各节点的 seal_key 不同 (生产环境中大概率如此), 需要:
-        // 1. 使用 ceremony 级别的共享密钥加密 share, 或
-        // 2. 使用接收方公钥加密 share (推荐), 或
-        // 3. 依赖 RA-TLS 传输层加密, share 本身不加密
-        //
-        // TODO: 实现基于接收方公钥的 share 加密方案
+        // Share 服务端已用请求者的 Ed25519 公钥做 ECDH 加密,
+        // 这里用本节点的私钥解密, 不依赖 seal_key 一致性。
+        let receiver_x25519_secret = shamir::ed25519_to_x25519_secret(&enclave.signing_key().to_bytes());
         let mut all_shares = vec![local_share];
-        for es in &peer_encrypted {
-            let share = shamir::decrypt_share(es, &seal_key)
-                .map_err(|e| BotError::EnclaveError(format!(
-                    "peer share decrypt failed (possible key mismatch — \
-                     see share_recovery.rs H2 comment): {}", e
-                )))?;
+        for ecdh_share in &peer_encrypted {
+            let share = shamir::decrypt_share_from_sender(
+                &ecdh_share.encrypted,
+                &receiver_x25519_secret,
+                &ecdh_share.ephemeral_pk,
+            ).map_err(|e| BotError::EnclaveError(format!(
+                "peer share ECDH decrypt failed: {}", e
+            )))?;
             all_shares.push(share);
         }
 
@@ -187,6 +195,50 @@ async fn try_share_recovery(
         signing_key,
         source,
     })
+}
+
+/// 从链上 PeerRegistry 自动发现 peer 端点
+///
+/// 查询 bot_id_hash 对应的所有注册 Peer, 排除自己 (根据公钥), 返回端点列表
+async fn auto_discover_peers(
+    config: &RecoveryConfig,
+    enclave: &Arc<EnclaveBridge>,
+) -> BotResult<Option<Vec<String>>> {
+    let chain = match config.chain_client.as_ref() {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+    let bot_id_hash = match config.bot_id_hash.as_ref() {
+        Some(h) => h,
+        None => return Ok(None),
+    };
+
+    info!("尝试从链上 PeerRegistry 自动发现 peer...");
+    let peers = chain.query_peer_registry(bot_id_hash).await?;
+
+    if peers.is_empty() {
+        warn!("链上 PeerRegistry 无注册 peer");
+        return Ok(None);
+    }
+
+    let my_pk = enclave.public_key_bytes();
+    let endpoints: Vec<String> = peers.iter()
+        .filter(|p| p.public_key != my_pk)
+        .filter(|p| !p.endpoint.is_empty())
+        .map(|p| p.endpoint.clone())
+        .collect();
+
+    if endpoints.is_empty() {
+        warn!(total_peers = peers.len(), "链上有 peer 但排除自己后无可用端点");
+        return Ok(None);
+    }
+
+    info!(
+        discovered = endpoints.len(),
+        total = peers.len(),
+        "从链上 PeerRegistry 发现 {} 个 peer 端点", endpoints.len()
+    );
+    Ok(Some(endpoints))
 }
 
 /// 环境变量 fallback (过渡模式)
@@ -224,8 +276,10 @@ fn try_env_fallback(
         vault.set_discord_token(token);
     }
 
-    // 实际签名密钥由 EnclaveBridge 管理, 这里存零值表示不覆盖
-    let signing_key = Zeroizing::new([0u8; 32]);
+    // R5 修复: 使用 EnclaveBridge 的实际 Ed25519 密钥, 避免 auto-seal 存入零值
+    // 这样从 share 恢复时能还原正确的签名密钥
+    let mut signing_key = Zeroizing::new([0u8; 32]);
+    signing_key.copy_from_slice(&enclave.signing_key().to_bytes());
 
     // ── Auto-seal: 将 Token 自动保存为 Shamir share ──
     // 下次启动时 recover_token() 会直接从 share 恢复, 不再需要环境变量
@@ -270,14 +324,16 @@ fn auto_seal_token(
         return Ok(());
     }
 
-    // K=1, N=1: 单节点 auto-seal (过渡用途)
-    create_and_save_share(enclave, token, signing_key, 1, 1, 0)?;
+    // K=1, N=1: 单节点 auto-seal (过渡用途, ceremony_hash 为零)
+    let zero_hash = [0u8; 32];
+    create_and_save_share(enclave, token, signing_key, 1, 1, 0, &zero_hash)?;
     Ok(())
 }
 
 /// 执行 Ceremony 后保存 share (由 Ceremony 端点调用)
 ///
 /// 将 bot_token + signing_key 编码为 secrets, 分片, 加密并保存本地 share
+/// ceremony_hash 同时保存, 用于后续 handle_share_request 验证
 pub fn create_and_save_share(
     enclave: &Arc<EnclaveBridge>,
     bot_token: &str,
@@ -285,6 +341,7 @@ pub fn create_and_save_share(
     k: u8,
     n: u8,
     local_share_index: usize,
+    ceremony_hash: &[u8; 32],
 ) -> BotResult<()> {
     let secrets = shamir::encode_secrets(bot_token, signing_key);
 
@@ -299,14 +356,17 @@ pub fn create_and_save_share(
         )));
     }
 
-    let seal_key = enclave.seal_key();
+    let seal_key = enclave.seal_key()?;
     let encrypted = shamir::encrypt_share(&shares[local_share_index], &seal_key)
         .map_err(|e| BotError::EnclaveError(format!("encrypt share: {}", e)))?;
 
     enclave.save_local_share(&encrypted)?;
+    // R4: 保存 ceremony_hash, 供 handle_share_request 验证请求来源
+    enclave.save_ceremony_hash(ceremony_hash)?;
 
     info!(
         k = k, n = n, share_id = shares[local_share_index].id,
+        ceremony = %hex::encode(ceremony_hash),
         "Ceremony share 已创建并密封保存"
     );
 
@@ -328,6 +388,8 @@ mod tests {
             needs_discord: dc,
             peer_endpoints: vec![],
             ceremony_hash: [0u8; 32],
+            chain_client: None,
+            bot_id_hash: None,
         }
     }
 
@@ -339,7 +401,8 @@ mod tests {
 
         let token = "123456:ABCDEF_token";
         let sk = [0x42u8; 32];
-        create_and_save_share(&enclave, token, &sk, 1, 1, 0).unwrap();
+        let ch = [0xAA; 32];
+        create_and_save_share(&enclave, token, &sk, 1, 1, 0, &ch).unwrap();
 
         let config = default_config(1, true, false);
         let result = recover_token(&enclave, &config).await.unwrap();
@@ -349,6 +412,8 @@ mod tests {
         let url = result.vault.build_tg_api_url("getMe").unwrap();
         assert!(url.contains("123456:ABCDEF_token"));
         assert_eq!(&*result.signing_key, &sk);
+        // R4: verify ceremony_hash was persisted
+        assert_eq!(enclave.load_ceremony_hash().unwrap(), Some(ch));
     }
 
     #[test]
@@ -384,7 +449,7 @@ mod tests {
     fn create_share_invalid_index() {
         let dir = tempfile::tempdir().unwrap();
         let enclave = make_enclave(dir.path().to_str().unwrap());
-        let result = create_and_save_share(&enclave, "token", &[0u8; 32], 2, 3, 5);
+        let result = create_and_save_share(&enclave, "token", &[0u8; 32], 2, 3, 5, &[0u8; 32]);
         assert!(result.is_err());
     }
 
@@ -396,7 +461,7 @@ mod tests {
 
         let token = "my_bot:secret_token_789";
         let sk = [0xABu8; 32];
-        create_and_save_share(&enclave, token, &sk, 1, 3, 0).unwrap();
+        create_and_save_share(&enclave, token, &sk, 1, 3, 0, &[0u8; 32]).unwrap();
 
         let config = default_config(1, true, true);
         let result = recover_token(&enclave, &config).await.unwrap();
@@ -427,7 +492,7 @@ mod tests {
 
         let token = "test:TOKEN";
         let sk = [0x11u8; 32];
-        create_and_save_share(&enclave, token, &sk, 2, 3, 0).unwrap();
+        create_and_save_share(&enclave, token, &sk, 2, 3, 0, &[0u8; 32]).unwrap();
 
         // K=2 but no peer endpoints → try_share_recovery must fail
         let config = RecoveryConfig {
@@ -436,6 +501,8 @@ mod tests {
             needs_discord: false,
             peer_endpoints: vec![], // no peers!
             ceremony_hash: [0u8; 32],
+            chain_client: None,
+            bot_id_hash: None,
         };
         let result = try_share_recovery(&enclave, &config).await;
         assert!(result.is_err());

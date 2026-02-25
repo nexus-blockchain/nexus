@@ -16,7 +16,7 @@
 
 pub use pallet::*;
 
-use codec::{Decode, Encode};
+use codec::{Decode, DecodeWithMemTracking, Encode};
 use frame_support::pallet_prelude::*;
 use sp_runtime::traits::Saturating;
 use sp_std::marker::PhantomData;
@@ -61,7 +61,7 @@ pub trait ArchivableData: Encode + Decode + Clone {
 }
 
 /// 归档状态
-#[derive(Encode, Decode, Clone, Copy, PartialEq, Eq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+#[derive(Encode, Decode, DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub enum ArchiveLevel {
     /// 活跃数据（完整存储）
     Active,
@@ -103,7 +103,7 @@ impl ArchiveLevel {
 }
 
 /// 归档记录
-#[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+#[derive(Encode, Decode, DecodeWithMemTracking, Clone, PartialEq, Eq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub struct ArchiveRecord {
     /// 数据ID
     pub data_id: u64,
@@ -118,7 +118,7 @@ pub struct ArchiveRecord {
 }
 
 /// 归档批次信息
-#[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+#[derive(Encode, Decode, DecodeWithMemTracking, Clone, PartialEq, Eq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub struct ArchiveBatch {
     /// 批次ID
     pub batch_id: u64,
@@ -244,7 +244,7 @@ pub mod pallet {
 
 /// 归档统计信息
 #[derive(
-    Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug, TypeInfo, MaxEncodedLen, Default,
+    Encode, Decode, DecodeWithMemTracking, Clone, PartialEq, Eq, RuntimeDebug, TypeInfo, MaxEncodedLen, Default,
 )]
 pub struct ArchiveStatistics {
     /// 总归档到L1数量
@@ -323,7 +323,12 @@ impl<T: Config> StorageLifecycleManager<T> {
         };
 
         ArchiveBatches::<T>::try_mutate(&data_type, |batches| {
-            batches.try_push(batch).map_err(|_| Error::<T>::BatchQueueFull)
+            // LC3修复：队列满时淘汰最旧批次，避免永久失败
+            if batches.try_push(batch.clone()).is_err() {
+                batches.remove(0);
+                batches.try_push(batch).map_err(|_| Error::<T>::BatchQueueFull)?;
+            }
+            Ok::<(), Error<T>>(())
         })?;
 
         // 更新统计
@@ -374,6 +379,10 @@ impl<T: Config> StorageLifecycleManager<T> {
 
 /// 辅助函数：将区块号转换为年月格式
 pub fn block_to_year_month(block_number: u32, blocks_per_day: u32) -> u16 {
+    // LC2修复：防止除零
+    if blocks_per_day == 0 {
+        return 2401; // 默认返回 2024年1月
+    }
     // 假设创世区块是2024年1月
     let days = block_number / blocks_per_day;
     let months = days / 30;

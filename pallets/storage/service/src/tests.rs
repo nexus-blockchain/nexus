@@ -129,6 +129,7 @@ impl crate::Config for Test {
     type MonthlyPublicFeeQuota = MonthlyPublicFeeQuota;
     type QuotaResetPeriod = QuotaResetPeriod;
     type DefaultBillingPeriod = frame_support::traits::ConstU32<100>; // 100块测试周期
+    type OperatorGracePeriod = frame_support::traits::ConstU64<100>; // 100块宽限期（测试用）
 }
 
 fn new_test_ext() -> sp_io::TestExternalities {
