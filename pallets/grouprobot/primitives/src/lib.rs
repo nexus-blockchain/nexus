@@ -568,3 +568,75 @@ impl<AccountId> NodeConsensusProvider<AccountId> for () {
 	fn node_operator(_: &NodeId) -> Option<AccountId> { None }
 	fn is_tee_node_by_operator(_: &AccountId) -> bool { false }
 }
+
+/// 🆕 10.2/10.4: 订阅查询 trait (为未来 subscription pallet 拆分准备)
+///
+/// 允许 ads 等 pallet 查询 Bot 的有效订阅层级, 无需直接依赖 consensus pallet.
+pub trait SubscriptionProvider {
+	/// 查询 Bot 的有效订阅层级 (无订阅 = Free)
+	fn effective_tier(bot_id_hash: &BotIdHash) -> SubscriptionTier;
+	/// 查询 Bot 的功能限制
+	fn effective_feature_gate(bot_id_hash: &BotIdHash) -> TierFeatureGate;
+}
+
+impl SubscriptionProvider for () {
+	fn effective_tier(_: &BotIdHash) -> SubscriptionTier { SubscriptionTier::Free }
+	fn effective_feature_gate(_: &BotIdHash) -> TierFeatureGate { SubscriptionTier::Free.feature_gate() }
+}
+
+/// 🆕 10.4: 统一奖励写入 trait (为未来 rewards pallet 拆分准备)
+///
+/// ads 和 subscription 都通过此 trait 向同一奖励池写入节点奖励,
+/// 节点只需调用一次 claim 即可领取全部来源的奖励.
+pub trait RewardAccruer {
+	/// 向节点累加待领取奖励
+	fn accrue_node_reward(node_id: &NodeId, amount: u128);
+}
+
+impl RewardAccruer for () {
+	fn accrue_node_reward(_: &NodeId, _: u128) {}
+}
+
+/// 订阅结算 trait (consensus on_era_end 调用 subscription pallet)
+pub trait SubscriptionSettler {
+	/// 结算当前 Era 的订阅费, 返回本次收取的总收入 (u128)
+	fn settle_era() -> u128;
+}
+
+impl SubscriptionSettler for () {
+	fn settle_era() -> u128 { 0 }
+}
+
+/// Era 奖励分配 trait (consensus on_era_end 调用 rewards pallet)
+pub trait EraRewardDistributor {
+	/// 向节点分配奖励并记录 Era 信息
+	///
+	/// - `era`: 当前 Era 编号
+	/// - `total_pool`: 可分配总额 (subscription node_share + inflation)
+	/// - `subscription_income`: 本期订阅收入
+	/// - `inflation`: 本期通胀铸币
+	/// - `treasury_share`: 国库分成
+	/// - `node_weights`: 各节点权重 (node_id, weight)
+	/// - `node_count`: 活跃节点数
+	///
+	/// 返回实际分配的总额
+	fn distribute_and_record(
+		era: u64,
+		total_pool: u128,
+		subscription_income: u128,
+		inflation: u128,
+		treasury_share: u128,
+		node_weights: &[(NodeId, u128)],
+		node_count: u32,
+	) -> u128;
+
+	/// 清理过期 Era 奖励记录
+	fn prune_old_eras(current_era: u64);
+}
+
+impl EraRewardDistributor for () {
+	fn distribute_and_record(
+		_: u64, _: u128, _: u128, _: u128, _: u128, _: &[(NodeId, u128)], _: u32,
+	) -> u128 { 0 }
+	fn prune_old_eras(_: u64) {}
+}

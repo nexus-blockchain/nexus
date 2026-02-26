@@ -48,7 +48,7 @@ impl EnclaveBridge {
         info!(mode = %mode, "初始化 Enclave 桥接");
 
         std::fs::create_dir_all(data_dir).ok();
-        let sealed_storage = SealedStorage::new(data_dir)?;
+        let sealed_storage = SealedStorage::new(data_dir, mode.is_hardware())?;
 
         // 加载或生成 Ed25519 密钥
         let keypair = Self::load_or_generate_key(&sealed_storage)?;

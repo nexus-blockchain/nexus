@@ -11,6 +11,8 @@ use crate::tee::enclave_bridge::{EnclaveBridge, TeeMode};
 pub const QUOTE_VALIDITY_SECS: u64 = 24 * 3600; // 24h
 /// 证明刷新提前量 (秒)
 pub const QUOTE_REFRESH_MARGIN_SECS: u64 = 3600; // 1h
+/// Software 模式刷新间隔 (秒) — 模拟证明无安全意义, 降低链上交易频率
+pub const SOFTWARE_REFRESH_SECS: u64 = 7 * 24 * 3600; // 7 days
 
 /// TDX+SGX 双证明生成器
 pub struct Attestor {
@@ -174,15 +176,24 @@ impl Attestor {
     }
 
     /// 软件模式: 生成模拟证明
+    ///
+    /// ⚠️ 包含随机盐, 每次生成的 mrtd/mrenclave 不同,
+    /// 防止攻击者从公钥推导出 mrtd 来伪造白名单匹配
     fn generate_simulated_attestation(&self, public_key: &[u8; 32]) -> AttestationBundle {
+        let mut salt = [0u8; 16];
+        use rand::RngCore;
+        rand::rngs::OsRng.fill_bytes(&mut salt);
+
         let mut hasher = Sha256::new();
         hasher.update(b"simulated-tdx-quote-");
         hasher.update(public_key);
+        hasher.update(&salt);
         let tdx_quote_hash: [u8; 32] = hasher.finalize().into();
 
         let mut hasher = Sha256::new();
         hasher.update(b"simulated-sgx-quote-");
         hasher.update(public_key);
+        hasher.update(&salt);
         let sgx_quote_hash: [u8; 32] = hasher.finalize().into();
 
         let mut mrtd = [0u8; 48];
@@ -364,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn attestation_deterministic_for_same_key() {
+    fn attestation_non_deterministic_with_salt() {
         let dir = tempfile::tempdir().unwrap();
         let enclave = Arc::new(
             EnclaveBridge::init(dir.path().to_str().unwrap(), "software").unwrap()
@@ -372,6 +383,10 @@ mod tests {
         let attestor = Attestor::new(enclave);
         let b1 = attestor.generate_attestation().unwrap();
         let b2 = attestor.generate_attestation().unwrap();
-        assert_eq!(b1.tdx_quote_hash, b2.tdx_quote_hash);
+        // SW3: 随机盐使每次生成不同, 防止从公钥推导 mrtd
+        assert_ne!(b1.tdx_quote_hash, b2.tdx_quote_hash);
+        assert_ne!(b1.mrtd, b2.mrtd);
+        assert!(b1.is_simulated);
+        assert!(b2.is_simulated);
     }
 }

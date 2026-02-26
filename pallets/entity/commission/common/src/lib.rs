@@ -46,19 +46,6 @@ impl CommissionModes {
 }
 
 // ============================================================================
-// 返佣来源
-// ============================================================================
-
-/// 返佣来源（预留，当前版本返佣统一从 Shop 运营账户出）
-#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
-pub enum CommissionSource {
-    #[default]
-    PlatformFee,
-    ShopFund,
-    Mixed,
-}
-
-// ============================================================================
 // 返佣类型 / 状态
 // ============================================================================
 
@@ -74,6 +61,7 @@ pub enum CommissionType {
     RepeatPurchase,
     SingleLineUpline,
     SingleLineDownline,
+    EntityReferral,
 }
 
 /// 返佣状态
@@ -233,6 +221,7 @@ pub trait CommissionProvider<AccountId, Balance> {
         buyer: &AccountId,
         order_amount: Balance,
         available_pool: Balance,
+        platform_fee: Balance,
     ) -> Result<(), DispatchError>;
 
     fn cancel_commission(order_id: u64) -> Result<(), DispatchError>;
@@ -282,7 +271,7 @@ pub trait CommissionProvider<AccountId, Balance> {
 pub struct NullCommissionProvider;
 
 impl<AccountId, Balance: Default> CommissionProvider<AccountId, Balance> for NullCommissionProvider {
-    fn process_commission(_: u64, _: u64, _: &AccountId, _: Balance, _: Balance) -> Result<(), DispatchError> { Ok(()) }
+    fn process_commission(_: u64, _: u64, _: &AccountId, _: Balance, _: Balance, _: Balance) -> Result<(), DispatchError> { Ok(()) }
     fn cancel_commission(_: u64) -> Result<(), DispatchError> { Ok(()) }
     fn pending_commission(_: u64, _: &AccountId) -> Balance { Balance::default() }
     fn set_commission_modes(_: u64, _: u16) -> Result<(), DispatchError> { Ok(()) }
@@ -309,6 +298,8 @@ pub trait MemberProvider<AccountId> {
     fn get_member_stats(shop_id: u64, account: &AccountId) -> (u32, u32, u128);
     fn uses_custom_levels(shop_id: u64) -> bool;
     fn custom_level_id(shop_id: u64, account: &AccountId) -> u8;
+    /// 获取自定义等级的返佣加成（基点），用于 level-diff 无独立配置时的回退
+    fn get_level_commission_bonus(shop_id: u64, level_id: u8) -> u16;
     fn auto_register(shop_id: u64, account: &AccountId, referrer: Option<AccountId>) -> Result<(), DispatchError>;
 
     fn set_custom_levels_enabled(shop_id: u64, enabled: bool) -> Result<(), DispatchError>;
@@ -329,6 +320,7 @@ impl<AccountId> MemberProvider<AccountId> for NullMemberProvider {
     fn get_member_stats(_: u64, _: &AccountId) -> (u32, u32, u128) { (0, 0, 0) }
     fn uses_custom_levels(_: u64) -> bool { false }
     fn custom_level_id(_: u64, _: &AccountId) -> u8 { 0 }
+    fn get_level_commission_bonus(_: u64, _: u8) -> u16 { 0 }
     fn auto_register(_: u64, _: &AccountId, _: Option<AccountId>) -> Result<(), DispatchError> { Ok(()) }
     fn set_custom_levels_enabled(_: u64, _: bool) -> Result<(), DispatchError> { Ok(()) }
     fn set_upgrade_mode(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
@@ -336,6 +328,21 @@ impl<AccountId> MemberProvider<AccountId> for NullMemberProvider {
     fn update_custom_level(_: u64, _: u8, _: Option<&[u8]>, _: Option<u128>, _: Option<u16>, _: Option<u16>) -> Result<(), DispatchError> { Ok(()) }
     fn remove_custom_level(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
     fn custom_level_count(_: u64) -> u8 { 0 }
+}
+
+// ============================================================================
+// EntityReferrerProvider — 招商推荐人查询接口
+// ============================================================================
+
+/// 招商推荐人查询接口（供 commission-core 查询 Entity 级推荐人）
+pub trait EntityReferrerProvider<AccountId> {
+    /// 获取 Entity 的招商推荐人
+    fn entity_referrer(entity_id: u64) -> Option<AccountId>;
+}
+
+/// 空 EntityReferrerProvider 实现
+impl<AccountId> EntityReferrerProvider<AccountId> for () {
+    fn entity_referrer(_entity_id: u64) -> Option<AccountId> { None }
 }
 
 // ============================================================================
@@ -404,5 +411,21 @@ pub trait LevelDiffPlanWriter {
 /// 空 LevelDiffPlanWriter 实现
 impl LevelDiffPlanWriter for () {
     fn set_global_rates(_: u64, _: u16, _: u16, _: u16, _: u16, _: u16) -> Result<(), DispatchError> { Ok(()) }
+    fn clear_config(_: u64) -> Result<(), DispatchError> { Ok(()) }
+}
+
+/// 团队业绩插件写入接口（由 commission-team 实现）
+pub trait TeamPlanWriter<Balance> {
+    /// 设置团队业绩阶梯配置
+    ///
+    /// tiers: Vec<(sales_threshold_u128, min_team_size, rate_bps)>
+    fn set_team_config(entity_id: u64, tiers: Vec<(u128, u32, u16)>, max_depth: u8, allow_stacking: bool) -> Result<(), DispatchError>;
+    /// 清除团队业绩配置
+    fn clear_config(entity_id: u64) -> Result<(), DispatchError>;
+}
+
+/// 空 TeamPlanWriter 实现
+impl<Balance> TeamPlanWriter<Balance> for () {
+    fn set_team_config(_: u64, _: Vec<(u128, u32, u16)>, _: u8, _: bool) -> Result<(), DispatchError> { Ok(()) }
     fn clear_config(_: u64) -> Result<(), DispatchError> { Ok(()) }
 }

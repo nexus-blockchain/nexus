@@ -176,7 +176,7 @@ pub struct MemberRegistrationPolicy(pub u8);
 | `MemberLevel` | Normal / Silver / Gold / Platinum / Diamond |
 | `ProductStatus` | Draft / OnSale / SoldOut / OffShelf |
 | `ProductCategory` | Digital / Physical / Service / Other |
-| `MallOrderStatus` | Created / Paid / Shipped / Completed / Cancelled / Disputed / Refunded / Expired |
+| `OrderStatus` | Created / Paid / Shipped / Completed / Cancelled / Disputed / Refunded / Expired |
 | `DividendConfig<Balance, BlockNumber>` | 分红配置（启用、周期、累计待分配金额） |
 
 ## Trait 接口

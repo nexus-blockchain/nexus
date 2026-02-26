@@ -137,7 +137,7 @@ impl EntityProvider<u64> for MockEntityProvider {
 pub struct MockPricingProvider;
 
 impl PricingProvider for MockPricingProvider {
-    fn get_cos_usdt_price() -> u64 {
+    fn get_nex_usdt_price() -> u64 {
         PRICING.with(|p| *p.borrow())
     }
 }

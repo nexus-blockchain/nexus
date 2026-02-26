@@ -334,6 +334,9 @@ mod runtime {
 	#[runtime::pallet_index(135)]
 	pub type CommissionSingleLine = pallet_commission_single_line;
 
+	#[runtime::pallet_index(136)]
+	pub type CommissionTeam = pallet_commission_team;
+
 	#[runtime::pallet_index(128)]
 	pub type EntityMarket = pallet_entity_market;
 
@@ -361,4 +364,10 @@ mod runtime {
 
 	#[runtime::pallet_index(153)]
 	pub type GroupRobotCeremony = pallet_grouprobot_ceremony;
+
+	#[runtime::pallet_index(154)]
+	pub type GroupRobotSubscription = pallet_grouprobot_subscription;
+
+	#[runtime::pallet_index(155)]
+	pub type GroupRobotRewards = pallet_grouprobot_rewards;
 }

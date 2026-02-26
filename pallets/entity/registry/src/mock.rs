@@ -39,7 +39,7 @@ impl pallet_balances::Config for Test {
 
 pub struct MockPricingProvider;
 impl PricingProvider for MockPricingProvider {
-    fn get_cos_usdt_price() -> u64 {
+    fn get_nex_usdt_price() -> u64 {
         // 1 NEX = 0.5 USDT → price = 500_000 (precision 10^6)
         500_000
     }

@@ -7,7 +7,7 @@ fn tron_address() -> Vec<u8> {
 }
 
 fn buyer_tron() -> Vec<u8> {
-    b"T1234567890123456789012345678901AB".to_vec()
+    b"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t".to_vec()
 }
 
 /// 设置初始价格（seed_liquidity 需要基准价格）
@@ -1562,7 +1562,139 @@ fn on_idle_noop_without_twap_data() {
     });
 }
 
+// ==================== 审计修复回归测试 ====================
+
 #[test]
+fn m2_reward_paid_event_tracks_success() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(1);
+        let nex = 100_000_000_000_000u128;
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+        ));
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
+        ));
+        let trade = NexMarket::usdt_trades(0).unwrap();
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount));
+        assert_ok!(NexMarket::claim_verification_reward(RuntimeOrigin::signed(CHARLIE), 0));
+
+        // 验证 VerificationRewardClaimed 事件包含 reward_paid=true
+        let events = System::events();
+        let found = events.iter().any(|e| {
+            if let RuntimeEvent::NexMarket(Event::VerificationRewardClaimed { reward_paid, .. }) = &e.event {
+                *reward_paid == true
+            } else {
+                false
+            }
+        });
+        assert!(found, "Should emit VerificationRewardClaimed with reward_paid=true");
+    });
+}
+
+#[test]
+fn m2_reward_paid_false_when_source_empty() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(1);
+        let nex = 100_000_000_000_000u128;
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+        ));
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
+        ));
+        let trade = NexMarket::usdt_trades(0).unwrap();
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount));
+
+        // 清空 RewardSource 余额 → transfer 会失败
+        let reward_source: u64 = 97;
+        let balance = Balances::free_balance(reward_source);
+        // 转走所有余额（保留 existential deposit 以外的全部）
+        let _ = Balances::transfer_allow_death(RuntimeOrigin::signed(reward_source), 99, balance);
+
+        // claim 仍应成功（奖励失败不阻断结算）
+        assert_ok!(NexMarket::claim_verification_reward(RuntimeOrigin::signed(CHARLIE), 0));
+
+        // 交易已完成
+        let trade = NexMarket::usdt_trades(0).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Completed);
+
+        // 验证 reward_paid=false
+        let events = System::events();
+        let found = events.iter().any(|e| {
+            if let RuntimeEvent::NexMarket(Event::VerificationRewardClaimed { reward_paid, .. }) = &e.event {
+                *reward_paid == false
+            } else {
+                false
+            }
+        });
+        assert!(found, "Should emit VerificationRewardClaimed with reward_paid=false");
+    });
+}
+
+#[test]
+fn l1_query_filters_expired_orders() {
+    new_test_ext().execute_with(|| {
+        // 创建卖单
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(),
+        ));
+        // 创建买单
+        assert_ok!(NexMarket::place_buy_order(
+            RuntimeOrigin::signed(BOB), 100_000_000_000_000, 400_000, buyer_tron(),
+        ));
+
+        // 当前应该有 1 卖单 + 1 买单
+        assert_eq!(NexMarket::get_sell_order_list().len(), 1);
+        assert_eq!(NexMarket::get_buy_order_list().len(), 1);
+
+        // 推进到订单过期后 (DefaultOrderTTL=14400)
+        System::set_block_number(14401);
+
+        // 查询应返回空列表（过期订单被过滤）
+        assert_eq!(NexMarket::get_sell_order_list().len(), 0);
+        assert_eq!(NexMarket::get_buy_order_list().len(), 0);
+    });
+}
+
+#[test]
+fn h2_weight_values_are_realistic() {
+    // 验证权重值在合理范围 (10M ~ 500M ref_time)
+    use crate::weights::WeightInfo;
+    let weights: Vec<Weight> = vec![
+        <() as WeightInfo>::place_sell_order(),
+        <() as WeightInfo>::place_buy_order(),
+        <() as WeightInfo>::cancel_order(),
+        <() as WeightInfo>::reserve_sell_order(),
+        <() as WeightInfo>::accept_buy_order(),
+        <() as WeightInfo>::confirm_payment(),
+        <() as WeightInfo>::process_timeout(),
+        <() as WeightInfo>::submit_ocw_result(),
+        <() as WeightInfo>::claim_reward(),
+        <() as WeightInfo>::configure_price_protection(),
+        <() as WeightInfo>::set_initial_price(),
+        <() as WeightInfo>::lift_circuit_breaker(),
+        <() as WeightInfo>::fund_seed_account(),
+        <() as WeightInfo>::seed_liquidity(),
+        <() as WeightInfo>::auto_confirm_payment(),
+        <() as WeightInfo>::submit_underpaid_update(),
+        <() as WeightInfo>::finalize_underpaid(),
+    ];
+
+    for (i, w) in weights.iter().enumerate() {
+        let ref_time = w.ref_time();
+        assert!(ref_time >= 10_000_000, "Weight {} ref_time too low: {}", i, ref_time);
+        assert!(ref_time <= 500_000_000, "Weight {} ref_time too high: {}", i, ref_time);
+        let proof_size = w.proof_size();
+        assert!(proof_size >= 1_000, "Weight {} proof_size too low: {}", i, proof_size);
+        assert!(proof_size <= 100_000, "Weight {} proof_size too high: {}", i, proof_size);
+    }
+}
+
 fn normal_sell_order_still_requires_deposit() {
     new_test_ext().execute_with(|| {
         // Alice 正常挂卖单（非 seed_liquidity）

@@ -1,7 +1,7 @@
 use crate::mock::*;
 use crate::pallet::*;
 use frame_support::{assert_noop, assert_ok};
-use pallet_entity_common::MallOrderStatus;
+use pallet_entity_common::OrderStatus;
 
 // ==================== place_order ====================
 
@@ -23,7 +23,7 @@ fn place_order_physical_works() {
         assert_eq!(order.quantity, 2);
         assert_eq!(order.unit_price, 100);
         assert_eq!(order.total_amount, 200); // 100 * 2
-        assert_eq!(order.status, MallOrderStatus::Paid);
+        assert_eq!(order.status, OrderStatus::Paid);
         assert!(order.requires_shipping);
         assert_eq!(order.escrow_id, 1);
     });
@@ -42,7 +42,7 @@ fn place_order_digital_auto_completes() {
         ));
 
         let order = Transaction::orders(1).expect("order should exist");
-        assert_eq!(order.status, MallOrderStatus::Completed);
+        assert_eq!(order.status, OrderStatus::Completed);
         assert!(order.completed_at.is_some());
         assert!(!order.requires_shipping);
     });
@@ -61,7 +61,7 @@ fn place_order_service_works() {
         ));
 
         let order = Transaction::orders(1).expect("order should exist");
-        assert_eq!(order.status, MallOrderStatus::Paid);
+        assert_eq!(order.status, OrderStatus::Paid);
         assert!(!order.requires_shipping);
         assert_eq!(order.product_category, pallet_entity_common::ProductCategory::Service);
     });
@@ -103,12 +103,12 @@ fn place_order_fails_buy_own_product() {
 #[test]
 fn cancel_order_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
 
         assert_ok!(Transaction::cancel_order(RuntimeOrigin::signed(BUYER), 1));
 
         let order = Transaction::orders(1).expect("order should exist");
-        assert_eq!(order.status, MallOrderStatus::Cancelled);
+        assert_eq!(order.status, OrderStatus::Cancelled);
 
         // C3: on_order_cancelled was called
         assert_eq!(get_cancelled_orders(), vec![1]);
@@ -130,7 +130,7 @@ fn cancel_order_fails_digital() {
 #[test]
 fn cancel_order_fails_not_buyer() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
 
         assert_noop!(
             Transaction::cancel_order(RuntimeOrigin::signed(BUYER2), 1),
@@ -142,7 +142,7 @@ fn cancel_order_fails_not_buyer() {
 #[test]
 fn cancel_order_fails_after_shipped() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
         assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track123".to_vec()));
 
         assert_noop!(
@@ -157,11 +157,11 @@ fn cancel_order_fails_after_shipped() {
 #[test]
 fn ship_order_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
         assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track_cid".to_vec()));
 
         let order = Transaction::orders(1).expect("order should exist");
-        assert_eq!(order.status, MallOrderStatus::Shipped);
+        assert_eq!(order.status, OrderStatus::Shipped);
         assert!(order.shipped_at.is_some());
         assert!(order.tracking_cid.is_some());
     });
@@ -170,7 +170,7 @@ fn ship_order_works() {
 #[test]
 fn ship_order_fails_not_seller() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
 
         assert_noop!(
             Transaction::ship_order(RuntimeOrigin::signed(BUYER), 1, b"track".to_vec()),
@@ -184,12 +184,12 @@ fn ship_order_fails_not_seller() {
 #[test]
 fn confirm_receipt_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
         assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
         assert_ok!(Transaction::confirm_receipt(RuntimeOrigin::signed(BUYER), 1));
 
         let order = Transaction::orders(1).expect("order should exist");
-        assert_eq!(order.status, MallOrderStatus::Completed);
+        assert_eq!(order.status, OrderStatus::Completed);
         assert!(order.completed_at.is_some());
 
         // Check stats
@@ -201,7 +201,7 @@ fn confirm_receipt_works() {
 #[test]
 fn confirm_receipt_fails_not_shipped() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
 
         assert_noop!(
             Transaction::confirm_receipt(RuntimeOrigin::signed(BUYER), 1),
@@ -215,14 +215,14 @@ fn confirm_receipt_fails_not_shipped() {
 #[test]
 fn request_refund_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
 
         assert_ok!(Transaction::request_refund(
             RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()
         ));
 
         let order = Transaction::orders(1).expect("order should exist");
-        assert_eq!(order.status, MallOrderStatus::Disputed);
+        assert_eq!(order.status, OrderStatus::Disputed);
     });
 }
 
@@ -241,12 +241,12 @@ fn request_refund_fails_digital() {
 #[test]
 fn approve_refund_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
         assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
         assert_ok!(Transaction::approve_refund(RuntimeOrigin::signed(SELLER), 1));
 
         let order = Transaction::orders(1).expect("order should exist");
-        assert_eq!(order.status, MallOrderStatus::Refunded);
+        assert_eq!(order.status, OrderStatus::Refunded);
 
         // C3: on_order_cancelled was called
         assert_eq!(get_cancelled_orders(), vec![1]);
@@ -256,7 +256,7 @@ fn approve_refund_works() {
 #[test]
 fn approve_refund_fails_not_seller() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
         assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
 
         assert_noop!(
@@ -275,12 +275,12 @@ fn service_order_full_flow() {
         assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None));
 
         let order = Transaction::orders(1).unwrap();
-        assert_eq!(order.status, MallOrderStatus::Paid);
+        assert_eq!(order.status, OrderStatus::Paid);
 
         // Start service
         assert_ok!(Transaction::start_service(RuntimeOrigin::signed(SELLER), 1));
         let order = Transaction::orders(1).unwrap();
-        assert_eq!(order.status, MallOrderStatus::Shipped);
+        assert_eq!(order.status, OrderStatus::Shipped);
         assert!(order.service_started_at.is_some());
 
         // Complete service
@@ -291,7 +291,7 @@ fn service_order_full_flow() {
         // Confirm service
         assert_ok!(Transaction::confirm_service(RuntimeOrigin::signed(BUYER), 1));
         let order = Transaction::orders(1).unwrap();
-        assert_eq!(order.status, MallOrderStatus::Completed);
+        assert_eq!(order.status, OrderStatus::Completed);
     });
 }
 
@@ -299,7 +299,7 @@ fn service_order_full_flow() {
 fn start_service_fails_not_service_order() {
     new_test_ext().execute_with(|| {
         // Product 1 = Physical
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
 
         assert_noop!(
             Transaction::start_service(RuntimeOrigin::signed(SELLER), 1),
@@ -328,14 +328,14 @@ fn confirm_service_fails_without_completion() {
 fn ship_timeout_auto_refunds() {
     new_test_ext().execute_with(|| {
         // Physical product, ShipTimeout = 100 blocks
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None));
-        assert_eq!(Transaction::orders(1).unwrap().status, MallOrderStatus::Paid);
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Paid);
 
         // Advance to block 1 + 100 = 101
         run_to_block(101);
 
         let order = Transaction::orders(1).unwrap();
-        assert_eq!(order.status, MallOrderStatus::Refunded);
+        assert_eq!(order.status, OrderStatus::Refunded);
 
         // C3: on_order_cancelled was called by timeout handler
         assert!(get_cancelled_orders().contains(&1));
@@ -345,14 +345,14 @@ fn ship_timeout_auto_refunds() {
 #[test]
 fn confirm_timeout_auto_completes() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
         assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
 
         // shipped_at = 1, ConfirmTimeout = 200, expiry = 1 + 200 = 201
         run_to_block(201);
 
         let order = Transaction::orders(1).unwrap();
-        assert_eq!(order.status, MallOrderStatus::Completed);
+        assert_eq!(order.status, OrderStatus::Completed);
     });
 }
 
@@ -366,7 +366,7 @@ fn service_timeout_auto_refunds() {
         run_to_block(101);
 
         let order = Transaction::orders(1).unwrap();
-        assert_eq!(order.status, MallOrderStatus::Refunded);
+        assert_eq!(order.status, OrderStatus::Refunded);
     });
 }
 
@@ -379,7 +379,7 @@ fn order_provider_trait_works() {
 
         assert!(!<Transaction as OrderProvider<u64, u64>>::order_exists(1));
 
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
 
         assert!(<Transaction as OrderProvider<u64, u64>>::order_exists(1));
         assert_eq!(<Transaction as OrderProvider<u64, u64>>::order_buyer(1), Some(BUYER));
@@ -398,8 +398,8 @@ fn order_provider_trait_works() {
 #[test]
 fn order_stats_tracking() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None));
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 2, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 2, Some(b"addr".to_vec()), None));
 
         let stats = Transaction::order_stats();
         assert_eq!(stats.total_orders, 2);
@@ -420,7 +420,7 @@ fn order_stats_tracking() {
 fn platform_fee_calculated_correctly() {
     new_test_ext().execute_with(|| {
         // Price 100 * qty 1 = 100, platform_fee = 100 * 200 / 10000 = 2
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
 
         let order = Transaction::orders(1).unwrap();
         assert_eq!(order.total_amount, 100);
@@ -441,7 +441,7 @@ fn service_in_progress_not_auto_completed_by_ship_timeout() {
         System::set_block_number(50);
         assert_ok!(Transaction::start_service(RuntimeOrigin::signed(SELLER), 1));
         let order = Transaction::orders(1).unwrap();
-        assert_eq!(order.status, MallOrderStatus::Shipped);
+        assert_eq!(order.status, OrderStatus::Shipped);
         assert!(order.service_completed_at.is_none());
 
         // ShipTimeout = 100, original expiry at block 1+100 = 101
@@ -450,7 +450,7 @@ fn service_in_progress_not_auto_completed_by_ship_timeout() {
 
         // H5: Order should still be Shipped (not auto-completed)
         let order = Transaction::orders(1).unwrap();
-        assert_eq!(order.status, MallOrderStatus::Shipped);
+        assert_eq!(order.status, OrderStatus::Shipped);
     });
 }
 
@@ -471,6 +471,133 @@ fn service_completed_auto_confirms_after_service_confirm_timeout() {
         // so the H5 check allows auto-complete. This is correct behavior:
         // the service is done, buyer hasn't confirmed, so auto-complete is fine.
         run_to_block(101);
-        assert_eq!(Transaction::orders(1).unwrap().status, MallOrderStatus::Completed);
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Completed);
+    });
+}
+
+// ==================== Audit fix regression tests ====================
+
+// C2: Service order cannot use ship_order
+#[test]
+fn c2_ship_order_rejects_service_order() {
+    new_test_ext().execute_with(|| {
+        // Product 3 = Service
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None));
+
+        assert_noop!(
+            Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()),
+            Error::<Test>::ServiceOrderCannotShip
+        );
+    });
+}
+
+// C2: Service order cannot use confirm_receipt
+#[test]
+fn c2_confirm_receipt_rejects_service_order() {
+    new_test_ext().execute_with(|| {
+        // Product 3 = Service, use start_service to get to Shipped
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None));
+        assert_ok!(Transaction::start_service(RuntimeOrigin::signed(SELLER), 1));
+
+        assert_noop!(
+            Transaction::confirm_receipt(RuntimeOrigin::signed(BUYER), 1),
+            Error::<Test>::ServiceOrderCannotShip
+        );
+    });
+}
+
+// M5: request_refund rejects empty reason_cid
+#[test]
+fn m5_request_refund_rejects_empty_reason() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
+
+        assert_noop!(
+            Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"".to_vec()),
+            Error::<Test>::EmptyReasonCid
+        );
+    });
+}
+
+// M5: request_refund rejects too-long reason_cid
+#[test]
+fn m5_request_refund_rejects_long_reason() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None));
+
+        let long_cid = vec![b'x'; 65]; // MaxCidLength = 64
+        assert_noop!(
+            Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, long_cid),
+            Error::<Test>::CidTooLong
+        );
+    });
+}
+
+// M6: Physical order requires shipping_cid
+#[test]
+fn m6_physical_order_requires_shipping_cid() {
+    new_test_ext().execute_with(|| {
+        // Product 1 = Physical, no shipping_cid → should fail
+        assert_noop!(
+            Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None),
+            Error::<Test>::ShippingCidRequired
+        );
+
+        // With shipping_cid → should succeed
+        assert_ok!(Transaction::place_order(
+            RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None
+        ));
+    });
+}
+
+// M6: Service order does NOT require shipping_cid
+#[test]
+fn m6_service_order_no_shipping_cid_ok() {
+    new_test_ext().execute_with(|| {
+        // Product 3 = Service, no shipping_cid → should succeed
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None));
+    });
+}
+
+// C1: ExpiryQueue partial processing preserves unprocessed entries
+#[test]
+fn c1_expiry_queue_preserves_unprocessed() {
+    new_test_ext().execute_with(|| {
+        // Place 3 physical orders — all expire at block 1 + 100 = 101
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"a".to_vec()), None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"b".to_vec()), None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"c".to_vec()), None));
+
+        // Verify all 3 are in the expiry queue at block 101
+        let queue = crate::ExpiryQueue::<Test>::get(101u64);
+        assert_eq!(queue.len(), 3);
+
+        // Process with very limited weight — only 1 order can be processed
+        System::set_block_number(101);
+        <Transaction as frame_support::traits::Hooks<u64>>::on_idle(
+            101,
+            frame_support::weights::Weight::from_parts(250_000_000, 100_000), // ~1 order
+        );
+
+        // Order 1 should be refunded, orders 2 and 3 should remain
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Refunded);
+
+        // Remaining orders should still be in the queue
+        let queue_after = crate::ExpiryQueue::<Test>::get(101u64);
+        assert!(queue_after.len() >= 1, "unprocessed orders should remain in queue");
+
+        // Process remaining with enough weight
+        <Transaction as frame_support::traits::Hooks<u64>>::on_idle(
+            101,
+            frame_support::weights::Weight::from_parts(10_000_000_000, 1_000_000),
+        );
+
+        // All should now be refunded
+        assert_eq!(Transaction::orders(2).unwrap().status, OrderStatus::Refunded);
+        assert_eq!(Transaction::orders(3).unwrap().status, OrderStatus::Refunded);
+
+        // Queue should be empty now
+        let queue_final = crate::ExpiryQueue::<Test>::get(101u64);
+        assert!(queue_final.is_empty());
     });
 }

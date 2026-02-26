@@ -94,6 +94,13 @@ impl EntityProvider<u64> for MockEntityProvider {
     fn entity_account(entity_id: u64) -> u64 {
         100 + entity_id
     }
+    fn entity_shops(entity_id: u64) -> sp_std::vec::Vec<u64> {
+        match entity_id {
+            1 => sp_std::vec![SHOP_ID],
+            2 => sp_std::vec![SHOP_ID_2],
+            _ => sp_std::vec![],
+        }
+    }
     fn update_entity_stats(_: u64, _: u128, _: u32) -> Result<(), DispatchError> { Ok(()) }
     fn update_entity_rating(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
 }
@@ -189,6 +196,8 @@ parameter_types! {
     pub const MinProposalThreshold: u16 = 100; // 1%
     pub const TimeWeightFullPeriod: u64 = 1000; // 1000 blocks to reach max multiplier
     pub const TimeWeightMaxMultiplier: u32 = 30000; // 3x max voting power
+    pub const MinVotingPeriod: u64 = 10;  // C3: 最小投票期 10 blocks
+    pub const MinExecutionDelay: u64 = 5; // C3: 最小执行延迟 5 blocks
 }
 
 impl pallet_entity_governance::Config for Test {
@@ -206,7 +215,8 @@ impl pallet_entity_governance::Config for Test {
     type MaxTitleLength = ConstU32<128>;
     type MaxCidLength = ConstU32<64>;
     type MaxActiveProposals = ConstU32<10>;
-    type MaxCommitteeSize = ConstU32<10>;
+    type MinVotingPeriod = MinVotingPeriod;
+    type MinExecutionDelay = MinExecutionDelay;
     type TimeWeightFullPeriod = TimeWeightFullPeriod;
     type TimeWeightMaxMultiplier = TimeWeightMaxMultiplier;
 }

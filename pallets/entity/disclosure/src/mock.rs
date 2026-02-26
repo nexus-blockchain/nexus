@@ -62,8 +62,11 @@ impl EntityProvider<u64> for MockEntityProvider {
     fn update_entity_rating(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
 }
 
+parameter_types! {
+    pub const MaxBlackoutDuration: u64 = 200; // 测试用较小值
+}
+
 impl pallet_entity_disclosure::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type EntityProvider = MockEntityProvider;
     type MaxCidLength = ConstU32<64>;
     type MaxInsiders = ConstU32<5>;
@@ -72,6 +75,9 @@ impl pallet_entity_disclosure::Config for Test {
     type StandardDisclosureInterval = StandardDisclosureInterval;
     type EnhancedDisclosureInterval = EnhancedDisclosureInterval;
     type MajorHolderThreshold = ConstU16<500>;
+    type MaxBlackoutDuration = MaxBlackoutDuration;
+    type MaxAnnouncementHistory = ConstU32<10>;
+    type MaxTitleLength = ConstU32<128>;
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

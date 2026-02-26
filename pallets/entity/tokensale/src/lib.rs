@@ -707,6 +707,8 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
+            // H3-fix: 当前仅支持原生 NEX（asset_id = None），阻止多资产键不一致
+            ensure!(asset_id.is_none(), Error::<T>::InvalidPaymentAsset);
             ensure!(!min_purchase.is_zero(), Error::<T>::InvalidPrice);
             ensure!(max_purchase_per_account >= min_purchase, Error::<T>::InvalidPurchaseLimits);
 
@@ -1047,8 +1049,9 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
 
             let round = SaleRounds::<T>::get(round_id).ok_or(Error::<T>::RoundNotFound)?;
+            // H2-fix: 仅允许 Ended 状态（Completed 来自 cancel→reclaim 路径，代币已被 unreserve）
             ensure!(
-                round.status == RoundStatus::Ended || round.status == RoundStatus::Completed,
+                round.status == RoundStatus::Ended,
                 Error::<T>::InvalidRoundStatus
             );
 
@@ -1260,7 +1263,8 @@ pub mod pallet {
                     )?;
                 }
 
-                // 标记完成
+                // C1-fix: 标记资金已提取，防止 withdraw_funds 双重提取
+                round.funds_withdrawn = true;
                 round.status = RoundStatus::Completed;
 
                 Self::deposit_event(Event::ExpiredRefundsReclaimed {

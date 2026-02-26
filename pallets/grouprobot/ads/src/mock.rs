@@ -64,6 +64,63 @@ impl NodeConsensusProvider<u64> for MockNodeConsensus {
 	}
 }
 
+// ============================================================================
+// Mock SubscriptionProvider
+// ============================================================================
+
+pub struct MockSubscription;
+
+impl SubscriptionProvider for MockSubscription {
+	fn effective_tier(bot_id_hash: &BotIdHash) -> SubscriptionTier {
+		// community_hash(1) = Pro, community_hash(2) = Free, others = Basic
+		match bot_id_hash[0] {
+			1 => SubscriptionTier::Pro,
+			2 => SubscriptionTier::Free,
+			_ => SubscriptionTier::Basic,
+		}
+	}
+	fn effective_feature_gate(bot_id_hash: &BotIdHash) -> TierFeatureGate {
+		MockSubscription::effective_tier(bot_id_hash).feature_gate()
+	}
+}
+
+// ============================================================================
+// Mock RewardAccruer
+// ============================================================================
+
+pub struct MockRewardPool;
+
+impl RewardAccruer for MockRewardPool {
+	fn accrue_node_reward(_node_id: &NodeId, _amount: u128) {
+		// no-op in tests; rewards pallet handles unified claim
+	}
+}
+
+// ============================================================================
+// Mock BotRegistryProvider (10.9: CommunityAdmin 绑定 Bot Owner)
+// ============================================================================
+
+pub struct MockBotRegistry;
+
+impl BotRegistryProvider<u64> for MockBotRegistry {
+	fn is_bot_active(_: &BotIdHash) -> bool { true }
+	fn is_tee_node(_: &BotIdHash) -> bool { false }
+	fn has_dual_attestation(_: &BotIdHash) -> bool { false }
+	fn is_attestation_fresh(_: &BotIdHash) -> bool { false }
+	fn bot_owner(bot_id_hash: &BotIdHash) -> Option<u64> {
+		// community_hash(1) 的 owner 是 BOT_OWNER (40)
+		// community_hash(2) 的 owner 是 BOT_OWNER2 (41)
+		// 其他没有 owner
+		match bot_id_hash[0] {
+			1 => Some(BOT_OWNER),
+			2 => Some(BOT_OWNER2),
+			_ => None,
+		}
+	}
+	fn bot_public_key(_: &BotIdHash) -> Option<[u8; 32]> { None }
+	fn peer_count(_: &BotIdHash) -> u32 { 0 }
+}
+
 impl pallet_grouprobot_ads::Config for Test {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
@@ -81,6 +138,9 @@ impl pallet_grouprobot_ads::Config for Test {
 	type AdSlashPercentage = ConstU32<30>;
 	type TreasuryAccount = TreasuryAccountId;
 	type NodeConsensus = MockNodeConsensus;
+	type Subscription = MockSubscription;
+	type RewardPool = MockRewardPool;
+	type BotRegistry = MockBotRegistry;
 }
 
 pub const ADVERTISER: u64 = 1;
@@ -88,6 +148,8 @@ pub const ADVERTISER2: u64 = 2;
 pub const COMMUNITY_OWNER: u64 = 10;
 pub const TREASURY: u64 = 999;
 pub const REPORTER: u64 = 50;
+pub const BOT_OWNER: u64 = 40;
+pub const BOT_OWNER2: u64 = 41;
 pub const NODE_OPERATOR: u64 = 20;
 pub const TEE_NODE_OPERATOR: u64 = 30;
 
@@ -117,6 +179,8 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 			(REPORTER, 100_000_000_000_000),            // 100 UNIT
 			(NODE_OPERATOR, 100_000_000_000_000),       // 100 UNIT
 			(TEE_NODE_OPERATOR, 100_000_000_000_000),   // 100 UNIT
+			(BOT_OWNER, 500_000_000_000_000),           // 500 UNIT
+			(BOT_OWNER2, 500_000_000_000_000),          // 500 UNIT
 		],
 		dev_accounts: None,
 	}
@@ -124,7 +188,11 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 	.unwrap();
 
 	let mut ext = sp_io::TestExternalities::new(t);
-	ext.execute_with(|| System::set_block_number(1));
+	ext.execute_with(|| {
+		System::set_block_number(1);
+		// 🆕 10.6: Pro 社区默认有质押, 以通过 AdsDisabledByTier 检查
+		crate::CommunityAdStake::<Test>::insert(community_hash(1), 100_000_000_000_000u128);
+	});
 	ext
 }
 

@@ -108,60 +108,6 @@ impl pallet_escrow::pallet::Escrow<u64, u64> for MockEscrow {
     }
 }
 
-// ==================== Mock EntityProvider ====================
-
-pub struct MockEntityProvider;
-
-impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
-    fn entity_exists(entity_id: u64) -> bool {
-        entity_id >= 1 && entity_id <= 3
-    }
-
-    fn is_entity_active(entity_id: u64) -> bool {
-        entity_id == 1 || entity_id == 2
-    }
-
-    fn entity_status(entity_id: u64) -> Option<pallet_entity_common::EntityStatus> {
-        match entity_id {
-            1 | 2 => Some(pallet_entity_common::EntityStatus::Active),
-            3 => Some(pallet_entity_common::EntityStatus::Suspended),
-            _ => None,
-        }
-    }
-
-    fn entity_owner(entity_id: u64) -> Option<u64> {
-        match entity_id {
-            1 => Some(SELLER),
-            2 => Some(SELLER2),
-            _ => None,
-        }
-    }
-
-    fn entity_account(entity_id: u64) -> u64 {
-        1000 + entity_id
-    }
-
-    fn update_entity_stats(_entity_id: u64, _sales_amount: u128, _order_count: u32) -> Result<(), sp_runtime::DispatchError> {
-        Ok(())
-    }
-
-    fn update_entity_rating(_entity_id: u64, _rating: u8) -> Result<(), sp_runtime::DispatchError> {
-        Ok(())
-    }
-
-    fn is_entity_admin(_entity_id: u64, _account: &u64) -> bool {
-        false
-    }
-
-    fn register_shop(_entity_id: u64, _shop_id: u64) -> Result<(), sp_runtime::DispatchError> {
-        Ok(())
-    }
-
-    fn unregister_shop(_entity_id: u64, _shop_id: u64) -> Result<(), sp_runtime::DispatchError> {
-        Ok(())
-    }
-}
-
 // ==================== Mock ShopProvider ====================
 
 pub struct MockShopProvider;
@@ -400,7 +346,7 @@ pub fn get_cancelled_orders() -> Vec<u64> {
 }
 
 impl pallet_entity_common::OrderCommissionHandler<u64, u64> for MockCommissionHandler {
-    fn on_order_completed(_shop_id: u64, _order_id: u64, _buyer: &u64, _amount: u64) -> Result<(), sp_runtime::DispatchError> {
+    fn on_order_completed(_shop_id: u64, _order_id: u64, _buyer: &u64, _amount: u64, _platform_fee: u64) -> Result<(), sp_runtime::DispatchError> {
         Ok(())
     }
 
@@ -429,7 +375,6 @@ impl pallet_entity_transaction::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type Escrow = MockEscrow;
-    type EntityProvider = MockEntityProvider;
     type ShopProvider = MockShopProvider;
     type ProductProvider = MockProductProvider;
     type EntityToken = MockEntityToken;

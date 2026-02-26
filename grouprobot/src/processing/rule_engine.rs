@@ -34,6 +34,33 @@ impl RuleEngine {
         Self::with_blacklist(store, anti_flood, flood_limit, vec![])
     }
 
+    /// 免注册模式 (CHAIN_ENABLED=false): 默认安全规则 + 强制广告
+    ///
+    /// 规则链: CallbackRule → FloodRule(10) → CommandRule → JoinRequestRule → AdFooterRule(强制) → DefaultRule
+    /// 不可自定义规则, 不连接链, 无需 GAS 费
+    pub fn free_mode(store: Arc<LocalStore>) -> Self {
+        let mut rules: Vec<Box<dyn Rule>> = vec![];
+
+        // Callback (最高优先级)
+        rules.push(Box::new(CallbackRule::new()));
+        // 防刷屏 (硬编码限额 10)
+        rules.push(Box::new(FloodRule::new(10)));
+        // 管理命令
+        rules.push(Box::new(CommandRule::new()));
+        // 入群审批
+        rules.push(Box::new(JoinRequestRule::new()));
+        // 强制广告 (免注册模式核心约束)
+        let ad = AdFooterRule::new(true);
+        ad.set_footer(Some(
+            "⚡ Powered by GroupRobot | 链上注册解锁自定义规则 · 升级 Pro 去广告".to_string()
+        ));
+        rules.push(Box::new(ad));
+        // 兜底
+        rules.push(Box::new(DefaultRule));
+
+        Self { rules, store, warn_tracker: None }
+    }
+
     /// 根据群配置 + 黑名单关键词构建规则链
     pub fn with_blacklist(
         store: Arc<LocalStore>,
@@ -417,6 +444,39 @@ mod tests {
 
         // Normal message passes
         assert!(engine.evaluate(&make_ctx("good morning everyone", false)).await.action.is_none());
+    }
+
+    // ── 免注册模式测试 ──
+
+    #[tokio::test]
+    async fn free_mode_normal_message_passes() {
+        let store = Arc::new(LocalStore::new());
+        let engine = RuleEngine::free_mode(store);
+        let decision = engine.evaluate(&make_ctx("hello world", false)).await;
+        assert!(decision.action.is_none());
+    }
+
+    #[tokio::test]
+    async fn free_mode_flood_triggers() {
+        let store = Arc::new(LocalStore::new());
+        let engine = RuleEngine::free_mode(store);
+        let ctx = make_ctx("msg", false);
+        // FloodRule limit=10, 发送 10 条后第 11 条触发
+        for _ in 0..10 {
+            engine.evaluate(&ctx).await;
+        }
+        let d = engine.evaluate(&ctx).await;
+        assert!(d.action.is_some());
+        assert_eq!(d.matched_rule, "flood");
+    }
+
+    #[tokio::test]
+    async fn free_mode_command_works() {
+        let store = Arc::new(LocalStore::new());
+        let engine = RuleEngine::free_mode(store);
+        let d = engine.evaluate(&make_ctx("/ban 123", true)).await;
+        assert!(d.action.is_some());
+        assert_eq!(d.matched_rule, "command");
     }
 
     // ── Phase 4: Tier gating tests ──

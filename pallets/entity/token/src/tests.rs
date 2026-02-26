@@ -48,7 +48,7 @@ fn create_shop_token_fails_shop_not_found() {
                 b"T".to_vec(),
                 18, 500, 1000,
             ),
-            Error::<Test>::ShopNotFound
+            Error::<Test>::EntityNotFound
         );
     });
 }
@@ -65,7 +65,7 @@ fn create_shop_token_fails_shop_not_active() {
                 b"T".to_vec(),
                 18, 500, 1000,
             ),
-            Error::<Test>::ShopNotActive
+            Error::<Test>::EntityNotActive
         );
     });
 }
@@ -82,7 +82,7 @@ fn create_shop_token_fails_not_owner() {
                 b"T".to_vec(),
                 18, 500, 1000,
             ),
-            Error::<Test>::NotShopOwner
+            Error::<Test>::NotEntityOwner
         );
     });
 }
@@ -555,7 +555,7 @@ fn change_token_type_updates_restrictions() {
         let config = EntityToken::entity_token_configs(SHOP_ID).unwrap();
         assert_eq!(config.token_type, TokenType::Equity);
         // Equity 的默认转账限制和 KYC 级别应被联动更新
-        assert_eq!(config.transfer_restriction, TransferRestrictionMode::from_u8(TokenType::Equity.default_transfer_restriction()));
+        assert_eq!(config.transfer_restriction, TokenType::Equity.default_transfer_restriction());
         assert_eq!(config.min_receiver_kyc, TokenType::Equity.required_kyc_level().1);
     });
 }
@@ -825,6 +825,65 @@ fn reward_on_purchase_skips_when_max_supply_reached() {
         let reward = EntityToken::reward_on_purchase(SHOP_ID, &USER_B, 10000);
         assert_ok!(&reward);
         assert_eq!(reward.unwrap(), 0);
+    });
+}
+
+// ==================== H1 回归: unlock_tokens 错误语义 ====================
+
+#[test]
+fn h1_unlock_tokens_no_locks_returns_no_locked_tokens() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        // 用户没有任何锁仓 → NoLockedTokens
+        assert_noop!(
+            EntityToken::unlock_tokens(RuntimeOrigin::signed(USER_A), SHOP_ID),
+            Error::<Test>::NoLockedTokens
+        );
+    });
+}
+
+#[test]
+fn h1_unlock_tokens_all_unexpired_returns_unlock_time_not_reached() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 1000,
+        ));
+        // 锁仓 500，到期 block 11
+        assert_ok!(EntityToken::lock_tokens(
+            RuntimeOrigin::signed(USER_A), SHOP_ID, 500, 10,
+        ));
+        // block 1，全部未到期 → UnlockTimeNotReached
+        assert_noop!(
+            EntityToken::unlock_tokens(RuntimeOrigin::signed(USER_A), SHOP_ID),
+            Error::<Test>::UnlockTimeNotReached
+        );
+    });
+}
+
+#[test]
+fn h1_unlock_partial_expired_works() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 1000,
+        ));
+        // 两笔锁仓：300 到 block 5，400 到 block 20
+        assert_ok!(EntityToken::lock_tokens(
+            RuntimeOrigin::signed(USER_A), SHOP_ID, 300, 4,
+        ));
+        assert_ok!(EntityToken::lock_tokens(
+            RuntimeOrigin::signed(USER_A), SHOP_ID, 400, 19,
+        ));
+        // block 6: 第一笔到期，第二笔未到期
+        run_to_block(6);
+        assert_ok!(EntityToken::unlock_tokens(
+            RuntimeOrigin::signed(USER_A), SHOP_ID,
+        ));
+        // 应只解锁了 300，仍有 400 锁仓
+        let locks = EntityToken::locked_tokens(SHOP_ID, &USER_A);
+        assert_eq!(locks.len(), 1);
+        assert_eq!(locks[0].amount, 400);
     });
 }
 

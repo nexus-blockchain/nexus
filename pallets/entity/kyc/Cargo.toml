@@ -16,7 +16,6 @@ scale-info = { workspace = true }
 frame-support = { workspace = true }
 frame-system = { workspace = true }
 sp-runtime = { workspace = true }
-pallet-entity-common = { workspace = true }
 
 [dev-dependencies]
 sp-core = { workspace = true }
@@ -30,7 +29,6 @@ std = [
     "frame-support/std",
     "frame-system/std",
     "sp-runtime/std",
-    "pallet-entity-common/std",
 ]
 runtime-benchmarks = [
     "frame-support/runtime-benchmarks",

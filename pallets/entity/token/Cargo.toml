@@ -36,6 +36,7 @@ std = [
     "frame-system/std",
     "sp-runtime/std",
     "sp-std/std",
+    "log/std",
     "pallet-entity-common/std",
 ]
 runtime-benchmarks = [

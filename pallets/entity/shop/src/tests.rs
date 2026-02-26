@@ -383,6 +383,138 @@ fn fund_operating_fails_on_closed_shop() {
 }
 
 // ============================================================================
+// withdraw_operating_fund tests
+// ============================================================================
+
+#[test]
+fn withdraw_operating_fund_works() {
+    new_test_ext().execute_with(|| {
+        // Create shop with 1000 initial fund
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+        ));
+
+        let shop_account = Shop::shop_account_id(1);
+        let owner_before = Balances::free_balance(1);
+        let shop_before = Balances::free_balance(shop_account);
+
+        // Withdraw 500 (leaves 500 which is > MinOperatingBalance=100)
+        assert_ok!(Shop::withdraw_operating_fund(RuntimeOrigin::signed(1), 1, 500));
+
+        assert_eq!(Balances::free_balance(shop_account), shop_before - 500);
+        assert_eq!(Balances::free_balance(1), owner_before + 500);
+    });
+}
+
+#[test]
+fn withdraw_operating_fund_fails_not_owner() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+        ));
+
+        // Account 2 is not entity owner
+        assert_noop!(
+            Shop::withdraw_operating_fund(RuntimeOrigin::signed(2), 1, 100),
+            Error::<Test>::NotAuthorized
+        );
+    });
+}
+
+#[test]
+fn withdraw_operating_fund_fails_below_minimum() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+        ));
+
+        // Try withdraw 950, leaving 50 < MinOperatingBalance(100)
+        assert_noop!(
+            Shop::withdraw_operating_fund(RuntimeOrigin::signed(1), 1, 950),
+            Error::<Test>::WithdrawBelowMinimum
+        );
+    });
+}
+
+#[test]
+fn withdraw_operating_fund_closed_shop_no_minimum() {
+    new_test_ext().execute_with(|| {
+        // Create non-primary shop (shop_id=1)
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Shop 2"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+        ));
+
+        // Close shop first
+        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
+
+        // close_shop auto-refunds, so shop_account should be 0 now
+        let shop_account = Shop::shop_account_id(1);
+        assert_eq!(Balances::free_balance(shop_account), 0);
+    });
+}
+
+#[test]
+fn withdraw_operating_fund_fails_zero_amount() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+        ));
+        assert_noop!(
+            Shop::withdraw_operating_fund(RuntimeOrigin::signed(1), 1, 0),
+            Error::<Test>::ZeroWithdrawAmount
+        );
+    });
+}
+
+#[test]
+fn withdraw_operating_fund_fails_insufficient() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+        ));
+
+        // Try withdraw more than available
+        assert_noop!(
+            Shop::withdraw_operating_fund(RuntimeOrigin::signed(1), 1, 5000),
+            Error::<Test>::InsufficientOperatingFund
+        );
+    });
+}
+
+// ============================================================================
+// close_shop auto-refund tests
+// ============================================================================
+
+#[test]
+fn close_shop_refunds_operating_fund() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Shop 2"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+        ));
+
+        let owner_before = Balances::free_balance(1);
+        let shop_account = Shop::shop_account_id(1);
+        let shop_balance = Balances::free_balance(shop_account);
+        assert_eq!(shop_balance, 1000);
+
+        // Close shop — should auto-refund
+        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
+
+        // shop_account should be empty
+        assert_eq!(Balances::free_balance(shop_account), 0);
+        // owner should have received the refund
+        assert_eq!(Balances::free_balance(1), owner_before + 1000);
+    });
+}
+
+// ============================================================================
 // ShopProvider trait tests
 // ============================================================================
 
@@ -410,6 +542,166 @@ fn shop_provider_trait_works() {
         // Pause shop
         assert_ok!(Shop::pause_shop(RuntimeOrigin::signed(1), 1));
         assert!(!<Shop as ShopProvider<u64>>::is_shop_active(1));
+    });
+}
+
+// ============================================================================
+// H2: disable_points clears balances and total supply
+// ============================================================================
+
+#[test]
+fn h2_disable_points_clears_balances() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+        ));
+
+        // Enable points
+        let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+        assert_ok!(Shop::enable_points(
+            RuntimeOrigin::signed(1), 1, name, symbol, 500, 1000, true,
+        ));
+
+        // Issue some points
+        assert_ok!(Shop::issue_points(1, &2, 500));
+        assert_eq!(Shop::shop_points_balance(1, 2), 500);
+        assert_eq!(Shop::shop_points_total_supply(1), 500);
+
+        // Disable points
+        assert_ok!(Shop::disable_points(RuntimeOrigin::signed(1), 1));
+
+        // H2: Balances and total supply should be cleaned
+        assert_eq!(Shop::shop_points_balance(1, 2), 0);
+        assert_eq!(Shop::shop_points_total_supply(1), 0);
+        assert!(Shop::shop_points_config(1).is_none());
+    });
+}
+
+// ============================================================================
+// H3: add_manager / remove_manager reject closed shop
+// ============================================================================
+
+#[test]
+fn h3_add_manager_fails_closed_shop() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+        ));
+        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
+
+        assert_noop!(
+            Shop::add_manager(RuntimeOrigin::signed(1), 1, 2),
+            Error::<Test>::ShopAlreadyClosed
+        );
+    });
+}
+
+#[test]
+fn h3_remove_manager_fails_closed_shop() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+        ));
+        assert_ok!(Shop::add_manager(RuntimeOrigin::signed(1), 1, 2));
+        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
+
+        assert_noop!(
+            Shop::remove_manager(RuntimeOrigin::signed(1), 1, 2),
+            Error::<Test>::ShopAlreadyClosed
+        );
+    });
+}
+
+// ============================================================================
+// M1: enable_points rejects empty name/symbol
+// ============================================================================
+
+#[test]
+fn m1_enable_points_rejects_empty_name() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+        ));
+
+        let empty_name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::default();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+        assert_noop!(
+            Shop::enable_points(RuntimeOrigin::signed(1), 1, empty_name, symbol, 500, 1000, true),
+            Error::<Test>::ShopNameEmpty
+        );
+    });
+}
+
+#[test]
+fn m1_enable_points_rejects_empty_symbol() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+        ));
+
+        let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
+        let empty_symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::default();
+        assert_noop!(
+            Shop::enable_points(RuntimeOrigin::signed(1), 1, name, empty_symbol, 500, 1000, true),
+            Error::<Test>::InvalidConfig
+        );
+    });
+}
+
+// ============================================================================
+// M3: close_shop cleans points data
+// ============================================================================
+
+#[test]
+fn m3_close_shop_cleans_points_data() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+        ));
+
+        // Enable and issue points
+        let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+        assert_ok!(Shop::enable_points(
+            RuntimeOrigin::signed(1), 1, name, symbol, 500, 1000, true,
+        ));
+        assert_ok!(Shop::issue_points(1, &2, 500));
+
+        // Close shop
+        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
+
+        // M3: Points data should be cleaned
+        assert!(Shop::shop_points_config(1).is_none());
+        assert_eq!(Shop::shop_points_balance(1, 2), 0);
+        assert_eq!(Shop::shop_points_total_supply(1), 0);
+    });
+}
+
+// ============================================================================
+// H4: deduct_operating_fund rejects closed shop
+// ============================================================================
+
+#[test]
+fn h4_deduct_operating_fund_fails_closed_shop() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+        ));
+        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
+
+        // H4: deduct_operating_fund should fail on closed shop
+        assert_noop!(
+            <Shop as ShopProvider<u64>>::deduct_operating_fund(1, 100),
+            Error::<Test>::ShopAlreadyClosed
+        );
     });
 }
 

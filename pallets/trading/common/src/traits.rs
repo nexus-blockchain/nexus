@@ -89,7 +89,7 @@ pub trait DepositCalculator<Balance> {
     ///
     /// ## 计算公式
     /// ```text
-    /// nex_amount = usd_amount * 10^18 / rate
+    /// nex_amount = usd_amount * 10^12 / rate
     /// ```
     /// 其中 rate 是 NEX/USD 汇率（精度 10^6）
     fn calculate_deposit(usd_amount: u64, fallback: Balance) -> Balance;
@@ -184,6 +184,50 @@ impl PriceOracle for () {
     fn get_last_trade_price() -> Option<u64> { None }
     fn is_price_stale(_max_age_blocks: u32) -> bool { true }
     fn get_trade_count() -> u64 { 0 }
+}
+
+// ===== 🆕 v0.7.0: 统一兑换比率接口 =====
+
+/// NEX/USDT 统一兑换比率接口
+///
+/// ## 说明
+/// 聚合 TWAP + 陈旧检测 + 置信度评估的统一查询接口。
+/// 适用于需要简单获取可靠汇率的模块（佣金换算、直播打赏定价等）。
+///
+/// ## 与 PricingProvider / PriceOracle 的关系
+/// - `PricingProvider`: 底层原始汇率查询（已有多个消费方，保留不变）
+/// - `PriceOracle`: 底层 TWAP/成交价/陈旧检测（已有，保留不变）
+/// - `ExchangeRateProvider`: 高级封装，内部组合上述接口，提供带置信度的汇率
+///
+/// ## 置信度等级
+/// - 90-100: TWAP 可用且新鲜（高交易量）
+/// - 60-89:  LastTradePrice 可用但非 TWAP
+/// - 30-59:  仅 initial_price 可用（冷启动期）
+/// - 0-29:   价格过时或不可用
+pub trait ExchangeRateProvider {
+    /// 获取 NEX/USDT 兑换比率（精度 10^6）
+    ///
+    /// 内部优先级：1h TWAP → LastTradePrice → initial_price
+    /// 返回 `None` 表示完全不可用
+    fn get_nex_usdt_rate() -> Option<u64>;
+
+    /// 价格置信度 (0-100)
+    ///
+    /// 基于数据来源、新鲜度和交易量综合评估
+    fn price_confidence() -> u8;
+
+    /// 价格是否可信赖（置信度 >= 阈值）
+    ///
+    /// 默认阈值 30，可覆盖
+    fn is_rate_reliable() -> bool {
+        Self::price_confidence() >= 30
+    }
+}
+
+/// ExchangeRateProvider 的空实现
+impl ExchangeRateProvider for () {
+    fn get_nex_usdt_rate() -> Option<u64> { None }
+    fn price_confidence() -> u8 { 0 }
 }
 
 // ===== 单元测试 =====
@@ -303,6 +347,40 @@ mod tests {
         
         let result = <() as PricingProvider<u128>>::report_p2p_trade(0, 0, 0);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_exchange_rate_provider_empty_impl() {
+        assert_eq!(<() as ExchangeRateProvider>::get_nex_usdt_rate(), None);
+        assert_eq!(<() as ExchangeRateProvider>::price_confidence(), 0);
+        assert!(!<() as ExchangeRateProvider>::is_rate_reliable());
+    }
+
+    #[test]
+    fn test_exchange_rate_provider_reliability_threshold() {
+        // 置信度 < 30 → 不可信
+        struct LowConfidence;
+        impl ExchangeRateProvider for LowConfidence {
+            fn get_nex_usdt_rate() -> Option<u64> { Some(500_000) }
+            fn price_confidence() -> u8 { 29 }
+        }
+        assert!(!LowConfidence::is_rate_reliable());
+
+        // 置信度 >= 30 → 可信
+        struct MidConfidence;
+        impl ExchangeRateProvider for MidConfidence {
+            fn get_nex_usdt_rate() -> Option<u64> { Some(500_000) }
+            fn price_confidence() -> u8 { 30 }
+        }
+        assert!(MidConfidence::is_rate_reliable());
+
+        // 高置信度
+        struct HighConfidence;
+        impl ExchangeRateProvider for HighConfidence {
+            fn get_nex_usdt_rate() -> Option<u64> { Some(500_000) }
+            fn price_confidence() -> u8 { 95 }
+        }
+        assert!(HighConfidence::is_rate_reliable());
     }
 
 }

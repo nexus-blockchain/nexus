@@ -203,10 +203,14 @@ pub mod pallet {
     #[pallet::getter(fn shop_entity)]
     pub type ShopEntity<T: Config> = StorageMap<_, Blake2_128Concat, u64, u64>;
 
+    /// Shop ID 起始值（从 1 开始，避免 0 与 primary_shop_id 哨兵值冲突）
+    #[pallet::type_value]
+    pub fn DefaultNextShopId() -> u64 { 1 }
+
     /// 下一个 Shop ID
     #[pallet::storage]
     #[pallet::getter(fn next_shop_id)]
-    pub type NextShopId<T: Config> = StorageValue<_, u64, ValueQuery>;
+    pub type NextShopId<T: Config> = StorageValue<_, u64, ValueQuery, DefaultNextShopId>;
 
     /// Shop 积分配置 shop_id -> PointsConfig
     #[pallet::storage]
@@ -275,6 +279,10 @@ pub mod pallet {
         FundWarning { shop_id: u64, balance: BalanceOf<T> },
         /// 资金耗尽
         FundDepleted { shop_id: u64 },
+        /// Shop 运营资金提取
+        OperatingFundWithdrawn { shop_id: u64, to: T::AccountId, amount: BalanceOf<T>, new_balance: BalanceOf<T> },
+        /// Shop 关闭时资金退还
+        ShopClosedFundRefunded { shop_id: u64, to: T::AccountId, amount: BalanceOf<T> },
     }
 
     // ========================================================================
@@ -327,6 +335,10 @@ pub mod pallet {
         InvalidConfig,
         /// 不能关闭主 Shop
         CannotClosePrimaryShop,
+        /// 提取后余额低于最低运营要求
+        WithdrawBelowMinimum,
+        /// 提取金额为零
+        ZeroWithdrawAmount,
     }
 
     // ========================================================================
@@ -433,6 +445,9 @@ pub mod pallet {
                 let owner = T::EntityProvider::entity_owner(shop.entity_id)
                     .ok_or(Error::<T>::EntityNotFound)?;
                 ensure!(who == owner, Error::<T>::NotAuthorized);
+
+                // H3: 已关闭的 Shop 不可操作管理员
+                ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
                 
                 // 检查是否已存在
                 ensure!(!shop.managers.contains(&manager), Error::<T>::ManagerAlreadyExists);
@@ -463,6 +478,9 @@ pub mod pallet {
                 let owner = T::EntityProvider::entity_owner(shop.entity_id)
                     .ok_or(Error::<T>::EntityNotFound)?;
                 ensure!(who == owner, Error::<T>::NotAuthorized);
+
+                // H3: 已关闭的 Shop 不可操作管理员
+                ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
                 
                 // 查找并移除
                 let pos = shop.managers.iter().position(|m| m == &manager)
@@ -625,6 +643,10 @@ pub mod pallet {
             // 检查是否已启用
             ensure!(!ShopPointsConfigs::<T>::contains_key(shop_id), Error::<T>::PointsAlreadyEnabled);
             
+            // M1: 积分名称和符号不能为空
+            ensure!(!name.is_empty(), Error::<T>::ShopNameEmpty);
+            ensure!(!symbol.is_empty(), Error::<T>::InvalidConfig);
+
             // 验证配置
             ensure!(reward_rate <= 10000 && exchange_rate <= 10000, Error::<T>::InvalidConfig);
             
@@ -670,6 +692,29 @@ pub mod pallet {
                 
                 // M4: 注销 Entity-Shop 关联
                 T::EntityProvider::unregister_shop(shop.entity_id, shop_id)?;
+
+                // M3: 清理积分数据
+                ShopPointsConfigs::<T>::remove(shop_id);
+                let _ = ShopPointsBalances::<T>::clear_prefix(shop_id, u32::MAX, None);
+                ShopPointsTotalSupply::<T>::remove(shop_id);
+
+                // 退还 shop_account 余额给 entity_owner
+                let shop_account = Self::shop_account_id(shop_id);
+                let remaining = T::Currency::free_balance(&shop_account);
+                if !remaining.is_zero() {
+                    if T::Currency::transfer(
+                        &shop_account,
+                        &who,
+                        remaining,
+                        ExistenceRequirement::AllowDeath,
+                    ).is_ok() {
+                        Self::deposit_event(Event::ShopClosedFundRefunded {
+                            shop_id,
+                            to: who,
+                            amount: remaining,
+                        });
+                    }
+                }
                 
                 Self::deposit_event(Event::ShopClosed { shop_id });
                 Ok(())
@@ -690,6 +735,9 @@ pub mod pallet {
             ensure!(ShopPointsConfigs::<T>::contains_key(shop_id), Error::<T>::PointsNotEnabled);
 
             ShopPointsConfigs::<T>::remove(shop_id);
+            // H2: 清理积分余额和总供应量，避免残留数据
+            let _ = ShopPointsBalances::<T>::clear_prefix(shop_id, u32::MAX, None);
+            ShopPointsTotalSupply::<T>::remove(shop_id);
 
             Self::deposit_event(Event::ShopPointsDisabled { shop_id });
             Ok(())
@@ -761,6 +809,66 @@ pub mod pallet {
             });
             Ok(())
         }
+
+        /// 提取运营资金
+        ///
+        /// 仅 Entity owner 可调用，将 shop_account 中的运营资金提取到个人账户。
+        /// - 活跃 Shop: 提取后余额不得低于 MinOperatingBalance
+        /// - 已关闭 Shop: 无最低余额限制，可全额提取
+        /// - 佣金保护: 不得侵占已承诺的佣金资金 (pending + shopping)
+        #[pallet::call_index(13)]
+        #[pallet::weight(Weight::from_parts(200_000_000, 8_000))]
+        pub fn withdraw_operating_fund(
+            origin: OriginFor<T>,
+            shop_id: u64,
+            amount: BalanceOf<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            ensure!(!amount.is_zero(), Error::<T>::ZeroWithdrawAmount);
+
+            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
+
+            // 仅 Entity owner 可提取（不允许 manager）
+            let owner = T::EntityProvider::entity_owner(shop.entity_id)
+                .ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(who == owner, Error::<T>::NotAuthorized);
+
+            let shop_account = Self::shop_account_id(shop_id);
+            let balance = T::Currency::free_balance(&shop_account);
+
+            // 佣金保护：不得侵占已承诺的佣金资金
+            let protected: BalanceOf<T> = T::CommissionFundGuard::protected_funds(shop_id).saturated_into();
+            let available = balance.saturating_sub(protected);
+            ensure!(available >= amount, Error::<T>::InsufficientOperatingFund);
+
+            // 活跃 Shop 检查最低余额
+            if shop.status != ShopOperatingStatus::Closed {
+                let after_withdraw = balance.saturating_sub(amount);
+                ensure!(
+                    after_withdraw >= T::MinOperatingBalance::get(),
+                    Error::<T>::WithdrawBelowMinimum
+                );
+            }
+
+            // 转账 shop_account → entity_owner
+            T::Currency::transfer(
+                &shop_account,
+                &who,
+                amount,
+                ExistenceRequirement::AllowDeath,
+            )?;
+
+            let new_balance = T::Currency::free_balance(&shop_account);
+
+            Self::deposit_event(Event::OperatingFundWithdrawn {
+                shop_id,
+                to: who,
+                amount,
+                new_balance,
+            });
+            Ok(())
+        }
     }
 
     // ========================================================================
@@ -796,6 +904,9 @@ pub mod pallet {
             amount: BalanceOf<T>,
         ) -> DispatchResult {
             ensure!(!amount.is_zero(), Error::<T>::InsufficientPointsBalance);
+            // M5: 已关闭的 Shop 不可发放积分
+            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
+            ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
             let config = ShopPointsConfigs::<T>::get(shop_id)
                 .ok_or(Error::<T>::PointsNotEnabled)?;
             ensure!(config.enabled, Error::<T>::PointsNotEnabled);
@@ -818,6 +929,9 @@ pub mod pallet {
             amount: BalanceOf<T>,
         ) -> DispatchResult {
             ensure!(!amount.is_zero(), Error::<T>::InsufficientPointsBalance);
+            // M5: 已关闭的 Shop 不可销毁积分
+            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
+            ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
             ensure!(
                 ShopPointsConfigs::<T>::contains_key(shop_id),
                 Error::<T>::PointsNotEnabled
@@ -1003,6 +1117,10 @@ pub mod pallet {
         }
 
         fn deduct_operating_fund(shop_id: u64, amount: u128) -> Result<(), DispatchError> {
+            // H4: 已关闭的 Shop 不可扣减运营资金
+            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
+            ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
+
             let shop_account = Self::shop_account_id(shop_id);
             let balance = T::Currency::free_balance(&shop_account);
             let amount_balance: BalanceOf<T> = amount.saturated_into();
@@ -1091,6 +1209,32 @@ pub mod pallet {
             Shops::<T>::try_mutate(shop_id, |maybe_shop| -> Result<(), DispatchError> {
                 let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
                 shop.status = ShopOperatingStatus::Closed;
+
+                // M3: 清理积分数据
+                ShopPointsConfigs::<T>::remove(shop_id);
+                let _ = ShopPointsBalances::<T>::clear_prefix(shop_id, u32::MAX, None);
+                ShopPointsTotalSupply::<T>::remove(shop_id);
+
+                // 退还 shop_account 余额给 entity_owner（best-effort）
+                let shop_account = Self::shop_account_id(shop_id);
+                let remaining = T::Currency::free_balance(&shop_account);
+                if !remaining.is_zero() {
+                    if let Some(owner) = T::EntityProvider::entity_owner(shop.entity_id) {
+                        if T::Currency::transfer(
+                            &shop_account,
+                            &owner,
+                            remaining,
+                            ExistenceRequirement::AllowDeath,
+                        ).is_ok() {
+                            Self::deposit_event(Event::ShopClosedFundRefunded {
+                                shop_id,
+                                to: owner,
+                                amount: remaining,
+                            });
+                        }
+                    }
+                }
+
                 Self::deposit_event(Event::ShopClosed { shop_id });
                 Ok(())
             })

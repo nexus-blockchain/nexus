@@ -15,8 +15,7 @@ pub struct SealedStorage {
 }
 
 impl SealedStorage {
-    pub fn new(data_dir: &str) -> Result<Self, BotError> {
-        let is_hardware = std::path::Path::new("/dev/attestation/quote").exists();
+    pub fn new(data_dir: &str, is_hardware: bool) -> Result<Self, BotError> {
         let key = if is_hardware {
             Self::derive_hardware_key()?
         } else {
@@ -151,7 +150,7 @@ mod tests {
     #[test]
     fn seal_unseal_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = SealedStorage::new(dir.path().to_str().unwrap()).unwrap();
+        let storage = SealedStorage::new(dir.path().to_str().unwrap(), false).unwrap();
 
         let data = b"hello sealed world";
         storage.seal("test.sealed", data).unwrap();
@@ -162,14 +161,14 @@ mod tests {
     #[test]
     fn unseal_nonexistent_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = SealedStorage::new(dir.path().to_str().unwrap()).unwrap();
+        let storage = SealedStorage::new(dir.path().to_str().unwrap(), false).unwrap();
         assert!(storage.unseal("nonexistent").is_err());
     }
 
     #[test]
     fn exists_check() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = SealedStorage::new(dir.path().to_str().unwrap()).unwrap();
+        let storage = SealedStorage::new(dir.path().to_str().unwrap(), false).unwrap();
         assert!(!storage.exists("foo"));
         storage.seal("foo", b"bar").unwrap();
         assert!(storage.exists("foo"));
@@ -178,7 +177,7 @@ mod tests {
     #[test]
     fn different_data_different_ciphertext() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = SealedStorage::new(dir.path().to_str().unwrap()).unwrap();
+        let storage = SealedStorage::new(dir.path().to_str().unwrap(), false).unwrap();
         storage.seal("a.sealed", b"aaa").unwrap();
         storage.seal("b.sealed", b"bbb").unwrap();
         let a = std::fs::read(dir.path().join("a.sealed")).unwrap();

@@ -145,10 +145,10 @@ impl pallet_entity_token::Config for Runtime {
 
 | # | 调用 | 权限 | 说明 |
 |---|------|------|------|
-| 0 | `create_shop_token(shop_id, name, symbol, decimals, reward_rate, exchange_rate)` | Shop owner | 创建通证（需 Shop active，name/symbol 非空） |
-| 1 | `update_token_config(shop_id, reward_rate?, exchange_rate?, min_redeem?, max_redeem?, transferable?, enabled?)` | Shop owner | 更新配置（校验 min_redeem ≤ max_redeem） |
-| 2 | `mint_tokens(shop_id, to, amount)` | Shop owner | 铸造代币（检查 max_supply） |
-| 3 | `transfer_tokens(shop_id, to, amount)` | 持有者 | 转让（扣除锁仓+预留后检查可用余额，含转账限制） |
+| 0 | `create_shop_token(entity_id, name, symbol, decimals, reward_rate, exchange_rate)` | Entity owner | 创建通证（需 Entity active，name/symbol 非空） |
+| 1 | `update_token_config(entity_id, reward_rate?, exchange_rate?, min_redeem?, max_redeem?, transferable?, enabled?)` | Entity owner | 更新配置（校验 min_redeem ≤ max_redeem） |
+| 2 | `mint_tokens(entity_id, to, amount)` | Entity owner | 铸造代币（检查 max_supply） |
+| 3 | `transfer_tokens(entity_id, to, amount)` | 持有者 | 转让（扣除锁仓+预留后检查可用余额，含转账限制） |
 | 4 | `configure_dividend(entity_id, enabled, min_period)` | Owner | 配置分红（需通证类型支持） |
 | 5 | `distribute_dividend(entity_id, total_amount, recipients)` | Owner | 分发分红（校验 total=sum，检查 token_type，限制人数） |
 | 6 | `claim_dividend(entity_id)` | 持有者 | 领取分红（检查 max_supply，mint 给持有人） |
@@ -237,7 +237,6 @@ asset_id = ShopTokenOffset + shop_id
 | `TokensRedeemed` | shop_id, buyer, tokens, discount | redeem_for_discount |
 | `TokensTransferred` | shop_id, from, to, amount | transfer_tokens |
 | `TokensMinted` | shop_id, to, amount | mint_tokens |
-| `TokensBurned` | shop_id, from, amount | (预留) |
 | `DividendConfigured` | entity_id, enabled, min_period | configure_dividend |
 | `DividendDistributed` | entity_id, total_amount, recipients_count | distribute_dividend |
 | `DividendClaimed` | entity_id, holder, amount | claim_dividend |
@@ -252,8 +251,8 @@ asset_id = ShopTokenOffset + shop_id
 
 | 错误 | 说明 |
 |------|------|
-| `ShopNotFound` | 店铺不存在 |
-| `NotShopOwner` | 非店主 |
+| `EntityNotFound` | 实体不存在 |
+| `NotEntityOwner` | 非实体所有者 |
 | `TokenNotEnabled` | 通证未启用或不存在 |
 | `TokenAlreadyExists` | 通证已存在 |
 | `InsufficientBalance` | 余额不足 |
@@ -268,7 +267,6 @@ asset_id = ShopTokenOffset + shop_id
 | `DividendNotEnabled` | 分红未启用 |
 | `DividendPeriodNotReached` | 分红周期未到 |
 | `NoDividendToClaim` | 无待领取分红 |
-| `TokensAreLocked` | 代币锁仓中 |
 | `NoLockedTokens` | 无锁仓记录 |
 | `UnlockTimeNotReached` | 解锁时间未到 |
 | `ExceedsMaxSupply` | 超过最大供应量 |
@@ -279,9 +277,7 @@ asset_id = ShopTokenOffset + shop_id
 | `ReceiverKycInsufficient` | 接收方 KYC 级别不足 |
 | `ReceiverNotMember` | 接收方非 Entity 成员 |
 | `TransferListFull` | 白/黑名单已满 |
-| `AddressAlreadyInList` | 地址已在列表中 |
-| `AddressNotInList` | 地址不在列表中 |
-| `ShopNotActive` | 店铺未激活 |
+| `EntityNotActive` | 实体未激活 |
 | `ZeroAmount` | 数量为零 |
 | `InvalidLockDuration` | 锁仓时长为零 |
 | `TooManyRecipients` | 分红接收人超过 MaxDividendRecipients |
@@ -294,9 +290,9 @@ asset_id = ShopTokenOffset + shop_id
 
 | 操作 | 调用方 | 前置条件 |
 |------|--------|----------|
-| `create_shop_token` | Shop owner | Shop 存在 + **Shop active** + 通证不存在 + name/symbol 非空 |
-| `update_token_config` | Shop owner | 通证已创建 |
-| `mint_tokens` | Shop owner | 通证 enabled + max_supply 检查 |
+| `create_shop_token` | Entity owner | Entity 存在 + **Entity active** + 通证不存在 + name/symbol 非空 |
+| `update_token_config` | Entity owner | 通证已创建 |
+| `mint_tokens` | Entity owner | 通证 enabled + max_supply 检查 |
 | `transfer_tokens` | 持有者 | transferable + 可用余额（扣除锁仓+预留）+ 转账限制 |
 | `configure_dividend` | Owner | token_type 支持分红 |
 | `distribute_dividend` | Owner | 分红 enabled + 周期满足 + token_type 支持分红 + 人数限制 + total=sum |

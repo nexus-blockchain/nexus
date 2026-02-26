@@ -9,6 +9,9 @@ use frame_support::pallet_prelude::*;
 use scale_info::TypeInfo;
 use sp_runtime::DispatchError;
 
+#[cfg(test)]
+mod tests;
+
 // ============================================================================
 // 实体类型枚举 (Phase 2 新增)
 // ============================================================================
@@ -39,13 +42,8 @@ impl EntityType {
     /// 默认治理模式（创建实体时的建议值）
     pub fn default_governance(&self) -> GovernanceMode {
         match self {
-            Self::Merchant | Self::ServiceProvider => GovernanceMode::None,
-            Self::Enterprise => GovernanceMode::DualTrack,
-            Self::DAO => GovernanceMode::FullDAO,
-            Self::Community => GovernanceMode::Advisory,
-            Self::Project => GovernanceMode::DualTrack,
-            Self::Fund => GovernanceMode::Committee,
-            Self::Custom(_) => GovernanceMode::None,
+            Self::DAO | Self::Enterprise | Self::Project | Self::Fund => GovernanceMode::FullDAO,
+            _ => GovernanceMode::None,
         }
     }
     
@@ -108,19 +106,11 @@ impl EntityType {
 /// 治理模式
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
 pub enum GovernanceMode {
-    /// 无治理（管理员全权控制）
+    /// 无治理（管理员全权控制，可 lock_governance 锁定参数）
     #[default]
     None,
-    /// 咨询型（提案不自动执行，仅收集意见）
-    Advisory,
-    /// 双轨制（管理员可快速执行，重大决策需投票）
-    DualTrack,
-    /// 委员会（委员会成员投票决策）
-    Committee,
-    /// 完全 DAO（所有决策需投票）
+    /// 完全 DAO（所有决策需代币投票，可选管理员否决权）
     FullDAO,
-    /// 分层治理（不同级别决策不同阈值）
-    Tiered,
 }
 
 // ============================================================================
@@ -425,15 +415,14 @@ impl TokenType {
     }
     
     /// 默认转账限制模式
-    /// 0 = None, 1 = Whitelist, 2 = Blacklist, 3 = KycRequired, 4 = MembersOnly
-    pub fn default_transfer_restriction(&self) -> u8 {
+    pub fn default_transfer_restriction(&self) -> TransferRestrictionMode {
         match self {
-            Self::Points => 0,       // None
-            Self::Membership => 4,   // MembersOnly
-            Self::Governance => 3,   // KycRequired
-            Self::Share | Self::Bond => 3, // KycRequired
-            Self::Equity => 1,       // Whitelist
-            Self::Hybrid(_) => 0,    // None (可配置)
+            Self::Points => TransferRestrictionMode::None,
+            Self::Membership => TransferRestrictionMode::MembersOnly,
+            Self::Governance => TransferRestrictionMode::KycRequired,
+            Self::Share | Self::Bond => TransferRestrictionMode::KycRequired,
+            Self::Equity => TransferRestrictionMode::Whitelist,
+            Self::Hybrid(_) => TransferRestrictionMode::None,
         }
     }
 }
@@ -516,15 +505,34 @@ pub enum ProductCategory {
 // 会员相关类型
 // ============================================================================
 
-/// 会员等级
+/// 会员等级（数值越大级别越高）
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
 pub enum MemberLevel {
     #[default]
-    Normal,     // 普通会员
-    Silver,     // 银卡会员
-    Gold,       // 金卡会员
-    Platinum,   // 白金会员
-    Diamond,    // 钻石会员
+    Normal = 0,     // 普通会员
+    Silver = 1,     // 银卡会员
+    Gold = 2,       // 金卡会员
+    Platinum = 3,   // 白金会员
+    Diamond = 4,    // 钻石会员
+}
+
+impl MemberLevel {
+    /// 返回等级数值（用于排序和比较）
+    pub fn rank(&self) -> u8 {
+        *self as u8
+    }
+}
+
+impl PartialOrd for MemberLevel {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for MemberLevel {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.rank().cmp(&other.rank())
+    }
 }
 
 // ============================================================================
@@ -533,7 +541,7 @@ pub enum MemberLevel {
 
 /// 订单状态
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
-pub enum MallOrderStatus {
+pub enum OrderStatus {
     /// 已创建，待支付
     #[default]
     Created,
@@ -621,10 +629,14 @@ pub trait EntityProvider<AccountId> {
         let _ = entity_id;
         Ok(())
     }
+
+    /// 设置实体治理模式（治理 pallet 同步调用）
+    fn set_governance_mode(entity_id: u64, mode: GovernanceMode) -> Result<(), DispatchError> {
+        let _ = (entity_id, mode);
+        Ok(())
+    }
 }
 
-/// 向后兼容别名（旧 EntityProvider）
-pub trait LegacyShopProvider<AccountId>: EntityProvider<AccountId> {}
 
 // ============================================================================
 // Shop 查询接口 (Entity-Shop 分离架构)
@@ -824,9 +836,6 @@ impl<AccountId: Default> EntityProvider<AccountId> for NullEntityProvider {
     fn update_entity_rating(_entity_id: u64, _rating: u8) -> Result<(), DispatchError> { Ok(()) }
 }
 
-/// 向后兼容别名（旧 EntityProvider 的空实现）
-pub type NullLegacyShopProvider = NullEntityProvider;
-
 /// 空 Shop 提供者（测试用）
 pub struct NullShopProvider;
 
@@ -941,9 +950,6 @@ pub trait EntityTokenProvider<AccountId, Balance> {
     fn total_supply(entity_id: u64) -> Balance;
 }
 
-/// 向后兼容别名
-pub trait ShopTokenProvider<AccountId, Balance>: EntityTokenProvider<AccountId, Balance> {}
-
 /// 空实体代币提供者（测试用或未启用代币时）
 pub struct NullEntityTokenProvider;
 
@@ -960,7 +966,78 @@ pub trait PricingProvider {
     /// # 返回
     /// - `u64`: 价格（精度 10^6，即 1,000,000 = 1 USDT/NEX）
     /// - 返回 0 表示价格不可用
-    fn get_cos_usdt_price() -> u64;
+    fn get_nex_usdt_price() -> u64;
+
+    /// 价格数据是否过时
+    ///
+    /// # 说明
+    /// 若市场长期无交易，价格可能严重偏离真实值。
+    /// 消费方应在使用价格前检查此标志，过时时使用兜底值。
+    ///
+    /// # 默认实现
+    /// 返回 `false`（向后兼容，不影响现有模块）
+    fn is_price_stale() -> bool { false }
+}
+
+// ============================================================================
+// 实体代币价格查询接口
+// ============================================================================
+
+/// 实体代币当前价格查询接口
+///
+/// 供需要获取 Entity Token 价格的模块使用（佣金换算、分红定价、前端展示等）。
+///
+/// ## 价格单位
+/// - `get_token_price`: NEX per Token（精度 10^12，链上原生代币单位）
+/// - `get_token_price_usdt`: USDT per Token（精度 10^6，通过 NEX 价格间接换算）
+///
+/// ## 置信度等级
+/// - 90-100: TWAP 可用 + 高交易量（≥100 笔）
+/// - 60-89:  TWAP 或 LastTradePrice 可用
+/// - 30-59:  仅 initial_price（冷启动期）
+/// - 0-29:   价格过时或不可用
+///
+/// ## 注意
+/// Entity Token 价格由 entity owner 可影响（set_initial_price + 低流动性自买自卖），
+/// **不应用于安全关键的押金/保证金计算**，仅适用于展示和非关键换算。
+pub trait EntityTokenPriceProvider {
+    type Balance;
+
+    /// 获取代币当前价格（NEX per Token, 精度 10^12）
+    ///
+    /// 优先级：1h TWAP → LastTradePrice → initial_price
+    /// 返回 `None` 表示无任何价格数据
+    fn get_token_price(entity_id: u64) -> Option<Self::Balance>;
+
+    /// 获取代币 USDT 计价（精度 10^6）
+    ///
+    /// 通过 token_nex_price × nex_usdt_rate / 10^12 间接换算
+    /// 返回 `None` 表示价格不可用（Token 或 NEX/USDT 价格缺失）
+    fn get_token_price_usdt(entity_id: u64) -> Option<u64>;
+
+    /// 价格置信度 (0-100)
+    ///
+    /// 基于数据来源、交易量和新鲜度综合评估
+    fn token_price_confidence(entity_id: u64) -> u8;
+
+    /// 价格数据是否过时（超过 max_age_blocks 个区块未更新）
+    fn is_token_price_stale(entity_id: u64, max_age_blocks: u32) -> bool;
+
+    /// 价格是否可信赖（置信度 >= 阈值）
+    ///
+    /// 默认阈值 30
+    fn is_token_price_reliable(entity_id: u64) -> bool {
+        Self::token_price_confidence(entity_id) >= 30
+    }
+}
+
+/// EntityTokenPriceProvider 的空实现（无市场时使用）
+impl EntityTokenPriceProvider for () {
+    type Balance = u128;
+    fn get_token_price(_entity_id: u64) -> Option<u128> { None }
+    fn get_token_price_usdt(_entity_id: u64) -> Option<u64> { None }
+    fn token_price_confidence(_entity_id: u64) -> u8 { 0 }
+    fn is_token_price_stale(_entity_id: u64, _max_age_blocks: u32) -> bool { true }
 }
 
 // ============================================================================
@@ -992,6 +1069,7 @@ pub trait OrderCommissionHandler<AccountId, Balance> {
         order_id: u64,
         buyer: &AccountId,
         order_amount: Balance,
+        platform_fee: Balance,
     ) -> Result<(), DispatchError>;
 
     /// 订单取消/退款时撤销佣金
@@ -1000,7 +1078,7 @@ pub trait OrderCommissionHandler<AccountId, Balance> {
 
 /// 空佣金处理（无佣金系统时使用）
 impl<AccountId, Balance> OrderCommissionHandler<AccountId, Balance> for () {
-    fn on_order_completed(_: u64, _: u64, _: &AccountId, _: Balance) -> Result<(), DispatchError> { Ok(()) }
+    fn on_order_completed(_: u64, _: u64, _: &AccountId, _: Balance, _: Balance) -> Result<(), DispatchError> { Ok(()) }
     fn on_order_cancelled(_: u64) -> Result<(), DispatchError> { Ok(()) }
 }
 
@@ -1008,10 +1086,11 @@ impl<AccountId, Balance> OrderCommissionHandler<AccountId, Balance> for () {
 pub struct NullPricingProvider;
 
 impl PricingProvider for NullPricingProvider {
-    fn get_cos_usdt_price() -> u64 {
+    fn get_nex_usdt_price() -> u64 {
         // 默认价格：0.000001 USDT/NEX（精度 10^6 = 1）
         1
     }
+    fn is_price_stale() -> bool { false }
 }
 
 impl<AccountId, Balance: Default> EntityTokenProvider<AccountId, Balance> for NullEntityTokenProvider {
@@ -1043,5 +1122,3 @@ impl<AccountId, Balance: Default> EntityTokenProvider<AccountId, Balance> for Nu
     }
 }
 
-/// 向后兼容别名
-pub type NullShopTokenProvider = NullEntityTokenProvider;

@@ -1086,6 +1086,8 @@ pub mod pallet {
             } else {
                 min_deposit
             };
+            // 注：价格陈旧性由上游 TradingPricingProvider（TWAP 优先）保障，
+            // 且 min_deposit 兜底确保即使价格异常也不会产生零押金。
             
             T::Fungible::hold(
                 &T::RuntimeHoldReason::from(HoldReason::ComplaintDeposit),

@@ -128,17 +128,30 @@ pub fn calculate_payment_verification_result(
         return PaymentVerificationResult::Invalid;
     }
     if expected_amount == 0 {
-        return PaymentVerificationResult::Overpaid;
+        return PaymentVerificationResult::Invalid;
     }
-    let ratio = (actual_amount as u128)
-        .saturating_mul(10000)
-        .saturating_div(expected_amount as u128) as u16;
+    let ratio = compute_payment_ratio_bps(expected_amount, actual_amount);
     match ratio {
         r if r >= 10050 => PaymentVerificationResult::Overpaid,
         r if r >= 9950 => PaymentVerificationResult::Exact,
         r if r >= 5000 => PaymentVerificationResult::Underpaid,
         _ => PaymentVerificationResult::SeverelyUnderpaid,
     }
+}
+
+/// 计算付款比例（basis points, 10000 = 100%）
+///
+/// 返回 u32 避免 u16 截断（付款超 6.55 倍时 u16 会回绕）。
+/// 下游 pallet 应统一使用此函数，不要自行 `as u16`。
+pub fn compute_payment_ratio_bps(expected_amount: u64, actual_amount: u64) -> u32 {
+    if expected_amount == 0 {
+        return 0;
+    }
+    let ratio_u128 = (actual_amount as u128)
+        .saturating_mul(10000)
+        .saturating_div(expected_amount as u128);
+    // u32::MAX = 4_294_967_295，足以表示 ~429496 倍付款
+    ratio_u128.min(u32::MAX as u128) as u32
 }
 
 /// 保证金没收梯度计算（entity-market / nex-market 共享）
@@ -149,7 +162,7 @@ pub fn calculate_payment_verification_result(
 /// | 95% - 99.5% | 20%     |
 /// | 80% - 95%   | 50%     |
 /// | < 80%       | 100%    |
-pub fn calculate_deposit_forfeit_rate(payment_ratio: u16) -> u16 {
+pub fn calculate_deposit_forfeit_rate(payment_ratio: u32) -> u16 {
     match payment_ratio {
         r if r >= 9950 => 0,
         r if r >= 9500 => 2000,
@@ -158,3 +171,177 @@ pub fn calculate_deposit_forfeit_rate(payment_ratio: u16) -> u16 {
     }
 }
 
+// ===== 单元测试 =====
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- H1 回归测试: compute_payment_ratio_bps ----
+
+    #[test]
+    fn h1_ratio_normal_exact_payment() {
+        // 100% 付款 → 10000 bps
+        assert_eq!(compute_payment_ratio_bps(1_000_000, 1_000_000), 10000);
+    }
+
+    #[test]
+    fn h1_ratio_50_percent() {
+        assert_eq!(compute_payment_ratio_bps(1_000_000, 500_000), 5000);
+    }
+
+    #[test]
+    fn h1_ratio_overpaid_7x_no_truncation() {
+        // 修复前: 7x = 70000 bps, as u16 → 70000 % 65536 = 4464 → SeverelyUnderpaid
+        // 修复后: 70000 (u32) → Overpaid
+        let ratio = compute_payment_ratio_bps(1_000_000, 7_000_000);
+        assert_eq!(ratio, 70000);
+        assert!(ratio > 10050); // Overpaid 阈值
+    }
+
+    #[test]
+    fn h1_ratio_overpaid_100x_no_truncation() {
+        // 100x 付款 → 1_000_000 bps
+        let ratio = compute_payment_ratio_bps(1_000_000, 100_000_000);
+        assert_eq!(ratio, 1_000_000);
+    }
+
+    #[test]
+    fn h1_ratio_expected_zero_returns_zero() {
+        assert_eq!(compute_payment_ratio_bps(0, 1_000_000), 0);
+    }
+
+    #[test]
+    fn h1_ratio_both_zero() {
+        assert_eq!(compute_payment_ratio_bps(0, 0), 0);
+    }
+
+    #[test]
+    fn h1_ratio_max_u64_no_overflow() {
+        // u64::MAX * 10000 会溢出 u128? 不会: u64::MAX * 10000 < u128::MAX
+        let ratio = compute_payment_ratio_bps(1, u64::MAX);
+        assert!(ratio == u32::MAX); // 被 min(u32::MAX) 限制
+    }
+
+    // ---- H1 回归测试: calculate_payment_verification_result ----
+
+    #[test]
+    fn h1_verification_exact_payment() {
+        assert_eq!(
+            calculate_payment_verification_result(1_000_000, 1_000_000),
+            PaymentVerificationResult::Exact,
+        );
+    }
+
+    #[test]
+    fn h1_verification_overpaid_7x_not_severely_underpaid() {
+        // 核心回归: 修复前会返回 SeverelyUnderpaid
+        assert_eq!(
+            calculate_payment_verification_result(1_000_000, 7_000_000),
+            PaymentVerificationResult::Overpaid,
+        );
+    }
+
+    #[test]
+    fn h1_verification_overpaid_boundary() {
+        // 100.5% → Overpaid
+        assert_eq!(
+            calculate_payment_verification_result(10000, 10050),
+            PaymentVerificationResult::Overpaid,
+        );
+        // 100.49% → Exact
+        assert_eq!(
+            calculate_payment_verification_result(10000, 10049),
+            PaymentVerificationResult::Exact,
+        );
+    }
+
+    #[test]
+    fn h1_verification_underpaid_boundary() {
+        // 99.5% → Exact
+        assert_eq!(
+            calculate_payment_verification_result(10000, 9950),
+            PaymentVerificationResult::Exact,
+        );
+        // 99.49% → Underpaid
+        assert_eq!(
+            calculate_payment_verification_result(10000, 9949),
+            PaymentVerificationResult::Underpaid,
+        );
+    }
+
+    #[test]
+    fn h1_verification_severely_underpaid_boundary() {
+        // 50% → Underpaid
+        assert_eq!(
+            calculate_payment_verification_result(10000, 5000),
+            PaymentVerificationResult::Underpaid,
+        );
+        // 49.99% → SeverelyUnderpaid
+        assert_eq!(
+            calculate_payment_verification_result(10000, 4999),
+            PaymentVerificationResult::SeverelyUnderpaid,
+        );
+    }
+
+    // ---- M2 回归测试: expected_amount == 0 ----
+
+    #[test]
+    fn m2_expected_zero_returns_invalid() {
+        // 修复前返回 Overpaid，修复后返回 Invalid
+        assert_eq!(
+            calculate_payment_verification_result(0, 1_000_000),
+            PaymentVerificationResult::Invalid,
+        );
+    }
+
+    #[test]
+    fn m2_both_zero_returns_invalid() {
+        assert_eq!(
+            calculate_payment_verification_result(0, 0),
+            PaymentVerificationResult::Invalid,
+        );
+    }
+
+    #[test]
+    fn m2_actual_zero_returns_invalid() {
+        assert_eq!(
+            calculate_payment_verification_result(1_000_000, 0),
+            PaymentVerificationResult::Invalid,
+        );
+    }
+
+    // ---- forfeit_rate 回归测试 ----
+
+    #[test]
+    fn forfeit_rate_exact_no_forfeit() {
+        assert_eq!(calculate_deposit_forfeit_rate(10000), 0);
+        assert_eq!(calculate_deposit_forfeit_rate(9950), 0);
+    }
+
+    #[test]
+    fn forfeit_rate_slight_underpaid() {
+        assert_eq!(calculate_deposit_forfeit_rate(9949), 2000);
+        assert_eq!(calculate_deposit_forfeit_rate(9500), 2000);
+    }
+
+    #[test]
+    fn forfeit_rate_moderate_underpaid() {
+        assert_eq!(calculate_deposit_forfeit_rate(9499), 5000);
+        assert_eq!(calculate_deposit_forfeit_rate(8000), 5000);
+    }
+
+    #[test]
+    fn forfeit_rate_severe_underpaid() {
+        assert_eq!(calculate_deposit_forfeit_rate(7999), 10000);
+        assert_eq!(calculate_deposit_forfeit_rate(0), 10000);
+    }
+
+    #[test]
+    fn forfeit_rate_accepts_u32_large_values() {
+        // 超付 70000 bps (7x) → 不没收
+        assert_eq!(calculate_deposit_forfeit_rate(70000), 0);
+        // u32::MAX → 不没收
+        assert_eq!(calculate_deposit_forfeit_rate(u32::MAX), 0);
+    }
+}

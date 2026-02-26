@@ -17,6 +17,17 @@ impl frame_system::Config for Test {
 	type Block = Block;
 }
 
+// Mock SubscriptionProvider: bot_id[0]==1 => Basic (paid), bot_id[0]==2 => Free
+pub struct MockSubscription;
+impl SubscriptionProvider for MockSubscription {
+	fn effective_tier(bot_id_hash: &BotIdHash) -> SubscriptionTier {
+		if bot_id_hash[0] == 1 { SubscriptionTier::Basic } else { SubscriptionTier::Free }
+	}
+	fn effective_feature_gate(bot_id_hash: &BotIdHash) -> TierFeatureGate {
+		MockSubscription::effective_tier(bot_id_hash).feature_gate()
+	}
+}
+
 pub struct MockBotRegistry;
 impl BotRegistryProvider<u64> for MockBotRegistry {
 	fn is_bot_active(bot_id_hash: &BotIdHash) -> bool { bot_id_hash[0] == 1 }
@@ -24,7 +35,11 @@ impl BotRegistryProvider<u64> for MockBotRegistry {
 	fn has_dual_attestation(_: &BotIdHash) -> bool { false }
 	fn is_attestation_fresh(_: &BotIdHash) -> bool { false }
 	fn bot_owner(bot_id_hash: &BotIdHash) -> Option<u64> {
-		if bot_id_hash[0] == 1 { Some(OWNER) } else { None }
+		match bot_id_hash[0] {
+			1 => Some(OWNER),
+			2 => Some(OTHER), // Free tier bot, owned by OTHER
+			_ => None,
+		}
 	}
 	fn bot_public_key(_: &BotIdHash) -> Option<[u8; 32]> { None }
 	fn peer_count(bot_id_hash: &BotIdHash) -> u32 {
@@ -44,6 +59,7 @@ impl pallet_grouprobot_ceremony::Config for Test {
 	type CeremonyValidityBlocks = CeremonyValidityBlocks;
 	type CeremonyCheckInterval = CeremonyCheckInterval;
 	type BotRegistry = MockBotRegistry;
+	type Subscription = MockSubscription;
 }
 
 pub const OWNER: u64 = 1;

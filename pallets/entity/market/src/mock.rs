@@ -82,7 +82,7 @@ impl EntityProvider<u64> for MockEntityProvider {
         entity_id == 1 || entity_id == 2
     }
     fn is_entity_active(entity_id: u64) -> bool {
-        entity_id == 1 || entity_id == 2
+        ENTITY_ACTIVE.with(|e| *e.borrow().get(&entity_id).unwrap_or(&(entity_id == 1 || entity_id == 2)))
     }
     fn entity_status(entity_id: u64) -> Option<EntityStatus> {
         if entity_id == 1 || entity_id == 2 {
@@ -118,6 +118,11 @@ thread_local! {
     static TOKEN_BALANCES: RefCell<HashMap<(u64, u64), u128>> = RefCell::new(HashMap::new());
     static TOKEN_RESERVED: RefCell<HashMap<(u64, u64), u128>> = RefCell::new(HashMap::new());
     static TOKEN_ENABLED: RefCell<HashMap<u64, bool>> = RefCell::new(HashMap::new());
+    static ENTITY_ACTIVE: RefCell<HashMap<u64, bool>> = RefCell::new(HashMap::new());
+}
+
+pub fn set_entity_active(entity_id: u64, active: bool) {
+    ENTITY_ACTIVE.with(|e| e.borrow_mut().insert(entity_id, active));
 }
 
 pub fn set_token_balance(entity_id: u64, who: u64, amount: u128) {
@@ -253,6 +258,13 @@ impl pallet_entity_market::Config for Test {
     type TreasuryAccount = TreasuryAccountId;
     type VerificationGracePeriod = ConstU32<600>;  // 1h 宽限期
     type UnderpaidGracePeriod = ConstU32<1200>;    // 2h 补付窗口
+    type NexUsdtPrice = MockNexUsdtPrice;
+}
+
+/// Mock NEX/USDT 价格: 0.5 USDT/NEX (500_000, 精度 10^6)
+pub struct MockNexUsdtPrice;
+impl pallet_entity_common::PricingProvider for MockNexUsdtPrice {
+    fn get_nex_usdt_price() -> u64 { 500_000 }
 }
 
 // ==================== 测试构建器 ====================

@@ -103,9 +103,20 @@ async fn main() -> anyhow::Result<()> {
     info!(
         platform = ?cfg.platform,
         tee_mode = %cfg.tee_mode,
+        chain_enabled = cfg.chain_enabled,
         port = cfg.webhook_port,
         "配置加载完成"
     );
+
+    if !cfg.chain_enabled {
+        info!("╔══════════════════════════════════════════════════╗");
+        info!("║  🆓 免注册模式 (CHAIN_ENABLED=false)             ║");
+        info!("║  • 使用默认安全规则 (防刷屏/管理命令/入群审批)     ║");
+        info!("║  • 强制展示广告                                   ║");
+        info!("║  • 无需链上注册, 无需 GAS 费                      ║");
+        info!("║  • 设置 CHAIN_ENABLED=true 解锁自定义规则         ║");
+        info!("╚══════════════════════════════════════════════════╝");
+    }
 
     // M2 修复: 安全配置缺失警告
     if cfg.webhook_secret.is_empty() && cfg.platform.needs_telegram() {
@@ -152,8 +163,11 @@ async fn main() -> anyhow::Result<()> {
     // 首次 env fallback 会 auto-seal, 后续启动直接从 share 恢复
 
     // R3 修复: K>1 且无静态 peer 时, 提前连接链以支持链上 peer 自动发现
+    // 免注册模式跳过提前链连接
     let early_chain: Option<Arc<ChainClient>> =
-        if cfg.shamir_threshold > 1 && cfg.peer_endpoints.is_empty() {
+        if !cfg.chain_enabled {
+            None
+        } else if cfg.shamir_threshold > 1 && cfg.peer_endpoints.is_empty() {
             info!("K>1 且无静态 PEER_ENDPOINTS, 尝试提前连接链以发现 peer...");
             let signer = chain::client::load_or_generate_signer(
                 &cfg.data_dir, cfg.chain_signer_seed.as_deref(),
@@ -278,11 +292,16 @@ async fn main() -> anyhow::Result<()> {
     let config_manager = Arc::new(ConfigManager::new(30));
 
     // ── 规则引擎 + 消息路由器 ──
-    let rule_engine = RuleEngine::new(local_store.clone(), true, 10);
+    let rule_engine = if cfg.chain_enabled {
+        RuleEngine::new(local_store.clone(), true, 10)
+    } else {
+        RuleEngine::free_mode(local_store.clone())
+    };
     let (log_tx, log_rx) = tokio::sync::mpsc::channel(1024);
     let audit_logger = Arc::new(crate::processing::audit_logger::AuditLogger::new(1000));
     let router = Arc::new(MessageRouter::new(
         rule_engine, key_manager.clone(), sequence.clone(), log_tx, audit_logger,
+        cfg.chain_enabled,
     ));
 
     // ── 构建 AppState ──
@@ -396,7 +415,8 @@ async fn main() -> anyhow::Result<()> {
     let shared_chain = tee::ceremony::new_shared_chain();
 
     // ── 链客户端 + TEE 证明提交 (后台任务) ──
-    {
+    // 免注册模式: 跳过链连接, 日志接收端直接 drop
+    if cfg.chain_enabled {
         let chain_rpc = cfg.chain_rpc.clone();
         let data_dir = cfg.data_dir.clone();
         let chain_signer_seed = cfg.chain_signer_seed.clone();
@@ -502,9 +522,13 @@ async fn main() -> anyhow::Result<()> {
                         batcher.run().await;
                     });
 
-                    // 24h 证明刷新循环
-                    let refresh_secs = tee::attestor::QUOTE_VALIDITY_SECS
-                        - tee::attestor::QUOTE_REFRESH_MARGIN_SECS;
+                    // 证明刷新循环: Hardware=23h, Software=7天
+                    let refresh_secs = if is_hardware {
+                        tee::attestor::QUOTE_VALIDITY_SECS
+                            - tee::attestor::QUOTE_REFRESH_MARGIN_SECS
+                    } else {
+                        tee::attestor::SOFTWARE_REFRESH_SECS
+                    };
                     let mut refresh_interval = tokio::time::interval(
                         std::time::Duration::from_secs(refresh_secs)
                     );
@@ -563,6 +587,10 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         });
+    } else {
+        // 免注册模式: 日志接收端直接 drop, 不启动链后台任务
+        drop(log_rx);
+        info!("免注册模式: 链客户端已禁用, 日志将不提交");
     }
 
     // ── Prometheus /metrics 路由 ──

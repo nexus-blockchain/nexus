@@ -14,8 +14,12 @@ frame-system = { workspace = true }
 sp-runtime = { workspace = true }
 sp-std = { workspace = true }
 
-pallet-entity-common = { path = "../../common", default-features = false }
 pallet-commission-common = { path = "../common", default-features = false }
+
+[dev-dependencies]
+sp-io = { workspace = true }
+pallet-balances = { workspace = true, features = ["std"] }
+pallet-entity-common = { path = "../../common", default-features = false }
 
 [features]
 default = ["std"]
@@ -26,7 +30,6 @@ std = [
     "frame-system/std",
     "sp-runtime/std",
     "sp-std/std",
-    "pallet-entity-common/std",
     "pallet-commission-common/std",
 ]
 runtime-benchmarks = [

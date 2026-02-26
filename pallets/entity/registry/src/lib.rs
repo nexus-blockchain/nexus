@@ -215,10 +215,14 @@ pub mod pallet {
 
     // ==================== 存储项 ====================
 
+    /// Entity ID 起始值（从 1 开始，避免 0 与 primary_shop_id 哨兵值冲突）
+    #[pallet::type_value]
+    pub fn DefaultNextEntityId() -> u64 { 1 }
+
     /// 下一个 Entity ID
     #[pallet::storage]
     #[pallet::getter(fn next_entity_id)]
-    pub type NextEntityId<T> = StorageValue<_, u64, ValueQuery>;
+    pub type NextEntityId<T> = StorageValue<_, u64, ValueQuery, DefaultNextEntityId>;
 
     /// Entity 存储 entity_id -> Entity
     #[pallet::storage]
@@ -249,6 +253,16 @@ pub mod pallet {
     /// 治理暂停标记（区分治理暂停 vs 资金不足暂停，防止 top_up_fund 绕过治理）
     #[pallet::storage]
     pub type GovernanceSuspended<T: Config> = StorageMap<_, Blake2_128Concat, u64, bool, ValueQuery>;
+
+    /// Entity 推荐人 (entity_id → referrer_account)
+    #[pallet::storage]
+    #[pallet::getter(fn entity_referrer)]
+    pub type EntityReferrer<T: Config> = StorageMap<_, Blake2_128Concat, u64, T::AccountId>;
+
+    /// 账户招商统计 (account → 推荐的 entity 数量)
+    #[pallet::storage]
+    #[pallet::getter(fn entity_referral_count)]
+    pub type EntityReferralCount<T: Config> = StorageMap<_, Blake2_128Concat, T::AccountId, u32, ValueQuery>;
 
     /// Entity 关联的所有 Shop IDs（1:N 多店铺）
     #[pallet::storage]
@@ -371,6 +385,11 @@ pub mod pallet {
             entity_id: u64,
             shop_id: u64,
         },
+        /// Entity 推荐人已绑定
+        EntityReferrerBound {
+            entity_id: u64,
+            referrer: T::AccountId,
+        },
     }
 
     // ==================== 错误 ====================
@@ -391,6 +410,8 @@ pub mod pallet {
         NameEmpty,
         /// 名称过长
         NameTooLong,
+        /// 名称内容无效（非 UTF-8 或含控制字符）
+        InvalidName,
         /// CID 过长
         CidTooLong,
         /// 价格不可用
@@ -423,6 +444,20 @@ pub mod pallet {
         ZeroAmount,
         /// 实体已验证
         AlreadyVerified,
+        /// Shop 已注册在此 Entity
+        ShopAlreadyRegistered,
+        /// 实体状态不允许此操作（已关闭或已封禁）
+        EntityNotActive,
+        /// 类型未变化
+        SameEntityType,
+        /// 治理模式未变化
+        SameGovernanceMode,
+        /// 推荐人已绑定（不可更改）
+        ReferrerAlreadyBound,
+        /// 无效推荐人（推荐人未拥有 Active Entity）
+        InvalidReferrer,
+        /// 不能推荐自己
+        SelfReferral,
     }
 
     // ==================== Extrinsics ====================
@@ -450,6 +485,7 @@ pub mod pallet {
             name: Vec<u8>,
             logo_cid: Option<Vec<u8>>,
             description_cid: Option<Vec<u8>>,
+            referrer: Option<T::AccountId>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -461,15 +497,28 @@ pub mod pallet {
             );
 
             ensure!(!name.is_empty(), Error::<T>::NameEmpty);
+            // H2: 名称内容校验（UTF-8 + 无控制字符 + 非全空白）
+            let name_str = core::str::from_utf8(&name).map_err(|_| Error::<T>::InvalidName)?;
+            ensure!(!name_str.trim().is_empty(), Error::<T>::NameEmpty);
+            ensure!(!name_str.chars().any(|c| c.is_control()), Error::<T>::InvalidName);
             let name: BoundedVec<u8, T::MaxEntityNameLength> =
                 name.try_into().map_err(|_| Error::<T>::NameTooLong)?;
 
+            // H1: 空 CID 转为 None
             let logo_cid: Option<BoundedVec<u8, T::MaxCidLength>> = logo_cid
+                .filter(|c| !c.is_empty())
                 .map(|c| c.try_into().map_err(|_| Error::<T>::CidTooLong))
                 .transpose()?;
             let description_cid: Option<BoundedVec<u8, T::MaxCidLength>> = description_cid
+                .filter(|c| !c.is_empty())
                 .map(|c| c.try_into().map_err(|_| Error::<T>::CidTooLong))
                 .transpose()?;
+
+            // 验证推荐人
+            if let Some(ref ref_account) = referrer {
+                ensure!(ref_account != &who, Error::<T>::SelfReferral);
+                ensure!(Self::has_active_entity(ref_account), Error::<T>::InvalidReferrer);
+            }
 
             // 计算初始金库资金（50 USDT 等值 NEX）
             let initial_fund = Self::calculate_initial_fund()?;
@@ -527,6 +576,18 @@ pub mod pallet {
                 stats.active_entities = stats.active_entities.saturating_add(1);
             });
 
+            // 记录推荐人（如果有）
+            if let Some(ref ref_account) = referrer {
+                EntityReferrer::<T>::insert(entity_id, ref_account);
+                EntityReferralCount::<T>::mutate(ref_account, |count| {
+                    *count = count.saturating_add(1);
+                });
+                Self::deposit_event(Event::EntityReferrerBound {
+                    entity_id,
+                    referrer: ref_account.clone(),
+                });
+            }
+
             Self::deposit_event(Event::EntityCreated {
                 entity_id,
                 owner: who,
@@ -558,16 +619,20 @@ pub mod pallet {
                     Error::<T>::InvalidEntityStatus
                 );
 
-                // H4: 名称更新时不允许为空
+                // H2: 名称更新时校验内容
                 if let Some(n) = name {
                     ensure!(!n.is_empty(), Error::<T>::NameEmpty);
+                    let n_str = core::str::from_utf8(&n).map_err(|_| Error::<T>::InvalidName)?;
+                    ensure!(!n_str.trim().is_empty(), Error::<T>::NameEmpty);
+                    ensure!(!n_str.chars().any(|c| c.is_control()), Error::<T>::InvalidName);
                     entity.name = n.try_into().map_err(|_| Error::<T>::NameTooLong)?;
                 }
+                // H1: 空 CID 转为 None
                 if let Some(c) = logo_cid {
-                    entity.logo_cid = Some(c.try_into().map_err(|_| Error::<T>::CidTooLong)?);
+                    entity.logo_cid = if c.is_empty() { None } else { Some(c.try_into().map_err(|_| Error::<T>::CidTooLong)?) };
                 }
                 if let Some(c) = description_cid {
-                    entity.description_cid = Some(c.try_into().map_err(|_| Error::<T>::CidTooLong)?);
+                    entity.description_cid = if c.is_empty() { None } else { Some(c.try_into().map_err(|_| Error::<T>::CidTooLong)?) };
                 }
                 // M2: 支持更新 metadata_uri
                 if let Some(uri) = metadata_uri {
@@ -725,15 +790,20 @@ pub mod pallet {
             let treasury_account = Self::entity_treasury_account(entity_id);
             let balance = T::Currency::free_balance(&treasury_account);
 
-            // 退还全部余额给所有者
-            if !balance.is_zero() {
-                T::Currency::transfer(
+            // H3 修复: 退还余额给所有者，失败不阻止关闭流程
+            let fund_refunded = if !balance.is_zero() {
+                match T::Currency::transfer(
                     &treasury_account,
                     &entity.owner,
                     balance,
                     ExistenceRequirement::AllowDeath,
-                )?;
-            }
+                ) {
+                    Ok(_) => balance,
+                    Err(_) => Zero::zero(),
+                }
+            } else {
+                Zero::zero()
+            };
 
             // 更新状态
             Entities::<T>::mutate(entity_id, |s| {
@@ -760,7 +830,7 @@ pub mod pallet {
 
             Self::deposit_event(Event::EntityClosed {
                 entity_id,
-                fund_refunded: balance,
+                fund_refunded,
             });
             Ok(())
         }
@@ -864,12 +934,13 @@ pub mod pallet {
                         Self::deposit_event(Event::FundConfiscated { entity_id, amount: balance });
                     }
                 } else {
-                    T::Currency::transfer(
+                    // H2 修复: 退还失败不应阻止封禁（owner 账户可能已被 reaped）
+                    let _ = T::Currency::transfer(
                         &treasury_account,
                         &entity.owner,
                         balance,
                         ExistenceRequirement::AllowDeath,
-                    )?;
+                    );
                 }
             }
 
@@ -886,6 +957,9 @@ pub mod pallet {
 
             // 清理 PendingClose 关闭申请（若有）
             EntityCloseRequests::<T>::remove(entity_id);
+
+            // H3 修复: 清除治理暂停标记（防止残留影响后续 reopen 流程）
+            GovernanceSuspended::<T>::remove(entity_id);
 
             if entity.status == EntityStatus::Active {
                 EntityStats::<T>::mutate(|stats| {
@@ -996,6 +1070,13 @@ pub mod pallet {
             new_owner: T::AccountId,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+
+            // H2 修复: 先验证新 owner 容量，避免 Entity 变更后 UserEntity 写入失败导致不一致
+            let new_owner_entities = UserEntity::<T>::get(&new_owner);
+            ensure!(
+                (new_owner_entities.len() as u32) < T::MaxEntitiesPerUser::get(),
+                Error::<T>::MaxEntitiesReached
+            );
             
             let old_owner = Entities::<T>::try_mutate(entity_id, |maybe_entity| -> Result<T::AccountId, DispatchError> {
                 let entity = maybe_entity.as_mut().ok_or(Error::<T>::EntityNotFound)?;
@@ -1019,7 +1100,7 @@ pub mod pallet {
                 Ok(old)
             })?;
 
-            // 更新用户实体索引
+            // 更新用户实体索引（容量已预先验证，try_push 不会失败）
             UserEntity::<T>::mutate(&old_owner, |entities| {
                 entities.retain(|&id| id != entity_id);
             });
@@ -1059,6 +1140,12 @@ pub mod pallet {
                     Error::<T>::InvalidEntityStatus
                 );
                 
+                // M2 修复: 同类型且同治理模式不需要升级
+                ensure!(
+                    entity.entity_type != new_type || entity.governance_mode != new_governance,
+                    Error::<T>::SameEntityType
+                );
+
                 // 非治理操作需要是所有者，且受升级路径限制
                 if let Some(ref caller) = who {
                     ensure!(entity.owner == *caller, Error::<T>::NotEntityOwner);
@@ -1096,41 +1183,8 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 变更治理模式（需治理批准）
-        #[pallet::call_index(13)]
-        #[pallet::weight(Weight::from_parts(60_000_000, 4_000))]
-        pub fn change_governance_mode(
-            origin: OriginFor<T>,
-            entity_id: u64,
-            new_mode: GovernanceMode,
-        ) -> DispatchResult {
-            T::GovernanceOrigin::ensure_origin(origin)?;
-            
-            let old_mode = Entities::<T>::try_mutate(entity_id, |maybe_entity| -> Result<GovernanceMode, DispatchError> {
-                let entity = maybe_entity.as_mut().ok_or(Error::<T>::EntityNotFound)?;
-                ensure!(
-                    !matches!(entity.status, EntityStatus::Banned | EntityStatus::Closed),
-                    Error::<T>::InvalidEntityStatus
-                );
-                
-                // DAO 类型不能设为无治理
-                if entity.entity_type == EntityType::DAO {
-                    ensure!(new_mode != GovernanceMode::None, Error::<T>::DAORequiresGovernance);
-                }
-                
-                let old = entity.governance_mode;
-                entity.governance_mode = new_mode;
-                
-                Ok(old)
-            })?;
-
-            Self::deposit_event(Event::GovernanceModeChanged {
-                entity_id,
-                old_mode,
-                new_mode,
-            });
-            Ok(())
-        }
+        // call_index(13) 已移除: change_governance_mode 死代码
+        // 治理模式变更统一由 pallet-entity-governance::configure_governance 管理
 
         /// 验证实体（治理）
         #[pallet::call_index(14)]
@@ -1205,6 +1259,48 @@ pub mod pallet {
 
             Ok(())
         }
+
+        /// 补绑 Entity 推荐人（仅限创建时未填的，一次性操作）
+        ///
+        /// # 规则
+        /// - 仅 Entity owner 可操作
+        /// - Entity 必须 Active
+        /// - 尚未绑定推荐人
+        /// - 推荐人必须拥有 Active Entity
+        /// - 不能推荐自己
+        #[pallet::call_index(16)]
+        #[pallet::weight(Weight::from_parts(80_000_000, 5_000))]
+        pub fn bind_entity_referrer(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            referrer: T::AccountId,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let entity = Entities::<T>::get(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(entity.owner == who, Error::<T>::NotEntityOwner);
+            ensure!(entity.status == EntityStatus::Active, Error::<T>::EntityNotActive);
+
+            // 不能已有推荐人
+            ensure!(!EntityReferrer::<T>::contains_key(entity_id), Error::<T>::ReferrerAlreadyBound);
+
+            // 验证推荐人
+            ensure!(referrer != who, Error::<T>::SelfReferral);
+            ensure!(Self::has_active_entity(&referrer), Error::<T>::InvalidReferrer);
+
+            // 写入
+            EntityReferrer::<T>::insert(entity_id, &referrer);
+            EntityReferralCount::<T>::mutate(&referrer, |count| {
+                *count = count.saturating_add(1);
+            });
+
+            Self::deposit_event(Event::EntityReferrerBound {
+                entity_id,
+                referrer,
+            });
+
+            Ok(())
+        }
     }
 
     // ==================== 辅助函数 ====================
@@ -1222,8 +1318,16 @@ pub mod pallet {
         /// 2. 计算所需 NEX 数量 = USDT 金额 * 10^12 / 价格
         /// 3. 限制在 [MinInitialFundCos, MaxInitialFundCos] 范围内
         pub fn calculate_initial_fund() -> Result<BalanceOf<T>, sp_runtime::DispatchError> {
-            let price = T::PricingProvider::get_cos_usdt_price();
+            let price = T::PricingProvider::get_nex_usdt_price();
             ensure!(price > 0, Error::<T>::PriceUnavailable);
+
+            let min_fund = T::MinInitialFundCos::get();
+            let max_fund = T::MaxInitialFundCos::get();
+
+            // 价格过时时使用保守兜底值，避免基于过期数据计算押金
+            if T::PricingProvider::is_price_stale() {
+                return Ok(min_fund);
+            }
 
             let usdt_amount = T::InitialFundUsdt::get();
 
@@ -1236,8 +1340,6 @@ pub mod pallet {
 
             let nex_amount: BalanceOf<T> = nex_amount_u128.saturated_into();
 
-            let min_fund = T::MinInitialFundCos::get();
-            let max_fund = T::MaxInitialFundCos::get();
             let final_fund = nex_amount.max(min_fund).min(max_fund);
 
             Ok(final_fund)
@@ -1271,6 +1373,13 @@ pub mod pallet {
             fee: BalanceOf<T>,
             fee_type: FeeType,
         ) -> sp_runtime::DispatchResult {
+            // H4+M4 修复: 检查 Entity 状态，仅 Active/Suspended 允许扣费
+            let entity = Entities::<T>::get(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(
+                matches!(entity.status, EntityStatus::Active | EntityStatus::Suspended),
+                Error::<T>::EntityNotActive
+            );
+
             let treasury_account = Self::entity_treasury_account(entity_id);
             let balance = T::Currency::free_balance(&treasury_account);
 
@@ -1332,7 +1441,7 @@ pub mod pallet {
 
         /// 获取初始资金计算详情（供前端查询）
         pub fn get_initial_fund_details() -> (u64, u64, u128) {
-            let price = T::PricingProvider::get_cos_usdt_price();
+            let price = T::PricingProvider::get_nex_usdt_price();
             let usdt_amount = T::InitialFundUsdt::get();
 
             let nex_amount = if price > 0 {
@@ -1413,6 +1522,17 @@ pub mod pallet {
                 .map(|e| e.admins.into_inner())
                 .unwrap_or_default()
         }
+
+        /// 检查账户是否拥有至少一个 Active Entity
+        pub fn has_active_entity(account: &T::AccountId) -> bool {
+            UserEntity::<T>::get(account)
+                .iter()
+                .any(|&eid| {
+                    Entities::<T>::get(eid)
+                        .map(|e| e.status == EntityStatus::Active)
+                        .unwrap_or(false)
+                })
+        }
     }
 
     // ==================== EntityProvider 实现 ====================
@@ -1443,6 +1563,11 @@ pub mod pallet {
         fn update_entity_stats(entity_id: u64, sales_amount: u128, order_count: u32) -> Result<(), sp_runtime::DispatchError> {
             Entities::<T>::try_mutate(entity_id, |maybe_entity| -> Result<(), sp_runtime::DispatchError> {
                 let entity = maybe_entity.as_mut().ok_or(Error::<T>::EntityNotFound)?;
+                // L2 修复: 不允许对 Banned/Closed Entity 更新统计
+                ensure!(
+                    !matches!(entity.status, EntityStatus::Banned | EntityStatus::Closed),
+                    Error::<T>::EntityNotActive
+                );
                 entity.total_sales = entity.total_sales.saturating_add(sales_amount.saturated_into());
                 entity.total_orders = entity.total_orders.saturating_add(order_count as u64);
                 Ok(())
@@ -1461,7 +1586,8 @@ pub mod pallet {
 
             // 添加到 EntityShops 列表
             EntityShops::<T>::try_mutate(entity_id, |shops| -> Result<(), sp_runtime::DispatchError> {
-                ensure!(!shops.contains(&shop_id), Error::<T>::ShopLimitReached);
+                // H5 修复: 区分重复注册和容量已满两种错误
+                ensure!(!shops.contains(&shop_id), Error::<T>::ShopAlreadyRegistered);
                 shops.try_push(shop_id).map_err(|_| Error::<T>::ShopLimitReached)?;
                 Ok(())
             })?;
@@ -1507,6 +1633,64 @@ pub mod pallet {
 
         fn entity_shops(entity_id: u64) -> sp_std::vec::Vec<u64> {
             EntityShops::<T>::get(entity_id).into_inner()
+        }
+
+        // H4 修复: 实现 pause_entity/resume_entity（供治理模块调用）
+        fn pause_entity(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
+            let entity = Entities::<T>::get(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(entity.status == EntityStatus::Active, Error::<T>::InvalidEntityStatus);
+
+            Entities::<T>::mutate(entity_id, |s| {
+                if let Some(e) = s {
+                    e.status = EntityStatus::Suspended;
+                }
+            });
+            EntityStats::<T>::mutate(|stats| {
+                stats.active_entities = stats.active_entities.saturating_sub(1);
+            });
+            // 标记为治理暂停（防止 top_up_fund 绕过治理自动恢复）
+            GovernanceSuspended::<T>::insert(entity_id, true);
+
+            Self::deposit_event(Event::EntityStatusChanged {
+                entity_id,
+                status: EntityStatus::Suspended,
+            });
+            Ok(())
+        }
+
+        fn resume_entity(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
+            let entity = Entities::<T>::get(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(entity.status == EntityStatus::Suspended, Error::<T>::InvalidEntityStatus);
+
+            let treasury_account = Self::entity_treasury_account(entity_id);
+            let balance = T::Currency::free_balance(&treasury_account);
+            let min_balance = T::MinOperatingBalance::get();
+            ensure!(balance >= min_balance, Error::<T>::InsufficientOperatingFund);
+
+            Entities::<T>::mutate(entity_id, |s| {
+                if let Some(e) = s {
+                    e.status = EntityStatus::Active;
+                }
+            });
+            EntityStats::<T>::mutate(|stats| {
+                stats.active_entities = stats.active_entities.saturating_add(1);
+            });
+            GovernanceSuspended::<T>::remove(entity_id);
+
+            Self::deposit_event(Event::EntityStatusChanged {
+                entity_id,
+                status: EntityStatus::Active,
+            });
+            Ok(())
+        }
+
+        // C2: 治理 pallet 同步调用 — 更新 Entity.governance_mode 字段
+        fn set_governance_mode(entity_id: u64, mode: GovernanceMode) -> Result<(), sp_runtime::DispatchError> {
+            Entities::<T>::try_mutate(entity_id, |maybe_entity| -> Result<(), sp_runtime::DispatchError> {
+                let entity = maybe_entity.as_mut().ok_or(Error::<T>::EntityNotFound)?;
+                entity.governance_mode = mode;
+                Ok(())
+            })
         }
     }
 }

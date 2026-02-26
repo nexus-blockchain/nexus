@@ -31,6 +31,8 @@ extern crate alloc;
 
 pub use pallet::*;
 
+pub mod weights;
+
 #[cfg(test)]
 mod mock;
 
@@ -49,6 +51,8 @@ pub mod pallet {
     use frame_system::pallet_prelude::*;
     use pallet_entity_common::{DividendConfig, EntityProvider, ShopProvider, TokenType, TransferRestrictionMode};
     use sp_runtime::traits::{AtLeast32BitUnsigned, Saturating, Zero};
+
+    pub use crate::weights::WeightInfo;
 
     /// T-M1 审计修复: 独立锁仓条目，避免合并时意外延长解锁时间
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
@@ -152,6 +156,9 @@ pub mod pallet {
 
         /// 成员查询接口（可选）
         type MemberProvider: EntityMemberProvider<Self::AccountId>;
+
+        /// Weight information for extrinsics in this pallet.
+        type WeightInfo: WeightInfo;
     }
 
     /// KYC 级别查询 Trait
@@ -343,12 +350,6 @@ pub mod pallet {
             to: T::AccountId,
             amount: T::AssetBalance,
         },
-        /// 代币已销毁
-        TokensBurned {
-            entity_id: u64,
-            from: T::AccountId,
-            amount: T::AssetBalance,
-        },
         // ========== Phase 4 新增事件 ==========
         /// 分红已配置
         DividendConfigured {
@@ -412,10 +413,10 @@ pub mod pallet {
 
     #[pallet::error]
     pub enum Error<T> {
-        /// 店铺不存在
-        ShopNotFound,
-        /// 不是店主
-        NotShopOwner,
+        /// 实体不存在
+        EntityNotFound,
+        /// 非实体所有者
+        NotEntityOwner,
         /// 店铺代币未启用
         TokenNotEnabled,
         /// 代币已存在
@@ -445,8 +446,6 @@ pub mod pallet {
         DividendPeriodNotReached,
         /// 无可领取分红
         NoDividendToClaim,
-        /// 代币已锁仓
-        TokensAreLocked,
         /// 无锁仓代币
         NoLockedTokens,
         /// 解锁时间未到
@@ -470,12 +469,8 @@ pub mod pallet {
         ReceiverNotMember,
         /// 白名单/黑名单已满
         TransferListFull,
-        /// 地址已在列表中
-        AddressAlreadyInList,
-        /// 地址不在列表中
-        AddressNotInList,
-        /// 店铺未激活
-        ShopNotActive,
+        /// 实体未激活
+        EntityNotActive,
         /// 数量为零
         ZeroAmount,
         /// 锁仓时长为零
@@ -506,7 +501,7 @@ pub mod pallet {
         /// - `reward_rate`: 购物返积分比例（基点）
         /// - `exchange_rate`: 积分兑换比例（基点）
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::create_shop_token())]
         pub fn create_shop_token(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -519,10 +514,10 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
 
             // 验证实体存在且调用者是所有者
-            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::ShopNotFound);
-            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::ShopNotActive);
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
+            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
 
             // 检查代币是否已存在
             ensure!(!EntityTokenConfigs::<T>::contains_key(entity_id), Error::<T>::TokenAlreadyExists);
@@ -570,7 +565,7 @@ pub mod pallet {
                     last_distribution: Zero::zero(),
                     accumulated: Zero::zero(),
                 },
-                transfer_restriction: TransferRestrictionMode::from_u8(token_type.default_transfer_restriction()),
+                transfer_restriction: token_type.default_transfer_restriction(),
                 min_receiver_kyc: token_type.required_kyc_level().1,
             };
             EntityTokenConfigs::<T>::insert(entity_id, config);
@@ -589,7 +584,7 @@ pub mod pallet {
 
         /// 更新代币配置
         #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::update_token_config())]
         pub fn update_token_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -603,8 +598,8 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
 
             // 验证实体所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
 
             EntityTokenConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
                 let config = maybe_config.as_mut().ok_or(Error::<T>::TokenNotEnabled)?;
@@ -644,7 +639,7 @@ pub mod pallet {
 
         /// 实体所有者铸造代币（用于活动奖励等）
         #[pallet::call_index(2)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::mint_tokens())]
         pub fn mint_tokens(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -654,8 +649,8 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
 
             // 验证实体所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
 
             // 检查代币是否启用
             let config = EntityTokenConfigs::<T>::get(entity_id).ok_or(Error::<T>::TokenNotEnabled)?;
@@ -681,7 +676,7 @@ pub mod pallet {
 
         /// 用户转让积分
         #[pallet::call_index(3)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::transfer_tokens())]
         pub fn transfer_tokens(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -723,7 +718,7 @@ pub mod pallet {
 
         /// 配置分红
         #[pallet::call_index(4)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::configure_dividend())]
         pub fn configure_dividend(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -733,8 +728,8 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
 
             // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
 
             // 检查代币是否存在
             EntityTokenConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
@@ -759,7 +754,7 @@ pub mod pallet {
 
         /// 分发分红（按持有比例分配）
         #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(300_000_000, 10_000))]
+        #[pallet::weight(T::WeightInfo::distribute_dividend(recipients.len() as u32))]
         pub fn distribute_dividend(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -769,8 +764,8 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
 
             // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
 
             // H5: 限制接收人数量
             ensure!(
@@ -830,7 +825,7 @@ pub mod pallet {
 
         /// 领取分红
         #[pallet::call_index(6)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::claim_dividend())]
         pub fn claim_dividend(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -867,7 +862,7 @@ pub mod pallet {
 
         /// 锁仓代币
         #[pallet::call_index(7)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::lock_tokens())]
         pub fn lock_tokens(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -916,7 +911,7 @@ pub mod pallet {
 
         /// 解锁代币（T-M1: 仅移除已到期的锁仓条目，保留未到期的）
         #[pallet::call_index(8)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::unlock_tokens())]
         pub fn unlock_tokens(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -925,6 +920,10 @@ pub mod pallet {
 
             let now = <frame_system::Pallet<T>>::block_number();
             let mut unlocked_total = T::AssetBalance::zero();
+
+            let has_locks = LockedTokens::<T>::contains_key(entity_id, &who);
+            let entries_len = LockedTokens::<T>::get(entity_id, &who).len();
+            ensure!(has_locks && entries_len > 0, Error::<T>::NoLockedTokens);
 
             LockedTokens::<T>::mutate(entity_id, &who, |entries| {
                 let mut i = 0;
@@ -938,7 +937,7 @@ pub mod pallet {
                 }
             });
 
-            ensure!(!unlocked_total.is_zero(), Error::<T>::NoLockedTokens);
+            ensure!(!unlocked_total.is_zero(), Error::<T>::UnlockTimeNotReached);
 
             Self::deposit_event(Event::TokensUnlocked {
                 entity_id,
@@ -950,7 +949,7 @@ pub mod pallet {
 
         /// 变更通证类型（需所有者操作）
         #[pallet::call_index(9)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::change_token_type())]
         pub fn change_token_type(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -959,8 +958,8 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
 
             // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
 
             let old_type = EntityTokenConfigs::<T>::try_mutate(entity_id, |maybe_config| -> Result<TokenType, DispatchError> {
                 let config = maybe_config.as_mut().ok_or(Error::<T>::TokenNotEnabled)?;
@@ -970,7 +969,7 @@ pub mod pallet {
                 // 根据新类型更新可转让性
                 config.transferable = new_type.is_transferable_by_default();
                 // M5: 联动更新转账限制和 KYC 要求
-                config.transfer_restriction = TransferRestrictionMode::from_u8(new_type.default_transfer_restriction());
+                config.transfer_restriction = new_type.default_transfer_restriction();
                 config.min_receiver_kyc = new_type.required_kyc_level().1;
                 
                 Ok(old)
@@ -986,7 +985,7 @@ pub mod pallet {
 
         /// 设置最大供应量
         #[pallet::call_index(10)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_max_supply())]
         pub fn set_max_supply(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -995,8 +994,8 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
 
             // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
 
             EntityTokenConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
                 let config = maybe_config.as_mut().ok_or(Error::<T>::TokenNotEnabled)?;
@@ -1019,7 +1018,7 @@ pub mod pallet {
 
         /// 设置转账限制模式
         #[pallet::call_index(11)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_transfer_restriction())]
         pub fn set_transfer_restriction(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1029,8 +1028,8 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
 
             // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
 
             let clamped_kyc = min_receiver_kyc.min(4);
             EntityTokenConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
@@ -1051,7 +1050,7 @@ pub mod pallet {
 
         /// 添加白名单地址
         #[pallet::call_index(12)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::add_to_whitelist(accounts.len() as u32))]
         pub fn add_to_whitelist(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1063,8 +1062,8 @@ pub mod pallet {
             ensure!(accounts.len() <= T::MaxTransferListSize::get() as usize, Error::<T>::TransferListFull);
 
             // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
 
             let mut added = 0u32;
             TransferWhitelist::<T>::try_mutate(entity_id, |list| -> DispatchResult {
@@ -1087,7 +1086,7 @@ pub mod pallet {
 
         /// 移除白名单地址
         #[pallet::call_index(13)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::remove_from_whitelist(accounts.len() as u32))]
         pub fn remove_from_whitelist(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1099,8 +1098,8 @@ pub mod pallet {
             ensure!(accounts.len() <= T::MaxTransferListSize::get() as usize, Error::<T>::TransferListFull);
 
             // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
 
             let mut removed = 0u32;
             TransferWhitelist::<T>::mutate(entity_id, |list| {
@@ -1122,7 +1121,7 @@ pub mod pallet {
 
         /// 添加黑名单地址
         #[pallet::call_index(14)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::add_to_blacklist(accounts.len() as u32))]
         pub fn add_to_blacklist(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1134,8 +1133,8 @@ pub mod pallet {
             ensure!(accounts.len() <= T::MaxTransferListSize::get() as usize, Error::<T>::TransferListFull);
 
             // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
 
             let mut added = 0u32;
             TransferBlacklist::<T>::try_mutate(entity_id, |list| -> DispatchResult {
@@ -1158,7 +1157,7 @@ pub mod pallet {
 
         /// 移除黑名单地址
         #[pallet::call_index(15)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::remove_from_blacklist(accounts.len() as u32))]
         pub fn remove_from_blacklist(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1170,8 +1169,8 @@ pub mod pallet {
             ensure!(accounts.len() <= T::MaxTransferListSize::get() as usize, Error::<T>::TransferListFull);
 
             // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
 
             let mut removed = 0u32;
             TransferBlacklist::<T>::mutate(entity_id, |list| {

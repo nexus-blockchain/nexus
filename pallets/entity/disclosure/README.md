@@ -1,6 +1,6 @@
 # pallet-entity-disclosure
 
-> 实体财务信息披露与内幕交易控制模块
+> 实体财务信息披露、内幕交易控制与公告发布模块
 
 ## 概述
 
@@ -9,6 +9,7 @@
 1. **定期披露** — 按实体设定的级别（Basic → Full），自动计算下次披露截止时间，支持逾期违规追踪
 2. **内幕人员管理** — 注册/注销实体内幕人员，五种角色分类，供外部模块查询交易资格
 3. **黑窗口期控制** — 披露发布后自动触发交易限制窗口，或由管理员手动管理
+4. **公告发布** — 实体发布、更新、撤回公告，支持 8 种分类、可选过期时间、置顶功能
 
 ### 架构定位
 
@@ -20,7 +21,8 @@ pallet-entity-disclosure ◄── EntityProvider (entity_owner, entity_exists)
         │
         ├── 披露记录 (DisclosureRecord) ── IPFS CID 引用链下内容
         ├── 内幕人员 (InsiderRecord)     ── 供 market/token 模块查询
-        └── 黑窗口期 (BlackoutPeriods)   ── is_in_blackout() / can_insider_trade()
+        ├── 黑窗口期 (BlackoutPeriods)   ── is_in_blackout() / can_insider_trade()
+        └── 公告管理 (AnnouncementRecord) ── 发布/更新/撤回/置顶
 ```
 
 外部模块通过 `Pallet::<T>::can_insider_trade(entity_id, &account)` 查询账户是否允许交易。
@@ -118,6 +120,32 @@ pub struct InsiderRecord<AccountId, BlockNumber> {
 | `BlackoutTrading` | 黑窗口期内交易 |
 | `UndisclosedMaterialEvent` | 未披露重大事件 |
 
+### AnnouncementRecord
+
+```rust
+pub struct AnnouncementRecord<AccountId, BlockNumber, MaxCidLen, MaxTitleLen> {
+    pub id: u64,                                    // 自增 ID
+    pub entity_id: u64,                             // 所属实体
+    pub category: AnnouncementCategory,             // 分类（8 种）
+    pub title: BoundedVec<u8, MaxTitleLen>,          // 标题
+    pub content_cid: BoundedVec<u8, MaxCidLen>,     // 内容 IPFS CID
+    pub publisher: AccountId,                       // 发布者
+    pub published_at: BlockNumber,                  // 发布区块
+    pub expires_at: Option<BlockNumber>,            // 过期时间（None = 永不过期）
+    pub status: AnnouncementStatus,                 // Active / Withdrawn / Expired
+    pub is_pinned: bool,                            // 是否置顶
+}
+```
+
+**AnnouncementCategory（8 种）：** `General` | `Promotion` | `SystemUpdate` | `Event` | `Policy` | `Partnership` | `Product` | `Other`
+
+**状态流转：**
+
+```
+Active ───┬─── Withdrawn  (撤回)
+           └─── Expired    (过期)
+```
+
 ## Extrinsics
 
 | # | 函数 | 权限 | 说明 |
@@ -130,6 +158,10 @@ pub struct InsiderRecord<AccountId, BlockNumber> {
 | 5 | `remove_insider(entity_id, account)` | Entity Owner | 软删除内幕人员（`active=false`），保留历史记录 |
 | 6 | `start_blackout(entity_id, duration)` | Entity Owner | 手动开启黑窗口期，设置 `(now, now + duration)` |
 | 7 | `end_blackout(entity_id)` | Entity Owner | 手动提前结束黑窗口期（删除存储记录） |
+| 8 | `publish_announcement(entity_id, category, title, content_cid, expires_at?)` | Entity Owner | 发布公告，支持可选过期时间 |
+| 9 | `update_announcement(id, title?, content_cid?, category?, expires_at?)` | Entity Owner | 更新公告内容（仅 Active 状态），支持部分更新 |
+| 10 | `withdraw_announcement(announcement_id)` | Owner 或 Publisher | 撤回公告（Active → Withdrawn），自动清除置顶 |
+| 11 | `pin_announcement(entity_id, announcement_id?)` | Entity Owner | 置顶/取消置顶公告（Some=置顶，None=取消），每实体最多一个 |
 
 ## 存储
 
@@ -141,6 +173,10 @@ pub struct InsiderRecord<AccountId, BlockNumber> {
 | `EntityDisclosures` | `entity_id` | `BoundedVec<u64, MaxDisclosureHistory>` | 实体关联的披露 ID 列表 |
 | `Insiders` | `entity_id` | `BoundedVec<InsiderRecord, MaxInsiders>` | 内幕人员列表 |
 | `BlackoutPeriods` | `entity_id` | `(BlockNumber, BlockNumber)` | 黑窗口期起止区块 |
+| `NextAnnouncementId` | — | `u64` | 公告全局自增 ID |
+| `Announcements` | `announcement_id` | `AnnouncementRecord` | 公告记录 |
+| `EntityAnnouncements` | `entity_id` | `BoundedVec<u64, MaxAnnouncementHistory>` | 实体关联公告 ID 列表 |
+| `PinnedAnnouncement` | `entity_id` | `u64` | 实体置顶公告 ID（最多一个） |
 
 ## 事件
 
@@ -155,6 +191,11 @@ pub struct InsiderRecord<AccountId, BlockNumber> {
 | `BlackoutStarted` | `entity_id, start_block, end_block` | `start_blackout` 或 `publish_disclosure` 自动触发 |
 | `BlackoutEnded` | `entity_id` | `end_blackout` |
 | `DisclosureViolation` | `entity_id, violation_type` | 违规检测时发出 |
+| `AnnouncementPublished` | `announcement_id, entity_id, category, publisher` | `publish_announcement` |
+| `AnnouncementUpdated` | `announcement_id, entity_id` | `update_announcement` |
+| `AnnouncementWithdrawn` | `announcement_id, entity_id` | `withdraw_announcement` |
+| `AnnouncementPinned` | `entity_id, announcement_id` | `pin_announcement(Some)` |
+| `AnnouncementUnpinned` | `entity_id` | `pin_announcement(None)` |
 
 ## 错误
 
@@ -172,6 +213,12 @@ pub struct InsiderRecord<AccountId, BlockNumber> {
 | `InvalidDisclosureStatus` | 披露状态不允许该操作（如撤回非 Published 的记录） |
 | `InsufficientDisclosureLevel` | 披露级别不满足要求 |
 | `DisclosureIntervalNotReached` | 披露间隔未到 |
+| `AnnouncementNotFound` | `announcement_id` 不存在 |
+| `AnnouncementHistoryFull` | `EntityAnnouncements` 达到 `MaxAnnouncementHistory` 上限 |
+| `AnnouncementNotActive` | 公告状态不是 Active |
+| `EmptyTitle` | 公告标题为空 |
+| `TitleTooLong` | 标题超过 `MaxTitleLength` |
+| `InvalidExpiry` | 过期时间早于当前区块 |
 
 ## 公开查询接口
 
@@ -194,6 +241,12 @@ Pallet::<T>::get_disclosure_level(entity_id) -> DisclosureLevel
 
 // 检查实体是否逾期未披露
 Pallet::<T>::is_disclosure_overdue(entity_id) -> bool
+
+// 检查公告是否已过期
+Pallet::<T>::is_announcement_expired(announcement_id) -> bool
+
+// 获取实体置顶公告 ID
+Pallet::<T>::get_pinned_announcement(entity_id) -> Option<u64>
 ```
 
 ## Runtime 配置
@@ -208,6 +261,9 @@ impl pallet_entity_disclosure::Config for Runtime {
     type StandardDisclosureInterval = ...;       // Standard 级别间隔（~3 个月）
     type EnhancedDisclosureInterval = ...;       // Enhanced 级别间隔（~1 个月）
     type MajorHolderThreshold = ConstU32<500>;   // 大股东阈值（基点，500 = 5%）
+    type MaxBlackoutDuration = ...;              // 黑窗口期最大时长
+    type MaxAnnouncementHistory = ConstU32<200>; // 每实体最大公告数
+    type MaxTitleLength = ConstU32<128>;         // 公告标题最大字节数
 }
 ```
 
@@ -225,10 +281,11 @@ impl pallet_entity_disclosure::Config for Runtime {
 cargo test -p pallet-entity-disclosure
 ```
 
-覆盖：配置披露、发布披露、添加内幕人员、黑窗口期管理。
+覆盖：配置披露、发布披露、添加内幕人员、黑窗口期管理、公告发布/更新/撤回/置顶。73 个测试。
 
 ## 版本历史
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
 | v0.1.0 | 2026-02-03 | Phase 6 初始版本：8 个 extrinsic、6 个 helper、13 种披露类型、5 种内幕角色 |
+| v0.2.0 | 2026-02-26 | 公告发布功能：+4 extrinsic (8-11)、+4 storage、+5 event、+6 error、+2 helper、+2 Config 常量、+42 测试 |

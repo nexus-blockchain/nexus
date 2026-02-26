@@ -36,20 +36,6 @@ pub mod pallet {
     pub use pallet_entity_common::MemberLevel;
     use sp_runtime::traits::{Saturating, Zero};
 
-    // ============================================================================
-    // Entity-Shop 分离架构：会员范围
-    // ============================================================================
-
-    /// 会员范围（Entity 级别或 Shop 级别）
-    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
-    pub enum MemberScope {
-        /// Entity 级别（所有 Shop 共享会员）
-        #[default]
-        Entity,
-        /// Shop 级别（各 Shop 独立会员）
-        Shop,
-    }
-
     /// 货币余额类型别名
     pub type BalanceOf<T> =
         <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
@@ -380,6 +366,18 @@ pub mod pallet {
         ValueQuery,
     >;
 
+    /// P3 修复: 会员累计消费 USDT (entity_id, account) -> total_spent_usdt
+    /// 独立存储避免 EntityMember 结构变更和存储迁移
+    #[pallet::storage]
+    #[pallet::getter(fn member_spent_usdt)]
+    pub type MemberSpentUsdt<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat, u64,
+        Blake2_128Concat, T::AccountId,
+        u64,
+        ValueQuery,
+    >;
+
     /// 会员订单数量 (entity_id, account) -> order_count
     #[pallet::storage]
     #[pallet::getter(fn member_order_count)]
@@ -600,6 +598,16 @@ pub mod pallet {
         NotEntityAdmin,
         /// 基点值超出范围（最大 10000 = 100%）
         InvalidBasisPoints,
+        /// 无效策略位标记（仅低 3 位有效: 0b0000_0111）
+        InvalidPolicyBits,
+        /// 无效升级模式值
+        InvalidUpgradeMode,
+        /// 等级系统已初始化（防止覆盖已有等级数据）
+        LevelSystemAlreadyInitialized,
+        /// 升级规则系统已初始化（防止覆盖已有规则）
+        UpgradeRuleSystemAlreadyInitialized,
+        /// 等级名称过长（超过 32 字节）
+        NameTooLong,
     }
 
     // ============================================================================
@@ -770,6 +778,12 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let entity_id = Self::ensure_shop_owner(shop_id, &who)?;
+
+            // H3 审计修复: 防止覆盖已有等级系统（已有自定义等级的数据会丢失）
+            ensure!(
+                !EntityLevelSystems::<T>::contains_key(entity_id),
+                Error::<T>::LevelSystemAlreadyInitialized
+            );
 
             let system = EntityLevelSystem {
                 levels: BoundedVec::default(),
@@ -1054,6 +1068,12 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             let entity_id = Self::ensure_shop_owner(shop_id, &who)?;
 
+            // H5 审计修复: 防止覆盖已有升级规则系统
+            ensure!(
+                !EntityUpgradeRules::<T>::contains_key(entity_id),
+                Error::<T>::UpgradeRuleSystemAlreadyInitialized
+            );
+
             let system = EntityUpgradeRuleSystem {
                 rules: BoundedVec::default(),
                 next_rule_id: 0,
@@ -1099,6 +1119,14 @@ pub mod pallet {
             let entity_id = Self::ensure_shop_owner(shop_id, &who)?;
 
             ensure!(!name.is_empty(), Error::<T>::EmptyRuleName);
+
+            // H4 审计修复: 验证 target_level_id 对应的等级存在
+            if let Some(level_system) = EntityLevelSystems::<T>::get(entity_id) {
+                ensure!(
+                    (target_level_id as usize) < level_system.levels.len(),
+                    Error::<T>::InvalidTargetLevel
+                );
+            }
 
             EntityUpgradeRules::<T>::try_mutate(entity_id, |maybe_system| -> DispatchResult {
                 let system = maybe_system.as_mut().ok_or(Error::<T>::UpgradeRuleSystemNotInitialized)?;
@@ -1269,6 +1297,9 @@ pub mod pallet {
                     || T::EntityProvider::is_entity_admin(entity_id, &who),
                 Error::<T>::NotEntityAdmin
             );
+
+            // H2 审计修复: 只允许低 3 位 (PURCHASE=1, REFERRAL=2, APPROVAL=4)
+            ensure!(policy_bits <= 0b0000_0111, Error::<T>::InvalidPolicyBits);
 
             let policy = MemberRegistrationPolicy(policy_bits);
             EntityMemberPolicy::<T>::insert(entity_id, policy);
@@ -1490,15 +1521,24 @@ pub mod pallet {
         }
 
         /// 更新团队人数（递归向上更新，entity 级别）
+        /// H1 审计修复: 添加 visited 集合防止循环引用导致重复 +1
         fn update_team_size_by_entity(entity_id: u64, account: &T::AccountId) {
+            use alloc::collections::BTreeSet;
+
             let mut current = Some(account.clone());
             let mut depth = 0u32;
+            let mut visited = BTreeSet::new();
             const MAX_DEPTH: u32 = 100;
 
             while let Some(ref curr_account) = current {
                 if depth >= MAX_DEPTH {
                     break;
                 }
+
+                if visited.contains(curr_account) {
+                    break;
+                }
+                visited.insert(curr_account.clone());
 
                 EntityMembers::<T>::mutate(entity_id, curr_account, |maybe_member| {
                     if let Some(ref mut m) = maybe_member {
@@ -1702,6 +1742,13 @@ pub mod pallet {
             EntityMembers::<T>::mutate(entity_id, account, |maybe_member| -> DispatchResult {
                 let member = maybe_member.as_mut().ok_or(Error::<T>::NotMember)?;
 
+                // H7 审计修复: 验证目标等级仍然存在（等级可能在规则创建后被删除）
+                if let Some(ref system) = EntityLevelSystems::<T>::get(entity_id) {
+                    if system.use_custom && (target_level_id as usize) >= system.levels.len() {
+                        return Ok(());
+                    }
+                }
+
                 let old_level_id = member.custom_level_id;
 
                 // 检查是否需要升级
@@ -1817,7 +1864,7 @@ pub mod pallet {
                 system.upgrade_mode = match mode {
                     0 => LevelUpgradeMode::AutoUpgrade,
                     1 => LevelUpgradeMode::ManualUpgrade,
-                    _ => return Err(Error::<T>::InvalidLevelId.into()),
+                    _ => return Err(Error::<T>::InvalidUpgradeMode.into()),
                 };
                 Ok(())
             })
@@ -1833,7 +1880,7 @@ pub mod pallet {
             commission_bonus: u16,
         ) -> DispatchResult {
             let name: BoundedVec<u8, ConstU32<32>> = name.to_vec().try_into()
-                .map_err(|_| Error::<T>::EmptyLevelName)?;
+                .map_err(|_| Error::<T>::NameTooLong)?;
             ensure!(!name.is_empty(), Error::<T>::EmptyLevelName);
             ensure!(discount_rate <= 10000, Error::<T>::InvalidBasisPoints);
             ensure!(commission_bonus <= 10000, Error::<T>::InvalidBasisPoints);
@@ -1899,7 +1946,7 @@ pub mod pallet {
                 }
                 if let Some(new_name) = name {
                     let bounded_name: BoundedVec<u8, ConstU32<32>> = new_name.to_vec().try_into()
-                        .map_err(|_| Error::<T>::EmptyLevelName)?;
+                        .map_err(|_| Error::<T>::NameTooLong)?;
                     ensure!(!bounded_name.is_empty(), Error::<T>::EmptyLevelName);
                     level.name = bounded_name;
                 }
@@ -1970,9 +2017,12 @@ pub mod pallet {
                 member.total_spent = member.total_spent.saturating_add(amount);
                 member.last_active_at = <frame_system::Pallet<T>>::block_number();
 
-                // 计算新等级（全局默认体系）
-                // total_spent 已包含 amount，直接转换为 USDT 即可
-                let current_spent_usdt = sp_runtime::SaturatedConversion::saturated_into::<u64>(member.total_spent);
+                // P3 修复: 累计 USDT 消费到独立存储，用于全局等级计算
+                // 避免 Balance(NEX) 与 u64(USDT) 精度不匹配的问题
+                let current_spent_usdt = MemberSpentUsdt::<T>::mutate(entity_id, account, |usdt| {
+                    *usdt = usdt.saturating_add(amount_usdt);
+                    *usdt
+                });
                 let new_level = Self::calculate_level(current_spent_usdt);
 
                 if new_level != member.level {
@@ -1985,6 +2035,27 @@ pub mod pallet {
                         old_level,
                         new_level,
                     });
+                }
+
+                // P4 修复: 检查自定义等级是否已过期，若过期则立即修正存储
+                // 确保后续比较基于正确的 custom_level_id
+                if let Some(expires_at) = MemberLevelExpiry::<T>::get(entity_id, account) {
+                    let now = <frame_system::Pallet<T>>::block_number();
+                    if now > expires_at {
+                        let recalculated = Self::calculate_custom_level(shop_id, member.total_spent);
+                        if recalculated != member.custom_level_id {
+                            let expired_level_id = member.custom_level_id;
+                            member.custom_level_id = recalculated;
+
+                            Self::deposit_event(Event::MemberLevelExpired {
+                                shop_id,
+                                account: account.clone(),
+                                expired_level_id,
+                                new_level_id: recalculated,
+                            });
+                        }
+                        MemberLevelExpiry::<T>::remove(entity_id, account);
+                    }
                 }
 
                 // 计算自定义等级（如果启用且为自动升级模式，entity 级别）
@@ -2132,9 +2203,8 @@ impl<T: pallet::Config> MemberProvider<T::AccountId, pallet::BalanceOf<T>> for p
     }
 
     fn custom_level_id(shop_id: u64, account: &T::AccountId) -> u8 {
-        Self::get_member_by_shop(shop_id, account)
-            .map(|m| m.custom_level_id)
-            .unwrap_or(0)
+        // H6 审计修复: 使用 get_effective_level 检查等级过期
+        Self::get_effective_level(shop_id, account)
     }
 
     fn get_level_discount(shop_id: u64, level_id: u8) -> u16 {

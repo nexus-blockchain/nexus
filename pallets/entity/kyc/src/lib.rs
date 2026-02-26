@@ -80,7 +80,7 @@ pub mod pallet {
         Revoked,
     }
 
-    /// 认证类型
+    /// 认证类型（预留，当前未使用）
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     pub enum VerificationType {
         /// 邮箱验证
@@ -249,6 +249,10 @@ pub mod pallet {
         #[pallet::constant]
         type EnhancedKycValidity: Get<BlockNumberFor<Self>>;
 
+        /// 机构 KYC 有效期（区块数）
+        #[pallet::constant]
+        type InstitutionalKycValidity: Get<BlockNumberFor<Self>>;
+
         /// 管理员 Origin
         type AdminOrigin: frame_support::traits::EnsureOrigin<Self::RuntimeOrigin>;
     }
@@ -291,17 +295,6 @@ pub mod pallet {
         Blake2_128Concat,
         u64,  // entity_id
         EntityKycRequirement,
-    >;
-
-    /// 待审核队列
-    #[pallet::storage]
-    #[pallet::getter(fn pending_verifications)]
-    pub type PendingVerifications<T: Config> = StorageMap<
-        _,
-        Blake2_128Concat,
-        T::AccountId,  // provider
-        BoundedVec<T::AccountId, ConstU32<1000>>,
-        ValueQuery,
     >;
 
     /// 高风险国家列表
@@ -410,6 +403,14 @@ pub mod pallet {
         ProviderLevelNotSupported,
         /// 高风险国家列表超出上限
         TooManyCountries,
+        /// 无效的风险评分（应为 0-100）
+        InvalidRiskScore,
+        /// 提供者名称不能为空
+        EmptyProviderName,
+        /// KYC 数据 CID 不能为空
+        EmptyDataCid,
+        /// 无效的国家代码（需为 ISO 3166-1 alpha-2 大写字母）
+        InvalidCountryCode,
     }
 
     // ==================== Extrinsics ====================
@@ -426,6 +427,18 @@ pub mod pallet {
             country_code: [u8; 2],
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+
+            // H1: 不允许提交 None 级别
+            ensure!(level != KycLevel::None, Error::<T>::InvalidKycLevel);
+
+            // H1-audit: 不允许空 CID
+            ensure!(!data_cid.is_empty(), Error::<T>::EmptyDataCid);
+
+            // H2-audit: 验证国家代码格式 (ISO 3166-1 alpha-2: 两个大写 ASCII 字母)
+            ensure!(
+                country_code[0].is_ascii_uppercase() && country_code[1].is_ascii_uppercase(),
+                Error::<T>::InvalidCountryCode
+            );
 
             // 检查是否已有待审核或已通过的 KYC
             if let Some(record) = KycRecords::<T>::get(&who) {
@@ -486,6 +499,9 @@ pub mod pallet {
             let provider = Providers::<T>::get(&who).ok_or(Error::<T>::ProviderNotFound)?;
             ensure!(provider.active, Error::<T>::ProviderNotActive);
 
+            // H2: 风险评分必须 0-100
+            ensure!(risk_score <= 100, Error::<T>::InvalidRiskScore);
+
             KycRecords::<T>::try_mutate(&account, |maybe_record| -> DispatchResult {
                 let record = maybe_record.as_mut().ok_or(Error::<T>::KycNotFound)?;
                 ensure!(record.status == KycStatus::Pending, Error::<T>::InvalidKycStatus);
@@ -542,6 +558,8 @@ pub mod pallet {
             KycRecords::<T>::try_mutate(&account, |maybe_record| -> DispatchResult {
                 let record = maybe_record.as_mut().ok_or(Error::<T>::KycNotFound)?;
                 ensure!(record.status == KycStatus::Pending, Error::<T>::InvalidKycStatus);
+                // M1-audit: 与 approve_kyc 一致，提供者只能操作其支持级别范围内的记录
+                ensure!(record.level <= provider.max_level, Error::<T>::ProviderLevelNotSupported);
 
                 let now = <frame_system::Pallet<T>>::block_number();
 
@@ -599,8 +617,14 @@ pub mod pallet {
 
             ensure!(!Providers::<T>::contains_key(&provider_account), Error::<T>::ProviderAlreadyExists);
 
+            // M1: 提供者必须能审核至少 Basic 级别
+            ensure!(max_level != KycLevel::None, Error::<T>::InvalidKycLevel);
+
             let count = ProviderCount::<T>::get();
             ensure!(count < T::MaxProviders::get(), Error::<T>::MaxProvidersReached);
+
+            // L1: 名称不能为空
+            ensure!(!name.is_empty(), Error::<T>::EmptyProviderName);
 
             let name_bounded: BoundedVec<u8, T::MaxProviderNameLength> = 
                 name.clone().try_into().map_err(|_| Error::<T>::NameTooLong)?;
@@ -668,6 +692,9 @@ pub mod pallet {
                 max_risk_score,
             };
 
+            // H3-audit: max_risk_score 不能超过 100（approve_kyc 上限为 100）
+            ensure!(max_risk_score <= 100, Error::<T>::InvalidRiskScore);
+
             EntityRequirements::<T>::insert(entity_id, requirement);
 
             Self::deposit_event(Event::EntityRequirementSet {
@@ -685,6 +712,14 @@ pub mod pallet {
             countries: Vec<[u8; 2]>,
         ) -> DispatchResult {
             T::AdminOrigin::ensure_origin(origin)?;
+
+            // H2-audit: 验证所有国家代码格式
+            for code in &countries {
+                ensure!(
+                    code[0].is_ascii_uppercase() && code[1].is_ascii_uppercase(),
+                    Error::<T>::InvalidCountryCode
+                );
+            }
 
             let bounded: BoundedVec<[u8; 2], ConstU32<50>> = 
                 countries.try_into().map_err(|_| Error::<T>::TooManyCountries)?;
@@ -706,7 +741,9 @@ pub mod pallet {
                 KycLevel::None => BlockNumberFor::<T>::from(0u32),
                 KycLevel::Basic => T::BasicKycValidity::get(),
                 KycLevel::Standard => T::StandardKycValidity::get(),
-                KycLevel::Enhanced | KycLevel::Institutional => T::EnhancedKycValidity::get(),
+                KycLevel::Enhanced => T::EnhancedKycValidity::get(),
+                // M3-audit: 机构级别使用独立有效期
+                KycLevel::Institutional => T::InstitutionalKycValidity::get(),
             }
         }
 
@@ -729,10 +766,19 @@ pub mod pallet {
             }
         }
 
-        /// 获取用户 KYC 级别
+        /// 获取用户 KYC 级别（含过期检查）
         pub fn get_kyc_level(account: &T::AccountId) -> KycLevel {
             KycRecords::<T>::get(account)
                 .filter(|r| r.status == KycStatus::Approved)
+                .filter(|r| {
+                    // C1: 过期的 KYC 不应返回有效级别
+                    if let Some(expires_at) = r.expires_at {
+                        let now = <frame_system::Pallet<T>>::block_number();
+                        now <= expires_at
+                    } else {
+                        true // 无过期时间视为永久有效
+                    }
+                })
                 .map(|r| r.level)
                 .unwrap_or(KycLevel::None)
         }
@@ -775,10 +821,11 @@ pub mod pallet {
                     if record.risk_score > requirement.max_risk_score {
                         return false;
                     }
-                    // 检查过期
+                    // 检查过期（M2-audit: 考虑 grace_period 宽限期）
                     if let Some(expires_at) = record.expires_at {
                         let now = <frame_system::Pallet<T>>::block_number();
-                        if now > expires_at {
+                        let grace = BlockNumberFor::<T>::from(requirement.grace_period);
+                        if now > expires_at.saturating_add(grace) {
                             return false;
                         }
                     }

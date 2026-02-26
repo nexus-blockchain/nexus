@@ -27,6 +27,7 @@ parameter_types! {
     pub const BasicKycValidity: u64 = 1000;
     pub const StandardKycValidity: u64 = 500;
     pub const EnhancedKycValidity: u64 = 2000;
+    pub const InstitutionalKycValidity: u64 = 3000;
 }
 
 impl pallet_entity_kyc::Config for Test {
@@ -37,6 +38,7 @@ impl pallet_entity_kyc::Config for Test {
     type BasicKycValidity = BasicKycValidity;
     type StandardKycValidity = StandardKycValidity;
     type EnhancedKycValidity = EnhancedKycValidity;
+    type InstitutionalKycValidity = InstitutionalKycValidity;
     type AdminOrigin = EnsureRoot<u64>;
 }
 

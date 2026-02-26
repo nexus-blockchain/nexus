@@ -45,6 +45,9 @@ pub struct BotConfig {
     pub webhook_secret: String,
 
     // 链上
+    /// 是否启用链上交互 (CHAIN_ENABLED, 默认 true)
+    /// false = 免注册模式: 使用默认规则 + 强制广告, 无需链上注册和 GAS 费
+    pub chain_enabled: bool,
     pub chain_rpc: String,
     pub chain_signer_seed: Option<String>,
 
@@ -88,6 +91,7 @@ impl std::fmt::Debug for BotConfig {
             .field("webhook_port", &self.webhook_port)
             .field("webhook_url", &self.webhook_url)
             .field("webhook_secret", &if self.webhook_secret.is_empty() { "<empty>" } else { "<REDACTED>" })
+            .field("chain_enabled", &self.chain_enabled)
             .field("chain_rpc", &self.chain_rpc)
             .field("chain_signer_seed", &if self.chain_signer_seed.is_some() { "<REDACTED>" } else { "<none>" })
             .field("tee_mode", &self.tee_mode)
@@ -138,6 +142,10 @@ impl BotConfig {
                 .unwrap_or(3000),
             webhook_url: std::env::var("WEBHOOK_URL").unwrap_or_default(),
             webhook_secret: std::env::var("WEBHOOK_SECRET").unwrap_or_default(),
+            chain_enabled: std::env::var("CHAIN_ENABLED")
+                .unwrap_or_else(|_| "true".into())
+                .parse()
+                .unwrap_or(true),
             chain_rpc: std::env::var("CHAIN_RPC")
                 .unwrap_or_else(|_| "ws://127.0.0.1:9944".into()),
             chain_signer_seed: std::env::var("CHAIN_SIGNER_SEED").ok(),
@@ -244,6 +252,7 @@ mod tests {
             webhook_port: 3000,
             webhook_url: "https://example.com/webhook".into(),
             webhook_secret: "super_secret_value_123".into(),
+            chain_enabled: true,
             chain_rpc: "ws://127.0.0.1:9944".into(),
             chain_signer_seed: Some("0xdeadbeef1234567890".into()),
             tee_mode: "software".into(),

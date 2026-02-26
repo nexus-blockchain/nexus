@@ -194,6 +194,7 @@ fn batch_submit_logs_fails_empty() {
 #[test]
 fn clear_expired_logs_works() {
 	new_test_ext().execute_with(|| {
+		// Basic tier: log_retention_days=30, min_retention_blocks=432000
 		// Submit at block 1
 		assert_ok!(GroupRobotCommunity::submit_action_log(
 			RuntimeOrigin::signed(OWNER),
@@ -201,24 +202,24 @@ fn clear_expired_logs_works() {
 			ActionType::Ban, [1u8; 32], 1, [2u8; 32], [3u8; 64],
 		));
 
-		// Advance to block 100
-		System::set_block_number(100);
+		// Advance well past retention period
+		System::set_block_number(500_000);
 
-		// Submit another at block 100
+		// Submit another at block 500000
 		assert_ok!(GroupRobotCommunity::submit_action_log(
 			RuntimeOrigin::signed(OWNER),
 			community_hash(1),
 			ActionType::Kick, [1u8; 32], 2, [2u8; 32], [3u8; 64],
 		));
 
-		// Clear logs older than 50 blocks
+		// Clear logs older than 432000 blocks (meets Basic tier retention)
 		assert_ok!(GroupRobotCommunity::clear_expired_logs(
 			RuntimeOrigin::signed(OWNER),
 			community_hash(1),
-			50, // max_age_blocks
+			432_000, // max_age_blocks >= 30 days * 14400
 		));
 
-		// Only the second log should remain
+		// Only the second log should remain (first log is 499999 blocks old > 432000)
 		assert_eq!(ActionLogs::<Test>::get(community_hash(1)).len(), 1);
 		assert_eq!(LogCount::<Test>::get(), 1);
 	});
@@ -227,11 +228,12 @@ fn clear_expired_logs_works() {
 #[test]
 fn clear_expired_logs_fails_none() {
 	new_test_ext().execute_with(|| {
+		// Use max_age >= retention period so we pass tier gate, but no logs exist
 		assert_noop!(
 			GroupRobotCommunity::clear_expired_logs(
 				RuntimeOrigin::signed(OWNER),
 				community_hash(1),
-				100,
+				432_000, // meets Basic tier retention
 			),
 			Error::<Test>::NoLogsToClear
 		);
@@ -578,5 +580,63 @@ fn reset_reputation_adjusts_global() {
 		// Global should now be 20 (only community 2 remains)
 		assert_eq!(GlobalReputation::<Test>::get(user_hash(1)), 20);
 		assert_eq!(MemberReputation::<Test>::get(community_hash(1), user_hash(1)).score, 0);
+	});
+}
+
+// ============================================================================
+// Tier gate
+// ============================================================================
+
+#[test]
+fn submit_action_log_fails_free_tier() {
+	new_test_ext().execute_with(|| {
+		// community_hash(2) → Free tier in MockSubscription
+		assert_noop!(
+			GroupRobotCommunity::submit_action_log(
+				RuntimeOrigin::signed(OTHER),
+				community_hash(2),
+				ActionType::Ban,
+				[1u8; 32], 1, [2u8; 32], [3u8; 64],
+			),
+			Error::<Test>::FreeTierNotAllowed
+		);
+	});
+}
+
+#[test]
+fn batch_submit_logs_fails_free_tier() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotCommunity::batch_submit_logs(
+				RuntimeOrigin::signed(OTHER),
+				community_hash(2),
+				vec![(ActionType::Ban, [1u8; 32], 1, [2u8; 32], [3u8; 64])],
+			),
+			Error::<Test>::FreeTierNotAllowed
+		);
+	});
+}
+
+#[test]
+fn clear_expired_logs_enforces_retention_period() {
+	new_test_ext().execute_with(|| {
+		// community_hash(1) → Basic tier (log_retention_days=30, min blocks=30*14400=432000)
+		// Submit a log first
+		assert_ok!(GroupRobotCommunity::submit_action_log(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1),
+			ActionType::Ban,
+			[1u8; 32], 1, [2u8; 32], [3u8; 64],
+		));
+
+		// Try to clear with max_age_blocks < 432000 → RetentionPeriodNotExpired
+		assert_noop!(
+			GroupRobotCommunity::clear_expired_logs(
+				RuntimeOrigin::signed(OWNER),
+				community_hash(1),
+				100, // too small
+			),
+			Error::<Test>::RetentionPeriodNotExpired
+		);
 	});
 }

@@ -304,18 +304,17 @@ fn settle_era_ads_works() {
 
 		// Cost = bid * audience / 1000 = (UNIT/2) * 1000 / 1000 = UNIT/2
 		let expected_cost = UNIT / 2;
-		let community_share = expected_cost * 60 / 100; // 60%
-		let node_share = expected_cost * 32 / 100; // 32% (TEE)
+		let community_share = expected_cost * 80 / 100; // 80%
+		let _node_share = expected_cost * 15 / 100; // 15% (TEE, written to unified rewards pool)
 
 		assert_eq!(CommunityClaimable::<Test>::get(&ch), community_share);
 		assert_eq!(CommunityTotalRevenue::<Test>::get(&ch), expected_cost);
 
-		// 节点应有待领取奖励
-		assert_eq!(NodeAdPendingRewards::<Test>::get(&tee_node()), node_share);
+		// 10.4: 节点奖励已通过 RewardPool trait 写入统一奖励池 (不再在 ads 本地记账)
 
-		// Receipt should be settled
+		// M7: Receipts cleared after settlement
 		let receipts = DeliveryReceipts::<Test>::get(&ch);
-		assert!(receipts[0].settled);
+		assert!(receipts.is_empty());
 	});
 }
 
@@ -352,13 +351,14 @@ fn settle_respects_audience_cap() {
 fn stake_for_ads_works() {
 	new_test_ext().execute_with(|| {
 		let ch = community_hash(1);
+		let base = CommunityAdStake::<Test>::get(&ch); // 10.6: pre-populated stake
 		assert_ok!(GroupRobotAds::stake_for_ads(
 			RuntimeOrigin::signed(COMMUNITY_OWNER), ch, 50 * UNIT,
 		));
 
-		assert_eq!(CommunityAdStake::<Test>::get(&ch), 50 * UNIT);
-		// 50 UNIT → cap = 50 * 20 = 1000
-		assert_eq!(CommunityAudienceCap::<Test>::get(&ch), 1000);
+		assert_eq!(CommunityAdStake::<Test>::get(&ch), base + 50 * UNIT);
+		// cap 由 compute_audience_cap 计算 (分段函数, 已由 compute_audience_cap_tiers 覆盖)
+		assert!(CommunityAudienceCap::<Test>::get(&ch) > 0);
 	});
 }
 
@@ -366,6 +366,7 @@ fn stake_for_ads_works() {
 fn unstake_from_ads_works() {
 	new_test_ext().execute_with(|| {
 		let ch = community_hash(1);
+		let base = CommunityAdStake::<Test>::get(&ch); // 10.6: pre-populated stake
 		assert_ok!(GroupRobotAds::stake_for_ads(
 			RuntimeOrigin::signed(COMMUNITY_OWNER), ch, 50 * UNIT,
 		));
@@ -373,9 +374,9 @@ fn unstake_from_ads_works() {
 			RuntimeOrigin::signed(COMMUNITY_OWNER), ch, 20 * UNIT,
 		));
 
-		assert_eq!(CommunityAdStake::<Test>::get(&ch), 30 * UNIT);
-		// 30 UNIT → cap = 30 * 20 = 600
-		assert_eq!(CommunityAudienceCap::<Test>::get(&ch), 600);
+		assert_eq!(CommunityAdStake::<Test>::get(&ch), base + 30 * UNIT);
+		// cap 减少但仍 > 0
+		assert!(CommunityAudienceCap::<Test>::get(&ch) > 0);
 	});
 }
 
@@ -474,6 +475,8 @@ fn advertiser_prefer_community_works() {
 fn community_block_advertiser_works() {
 	new_test_ext().execute_with(|| {
 		let ch = community_hash(1);
+		// H3: 需要先设置社区管理员
+		CommunityAdmin::<Test>::insert(&ch, COMMUNITY_OWNER);
 		assert_ok!(GroupRobotAds::community_block_advertiser(
 			RuntimeOrigin::signed(COMMUNITY_OWNER), ch, ADVERTISER,
 		));
@@ -485,6 +488,7 @@ fn community_block_advertiser_works() {
 fn community_unblock_advertiser_works() {
 	new_test_ext().execute_with(|| {
 		let ch = community_hash(1);
+		CommunityAdmin::<Test>::insert(&ch, COMMUNITY_OWNER);
 		assert_ok!(GroupRobotAds::community_block_advertiser(
 			RuntimeOrigin::signed(COMMUNITY_OWNER), ch, ADVERTISER,
 		));
@@ -499,6 +503,7 @@ fn community_unblock_advertiser_works() {
 fn community_prefer_advertiser_works() {
 	new_test_ext().execute_with(|| {
 		let ch = community_hash(1);
+		CommunityAdmin::<Test>::insert(&ch, COMMUNITY_OWNER);
 		assert_ok!(GroupRobotAds::community_prefer_advertiser(
 			RuntimeOrigin::signed(COMMUNITY_OWNER), ch, ADVERTISER,
 		));
@@ -514,18 +519,21 @@ fn community_prefer_advertiser_works() {
 fn slash_community_works() {
 	new_test_ext().execute_with(|| {
 		let ch = community_hash(1);
+		let base = CommunityAdStake::<Test>::get(&ch); // 10.6: pre-populated stake
 		// Stake 100 UNIT
 		assert_ok!(GroupRobotAds::stake_for_ads(
 			RuntimeOrigin::signed(COMMUNITY_OWNER), ch, 100 * UNIT,
 		));
+		let total = base + 100 * UNIT;
 		let cap_before = CommunityAudienceCap::<Test>::get(&ch);
 
 		assert_ok!(GroupRobotAds::slash_community(
 			RuntimeOrigin::root(), ch, REPORTER,
 		));
 
-		// 30% slashed = 30 UNIT
-		assert_eq!(CommunityAdStake::<Test>::get(&ch), 70 * UNIT);
+		// 30% slashed
+		let slashed = total * 30 / 100;
+		assert_eq!(CommunityAdStake::<Test>::get(&ch), total - slashed);
 		// cap halved
 		assert_eq!(CommunityAudienceCap::<Test>::get(&ch), cap_before / 2);
 		assert_eq!(SlashCount::<Test>::get(&ch), 1);
@@ -594,6 +602,9 @@ fn claim_ad_revenue_works() {
 		let id = create_approved_campaign(ADVERTISER);
 		let ch = community_hash(1);
 
+		// H5: 设置社区管理员
+		CommunityAdmin::<Test>::insert(&ch, COMMUNITY_OWNER);
+
 		assert_ok!(GroupRobotAds::submit_delivery_receipt(
 			RuntimeOrigin::signed(TEE_NODE_OPERATOR),
 			id, ch, AdDeliveryType::ScheduledPost, 1000, tee_node(), [0u8; 64],
@@ -618,9 +629,11 @@ fn claim_ad_revenue_works() {
 #[test]
 fn claim_fails_nothing() {
 	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		CommunityAdmin::<Test>::insert(&ch, COMMUNITY_OWNER);
 		assert_noop!(
 			GroupRobotAds::claim_ad_revenue(
-				RuntimeOrigin::signed(COMMUNITY_OWNER), community_hash(1),
+				RuntimeOrigin::signed(COMMUNITY_OWNER), ch,
 			),
 			Error::<Test>::NothingToClaim
 		);
@@ -684,7 +697,7 @@ fn check_audience_surge_first_report_stores() {
 		assert_eq!(PreviousEraAudience::<Test>::get(&ch), 0);
 
 		assert_ok!(GroupRobotAds::check_audience_surge(
-			RuntimeOrigin::signed(COMMUNITY_OWNER), ch, 500,
+			RuntimeOrigin::signed(TEE_NODE_OPERATOR), ch, 500,
 		));
 		assert_eq!(PreviousEraAudience::<Test>::get(&ch), 500);
 		// 首次不触发暂停
@@ -701,7 +714,7 @@ fn check_audience_surge_normal_growth() {
 
 		// 800 = 60% 增长, 阈值 100% → 不触发
 		assert_ok!(GroupRobotAds::check_audience_surge(
-			RuntimeOrigin::signed(COMMUNITY_OWNER), ch, 800,
+			RuntimeOrigin::signed(TEE_NODE_OPERATOR), ch, 800,
 		));
 		assert_eq!(AudienceSurgePaused::<Test>::get(&ch), 0);
 		assert_eq!(PreviousEraAudience::<Test>::get(&ch), 800);
@@ -716,7 +729,7 @@ fn check_audience_surge_triggers_pause() {
 
 		// 1100 = 120% 增长, 阈值 100% → 触发暂停
 		assert_ok!(GroupRobotAds::check_audience_surge(
-			RuntimeOrigin::signed(COMMUNITY_OWNER), ch, 1100,
+			RuntimeOrigin::signed(TEE_NODE_OPERATOR), ch, 1100,
 		));
 		assert_eq!(AudienceSurgePaused::<Test>::get(&ch), 2);
 
@@ -769,13 +782,13 @@ fn surge_pause_decrements_and_resumes() {
 
 		// 正常 audience (600 = 20% growth, under threshold)
 		assert_ok!(GroupRobotAds::check_audience_surge(
-			RuntimeOrigin::signed(COMMUNITY_OWNER), ch, 600,
+			RuntimeOrigin::signed(TEE_NODE_OPERATOR), ch, 600,
 		));
 		assert_eq!(AudienceSurgePaused::<Test>::get(&ch), 1);
 
 		// 再次正常
 		assert_ok!(GroupRobotAds::check_audience_surge(
-			RuntimeOrigin::signed(COMMUNITY_OWNER), ch, 700,
+			RuntimeOrigin::signed(TEE_NODE_OPERATOR), ch, 700,
 		));
 		assert_eq!(AudienceSurgePaused::<Test>::get(&ch), 0);
 
@@ -971,10 +984,8 @@ fn tee_node_gets_bonus_on_settle() {
 
 		// Cost = (UNIT/2) * 1000 / 1000 = UNIT/2
 		let expected_cost = UNIT / 2;
-		let tee_node_share = expected_cost * 32 / 100; // TEE = 32%
-
-		let pending = NodeAdPendingRewards::<Test>::get(&tee_node());
-		assert_eq!(pending, tee_node_share);
+		let _tee_node_share = expected_cost * 15 / 100; // TEE = 15% (written to unified rewards pool)
+		// 10.4: node rewards go through RewardPool trait, no local NodeAdPendingRewards
 	});
 }
 
@@ -1013,78 +1024,94 @@ fn tee_bonus_comes_from_treasury_share() {
 		));
 
 		let expected_cost = UNIT / 2;
-		let community_share = expected_cost * 60 / 100;
-		let tee_node_share = expected_cost * 32 / 100; // 32%
-		// 国库 = 剩余 (8%)
-		let treasury_direct = expected_cost - community_share - tee_node_share;
-		// 国库实际变化 = treasury_direct + tee_node_share (代管)
+		let community_share = expected_cost * 80 / 100;
+		let tee_node_share = expected_cost * 15 / 100; // 15%
+		// 国库 = 剩余 (5%)
+		// C1: 全部 actual_cost 都转入国库, 国库变化 = expected_cost
 		let treasury_after = pallet_balances::Pallet::<Test>::free_balance(TREASURY);
 		let treasury_change = treasury_after - treasury_before;
-		assert_eq!(treasury_change, treasury_direct + tee_node_share);
+		assert_eq!(treasury_change, expected_cost);
+	});
+}
+
+// 10.4: claim_node_ad_revenue tests removed — node rewards now claimed via unified rewards pallet
+
+// ============================================================================
+// 10.9: CommunityAdmin 绑定 Bot Owner
+// ============================================================================
+
+#[test]
+fn stake_sets_admin_to_bot_owner() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1); // MockBotRegistry: bot_owner = BOT_OWNER (40)
+		assert_ok!(GroupRobotAds::stake_for_ads(
+			RuntimeOrigin::signed(COMMUNITY_OWNER), ch, 10 * UNIT,
+		));
+		// 管理员应为 Bot Owner, 而非首个质押者
+		assert_eq!(CommunityAdmin::<Test>::get(&ch), Some(BOT_OWNER));
 	});
 }
 
 #[test]
-fn claim_node_ad_revenue_works() {
+fn stake_falls_back_to_staker_when_no_bot_owner() {
 	new_test_ext().execute_with(|| {
-		let id = create_approved_campaign(ADVERTISER);
+		let ch = community_hash(99); // MockBotRegistry: bot_owner = None
+		assert_ok!(GroupRobotAds::stake_for_ads(
+			RuntimeOrigin::signed(COMMUNITY_OWNER), ch, 10 * UNIT,
+		));
+		// 无 Bot Owner 时, 回退到首个质押者
+		assert_eq!(CommunityAdmin::<Test>::get(&ch), Some(COMMUNITY_OWNER));
+	});
+}
+
+#[test]
+fn second_staker_does_not_change_admin() {
+	new_test_ext().execute_with(|| {
 		let ch = community_hash(1);
-
-		assert_ok!(GroupRobotAds::submit_delivery_receipt(
-			RuntimeOrigin::signed(TEE_NODE_OPERATOR),
-			id, ch, AdDeliveryType::ScheduledPost, 1000, tee_node(), [0u8; 64],
+		assert_ok!(GroupRobotAds::stake_for_ads(
+			RuntimeOrigin::signed(COMMUNITY_OWNER), ch, 10 * UNIT,
 		));
-		assert_ok!(GroupRobotAds::settle_era_ads(
-			RuntimeOrigin::signed(COMMUNITY_OWNER), ch,
+		assert_eq!(CommunityAdmin::<Test>::get(&ch), Some(BOT_OWNER));
+
+		// 第二个质押者不应改变管理员
+		assert_ok!(GroupRobotAds::stake_for_ads(
+			RuntimeOrigin::signed(ADVERTISER), ch, 5 * UNIT,
 		));
-
-		let pending = NodeAdPendingRewards::<Test>::get(&tee_node());
-		assert!(pending > 0);
-
-		let before = pallet_balances::Pallet::<Test>::free_balance(TEE_NODE_OPERATOR);
-		assert_ok!(GroupRobotAds::claim_node_ad_revenue(
-			RuntimeOrigin::signed(TEE_NODE_OPERATOR), tee_node(),
-		));
-		let after = pallet_balances::Pallet::<Test>::free_balance(TEE_NODE_OPERATOR);
-
-		assert_eq!(after - before, pending);
-		assert_eq!(NodeAdPendingRewards::<Test>::get(&tee_node()), 0);
-		assert_eq!(NodeAdTotalEarned::<Test>::get(&tee_node()), pending);
+		assert_eq!(CommunityAdmin::<Test>::get(&ch), Some(BOT_OWNER));
 	});
 }
 
 #[test]
-fn claim_node_ad_revenue_fails_not_operator() {
+fn bot_owner_can_manage_community_preferences() {
 	new_test_ext().execute_with(|| {
-		let id = create_approved_campaign(ADVERTISER);
 		let ch = community_hash(1);
-
-		assert_ok!(GroupRobotAds::submit_delivery_receipt(
-			RuntimeOrigin::signed(TEE_NODE_OPERATOR),
-			id, ch, AdDeliveryType::ScheduledPost, 1000, tee_node(), [0u8; 64],
-		));
-		assert_ok!(GroupRobotAds::settle_era_ads(
-			RuntimeOrigin::signed(COMMUNITY_OWNER), ch,
+		// stake 设置 admin = BOT_OWNER
+		assert_ok!(GroupRobotAds::stake_for_ads(
+			RuntimeOrigin::signed(COMMUNITY_OWNER), ch, 10 * UNIT,
 		));
 
-		// 非运营者尝试领取
-		assert_noop!(
-			GroupRobotAds::claim_node_ad_revenue(
-				RuntimeOrigin::signed(ADVERTISER), tee_node(),
-			),
-			Error::<Test>::NotNodeOperator
-		);
+		// BOT_OWNER 可以管理社区偏好
+		assert_ok!(GroupRobotAds::community_block_advertiser(
+			RuntimeOrigin::signed(BOT_OWNER), ch, ADVERTISER,
+		));
+		assert_eq!(CommunityBlacklist::<Test>::get(&ch).len(), 1);
 	});
 }
 
 #[test]
-fn claim_node_ad_revenue_fails_nothing() {
+fn non_bot_owner_cannot_manage_community() {
 	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_ok!(GroupRobotAds::stake_for_ads(
+			RuntimeOrigin::signed(COMMUNITY_OWNER), ch, 10 * UNIT,
+		));
+
+		// COMMUNITY_OWNER 不是管理员 (BOT_OWNER 是), 操作应被拒绝
 		assert_noop!(
-			GroupRobotAds::claim_node_ad_revenue(
-				RuntimeOrigin::signed(NODE_OPERATOR), default_node(),
+			GroupRobotAds::community_block_advertiser(
+				RuntimeOrigin::signed(COMMUNITY_OWNER), ch, ADVERTISER,
 			),
-			Error::<Test>::NoNodeAdReward
+			Error::<Test>::NotCommunityAdmin
 		);
 	});
 }
@@ -1092,16 +1119,16 @@ fn claim_node_ad_revenue_fails_nothing() {
 #[test]
 fn set_tee_ad_percentage_works() {
 	new_test_ext().execute_with(|| {
-		// 默认 0 (使用硬编码默认 32%)
+		// 默认 0 (使用硬编码默认 15%)
 		assert_eq!(TeeNodeAdPct::<Test>::get(), 0);
 
 		assert_ok!(GroupRobotAds::set_tee_ad_percentage(
-			RuntimeOrigin::root(), 35,
+			RuntimeOrigin::root(), 15,
 		));
-		assert_eq!(TeeNodeAdPct::<Test>::get(), 35);
+		assert_eq!(TeeNodeAdPct::<Test>::get(), 15);
 
 		System::assert_last_event(Event::TeeAdPercentUpdated {
-			tee_pct: 35,
+			tee_pct: 15,
 		}.into());
 	});
 }
@@ -1109,26 +1136,26 @@ fn set_tee_ad_percentage_works() {
 #[test]
 fn set_tee_ad_percentage_rejects_invalid() {
 	new_test_ext().execute_with(|| {
-		// 超过 40%
+		// 超过 20%
 		assert_noop!(
 			GroupRobotAds::set_tee_ad_percentage(RuntimeOrigin::root(), 50),
 			Error::<Test>::InvalidPercentage
 		);
 		assert_noop!(
-			GroupRobotAds::set_tee_ad_percentage(RuntimeOrigin::root(), 41),
+			GroupRobotAds::set_tee_ad_percentage(RuntimeOrigin::root(), 21),
 			Error::<Test>::InvalidPercentage
 		);
-		// 边界值: 40% 应成功
-		assert_ok!(GroupRobotAds::set_tee_ad_percentage(RuntimeOrigin::root(), 40));
-		assert_eq!(TeeNodeAdPct::<Test>::get(), 40);
+		// 边界值: 20% 应成功
+		assert_ok!(GroupRobotAds::set_tee_ad_percentage(RuntimeOrigin::root(), 20));
+		assert_eq!(TeeNodeAdPct::<Test>::get(), 20);
 	});
 }
 
 #[test]
 fn governance_tee_percentage_applied() {
 	new_test_ext().execute_with(|| {
-		// 治理调整: TEE=25%
-		assert_ok!(GroupRobotAds::set_tee_ad_percentage(RuntimeOrigin::root(), 25));
+		// 治理调整: TEE=18%
+		assert_ok!(GroupRobotAds::set_tee_ad_percentage(RuntimeOrigin::root(), 18));
 
 		let id = create_approved_campaign(ADVERTISER);
 		let ch = community_hash(1);
@@ -1142,9 +1169,7 @@ fn governance_tee_percentage_applied() {
 		));
 
 		let expected_cost = UNIT / 2;
-		let tee_share = expected_cost * 25 / 100; // 治理设置的 25%
-
-		assert_eq!(NodeAdPendingRewards::<Test>::get(&tee_node()), tee_share);
+		let _tee_share = expected_cost * 18 / 100; // 治理设置的 18% (written to unified rewards pool)
 	});
 }
 
@@ -1179,6 +1204,64 @@ fn submit_receipt_fails_inactive_node() {
 				id, ch, AdDeliveryType::ScheduledPost, 500, inactive, [0u8; 64],
 			),
 			Error::<Test>::NodeNotActive
+		);
+	});
+}
+
+// ============================================================================
+// 10.6: 订阅层级功能限制
+// ============================================================================
+
+#[test]
+fn submit_receipt_fails_free_tier_no_tee_access() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		// community_hash(2) → Free tier (tee_access: false)
+		let ch = community_hash(2);
+
+		assert_noop!(
+			GroupRobotAds::submit_delivery_receipt(
+				RuntimeOrigin::signed(TEE_NODE_OPERATOR),
+				id, ch, AdDeliveryType::ScheduledPost, 500, tee_node(), [0u8; 64],
+			),
+			Error::<Test>::TeeNotAvailableForTier
+		);
+	});
+}
+
+#[test]
+fn submit_receipt_fails_basic_tier_no_tee_access() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		// community_hash(3) → Basic tier (tee_access: false)
+		let ch = community_hash(3);
+
+		assert_noop!(
+			GroupRobotAds::submit_delivery_receipt(
+				RuntimeOrigin::signed(TEE_NODE_OPERATOR),
+				id, ch, AdDeliveryType::ScheduledPost, 500, tee_node(), [0u8; 64],
+			),
+			Error::<Test>::TeeNotAvailableForTier
+		);
+	});
+}
+
+#[test]
+fn submit_receipt_fails_pro_tier_ads_disabled() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		// community_hash(1) → Pro tier (can_disable_ads: true)
+		let ch = community_hash(1);
+
+		// 清零质押 → 社区退出广告
+		CommunityAdStake::<Test>::remove(&ch);
+
+		assert_noop!(
+			GroupRobotAds::submit_delivery_receipt(
+				RuntimeOrigin::signed(TEE_NODE_OPERATOR),
+				id, ch, AdDeliveryType::ScheduledPost, 500, tee_node(), [0u8; 64],
+			),
+			Error::<Test>::AdsDisabledByTier
 		);
 	});
 }

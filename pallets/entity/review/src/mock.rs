@@ -207,6 +207,7 @@ impl pallet_entity_review::Config for Test {
     type OrderProvider = MockOrderProvider;
     type ShopProvider = MockShopProvider;
     type MaxCidLength = ConstU32<64>;
+    type WeightInfo = ();
 }
 
 // ==================== 辅助函数 ====================

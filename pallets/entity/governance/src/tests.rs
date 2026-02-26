@@ -347,14 +347,18 @@ fn configure_governance_works() {
             1, // entity_id
             GovernanceMode::FullDAO,
             Some(200), // voting period
+            Some(30),  // execution delay
             Some(20),  // quorum
+            Some(60),  // pass threshold
             Some(500), // proposal threshold
             Some(false), // no veto
         ));
         let config = GovernanceConfigs::<Test>::get(1).unwrap();
         assert_eq!(config.mode, GovernanceMode::FullDAO);
         assert_eq!(config.voting_period, 200);
+        assert_eq!(config.execution_delay, 30);
         assert_eq!(config.quorum_threshold, 20);
+        assert_eq!(config.pass_threshold, 60);
         assert_eq!(config.proposal_threshold, 500);
         assert!(!config.admin_veto_enabled);
     });
@@ -367,7 +371,7 @@ fn configure_governance_fails_not_owner() {
         assert_noop!(
             EntityGovernance::configure_governance(
                 RuntimeOrigin::signed(ALICE), 1,
-                GovernanceMode::FullDAO, None, None, None, None,
+                GovernanceMode::FullDAO, None, None, None, None, None, None,
             ),
             Error::<Test>::NotShopOwner
         );
@@ -382,7 +386,7 @@ fn configure_governance_fails_invalid_quorum() {
         assert_noop!(
             EntityGovernance::configure_governance(
                 RuntimeOrigin::signed(OWNER), 1,
-                GovernanceMode::FullDAO, None, Some(101), None, None,
+                GovernanceMode::FullDAO, None, None, Some(101), None, None, None,
             ),
             Error::<Test>::InvalidParameter
         );
@@ -397,71 +401,9 @@ fn configure_governance_fails_invalid_threshold() {
         assert_noop!(
             EntityGovernance::configure_governance(
                 RuntimeOrigin::signed(OWNER), 1,
-                GovernanceMode::FullDAO, None, None, Some(10001), None,
+                GovernanceMode::FullDAO, None, None, None, None, Some(10001), None,
             ),
             Error::<Test>::InvalidParameter
-        );
-    });
-}
-
-// ==================== 分层治理阈值 ====================
-
-#[test]
-fn set_tiered_thresholds_works() {
-    ExtBuilder::build().execute_with(|| {
-        assert_ok!(EntityGovernance::set_tiered_thresholds(
-            RuntimeOrigin::signed(OWNER), 1, 40, 55, 67, 80,
-        ));
-        let config = GovernanceConfigs::<Test>::get(1).unwrap();
-        assert_eq!(config.operational_threshold, 40);
-        assert_eq!(config.significant_threshold, 55);
-        assert_eq!(config.critical_threshold, 67);
-        assert_eq!(config.constitutional_threshold, 80);
-    });
-}
-
-#[test]
-fn set_tiered_thresholds_fails_invalid() {
-    ExtBuilder::build().execute_with(|| {
-        // H4: threshold > 100 should fail
-        assert_noop!(
-            EntityGovernance::set_tiered_thresholds(
-                RuntimeOrigin::signed(OWNER), 1, 40, 55, 101, 80,
-            ),
-            Error::<Test>::InvalidParameter
-        );
-    });
-}
-
-// ==================== 委员会 ====================
-
-#[test]
-fn add_and_remove_committee_member() {
-    ExtBuilder::build().execute_with(|| {
-        assert_ok!(EntityGovernance::add_committee_member(
-            RuntimeOrigin::signed(OWNER), 1, ALICE,
-        ));
-        let members = CommitteeMembers::<Test>::get(1);
-        assert_eq!(members.len(), 1);
-        assert!(members.contains(&ALICE));
-
-        assert_ok!(EntityGovernance::remove_committee_member(
-            RuntimeOrigin::signed(OWNER), 1, ALICE,
-        ));
-        let members = CommitteeMembers::<Test>::get(1);
-        assert!(members.is_empty());
-    });
-}
-
-#[test]
-fn add_committee_member_fails_duplicate() {
-    ExtBuilder::build().execute_with(|| {
-        assert_ok!(EntityGovernance::add_committee_member(
-            RuntimeOrigin::signed(OWNER), 1, ALICE,
-        ));
-        assert_noop!(
-            EntityGovernance::add_committee_member(RuntimeOrigin::signed(OWNER), 1, ALICE),
-            Error::<Test>::CommitteeMemberExists
         );
     });
 }
@@ -472,10 +414,10 @@ fn add_committee_member_fails_duplicate() {
 fn veto_proposal_works() {
     ExtBuilder::build().execute_with(|| {
         use pallet_entity_common::GovernanceMode;
-        // Configure DualTrack with veto
+        // Configure FullDAO with veto enabled
         assert_ok!(EntityGovernance::configure_governance(
             RuntimeOrigin::signed(OWNER), 1,
-            GovernanceMode::DualTrack, None, None, None, Some(true),
+            GovernanceMode::FullDAO, None, None, None, None, None, Some(true),
         ));
 
         assert_ok!(EntityGovernance::create_proposal(
@@ -491,13 +433,13 @@ fn veto_proposal_works() {
 }
 
 #[test]
-fn veto_fails_wrong_mode() {
+fn veto_fails_not_enabled() {
     ExtBuilder::build().execute_with(|| {
         use pallet_entity_common::GovernanceMode;
-        // Configure FullDAO (no veto)
+        // Configure FullDAO without veto (default admin_veto_enabled=false)
         assert_ok!(EntityGovernance::configure_governance(
             RuntimeOrigin::signed(OWNER), 1,
-            GovernanceMode::FullDAO, None, None, None, Some(true),
+            GovernanceMode::FullDAO, None, None, None, None, None, None,
         ));
 
         assert_ok!(EntityGovernance::create_proposal(
@@ -507,7 +449,7 @@ fn veto_fails_wrong_mode() {
 
         assert_noop!(
             EntityGovernance::veto_proposal(RuntimeOrigin::signed(OWNER), 0),
-            Error::<Test>::GovernanceModeNotAllowed
+            Error::<Test>::NoVetoRight
         );
     });
 }
@@ -521,7 +463,7 @@ fn create_proposal_fails_governance_mode_none() {
         // 配置 None 模式
         assert_ok!(EntityGovernance::configure_governance(
             RuntimeOrigin::signed(OWNER), 1,
-            GovernanceMode::None, None, None, None, None,
+            GovernanceMode::None, None, None, None, None, None, None,
         ));
 
         assert_noop!(
@@ -776,5 +718,395 @@ fn time_weight_vote_uses_weighted_power() {
         // multiplier = 10000 + 19980 = 29980
         // weight = 150_000 * 29980 / 10000 = 449_700
         assert_eq!(proposal.yes_votes, 449_700);
+    });
+}
+
+// ==================== 审计回归测试 ====================
+
+#[test]
+fn h1_finalize_uses_custom_quorum() {
+    // H1: finalize_voting 应使用 GovernanceConfig 中的自定义 quorum，而非全局默认 10%
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        // 设置自定义 quorum 为 30%
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), 1,
+            GovernanceMode::FullDAO, None, None, Some(30), None, None, None,
+        ));
+
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        // BOB(15%) + CHARLIE(5%) = 20% < 自定义 quorum 30%
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes));
+
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+
+        // 应 Failed（20% < 30% quorum），而非 Passed
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Failed);
+    });
+}
+
+#[test]
+fn h3_add_upgrade_rule_returns_not_implemented() {
+    // H3: AddUpgradeRule 执行应返回 ProposalTypeNotImplemented
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::AddUpgradeRule { rule_cid: b"rule1".to_vec().try_into().unwrap() },
+            b"Add Rule".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes));
+
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+        advance_blocks(50);
+
+        assert_noop!(
+            EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0),
+            Error::<Test>::ProposalTypeNotImplemented
+        );
+    });
+}
+
+#[test]
+fn h4_create_proposal_fails_inactive_entity() {
+    // H4: 非活跃实体不能创建提案
+    ExtBuilder::build().execute_with(|| {
+        // entity_id 3 存在但不活跃（MockEntityProvider 只让 1,2 活跃）
+        set_token_enabled(3, true);
+        set_token_balance(3, ALICE, 20_000);
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), 3,
+                proposal_type_general(), b"Test".to_vec(), None,
+            ),
+            Error::<Test>::ShopNotFound
+        );
+    });
+}
+
+#[test]
+fn m5_execute_proposal_fails_expired() {
+    // M5: 超过执行窗口后不允许执行
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes));
+
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+
+        // ExecutionDelay=50, window=50*2=100, exec_time=block ~152
+        // 过期时间 = exec_time + 100 = ~252
+        // 推进到超过过期时间
+        advance_blocks(200); // block ~302, 远超过期
+        assert_noop!(
+            EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0),
+            Error::<Test>::ExecutionExpired
+        );
+    });
+}
+
+#[test]
+fn m5_execute_proposal_within_window_works() {
+    // M5: 在执行窗口内正常执行
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes));
+
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+
+        // 在窗口内执行（刚好到执行延迟点）
+        advance_blocks(50);
+        assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
+
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Executed);
+    });
+}
+
+// ==================== 治理锁定测试 ====================
+
+#[test]
+fn lock_governance_works() {
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), 1,
+            GovernanceMode::None, None, None, None, None, None, None,
+        ));
+        assert_ok!(EntityGovernance::lock_governance(RuntimeOrigin::signed(OWNER), 1));
+        assert!(GovernanceLocked::<Test>::get(1));
+    });
+}
+
+#[test]
+fn lock_governance_fails_not_owner() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::lock_governance(RuntimeOrigin::signed(ALICE), 1),
+            Error::<Test>::NotShopOwner
+        );
+    });
+}
+
+#[test]
+fn lock_governance_fails_already_locked() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::lock_governance(RuntimeOrigin::signed(OWNER), 1));
+        assert_noop!(
+            EntityGovernance::lock_governance(RuntimeOrigin::signed(OWNER), 1),
+            Error::<Test>::GovernanceAlreadyLocked
+        );
+    });
+}
+
+#[test]
+fn locked_configure_governance_rejected() {
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        assert_ok!(EntityGovernance::lock_governance(RuntimeOrigin::signed(OWNER), 1));
+        assert_noop!(
+            EntityGovernance::configure_governance(
+                RuntimeOrigin::signed(OWNER), 1,
+                GovernanceMode::None, Some(200), None, None, None, None, None,
+            ),
+            Error::<Test>::GovernanceConfigIsLocked
+        );
+    });
+}
+
+#[test]
+fn locked_none_blocks_upgrade_to_fulldao() {
+    // None 锁定后永久冻结，不可升级到 FullDAO
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), 1,
+            GovernanceMode::None, None, None, None, None, None, None,
+        ));
+        assert_ok!(EntityGovernance::lock_governance(RuntimeOrigin::signed(OWNER), 1));
+
+        // 锁定后不可升级到 FullDAO
+        assert_noop!(
+            EntityGovernance::configure_governance(
+                RuntimeOrigin::signed(OWNER), 1,
+                GovernanceMode::FullDAO, None, None, None, None, None, None,
+            ),
+            Error::<Test>::GovernanceConfigIsLocked
+        );
+        // 锁定仍然存在
+        assert!(GovernanceLocked::<Test>::get(1));
+    });
+}
+
+#[test]
+fn locked_upgrade_rejects_none_to_none() {
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), 1,
+            GovernanceMode::None, None, None, None, None, None, None,
+        ));
+        assert_ok!(EntityGovernance::lock_governance(RuntimeOrigin::signed(OWNER), 1));
+
+        // 锁定后不能设置回 None
+        assert_noop!(
+            EntityGovernance::configure_governance(
+                RuntimeOrigin::signed(OWNER), 1,
+                GovernanceMode::None, None, None, None, None, None, None,
+            ),
+            Error::<Test>::GovernanceConfigIsLocked
+        );
+    });
+}
+
+#[test]
+fn lock_governance_works_in_fulldao_mode() {
+    // FullDAO 可锁定（放弃控制权，仅通过提案修改）
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), 1,
+            GovernanceMode::FullDAO, None, None, None, None, None, None,
+        ));
+        assert_ok!(EntityGovernance::lock_governance(RuntimeOrigin::signed(OWNER), 1));
+        assert!(GovernanceLocked::<Test>::get(1));
+    });
+}
+
+// ==================== C5: FullDAO 模式下阻止 configure_governance ====================
+
+#[test]
+fn c5_unlocked_fulldao_allows_configure() {
+    // 未锁定的 FullDAO 允许 Owner 配置（设置阶段）
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), 1,
+            GovernanceMode::FullDAO, None, None, None, None, None, None,
+        ));
+        // 设置阶段：可以继续修改参数
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), 1,
+            GovernanceMode::FullDAO, Some(200), Some(80), Some(25), Some(60), None, None,
+        ));
+        let config = GovernanceConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.voting_period, 200);
+        assert_eq!(config.execution_delay, 80);
+    });
+}
+
+#[test]
+fn c5_locked_fulldao_blocks_configure() {
+    // 锁定后的 FullDAO，Owner 不可直接修改（需走提案）
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), 1,
+            GovernanceMode::FullDAO, None, None, None, None, None, None,
+        ));
+        assert_ok!(EntityGovernance::lock_governance(RuntimeOrigin::signed(OWNER), 1));
+        assert_noop!(
+            EntityGovernance::configure_governance(
+                RuntimeOrigin::signed(OWNER), 1,
+                GovernanceMode::FullDAO, Some(200), None, None, None, None, None,
+            ),
+            Error::<Test>::GovernanceConfigIsLocked
+        );
+    });
+}
+
+// ==================== C4: FullDAO 模式下 cancel 限制 ====================
+
+#[test]
+fn c4_cancel_proposal_owner_blocked_in_fulldao() {
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        // 设为 FullDAO
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), 1,
+            GovernanceMode::FullDAO, None, None, None, None, None, None,
+        ));
+        // ALICE 创建提案
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        // Owner（非提案者）在 FullDAO 模式下不能取消
+        assert_noop!(
+            EntityGovernance::cancel_proposal(RuntimeOrigin::signed(OWNER), 0),
+            Error::<Test>::GovernanceModeNotAllowed
+        );
+        // 提案者仍然可以取消
+        assert_ok!(EntityGovernance::cancel_proposal(RuntimeOrigin::signed(ALICE), 0));
+    });
+}
+
+// ==================== C3: MinVotingPeriod/MinExecutionDelay ====================
+
+#[test]
+fn c3_configure_governance_fails_voting_period_too_short() {
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        // MinVotingPeriod = 10, 设为 5 应失败
+        assert_noop!(
+            EntityGovernance::configure_governance(
+                RuntimeOrigin::signed(OWNER), 1,
+                GovernanceMode::None, Some(5), None, None, None, None, None,
+            ),
+            Error::<Test>::VotingPeriodTooShort
+        );
+        // 设为 10 应成功
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), 1,
+            GovernanceMode::None, Some(10), None, None, None, None, None,
+        ));
+    });
+}
+
+#[test]
+fn c3_configure_governance_fails_execution_delay_too_short() {
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        // MinExecutionDelay = 5, 设为 2 应失败
+        assert_noop!(
+            EntityGovernance::configure_governance(
+                RuntimeOrigin::signed(OWNER), 1,
+                GovernanceMode::None, None, Some(2), None, None, None, None,
+            ),
+            Error::<Test>::ExecutionDelayTooShort
+        );
+        // 设为 5 应成功
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), 1,
+            GovernanceMode::None, None, Some(5), None, None, None, None,
+        ));
+    });
+}
+
+// ==================== C1+H4: 治理参数快照 ====================
+
+#[test]
+fn c1_h4_proposal_snapshots_governance_params() {
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        // 设置自定义治理参数
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), 1,
+            GovernanceMode::FullDAO, Some(200), Some(80), Some(25), Some(60), None, None,
+        ));
+
+        // 创建提案
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Snapshot Test".to_vec(), None,
+        ));
+
+        // 验证快照参数
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        assert_eq!(proposal.snapshot_quorum, 25);
+        assert_eq!(proposal.snapshot_pass, 60);
+        assert_eq!(proposal.snapshot_execution_delay, 80);
+        assert_eq!(proposal.snapshot_total_supply, TOTAL_SUPPLY);
+    });
+}
+
+// ==================== FullDAO 需要代币 ====================
+
+#[test]
+fn fulldao_requires_token_enabled() {
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        // 禁用代币
+        set_token_enabled(SHOP_ID, false);
+        // 设 FullDAO 应失败
+        assert_noop!(
+            EntityGovernance::configure_governance(
+                RuntimeOrigin::signed(OWNER), 1,
+                GovernanceMode::FullDAO, None, None, None, None, None, None,
+            ),
+            Error::<Test>::TokenNotEnabledForDAO
+        );
+        // 重新启用代币后应成功
+        set_token_enabled(SHOP_ID, true);
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), 1,
+            GovernanceMode::FullDAO, None, None, None, None, None, None,
+        ));
     });
 }

@@ -17,7 +17,7 @@ pallets/trading/common/
 ├── src/
 │   ├── lib.rs          # 模块入口，重新导出公共 API
 │   ├── types.rs        # 公共类型定义
-│   ├── traits.rs       # 公共 Trait 接口（PricingProvider, DepositCalculator）
+│   ├── traits.rs       # 公共 Trait 接口（PricingProvider, PriceOracle, ExchangeRateProvider, DepositCalculator）
 │   ├── mask.rs         # 数据脱敏函数
 │   ├── validation.rs   # 验证函数
 │   └── time.rs         # 时间转换工具
@@ -51,7 +51,59 @@ pub trait PricingProvider<Balance> {
 - `pallet-entity-*`：Entity 定价
 
 **Runtime 实现**：
-- `TradingPricingProvider`：读取 `pallet-nex-market::LastTradePrice` / `PriceProtectionStore`
+- `TradingPricingProvider`：优先 1h TWAP → LastTradePrice → initial_price（治理设定）
+
+### PriceOracle
+
+NEX/USDT 链上 TWAP 价格预言机接口。
+
+```rust
+pub trait PriceOracle {
+    /// 获取指定窗口的 TWAP（精度 10^6 = 1 USDT）
+    fn get_twap(window: TwapWindow) -> Option<u64>;
+    /// 获取最新成交价
+    fn get_last_trade_price() -> Option<u64>;
+    /// 价格数据是否过时（超过 max_age_blocks 个区块未更新）
+    fn is_price_stale(max_age_blocks: u32) -> bool;
+    /// 获取累计交易数（用于判断数据可信度）
+    fn get_trade_count() -> u64;
+}
+```
+
+**TWAP 窗口**：
+- `TwapWindow::OneHour` — ~10min 实际窗口
+- `TwapWindow::OneDay` — ~1-2h 实际窗口
+- `TwapWindow::OneWeek` — ~24-48h 实际窗口（最抗操纵）
+
+**Runtime 实现**：
+- `pallet_nex_market::Pallet<Runtime>` 直接实现此 trait
+
+### ExchangeRateProvider（v0.7.0）
+
+统一兑换比率接口 — 聚合 TWAP + 陈旧检测 + 置信度评估。
+
+```rust
+pub trait ExchangeRateProvider {
+    /// 获取 NEX/USDT 兑换比率（精度 10^6）
+    fn get_nex_usdt_rate() -> Option<u64>;
+    /// 价格置信度 (0-100)
+    fn price_confidence() -> u8;
+    /// 价格是否可信赖（置信度 >= 30）
+    fn is_rate_reliable() -> bool;
+}
+```
+
+**置信度等级**：
+
+| 区间 | 含义 | 数据来源 |
+|------|------|----------|
+| 90-100 | 高可信 | TWAP 可用 + 高交易量（≥100笔） |
+| 60-89 | 中可信 | TWAP 或 LastTradePrice 可用 |
+| 30-59 | 低可信 | 仅 initial_price（冷启动期） |
+| 0-29 | 不可信 | 价格过时或不可用 |
+
+**Runtime 实现**：
+- `NexExchangeRateProvider`：组合 `TradingPricingProvider` + `PriceOracle` 的置信度评估
 
 ### DepositCalculator
 
@@ -138,7 +190,7 @@ pub fn mask_id_card(id_card: &str) -> Vec<u8>
 | 长度 | 规则 | 示例 |
 |------|------|------|
 | 18位 | 前4位 + 10个`*` + 后4位 | `"110101199001011234"` → `"1101**********1234"` |
-| 15位 | 前4位 + 7个`*` + 后4位 | `"110101900101123"` → `"1101*******0123"` |
+| 15位 | 前4位 + 7个`*` + 后4位 | `"110101900101123"` → `"1101*******1123"` |
 | <8位 | 全部用`*`替换 | `"1234567"` → `"*******"` |
 
 #### mask_birthday
@@ -169,6 +221,7 @@ pub fn is_valid_tron_address(address: &[u8]) -> bool
 - 长度：34 字符
 - 开头：`T`
 - 编码：Base58（字符集：`1-9, A-H, J-N, P-Z, a-k, m-z`）
+- 校验和：Base58Check（SHA256 双哈希后 4 字节校验）
 
 ### 时间转换工具
 
@@ -240,7 +293,8 @@ let remaining = estimate_remaining_seconds(1100, 1000);  // 600 秒
 
 | 版本 | 日期 | 变更内容 |
 |------|------|----------|
-| v0.6.0 | 2026-02-23 | 移除 MakerInterface/MakerCreditInterface/MakerApplicationInfo，仅保留 PricingProvider + DepositCalculator |
+| v0.7.0 | 2026-02-26 | 新增 ExchangeRateProvider（带置信度的统一兑换比率接口） |
+| v0.6.0 | 2026-02-23 | 新增 PriceOracle（TWAP 预言机接口）；移除 MakerInterface 等废弃 Trait |
 | v0.5.0 | 2026-02-08 | 适配 P2P 统一模型：report_swap_order → report_p2p_trade |
 | v0.4.0 | 2026-01-18 | 统一公共类型和 Trait 定义 |
 | v0.3.0 | 2026-01-18 | 添加时间转换工具函数 |

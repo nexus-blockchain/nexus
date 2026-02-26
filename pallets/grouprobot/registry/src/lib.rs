@@ -167,6 +167,8 @@ pub mod pallet {
 		/// Peer 心跳过期阈值 (区块数), 超过此时间未心跳则自动移除
 		#[pallet::constant]
 		type PeerHeartbeatTimeout: Get<BlockNumberFor<Self>>;
+		/// 订阅层级查询 (tier gate)
+		type Subscription: SubscriptionProvider;
 	}
 
 	// ========================================================================
@@ -354,6 +356,8 @@ pub mod pallet {
 		MaxPeersReached,
 		/// 端点 URL 为空
 		EndpointEmpty,
+		/// Free 层级不允许使用此功能
+		FreeTierNotAllowed,
 	}
 
 	// ========================================================================
@@ -1478,6 +1482,12 @@ pub mod pallet {
 			ensure!(bot.status == BotStatus::Active, Error::<T>::BotNotActive);
 			ensure!(!endpoint.is_empty(), Error::<T>::EndpointEmpty);
 
+			// Tier gate: Free 层级不允许注册 Peer
+			ensure!(
+				T::Subscription::effective_tier(&bot_id_hash).is_paid(),
+				Error::<T>::FreeTierNotAllowed
+			);
+
 			PeerRegistry::<T>::try_mutate(&bot_id_hash, |peers| -> DispatchResult {
 				// 检查是否已注册 (相同公钥)
 				ensure!(
@@ -1540,6 +1550,12 @@ pub mod pallet {
 			let who = ensure_signed(origin)?;
 			let bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
 			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+
+			// Tier gate: Free 层级不允许 Peer 心跳
+			ensure!(
+				T::Subscription::effective_tier(&bot_id_hash).is_paid(),
+				Error::<T>::FreeTierNotAllowed
+			);
 
 			PeerRegistry::<T>::try_mutate(&bot_id_hash, |peers| -> DispatchResult {
 				let peer = peers.iter_mut().find(|p| p.public_key == peer_public_key)

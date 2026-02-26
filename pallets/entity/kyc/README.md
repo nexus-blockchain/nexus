@@ -118,7 +118,6 @@ impl pallet_entity_kyc::Config for Runtime {
 | `Providers` | `StorageMap<AccountId, KycProvider>` | 认证提供者 |
 | `ProviderCount` | `StorageValue<u32>` | 活跃提供者数量 |
 | `EntityRequirements` | `StorageMap<u64, EntityKycRequirement>` | 实体 KYC 要求 |
-| `PendingVerifications` | `StorageMap<AccountId, BoundedVec<AccountId>>` | 提供者待审核队列 |
 | `HighRiskCountries` | `StorageValue<BoundedVec<[u8;2]>>` | 高风险国家列表 |
 
 ## Events

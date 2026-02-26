@@ -585,6 +585,7 @@ fn deduct_stock_fails_insufficient() {
         use pallet_entity_common::ProductProvider;
 
         create_default_product();
+        assert_ok!(EntityService::publish_product(RuntimeOrigin::signed(1), 0));
 
         assert_noop!(
             <EntityService as ProductProvider<u64, u128>>::deduct_stock(0, 101),
@@ -610,12 +611,15 @@ fn deduct_stock_infinite_stock_no_change() {
             ProductCategory::Digital,
         ));
 
+        // 上架后测试
+        assert_ok!(EntityService::publish_product(RuntimeOrigin::signed(1), 0));
+
         // deduct_stock 对无限库存不起作用
         assert_ok!(<EntityService as ProductProvider<u64, u128>>::deduct_stock(0, 999));
 
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.stock, 0); // 仍然是 0
-        assert_eq!(product.status, ProductStatus::Draft);
+        assert_eq!(product.status, ProductStatus::OnSale);
     });
 }
 
@@ -656,6 +660,9 @@ fn restore_stock_infinite_no_change() {
             0,                              // 无限库存
             ProductCategory::Digital,
         ));
+
+        // 上架后测试
+        assert_ok!(EntityService::publish_product(RuntimeOrigin::signed(1), 0));
 
         // 无限库存 restore 不起作用
         assert_ok!(<EntityService as ProductProvider<u64, u128>>::restore_stock(0, 50));
@@ -829,5 +836,265 @@ fn shop_products_index_correct() {
         assert_ok!(EntityService::delete_product(RuntimeOrigin::signed(1), 0));
         let shop_products = ShopProducts::<Test>::get(1);
         assert_eq!(shop_products.to_vec(), vec![1]);
+    });
+}
+
+// ==================== H1: 补货检查 Shop 激活状态 ====================
+
+#[test]
+fn h1_update_product_restock_fails_shop_not_active() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product();
+        assert_ok!(EntityService::publish_product(RuntimeOrigin::signed(1), 0));
+
+        // 扣光库存 → SoldOut
+        assert_ok!(<EntityService as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::SoldOut);
+
+        // Shop 变为不激活
+        set_shop_active(1, false);
+
+        // H1: 补货应失败，因为 Shop 未激活
+        assert_noop!(
+            EntityService::update_product(
+                RuntimeOrigin::signed(1),
+                0,
+                None, None, None, None,
+                Some(50), // 补货
+                None,
+            ),
+            Error::<Test>::ShopNotActive
+        );
+
+        // 商品应仍为 SoldOut
+        assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::SoldOut);
+    });
+}
+
+#[test]
+fn h1_update_product_restock_works_when_shop_active() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product();
+        assert_ok!(EntityService::publish_product(RuntimeOrigin::signed(1), 0));
+        assert_ok!(<EntityService as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+
+        // Shop 激活状态下补货应成功
+        assert_ok!(EntityService::update_product(
+            RuntimeOrigin::signed(1),
+            0,
+            None, None, None, None,
+            Some(50),
+            None,
+        ));
+
+        let product = Products::<Test>::get(0).unwrap();
+        assert_eq!(product.status, ProductStatus::OnSale);
+        assert_eq!(product.stock, 50);
+    });
+}
+
+// ==================== H2: 空 CID 检查 ====================
+
+#[test]
+fn h2_create_product_rejects_empty_name_cid() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityService::create_product(
+                RuntimeOrigin::signed(1),
+                1,
+                vec![],  // 空 name_cid
+                b"QmImages".to_vec(),
+                b"QmDetail".to_vec(),
+                1_000u128,
+                100,
+                ProductCategory::Physical,
+            ),
+            Error::<Test>::EmptyCid
+        );
+    });
+}
+
+#[test]
+fn h2_update_product_rejects_empty_name_cid() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+
+        assert_noop!(
+            EntityService::update_product(
+                RuntimeOrigin::signed(1),
+                0,
+                Some(vec![]),  // 空 name_cid
+                None, None, None, None, None,
+            ),
+            Error::<Test>::EmptyCid
+        );
+
+        // 确认 name_cid 未被修改
+        let product = Products::<Test>::get(0).unwrap();
+        assert_eq!(product.name_cid.to_vec(), b"QmName".to_vec());
+    });
+}
+
+// ==================== M2: StockUpdated 事件 ====================
+
+#[test]
+fn m2_deduct_stock_emits_stock_updated_event() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product();
+        assert_ok!(EntityService::publish_product(RuntimeOrigin::signed(1), 0));
+
+        System::reset_events();
+        assert_ok!(<EntityService as ProductProvider<u64, u128>>::deduct_stock(0, 30));
+
+        let events = System::events();
+        let found = events.iter().any(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::EntityService(Event::StockUpdated { product_id: 0, new_stock: 70 })
+            )
+        });
+        assert!(found, "StockUpdated event should be emitted by deduct_stock");
+    });
+}
+
+#[test]
+fn m2_restore_stock_emits_stock_updated_event() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product();
+        assert_ok!(EntityService::publish_product(RuntimeOrigin::signed(1), 0));
+        assert_ok!(<EntityService as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+
+        System::reset_events();
+        assert_ok!(<EntityService as ProductProvider<u64, u128>>::restore_stock(0, 25));
+
+        let events = System::events();
+        let found = events.iter().any(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::EntityService(Event::StockUpdated { product_id: 0, new_stock: 25 })
+            )
+        });
+        assert!(found, "StockUpdated event should be emitted by restore_stock");
+    });
+}
+
+// ==================== 审计修复回归测试 ====================
+
+#[test]
+fn deduct_stock_rejects_draft_product() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product(); // status = Draft
+        assert_noop!(
+            <EntityService as ProductProvider<u64, u128>>::deduct_stock(0, 10),
+            Error::<Test>::InvalidProductStatus
+        );
+    });
+}
+
+#[test]
+fn deduct_stock_rejects_offshelf_product() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product();
+        assert_ok!(EntityService::publish_product(RuntimeOrigin::signed(1), 0));
+        assert_ok!(EntityService::unpublish_product(RuntimeOrigin::signed(1), 0));
+        // status = OffShelf
+        assert_noop!(
+            <EntityService as ProductProvider<u64, u128>>::deduct_stock(0, 10),
+            Error::<Test>::InvalidProductStatus
+        );
+    });
+}
+
+#[test]
+fn deduct_stock_rejects_soldout_product() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product();
+        assert_ok!(EntityService::publish_product(RuntimeOrigin::signed(1), 0));
+        // 扣完库存使其 SoldOut
+        assert_ok!(<EntityService as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        let product = Products::<Test>::get(0).unwrap();
+        assert_eq!(product.status, ProductStatus::SoldOut);
+        // 再次扣减应失败
+        assert_noop!(
+            <EntityService as ProductProvider<u64, u128>>::deduct_stock(0, 1),
+            Error::<Test>::InvalidProductStatus
+        );
+    });
+}
+
+#[test]
+fn restore_stock_rejects_draft_product() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product(); // status = Draft
+        assert_noop!(
+            <EntityService as ProductProvider<u64, u128>>::restore_stock(0, 10),
+            Error::<Test>::InvalidProductStatus
+        );
+    });
+}
+
+#[test]
+fn restore_stock_works_for_offshelf_product() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product();
+        assert_ok!(EntityService::publish_product(RuntimeOrigin::signed(1), 0));
+        assert_ok!(<EntityService as ProductProvider<u64, u128>>::deduct_stock(0, 50));
+        assert_ok!(EntityService::unpublish_product(RuntimeOrigin::signed(1), 0));
+        // OffShelf 状态下恢复库存应成功，但不改变状态
+        assert_ok!(<EntityService as ProductProvider<u64, u128>>::restore_stock(0, 50));
+        let product = Products::<Test>::get(0).unwrap();
+        assert_eq!(product.status, ProductStatus::OffShelf);
+        assert_eq!(product.stock, 100);
+    });
+}
+
+#[test]
+fn restore_stock_soldout_to_onsale() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product();
+        assert_ok!(EntityService::publish_product(RuntimeOrigin::signed(1), 0));
+        assert_ok!(<EntityService as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        let product = Products::<Test>::get(0).unwrap();
+        assert_eq!(product.status, ProductStatus::SoldOut);
+        // 恢复库存应将 SoldOut -> OnSale
+        assert_ok!(<EntityService as ProductProvider<u64, u128>>::restore_stock(0, 25));
+        let product = Products::<Test>::get(0).unwrap();
+        assert_eq!(product.status, ProductStatus::OnSale);
+        assert_eq!(product.stock, 25);
+    });
+}
+
+#[test]
+fn delete_product_fails_without_deposit_record() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+        // 手动移除押金记录
+        ProductDeposits::<Test>::remove(0);
+        assert_noop!(
+            EntityService::delete_product(RuntimeOrigin::signed(1), 0),
+            Error::<Test>::DepositNotFound
+        );
+        // 商品应仍然存在
+        assert!(Products::<Test>::get(0).is_some());
     });
 }

@@ -23,9 +23,10 @@ pub mod pallet {
     };
     use frame_system::pallet_prelude::*;
     use pallet_commission_common::{
-        CommissionModes, CommissionOutput, CommissionPlugin, CommissionType, MemberProvider,
+        CommissionOutput, CommissionType, MemberProvider,
     };
     use sp_runtime::traits::{Saturating, Zero};
+    use alloc::collections::BTreeSet;
 
     pub type BalanceOf<T> =
         <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
@@ -326,8 +327,12 @@ pub mod pallet {
             remaining: &mut BalanceOf<T>,
             config: &MultiLevelConfigOf<T>,
             outputs: &mut Vec<CommissionOutput<T::AccountId, BalanceOf<T>>>,
-        ) {
+        ) where T::AccountId: Ord {
             if config.levels.is_empty() { return; }
+
+            // H1 审计修复: 循环检测 — 防止环形推荐链下同一推荐人重复获得佣金
+            let mut visited = BTreeSet::new();
+            visited.insert(buyer.clone());
 
             let mut current_referrer = T::MemberProvider::get_referrer(shop_id, buyer);
             let mut total_commission = BalanceOf::<T>::zero();
@@ -337,11 +342,18 @@ pub mod pallet {
 
             for (level_idx, tier) in config.levels.iter().enumerate() {
                 if tier.rate == 0 {
+                    if let Some(ref r) = current_referrer {
+                        visited.insert(r.clone());
+                    }
                     current_referrer = current_referrer.and_then(|r| T::MemberProvider::get_referrer(shop_id, &r));
                     continue;
                 }
 
                 let Some(ref referrer) = current_referrer else { break };
+
+                // H1: 检测循环
+                if visited.contains(referrer) { break; }
+                visited.insert(referrer.clone());
 
                 if !Self::check_tier_activation(shop_id, referrer, tier) {
                     current_referrer = T::MemberProvider::get_referrer(shop_id, referrer);
@@ -352,6 +364,9 @@ pub mod pallet {
                 let actual = commission.min(*remaining);
                 if actual.is_zero() { break; }
 
+                // M2 审计修复: level u8 溢出防护
+                let level = (level_idx + 1).min(255) as u8;
+
                 let new_total = total_commission.saturating_add(actual);
                 if new_total > max_commission {
                     let can_distribute = max_commission.saturating_sub(total_commission);
@@ -361,7 +376,7 @@ pub mod pallet {
                             beneficiary: referrer.clone(),
                             amount: can_distribute,
                             commission_type: CommissionType::MultiLevel,
-                            level: (level_idx + 1) as u8,
+                            level,
                         });
                     }
                     break;
@@ -373,7 +388,7 @@ pub mod pallet {
                     beneficiary: referrer.clone(),
                     amount: actual,
                     commission_type: CommissionType::MultiLevel,
-                    level: (level_idx + 1) as u8,
+                    level,
                 });
 
                 current_referrer = T::MemberProvider::get_referrer(shop_id, referrer);
@@ -425,6 +440,9 @@ pub mod pallet {
             config: &FirstOrderConfig<BalanceOf<T>>,
             outputs: &mut Vec<CommissionOutput<T::AccountId, BalanceOf<T>>>,
         ) {
+            // H3 审计修复: 零值早返回，避免不必要的 storage read
+            if config.use_amount && config.amount.is_zero() { return; }
+            if !config.use_amount && config.rate == 0 { return; }
             if let Some(referrer) = T::MemberProvider::get_referrer(shop_id, buyer) {
                 let commission = if config.use_amount {
                     config.amount
@@ -537,6 +555,8 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
 
 impl<T: pallet::Config> pallet_commission_common::ReferralPlanWriter<pallet::BalanceOf<T>> for pallet::Pallet<T> {
     fn set_direct_rate(entity_id: u64, rate: u16) -> Result<(), sp_runtime::DispatchError> {
+        // H2 审计修复: 防御性校验
+        frame_support::ensure!(rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
         pallet::ReferralConfigs::<T>::mutate(entity_id, |maybe| {
             let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
             config.direct_reward.rate = rate;
@@ -545,7 +565,12 @@ impl<T: pallet::Config> pallet_commission_common::ReferralPlanWriter<pallet::Bal
     }
 
     fn set_multi_level(entity_id: u64, level_rates: alloc::vec::Vec<u16>, max_total_rate: u16) -> Result<(), sp_runtime::DispatchError> {
-        // H3 审计修复: 超过 MaxMultiLevels 时返回错误而非静默清空
+        // H2 审计修复: 防御性校验
+        frame_support::ensure!(max_total_rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
+        for &rate in level_rates.iter() {
+            frame_support::ensure!(rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
+        }
+        // H3 审计修复(前轮): 超过 MaxMultiLevels 时返回错误而非静默清空
         let bounded: frame_support::BoundedVec<pallet::MultiLevelTier, T::MaxMultiLevels> = level_rates
             .into_iter()
             .map(|rate| pallet::MultiLevelTier { rate, required_directs: 0, required_team_size: 0, required_spent: 0 })
@@ -568,6 +593,8 @@ impl<T: pallet::Config> pallet_commission_common::ReferralPlanWriter<pallet::Bal
     }
 
     fn set_first_order(entity_id: u64, amount: pallet::BalanceOf<T>, rate: u16, use_amount: bool) -> Result<(), sp_runtime::DispatchError> {
+        // H2 审计修复: 防御性校验
+        frame_support::ensure!(rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
         pallet::ReferralConfigs::<T>::mutate(entity_id, |maybe| {
             let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
             config.first_order = pallet::FirstOrderConfig { amount, rate, use_amount };
@@ -576,6 +603,8 @@ impl<T: pallet::Config> pallet_commission_common::ReferralPlanWriter<pallet::Bal
     }
 
     fn set_repeat_purchase(entity_id: u64, rate: u16, min_orders: u32) -> Result<(), sp_runtime::DispatchError> {
+        // H2 审计修复: 防御性校验
+        frame_support::ensure!(rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
         pallet::ReferralConfigs::<T>::mutate(entity_id, |maybe| {
             let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
             config.repeat_purchase = pallet::RepeatPurchaseConfig { rate, min_orders };
@@ -588,3 +617,8 @@ impl<T: pallet::Config> pallet_commission_common::ReferralPlanWriter<pallet::Bal
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod mock;
+#[cfg(test)]
+mod tests;

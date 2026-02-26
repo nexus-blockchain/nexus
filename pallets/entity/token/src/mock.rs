@@ -212,6 +212,7 @@ impl pallet_entity_token::Config for Test {
     type MaxDividendRecipients = ConstU32<50>;
     type KycProvider = MockKycProvider;
     type MemberProvider = MockMemberProvider;
+    type WeightInfo = ();
 }
 
 // ==================== 工具函数 ====================

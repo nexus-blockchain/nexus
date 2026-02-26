@@ -643,7 +643,7 @@ pub mod pallet {
             trade_id: u64,
             expected_amount: u64,
             actual_amount: u64,
-            payment_ratio: u16,
+            payment_ratio: u32,
             nex_released: BalanceOf<T>,
             deposit_forfeited: BalanceOf<T>,
         },
@@ -671,6 +671,7 @@ pub mod pallet {
             trade_id: u64,
             claimer: T::AccountId,
             reward: BalanceOf<T>,
+            reward_paid: bool,
         },
         /// 流动性种子已注入（seed_liquidity）
         LiquiditySeeded {
@@ -700,7 +701,7 @@ pub mod pallet {
             trade_id: u64,
             expected_amount: u64,
             actual_amount: u64,
-            payment_ratio: u16,
+            payment_ratio: u32,
             deadline: BlockNumberFor<T>,
         },
         /// 补付窗口内金额已更新
@@ -713,7 +714,7 @@ pub mod pallet {
         UnderpaidFinalized {
             trade_id: u64,
             final_amount: u64,
-            payment_ratio: u16,
+            payment_ratio: u32,
             deposit_forfeit_rate: u16,
         },
     }
@@ -790,6 +791,12 @@ pub mod pallet {
         OrderExpired,
         /// 熔断未激活（无需解除）
         CircuitBreakerNotActive,
+        /// 待付款跟踪队列已满
+        AwaitingPaymentQueueFull,
+        /// 少付跟踪队列已满
+        UnderpaidQueueFull,
+        /// 订单索引恢复失败（订单簿满）
+        OrderIndexRestoreFailed,
     }
 
     // ==================== Extrinsics ====================
@@ -815,9 +822,8 @@ pub mod pallet {
             // 价格偏离检查
             Self::check_price_deviation(usdt_price)?;
 
-            // 验证 TRON 地址
-            ensure!(tron_address.len() == 34, Error::<T>::InvalidTronAddress);
-            ensure!(tron_address.first() == Some(&b'T'), Error::<T>::InvalidTronAddress);
+            // 验证 TRON 地址（Base58Check 完整校验）
+            ensure!(pallet_trading_common::is_valid_tron_address(&tron_address), Error::<T>::InvalidTronAddress);
             let tron_addr: TronAddress = tron_address.try_into().map_err(|_| Error::<T>::InvalidTronAddress)?;
 
             // 锁定 NEX
@@ -854,9 +860,8 @@ pub mod pallet {
             ensure!(usdt_price > 0, Error::<T>::ZeroPrice);
             ensure!(!nex_amount.is_zero(), Error::<T>::AmountTooSmall);
 
-            // 验证买家 TRON 地址
-            ensure!(buyer_tron_address.len() == 34, Error::<T>::InvalidTronAddress);
-            ensure!(buyer_tron_address.first() == Some(&b'T'), Error::<T>::InvalidTronAddress);
+            // 验证买家 TRON 地址（Base58Check 完整校验）
+            ensure!(pallet_trading_common::is_valid_tron_address(&buyer_tron_address), Error::<T>::InvalidTronAddress);
             let buyer_tron: TronAddress = buyer_tron_address.try_into().map_err(|_| Error::<T>::InvalidTronAddress)?;
 
             Self::check_price_deviation(usdt_price)?;
@@ -1058,9 +1063,8 @@ pub mod pallet {
             // M4: 吃单时也检查价格偏离 + 熔断
             Self::check_price_deviation(order.usdt_price)?;
 
-            // 验证 TRON 地址
-            ensure!(tron_address.len() == 34, Error::<T>::InvalidTronAddress);
-            ensure!(tron_address.first() == Some(&b'T'), Error::<T>::InvalidTronAddress);
+            // 验证 TRON 地址（Base58Check 完整校验）
+            ensure!(pallet_trading_common::is_valid_tron_address(&tron_address), Error::<T>::InvalidTronAddress);
             let tron_addr: TronAddress = tron_address.try_into().map_err(|_| Error::<T>::InvalidTronAddress)?;
 
             let available = order.nex_amount.checked_sub(&order.filled_amount)
@@ -1206,9 +1210,7 @@ pub mod pallet {
                             Self::process_underpaid(&mut trade, trade_id, final_amount)?;
                         }
                     }
-                    let payment_ratio = if trade.usdt_amount > 0 {
-                        ((final_amount as u128) * 10000 / (trade.usdt_amount as u128)) as u16
-                    } else { 0 };
+                    let payment_ratio = pallet_trading_common::compute_payment_ratio_bps(trade.usdt_amount, final_amount);
                     let deposit_forfeit_rate = Self::calculate_deposit_forfeit_rate(payment_ratio);
 
                     PendingUnderpaidTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
@@ -1331,12 +1333,15 @@ pub mod pallet {
 
                     // 从 PendingUsdtTrades 移到 PendingUnderpaidTrades
                     PendingUsdtTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
-                    let _ = PendingUnderpaidTrades::<T>::try_mutate(|p| { p.try_push(trade_id) });
+                    PendingUnderpaidTrades::<T>::try_mutate(|p| {
+                        p.try_push(trade_id).map_err(|_| Error::<T>::UnderpaidQueueFull)
+                    })?;
 
                     // 同时存储当前结果（claim 可在补付窗口到期后使用最新值）
                     OcwVerificationResults::<T>::insert(trade_id, (verification_result, actual_amount));
 
-                    let payment_ratio = ((actual_amount as u128) * 10000 / (trade.usdt_amount as u128)) as u16;
+                    let payment_ratio = pallet_trading_common::compute_payment_ratio_bps(trade.usdt_amount, actual_amount);
+                    let deposit_forfeit_rate = Self::calculate_deposit_forfeit_rate(payment_ratio);
                     Self::deposit_event(Event::UnderpaidDetected {
                         trade_id,
                         expected_amount: trade.usdt_amount,
@@ -1562,7 +1567,7 @@ pub mod pallet {
         /// 但买家忘记调用 confirm_payment 时，sidecar 可调用此函数
         /// 一步完成：确认付款 + 存储验证结果。
         #[pallet::call_index(15)]
-        #[pallet::weight(T::WeightInfo::submit_ocw_result())]
+        #[pallet::weight(T::WeightInfo::auto_confirm_payment())]
         pub fn auto_confirm_payment(
             origin: OriginFor<T>,
             trade_id: u64,
@@ -1596,10 +1601,12 @@ pub mod pallet {
                     trade.underpaid_deadline = Some(deadline);
                     UsdtTrades::<T>::insert(trade_id, &trade);
 
-                    let _ = PendingUnderpaidTrades::<T>::try_mutate(|p| { p.try_push(trade_id) });
+                    PendingUnderpaidTrades::<T>::try_mutate(|p| {
+                        p.try_push(trade_id).map_err(|_| Error::<T>::UnderpaidQueueFull)
+                    })?;
                     OcwVerificationResults::<T>::insert(trade_id, (verification_result, actual_amount));
 
-                    let payment_ratio = ((actual_amount as u128) * 10000 / (trade.usdt_amount as u128)) as u16;
+                    let payment_ratio = pallet_trading_common::compute_payment_ratio_bps(trade.usdt_amount, actual_amount);
                     Self::deposit_event(Event::UnderpaidDetected {
                         trade_id,
                         expected_amount: trade.usdt_amount,
@@ -1613,9 +1620,9 @@ pub mod pallet {
                     trade.status = UsdtTradeStatus::AwaitingVerification;
                     UsdtTrades::<T>::insert(trade_id, &trade);
 
-                    let _ = PendingUsdtTrades::<T>::try_mutate(|pending| {
-                        pending.try_push(trade_id)
-                    });
+                    PendingUsdtTrades::<T>::try_mutate(|pending| {
+                        pending.try_push(trade_id).map_err(|_| Error::<T>::PendingQueueFull)
+                    })?;
                     OcwVerificationResults::<T>::insert(trade_id, (verification_result, actual_amount));
 
                     Self::deposit_event(Event::OcwResultSubmitted {
@@ -1632,7 +1639,7 @@ pub mod pallet {
         /// 补付窗口内，OCW 持续扫描 TronGrid，发现新转账则更新金额。
         /// 若累计金额达到 99.5%，直接升级为 Exact 结算。
         #[pallet::call_index(16)]
-        #[pallet::weight(T::WeightInfo::submit_ocw_result())]
+        #[pallet::weight(T::WeightInfo::submit_underpaid_update())]
         pub fn submit_underpaid_update(
             origin: OriginFor<T>,
             trade_id: u64,
@@ -1669,7 +1676,9 @@ pub mod pallet {
 
                 // 移回 PendingUsdtTrades
                 PendingUnderpaidTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
-                let _ = PendingUsdtTrades::<T>::try_mutate(|p| { p.try_push(trade_id) });
+                PendingUsdtTrades::<T>::try_mutate(|p| {
+                    p.try_push(trade_id).map_err(|_| Error::<T>::PendingQueueFull)
+                })?;
             }
 
             Ok(())
@@ -1681,7 +1690,7 @@ pub mod pallet {
         /// - 按比例释放 NEX
         /// - 保证金按梯度没收
         #[pallet::call_index(17)]
-        #[pallet::weight(T::WeightInfo::claim_reward())]
+        #[pallet::weight(T::WeightInfo::finalize_underpaid())]
         pub fn finalize_underpaid(
             origin: OriginFor<T>,
             trade_id: u64,
@@ -1714,9 +1723,7 @@ pub mod pallet {
                 }
             }
 
-            let payment_ratio = if trade.usdt_amount > 0 {
-                ((final_amount as u128) * 10000 / (trade.usdt_amount as u128)) as u16
-            } else { 0 };
+            let payment_ratio = pallet_trading_common::compute_payment_ratio_bps(trade.usdt_amount, final_amount);
             let deposit_forfeit_rate = Self::calculate_deposit_forfeit_rate(payment_ratio);
 
             // 清理队列
@@ -1945,9 +1952,9 @@ pub mod pallet {
             UsdtTrades::<T>::insert(trade_id, trade);
 
             // 加入待付款跟踪队列
-            let _ = AwaitingPaymentTrades::<T>::try_mutate(|list| {
-                list.try_push(trade_id)
-            });
+            AwaitingPaymentTrades::<T>::try_mutate(|list| {
+                list.try_push(trade_id).map_err(|_| Error::<T>::AwaitingPaymentQueueFull)
+            })?;
 
             Ok(trade_id)
         }
@@ -2008,17 +2015,19 @@ pub mod pallet {
             PendingUsdtTrades::<T>::mutate(|pending| { pending.retain(|&id| id != trade_id); });
             OcwVerificationResults::<T>::remove(trade_id);
 
-            // 支付奖励
+            // 支付奖励（非核心操作，失败不阻断交易结算）
             let reward = T::VerificationReward::get();
-            if reward > Zero::zero() {
+            let reward_paid = if reward > Zero::zero() {
                 let reward_source = T::RewardSource::get();
-                let _ = T::Currency::transfer(
+                T::Currency::transfer(
                     &reward_source, caller, reward, ExistenceRequirement::KeepAlive,
-                );
-            }
+                ).is_ok()
+            } else {
+                true
+            };
 
             Self::deposit_event(Event::VerificationRewardClaimed {
-                trade_id, claimer: caller.clone(), reward,
+                trade_id, claimer: caller.clone(), reward, reward_paid,
             });
 
             Ok(())
@@ -2083,11 +2092,7 @@ pub mod pallet {
             trade_id: u64,
             actual_amount: u64,
         ) -> DispatchResult {
-            let payment_ratio = if trade.usdt_amount > 0 {
-                ((actual_amount as u128) * 10000 / (trade.usdt_amount as u128)) as u16
-            } else {
-                0
-            };
+            let payment_ratio = pallet_trading_common::compute_payment_ratio_bps(trade.usdt_amount, actual_amount);
 
             // 按比例释放 NEX
             let nex_u128: u128 = trade.nex_amount.saturated_into();
@@ -2123,10 +2128,15 @@ pub mod pallet {
 
                 if !deposit_forfeited.is_zero() {
                     let treasury = T::TreasuryAccount::get();
-                    let _ = T::Currency::repatriate_reserved(
+                    // repatriate_reserved 返回 Ok(remaining) 表示未能转移的余额
+                    let actually_forfeited = match T::Currency::repatriate_reserved(
                         &trade.buyer, &treasury, deposit_forfeited,
                         frame_support::traits::BalanceStatus::Free,
-                    );
+                    ) {
+                        Ok(remaining) => deposit_forfeited.saturating_sub(remaining),
+                        Err(_) => Zero::zero(),
+                    };
+                    deposit_forfeited = actually_forfeited;
                 }
 
                 // 退还未没收部分
@@ -2174,7 +2184,7 @@ pub mod pallet {
         }
 
         /// 保证金没收梯度（委托给 pallet-trading-common）
-        fn calculate_deposit_forfeit_rate(payment_ratio: u16) -> u16 {
+        fn calculate_deposit_forfeit_rate(payment_ratio: u32) -> u16 {
             pallet_trading_common::calculate_deposit_forfeit_rate(payment_ratio)
         }
 
@@ -2191,15 +2201,20 @@ pub mod pallet {
                 .saturating_div(10000);
             let forfeit_amount: BalanceOf<T> = forfeit_u128.saturated_into();
 
-            if !forfeit_amount.is_zero() {
+            let actually_forfeited = if !forfeit_amount.is_zero() {
                 let treasury = T::TreasuryAccount::get();
-                let _ = T::Currency::repatriate_reserved(
+                match T::Currency::repatriate_reserved(
                     &trade.buyer, &treasury, forfeit_amount,
                     frame_support::traits::BalanceStatus::Free,
-                );
-            }
+                ) {
+                    Ok(remaining) => forfeit_amount.saturating_sub(remaining),
+                    Err(_) => Zero::zero(),
+                }
+            } else {
+                Zero::zero()
+            };
 
-            let refund = trade.buyer_deposit.saturating_sub(forfeit_amount);
+            let refund = trade.buyer_deposit.saturating_sub(actually_forfeited);
             if !refund.is_zero() {
                 T::Currency::unreserve(&trade.buyer, refund);
             }
@@ -2208,7 +2223,7 @@ pub mod pallet {
 
             Self::deposit_event(Event::BuyerDepositForfeited {
                 trade_id, buyer: trade.buyer.clone(),
-                forfeited: forfeit_amount, to_treasury: forfeit_amount,
+                forfeited: actually_forfeited, to_treasury: actually_forfeited,
             });
         }
 
@@ -2231,21 +2246,29 @@ pub mod pallet {
 
                         // 如果从 Filled 恢复，重新加入订单簿和用户索引
                         if was_filled {
-                            match order.side {
+                            let book_ok = match order.side {
                                 OrderSide::Sell => {
-                                    let _ = SellOrders::<T>::try_mutate(|orders| {
+                                    SellOrders::<T>::try_mutate(|orders| {
                                         orders.try_push(order_id)
-                                    });
+                                    }).is_ok()
                                 }
                                 OrderSide::Buy => {
-                                    let _ = BuyOrders::<T>::try_mutate(|orders| {
+                                    BuyOrders::<T>::try_mutate(|orders| {
                                         orders.try_push(order_id)
-                                    });
+                                    }).is_ok()
                                 }
+                            };
+                            if !book_ok {
+                                log::warn!(target: "nex-market",
+                                    "Order {} rollback: order book full, order is a ghost record", order_id);
                             }
-                            let _ = UserOrders::<T>::try_mutate(&order.maker, |orders| {
+                            let user_ok = UserOrders::<T>::try_mutate(&order.maker, |orders| {
                                 orders.try_push(order_id)
-                            });
+                            }).is_ok();
+                            if !user_ok {
+                                log::warn!(target: "nex-market",
+                                    "Order {} rollback: user orders full for {:?}", order_id, order.maker);
+                            }
                         }
                     }
                 }
@@ -2744,19 +2767,27 @@ impl<T: pallet::Config> pallet_trading_common::PriceOracle for pallet::Pallet<T>
 // ==================== 公共查询接口 ====================
 
 impl<T: Config> Pallet<T> {
-    /// 获取卖单列表
+    /// 获取卖单列表（过滤已过期订单，与撮合逻辑一致）
     pub fn get_sell_order_list() -> Vec<Order<T>> {
+        let now = <frame_system::Pallet<T>>::block_number();
         SellOrders::<T>::get().iter()
             .filter_map(|&id| Orders::<T>::get(id))
-            .filter(|o| o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+            .filter(|o| {
+                (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+                && now <= o.expires_at
+            })
             .collect()
     }
 
-    /// 获取买单列表
+    /// 获取买单列表（过滤已过期订单，与撮合逻辑一致）
     pub fn get_buy_order_list() -> Vec<Order<T>> {
+        let now = <frame_system::Pallet<T>>::block_number();
         BuyOrders::<T>::get().iter()
             .filter_map(|&id| Orders::<T>::get(id))
-            .filter(|o| o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+            .filter(|o| {
+                (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+                && now <= o.expires_at
+            })
             .collect()
     }
 

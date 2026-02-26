@@ -17,6 +17,8 @@ extern crate alloc;
 
 pub use pallet::*;
 
+pub mod weights;
+
 #[cfg(test)]
 mod mock;
 
@@ -27,6 +29,7 @@ mod tests;
 pub mod pallet {
     use super::*;
     use alloc::vec::Vec;
+    use crate::weights::WeightInfo;
     use frame_support::{
         pallet_prelude::*,
         BoundedVec,
@@ -68,6 +71,9 @@ pub mod pallet {
         /// CID 最大长度
         #[pallet::constant]
         type MaxCidLength: Get<u32>;
+
+        /// 权重信息
+        type WeightInfo: WeightInfo;
     }
 
     #[pallet::pallet]
@@ -84,6 +90,11 @@ pub mod pallet {
     #[pallet::storage]
     #[pallet::getter(fn review_count)]
     pub type ReviewCount<T: Config> = StorageValue<_, u64, ValueQuery>;
+
+    /// 店铺评价计数
+    #[pallet::storage]
+    #[pallet::getter(fn shop_review_count)]
+    pub type ShopReviewCount<T: Config> = StorageMap<_, Blake2_128Concat, u64, u64, ValueQuery>;
 
     // ==================== 事件 ====================
 
@@ -115,6 +126,8 @@ pub mod pallet {
         InvalidRating,
         /// CID 过长
         CidTooLong,
+        /// CID 为空
+        EmptyCid,
     }
 
     // ==================== Extrinsics ====================
@@ -123,7 +136,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// 提交评价
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::submit_review())]
         pub fn submit_review(
             origin: OriginFor<T>,
             order_id: u64,
@@ -143,7 +156,10 @@ pub mod pallet {
 
             // 转换 CID
             let content_cid: Option<BoundedVec<u8, T::MaxCidLength>> = content_cid
-                .map(|c| c.try_into().map_err(|_| Error::<T>::CidTooLong))
+                .map(|c| {
+                    ensure!(!c.is_empty(), Error::<T>::EmptyCid);
+                    c.try_into().map_err(|_| Error::<T>::CidTooLong)
+                })
                 .transpose()?;
 
             let now = <frame_system::Pallet<T>>::block_number();
@@ -163,6 +179,7 @@ pub mod pallet {
             let shop_id = T::OrderProvider::order_shop_id(order_id);
             if let Some(sid) = shop_id {
                 T::ShopProvider::update_shop_rating(sid, rating)?;
+                ShopReviewCount::<T>::mutate(sid, |c| *c = c.saturating_add(1));
             }
 
             Self::deposit_event(Event::ReviewSubmitted {

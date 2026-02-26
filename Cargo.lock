@@ -5943,6 +5943,7 @@ dependencies = [
  "pallet-commission-level-diff",
  "pallet-commission-referral",
  "pallet-commission-single-line",
+ "pallet-commission-team",
  "pallet-contracts",
  "pallet-entity-commission",
  "pallet-entity-common",
@@ -5966,6 +5967,8 @@ dependencies = [
  "pallet-grouprobot-consensus",
  "pallet-grouprobot-primitives",
  "pallet-grouprobot-registry",
+ "pallet-grouprobot-rewards",
+ "pallet-grouprobot-subscription",
  "pallet-membership",
  "pallet-nex-market",
  "pallet-storage-lifecycle",
@@ -6488,10 +6491,12 @@ version = "0.1.0"
 dependencies = [
  "frame-support",
  "frame-system",
+ "pallet-balances",
  "pallet-commission-common",
  "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
+ "sp-io",
  "sp-runtime",
  "sp-std",
 ]
@@ -6502,10 +6507,12 @@ version = "0.1.0"
 dependencies = [
  "frame-support",
  "frame-system",
+ "pallet-balances",
  "pallet-commission-common",
  "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
+ "sp-io",
  "sp-runtime",
  "sp-std",
 ]
@@ -6520,6 +6527,24 @@ dependencies = [
  "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
+ "sp-runtime",
+ "sp-std",
+]
+
+[[package]]
+name = "pallet-commission-team"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "log",
+ "pallet-balances",
+ "pallet-commission-common",
+ "pallet-entity-common",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-io",
  "sp-runtime",
  "sp-std",
 ]
@@ -6641,7 +6666,6 @@ version = "0.1.0"
 dependencies = [
  "frame-support",
  "frame-system",
- "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
  "sp-core",
@@ -6726,7 +6750,6 @@ version = "0.1.0"
 dependencies = [
  "frame-support",
  "frame-system",
- "log",
  "pallet-balances",
  "pallet-entity-common",
  "parity-scale-codec",
@@ -6938,6 +6961,38 @@ dependencies = [
  "frame-system",
  "log",
  "p256",
+ "pallet-balances",
+ "pallet-grouprobot-primitives",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+]
+
+[[package]]
+name = "pallet-grouprobot-rewards"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "log",
+ "pallet-balances",
+ "pallet-grouprobot-primitives",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+]
+
+[[package]]
+name = "pallet-grouprobot-subscription"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "log",
  "pallet-balances",
  "pallet-grouprobot-primitives",
  "parity-scale-codec",

@@ -25,7 +25,7 @@ use frame_support::pallet_prelude::*;
 use frame_system::pallet_prelude::*;
 use pallet_grouprobot_primitives::*;
 use scale_info::TypeInfo;
-use sp_runtime::traits::{Saturating, Zero};
+use sp_runtime::traits::{Saturating, Zero, UniqueSaturatedInto};
 
 /// Balance 类型别名
 type BalanceOf<T> =
@@ -164,6 +164,15 @@ pub mod pallet {
 
 		/// 节点共识查询 (用于验证节点状态 + TEE 状态)
 		type NodeConsensus: NodeConsensusProvider<Self::AccountId>;
+
+		/// 🆕 10.6: 订阅层级查询 (用于检查 Bot 订阅层级 + 功能限制)
+		type Subscription: SubscriptionProvider;
+
+		/// 🆕 10.4: 统一奖励写入 (ads 节点奖励写入同一奖励池)
+		type RewardPool: RewardAccruer;
+
+		/// 🆕 10.9: Bot 注册查询 (用于绑定 CommunityAdmin 到 Bot Owner)
+		type BotRegistry: BotRegistryProvider<Self::AccountId>;
 	}
 
 	// ========================================================================
@@ -274,21 +283,30 @@ pub mod pallet {
 	pub type BannedCommunities<T: Config> =
 		StorageMap<_, Blake2_128Concat, CommunityIdHash, bool, ValueQuery>;
 
+	/// 社区管理员 (首个质押者自动成为管理员, 可提取收入/管理偏好)
+	#[pallet::storage]
+	pub type CommunityAdmin<T: Config> =
+		StorageMap<_, Blake2_128Concat, CommunityIdHash, T::AccountId>;
+
+	/// 每个质押者在每个社区的质押额 (C3: 防止 unstake 超额释放)
+	#[pallet::storage]
+	pub type CommunityStakers<T: Config> = StorageDoubleMap<
+		_,
+		Blake2_128Concat, CommunityIdHash,
+		Blake2_128Concat, T::AccountId,
+		BalanceOf<T>,
+		ValueQuery,
+	>;
+
 	// ---- TEE 节点广告收入 ----
 
-	/// 节点广告待领取奖励
-	#[pallet::storage]
-	pub type NodeAdPendingRewards<T: Config> =
-		StorageMap<_, Blake2_128Concat, NodeId, BalanceOf<T>, ValueQuery>;
-
-	/// 节点广告累计已领取
-	#[pallet::storage]
-	pub type NodeAdTotalEarned<T: Config> =
-		StorageMap<_, Blake2_128Concat, NodeId, BalanceOf<T>, ValueQuery>;
-
-	/// TEE 节点广告分成百分比 (默认 32, 即 32%)
+	/// TEE 节点广告分成百分比 (默认 15, 即 15%)
 	#[pallet::storage]
 	pub type TeeNodeAdPct<T: Config> = StorageValue<_, u32, ValueQuery>;
+
+	/// 🆕 10.5: 社区广告分成百分比 (默认 80, 即 80%). 可通过治理调整.
+	#[pallet::storage]
+	pub type CommunityAdPct<T: Config> = StorageValue<_, u32, ValueQuery>;
 
 	// ---- Phase 5: 反作弊 ----
 
@@ -450,15 +468,13 @@ pub mod pallet {
 			node_id: NodeId,
 			amount: BalanceOf<T>,
 		},
-		/// 节点广告收入已提取
-		NodeAdRevenueClaimed {
-			node_id: NodeId,
-			amount: BalanceOf<T>,
-			claimer: T::AccountId,
-		},
 		/// TEE 节点广告分成百分比已更新
 		TeeAdPercentUpdated {
 			tee_pct: u32,
+		},
+		/// 🆕 10.5: 社区广告分成百分比已更新
+		CommunityAdPercentUpdated {
+			community_pct: u32,
 		},
 	}
 
@@ -520,14 +536,20 @@ pub mod pallet {
 		NodeReportsFull,
 		/// 节点不存在或未激活
 		NodeNotActive,
-		/// 节点无待领取广告收入
-		NoNodeAdReward,
-		/// 非节点运营者
-		NotNodeOperator,
 		/// 节点非 TEE, 不允许提交广告投放收据
 		NodeNotTee,
 		/// 无效的百分比值
 		InvalidPercentage,
+		/// 非社区管理员
+		NotCommunityAdmin,
+		/// Campaign 已过期
+		CampaignExpired,
+		/// 结算转账失败
+		SettlementTransferFailed,
+		/// 🆕 10.6: Bot 订阅层级不允许禁用广告 (Free/Basic 强制投放)
+		AdsDisabledByTier,
+		/// 🆕 10.6: Bot 订阅层级不支持 TEE 功能
+		TeeNotAvailableForTier,
 	}
 
 	// ========================================================================
@@ -609,8 +631,13 @@ pub mod pallet {
 			Campaigns::<T>::try_mutate(campaign_id, |maybe| {
 				let c = maybe.as_mut().ok_or(Error::<T>::CampaignNotFound)?;
 				ensure!(c.advertiser == who, Error::<T>::NotCampaignOwner);
-				ensure!(c.status == CampaignStatus::Active || c.status == CampaignStatus::Paused,
-					Error::<T>::CampaignInactive);
+				// H1: 允许 Active/Paused/Exhausted 状态追加预算
+				ensure!(
+					c.status == CampaignStatus::Active
+					|| c.status == CampaignStatus::Paused
+					|| c.status == CampaignStatus::Exhausted,
+					Error::<T>::CampaignInactive
+				);
 
 				T::Currency::reserve(&who, amount)?;
 				c.total_budget = c.total_budget.saturating_add(amount);
@@ -727,6 +754,10 @@ pub mod pallet {
 			ensure!(campaign.status == CampaignStatus::Active, Error::<T>::CampaignNotActive);
 			ensure!(campaign.review_status == AdReviewStatus::Approved, Error::<T>::CampaignNotApproved);
 
+			// M8: 检查 Campaign 是否过期
+			let now = frame_system::Pallet::<T>::block_number();
+			ensure!(now <= campaign.expires_at, Error::<T>::CampaignExpired);
+
 			// 验证节点存在且活跃
 			ensure!(T::NodeConsensus::is_node_active(&node_id), Error::<T>::NodeNotActive);
 
@@ -735,6 +766,19 @@ pub mod pallet {
 
 			// 社区未被禁止
 			ensure!(!BannedCommunities::<T>::get(&community_id_hash), Error::<T>::CommunityBanned);
+
+			// 🆕 10.6: 检查 Bot 的订阅层级功能限制
+			// 用 community_id_hash 作为 bot_id_hash 的代理查询
+			let gate = T::Subscription::effective_feature_gate(&community_id_hash);
+
+			// Free/Basic 层级没有 TEE 权限, 不允许 TEE 节点投放广告
+			ensure!(gate.tee_access, Error::<T>::TeeNotAvailableForTier);
+
+			// Pro/Enterprise 可禁用广告; 若社区无质押 (已退出广告), 拒绝收据
+			if gate.can_disable_ads {
+				let stake = CommunityAdStake::<T>::get(&community_id_hash);
+				ensure!(!stake.is_zero(), Error::<T>::AdsDisabledByTier);
+			}
 
 			// P5 L3: 社区未因突增被暂停
 			ensure!(
@@ -808,105 +852,99 @@ pub mod pallet {
 			let mut total_cost = BalanceOf::<T>::zero();
 			let mut community_share_total = BalanceOf::<T>::zero();
 
-			DeliveryReceipts::<T>::mutate(&community_id_hash, |receipts| {
-				for receipt in receipts.iter_mut() {
-					if receipt.settled {
-						continue;
+			// 三方分成比例 (10.5: community_pct 从 StorageValue 读取, 默认 80)
+			let community_pct = {
+				let v = CommunityAdPct::<T>::get();
+				if v == 0 { 80u32 } else { v }
+			};
+			let tee_pct = {
+				let v = TeeNodeAdPct::<T>::get();
+				if v == 0 { 15u32 } else { v }
+			};
+
+			// 收集待结算收据数据 (避免在 mutate 闭包内做复杂转账)
+			let receipts_snapshot = DeliveryReceipts::<T>::get(&community_id_hash);
+			let mut settle_items: alloc::vec::Vec<(u64, BalanceOf<T>, BalanceOf<T>, BalanceOf<T>, NodeId, T::AccountId)> = alloc::vec::Vec::new();
+
+			for receipt in receipts_snapshot.iter() {
+				if receipt.settled {
+					continue;
+				}
+				let cap = CommunityAudienceCap::<T>::get(&community_id_hash);
+				let effective = if cap > 0 {
+					core::cmp::min(receipt.audience_size, cap)
+				} else {
+					receipt.audience_size
+				};
+				if let Some(campaign) = Campaigns::<T>::get(receipt.campaign_id) {
+					let cost = Self::compute_cpm_cost(campaign.bid_per_mille, effective);
+					let escrow = CampaignEscrow::<T>::get(receipt.campaign_id);
+					let actual_cost = core::cmp::min(cost, escrow);
+					if !actual_cost.is_zero() {
+						let community_share = Self::percent_of(actual_cost, community_pct);
+						let node_share = Self::percent_of(actual_cost, tee_pct);
+						settle_items.push((
+							receipt.campaign_id,
+							actual_cost,
+							community_share,
+							node_share,
+							receipt.node_id,
+							campaign.advertiser.clone(),
+						));
 					}
+				}
+			}
 
-					// 计算有效 audience
-					let cap = CommunityAudienceCap::<T>::get(&community_id_hash);
-					let effective = if cap > 0 {
-						core::cmp::min(receipt.audience_size, cap)
-					} else {
-						receipt.audience_size
-					};
+			// 执行转账 (C1+H4: 全额转入国库, 错误传播)
+			for (campaign_id, actual_cost, community_share, node_share, node_id, advertiser) in settle_items.iter() {
+				// 解锁 advertiser 的 reserve
+				T::Currency::unreserve(advertiser, *actual_cost);
 
-					if let Some(campaign) = Campaigns::<T>::get(receipt.campaign_id) {
-						// CPM 计费: cost = bid_per_mille * effective / 1000
-						let cost = Self::compute_cpm_cost(campaign.bid_per_mille, effective);
+				// C1: 将全部 actual_cost 从广告主转入国库
+				// H4: 错误传播, 不再静默忽略
+				T::Currency::transfer(
+					advertiser,
+					&treasury,
+					*actual_cost,
+					ExistenceRequirement::AllowDeath,
+				).map_err(|_| Error::<T>::SettlementTransferFailed)?;
 
-						// 从 escrow 扣除
-						let escrow = CampaignEscrow::<T>::get(receipt.campaign_id);
-						let actual_cost = core::cmp::min(cost, escrow);
+				// 节点收入记账 (10.4: 通过 RewardPool trait 写入统一奖励池, 由 rewards pallet 统一 claim)
+				if !node_share.is_zero() {
+					let share_u128: u128 = (*node_share).unique_saturated_into();
+					T::RewardPool::accrue_node_reward(node_id, share_u128);
+					Self::deposit_event(Event::NodeAdRewardAccrued {
+						node_id: *node_id,
+						amount: *node_share,
+					});
+				}
 
-						if !actual_cost.is_zero() {
-							// 解锁 advertiser 的 reserve
-							T::Currency::unreserve(&campaign.advertiser, actual_cost);
+				// 社区收入记账
+				CommunityClaimable::<T>::mutate(&community_id_hash, |c| {
+					*c = c.saturating_add(*community_share);
+				});
 
-							// 二方分成: 社区 60%, TEE 节点 (治理可调, 默认 32%), 余额→国库
-							let community_pct = 60u32;
-							let tee_pct = {
-								let v = TeeNodeAdPct::<T>::get();
-								if v == 0 { 32u32 } else { v }
-							};
+				// 更新 escrow
+				CampaignEscrow::<T>::mutate(campaign_id, |e| {
+					*e = e.saturating_sub(*actual_cost);
+				});
 
-							let community_share = Self::percent_of(actual_cost, community_pct);
-							let node_share = Self::percent_of(actual_cost, tee_pct);
-
-							// 国库 = 剩余部分
-							let final_treasury_share = actual_cost
-								.saturating_sub(community_share)
-								.saturating_sub(node_share);
-
-							// 转给国库
-							if !final_treasury_share.is_zero() {
-								let _ = T::Currency::transfer(
-									&campaign.advertiser,
-									&treasury,
-									final_treasury_share,
-									ExistenceRequirement::AllowDeath,
-								);
-							}
-
-							// 节点收入存入 NodeAdPendingRewards
-							if !node_share.is_zero() {
-								// 节点广告收入从 advertiser 转入国库代管
-								let _ = T::Currency::transfer(
-									&campaign.advertiser,
-									&treasury,
-									node_share,
-									ExistenceRequirement::AllowDeath,
-								);
-								NodeAdPendingRewards::<T>::mutate(&receipt.node_id, |pending| {
-									*pending = pending.saturating_add(node_share);
-								});
-
-								Self::deposit_event(Event::NodeAdRewardAccrued {
-									node_id: receipt.node_id,
-									amount: node_share,
-								});
-							}
-
-							// 群主收入存入 claimable
-							CommunityClaimable::<T>::mutate(&community_id_hash, |c| {
-								*c = c.saturating_add(community_share);
-							});
-
-							// 更新 escrow
-							CampaignEscrow::<T>::mutate(receipt.campaign_id, |e| {
-								*e = e.saturating_sub(actual_cost);
-							});
-
-							// 更新 campaign spent
-							Campaigns::<T>::mutate(receipt.campaign_id, |maybe| {
-								if let Some(c) = maybe {
-									c.spent = c.spent.saturating_add(actual_cost);
-									// 检查预算耗尽
-									if CampaignEscrow::<T>::get(receipt.campaign_id).is_zero() {
-										c.status = CampaignStatus::Exhausted;
-									}
-								}
-							});
-
-							total_cost = total_cost.saturating_add(actual_cost);
-							community_share_total = community_share_total.saturating_add(community_share);
+				// 更新 campaign spent
+				Campaigns::<T>::mutate(campaign_id, |maybe| {
+					if let Some(c) = maybe {
+						c.spent = c.spent.saturating_add(*actual_cost);
+						if CampaignEscrow::<T>::get(campaign_id).is_zero() {
+							c.status = CampaignStatus::Exhausted;
 						}
 					}
+				});
 
-					receipt.settled = true;
-				}
-			});
+				total_cost = total_cost.saturating_add(*actual_cost);
+				community_share_total = community_share_total.saturating_add(*community_share);
+			}
+
+			// M7: 结算完毕, 清空本 Era 收据
+			DeliveryReceipts::<T>::remove(&community_id_hash);
 
 			// 更新收入统计
 			if !total_cost.is_zero() {
@@ -934,6 +972,12 @@ pub mod pallet {
 
 			Campaigns::<T>::try_mutate(campaign_id, |maybe| {
 				let c = maybe.as_mut().ok_or(Error::<T>::CampaignNotFound)?;
+				// H2: 只允许对 Active 且已审核通过/待审核的 Campaign 举报
+				ensure!(c.status == CampaignStatus::Active, Error::<T>::CampaignNotActive);
+				ensure!(
+					c.review_status == AdReviewStatus::Approved || c.review_status == AdReviewStatus::Pending,
+					Error::<T>::AlreadyReviewed
+				);
 				c.review_status = AdReviewStatus::Flagged;
 				Ok::<(), DispatchError>(())
 			})?;
@@ -942,7 +986,7 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// 群主提取广告收入
+		/// 社区管理员提取广告收入
 		#[pallet::call_index(8)]
 		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
 		pub fn claim_ad_revenue(
@@ -951,10 +995,15 @@ pub mod pallet {
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 
+			// H5: 仅社区管理员可提取
+			let admin = CommunityAdmin::<T>::get(&community_id_hash)
+				.ok_or(Error::<T>::NotCommunityAdmin)?;
+			ensure!(admin == who, Error::<T>::NotCommunityAdmin);
+
 			let amount = CommunityClaimable::<T>::get(&community_id_hash);
 			ensure!(!amount.is_zero(), Error::<T>::NothingToClaim);
 
-			// 从国库转给群主 (广告收入在结算时已从 advertiser 转出)
+			// C1: 从国库转给群主 (结算时已将全部 actual_cost 转入国库)
 			let treasury = T::TreasuryAccount::get();
 			T::Currency::transfer(
 				&treasury,
@@ -987,6 +1036,18 @@ pub mod pallet {
 
 			T::Currency::reserve(&who, amount)?;
 
+			// C3: 记录个人质押额
+			let personal = CommunityStakers::<T>::get(&community_id_hash, &who);
+			CommunityStakers::<T>::insert(&community_id_hash, &who, personal.saturating_add(amount));
+
+			// 🆕 10.9: 社区管理员绑定 Bot Owner (而非首个质押者)
+			if !CommunityAdmin::<T>::contains_key(&community_id_hash) {
+				// 尝试通过 BotRegistry 查找 community 对应的 Bot Owner
+				let admin = T::BotRegistry::bot_owner(&community_id_hash)
+					.unwrap_or_else(|| who.clone());
+				CommunityAdmin::<T>::insert(&community_id_hash, admin);
+			}
+
 			let new_stake = CommunityAdStake::<T>::get(&community_id_hash).saturating_add(amount);
 			CommunityAdStake::<T>::insert(&community_id_hash, new_stake);
 
@@ -1012,10 +1073,22 @@ pub mod pallet {
 			let who = ensure_signed(origin)?;
 			ensure!(!amount.is_zero(), Error::<T>::ZeroStakeAmount);
 
+			// C3: 检查个人质押额, 防止超额释放
+			let personal = CommunityStakers::<T>::get(&community_id_hash, &who);
+			ensure!(personal >= amount, Error::<T>::InsufficientStake);
+
 			let current = CommunityAdStake::<T>::get(&community_id_hash);
 			ensure!(current >= amount, Error::<T>::InsufficientStake);
 
 			T::Currency::unreserve(&who, amount);
+
+			// 更新个人质押额
+			let new_personal = personal.saturating_sub(amount);
+			if new_personal.is_zero() {
+				CommunityStakers::<T>::remove(&community_id_hash, &who);
+			} else {
+				CommunityStakers::<T>::insert(&community_id_hash, &who, new_personal);
+			}
 
 			let new_stake = current.saturating_sub(amount);
 			CommunityAdStake::<T>::insert(&community_id_hash, new_stake);
@@ -1096,7 +1169,7 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// 社区拉黑广告主
+		/// 社区拉黑广告主 (H3: 仅社区管理员)
 		#[pallet::call_index(14)]
 		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
 		pub fn community_block_advertiser(
@@ -1104,7 +1177,11 @@ pub mod pallet {
 			community_id_hash: CommunityIdHash,
 			advertiser: T::AccountId,
 		) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
+			let who = ensure_signed(origin)?;
+			// H3: 仅社区管理员可操作
+			let admin = CommunityAdmin::<T>::get(&community_id_hash)
+				.ok_or(Error::<T>::NotCommunityAdmin)?;
+			ensure!(admin == who, Error::<T>::NotCommunityAdmin);
 
 			CommunityBlacklist::<T>::try_mutate(&community_id_hash, |list| {
 				ensure!(!list.contains(&advertiser), Error::<T>::AlreadyBlacklisted);
@@ -1119,7 +1196,7 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// 社区取消拉黑广告主
+		/// 社区取消拉黑广告主 (H3: 仅社区管理员)
 		#[pallet::call_index(15)]
 		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
 		pub fn community_unblock_advertiser(
@@ -1127,7 +1204,10 @@ pub mod pallet {
 			community_id_hash: CommunityIdHash,
 			advertiser: T::AccountId,
 		) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
+			let who = ensure_signed(origin)?;
+			let admin = CommunityAdmin::<T>::get(&community_id_hash)
+				.ok_or(Error::<T>::NotCommunityAdmin)?;
+			ensure!(admin == who, Error::<T>::NotCommunityAdmin);
 
 			CommunityBlacklist::<T>::try_mutate(&community_id_hash, |list| {
 				let pos = list.iter().position(|a| a == &advertiser)
@@ -1143,7 +1223,7 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// 社区指定广告主 (白名单)
+		/// 社区指定广告主 (白名单) (H3: 仅社区管理员)
 		#[pallet::call_index(16)]
 		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
 		pub fn community_prefer_advertiser(
@@ -1151,7 +1231,10 @@ pub mod pallet {
 			community_id_hash: CommunityIdHash,
 			advertiser: T::AccountId,
 		) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
+			let who = ensure_signed(origin)?;
+			let admin = CommunityAdmin::<T>::get(&community_id_hash)
+				.ok_or(Error::<T>::NotCommunityAdmin)?;
+			ensure!(admin == who, Error::<T>::NotCommunityAdmin);
 
 			CommunityWhitelist::<T>::try_mutate(&community_id_hash, |list| {
 				ensure!(!list.contains(&advertiser), Error::<T>::AlreadyWhitelisted);
@@ -1183,20 +1266,38 @@ pub mod pallet {
 			let slash_amount = Self::percent_of(stake, slash_pct);
 
 			if !slash_amount.is_zero() {
+				// C2: 从社区管理员的 reserve 中释放 slash_amount, 再转给举报者/国库
+				let admin = CommunityAdmin::<T>::get(&community_id_hash)
+					.ok_or(Error::<T>::NotCommunityAdmin)?;
+
+				// unreserve 管理员的质押 (实际从 reserved balance 释放到 free)
+				T::Currency::unreserve(&admin, slash_amount);
+
 				// 50% 给举报者, 50% 入国库
 				let reporter_share = Self::percent_of(slash_amount, 50u32);
 				let treasury_share = slash_amount.saturating_sub(reporter_share);
-
-				// slash = unreserve from stake
-				// (质押者未知, 简化: 直接从 reserve 中减少质押并铸币给举报者/国库)
-				// 实际实现中应记录 staker accountId, 此处简化
 				let treasury = T::TreasuryAccount::get();
 
 				if !reporter_share.is_zero() {
-					let _ = T::Currency::deposit_into_existing(&reporter, reporter_share);
+					let _ = T::Currency::transfer(
+						&admin, &reporter, reporter_share,
+						ExistenceRequirement::AllowDeath,
+					);
 				}
 				if !treasury_share.is_zero() {
-					let _ = T::Currency::deposit_into_existing(&treasury, treasury_share);
+					let _ = T::Currency::transfer(
+						&admin, &treasury, treasury_share,
+						ExistenceRequirement::AllowDeath,
+					);
+				}
+
+				// C3: 更新管理员个人质押记录
+				let personal = CommunityStakers::<T>::get(&community_id_hash, &admin);
+				let new_personal = personal.saturating_sub(slash_amount);
+				if new_personal.is_zero() {
+					CommunityStakers::<T>::remove(&community_id_hash, &admin);
+				} else {
+					CommunityStakers::<T>::insert(&community_id_hash, &admin, new_personal);
 				}
 			}
 
@@ -1270,7 +1371,7 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// 检查 audience 突增并自动暂停 (L3, 任何人可触发)
+		/// 检查 audience 突增并自动暂停 (L3, H6: 仅 TEE 节点运营者可触发)
 		#[pallet::call_index(20)]
 		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
 		pub fn check_audience_surge(
@@ -1278,7 +1379,9 @@ pub mod pallet {
 			community_id_hash: CommunityIdHash,
 			current_audience: u32,
 		) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
+			let who = ensure_signed(origin)?;
+			// H6: 仅 TEE 节点运营者可提交突增检测
+			ensure!(T::NodeConsensus::is_tee_node_by_operator(&who), Error::<T>::NodeNotTee);
 
 			let previous = PreviousEraAudience::<T>::get(&community_id_hash);
 			let threshold_pct = T::AudienceSurgeThresholdPct::get();
@@ -1323,47 +1426,10 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// 节点运营者提取广告收入
-		#[pallet::call_index(21)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
-		pub fn claim_node_ad_revenue(
-			origin: OriginFor<T>,
-			node_id: NodeId,
-		) -> DispatchResult {
-			let who = ensure_signed(origin)?;
-
-			// 验证调用者是节点运营者
-			let operator = T::NodeConsensus::node_operator(&node_id)
-				.ok_or(Error::<T>::NodeNotActive)?;
-			ensure!(operator == who, Error::<T>::NotNodeOperator);
-
-			let amount = NodeAdPendingRewards::<T>::get(&node_id);
-			ensure!(!amount.is_zero(), Error::<T>::NoNodeAdReward);
-
-			// 从国库转给节点运营者
-			let treasury = T::TreasuryAccount::get();
-			T::Currency::transfer(
-				&treasury,
-				&who,
-				amount,
-				ExistenceRequirement::AllowDeath,
-			)?;
-
-			NodeAdPendingRewards::<T>::remove(&node_id);
-			NodeAdTotalEarned::<T>::mutate(&node_id, |earned| {
-				*earned = earned.saturating_add(amount);
-			});
-
-			Self::deposit_event(Event::NodeAdRevenueClaimed {
-				node_id,
-				amount,
-				claimer: who,
-			});
-			Ok(())
-		}
+		// 🆕 10.4: claim_node_ad_revenue 已移除 — 节点奖励统一由 rewards pallet 的 claim_rewards 领取
 
 		/// 设置 TEE 节点广告分成百分比 (Root/DAO)
-		/// 约束: community(60%) + tee_pct <= 100, 即 tee_pct <= 40
+		/// 约束: community_pct + tee_pct <= 100
 		#[pallet::call_index(22)]
 		#[pallet::weight(Weight::from_parts(10_000_000, 3_000))]
 		pub fn set_tee_ad_percentage(
@@ -1371,14 +1437,56 @@ pub mod pallet {
 			tee_pct: u32,
 		) -> DispatchResult {
 			ensure_root(origin)?;
-			// 社区固定 60%, TEE 节点 + 国库 ≤ 40%
-			ensure!(tee_pct <= 40, Error::<T>::InvalidPercentage);
+			let community_pct = {
+				let v = CommunityAdPct::<T>::get();
+				if v == 0 { 80u32 } else { v }
+			};
+			// community_pct + tee_pct 不得超过 100
+			ensure!(community_pct.saturating_add(tee_pct) <= 100, Error::<T>::InvalidPercentage);
 
 			TeeNodeAdPct::<T>::put(tee_pct);
 
 			Self::deposit_event(Event::TeeAdPercentUpdated {
 				tee_pct,
 			});
+			Ok(())
+		}
+
+		/// 🆕 10.5: 设置社区广告分成百分比 (Root/DAO)
+		/// 约束: community_pct + tee_pct <= 100, community_pct >= 50 (保障社区最低收益)
+		#[pallet::call_index(24)]
+		#[pallet::weight(Weight::from_parts(10_000_000, 3_000))]
+		pub fn set_community_ad_percentage(
+			origin: OriginFor<T>,
+			community_pct: u32,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			// 社区分成不低于 50%, 不超过 95%
+			ensure!(community_pct >= 50 && community_pct <= 95, Error::<T>::InvalidPercentage);
+			let tee_pct = {
+				let v = TeeNodeAdPct::<T>::get();
+				if v == 0 { 15u32 } else { v }
+			};
+			ensure!(community_pct.saturating_add(tee_pct) <= 100, Error::<T>::InvalidPercentage);
+
+			CommunityAdPct::<T>::put(community_pct);
+
+			Self::deposit_event(Event::CommunityAdPercentUpdated {
+				community_pct,
+			});
+			Ok(())
+		}
+
+		/// 设置/变更社区管理员 (Root/DAO)
+		#[pallet::call_index(23)]
+		#[pallet::weight(Weight::from_parts(10_000_000, 3_000))]
+		pub fn set_community_admin(
+			origin: OriginFor<T>,
+			community_id_hash: CommunityIdHash,
+			new_admin: T::AccountId,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			CommunityAdmin::<T>::insert(&community_id_hash, new_admin);
 			Ok(())
 		}
 	}

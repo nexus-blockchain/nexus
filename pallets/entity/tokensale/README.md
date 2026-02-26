@@ -109,7 +109,7 @@ create_sale_round ──→ [NotStarted] ──┤
 ### SaleRound
 
 ```rust
-pub struct SaleRound<AccountId, Balance, BlockNumber, AssetId, MaxPaymentOptions> {
+pub struct SaleRound<AccountId, Balance, BlockNumber> {
     pub id: u64,
     pub entity_id: u64,
     pub mode: SaleMode,
@@ -118,7 +118,7 @@ pub struct SaleRound<AccountId, Balance, BlockNumber, AssetId, MaxPaymentOptions
     pub sold_amount: Balance,
     pub remaining_amount: Balance,
     pub participants_count: u32,
-    pub payment_options: BoundedVec<PaymentConfig<AssetId, Balance>, MaxPaymentOptions>,
+    pub payment_options_count: u32,             // 实际数据在 RoundPaymentOptions
     pub vesting_config: VestingConfig<BlockNumber>,
     pub kyc_required: bool,
     pub min_kyc_level: u8,                     // 0-4
@@ -129,6 +129,9 @@ pub struct SaleRound<AccountId, Balance, BlockNumber, AssetId, MaxPaymentOptions
     pub creator: AccountId,
     pub created_at: BlockNumber,
     pub funds_withdrawn: bool,                 // v0.2.0 新增
+    pub cancelled_at: Option<BlockNumber>,      // v0.3.0 新增
+    pub total_refunded_tokens: Balance,         // v0.3.0 新增
+    pub total_refunded_nex: Balance,            // v0.3.0 新增
 }
 ```
 
@@ -222,7 +225,7 @@ impl pallet_entity_tokensale::Config for Runtime {
 | 5 | `start_sale` | 创建者 | NotStarted | 锁定 Entity 代币 + 需 ≥1 支付选项 |
 | 6 | `subscribe` | signed | Active | NEX → 托管（时间窗口+KYC+白名单校验） |
 | 7 | `end_sale` | 创建者 | Active | 释放未售代币（须 ≥ end_block 或已售罄） |
-| 8 | `claim_tokens` | 认购者 | Ended/Completed | Entity 代币 → 用户（初始解锁） |
+| 8 | `claim_tokens` | 认购者 | Ended | Entity 代币 → 用户（初始解锁） |
 | 9 | `unlock_tokens` | 认购者 | 已 claimed | Entity 代币 → 用户（后续解锁） |
 | 10 | `cancel_sale` | 创建者 | NotStarted/Active | 释放未售代币 → Cancelled |
 | 11 | `claim_refund` | 认购者 | Cancelled | NEX 退还 + 释放对应代币 |
@@ -333,7 +336,7 @@ new_unlock = (initial_unlock + unlocked) - already_unlocked
 | `start_sale` | 轮次创建者 | NotStarted + ≥1 支付选项 |
 | `subscribe` | signed | Active + 时间窗口 + KYC + 白名单 |
 | `end_sale` | 轮次创建者 | Active + (now ≥ end_block 或 已售罄) |
-| `claim_tokens` | 认购者 | Ended/Completed + 未 claimed |
+| `claim_tokens` | 认购者 | Ended + 未 claimed |
 | `unlock_tokens` | 认购者 | 已 claimed + 悬崖期后 |
 | `cancel_sale` | 轮次创建者 | NotStarted/Active |
 | `claim_refund` | 认购者 | Cancelled + 未退款 |
@@ -343,7 +346,7 @@ new_unlock = (initial_unlock + unlocked) - already_unlocked
 
 ```bash
 cargo test -p pallet-entity-tokensale
-# 37 tests passed
+# 49 tests passed
 ```
 
 | 测试 | 覆盖 |
@@ -383,6 +386,18 @@ cargo test -p pallet-entity-tokensale
 | `end_sale_allows_after_end_block` | 超过 end_block 后正常结束 |
 | `cliff_vesting_unlock_interval_step_function` | Cliff 阶梯解锁各阶段验证 |
 | `linear_vesting_continuous_unlock` | Linear 连续线性不受 interval 影响 |
+| `on_initialize_auto_ends_expired_sale` | on_initialize 自动结束过期发售 |
+| `on_initialize_does_not_end_before_expiry` | 未过期不结束 |
+| `on_initialize_handles_multiple_rounds` | 多轮次部分过期处理 |
+| `payment_options_stored_separately` | 支付选项独立存储验证 |
+| `reclaim_unclaimed_tokens_after_grace_period` | 退款宽限期回收流程 |
+| `reclaim_rejects_non_creator` | 非创建者不能回收 |
+| `dutch_auction_allows_zero_price_in_payment_option` | 荷兰拍卖允许 price=0 |
+| `non_dutch_rejects_zero_price` | 非荷兰拍卖拒绝 price=0 |
+| `dutch_auction_start_requires_configure` | 荷兰拍卖需先配置 |
+| `c1_reclaim_blocks_subsequent_withdraw` | C1: reclaim 后阻止 withdraw 双重提取 |
+| `h2_claim_tokens_rejects_completed_from_cancel` | H2: Completed 状态拒绝 claim_tokens |
+| `h3_add_payment_option_rejects_non_none_asset_id` | H3: 拒绝非 None asset_id |
 
 ## 版本历史
 
@@ -392,6 +407,7 @@ cargo test -p pallet-entity-tokensale
 | v0.1.1 | 2026-02-09 | 模块文件夹从 `sale` 重命名为 `tokensale`，更新 README |
 | v0.2.0 | 2026-02-09 | 深度审计修复（20 项），详见下方 |
 | v0.3.0 | 2026-02-23 | 二次深度审计（4 项修复 + 5 新测试），详见下方 |
+| v0.4.0 | 2026-02-26 | 三次审计（3 项修复 + 3 新测试），详见下方 |
 
 ### v0.2.0 审计修复详情
 
@@ -424,11 +440,17 @@ cargo test -p pallet-entity-tokensale
 - 新增 5 个测试覆盖上述修复
 - 已有 4 个测试适配 H2 变更（end_sale 前需推进到 end_block）
 
+### v0.4.0 三次审计（3 项修复 + 3 新测试）
+
+- **C1**: `reclaim_unclaimed_tokens` 未设置 `funds_withdrawn = true` → 允许 `withdraw_funds` 双重提取，跨轮资金污染。修复: reclaim 时同步标记 `funds_withdrawn = true`
+- **H2**: `claim_tokens` 允许 `Completed` 状态（来自 cancel→reclaim 路径，代币已 unreserve）→ 认购者拿不到代币但状态标记已领取。修复: 仅允许 `Ended` 状态
+- **H3**: `add_payment_option` 允许 `asset_id = Some(x)` → `RaisedFunds` 键不一致，`withdraw_funds` 只读 `None` 键导致资金永久锁定。修复: 强制 `asset_id = None`
+- **M4**: Mock `repatriate_reserved` 返回值语义与真实 pallet 不一致（返回差额 vs 实际量）。修复: 改为返回 `Ok(actual)`
+- 新增 3 个回归测试
+
 **已知设计局限（标记未修）：**
-- L1: 无 `on_initialize` 自动结束机制，过期发售需手动调用 `end_sale`
-- L2: `SaleRound` 结构体较大（含 `BoundedVec<PaymentConfig>`），频繁读写开销高
-- L3: 未领取退款会导致 Entity 代币永久锁定（设计如此，用户自负）
-- L4: DutchAuction 模式下 `payment_option.price` 被荷兰公式覆盖，该字段冗余
+- L1: `EntityTokenProvider::repatriate_reserved` 返回值语义（实际量 vs 差额）与 Substrate `ReservableCurrency` 惯例不同，跨 pallet 影响范围较广（market 等也使用），暂不修改
+- L2: `RoundStatus` 枚举中 `WhitelistOpen`、`SoldOut`、`Settling` 三个值为预留，从未使用
 
 ## 许可证
 

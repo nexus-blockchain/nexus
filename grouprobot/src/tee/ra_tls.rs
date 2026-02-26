@@ -425,9 +425,10 @@ impl ProvisionState {
             TeeMode::Software => {
                 // 软件模式: 模拟 Quote (包含 pk_hash 在 report_data 位置)
                 // 前端开发/测试用, 生产环境必须是 Hardware 模式
+                // version=0 标记: 客户端可据此识别并拒绝 Software 模式 Quote
                 let mut mock_quote = vec![0u8; 256];
-                // 模拟 header (4 bytes version)
-                mock_quote[0..4].copy_from_slice(&4u32.to_le_bytes());
+                // 模拟 header (4 bytes version=0, 明确标记为非真实 Quote)
+                mock_quote[0..4].copy_from_slice(&0u32.to_le_bytes());
                 // 模拟 report_data (offset 568 in real TDX Quote, 此处简化为 offset 48)
                 if mock_quote.len() >= 80 {
                     mock_quote[48..80].copy_from_slice(pk_hash);

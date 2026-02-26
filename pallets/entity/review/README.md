@@ -7,7 +7,7 @@
 `pallet-entity-review` 是 Entity 商城系统的评价管理模块，负责订单完成后的评分提交和店铺评分更新。
 
 - **Runtime pallet_index:** 123
-- **版本:** 0.2.0-audit
+- **版本:** 0.3.0-audit
 
 ### 核心功能
 
@@ -61,6 +61,7 @@ impl pallet_entity_review::Config for Runtime {
 | `OrderProvider` | `OrderProvider<AccountId, u128>` | 订单查询接口 |
 | `ShopProvider` | `ShopProvider<AccountId>` | 店铺更新接口 |
 | `MaxCidLength` | `Get<u32>` (常量) | CID 最大长度 |
+| `WeightInfo` | `WeightInfo` | 权重信息（benchmark 集成） |
 
 ## Extrinsics
 
@@ -101,6 +102,7 @@ pub fn submit_review(
 |--------|------|------|
 | `Reviews` | `StorageMap<Blake2_128Concat, u64, MallReviewOf<T>>` | 订单 ID → 评价记录 |
 | `ReviewCount` | `StorageValue<u64, ValueQuery>` | 全局评价总数（默认 0） |
+| `ShopReviewCount` | `StorageMap<Blake2_128Concat, u64, u64, ValueQuery>` | 店铺 ID → 该店铺评价数量 |
 
 > **L1 备注：** 当前无用户→评价索引（仅 `order_id → review`），按用户查询需遍历或链下索引。
 
@@ -120,6 +122,7 @@ pub fn submit_review(
 | `AlreadyReviewed` | 该订单已评价 |
 | `InvalidRating` | 评分不在 1-5 范围 |
 | `CidTooLong` | CID 超过 `MaxCidLength` 限制 |
+| `EmptyCid` | CID 为空（`Some(vec![])` 无意义） |
 
 ## 依赖接口
 
@@ -148,8 +151,9 @@ pallets/entity/review/
 ├── README.md
 └── src/
     ├── lib.rs      # 主模块（Config、Storage、Extrinsics、Events、Errors）
+    ├── weights.rs  # 权重定义（WeightInfo trait + SubstrateWeight）
     ├── mock.rs     # 测试 mock runtime
-    └── tests.rs    # 单元测试（24 tests）
+    └── tests.rs    # 单元测试（29 tests）
 ```
 
 ## 审计记录 (v0.2.0)
@@ -157,7 +161,7 @@ pallets/entity/review/
 | 级别 | ID | 问题 | 修复 |
 |------|-----|------|------|
 | Critical | C1 | `MallReview` 缺少 `DecodeWithMemTracking` | 添加 derive |
-| Critical | C2 | `mock.rs` / `tests.rs` 不存在，零测试覆盖 | 创建 24 个测试 |
+| Critical | C2 | `mock.rs` / `tests.rs` 不存在，零测试覆盖 | 创建 22 个测试 |
 | Critical | C3 | `submit_review` weight `proof_size=0` | 修复为 `(35_000_000, 5_000)` |
 | High | H1 | `update_shop_rating` 失败被 `let _ =` 静默忽略 | 改为传播错误 `?` |
 | High | H2 | `order_exists` 冗余调用（`order_buyer` 已隐含检查） | 移除 |
@@ -166,9 +170,22 @@ pallets/entity/review/
 | Medium | M3 | Config 中 `RuntimeEvent` 已弃用 | 移除，使用 bound 语法 |
 | Low | L1 | 无用户→评价索引 | 文档标注，暂不实现 |
 
+## 审计记录 (v0.3.0)
+
+| 级别 | ID | 问题 | 修复 |
+|------|-----|------|------|
+| High | H1 | `submit_review` 接受空 CID `Some(vec![])` — 无语义价值，浪费存储 | 添加 `ensure!(!c.is_empty(), EmptyCid)` |
+| High | H2 | 无 per-shop 评价计数 — 查询店铺评价数量需全表扫描 | 新增 `ShopReviewCount` StorageMap |
+| Medium | M1 | 权重硬编码 `(35M, 5K)` 无 `WeightInfo` trait — 不支持 benchmark 集成 | 新建 `weights.rs` + Config `WeightInfo` |
+| Medium | M2 | README 说 "24 tests" 实际 22 个 | 修正 |
+| Low | L1 | 无评价时间窗口 — 订单完成后可无限期评价 | 记录（需 OrderProvider 扩展） |
+| Low | L2 | 无评价审核/删除机制 — 管理员无法处理虚假评价 | 记录（设计决策） |
+| Low | L3 | CID 格式不验证（仅长度检查，不校验 IPFS 编码） | 记录（链上验证成本过高） |
+
 ## 版本历史
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
-| v0.2.0 | 2026-02-09 | 深度审计：C3/H2/M3/L1 共 9 项修复，24 测试 |
+| v0.3.0 | 2026-02-26 | 深度审计 Round 2：H1/H2/M1/M2 共 4 项修复，+7 测试（29 total） |
+| v0.2.0 | 2026-02-09 | 深度审计：C3/H2/M3/L1 共 9 项修复，22 测试 |
 | v0.1.0 | 2026-01-31 | 从 pallet-mall 拆分，独立评价模块 |

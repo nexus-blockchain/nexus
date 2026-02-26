@@ -810,12 +810,12 @@ fn on_initialize_handles_multiple_rounds() {
 fn payment_options_stored_separately() {
     new_test_ext().execute_with(|| {
         let round_id = setup_round();
-        // 添加 2 个支付选项
+        // H3-fix: 仅允许 None asset_id，添加 2 个不同价格的 NEX 选项
         assert_ok!(EntityTokenSale::add_payment_option(
             RuntimeOrigin::signed(CREATOR), round_id, None, 100u128, 10u128, 10_000u128,
         ));
         assert_ok!(EntityTokenSale::add_payment_option(
-            RuntimeOrigin::signed(CREATOR), round_id, Some(1u64), 50u128, 5u128, 5_000u128,
+            RuntimeOrigin::signed(CREATOR), round_id, None, 50u128, 5u128, 5_000u128,
         ));
 
         // SaleRound 只记录计数
@@ -883,6 +883,80 @@ fn reclaim_unclaimed_tokens_after_grace_period() {
         // 轮次标记为 Completed
         let round = SaleRounds::<Test>::get(round_id).unwrap();
         assert_eq!(round.status, RoundStatus::Completed);
+        // C1-fix: funds_withdrawn 也被标记
+        assert!(round.funds_withdrawn);
+    });
+}
+
+// ==================== C1-fix: reclaim 后 withdraw_funds 被阻止 ====================
+
+#[test]
+fn c1_reclaim_blocks_subsequent_withdraw() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+
+        // 认购
+        assert_ok!(EntityTokenSale::subscribe(
+            RuntimeOrigin::signed(BUYER), round_id, 100u128, None,
+        ));
+
+        // 取消
+        assert_ok!(EntityTokenSale::cancel_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // 推进到宽限期后
+        frame_system::Pallet::<Test>::set_block_number(200);
+
+        // reclaim
+        assert_ok!(EntityTokenSale::reclaim_unclaimed_tokens(
+            RuntimeOrigin::signed(CREATOR), round_id,
+        ));
+
+        // withdraw_funds 应被 FundsAlreadyWithdrawn 阻止
+        assert_noop!(
+            EntityTokenSale::withdraw_funds(RuntimeOrigin::signed(CREATOR), round_id),
+            Error::<Test>::FundsAlreadyWithdrawn
+        );
+    });
+}
+
+// ==================== H2-fix: claim_tokens 拒绝 Completed 状态 ====================
+
+#[test]
+fn h2_claim_tokens_rejects_completed_from_cancel() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+
+        assert_ok!(EntityTokenSale::subscribe(
+            RuntimeOrigin::signed(BUYER), round_id, 100u128, None,
+        ));
+
+        // cancel → reclaim → Completed
+        assert_ok!(EntityTokenSale::cancel_sale(RuntimeOrigin::signed(CREATOR), round_id));
+        frame_system::Pallet::<Test>::set_block_number(200);
+        assert_ok!(EntityTokenSale::reclaim_unclaimed_tokens(
+            RuntimeOrigin::signed(CREATOR), round_id,
+        ));
+
+        // claim_tokens 应被拒绝（Completed 不再允许）
+        assert_noop!(
+            EntityTokenSale::claim_tokens(RuntimeOrigin::signed(BUYER), round_id),
+            Error::<Test>::InvalidRoundStatus
+        );
+    });
+}
+
+// ==================== H3-fix: add_payment_option 拒绝非 None asset_id ====================
+
+#[test]
+fn h3_add_payment_option_rejects_non_none_asset_id() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_round();
+        assert_noop!(
+            EntityTokenSale::add_payment_option(
+                RuntimeOrigin::signed(CREATOR), round_id, Some(1u64), 100u128, 10u128, 10_000u128,
+            ),
+            Error::<Test>::InvalidPaymentAsset
+        );
     });
 }
 

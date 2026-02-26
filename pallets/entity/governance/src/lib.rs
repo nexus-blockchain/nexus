@@ -45,7 +45,7 @@ pub mod pallet {
         BoundedVec,
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{GovernanceMode, EntityProvider, EntityTokenProvider, ShopProvider, TokenType};
+    use pallet_entity_common::{GovernanceMode, EntityProvider, EntityTokenProvider, ShopProvider};
     use pallet_entity_commission::{CommissionProvider, MemberProvider};
     use sp_runtime::traits::{Saturating, Zero};
     use sp_runtime::SaturatedConversion;
@@ -280,6 +280,15 @@ pub mod pallet {
         pub no_votes: BalanceOf<T>,
         /// 弃权票
         pub abstain_votes: BalanceOf<T>,
+        // ========== C1+H4 治理参数快照 ==========
+        /// 快照: 法定人数阈值（百分比）
+        pub snapshot_quorum: u8,
+        /// 快照: 通过阈值（百分比）
+        pub snapshot_pass: u8,
+        /// 快照: 执行延迟（区块数）
+        pub snapshot_execution_delay: BlockNumberFor<T>,
+        /// 快照: 代币总供应量
+        pub snapshot_total_supply: BalanceOf<T>,
     }
 
     /// 投票记录
@@ -310,81 +319,41 @@ pub mod pallet {
 
     // ========== Phase 5 新增类型 ==========
 
-    /// 提案级别（用于分层治理）
-    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
-    pub enum ProposalLevel {
-        /// 日常运营（低阈值）
-        #[default]
-        Operational,
-        /// 重要决策（中等阈值）
-        Significant,
-        /// 重大变更（高阈值）
-        Critical,
-        /// 宪法级（最高阈值）
-        Constitutional,
-    }
-
     /// 治理配置
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
-    #[scale_info(skip_type_params(MaxCommitteeSize))]
-    pub struct GovernanceConfig<AccountId, Balance, BlockNumber, MaxCommitteeSize: Get<u32>> {
+    pub struct GovernanceConfig<BlockNumber> {
         /// 治理模式
         pub mode: GovernanceMode,
-        /// 投票期（区块数，0 = 使用默认）
+        /// 投票期（区块数，0 = 使用全局默认）
         pub voting_period: BlockNumber,
-        /// 执行延迟（区块数，0 = 使用默认）
+        /// 执行延迟（区块数，0 = 使用全局默认）
         pub execution_delay: BlockNumber,
-        /// 日常运营通过阈值（百分比）
-        pub operational_threshold: u8,
-        /// 重要决策通过阈值（百分比）
-        pub significant_threshold: u8,
-        /// 重大变更通过阈值（百分比）
-        pub critical_threshold: u8,
-        /// 宪法级通过阈值（百分比）
-        pub constitutional_threshold: u8,
-        /// 法定人数阈值（百分比）
+        /// 法定人数阈值（百分比，0 = 使用全局默认）
         pub quorum_threshold: u8,
-        /// 提案创建门槛（基点）
+        /// 通过阈值（百分比，0 = 使用全局默认）
+        pub pass_threshold: u8,
+        /// 提案创建门槛（基点，0 = 使用全局默认）
         pub proposal_threshold: u16,
-        /// 管理员否决权是否启用
+        /// 管理员否决权是否启用（FullDAO 下可选）
         pub admin_veto_enabled: bool,
-        /// 需要具有投票权的 TokenType
-        pub required_token_type: Option<TokenType>,
-        /// 最小委员会批准数
-        pub min_committee_approval: u8,
-        /// _phantom
-        _phantom: core::marker::PhantomData<(AccountId, AccountId, Balance, MaxCommitteeSize)>,
     }
 
-    impl<AccountId, Balance, BlockNumber: Default, MaxCommitteeSize: Get<u32>> Default 
-        for GovernanceConfig<AccountId, Balance, BlockNumber, MaxCommitteeSize> 
-    {
+    impl<BlockNumber: Default> Default for GovernanceConfig<BlockNumber> {
         fn default() -> Self {
             Self {
                 mode: GovernanceMode::None,
                 voting_period: BlockNumber::default(),
                 execution_delay: BlockNumber::default(),
-                operational_threshold: 50,
-                significant_threshold: 60,
-                critical_threshold: 67,
-                constitutional_threshold: 75,
-                quorum_threshold: 10,
-                proposal_threshold: 100, // 1%
-                admin_veto_enabled: true,
-                required_token_type: None,
-                min_committee_approval: 1,
-                _phantom: core::marker::PhantomData,
+                quorum_threshold: 0,
+                pass_threshold: 0,
+                proposal_threshold: 0,
+                admin_veto_enabled: false,
             }
         }
     }
 
     /// 治理配置类型别名
-    pub type GovernanceConfigOf<T> = GovernanceConfig<
-        <T as frame_system::Config>::AccountId,
-        BalanceOf<T>,
-        BlockNumberFor<T>,
-        <T as Config>::MaxCommitteeSize,
-    >;
+    pub type GovernanceConfigOf<T> = GovernanceConfig<BlockNumberFor<T>>;
 
     // ==================== 配置 ====================
 
@@ -449,9 +418,13 @@ pub mod pallet {
 
         // ========== Phase 5 新增配置 ==========
 
-        /// 委员会最大成员数
+        /// C3: 最小投票期（区块数，configure_governance 不得低于此值）
         #[pallet::constant]
-        type MaxCommitteeSize: Get<u32>;
+        type MinVotingPeriod: Get<BlockNumberFor<Self>>;
+
+        /// C3: 最小执行延迟（区块数，configure_governance 不得低于此值）
+        #[pallet::constant]
+        type MinExecutionDelay: Get<BlockNumberFor<Self>>;
 
         /// 时间加权：达到最大乘数所需的持有区块数（0 = 禁用时间加权）
         #[pallet::constant]
@@ -542,23 +515,21 @@ pub mod pallet {
         _,
         Blake2_128Concat,
         u64,  // entity_id
-        GovernanceConfig<T::AccountId, BalanceOf<T>, BlockNumberFor<T>, T::MaxCommitteeSize>,
+        GovernanceConfigOf<T>,
     >;
 
-    /// 委员会成员 (entity_id) -> Vec<AccountId>
-    /// L1 注意: 委员会投票模式尚未在 vote/finalize_voting 中实现，
-    /// 当前仅用于存储成员列表，待后续版本集成
+    /// 治理配置锁定标记（锁定后不可再修改治理参数，但仍可升级到 FullDAO 放权）
     #[pallet::storage]
-    #[pallet::getter(fn committee_members)]
-    pub type CommitteeMembers<T: Config> = StorageMap<
+    #[pallet::getter(fn governance_locked)]
+    pub type GovernanceLocked<T: Config> = StorageMap<
         _,
         Blake2_128Concat,
-        u64,
-        BoundedVec<T::AccountId, T::MaxCommitteeSize>,
+        u64,  // entity_id
+        bool,
         ValueQuery,
     >;
 
-    // ==================== 事件 ====================
+    // ==================== 事件 ==
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -599,16 +570,6 @@ pub mod pallet {
             entity_id: u64,
             mode: GovernanceMode,
         },
-        /// 委员会成员已添加
-        CommitteeMemberAdded {
-            entity_id: u64,
-            member: T::AccountId,
-        },
-        /// 委员会成员已移除
-        CommitteeMemberRemoved {
-            entity_id: u64,
-            member: T::AccountId,
-        },
         /// 管理员已否决提案
         ProposalVetoed {
             proposal_id: ProposalId,
@@ -618,6 +579,10 @@ pub mod pallet {
         ProposalExecutionNote {
             proposal_id: ProposalId,
             note: Vec<u8>,
+        },
+        /// 治理配置已锁定（不可再修改）
+        GovernanceConfigLocked {
+            entity_id: u64,
         },
     }
 
@@ -658,16 +623,6 @@ pub mod pallet {
         // ========== Phase 5 新增错误 ==========
         /// 治理模式不允许此操作
         GovernanceModeNotAllowed,
-        /// 不是管理员
-        NotAdmin,
-        /// 不是委员会成员
-        NotCommitteeMember,
-        /// 委员会成员已存在
-        CommitteeMemberExists,
-        /// 委员会成员不存在
-        CommitteeMemberNotFound,
-        /// 委员会已满
-        CommitteeFull,
         /// 提案已被否决
         ProposalAlreadyVetoed,
         /// 无否决权
@@ -678,6 +633,20 @@ pub mod pallet {
         InvalidParameter,
         /// 提案类型暂未实现链上执行（需链下工作者配合）
         ProposalTypeNotImplemented,
+        /// 提案执行已过期
+        ExecutionExpired,
+        /// 治理配置已锁定，不可修改
+        GovernanceConfigIsLocked,
+        /// 治理配置已经锁定过
+        GovernanceAlreadyLocked,
+        /// C5: FullDAO 模式下 Owner 不可直接修改治理参数
+        FullDAOCannotConfigure,
+        /// C3: 投票期低于最小值
+        VotingPeriodTooShort,
+        /// C3: 执行延迟低于最小值
+        ExecutionDelayTooShort,
+        /// FullDAO 需要先发行代币
+        TokenNotEnabledForDAO,
     }
 
     // ==================== Extrinsics ====================
@@ -702,8 +671,9 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证实体存在
+            // 验证实体存在且活跃
             ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::ShopNotFound);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::ShopNotFound);
 
             // H1: 检查治理模式，None 模式不允许创建提案
             let gov_config = GovernanceConfigs::<T>::get(entity_id);
@@ -714,14 +684,17 @@ pub mod pallet {
             // H2: 验证提案参数有效性
             Self::validate_proposal_type(&proposal_type)?;
 
-            // 验证代币已启用（Entity 级统一代币）
+            // 验证代币已启用且持有足够代币
             ensure!(T::TokenProvider::is_token_enabled(entity_id), Error::<T>::TokenNotEnabled);
-
-            // 验证持有足够代币
             let balance = T::TokenProvider::token_balance(entity_id, &who);
             let total_supply = T::TokenProvider::total_supply(entity_id);
+            // X2 修复: 优先使用 GovernanceConfig 自定义提案门槛，回退到全局默认
+            let effective_threshold: u16 = gov_config.as_ref()
+                .filter(|c| c.proposal_threshold > 0)
+                .map(|c| c.proposal_threshold)
+                .unwrap_or(T::MinProposalThreshold::get());
             let min_threshold = total_supply
-                .saturating_mul(T::MinProposalThreshold::get().into())
+                .saturating_mul(effective_threshold.into())
                 / 10000u128.into();
             ensure!(balance >= min_threshold, Error::<T>::InsufficientTokensForProposal);
 
@@ -742,7 +715,26 @@ pub mod pallet {
             // 创建提案
             let proposal_id = NextProposalId::<T>::get();
             let now = <frame_system::Pallet<T>>::block_number();
-            let voting_end = now.saturating_add(T::VotingPeriod::get());
+            // X3 修复: 优先使用 GovernanceConfig 自定义投票期，回退到全局默认
+            let effective_voting_period = gov_config.as_ref()
+                .filter(|c| c.voting_period > BlockNumberFor::<T>::default())
+                .map(|c| c.voting_period)
+                .unwrap_or(T::VotingPeriod::get());
+            let voting_end = now.saturating_add(effective_voting_period);
+
+            // C1+H4: 快照治理参数和总供应量，防止运行时偷换
+            let snapshot_quorum: u8 = gov_config.as_ref()
+                .filter(|c| c.quorum_threshold > 0)
+                .map(|c| c.quorum_threshold)
+                .unwrap_or(T::QuorumThreshold::get());
+            let snapshot_pass: u8 = gov_config.as_ref()
+                .filter(|c| c.pass_threshold > 0)
+                .map(|c| c.pass_threshold)
+                .unwrap_or(T::PassThreshold::get());
+            let snapshot_execution_delay = gov_config.as_ref()
+                .filter(|c| c.execution_delay > BlockNumberFor::<T>::default())
+                .map(|c| c.execution_delay)
+                .unwrap_or(T::ExecutionDelay::get());
 
             let proposal = Proposal {
                 id: proposal_id,
@@ -760,6 +752,10 @@ pub mod pallet {
                 yes_votes: Zero::zero(),
                 no_votes: Zero::zero(),
                 abstain_votes: Zero::zero(),
+                snapshot_quorum,
+                snapshot_pass,
+                snapshot_execution_delay,
+                snapshot_total_supply: total_supply,
             };
 
             // 保存
@@ -809,11 +805,11 @@ pub mod pallet {
                 Error::<T>::AlreadyVoted
             );
 
-            // Phase 8: 检查代币类型是否具有投票权
+            // 检查代币类型投票权
             let token_type = T::TokenProvider::get_token_type(proposal.entity_id);
             ensure!(token_type.has_voting_power(), Error::<T>::TokenTypeNoVotingPower);
 
-            // H1 修复: 获取当前投票权重
+            // 获取当前投票权重
             let current_balance = Self::calculate_voting_power(proposal.entity_id, &who);
             ensure!(!current_balance.is_zero(), Error::<T>::NoVotingPower);
 
@@ -880,16 +876,18 @@ pub mod pallet {
             ensure!(now > proposal.voting_end, Error::<T>::VotingNotEnded);
 
             // 计算结果
-            // L2 注意: 使用当前 total_supply 而非快照时的供应量，
-            // 如果在投票期间有增发/销毁，法定人数计算可能偏差
             let total_votes = proposal.yes_votes
                 .saturating_add(proposal.no_votes)
                 .saturating_add(proposal.abstain_votes);
-            let total_supply = T::TokenProvider::total_supply(proposal.entity_id);
+
+            // C1+H4: 使用提案创建时的快照值，防止运行时偷换攻击
+            let effective_quorum: u8 = proposal.snapshot_quorum;
+            let effective_pass: u8 = proposal.snapshot_pass;
+            let total_supply: BalanceOf<T> = proposal.snapshot_total_supply;
 
             // 检查法定人数
             let quorum_threshold: BalanceOf<T> = total_supply
-                .saturating_mul(T::QuorumThreshold::get().into())
+                .saturating_mul(effective_quorum.into())
                 / 100u128.into();
             
             if total_votes < quorum_threshold {
@@ -902,12 +900,13 @@ pub mod pallet {
 
             // 检查通过阈值
             let pass_threshold: BalanceOf<T> = total_votes
-                .saturating_mul(T::PassThreshold::get().into())
+                .saturating_mul(effective_pass.into())
                 / 100u128.into();
 
             if proposal.yes_votes > pass_threshold {
                 proposal.status = ProposalStatus::Passed;
-                proposal.execution_time = Some(now.saturating_add(T::ExecutionDelay::get()));
+                // C1: 使用快照的执行延迟
+                proposal.execution_time = Some(now.saturating_add(proposal.snapshot_execution_delay));
                 // H5 修复: 通过的提案也从活跃列表移除，不阻塞新提案
                 Self::remove_from_active(proposal_id, proposal.entity_id);
                 Proposals::<T>::insert(proposal_id, proposal);
@@ -944,6 +943,11 @@ pub mod pallet {
             let exec_time = proposal.execution_time.ok_or(Error::<T>::ExecutionTimeNotReached)?;
             ensure!(now >= exec_time, Error::<T>::ExecutionTimeNotReached);
 
+            // H3+M5: 执行过期检查——使用快照的执行延迟的 2 倍作为窗口
+            let execution_window = proposal.snapshot_execution_delay.saturating_mul(2u32.into());
+            let expiry = exec_time.saturating_add(execution_window);
+            ensure!(now <= expiry, Error::<T>::ExecutionExpired);
+
             // 执行提案（根据类型）
             Self::do_execute_proposal(&proposal)?;
 
@@ -970,12 +974,19 @@ pub mod pallet {
             let mut proposal = Proposals::<T>::get(proposal_id)
                 .ok_or(Error::<T>::ProposalNotFound)?;
 
-            // 验证权限（提案者或实体所有者）
+            // C4: FullDAO 模式下只允许提案者取消，Owner 需走 veto 通道
             let owner = T::EntityProvider::entity_owner(proposal.entity_id);
-            ensure!(
-                proposal.proposer == who || owner == Some(who.clone()),
-                Error::<T>::CannotCancel
-            );
+            let is_owner = owner == Some(who.clone());
+            let is_proposer = proposal.proposer == who;
+
+            if is_owner && !is_proposer {
+                // Owner 非提案者 — 检查是否为 FullDAO 模式
+                let gov_config = GovernanceConfigs::<T>::get(proposal.entity_id);
+                if let Some(ref cfg) = gov_config {
+                    ensure!(cfg.mode != GovernanceMode::FullDAO, Error::<T>::GovernanceModeNotAllowed);
+                }
+            }
+            ensure!(is_proposer || is_owner, Error::<T>::CannotCancel);
 
             // 验证状态（只能取消 Created 或 Voting 状态的提案）
             ensure!(
@@ -1004,34 +1015,57 @@ pub mod pallet {
             entity_id: u64,
             mode: GovernanceMode,
             voting_period: Option<BlockNumberFor<T>>,
+            execution_delay: Option<BlockNumberFor<T>>,
             quorum_threshold: Option<u8>,
+            pass_threshold: Option<u8>,
             proposal_threshold: Option<u16>,
             admin_veto_enabled: Option<bool>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // H2 修复: 用 EntityProvider 验证实体所有者
             let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
             ensure!(owner == who, Error::<T>::NotShopOwner);
 
-            // H4: 参数验证
+            // 锁定检查：锁定后永久不可修改（None 锁定=永久冻结，FullDAO 锁定=仅提案可改）
+            ensure!(!GovernanceLocked::<T>::get(entity_id), Error::<T>::GovernanceConfigIsLocked);
+
+            // FullDAO 模式需要代币已发行，否则无人能投票，治理瘫痪
+            if mode == GovernanceMode::FullDAO {
+                ensure!(T::TokenProvider::is_token_enabled(entity_id), Error::<T>::TokenNotEnabledForDAO);
+            }
+
+            // 参数验证（上限）
             if let Some(q) = quorum_threshold {
                 ensure!(q <= 100, Error::<T>::InvalidParameter);
+            }
+            if let Some(p) = pass_threshold {
+                ensure!(p <= 100, Error::<T>::InvalidParameter);
             }
             if let Some(t) = proposal_threshold {
                 ensure!(t <= 10000, Error::<T>::InvalidParameter);
             }
+            // C3: 参数验证（下限）
+            if let Some(period) = voting_period {
+                ensure!(period >= T::MinVotingPeriod::get(), Error::<T>::VotingPeriodTooShort);
+            }
+            if let Some(delay) = execution_delay {
+                ensure!(delay >= T::MinExecutionDelay::get(), Error::<T>::ExecutionDelayTooShort);
+            }
 
             GovernanceConfigs::<T>::mutate(entity_id, |maybe_config| {
                 let config = maybe_config.get_or_insert_with(GovernanceConfigOf::<T>::default);
-                
                 config.mode = mode;
-                
                 if let Some(period) = voting_period {
                     config.voting_period = period;
                 }
+                if let Some(delay) = execution_delay {
+                    config.execution_delay = delay;
+                }
                 if let Some(quorum) = quorum_threshold {
                     config.quorum_threshold = quorum;
+                }
+                if let Some(pass) = pass_threshold {
+                    config.pass_threshold = pass;
                 }
                 if let Some(threshold) = proposal_threshold {
                     config.proposal_threshold = threshold;
@@ -1041,6 +1075,9 @@ pub mod pallet {
                 }
             });
 
+            // C2: 同步 registry 侧
+            let _ = T::EntityProvider::set_governance_mode(entity_id, mode);
+
             Self::deposit_event(Event::GovernanceConfigUpdated {
                 entity_id,
                 mode,
@@ -1048,99 +1085,34 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 设置分层治理阈值
-        #[pallet::call_index(6)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 3_000))]
-        pub fn set_tiered_thresholds(
+        /// 锁定治理配置（不可逆）
+        ///
+        /// 锁定后 owner 不可再修改治理参数。
+        /// 唯一例外：锁定后仍可通过 configure_governance 将模式从 None 升级到
+        /// FullDAO，即“放权”操作。升级后锁定自动解除。
+        #[pallet::call_index(10)]
+        #[pallet::weight(Weight::from_parts(15_000_000, 2_000))]
+        pub fn lock_governance(
             origin: OriginFor<T>,
             entity_id: u64,
-            operational: u8,
-            significant: u8,
-            critical: u8,
-            constitutional: u8,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
             let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
             ensure!(owner == who, Error::<T>::NotShopOwner);
 
-            // H4: 阈值验证（百分比不超过 100）
-            ensure!(operational <= 100, Error::<T>::InvalidParameter);
-            ensure!(significant <= 100, Error::<T>::InvalidParameter);
-            ensure!(critical <= 100, Error::<T>::InvalidParameter);
-            ensure!(constitutional <= 100, Error::<T>::InvalidParameter);
+            ensure!(!GovernanceLocked::<T>::get(entity_id), Error::<T>::GovernanceAlreadyLocked);
 
-            GovernanceConfigs::<T>::mutate(entity_id, |maybe_config| {
-                let config = maybe_config.get_or_insert_with(GovernanceConfigOf::<T>::default);
-                config.operational_threshold = operational;
-                config.significant_threshold = significant;
-                config.critical_threshold = critical;
-                config.constitutional_threshold = constitutional;
-            });
+            // None 和 FullDAO 均可锁定：
+            // - None 锁定 = 永久冻结，不可升级，不可解锁
+            // - FullDAO 锁定 = 放弃控制权，仅通过提案修改
+            GovernanceLocked::<T>::insert(entity_id, true);
 
-            Self::deposit_event(Event::GovernanceConfigUpdated {
-                entity_id,
-                mode: GovernanceConfigs::<T>::get(entity_id)
-                    .map(|c| c.mode)
-                    .unwrap_or_default(),
-            });
+            Self::deposit_event(Event::GovernanceConfigLocked { entity_id });
             Ok(())
         }
 
-        /// 添加委员会成员
-        #[pallet::call_index(7)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 3_000))]
-        pub fn add_committee_member(
-            origin: OriginFor<T>,
-            entity_id: u64,
-            member: T::AccountId,
-        ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
-
-            CommitteeMembers::<T>::try_mutate(entity_id, |members| -> DispatchResult {
-                ensure!(!members.contains(&member), Error::<T>::CommitteeMemberExists);
-                members.try_push(member.clone()).map_err(|_| Error::<T>::CommitteeFull)?;
-                Ok(())
-            })?;
-
-            Self::deposit_event(Event::CommitteeMemberAdded {
-                entity_id,
-                member,
-            });
-            Ok(())
-        }
-
-        /// 移除委员会成员
-        #[pallet::call_index(8)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 3_000))]
-        pub fn remove_committee_member(
-            origin: OriginFor<T>,
-            entity_id: u64,
-            member: T::AccountId,
-        ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(owner == who, Error::<T>::NotShopOwner);
-
-            CommitteeMembers::<T>::try_mutate(entity_id, |members| -> DispatchResult {
-                let pos = members.iter().position(|m| m == &member)
-                    .ok_or(Error::<T>::CommitteeMemberNotFound)?;
-                members.remove(pos);
-                Ok(())
-            })?;
-
-            Self::deposit_event(Event::CommitteeMemberRemoved {
-                entity_id,
-                member,
-            });
-            Ok(())
-        }
-
-        /// 管理员否决提案（DualTrack 模式）
+        /// 管理员否决提案（需 admin_veto_enabled）
         #[pallet::call_index(9)]
         #[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
         pub fn veto_proposal(
@@ -1160,10 +1132,6 @@ pub mod pallet {
             let config = GovernanceConfigs::<T>::get(proposal.entity_id)
                 .unwrap_or_default();
             ensure!(config.admin_veto_enabled, Error::<T>::NoVetoRight);
-            ensure!(
-                config.mode == GovernanceMode::DualTrack || config.mode == GovernanceMode::Advisory,
-                Error::<T>::GovernanceModeNotAllowed
-            );
 
             // 验证状态
             ensure!(
@@ -1250,13 +1218,7 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 计算投票权重（时间加权）
-        ///
-        /// 公式: voting_power = balance * multiplier / 10000
-        /// 其中 multiplier = 10000 + min(holding_blocks * bonus_range / full_period, bonus_range)
-        /// bonus_range = max_multiplier - 10000
-        ///
-        /// 当 TimeWeightFullPeriod == 0 时，禁用时间加权，直接返回余额。
+        /// 计算投票权重（代币余额 × 时间加权）
         pub fn calculate_voting_power(entity_id: u64, holder: &T::AccountId) -> BalanceOf<T> {
             let balance = T::TokenProvider::token_balance(entity_id, holder);
 
@@ -1463,8 +1425,7 @@ pub mod pallet {
 
                 // ==================== 治理参数类 ====================
                 ProposalType::VotingPeriodChange { new_period_blocks } => {
-                    // H6 修复: 无配置时创建默认配置再更新
-                    let entity_id = T::ShopProvider::shop_entity_id(shop_id).unwrap_or(shop_id);
+                    // H2 修复: 直接使用 proposal.entity_id，不再经 shop_entity_id 二次解析
                     GovernanceConfigs::<T>::mutate(entity_id, |maybe_config| {
                         let config = maybe_config.get_or_insert_with(GovernanceConfigOf::<T>::default);
                         config.voting_period = (*new_period_blocks).into();
@@ -1472,7 +1433,6 @@ pub mod pallet {
                     Ok(())
                 },
                 ProposalType::QuorumChange { new_quorum } => {
-                    let entity_id = T::ShopProvider::shop_entity_id(shop_id).unwrap_or(shop_id);
                     GovernanceConfigs::<T>::mutate(entity_id, |maybe_config| {
                         let config = maybe_config.get_or_insert_with(GovernanceConfigOf::<T>::default);
                         config.quorum_threshold = *new_quorum;
@@ -1480,7 +1440,6 @@ pub mod pallet {
                     Ok(())
                 },
                 ProposalType::ProposalThresholdChange { new_threshold } => {
-                    let entity_id = T::ShopProvider::shop_entity_id(shop_id).unwrap_or(shop_id);
                     GovernanceConfigs::<T>::mutate(entity_id, |maybe_config| {
                         let config = maybe_config.get_or_insert_with(GovernanceConfigOf::<T>::default);
                         config.proposal_threshold = *new_threshold;
@@ -1572,12 +1531,12 @@ pub mod pallet {
                     T::MemberProvider::set_custom_levels_enabled(shop_id, *enabled)
                 },
                 ProposalType::AddUpgradeRule { rule_cid: _ } => {
-                    // 升级规则配置需要解析 CID，暂不支持链上直接执行
-                    Ok(())
+                    // H3 修复: 升级规则配置需要解析 CID，暂不支持链上直接执行
+                    Err(Error::<T>::ProposalTypeNotImplemented.into())
                 },
                 ProposalType::RemoveUpgradeRule { rule_id: _ } => {
-                    // 需要扩展 MemberProvider trait 添加删除规则方法
-                    Ok(())
+                    // H3 修复: 需要扩展 MemberProvider trait
+                    Err(Error::<T>::ProposalTypeNotImplemented.into())
                 },
 
                 // ==================== 社区类 ====================

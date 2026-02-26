@@ -122,6 +122,7 @@ impl pallet_entity_common::EntityTokenProvider<u64, u128> for MockTokenProvider 
             amount - actual
         })
     }
+    // M4-fix: 返回 actual（实际转移量），与 pallet-entity-token 实现一致
     fn repatriate_reserved(entity_id: u64, from: &u64, to: &u64, amount: u128) -> Result<u128, DispatchError> {
         TOKEN_RESERVED.with(|r| {
             let mut map = r.borrow_mut();
@@ -133,7 +134,7 @@ impl pallet_entity_common::EntityTokenProvider<u64, u128> for MockTokenProvider 
                 let bal = bmap.entry((entity_id, *to)).or_insert(0);
                 *bal += actual;
             });
-            Ok(amount - actual)
+            Ok(actual)
         })
     }
     fn get_token_type(_: u64) -> pallet_entity_common::TokenType { Default::default() }

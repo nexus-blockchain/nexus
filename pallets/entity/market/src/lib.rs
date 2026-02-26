@@ -487,6 +487,9 @@ pub mod pallet {
         /// 少付补付窗口（区块数）
         #[pallet::constant]
         type UnderpaidGracePeriod: Get<u32>;
+
+        /// NEX/USDT 价格查询（用于代币 USDT 间接换算）
+        type NexUsdtPrice: pallet_entity_common::PricingProvider;
     }
 
     #[pallet::pallet]
@@ -868,7 +871,7 @@ pub mod pallet {
             trade_id: u64,
             expected_amount: u64,
             actual_amount: u64,
-            payment_ratio: u16,  // 实际付款比例 (bps)
+            payment_ratio: u32,  // 实际付款比例 (bps)
             token_released: T::TokenBalance,
             deposit_forfeited: BalanceOf<T>,
         },
@@ -898,7 +901,7 @@ pub mod pallet {
             trade_id: u64,
             expected_amount: u64,
             actual_amount: u64,
-            payment_ratio: u16,
+            payment_ratio: u32,
             deadline: BlockNumberFor<T>,
         },
         /// 补付窗口内金额已更新
@@ -911,7 +914,7 @@ pub mod pallet {
         UnderpaidFinalized {
             trade_id: u64,
             final_amount: u64,
-            payment_ratio: u16,
+            payment_ratio: u32,
             deposit_forfeit_rate: u16,
         },
         /// AwaitingVerification 超时退款（宽限期后仍无结果）
@@ -1003,6 +1006,12 @@ pub mod pallet {
         UnderpaidGraceNotExpired,
         /// 交易不在 UnderpaidPending 状态
         NotUnderpaidPending,
+        /// 实体未激活（Banned/Closed）
+        EntityNotActive,
+        /// 订单 TTL 过短
+        OrderTtlTooShort,
+        /// USDT 超时时间过短
+        UsdtTimeoutTooShort,
     }
 
     // ==================== Extrinsics ====================
@@ -1390,6 +1399,10 @@ pub mod pallet {
             // H8: 手续费率上限验证（最高 50%）
             ensure!(fee_rate <= 5000, Error::<T>::InvalidFeeRate);
 
+            // H6 审计修复: TTL 和超时最小值验证（防止立即过期）
+            ensure!(order_ttl >= 10, Error::<T>::OrderTtlTooShort);
+            ensure!(usdt_timeout >= 10, Error::<T>::UsdtTimeoutTooShort);
+
             let config = MarketConfig {
                 cos_enabled,
                 usdt_enabled,
@@ -1712,9 +1725,12 @@ pub mod pallet {
 
             // 计算 USDT 金额
             let fill_u128: u128 = fill_amount.into();
-            let usdt_amount = fill_u128
+            let usdt_amount_u128 = fill_u128
                 .checked_mul(order.usdt_price as u128)
-                .ok_or(Error::<T>::ArithmeticOverflow)? as u64;
+                .ok_or(Error::<T>::ArithmeticOverflow)?;
+            // H5 审计修复: 防止 u128→u64 截断
+            ensure!(usdt_amount_u128 <= u64::MAX as u128, Error::<T>::ArithmeticOverflow);
+            let usdt_amount = usdt_amount_u128 as u64;
 
             // 获取卖家 TRON 地址
             let seller_tron_address = order.tron_address.clone()
@@ -1813,13 +1829,28 @@ pub mod pallet {
 
             // 计算 USDT 金额
             let fill_u128: u128 = fill_amount.into();
-            let usdt_amount = fill_u128
+            let usdt_amount_u128 = fill_u128
                 .checked_mul(order.usdt_price as u128)
-                .ok_or(Error::<T>::ArithmeticOverflow)? as u64;
+                .ok_or(Error::<T>::ArithmeticOverflow)?;
+            // H5 审计修复: 防止 u128→u64 截断
+            ensure!(usdt_amount_u128 <= u64::MAX as u128, Error::<T>::ArithmeticOverflow);
+            let usdt_amount = usdt_amount_u128 as u64;
 
             // P0 修复: 买家在 place_usdt_buy_order 时已锁定 maker_deposit 保证金
-            // 此处直接使用已锁定的保证金，无需重复锁定
-            let buyer_deposit = order.maker_deposit;
+            // H2 审计修复: 按比例分配保证金，防止多个 partial fill 引用同一份保证金
+            let buyer_deposit = if fill_amount >= available {
+                // 全部成交，取剩余全部保证金
+                order.maker_deposit
+            } else {
+                // 部分成交，按比例分配
+                let deposit_u128: u128 = order.maker_deposit.into();
+                let fill_u128: u128 = fill_amount.into();
+                let available_u128: u128 = available.into();
+                let proportional: u128 = deposit_u128.saturating_mul(fill_u128) / available_u128;
+                proportional.into()
+            };
+            // 扣减订单剩余保证金
+            order.maker_deposit = order.maker_deposit.saturating_sub(buyer_deposit);
 
             // 检查卖家 Token 余额并锁定
             let seller_balance = T::TokenProvider::token_balance(order.entity_id, &who);
@@ -2049,9 +2080,7 @@ pub mod pallet {
                             Self::process_underpaid(&mut trade, trade_id, final_amount)?;
                         }
                     }
-                    let payment_ratio = if trade.usdt_amount > 0 {
-                        ((final_amount as u128) * 10000 / (trade.usdt_amount as u128)) as u16
-                    } else { 0 };
+                    let payment_ratio = pallet_trading_common::compute_payment_ratio_bps(trade.usdt_amount, final_amount);
                     let deposit_forfeit_rate = Self::calculate_deposit_forfeit_rate(payment_ratio);
 
                     PendingUnderpaidTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
@@ -2166,7 +2195,7 @@ pub mod pallet {
 
                     OcwVerificationResults::<T>::insert(trade_id, (verification_result, actual_amount));
 
-                    let payment_ratio = ((actual_amount as u128) * 10000 / (trade.usdt_amount as u128)) as u16;
+                    let payment_ratio = pallet_trading_common::compute_payment_ratio_bps(trade.usdt_amount, actual_amount);
                     Self::deposit_event(Event::UnderpaidDetected {
                         trade_id,
                         expected_amount: trade.usdt_amount,
@@ -2287,9 +2316,7 @@ pub mod pallet {
                 }
             }
 
-            let payment_ratio = if trade.usdt_amount > 0 {
-                ((final_amount as u128) * 10000 / (trade.usdt_amount as u128)) as u16
-            } else { 0 };
+            let payment_ratio = pallet_trading_common::compute_payment_ratio_bps(trade.usdt_amount, final_amount);
             let deposit_forfeit_rate = Self::calculate_deposit_forfeit_rate(payment_ratio);
 
             PendingUnderpaidTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
@@ -2394,6 +2421,9 @@ pub mod pallet {
             )?;
 
             ensure!(!filled.is_zero(), Error::<T>::AmountTooSmall);
+
+            // H3 审计修复: 最终滑点检查（防止 partial fill 绕过 min_receive）
+            ensure!(total_receive >= min_receive, Error::<T>::SlippageExceeded);
 
             Self::deposit_event(Event::MarketOrderExecuted {
                 entity_id,
@@ -2539,8 +2569,10 @@ pub mod pallet {
 
     impl<T: Config> Pallet<T> {
         /// 验证市场是否启用
+        /// H4 审计修复: 添加 is_entity_active 检查，Banned/Closed 实体不允许新订单
         fn ensure_market_enabled(entity_id: u64) -> DispatchResult {
             ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(
                 T::TokenProvider::is_token_enabled(entity_id),
                 Error::<T>::TokenNotEnabled
@@ -2799,16 +2831,17 @@ pub mod pallet {
             forfeit_amount
         }
 
-        /// 验证并转换 TRON 地址
+        /// 验证并转换 TRON 地址（Base58Check 完整校验）
         fn validate_tron_address(raw: Vec<u8>) -> Result<TronAddress, DispatchError> {
-            ensure!(raw.len() == 34, Error::<T>::InvalidTronAddress);
-            ensure!(raw.first() == Some(&b'T'), Error::<T>::InvalidTronAddress);
+            ensure!(pallet_trading_common::is_valid_tron_address(&raw), Error::<T>::InvalidTronAddress);
             raw.try_into().map_err(|_| Error::<T>::InvalidTronAddress.into())
         }
 
         /// 验证 USDT 市场是否启用
+        /// H4 审计修复: 添加 is_entity_active 检查
         fn ensure_usdt_market_enabled(entity_id: u64) -> DispatchResult {
             ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(
                 T::TokenProvider::is_token_enabled(entity_id),
                 Error::<T>::TokenNotEnabled
@@ -3069,11 +3102,7 @@ pub mod pallet {
             actual_amount: u64,
         ) -> DispatchResult {
             // 计算付款比例 (bps)
-            let payment_ratio = if trade.usdt_amount > 0 {
-                ((actual_amount as u128) * 10000 / (trade.usdt_amount as u128)) as u16
-            } else {
-                0
-            };
+            let payment_ratio = pallet_trading_common::compute_payment_ratio_bps(trade.usdt_amount, actual_amount);
 
             // 按比例计算释放的 Token 数量
             // 使用 u128 中间计算（TokenBalance 实现了 From<u128> 和 Into<u128>）
@@ -3132,7 +3161,7 @@ pub mod pallet {
         }
 
         /// 保证金没收梯度（委托给 pallet-trading-common）
-        fn calculate_deposit_forfeit_rate(payment_ratio: u16) -> u16 {
+        fn calculate_deposit_forfeit_rate(payment_ratio: u32) -> u16 {
             pallet_trading_common::calculate_deposit_forfeit_rate(payment_ratio)
         }
 
@@ -3204,9 +3233,18 @@ pub mod pallet {
         }
 
         /// H7: 回滚父订单的 filled_amount（USDT 交易失败/超时时调用）
+        /// H1 审计修复: 仅对 Filled/PartiallyFilled 订单回滚，防止复活 Expired/Cancelled 订单
         fn rollback_order_filled_amount(order_id: u64, amount: T::TokenBalance) {
             Orders::<T>::mutate(order_id, |maybe_order| {
                 if let Some(order) = maybe_order {
+                    // H1: 仅允许回滚活跃状态的订单
+                    if order.status != OrderStatus::Filled
+                        && order.status != OrderStatus::PartiallyFilled
+                        && order.status != OrderStatus::Open
+                    {
+                        return;
+                    }
+
                     order.filled_amount = order.filled_amount.saturating_sub(amount);
                     // 如果回滚后 filled_amount < token_amount，重新开放订单
                     if order.status == OrderStatus::Filled {
@@ -4132,5 +4170,91 @@ impl<T: Config> Pallet<T> {
             .collect();
 
         (asks, bids)
+    }
+}
+
+// ==================== EntityTokenPriceProvider 实现 ====================
+
+impl<T: Config> pallet_entity_common::EntityTokenPriceProvider for Pallet<T> {
+    type Balance = BalanceOf<T>;
+
+    fn get_token_price(entity_id: u64) -> Option<BalanceOf<T>> {
+        use pallet::{TwapPeriod, LastTradePrice, PriceProtection};
+        // 优先级: 1h TWAP → LastTradePrice → initial_price
+        Self::calculate_twap(entity_id, TwapPeriod::OneHour)
+            .or_else(|| LastTradePrice::<T>::get(entity_id))
+            .or_else(|| {
+                PriceProtection::<T>::get(entity_id)
+                    .and_then(|config| config.initial_price)
+            })
+    }
+
+    fn get_token_price_usdt(entity_id: u64) -> Option<u64> {
+        use pallet_entity_common::PricingProvider;
+        // token_nex_price × nex_usdt_rate / 10^12
+        let token_nex: u128 = <Self as pallet_entity_common::EntityTokenPriceProvider>::get_token_price(entity_id)?.into();
+        let nex_usdt = T::NexUsdtPrice::get_nex_usdt_price();
+        if nex_usdt == 0 {
+            return None;
+        }
+        // token_nex (10^12 精度) × nex_usdt (10^6 精度) / 10^12 = USDT per Token (10^6 精度)
+        let usdt_price = token_nex
+            .checked_mul(nex_usdt as u128)?
+            .checked_div(1_000_000_000_000u128)?;
+        Some(usdt_price as u64)
+    }
+
+    fn token_price_confidence(entity_id: u64) -> u8 {
+        use sp_runtime::SaturatedConversion;
+        use pallet::{TwapAccumulators, TwapPeriod, LastTradePrice, PriceProtection};
+
+        let acc = match TwapAccumulators::<T>::get(entity_id) {
+            Some(a) => a,
+            None => {
+                // 无累积器：仅检查 initial_price
+                return if PriceProtection::<T>::get(entity_id)
+                    .and_then(|c| c.initial_price)
+                    .is_some()
+                {
+                    35
+                } else {
+                    0
+                };
+            }
+        };
+
+        let current_block: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
+        let blocks_since = current_block.saturating_sub(acc.current_block);
+
+        // 超过 ~4h 无交易视为过时
+        let stale = blocks_since > 2400;
+
+        let has_twap = Self::calculate_twap(entity_id, TwapPeriod::OneHour).is_some();
+        let has_last_trade = LastTradePrice::<T>::get(entity_id).is_some();
+
+        if stale {
+            if has_twap { 25 } else if has_last_trade { 15 } else { 10 }
+        } else if has_twap && acc.trade_count >= 100 {
+            95
+        } else if has_twap {
+            80
+        } else if has_last_trade {
+            65
+        } else {
+            35
+        }
+    }
+
+    fn is_token_price_stale(entity_id: u64, max_age_blocks: u32) -> bool {
+        use sp_runtime::SaturatedConversion;
+        use pallet::TwapAccumulators;
+
+        match TwapAccumulators::<T>::get(entity_id) {
+            Some(acc) => {
+                let current_block: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
+                current_block.saturating_sub(acc.current_block) > max_age_blocks
+            }
+            None => true, // 无累积器 = 无交易数据 = 过时
+        }
     }
 }

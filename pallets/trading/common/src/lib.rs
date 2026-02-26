@@ -6,7 +6,7 @@
 //!
 //! 本 crate 提供交易相关的公共工具函数和统一接口，包括：
 //! - 公共类型定义（TronAddress, MomentOf 等）
-//! - 公共 Trait 定义（PricingProvider, MakerInterface, MakerCreditInterface）
+//! - 公共 Trait 定义（PricingProvider, DepositCalculator, PriceOracle）
 //! - 脱敏函数（姓名、身份证、生日）
 //! - TRON 地址验证
 //! - 时间转换工具
@@ -42,6 +42,7 @@ pub use types::{
     BuyerDepositStatus,
     PaymentVerificationResult,
     calculate_payment_verification_result,
+    compute_payment_ratio_bps,
     calculate_deposit_forfeit_rate,
 };
 
@@ -52,6 +53,7 @@ pub use traits::{
     DepositCalculatorImpl,
     PriceOracle,
     TwapWindow,
+    ExchangeRateProvider,
 };
 
 // 重新导出工具函数

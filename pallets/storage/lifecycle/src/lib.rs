@@ -60,6 +60,33 @@ pub trait ArchivableData: Encode + Decode + Clone {
     fn update_stats(stats: &mut Self::PermanentStats, archived: &Self::ArchivedL1);
 }
 
+/// 存储归档器 Trait
+///
+/// 由 pallet-storage-service 实现，供 lifecycle pallet 调用。
+/// 解耦归档逻辑与具体存储实现。
+pub trait StorageArchiver {
+    /// 扫描可归档的记录ID（已过期超过 delay 区块的 CID）
+    ///
+    /// # Arguments
+    /// * `delay` - 过期后等待多少区块才可归档
+    /// * `max_count` - 最多返回多少条
+    ///
+    /// # Returns
+    /// 可归档的记录ID列表
+    fn scan_archivable(delay: u64, max_count: u32) -> sp_std::vec::Vec<u64>;
+
+    /// 执行归档清理（删除链上存储记录）
+    fn archive_records(ids: &[u64]);
+}
+
+/// 空实现（runtime 未接入 service pallet 时使用）
+impl StorageArchiver for () {
+    fn scan_archivable(_delay: u64, _max_count: u32) -> sp_std::vec::Vec<u64> {
+        sp_std::vec::Vec::new()
+    }
+    fn archive_records(_ids: &[u64]) {}
+}
+
 /// 归档状态
 #[derive(Encode, Decode, DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub enum ArchiveLevel {
@@ -166,6 +193,59 @@ pub mod pallet {
         /// 每次on_idle最大处理数量
         #[pallet::constant]
         type MaxBatchSize: Get<u32>;
+
+        /// 存储归档器：提供可归档记录的扫描与清理接口
+        type StorageArchiver: StorageArchiver;
+    }
+
+    #[pallet::hooks]
+    impl<T: Config> Hooks<frame_system::pallet_prelude::BlockNumberFor<T>> for Pallet<T> {
+        fn on_idle(
+            n: frame_system::pallet_prelude::BlockNumberFor<T>,
+            remaining_weight: Weight,
+        ) -> Weight {
+            let max_batch = T::MaxBatchSize::get();
+            // 最小权重门槛：至少能处理 1 条记录
+            let min_weight = Weight::from_parts(50_000_000, 5_000);
+            if remaining_weight.any_lt(min_weight) {
+                return Weight::zero();
+            }
+
+            let now: u64 = n.try_into().unwrap_or(0u64);
+            let l1_delay = T::L1ArchiveDelay::get() as u64;
+
+            // 扫描可归档记录（已过期超过 L1ArchiveDelay 的 CID）
+            let expired_ids = T::StorageArchiver::scan_archivable(l1_delay, max_batch);
+            let count = expired_ids.len() as u32;
+
+            if count > 0 {
+                // 执行归档清理
+                T::StorageArchiver::archive_records(&expired_ids);
+
+                // 记录批次
+                let data_type_vec: sp_runtime::BoundedVec<u8, ConstU32<32>> =
+                    sp_runtime::BoundedVec::truncate_from(b"pin_storage".to_vec());
+                let _ = StorageLifecycleManager::<T>::record_batch(
+                    data_type_vec.clone(),
+                    *expired_ids.first().unwrap_or(&0),
+                    *expired_ids.last().unwrap_or(&0),
+                    count,
+                    ArchiveLevel::Purged,
+                    now,
+                );
+
+                Self::deposit_event(Event::DataPurged {
+                    data_type: data_type_vec,
+                    count,
+                });
+            }
+
+            // 返回消耗的权重
+            Weight::from_parts(
+                50_000_000u64.saturating_mul(count as u64 + 1),
+                5_000u64.saturating_mul(count as u64 + 1),
+            )
+        }
     }
 
     /// 归档游标（按数据类型）

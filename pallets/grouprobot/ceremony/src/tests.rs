@@ -438,6 +438,27 @@ fn record_ceremony_first_is_not_re_ceremony() {
 	});
 }
 
+// ============================================================================
+// Tier gate
+// ============================================================================
+
+#[test]
+fn record_ceremony_fails_free_tier() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		// bot_id(2) → owner=OTHER, tier=Free in MockSubscription
+		assert_noop!(
+			GroupRobotCeremony::record_ceremony(
+				RuntimeOrigin::signed(OTHER),
+				ceremony_hash(10), mrenclave(1), 2, 3, bot_pk(2), vec![[10u8; 32]], bot_id(2),
+			),
+			Error::<Test>::FreeTierNotAllowed
+		);
+	});
+}
+
 #[test]
 fn record_ceremony_second_is_re_ceremony() {
 	new_test_ext().execute_with(|| {

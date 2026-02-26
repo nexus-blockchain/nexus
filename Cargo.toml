@@ -28,6 +28,7 @@ members = [
     "pallets/entity/commission/referral",
     "pallets/entity/commission/level-diff",
     "pallets/entity/commission/single-line",
+    "pallets/entity/commission/team",
     "pallets/entity/commission",
     "pallets/entity/service",
     "pallets/entity/transaction",
@@ -45,6 +46,8 @@ members = [
     "pallets/grouprobot/community",
     "pallets/grouprobot/ceremony",
     "pallets/grouprobot/ads",
+    "pallets/grouprobot/subscription",
+    "pallets/grouprobot/rewards",
 ]
 resolver = "2"
 exclude = ["grouprobot"]
@@ -78,6 +81,7 @@ pallet-commission-core = { path = "./pallets/entity/commission/core", default-fe
 pallet-commission-referral = { path = "./pallets/entity/commission/referral", default-features = false }
 pallet-commission-level-diff = { path = "./pallets/entity/commission/level-diff", default-features = false }
 pallet-commission-single-line = { path = "./pallets/entity/commission/single-line", default-features = false }
+pallet-commission-team = { path = "./pallets/entity/commission/team", default-features = false }
 pallet-entity-commission = { path = "./pallets/entity/commission", default-features = false }
 pallet-entity-service = { path = "./pallets/entity/service", default-features = false }
 pallet-entity-transaction = { path = "./pallets/entity/transaction", default-features = false }
@@ -93,6 +97,8 @@ pallet-grouprobot-consensus = { path = "./pallets/grouprobot/consensus", default
 pallet-grouprobot-community = { path = "./pallets/grouprobot/community", default-features = false }
 pallet-grouprobot-ceremony = { path = "./pallets/grouprobot/ceremony", default-features = false }
 pallet-grouprobot-ads = { path = "./pallets/grouprobot/ads", default-features = false }
+pallet-grouprobot-subscription = { path = "./pallets/grouprobot/subscription", default-features = false }
+pallet-grouprobot-rewards = { path = "./pallets/grouprobot/rewards", default-features = false }
 # Additional dependencies
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 sp-application-crypto = { version = "44.0.0", default-features = false }

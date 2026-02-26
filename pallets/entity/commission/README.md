@@ -19,6 +19,7 @@
 - 🎁 **首单奖励** - 新用户首单额外奖励
 - 🔄 **复购奖励** - 复购用户额外奖励
 - 📈 **单线收益** - 基于全局注册顺序的上下线收益
+- 🏆 **团队业绩** - 团队累计销售额阶梯奖金
 - ⚙️ **灵活配置** - 店主可自定义各模式参数
 
 ## 🎯 返佣模式（可多选）
@@ -27,13 +28,14 @@
 |------|--------|------|
 | `DIRECT_REWARD` | 0x01 | 直推奖励 |
 | `MULTI_LEVEL` | 0x02 | 多级分销（N层+激活条件） |
-| `TEAM_PERFORMANCE` | 0x04 | 团队业绩（预留） |
+| `TEAM_PERFORMANCE` | 0x04 | 团队业绩（阶梯奖金） |
 | `LEVEL_DIFF` | 0x08 | 等级差价 |
 | `FIXED_AMOUNT` | 0x10 | 固定金额 |
 | `FIRST_ORDER` | 0x20 | 首单奖励 |
 | `REPEAT_PURCHASE` | 0x40 | 复购奖励 |
 | `SINGLE_LINE_UPLINE` | 0x80 | 单线上线收益 |
 | `SINGLE_LINE_DOWNLINE` | 0x100 | 单线下线收益 |
+| `ENTITY_REFERRAL` | - | 招商推荐人奖金（从平台费扣除，由 core 内置处理） |
 
 ## 💡 多选返佣示例
 
@@ -122,8 +124,7 @@ impl CommissionModes {
 ```rust
 pub struct EntityCommissionConfig<Balance> {
     pub enabled_modes: CommissionModes,   // 启用的模式（位标志）
-    pub source: CommissionSource,         // 返佣来源
-    pub max_commission_rate: u16,         // 返佣上限比例（基点）
+    pub max_commission_rate: u16,         // 会员返佣上限（卖家货款扣除）
     pub enabled: bool,                    // 是否全局启用
     pub direct_reward: DirectRewardConfig,
     pub multi_level: MultiLevelConfig,
@@ -325,15 +326,16 @@ fn set_repeat_purchase_config(
 ) -> DispatchResult
 ```
 
-### 8. set_commission_source
+### 8. set_commission_rate
 
-设置返佣来源和上限。
+设置会员返佣上限（从卖家货款扣除）。
+
+**权限：** Entity Owner
 
 ```rust
-fn set_commission_source(
+fn set_commission_rate(
     origin: OriginFor<T>,
     shop_id: u64,
-    source: CommissionSource,
     max_rate: u16,
 ) -> DispatchResult
 ```
@@ -413,13 +415,13 @@ pub trait CommissionProvider<AccountId, Balance> {
 在 `pallet-entity-order` 的 `do_complete_order` 中调用：
 
 ```rust
-// 发放返佣（从平台费中扣除）
-T::CommissionProvider::process_commission(
+// 发放返佣（双来源：平台费→招商奖金，卖家货款→会员返佣）
+T::CommissionHandler::on_order_completed(
     order.shop_id,
     order_id,
     &order.buyer,
     order.total_amount,
-    order.platform_fee,  // 可用返佣池
+    order.platform_fee,
 )?;
 ```
 
@@ -495,6 +497,53 @@ pub struct SingleLineConfig<Balance> {
 - ✅ **消费越多层数越多** - 激励持续消费
 - ⚠️ **比例较低** - 建议 0.05%-0.1%，避免资金压力
 
+## 🏆 团队业绩模式
+
+### 概念说明
+
+团队业绩返佣基于推荐链上级的**团队累计销售额**，按阶梯比例发放奖金。与等级差价不同，团队业绩关注的是团队整体表现而非个人等级。
+
+### 配置参数
+
+```rust
+pub struct TeamPerformanceTier<Balance> {
+    pub sales_threshold: Balance,  // 团队累计销售额门槛
+    pub min_team_size: u32,        // 团队最小人数门槛（0=不限制）
+    pub rate: u16,                 // 奖金比例（基点，500 = 5%）
+}
+
+pub struct TeamPerformanceConfig<Balance, MaxTiers> {
+    pub tiers: BoundedVec<TeamPerformanceTier<Balance>, MaxTiers>,
+    pub max_depth: u8,        // 沿推荐链向上最大遍历深度（1-30）
+    pub allow_stacking: bool, // 是否允许多层叠加
+}
+```
+
+### 计算示例
+
+```
+配置：
+├── Tier 1: 团队销售 ≥ 3000, 团队 ≥ 5人, rate = 2%
+└── Tier 2: 团队销售 ≥ 10000, 团队 ≥ 20人, rate = 5%
+
+推荐链: Alice(团队50人,销售20000) → Bob(团队10人,销售5000) → Carol → David(buyer)
+
+David 消费 10000 NEX, allow_stacking=false:
+└── Bob 达标 Tier1 (5000≥3000, 10≥5): 10000 × 2% = 200 NEX（最近达标上级）
+
+David 消费 10000 NEX, allow_stacking=true:
+├── Bob 达标 Tier1: 10000 × 2% = 200 NEX
+└── Alice 达标 Tier2: 10000 × 5% = 500 NEX
+```
+
+### 与等级差价的区别
+
+| | 等级差价 (LEVEL_DIFF) | 团队业绩 (TEAM_PERFORMANCE) |
+|---|---|---|
+| 依据 | 个人会员等级 | 团队累计销售额 + 团队人数 |
+| 计算 | 上下级费率差额 | 固定阶梯比例 |
+| 场景 | 代理商等级体系 | 团队销售目标达标奖金 |
+
 ## 🔒 安全机制
 
 1. **返佣上限** - `max_commission_rate` 限制总返佣不超过可用池的比例
@@ -506,7 +555,7 @@ pub struct SingleLineConfig<Balance> {
 ## 📝 注意事项
 
 1. **模式可叠加** - 同一订单可触发多种返佣模式
-2. **返佣池有限** - 总返佣受限于 `available_pool`（通常是平台费）
+2. **返佣池有限** - 总返佣受限于 `available_pool`（ShopRevenue = 卖家货款，PlatformFee = 平台费）
 3. **需手动提取** - 返佣记录后需调用 `withdraw_commission` 提取
 4. **店主配置** - 店主需先配置并启用返佣功能
 

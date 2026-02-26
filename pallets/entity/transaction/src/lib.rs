@@ -19,7 +19,7 @@
 extern crate alloc;
 
 pub use pallet::*;
-pub use pallet_entity_common::MallOrderStatus;
+pub use pallet_entity_common::OrderStatus;
 
 #[cfg(test)]
 mod mock;
@@ -38,7 +38,7 @@ pub mod pallet {
     };
     use frame_system::pallet_prelude::*;
     use pallet_escrow::pallet::Escrow as EscrowTrait;
-    use pallet_entity_common::{MallOrderStatus, OrderCommissionHandler, OrderProvider, ProductCategory, ProductProvider, EntityProvider, EntityTokenProvider, ShopProvider};
+    use pallet_entity_common::{OrderStatus, OrderCommissionHandler, OrderProvider, ProductCategory, ProductProvider, EntityTokenProvider, ShopProvider};
     use sp_runtime::{traits::{Saturating, Zero}, SaturatedConversion};
 
     /// 货币余额类型别名
@@ -48,7 +48,7 @@ pub mod pallet {
     /// 订单信息
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     #[scale_info(skip_type_params(MaxCidLen))]
-    pub struct MallOrder<AccountId, Balance, BlockNumber, MaxCidLen: Get<u32>> {
+    pub struct Order<AccountId, Balance, BlockNumber, MaxCidLen: Get<u32>> {
         /// 订单 ID
         pub id: u64,
         /// 店铺 ID
@@ -76,7 +76,7 @@ pub mod pallet {
         /// 物流信息 IPFS CID
         pub tracking_cid: Option<BoundedVec<u8, MaxCidLen>>,
         /// 订单状态
-        pub status: MallOrderStatus,
+        pub status: OrderStatus,
         /// 创建时间
         pub created_at: BlockNumber,
         /// 支付时间
@@ -94,7 +94,7 @@ pub mod pallet {
     }
 
     /// 订单类型别名
-    pub type MallOrderOf<T> = MallOrder<
+    pub type OrderOf<T> = Order<
         <T as frame_system::Config>::AccountId,
         BalanceOf<T>,
         BlockNumberFor<T>,
@@ -143,9 +143,6 @@ pub mod pallet {
 
         /// 托管接口
         type Escrow: EscrowTrait<Self::AccountId, BalanceOf<Self>>;
-
-        /// 实体查询接口
-        type EntityProvider: EntityProvider<Self::AccountId>;
 
         /// Shop 查询接口（Entity-Shop 分离架构）
         type ShopProvider: ShopProvider<Self::AccountId>;
@@ -197,7 +194,7 @@ pub mod pallet {
     /// 订单存储
     #[pallet::storage]
     #[pallet::getter(fn orders)]
-    pub type Orders<T: Config> = StorageMap<_, Blake2_128Concat, u64, MallOrderOf<T>>;
+    pub type Orders<T: Config> = StorageMap<_, Blake2_128Concat, u64, OrderOf<T>>;
 
     /// 买家订单索引
     #[pallet::storage]
@@ -316,6 +313,12 @@ pub mod pallet {
         InvalidAmount,
         /// 超时队列已满
         ExpiryQueueFull,
+        /// 实物商品必须提供收货地址
+        ShippingCidRequired,
+        /// 服务类订单不可使用发货/收货流程
+        ServiceOrderCannotShip,
+        /// 退款理由 CID 不能为空
+        EmptyReasonCid,
     }
 
     // ==================== Hooks ====================
@@ -421,6 +424,11 @@ pub mod pallet {
                 ProductCategory::Other => true,
             };
 
+            // M6: 实物商品必须提供收货地址
+            if requires_shipping {
+                ensure!(shipping_cid.is_some(), Error::<T>::ShippingCidRequired);
+            }
+
             let order_id = NextOrderId::<T>::get();
             let now = <frame_system::Pallet<T>>::block_number();
 
@@ -433,12 +441,12 @@ pub mod pallet {
 
             // 数字商品：支付后立即完成
             let initial_status = if product_category == ProductCategory::Digital {
-                MallOrderStatus::Completed
+                OrderStatus::Completed
             } else {
-                MallOrderStatus::Paid
+                OrderStatus::Paid
             };
 
-            let order = MallOrder {
+            let order = Order {
                 id: order_id,
                 shop_id,
                 product_id,
@@ -486,11 +494,12 @@ pub mod pallet {
                 stats.total_orders = stats.total_orders.saturating_add(1);
             });
 
+            // L9: 事件金额使用实际支付金额（积分抵扣后）
             Self::deposit_event(Event::OrderCreated {
                 order_id,
                 buyer: buyer.clone(),
                 seller: seller.clone(),
-                amount: total_amount,
+                amount: final_amount,
             });
             Self::deposit_event(Event::OrderPaid {
                 order_id,
@@ -522,7 +531,7 @@ pub mod pallet {
             
             // L1: place_order 直接设为 Paid，移除 Created 死分支
             ensure!(
-                order.status == MallOrderStatus::Paid,
+                order.status == OrderStatus::Paid,
                 Error::<T>::CannotCancelOrder
             );
 
@@ -541,7 +550,7 @@ pub mod pallet {
 
             Orders::<T>::mutate(order_id, |maybe_order| {
                 if let Some(o) = maybe_order {
-                    o.status = MallOrderStatus::Cancelled;
+                    o.status = OrderStatus::Cancelled;
                 }
             });
 
@@ -562,12 +571,17 @@ pub mod pallet {
             Orders::<T>::try_mutate(order_id, |maybe_order| -> DispatchResult {
                 let order = maybe_order.as_mut().ok_or(Error::<T>::OrderNotFound)?;
                 ensure!(order.seller == who, Error::<T>::NotOrderSeller);
-                ensure!(order.status == MallOrderStatus::Paid, Error::<T>::InvalidOrderStatus);
+                // C2: 服务类订单必须走 start_service 流程
+                ensure!(
+                    order.product_category != ProductCategory::Service,
+                    Error::<T>::ServiceOrderCannotShip
+                );
+                ensure!(order.status == OrderStatus::Paid, Error::<T>::InvalidOrderStatus);
 
                 order.tracking_cid = Some(
                     tracking_cid.try_into().map_err(|_| Error::<T>::CidTooLong)?
                 );
-                order.status = MallOrderStatus::Shipped;
+                order.status = OrderStatus::Shipped;
                 order.shipped_at = Some(<frame_system::Pallet<T>>::block_number());
                 Ok(())
             })?;
@@ -591,7 +605,12 @@ pub mod pallet {
 
             let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
             ensure!(order.buyer == who, Error::<T>::NotOrderBuyer);
-            ensure!(order.status == MallOrderStatus::Shipped, Error::<T>::InvalidOrderStatus);
+            // C2: 服务类订单必须走 confirm_service 流程
+            ensure!(
+                order.product_category != ProductCategory::Service,
+                Error::<T>::ServiceOrderCannotShip
+            );
+            ensure!(order.status == OrderStatus::Shipped, Error::<T>::InvalidOrderStatus);
 
             Self::do_complete_order(order_id, &order)
         }
@@ -602,9 +621,14 @@ pub mod pallet {
         pub fn request_refund(
             origin: OriginFor<T>,
             order_id: u64,
-            _reason_cid: Vec<u8>,
+            reason_cid: Vec<u8>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+
+            // M5: 校验退款理由 CID
+            ensure!(!reason_cid.is_empty(), Error::<T>::EmptyReasonCid);
+            let _bounded_reason: BoundedVec<u8, T::MaxCidLength> =
+                reason_cid.try_into().map_err(|_| Error::<T>::CidTooLong)?;
 
             Orders::<T>::try_mutate(order_id, |maybe_order| -> DispatchResult {
                 let order = maybe_order.as_mut().ok_or(Error::<T>::OrderNotFound)?;
@@ -617,11 +641,11 @@ pub mod pallet {
                 );
                 
                 ensure!(
-                    order.status == MallOrderStatus::Paid || order.status == MallOrderStatus::Shipped,
+                    order.status == OrderStatus::Paid || order.status == OrderStatus::Shipped,
                     Error::<T>::InvalidOrderStatus
                 );
 
-                order.status = MallOrderStatus::Disputed;
+                order.status = OrderStatus::Disputed;
                 Ok(())
             })?;
 
@@ -640,7 +664,7 @@ pub mod pallet {
 
             let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
             ensure!(order.seller == who, Error::<T>::NotOrderSeller);
-            ensure!(order.status == MallOrderStatus::Disputed, Error::<T>::InvalidOrderStatus);
+            ensure!(order.status == OrderStatus::Disputed, Error::<T>::InvalidOrderStatus);
 
             // 解除争议锁定后退款给买家
             T::Escrow::set_resolved(order_id)?;
@@ -658,7 +682,7 @@ pub mod pallet {
 
             Orders::<T>::mutate(order_id, |maybe_order| {
                 if let Some(o) = maybe_order {
-                    o.status = MallOrderStatus::Refunded;
+                    o.status = OrderStatus::Refunded;
                 }
             });
 
@@ -679,9 +703,9 @@ pub mod pallet {
                 let order = maybe_order.as_mut().ok_or(Error::<T>::OrderNotFound)?;
                 ensure!(order.seller == who, Error::<T>::NotOrderSeller);
                 ensure!(order.product_category == ProductCategory::Service, Error::<T>::NotServiceOrder);
-                ensure!(order.status == MallOrderStatus::Paid, Error::<T>::InvalidOrderStatus);
+                ensure!(order.status == OrderStatus::Paid, Error::<T>::InvalidOrderStatus);
 
-                order.status = MallOrderStatus::Shipped;  // 复用 Shipped 状态表示服务进行中
+                order.status = OrderStatus::Shipped;  // 复用 Shipped 状态表示服务进行中
                 order.service_started_at = Some(<frame_system::Pallet<T>>::block_number());
                 Ok(())
             })?;
@@ -700,7 +724,7 @@ pub mod pallet {
                 let order = maybe_order.as_mut().ok_or(Error::<T>::OrderNotFound)?;
                 ensure!(order.seller == who, Error::<T>::NotOrderSeller);
                 ensure!(order.product_category == ProductCategory::Service, Error::<T>::NotServiceOrder);
-                ensure!(order.status == MallOrderStatus::Shipped, Error::<T>::InvalidOrderStatus);
+                ensure!(order.status == OrderStatus::Shipped, Error::<T>::InvalidOrderStatus);
 
                 order.service_completed_at = Some(<frame_system::Pallet<T>>::block_number());
                 Ok(())
@@ -726,7 +750,7 @@ pub mod pallet {
             let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
             ensure!(order.buyer == who, Error::<T>::NotOrderBuyer);
             ensure!(order.product_category == ProductCategory::Service, Error::<T>::NotServiceOrder);
-            ensure!(order.status == MallOrderStatus::Shipped, Error::<T>::InvalidOrderStatus);
+            ensure!(order.status == OrderStatus::Shipped, Error::<T>::InvalidOrderStatus);
             ensure!(order.service_completed_at.is_some(), Error::<T>::InvalidOrderStatus);
 
             Self::do_complete_order(order_id, &order)
@@ -737,7 +761,7 @@ pub mod pallet {
 
     impl<T: Config> Pallet<T> {
         /// 完成订单（释放资金）
-        fn do_complete_order(order_id: u64, order: &MallOrderOf<T>) -> DispatchResult {
+        fn do_complete_order(order_id: u64, order: &OrderOf<T>) -> DispatchResult {
             let seller_amount = order.total_amount.saturating_sub(order.platform_fee);
 
             // 释放资金给卖家
@@ -752,7 +776,7 @@ pub mod pallet {
 
             Orders::<T>::mutate(order_id, |maybe_order| {
                 if let Some(o) = maybe_order {
-                    o.status = MallOrderStatus::Completed;
+                    o.status = OrderStatus::Completed;
                     o.completed_at = Some(now);
                 }
             });
@@ -772,6 +796,7 @@ pub mod pallet {
                 order_id,
                 &order.buyer,
                 order.total_amount,
+                order.platform_fee,
             ).is_err() {
                 Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionComplete });
             }
@@ -813,18 +838,18 @@ pub mod pallet {
             }
 
             let mut processed = 0u32;
-            let mut reads = 1u32; // ExpiryQueue read
+            let mut iterated = 0usize; // C1: 实际遍历位置（含跳过和失败的）
 
             for &order_id in order_ids.iter() {
                 if processed >= max_count {
                     break;
                 }
-                reads = reads.saturating_add(1);
+                iterated = iterated.saturating_add(1);
 
                 if let Some(order) = Orders::<T>::get(order_id) {
                     match order.status {
                         // 发货超时：自动退款
-                        MallOrderStatus::Paid => {
+                        OrderStatus::Paid => {
                             if order.requires_shipping {
                                 // 实物商品：未发货 → 退款（Escrow 失败则跳过，避免状态不一致）
                                 if T::Escrow::refund_all(order_id, &order.buyer).is_ok() {
@@ -836,7 +861,7 @@ pub mod pallet {
                                     }
                                     Orders::<T>::mutate(order_id, |o| {
                                         if let Some(ord) = o {
-                                            ord.status = MallOrderStatus::Refunded;
+                                            ord.status = OrderStatus::Refunded;
                                         }
                                     });
                                     processed = processed.saturating_add(1);
@@ -854,7 +879,7 @@ pub mod pallet {
                                     }
                                     Orders::<T>::mutate(order_id, |o| {
                                         if let Some(ord) = o {
-                                            ord.status = MallOrderStatus::Refunded;
+                                            ord.status = OrderStatus::Refunded;
                                         }
                                     });
                                     processed = processed.saturating_add(1);
@@ -864,7 +889,7 @@ pub mod pallet {
                             }
                         }
                         // 确认超时：自动确认收货/服务
-                        MallOrderStatus::Shipped => {
+                        OrderStatus::Shipped => {
                             // H5: 服务类订单必须 service_completed_at 已设置才能自动完成
                             // 否则这是来自 place_order 的 ShipTimeout 触发，应跳过
                             if order.product_category == ProductCategory::Service
@@ -883,8 +908,24 @@ pub mod pallet {
                 }
             }
 
-            // 清理已处理的队列条目
-            ExpiryQueue::<T>::remove(now);
+            // C1: 按实际遍历位置截断，保留未遍历的订单
+            if iterated >= order_ids.len() {
+                // 全部遍历完毕，清空队列
+                ExpiryQueue::<T>::remove(now);
+            } else {
+                // 部分遍历，保留未遍历的条目
+                let remaining: BoundedVec<u64, ConstU32<500>> = order_ids
+                    .into_iter()
+                    .skip(iterated)
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .expect("remaining is subset of original bounded vec");
+                if remaining.is_empty() {
+                    ExpiryQueue::<T>::remove(now);
+                } else {
+                    ExpiryQueue::<T>::insert(now, remaining);
+                }
+            }
 
             // 精确报告 weight：读队列 + 每个订单读写 + escrow + commission 操作
             Weight::from_parts(
@@ -919,13 +960,13 @@ pub mod pallet {
 
         fn is_order_completed(order_id: u64) -> bool {
             Orders::<T>::get(order_id)
-                .map(|o| o.status == MallOrderStatus::Completed)
+                .map(|o| o.status == OrderStatus::Completed)
                 .unwrap_or(false)
         }
 
         fn is_order_disputed(order_id: u64) -> bool {
             Orders::<T>::get(order_id)
-                .map(|o| o.status == MallOrderStatus::Disputed)
+                .map(|o| o.status == OrderStatus::Disputed)
                 .unwrap_or(false)
         }
 
@@ -935,7 +976,7 @@ pub mod pallet {
                     // 必须是买家或卖家
                     let is_party = o.buyer == *who || o.seller == *who;
                     // 订单状态必须是 Paid 或 Shipped（未完成且未争议）
-                    let status_ok = matches!(o.status, MallOrderStatus::Paid | MallOrderStatus::Shipped);
+                    let status_ok = matches!(o.status, OrderStatus::Paid | OrderStatus::Shipped);
                     is_party && status_ok
                 })
                 .unwrap_or(false)

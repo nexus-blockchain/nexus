@@ -17,6 +17,17 @@ impl frame_system::Config for Test {
 	type Block = Block;
 }
 
+// Mock SubscriptionProvider: community_hash(1) => Basic (paid), others => Free
+pub struct MockSubscription;
+impl SubscriptionProvider for MockSubscription {
+	fn effective_tier(bot_id_hash: &BotIdHash) -> SubscriptionTier {
+		if bot_id_hash[0] == 1 { SubscriptionTier::Basic } else { SubscriptionTier::Free }
+	}
+	fn effective_feature_gate(bot_id_hash: &BotIdHash) -> TierFeatureGate {
+		MockSubscription::effective_tier(bot_id_hash).feature_gate()
+	}
+}
+
 pub struct MockBotRegistry;
 impl BotRegistryProvider<u64> for MockBotRegistry {
 	fn is_bot_active(bot_id_hash: &BotIdHash) -> bool { bot_id_hash[0] == 1 }
@@ -36,6 +47,7 @@ impl pallet_grouprobot_community::Config for Test {
 	type ReputationCooldown = frame_support::traits::ConstU64<5>;
 	type MaxReputationDelta = frame_support::traits::ConstU32<100>;
 	type BotRegistry = MockBotRegistry;
+	type Subscription = MockSubscription;
 }
 
 pub const OWNER: u64 = 1;

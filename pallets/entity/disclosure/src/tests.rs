@@ -484,3 +484,799 @@ fn get_disclosure_level_default() {
         assert_eq!(Pallet::<Test>::get_disclosure_level(ENTITY_ID), DisclosureLevel::Basic);
     });
 }
+
+// ==================== 审计回归测试 ====================
+
+#[test]
+fn h1_configure_disclosure_rejects_blackout_exceeds_max() {
+    new_test_ext().execute_with(|| {
+        // MaxBlackoutDuration = 200
+        assert_noop!(
+            EntityDisclosure::configure_disclosure(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                DisclosureLevel::Standard, true, 0u64, 201u64,
+            ),
+            Error::<Test>::BlackoutExceedsMax
+        );
+        // 恰好等于上限应成功
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 0u64, 200u64,
+        ));
+    });
+}
+
+#[test]
+fn h2_publish_disclosure_rejects_empty_cid() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::publish_disclosure(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                DisclosureType::AnnualReport, vec![], None,
+            ),
+            Error::<Test>::EmptyCid
+        );
+    });
+}
+
+#[test]
+fn h2_correct_disclosure_rejects_empty_cid() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport, b"QmOld".to_vec(), None,
+        ));
+        assert_noop!(
+            EntityDisclosure::correct_disclosure(
+                RuntimeOrigin::signed(OWNER), 0, vec![], None,
+            ),
+            Error::<Test>::EmptyCid
+        );
+    });
+}
+
+#[test]
+fn h3_correct_disclosure_triggers_blackout() {
+    new_test_ext().execute_with(|| {
+        // 配置：启用内幕控制 + blackout_after=50
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 0u64, 50u64,
+        ));
+
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport, b"QmOld".to_vec(), None,
+        ));
+
+        // publish 触发了黑窗口，先结束它
+        assert_ok!(EntityDisclosure::end_blackout(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+        ));
+        assert!(!Pallet::<Test>::is_in_blackout(ENTITY_ID));
+
+        // 更正披露也应触发黑窗口
+        assert_ok!(EntityDisclosure::correct_disclosure(
+            RuntimeOrigin::signed(OWNER), 0,
+            b"QmNew".to_vec(), None,
+        ));
+        assert!(Pallet::<Test>::is_in_blackout(ENTITY_ID));
+    });
+}
+
+#[test]
+fn h5_configure_preserves_last_disclosure() {
+    new_test_ext().execute_with(|| {
+        // 首次配置：last_disclosure 应为 0（无历史记录）
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64, 0u64,
+        ));
+        let config = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(config.last_disclosure, 0);
+
+        // 发布一个披露
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport, b"QmCid".to_vec(), None,
+        ));
+        let config = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(config.last_disclosure, 1); // block 1
+
+        // 重新配置不应重置 last_disclosure
+        advance_blocks(10);
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Enhanced, false, 0u64, 0u64,
+        ));
+        let config = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(config.last_disclosure, 1); // 保持不变，不被伪造为 now(11)
+        assert_eq!(config.level, DisclosureLevel::Enhanced);
+    });
+}
+
+#[test]
+fn l1_end_blackout_fails_when_none_exists() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::end_blackout(RuntimeOrigin::signed(OWNER), ENTITY_ID),
+            Error::<Test>::BlackoutNotFound
+        );
+    });
+}
+
+#[test]
+fn m3_start_blackout_respects_config_max() {
+    new_test_ext().execute_with(|| {
+        // MaxBlackoutDuration = 200
+        assert_noop!(
+            EntityDisclosure::start_blackout(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, 201u64,
+            ),
+            Error::<Test>::InvalidBlackoutDuration
+        );
+        // 零时长也不允许
+        assert_noop!(
+            EntityDisclosure::start_blackout(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, 0u64,
+            ),
+            Error::<Test>::InvalidBlackoutDuration
+        );
+        // 恰好 200 应成功
+        assert_ok!(EntityDisclosure::start_blackout(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 200u64,
+        ));
+    });
+}
+
+#[test]
+fn l2_disclosure_type_has_default() {
+    // DisclosureType 应有 Default trait
+    let dt: DisclosureType = Default::default();
+    assert_eq!(dt, DisclosureType::AnnualReport);
+}
+
+#[test]
+fn h5_configure_preserves_violation_count() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64, 0u64,
+        ));
+        // 手动修改 violation_count 模拟累积
+        DisclosureConfigs::<Test>::mutate(ENTITY_ID, |c| {
+            if let Some(config) = c {
+                config.violation_count = 3;
+            }
+        });
+
+        // 重新配置不应清除 violation_count
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Enhanced, true, 0u64, 50u64,
+        ));
+        let config = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(config.violation_count, 3);
+    });
+}
+
+// ==================== publish_announcement ====================
+
+#[test]
+fn publish_announcement_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER),
+            ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Hello World".to_vec(),
+            b"QmAnnouncement1".to_vec(),
+            None,
+        ));
+
+        let record = Announcements::<Test>::get(0).unwrap();
+        assert_eq!(record.entity_id, ENTITY_ID);
+        assert_eq!(record.category, AnnouncementCategory::General);
+        assert_eq!(record.title.to_vec(), b"Hello World".to_vec());
+        assert_eq!(record.content_cid.to_vec(), b"QmAnnouncement1".to_vec());
+        assert_eq!(record.publisher, OWNER);
+        assert_eq!(record.status, AnnouncementStatus::Active);
+        assert_eq!(record.is_pinned, false);
+        assert_eq!(record.expires_at, None);
+
+        let history = EntityAnnouncements::<Test>::get(ENTITY_ID);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0], 0);
+
+        assert_eq!(NextAnnouncementId::<Test>::get(), 1);
+    });
+}
+
+#[test]
+fn publish_announcement_with_expiry() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER),
+            ENTITY_ID,
+            AnnouncementCategory::Promotion,
+            b"Sale".to_vec(),
+            b"QmSale".to_vec(),
+            Some(100u64),
+        ));
+
+        let record = Announcements::<Test>::get(0).unwrap();
+        assert_eq!(record.expires_at, Some(100));
+        assert_eq!(record.category, AnnouncementCategory::Promotion);
+    });
+}
+
+#[test]
+fn publish_announcement_fails_not_owner() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::publish_announcement(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID,
+                AnnouncementCategory::General,
+                b"Title".to_vec(), b"QmCid".to_vec(), None,
+            ),
+            Error::<Test>::NotAdmin
+        );
+    });
+}
+
+#[test]
+fn publish_announcement_fails_entity_not_found() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::publish_announcement(
+                RuntimeOrigin::signed(OWNER), 999,
+                AnnouncementCategory::General,
+                b"Title".to_vec(), b"QmCid".to_vec(), None,
+            ),
+            Error::<Test>::EntityNotFound
+        );
+    });
+}
+
+#[test]
+fn publish_announcement_fails_empty_title() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::publish_announcement(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                AnnouncementCategory::General,
+                vec![], b"QmCid".to_vec(), None,
+            ),
+            Error::<Test>::EmptyTitle
+        );
+    });
+}
+
+#[test]
+fn publish_announcement_fails_title_too_long() {
+    new_test_ext().execute_with(|| {
+        let long_title = vec![0u8; 129]; // MaxTitleLength = 128
+        assert_noop!(
+            EntityDisclosure::publish_announcement(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                AnnouncementCategory::General,
+                long_title, b"QmCid".to_vec(), None,
+            ),
+            Error::<Test>::TitleTooLong
+        );
+    });
+}
+
+#[test]
+fn publish_announcement_fails_empty_cid() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::publish_announcement(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                AnnouncementCategory::General,
+                b"Title".to_vec(), vec![], None,
+            ),
+            Error::<Test>::EmptyCid
+        );
+    });
+}
+
+#[test]
+fn publish_announcement_fails_cid_too_long() {
+    new_test_ext().execute_with(|| {
+        let long_cid = vec![0u8; 65]; // MaxCidLength = 64
+        assert_noop!(
+            EntityDisclosure::publish_announcement(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                AnnouncementCategory::General,
+                b"Title".to_vec(), long_cid, None,
+            ),
+            Error::<Test>::CidTooLong
+        );
+    });
+}
+
+#[test]
+fn publish_announcement_fails_invalid_expiry() {
+    new_test_ext().execute_with(|| {
+        // block_number = 1, expires_at = 1 (not > now)
+        assert_noop!(
+            EntityDisclosure::publish_announcement(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                AnnouncementCategory::General,
+                b"Title".to_vec(), b"QmCid".to_vec(), Some(1u64),
+            ),
+            Error::<Test>::InvalidExpiry
+        );
+    });
+}
+
+#[test]
+fn publish_announcement_fails_history_full() {
+    new_test_ext().execute_with(|| {
+        // MaxAnnouncementHistory = 10
+        for i in 0..10 {
+            assert_ok!(EntityDisclosure::publish_announcement(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                AnnouncementCategory::General,
+                format!("Title {}", i).into_bytes(),
+                b"QmCid".to_vec(), None,
+            ));
+        }
+        assert_noop!(
+            EntityDisclosure::publish_announcement(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                AnnouncementCategory::General,
+                b"Title 11".to_vec(), b"QmCid".to_vec(), None,
+            ),
+            Error::<Test>::AnnouncementHistoryFull
+        );
+    });
+}
+
+// ==================== update_announcement ====================
+
+#[test]
+fn update_announcement_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Old Title".to_vec(), b"QmOld".to_vec(), None,
+        ));
+
+        assert_ok!(EntityDisclosure::update_announcement(
+            RuntimeOrigin::signed(OWNER), 0,
+            Some(b"New Title".to_vec()),
+            Some(b"QmNew".to_vec()),
+            Some(AnnouncementCategory::SystemUpdate),
+            Some(Some(200u64)),
+        ));
+
+        let record = Announcements::<Test>::get(0).unwrap();
+        assert_eq!(record.title.to_vec(), b"New Title".to_vec());
+        assert_eq!(record.content_cid.to_vec(), b"QmNew".to_vec());
+        assert_eq!(record.category, AnnouncementCategory::SystemUpdate);
+        assert_eq!(record.expires_at, Some(200));
+    });
+}
+
+#[test]
+fn update_announcement_partial_update() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), Some(100u64),
+        ));
+
+        // 只更新标题
+        assert_ok!(EntityDisclosure::update_announcement(
+            RuntimeOrigin::signed(OWNER), 0,
+            Some(b"Updated Title".to_vec()),
+            None, None, None,
+        ));
+
+        let record = Announcements::<Test>::get(0).unwrap();
+        assert_eq!(record.title.to_vec(), b"Updated Title".to_vec());
+        assert_eq!(record.content_cid.to_vec(), b"QmCid".to_vec());
+        assert_eq!(record.category, AnnouncementCategory::General);
+        assert_eq!(record.expires_at, Some(100));
+    });
+}
+
+#[test]
+fn update_announcement_clear_expiry() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), Some(100u64),
+        ));
+
+        // 清除过期时间 → 永不过期
+        assert_ok!(EntityDisclosure::update_announcement(
+            RuntimeOrigin::signed(OWNER), 0,
+            None, None, None, Some(None),
+        ));
+
+        let record = Announcements::<Test>::get(0).unwrap();
+        assert_eq!(record.expires_at, None);
+    });
+}
+
+#[test]
+fn update_announcement_fails_not_found() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::update_announcement(
+                RuntimeOrigin::signed(OWNER), 999,
+                Some(b"Title".to_vec()), None, None, None,
+            ),
+            Error::<Test>::AnnouncementNotFound
+        );
+    });
+}
+
+#[test]
+fn update_announcement_fails_not_owner() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+
+        assert_noop!(
+            EntityDisclosure::update_announcement(
+                RuntimeOrigin::signed(ALICE), 0,
+                Some(b"New".to_vec()), None, None, None,
+            ),
+            Error::<Test>::NotAdmin
+        );
+    });
+}
+
+#[test]
+fn update_announcement_fails_withdrawn() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+        assert_ok!(EntityDisclosure::withdraw_announcement(RuntimeOrigin::signed(OWNER), 0));
+
+        assert_noop!(
+            EntityDisclosure::update_announcement(
+                RuntimeOrigin::signed(OWNER), 0,
+                Some(b"New".to_vec()), None, None, None,
+            ),
+            Error::<Test>::AnnouncementNotActive
+        );
+    });
+}
+
+#[test]
+fn update_announcement_fails_empty_title() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+
+        assert_noop!(
+            EntityDisclosure::update_announcement(
+                RuntimeOrigin::signed(OWNER), 0,
+                Some(vec![]), None, None, None,
+            ),
+            Error::<Test>::EmptyTitle
+        );
+    });
+}
+
+#[test]
+fn update_announcement_fails_invalid_expiry() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+
+        // block_number = 1, expires_at = 1 (not > now)
+        assert_noop!(
+            EntityDisclosure::update_announcement(
+                RuntimeOrigin::signed(OWNER), 0,
+                None, None, None, Some(Some(1u64)),
+            ),
+            Error::<Test>::InvalidExpiry
+        );
+    });
+}
+
+// ==================== withdraw_announcement ====================
+
+#[test]
+fn withdraw_announcement_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+
+        assert_ok!(EntityDisclosure::withdraw_announcement(
+            RuntimeOrigin::signed(OWNER), 0,
+        ));
+
+        let record = Announcements::<Test>::get(0).unwrap();
+        assert_eq!(record.status, AnnouncementStatus::Withdrawn);
+    });
+}
+
+#[test]
+fn withdraw_announcement_clears_pinned() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+        assert_ok!(EntityDisclosure::pin_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, Some(0),
+        ));
+        assert_eq!(PinnedAnnouncement::<Test>::get(ENTITY_ID), Some(0));
+
+        // 撤回应清除置顶
+        assert_ok!(EntityDisclosure::withdraw_announcement(
+            RuntimeOrigin::signed(OWNER), 0,
+        ));
+        assert_eq!(PinnedAnnouncement::<Test>::get(ENTITY_ID), None);
+        assert_eq!(Announcements::<Test>::get(0).unwrap().is_pinned, false);
+    });
+}
+
+#[test]
+fn withdraw_announcement_fails_not_found() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::withdraw_announcement(RuntimeOrigin::signed(OWNER), 999),
+            Error::<Test>::AnnouncementNotFound
+        );
+    });
+}
+
+#[test]
+fn withdraw_announcement_fails_already_withdrawn() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+        assert_ok!(EntityDisclosure::withdraw_announcement(RuntimeOrigin::signed(OWNER), 0));
+
+        assert_noop!(
+            EntityDisclosure::withdraw_announcement(RuntimeOrigin::signed(OWNER), 0),
+            Error::<Test>::AnnouncementNotActive
+        );
+    });
+}
+
+#[test]
+fn withdraw_announcement_fails_not_admin() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+
+        assert_noop!(
+            EntityDisclosure::withdraw_announcement(RuntimeOrigin::signed(ALICE), 0),
+            Error::<Test>::NotAdmin
+        );
+    });
+}
+
+// ==================== pin_announcement ====================
+
+#[test]
+fn pin_announcement_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+
+        assert_ok!(EntityDisclosure::pin_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, Some(0),
+        ));
+
+        let record = Announcements::<Test>::get(0).unwrap();
+        assert!(record.is_pinned);
+        assert_eq!(PinnedAnnouncement::<Test>::get(ENTITY_ID), Some(0));
+    });
+}
+
+#[test]
+fn pin_announcement_replaces_old_pin() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"First".to_vec(), b"QmFirst".to_vec(), None,
+        ));
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Second".to_vec(), b"QmSecond".to_vec(), None,
+        ));
+
+        // 置顶第一个
+        assert_ok!(EntityDisclosure::pin_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, Some(0),
+        ));
+        assert!(Announcements::<Test>::get(0).unwrap().is_pinned);
+
+        // 置顶第二个 — 自动替换
+        assert_ok!(EntityDisclosure::pin_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, Some(1),
+        ));
+
+        assert!(!Announcements::<Test>::get(0).unwrap().is_pinned);
+        assert!(Announcements::<Test>::get(1).unwrap().is_pinned);
+        assert_eq!(PinnedAnnouncement::<Test>::get(ENTITY_ID), Some(1));
+    });
+}
+
+#[test]
+fn unpin_announcement_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+        assert_ok!(EntityDisclosure::pin_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, Some(0),
+        ));
+
+        // 取消置顶
+        assert_ok!(EntityDisclosure::pin_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, None,
+        ));
+
+        assert!(!Announcements::<Test>::get(0).unwrap().is_pinned);
+        assert_eq!(PinnedAnnouncement::<Test>::get(ENTITY_ID), None);
+    });
+}
+
+#[test]
+fn pin_announcement_fails_not_owner() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+
+        assert_noop!(
+            EntityDisclosure::pin_announcement(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID, Some(0),
+            ),
+            Error::<Test>::NotAdmin
+        );
+    });
+}
+
+#[test]
+fn pin_announcement_fails_not_found() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::pin_announcement(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, Some(999),
+            ),
+            Error::<Test>::AnnouncementNotFound
+        );
+    });
+}
+
+#[test]
+fn pin_announcement_fails_wrong_entity() {
+    new_test_ext().execute_with(|| {
+        // 公告属于 ENTITY_ID
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+
+        // 尝试在 ENTITY_ID_2 下置顶
+        assert_noop!(
+            EntityDisclosure::pin_announcement(
+                RuntimeOrigin::signed(OWNER_2), ENTITY_ID_2, Some(0),
+            ),
+            Error::<Test>::AnnouncementNotFound
+        );
+    });
+}
+
+#[test]
+fn pin_announcement_fails_withdrawn() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+        assert_ok!(EntityDisclosure::withdraw_announcement(RuntimeOrigin::signed(OWNER), 0));
+
+        assert_noop!(
+            EntityDisclosure::pin_announcement(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, Some(0),
+            ),
+            Error::<Test>::AnnouncementNotActive
+        );
+    });
+}
+
+// ==================== 公告 helper 函数 ====================
+
+#[test]
+fn is_announcement_expired_works() {
+    new_test_ext().execute_with(|| {
+        // 不过期公告
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"No Expiry".to_vec(), b"QmCid".to_vec(), None,
+        ));
+        assert!(!Pallet::<Test>::is_announcement_expired(0));
+
+        // 有过期时间公告
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::Promotion,
+            b"Expires Soon".to_vec(), b"QmCid2".to_vec(), Some(50u64),
+        ));
+        assert!(!Pallet::<Test>::is_announcement_expired(1));
+
+        // 过期后
+        advance_blocks(50);
+        assert!(Pallet::<Test>::is_announcement_expired(1));
+    });
+}
+
+#[test]
+fn get_pinned_announcement_works() {
+    new_test_ext().execute_with(|| {
+        assert_eq!(Pallet::<Test>::get_pinned_announcement(ENTITY_ID), None);
+
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+        assert_ok!(EntityDisclosure::pin_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, Some(0),
+        ));
+
+        assert_eq!(Pallet::<Test>::get_pinned_announcement(ENTITY_ID), Some(0));
+    });
+}
+
+#[test]
+fn announcement_category_default() {
+    let cat: AnnouncementCategory = Default::default();
+    assert_eq!(cat, AnnouncementCategory::General);
+}
+
+#[test]
+fn announcement_status_default() {
+    let status: AnnouncementStatus = Default::default();
+    assert_eq!(status, AnnouncementStatus::Active);
+}

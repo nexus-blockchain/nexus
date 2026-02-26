@@ -1,5 +1,6 @@
 use crate as pallet_grouprobot_registry;
 use frame_support::{derive_impl, parameter_types, traits::Hooks};
+use pallet_grouprobot_primitives::*;
 use sp_runtime::BuildStorage;
 
 type Block = frame_system::mocking::MockBlock<Test>;
@@ -22,6 +23,17 @@ parameter_types! {
 	pub const PeerHeartbeatTimeout: u64 = 50;
 }
 
+// Mock SubscriptionProvider: bot_id[0]==1 => Basic (paid), others => Free
+pub struct MockSubscription;
+impl SubscriptionProvider for MockSubscription {
+	fn effective_tier(bot_id_hash: &BotIdHash) -> SubscriptionTier {
+		if bot_id_hash[0] == 1 { SubscriptionTier::Basic } else { SubscriptionTier::Free }
+	}
+	fn effective_feature_gate(bot_id_hash: &BotIdHash) -> TierFeatureGate {
+		MockSubscription::effective_tier(bot_id_hash).feature_gate()
+	}
+}
+
 impl pallet_grouprobot_registry::Config for Test {
 	type RuntimeEvent = RuntimeEvent;
 	type MaxBotsPerOwner = frame_support::traits::ConstU32<5>;
@@ -33,6 +45,7 @@ impl pallet_grouprobot_registry::Config for Test {
 	type MaxPeersPerBot = frame_support::traits::ConstU32<10>;
 	type MaxEndpointLen = frame_support::traits::ConstU32<256>;
 	type PeerHeartbeatTimeout = PeerHeartbeatTimeout;
+	type Subscription = MockSubscription;
 }
 
 pub const OWNER: u64 = 1;

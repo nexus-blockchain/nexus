@@ -553,8 +553,11 @@ fn parse_tron_response(
     }
 
     // 检查收款地址
-    let expected_to_hex = bytes_to_hex(expected_to);
-    if !response_str.contains(&expected_to_hex) {
+    // H1修复: expected_to 是 Base58 字符串字节（如 "TR7NHq..."），
+    // 应直接转为 &str 匹配，而非 bytes_to_hex（会产生 ASCII hex 编码，永远不匹配）
+    let expected_to_str = core::str::from_utf8(expected_to)
+        .map_err(|_| "Invalid expected_to UTF-8")?;
+    if !response_str.contains(expected_to_str) {
         result.error = Some(b"Recipient address mismatch".to_vec());
         return Ok(result);
     }
@@ -566,8 +569,9 @@ fn parse_tron_response(
     // 计算金额匹配状态
     let (amount_status, is_acceptable) = match actual_amount {
         Some(actual) => {
-            let min_exact = expected_amount * 995 / 1000;  // -0.5%
-            let max_exact = expected_amount * 1005 / 1000; // +0.5%
+            // M2修复: 使用 u128 中间计算防止大金额乘法溢出
+            let min_exact = (expected_amount as u128 * 995 / 1000) as u64;  // -0.5%
+            let max_exact = (expected_amount as u128 * 1005 / 1000) as u64; // +0.5%
             let severe_threshold = expected_amount / 2;    // 50%
 
             if actual >= min_exact && actual <= max_exact {
@@ -770,6 +774,7 @@ pub fn parse_trc20_transfer_list(
 
     // 累计找到的最大金额（同一 from→to 可能有多笔转账）
     let mut total_matched_amount: u64 = 0;
+    let mut max_single_amount: u64 = 0; // L1修复: 独立跟踪最大单笔金额
     let mut best_tx_hash: Option<Vec<u8>> = None;
     let mut best_timestamp: Option<u64> = None;
 
@@ -807,8 +812,9 @@ pub fn parse_trc20_transfer_list(
                 if amount > 0 {
                     total_matched_amount = total_matched_amount.saturating_add(amount);
 
-                    // 记录最大单笔的交易信息
-                    if best_tx_hash.is_none() || amount > total_matched_amount.saturating_sub(amount) {
+                    // L1修复: 记录最大单笔的交易信息（用独立变量跟踪最大单笔金额）
+                    if best_tx_hash.is_none() || amount > max_single_amount {
+                        max_single_amount = amount;
                         best_tx_hash = extract_json_string_value(entry, "transaction_id")
                             .map(|s| s.as_bytes().to_vec());
                         best_timestamp = extract_json_string_value(entry, "block_timestamp")
@@ -911,12 +917,14 @@ pub fn calculate_amount_status(expected: u64, actual: u64) -> AmountStatus {
     if actual == 0 {
         return AmountStatus::Invalid;
     }
+    // L2修复: expected==0 应返回 Invalid（与 pallet-trading-common 统一语义）
     if expected == 0 {
-        return AmountStatus::Overpaid { excess: actual };
+        return AmountStatus::Invalid;
     }
 
-    let min_exact = expected * 995 / 1000;  // -0.5%
-    let max_exact = expected * 1005 / 1000; // +0.5%
+    // M2修复: 使用 u128 中间计算防止大金额乘法溢出
+    let min_exact = (expected as u128 * 995 / 1000) as u64;  // -0.5%
+    let max_exact = (expected as u128 * 1005 / 1000) as u64; // +0.5%
     let severe_threshold = expected / 2;    // 50%
 
     if actual >= min_exact && actual <= max_exact {
@@ -1132,8 +1140,8 @@ mod tests {
         // exact match
         let expected = 1_000_000u64;
         let actual = 1_000_000u64;
-        let min_exact = expected * 995 / 1000;
-        let max_exact = expected * 1005 / 1000;
+        let min_exact = (expected as u128 * 995 / 1000) as u64;
+        let max_exact = (expected as u128 * 1005 / 1000) as u64;
         assert!(actual >= min_exact && actual <= max_exact);
 
         // overpaid
@@ -1148,5 +1156,88 @@ mod tests {
         // severely underpaid
         let actual_severe = 400_000u64;
         assert!(actual_severe < expected / 2);
+    }
+
+    // ==================== 审计回归测试 ====================
+
+    #[test]
+    fn h1_parse_tron_response_base58_address_match() {
+        // H1修复: expected_to 是 Base58 字符串字节，应直接匹配响应中的 Base58 地址
+        // 修复前: bytes_to_hex("TSeller...") → "5453656c6c65722e2e2e" → 永远不匹配
+        // 修复后: 直接用 "TSeller..." 匹配
+        let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","to_address":"TSellerAddr12345678901234567890","confirmations":100,"amount":10000000}"#;
+        let expected_to = b"TSellerAddr12345678901234567890";
+        let result = parse_tron_response(response, expected_to, 10_000_000).unwrap();
+        assert!(result.is_valid);
+        assert_eq!(result.amount_status, AmountStatus::Exact);
+    }
+
+    #[test]
+    fn h1_parse_tron_response_address_mismatch() {
+        let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","to_address":"TSellerAddr12345678901234567890","confirmations":100,"amount":10000000}"#;
+        let wrong_to = b"TWrongAddr123456789012345678901";
+        let result = parse_tron_response(response, wrong_to, 10_000_000).unwrap();
+        assert!(!result.is_valid);
+        assert_eq!(result.error, Some(b"Recipient address mismatch".to_vec()));
+    }
+
+    #[test]
+    fn m2_calculate_amount_status_large_amount_no_overflow() {
+        // M2修复: 大金额不应溢出
+        // 修复前: 10^16 * 1005 溢出 u64（u64::MAX ≈ 1.84×10^19）
+        // 修复后: 使用 u128 中间计算
+        let large_amount: u64 = 10_000_000_000_000_000; // 10^16 ($10 billion USDT)
+        let result = calculate_amount_status(large_amount, large_amount);
+        assert_eq!(result, AmountStatus::Exact);
+
+        // 确认边界正确
+        let slightly_over = (large_amount as u128 * 1006 / 1000) as u64;
+        let result2 = calculate_amount_status(large_amount, slightly_over);
+        assert!(matches!(result2, AmountStatus::Overpaid { .. }));
+    }
+
+    #[test]
+    fn l1_best_tx_hash_tracks_largest_single() {
+        // L1修复: best_tx_hash 应指向最大单笔转账，不是"大于前序总和"
+        // 反例: [6M, 5M, 7M] — 7M 是最大单笔，修复前 best 停留在 6M
+        let response = br#"{"data":[{"transaction_id":"tx_6m","from":"TBuyer","to":"TSeller","value":"6000000","block_timestamp":1700000000000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}},{"transaction_id":"tx_5m","from":"TBuyer","to":"TSeller","value":"5000000","block_timestamp":1700000001000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}},{"transaction_id":"tx_7m","from":"TBuyer","to":"TSeller","value":"7000000","block_timestamp":1700000002000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
+        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000).unwrap();
+        assert!(result.found);
+        assert_eq!(result.actual_amount, Some(18_000_000)); // 6M+5M+7M
+        // best_tx_hash 应为最大单笔 7M 的 tx
+        assert_eq!(result.tx_hash, Some(b"tx_7m".to_vec()));
+    }
+
+    #[test]
+    fn l2_calculate_amount_status_expected_zero_returns_invalid() {
+        // L2修复: expected==0 返回 Invalid（与 pallet-trading-common 一致）
+        // 修复前返回 Overpaid
+        assert_eq!(calculate_amount_status(0, 1_000_000), AmountStatus::Invalid);
+        assert_eq!(calculate_amount_status(0, 0), AmountStatus::Invalid);
+    }
+
+    #[test]
+    fn h1_parse_tron_response_insufficient_confirmations() {
+        let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","to_address":"TSellerXXX","confirmations":5,"amount":10000000}"#;
+        let result = parse_tron_response(response, b"TSellerXXX", 10_000_000).unwrap();
+        assert!(!result.is_valid);
+        assert_eq!(result.confirmations, 5);
+        assert_eq!(result.error, Some(b"Insufficient confirmations".to_vec()));
+    }
+
+    #[test]
+    fn h1_parse_tron_response_not_usdt_contract() {
+        let response = br#"{"contractRet":"SUCCESS","contract_address":"TFakeContract","to_address":"TSellerXXX","confirmations":100,"amount":10000000}"#;
+        let result = parse_tron_response(response, b"TSellerXXX", 10_000_000).unwrap();
+        assert!(!result.is_valid);
+        assert_eq!(result.error, Some(b"Not a USDT TRC20 transaction".to_vec()));
+    }
+
+    #[test]
+    fn h1_parse_tron_response_tx_not_successful() {
+        let response = br#"{"contractRet":"REVERT","to_address":"TSellerXXX"}"#;
+        let result = parse_tron_response(response, b"TSellerXXX", 10_000_000).unwrap();
+        assert!(!result.is_valid);
+        assert_eq!(result.error, Some(b"Transaction not successful".to_vec()));
     }
 }

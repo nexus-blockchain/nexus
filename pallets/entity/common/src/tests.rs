@@ -1,0 +1,358 @@
+use super::*;
+
+// ============================================================================
+// EntityType tests
+// ============================================================================
+
+#[test]
+fn entity_type_default_governance() {
+    assert_eq!(EntityType::Merchant.default_governance(), GovernanceMode::None);
+    assert_eq!(EntityType::Enterprise.default_governance(), GovernanceMode::FullDAO);
+    assert_eq!(EntityType::DAO.default_governance(), GovernanceMode::FullDAO);
+    assert_eq!(EntityType::Community.default_governance(), GovernanceMode::None);
+    assert_eq!(EntityType::Project.default_governance(), GovernanceMode::FullDAO);
+    assert_eq!(EntityType::Fund.default_governance(), GovernanceMode::FullDAO);
+    assert_eq!(EntityType::ServiceProvider.default_governance(), GovernanceMode::None);
+    assert_eq!(EntityType::Custom(99).default_governance(), GovernanceMode::None);
+}
+
+#[test]
+fn entity_type_default_token_type() {
+    assert_eq!(EntityType::Merchant.default_token_type(), TokenType::Points);
+    assert_eq!(EntityType::DAO.default_token_type(), TokenType::Governance);
+    assert_eq!(EntityType::Enterprise.default_token_type(), TokenType::Equity);
+    assert_eq!(EntityType::Community.default_token_type(), TokenType::Membership);
+    assert_eq!(EntityType::Fund.default_token_type(), TokenType::Share);
+}
+
+#[test]
+fn entity_type_requires_kyc() {
+    assert!(EntityType::Enterprise.requires_kyc_by_default());
+    assert!(EntityType::Fund.requires_kyc_by_default());
+    assert!(EntityType::Project.requires_kyc_by_default());
+    assert!(!EntityType::Merchant.requires_kyc_by_default());
+    assert!(!EntityType::DAO.requires_kyc_by_default());
+    assert!(!EntityType::Community.requires_kyc_by_default());
+}
+
+#[test]
+fn entity_type_suggests_token_type() {
+    // Merchant should not suggest Equity
+    assert!(!EntityType::Merchant.suggests_token_type(&TokenType::Equity));
+    assert!(!EntityType::Merchant.suggests_token_type(&TokenType::Bond));
+    // DAO should not suggest Points
+    assert!(!EntityType::DAO.suggests_token_type(&TokenType::Points));
+    // Fund should not suggest Points
+    assert!(!EntityType::Fund.suggests_token_type(&TokenType::Points));
+    // Normal combos
+    assert!(EntityType::Enterprise.suggests_token_type(&TokenType::Equity));
+    assert!(EntityType::DAO.suggests_token_type(&TokenType::Governance));
+}
+
+#[test]
+fn entity_type_suggests_governance() {
+    assert!(!EntityType::DAO.suggests_governance(&GovernanceMode::None));
+    assert!(!EntityType::Fund.suggests_governance(&GovernanceMode::FullDAO));
+    assert!(EntityType::Enterprise.suggests_governance(&GovernanceMode::FullDAO));
+}
+
+#[test]
+fn entity_type_default_transfer_restriction() {
+    assert_eq!(EntityType::Merchant.default_transfer_restriction(), TransferRestrictionMode::None);
+    assert_eq!(EntityType::Enterprise.default_transfer_restriction(), TransferRestrictionMode::Whitelist);
+    assert_eq!(EntityType::DAO.default_transfer_restriction(), TransferRestrictionMode::None);
+    assert_eq!(EntityType::Project.default_transfer_restriction(), TransferRestrictionMode::KycRequired);
+}
+
+// ============================================================================
+// EffectiveShopStatus::compute tests
+// ============================================================================
+
+#[test]
+fn compute_entity_banned_forces_closed() {
+    assert_eq!(
+        EffectiveShopStatus::compute(&EntityStatus::Banned, &ShopOperatingStatus::Active),
+        EffectiveShopStatus::ClosedByEntity
+    );
+}
+
+#[test]
+fn compute_entity_closed_forces_closed() {
+    assert_eq!(
+        EffectiveShopStatus::compute(&EntityStatus::Closed, &ShopOperatingStatus::Active),
+        EffectiveShopStatus::ClosedByEntity
+    );
+}
+
+#[test]
+fn compute_entity_suspended_pauses_shop() {
+    assert_eq!(
+        EffectiveShopStatus::compute(&EntityStatus::Suspended, &ShopOperatingStatus::Active),
+        EffectiveShopStatus::PausedByEntity
+    );
+}
+
+#[test]
+fn compute_entity_suspended_but_shop_closed_shows_closed() {
+    assert_eq!(
+        EffectiveShopStatus::compute(&EntityStatus::Suspended, &ShopOperatingStatus::Closed),
+        EffectiveShopStatus::Closed
+    );
+}
+
+#[test]
+fn compute_entity_active_shop_active() {
+    assert_eq!(
+        EffectiveShopStatus::compute(&EntityStatus::Active, &ShopOperatingStatus::Active),
+        EffectiveShopStatus::Active
+    );
+}
+
+#[test]
+fn compute_entity_active_shop_paused() {
+    assert_eq!(
+        EffectiveShopStatus::compute(&EntityStatus::Active, &ShopOperatingStatus::Paused),
+        EffectiveShopStatus::PausedBySelf
+    );
+}
+
+#[test]
+fn compute_entity_active_shop_fund_depleted() {
+    assert_eq!(
+        EffectiveShopStatus::compute(&EntityStatus::Active, &ShopOperatingStatus::FundDepleted),
+        EffectiveShopStatus::FundDepleted
+    );
+}
+
+#[test]
+fn compute_entity_active_shop_closing() {
+    assert_eq!(
+        EffectiveShopStatus::compute(&EntityStatus::Active, &ShopOperatingStatus::Closing),
+        EffectiveShopStatus::Closed
+    );
+}
+
+#[test]
+fn compute_entity_pending_pauses_shop() {
+    assert_eq!(
+        EffectiveShopStatus::compute(&EntityStatus::Pending, &ShopOperatingStatus::Active),
+        EffectiveShopStatus::PausedByEntity
+    );
+}
+
+#[test]
+fn effective_shop_status_is_operational() {
+    assert!(EffectiveShopStatus::Active.is_operational());
+    assert!(!EffectiveShopStatus::PausedBySelf.is_operational());
+    assert!(!EffectiveShopStatus::ClosedByEntity.is_operational());
+}
+
+#[test]
+fn effective_shop_status_is_entity_caused() {
+    assert!(EffectiveShopStatus::PausedByEntity.is_entity_caused());
+    assert!(EffectiveShopStatus::ClosedByEntity.is_entity_caused());
+    assert!(!EffectiveShopStatus::PausedBySelf.is_entity_caused());
+    assert!(!EffectiveShopStatus::Active.is_entity_caused());
+}
+
+// ============================================================================
+// MemberRegistrationPolicy tests
+// ============================================================================
+
+#[test]
+fn member_policy_open_by_default() {
+    let policy = MemberRegistrationPolicy::default();
+    assert!(policy.is_open());
+    assert!(!policy.requires_purchase());
+    assert!(!policy.requires_referral());
+    assert!(!policy.requires_approval());
+}
+
+#[test]
+fn member_policy_flags() {
+    let policy = MemberRegistrationPolicy(
+        MemberRegistrationPolicy::PURCHASE_REQUIRED | MemberRegistrationPolicy::REFERRAL_REQUIRED,
+    );
+    assert!(!policy.is_open());
+    assert!(policy.requires_purchase());
+    assert!(policy.requires_referral());
+    assert!(!policy.requires_approval());
+}
+
+#[test]
+fn member_policy_all_flags() {
+    let policy = MemberRegistrationPolicy(
+        MemberRegistrationPolicy::PURCHASE_REQUIRED
+            | MemberRegistrationPolicy::REFERRAL_REQUIRED
+            | MemberRegistrationPolicy::APPROVAL_REQUIRED,
+    );
+    assert!(policy.requires_purchase());
+    assert!(policy.requires_referral());
+    assert!(policy.requires_approval());
+}
+
+// ============================================================================
+// TokenType tests
+// ============================================================================
+
+#[test]
+fn token_type_voting_power() {
+    assert!(TokenType::Governance.has_voting_power());
+    assert!(TokenType::Equity.has_voting_power());
+    assert!(TokenType::Hybrid(0).has_voting_power());
+    assert!(!TokenType::Points.has_voting_power());
+    assert!(!TokenType::Membership.has_voting_power());
+}
+
+#[test]
+fn token_type_dividend_rights() {
+    assert!(TokenType::Equity.has_dividend_rights());
+    assert!(TokenType::Share.has_dividend_rights());
+    assert!(TokenType::Hybrid(0).has_dividend_rights());
+    assert!(!TokenType::Points.has_dividend_rights());
+    assert!(!TokenType::Governance.has_dividend_rights());
+}
+
+#[test]
+fn token_type_transferable() {
+    assert!(!TokenType::Membership.is_transferable_by_default());
+    assert!(TokenType::Points.is_transferable_by_default());
+    assert!(TokenType::Equity.is_transferable_by_default());
+}
+
+#[test]
+fn token_type_kyc_levels() {
+    assert_eq!(TokenType::Points.required_kyc_level(), (0, 0));
+    assert_eq!(TokenType::Membership.required_kyc_level(), (1, 1));
+    assert_eq!(TokenType::Equity.required_kyc_level(), (3, 3));
+}
+
+#[test]
+fn token_type_is_security() {
+    assert!(TokenType::Equity.is_security());
+    assert!(TokenType::Share.is_security());
+    assert!(TokenType::Bond.is_security());
+    assert!(!TokenType::Points.is_security());
+    assert!(!TokenType::Governance.is_security());
+}
+
+#[test]
+fn token_type_default_transfer_restriction_returns_enum() {
+    assert_eq!(TokenType::Points.default_transfer_restriction(), TransferRestrictionMode::None);
+    assert_eq!(TokenType::Membership.default_transfer_restriction(), TransferRestrictionMode::MembersOnly);
+    assert_eq!(TokenType::Governance.default_transfer_restriction(), TransferRestrictionMode::KycRequired);
+    assert_eq!(TokenType::Equity.default_transfer_restriction(), TransferRestrictionMode::Whitelist);
+    assert_eq!(TokenType::Hybrid(0).default_transfer_restriction(), TransferRestrictionMode::None);
+}
+
+// ============================================================================
+// TransferRestrictionMode tests
+// ============================================================================
+
+#[test]
+fn transfer_restriction_from_u8() {
+    assert_eq!(TransferRestrictionMode::from_u8(0), TransferRestrictionMode::None);
+    assert_eq!(TransferRestrictionMode::from_u8(1), TransferRestrictionMode::Whitelist);
+    assert_eq!(TransferRestrictionMode::from_u8(2), TransferRestrictionMode::Blacklist);
+    assert_eq!(TransferRestrictionMode::from_u8(3), TransferRestrictionMode::KycRequired);
+    assert_eq!(TransferRestrictionMode::from_u8(4), TransferRestrictionMode::MembersOnly);
+    assert_eq!(TransferRestrictionMode::from_u8(255), TransferRestrictionMode::None);
+}
+
+// ============================================================================
+// ShopType tests
+// ============================================================================
+
+#[test]
+fn shop_type_requires_location() {
+    assert!(ShopType::PhysicalStore.requires_location());
+    assert!(ShopType::Warehouse.requires_location());
+    assert!(!ShopType::OnlineStore.requires_location());
+    assert!(!ShopType::Virtual.requires_location());
+}
+
+#[test]
+fn shop_type_supports_physical() {
+    assert!(ShopType::OnlineStore.supports_physical_products());
+    assert!(ShopType::PhysicalStore.supports_physical_products());
+    assert!(!ShopType::Virtual.supports_physical_products());
+}
+
+#[test]
+fn shop_type_supports_services() {
+    assert!(ShopType::ServicePoint.supports_services());
+    assert!(ShopType::Virtual.supports_services());
+    assert!(!ShopType::Warehouse.supports_services());
+}
+
+// ============================================================================
+// ShopOperatingStatus tests
+// ============================================================================
+
+#[test]
+fn shop_operating_status_operational() {
+    assert!(ShopOperatingStatus::Active.is_operational());
+    assert!(!ShopOperatingStatus::Paused.is_operational());
+    assert!(!ShopOperatingStatus::Closed.is_operational());
+}
+
+#[test]
+fn shop_operating_status_can_resume() {
+    assert!(ShopOperatingStatus::Paused.can_resume());
+    assert!(ShopOperatingStatus::FundDepleted.can_resume());
+    assert!(!ShopOperatingStatus::Active.can_resume());
+    assert!(!ShopOperatingStatus::Closed.can_resume());
+}
+
+// ============================================================================
+// MemberMode tests
+// ============================================================================
+
+#[test]
+fn member_mode_entity_members() {
+    assert!(MemberMode::Inherit.uses_entity_members());
+    assert!(MemberMode::Hybrid.uses_entity_members());
+    assert!(!MemberMode::Independent.uses_entity_members());
+}
+
+#[test]
+fn member_mode_shop_members() {
+    assert!(MemberMode::Independent.uses_shop_members());
+    assert!(MemberMode::Hybrid.uses_shop_members());
+    assert!(!MemberMode::Inherit.uses_shop_members());
+}
+
+// ============================================================================
+// MemberLevel tests
+// ============================================================================
+
+#[test]
+fn member_level_ordering() {
+    assert!(MemberLevel::Normal < MemberLevel::Silver);
+    assert!(MemberLevel::Silver < MemberLevel::Gold);
+    assert!(MemberLevel::Gold < MemberLevel::Platinum);
+    assert!(MemberLevel::Platinum < MemberLevel::Diamond);
+}
+
+#[test]
+fn member_level_rank() {
+    assert_eq!(MemberLevel::Normal.rank(), 0);
+    assert_eq!(MemberLevel::Silver.rank(), 1);
+    assert_eq!(MemberLevel::Gold.rank(), 2);
+    assert_eq!(MemberLevel::Platinum.rank(), 3);
+    assert_eq!(MemberLevel::Diamond.rank(), 4);
+}
+
+#[test]
+fn member_level_default_is_normal() {
+    assert_eq!(MemberLevel::default(), MemberLevel::Normal);
+}
+
+// ============================================================================
+// NullPricingProvider test
+// ============================================================================
+
+#[test]
+fn null_pricing_provider_returns_one() {
+    assert_eq!(NullPricingProvider::get_nex_usdt_price(), 1);
+}

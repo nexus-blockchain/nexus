@@ -1,4 +1,4 @@
-use crate::{mock::*, Error, Event, Reviews, ReviewCount};
+use crate::{mock::*, Error, Event, Reviews, ReviewCount, ShopReviewCount};
 use frame_support::{assert_noop, assert_ok};
 use frame_system::RawOrigin;
 use sp_runtime::DispatchError;
@@ -469,5 +469,111 @@ fn different_shops_rating_isolated() {
         let (sum2, count2) = get_shop_rating(200).unwrap();
         assert_eq!(sum2, 1);
         assert_eq!(count2, 1);
+    });
+}
+
+// ==================== H1: 空 CID 验证 ====================
+
+#[test]
+fn h1_submit_review_rejects_empty_cid() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+
+        assert_noop!(
+            EntityReview::submit_review(
+                RawOrigin::Signed(BUYER).into(),
+                1, 5, Some(vec![]),
+            ),
+            Error::<Test>::EmptyCid
+        );
+
+        // 评价不应存储
+        assert!(Reviews::<Test>::get(1).is_none());
+        assert_eq!(ReviewCount::<Test>::get(), 0);
+    });
+}
+
+// ==================== H2: 店铺评价计数 ====================
+
+#[test]
+fn h2_shop_review_count_increments() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+        add_order(2, BUYER2, 100, true);
+
+        assert_eq!(ShopReviewCount::<Test>::get(100), 0);
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 5, None,
+        ));
+        assert_eq!(ShopReviewCount::<Test>::get(100), 1);
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER2).into(),
+            2, 3, None,
+        ));
+        assert_eq!(ShopReviewCount::<Test>::get(100), 2);
+    });
+}
+
+#[test]
+fn h2_shop_review_count_isolated_per_shop() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_shop(200);
+        add_order(1, BUYER, 100, true);
+        add_order(2, BUYER2, 200, true);
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 4, None,
+        ));
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER2).into(),
+            2, 2, None,
+        ));
+
+        assert_eq!(ShopReviewCount::<Test>::get(100), 1);
+        assert_eq!(ShopReviewCount::<Test>::get(200), 1);
+    });
+}
+
+#[test]
+fn h2_shop_review_count_not_incremented_when_rating_fails() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+        set_shop_rating_fail(true);
+
+        assert_noop!(
+            EntityReview::submit_review(
+                RawOrigin::Signed(BUYER).into(),
+                1, 5, None,
+            ),
+            DispatchError::Other("shop rating update failed")
+        );
+
+        // 店铺评价计数不应递增（事务回滚）
+        assert_eq!(ShopReviewCount::<Test>::get(100), 0);
+    });
+}
+
+#[test]
+fn h1_submit_review_accepts_non_empty_cid() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+
+        // 单字节 CID 应被接受
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 4, Some(vec![0x42]),
+        ));
+
+        let review = Reviews::<Test>::get(1).unwrap();
+        assert_eq!(review.content_cid.unwrap().to_vec(), vec![0x42]);
     });
 }

@@ -16,7 +16,6 @@ frame-support = { workspace = true }
 frame-system = { workspace = true }
 sp-runtime = { workspace = true }
 sp-std = { workspace = true }
-log = { workspace = true }
 
 # 内部依赖
 pallet-entity-common = { path = "../common", default-features = false }

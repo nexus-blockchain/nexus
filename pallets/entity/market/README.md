@@ -1,4 +1,4 @@
-# pallet-entity-market v0.9.0
+# pallet-entity-market v1.1.0
 
 > 实体代币 P2P 交易市场模块 | Runtime Index: 126
 
@@ -472,6 +472,7 @@ impl<T: Config> Pallet<T> {
 | v0.7.0 | 2026-02-04 | 买家保证金机制（NEX reserve + forfeit + release） |
 | v0.8.0 | 2026-02-04 | 付款金额多档判定（5 级结果 + 自动按比例处理） |
 | v0.9.0 | 2026-02-24 | 少付补付窗口 + 梯度保证金没收 + 验证宽限期（参照 pallet-nex-market） |
+| v1.1.0 | 2026-02-26 | 新增 `EntityTokenPriceProvider` 实现（带置信度的代币价格查询 + USDT 间接换算） |
 | v1.0.0 | 2026-02-24 | **架构重构**: 市场隔离从 shop_id 改为 entity_id，移除 ShopProvider 依赖，修复 TokenProvider 核心 Bug |
 
 ## 相关模块

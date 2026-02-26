@@ -248,6 +248,8 @@ pub mod pallet {
         ArithmeticOverflow,
         /// 商品价格无效（不能为 0）
         InvalidPrice,
+        /// CID 内容不能为空
+        EmptyCid,
     }
 
     // ==================== Extrinsics ====================
@@ -271,6 +273,9 @@ pub mod pallet {
 
             // H4: 商品价格不能为零
             ensure!(!price.is_zero(), Error::<T>::InvalidPrice);
+
+            // H2: name_cid 不能为空
+            ensure!(!name_cid.is_empty(), Error::<T>::EmptyCid);
 
             // 验证店铺
             ensure!(T::ShopProvider::shop_exists(shop_id), Error::<T>::ShopNotFound);
@@ -377,6 +382,8 @@ pub mod pallet {
                 ensure!(owner == who, Error::<T>::NotShopOwner);
 
                 if let Some(c) = name_cid {
+                    // H2: name_cid 不能为空
+                    ensure!(!c.is_empty(), Error::<T>::EmptyCid);
                     product.name_cid = c.try_into().map_err(|_| Error::<T>::CidTooLong)?;
                 }
                 if let Some(c) = images_cid {
@@ -392,6 +399,11 @@ pub mod pallet {
                 if let Some(s) = stock {
                     product.stock = s;
                     if s > 0 && product.status == ProductStatus::SoldOut {
+                        // H1: 补货恢复上架时检查 Shop 激活状态
+                        ensure!(
+                            T::ShopProvider::is_shop_active(product.shop_id),
+                            Error::<T>::ShopNotActive
+                        );
                         product.status = ProductStatus::OnSale;
                         // M3: 补货恢复在售统计
                         ProductStats::<T>::mutate(|stats| {
@@ -504,18 +516,16 @@ pub mod pallet {
             );
 
             // 退还押金到店铺派生账户
-            let deposit_refunded = if let Some(deposit_info) = ProductDeposits::<T>::take(product_id) {
-                let pallet_account: T::AccountId = PRODUCT_PALLET_ID.into_account_truncating();
-                T::Currency::transfer(
-                    &pallet_account,
-                    &deposit_info.source_account,
-                    deposit_info.amount,
-                    ExistenceRequirement::AllowDeath,
-                )?;
-                deposit_info.amount
-            } else {
-                Zero::zero()
-            };
+            let deposit_info = ProductDeposits::<T>::take(product_id)
+                .ok_or(Error::<T>::DepositNotFound)?;
+            let pallet_account: T::AccountId = PRODUCT_PALLET_ID.into_account_truncating();
+            T::Currency::transfer(
+                &pallet_account,
+                &deposit_info.source_account,
+                deposit_info.amount,
+                ExistenceRequirement::AllowDeath,
+            )?;
+            let deposit_refunded = deposit_info.amount;
 
             // 删除商品
             Products::<T>::remove(product_id);
@@ -551,8 +561,16 @@ pub mod pallet {
 
         /// 计算商品押金（1 USDT 等值 NEX）
         pub fn calculate_product_deposit() -> Result<BalanceOf<T>, sp_runtime::DispatchError> {
-            let price = T::PricingProvider::get_cos_usdt_price();
+            let price = T::PricingProvider::get_nex_usdt_price();
             ensure!(price > 0, Error::<T>::PriceUnavailable);
+
+            let min_deposit = T::MinProductDepositCos::get();
+            let max_deposit = T::MaxProductDepositCos::get();
+
+            // 价格过时时使用保守兜底值，避免基于过期数据计算押金
+            if T::PricingProvider::is_price_stale() {
+                return Ok(min_deposit);
+            }
 
             let usdt_amount = T::ProductDepositUsdt::get();
 
@@ -565,8 +583,6 @@ pub mod pallet {
 
             let nex_amount: BalanceOf<T> = nex_amount_u128.saturated_into();
 
-            let min_deposit = T::MinProductDepositCos::get();
-            let max_deposit = T::MaxProductDepositCos::get();
             let final_deposit = nex_amount.max(min_deposit).min(max_deposit);
 
             Ok(final_deposit)
@@ -610,6 +626,7 @@ pub mod pallet {
         fn deduct_stock(product_id: u64, quantity: u32) -> Result<(), sp_runtime::DispatchError> {
             Products::<T>::try_mutate(product_id, |maybe_product| -> Result<(), sp_runtime::DispatchError> {
                 let product = maybe_product.as_mut().ok_or(Error::<T>::ProductNotFound)?;
+                ensure!(product.status == ProductStatus::OnSale, Error::<T>::InvalidProductStatus);
                 if product.stock > 0 {
                     ensure!(product.stock >= quantity, Error::<T>::InsufficientStock);
                     product.stock = product.stock.saturating_sub(quantity);
@@ -620,6 +637,11 @@ pub mod pallet {
                             stats.on_sale_products = stats.on_sale_products.saturating_sub(1);
                         });
                     }
+                    // M2: 发出库存更新事件
+                    Self::deposit_event(Event::StockUpdated {
+                        product_id,
+                        new_stock: product.stock,
+                    });
                 }
                 Ok(())
             })
@@ -628,6 +650,7 @@ pub mod pallet {
         fn restore_stock(product_id: u64, quantity: u32) -> Result<(), sp_runtime::DispatchError> {
             Products::<T>::try_mutate(product_id, |maybe_product| -> Result<(), sp_runtime::DispatchError> {
                 let product = maybe_product.as_mut().ok_or(Error::<T>::ProductNotFound)?;
+                ensure!(product.status != ProductStatus::Draft, Error::<T>::InvalidProductStatus);
                 if product.stock > 0 || product.status == ProductStatus::SoldOut {
                     let was_sold_out = product.status == ProductStatus::SoldOut;
                     product.stock = product.stock.saturating_add(quantity);
@@ -638,6 +661,11 @@ pub mod pallet {
                             stats.on_sale_products = stats.on_sale_products.saturating_add(1);
                         });
                     }
+                    // M2: 发出库存更新事件
+                    Self::deposit_event(Event::StockUpdated {
+                        product_id,
+                        new_stock: product.stock,
+                    });
                 }
                 Ok(())
             })
@@ -647,6 +675,11 @@ pub mod pallet {
             Products::<T>::try_mutate(product_id, |maybe_product| -> Result<(), sp_runtime::DispatchError> {
                 let product = maybe_product.as_mut().ok_or(Error::<T>::ProductNotFound)?;
                 product.sold_count = product.sold_count.saturating_add(quantity);
+                // M2: 发出库存更新事件（sold_count 变更）
+                Self::deposit_event(Event::StockUpdated {
+                    product_id,
+                    new_stock: product.stock,
+                });
                 Ok(())
             })
         }

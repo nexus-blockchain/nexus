@@ -50,6 +50,7 @@ async function entityShop(ctx: FlowContext): Promise<void> {
     'Test Entity E2E',       // name
     null,                     // logo_cid
     null,                     // description_cid
+    null,                     // referrer
   );
   const createResult = await ctx.send(createTx, eve, '创建实体 (Merchant)', 'eve');
   assertTxSuccess(createResult, '创建实体');
@@ -144,7 +145,7 @@ async function entityShop(ctx: FlowContext): Promise<void> {
   });
 
   // --------------- Step 10: 错误路径 — 空名称 ---------------
-  const emptyNameTx = (api.tx as any).entityRegistry.createEntity('', null, null);
+  const emptyNameTx = (api.tx as any).entityRegistry.createEntity('', null, null, null);
   const emptyResult = await ctx.send(emptyNameTx, eve, '[错误路径] 空名称创建实体', 'eve');
   await ctx.check('空名称创建应失败', 'eve', () => {
     assertTxFailed(emptyResult, 'NameEmpty', '空名称');

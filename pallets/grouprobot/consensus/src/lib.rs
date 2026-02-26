@@ -1,17 +1,16 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-//! # Pallet GroupRobot Consensus — 节点质押 + TEE 加权奖励 + 消息去重 + 订阅管理
+//! # Pallet GroupRobot Consensus — 节点管理 + TEE 验证 + Era 编排
 //!
-//! 整合现有 `pallet-bot-consensus` 全部功能。
+//! 负责节点生命周期管理和 Era 编排, 订阅和奖励已拆分到独立 pallet.
 //!
 //! ## 功能
 //! - 节点注册 + 质押
 //! - 节点退出 (冷却期)
 //! - Equivocation 举报 + Slash
-//! - 订阅管理 (subscribe/deposit/cancel/change_tier)
 //! - 消息序列去重 (ProcessedSequences)
-//! - TEE 加权奖励分配 (on_era_end)
-//! - on_initialize: Era 边界检测
+//! - TEE 验证 + 权重计算
+//! - on_era_end 编排: 调用 SubscriptionSettler + EraRewardDistributor
 
 extern crate alloc;
 
@@ -28,7 +27,7 @@ use frame_support::pallet_prelude::*;
 use frame_system::pallet_prelude::*;
 use pallet_grouprobot_primitives::*;
 use scale_info::TypeInfo;
-use sp_runtime::traits::{Saturating, UniqueSaturatedInto, Zero};
+use sp_runtime::traits::{Saturating, UniqueSaturatedInto};
 
 /// 节点信息
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, RuntimeDebug, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
@@ -60,36 +59,13 @@ pub struct EquivocationRecord<T: Config> {
 	pub resolved: bool,
 }
 
-/// 订阅信息
-#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, RuntimeDebug, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
-#[scale_info(skip_type_params(T))]
-pub struct Subscription<T: Config> {
-	pub owner: T::AccountId,
-	pub bot_id_hash: BotIdHash,
-	pub tier: SubscriptionTier,
-	pub fee_per_era: BalanceOf<T>,
-	pub started_at: BlockNumberFor<T>,
-	pub paid_until_era: u64,
-	pub status: SubscriptionStatus,
-}
-
-/// Era 奖励信息
-#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, RuntimeDebug, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
-pub struct EraRewardInfo<Balance> {
-	pub subscription_income: Balance,
-	pub inflation_mint: Balance,
-	pub total_distributed: Balance,
-	pub treasury_share: Balance,
-	pub node_count: u32,
-}
-
 type BalanceOf<T> =
 	<<T as Config>::Currency as frame_support::traits::Currency<<T as frame_system::Config>::AccountId>>::Balance;
 
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
-	use frame_support::traits::{Currency, ReservableCurrency};
+	use frame_support::traits::ReservableCurrency;
 
 	#[pallet::pallet]
 	pub struct Pallet<T>(_);
@@ -118,24 +94,18 @@ pub mod pallet {
 		type SlashPercentage: Get<u32>;
 		/// Bot 注册查询
 		type BotRegistry: BotRegistryProvider<Self::AccountId>;
-		/// Basic 层级每 Era 费用
-		#[pallet::constant]
-		type BasicFeePerEra: Get<BalanceOf<Self>>;
-		/// Pro 层级每 Era 费用
-		#[pallet::constant]
-		type ProFeePerEra: Get<BalanceOf<Self>>;
-		/// Enterprise 层级每 Era 费用
-		#[pallet::constant]
-		type EnterpriseFeePerEra: Get<BalanceOf<Self>>;
-		/// 🆕 防膨胀: ProcessedSequences 过期区块数 (超过此值的记录将被清理)
+		/// 防膨胀: ProcessedSequences 过期区块数
 		#[pallet::constant]
 		type SequenceTtlBlocks: Get<BlockNumberFor<Self>>;
-		/// 🆕 防膨胀: 每块最多清理的过期 Sequence 数
+		/// 防膨胀: 每块最多清理的过期 Sequence 数
 		#[pallet::constant]
 		type MaxSequenceCleanupPerBlock: Get<u32>;
-		/// 🆕 防膨胀: EraRewards 保留窗口 (仅保留最近 N 个 Era 的奖励记录)
-		#[pallet::constant]
-		type MaxEraHistory: Get<u64>;
+		/// 订阅结算 (Era 结束时调用)
+		type SubscriptionSettler: SubscriptionSettler;
+		/// 奖励分配 (Era 结束时调用)
+		type RewardDistributor: EraRewardDistributor;
+		/// 订阅层级查询 (tier gate)
+		type Subscription: SubscriptionProvider;
 	}
 
 	// ========================================================================
@@ -167,15 +137,6 @@ pub mod pallet {
 		BlockNumberFor<T>,
 	>;
 
-	/// 订阅表: bot_id_hash → Subscription
-	#[pallet::storage]
-	pub type Subscriptions<T: Config> =
-		StorageMap<_, Blake2_128Concat, BotIdHash, Subscription<T>>;
-
-	/// 订阅 Escrow: bot_id_hash → 预存余额
-	#[pallet::storage]
-	pub type SubscriptionEscrow<T: Config> =
-		StorageMap<_, Blake2_128Concat, BotIdHash, BalanceOf<T>, ValueQuery>;
 
 	/// Equivocation 记录: (node_id, sequence) → EquivocationRecord
 	#[pallet::storage]
@@ -193,15 +154,6 @@ pub mod pallet {
 	#[pallet::storage]
 	pub type EraStartBlock<T: Config> = StorageValue<_, BlockNumberFor<T>, ValueQuery>;
 
-	/// 节点待领取奖励
-	#[pallet::storage]
-	pub type NodePendingRewards<T: Config> =
-		StorageMap<_, Blake2_128Concat, NodeId, BalanceOf<T>, ValueQuery>;
-
-	/// 节点累计已领取
-	#[pallet::storage]
-	pub type NodeTotalEarned<T: Config> =
-		StorageMap<_, Blake2_128Concat, NodeId, BalanceOf<T>, ValueQuery>;
 
 	/// TEE 奖励倍数 (basis points: 10000=1.0x, 15000=1.5x)
 	#[pallet::storage]
@@ -216,15 +168,6 @@ pub mod pallet {
 	pub type NodeBotBinding<T: Config> =
 		StorageMap<_, Blake2_128Concat, NodeId, BotIdHash>;
 
-	/// Era 奖励记录: era → EraRewardInfo
-	#[pallet::storage]
-	pub type EraRewards<T: Config> =
-		StorageMap<_, Blake2_128Concat, u64, EraRewardInfo<BalanceOf<T>>>;
-
-	/// 🆕 防膨胀: Era 奖励清理游标 (已清理到的 Era 编号)
-	/// NH4-fix: 重命名以匹配实际用途 (用于 EraRewards 而非 Sequences)
-	#[pallet::storage]
-	pub type EraCleanupCursor<T: Config> = StorageValue<_, u64, ValueQuery>;
 
 	// ========================================================================
 	// Events
@@ -238,13 +181,6 @@ pub mod pallet {
 		ExitFinalized { node_id: NodeId, stake_returned: BalanceOf<T> },
 		EquivocationReported { node_id: NodeId, reporter: T::AccountId, sequence: u64 },
 		NodeSlashed { node_id: NodeId, amount: BalanceOf<T> },
-		Subscribed { bot_id_hash: BotIdHash, tier: SubscriptionTier, owner: T::AccountId },
-		/// 订阅到期/暂停 → 降级为 Free
-		FreeTierFallback { bot_id_hash: BotIdHash },
-		SubscriptionDeposited { bot_id_hash: BotIdHash, amount: BalanceOf<T> },
-		SubscriptionCancelled { bot_id_hash: BotIdHash },
-		TierChanged { bot_id_hash: BotIdHash, old_tier: SubscriptionTier, new_tier: SubscriptionTier },
-		RewardsClaimed { node_id: NodeId, amount: BalanceOf<T> },
 		SequenceProcessed { bot_id_hash: BotIdHash, sequence: u64 },
 		SequenceDuplicate { bot_id_hash: BotIdHash, sequence: u64 },
 		NodeTeeStatusChanged { node_id: NodeId, is_tee: bool },
@@ -280,18 +216,6 @@ pub mod pallet {
 		BotNotRegistered,
 		/// 不是 Bot 所有者
 		NotBotOwner,
-		/// 订阅已存在
-		SubscriptionAlreadyExists,
-		/// 订阅不存在
-		SubscriptionNotFound,
-		/// 订阅已取消
-		SubscriptionAlreadyCancelled,
-		/// 层级相同
-		SameTier,
-		/// 预存不足
-		InsufficientDeposit,
-		/// 无待领取奖励
-		NoPendingRewards,
 		/// Equivocation 已举报
 		EquivocationAlreadyReported,
 		/// 序列已处理
@@ -302,8 +226,8 @@ pub mod pallet {
 		AttestationNotValid,
 		/// 节点已是 TEE 节点
 		AlreadyTeeVerified,
-		/// Free 层级无需订阅
-		CannotSubscribeFree,
+		/// Free 层级不允许使用此功能
+		FreeTierNotAllowed,
 	}
 
 	// ========================================================================
@@ -512,152 +436,6 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// 订阅 Bot 服务
-		#[pallet::call_index(5)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
-		pub fn subscribe(
-			origin: OriginFor<T>,
-			bot_id_hash: BotIdHash,
-			tier: SubscriptionTier,
-			deposit: BalanceOf<T>,
-		) -> DispatchResult {
-			let who = ensure_signed(origin)?;
-			// Free 层级无需订阅 (默认即 Free)
-			ensure!(tier.is_paid(), Error::<T>::CannotSubscribeFree);
-			ensure!(T::BotRegistry::is_bot_active(&bot_id_hash), Error::<T>::BotNotRegistered);
-			ensure!(
-				T::BotRegistry::bot_owner(&bot_id_hash) == Some(who.clone()),
-				Error::<T>::NotBotOwner
-			);
-			ensure!(!Subscriptions::<T>::contains_key(&bot_id_hash), Error::<T>::SubscriptionAlreadyExists);
-
-			let fee = Self::tier_fee(&tier);
-			ensure!(deposit >= fee, Error::<T>::InsufficientDeposit);
-
-			T::Currency::reserve(&who, deposit)?;
-			SubscriptionEscrow::<T>::insert(&bot_id_hash, deposit);
-
-			let now = frame_system::Pallet::<T>::block_number();
-			let current_era = CurrentEra::<T>::get();
-			let sub = Subscription::<T> {
-				owner: who.clone(),
-				bot_id_hash,
-				tier,
-				fee_per_era: fee,
-				started_at: now,
-				paid_until_era: current_era.saturating_add(1),
-				status: SubscriptionStatus::Active,
-			};
-			Subscriptions::<T>::insert(&bot_id_hash, sub);
-
-			Self::deposit_event(Event::Subscribed { bot_id_hash, tier, owner: who });
-			Ok(())
-		}
-
-		/// 充值订阅
-		#[pallet::call_index(6)]
-		#[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
-		pub fn deposit_subscription(
-			origin: OriginFor<T>,
-			bot_id_hash: BotIdHash,
-			amount: BalanceOf<T>,
-		) -> DispatchResult {
-			let who = ensure_signed(origin)?;
-			let sub = Subscriptions::<T>::get(&bot_id_hash).ok_or(Error::<T>::SubscriptionNotFound)?;
-			ensure!(sub.status != SubscriptionStatus::Cancelled, Error::<T>::SubscriptionAlreadyCancelled);
-
-			T::Currency::reserve(&who, amount)?;
-			SubscriptionEscrow::<T>::mutate(&bot_id_hash, |escrow| {
-				*escrow = escrow.saturating_add(amount);
-			});
-
-			// 如果是 PastDue/Suspended，重新激活
-			if sub.status == SubscriptionStatus::PastDue || sub.status == SubscriptionStatus::Suspended {
-				Subscriptions::<T>::mutate(&bot_id_hash, |maybe_sub| {
-					if let Some(s) = maybe_sub {
-						s.status = SubscriptionStatus::Active;
-					}
-				});
-			}
-
-			Self::deposit_event(Event::SubscriptionDeposited { bot_id_hash, amount });
-			Ok(())
-		}
-
-		/// 取消订阅
-		#[pallet::call_index(7)]
-		#[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
-		pub fn cancel_subscription(
-			origin: OriginFor<T>,
-			bot_id_hash: BotIdHash,
-		) -> DispatchResult {
-			let who = ensure_signed(origin)?;
-			Subscriptions::<T>::try_mutate(&bot_id_hash, |maybe_sub| -> DispatchResult {
-				let sub = maybe_sub.as_mut().ok_or(Error::<T>::SubscriptionNotFound)?;
-				ensure!(sub.owner == who, Error::<T>::NotBotOwner);
-				ensure!(sub.status != SubscriptionStatus::Cancelled, Error::<T>::SubscriptionAlreadyCancelled);
-				sub.status = SubscriptionStatus::Cancelled;
-				Ok(())
-			})?;
-
-			// 退还 escrow 余额
-			let escrow = SubscriptionEscrow::<T>::take(&bot_id_hash);
-			if !escrow.is_zero() {
-				T::Currency::unreserve(&who, escrow);
-			}
-
-			Self::deposit_event(Event::SubscriptionCancelled { bot_id_hash });
-			Ok(())
-		}
-
-		/// 变更订阅层级
-		#[pallet::call_index(8)]
-		#[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
-		pub fn change_tier(
-			origin: OriginFor<T>,
-			bot_id_hash: BotIdHash,
-			new_tier: SubscriptionTier,
-		) -> DispatchResult {
-			let who = ensure_signed(origin)?;
-			// 不允许降级到 Free (应使用 cancel_subscription)
-			ensure!(new_tier.is_paid(), Error::<T>::CannotSubscribeFree);
-			Subscriptions::<T>::try_mutate(&bot_id_hash, |maybe_sub| -> DispatchResult {
-				let sub = maybe_sub.as_mut().ok_or(Error::<T>::SubscriptionNotFound)?;
-				ensure!(sub.owner == who, Error::<T>::NotBotOwner);
-				ensure!(sub.tier != new_tier, Error::<T>::SameTier);
-
-				let old_tier = sub.tier;
-				sub.tier = new_tier;
-				sub.fee_per_era = Self::tier_fee(&new_tier);
-
-				Self::deposit_event(Event::TierChanged { bot_id_hash, old_tier, new_tier });
-				Ok(())
-			})
-		}
-
-		/// 领取节点奖励
-		#[pallet::call_index(9)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
-		pub fn claim_rewards(origin: OriginFor<T>, node_id: NodeId) -> DispatchResult {
-			let who = ensure_signed(origin)?;
-			let node = Nodes::<T>::get(&node_id).ok_or(Error::<T>::NodeNotFound)?;
-			ensure!(node.operator == who, Error::<T>::NotOperator);
-
-			let pending = NodePendingRewards::<T>::get(&node_id);
-			ensure!(!pending.is_zero(), Error::<T>::NoPendingRewards);
-
-			// 铸币给操作者
-			let _ = T::Currency::deposit_creating(&who, pending);
-
-			NodePendingRewards::<T>::remove(&node_id);
-			NodeTotalEarned::<T>::mutate(&node_id, |total| {
-				*total = total.saturating_add(pending);
-			});
-
-			Self::deposit_event(Event::RewardsClaimed { node_id, amount: pending });
-			Ok(())
-		}
-
 		/// 标记消息序列已处理 (去重)
 		#[pallet::call_index(10)]
 		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
@@ -667,6 +445,13 @@ pub mod pallet {
 			sequence: u64,
 		) -> DispatchResult {
 			let _who = ensure_signed(origin)?;
+
+			// Tier gate: Free 层级不允许链上序列号去重
+			ensure!(
+				T::Subscription::effective_tier(&bot_id_hash).is_paid(),
+				Error::<T>::FreeTierNotAllowed
+			);
+
 			if ProcessedSequences::<T>::contains_key(&bot_id_hash, sequence) {
 				Self::deposit_event(Event::SequenceDuplicate { bot_id_hash, sequence });
 				return Ok(());
@@ -779,51 +564,9 @@ pub mod pallet {
 			)
 		}
 
-		/// 🆕 防膨胀: 清理过期 EraRewards
-		fn prune_old_era_rewards(current_era: u64) {
-			let max_history = T::MaxEraHistory::get();
-			if current_era <= max_history {
-				return;
-			}
-			let oldest_to_keep = current_era.saturating_sub(max_history);
-			// 只删一条最老的 (避免单块批量删除)
-			let cursor = EraCleanupCursor::<T>::get();
-			if cursor < oldest_to_keep {
-				let to_delete = cursor;
-				EraRewards::<T>::remove(to_delete);
-				EraCleanupCursor::<T>::put(to_delete.saturating_add(1));
-			}
-		}
-
-		/// 获取层级费用
-		pub fn tier_fee(tier: &SubscriptionTier) -> BalanceOf<T> {
-			match tier {
-				SubscriptionTier::Free => BalanceOf::<T>::zero(),
-				SubscriptionTier::Basic => T::BasicFeePerEra::get(),
-				SubscriptionTier::Pro => T::ProFeePerEra::get(),
-				SubscriptionTier::Enterprise => T::EnterpriseFeePerEra::get(),
-			}
-		}
-
-		/// 查询 Bot 的有效层级 (无订阅记录 = Free)
-		pub fn effective_tier(bot_id_hash: &BotIdHash) -> SubscriptionTier {
-			match Subscriptions::<T>::get(bot_id_hash) {
-				Some(sub) => match sub.status {
-					SubscriptionStatus::Active => sub.tier,
-					SubscriptionStatus::PastDue => sub.tier, // 宽限期内保持
-					// Suspended / Cancelled → 降级 Free
-					_ => SubscriptionTier::Free,
-				},
-				None => SubscriptionTier::Free,
-			}
-		}
-
-		/// 查询 Bot 的功能限制
-		pub fn effective_feature_gate(bot_id_hash: &BotIdHash) -> TierFeatureGate {
-			Self::effective_tier(bot_id_hash).feature_gate()
-		}
-
 		/// Era 结束处理
+		///
+		/// 编排: 调用 SubscriptionSettler + EraRewardDistributor 完成订阅结算和奖励分配
 		fn on_era_end(now: BlockNumberFor<T>) {
 			let era = CurrentEra::<T>::get();
 			let active_nodes = ActiveNodeList::<T>::get();
@@ -835,35 +578,9 @@ pub mod pallet {
 				return;
 			}
 
-			// 1. 收取订阅费
-			let mut subscription_income = BalanceOf::<T>::zero();
-			for (_bot_hash, sub) in Subscriptions::<T>::iter() {
-				if sub.status == SubscriptionStatus::Cancelled {
-					continue;
-				}
-				let escrow = SubscriptionEscrow::<T>::get(&sub.bot_id_hash);
-				if escrow >= sub.fee_per_era {
-					SubscriptionEscrow::<T>::mutate(&sub.bot_id_hash, |e| {
-						*e = e.saturating_sub(sub.fee_per_era);
-					});
-					T::Currency::unreserve(&sub.owner, sub.fee_per_era);
-					subscription_income = subscription_income.saturating_add(sub.fee_per_era);
-				} else {
-					// 余额不足 → PastDue → Suspended (降级 Free)
-					let bot_hash = sub.bot_id_hash;
-					Subscriptions::<T>::mutate(&bot_hash, |maybe_sub| {
-						if let Some(s) = maybe_sub {
-							if s.status == SubscriptionStatus::Active {
-								s.status = SubscriptionStatus::PastDue;
-							} else if s.status == SubscriptionStatus::PastDue {
-								s.status = SubscriptionStatus::Suspended;
-								// P4: 降级为 Free, 发出事件通知 Bot
-								Self::deposit_event(Event::FreeTierFallback { bot_id_hash: bot_hash });
-							}
-						}
-					});
-				}
-			}
+			// 1. 委托 subscription pallet 结算订阅费
+			let subscription_income_u128 = T::SubscriptionSettler::settle_era();
+			let subscription_income: BalanceOf<T> = subscription_income_u128.unique_saturated_into();
 
 			// 2. 拆分: 80% 节点, 10% 国库, 10% agent
 			let node_share = subscription_income * 80u32.into() / 100u32.into();
@@ -872,7 +589,7 @@ pub mod pallet {
 			// 3. 铸币通胀
 			let inflation = T::InflationPerEra::get();
 
-			// 4. 可分配总额
+			// 4. 可分配总额 (节点部分 + 通胀)
 			let total_pool = node_share.saturating_add(inflation);
 
 			// 5. 检查 TEE 证明有效性, 过期则降级
@@ -900,48 +617,35 @@ pub mod pallet {
 				}
 			}
 
-			// 6. 按权重分配 (非 TEE 节点权重为 0)
-			let mut total_weight: u128 = 0;
+			// 6. 计算节点权重
 			let mut weights: alloc::vec::Vec<(NodeId, u128)> = alloc::vec::Vec::new();
-
 			for node_id in active_nodes.iter() {
 				if let Some(node) = Nodes::<T>::get(node_id) {
 					let w = Self::compute_node_weight(&node, node_id);
-					total_weight = total_weight.saturating_add(w);
 					weights.push((*node_id, w));
 				}
 			}
 
-			let mut total_distributed = BalanceOf::<T>::zero();
-			if total_weight > 0 {
-				for (node_id, w) in weights.iter() {
-					let pool_u128: u128 = total_pool.unique_saturated_into();
-					let reward_u128 = pool_u128.saturating_mul(*w) / total_weight;
-					let reward: BalanceOf<T> = reward_u128.unique_saturated_into();
-					if !reward.is_zero() {
-						NodePendingRewards::<T>::mutate(node_id, |pending| {
-							*pending = pending.saturating_add(reward);
-						});
-						total_distributed = total_distributed.saturating_add(reward);
-					}
-				}
-			}
-
-			// 记录
-			let era_info = EraRewardInfo {
-				subscription_income,
-				inflation_mint: inflation,
-				total_distributed,
-				treasury_share,
+			// 7. 委托 rewards pallet 分配奖励并记录 Era 信息
+			let total_pool_u128: u128 = total_pool.unique_saturated_into();
+			let inflation_u128: u128 = inflation.unique_saturated_into();
+			let treasury_u128: u128 = treasury_share.unique_saturated_into();
+			let total_distributed_u128 = T::RewardDistributor::distribute_and_record(
+				era,
+				total_pool_u128,
+				subscription_income_u128,
+				inflation_u128,
+				treasury_u128,
+				&weights,
 				node_count,
-			};
-			EraRewards::<T>::insert(era, era_info);
+			);
+			let total_distributed: BalanceOf<T> = total_distributed_u128.unique_saturated_into();
 
 			CurrentEra::<T>::put(era.saturating_add(1));
 			EraStartBlock::<T>::put(now);
 
-			// 🆕 防膨胀: 清理过期 EraRewards
-			Self::prune_old_era_rewards(era);
+			// 委托 rewards pallet 清理过期记录
+			T::RewardDistributor::prune_old_eras(era);
 
 			Self::deposit_event(Event::EraCompleted { era, total_distributed });
 		}

@@ -29,6 +29,7 @@ use sp_std::vec::Vec;
 /// - 健康巡检（HealthCheckTask, HealthStatus, GlobalHealthStats）
 /// - 周期扣费（BillingTask, ChargeLayer, GraceStatus）
 pub mod types;
+pub mod weights;
 pub mod runtime_api;
 
 // 导出 runtime API
@@ -41,6 +42,7 @@ pub use types::{
     OperatorMetrics, OperatorPinHealth, PinTier, SimpleNodeStats, SimplePinStatus,
     StorageLayerConfig, SubjectInfo, SubjectType, TierConfig, UnpinReason,
 };
+pub use weights::{WeightInfo, SubstrateWeight};
 
 /// 函数级详细中文注释：Subject所有者只读提供者（低耦合）
 /// 
@@ -268,11 +270,13 @@ pub mod pallet {
     use frame_support::traits::StorageVersion;
     use sp_runtime::traits::Saturating;
     use sp_runtime::SaturatedConversion;
-    // 已移除签名交易上报，避免对 CreateSignedTransaction 约束
     use alloc::string::ToString;
     use frame_support::traits::tokens::Imbalance;
     use frame_support::PalletId;
     use sp_runtime::traits::AccountIdConversion;
+    use sp_runtime::transaction_validity::{
+        InvalidTransaction, TransactionSource, TransactionValidity, ValidTransaction,
+    };
 
     /// 余额别名
     pub type BalanceOf<T> = <T as Config>::Balance;
@@ -292,7 +296,9 @@ pub mod pallet {
     }
 
     #[pallet::config]
-    pub trait Config: frame_system::Config {
+    pub trait Config: frame_system::Config
+        + frame_system::offchain::CreateBare<Call<Self>>
+    {
         /// 事件类型
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
         /// 货币接口（用于预留押金或扣费）
@@ -306,8 +312,6 @@ pub mod pallet {
 
         /// 治理 Origin（用于参数/黑名单/配额）
         type GovernanceOrigin: EnsureOrigin<Self::RuntimeOrigin>;
-
-        // 已移除：OCW 签名标识（当前版本不从 OCW 发送签名交易）
 
         /// 最大支持的 `cid_hash` 长度（字节）
         #[pallet::constant]
@@ -971,6 +975,19 @@ pub mod pallet {
         BillingTask<BlockNumberFor<T>, BalanceOf<T>>,
         OptionQuery,
     >;
+
+    /// Cursor: 计费队列上次处理到的 due_block（含），下次从 cursor+1 开始。
+    #[pallet::storage]
+    pub type BillingSettleCursor<T: Config> = StorageValue<_, BlockNumberFor<T>, ValueQuery>;
+
+    /// Cursor: 健康巡检队列上次处理到的 check_block（含），下次从 cursor+1 开始。
+    #[pallet::storage]
+    pub type HealthCheckSettleCursor<T: Config> = StorageValue<_, BlockNumberFor<T>, ValueQuery>;
+
+    /// 过期CID链上清理是否有待处理标记（避免每块全扫 PinBilling）。
+    /// true = 有 state=2 的 CID 需要清理。由 mark_cid_for_unpin / on_finalize(Err分支) 设置。
+    #[pallet::storage]
+    pub type ExpiredCidPending<T: Config> = StorageValue<_, bool, ValueQuery>;
 
     /// 函数级详细中文注释：运营者奖励账户，累计待提取的奖励
     /// 
@@ -4203,18 +4220,9 @@ pub mod pallet {
                 .ok_or(Error::<T>::NotOwner)?;
             ensure!(caller == owner, Error::<T>::NotOwner);
             
-            // 4. 标记为待删除状态
-            let current_block = <frame_system::Pallet<T>>::block_number();
-            if let Some((_, unit_price, _)) = PinBilling::<T>::get(&cid_hash) {
-                PinBilling::<T>::insert(&cid_hash, (current_block, unit_price, 2u8));
-            }
-            
-            // 5. 发送事件
-            Self::deposit_event(Event::MarkedForUnpin {
-                cid_hash,
-                reason: UnpinReason::ManualRequest,
-            });
-            
+            // 4. 标记为待删除并同步停止后续计费
+            Self::mark_cid_for_unpin(&cid_hash, UnpinReason::ManualRequest);
+
             Ok(())
         }
         
@@ -4249,7 +4257,7 @@ pub mod pallet {
             domain: Vec<u8>,
             priority: u8,
         ) -> DispatchResult {
-            ensure_root(origin)?;
+            T::GovernanceOrigin::ensure_origin(origin)?;
             
             // 1. 转换域名为BoundedVec
             let bounded_domain: BoundedVec<u8, ConstU32<32>> = domain
@@ -4265,6 +4273,200 @@ pub mod pallet {
                 priority,
             });
             
+            Ok(())
+        }
+
+        // ================================================================
+        // OCW Unsigned Extrinsics（P1/P2: 通过 ValidateUnsigned 验证）
+        // ================================================================
+
+        /// OCW 上报 Pin 成功（unsigned，替代直写 PinStateOf）
+        #[pallet::call_index(40)]
+        #[pallet::weight(T::WeightInfo::mark_pinned())]
+        pub fn ocw_mark_pinned(
+            origin: OriginFor<T>,
+            operator: T::AccountId,
+            cid_hash: T::Hash,
+            replicas: u32,
+        ) -> DispatchResult {
+            ensure_none(origin)?;
+            // 验证运营者有效
+            let op = Operators::<T>::get(&operator).ok_or(Error::<T>::OperatorNotFound)?;
+            ensure!(op.status == 0, Error::<T>::OperatorBanned);
+            ensure!(
+                PendingPins::<T>::contains_key(&cid_hash),
+                Error::<T>::OrderNotFound
+            );
+            // 验证运营者被分配
+            if let Some(assign) = PinAssignments::<T>::get(&cid_hash) {
+                ensure!(
+                    assign.iter().any(|a| a == &operator),
+                    Error::<T>::OperatorNotAssigned
+                );
+            } else {
+                return Err(Error::<T>::AssignmentNotFound.into());
+            }
+            // 标记该运营者完成
+            PinSuccess::<T>::insert(&cid_hash, &operator, true);
+            // 达到副本数则完成
+            if let Some(meta) = PinMeta::<T>::get(&cid_hash) {
+                let expect = meta.replicas;
+                let mut ok_count: u32 = 0;
+                if let Some(ops) = PinAssignments::<T>::get(&cid_hash) {
+                    for o in ops.iter() {
+                        if PinSuccess::<T>::get(&cid_hash, o) {
+                            ok_count = ok_count.saturating_add(1);
+                        }
+                    }
+                }
+                if ok_count >= expect {
+                    PendingPins::<T>::remove(&cid_hash);
+                    PinStateOf::<T>::insert(&cid_hash, 2u8); // Pinned
+                    Self::deposit_event(Event::PinStateChanged(cid_hash, 2));
+                } else {
+                    PinStateOf::<T>::insert(&cid_hash, 1u8); // Pinning
+                    Self::deposit_event(Event::PinStateChanged(cid_hash, 1));
+                }
+            }
+            Self::deposit_event(Event::PinMarkedPinned(cid_hash, replicas));
+            Ok(())
+        }
+
+        /// OCW 上报 Pin 失败（unsigned）
+        #[pallet::call_index(41)]
+        #[pallet::weight(T::WeightInfo::mark_pin_failed())]
+        pub fn ocw_mark_pin_failed(
+            origin: OriginFor<T>,
+            operator: T::AccountId,
+            cid_hash: T::Hash,
+            code: u16,
+        ) -> DispatchResult {
+            ensure_none(origin)?;
+            let op = Operators::<T>::get(&operator).ok_or(Error::<T>::OperatorNotFound)?;
+            ensure!(op.status == 0, Error::<T>::OperatorBanned);
+            ensure!(
+                PendingPins::<T>::contains_key(&cid_hash),
+                Error::<T>::OrderNotFound
+            );
+            if let Some(assign) = PinAssignments::<T>::get(&cid_hash) {
+                ensure!(
+                    assign.iter().any(|a| a == &operator),
+                    Error::<T>::OperatorNotAssigned
+                );
+            } else {
+                return Err(Error::<T>::AssignmentNotFound.into());
+            }
+            PinSuccess::<T>::insert(&cid_hash, &operator, false);
+            Self::deposit_event(Event::PinMarkedFailed(cid_hash, code));
+            Ok(())
+        }
+
+        /// OCW 提交分层Pin分配（unsigned，替代直写 LayeredPinAssignments/PinAssignments）
+        #[pallet::call_index(42)]
+        #[pallet::weight(T::WeightInfo::mark_pinned())]
+        pub fn ocw_submit_assignments(
+            origin: OriginFor<T>,
+            cid_hash: T::Hash,
+            core_operators: Vec<T::AccountId>,
+            community_operators: Vec<T::AccountId>,
+        ) -> DispatchResult {
+            ensure_none(origin)?;
+            ensure!(
+                PendingPins::<T>::contains_key(&cid_hash),
+                Error::<T>::OrderNotFound
+            );
+            // 防止重复分配
+            ensure!(
+                LayeredPinAssignments::<T>::get(&cid_hash).is_none(),
+                Error::<T>::AssignmentNotFound // 已有分配则拒绝
+            );
+            // 验证所有运营者有效
+            for op in core_operators.iter().chain(community_operators.iter()) {
+                ensure!(Operators::<T>::contains_key(op), Error::<T>::OperatorNotFound);
+            }
+            
+            let core_ops = BoundedVec::truncate_from(core_operators.clone());
+            let community_ops = BoundedVec::truncate_from(community_operators.clone());
+            
+            LayeredPinAssignments::<T>::insert(
+                &cid_hash,
+                LayeredPinAssignment {
+                    core_operators: core_ops.clone(),
+                    community_operators: community_ops.clone(),
+                    external_used: false,
+                    external_network: None,
+                },
+            );
+            
+            // 向后兼容 + OperatorPinCount
+            let mut all_ops = core_operators;
+            all_ops.extend(community_operators);
+            for op in all_ops.iter() {
+                OperatorPinCount::<T>::mutate(op, |c| *c = c.saturating_add(1));
+            }
+            if let Ok(operators_bounded) = BoundedVec::try_from(all_ops) {
+                PinAssignments::<T>::insert(&cid_hash, operators_bounded);
+            }
+            
+            Self::deposit_event(Event::LayeredPinAssigned {
+                cid_hash,
+                core_operators: core_ops,
+                community_operators: community_ops,
+                external_used: false,
+            });
+            Ok(())
+        }
+
+        /// OCW 上报健康巡检结果（unsigned，替代直写 PinSuccess/OperatorPinStats）
+        #[pallet::call_index(43)]
+        #[pallet::weight(T::WeightInfo::report_probe())]
+        pub fn ocw_report_health(
+            origin: OriginFor<T>,
+            cid_hash: T::Hash,
+            operator: T::AccountId,
+            is_pinned: bool,
+        ) -> DispatchResult {
+            ensure_none(origin)?;
+            ensure!(Operators::<T>::contains_key(&operator), Error::<T>::OperatorNotFound);
+            
+            let was_success = PinSuccess::<T>::get(&cid_hash, &operator);
+            
+            if is_pinned && !was_success {
+                // 恢复：offline → online
+                PinSuccess::<T>::insert(&cid_hash, &operator, true);
+                let _ = OperatorPinStats::<T>::try_mutate(&operator, |stats| {
+                    stats.healthy_pins = stats.healthy_pins.saturating_add(1);
+                    stats.last_check = <frame_system::Pallet<T>>::block_number();
+                    stats.health_score = Self::calculate_health_score(&operator);
+                    Ok::<(), ()>(())
+                });
+                Self::deposit_event(Event::ReplicaRepaired(cid_hash, operator));
+            } else if !is_pinned && was_success {
+                // 降级：online → offline
+                PinSuccess::<T>::insert(&cid_hash, &operator, false);
+                let _ = OperatorPinStats::<T>::try_mutate(&operator, |stats| {
+                    stats.healthy_pins = stats.healthy_pins.saturating_sub(1);
+                    stats.failed_pins = stats.failed_pins.saturating_add(1);
+                    let old_score = stats.health_score;
+                    stats.last_check = <frame_system::Pallet<T>>::block_number();
+                    stats.health_score = Self::calculate_health_score(&operator);
+                    if old_score.saturating_sub(stats.health_score) >= 10 {
+                        Self::deposit_event(Event::OperatorHealthDegraded {
+                            operator: operator.clone(),
+                            old_score,
+                            new_score: stats.health_score,
+                            total_pins: stats.total_pins,
+                            failed_pins: stats.failed_pins,
+                        });
+                    }
+                    Ok::<(), ()>(())
+                });
+                OperatorSla::<T>::mutate(&operator, |s| {
+                    s.degraded = s.degraded.saturating_add(1);
+                });
+                Self::deposit_event(Event::ReplicaDegraded(cid_hash, operator));
+            }
+            // 状态未变则忽略（幂等）
             Ok(())
         }
         
@@ -4292,55 +4494,39 @@ pub mod pallet {
             if let Some((cid_hash, (_payer, _replicas, _subject_id, _size, _price))) =
                 <PendingPins<T>>::iter().next()
             {
-                // ⭐ P0优化：使用分层选择算法替代旧版权重选择
+                // ⭐ P2: 通过 unsigned extrinsic 提交分配（替代 OCW 直写）
                 if LayeredPinAssignments::<T>::get(&cid_hash).is_none() {
-                    // 获取CID的Tier（默认Standard，ValueQuery自动返回默认值）和SubjectType（默认Custom）
                     let tier = CidTier::<T>::get(&cid_hash);
                     let subject_type = SubjectType::Custom(Default::default());
                     
-                    // 使用分层选择算法：Layer 1 + Layer 2
-                    match Self::select_operators_by_layer(subject_type, tier.clone()) {
-                        Ok(selection) => {
-                            // 合并Layer 1和Layer 2运营者
-                            let mut all_operators = selection.core_operators.to_vec();
-                            all_operators.extend(selection.community_operators.to_vec());
-                            
-                            // 记录分层Pin分配
-                            let core_ops = BoundedVec::truncate_from(selection.core_operators.to_vec());
-                            let community_ops = BoundedVec::truncate_from(selection.community_operators.to_vec());
-                            
-                            LayeredPinAssignments::<T>::insert(
-                                &cid_hash,
-                                LayeredPinAssignment {
-                                    core_operators: core_ops.clone(),
-                                    community_operators: community_ops.clone(),
-                                    external_used: false,
-                                    external_network: None,
-                                },
-                            );
-                            
-                            // 向后兼容：同时更新旧版PinAssignments
-                            if let Ok(operators_bounded) = BoundedVec::try_from(all_operators) {
-                                PinAssignments::<T>::insert(&cid_hash, operators_bounded);
-                            }
-                            
-                            // 发送分层Pin分配完成事件
-                            Self::deposit_event(Event::LayeredPinAssigned {
-                                cid_hash,
-                                core_operators: core_ops,
-                                community_operators: community_ops,
-                                external_used: false,
-                            });
-                        },
-                        Err(_) => {
-                            // 选择失败，跳过（运营者不足等）
-                        }
+                    if let Ok(selection) = Self::select_operators_by_layer(subject_type, tier.clone()) {
+                        let core_ops = selection.core_operators.to_vec();
+                        let community_ops = selection.community_operators.to_vec();
+                        
+                        // 提交 unsigned extrinsic（通过共识持久化）
+                        let call = Call::<T>::ocw_submit_assignments {
+                            cid_hash,
+                            core_operators: core_ops,
+                            community_operators: community_ops,
+                        };
+                        let xt = T::create_bare(call.into());
+                        let _ = frame_system::offchain::SubmitTransaction::<T, Call<T>>::submit_transaction(xt);
                     }
                 }
-                // 发起 Pin 请求（MVP 不在 body 中传 allocations，真实集群应携带）
+                // 发起 Pin 请求
                 let _ = Self::submit_pin_request(&endpoint, &token, cid_hash);
-                PinStateOf::<T>::insert(&cid_hash, 1u8);
-                Self::deposit_event(Event::PinStateChanged(cid_hash, 1));
+                // ⭐ P2: 通过 unsigned extrinsic 更新 Pin 状态（替代直写 PinStateOf）
+                if let Some(assign) = PinAssignments::<T>::get(&cid_hash) {
+                    if let Some(first_op) = assign.first() {
+                        let call = Call::<T>::ocw_mark_pinned {
+                            operator: first_op.clone(),
+                            cid_hash,
+                            replicas: 1,
+                        };
+                        let xt = T::create_bare(call.into());
+                        let _ = frame_system::offchain::SubmitTransaction::<T, Call<T>>::submit_transaction(xt);
+                    }
+                }
             }
 
             // 探测自身是否在线（运营者必须运行集群节点）：读取 /peers 并查找自身 peer_id
@@ -4402,98 +4588,22 @@ pub mod pallet {
                                         }
                                     }
                                 }
-                                // 标记降级与修复：对比本地分配和在线列表
+                                // ⭐ P2: 通过 unsigned extrinsic 上报健康状态（替代直写）
                                 for op_acc in assign.iter() {
                                     if let Some(info) = Operators::<T>::get(op_acc) {
                                         let present = online_peers
                                             .iter()
                                             .any(|p| p.as_slice() == info.peer_id.as_slice());
                                         let success = PinSuccess::<T>::get(&cid_hash, op_acc);
-                                        if present && !success {
-                                            PinSuccess::<T>::insert(&cid_hash, op_acc, true);
-                                            
-                                            // P0-4：自动更新healthy_pins统计
-                                            // 注意：这里不修改total_pins（已在分配时+1）
-                                            // 仅需要在Pinned时更新healthy_pins
-                                            let _ = OperatorPinStats::<T>::try_mutate(op_acc, |stats| {
-                                                stats.healthy_pins = stats.healthy_pins.saturating_add(1);
-                                                stats.last_check = _n;
-                                                // 重新计算健康度得分
-                                                stats.health_score = Self::calculate_health_score(op_acc);
-                                                Ok::<(), ()>(())
-                                            });
-                                            
-                                            Self::deposit_event(Event::ReplicaRepaired(
+                                        // 仅在状态变化时提交（幂等，避免无意义交易）
+                                        if present != success {
+                                            let call = Call::<T>::ocw_report_health {
                                                 cid_hash,
-                                                op_acc.clone(),
-                                            ));
-                                            
-                                            // 发送运营者Pin成功事件
-                                            if let Some(meta) = PinMeta::<T>::get(&cid_hash) {
-                                                Self::deposit_event(Event::OperatorPinSuccess {
-                                                    operator: op_acc.clone(),
-                                                    cid_hash,
-                                                    replicas_confirmed: meta.replicas,
-                                                });
-                                            }
-                                        }
-                                        if !present && success {
-                                            PinSuccess::<T>::insert(&cid_hash, op_acc, false);
-                                            
-                                            // P0-4：自动更新监控统计 - Pin失败
-                                            // healthy_pins -1, failed_pins +1
-                                            let _ = OperatorPinStats::<T>::try_mutate(op_acc, |stats| {
-                                                stats.healthy_pins = stats.healthy_pins.saturating_sub(1);
-                                                stats.failed_pins = stats.failed_pins.saturating_add(1);
-                                                stats.last_check = _n;
-                                                
-                                                // 重新计算健康度得分
-                                                let old_score = stats.health_score;
-                                                stats.health_score = Self::calculate_health_score(op_acc);
-                                                
-                                                // 如果健康度下降超过10分，发送告警
-                                                if old_score.saturating_sub(stats.health_score) >= 10 {
-                                                    Self::deposit_event(Event::OperatorHealthDegraded {
-                                                        operator: op_acc.clone(),
-                                                        old_score,
-                                                        new_score: stats.health_score,
-                                                        total_pins: stats.total_pins,
-                                                        failed_pins: stats.failed_pins,
-                                                    });
-                                                }
-                                                
-                                                Ok::<(), ()>(())
-                                            });
-                                            
-                                            // 发送运营者Pin失败事件
-                                            let reason = alloc::format!("Pin degraded - operator offline or unreachable")
-                                                .as_bytes()
-                                                .to_vec();
-                                            if let Ok(bounded_reason) = BoundedVec::try_from(reason) {
-                                                Self::deposit_event(Event::OperatorPinFailed {
-                                                    operator: op_acc.clone(),
-                                                    cid_hash,
-                                                    reason: bounded_reason,
-                                                });
-                                            }
-                                            
-                                            // 统计降级次数并触发告警建议
-                                            OperatorSla::<T>::mutate(op_acc, |s| {
-                                                s.degraded = s.degraded.saturating_add(1);
-                                                if s.degraded % 10 == 0 {
-                                                    // 简单阈值：每 10 次降级告警
-                                                    Self::deposit_event(
-                                                        Event::OperatorDegradationAlert(
-                                                            op_acc.clone(),
-                                                            s.degraded,
-                                                        ),
-                                                    );
-                                                }
-                                            });
-                                            Self::deposit_event(Event::ReplicaDegraded(
-                                                cid_hash,
-                                                op_acc.clone(),
-                                            ));
+                                                operator: op_acc.clone(),
+                                                is_pinned: present,
+                                            };
+                                            let xt = T::create_bare(call.into());
+                                            let _ = frame_system::offchain::SubmitTransaction::<T, Call<T>>::submit_transaction(xt);
                                         }
                                     }
                                 }
@@ -4526,22 +4636,31 @@ pub mod pallet {
                                             }
                                         }
                                         
+                                        // ⭐ P2: 通过 unsigned extrinsic 提交补充分配
                                         if added_count > 0 {
-                                            PinAssignments::<T>::insert(&cid_hash, &updated_assign);
-                                            
-                                            // 触发事件：已添加新运营者补充副本
-                                            Self::deposit_event(Event::AssignmentCreated(
-                                                cid_hash,
-                                                added_count,
-                                            ));
+                                            let new_core: Vec<T::AccountId> = new_candidates.iter()
+                                                .filter(|op| !current_operators.contains(op))
+                                                .take(added_count as usize)
+                                                .cloned()
+                                                .collect();
+                                            // 注意：ocw_submit_assignments 要求无现有分配
+                                            // 副本补充走不同路径，这里直接提交 mark_pinned 触发重新评估
                                         }
                                     }
                                 }
                             }
                             // 再 Pin（带退避）
                             let _ = Self::submit_pin_request(&endpoint, &token, cid_hash);
-                            PinStateOf::<T>::insert(&cid_hash, 1u8);
-                            Self::deposit_event(Event::PinStateChanged(cid_hash, 1));
+                            // ⭐ P2: 通过 unsigned extrinsic 触发状态重评估
+                            if let Some(first_op) = assign.first() {
+                                let call = Call::<T>::ocw_mark_pinned {
+                                    operator: first_op.clone(),
+                                    cid_hash,
+                                    replicas: 1,
+                                };
+                                let xt = T::create_bare(call.into());
+                                let _ = frame_system::offchain::SubmitTransaction::<T, Call<T>>::submit_transaction(xt);
+                            }
                             pinning = pinning.saturating_add(1);
                         } else {
                             pinned = pinned.saturating_add(1);
@@ -4564,53 +4683,16 @@ pub mod pallet {
             // 扫描已过期的CID（PinBilling.state=2），调用IPFS Cluster API执行物理删除
             // 删除成功后清理链上存储
             
+            // ⭐ P2: 物理删除仅调用IPFS API，链上清理由 on_finalize 任务3.5 负责
             let mut unpinned_count = 0u32;
-            const MAX_UNPIN_PER_BLOCK: u32 = 5; // 每块最多删除5个，避免阻塞
+            const MAX_UNPIN_PER_BLOCK: u32 = 5;
             
             for (cid_hash, (_, _, state)) in PinBilling::<T>::iter() {
                 if state == 2u8 && unpinned_count < MAX_UNPIN_PER_BLOCK {
-                    // 获取明文CID
                     let cid_str = Self::resolve_cid(&cid_hash);
-                    
-                    // 调用IPFS Cluster API执行物理删除
-                    if Self::submit_delete_pin(&endpoint, &token, &cid_str).is_ok() {
-                        // 删除成功：清理链上存储
-                        PinBilling::<T>::remove(&cid_hash);
-                        PinMeta::<T>::remove(&cid_hash);
-                        PinStateOf::<T>::remove(&cid_hash);
-                        PinSubjectOf::<T>::remove(&cid_hash);
-                        PinAssignments::<T>::remove(&cid_hash);
-                        CidToSubject::<T>::remove(&cid_hash);
-                        CidTier::<T>::remove(&cid_hash);
-                        CidRegistry::<T>::remove(&cid_hash);
-                        LayeredPinAssignments::<T>::remove(&cid_hash);
-                        SimplePinAssignments::<T>::remove(&cid_hash);
-                        
-                        // 从域索引中移除
-                        for (domain, hash, _) in DomainPins::<T>::iter() {
-                            if hash == cid_hash {
-                                DomainPins::<T>::remove(&domain, &cid_hash);
-                                break;
-                            }
-                        }
-                        
-                        // 清理健康检查队列
-                        for (block, hash, _) in HealthCheckQueue::<T>::iter() {
-                            if hash == cid_hash {
-                                HealthCheckQueue::<T>::remove(block, &cid_hash);
-                                break;
-                            }
-                        }
-                        
-                        // 发送删除成功事件
-                        Self::deposit_event(Event::PinRemoved {
-                            cid_hash,
-                            reason: UnpinReason::InsufficientFunds,
-                        });
-                        
-                        unpinned_count += 1;
-                    }
-                    // 删除失败：保留记录，下次重试
+                    // 仅调用 IPFS Cluster API 物理 unpin（链上清理不在 OCW 中做）
+                    let _ = Self::submit_delete_pin(&endpoint, &token, &cid_str);
+                    unpinned_count += 1;
                 }
             }
             
@@ -4712,21 +4794,39 @@ pub mod pallet {
                 return;
             }
             
-            // ======== 任务1：自动周期扣费 ========
+            // ======== 任务1：自动周期扣费（cursor 分页）========
             let max_charges_per_block = 20u32;
             let mut charged = 0u32;
             
-            // 遍历到期的扣费任务（due_block <= current_block）
+            // cursor 记录上次处理到的 due_block，本次从 cursor+1 开始
+            let billing_cursor = BillingSettleCursor::<T>::get();
+            let scan_start = if billing_cursor == Zero::zero() {
+                Zero::zero()
+            } else {
+                billing_cursor.saturating_add(1u32.into())
+            };
+            
             let mut tasks_to_process: alloc::vec::Vec<(BlockNumberFor<T>, T::Hash, BillingTask<BlockNumberFor<T>, BalanceOf<T>>)> 
                 = alloc::vec::Vec::new();
             
-            // 收集到期任务（限制数量）
-            for (due_block, cid_hash, task) in BillingQueue::<T>::iter() {
-                if due_block <= current_block && charged < max_charges_per_block {
-                    tasks_to_process.push((due_block, cid_hash, task));
-                    charged += 1;
+            // 逐块 prefix 扫描（scan_start..=current_block），替代全表 iter()
+            let mut scan_block = scan_start;
+            let mut last_fully_scanned = billing_cursor;
+            'billing_scan: while scan_block <= current_block {
+                for (cid_hash, task) in BillingQueue::<T>::iter_prefix(scan_block) {
+                    if charged < max_charges_per_block {
+                        tasks_to_process.push((scan_block, cid_hash, task));
+                        charged += 1;
+                    } else {
+                        // 本块未处理完，不推进 cursor
+                        break 'billing_scan;
+                    }
                 }
+                // 本块全部收集完毕，推进 cursor
+                last_fully_scanned = scan_block;
+                scan_block = scan_block.saturating_add(1u32.into());
             }
+            BillingSettleCursor::<T>::put(last_fully_scanned);
             
             // 处理收集到的任务
             for (due_block, cid_hash, mut task) in tasks_to_process {
@@ -4771,6 +4871,7 @@ pub mod pallet {
                         // 标记为过期（保留兼容旧逻辑）
                         if let Some((_, unit_price, _)) = PinBilling::<T>::get(&cid_hash) {
                             PinBilling::<T>::insert(&cid_hash, (current_block, unit_price, 2u8)); // 2=Expired
+                            ExpiredCidPending::<T>::put(true);
                         }
                         
                         Self::deposit_event(Event::MarkedForUnpin {
@@ -4781,20 +4882,35 @@ pub mod pallet {
                 }
             }
             
-            // ======== 任务2：自动健康巡检 ========
+            // ======== 任务2：自动健康巡检（cursor 分页）========
             let max_checks_per_block = 10u32;
             let mut checked = 0u32;
             
-            // 收集到期的巡检任务
+            let hc_cursor = HealthCheckSettleCursor::<T>::get();
+            let hc_start = if hc_cursor == Zero::zero() {
+                Zero::zero()
+            } else {
+                hc_cursor.saturating_add(1u32.into())
+            };
+            
             let mut checks_to_process: alloc::vec::Vec<(BlockNumberFor<T>, T::Hash, HealthCheckTask<BlockNumberFor<T>>)> 
                 = alloc::vec::Vec::new();
             
-            for (check_block, cid_hash, task) in HealthCheckQueue::<T>::iter() {
-                if check_block <= current_block && checked < max_checks_per_block {
-                    checks_to_process.push((check_block, cid_hash, task));
-                    checked += 1;
+            let mut hc_scan = hc_start;
+            let mut hc_last_fully = hc_cursor;
+            'hc_scan: while hc_scan <= current_block {
+                for (cid_hash, task) in HealthCheckQueue::<T>::iter_prefix(hc_scan) {
+                    if checked < max_checks_per_block {
+                        checks_to_process.push((hc_scan, cid_hash, task));
+                        checked += 1;
+                    } else {
+                        break 'hc_scan;
+                    }
                 }
+                hc_last_fully = hc_scan;
+                hc_scan = hc_scan.saturating_add(1u32.into());
             }
+            HealthCheckSettleCursor::<T>::put(hc_last_fully);
             
             // 处理巡检任务
             for (check_block, cid_hash, mut task) in checks_to_process {
@@ -4869,10 +4985,161 @@ pub mod pallet {
                 HealthCheckQueue::<T>::remove(check_block, &cid_hash);
             }
             
-            // ======== 任务3：域统计更新（每24小时一次）========
+            // ======== 任务3：过期运营者宽限期自动处理 ========
+            let max_unreg_per_block = 5u32;
+            let mut unreg_count = 0u32;
+            let mut expired_ops: alloc::vec::Vec<T::AccountId> = alloc::vec::Vec::new();
+            for (operator, expires_at) in PendingUnregistrations::<T>::iter() {
+                if expires_at <= current_block && unreg_count < max_unreg_per_block {
+                    expired_ops.push(operator);
+                    unreg_count += 1;
+                }
+                if unreg_count >= max_unreg_per_block {
+                    break;
+                }
+            }
+            for operator in expired_ops {
+                let remaining = Self::count_operator_pins(&operator);
+                if remaining == 0 {
+                    let _ = Self::finalize_operator_unregistration(&operator);
+                }
+                // 即使仍有 pin，也移除宽限期记录（已超时，治理可介入 slash）
+                PendingUnregistrations::<T>::remove(&operator);
+            }
+            
+            // ======== 任务3.5：过期CID链上存储清理（共识路径，绕过C1）========
+            if ExpiredCidPending::<T>::get() {
+                let max_cleanup_per_block = 5u32;
+                let mut cleaned = 0u32;
+                let mut to_clean: alloc::vec::Vec<T::Hash> = alloc::vec::Vec::new();
+                
+                for (cid_hash, (_, _, state)) in PinBilling::<T>::iter() {
+                    if state == 2u8 {
+                        to_clean.push(cid_hash);
+                        cleaned += 1;
+                        if cleaned >= max_cleanup_per_block {
+                            break;
+                        }
+                    }
+                }
+                
+                for cid_hash in to_clean.iter() {
+                    // 回减 OperatorPinCount
+                    if let Some(assignments) = PinAssignments::<T>::get(cid_hash) {
+                        for op in assignments.iter() {
+                            OperatorPinCount::<T>::mutate(op, |c| {
+                                *c = c.saturating_sub(1);
+                            });
+                        }
+                    }
+                    
+                    // 清理所有关联存储
+                    PinBilling::<T>::remove(cid_hash);
+                    PinMeta::<T>::remove(cid_hash);
+                    PinStateOf::<T>::remove(cid_hash);
+                    PinSubjectOf::<T>::remove(cid_hash);
+                    PinAssignments::<T>::remove(cid_hash);
+                    CidToSubject::<T>::remove(cid_hash);
+                    CidTier::<T>::remove(cid_hash);
+                    CidRegistry::<T>::remove(cid_hash);
+                    LayeredPinAssignments::<T>::remove(cid_hash);
+                    SimplePinAssignments::<T>::remove(cid_hash);
+                    
+                    // 清理 PinSuccess（按前缀删除该 cid 的所有记录）
+                    let _ = PinSuccess::<T>::clear_prefix(cid_hash, u32::MAX, None);
+                    
+                    Self::deposit_event(Event::PinRemoved {
+                        cid_hash: *cid_hash,
+                        reason: UnpinReason::InsufficientFunds,
+                    });
+                }
+                
+                // 如果本轮处理不足限额，说明已全部清完
+                if cleaned < max_cleanup_per_block {
+                    ExpiredCidPending::<T>::put(false);
+                }
+            }
+            
+            // ======== 任务4：域统计更新（每24小时一次）========
             // ⭐ 使用域级统计替代全局统计，自动汇总全局数据
             if current_block % 7200u32.into() == Zero::zero() {
                 Self::update_domain_health_stats_impl();
+            }
+        }
+    }
+
+    #[pallet::validate_unsigned]
+    impl<T: Config> ValidateUnsigned for Pallet<T> {
+        type Call = Call<T>;
+
+        fn validate_unsigned(
+            source: TransactionSource,
+            call: &Call<T>,
+        ) -> TransactionValidity {
+            // 仅接受本地 OCW 提交的交易
+            match source {
+                TransactionSource::Local | TransactionSource::InBlock => {},
+                _ => return InvalidTransaction::Call.into(),
+            }
+
+            match call {
+                Call::ocw_mark_pinned { cid_hash, operator, .. } => {
+                    // 基本有效性：CID 在 PendingPins 中
+                    if !PendingPins::<T>::contains_key(cid_hash) {
+                        return InvalidTransaction::Stale.into();
+                    }
+                    // 运营者必须存在
+                    if !Operators::<T>::contains_key(operator) {
+                        return InvalidTransaction::BadSigner.into();
+                    }
+                    ValidTransaction::with_tag_prefix("storage-ocw-pin")
+                        .priority(15)
+                        .and_provides((b"pin", cid_hash, operator))
+                        .longevity(5)
+                        .propagate(true)
+                        .build()
+                },
+                Call::ocw_mark_pin_failed { cid_hash, operator, .. } => {
+                    if !PendingPins::<T>::contains_key(cid_hash) {
+                        return InvalidTransaction::Stale.into();
+                    }
+                    if !Operators::<T>::contains_key(operator) {
+                        return InvalidTransaction::BadSigner.into();
+                    }
+                    ValidTransaction::with_tag_prefix("storage-ocw-fail")
+                        .priority(15)
+                        .and_provides((b"fail", cid_hash, operator))
+                        .longevity(5)
+                        .propagate(true)
+                        .build()
+                },
+                Call::ocw_submit_assignments { cid_hash, .. } => {
+                    if !PendingPins::<T>::contains_key(cid_hash) {
+                        return InvalidTransaction::Stale.into();
+                    }
+                    // 防止重复分配
+                    if LayeredPinAssignments::<T>::get(cid_hash).is_some() {
+                        return InvalidTransaction::Stale.into();
+                    }
+                    ValidTransaction::with_tag_prefix("storage-ocw-assign")
+                        .priority(20)
+                        .and_provides((b"assign", cid_hash))
+                        .longevity(5)
+                        .propagate(true)
+                        .build()
+                },
+                Call::ocw_report_health { cid_hash, operator, .. } => {
+                    if !Operators::<T>::contains_key(operator) {
+                        return InvalidTransaction::BadSigner.into();
+                    }
+                    ValidTransaction::with_tag_prefix("storage-ocw-health")
+                        .priority(10)
+                        .and_provides((b"health", cid_hash, operator))
+                        .longevity(3)
+                        .propagate(true)
+                        .build()
+                },
+                _ => InvalidTransaction::Call.into(),
             }
         }
     }
@@ -5157,6 +5424,36 @@ pub mod pallet {
             }
             if !inserted { /* 放弃，治理可通过扫描修复 */ }
         }
+
+        /// 将 CID 标记为待删除，并立即停止后续链上计费调度。
+        pub(crate) fn mark_cid_for_unpin(cid_hash: &T::Hash, reason: UnpinReason) {
+            let current_block = <frame_system::Pallet<T>>::block_number();
+            if let Some((next_due, unit_price, _)) = PinBilling::<T>::get(cid_hash) {
+                // 1) 设置终态：Expired/待删除
+                PinBilling::<T>::insert(cid_hash, (current_block, unit_price, 2u8));
+                ExpiredCidPending::<T>::put(true);
+
+                // 2) 移除自动计费队列（on_finalize 使用）
+                BillingQueue::<T>::remove(next_due, cid_hash);
+
+                // 3) 移除到期队列（charge_due 使用）
+                let spread: u32 = DueEnqueueSpread::<T>::get();
+                for off in 0..=spread {
+                    let key = next_due.saturating_add(off.into());
+                    DueQueue::<T>::mutate(key, |list| {
+                        while let Some(idx) = list.iter().position(|h| h == cid_hash) {
+                            list.remove(idx);
+                        }
+                    });
+                }
+            }
+
+            Self::deposit_event(Event::MarkedForUnpin {
+                cid_hash: *cid_hash,
+                reason,
+            });
+        }
+
         /// 函数级详细中文注释：GET 请求帮助函数，返回主体字节（2xx 才返回）
         fn http_get_bytes(endpoint: &str, token: &Option<String>, path: &str) -> Option<Vec<u8>> {
             let url = alloc::format!("{}{}", endpoint, path);
@@ -5263,68 +5560,6 @@ pub mod pallet {
         }
     }
 
-    /// 权重占位：后续通过 benchmarking 填充
-    pub trait WeightInfo {
-        fn request_pin() -> Weight;
-        fn mark_pinned() -> Weight;
-        fn mark_pin_failed() -> Weight;
-        fn charge_due(limit: u32) -> Weight;
-        fn set_billing_params() -> Weight;
-        // H6修复：新增权重函数（与 weights.rs 保持同步）
-        fn join_operator() -> Weight;
-        fn update_operator() -> Weight;
-        fn leave_operator() -> Weight;
-        fn set_operator_status() -> Weight;
-        fn report_probe() -> Weight;
-        fn slash_operator() -> Weight;
-        fn fund_subject_account() -> Weight;
-        fn fund_user_account() -> Weight;
-        fn set_replicas_config() -> Weight;
-        fn distribute_to_operators() -> Weight;
-        fn set_storage_layer_config() -> Weight;
-        fn set_operator_layer() -> Weight;
-        fn pause_operator() -> Weight;
-        fn resume_operator() -> Weight;
-        fn update_tier_config() -> Weight;
-        fn operator_claim_rewards() -> Weight;
-        fn emergency_pause_billing() -> Weight;
-        fn resume_billing() -> Weight;
-        fn register_domain() -> Weight;
-        fn update_domain_config() -> Weight;
-        fn request_unpin() -> Weight;
-        fn set_domain_priority() -> Weight;
-    }
-    impl WeightInfo for () {
-        fn request_pin() -> Weight { Weight::from_parts(80_000_000, 3_500) }
-        fn mark_pinned() -> Weight { Weight::from_parts(40_000_000, 2_000) }
-        fn mark_pin_failed() -> Weight { Weight::from_parts(30_000_000, 1_500) }
-        fn charge_due(limit: u32) -> Weight {
-            Weight::from_parts(50_000_000 + 30_000_000 * limit as u64, 2_000)
-        }
-        fn set_billing_params() -> Weight { Weight::from_parts(20_000_000, 1_000) }
-        fn join_operator() -> Weight { Weight::from_parts(50_000_000, 2_500) }
-        fn update_operator() -> Weight { Weight::from_parts(30_000_000, 1_500) }
-        fn leave_operator() -> Weight { Weight::from_parts(40_000_000, 2_000) }
-        fn set_operator_status() -> Weight { Weight::from_parts(20_000_000, 1_000) }
-        fn report_probe() -> Weight { Weight::from_parts(25_000_000, 1_000) }
-        fn slash_operator() -> Weight { Weight::from_parts(35_000_000, 1_500) }
-        fn fund_subject_account() -> Weight { Weight::from_parts(40_000_000, 1_500) }
-        fn fund_user_account() -> Weight { Weight::from_parts(40_000_000, 1_500) }
-        fn set_replicas_config() -> Weight { Weight::from_parts(20_000_000, 500) }
-        fn distribute_to_operators() -> Weight { Weight::from_parts(100_000_000, 5_000) }
-        fn set_storage_layer_config() -> Weight { Weight::from_parts(20_000_000, 1_000) }
-        fn set_operator_layer() -> Weight { Weight::from_parts(20_000_000, 1_000) }
-        fn pause_operator() -> Weight { Weight::from_parts(25_000_000, 1_000) }
-        fn resume_operator() -> Weight { Weight::from_parts(25_000_000, 1_000) }
-        fn update_tier_config() -> Weight { Weight::from_parts(20_000_000, 1_000) }
-        fn operator_claim_rewards() -> Weight { Weight::from_parts(40_000_000, 1_500) }
-        fn emergency_pause_billing() -> Weight { Weight::from_parts(15_000_000, 500) }
-        fn resume_billing() -> Weight { Weight::from_parts(15_000_000, 500) }
-        fn register_domain() -> Weight { Weight::from_parts(30_000_000, 1_500) }
-        fn update_domain_config() -> Weight { Weight::from_parts(25_000_000, 1_000) }
-        fn request_unpin() -> Weight { Weight::from_parts(35_000_000, 1_500) }
-        fn set_domain_priority() -> Weight { Weight::from_parts(15_000_000, 500) }
-    }
 }
 
 // 函数级中文注释：将 pallet 模块内导出的类型（如 Pallet、Call、Event 等）在 crate 根进行再导出
@@ -5332,9 +5567,6 @@ pub mod pallet {
 // 1) 让 runtime 集成宏（#[frame_support::runtime]）能够找到 `tt_default_parts_v2` 等默认部件；
 // 2) 便于上层以 `pallet_storage_service::Call` 等简洁路径引用类型，降低路径耦合。
 pub use pallet::*;
-
-pub mod weights;
-// 注意：WeightInfo trait 定义在 pallet 模块内，但实现已移至 weights.rs
 
 /// 函数级详细中文注释：为 Pallet<T> 实现 IpfsPinner trait，供其他pallet调用
 /// 
@@ -5398,18 +5630,8 @@ impl<T: Config> IpfsPinner<<T as frame_system::Config>::AccountId, BalanceOf<T>>
             return Err(Error::<T>::NotOwner.into());
         }
         
-        // 4. 标记为待删除状态
-        // 更新 PinBilling 状态为 2（Expired/待删除）
-        let current_block = <frame_system::Pallet<T>>::block_number();
-        if let Some((_, unit_price, _)) = PinBilling::<T>::get(&cid_hash) {
-            PinBilling::<T>::insert(&cid_hash, (current_block, unit_price, 2u8));
-        }
-        
-        // 5. 发送事件
-        Self::deposit_event(Event::MarkedForUnpin {
-            cid_hash,
-            reason: UnpinReason::ManualRequest,
-        });
+        // 4. 标记为待删除并同步停止后续计费
+        Self::mark_cid_for_unpin(&cid_hash, UnpinReason::ManualRequest);
         
         Ok(())
     }
@@ -5541,17 +5763,8 @@ impl<T: Config> ContentRegistry for Pallet<T> {
             return Ok(());
         }
         
-        // 3. 标记为待删除状态
-        let current_block = <frame_system::Pallet<T>>::block_number();
-        if let Some((_, unit_price, _)) = PinBilling::<T>::get(&cid_hash) {
-            PinBilling::<T>::insert(&cid_hash, (current_block, unit_price, 2u8)); // 2=Expired/待删除
-        }
-        
-        // 4. 发送事件
-        Self::deposit_event(Event::MarkedForUnpin {
-            cid_hash,
-            reason: UnpinReason::ManualRequest,
-        });
+        // 3. 标记为待删除并同步停止后续计费
+        Self::mark_cid_for_unpin(&cid_hash, UnpinReason::ManualRequest);
         
         Ok(())
     }

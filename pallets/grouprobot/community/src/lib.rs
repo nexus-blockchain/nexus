@@ -119,6 +119,8 @@ pub mod pallet {
 		type MaxReputationDelta: Get<u32>;
 		/// Bot 注册查询
 		type BotRegistry: BotRegistryProvider<Self::AccountId>;
+		/// 订阅层级查询 (tier gate)
+		type Subscription: SubscriptionProvider;
 	}
 
 	// ========================================================================
@@ -255,6 +257,10 @@ pub mod pallet {
 		ReputationDeltaZero,
 		/// 社区配置不存在 (需先 update_community_config)
 		CommunityNotFound,
+		/// Free 层级不允许使用此功能
+		FreeTierNotAllowed,
+		/// 日志未超过层级保留期限
+		RetentionPeriodNotExpired,
 	}
 
 	// ========================================================================
@@ -276,6 +282,13 @@ pub mod pallet {
 			signature: [u8; 64],
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
+
+			// Tier gate: Free 层级不允许提交链上日志
+			ensure!(
+				T::Subscription::effective_tier(&community_id_hash).is_paid(),
+				Error::<T>::FreeTierNotAllowed
+			);
+
 			let now = frame_system::Pallet::<T>::block_number();
 
 			let log = ActionLog::<T> {
@@ -393,6 +406,13 @@ pub mod pallet {
 			logs: alloc::vec::Vec<(ActionType, [u8; 32], u64, [u8; 32], [u8; 64])>,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
+
+			// Tier gate: Free 层级不允许提交链上日志
+			ensure!(
+				T::Subscription::effective_tier(&community_id_hash).is_paid(),
+				Error::<T>::FreeTierNotAllowed
+			);
+
 			ensure!(!logs.is_empty(), Error::<T>::EmptyBatch);
 			ensure!(logs.len() <= 50, Error::<T>::BatchTooLarge);
 
@@ -547,6 +567,18 @@ pub mod pallet {
 			let _who = ensure_signed(origin)?;
 			// CM1-fix: 防止 max_age_blocks=0 擦除所有日志
 			ensure!(max_age_blocks > BlockNumberFor::<T>::default(), Error::<T>::InvalidMaxAge);
+
+			// Tier gate: 强制层级日志保留期下限 (6s/block → 14400 blocks/day)
+			let gate = T::Subscription::effective_feature_gate(&community_id_hash);
+			if gate.log_retention_days > 0 {
+				let min_retention: u32 = (gate.log_retention_days as u32).saturating_mul(14_400);
+				let min_retention_blocks: BlockNumberFor<T> = min_retention.into();
+				ensure!(max_age_blocks >= min_retention_blocks, Error::<T>::RetentionPeriodNotExpired);
+			} else {
+				// Enterprise (log_retention_days=0): 日志永久保留, 不允许清理
+				return Err(Error::<T>::RetentionPeriodNotExpired.into());
+			}
+
 			let now = frame_system::Pallet::<T>::block_number();
 
 			let mut cleared = 0u32;

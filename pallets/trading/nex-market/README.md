@@ -55,13 +55,18 @@ NEX/USDT P2P 交易市场模块 — 无做市商订单簿模型。
 | 2 | `cancel_order` | 取消订单（退还锁定） |
 | 3 | `reserve_sell_order` | 买家吃卖单（锁保证金） |
 | 4 | `accept_buy_order` | 卖家接买单（锁 NEX + 保证金） |
-| 5 | `confirm_payment` | 买家提交 TRON tx hash |
+| 5 | `confirm_payment` | 买家确认已付款 |
 | 6 | `process_timeout` | 处理超时交易 |
 | 7 | `submit_ocw_result` | OCW 提交验证结果（unsigned） |
-| 8 | `claim_verification_reward` | 领取验证奖励 |
+| 8 | `claim_verification_reward` | 领取验证奖励 + 结算交易 |
 | 9 | `configure_price_protection` | 配置价格保护（Root） |
 | 10 | `set_initial_price` | 设置初始价格（Root） |
 | 11 | `lift_circuit_breaker` | 解除熔断（Root） |
+| 13 | `fund_seed_account` | 国库注资种子账户（Root） |
+| 14 | `seed_liquidity` | 批量创建免保证金卖单（Root） |
+| 15 | `auto_confirm_payment` | OCW 自动确认付款（unsigned） |
+| 16 | `submit_underpaid_update` | OCW 更新少付累计金额（unsigned） |
+| 17 | `finalize_underpaid` | 少付终裁（补付窗口到期后） |
 
 ## 存储
 
@@ -81,6 +86,11 @@ NEX/USDT P2P 交易市场模块 — 无做市商订单簿模型。
 | `MarketStatsStore` | `MarketStats` | 市场统计 |
 | `TwapAccumulatorStore` | `TwapAccumulator` | TWAP 累积器 |
 | `PriceProtectionStore` | `PriceProtectionConfig` | 价格保护配置 |
+| `AwaitingPaymentTrades` | `BoundedVec<u64>` | OCW 待付款预检队列 |
+| `PendingUnderpaidTrades` | `BoundedVec<u64>` | OCW 少付跟踪队列 |
+| `CompletedBuyers` | `Map<AccountId, bool>` | 已完成免保证金交易的买家 |
+| `ActiveWaivedTrades` | `Map<AccountId, u32>` | 活跃免保证金交易计数 |
+| `CumulativeSeedUsdtSold` | `u64` | 种子流动性累计成交 USDT |
 
 ## 多档判定逻辑
 
@@ -97,6 +107,61 @@ NEX/USDT P2P 交易市场模块 — 无做市商订单簿模型。
 - **NEX**: 10^12（链上原生代币精度）
 - **USDT**: 10^6（TRC20 标准精度）
 - **usdt_price**: USDT per NEX，精度 10^6（例: 500_000 = 0.5 USDT/NEX）
+
+> **前端精度转换**：链上存储均为整数，前端负责人类可读转换。
+> - `price_usdt / 1_000_000` → USDT 显示值
+> - `nex_amount / 1_000_000_000_000` → NEX 显示值
+> - polkadot.js `formatBalance()` 自动读取 `tokenDecimals=12`
+
+## 对外价格服务
+
+本模块作为链上唯一的 NEX/USDT 价格数据源，通过三层 Trait 对外提供兑换比率：
+
+```text
+┌───────────────────────────────────────────────────────────┐
+│        ExchangeRateProvider (高级接口)              │
+│  get_nex_usdt_rate() + price_confidence()       │
+│  → NexExchangeRateProvider (runtime)              │
+├────────────────────────────┬──────────────────────────────┤
+│   PricingProvider            │   PriceOracle                │
+│   (底层汇率查询)           │   (底层 TWAP 预言机)          │
+│   → TradingPricingProvider  │   → pallet_nex_market::Pallet │
+│   → EntityPricingProvider   │                              │
+└────────────────────────────┴──────────────────────────────┘
+               │                              │
+               └─────────────┬──────────────┘
+                              │
+               ┌─────────────┴──────────────┐
+               │  pallet-nex-market           │
+               │  LastTradePrice               │
+               │  TwapAccumulator (1h/24h/7d)  │
+               │  BestAsk / BestBid            │
+               │  PriceProtectionConfig        │
+               └────────────────────────────┘
+```
+
+### 价格优先级（抗操纵）
+
+```text
+1h TWAP → LastTradePrice → initial_price（治理设定）
+```
+
+- **1h TWAP**：时间加权平均价，平滑单笔极端成交，抗操纵性最佳
+- **LastTradePrice**：TWAP 数据不足时的回退（如交易量太少）
+- **initial_price**：治理设定的初始价格，仅在冷启动期使用
+
+### 陈旧性保护
+
+消费方（entity-registry、entity-service）在价格超过 ~4h 未更新时，自动回退到保守兆底值（MinInitialFundCos / MinProductDepositCos）。
+
+### 消费方列表
+
+| 消费模块 | 用途 | 接口 |
+|----------|------|------|
+| entity-registry | 开店押金计算 | `entity_common::PricingProvider` |
+| entity-service | 商品押金计算 | `entity_common::PricingProvider` |
+| storage-service | 运营者保证金 | `DepositCalculatorImpl` |
+| arbitration | 投诉押金换算 | `trading_common::PricingProvider` |
 
 ## Config 参数
 
@@ -131,7 +196,7 @@ NEX/USDT P2P 交易市场模块 — 无做市商订单簿模型。
 cargo test -p pallet-nex-market
 ```
 
-28 个测试覆盖：
+测试覆盖：
 - 卖单 / 买单创建与取消
 - reserve_sell_order / accept_buy_order
 - confirm_payment 流程

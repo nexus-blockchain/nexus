@@ -23,6 +23,8 @@ pub struct MessageRouter {
     log_sender: mpsc::Sender<PendingActionLog>,
     /// 审计日志 (Phase 2)
     audit_logger: Arc<AuditLogger>,
+    /// 是否启用链上交互 (免注册模式=false, 跳过链上日志提交和序列号去重)
+    chain_enabled: bool,
 }
 
 impl MessageRouter {
@@ -32,6 +34,7 @@ impl MessageRouter {
         sequence: Arc<SequenceManager>,
         log_sender: mpsc::Sender<PendingActionLog>,
         audit_logger: Arc<AuditLogger>,
+        chain_enabled: bool,
     ) -> Self {
         Self {
             rule_engine: RwLock::new(rule_engine),
@@ -40,6 +43,7 @@ impl MessageRouter {
             sequence,
             log_sender,
             audit_logger,
+            chain_enabled,
         }
     }
 
@@ -77,29 +81,31 @@ impl MessageRouter {
             let execute_action = action_decision.to_execute_action(&ctx.group_id);
             let receipt = executor.execute(&execute_action).await?;
 
-            // 3. 签名 + 入队链上日志
-            let sequence = self.sequence.next()
-                .map_err(|e| BotError::Internal(e.into()))?;
-            let timestamp = chrono::Utc::now().timestamp() as u64;
+            // 3. 签名 + 入队链上日志 (免注册模式跳过)
+            if self.chain_enabled {
+                let sequence = self.sequence.next()
+                    .map_err(|e| BotError::Internal(e.into()))?;
+                let timestamp = chrono::Utc::now().timestamp() as u64;
 
-            let (signature, _msg_hash) = self.key_manager.sign_message(
-                &self.key_manager.bot_id_hash(),
-                sequence,
-                timestamp,
-                &serde_json::to_vec(&ctx.message_text).unwrap_or_default(),
-            );
+                let (signature, _msg_hash) = self.key_manager.sign_message(
+                    &self.key_manager.bot_id_hash(),
+                    sequence,
+                    timestamp,
+                    &serde_json::to_vec(&ctx.message_text).unwrap_or_default(),
+                );
 
-            let log = PendingActionLog {
-                community_id_hash: hash_group_id(&ctx.group_id),
-                action_type: action_decision.action_type.as_u8(),
-                target_hash: hash_user_id(&action_decision.target_user),
-                sequence,
-                message_hash: receipt.message_hash,
-                signature,
-            };
+                let log = PendingActionLog {
+                    community_id_hash: hash_group_id(&ctx.group_id),
+                    action_type: action_decision.action_type.as_u8(),
+                    target_hash: hash_user_id(&action_decision.target_user),
+                    sequence,
+                    message_hash: receipt.message_hash,
+                    signature,
+                };
 
-            if let Err(e) = self.log_sender.send(log).await {
-                warn!(error = %e, "动作日志入队失败");
+                if let Err(e) = self.log_sender.send(log).await {
+                    warn!(error = %e, "动作日志入队失败");
+                }
             }
 
             // 4. 审计日志 (Phase 2)
@@ -139,16 +145,18 @@ impl MessageRouter {
             );
         }
 
-        // 4. 去重标记 (异步, 不阻塞响应)
-        let chain_opt = self.chain.read().await.clone();
-        if let Some(chain) = chain_opt {
-            let bot_hash = self.key_manager.bot_id_hash();
-            let seq = self.sequence.current();
-            tokio::spawn(async move {
-                if let Err(e) = chain.mark_sequence_processed(bot_hash, seq).await {
-                    warn!(error = %e, seq = seq, "序列号去重标记失败");
-                }
-            });
+        // 4. 去重标记 (异步, 不阻塞响应; 免注册模式跳过)
+        if self.chain_enabled {
+            let chain_opt = self.chain.read().await.clone();
+            if let Some(chain) = chain_opt {
+                let bot_hash = self.key_manager.bot_id_hash();
+                let seq = self.sequence.current();
+                tokio::spawn(async move {
+                    if let Err(e) = chain.mark_sequence_processed(bot_hash, seq).await {
+                        warn!(error = %e, seq = seq, "序列号去重标记失败");
+                    }
+                });
+            }
         }
 
         Ok(())

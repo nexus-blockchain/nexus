@@ -60,6 +60,7 @@ pallet-commission-core = { workspace = true }
 pallet-commission-referral = { workspace = true }
 pallet-commission-level-diff = { workspace = true }
 pallet-commission-single-line = { workspace = true }
+pallet-commission-team = { workspace = true }
 pallet-entity-commission = { workspace = true }
 pallet-entity-service = { workspace = true }
 pallet-entity-transaction = { workspace = true }
@@ -72,6 +73,8 @@ pallet-entity-tokensale = { workspace = true }
 pallet-grouprobot-primitives = { workspace = true }
 pallet-grouprobot-registry = { workspace = true, features = ["dcap-verify"] }
 pallet-grouprobot-consensus = { workspace = true }
+pallet-grouprobot-subscription = { workspace = true }
+pallet-grouprobot-rewards = { workspace = true }
 pallet-grouprobot-community = { workspace = true }
 pallet-grouprobot-ceremony = { workspace = true }
 scale-info = { features = ["derive", "serde"], workspace = true }
@@ -144,6 +147,7 @@ std = [
 	"pallet-commission-referral/std",
 	"pallet-commission-level-diff/std",
 	"pallet-commission-single-line/std",
+	"pallet-commission-team/std",
 	"pallet-entity-commission/std",
 	"pallet-entity-service/std",
 	"pallet-entity-transaction/std",
@@ -156,6 +160,8 @@ std = [
 	"pallet-grouprobot-primitives/std",
 	"pallet-grouprobot-registry/std",
 	"pallet-grouprobot-consensus/std",
+	"pallet-grouprobot-subscription/std",
+	"pallet-grouprobot-rewards/std",
 	"pallet-grouprobot-community/std",
 	"pallet-grouprobot-ceremony/std",
 	"scale-info/std",

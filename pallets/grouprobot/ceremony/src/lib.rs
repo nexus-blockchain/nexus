@@ -80,6 +80,8 @@ pub mod pallet {
 		type CeremonyCheckInterval: Get<BlockNumberFor<Self>>;
 		/// Bot 注册查询
 		type BotRegistry: BotRegistryProvider<Self::AccountId>;
+		/// 订阅层级查询 (tier gate)
+		type Subscription: SubscriptionProvider;
 	}
 
 	// ========================================================================
@@ -177,6 +179,8 @@ pub mod pallet {
 		TooManyParticipants,
 		/// 仪式历史已满
 		CeremonyHistoryFull,
+		/// Free 层级不允许使用此功能
+		FreeTierNotAllowed,
 		/// 不是 Bot 所有者
 		NotBotOwner,
 		/// Bot 不存在
@@ -275,6 +279,12 @@ pub mod pallet {
 			let owner = T::BotRegistry::bot_owner(&bot_id_hash)
 				.ok_or(Error::<T>::BotNotFound)?;
 			ensure!(owner == who, Error::<T>::NotBotOwner);
+
+			// Tier gate: Free 层级不允许发起 Ceremony
+			ensure!(
+				T::Subscription::effective_tier(&bot_id_hash).is_paid(),
+				Error::<T>::FreeTierNotAllowed
+			);
 			// 验证 bot_public_key 匹配
 			if let Some(registered_pk) = T::BotRegistry::bot_public_key(&bot_id_hash) {
 				ensure!(registered_pk == bot_public_key, Error::<T>::BotPublicKeyMismatch);
