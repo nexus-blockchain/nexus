@@ -1139,6 +1139,19 @@ impl pallet_entity_commission::MemberProvider<AccountId> for MemberProviderBridg
 		pallet_entity_member::Pallet::<Runtime>::get_level_commission_bonus(shop_id, level_id)
 	}
 
+	fn is_member_by_entity(entity_id: u64, account: &AccountId) -> bool {
+		pallet_entity_member::EntityMembers::<Runtime>::contains_key(entity_id, account)
+	}
+
+	fn get_referrer_by_entity(entity_id: u64, account: &AccountId) -> Option<AccountId> {
+		pallet_entity_member::EntityMembers::<Runtime>::get(entity_id, account)
+			.and_then(|m| m.referrer)
+	}
+
+	fn custom_level_id_by_entity(entity_id: u64, account: &AccountId) -> u8 {
+		pallet_entity_member::Pallet::<Runtime>::get_effective_level_by_entity(entity_id, account)
+	}
+
 	fn set_custom_levels_enabled(shop_id: u64, enabled: bool) -> sp_runtime::DispatchResult {
 		// C2 审计修复: 解析 shop_id → entity_id（治理传入 shop_id，pallet 期望 entity_id）
 		use pallet_entity_common::ShopProvider;

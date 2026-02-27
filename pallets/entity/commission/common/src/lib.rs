@@ -302,6 +302,20 @@ pub trait MemberProvider<AccountId> {
     fn get_level_commission_bonus(shop_id: u64, level_id: u8) -> u16;
     fn auto_register(shop_id: u64, account: &AccountId, referrer: Option<AccountId>) -> Result<(), DispatchError>;
 
+    // entity_id 直达版本（避免 shop_id → entity_id 重复解析）
+    fn is_member_by_entity(entity_id: u64, account: &AccountId) -> bool {
+        let _ = (entity_id, account);
+        false
+    }
+    fn get_referrer_by_entity(entity_id: u64, account: &AccountId) -> Option<AccountId> {
+        let _ = (entity_id, account);
+        None
+    }
+    fn custom_level_id_by_entity(entity_id: u64, account: &AccountId) -> u8 {
+        let _ = (entity_id, account);
+        0
+    }
+
     fn set_custom_levels_enabled(shop_id: u64, enabled: bool) -> Result<(), DispatchError>;
     fn set_upgrade_mode(shop_id: u64, mode: u8) -> Result<(), DispatchError>;
     fn add_custom_level(shop_id: u64, level_id: u8, name: &[u8], threshold: u128, discount_rate: u16, commission_bonus: u16) -> Result<(), DispatchError>;

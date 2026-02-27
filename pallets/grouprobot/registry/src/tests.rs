@@ -1423,13 +1423,17 @@ fn peer_expires_after_heartbeat_timeout() {
 		));
 		assert_eq!(PeerRegistry::<Test>::get(bot_hash(1)).len(), 1);
 
-		// Advance past timeout (PeerHeartbeatTimeout=50, AttestationCheckInterval=10)
-		// Peer registered at block 1, last_seen=1. At block 60: 60-1=59 > 50 → expired
-		advance_to(60);
+		// P3-2: Peer cleanup is now passive via report_stale_peer
+		// Peer registered at block 1, last_seen=1. At block 60: 60-1=59 > 50 → stale
+		System::set_block_number(60);
 
+		// Anyone can report
+		assert_ok!(GroupRobotRegistry::report_stale_peer(
+			RuntimeOrigin::signed(OTHER), bot_hash(1), pk(10),
+		));
 		assert_eq!(PeerRegistry::<Test>::get(bot_hash(1)).len(), 0);
 		System::assert_has_event(RuntimeEvent::GroupRobotRegistry(
-			crate::Event::PeerExpired { bot_id_hash: bot_hash(1), public_key: pk(10), peer_count: 0 },
+			crate::Event::StalePeerReported { bot_id_hash: bot_hash(1), public_key: pk(10), reporter: OTHER, peer_count: 0 },
 		));
 	});
 }
@@ -1448,12 +1452,19 @@ fn peer_survives_if_heartbeat_fresh() {
 			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10),
 		));
 
-		// At block 60: 60-40=20 < 50 → NOT expired
-		advance_to(60);
+		// At block 60: 60-40=20 < 50 → NOT stale, report should fail
+		System::set_block_number(60);
+		assert_noop!(
+			GroupRobotRegistry::report_stale_peer(RuntimeOrigin::signed(OTHER), bot_hash(1), pk(10)),
+			Error::<Test>::PeerNotStale
+		);
 		assert_eq!(PeerRegistry::<Test>::get(bot_hash(1)).len(), 1);
 
-		// At block 100: 100-40=60 > 50 → expired
-		advance_to(100);
+		// At block 100: 100-40=60 > 50 → stale, report succeeds
+		System::set_block_number(100);
+		assert_ok!(GroupRobotRegistry::report_stale_peer(
+			RuntimeOrigin::signed(OTHER), bot_hash(1), pk(10),
+		));
 		assert_eq!(PeerRegistry::<Test>::get(bot_hash(1)).len(), 0);
 	});
 }
@@ -1473,8 +1484,18 @@ fn peer_expiry_partial_removes_only_stale() {
 		));
 		assert_eq!(PeerRegistry::<Test>::get(bot_hash(1)).len(), 2);
 
-		// At block 60: Peer A (last_seen=1, 60-1=59>50) expires, Peer B (last_seen=30, 60-30=30<50) survives
-		advance_to(60);
+		// At block 60: Peer A (last_seen=1, 60-1=59>50) stale, Peer B (last_seen=30, 60-30=30<50) fresh
+		System::set_block_number(60);
+
+		// Report Peer A → succeeds
+		assert_ok!(GroupRobotRegistry::report_stale_peer(
+			RuntimeOrigin::signed(OTHER), bot_hash(1), pk(10),
+		));
+		// Report Peer B → fails (not stale)
+		assert_noop!(
+			GroupRobotRegistry::report_stale_peer(RuntimeOrigin::signed(OTHER), bot_hash(1), pk(11)),
+			Error::<Test>::PeerNotStale
+		);
 		let peers = PeerRegistry::<Test>::get(bot_hash(1));
 		assert_eq!(peers.len(), 1);
 		assert_eq!(peers[0].public_key, pk(11));

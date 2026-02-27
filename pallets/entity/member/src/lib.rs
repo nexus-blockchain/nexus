@@ -1568,6 +1568,11 @@ pub mod pallet {
                 Some(id) => id,
                 None => return 0,
             };
+            Self::calculate_custom_level_by_entity(entity_id, total_spent)
+        }
+
+        /// 计算自定义等级（entity_id 直达，避免重复解析）
+        pub fn calculate_custom_level_by_entity(entity_id: u64, total_spent: BalanceOf<T>) -> u8 {
             let system = match EntityLevelSystems::<T>::get(entity_id) {
                 Some(s) if s.use_custom && !s.levels.is_empty() => s,
                 _ => return 0,
@@ -1816,6 +1821,11 @@ pub mod pallet {
                 Some(id) => id,
                 None => return 0,
             };
+            Self::get_effective_level_by_entity(entity_id, account)
+        }
+
+        /// 获取有效等级（entity_id 直达，避免重复解析）
+        pub fn get_effective_level_by_entity(entity_id: u64, account: &T::AccountId) -> u8 {
             let member = match EntityMembers::<T>::get(entity_id, account) {
                 Some(m) => m,
                 None => return 0,
@@ -1824,8 +1834,7 @@ pub mod pallet {
             if let Some(expires_at) = MemberLevelExpiry::<T>::get(entity_id, account) {
                 let now = <frame_system::Pallet<T>>::block_number();
                 if now > expires_at {
-                    // 已过期，返回基于消费的等级
-                    return Self::calculate_custom_level(shop_id, member.total_spent);
+                    return Self::calculate_custom_level_by_entity(entity_id, member.total_spent);
                 }
             }
 

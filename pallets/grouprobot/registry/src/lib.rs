@@ -246,6 +246,14 @@ pub mod pallet {
 	pub type AttestationsV2<T: Config> =
 		StorageMap<_, Blake2_128Concat, BotIdHash, AttestationRecordV2<T>>;
 
+	/// P3: 证明过期队列 (按 expires_at 排序)
+	/// 每个元素: (expires_at, bot_id_hash, is_v2)
+	/// 新提交的证明总是 append (相同 validity → 自然有序)
+	#[pallet::storage]
+	pub type AttestationExpiryQueue<T: Config> = StorageValue<
+		_, BoundedVec<(BlockNumberFor<T>, BotIdHash, bool), ConstU32<1000>>, ValueQuery,
+	>;
+
 	// ========================================================================
 	// Events
 	// ========================================================================
@@ -277,6 +285,7 @@ pub mod pallet {
 		PeerExpired { bot_id_hash: BotIdHash, public_key: [u8; 32], peer_count: u32 },
 		SgxAttestationSubmitted { bot_id_hash: BotIdHash, sgx_dcap_level: u8 },
 		TeeAttestationSubmitted { bot_id_hash: BotIdHash, tee_type: TeeType, dcap_level: u8 },
+		StalePeerReported { bot_id_hash: BotIdHash, public_key: [u8; 32], reporter: T::AccountId, peer_count: u32 },
 	}
 
 	// ========================================================================
@@ -358,6 +367,8 @@ pub mod pallet {
 		EndpointEmpty,
 		/// Free 层级不允许使用此功能
 		FreeTierNotAllowed,
+		/// Peer 尚未过期, 无法举报
+		PeerNotStale,
 	}
 
 	// ========================================================================
@@ -375,86 +386,63 @@ pub mod pallet {
 				return Weight::zero();
 			}
 
-			let mut reads: u64 = 0;
+			// P3: 游标化清理 — 仅从队列头部弹出已过期条目, 上限 10 条/块
+			const MAX_CLEANUP: u32 = 10;
+			let mut reads: u64 = 1; // 读取队列本身
 			let mut writes: u64 = 0;
+			let mut cleaned = 0u32;
 
-			let mut expired_bots: alloc::vec::Vec<BotIdHash> = alloc::vec::Vec::new();
-			for (bot_id_hash, record) in Attestations::<T>::iter() {
-				reads += 1;
-				if n >= record.expires_at {
-					expired_bots.push(bot_id_hash);
-				}
-			}
+			AttestationExpiryQueue::<T>::mutate(|queue| {
+				while cleaned < MAX_CLEANUP {
+					let entry = match queue.first() {
+						Some(e) => *e,
+						None => break,
+					};
+					let (expires_at, bot_id_hash, is_v2) = entry;
 
-			for bot_id_hash in expired_bots {
-				Attestations::<T>::remove(&bot_id_hash);
-				writes += 1;
-
-				Bots::<T>::mutate(&bot_id_hash, |maybe_bot| {
-					if let Some(bot) = maybe_bot {
-						bot.node_type = NodeType::StandardNode;
-						writes += 1;
+					if n < expires_at {
+						break; // 队列按 expires_at 排序, 后续都未过期
 					}
-				});
-				reads += 1;
 
-				Self::deposit_event(Event::AttestationExpired { bot_id_hash });
-			}
+					queue.remove(0);
 
-			// ── AttestationsV2 过期清理 ──
-			let mut expired_v2: alloc::vec::Vec<BotIdHash> = alloc::vec::Vec::new();
-			for (bot_id_hash, record) in AttestationsV2::<T>::iter() {
-				reads += 1;
-				if n >= record.expires_at {
-					expired_v2.push(bot_id_hash);
-				}
-			}
-			for bot_id_hash in expired_v2 {
-				AttestationsV2::<T>::remove(&bot_id_hash);
-				writes += 1;
+					// 验证证明是否仍存在且确实已过期 (处理刷新导致的陈旧条目)
+					let should_remove = if is_v2 {
+						reads += 1;
+						AttestationsV2::<T>::get(&bot_id_hash)
+							.map(|r| n >= r.expires_at)
+							.unwrap_or(false)
+					} else {
+						reads += 1;
+						Attestations::<T>::get(&bot_id_hash)
+							.map(|r| n >= r.expires_at)
+							.unwrap_or(false)
+					};
 
-				Bots::<T>::mutate(&bot_id_hash, |maybe_bot| {
-					if let Some(bot) = maybe_bot {
-						bot.node_type = NodeType::StandardNode;
-						writes += 1;
-					}
-				});
-				reads += 1;
-
-				Self::deposit_event(Event::AttestationExpired { bot_id_hash });
-			}
-
-			// ── Peer 心跳过期清理 ──
-			let peer_timeout = T::PeerHeartbeatTimeout::get();
-			if peer_timeout > BlockNumberFor::<T>::default() {
-				let mut stale: alloc::vec::Vec<(BotIdHash, alloc::vec::Vec<[u8; 32]>)> = alloc::vec::Vec::new();
-				for (bot_id_hash, peers) in PeerRegistry::<T>::iter() {
-					reads += 1;
-					let expired_pks: alloc::vec::Vec<[u8; 32]> = peers.iter()
-						.filter(|p| n.saturating_sub(p.last_seen) > peer_timeout)
-						.map(|p| p.public_key)
-						.collect();
-					if !expired_pks.is_empty() {
-						stale.push((bot_id_hash, expired_pks));
-					}
-				}
-
-				for (bot_id_hash, expired_pks) in stale {
-					PeerRegistry::<T>::mutate(&bot_id_hash, |peers| {
-						for pk in &expired_pks {
-							if let Some(idx) = peers.iter().position(|p| &p.public_key == pk) {
-								peers.swap_remove(idx);
-								writes += 1;
-								Self::deposit_event(Event::PeerExpired {
-									bot_id_hash,
-									public_key: *pk,
-									peer_count: peers.len() as u32,
-								});
-							}
+					if should_remove {
+						if is_v2 {
+							AttestationsV2::<T>::remove(&bot_id_hash);
+						} else {
+							Attestations::<T>::remove(&bot_id_hash);
 						}
-					});
-					reads += 1;
+						writes += 1;
+
+						Bots::<T>::mutate(&bot_id_hash, |maybe_bot| {
+							if let Some(bot) = maybe_bot {
+								bot.node_type = NodeType::StandardNode;
+								writes += 1;
+							}
+						});
+						reads += 1;
+
+						Self::deposit_event(Event::AttestationExpired { bot_id_hash });
+					}
+					cleaned += 1;
 				}
+			});
+
+			if cleaned > 0 {
+				writes += 1; // 队列写回
 			}
 
 			Weight::from_parts(
@@ -672,6 +660,7 @@ pub mod pallet {
 			};
 
 			Attestations::<T>::insert(&bot_id_hash, record);
+			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false);
 
 			// 更新 BotInfo 的 node_type
 			let now_u64: u64 = now.unique_saturated_into();
@@ -732,6 +721,7 @@ pub mod pallet {
 				api_server_quote_hash: None,
 			};
 			Attestations::<T>::insert(&bot_id_hash, record);
+			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false);
 
 			// 刷新 node_type
 			let now_u64: u64 = now.unique_saturated_into();
@@ -845,6 +835,7 @@ pub mod pallet {
 				api_server_quote_hash: None,
 			};
 			Attestations::<T>::insert(&bot_id_hash, record);
+			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false);
 
 			let now_u64: u64 = now.unique_saturated_into();
 			let expires_u64: u64 = expires_at.unique_saturated_into();
@@ -1031,6 +1022,7 @@ pub mod pallet {
 				api_server_quote_hash: None,
 			};
 			Attestations::<T>::insert(&bot_id_hash, record);
+			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false);
 
 			let now_u64: u64 = now.unique_saturated_into();
 			let expires_u64: u64 = expires_at.unique_saturated_into();
@@ -1154,6 +1146,7 @@ pub mod pallet {
 				api_server_quote_hash: Some(api_server_quote_hash),
 			};
 			Attestations::<T>::insert(&bot_id_hash, record);
+			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false);
 
 			let now_u64: u64 = now.unique_saturated_into();
 			let expires_u64: u64 = expires_at.unique_saturated_into();
@@ -1254,6 +1247,7 @@ pub mod pallet {
 				api_server_quote_hash: None,
 			};
 			Attestations::<T>::insert(&bot_id_hash, record);
+			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false);
 
 			let now_u64: u64 = now.unique_saturated_into();
 			let expires_u64: u64 = expires_at.unique_saturated_into();
@@ -1442,6 +1436,7 @@ pub mod pallet {
 				api_server_quote_hash: None,
 			};
 			AttestationsV2::<T>::insert(&bot_id_hash, record);
+			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, true);
 
 			// ── Step 6: 更新 NodeType → TeeNodeV2 ──
 			let now_u64: u64 = now.unique_saturated_into();
@@ -1569,6 +1564,42 @@ pub mod pallet {
 				Ok(())
 			})
 		}
+
+		/// P3-2: 举报过期 Peer (被动清理, 替代 on_initialize 全表扫描)
+		///
+		/// 任何人可调用。检查 Peer 的 last_seen + PeerHeartbeatTimeout < 当前块, 若已过期则移除。
+		#[pallet::call_index(22)]
+		#[pallet::weight(Weight::from_parts(35_000_000, 6_000))]
+		pub fn report_stale_peer(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			peer_public_key: [u8; 32],
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let now = frame_system::Pallet::<T>::block_number();
+			let timeout = T::PeerHeartbeatTimeout::get();
+
+			PeerRegistry::<T>::try_mutate(&bot_id_hash, |peers| -> DispatchResult {
+				let idx = peers.iter().position(|p| p.public_key == peer_public_key)
+					.ok_or(Error::<T>::PeerNotFound)?;
+
+				let peer = &peers[idx];
+				ensure!(
+					now.saturating_sub(peer.last_seen) > timeout,
+					Error::<T>::PeerNotStale
+				);
+
+				peers.swap_remove(idx);
+
+				Self::deposit_event(Event::StalePeerReported {
+					bot_id_hash,
+					public_key: peer_public_key,
+					reporter: who.clone(),
+					peer_count: peers.len() as u32,
+				});
+				Ok(())
+			})
+		}
 	}
 
 	// ========================================================================
@@ -1576,6 +1607,13 @@ pub mod pallet {
 	// ========================================================================
 
 	impl<T: Config> Pallet<T> {
+		/// P3: 将证明过期信息追加到过期队列 (队列满时静默丢弃)
+		fn enqueue_attestation_expiry(expires_at: BlockNumberFor<T>, bot_id_hash: BotIdHash, is_v2: bool) {
+			AttestationExpiryQueue::<T>::mutate(|queue| {
+				let _ = queue.try_push((expires_at, bot_id_hash, is_v2));
+			});
+		}
+
 		/// 将 DCAP 错误转换为 DispatchError
 		fn dcap_error_to_dispatch(e: dcap::DcapError) -> DispatchError {
 			match e {

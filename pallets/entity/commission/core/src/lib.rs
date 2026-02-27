@@ -406,11 +406,11 @@ pub mod pallet {
         #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_commission_modes(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             modes: CommissionModes,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            let entity_id = Self::ensure_entity_owner_via_shop(shop_id, &who)?;
+            Self::ensure_entity_owner(entity_id, &who)?;
 
             CommissionConfigs::<T>::mutate(entity_id, |maybe| {
                 let config = maybe.get_or_insert_with(CoreCommissionConfig::default);
@@ -428,11 +428,11 @@ pub mod pallet {
         #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_commission_rate(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             max_rate: u16,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            let entity_id = Self::ensure_entity_owner_via_shop(shop_id, &who)?;
+            Self::ensure_entity_owner(entity_id, &who)?;
             ensure!(max_rate <= 10000, Error::<T>::InvalidCommissionRate);
 
             CommissionConfigs::<T>::mutate(entity_id, |maybe| {
@@ -449,11 +449,11 @@ pub mod pallet {
         #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
         pub fn enable_commission(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             enabled: bool,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            let entity_id = Self::ensure_entity_owner_via_shop(shop_id, &who)?;
+            Self::ensure_entity_owner(entity_id, &who)?;
 
             CommissionConfigs::<T>::mutate(entity_id, |maybe| {
                 let config = maybe.get_or_insert_with(CoreCommissionConfig::default);
@@ -494,12 +494,12 @@ pub mod pallet {
 
                 // 如果目标不是自己，校验推荐关系
                 if target != who {
-                    if T::MemberProvider::is_member(shop_id, &target) {
+                    if T::MemberProvider::is_member_by_entity(entity_id, &target) {
                         // 已是会员 → 推荐人必须是出资人
-                        let referrer = T::MemberProvider::get_referrer(shop_id, &target);
+                        let referrer = T::MemberProvider::get_referrer_by_entity(entity_id, &target);
                         ensure!(referrer.as_ref() == Some(&who), Error::<T>::NotDirectReferral);
                     } else {
-                        // 非会员 → 自动注册，推荐人 = 出资人
+                        // 非会员 → 自动注册，推荐人 = 出资人（auto_register 需要 shop_id）
                         T::MemberProvider::auto_register(shop_id, &target, Some(who.clone()))
                             .map_err(|_| Error::<T>::AutoRegisterFailed)?;
                     }
@@ -518,7 +518,7 @@ pub mod pallet {
 
                 // 计算提现/复购/奖励分配
                 let split = Self::calc_withdrawal_split(
-                    entity_id, shop_id, &who, total_amount, requested_repurchase_rate,
+                    entity_id, &who, total_amount, requested_repurchase_rate,
                 );
 
                 // C1 审计修复: 偿付安全检查必须计入 repurchase+bonus 对 ShopShoppingTotal 的增量
@@ -585,7 +585,7 @@ pub mod pallet {
         #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
         pub fn set_withdrawal_config(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             mode: WithdrawalMode,
             default_tier: WithdrawalTierConfig,
             level_overrides: BoundedVec<(u8, WithdrawalTierConfig), T::MaxCustomLevels>,
@@ -594,7 +594,7 @@ pub mod pallet {
             shopping_balance_generates_commission: bool,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            let entity_id = Self::ensure_entity_owner_via_shop(shop_id, &who)?;
+            Self::ensure_entity_owner(entity_id, &who)?;
 
             // 校验模式参数
             match &mode {
@@ -640,11 +640,11 @@ pub mod pallet {
         #[pallet::weight(Weight::from_parts(60_000_000, 5_000))]
         pub fn init_commission_plan(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             plan: CommissionPlan,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            let entity_id = Self::ensure_entity_owner_via_shop(shop_id, &who)?;
+            Self::ensure_entity_owner(entity_id, &who)?;
 
             // 先清除旧配置（entity_id 作为 key）
             T::ReferralWriter::clear_config(entity_id)?;
@@ -725,12 +725,12 @@ pub mod pallet {
         #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn use_shopping_balance(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             account: T::AccountId,
             amount: BalanceOf<T>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            let entity_id = Self::ensure_entity_owner_via_shop(shop_id, &who)?;
+            Self::ensure_entity_owner(entity_id, &who)?;
             Self::do_use_shopping_balance(entity_id, &account, amount)
         }
     }
@@ -745,13 +745,12 @@ pub mod pallet {
             T::ShopProvider::shop_entity_id(shop_id).ok_or(Error::<T>::ShopNotFound)
         }
 
-        /// 验证 Entity 所有者权限（通过 shop_id 解析）
-        fn ensure_entity_owner_via_shop(shop_id: u64, who: &T::AccountId) -> Result<u64, DispatchError> {
-            let entity_id = Self::resolve_entity_id(shop_id)?;
+        /// 验证 Entity 所有者权限（直接通过 entity_id）
+        fn ensure_entity_owner(entity_id: u64, who: &T::AccountId) -> Result<(), DispatchError> {
             let owner = T::EntityProvider::entity_owner(entity_id)
                 .ok_or(Error::<T>::EntityNotFound)?;
             ensure!(*who == owner, Error::<T>::NotEntityOwner);
-            Ok(entity_id)
+            Ok(())
         }
 
         /// 使用购物余额内部实现（entity_id 级，供 extrinsic 和 CommissionProvider 调用）
@@ -794,7 +793,6 @@ pub mod pallet {
         /// 自愿多复购奖励：超出强制最低线的部分 × voluntary_bonus_rate 额外计入购物余额
         fn calc_withdrawal_split(
             entity_id: u64,
-            shop_id: u64,
             who: &T::AccountId,
             total_amount: BalanceOf<T>,
             requested_repurchase_rate: Option<u16>,
@@ -813,7 +811,7 @@ pub mod pallet {
                             (*repurchase_rate, *repurchase_rate, config.voluntary_bonus_rate)
                         },
                         WithdrawalMode::LevelBased => {
-                            let level_id = T::MemberProvider::custom_level_id(shop_id, who);
+                            let level_id = T::MemberProvider::custom_level_id_by_entity(entity_id, who);
                             let tier = config.level_overrides
                                 .iter()
                                 .find(|(id, _)| *id == level_id)

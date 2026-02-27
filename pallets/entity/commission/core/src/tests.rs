@@ -26,7 +26,7 @@ fn set_commission_rate_works() {
     new_test_ext().execute_with(|| {
         assert_ok!(CommissionCore::set_commission_rate(
             RuntimeOrigin::signed(SELLER),
-            SHOP_ID,
+            ENTITY_ID,
             5000,
         ));
         let config = CommissionConfigs::<Test>::get(ENTITY_ID).unwrap();
@@ -40,7 +40,7 @@ fn set_commission_rate_rejects_invalid() {
         assert_noop!(
             CommissionCore::set_commission_rate(
                 RuntimeOrigin::signed(SELLER),
-                SHOP_ID,
+                ENTITY_ID,
                 10001,
             ),
             Error::<Test>::InvalidCommissionRate
@@ -54,7 +54,7 @@ fn set_commission_rate_rejects_non_owner() {
         assert_noop!(
             CommissionCore::set_commission_rate(
                 RuntimeOrigin::signed(BUYER),
-                SHOP_ID,
+                ENTITY_ID,
                 5000,
             ),
             Error::<Test>::NotEntityOwner
@@ -362,7 +362,7 @@ fn init_commission_plan_works() {
     new_test_ext().execute_with(|| {
         assert_ok!(CommissionCore::init_commission_plan(
             RuntimeOrigin::signed(SELLER),
-            SHOP_ID,
+            ENTITY_ID,
             pallet_commission_common::CommissionPlan::DirectOnly { rate: 500 },
         ));
         let config = CommissionConfigs::<Test>::get(ENTITY_ID).unwrap();
