@@ -99,6 +99,7 @@ pub async fn handle_health(
         "uptime_secs": uptime,
         "platform": format!("{:?}", state.config.platform),
         "tee_mode": state.config.tee_mode,
+        "seal_policy": state.config.seal_policy,
     }))
 }
 
@@ -114,6 +115,11 @@ pub async fn handle_status(
         "bot_id_hash": state.config.bot_id_hash_hex(),
         "public_key": state.enclave.public_key_hex(),
         "tee_mode": format!("{}", state.enclave.mode()),
+        "seal_policy": state.config.seal_policy,
+        "upgrade_compat": {
+            "mrsigner_key_available": state.enclave.has_mrsigner_key(),
+            "cross_version_seal": state.config.seal_policy != "mrenclave",
+        },
         "cached_groups": state.config_manager.cached_count(),
         "local_store_counters": state.local_store.counter_count(),
         "local_store_fingerprints": state.local_store.fingerprint_count(),

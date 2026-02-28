@@ -45,7 +45,7 @@ pub mod pallet {
         BoundedVec, PalletId,
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{EntityStatus, EntityType, GovernanceMode, PricingProvider, EntityProvider, ShopProvider, ShopType, MemberMode};
+    use pallet_entity_common::{EntityStatus, EntityType, GovernanceMode, PricingProvider, EntityProvider, ShopProvider, ShopType};
     use sp_runtime::{
         traits::{AccountIdConversion, Saturating, Zero},
         SaturatedConversion,
@@ -562,12 +562,11 @@ pub mod pallet {
             })?;
             NextEntityId::<T>::put(entity_id.saturating_add(1));
 
-            // 自动创建 Primary Shop（继承 Entity 名称，默认线上商城 + Inherit 模式）
+            // 自动创建 Primary Shop（继承 Entity 名称，默认线上商城）
             let _primary_shop_id = T::ShopProvider::create_primary_shop(
                 entity_id,
                 entity.name.to_vec(),
                 ShopType::OnlineStore,
-                MemberMode::Inherit,
             )?;
 
             // 更新统计（付费即激活，无需审批）

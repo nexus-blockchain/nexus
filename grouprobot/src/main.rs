@@ -128,9 +128,11 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Enclave 初始化 ──
     std::fs::create_dir_all(&cfg.data_dir).ok();
-    let enclave = Arc::new(EnclaveBridge::init(&cfg.data_dir, &cfg.tee_mode)?);
+    let seal_policy = crate::tee::sealed_storage::SealPolicy::from_str_lossy(&cfg.seal_policy);
+    let enclave = Arc::new(EnclaveBridge::init_with_policy(&cfg.data_dir, &cfg.tee_mode, seal_policy)?);
     info!(
         mode = %enclave.mode(),
+        seal_policy = %seal_policy,
         public_key = %enclave.public_key_hex(),
         "Enclave 已初始化"
     );
@@ -201,6 +203,7 @@ async fn main() -> anyhow::Result<()> {
         ceremony_hash: cfg.bot_id_hash,
         chain_client: early_chain.clone(),
         bot_id_hash: Some(cfg.bot_id_hash),
+        migration_source: cfg.migration_source.clone(),
     };
 
     // provision_vault: inprocess 模式下供 RA-TLS Provision 写入 Token 用

@@ -222,6 +222,8 @@ pub mod pallet {
         pub referrer: Option<AccountId>,
         /// 直接推荐人数
         pub direct_referrals: u32,
+        /// 间接推荐人数（预留字段，后期扩展用）
+        pub indirect_referrals: Option<u32>,
         /// 团队总人数
         pub team_size: u32,
         /// 累计消费金额
@@ -234,6 +236,8 @@ pub mod pallet {
         pub joined_at: BlockNumber,
         /// 最后活跃时间
         pub last_active_at: BlockNumber,
+        /// 是否已激活（通过 repurchase_target 代注册的会员初始为 false，首次消费后激活）
+        pub activated: bool,
     }
 
     /// 实体会员类型别名
@@ -530,6 +534,11 @@ pub mod pallet {
             entity_id: u64,
             account: T::AccountId,
         },
+        /// 会员激活（代注册会员首次消费后激活）
+        MemberActivated {
+            entity_id: u64,
+            account: T::AccountId,
+        },
     }
 
     // ============================================================================
@@ -680,7 +689,7 @@ pub mod pallet {
             }
 
             // 正常注册
-            Self::do_register_member(entity_id, shop_id, &who, referrer.clone())?;
+            Self::do_register_member(entity_id, shop_id, &who, referrer.clone(), true)?;
 
             Self::deposit_event(Event::MemberRegistered {
                 shop_id,
@@ -1338,7 +1347,7 @@ pub mod pallet {
                 .ok_or(Error::<T>::PendingMemberNotFound)?;
 
             // 正式注册
-            Self::do_register_member(entity_id, shop_id, &account, referrer)?;
+            Self::do_register_member(entity_id, shop_id, &account, referrer, true)?;
 
             Self::deposit_event(Event::MemberApproved {
                 entity_id,
@@ -1428,32 +1437,41 @@ pub mod pallet {
         }
 
         /// 注册会员内部实现（统一写入 EntityMembers[entity_id]）
+        ///
+        /// `activated`: 是否立即激活。通过 repurchase_target 代注册的会员传 false，
+        /// 延迟到首次消费时激活并补偿统计。
         fn do_register_member(
             entity_id: u64,
             shop_id: u64,
             account: &T::AccountId,
             referrer: Option<T::AccountId>,
+            activated: bool,
         ) -> DispatchResult {
             let now = <frame_system::Pallet<T>>::block_number();
 
             let member = EntityMember {
                 referrer: referrer.clone(),
                 direct_referrals: 0,
+                indirect_referrals: None,
                 team_size: 0,
                 total_spent: Zero::zero(),
                 level: MemberLevel::Normal,
                 custom_level_id: 0,
                 joined_at: now,
                 last_active_at: now,
+                activated,
             };
 
             EntityMembers::<T>::insert(entity_id, account, member);
-            MemberCount::<T>::mutate(entity_id, |count| *count = count.saturating_add(1));
 
-            // 更新推荐人统计
-            if let Some(ref ref_account) = referrer {
-                Self::mutate_member_referral(entity_id, ref_account, account)?;
+            if activated {
+                // 正常注册：立即计入统计
+                MemberCount::<T>::mutate(entity_id, |count| *count = count.saturating_add(1));
+                if let Some(ref ref_account) = referrer {
+                    Self::mutate_member_referral(entity_id, ref_account, account)?;
+                }
             }
+            // activated=false: 延迟统计，等待首次消费激活
 
             Ok(())
         }
@@ -2023,6 +2041,21 @@ pub mod pallet {
             EntityMembers::<T>::mutate(entity_id, account, |maybe_member| -> DispatchResult {
                 let member = maybe_member.as_mut().ok_or(Error::<T>::NotMember)?;
 
+                // 首次消费激活（代注册会员 activated=false → true）
+                if !member.activated {
+                    member.activated = true;
+                    // 补偿注册时跳过的统计
+                    MemberCount::<T>::mutate(entity_id, |c| *c = c.saturating_add(1));
+                    if let Some(ref ref_account) = member.referrer {
+                        // best-effort: 推荐人统计失败不阻断消费
+                        let _ = Self::mutate_member_referral(entity_id, ref_account, account);
+                    }
+                    Self::deposit_event(Event::MemberActivated {
+                        entity_id,
+                        account: account.clone(),
+                    });
+                }
+
                 member.total_spent = member.total_spent.saturating_add(amount);
                 member.last_active_at = <frame_system::Pallet<T>>::block_number();
 
@@ -2140,10 +2173,64 @@ pub mod pallet {
                 return Ok(());
             }
 
-            Self::do_register_member(entity_id, shop_id, account, valid_referrer.clone())?;
+            Self::do_register_member(entity_id, shop_id, account, valid_referrer.clone(), true)?;
 
             Self::deposit_event(Event::MemberRegistered {
                 shop_id,
+                account: account.clone(),
+                referrer: valid_referrer,
+            });
+
+            Ok(())
+        }
+        /// 自动注册会员（entity_id 直达版本，供 commission-core 等已持有 entity_id 的模块调用）
+        ///
+        /// 与 `auto_register` 逻辑一致，但跳过 shop_id → entity_id 解析。
+        /// 事件中 shop_id 字段为 0（无 shop 上下文）。
+        pub fn auto_register_by_entity(
+            entity_id: u64,
+            account: &T::AccountId,
+            referrer: Option<T::AccountId>,
+        ) -> DispatchResult {
+            if EntityMembers::<T>::contains_key(entity_id, account) {
+                return Ok(()); // 已是会员
+            }
+
+            // 验证推荐人
+            let valid_referrer = if let Some(ref ref_account) = referrer {
+                if ref_account != account && EntityMembers::<T>::contains_key(entity_id, ref_account) {
+                    referrer
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // ---- 注册策略检查 ----
+            let policy = EntityMemberPolicy::<T>::get(entity_id);
+
+            if policy.requires_referral() && valid_referrer.is_none() {
+                return Err(Error::<T>::ReferralRequiredForRegistration.into());
+            }
+
+            if policy.requires_approval() {
+                if !PendingMembers::<T>::contains_key(entity_id, account) {
+                    PendingMembers::<T>::insert(entity_id, account, valid_referrer.clone());
+
+                    Self::deposit_event(Event::MemberPendingApproval {
+                        entity_id,
+                        account: account.clone(),
+                        referrer: valid_referrer,
+                    });
+                }
+                return Ok(());
+            }
+
+            Self::do_register_member(entity_id, 0, account, valid_referrer.clone(), false)?;
+
+            Self::deposit_event(Event::MemberRegistered {
+                shop_id: 0,
                 account: account.clone(),
                 referrer: valid_referrer,
             });
@@ -2199,6 +2286,9 @@ pub trait MemberProvider<AccountId, Balance> {
 
     /// 获取会员统计信息 (直推人数, 团队人数, 累计消费USDT)
     fn get_member_stats(shop_id: u64, account: &AccountId) -> (u32, u32, u128);
+
+    /// 查询会员是否已激活（代注册会员初始未激活，首次消费后激活）
+    fn is_activated_by_entity(entity_id: u64, account: &AccountId) -> bool;
 }
 
 /// MemberProvider 实现
@@ -2261,6 +2351,12 @@ impl<T: pallet::Config> MemberProvider<T::AccountId, pallet::BalanceOf<T>> for p
             })
             .unwrap_or((0, 0, 0))
     }
+
+    fn is_activated_by_entity(entity_id: u64, account: &T::AccountId) -> bool {
+        pallet::EntityMembers::<T>::get(entity_id, account)
+            .map(|m| m.activated)
+            .unwrap_or(false)
+    }
 }
 
 /// 空实现（用于测试或不需要会员功能的场景）
@@ -2284,4 +2380,5 @@ impl<AccountId, Balance> MemberProvider<AccountId, Balance> for NullMemberProvid
     ) -> sp_runtime::DispatchResult { Ok(()) }
     fn get_effective_level(_shop_id: u64, _account: &AccountId) -> u8 { 0 }
     fn get_member_stats(_shop_id: u64, _account: &AccountId) -> (u32, u32, u128) { (0, 0, 0) }
+    fn is_activated_by_entity(_entity_id: u64, _account: &AccountId) -> bool { true }
 }

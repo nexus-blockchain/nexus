@@ -25,7 +25,7 @@
 extern crate alloc;
 
 pub use pallet::*;
-pub use pallet_entity_common::{MemberMode, ShopOperatingStatus, ShopType};
+pub use pallet_entity_common::{ShopOperatingStatus, ShopType};
 
 #[cfg(test)]
 mod mock;
@@ -44,7 +44,7 @@ pub mod pallet {
     use frame_system::pallet_prelude::*;
     use pallet_entity_common::{
         CommissionFundGuard, EffectiveShopStatus, EntityProvider, EntityStatus,
-        MemberMode, ShopOperatingStatus, ShopProvider, ShopType,
+        ShopOperatingStatus, ShopProvider, ShopType,
     };
     use sp_runtime::{
         traits::{AccountIdConversion, Saturating, Zero},
@@ -109,8 +109,6 @@ pub mod pallet {
         pub customer_service: Option<AccountId>,
         /// 初始运营资金
         pub initial_fund: Balance,
-        /// 会员体系模式
-        pub member_mode: MemberMode,
         /// 地理位置（经度, 纬度）* 10^6
         pub location: Option<(i64, i64)>,
         /// 地址信息 CID
@@ -353,7 +351,6 @@ pub mod pallet {
         /// - `entity_id`: 所属 Entity ID
         /// - `name`: Shop 名称
         /// - `shop_type`: Shop 类型
-        /// - `member_mode`: 会员体系模式
         /// - `initial_fund`: 初始运营资金
         #[pallet::call_index(0)]
         #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
@@ -362,7 +359,6 @@ pub mod pallet {
             entity_id: u64,
             name: BoundedVec<u8, T::MaxShopNameLength>,
             shop_type: ShopType,
-            member_mode: MemberMode,
             initial_fund: BalanceOf<T>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
@@ -379,7 +375,7 @@ pub mod pallet {
             ensure!(who == owner, Error::<T>::NotAuthorized);
             
             // 先创建 Shop（获取分配的 shop_id）
-            let shop_id = Self::do_create_shop(entity_id, name, shop_type, member_mode, initial_fund)?;
+            let shop_id = Self::do_create_shop(entity_id, name, shop_type, initial_fund)?;
             
             // 再转移初始资金（Shop 已创建，转账失败会回滚整个 extrinsic）
             if !initial_fund.is_zero() {
@@ -956,7 +952,6 @@ pub mod pallet {
             entity_id: u64,
             name: BoundedVec<u8, T::MaxShopNameLength>,
             shop_type: ShopType,
-            member_mode: MemberMode,
             initial_fund: BalanceOf<T>,
             is_primary: bool,
         ) -> Result<u64, DispatchError> {
@@ -975,7 +970,6 @@ pub mod pallet {
                 managers: BoundedVec::default(),
                 customer_service: None,
                 initial_fund,
-                member_mode,
                 location: None,
                 address_cid: None,
                 business_hours_cid: None,
@@ -1010,10 +1004,9 @@ pub mod pallet {
             entity_id: u64,
             name: BoundedVec<u8, T::MaxShopNameLength>,
             shop_type: ShopType,
-            member_mode: MemberMode,
             initial_fund: BalanceOf<T>,
         ) -> Result<u64, DispatchError> {
-            Self::do_create_shop_inner(entity_id, name, shop_type, member_mode, initial_fund, false)
+            Self::do_create_shop_inner(entity_id, name, shop_type, initial_fund, false)
         }
 
         /// 获取 Shop 运营资金余额
@@ -1059,12 +1052,6 @@ pub mod pallet {
 
         fn shop_type(shop_id: u64) -> Option<ShopType> {
             Shops::<T>::get(shop_id).map(|s| s.shop_type)
-        }
-
-        fn shop_member_mode(shop_id: u64) -> MemberMode {
-            Shops::<T>::get(shop_id)
-                .map(|s| s.member_mode)
-                .unwrap_or_default()
         }
 
         fn is_shop_manager(shop_id: u64, account: &T::AccountId) -> bool {
@@ -1172,13 +1159,12 @@ pub mod pallet {
             entity_id: u64,
             name: sp_std::vec::Vec<u8>,
             shop_type: ShopType,
-            member_mode: MemberMode,
         ) -> Result<u64, DispatchError> {
             let bounded_name: BoundedVec<u8, T::MaxShopNameLength> = name
                 .try_into()
                 .map_err(|_| Error::<T>::NameTooLong)?;
 
-            Self::do_create_shop_inner(entity_id, bounded_name, shop_type, member_mode, Zero::zero(), true)
+            Self::do_create_shop_inner(entity_id, bounded_name, shop_type, Zero::zero(), true)
         }
 
         fn is_primary_shop(shop_id: u64) -> bool {

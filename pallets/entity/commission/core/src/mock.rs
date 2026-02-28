@@ -26,6 +26,7 @@ thread_local! {
     static SHOP_OWNERS: RefCell<BTreeMap<u64, u64>> = RefCell::new(BTreeMap::new());
     static REFERRERS: RefCell<BTreeMap<(u64, u64), u64>> = RefCell::new(BTreeMap::new());
     static ENTITY_REFERRERS: RefCell<BTreeMap<u64, u64>> = RefCell::new(BTreeMap::new());
+    static KYC_BLOCKED: RefCell<std::collections::BTreeSet<(u64, u64)>> = RefCell::new(std::collections::BTreeSet::new());
 }
 
 pub fn setup_default() {
@@ -48,6 +49,7 @@ pub fn clear_thread_locals() {
     SHOP_OWNERS.with(|m| m.borrow_mut().clear());
     REFERRERS.with(|m| m.borrow_mut().clear());
     ENTITY_REFERRERS.with(|m| m.borrow_mut().clear());
+    KYC_BLOCKED.with(|m| m.borrow_mut().clear());
 }
 
 // ============================================================================
@@ -69,7 +71,6 @@ impl pallet_entity_common::ShopProvider<u64> for MockShopProvider {
     }
     fn shop_account(_: u64) -> u64 { 0 }
     fn shop_type(_: u64) -> Option<pallet_entity_common::ShopType> { None }
-    fn shop_member_mode(_: u64) -> pallet_entity_common::MemberMode { pallet_entity_common::MemberMode::Inherit }
     fn is_shop_manager(_: u64, _: &u64) -> bool { false }
     fn update_shop_stats(_: u64, _: u128, _: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
     fn update_shop_rating(_: u64, _: u8) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
@@ -114,6 +115,8 @@ impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
         REFERRERS.with(|r| r.borrow().get(&(entity_id, *account)).copied())
     }
     fn custom_level_id_by_entity(_: u64, _: &u64) -> u8 { 0 }
+    fn auto_register_by_entity(_: u64, _: &u64, _: Option<u64>) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+    fn is_activated_by_entity(_: u64, _: &u64) -> bool { true }
     fn set_custom_levels_enabled(_: u64, _: bool) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
     fn set_upgrade_mode(_: u64, _: u8) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
     fn add_custom_level(_: u64, _: u8, _: &[u8], _: u128, _: u16, _: u16) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
@@ -179,6 +182,29 @@ impl pallet_commission_core::Config for Test {
     type ReferrerShareBps = ReferrerShareBps;
     type MaxCommissionRecordsPerOrder = ConstU32<20>;
     type MaxCustomLevels = ConstU32<10>;
+    type ParticipationGuard = MockParticipationGuard;
+}
+
+// ============================================================================
+// Mock ParticipationGuard (H3)
+// ============================================================================
+
+pub struct MockParticipationGuard;
+
+impl crate::ParticipationGuard<u64> for MockParticipationGuard {
+    fn can_participate(entity_id: u64, account: &u64) -> bool {
+        !KYC_BLOCKED.with(|s| s.borrow().contains(&(entity_id, *account)))
+    }
+}
+
+/// 标记 (entity_id, account) 为不满足参与要求（模拟 mandatory KYC 拒绝）
+pub fn block_participation(entity_id: u64, account: u64) {
+    KYC_BLOCKED.with(|s| s.borrow_mut().insert((entity_id, account)));
+}
+
+/// 解除参与限制
+pub fn unblock_participation(entity_id: u64, account: u64) {
+    KYC_BLOCKED.with(|s| s.borrow_mut().remove(&(entity_id, account)));
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

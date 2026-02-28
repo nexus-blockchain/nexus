@@ -6,7 +6,7 @@ use frame_support::{
 };
 use frame_system as system;
 use pallet_entity_common::{
-    EntityProvider, EntityStatus, EntityTokenProvider, MemberMode,
+    EntityProvider, EntityStatus, EntityTokenProvider,
     ShopProvider, ShopType, TokenType,
 };
 use pallet_entity_commission::{NullCommissionProvider, NullMemberProvider};
@@ -127,7 +127,6 @@ impl ShopProvider<u64> for MockShopProvider {
     }
     fn shop_account(shop_id: u64) -> u64 { 200 + shop_id }
     fn shop_type(_: u64) -> Option<ShopType> { Some(ShopType::OnlineStore) }
-    fn shop_member_mode(_: u64) -> MemberMode { MemberMode::Inherit }
     fn is_shop_manager(shop_id: u64, account: &u64) -> bool {
         Self::shop_owner(shop_id) == Some(*account)
     }

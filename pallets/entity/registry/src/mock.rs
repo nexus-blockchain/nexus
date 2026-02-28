@@ -9,7 +9,7 @@ use sp_runtime::{
     BuildStorage,
 };
 use frame_system::EnsureRoot;
-use pallet_entity_common::{ShopProvider, ShopType, MemberMode, ShopOperatingStatus, EffectiveShopStatus, PricingProvider};
+use pallet_entity_common::{ShopProvider, ShopType, ShopOperatingStatus, EffectiveShopStatus, PricingProvider};
 
 type Block = frame_system::mocking::MockBlock<Test>;
 
@@ -55,7 +55,6 @@ impl ShopProvider<u64> for MockShopProvider {
     fn shop_owner(_shop_id: u64) -> Option<u64> { None }
     fn shop_account(_shop_id: u64) -> u64 { 0 }
     fn shop_type(_shop_id: u64) -> Option<ShopType> { None }
-    fn shop_member_mode(_shop_id: u64) -> MemberMode { MemberMode::Inherit }
     fn is_shop_manager(_shop_id: u64, _account: &u64) -> bool { false }
     fn update_shop_stats(_shop_id: u64, _sales_amount: u128, _order_count: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
     fn update_shop_rating(_shop_id: u64, _rating: u8) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
@@ -65,7 +64,6 @@ impl ShopProvider<u64> for MockShopProvider {
         _entity_id: u64,
         _name: sp_std::vec::Vec<u8>,
         _shop_type: ShopType,
-        _member_mode: MemberMode,
     ) -> Result<u64, sp_runtime::DispatchError> {
         // Return a mock shop_id = 1
         Ok(1)

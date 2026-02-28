@@ -2,7 +2,7 @@ use std::path::Path;
 use tracing::{info, warn};
 
 use crate::error::{BotError, BotResult};
-use crate::tee::sealed_storage::SealedStorage;
+use crate::tee::sealed_storage::{SealedStorage, SealPolicy};
 
 /// TEE 模式 (三态: TDX / SGX / Software)
 #[derive(Debug, Clone, PartialEq)]
@@ -32,6 +32,13 @@ impl std::fmt::Display for TeeMode {
     }
 }
 
+/// 需要迁移的密封文件列表
+const SEALED_FILES: &[&str] = &[
+    "enclave_ed25519.sealed",
+    "shamir_share.sealed",
+    "ceremony_hash.sealed",
+];
+
 /// SGX Enclave 桥接
 /// 在 Hardware 模式下调用真实 ecall；Software 模式下使用 AES-GCM 模拟
 pub struct EnclaveBridge {
@@ -42,22 +49,52 @@ pub struct EnclaveBridge {
 }
 
 impl EnclaveBridge {
-    /// 初始化 Enclave 桥接
+    /// 初始化 Enclave 桥接 (使用默认 DualKey 策略)
     pub fn init(data_dir: &str, tee_mode_str: &str) -> BotResult<Self> {
+        Self::init_with_policy(data_dir, tee_mode_str, SealPolicy::DualKey)
+    }
+
+    /// 初始化 Enclave 桥接 (指定密封策略)
+    pub fn init_with_policy(
+        data_dir: &str,
+        tee_mode_str: &str,
+        seal_policy: SealPolicy,
+    ) -> BotResult<Self> {
         let mode = Self::detect_mode(tee_mode_str);
-        info!(mode = %mode, "初始化 Enclave 桥接");
+        info!(mode = %mode, seal_policy = %seal_policy, "初始化 Enclave 桥接");
 
         std::fs::create_dir_all(data_dir).ok();
-        let sealed_storage = SealedStorage::new(data_dir, mode.is_hardware())?;
+        let sealed_storage = SealedStorage::new_with_policy(
+            data_dir, mode.is_hardware(), seal_policy,
+        )?;
 
-        // 加载或生成 Ed25519 密钥
+        // V0 → V1 自动迁移: 旧格式密封文件升级为新格式
+        Self::run_migration(&sealed_storage);
+
         let keypair = Self::load_or_generate_key(&sealed_storage)?;
+
+        if sealed_storage.has_mrsigner_key() {
+            info!("MRSIGNER 密钥可用 — 跨版本密封兼容已启用");
+        } else if mode.is_hardware() {
+            warn!("MRSIGNER 密钥不可用 — 升级时密封文件可能不兼容, 需要 Gramine 配置 sgx.seal_key_derivation");
+        }
 
         Ok(Self {
             mode,
             sealed_storage,
             keypair,
         })
+    }
+
+    /// 自动迁移所有已知的密封文件 V0 → V1
+    fn run_migration(sealed: &SealedStorage) {
+        for file in SEALED_FILES {
+            match sealed.migrate_to_v1(file) {
+                Ok(true) => info!(file, "密封文件已自动迁移 V0 → V1"),
+                Ok(false) => {}
+                Err(e) => warn!(file, error = %e, "密封文件迁移失败 (非致命, 将在解封时重试)"),
+            }
+        }
     }
 
     fn detect_mode(tee_mode_str: &str) -> TeeMode {
@@ -79,7 +116,6 @@ impl EnclaveBridge {
     /// 3. 否则 → Software
     fn auto_detect_hardware() -> TeeMode {
         if Path::new("/dev/attestation/quote").exists() {
-            // Gramine 统一接口: 读取 quote version 来区分 TDX vs SGX
             if let Ok(quote) = std::fs::read("/dev/attestation/quote") {
                 if quote.len() >= 2 {
                     let version = u16::from_le_bytes([quote[0], quote[1]]);
@@ -113,7 +149,6 @@ impl EnclaveBridge {
     fn load_or_generate_key(sealed: &SealedStorage) -> BotResult<ed25519_dalek::SigningKey> {
         let key_file = "enclave_ed25519.sealed";
 
-        // 尝试加载
         if let Ok(seed_bytes) = sealed.unseal(key_file) {
             if seed_bytes.len() == 32 {
                 let mut seed = [0u8; 32];
@@ -124,13 +159,11 @@ impl EnclaveBridge {
             }
         }
 
-        // 生成新密钥
         let mut seed = [0u8; 32];
         use rand::RngCore;
         rand::rngs::OsRng.fill_bytes(&mut seed);
         let key = ed25519_dalek::SigningKey::from_bytes(&seed);
 
-        // 密封保存 — 失败则中止, 防止未持久化的密钥在重启后丢失
         sealed.seal(key_file, &seed).map_err(|e| {
             BotError::EnclaveError(format!("密钥密封保存失败, 中止启动以防密钥丢失: {}", e))
         })?;
@@ -139,9 +172,34 @@ impl EnclaveBridge {
         Ok(key)
     }
 
-    /// 获取 TEE 模式
+    /// 替换签名密钥 (从迁移恢复时使用, 保持跨版本身份连续性)
+    ///
+    /// 将旧版本的 Ed25519 seed 导入并用当前策略重新密封, 使节点在升级后
+    /// 保持相同的链上身份 (public_key 不变)
+    pub fn replace_signing_key(&mut self, seed: [u8; 32]) -> BotResult<()> {
+        let old_pk = hex::encode(self.public_key_bytes());
+        self.keypair = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let new_pk = hex::encode(self.public_key_bytes());
+
+        self.sealed_storage.seal("enclave_ed25519.sealed", &seed).map_err(|e| {
+            BotError::EnclaveError(format!("密钥替换密封失败: {}", e))
+        })?;
+
+        info!(
+            old_pk = %old_pk,
+            new_pk = %new_pk,
+            "Ed25519 密钥已从迁移恢复并重新密封 (身份已保持)"
+        );
+        Ok(())
+    }
+
     pub fn mode(&self) -> &TeeMode {
         &self.mode
+    }
+
+    /// 是否拥有 MRSIGNER 密钥 (用于判断跨版本升级兼容能力)
+    pub fn has_mrsigner_key(&self) -> bool {
+        self.sealed_storage.has_mrsigner_key()
     }
 
     /// 获取 Ed25519 签名密钥引用 (用于 ECDH share 加密)
@@ -149,17 +207,14 @@ impl EnclaveBridge {
         &self.keypair
     }
 
-    /// 获取公钥
     pub fn public_key(&self) -> ed25519_dalek::VerifyingKey {
         self.keypair.verifying_key()
     }
 
-    /// 获取公钥 bytes
     pub fn public_key_bytes(&self) -> [u8; 32] {
         self.public_key().to_bytes()
     }
 
-    /// 获取公钥 hex
     pub fn public_key_hex(&self) -> String {
         hex::encode(self.public_key_bytes())
     }
@@ -171,19 +226,16 @@ impl EnclaveBridge {
         sig.to_bytes()
     }
 
-    /// 验证签名
     pub fn verify(&self, message: &[u8], signature: &[u8; 64]) -> bool {
         use ed25519_dalek::Verifier;
         let sig = ed25519_dalek::Signature::from_bytes(signature);
         self.public_key().verify(message, &sig).is_ok()
     }
 
-    /// 密封数据
     pub fn seal(&self, name: &str, data: &[u8]) -> BotResult<()> {
         self.sealed_storage.seal(name, data)
     }
 
-    /// 解封数据
     pub fn unseal(&self, name: &str) -> BotResult<Vec<u8>> {
         self.sealed_storage.unseal(name)
     }
@@ -196,7 +248,6 @@ impl EnclaveBridge {
         use sha2::{Sha256, Digest};
         match self.mode {
             TeeMode::Tdx => {
-                // TDX: 从 SGX seal key 或 MRTD 派生
                 let hw_entropy = Self::read_tdx_seal_entropy()?;
                 let mut hasher = Sha256::new();
                 hasher.update(b"grouprobot-shamir-seal-hw:");
@@ -208,7 +259,6 @@ impl EnclaveBridge {
                 Ok(key)
             }
             TeeMode::Sgx => {
-                // SGX: 从 MRENCLAVE-bound seal key 派生
                 let hw_entropy = Self::read_sgx_seal_entropy()?;
                 let mut hasher = Sha256::new();
                 hasher.update(b"grouprobot-shamir-seal-sgx:");
@@ -220,8 +270,6 @@ impl EnclaveBridge {
                 Ok(key)
             }
             TeeMode::Software => {
-                // ⚠️ 软件模式: 从 data_dir + hostname + machine-id 派生
-                // 比纯 data_dir 更难预测, 但仍不安全 (仅开发/测试)
                 let mut hasher = Sha256::new();
                 hasher.update(b"grouprobot-shamir-seal-sw-v2:");
                 hasher.update(self.sealed_storage.data_dir().as_bytes());
@@ -240,12 +288,7 @@ impl EnclaveBridge {
     }
 
     /// 读取 TDX 硬件密封熵
-    ///
-    /// 优先使用 Gramine 提供的 SGX seal key 接口:
-    ///   /dev/attestation/keys/_sgx_mrenclave
-    /// 回退: 从 /dev/attestation/quote 的 MRTD 字段派生
     fn read_tdx_seal_entropy() -> BotResult<[u8; 64]> {
-        // Gramine SGX seal key (MRENCLAVE-bound)
         if let Ok(data) = std::fs::read("/dev/attestation/keys/_sgx_mrenclave") {
             if data.len() >= 16 {
                 use sha2::{Sha256, Digest};
@@ -255,7 +298,6 @@ impl EnclaveBridge {
                 let h1: [u8; 32] = hasher.finalize().into();
                 let mut entropy = [0u8; 64];
                 entropy[..32].copy_from_slice(&h1);
-                // 二次哈希增加熵
                 let mut hasher2 = Sha256::new();
                 hasher2.update(h1);
                 hasher2.update(b"seal-entropy-extend");
@@ -264,12 +306,10 @@ impl EnclaveBridge {
                 return Ok(entropy);
             }
         }
-        // 回退: 从 TDX report_data 路径读取
-        // 写入空 report_data → 读取 quote → 从 MRTD 字段派生
         if let Ok(quote) = std::fs::read("/dev/attestation/quote") {
             if quote.len() >= 232 {
                 use sha2::{Sha256, Digest};
-                let mrtd = &quote[184..232]; // MRTD 48 bytes
+                let mrtd = &quote[184..232];
                 let mut hasher = Sha256::new();
                 hasher.update(b"tdx-seal-from-mrtd:");
                 hasher.update(mrtd);
@@ -286,11 +326,7 @@ impl EnclaveBridge {
     }
 
     /// 读取 SGX-Only 硬件密封熵
-    ///
-    /// SGX 模式: 使用 MRENCLAVE-bound seal key
-    /// 回退: 从 Quote 的 MRENCLAVE 字段派生
     fn read_sgx_seal_entropy() -> BotResult<[u8; 64]> {
-        // Gramine SGX seal key (MRENCLAVE-bound)
         if let Ok(data) = std::fs::read("/dev/attestation/keys/_sgx_mrenclave") {
             if data.len() >= 16 {
                 use sha2::{Sha256, Digest};
@@ -308,11 +344,10 @@ impl EnclaveBridge {
                 return Ok(entropy);
             }
         }
-        // 回退: 从 SGX Quote 的 MRENCLAVE 字段派生
         if let Ok(quote) = std::fs::read("/dev/attestation/quote") {
             if quote.len() >= 144 {
                 use sha2::{Sha256, Digest};
-                let mrenclave = &quote[112..144]; // MRENCLAVE 32 bytes
+                let mrenclave = &quote[112..144];
                 let mut hasher = Sha256::new();
                 hasher.update(b"sgx-seal-from-mrenclave:");
                 hasher.update(mrenclave);
@@ -382,6 +417,18 @@ mod tests {
     }
 
     #[test]
+    fn init_with_all_policies() {
+        for policy in [SealPolicy::MrEnclave, SealPolicy::MrSigner, SealPolicy::DualKey] {
+            let dir = tempfile::tempdir().unwrap();
+            let bridge = EnclaveBridge::init_with_policy(
+                dir.path().to_str().unwrap(), "software", policy,
+            ).unwrap();
+            assert_eq!(*bridge.mode(), TeeMode::Software);
+            assert_eq!(bridge.public_key_bytes().len(), 32);
+        }
+    }
+
+    #[test]
     fn sign_and_verify() {
         let dir = tempfile::tempdir().unwrap();
         let bridge = EnclaveBridge::init(dir.path().to_str().unwrap(), "software").unwrap();
@@ -405,6 +452,45 @@ mod tests {
             bridge.public_key_bytes()
         };
         assert_eq!(pk1, pk2, "密钥应持久化");
+    }
+
+    #[test]
+    fn key_persistence_across_policies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        // 用 MrEnclave 策略创建密钥
+        let pk1 = {
+            let bridge = EnclaveBridge::init_with_policy(path, "software", SealPolicy::MrEnclave).unwrap();
+            bridge.public_key_bytes()
+        };
+        // 切换到 DualKey 策略, 密钥应保持 (V0 向后兼容)
+        let pk2 = {
+            let bridge = EnclaveBridge::init_with_policy(path, "software", SealPolicy::DualKey).unwrap();
+            bridge.public_key_bytes()
+        };
+        assert_eq!(pk1, pk2, "切换策略后密钥应保持不变 (V0 兼容)");
+    }
+
+    #[test]
+    fn replace_signing_key_preserves_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        let mut bridge = EnclaveBridge::init(path, "software").unwrap();
+        let original_pk = bridge.public_key_bytes();
+
+        let migration_seed = [0x42u8; 32];
+        let expected_key = ed25519_dalek::SigningKey::from_bytes(&migration_seed);
+        let expected_pk = expected_key.verifying_key().to_bytes();
+
+        bridge.replace_signing_key(migration_seed).unwrap();
+        assert_eq!(bridge.public_key_bytes(), expected_pk);
+        assert_ne!(bridge.public_key_bytes(), original_pk);
+
+        // 重启后应加载替换后的密钥
+        let bridge2 = EnclaveBridge::init(path, "software").unwrap();
+        assert_eq!(bridge2.public_key_bytes(), expected_pk);
     }
 
     #[test]

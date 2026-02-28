@@ -429,6 +429,80 @@ pub fn decrypt_share_from_sender(
     decrypt_share(encrypted, &derived_key)
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Raw ECDH 加解密 (用于 Migration Ceremony, 操作任意字节)
+// ═══════════════════════════════════════════════════════════════
+
+/// ECDH 加密任意字节 (Migration Ceremony 用)
+///
+/// 生成临时 X25519 密钥对 → ECDH → AES-256-GCM 加密
+/// 返回: (ciphertext, ephemeral_public_key)
+#[allow(dead_code)]
+pub fn ecdh_encrypt_raw(
+    plaintext: &[u8],
+    receiver_x25519_pk: &x25519_dalek::PublicKey,
+) -> Result<(Vec<u8>, [u8; 32]), ShamirError> {
+    use sha2::{Sha256, Digest};
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+
+    let ephemeral_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let ephemeral_public = x25519_dalek::PublicKey::from(&ephemeral_secret);
+    let shared_secret = ephemeral_secret.diffie_hellman(receiver_x25519_pk);
+
+    let mut hasher = Sha256::new();
+    hasher.update(shared_secret.as_bytes());
+    hasher.update(b"grouprobot-migration-ecdh-v1");
+    let derived_key: [u8; 32] = hasher.finalize().into();
+
+    let cipher = Aes256Gcm::new(&derived_key.into());
+    let mut nonce_bytes = [0u8; 12];
+    use rand::RngCore;
+    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let ciphertext = cipher.encrypt(nonce, plaintext)
+        .map_err(|e| ShamirError::InvalidParameters(format!("ECDH encrypt: {}", e)))?;
+
+    // [nonce:12][ciphertext]
+    let mut output = Vec::with_capacity(12 + ciphertext.len());
+    output.extend_from_slice(&nonce_bytes);
+    output.extend_from_slice(&ciphertext);
+
+    Ok((output, ephemeral_public.to_bytes()))
+}
+
+/// ECDH 解密任意字节 (Migration Ceremony 用)
+///
+/// data = [nonce:12][ciphertext]
+#[allow(dead_code)]
+pub fn ecdh_decrypt_raw(
+    data: &[u8],
+    receiver_secret: &x25519_dalek::StaticSecret,
+    ephemeral_pk: &[u8; 32],
+) -> Result<Vec<u8>, ShamirError> {
+    use sha2::{Sha256, Digest};
+    use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
+
+    if data.len() < 13 {
+        return Err(ShamirError::InvalidParameters("ECDH encrypted data too short".into()));
+    }
+
+    let sender_pk = x25519_dalek::PublicKey::from(*ephemeral_pk);
+    let shared_secret = receiver_secret.diffie_hellman(&sender_pk);
+
+    let mut hasher = Sha256::new();
+    hasher.update(shared_secret.as_bytes());
+    hasher.update(b"grouprobot-migration-ecdh-v1");
+    let derived_key: [u8; 32] = hasher.finalize().into();
+
+    let cipher = Aes256Gcm::new(&derived_key.into());
+    let nonce = Nonce::from_slice(&data[..12]);
+    let ciphertext = &data[12..];
+
+    cipher.decrypt(nonce, ciphertext)
+        .map_err(|e| ShamirError::InvalidParameters(format!("ECDH decrypt: {}", e)))
+}
+
 /// 带 ephemeral_pk 的加密 share (传输格式)
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
@@ -732,5 +806,36 @@ mod tests {
         let pk1 = x25519_dalek::PublicKey::from(&s1);
         let pk2 = x25519_dalek::PublicKey::from(&s2);
         assert_eq!(pk1.as_bytes(), pk2.as_bytes());
+    }
+
+    #[test]
+    fn ecdh_raw_roundtrip() {
+        let receiver_ed = ed25519_dalek::SigningKey::from_bytes(&[0x77u8; 32]);
+        let receiver_x_secret = ed25519_to_x25519_secret(&receiver_ed.to_bytes());
+        let receiver_x_pk = x25519_dalek::PublicKey::from(&receiver_x_secret);
+
+        let plaintext = b"migration secret payload: sk + token";
+        let (encrypted, ephemeral_pk) = ecdh_encrypt_raw(plaintext, &receiver_x_pk).unwrap();
+
+        let decrypted = ecdh_decrypt_raw(&encrypted, &receiver_x_secret, &ephemeral_pk).unwrap();
+        assert_eq!(&decrypted, plaintext);
+    }
+
+    #[test]
+    fn ecdh_raw_wrong_key_fails() {
+        let receiver_ed = ed25519_dalek::SigningKey::from_bytes(&[0x77u8; 32]);
+        let receiver_x_secret = ed25519_to_x25519_secret(&receiver_ed.to_bytes());
+        let receiver_x_pk = x25519_dalek::PublicKey::from(&receiver_x_secret);
+
+        let (encrypted, ephemeral_pk) = ecdh_encrypt_raw(b"secret", &receiver_x_pk).unwrap();
+
+        let wrong_secret = ed25519_to_x25519_secret(&[0xAA; 32]);
+        assert!(ecdh_decrypt_raw(&encrypted, &wrong_secret, &ephemeral_pk).is_err());
+    }
+
+    #[test]
+    fn ecdh_raw_too_short_fails() {
+        let secret = ed25519_to_x25519_secret(&[0x11; 32]);
+        assert!(ecdh_decrypt_raw(&[0u8; 5], &secret, &[0u8; 32]).is_err());
     }
 }

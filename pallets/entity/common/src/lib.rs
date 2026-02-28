@@ -270,28 +270,11 @@ impl ShopOperatingStatus {
     }
 }
 
-/// 会员体系模式
+/// 会员体系模式（统一继承模式：会员数据存储在 Entity 级别，所有 Shop 共享）
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
 pub enum MemberMode {
-    /// 继承模式：会员数据存储在 Entity 级别，所有 Shop 共享
     #[default]
     Inherit,
-    /// 独立模式：会员数据存储在 Shop 级别，各 Shop 独立
-    Independent,
-    /// 混合模式：Entity + Shop 双层会员体系
-    Hybrid,
-}
-
-impl MemberMode {
-    /// 是否在 Entity 级别存储会员
-    pub fn uses_entity_members(&self) -> bool {
-        matches!(self, Self::Inherit | Self::Hybrid)
-    }
-    
-    /// 是否在 Shop 级别存储会员
-    pub fn uses_shop_members(&self) -> bool {
-        matches!(self, Self::Independent | Self::Hybrid)
-    }
 }
 
 // ============================================================================
@@ -664,9 +647,6 @@ pub trait ShopProvider<AccountId> {
     /// 获取 Shop 类型
     fn shop_type(shop_id: u64) -> Option<ShopType>;
     
-    /// 获取 Shop 会员模式
-    fn shop_member_mode(shop_id: u64) -> MemberMode;
-    
     /// 检查是否为 Shop 管理员
     fn is_shop_manager(shop_id: u64, account: &AccountId) -> bool;
     
@@ -693,9 +673,8 @@ pub trait ShopProvider<AccountId> {
         entity_id: u64,
         name: sp_std::vec::Vec<u8>,
         shop_type: ShopType,
-        member_mode: MemberMode,
     ) -> Result<u64, DispatchError> {
-        let _ = (entity_id, name, shop_type, member_mode);
+        let _ = (entity_id, name, shop_type);
         Err(DispatchError::Other("not implemented"))
     }
     
@@ -846,7 +825,6 @@ impl<AccountId: Default> ShopProvider<AccountId> for NullShopProvider {
     fn shop_owner(_shop_id: u64) -> Option<AccountId> { None }
     fn shop_account(_shop_id: u64) -> AccountId { AccountId::default() }
     fn shop_type(_shop_id: u64) -> Option<ShopType> { None }
-    fn shop_member_mode(_shop_id: u64) -> MemberMode { MemberMode::default() }
     fn is_shop_manager(_shop_id: u64, _account: &AccountId) -> bool { false }
     fn shop_own_status(_shop_id: u64) -> Option<ShopOperatingStatus> { None }
     fn effective_status(_shop_id: u64) -> Option<EffectiveShopStatus> { None }
@@ -1080,6 +1058,28 @@ pub trait OrderCommissionHandler<AccountId, Balance> {
 impl<AccountId, Balance> OrderCommissionHandler<AccountId, Balance> for () {
     fn on_order_completed(_: u64, _: u64, _: &AccountId, _: Balance, _: Balance) -> Result<(), DispatchError> { Ok(()) }
     fn on_order_cancelled(_: u64) -> Result<(), DispatchError> { Ok(()) }
+}
+
+// ============================================================================
+// 购物余额接口
+// ============================================================================
+
+/// 购物余额提供者（供 Transaction 模块在下单时抵扣购物余额）
+///
+/// `consume_shopping_balance` 会：
+/// 1. 扣减会员购物余额记账（MemberShoppingBalance / ShopShoppingTotal）
+/// 2. 将等额 NEX 从 Entity 账户转入会员钱包（会员随后通过 Escrow 锁定）
+pub trait ShoppingBalanceProvider<AccountId, Balance> {
+    /// 查询会员在指定店铺的购物余额
+    fn shopping_balance(shop_id: u64, account: &AccountId) -> Balance;
+    /// 消费购物余额：扣减记账 + 将 NEX 从 Entity 账户转入会员钱包
+    fn consume_shopping_balance(shop_id: u64, account: &AccountId, amount: Balance) -> Result<(), DispatchError>;
+}
+
+/// 空购物余额提供者（无佣金系统时使用）
+impl<AccountId, Balance: Default> ShoppingBalanceProvider<AccountId, Balance> for () {
+    fn shopping_balance(_: u64, _: &AccountId) -> Balance { Balance::default() }
+    fn consume_shopping_balance(_: u64, _: &AccountId, _: Balance) -> Result<(), DispatchError> { Ok(()) }
 }
 
 /// 空定价提供者（测试用）

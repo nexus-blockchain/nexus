@@ -315,6 +315,15 @@ pub trait MemberProvider<AccountId> {
         let _ = (entity_id, account);
         0
     }
+    fn auto_register_by_entity(entity_id: u64, account: &AccountId, referrer: Option<AccountId>) -> Result<(), DispatchError> {
+        let _ = (entity_id, account, referrer);
+        Ok(())
+    }
+    /// 查询会员是否已激活（通过 repurchase_target 代注册的会员初始未激活，首次消费后激活）
+    fn is_activated_by_entity(entity_id: u64, account: &AccountId) -> bool {
+        let _ = (entity_id, account);
+        true // 默认已激活（无 member 系统时不阻断）
+    }
 
     fn set_custom_levels_enabled(shop_id: u64, enabled: bool) -> Result<(), DispatchError>;
     fn set_upgrade_mode(shop_id: u64, mode: u8) -> Result<(), DispatchError>;

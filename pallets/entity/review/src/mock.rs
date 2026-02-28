@@ -9,7 +9,7 @@ use sp_runtime::{
     BuildStorage,
 };
 use sp_core::ConstU64;
-use pallet_entity_common::{OrderProvider, ShopProvider, ShopType, MemberMode, ShopOperatingStatus, EffectiveShopStatus};
+use pallet_entity_common::{OrderProvider, ShopProvider, ShopType, ShopOperatingStatus, EffectiveShopStatus};
 use sp_runtime::DispatchError;
 use core::cell::RefCell;
 
@@ -113,7 +113,6 @@ impl ShopProvider<u64> for MockShopProvider {
     fn shop_owner(_shop_id: u64) -> Option<u64> { None }
     fn shop_account(_shop_id: u64) -> u64 { 0 }
     fn shop_type(_shop_id: u64) -> Option<ShopType> { None }
-    fn shop_member_mode(_shop_id: u64) -> MemberMode { MemberMode::default() }
     fn is_shop_manager(_shop_id: u64, _account: &u64) -> bool { false }
     fn shop_own_status(_shop_id: u64) -> Option<ShopOperatingStatus> { None }
     fn effective_status(_shop_id: u64) -> Option<EffectiveShopStatus> { None }

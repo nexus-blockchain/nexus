@@ -21,6 +21,22 @@ pub use pallet_commission_common::{
 use pallet_entity_common::ShopProvider as ShopProviderT;
 use sp_runtime::traits::Zero;
 
+/// Entity 参与权守卫（H3 修复: KYC / 合规检查接口）
+///
+/// 在 `withdraw_commission` 和 `do_consume_shopping_balance` 中调用，
+/// 确保 target 账户满足 Entity 的参与要求（如 mandatory KYC）。
+/// 默认空实现允许所有操作（适用于未配置 KYC 的 Entity）。
+pub trait ParticipationGuard<AccountId> {
+    fn can_participate(entity_id: u64, account: &AccountId) -> bool;
+}
+
+/// 默认空实现（无 KYC 系统时使用，所有账户均允许）
+impl<AccountId> ParticipationGuard<AccountId> for () {
+    fn can_participate(_entity_id: u64, _account: &AccountId) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod mock;
 #[cfg(test)]
@@ -184,6 +200,10 @@ pub mod pallet {
         /// 最大自定义等级数
         #[pallet::constant]
         type MaxCustomLevels: Get<u32>;
+
+        /// Entity 参与权守卫（KYC / 合规检查）
+        /// 默认使用 `()` 允许所有操作（无 KYC 要求）
+        type ParticipationGuard: crate::ParticipationGuard<Self::AccountId>;
     }
 
     #[pallet::pallet]
@@ -333,6 +353,8 @@ pub mod pallet {
         TieredWithdrawal {
             entity_id: u64,
             account: T::AccountId,
+            /// M3 审计修复: 购物余额实际接收账户（可能与 account 不同）
+            repurchase_target: T::AccountId,
             withdrawn_amount: BalanceOf<T>,
             repurchase_amount: BalanceOf<T>,
             bonus_amount: BalanceOf<T>,
@@ -393,6 +415,16 @@ pub mod pallet {
         AutoRegisterFailed,
         /// 提现金额不能为 0
         ZeroWithdrawalAmount,
+        /// LevelBased 配置中 level_id 重复
+        DuplicateLevelId,
+        /// 复购目标账户未通过审批（APPROVAL_REQUIRED 下待审批状态）
+        TargetNotApprovedMember,
+        /// 会员未激活（代注册会员需首次消费后激活）
+        MemberNotActivated,
+        /// H3: 复购目标账户不满足 Entity 的参与要求（如 mandatory KYC）
+        TargetParticipationDenied,
+        /// H3: 账户不满足 Entity 参与要求，无法提取购物余额
+        ParticipationRequirementNotMet,
     }
 
     // ========================================================================
@@ -466,7 +498,7 @@ pub mod pallet {
 
         /// 提取返佣（四种提现模式 + 自愿复购奖励 + 指定复购目标，Entity 级佣金池）
         ///
-        /// - `shop_id`: 任意关联 Shop（用于定位 Entity 和查询会员等级）
+        /// - `entity_id`: Entity ID（佣金统一在 Entity 级记账）
         /// - `amount`: 提现金额（None = 全部 pending）
         /// - `requested_repurchase_rate`: 会员请求的复购比率（万分比，MemberChoice 模式下使用）
         /// - `repurchase_target`: 复购购物余额的接收账户（None = 自己）
@@ -476,13 +508,12 @@ pub mod pallet {
         #[pallet::weight(Weight::from_parts(80_000_000, 6_000))]
         pub fn withdraw_commission(
             origin: OriginFor<T>,
-            shop_id: u64,
+            entity_id: u64,
             amount: Option<BalanceOf<T>>,
             requested_repurchase_rate: Option<u16>,
             repurchase_target: Option<T::AccountId>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            let entity_id = Self::resolve_entity_id(shop_id)?;
 
             // 确定复购目标账户
             let target = repurchase_target.unwrap_or_else(|| who.clone());
@@ -499,10 +530,29 @@ pub mod pallet {
                         let referrer = T::MemberProvider::get_referrer_by_entity(entity_id, &target);
                         ensure!(referrer.as_ref() == Some(&who), Error::<T>::NotDirectReferral);
                     } else {
-                        // 非会员 → 自动注册，推荐人 = 出资人（auto_register 需要 shop_id）
-                        T::MemberProvider::auto_register(shop_id, &target, Some(who.clone()))
+                        // 非会员 → 自动注册，推荐人 = 出资人
+                        T::MemberProvider::auto_register_by_entity(entity_id, &target, Some(who.clone()))
                             .map_err(|_| Error::<T>::AutoRegisterFailed)?;
+                        // H1 修复: 注册后验证 target 是否已成为正式会员
+                        // APPROVAL_REQUIRED 策略下 auto_register 返回 Ok 但 target 仅进入 PendingMembers
+                        ensure!(
+                            T::MemberProvider::is_member_by_entity(entity_id, &target),
+                            Error::<T>::TargetNotApprovedMember
+                        );
                     }
+
+                    // H3 修复: 检查 target 是否满足 Entity 的参与要求（如 mandatory KYC）
+                    ensure!(
+                        T::ParticipationGuard::can_participate(entity_id, &target),
+                        Error::<T>::TargetParticipationDenied
+                    );
+                }
+
+                // H1 审计修复: 提现前检查 WithdrawalConfig 是否启用
+                // 未启用时 calc_withdrawal_split 返回 0% 复购，会绕过 Governance 底线
+                let withdrawal_config = WithdrawalConfigs::<T>::get(entity_id);
+                if let Some(ref wc) = withdrawal_config {
+                    ensure!(wc.enabled, Error::<T>::WithdrawalConfigNotEnabled);
                 }
 
                 // 冻结期检查
@@ -560,7 +610,8 @@ pub mod pallet {
                 // 统计记在出资人名下
                 stats.pending = stats.pending.saturating_sub(total_amount);
                 stats.withdrawn = stats.withdrawn.saturating_add(split.withdrawal);
-                stats.repurchased = stats.repurchased.saturating_add(split.repurchase);
+                // H3 审计修复: repurchased 应包含 bonus（两者均进入购物余额）
+                stats.repurchased = stats.repurchased.saturating_add(split.repurchase).saturating_add(split.bonus);
 
                 // 释放 pending 锁定
                 ShopPendingTotal::<T>::mutate(entity_id, |total| {
@@ -571,6 +622,7 @@ pub mod pallet {
                 Self::deposit_event(Event::TieredWithdrawal {
                     entity_id,
                     account: who.clone(),
+                    repurchase_target: target.clone(),
                     withdrawn_amount: split.withdrawal,
                     repurchase_amount: split.repurchase,
                     bonus_amount: split.bonus,
@@ -612,11 +664,15 @@ pub mod pallet {
                 default_tier.withdrawal_rate.saturating_add(default_tier.repurchase_rate) == 10000,
                 Error::<T>::InvalidWithdrawalConfig
             );
-            for (_, tier) in level_overrides.iter() {
-                ensure!(
-                    tier.withdrawal_rate.saturating_add(tier.repurchase_rate) == 10000,
-                    Error::<T>::InvalidWithdrawalConfig
-                );
+            {
+                let mut seen_ids = alloc::collections::BTreeSet::new();
+                for (level_id, tier) in level_overrides.iter() {
+                    ensure!(seen_ids.insert(*level_id), Error::<T>::DuplicateLevelId);
+                    ensure!(
+                        tier.withdrawal_rate.saturating_add(tier.repurchase_rate) == 10000,
+                        Error::<T>::InvalidWithdrawalConfig
+                    );
+                }
             }
 
             // 校验 bonus rate
@@ -720,18 +776,19 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 使用购物余额支付（需 Entity owner 授权，由订单流程触发）
+        /// 提取购物余额（会员自主操作：扣减记账 + NEX 从 Entity 转入会员钱包）
+        ///
+        /// 会员可随时将购物余额兑换为 NEX，也可通过 `place_order` 的 `use_shopping_balance`
+        /// 参数在下单时自动抵扣。
         #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
         pub fn use_shopping_balance(
             origin: OriginFor<T>,
             entity_id: u64,
-            account: T::AccountId,
             amount: BalanceOf<T>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            Self::ensure_entity_owner(entity_id, &who)?;
-            Self::do_use_shopping_balance(entity_id, &account, amount)
+            Self::do_consume_shopping_balance(entity_id, &who, amount)
         }
     }
 
@@ -766,6 +823,55 @@ pub mod pallet {
                 ShopShoppingTotal::<T>::mutate(entity_id, |total| {
                     *total = total.saturating_sub(amount);
                 });
+
+                Self::deposit_event(Event::ShoppingBalanceUsed {
+                    entity_id,
+                    account: account.clone(),
+                    amount,
+                });
+
+                Ok(())
+            })
+        }
+
+        /// 消费购物余额（扣减记账 + NEX 从 Entity 账户转入会员钱包）
+        ///
+        /// 供 `use_shopping_balance` extrinsic 和 `ShoppingBalanceProvider::consume` 调用。
+        /// 与 `do_use_shopping_balance`（纯记账）不同，本函数会实际转移 NEX。
+        pub fn do_consume_shopping_balance(
+            entity_id: u64,
+            account: &T::AccountId,
+            amount: BalanceOf<T>,
+        ) -> DispatchResult {
+            ensure!(!amount.is_zero(), Error::<T>::ZeroWithdrawalAmount);
+            // M2 方案 B: 未激活会员不能直接提取 NEX，必须先通过下单消费激活
+            ensure!(
+                T::MemberProvider::is_activated_by_entity(entity_id, account),
+                Error::<T>::MemberNotActivated
+            );
+
+            // H3 修复: 检查账户是否满足 Entity 的参与要求（如 mandatory KYC）
+            ensure!(
+                T::ParticipationGuard::can_participate(entity_id, account),
+                Error::<T>::ParticipationRequirementNotMet
+            );
+
+            MemberShoppingBalance::<T>::try_mutate(entity_id, account, |balance| -> DispatchResult {
+                ensure!(*balance >= amount, Error::<T>::InsufficientShoppingBalance);
+                *balance = balance.saturating_sub(amount);
+
+                ShopShoppingTotal::<T>::mutate(entity_id, |total| {
+                    *total = total.saturating_sub(amount);
+                });
+
+                // 将 NEX 从 Entity 账户转入会员钱包
+                let entity_account = T::EntityProvider::entity_account(entity_id);
+                T::Currency::transfer(
+                    &entity_account,
+                    account,
+                    amount,
+                    ExistenceRequirement::KeepAlive,
+                )?;
 
                 Self::deposit_event(Event::ShoppingBalanceUsed {
                     entity_id,

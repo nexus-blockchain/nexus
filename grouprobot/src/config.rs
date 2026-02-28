@@ -54,6 +54,8 @@ pub struct BotConfig {
     // TEE
     pub tee_mode: String,
     pub data_dir: String,
+    /// 密封策略: "mrenclave" / "mrsigner" / "dual" (默认 "dual")
+    pub seal_policy: String,
 
     // Vault 进程模式: "inprocess" | "spawn" | "connect"
     pub vault_mode: String,
@@ -65,6 +67,8 @@ pub struct BotConfig {
     pub shamir_threshold: u8,
     /// Peer TEE 节点端点列表 (RA-TLS, 用于收集 K-1 个 share)
     pub peer_endpoints: Vec<String>,
+    /// 旧版本 Enclave 端点 (Migration Ceremony, 用于跨版本密钥传递)
+    pub migration_source: Option<String>,
     /// Ceremony share 接收端口 (0 = 禁用)
     pub ceremony_port: u16,
 
@@ -96,9 +100,11 @@ impl std::fmt::Debug for BotConfig {
             .field("chain_signer_seed", &if self.chain_signer_seed.is_some() { "<REDACTED>" } else { "<none>" })
             .field("tee_mode", &self.tee_mode)
             .field("data_dir", &self.data_dir)
+            .field("seal_policy", &self.seal_policy)
             .field("vault_mode", &self.vault_mode)
             .field("shamir_threshold", &self.shamir_threshold)
             .field("peer_endpoints", &self.peer_endpoints.len())
+            .field("migration_source", &self.migration_source)
             .field("ceremony_port", &self.ceremony_port)
             .field("provision_secret", &if self.provision_secret.is_empty() { "<disabled>" } else { "<REDACTED>" })
             .field("metrics_enabled", &self.metrics_enabled)
@@ -151,6 +157,7 @@ impl BotConfig {
             chain_signer_seed: std::env::var("CHAIN_SIGNER_SEED").ok(),
             tee_mode: std::env::var("TEE_MODE").unwrap_or_else(|_| "auto".into()),
             data_dir: std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".into()),
+            seal_policy: std::env::var("SEAL_POLICY").unwrap_or_else(|_| "dual".into()),
             vault_mode: std::env::var("VAULT_MODE").unwrap_or_else(|_| "inprocess".into()),
             vault_socket: std::env::var("VAULT_SOCKET").unwrap_or_default(),
             shamir_threshold: std::env::var("SHAMIR_THRESHOLD")
@@ -163,6 +170,8 @@ impl BotConfig {
                 .filter(|s| !s.is_empty())
                 .map(|s| s.trim().to_string())
                 .collect(),
+            migration_source: std::env::var("MIGRATION_SOURCE").ok()
+                .filter(|s| !s.is_empty()),
             ceremony_port: std::env::var("CEREMONY_PORT")
                 .unwrap_or_else(|_| "0".into())
                 .parse()
@@ -257,10 +266,12 @@ mod tests {
             chain_signer_seed: Some("0xdeadbeef1234567890".into()),
             tee_mode: "software".into(),
             data_dir: "./data".into(),
+            seal_policy: "dual".into(),
             vault_mode: "inprocess".into(),
             vault_socket: String::new(),
             shamir_threshold: 2,
             peer_endpoints: vec![],
+            migration_source: None,
             ceremony_port: 0,
             provision_secret: String::new(),
             webhook_rate_limit: 200,

@@ -1050,6 +1050,7 @@ impl pallet_entity_transaction::Config for Runtime {
 	type ConfirmTimeout = EntityConfirmTimeout;
 	type ServiceConfirmTimeout = ConstU32<{ 7 * 24 * 600 }>;  // 7 天
 	type CommissionHandler = OrderCommissionBridge;
+	type ShoppingBalance = ShoppingBalanceBridge;
 	type MaxCidLength = ConstU32<64>;
 }
 
@@ -1211,6 +1212,16 @@ impl pallet_entity_commission::MemberProvider<AccountId> for MemberProviderBridg
 	fn auto_register(shop_id: u64, account: &AccountId, referrer: Option<AccountId>) -> sp_runtime::DispatchResult {
 		pallet_entity_member::Pallet::<Runtime>::auto_register(shop_id, account, referrer)
 	}
+
+	fn auto_register_by_entity(entity_id: u64, account: &AccountId, referrer: Option<AccountId>) -> sp_runtime::DispatchResult {
+		pallet_entity_member::Pallet::<Runtime>::auto_register_by_entity(entity_id, account, referrer)
+	}
+
+	fn is_activated_by_entity(entity_id: u64, account: &AccountId) -> bool {
+		pallet_entity_member::EntityMembers::<Runtime>::get(entity_id, account)
+			.map(|m| m.activated)
+			.unwrap_or(false)
+	}
 }
 
 /// 桥接：OrderCommissionHandler → CommissionProvider（供 Transaction 模块调用）
@@ -1235,6 +1246,24 @@ impl pallet_entity_common::OrderCommissionHandler<AccountId, Balance> for OrderC
 
 /// 桥接实现：CommissionCore pallet 作为 CommissionProvider
 pub type EntityCommissionProvider = pallet_commission_core::Pallet<Runtime>;
+
+/// 桥接：购物余额 → CommissionCore（供 Transaction 模块下单时抵扣购物余额）
+pub struct ShoppingBalanceBridge;
+impl pallet_entity_common::ShoppingBalanceProvider<AccountId, Balance> for ShoppingBalanceBridge {
+	fn shopping_balance(shop_id: u64, account: &AccountId) -> Balance {
+		use pallet_entity_common::ShopProvider;
+		match EntityShop::shop_entity_id(shop_id) {
+			Some(entity_id) => pallet_commission_core::MemberShoppingBalance::<Runtime>::get(entity_id, account),
+			None => 0,
+		}
+	}
+	fn consume_shopping_balance(shop_id: u64, account: &AccountId, amount: Balance) -> Result<(), sp_runtime::DispatchError> {
+		use pallet_entity_common::ShopProvider;
+		let entity_id = EntityShop::shop_entity_id(shop_id)
+			.ok_or(sp_runtime::DispatchError::Other("ShopNotFound"))?;
+		pallet_commission_core::Pallet::<Runtime>::do_consume_shopping_balance(entity_id, account, amount)
+	}
+}
 pub type EntityMemberProvider = MemberProviderBridge;
 
 impl pallet_entity_governance::Config for Runtime {
@@ -1282,6 +1311,16 @@ impl pallet_commission_common::EntityReferrerProvider<AccountId> for EntityRefer
 	}
 }
 
+/// H3 桥接：ParticipationGuard → pallet-entity-kyc::can_participate_in_entity
+/// Entity 未配置 EntityRequirements 或 mandatory=false 时返回 true（允许所有操作）
+pub struct KycParticipationGuard;
+
+impl pallet_commission_core::ParticipationGuard<AccountId> for KycParticipationGuard {
+	fn can_participate(entity_id: u64, account: &AccountId) -> bool {
+		pallet_entity_kyc::Pallet::<Runtime>::can_participate_in_entity(account, entity_id)
+	}
+}
+
 impl pallet_commission_core::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
@@ -1301,6 +1340,7 @@ impl pallet_commission_core::Config for Runtime {
 	type ReferrerShareBps = ConstU16<5000>; // 50% of platform fee → referrer
 	type MaxCommissionRecordsPerOrder = ConstU32<20>;
 	type MaxCustomLevels = ConstU32<10>;
+	type ParticipationGuard = KycParticipationGuard;
 }
 
 impl pallet_commission_referral::Config for Runtime {

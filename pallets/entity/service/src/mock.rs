@@ -6,7 +6,7 @@ use frame_support::{
 };
 use sp_runtime::BuildStorage;
 use pallet_entity_common::{
-    EntityProvider, EntityStatus, ShopProvider, ShopType, MemberMode,
+    EntityProvider, EntityStatus, ShopProvider, ShopType,
     PricingProvider,
 };
 use sp_runtime::DispatchError;
@@ -71,10 +71,6 @@ impl ShopProvider<u64> for MockShopProvider {
 
     fn shop_type(_shop_id: u64) -> Option<ShopType> {
         Some(ShopType::default())
-    }
-
-    fn shop_member_mode(_shop_id: u64) -> MemberMode {
-        MemberMode::default()
     }
 
     fn is_shop_manager(_shop_id: u64, _account: &u64) -> bool {

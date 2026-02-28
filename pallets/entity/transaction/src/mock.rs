@@ -145,10 +145,6 @@ impl pallet_entity_common::ShopProvider<u64> for MockShopProvider {
         Some(pallet_entity_common::ShopType::OnlineStore)
     }
 
-    fn shop_member_mode(_shop_id: u64) -> pallet_entity_common::MemberMode {
-        pallet_entity_common::MemberMode::Inherit
-    }
-
     fn is_shop_manager(_shop_id: u64, _account: &u64) -> bool {
         false
     }
@@ -185,7 +181,7 @@ impl pallet_entity_common::ShopProvider<u64> for MockShopProvider {
         10000
     }
 
-    fn create_primary_shop(_entity_id: u64, _name: sp_std::vec::Vec<u8>, _shop_type: pallet_entity_common::ShopType, _member_mode: pallet_entity_common::MemberMode) -> Result<u64, sp_runtime::DispatchError> {
+    fn create_primary_shop(_entity_id: u64, _name: sp_std::vec::Vec<u8>, _shop_type: pallet_entity_common::ShopType) -> Result<u64, sp_runtime::DispatchError> {
         Ok(1)
     }
 
@@ -333,6 +329,39 @@ impl pallet_entity_common::EntityTokenProvider<u64, u64> for MockEntityToken {
     }
 }
 
+// ==================== Mock ShoppingBalanceProvider ====================
+
+pub struct MockShoppingBalanceProvider;
+
+thread_local! {
+    static SHOPPING_BALANCES: RefCell<HashMap<(u64, u64), u64>> = RefCell::new(HashMap::new());
+}
+
+#[allow(dead_code)]
+pub fn set_shopping_balance(shop_id: u64, account: u64, amount: u64) {
+    SHOPPING_BALANCES.with(|b| b.borrow_mut().insert((shop_id, account), amount));
+}
+
+impl pallet_entity_common::ShoppingBalanceProvider<u64, u64> for MockShoppingBalanceProvider {
+    fn shopping_balance(shop_id: u64, account: &u64) -> u64 {
+        SHOPPING_BALANCES.with(|b| *b.borrow().get(&(shop_id, *account)).unwrap_or(&0))
+    }
+
+    fn consume_shopping_balance(shop_id: u64, account: &u64, amount: u64) -> Result<(), sp_runtime::DispatchError> {
+        SHOPPING_BALANCES.with(|b| {
+            let mut map = b.borrow_mut();
+            let balance = map.entry((shop_id, *account)).or_insert(0);
+            if *balance < amount {
+                return Err(sp_runtime::DispatchError::Other("InsufficientShoppingBalance"));
+            }
+            *balance -= amount;
+            // Simulate: transfer NEX from Entity to buyer (in real impl, commission-core does this)
+            // For tests, we just credit the buyer's balance conceptually
+            Ok(())
+        })
+    }
+}
+
 // ==================== Mock CommissionHandler ====================
 
 pub struct MockCommissionHandler;
@@ -384,6 +413,7 @@ impl pallet_entity_transaction::Config for Test {
     type ConfirmTimeout = ConstU64<200>;
     type ServiceConfirmTimeout = ConstU64<150>;
     type CommissionHandler = MockCommissionHandler;
+    type ShoppingBalance = MockShoppingBalanceProvider;
     type MaxCidLength = ConstU32<64>;
 }
 
@@ -415,6 +445,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         ESCROW_STATES.with(|s| s.borrow_mut().clear());
         PRODUCT_STOCK.with(|s| s.borrow_mut().clear());
         CANCELLED_ORDERS.with(|c| c.borrow_mut().clear());
+        SHOPPING_BALANCES.with(|b| b.borrow_mut().clear());
     });
     ext
 }

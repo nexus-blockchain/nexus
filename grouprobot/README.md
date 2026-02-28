@@ -176,6 +176,8 @@ Token 保护的三种进程隔离模式:
 | `CHAIN_SIGNER_SEED` | 自动生成 | sr25519 签名密钥种子 (启动后自动从 environ 清除) |
 | `TEE_MODE` | `auto` | TEE 模式: `auto` / `hardware` / `software` |
 | `DATA_DIR` | `./data` | 数据目录 (密封密钥/share/序列号) |
+| `SEAL_POLICY` | `dual` | 密封策略: `mrenclave` / `mrsigner` / `dual` (见下方说明) |
+| `MIGRATION_SOURCE` | — | 旧版本 Enclave 端点 (Migration Ceremony, 例: `https://old:3000`) |
 | `VAULT_MODE` | `inprocess` | Token 保险库模式: `inprocess` / `spawn` / `connect` |
 | `VAULT_SOCKET` | 自动 | Vault Unix socket 路径 |
 | `SHAMIR_THRESHOLD` | `2` | Shamir 门限 K (默认 K=2, N=4) |
@@ -210,11 +212,60 @@ Token 保护的三种进程隔离模式:
 - **Shamir 恢复**: 本地 sealed share → K-1 peer RA-TLS 收集 → 环境变量 fallback (auto-seal)
 - **证明刷新**: 24h 有效期, 23h 自动刷新 (1h 安全边际)
 
+## 密封策略 (SEAL_POLICY)
+
+控制密封存储的密钥绑定方式, 直接影响升级兼容性:
+
+| 策略 | 密钥绑定 | 升级兼容 | 安全性 | 适用场景 |
+|------|----------|----------|--------|----------|
+| `mrenclave` | 代码度量 (MRENCLAVE) | 代码变更后旧文件不可读 | 最高 | 安全性优先, 无跨版本需求 |
+| `mrsigner` | 签名者 (MRSIGNER) | Gramine 签名密钥不变即兼容 | 高 | 频繁升级, 单签名密钥管控 |
+| `dual` | 写 MRSIGNER / 读兼容两种 | 跨版本兼容 + V0 向后兼容 | 高 | **推荐生产环境** |
+
+密封文件格式:
+- V0 (旧): `[nonce:12][ciphertext]` — 仅 MRENCLAVE 密钥
+- V1 (新): `[0x01][key_type:1][nonce:12][ciphertext]` — 标识密钥类型
+
+启动时自动将 V0 文件迁移到 V1 (原文件备份为 `.v0.bak`)。
+
+## 5 级恢复链
+
+启动时按优先级尝试恢复 Token + 签名密钥:
+
+| 级别 | 来源 | 条件 | 场景 |
+|------|------|------|------|
+| 1 | 本地密封 share (K=1) | 本地 `.sealed` 文件可解密 | 常规重启, MRSIGNER 跨版本 |
+| 2 | 本地 + Peer share (K>1) | peer 端点可达, K 个 share 收集成功 | 滚动升级, 多节点部署 |
+| 3 | Migration Ceremony | `MIGRATION_SOURCE` 已配置, 旧版本运行中 | Gramine 签名密钥变更 |
+| 4 | RA-TLS Provision | DApp 管理员通过 `/provision/inject-token` 注入 | 管理员干预 |
+| 5 | 环境变量 fallback | `BOT_TOKEN` 环境变量存在 | 紧急恢复, 首次部署 |
+
+### Migration Ceremony 协议
+
+用于 Gramine 签名密钥变更等 MRSIGNER 也变的场景:
+
+```
+旧 Enclave (运行中) ←── HTTP POST /migration/export-secret ──── 新 Enclave (启动中)
+    │                                                              │
+    │  1. 解密本地 share → 恢复 secret                              │
+    │  2. ECDH(ephemeral_sk, new_pk) 加密 → 响应                   │
+    │                                                              │
+    │  ──────── { encrypted_secret, ephemeral_pk } ──────────►    │
+    │                                                              │
+    │                              3. ECDH 解密 → 获得 secret      │
+    │                              4. Auto-seal → 本地密封保存      │
+```
+
+安全约束:
+- 单次使用: 导出后标记 `exported`, 拒绝重复导出
+- ECDH 端到端: secret 明文仅在 TEE 内存中
+- 身份保持: 迁移的 Ed25519 签名密钥保持链上身份不变
+
 ## 测试
 
 ```bash
 cargo test
-# 131 tests passing
+# 398 tests passing
 ```
 
 ## SGX 部署 (Gramine)
@@ -231,6 +282,104 @@ cd gramine
 gramine-manifest -Dlog_level=error token-vault.manifest.template token-vault.manifest
 gramine-sgx-sign --manifest token-vault.manifest --output token-vault.manifest.sgx
 ```
+
+## 升级 SOP
+
+### 场景 A: 小版本升级 (同 Gramine 签名密钥)
+
+MRSIGNER 不变, `SEAL_POLICY=dual` 时 Level 1 直接解密旧密封文件:
+
+```bash
+# 1. 编译新版本
+cargo build --release
+
+# 2. 提取新 MRTD + 链上预批准
+./scripts/extract-mrtd.sh
+substrate-cli tx groupRobotRegistry approve_mrtd --mrtd <NEW_MRTD>
+
+# 3. 滚动升级 (自动逐台)
+./scripts/rolling-upgrade.sh upgrade-config.json
+
+# 4. 验证: 所有节点 public_key 不变, 版本更新
+curl http://node:3000/v1/status
+```
+
+### 场景 B: 多节点滚动升级 (K-of-N)
+
+约束: 同时停止的节点数 ≤ N - K
+
+```bash
+# 1. 链上预批准新 MRTD (同上)
+# 2. 编写 upgrade-config.json:
+cat > upgrade-config.json <<'EOF'
+{
+  "nodes": [
+    { "name": "node-a", "host": "10.0.1.1", "port": 3000, "ssh": "user@10.0.1.1" },
+    { "name": "node-b", "host": "10.0.1.2", "port": 3000, "ssh": "user@10.0.1.2" },
+    { "name": "node-c", "host": "10.0.1.3", "port": 3000, "ssh": "user@10.0.1.3" },
+    { "name": "node-d", "host": "10.0.1.4", "port": 3000, "ssh": "user@10.0.1.4" }
+  ],
+  "shamir_k": 2,
+  "binary_path": "/opt/grouprobot/grouprobot",
+  "new_binary": "./target/release/grouprobot",
+  "health_timeout": 60
+}
+EOF
+
+# 3. 执行
+./scripts/rolling-upgrade.sh upgrade-config.json
+```
+
+### 场景 C: Gramine 签名密钥变更 (Migration Ceremony)
+
+MRSIGNER 也变, 需通过旧版本传递密钥:
+
+```bash
+# 1. 保持旧版本运行
+# 2. 启动新版本, 指定 MIGRATION_SOURCE:
+MIGRATION_SOURCE=https://old-node:3000 \
+SEAL_POLICY=dual \
+./grouprobot
+
+# 新版本启动时自动:
+#   Level 1: 本地 share 解密失败 (MRSIGNER 变了)
+#   Level 3: 向旧版本发起 Migration Ceremony
+#   → ECDH 获取 secret → auto-seal → 身份保持
+#
+# 3. 验证后停止旧版本
+```
+
+### CI/CD 集成
+
+```yaml
+# GitHub Actions 示例
+- name: Build SGX Enclave
+  run: |
+    cargo build --release
+    cp target/release/grouprobot gramine/
+    cd gramine
+    gramine-manifest -Dlog_level=error token-vault.manifest.template token-vault.manifest
+    gramine-sgx-sign --manifest token-vault.manifest --output token-vault.manifest.sgx
+
+- name: Extract MRTD
+  run: ./scripts/extract-mrtd.sh
+
+- name: Upload measurements
+  uses: actions/upload-artifact@v4
+  with:
+    name: mrtd-measurements
+    path: gramine/mrtd-measurements.json
+```
+
+### 升级验证清单
+
+| 检查项 | 命令 | 期望 |
+|--------|------|------|
+| 节点健康 | `curl /health` | `{"status": "ok"}` |
+| 版本更新 | `curl /health` | `.version` = 新版本 |
+| 身份保持 | `curl /v1/status` | `.public_key` 不变 |
+| 密封兼容 | `curl /v1/status` | `.upgrade_compat.cross_version_seal` = true |
+| 链上证明 | `substrate-cli query attestations` | `quote_verified=true`, `mrtd=新值` |
 
 ## 许可证
 

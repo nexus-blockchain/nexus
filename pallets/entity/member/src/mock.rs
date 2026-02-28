@@ -134,10 +134,6 @@ impl pallet_entity_common::ShopProvider<u64> for MockShopProvider {
         Some(pallet_entity_common::ShopType::OnlineStore)
     }
 
-    fn shop_member_mode(_shop_id: u64) -> pallet_entity_common::MemberMode {
-        pallet_entity_common::MemberMode::Inherit
-    }
-
     fn is_shop_manager(_shop_id: u64, _account: &u64) -> bool {
         false
     }

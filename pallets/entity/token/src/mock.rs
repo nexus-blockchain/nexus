@@ -114,7 +114,7 @@ impl pallet_assets::Config for Test {
 
 use pallet_entity_common::{
     EntityProvider as EntityProviderTrait, ShopProvider as ShopProviderTrait,
-    EntityStatus, ShopType, MemberMode, ShopOperatingStatus, EffectiveShopStatus,
+    EntityStatus, ShopType, ShopOperatingStatus, EffectiveShopStatus,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -144,7 +144,6 @@ impl ShopProviderTrait<u64> for MockShopProvider {
     }
     fn shop_account(_shop_id: u64) -> u64 { 999 }
     fn shop_type(_shop_id: u64) -> Option<ShopType> { Some(ShopType::default()) }
-    fn shop_member_mode(_shop_id: u64) -> MemberMode { MemberMode::default() }
     fn is_shop_manager(_shop_id: u64, _account: &u64) -> bool { false }
     fn shop_own_status(_shop_id: u64) -> Option<ShopOperatingStatus> { None }
     fn effective_status(_shop_id: u64) -> Option<EffectiveShopStatus> { None }

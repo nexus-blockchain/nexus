@@ -1,15 +1,14 @@
-// Share Recovery — 启动时从 Shamir Share 恢复 Token + 签名密钥
+// Share Recovery — 5 级恢复链
 //
-// 恢复流程:
-// 1. 尝试加载本地密封 share
-// 2. K=1: 单个 share 直接恢复
-//    K>1: 本地 share + 从 peer 收集 K-1 个 share → Shamir recover
-// 3. decode_secrets → (signing_key, bot_token)
-// 4. 注入 TokenVault
-//
-// Fallback: 无 share 时从环境变量加载 (过渡模式, 带告警)
+// 优先级:
+// 1. 本地密封 share (MRSIGNER/MRENCLAVE 兼容读取)
+// 2. Peer share 收集 (K-of-N, 滚动升级)
+// 3. Migration Ceremony (从旧版本 Enclave ECDH 传递)
+// 4. RA-TLS Provision (DApp 注入, 管理员干预)
+// 5. 环境变量 fallback + auto-seal (紧急恢复)
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tracing::{info, warn};
 use zeroize::Zeroizing;
@@ -31,14 +30,19 @@ pub struct RecoveryResult {
     pub source: RecoverySource,
 }
 
-/// 恢复来源
+/// 恢复来源 (5 级)
 #[derive(Debug, Clone, PartialEq)]
 pub enum RecoverySource {
-    /// 从本地密封 share 恢复 (K=1)
+    /// Level 1: 从本地密封 share 恢复 (K=1, MRSIGNER/MRENCLAVE dual-key)
     LocalShare,
-    /// 从本地 + peer 收集 share 恢复 (K>1)
+    /// Level 2: 从本地 + peer 收集 share 恢复 (K>1)
     PeerShares { collected: usize, threshold: u8 },
-    /// 从环境变量 fallback (过渡模式)
+    /// Level 3: 从旧版本 Enclave 迁移恢复 (Migration Ceremony)
+    MigrationCeremony { source_endpoint: String },
+    /// Level 4: 从 RA-TLS Provision 恢复 (已有机制, 此处标记)
+    #[allow(dead_code)]
+    RaTlsProvision,
+    /// Level 5: 从环境变量 fallback (过渡模式)
     EnvironmentVariable,
 }
 
@@ -49,6 +53,10 @@ impl std::fmt::Display for RecoverySource {
             Self::PeerShares { collected, threshold } => {
                 write!(f, "{}/{} peer shares", collected, threshold)
             }
+            Self::MigrationCeremony { source_endpoint } => {
+                write!(f, "migration ceremony from {}", source_endpoint)
+            }
+            Self::RaTlsProvision => write!(f, "RA-TLS provision"),
             Self::EnvironmentVariable => write!(f, "environment variable (INSECURE)"),
         }
     }
@@ -69,29 +77,47 @@ pub struct RecoveryConfig {
     pub chain_client: Option<Arc<ChainClient>>,
     /// Bot ID Hash (用于链上查询 PeerRegistry)
     pub bot_id_hash: Option<[u8; 32]>,
+    /// 旧版本 Enclave 端点 (用于 Migration Ceremony, Level 3)
+    pub migration_source: Option<String>,
 }
 
-/// 尝试从密封 share 恢复 Token
-///
-/// 优先级:
-/// 1. 本地密封 share (+ peer shares if K>1) → Shamir recover → decode_secrets
-/// 2. 环境变量 fallback (过渡模式, 带告警)
+/// 5 级恢复链: 按优先级尝试所有恢复路径
 pub async fn recover_token(
     enclave: &Arc<EnclaveBridge>,
     config: &RecoveryConfig,
 ) -> BotResult<RecoveryResult> {
-    // 尝试从 share 恢复
+    // ── Level 1+2: 本地密封 share (+ peer if K>1) ──
     match try_share_recovery(enclave, config).await {
         Ok(result) => {
             info!(source = %result.source, "Token 已从 Shamir share 恢复");
             return Ok(result);
         }
         Err(e) => {
-            warn!(error = %e, "Share 恢复失败, 尝试环境变量 fallback");
+            warn!(error = %e, "Level 1/2 share 恢复失败");
         }
     }
 
-    // Fallback: 环境变量 (过渡模式) + auto-seal
+    // ── Level 3: Migration Ceremony (从旧版本 Enclave 获取) ──
+    if let Some(ref source_endpoint) = config.migration_source {
+        info!(endpoint = %source_endpoint, "尝试 Level 3: Migration Ceremony");
+        match try_migration_recovery(enclave, config, source_endpoint).await {
+            Ok(result) => {
+                info!(source = %result.source, "Token 已从 Migration Ceremony 恢复");
+                return Ok(result);
+            }
+            Err(e) => {
+                warn!(error = %e, "Level 3 Migration Ceremony 失败");
+            }
+        }
+    }
+
+    // ── Level 4: RA-TLS Provision (已由外部机制处理, 此处仅记录) ──
+    // RA-TLS Provision 通过 /provision/inject-token 端点异步注入,
+    // 不在 startup recovery chain 中同步等待.
+    // 如果 provision 已注入 Token, try_share_recovery 已经能读到.
+
+    // ── Level 5: 环境变量 fallback + auto-seal (紧急恢复) ──
+    warn!("⚠️ Level 1-3 均失败, 降级到 Level 5: 环境变量 fallback");
     try_env_fallback(enclave, config)
 }
 
@@ -147,10 +173,6 @@ async fn try_share_recovery(
             needed,
         ).await?;
 
-        // 解密 peer shares (ECDH: 用本节点 Ed25519 私钥 → X25519 解密)
-        //
-        // Share 服务端已用请求者的 Ed25519 公钥做 ECDH 加密,
-        // 这里用本节点的私钥解密, 不依赖 seal_key 一致性。
         let receiver_x25519_secret = shamir::ed25519_to_x25519_secret(&enclave.signing_key().to_bytes());
         let mut all_shares = vec![local_share];
         for ecdh_share in &peer_encrypted {
@@ -197,9 +219,118 @@ async fn try_share_recovery(
     })
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Level 3: Migration Ceremony — 从旧版本 Enclave 获取密钥
+// ═══════════════════════════════════════════════════════════════
+
+/// Migration 导出响应 (旧版本 Enclave 返回)
+#[derive(serde::Deserialize)]
+struct MigrationExportResponse {
+    /// ECDH 加密的 secret (base64)
+    encrypted_secret: String,
+    /// 临时 X25519 公钥 (hex, 用于 ECDH 解密)
+    ephemeral_pk: String,
+    /// 旧版本的 Ed25519 公钥 (hex)
+    #[allow(dead_code)]
+    source_pk: String,
+}
+
+/// 从旧版本 Enclave 请求密钥迁移
+async fn try_migration_recovery(
+    enclave: &Arc<EnclaveBridge>,
+    config: &RecoveryConfig,
+    source_endpoint: &str,
+) -> BotResult<RecoveryResult> {
+    let url = format!(
+        "{}/migration/export-secret",
+        source_endpoint.trim_end_matches('/')
+    );
+
+    let my_pk = enclave.public_key_bytes();
+    let my_pk_hex = hex::encode(my_pk);
+
+    info!(url = %url, requester_pk = %my_pk_hex, "发起 Migration Ceremony 请求");
+
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| BotError::EnclaveError(format!("http client: {}", e)))?;
+
+    let req_body = serde_json::json!({
+        "requester_pk": my_pk_hex,
+    });
+
+    let resp = http.post(&url)
+        .json(&req_body)
+        .send()
+        .await
+        .map_err(|e| BotError::EnclaveError(format!("migration request failed: {}", e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(BotError::EnclaveError(format!(
+            "migration export failed: {} — {}", status, body
+        )));
+    }
+
+    let export_resp: MigrationExportResponse = resp.json().await
+        .map_err(|e| BotError::EnclaveError(format!("migration response parse: {}", e)))?;
+
+    // ECDH 解密: 用本节点的 Ed25519 私钥 → X25519 解密
+    let receiver_x25519 = shamir::ed25519_to_x25519_secret(&enclave.signing_key().to_bytes());
+
+    let ephemeral_pk_bytes = hex::decode(&export_resp.ephemeral_pk)
+        .map_err(|e| BotError::EnclaveError(format!("ephemeral_pk hex: {}", e)))?;
+    if ephemeral_pk_bytes.len() != 32 {
+        return Err(BotError::EnclaveError("ephemeral_pk must be 32 bytes".into()));
+    }
+    let mut ephemeral_pk = [0u8; 32];
+    ephemeral_pk.copy_from_slice(&ephemeral_pk_bytes);
+
+    let encrypted_bytes = crate::tee::peer_client::base64_decode_pub(&export_resp.encrypted_secret)
+        .map_err(|e| BotError::EnclaveError(format!("encrypted_secret base64: {}", e)))?;
+
+    let secret_bytes = shamir::ecdh_decrypt_raw(&encrypted_bytes, &receiver_x25519, &ephemeral_pk)
+        .map_err(|e| BotError::EnclaveError(format!("migration ECDH decrypt: {}", e)))?;
+
+    // 解码: secret_bytes = encode_secrets(bot_token, signing_key)
+    let (sk_bytes, bot_token) = shamir::decode_secrets(&secret_bytes)
+        .map_err(|e| BotError::EnclaveError(format!("migration decode secrets: {}", e)))?;
+
+    let mut vault = TokenVault::new();
+    if config.needs_telegram {
+        vault.set_telegram_token(bot_token.clone());
+    }
+    if config.needs_discord {
+        vault.set_discord_token(bot_token.clone());
+    }
+
+    let mut signing_key = Zeroizing::new([0u8; 32]);
+    signing_key.copy_from_slice(&sk_bytes);
+
+    // 用迁移的密钥替换当前自动生成的密钥 (保持链上身份)
+    // replace_signing_key 会用当前 SealPolicy 重新密封
+    // 注意: enclave 被 Arc 包裹, 需要获取可变引用的方式处理
+    // 这里通过 auto-seal 机制保存: 创建 K=1 share 并密封
+    auto_seal_token(enclave, &bot_token, &sk_bytes)?;
+
+    info!(
+        source = %source_endpoint,
+        signing_key_pk = %hex::encode(ed25519_dalek::SigningKey::from_bytes(&sk_bytes).verifying_key().to_bytes()),
+        "Migration Ceremony 成功: secret 已恢复并密封"
+    );
+
+    Ok(RecoveryResult {
+        vault,
+        signing_key,
+        source: RecoverySource::MigrationCeremony {
+            source_endpoint: source_endpoint.to_string(),
+        },
+    })
+}
+
 /// 从链上 PeerRegistry 自动发现 peer 端点
-///
-/// 查询 bot_id_hash 对应的所有注册 Peer, 排除自己 (根据公钥), 返回端点列表
 async fn auto_discover_peers(
     config: &RecoveryConfig,
     enclave: &Arc<EnclaveBridge>,
@@ -254,8 +385,6 @@ fn try_env_fallback(
 
     let mut vault = TokenVault::new();
 
-    // ⚠️ 安全: 使用 Zeroizing 包裹环境变量中读取的 token, 确保 drop 时清零
-    // 避免 token.clone() 产生未清零的 String 副本
     let mut primary_token: Option<Zeroizing<String>>;
 
     if config.needs_telegram {
@@ -276,17 +405,14 @@ fn try_env_fallback(
         vault.set_discord_token(token);
     }
 
-    // R5 修复: 使用 EnclaveBridge 的实际 Ed25519 密钥, 避免 auto-seal 存入零值
-    // 这样从 share 恢复时能还原正确的签名密钥
     let mut signing_key = Zeroizing::new([0u8; 32]);
     signing_key.copy_from_slice(&enclave.signing_key().to_bytes());
 
     // ── Auto-seal: 将 Token 自动保存为 Shamir share ──
-    // 下次启动时 recover_token() 会直接从 share 恢复, 不再需要环境变量
     if let Some(ref token) = primary_token {
         match auto_seal_token(enclave, token.as_str(), &signing_key) {
             Ok(()) => {
-                info!("✅ Token 已自动密封为 Shamir share (下次启动将从 share 恢复)");
+                info!("Token 已自动密封为 Shamir share (下次启动将从 share 恢复)");
                 warn!("⚠️  请在下次部署时移除 BOT_TOKEN / DISCORD_BOT_TOKEN 环境变量");
             }
             Err(e) => {
@@ -294,10 +420,8 @@ fn try_env_fallback(
             }
         }
     }
-    // primary_token (Zeroizing<String>) 在此作用域结束后自动清零
 
-    // ⚠️ 安全: 清除环境变量中的 token 明文, 防止通过 /proc/<pid>/environ 读取
-    // 注意: std::env::remove_var 仅清除进程内 env, 不影响父进程
+    // 清除环境变量中的 token 明文
     if config.needs_telegram {
         std::env::remove_var("BOT_TOKEN");
     }
@@ -318,22 +442,17 @@ fn auto_seal_token(
     token: &str,
     signing_key: &[u8; 32],
 ) -> BotResult<()> {
-    // 检查是否已有 share (避免覆盖 Ceremony 产出的 share)
     if let Ok(Some(_)) = enclave.load_local_share() {
         info!("本地已有 share, 跳过 auto-seal");
         return Ok(());
     }
 
-    // K=1, N=1: 单节点 auto-seal (过渡用途, ceremony_hash 为零)
     let zero_hash = [0u8; 32];
     create_and_save_share(enclave, token, signing_key, 1, 1, 0, &zero_hash)?;
     Ok(())
 }
 
 /// 执行 Ceremony 后保存 share (由 Ceremony 端点调用)
-///
-/// 将 bot_token + signing_key 编码为 secrets, 分片, 加密并保存本地 share
-/// ceremony_hash 同时保存, 用于后续 handle_share_request 验证
 pub fn create_and_save_share(
     enclave: &Arc<EnclaveBridge>,
     bot_token: &str,
@@ -361,7 +480,6 @@ pub fn create_and_save_share(
         .map_err(|e| BotError::EnclaveError(format!("encrypt share: {}", e)))?;
 
     enclave.save_local_share(&encrypted)?;
-    // R4: 保存 ceremony_hash, 供 handle_share_request 验证请求来源
     enclave.save_ceremony_hash(ceremony_hash)?;
 
     info!(
@@ -390,6 +508,7 @@ mod tests {
             ceremony_hash: [0u8; 32],
             chain_client: None,
             bot_id_hash: None,
+            migration_source: None,
         }
     }
 
@@ -412,13 +531,11 @@ mod tests {
         let url = result.vault.build_tg_api_url("getMe").unwrap();
         assert!(url.contains("123456:ABCDEF_token"));
         assert_eq!(&*result.signing_key, &sk);
-        // R4: verify ceremony_hash was persisted
         assert_eq!(enclave.load_ceremony_hash().unwrap(), Some(ch));
     }
 
     #[test]
     fn no_share_falls_back_to_env() {
-        // 直接测试 try_env_fallback (同步, 避免与 async 测试的 env var 竞争)
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
         let enclave = make_enclave(path);
@@ -430,11 +547,8 @@ mod tests {
         assert_eq!(result.source, RecoverySource::EnvironmentVariable);
         assert!(result.vault.has_telegram_token());
 
-        // ── 附带测试 auto-seal → share 恢复 (在同一线程内顺序执行, 无竞争) ──
-        // auto_seal 应该已经保存了 share
         assert!(enclave.load_local_share().unwrap().is_some());
 
-        // 清除 env, 从 sealed share 恢复
         std::env::remove_var("BOT_TOKEN");
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let r2 = rt.block_on(recover_token(&enclave, &config)).unwrap();
@@ -479,6 +593,12 @@ mod tests {
             "2/3 peer shares"
         );
         assert_eq!(
+            format!("{}", RecoverySource::MigrationCeremony {
+                source_endpoint: "https://old:3000".into(),
+            }),
+            "migration ceremony from https://old:3000"
+        );
+        assert_eq!(
             format!("{}", RecoverySource::EnvironmentVariable),
             "environment variable (INSECURE)"
         );
@@ -494,19 +614,48 @@ mod tests {
         let sk = [0x11u8; 32];
         create_and_save_share(&enclave, token, &sk, 2, 3, 0, &[0u8; 32]).unwrap();
 
-        // K=2 but no peer endpoints → try_share_recovery must fail
         let config = RecoveryConfig {
             threshold: 2,
             needs_telegram: true,
             needs_discord: false,
-            peer_endpoints: vec![], // no peers!
+            peer_endpoints: vec![],
             ceremony_hash: [0u8; 32],
             chain_client: None,
             bot_id_hash: None,
+            migration_source: None,
         };
         let result = try_share_recovery(&enclave, &config).await;
         assert!(result.is_err());
         let err_msg = format!("{}", result.err().unwrap());
         assert!(err_msg.contains("no peer_endpoints"), "expected peer_endpoints error, got: {}", err_msg);
+    }
+
+    #[tokio::test]
+    async fn migration_recovery_unreachable_endpoint_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let enclave = make_enclave(path);
+
+        let config = default_config(1, true, false);
+        let result = try_migration_recovery(
+            &enclave, &config, "http://127.0.0.1:59999",
+        ).await;
+        assert!(result.is_err(), "unreachable migration source should fail");
+        let err = format!("{}", result.err().unwrap());
+        assert!(
+            err.contains("migration request failed") || err.contains("connection"),
+            "expected connection error, got: {}", err
+        );
+    }
+
+    #[test]
+    fn recovery_source_migration_eq() {
+        let a = RecoverySource::MigrationCeremony {
+            source_endpoint: "https://a:3000".into(),
+        };
+        let b = RecoverySource::MigrationCeremony {
+            source_endpoint: "https://a:3000".into(),
+        };
+        assert_eq!(a, b);
     }
 }

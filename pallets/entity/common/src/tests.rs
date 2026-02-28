@@ -305,24 +305,6 @@ fn shop_operating_status_can_resume() {
 }
 
 // ============================================================================
-// MemberMode tests
-// ============================================================================
-
-#[test]
-fn member_mode_entity_members() {
-    assert!(MemberMode::Inherit.uses_entity_members());
-    assert!(MemberMode::Hybrid.uses_entity_members());
-    assert!(!MemberMode::Independent.uses_entity_members());
-}
-
-#[test]
-fn member_mode_shop_members() {
-    assert!(MemberMode::Independent.uses_shop_members());
-    assert!(MemberMode::Hybrid.uses_shop_members());
-    assert!(!MemberMode::Inherit.uses_shop_members());
-}
-
-// ============================================================================
 // MemberLevel tests
 // ============================================================================
 

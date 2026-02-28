@@ -23,6 +23,7 @@ loader.env.LD_LIBRARY_PATH = "/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-g
 # BOT_TOKEN 由 Shamir share 恢复, 不从环境变量传入
 loader.env.DATA_DIR = "/data"
 loader.env.TEE_MODE = "hardware"
+loader.env.SEAL_POLICY = "dual"
 loader.env.VAULT_SOCKET = "/data/vault.sock"
 loader.env.RUST_LOG = "info"
 loader.env.VAULT_MODE = "server"
@@ -59,6 +60,16 @@ sgx.allowed_files = [
 # ── 加密文件 (SGX seal key 加密) ──
 # data/ 目录包含 sealed shares 和 IPC socket
 sgx.protected_files_key = "default"
+
+# ── Seal Key 派生策略 ──
+# Gramine 默认使用 MRENCLAVE-bound seal key (/dev/attestation/keys/_sgx_mrenclave)
+# 同时暴露 MRSIGNER-bound seal key (/dev/attestation/keys/_sgx_mrsigner)
+# 应用层通过 SEAL_POLICY 环境变量选择:
+#   mrenclave — 最高安全性, 代码变更后旧密封文件不可读
+#   mrsigner  — 跨版本兼容, 只要 Gramine 签名密钥不变
+#   dual      — 写入用 MRSIGNER, 读取兼容两种 (推荐生产环境)
+sgx.seal_key_flags.mrenclave = true
+sgx.seal_key_flags.mrsigner = true
 
 # ── 系统调用白名单 ──
 # Gramine 默认允许大多数系统调用

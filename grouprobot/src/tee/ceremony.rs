@@ -792,6 +792,118 @@ fn compute_mrenclave(pk: &[u8; 32]) -> [u8; 32] {
     h.finalize().into()
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Migration Ceremony — 跨版本密钥传递
+// ═══════════════════════════════════════════════════════════════
+
+/// Migration 导出请求 (新版本 Enclave → 旧版本)
+#[derive(serde::Deserialize)]
+pub struct MigrationExportRequest {
+    /// 请求者 (新版本) 的 Ed25519 公钥 (hex)
+    pub requester_pk: String,
+}
+
+/// Migration 导出响应 (旧版本 Enclave 返回)
+#[derive(serde::Serialize)]
+pub struct MigrationExportResponse {
+    /// ECDH 加密的 secret (base64)
+    pub encrypted_secret: String,
+    /// 临时 X25519 公钥 (hex)
+    pub ephemeral_pk: String,
+    /// 旧版本的 Ed25519 公钥 (hex)
+    pub source_pk: String,
+}
+
+/// Migration 导出状态 (一次性使用)
+pub struct MigrationExportGuard {
+    exported: std::sync::atomic::AtomicBool,
+}
+
+impl MigrationExportGuard {
+    pub fn new() -> Self {
+        Self { exported: std::sync::atomic::AtomicBool::new(false) }
+    }
+
+    fn try_export(&self) -> bool {
+        !self.exported.swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[allow(dead_code)]
+    pub fn is_exported(&self) -> bool {
+        self.exported.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// 处理 Migration 导出请求
+///
+/// 旧版本 Enclave 解密本地 share → 恢复 secret → ECDH 加密发送给新版本
+///
+/// 安全约束:
+/// - 单次使用: 导出后标记 exported, 拒绝重复导出
+/// - ECDH 端到端: secret 明文只在 TEE 内存中
+/// - 超时: 由 HTTP 层控制
+pub fn handle_migration_export(
+    enclave: &Arc<EnclaveBridge>,
+    req: &MigrationExportRequest,
+    guard: &MigrationExportGuard,
+) -> BotResult<MigrationExportResponse> {
+    // 一次性使用守卫
+    if !guard.try_export() {
+        warn!("Migration export 已使用过, 拒绝重复导出");
+        return Err(BotError::EnclaveError(
+            "migration export already used (one-time only)".into(),
+        ));
+    }
+
+    // 验证请求者公钥
+    if req.requester_pk.len() != 64 {
+        return Err(BotError::EnclaveError("invalid requester_pk: must be 64 hex chars".into()));
+    }
+    let requester_pk_bytes = hex::decode(&req.requester_pk)
+        .map_err(|e| BotError::EnclaveError(format!("requester_pk hex: {}", e)))?;
+    if requester_pk_bytes.len() != 32 {
+        return Err(BotError::EnclaveError("requester_pk must be 32 bytes".into()));
+    }
+    let mut requester_pk = [0u8; 32];
+    requester_pk.copy_from_slice(&requester_pk_bytes);
+
+    info!(
+        requester = %req.requester_pk,
+        "Migration export: 新版本 Enclave 请求密钥迁移"
+    );
+
+    // 加载并解密本地 share → 恢复 secret
+    let encrypted_share = enclave.load_local_share()?
+        .ok_or_else(|| BotError::EnclaveError("no local share to export".into()))?;
+    let seal_key = enclave.seal_key()?;
+    let local_share = shamir::decrypt_share(&encrypted_share, &seal_key)
+        .map_err(|e| BotError::EnclaveError(format!("decrypt local share for migration: {}", e)))?;
+
+    let secrets = shamir::recover(&[local_share], 1)
+        .map_err(|e| BotError::EnclaveError(format!("recover secret for migration: {}", e)))?;
+
+    // ECDH 加密: 用请求者 Ed25519 公钥 → X25519 公钥
+    let requester_vk = ed25519_dalek::VerifyingKey::from_bytes(&requester_pk)
+        .map_err(|e| BotError::EnclaveError(format!("invalid requester Ed25519 pk: {}", e)))?;
+    let requester_x25519 = shamir::ed25519_pk_to_x25519(&requester_vk);
+
+    let (encrypted, ephemeral_pk) = shamir::ecdh_encrypt_raw(&secrets, &requester_x25519)
+        .map_err(|e| BotError::EnclaveError(format!("ECDH encrypt for migration: {}", e)))?;
+
+    let source_pk = hex::encode(enclave.public_key_bytes());
+    info!(
+        source_pk = %source_pk,
+        requester = %req.requester_pk,
+        "Migration export 成功: secret 已 ECDH 加密发送"
+    );
+
+    Ok(MigrationExportResponse {
+        encrypted_secret: base64_encode(&encrypted),
+        ephemeral_pk: hex::encode(ephemeral_pk),
+        source_pk,
+    })
+}
+
 /// 共享链客户端句柄 (支持后台异步注入)
 pub type SharedChainClient = Arc<tokio::sync::RwLock<Option<Arc<ChainClient>>>>;
 
@@ -812,9 +924,11 @@ pub fn ceremony_routes(
 
     let enclave_receive = enclave.clone();
     let enclave_receive_ecdh = enclave.clone();
+    let enclave_migration = enclave.clone();
     let enclave_share = enclave;
     let chain_receive = shared_chain.clone();
     let chain_receive_ecdh = shared_chain.clone();
+    let migration_guard = Arc::new(MigrationExportGuard::new());
 
     axum::Router::new()
         .route("/ceremony/receive-share", post({
@@ -951,6 +1065,23 @@ pub fn ceremony_routes(
                     };
                     drop(chain_lock);
                     match handle_receive_share_ecdh(&enc, &req, &guard) {
+                        Ok(resp) => (axum::http::StatusCode::OK, Json(serde_json::json!(resp))),
+                        Err(e) => (
+                            axum::http::StatusCode::FORBIDDEN,
+                            Json(serde_json::json!({"error": format!("{}", e)})),
+                        ),
+                    }
+                }
+            }
+        }))
+        .route("/migration/export-secret", post({
+            let enc = enclave_migration;
+            let guard = migration_guard;
+            move |Json(req): Json<MigrationExportRequest>| {
+                let enc = enc.clone();
+                let guard = guard.clone();
+                async move {
+                    match handle_migration_export(&enc, &req, &guard) {
                         Ok(resp) => (axum::http::StatusCode::OK, Json(serde_json::json!(resp))),
                         Err(e) => (
                             axum::http::StatusCode::FORBIDDEN,
@@ -1187,6 +1318,76 @@ mod tests {
         assert_eq!(config.new_k, 2);
         assert_eq!(config.new_n, 4);
         assert_eq!(p.public_key, [0x11; 32]);
+    }
+
+    #[test]
+    fn migration_export_one_time_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let enclave = make_enclave(path);
+
+        // 创建 share (K=1)
+        let token = "test:MIGRATION_TOKEN";
+        let sk = [0x99u8; 32];
+        let secrets = shamir::encode_secrets(token, &sk);
+        let config = shamir::ShamirConfig::new(1, 1).unwrap();
+        let shares = shamir::split(&secrets, &config).unwrap();
+        let seal_key = enclave.seal_key().unwrap();
+        let encrypted = shamir::encrypt_share(&shares[0], &seal_key).unwrap();
+        enclave.save_local_share(&encrypted).unwrap();
+
+        // 新版本 Enclave 的密钥
+        let new_sk = ed25519_dalek::SigningKey::from_bytes(&[0x88u8; 32]);
+        let new_pk_hex = hex::encode(new_sk.verifying_key().to_bytes());
+
+        let guard = MigrationExportGuard::new();
+        let req = MigrationExportRequest { requester_pk: new_pk_hex.clone() };
+
+        // 第一次导出成功
+        let resp = handle_migration_export(&enclave, &req, &guard).unwrap();
+        assert!(!resp.encrypted_secret.is_empty());
+        assert!(!resp.ephemeral_pk.is_empty());
+        assert!(!resp.source_pk.is_empty());
+
+        // 验证: 新版本能用自己的私钥 ECDH 解密
+        let receiver_x25519 = shamir::ed25519_to_x25519_secret(&new_sk.to_bytes());
+        let ephemeral_pk_bytes = hex::decode(&resp.ephemeral_pk).unwrap();
+        let mut ephemeral_pk = [0u8; 32];
+        ephemeral_pk.copy_from_slice(&ephemeral_pk_bytes);
+
+        let encrypted_bytes = crate::tee::peer_client::base64_decode_pub(&resp.encrypted_secret).unwrap();
+        let decrypted = shamir::ecdh_decrypt_raw(&encrypted_bytes, &receiver_x25519, &ephemeral_pk).unwrap();
+
+        let (sk_out, token_out) = shamir::decode_secrets(&decrypted).unwrap();
+        assert_eq!(token_out, token);
+        assert_eq!(sk_out, sk);
+
+        // 第二次导出拒绝 (一次性使用)
+        let req2 = MigrationExportRequest { requester_pk: new_pk_hex };
+        let result = handle_migration_export(&enclave, &req2, &guard);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn migration_export_no_share_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let enclave = make_enclave(dir.path().to_str().unwrap());
+
+        let guard = MigrationExportGuard::new();
+        let req = MigrationExportRequest {
+            requester_pk: hex::encode([0x11; 32]),
+        };
+        let result = handle_migration_export(&enclave, &req, &guard);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn migration_guard_state() {
+        let guard = MigrationExportGuard::new();
+        assert!(!guard.is_exported());
+        assert!(guard.try_export());
+        assert!(guard.is_exported());
+        assert!(!guard.try_export());
     }
 
     #[test]

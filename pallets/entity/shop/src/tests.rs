@@ -1,6 +1,6 @@
 //! Unit tests for pallet-entity-shop
 
-use crate::{mock::*, Error, ShopOperatingStatus, ShopType, MemberMode};
+use crate::{mock::*, Error, ShopOperatingStatus, ShopType};
 use frame_support::{assert_noop, assert_ok, BoundedVec};
 use pallet_entity_common::ShopProvider;
 
@@ -19,14 +19,11 @@ fn create_shop_works() {
         let owner = 1;
         let name = bounded_name(b"Test Shop");
         let shop_type = ShopType::OnlineStore;
-        let member_mode = MemberMode::Inherit;
-
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(owner),
             entity_id,
             name.clone(),
             shop_type,
-            member_mode,
             1000, // initial_fund
         ));
 
@@ -35,7 +32,6 @@ fn create_shop_works() {
         let shop = Shop::shops(1).unwrap();
         assert_eq!(shop.entity_id, entity_id);
         assert_eq!(shop.shop_type, shop_type);
-        assert_eq!(shop.member_mode, member_mode);
         assert_eq!(shop.status, ShopOperatingStatus::Active);
 
         // Check ShopEntity index
@@ -55,7 +51,6 @@ fn create_shop_fails_entity_not_found() {
                 999, // non-existent entity
                 bounded_name(b"Test Shop"),
                 ShopType::OnlineStore,
-                MemberMode::Inherit,
                 1000,
             ),
             Error::<Test>::EntityNotFound
@@ -73,7 +68,6 @@ fn create_shop_fails_not_entity_owner() {
                 1,
                 bounded_name(b"Test Shop"),
                 ShopType::OnlineStore,
-                MemberMode::Inherit,
                 1000,
             ),
             Error::<Test>::NotAuthorized
@@ -91,7 +85,6 @@ fn create_shop_fails_entity_not_active() {
                 3,
                 bounded_name(b"Test Shop"),
                 ShopType::OnlineStore,
-                MemberMode::Inherit,
                 1000,
             ),
             Error::<Test>::EntityNotActive
@@ -112,7 +105,6 @@ fn update_shop_works() {
             1,
             bounded_name(b"Test Shop"),
             ShopType::OnlineStore,
-            MemberMode::Inherit,
             1000,
         ));
 
@@ -139,7 +131,6 @@ fn update_shop_fails_not_manager() {
             1,
             bounded_name(b"Test Shop"),
             ShopType::OnlineStore,
-            MemberMode::Inherit,
             1000,
         ));
 
@@ -169,7 +160,6 @@ fn add_manager_works() {
             1,
             bounded_name(b"Test Shop"),
             ShopType::OnlineStore,
-            MemberMode::Inherit,
             1000,
         ));
 
@@ -189,7 +179,6 @@ fn add_manager_fails_already_manager() {
             1,
             bounded_name(b"Test Shop"),
             ShopType::OnlineStore,
-            MemberMode::Inherit,
             1000,
         ));
 
@@ -211,7 +200,6 @@ fn remove_manager_works() {
             1,
             bounded_name(b"Test Shop"),
             ShopType::OnlineStore,
-            MemberMode::Inherit,
             1000,
         ));
 
@@ -235,7 +223,6 @@ fn pause_and_resume_shop_works() {
             1,
             bounded_name(b"Test Shop"),
             ShopType::OnlineStore,
-            MemberMode::Inherit,
             1000,
         ));
 
@@ -259,7 +246,6 @@ fn pause_shop_fails_already_paused() {
             1,
             bounded_name(b"Test Shop"),
             ShopType::OnlineStore,
-            MemberMode::Inherit,
             1000,
         ));
 
@@ -284,7 +270,6 @@ fn close_shop_works() {
             1,
             bounded_name(b"Test Shop"),
             ShopType::OnlineStore,
-            MemberMode::Inherit,
             1000,
         ));
 
@@ -306,7 +291,6 @@ fn create_primary_shop_works() {
             1,
             b"Primary Shop".to_vec(),
             ShopType::OnlineStore,
-            MemberMode::Inherit,
         ).unwrap();
 
         assert!(Shop::shops(shop_id).is_some());
@@ -327,7 +311,6 @@ fn cannot_close_primary_shop() {
             1,
             b"Primary Shop".to_vec(),
             ShopType::OnlineStore,
-            MemberMode::Inherit,
         ).unwrap();
 
         assert_noop!(
@@ -345,7 +328,6 @@ fn normal_shop_is_not_primary() {
             1,
             bounded_name(b"Normal Shop"),
             ShopType::OnlineStore,
-            MemberMode::Inherit,
             1000,
         ));
 
@@ -367,7 +349,6 @@ fn fund_operating_fails_on_closed_shop() {
             1,
             bounded_name(b"Test Shop"),
             ShopType::OnlineStore,
-            MemberMode::Inherit,
             1000,
         ));
 
@@ -392,7 +373,7 @@ fn withdraw_operating_fund_works() {
         // Create shop with 1000 initial fund
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
 
         let shop_account = Shop::shop_account_id(1);
@@ -412,7 +393,7 @@ fn withdraw_operating_fund_fails_not_owner() {
     new_test_ext().execute_with(|| {
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
 
         // Account 2 is not entity owner
@@ -428,7 +409,7 @@ fn withdraw_operating_fund_fails_below_minimum() {
     new_test_ext().execute_with(|| {
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
 
         // Try withdraw 950, leaving 50 < MinOperatingBalance(100)
@@ -445,7 +426,7 @@ fn withdraw_operating_fund_closed_shop_no_minimum() {
         // Create non-primary shop (shop_id=1)
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Shop 2"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+            bounded_name(b"Shop 2"), ShopType::OnlineStore, 1000,
         ));
 
         // Close shop first
@@ -462,7 +443,7 @@ fn withdraw_operating_fund_fails_zero_amount() {
     new_test_ext().execute_with(|| {
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
         assert_noop!(
             Shop::withdraw_operating_fund(RuntimeOrigin::signed(1), 1, 0),
@@ -476,7 +457,7 @@ fn withdraw_operating_fund_fails_insufficient() {
     new_test_ext().execute_with(|| {
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
 
         // Try withdraw more than available
@@ -496,7 +477,7 @@ fn close_shop_refunds_operating_fund() {
     new_test_ext().execute_with(|| {
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Shop 2"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+            bounded_name(b"Shop 2"), ShopType::OnlineStore, 1000,
         ));
 
         let owner_before = Balances::free_balance(1);
@@ -530,7 +511,6 @@ fn shop_provider_trait_works() {
             1,
             bounded_name(b"Test Shop"),
             ShopType::OnlineStore,
-            MemberMode::Inherit,
             1000,
         ));
 
@@ -554,7 +534,7 @@ fn h2_disable_points_clears_balances() {
     new_test_ext().execute_with(|| {
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
 
         // Enable points
@@ -588,7 +568,7 @@ fn h3_add_manager_fails_closed_shop() {
     new_test_ext().execute_with(|| {
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
         assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
 
@@ -604,7 +584,7 @@ fn h3_remove_manager_fails_closed_shop() {
     new_test_ext().execute_with(|| {
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
         assert_ok!(Shop::add_manager(RuntimeOrigin::signed(1), 1, 2));
         assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
@@ -625,7 +605,7 @@ fn m1_enable_points_rejects_empty_name() {
     new_test_ext().execute_with(|| {
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
 
         let empty_name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::default();
@@ -642,7 +622,7 @@ fn m1_enable_points_rejects_empty_symbol() {
     new_test_ext().execute_with(|| {
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
 
         let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
@@ -663,7 +643,7 @@ fn m3_close_shop_cleans_points_data() {
     new_test_ext().execute_with(|| {
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
 
         // Enable and issue points
@@ -693,7 +673,7 @@ fn h4_deduct_operating_fund_fails_closed_shop() {
     new_test_ext().execute_with(|| {
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, MemberMode::Inherit, 1000,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
         assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
 
@@ -718,7 +698,6 @@ fn multiple_shops_per_entity_works() {
             1,
             bounded_name(b"Shop 1"),
             ShopType::OnlineStore,
-            MemberMode::Inherit,
             1000,
         ));
 
@@ -728,7 +707,6 @@ fn multiple_shops_per_entity_works() {
             1,
             bounded_name(b"Shop 2"),
             ShopType::PhysicalStore,
-            MemberMode::Independent,
             1000,
         ));
 

@@ -38,7 +38,7 @@ pub mod pallet {
     };
     use frame_system::pallet_prelude::*;
     use pallet_escrow::pallet::Escrow as EscrowTrait;
-    use pallet_entity_common::{OrderStatus, OrderCommissionHandler, OrderProvider, ProductCategory, ProductProvider, EntityTokenProvider, ShopProvider};
+    use pallet_entity_common::{OrderStatus, OrderCommissionHandler, OrderProvider, ProductCategory, ProductProvider, EntityTokenProvider, ShopProvider, ShoppingBalanceProvider};
     use sp_runtime::{traits::{Saturating, Zero}, SaturatedConversion};
 
     /// 货币余额类型别名
@@ -175,6 +175,9 @@ pub mod pallet {
 
         /// 佣金处理接口（订单完成时触发返佣）
         type CommissionHandler: OrderCommissionHandler<Self::AccountId, BalanceOf<Self>>;
+
+        /// 购物余额接口（下单时抵扣复购余额）
+        type ShoppingBalance: ShoppingBalanceProvider<Self::AccountId, BalanceOf<Self>>;
 
         /// CID 最大长度
         #[pallet::constant]
@@ -350,6 +353,7 @@ pub mod pallet {
         /// - `quantity`: 购买数量
         /// - `shipping_cid`: 收货地址 IPFS CID
         /// - `use_tokens`: 使用积分抵扣金额（可选）
+        /// - `use_shopping_balance`: 使用购物余额抵扣（可选，NEX 从 Entity 转入买家后锁入托管）
         #[pallet::call_index(0)]
         #[pallet::weight(Weight::from_parts(350_000_000, 16_000))]
         pub fn place_order(
@@ -358,6 +362,7 @@ pub mod pallet {
             quantity: u32,
             shipping_cid: Option<Vec<u8>>,
             use_tokens: Option<BalanceOf<T>>,
+            use_shopping_balance: Option<BalanceOf<T>>,
         ) -> DispatchResult {
             let buyer = ensure_signed(origin)?;
 
@@ -401,6 +406,15 @@ pub mod pallet {
                     final_amount = final_amount.saturating_sub(discount);
                 }
             }
+            // 购物余额抵扣（NEX 从 Entity 账户转入买家钱包，随后由 Escrow 锁定）
+            if let Some(shopping_amount) = use_shopping_balance {
+                if !shopping_amount.is_zero() {
+                    ensure!(shopping_amount <= final_amount, Error::<T>::InvalidAmount);
+                    T::ShoppingBalance::consume_shopping_balance(shop_id, &buyer, shopping_amount)?;
+                    // final_amount 不变：买家钱包已收到 NEX，Escrow 将从中锁定全额
+                }
+            }
+
             // C2: 积分抵扣后金额不能为零
             ensure!(!final_amount.is_zero(), Error::<T>::InvalidAmount);
             
