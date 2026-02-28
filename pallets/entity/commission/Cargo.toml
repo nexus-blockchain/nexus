@@ -15,6 +15,7 @@ pallet-commission-core = { path = "core", default-features = false }
 pallet-commission-referral = { path = "referral", default-features = false }
 pallet-commission-level-diff = { path = "level-diff", default-features = false }
 pallet-commission-single-line = { path = "single-line", default-features = false }
+pallet-commission-pool-reward = { path = "pool-reward", default-features = false }
 
 [features]
 default = ["std"]
@@ -24,16 +25,19 @@ std = [
     "pallet-commission-referral/std",
     "pallet-commission-level-diff/std",
     "pallet-commission-single-line/std",
+    "pallet-commission-pool-reward/std",
 ]
 runtime-benchmarks = [
     "pallet-commission-core/runtime-benchmarks",
     "pallet-commission-referral/runtime-benchmarks",
     "pallet-commission-level-diff/runtime-benchmarks",
     "pallet-commission-single-line/runtime-benchmarks",
+    "pallet-commission-pool-reward/runtime-benchmarks",
 ]
 try-runtime = [
     "pallet-commission-core/try-runtime",
     "pallet-commission-referral/try-runtime",
     "pallet-commission-level-diff/try-runtime",
     "pallet-commission-single-line/try-runtime",
+    "pallet-commission-pool-reward/try-runtime",
 ]

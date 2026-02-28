@@ -578,7 +578,6 @@ pub struct WithdrawalTierConfig {
 pub struct EntityWithdrawalConfig<MaxLevels> {
     pub tier_configs: BoundedVec<WithdrawalTierConfig, MaxLevels>,
     pub enabled: bool,
-    pub shopping_balance_generates_commission: bool,
 }
 ```
 
@@ -598,7 +597,6 @@ EntityCommission::set_withdrawal_config(
     shop_id,
     tier_configs.try_into().unwrap(),
     true,   // 启用分级提现
-    false,  // 购物余额消费不产生返佣
 )?;
 ```
 
@@ -633,7 +631,6 @@ fn set_withdrawal_config(
     shop_id: u64,
     tier_configs: BoundedVec<WithdrawalTierConfig, T::MaxCustomLevels>,
     enabled: bool,
-    shopping_balance_generates_commission: bool,
 ) -> DispatchResult
 ```
 

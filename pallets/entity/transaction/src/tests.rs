@@ -604,3 +604,102 @@ fn c1_expiry_queue_preserves_unprocessed() {
         assert!(queue_final.is_empty());
     });
 }
+
+// ============================================================================
+// MemberHandler 集成测试
+// ============================================================================
+
+#[test]
+fn order_complete_triggers_member_register_and_update_spent() {
+    new_test_ext().execute_with(|| {
+        // Digital product auto-completes → triggers do_complete_order
+        assert_ok!(Transaction::place_order(
+            RuntimeOrigin::signed(BUYER),
+            2, // Digital, price 50
+            1,
+            None, None, None,
+        ));
+
+        // auto_register should have been called with (shop_id=1, buyer=1)
+        let registered = get_member_registered();
+        assert_eq!(registered.len(), 1);
+        assert_eq!(registered[0], (SHOP_1, BUYER));
+
+        // update_spent should have been called with (shop_id=1, buyer=1, amount=50, amount_usdt)
+        let spent = get_member_spent();
+        assert_eq!(spent.len(), 1);
+        assert_eq!(spent[0].0, SHOP_1);
+        assert_eq!(spent[0].1, BUYER);
+        assert_eq!(spent[0].2, 50); // amount NEX
+        // MockPricingProvider: 1 USDT/NEX → 50 NEX * 1_000_000 / 10^12
+        // 注意: mock 中 Balance=u64, 50 * 1_000_000 / 10^12 = 0（精度截断）
+        // 这在测试环境中是预期的，因为 mock Balance 不是 12 位精度
+    });
+}
+
+#[test]
+fn confirm_order_triggers_member_handler() {
+    new_test_ext().execute_with(|| {
+        // Physical order: place → ship → confirm → do_complete_order
+        assert_ok!(Transaction::place_order(
+            RuntimeOrigin::signed(BUYER),
+            1, // Physical, price 100
+            1,
+            Some(b"addr".to_vec()), None, None,
+        ));
+
+        // place_order 不触发 do_complete_order
+        assert!(get_member_registered().is_empty());
+        assert!(get_member_spent().is_empty());
+
+        // ship
+        assert_ok!(Transaction::ship_order(
+            RuntimeOrigin::signed(SELLER),
+            1,
+            b"tracking".to_vec(),
+        ));
+
+        // confirm → triggers do_complete_order
+        assert_ok!(Transaction::confirm_receipt(RuntimeOrigin::signed(BUYER), 1));
+
+        let registered = get_member_registered();
+        assert_eq!(registered.len(), 1);
+        assert_eq!(registered[0], (SHOP_1, BUYER));
+
+        let spent = get_member_spent();
+        assert_eq!(spent.len(), 1);
+        assert_eq!(spent[0].0, SHOP_1);
+        assert_eq!(spent[0].1, BUYER);
+        assert_eq!(spent[0].2, 100); // amount NEX = price 100 * qty 1
+    });
+}
+
+#[test]
+fn auto_complete_timeout_triggers_member_handler() {
+    new_test_ext().execute_with(|| {
+        // Physical: place → ship → timeout auto-complete
+        assert_ok!(Transaction::place_order(
+            RuntimeOrigin::signed(BUYER),
+            1, 1, Some(b"addr".to_vec()), None, None,
+        ));
+        assert_ok!(Transaction::ship_order(
+            RuntimeOrigin::signed(SELLER),
+            1,
+            b"tracking".to_vec(),
+        ));
+
+        // 发货后不确认，等待 ConfirmTimeout(200) 自动完成
+        run_to_block(202);
+
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.status, OrderStatus::Completed);
+
+        let registered = get_member_registered();
+        assert_eq!(registered.len(), 1);
+        assert_eq!(registered[0], (SHOP_1, BUYER));
+
+        let spent = get_member_spent();
+        assert_eq!(spent.len(), 1);
+        assert_eq!(spent[0].2, 100);
+    });
+}

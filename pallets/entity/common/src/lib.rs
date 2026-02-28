@@ -335,6 +335,42 @@ impl Default for MemberRegistrationPolicy {
 }
 
 // ============================================================================
+// 会员统计策略 (MemberStatsPolicy)
+// ============================================================================
+
+/// 会员统计策略（位标记）
+///
+/// 控制业务逻辑中推荐人数的计算口径（升级规则、佣金门槛等）
+///
+/// - 默认值 `0b00` = 使用有效推荐人数（排除复购赠与注册）
+/// - 置位对应标记 = 将复购赠与注册的账户也计入推荐人数
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+pub struct MemberStatsPolicy(pub u8);
+
+impl MemberStatsPolicy {
+    /// 直推人数包含复购赠与（置位 = direct_referrals，不置位 = qualified_referrals）
+    pub const INCLUDE_REPURCHASE_DIRECT: u8 = 0b0000_0001;
+    /// 间接推荐人数包含复购赠与（置位 = indirect_referrals，不置位 = qualified_indirect_referrals）
+    pub const INCLUDE_REPURCHASE_INDIRECT: u8 = 0b0000_0010;
+
+    /// 直推人数是否包含复购赠与
+    pub fn include_repurchase_direct(&self) -> bool {
+        self.0 & Self::INCLUDE_REPURCHASE_DIRECT != 0
+    }
+
+    /// 间接推荐人数是否包含复购赠与
+    pub fn include_repurchase_indirect(&self) -> bool {
+        self.0 & Self::INCLUDE_REPURCHASE_INDIRECT != 0
+    }
+}
+
+impl Default for MemberStatsPolicy {
+    fn default() -> Self {
+        Self(0) // 默认：排除复购（安全默认值）
+    }
+}
+
+// ============================================================================
 // 通证类型枚举 (Phase 2 新增)
 // ============================================================================
 
@@ -1027,8 +1063,8 @@ impl EntityTokenPriceProvider for () {
 /// 供 Shop 模块在扣费时查询已承诺（pending + shopping）的佣金资金，
 /// 防止运营扣费侵占用户佣金。
 pub trait CommissionFundGuard {
-    /// 获取 shop 已承诺的佣金资金总额（pending_total + shopping_total）
-    fn protected_funds(shop_id: u64) -> u128;
+    /// 获取 entity 已承诺的佣金资金总额（pending_total + shopping_total）
+    fn protected_funds(entity_id: u64) -> u128;
 }
 
 /// 空 CommissionFundGuard 实现（无佣金系统时使用）
@@ -1043,6 +1079,7 @@ impl CommissionFundGuard for () {
 pub trait OrderCommissionHandler<AccountId, Balance> {
     /// 订单完成时处理佣金
     fn on_order_completed(
+        entity_id: u64,
         shop_id: u64,
         order_id: u64,
         buyer: &AccountId,
@@ -1056,7 +1093,7 @@ pub trait OrderCommissionHandler<AccountId, Balance> {
 
 /// 空佣金处理（无佣金系统时使用）
 impl<AccountId, Balance> OrderCommissionHandler<AccountId, Balance> for () {
-    fn on_order_completed(_: u64, _: u64, _: &AccountId, _: Balance, _: Balance) -> Result<(), DispatchError> { Ok(()) }
+    fn on_order_completed(_: u64, _: u64, _: u64, _: &AccountId, _: Balance, _: Balance) -> Result<(), DispatchError> { Ok(()) }
     fn on_order_cancelled(_: u64) -> Result<(), DispatchError> { Ok(()) }
 }
 
@@ -1070,16 +1107,34 @@ impl<AccountId, Balance> OrderCommissionHandler<AccountId, Balance> for () {
 /// 1. 扣减会员购物余额记账（MemberShoppingBalance / ShopShoppingTotal）
 /// 2. 将等额 NEX 从 Entity 账户转入会员钱包（会员随后通过 Escrow 锁定）
 pub trait ShoppingBalanceProvider<AccountId, Balance> {
-    /// 查询会员在指定店铺的购物余额
-    fn shopping_balance(shop_id: u64, account: &AccountId) -> Balance;
+    /// 查询会员在指定实体的购物余额
+    fn shopping_balance(entity_id: u64, account: &AccountId) -> Balance;
     /// 消费购物余额：扣减记账 + 将 NEX 从 Entity 账户转入会员钱包
-    fn consume_shopping_balance(shop_id: u64, account: &AccountId, amount: Balance) -> Result<(), DispatchError>;
+    fn consume_shopping_balance(entity_id: u64, account: &AccountId, amount: Balance) -> Result<(), DispatchError>;
 }
 
 /// 空购物余额提供者（无佣金系统时使用）
 impl<AccountId, Balance: Default> ShoppingBalanceProvider<AccountId, Balance> for () {
     fn shopping_balance(_: u64, _: &AccountId) -> Balance { Balance::default() }
     fn consume_shopping_balance(_: u64, _: &AccountId, _: Balance) -> Result<(), DispatchError> { Ok(()) }
+}
+
+/// 订单会员处理接口
+///
+/// 供 Transaction 模块在订单完成时：
+/// 1. 自动注册买家为会员（如果尚未注册）
+/// 2. 更新消费金额（触发等级升级）
+pub trait OrderMemberHandler<AccountId, Balance> {
+    /// 自动注册会员（首次下单时，推荐人可选）
+    fn auto_register(entity_id: u64, account: &AccountId, referrer: Option<AccountId>) -> Result<(), DispatchError>;
+    /// 更新消费金额（订单完成时，amount=NEX, amount_usdt=USDT 精度值）
+    fn update_spent(entity_id: u64, account: &AccountId, amount: Balance, amount_usdt: u64) -> Result<(), DispatchError>;
+}
+
+/// 空会员处理（无会员系统时使用）
+impl<AccountId, Balance> OrderMemberHandler<AccountId, Balance> for () {
+    fn auto_register(_: u64, _: &AccountId, _: Option<AccountId>) -> Result<(), DispatchError> { Ok(()) }
+    fn update_spent(_: u64, _: &AccountId, _: Balance, _: u64) -> Result<(), DispatchError> { Ok(()) }
 }
 
 /// 空定价提供者（测试用）

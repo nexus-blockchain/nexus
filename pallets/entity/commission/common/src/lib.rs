@@ -31,6 +31,7 @@ impl CommissionModes {
     pub const REPEAT_PURCHASE: u16 = 0b0100_0000;
     pub const SINGLE_LINE_UPLINE: u16 = 0b1000_0000;
     pub const SINGLE_LINE_DOWNLINE: u16 = 0b1_0000_0000;
+    pub const POOL_REWARD: u16 = 0b10_0000_0000;
 
     pub fn contains(&self, flag: u16) -> bool {
         self.0 & flag != 0
@@ -62,6 +63,7 @@ pub enum CommissionType {
     SingleLineUpline,
     SingleLineDownline,
     EntityReferral,
+    PoolReward,
 }
 
 /// 返佣状态
@@ -170,8 +172,7 @@ pub trait CommissionPlugin<AccountId, Balance> {
     /// 计算返佣
     ///
     /// # 参数
-    /// - `entity_id`: 实体 ID（用于插件配置查询）
-    /// - `shop_id`: 店铺 ID（用于 MemberProvider 查询推荐链）
+    /// - `entity_id`: 实体 ID（用于插件配置查询和 MemberProvider 查询推荐链）
     /// - `buyer`: 买家账户
     /// - `order_amount`: 订单金额
     /// - `remaining`: 剩余可分配额度
@@ -183,7 +184,6 @@ pub trait CommissionPlugin<AccountId, Balance> {
     /// `(outputs, new_remaining)` — 返佣输出列表和剩余额度
     fn calculate(
         entity_id: u64,
-        shop_id: u64,
         buyer: &AccountId,
         order_amount: Balance,
         remaining: Balance,
@@ -197,7 +197,6 @@ pub trait CommissionPlugin<AccountId, Balance> {
 impl<AccountId, Balance> CommissionPlugin<AccountId, Balance> for () {
     fn calculate(
         _entity_id: u64,
-        _shop_id: u64,
         _buyer: &AccountId,
         _order_amount: Balance,
         remaining: Balance,
@@ -213,9 +212,10 @@ impl<AccountId, Balance> CommissionPlugin<AccountId, Balance> for () {
 // CommissionProvider Trait（供外部模块调用）
 // ============================================================================
 
-/// 返佣服务接口
+/// 返佣服务接口（所有方法统一使用 entity_id）
 pub trait CommissionProvider<AccountId, Balance> {
     fn process_commission(
+        entity_id: u64,
         shop_id: u64,
         order_id: u64,
         buyer: &AccountId,
@@ -226,14 +226,14 @@ pub trait CommissionProvider<AccountId, Balance> {
 
     fn cancel_commission(order_id: u64) -> Result<(), DispatchError>;
 
-    fn pending_commission(shop_id: u64, account: &AccountId) -> Balance;
+    fn pending_commission(entity_id: u64, account: &AccountId) -> Balance;
 
-    fn set_commission_modes(shop_id: u64, modes: u16) -> Result<(), DispatchError>;
+    fn set_commission_modes(entity_id: u64, modes: u16) -> Result<(), DispatchError>;
 
-    fn set_direct_reward_rate(shop_id: u64, rate: u16) -> Result<(), DispatchError>;
+    fn set_direct_reward_rate(entity_id: u64, rate: u16) -> Result<(), DispatchError>;
 
     fn set_level_diff_config(
-        shop_id: u64,
+        entity_id: u64,
         normal_rate: u16,
         silver_rate: u16,
         gold_rate: u16,
@@ -241,37 +241,36 @@ pub trait CommissionProvider<AccountId, Balance> {
         diamond_rate: u16,
     ) -> Result<(), DispatchError>;
 
-    fn set_fixed_amount(shop_id: u64, amount: Balance) -> Result<(), DispatchError>;
+    fn set_fixed_amount(entity_id: u64, amount: Balance) -> Result<(), DispatchError>;
 
     fn set_first_order_config(
-        shop_id: u64,
+        entity_id: u64,
         amount: Balance,
         rate: u16,
         use_amount: bool,
     ) -> Result<(), DispatchError>;
 
-    fn set_repeat_purchase_config(shop_id: u64, rate: u16, min_orders: u32) -> Result<(), DispatchError>;
+    fn set_repeat_purchase_config(entity_id: u64, rate: u16, min_orders: u32) -> Result<(), DispatchError>;
 
     fn set_withdrawal_config_by_governance(
-        shop_id: u64,
+        entity_id: u64,
         enabled: bool,
-        shopping_balance_generates_commission: bool,
     ) -> Result<(), DispatchError>;
 
-    fn shopping_balance(shop_id: u64, account: &AccountId) -> Balance;
+    fn shopping_balance(entity_id: u64, account: &AccountId) -> Balance;
 
     /// 使用购物余额（由订单模块调用）
-    fn use_shopping_balance(shop_id: u64, account: &AccountId, amount: Balance) -> Result<(), DispatchError>;
+    fn use_shopping_balance(entity_id: u64, account: &AccountId, amount: Balance) -> Result<(), DispatchError>;
 
     /// 设置全局最低复购比例（由 Governance 调用，万分比）
-    fn set_min_repurchase_rate(shop_id: u64, rate: u16) -> Result<(), DispatchError>;
+    fn set_min_repurchase_rate(entity_id: u64, rate: u16) -> Result<(), DispatchError>;
 }
 
 /// 空 CommissionProvider 实现
 pub struct NullCommissionProvider;
 
 impl<AccountId, Balance: Default> CommissionProvider<AccountId, Balance> for NullCommissionProvider {
-    fn process_commission(_: u64, _: u64, _: &AccountId, _: Balance, _: Balance, _: Balance) -> Result<(), DispatchError> { Ok(()) }
+    fn process_commission(_: u64, _: u64, _: u64, _: &AccountId, _: Balance, _: Balance, _: Balance) -> Result<(), DispatchError> { Ok(()) }
     fn cancel_commission(_: u64) -> Result<(), DispatchError> { Ok(()) }
     fn pending_commission(_: u64, _: &AccountId) -> Balance { Balance::default() }
     fn set_commission_modes(_: u64, _: u16) -> Result<(), DispatchError> { Ok(()) }
@@ -280,7 +279,7 @@ impl<AccountId, Balance: Default> CommissionProvider<AccountId, Balance> for Nul
     fn set_fixed_amount(_: u64, _: Balance) -> Result<(), DispatchError> { Ok(()) }
     fn set_first_order_config(_: u64, _: Balance, _: u16, _: bool) -> Result<(), DispatchError> { Ok(()) }
     fn set_repeat_purchase_config(_: u64, _: u16, _: u32) -> Result<(), DispatchError> { Ok(()) }
-    fn set_withdrawal_config_by_governance(_: u64, _: bool, _: bool) -> Result<(), DispatchError> { Ok(()) }
+    fn set_withdrawal_config_by_governance(_: u64, _: bool) -> Result<(), DispatchError> { Ok(()) }
     fn shopping_balance(_: u64, _: &AccountId) -> Balance { Balance::default() }
     fn use_shopping_balance(_: u64, _: &AccountId, _: Balance) -> Result<(), DispatchError> { Ok(()) }
     fn set_min_repurchase_rate(_: u64, _: u16) -> Result<(), DispatchError> { Ok(()) }
@@ -290,47 +289,34 @@ impl<AccountId, Balance: Default> CommissionProvider<AccountId, Balance> for Nul
 // MemberProvider Trait（由 member 模块实现）
 // ============================================================================
 
-/// 会员服务接口（供返佣插件查询推荐人、等级等）
+/// 会员服务接口（供返佣插件查询推荐人、等级等，统一使用 entity_id）
 pub trait MemberProvider<AccountId> {
-    fn is_member(shop_id: u64, account: &AccountId) -> bool;
-    fn get_referrer(shop_id: u64, account: &AccountId) -> Option<AccountId>;
-    fn member_level(shop_id: u64, account: &AccountId) -> Option<pallet_entity_common::MemberLevel>;
-    fn get_member_stats(shop_id: u64, account: &AccountId) -> (u32, u32, u128);
-    fn uses_custom_levels(shop_id: u64) -> bool;
-    fn custom_level_id(shop_id: u64, account: &AccountId) -> u8;
+    fn is_member(entity_id: u64, account: &AccountId) -> bool;
+    fn get_referrer(entity_id: u64, account: &AccountId) -> Option<AccountId>;
+    fn member_level(entity_id: u64, account: &AccountId) -> Option<pallet_entity_common::MemberLevel>;
+    fn get_member_stats(entity_id: u64, account: &AccountId) -> (u32, u32, u128);
+    fn uses_custom_levels(entity_id: u64) -> bool;
+    fn custom_level_id(entity_id: u64, account: &AccountId) -> u8;
     /// 获取自定义等级的返佣加成（基点），用于 level-diff 无独立配置时的回退
-    fn get_level_commission_bonus(shop_id: u64, level_id: u8) -> u16;
-    fn auto_register(shop_id: u64, account: &AccountId, referrer: Option<AccountId>) -> Result<(), DispatchError>;
-
-    // entity_id 直达版本（避免 shop_id → entity_id 重复解析）
-    fn is_member_by_entity(entity_id: u64, account: &AccountId) -> bool {
-        let _ = (entity_id, account);
-        false
-    }
-    fn get_referrer_by_entity(entity_id: u64, account: &AccountId) -> Option<AccountId> {
-        let _ = (entity_id, account);
-        None
-    }
-    fn custom_level_id_by_entity(entity_id: u64, account: &AccountId) -> u8 {
-        let _ = (entity_id, account);
-        0
-    }
-    fn auto_register_by_entity(entity_id: u64, account: &AccountId, referrer: Option<AccountId>) -> Result<(), DispatchError> {
-        let _ = (entity_id, account, referrer);
+    fn get_level_commission_bonus(entity_id: u64, level_id: u8) -> u16;
+    fn auto_register(entity_id: u64, account: &AccountId, referrer: Option<AccountId>) -> Result<(), DispatchError>;
+    /// 自动注册会员（entity_id 直达，qualified 控制是否为有效直推）
+    fn auto_register_qualified(entity_id: u64, account: &AccountId, referrer: Option<AccountId>, qualified: bool) -> Result<(), DispatchError> {
+        let _ = (entity_id, account, referrer, qualified);
         Ok(())
     }
-    /// 查询会员是否已激活（通过 repurchase_target 代注册的会员初始未激活，首次消费后激活）
-    fn is_activated_by_entity(entity_id: u64, account: &AccountId) -> bool {
+    /// 查询会员是否已激活
+    fn is_activated(entity_id: u64, account: &AccountId) -> bool {
         let _ = (entity_id, account);
         true // 默认已激活（无 member 系统时不阻断）
     }
 
-    fn set_custom_levels_enabled(shop_id: u64, enabled: bool) -> Result<(), DispatchError>;
-    fn set_upgrade_mode(shop_id: u64, mode: u8) -> Result<(), DispatchError>;
-    fn add_custom_level(shop_id: u64, level_id: u8, name: &[u8], threshold: u128, discount_rate: u16, commission_bonus: u16) -> Result<(), DispatchError>;
-    fn update_custom_level(shop_id: u64, level_id: u8, name: Option<&[u8]>, threshold: Option<u128>, discount_rate: Option<u16>, commission_bonus: Option<u16>) -> Result<(), DispatchError>;
-    fn remove_custom_level(shop_id: u64, level_id: u8) -> Result<(), DispatchError>;
-    fn custom_level_count(shop_id: u64) -> u8;
+    fn set_custom_levels_enabled(entity_id: u64, enabled: bool) -> Result<(), DispatchError>;
+    fn set_upgrade_mode(entity_id: u64, mode: u8) -> Result<(), DispatchError>;
+    fn add_custom_level(entity_id: u64, level_id: u8, name: &[u8], threshold: u128, discount_rate: u16, commission_bonus: u16) -> Result<(), DispatchError>;
+    fn update_custom_level(entity_id: u64, level_id: u8, name: Option<&[u8]>, threshold: Option<u128>, discount_rate: Option<u16>, commission_bonus: Option<u16>) -> Result<(), DispatchError>;
+    fn remove_custom_level(entity_id: u64, level_id: u8) -> Result<(), DispatchError>;
+    fn custom_level_count(entity_id: u64) -> u8;
 }
 
 /// 空 MemberProvider 实现
@@ -450,5 +436,21 @@ pub trait TeamPlanWriter<Balance> {
 /// 空 TeamPlanWriter 实现
 impl<Balance> TeamPlanWriter<Balance> for () {
     fn set_team_config(_: u64, _: Vec<(u128, u32, u16)>, _: u8, _: bool) -> Result<(), DispatchError> { Ok(()) }
+    fn clear_config(_: u64) -> Result<(), DispatchError> { Ok(()) }
+}
+
+/// 沉淀池奖励插件写入接口（由 commission-pool-reward 实现）
+pub trait PoolRewardPlanWriter {
+    /// 设置沉淀池奖励配置
+    ///
+    /// level_rates: Vec<(level_id, rate_bps)>
+    fn set_pool_reward_config(entity_id: u64, level_rates: Vec<(u8, u16)>, max_depth: u8, max_drain_rate: u16) -> Result<(), DispatchError>;
+    /// 清除沉淀池奖励配置
+    fn clear_config(entity_id: u64) -> Result<(), DispatchError>;
+}
+
+/// 空 PoolRewardPlanWriter 实现
+impl PoolRewardPlanWriter for () {
+    fn set_pool_reward_config(_: u64, _: Vec<(u8, u16)>, _: u8, _: u16) -> Result<(), DispatchError> { Ok(()) }
     fn clear_config(_: u64) -> Result<(), DispatchError> { Ok(()) }
 }

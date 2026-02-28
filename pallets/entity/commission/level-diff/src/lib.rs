@@ -204,14 +204,13 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         pub fn process_level_diff(
             entity_id: u64,
-            shop_id: u64,
             buyer: &T::AccountId,
             order_amount: BalanceOf<T>,
             remaining: &mut BalanceOf<T>,
             outputs: &mut Vec<CommissionOutput<T::AccountId, BalanceOf<T>>>,
         ) {
             let global_config = LevelDiffConfigs::<T>::get(entity_id);
-            let uses_custom = T::MemberProvider::uses_custom_levels(shop_id);
+            let uses_custom = T::MemberProvider::uses_custom_levels(entity_id);
             let custom_config = CustomLevelDiffConfigs::<T>::get(entity_id);
 
             let max_depth = if uses_custom {
@@ -220,7 +219,7 @@ pub mod pallet {
                 10
             };
 
-            let mut current_referrer = T::MemberProvider::get_referrer(shop_id, buyer);
+            let mut current_referrer = T::MemberProvider::get_referrer(entity_id, buyer);
             let mut prev_rate: u16 = 0;
             let mut level: u8 = 0;
 
@@ -231,14 +230,14 @@ pub mod pallet {
                 if remaining.is_zero() { break; }
 
                 let referrer_rate = if uses_custom {
-                    let level_id = T::MemberProvider::custom_level_id(shop_id, referrer);
+                    let level_id = T::MemberProvider::custom_level_id(entity_id, referrer);
                     // P1/P2 修复: CustomLevelDiffConfig 优先；无配置或 level_id 越界时
                     // 回退到 CustomLevel.commission_bonus（通过 MemberProvider）
                     custom_config.as_ref()
                         .and_then(|c| c.level_rates.get(level_id as usize).copied())
-                        .unwrap_or_else(|| T::MemberProvider::get_level_commission_bonus(shop_id, level_id))
+                        .unwrap_or_else(|| T::MemberProvider::get_level_commission_bonus(entity_id, level_id))
                 } else {
-                    let referrer_level = T::MemberProvider::member_level(shop_id, referrer)
+                    let referrer_level = T::MemberProvider::member_level(entity_id, referrer)
                         .unwrap_or(MemberLevel::Normal);
                     global_config.as_ref()
                         .map(|c| c.rate_for_level(referrer_level))
@@ -265,7 +264,7 @@ pub mod pallet {
                     prev_rate = referrer_rate;
                 }
 
-                current_referrer = T::MemberProvider::get_referrer(shop_id, referrer);
+                current_referrer = T::MemberProvider::get_referrer(entity_id, referrer);
             }
         }
     }
@@ -278,7 +277,6 @@ pub mod pallet {
 impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId, pallet::BalanceOf<T>> for pallet::Pallet<T> {
     fn calculate(
         entity_id: u64,
-        shop_id: u64,
         buyer: &T::AccountId,
         order_amount: pallet::BalanceOf<T>,
         remaining: pallet::BalanceOf<T>,
@@ -295,9 +293,8 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
         let mut remaining = remaining;
         let mut outputs = alloc::vec::Vec::new();
 
-        // entity_id for config lookup, shop_id for MemberProvider
         pallet::Pallet::<T>::process_level_diff(
-            entity_id, shop_id, buyer, order_amount, &mut remaining, &mut outputs,
+            entity_id, buyer, order_amount, &mut remaining, &mut outputs,
         );
 
         (outputs, remaining)
@@ -363,21 +360,21 @@ mod tests {
 
     impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
         fn is_member(_: u64, _: &u64) -> bool { true }
-        fn get_referrer(shop_id: u64, account: &u64) -> Option<u64> {
-            REFERRERS.with(|r| r.borrow().get(&(shop_id, *account)).copied())
+        fn get_referrer(entity_id: u64, account: &u64) -> Option<u64> {
+            REFERRERS.with(|r| r.borrow().get(&(entity_id, *account)).copied())
         }
-        fn member_level(shop_id: u64, account: &u64) -> Option<pallet_entity_common::MemberLevel> {
-            MEMBER_LEVELS.with(|m| m.borrow().get(&(shop_id, *account)).copied())
+        fn member_level(entity_id: u64, account: &u64) -> Option<pallet_entity_common::MemberLevel> {
+            MEMBER_LEVELS.with(|m| m.borrow().get(&(entity_id, *account)).copied())
         }
         fn get_member_stats(_: u64, _: &u64) -> (u32, u32, u128) { (0, 0, 0) }
-        fn uses_custom_levels(_shop_id: u64) -> bool {
+        fn uses_custom_levels(_entity_id: u64) -> bool {
             CUSTOM_LEVELS.with(|c| *c.borrow())
         }
-        fn custom_level_id(shop_id: u64, account: &u64) -> u8 {
-            CUSTOM_LEVEL_IDS.with(|c| c.borrow().get(&(shop_id, *account)).copied().unwrap_or(0))
+        fn custom_level_id(entity_id: u64, account: &u64) -> u8 {
+            CUSTOM_LEVEL_IDS.with(|c| c.borrow().get(&(entity_id, *account)).copied().unwrap_or(0))
         }
-        fn get_level_commission_bonus(shop_id: u64, level_id: u8) -> u16 {
-            LEVEL_BONUSES.with(|l| l.borrow().get(&(shop_id, level_id)).copied().unwrap_or(0))
+        fn get_level_commission_bonus(entity_id: u64, level_id: u8) -> u16 {
+            LEVEL_BONUSES.with(|l| l.borrow().get(&(entity_id, level_id)).copied().unwrap_or(0))
         }
         fn auto_register(_: u64, _: &u64, _: Option<u64>) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
         fn set_custom_levels_enabled(_: u64, _: bool) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
@@ -429,13 +426,13 @@ mod tests {
     }
 
     // Helper: setup chain buyer(50) → 40 → 30 → 20 → 10
-    fn setup_chain(shop_id: u64) {
+    fn setup_chain(entity_id: u64) {
         REFERRERS.with(|r| {
             let mut m = r.borrow_mut();
-            m.insert((shop_id, 50), 40);
-            m.insert((shop_id, 40), 30);
-            m.insert((shop_id, 30), 20);
-            m.insert((shop_id, 20), 10);
+            m.insert((entity_id, 50), 40);
+            m.insert((entity_id, 40), 30);
+            m.insert((entity_id, 30), 20);
+            m.insert((entity_id, 20), 10);
         });
     }
 
@@ -447,10 +444,9 @@ mod tests {
     fn p1_fallback_to_commission_bonus_when_no_custom_config() {
         new_test_ext().execute_with(|| {
             let entity_id = 1u64;
-            let shop_id = 1u64;
 
             // 推荐链: 50 → 40 → 30
-            setup_chain(shop_id);
+            setup_chain(entity_id);
 
             // 启用自定义等级
             CUSTOM_LEVELS.with(|c| *c.borrow_mut() = true);
@@ -458,15 +454,15 @@ mod tests {
             // 设置等级: 40=level_0, 30=level_1
             CUSTOM_LEVEL_IDS.with(|c| {
                 let mut m = c.borrow_mut();
-                m.insert((shop_id, 40), 0);
-                m.insert((shop_id, 30), 1);
+                m.insert((entity_id, 40), 0);
+                m.insert((entity_id, 30), 1);
             });
 
             // 设置 commission_bonus（来自 CustomLevel 定义）
             LEVEL_BONUSES.with(|l| {
                 let mut m = l.borrow_mut();
-                m.insert((shop_id, 0), 300);  // 3%
-                m.insert((shop_id, 1), 600);  // 6%
+                m.insert((entity_id, 0), 300);  // 3%
+                m.insert((entity_id, 1), 600);  // 6%
             });
 
             // 不设置 CustomLevelDiffConfig — 应回退到 commission_bonus
@@ -474,7 +470,7 @@ mod tests {
             let mut outputs = alloc::vec::Vec::new();
 
             pallet::Pallet::<Test>::process_level_diff(
-                entity_id, shop_id, &50, 10000, &mut remaining, &mut outputs,
+                entity_id, &50, 10000, &mut remaining, &mut outputs,
             );
 
             // 40: rate=300, prev=0, diff=300 → 10000×300/10000 = 300
@@ -492,22 +488,21 @@ mod tests {
     fn p1_custom_config_takes_priority_over_commission_bonus() {
         new_test_ext().execute_with(|| {
             let entity_id = 1u64;
-            let shop_id = 1u64;
 
-            setup_chain(shop_id);
+            setup_chain(entity_id);
             CUSTOM_LEVELS.with(|c| *c.borrow_mut() = true);
 
             CUSTOM_LEVEL_IDS.with(|c| {
                 let mut m = c.borrow_mut();
-                m.insert((shop_id, 40), 0);
-                m.insert((shop_id, 30), 1);
+                m.insert((entity_id, 40), 0);
+                m.insert((entity_id, 30), 1);
             });
 
             // commission_bonus = 100, 200
             LEVEL_BONUSES.with(|l| {
                 let mut m = l.borrow_mut();
-                m.insert((shop_id, 0), 100);
-                m.insert((shop_id, 1), 200);
+                m.insert((entity_id, 0), 100);
+                m.insert((entity_id, 1), 200);
             });
 
             // CustomLevelDiffConfig 配置 = 500, 800 → 应优先使用
@@ -523,7 +518,7 @@ mod tests {
             let mut outputs = alloc::vec::Vec::new();
 
             pallet::Pallet::<Test>::process_level_diff(
-                entity_id, shop_id, &50, 10000, &mut remaining, &mut outputs,
+                entity_id, &50, 10000, &mut remaining, &mut outputs,
             );
 
             // 40: rate=500, prev=0, diff=500 → 500
@@ -542,23 +537,22 @@ mod tests {
     fn p2_level_id_out_of_bounds_falls_back_to_commission_bonus() {
         new_test_ext().execute_with(|| {
             let entity_id = 1u64;
-            let shop_id = 1u64;
 
-            setup_chain(shop_id);
+            setup_chain(entity_id);
             CUSTOM_LEVELS.with(|c| *c.borrow_mut() = true);
 
             // 3 个自定义等级（id=0,1,2），但 CustomLevelDiffConfig 只有 2 条 rate
             CUSTOM_LEVEL_IDS.with(|c| {
                 let mut m = c.borrow_mut();
-                m.insert((shop_id, 40), 0);
-                m.insert((shop_id, 30), 1);
-                m.insert((shop_id, 20), 2);  // 越界！level_rates 只有 [0] 和 [1]
+                m.insert((entity_id, 40), 0);
+                m.insert((entity_id, 30), 1);
+                m.insert((entity_id, 20), 2);  // 越界！level_rates 只有 [0] 和 [1]
             });
 
             // commission_bonus 回退
             LEVEL_BONUSES.with(|l| {
                 let mut m = l.borrow_mut();
-                m.insert((shop_id, 2), 900);  // level_id=2 的回退
+                m.insert((entity_id, 2), 900);  // level_id=2 的回退
             });
 
             // level_rates 只有 2 个元素: [300, 600]
@@ -574,7 +568,7 @@ mod tests {
             let mut outputs = alloc::vec::Vec::new();
 
             pallet::Pallet::<Test>::process_level_diff(
-                entity_id, shop_id, &50, 10000, &mut remaining, &mut outputs,
+                entity_id, &50, 10000, &mut remaining, &mut outputs,
             );
 
             // 40: rate=300 (from level_rates[0]), prev=0, diff=300 → 300
@@ -594,14 +588,13 @@ mod tests {
     fn p2_level_id_out_of_bounds_no_bonus_yields_zero() {
         new_test_ext().execute_with(|| {
             let entity_id = 1u64;
-            let shop_id = 1u64;
 
             // 50 → 40
-            REFERRERS.with(|r| r.borrow_mut().insert((shop_id, 50), 40));
+            REFERRERS.with(|r| r.borrow_mut().insert((entity_id, 50), 40));
             CUSTOM_LEVELS.with(|c| *c.borrow_mut() = true);
 
             // level_id=2 超出 level_rates（空配置）
-            CUSTOM_LEVEL_IDS.with(|c| c.borrow_mut().insert((shop_id, 40), 2));
+            CUSTOM_LEVEL_IDS.with(|c| c.borrow_mut().insert((entity_id, 40), 2));
             // 不设置 commission_bonus → 回退为 0
 
             let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600]).unwrap();
@@ -616,7 +609,7 @@ mod tests {
             let mut outputs = alloc::vec::Vec::new();
 
             pallet::Pallet::<Test>::process_level_diff(
-                entity_id, shop_id, &50, 10000, &mut remaining, &mut outputs,
+                entity_id, &50, 10000, &mut remaining, &mut outputs,
             );
 
             // rate=0 (fallback, no bonus), prev=0 → no diff → no commission
@@ -634,7 +627,7 @@ mod tests {
         new_test_ext().execute_with(|| {
             let modes = CommissionModes(CommissionModes::DIRECT_REWARD);
             let (outputs, remaining) = <pallet::Pallet<Test> as pallet_commission_common::CommissionPlugin<u64, Balance>>::calculate(
-                1, 1, &50, 10000, 10000, modes, false, 1,
+                1, &50, 10000, 10000, modes, false, 1,
             );
             assert!(outputs.is_empty());
             assert_eq!(remaining, 10000);
@@ -645,16 +638,15 @@ mod tests {
     fn plugin_works_with_level_diff_mode_enabled() {
         new_test_ext().execute_with(|| {
             let entity_id = 1u64;
-            let shop_id = 1u64;
 
-            REFERRERS.with(|r| r.borrow_mut().insert((shop_id, 50), 40));
+            REFERRERS.with(|r| r.borrow_mut().insert((entity_id, 50), 40));
             CUSTOM_LEVELS.with(|c| *c.borrow_mut() = true);
-            CUSTOM_LEVEL_IDS.with(|c| c.borrow_mut().insert((shop_id, 40), 0));
-            LEVEL_BONUSES.with(|l| l.borrow_mut().insert((shop_id, 0), 500));
+            CUSTOM_LEVEL_IDS.with(|c| c.borrow_mut().insert((entity_id, 40), 0));
+            LEVEL_BONUSES.with(|l| l.borrow_mut().insert((entity_id, 0), 500));
 
             let modes = CommissionModes(CommissionModes::LEVEL_DIFF);
             let (outputs, remaining) = <pallet::Pallet<Test> as pallet_commission_common::CommissionPlugin<u64, Balance>>::calculate(
-                entity_id, shop_id, &50, 10000, 10000, modes, false, 1,
+                entity_id, &50, 10000, 10000, modes, false, 1,
             );
 
             assert_eq!(outputs.len(), 1);

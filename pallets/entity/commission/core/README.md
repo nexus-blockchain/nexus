@@ -13,6 +13,7 @@
 - 一键初始化佣金方案（`init_commission_plan`）
 - 调度各插件（ReferralPlugin / LevelDiffPlugin / SingleLinePlugin / TeamPlugin）
 - **平台费固定分配**：招商人 50% + 国库 50%（无招商人时 100% 进国库）
+- **KYC/合规守卫**：通过 `ParticipationGuard` trait 在提现和购物余额消费前检查参与权
 
 ## 架构
 
@@ -92,6 +93,10 @@ pub trait Config: frame_system::Config {
 
     #[pallet::constant]
     type MaxCustomLevels: Get<u32>;
+
+    /// Entity 参与权守卫（KYC / 合规检查）
+    /// 默认使用 `()` 允许所有操作（无 KYC 要求）
+    type ParticipationGuard: ParticipationGuard<Self::AccountId>;
 }
 ```
 
@@ -135,7 +140,6 @@ pub struct EntityWithdrawalConfig<MaxLevels: Get<u32>> {
     pub level_overrides: BoundedVec<(u8, WithdrawalTierConfig), MaxLevels>, // 按 level_id 覆写
     pub voluntary_bonus_rate: u16,                                    // 自愿多复购奖励（万分比）
     pub enabled: bool,                                                // 是否启用
-    pub shopping_balance_generates_commission: bool,                   // 购物余额是否产生佣金
 }
 ```
 
@@ -150,7 +154,7 @@ pub struct EntityWithdrawalConfig<MaxLevels: Get<u32>> {
 | 2 | `enable_commission` | Entity Owner | 启用/禁用返佣 |
 | 3 | `withdraw_commission` | 会员 | 提取返佣（支持四种提现模式 + 指定复购目标） |
 | 4 | `set_withdrawal_config` | Entity Owner | 设置提现配置（含 level_id 唯一性校验） |
-| 5 | `use_shopping_balance` | Entity Owner | 使用购物余额支付 |
+| 5 | `use_shopping_balance` | ~~会员~~ **已禁用** | 购物余额仅可用于购物（下单抵扣），不可直接提取为 NEX → `ShoppingBalanceWithdrawalDisabled` |
 | 6 | `init_commission_plan` | Entity Owner | 一键初始化佣金方案（None/DirectOnly/MultiLevel/LevelDiff/Custom） |
 
 ### set_withdrawal_config 校验规则
@@ -164,11 +168,14 @@ pub struct EntityWithdrawalConfig<MaxLevels: Get<u32>> {
 
 1. 确定复购目标账户（自己 or 指定目标）
 2. 如果目标不是自己：校验推荐关系 或 自动注册
-3. 冻结期检查（`withdrawal_cooldown` > 0 时）
-4. `calc_withdrawal_split` 计算提现/复购/奖励分配
-5. 偿付安全检查：`entity_balance - withdrawal ≥ remaining_pending + new_shopping_total`
-6. 转账提现部分到用户钱包
-7. 复购 + 奖励记入目标账户购物余额
+3. **H1 修复**: auto_register 后验证 target 已成为正式会员（`TargetNotApprovedMember`）
+4. **H3 修复**: `ParticipationGuard::can_participate` 检查 target 是否满足 Entity KYC 要求（`TargetParticipationDenied`）
+5. `WithdrawalConfig` 启用检查（`WithdrawalConfigNotEnabled`）
+6. 冻结期检查（`withdrawal_cooldown` > 0 时）
+7. `calc_withdrawal_split` 计算提现/复购/奖励分配
+8. 偿付安全检查：`entity_balance - withdrawal ≥ remaining_pending + new_shopping_total`
+9. 转账提现部分到用户钱包
+10. 复购 + 奖励记入目标账户购物余额
 
 ## 提现系统
 
@@ -215,9 +222,25 @@ bonus = (repurchase - mandatory_repurchase) × voluntary_bonus_rate / 10000
 
 `withdraw_commission` 的 `repurchase_target` 参数：
 - `None` → 复购到自己的购物余额
-- 目标为非会员 → 自动注册（推荐人 = 出资人）
+- 目标为非会员 → 自动注册（推荐人 = 出资人），注册后验证会员状态
 - 目标为已有会员且推荐人是出资人 → 允许
 - 目标为已有会员但推荐人非出资人 → `NotDirectReferral` 错误
+- APPROVAL_REQUIRED 策略下 target 仅进入 PendingMembers → `TargetNotApprovedMember` 错误
+- Entity 配置 mandatory KYC 且 target 未通过 → `TargetParticipationDenied` 错误
+
+### 购物余额使用规则
+
+购物余额**仅可用于购物**（通过 `place_order` 下单抵扣），不可直接提取为 NEX：
+
+| 路径 | 函数 | 行为 | 状态 |
+|------|------|------|------|
+| 下单抵扣 | `ShoppingBalanceProvider::consume` → `do_consume_shopping_balance` | NEX 从 Entity 转入买家钱包 → Escrow 锁定 | ✅ 允许 |
+| 直接提现 | `use_shopping_balance` extrinsic | — | ❌ 已禁用 |
+| 纯记账 | `CommissionProvider::use_shopping_balance` → `do_use_shopping_balance` | 仅扣减记账 | ✅ 允许 |
+
+`do_consume_shopping_balance` 的安全检查：
+1. **H3**: KYC 参与权检查 → `ParticipationRequirementNotMet`
+2. 余额充足性 → `InsufficientShoppingBalance`
 
 ### 偿付安全
 
@@ -235,7 +258,8 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 | `credit_commission` | 记录并发放返佣（写入 Records/Stats/PendingTotal/LastCredited） |
 | `cancel_commission` | 取消订单返佣（H2 审计修复：先转账后更新记录，防止转账失败但记录已取消） |
 | `calc_withdrawal_split` | 计算提现/复购/奖励分配（三层约束模型） |
-| `do_use_shopping_balance` | 使用购物余额内部实现（供 extrinsic 和 CommissionProvider 调用） |
+| `do_use_shopping_balance` | 使用购物余额纯记账（供 CommissionProvider 调用，不转 NEX） |
+| `do_consume_shopping_balance` | 消费购物余额（扣减记账 + NEX 从 Entity 转入会员钱包，供 ShoppingBalanceProvider 调用） |
 | `resolve_entity_id` | 从 shop_id 解析 entity_id |
 | `ensure_entity_owner` | 验证 Entity 所有者权限 |
 
@@ -275,7 +299,7 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 | `CommissionWithdrawn` | entity_id, account, amount | 返佣提取 |
 | `CommissionCancelled` | order_id, refund_succeeded, refund_failed | 返佣取消（CC-M1 审计修复：含成功/失败计数） |
 | `CommissionPlanInitialized` | entity_id, plan | 佣金方案初始化 |
-| `TieredWithdrawal` | entity_id, account, withdrawn_amount, repurchase_amount, bonus_amount | 分级提现（三部分金额） |
+| `TieredWithdrawal` | entity_id, account, **repurchase_target**, withdrawn_amount, repurchase_amount, bonus_amount | 分级提现（M3 修复: 含购物余额实际接收账户） |
 | `WithdrawalConfigUpdated` | entity_id | 提现配置更新 |
 | `ShoppingBalanceUsed` | entity_id, account, amount | 购物余额使用 |
 | `CommissionFundsTransferred` | entity_id, shop_id, amount | 佣金资金转入 Entity |
@@ -305,6 +329,11 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 | `AutoRegisterFailed` | 自动注册会员失败 |
 | `ZeroWithdrawalAmount` | 提现金额为 0 |
 | `DuplicateLevelId` | LevelBased 配置中 level_overrides 存在重复的 level_id |
+| `TargetNotApprovedMember` | H1: 复购目标未通过审批（APPROVAL_REQUIRED 策略下） |
+| `MemberNotActivated` | ~~已废弃~~ 激活机制已移除，保留错误码供兼容 |
+| `TargetParticipationDenied` | H3: 复购目标不满足 Entity 参与要求（如 mandatory KYC） |
+| `ParticipationRequirementNotMet` | H3: 账户不满足 Entity 参与要求，无法消费购物余额 |
+| `ShoppingBalanceWithdrawalDisabled` | 购物余额仅可用于购物，不可直接提取为 NEX |
 
 ## Trait 实现
 
@@ -332,6 +361,25 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 
 佣金资金已转入 Entity 账户，Shop 的 `protected_funds` 始终返回 0。
 
+## ParticipationGuard Trait
+
+KYC/合规检查的泛型接口，在 `withdraw_commission` 和 `do_consume_shopping_balance` 中调用：
+
+```rust
+pub trait ParticipationGuard<AccountId> {
+    fn can_participate(entity_id: u64, account: &AccountId) -> bool;
+}
+
+/// 默认空实现（无 KYC 系统时使用，所有账户均允许）
+impl<AccountId> ParticipationGuard<AccountId> for () {
+    fn can_participate(_: u64, _: &AccountId) -> bool { true }
+}
+```
+
+Runtime 通过 `KycParticipationGuard` 桥接 `pallet-entity-kyc::can_participate_in_entity`：
+- Entity 未配置 `EntityRequirements` 或 `mandatory=false` → 返回 `true`（允许所有）
+- Entity 配置 `mandatory=true` → 检查账户 KYC 状态、级别、国家、风险评分、过期
+
 ## 审计修复记录
 
 | 编号 | 级别 | 修复 | 说明 |
@@ -340,10 +388,17 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 | CC-M1 | Medium | `CommissionCancelled` 事件 | 增加 refund_succeeded / refund_failed 计数 |
 | C1 | Critical | `withdraw_commission` | 偿付安全检查计入 repurchase + bonus 对 ShopShoppingTotal 的增量 |
 | M1 | Low | `set_withdrawal_config` | level_overrides 添加 level_id 唯一性校验（DuplicateLevelId 错误） |
+| H1-rep | High | `withdraw_commission` | APPROVAL_REQUIRED 策略下 auto_register 后验证 target 会员状态（`TargetNotApprovedMember`） |
+| H1-audit | High | `withdraw_commission` | WithdrawalConfig 未启用时拒绝提现（`WithdrawalConfigNotEnabled`） |
+| H3-rep | High | `withdraw_commission` / `do_consume_shopping_balance` | 引入 `ParticipationGuard` trait 检查 Entity KYC 参与要求 |
+| H3-stats | High | `withdraw_commission` | `stats.repurchased` 含 bonus（修复统计不完整） |
+| M2-rep | ~~Removed~~ | `do_consume_shopping_balance` | ~~激活检查已移除（过度设计）~~ KYC 参与权检查已足够 |
+| M3 | Medium | `TieredWithdrawal` 事件 | 新增 `repurchase_target` 字段 |
+| — | — | `use_shopping_balance` extrinsic | 禁用直接提现，购物余额仅可用于购物 |
 
 ## 测试覆盖
 
-19 个测试（`cargo test -p pallet-commission-core`）：
+29 个测试（`cargo test -p pallet-commission-core`）：
 
 - **set_commission_rate**: works / rejects_invalid / rejects_non_owner
 - **process_commission（平台费分配）**: referrer_gets_half / dual_source / referrer_skipped_no_referrer / referrer_skipped_zero_fee / referrer_capped / referrer_stats
@@ -351,7 +406,13 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 - **cancel_commission**: refunds_all（双来源 + 国库退款）
 - **未配置佣金**: treasury_receives_even_without_config
 - **init_commission_plan**: works
-- **set_withdrawal_config**: m1_rejects_duplicate_level_id（M1 审计回归测试）
+- **set_withdrawal_config**: m1_rejects_duplicate_level_id
+- **提现审计**: h1_withdraw_blocked_when_config_disabled / h1_withdraw_allowed_when_no_config
+- **统计修复**: h3_repurchased_includes_bonus
+- **事件修复**: m3_event_includes_repurchase_target
+- **提现模式**: fixed_rate_withdrawal_split_works / governance_floor_enforced_in_full_withdrawal_mode
+- **H3 KYC**: h3_withdraw_blocked_when_target_participation_denied / h3_consume_shopping_balance_blocked_when_participation_denied / h3_self_withdraw_not_checked_by_participation_guard
+- **购物余额**: use_shopping_balance_extrinsic_always_rejected
 
 ## 依赖
 

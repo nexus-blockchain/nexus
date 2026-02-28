@@ -16,15 +16,15 @@ thread_local! {
     static MEMBER_STATS: RefCell<BTreeMap<(u64, u64), (u32, u32, u128)>> = RefCell::new(BTreeMap::new());
 }
 
-pub fn set_referrer(shop_id: u64, account: u64, referrer: u64) {
+pub fn set_referrer(entity_id: u64, account: u64, referrer: u64) {
     REFERRERS.with(|r| {
-        r.borrow_mut().insert((shop_id, account), referrer);
+        r.borrow_mut().insert((entity_id, account), referrer);
     });
 }
 
-pub fn set_stats(shop_id: u64, account: u64, direct: u32, team_size: u32, total_spent: u128) {
+pub fn set_stats(entity_id: u64, account: u64, direct: u32, team_size: u32, total_spent: u128) {
     MEMBER_STATS.with(|s| {
-        s.borrow_mut().insert((shop_id, account), (direct, team_size, total_spent));
+        s.borrow_mut().insert((entity_id, account), (direct, team_size, total_spent));
     });
 }
 
@@ -34,10 +34,10 @@ pub fn clear_thread_locals() {
 }
 
 /// 设置线性推荐链: buyer -> r1 -> r2 -> r3 -> ...
-pub fn setup_chain(shop_id: u64, buyer: u64, referrers: &[u64]) {
+pub fn setup_chain(entity_id: u64, buyer: u64, referrers: &[u64]) {
     let mut prev = buyer;
     for &r in referrers {
-        set_referrer(shop_id, prev, r);
+        set_referrer(entity_id, prev, r);
         prev = r;
     }
 }
@@ -50,12 +50,12 @@ pub struct MockMemberProvider;
 
 impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
     fn is_member(_: u64, _: &u64) -> bool { true }
-    fn get_referrer(shop_id: u64, account: &u64) -> Option<u64> {
-        REFERRERS.with(|r| r.borrow().get(&(shop_id, *account)).copied())
+    fn get_referrer(entity_id: u64, account: &u64) -> Option<u64> {
+        REFERRERS.with(|r| r.borrow().get(&(entity_id, *account)).copied())
     }
     fn member_level(_: u64, _: &u64) -> Option<pallet_entity_common::MemberLevel> { None }
-    fn get_member_stats(shop_id: u64, account: &u64) -> (u32, u32, u128) {
-        MEMBER_STATS.with(|s| s.borrow().get(&(shop_id, *account)).copied().unwrap_or((0, 0, 0)))
+    fn get_member_stats(entity_id: u64, account: &u64) -> (u32, u32, u128) {
+        MEMBER_STATS.with(|s| s.borrow().get(&(entity_id, *account)).copied().unwrap_or((0, 0, 0)))
     }
     fn uses_custom_levels(_: u64) -> bool { false }
     fn custom_level_id(_: u64, _: &u64) -> u8 { 0 }

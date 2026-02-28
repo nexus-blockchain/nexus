@@ -8,6 +8,7 @@
 //! - `pallet-commission-referral` — 推荐链返佣（Direct/Multi/Fixed/First/Repeat）
 //! - `pallet-commission-level-diff` — 等级极差返佣
 //! - `pallet-commission-single-line` — 单线收益（上线/下线）
+//! - `pallet-commission-pool-reward` — 沉淀池奖励（未分配佣金回馈高级别会员）
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -17,11 +18,13 @@ pub use pallet_commission_core;
 pub use pallet_commission_referral;
 pub use pallet_commission_level_diff;
 pub use pallet_commission_single_line;
+pub use pallet_commission_pool_reward;
 
 // Re-export commonly used traits and types at crate root
 pub use pallet_commission_common::{
     CommissionModes, CommissionOutput, CommissionPlugin, CommissionPlan, CommissionProvider,
     CommissionRecord, CommissionStatus, CommissionType,
     LevelDiffPlanWriter, MemberCommissionStatsData, MemberProvider,
-    NullCommissionProvider, NullMemberProvider, ReferralPlanWriter, WithdrawalTierConfig,
+    NullCommissionProvider, NullMemberProvider, PoolRewardPlanWriter, ReferralPlanWriter,
+    WithdrawalTierConfig,
 };

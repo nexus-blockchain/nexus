@@ -297,7 +297,7 @@ pub mod pallet {
 
     impl<T: Config> Pallet<T> {
         pub fn process_direct_reward(
-            shop_id: u64,
+            entity_id: u64,
             buyer: &T::AccountId,
             order_amount: BalanceOf<T>,
             remaining: &mut BalanceOf<T>,
@@ -305,7 +305,7 @@ pub mod pallet {
             outputs: &mut Vec<CommissionOutput<T::AccountId, BalanceOf<T>>>,
         ) {
             if config.rate == 0 { return; }
-            if let Some(referrer) = T::MemberProvider::get_referrer(shop_id, buyer) {
+            if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
                 let commission = order_amount.saturating_mul(config.rate.into()) / 10000u32.into();
                 let actual = commission.min(*remaining);
                 if !actual.is_zero() {
@@ -321,7 +321,7 @@ pub mod pallet {
         }
 
         pub fn process_multi_level(
-            shop_id: u64,
+            entity_id: u64,
             buyer: &T::AccountId,
             order_amount: BalanceOf<T>,
             remaining: &mut BalanceOf<T>,
@@ -334,7 +334,7 @@ pub mod pallet {
             let mut visited = BTreeSet::new();
             visited.insert(buyer.clone());
 
-            let mut current_referrer = T::MemberProvider::get_referrer(shop_id, buyer);
+            let mut current_referrer = T::MemberProvider::get_referrer(entity_id, buyer);
             let mut total_commission = BalanceOf::<T>::zero();
             let max_commission = order_amount
                 .saturating_mul(config.max_total_rate.into())
@@ -345,7 +345,7 @@ pub mod pallet {
                     if let Some(ref r) = current_referrer {
                         visited.insert(r.clone());
                     }
-                    current_referrer = current_referrer.and_then(|r| T::MemberProvider::get_referrer(shop_id, &r));
+                    current_referrer = current_referrer.and_then(|r| T::MemberProvider::get_referrer(entity_id, &r));
                     continue;
                 }
 
@@ -355,8 +355,8 @@ pub mod pallet {
                 if visited.contains(referrer) { break; }
                 visited.insert(referrer.clone());
 
-                if !Self::check_tier_activation(shop_id, referrer, tier) {
-                    current_referrer = T::MemberProvider::get_referrer(shop_id, referrer);
+                if !Self::check_tier_activation(entity_id, referrer, tier) {
+                    current_referrer = T::MemberProvider::get_referrer(entity_id, referrer);
                     continue;
                 }
 
@@ -391,19 +391,19 @@ pub mod pallet {
                     level,
                 });
 
-                current_referrer = T::MemberProvider::get_referrer(shop_id, referrer);
+                current_referrer = T::MemberProvider::get_referrer(entity_id, referrer);
             }
         }
 
         pub fn check_tier_activation(
-            shop_id: u64,
+            entity_id: u64,
             account: &T::AccountId,
             tier: &MultiLevelTier,
         ) -> bool {
             if tier.required_directs == 0 && tier.required_team_size == 0 && tier.required_spent == 0 {
                 return true;
             }
-            let (direct_referrals, team_size, total_spent) = T::MemberProvider::get_member_stats(shop_id, account);
+            let (direct_referrals, team_size, total_spent) = T::MemberProvider::get_member_stats(entity_id, account);
             if tier.required_directs > 0 && direct_referrals < tier.required_directs { return false; }
             if tier.required_team_size > 0 && team_size < tier.required_team_size { return false; }
             if tier.required_spent > 0 && total_spent < tier.required_spent { return false; }
@@ -411,14 +411,14 @@ pub mod pallet {
         }
 
         pub fn process_fixed_amount(
-            shop_id: u64,
+            entity_id: u64,
             buyer: &T::AccountId,
             remaining: &mut BalanceOf<T>,
             config: &FixedAmountConfig<BalanceOf<T>>,
             outputs: &mut Vec<CommissionOutput<T::AccountId, BalanceOf<T>>>,
         ) {
             if config.amount.is_zero() { return; }
-            if let Some(referrer) = T::MemberProvider::get_referrer(shop_id, buyer) {
+            if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
                 let actual = config.amount.min(*remaining);
                 if !actual.is_zero() {
                     *remaining = remaining.saturating_sub(actual);
@@ -433,7 +433,7 @@ pub mod pallet {
         }
 
         pub fn process_first_order(
-            shop_id: u64,
+            entity_id: u64,
             buyer: &T::AccountId,
             order_amount: BalanceOf<T>,
             remaining: &mut BalanceOf<T>,
@@ -443,7 +443,7 @@ pub mod pallet {
             // H3 审计修复: 零值早返回，避免不必要的 storage read
             if config.use_amount && config.amount.is_zero() { return; }
             if !config.use_amount && config.rate == 0 { return; }
-            if let Some(referrer) = T::MemberProvider::get_referrer(shop_id, buyer) {
+            if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
                 let commission = if config.use_amount {
                     config.amount
                 } else {
@@ -463,7 +463,7 @@ pub mod pallet {
         }
 
         pub fn process_repeat_purchase(
-            shop_id: u64,
+            entity_id: u64,
             buyer: &T::AccountId,
             order_amount: BalanceOf<T>,
             remaining: &mut BalanceOf<T>,
@@ -472,7 +472,7 @@ pub mod pallet {
             outputs: &mut Vec<CommissionOutput<T::AccountId, BalanceOf<T>>>,
         ) {
             if config.rate == 0 || buyer_order_count < config.min_orders { return; }
-            if let Some(referrer) = T::MemberProvider::get_referrer(shop_id, buyer) {
+            if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
                 let commission = order_amount.saturating_mul(config.rate.into()) / 10000u32.into();
                 let actual = commission.min(*remaining);
                 if !actual.is_zero() {
@@ -496,7 +496,6 @@ pub mod pallet {
 impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId, pallet::BalanceOf<T>> for pallet::Pallet<T> {
     fn calculate(
         entity_id: u64,
-        shop_id: u64,
         buyer: &T::AccountId,
         order_amount: pallet::BalanceOf<T>,
         remaining: pallet::BalanceOf<T>,
@@ -506,7 +505,6 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
     ) -> (alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, pallet::BalanceOf<T>>>, pallet::BalanceOf<T>) {
         use pallet_commission_common::CommissionModes;
 
-        // 配置按 entity_id 查询，推荐链按 shop_id 查询
         let config = match pallet::ReferralConfigs::<T>::get(entity_id) {
             Some(c) => c,
             None => return (alloc::vec::Vec::new(), remaining),
@@ -517,31 +515,31 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
 
         if enabled_modes.contains(CommissionModes::DIRECT_REWARD) {
             pallet::Pallet::<T>::process_direct_reward(
-                shop_id, buyer, order_amount, &mut remaining, &config.direct_reward, &mut outputs,
+                entity_id, buyer, order_amount, &mut remaining, &config.direct_reward, &mut outputs,
             );
         }
 
         if enabled_modes.contains(CommissionModes::MULTI_LEVEL) {
             pallet::Pallet::<T>::process_multi_level(
-                shop_id, buyer, order_amount, &mut remaining, &config.multi_level, &mut outputs,
+                entity_id, buyer, order_amount, &mut remaining, &config.multi_level, &mut outputs,
             );
         }
 
         if enabled_modes.contains(CommissionModes::FIXED_AMOUNT) {
             pallet::Pallet::<T>::process_fixed_amount(
-                shop_id, buyer, &mut remaining, &config.fixed_amount, &mut outputs,
+                entity_id, buyer, &mut remaining, &config.fixed_amount, &mut outputs,
             );
         }
 
         if enabled_modes.contains(CommissionModes::FIRST_ORDER) && is_first_order {
             pallet::Pallet::<T>::process_first_order(
-                shop_id, buyer, order_amount, &mut remaining, &config.first_order, &mut outputs,
+                entity_id, buyer, order_amount, &mut remaining, &config.first_order, &mut outputs,
             );
         }
 
         if enabled_modes.contains(CommissionModes::REPEAT_PURCHASE) {
             pallet::Pallet::<T>::process_repeat_purchase(
-                shop_id, buyer, order_amount, &mut remaining, &config.repeat_purchase, buyer_order_count, &mut outputs,
+                entity_id, buyer, order_amount, &mut remaining, &config.repeat_purchase, buyer_order_count, &mut outputs,
             );
         }
 

@@ -29,6 +29,7 @@ members = [
     "pallets/entity/commission/level-diff",
     "pallets/entity/commission/single-line",
     "pallets/entity/commission/team",
+    "pallets/entity/commission/pool-reward",
     "pallets/entity/commission",
     "pallets/entity/service",
     "pallets/entity/transaction",
@@ -82,6 +83,7 @@ pallet-commission-referral = { path = "./pallets/entity/commission/referral", de
 pallet-commission-level-diff = { path = "./pallets/entity/commission/level-diff", default-features = false }
 pallet-commission-single-line = { path = "./pallets/entity/commission/single-line", default-features = false }
 pallet-commission-team = { path = "./pallets/entity/commission/team", default-features = false }
+pallet-commission-pool-reward = { path = "./pallets/entity/commission/pool-reward", default-features = false }
 pallet-entity-commission = { path = "./pallets/entity/commission", default-features = false }
 pallet-entity-service = { path = "./pallets/entity/service", default-features = false }
 pallet-entity-transaction = { path = "./pallets/entity/transaction", default-features = false }

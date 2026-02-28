@@ -338,19 +338,19 @@ thread_local! {
 }
 
 #[allow(dead_code)]
-pub fn set_shopping_balance(shop_id: u64, account: u64, amount: u64) {
-    SHOPPING_BALANCES.with(|b| b.borrow_mut().insert((shop_id, account), amount));
+pub fn set_shopping_balance(entity_id: u64, account: u64, amount: u64) {
+    SHOPPING_BALANCES.with(|b| b.borrow_mut().insert((entity_id, account), amount));
 }
 
 impl pallet_entity_common::ShoppingBalanceProvider<u64, u64> for MockShoppingBalanceProvider {
-    fn shopping_balance(shop_id: u64, account: &u64) -> u64 {
-        SHOPPING_BALANCES.with(|b| *b.borrow().get(&(shop_id, *account)).unwrap_or(&0))
+    fn shopping_balance(entity_id: u64, account: &u64) -> u64 {
+        SHOPPING_BALANCES.with(|b| *b.borrow().get(&(entity_id, *account)).unwrap_or(&0))
     }
 
-    fn consume_shopping_balance(shop_id: u64, account: &u64, amount: u64) -> Result<(), sp_runtime::DispatchError> {
+    fn consume_shopping_balance(entity_id: u64, account: &u64, amount: u64) -> Result<(), sp_runtime::DispatchError> {
         SHOPPING_BALANCES.with(|b| {
             let mut map = b.borrow_mut();
-            let balance = map.entry((shop_id, *account)).or_insert(0);
+            let balance = map.entry((entity_id, *account)).or_insert(0);
             if *balance < amount {
                 return Err(sp_runtime::DispatchError::Other("InsufficientShoppingBalance"));
             }
@@ -375,12 +375,54 @@ pub fn get_cancelled_orders() -> Vec<u64> {
 }
 
 impl pallet_entity_common::OrderCommissionHandler<u64, u64> for MockCommissionHandler {
-    fn on_order_completed(_shop_id: u64, _order_id: u64, _buyer: &u64, _amount: u64, _platform_fee: u64) -> Result<(), sp_runtime::DispatchError> {
+    fn on_order_completed(_entity_id: u64, _shop_id: u64, _order_id: u64, _buyer: &u64, _amount: u64, _platform_fee: u64) -> Result<(), sp_runtime::DispatchError> {
         Ok(())
     }
 
     fn on_order_cancelled(order_id: u64) -> Result<(), sp_runtime::DispatchError> {
         CANCELLED_ORDERS.with(|c| c.borrow_mut().push(order_id));
+        Ok(())
+    }
+}
+
+// ==================== Mock PricingProvider ====================
+
+pub struct MockPricingProvider;
+
+impl pallet_entity_common::PricingProvider for MockPricingProvider {
+    fn get_nex_usdt_price() -> u64 {
+        // 测试价格: 1 USDT/NEX (精度 10^6)
+        1_000_000
+    }
+}
+
+// ==================== Mock MemberHandler ====================
+
+pub struct MockMemberHandler;
+
+thread_local! {
+    static MEMBER_REGISTERED: RefCell<Vec<(u64, u64)>> = RefCell::new(Vec::new());
+    static MEMBER_SPENT: RefCell<Vec<(u64, u64, u64, u64)>> = RefCell::new(Vec::new());
+}
+
+#[allow(dead_code)]
+pub fn get_member_registered() -> Vec<(u64, u64)> {
+    MEMBER_REGISTERED.with(|r| r.borrow().clone())
+}
+
+#[allow(dead_code)]
+pub fn get_member_spent() -> Vec<(u64, u64, u64, u64)> {
+    MEMBER_SPENT.with(|s| s.borrow().clone())
+}
+
+impl pallet_entity_common::OrderMemberHandler<u64, u64> for MockMemberHandler {
+    fn auto_register(entity_id: u64, account: &u64, _referrer: Option<u64>) -> Result<(), sp_runtime::DispatchError> {
+        MEMBER_REGISTERED.with(|r| r.borrow_mut().push((entity_id, *account)));
+        Ok(())
+    }
+
+    fn update_spent(entity_id: u64, account: &u64, amount: u64, amount_usdt: u64) -> Result<(), sp_runtime::DispatchError> {
+        MEMBER_SPENT.with(|s| s.borrow_mut().push((entity_id, *account, amount, amount_usdt)));
         Ok(())
     }
 }
@@ -414,6 +456,8 @@ impl pallet_entity_transaction::Config for Test {
     type ServiceConfirmTimeout = ConstU64<150>;
     type CommissionHandler = MockCommissionHandler;
     type ShoppingBalance = MockShoppingBalanceProvider;
+    type MemberHandler = MockMemberHandler;
+    type PricingProvider = MockPricingProvider;
     type MaxCidLength = ConstU32<64>;
 }
 
@@ -446,6 +490,8 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         PRODUCT_STOCK.with(|s| s.borrow_mut().clear());
         CANCELLED_ORDERS.with(|c| c.borrow_mut().clear());
         SHOPPING_BALANCES.with(|b| b.borrow_mut().clear());
+        MEMBER_REGISTERED.with(|r| r.borrow_mut().clear());
+        MEMBER_SPENT.with(|s| s.borrow_mut().clear());
     });
     ext
 }

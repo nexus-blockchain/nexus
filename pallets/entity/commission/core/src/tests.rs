@@ -76,7 +76,7 @@ fn referrer_gets_half_platform_fee() {
 
         let platform_fee: Balance = 10_000;
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 1, &BUYER, 100_000, 100_000, platform_fee,
+            ENTITY_ID, SHOP_ID, 1, &BUYER, 100_000, 100_000, platform_fee,
         ));
 
         // ReferrerShareBps=5000 → referrer = 10000 * 50% = 5000
@@ -107,7 +107,7 @@ fn dual_source_both_pools_work() {
 
         let platform_fee: Balance = 10_000;
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 2, &BUYER, 100_000, 100_000, platform_fee,
+            ENTITY_ID, SHOP_ID, 2, &BUYER, 100_000, 100_000, platform_fee,
         ));
 
         // 池A: referrer = 5000, treasury = 5000
@@ -129,7 +129,7 @@ fn referrer_skipped_when_no_referrer() {
         setup_config(10000);
 
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 3, &BUYER, 100_000, 100_000, 10_000,
+            ENTITY_ID, SHOP_ID, 3, &BUYER, 100_000, 100_000, 10_000,
         ));
 
         // 无推荐人 → 无佣金记录，全部进国库
@@ -148,7 +148,7 @@ fn referrer_skipped_when_platform_fee_zero() {
         setup_config(10000);
 
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 5, &BUYER, 100_000, 100_000, 0,
+            ENTITY_ID, SHOP_ID, 5, &BUYER, 100_000, 100_000, 0,
         ));
 
         let records = OrderCommissionRecords::<Test>::get(5u64);
@@ -169,7 +169,7 @@ fn referrer_amount_capped_by_platform_balance() {
         // 国库 = 0，referrer transferable = 501 - 1 = 500
         // referrer_amount = min(5000, 500) = 500
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 6, &BUYER, 100_000, 100_000, platform_fee,
+            ENTITY_ID, SHOP_ID, 6, &BUYER, 100_000, 100_000, platform_fee,
         ));
 
         let records = OrderCommissionRecords::<Test>::get(6u64);
@@ -189,7 +189,7 @@ fn referrer_stats_tracked_correctly() {
         setup_config(10000);
 
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 7, &BUYER, 100_000, 100_000, 10_000,
+            ENTITY_ID, SHOP_ID, 7, &BUYER, 100_000, 100_000, 10_000,
         ));
 
         // referrer = 50% of 10000 = 5000
@@ -215,7 +215,7 @@ fn platform_fee_50_50_split() {
 
         let platform_fee: Balance = 10_000;
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 20, &BUYER, 100_000, 100_000, platform_fee,
+            ENTITY_ID, SHOP_ID, 20, &BUYER, 100_000, 100_000, platform_fee,
         ));
 
         // 50/50: referrer=5000, treasury=5000
@@ -232,7 +232,7 @@ fn full_platform_fee_to_treasury_when_no_referrer() {
         setup_config(10000);
 
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 21, &BUYER, 100_000, 100_000, 10_000,
+            ENTITY_ID, SHOP_ID, 21, &BUYER, 100_000, 100_000, 10_000,
         ));
 
         let treasury_bal = <pallet_balances::Pallet<Test> as frame_support::traits::Currency<u64>>::free_balance(&TREASURY);
@@ -248,7 +248,7 @@ fn no_treasury_transfer_when_platform_fee_zero() {
         setup_config(10000);
 
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 22, &BUYER, 100_000, 100_000, 0,
+            ENTITY_ID, SHOP_ID, 22, &BUYER, 100_000, 100_000, 0,
         ));
 
         let treasury_bal = <pallet_balances::Pallet<Test> as frame_support::traits::Currency<u64>>::free_balance(&TREASURY);
@@ -269,7 +269,7 @@ fn treasury_transfer_capped_by_platform_balance() {
         // platform_transferable = 500, treasury_cap = 500 - 5000 = 0
         // actual_treasury = 0
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 23, &BUYER, 100_000, 100_000, platform_fee,
+            ENTITY_ID, SHOP_ID, 23, &BUYER, 100_000, 100_000, platform_fee,
         ));
 
         let treasury_bal = <pallet_balances::Pallet<Test> as frame_support::traits::Currency<u64>>::free_balance(&TREASURY);
@@ -293,7 +293,7 @@ fn cancel_commission_refunds_all() {
         fund(ea, 1); // 底仓
 
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 8, &BUYER, 100_000, 100_000, 10_000,
+            ENTITY_ID, SHOP_ID, 8, &BUYER, 100_000, 100_000, 10_000,
         ));
 
         // referrer=5000, treasury=5000
@@ -340,7 +340,7 @@ fn treasury_receives_platform_fee_even_without_commission_config() {
         fund(PLATFORM, 1_000_000);
 
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 30, &BUYER, 100_000, 100_000, 10_000,
+            ENTITY_ID, SHOP_ID, 30, &BUYER, 100_000, 100_000, 10_000,
         ));
 
         // 无推荐人 → 全部 10000 进国库
@@ -381,7 +381,6 @@ fn m1_set_withdrawal_config_rejects_duplicate_level_id() {
                 overrides,
                 0,
                 true,
-                false,
             ),
             Error::<Test>::DuplicateLevelId
         );
@@ -398,7 +397,6 @@ fn m1_set_withdrawal_config_rejects_duplicate_level_id() {
             overrides_ok,
             0,
             true,
-            false,
         ));
     });
 }
@@ -439,7 +437,7 @@ fn h1_withdraw_blocked_when_config_disabled() {
 
         // 产生佣金
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 100, &BUYER, 100_000, 100_000, 10_000,
+            ENTITY_ID, SHOP_ID, 100, &BUYER, 100_000, 100_000, 10_000,
         ));
         let stats = MemberCommissionStats::<Test>::get(ENTITY_ID, REFERRER);
         assert!(stats.pending > 0);
@@ -453,7 +451,6 @@ fn h1_withdraw_blocked_when_config_disabled() {
             BoundedVec::default(),
             0,
             false, // disabled
-            false,
         ));
 
         // 提现应失败
@@ -480,7 +477,7 @@ fn h1_withdraw_allowed_when_no_config() {
         setup_config(10000);
 
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 101, &BUYER, 100_000, 100_000, 10_000,
+            ENTITY_ID, SHOP_ID, 101, &BUYER, 100_000, 100_000, 10_000,
         ));
 
         // 无 WithdrawalConfig → 允许全额提现
@@ -515,7 +512,7 @@ fn h3_repurchased_includes_bonus() {
         setup_config(10000);
 
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 200, &BUYER, 100_000, 100_000, 10_000,
+            ENTITY_ID, SHOP_ID, 200, &BUYER, 100_000, 100_000, 10_000,
         ));
 
         // MemberChoice 模式: min=2000(20%), bonus_rate=1000(10%)
@@ -528,7 +525,6 @@ fn h3_repurchased_includes_bonus() {
             BoundedVec::default(),
             1000, // 10% voluntary bonus
             true,
-            false,
         ));
 
         let pending = MemberCommissionStats::<Test>::get(ENTITY_ID, REFERRER).pending;
@@ -575,7 +571,7 @@ fn m3_event_includes_repurchase_target() {
         setup_config(10000);
 
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 300, &BUYER, 100_000, 100_000, 10_000,
+            ENTITY_ID, SHOP_ID, 300, &BUYER, 100_000, 100_000, 10_000,
         ));
 
         // FixedRate 30% 复购
@@ -587,7 +583,6 @@ fn m3_event_includes_repurchase_target() {
             BoundedVec::default(),
             0,
             true,
-            false,
         ));
 
         // 设置推荐关系: REFERRER 是 BUYER 在 entity 级的推荐人
@@ -637,7 +632,7 @@ fn fixed_rate_withdrawal_split_works() {
         setup_config(10000);
 
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 400, &BUYER, 100_000, 100_000, 20_000,
+            ENTITY_ID, SHOP_ID, 400, &BUYER, 100_000, 100_000, 20_000,
         ));
         // referrer gets 50% of 20000 = 10000
 
@@ -649,7 +644,6 @@ fn fixed_rate_withdrawal_split_works() {
             BoundedVec::default(),
             0,
             true,
-            false,
         ));
 
         assert_ok!(CommissionCore::withdraw_commission(
@@ -690,7 +684,7 @@ fn governance_floor_enforced_in_full_withdrawal_mode() {
         setup_config(10000);
 
         assert_ok!(CommissionCore::process_commission(
-            SHOP_ID, 500, &BUYER, 100_000, 100_000, 20_000,
+            ENTITY_ID, SHOP_ID, 500, &BUYER, 100_000, 100_000, 20_000,
         ));
 
         // FullWithdrawal + governance floor at 30%
@@ -702,7 +696,6 @@ fn governance_floor_enforced_in_full_withdrawal_mode() {
             BoundedVec::default(),
             0,
             true,
-            false,
         ));
         GlobalMinRepurchaseRate::<Test>::insert(ENTITY_ID, 3000u16);
 
@@ -810,5 +803,29 @@ fn h3_self_withdraw_not_checked_by_participation_guard() {
             None,
             None, // target = self
         ));
+    });
+}
+
+// ============================================================================
+// 购物余额仅可用于购物，不可直接提取
+// ============================================================================
+
+#[test]
+fn use_shopping_balance_extrinsic_always_rejected() {
+    new_test_ext().execute_with(|| {
+        fund(entity_account(ENTITY_ID), 100_000);
+        MemberShoppingBalance::<Test>::insert(ENTITY_ID, REFERRER, 5_000u128);
+
+        assert_noop!(
+            CommissionCore::use_shopping_balance(
+                RuntimeOrigin::signed(REFERRER),
+                ENTITY_ID,
+                1_000,
+            ),
+            Error::<Test>::ShoppingBalanceWithdrawalDisabled
+        );
+
+        // 余额不变
+        assert_eq!(MemberShoppingBalance::<Test>::get(ENTITY_ID, REFERRER), 5_000);
     });
 }

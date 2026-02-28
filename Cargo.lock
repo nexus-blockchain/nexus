@@ -5941,6 +5941,7 @@ dependencies = [
  "pallet-commission-common",
  "pallet-commission-core",
  "pallet-commission-level-diff",
+ "pallet-commission-pool-reward",
  "pallet-commission-referral",
  "pallet-commission-single-line",
  "pallet-commission-team",
@@ -6502,6 +6503,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-commission-pool-reward"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "pallet-balances",
+ "pallet-commission-common",
+ "pallet-entity-common",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-io",
+ "sp-runtime",
+ "sp-std",
+]
+
+[[package]]
 name = "pallet-commission-referral"
 version = "0.1.0"
 dependencies = [
@@ -6611,6 +6628,7 @@ dependencies = [
  "pallet-commission-common",
  "pallet-commission-core",
  "pallet-commission-level-diff",
+ "pallet-commission-pool-reward",
  "pallet-commission-referral",
  "pallet-commission-single-line",
 ]

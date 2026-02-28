@@ -834,7 +834,7 @@ pub mod pallet {
             let balance = T::Currency::free_balance(&shop_account);
 
             // 佣金保护：不得侵占已承诺的佣金资金
-            let protected: BalanceOf<T> = T::CommissionFundGuard::protected_funds(shop_id).saturated_into();
+            let protected: BalanceOf<T> = T::CommissionFundGuard::protected_funds(shop.entity_id).saturated_into();
             let available = balance.saturating_sub(protected);
             ensure!(available >= amount, Error::<T>::InsufficientOperatingFund);
 
@@ -1113,7 +1113,7 @@ pub mod pallet {
             let amount_balance: BalanceOf<T> = amount.saturated_into();
 
             // 偿付安全：扣费不得侵占已承诺的佣金资金（pending + shopping）
-            let protected: BalanceOf<T> = T::CommissionFundGuard::protected_funds(shop_id).saturated_into();
+            let protected: BalanceOf<T> = T::CommissionFundGuard::protected_funds(shop.entity_id).saturated_into();
             let available = balance.saturating_sub(protected);
             ensure!(available >= amount_balance, Error::<T>::InsufficientOperatingFund);
             

@@ -38,7 +38,7 @@ pub mod pallet {
     };
     use frame_system::pallet_prelude::*;
     use pallet_escrow::pallet::Escrow as EscrowTrait;
-    use pallet_entity_common::{OrderStatus, OrderCommissionHandler, OrderProvider, ProductCategory, ProductProvider, EntityTokenProvider, ShopProvider, ShoppingBalanceProvider};
+    use pallet_entity_common::{OrderStatus, OrderCommissionHandler, OrderMemberHandler, OrderProvider, PricingProvider, ProductCategory, ProductProvider, EntityTokenProvider, ShopProvider, ShoppingBalanceProvider};
     use sp_runtime::{traits::{Saturating, Zero}, SaturatedConversion};
 
     /// 货币余额类型别名
@@ -129,6 +129,8 @@ pub mod pallet {
         ShopStatsUpdate,
         /// 积分奖励
         TokenReward,
+        /// 会员注册/消费更新
+        MemberUpdate,
         /// 订单自动完成
         AutoComplete,
     }
@@ -178,6 +180,12 @@ pub mod pallet {
 
         /// 购物余额接口（下单时抵扣复购余额）
         type ShoppingBalance: ShoppingBalanceProvider<Self::AccountId, BalanceOf<Self>>;
+
+        /// 会员处理接口（订单完成时自动注册 + 更新消费金额）
+        type MemberHandler: OrderMemberHandler<Self::AccountId, BalanceOf<Self>>;
+
+        /// NEX/USDT 定价接口（用于将 NEX 金额转换为 USDT 以更新会员消费统计）
+        type PricingProvider: PricingProvider;
 
         /// CID 最大长度
         #[pallet::constant]
@@ -410,7 +418,7 @@ pub mod pallet {
             if let Some(shopping_amount) = use_shopping_balance {
                 if !shopping_amount.is_zero() {
                     ensure!(shopping_amount <= final_amount, Error::<T>::InvalidAmount);
-                    T::ShoppingBalance::consume_shopping_balance(shop_id, &buyer, shopping_amount)?;
+                    T::ShoppingBalance::consume_shopping_balance(entity_id, &buyer, shopping_amount)?;
                     // final_amount 不变：买家钱包已收到 NEX，Escrow 将从中锁定全额
                 }
             }
@@ -795,6 +803,30 @@ pub mod pallet {
                 }
             });
 
+            // 解析 entity_id（供会员/佣金模块使用）
+            let entity_id = T::ShopProvider::shop_entity_id(order.shop_id)
+                .unwrap_or(order.shop_id);
+
+            // 自动注册买家为会员 + 更新消费金额（best-effort）
+            // auto_register: 首次购买时注册会员（PURCHASE_REQUIRED 策略触发点）
+            // update_spent: 更新消费金额 + 激活待激活会员 + 触发等级升级
+            let _ = T::MemberHandler::auto_register(entity_id, &order.buyer, None);
+            // NEX → USDT 转换: price 精度 10^6, NEX 精度 10^12
+            // amount_usdt (6 dec) = amount_nex (12 dec) * price (6 dec) / 10^12
+            let amount_nex: u128 = order.total_amount.saturated_into();
+            let nex_price: u128 = T::PricingProvider::get_nex_usdt_price() as u128;
+            let amount_usdt: u64 = amount_nex.saturating_mul(nex_price)
+                .checked_div(1_000_000_000_000u128)
+                .unwrap_or(0) as u64;
+            if T::MemberHandler::update_spent(
+                entity_id,
+                &order.buyer,
+                order.total_amount,
+                amount_usdt,
+            ).is_err() {
+                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::MemberUpdate });
+            }
+
             // 更新店铺统计（best-effort，失败发事件）
             if T::ShopProvider::update_shop_stats(
                 order.shop_id,
@@ -806,6 +838,7 @@ pub mod pallet {
 
             // 触发佣金计算（best-effort，失败发事件）
             if T::CommissionHandler::on_order_completed(
+                entity_id,
                 order.shop_id,
                 order_id,
                 &order.buyer,

@@ -61,6 +61,7 @@ pallet-commission-referral = { workspace = true }
 pallet-commission-level-diff = { workspace = true }
 pallet-commission-single-line = { workspace = true }
 pallet-commission-team = { workspace = true }
+pallet-commission-pool-reward = { workspace = true }
 pallet-entity-commission = { workspace = true }
 pallet-entity-service = { workspace = true }
 pallet-entity-transaction = { workspace = true }
@@ -148,6 +149,7 @@ std = [
 	"pallet-commission-level-diff/std",
 	"pallet-commission-single-line/std",
 	"pallet-commission-team/std",
+	"pallet-commission-pool-reward/std",
 	"pallet-entity-commission/std",
 	"pallet-entity-service/std",
 	"pallet-entity-transaction/std",

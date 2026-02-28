@@ -207,8 +207,7 @@ pub mod pallet {
 
         /// 处理团队业绩返佣
         pub fn process_team_performance(
-            _entity_id: u64,
-            shop_id: u64,
+            entity_id: u64,
             buyer: &T::AccountId,
             order_amount: BalanceOf<T>,
             remaining: &mut BalanceOf<T>,
@@ -217,7 +216,7 @@ pub mod pallet {
         ) {
             if config.tiers.is_empty() { return; }
 
-            let mut current = T::MemberProvider::get_referrer(shop_id, buyer);
+            let mut current = T::MemberProvider::get_referrer(entity_id, buyer);
             let mut depth: u8 = 0;
 
             while let Some(ref ancestor) = current {
@@ -227,7 +226,7 @@ pub mod pallet {
 
                 // 查询团队统计：(direct_referrals, team_size, total_spent)
                 let (_direct, team_size, total_spent) =
-                    T::MemberProvider::get_member_stats(shop_id, ancestor);
+                    T::MemberProvider::get_member_stats(entity_id, ancestor);
 
                 if let Some(rate) = Self::match_tier(&config.tiers, team_size, total_spent) {
                     if rate > 0 {
@@ -253,7 +252,7 @@ pub mod pallet {
                     }
                 }
 
-                current = T::MemberProvider::get_referrer(shop_id, ancestor);
+                current = T::MemberProvider::get_referrer(entity_id, ancestor);
             }
         }
     }
@@ -268,7 +267,6 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
 {
     fn calculate(
         entity_id: u64,
-        shop_id: u64,
         buyer: &T::AccountId,
         order_amount: pallet::BalanceOf<T>,
         remaining: pallet::BalanceOf<T>,
@@ -294,7 +292,7 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
         let mut outputs = alloc::vec::Vec::new();
 
         pallet::Pallet::<T>::process_team_performance(
-            entity_id, shop_id, buyer, order_amount, &mut remaining, &config, &mut outputs,
+            entity_id, buyer, order_amount, &mut remaining, &config, &mut outputs,
         );
 
         (outputs, remaining)
@@ -375,12 +373,12 @@ mod tests {
 
     impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
         fn is_member(_: u64, _: &u64) -> bool { true }
-        fn get_referrer(shop_id: u64, account: &u64) -> Option<u64> {
-            REFERRERS.with(|r| r.borrow().get(&(shop_id, *account)).copied())
+        fn get_referrer(entity_id: u64, account: &u64) -> Option<u64> {
+            REFERRERS.with(|r| r.borrow().get(&(entity_id, *account)).copied())
         }
         fn member_level(_: u64, _: &u64) -> Option<pallet_entity_common::MemberLevel> { None }
-        fn get_member_stats(shop_id: u64, account: &u64) -> (u32, u32, u128) {
-            MEMBER_STATS.with(|s| s.borrow().get(&(shop_id, *account)).copied().unwrap_or((0, 0, 0)))
+        fn get_member_stats(entity_id: u64, account: &u64) -> (u32, u32, u128) {
+            MEMBER_STATS.with(|s| s.borrow().get(&(entity_id, *account)).copied().unwrap_or((0, 0, 0)))
         }
         fn uses_custom_levels(_: u64) -> bool { false }
         fn custom_level_id(_: u64, _: &u64) -> u8 { 0 }
@@ -431,20 +429,20 @@ mod tests {
         ext
     }
 
-    fn setup_chain(shop_id: u64) {
+    fn setup_chain(entity_id: u64) {
         // 推荐链: 10 → 20 → 30 → 40 → 50 (buyer)
         REFERRERS.with(|r| {
             let mut m = r.borrow_mut();
-            m.insert((shop_id, 50), 40);
-            m.insert((shop_id, 40), 30);
-            m.insert((shop_id, 30), 20);
-            m.insert((shop_id, 20), 10);
+            m.insert((entity_id, 50), 40);
+            m.insert((entity_id, 40), 30);
+            m.insert((entity_id, 30), 20);
+            m.insert((entity_id, 20), 10);
         });
     }
 
-    fn set_stats(shop_id: u64, account: u64, direct: u32, team_size: u32, total_spent: u128) {
+    fn set_stats(entity_id: u64, account: u64, direct: u32, team_size: u32, total_spent: u128) {
         MEMBER_STATS.with(|s| {
-            s.borrow_mut().insert((shop_id, account), (direct, team_size, total_spent));
+            s.borrow_mut().insert((entity_id, account), (direct, team_size, total_spent));
         });
     }
 
@@ -578,7 +576,7 @@ mod tests {
             use pallet_commission_common::CommissionPlugin;
             let modes = CommissionModes(CommissionModes::TEAM_PERFORMANCE);
             let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-                1, 1, &50, 10000, 10000, modes, false, 0,
+                1, &50, 10000, 10000, modes, false, 0,
             );
             assert!(outputs.is_empty());
             assert_eq!(remaining, 10000);
@@ -600,7 +598,7 @@ mod tests {
             use pallet_commission_common::CommissionPlugin;
             let modes = CommissionModes(CommissionModes::DIRECT_REWARD); // 不含 TEAM_PERFORMANCE
             let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-                1, 1, &50, 10000, 10000, modes, false, 0,
+                1, &50, 10000, 10000, modes, false, 0,
             );
             assert!(outputs.is_empty());
             assert_eq!(remaining, 10000);
@@ -629,7 +627,7 @@ mod tests {
             let modes = CommissionModes(CommissionModes::TEAM_PERFORMANCE);
             // buyer=50, order=10000
             let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-                1, 1, &50, 10000, 10000, modes, false, 0,
+                1, &50, 10000, 10000, modes, false, 0,
             );
 
             // non-stacking: 最近达标上级 = account 40 (tier1: 3000/5 → rate 200)
@@ -661,7 +659,7 @@ mod tests {
             use pallet_commission_common::CommissionPlugin;
             let modes = CommissionModes(CommissionModes::TEAM_PERFORMANCE);
             let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-                1, 1, &50, 10000, 10000, modes, false, 0,
+                1, &50, 10000, 10000, modes, false, 0,
             );
 
             // stacking: account 40 gets tier1 rate=200, account 30 gets tier2 rate=500
@@ -692,7 +690,7 @@ mod tests {
             use pallet_commission_common::CommissionPlugin;
             let modes = CommissionModes(CommissionModes::TEAM_PERFORMANCE);
             let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-                1, 1, &50, 10000, 10000, modes, false, 0,
+                1, &50, 10000, 10000, modes, false, 0,
             );
 
             // account 40 团队人数 3 < 5，不达标
@@ -719,7 +717,7 @@ mod tests {
             let modes = CommissionModes(CommissionModes::TEAM_PERFORMANCE);
             // remaining 仅 100
             let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-                1, 1, &50, 10000, 100, modes, false, 0,
+                1, &50, 10000, 100, modes, false, 0,
             );
 
             // 计算 10000*5000/10000=5000 但 capped by remaining=100
@@ -747,7 +745,7 @@ mod tests {
             use pallet_commission_common::CommissionPlugin;
             let modes = CommissionModes(CommissionModes::TEAM_PERFORMANCE);
             let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-                1, 1, &50, 10000, 10000, modes, false, 0,
+                1, &50, 10000, 10000, modes, false, 0,
             );
 
             // max_depth=2 只遍历到 account 30 (深度2)，account 10 在深度4，被截断

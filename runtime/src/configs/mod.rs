@@ -25,7 +25,7 @@
 
 // Substrate and Polkadot dependencies
 use sp_runtime::{traits::AccountIdConversion, generic};
-use crate::UncheckedExtrinsic;
+use crate::{UncheckedExtrinsic, EntityMember};
 use frame_support::{
 	derive_impl, parameter_types,
 	traits::{ConstBool, ConstU128, ConstU16, ConstU32, ConstU64, ConstU8, VariantCountOf},
@@ -1051,6 +1051,8 @@ impl pallet_entity_transaction::Config for Runtime {
 	type ServiceConfirmTimeout = ConstU32<{ 7 * 24 * 600 }>;  // 7 天
 	type CommissionHandler = OrderCommissionBridge;
 	type ShoppingBalance = ShoppingBalanceBridge;
+	type MemberHandler = EntityMember;
+	type PricingProvider = EntityPricingProvider;
 	type MaxCidLength = ConstU32<64>;
 }
 
@@ -1104,22 +1106,22 @@ impl pallet_entity_common::PricingProvider for EntityPricingProvider {
 pub struct MemberProviderBridge;
 
 impl pallet_entity_commission::MemberProvider<AccountId> for MemberProviderBridge {
-	fn is_member(shop_id: u64, account: &AccountId) -> bool {
-		pallet_entity_member::Pallet::<Runtime>::is_member_of_shop(shop_id, account)
+	fn is_member(entity_id: u64, account: &AccountId) -> bool {
+		pallet_entity_member::EntityMembers::<Runtime>::contains_key(entity_id, account)
 	}
 
-	fn get_referrer(shop_id: u64, account: &AccountId) -> Option<AccountId> {
-		pallet_entity_member::Pallet::<Runtime>::get_member_by_shop(shop_id, account)
+	fn get_referrer(entity_id: u64, account: &AccountId) -> Option<AccountId> {
+		pallet_entity_member::EntityMembers::<Runtime>::get(entity_id, account)
 			.and_then(|m| m.referrer)
 	}
 
-	fn member_level(shop_id: u64, account: &AccountId) -> Option<pallet_entity_common::MemberLevel> {
-		pallet_entity_member::Pallet::<Runtime>::get_member_by_shop(shop_id, account)
+	fn member_level(entity_id: u64, account: &AccountId) -> Option<pallet_entity_common::MemberLevel> {
+		pallet_entity_member::EntityMembers::<Runtime>::get(entity_id, account)
 			.map(|m| m.level)
 	}
 
-	fn get_member_stats(shop_id: u64, account: &AccountId) -> (u32, u32, u128) {
-		pallet_entity_member::Pallet::<Runtime>::get_member_by_shop(shop_id, account)
+	fn get_member_stats(entity_id: u64, account: &AccountId) -> (u32, u32, u128) {
+		pallet_entity_member::EntityMembers::<Runtime>::get(entity_id, account)
 			.map(|m| {
 				let spent_usdt: u128 = sp_runtime::SaturatedConversion::saturated_into(m.total_spent);
 				(m.direct_referrals, m.team_size, spent_usdt)
@@ -1127,47 +1129,41 @@ impl pallet_entity_commission::MemberProvider<AccountId> for MemberProviderBridg
 			.unwrap_or((0, 0, 0))
 	}
 
-	fn uses_custom_levels(shop_id: u64) -> bool {
-		pallet_entity_member::Pallet::<Runtime>::uses_custom_levels(shop_id)
+	fn uses_custom_levels(entity_id: u64) -> bool {
+		pallet_entity_member::Pallet::<Runtime>::uses_custom_levels_by_entity(entity_id)
 	}
 
-	fn custom_level_id(shop_id: u64, account: &AccountId) -> u8 {
+	fn custom_level_id(entity_id: u64, account: &AccountId) -> u8 {
 		// H6 审计修复: 使用 get_effective_level 检查等级过期
-		pallet_entity_member::Pallet::<Runtime>::get_effective_level(shop_id, account)
-	}
-
-	fn get_level_commission_bonus(shop_id: u64, level_id: u8) -> u16 {
-		pallet_entity_member::Pallet::<Runtime>::get_level_commission_bonus(shop_id, level_id)
-	}
-
-	fn is_member_by_entity(entity_id: u64, account: &AccountId) -> bool {
-		pallet_entity_member::EntityMembers::<Runtime>::contains_key(entity_id, account)
-	}
-
-	fn get_referrer_by_entity(entity_id: u64, account: &AccountId) -> Option<AccountId> {
-		pallet_entity_member::EntityMembers::<Runtime>::get(entity_id, account)
-			.and_then(|m| m.referrer)
-	}
-
-	fn custom_level_id_by_entity(entity_id: u64, account: &AccountId) -> u8 {
 		pallet_entity_member::Pallet::<Runtime>::get_effective_level_by_entity(entity_id, account)
 	}
 
-	fn set_custom_levels_enabled(shop_id: u64, enabled: bool) -> sp_runtime::DispatchResult {
-		// C2 审计修复: 解析 shop_id → entity_id（治理传入 shop_id，pallet 期望 entity_id）
-		use pallet_entity_common::ShopProvider;
-		let entity_id = EntityShop::shop_entity_id(shop_id).unwrap_or(shop_id);
+	fn get_level_commission_bonus(entity_id: u64, level_id: u8) -> u16 {
+		pallet_entity_member::Pallet::<Runtime>::get_level_commission_bonus_by_entity(entity_id, level_id)
+	}
+
+	fn auto_register(entity_id: u64, account: &AccountId, referrer: Option<AccountId>) -> sp_runtime::DispatchResult {
+		pallet_entity_member::Pallet::<Runtime>::auto_register_by_entity(entity_id, account, referrer, true)
+	}
+
+	fn auto_register_qualified(entity_id: u64, account: &AccountId, referrer: Option<AccountId>, qualified: bool) -> sp_runtime::DispatchResult {
+		pallet_entity_member::Pallet::<Runtime>::auto_register_by_entity(entity_id, account, referrer, qualified)
+	}
+
+	fn is_activated(_entity_id: u64, _account: &AccountId) -> bool {
+		true // 激活机制已移除，所有注册会员均视为已激活
+	}
+
+	fn set_custom_levels_enabled(entity_id: u64, enabled: bool) -> sp_runtime::DispatchResult {
 		pallet_entity_member::Pallet::<Runtime>::governance_set_custom_levels_enabled(entity_id, enabled)
 	}
 
-	fn set_upgrade_mode(shop_id: u64, mode: u8) -> sp_runtime::DispatchResult {
-		use pallet_entity_common::ShopProvider;
-		let entity_id = EntityShop::shop_entity_id(shop_id).unwrap_or(shop_id);
+	fn set_upgrade_mode(entity_id: u64, mode: u8) -> sp_runtime::DispatchResult {
 		pallet_entity_member::Pallet::<Runtime>::governance_set_upgrade_mode(entity_id, mode)
 	}
 
 	fn add_custom_level(
-		shop_id: u64,
+		entity_id: u64,
 		_level_id: u8,
 		name: &[u8],
 		threshold: u128,
@@ -1175,52 +1171,30 @@ impl pallet_entity_commission::MemberProvider<AccountId> for MemberProviderBridg
 		commission_bonus: u16,
 	) -> sp_runtime::DispatchResult {
 		// level_id 由 pallet 自动分配，忽略传入值
-		// C2 审计修复: 解析 shop_id → entity_id
-		use pallet_entity_common::ShopProvider;
-		let entity_id = EntityShop::shop_entity_id(shop_id).unwrap_or(shop_id);
 		pallet_entity_member::Pallet::<Runtime>::governance_add_custom_level(
 			entity_id, name, threshold, discount_rate, commission_bonus,
 		)
 	}
 
 	fn update_custom_level(
-		shop_id: u64,
+		entity_id: u64,
 		level_id: u8,
 		name: Option<&[u8]>,
 		threshold: Option<u128>,
 		discount_rate: Option<u16>,
 		commission_bonus: Option<u16>,
 	) -> sp_runtime::DispatchResult {
-		// C2 审计修复: 解析 shop_id → entity_id
-		use pallet_entity_common::ShopProvider;
-		let entity_id = EntityShop::shop_entity_id(shop_id).unwrap_or(shop_id);
 		pallet_entity_member::Pallet::<Runtime>::governance_update_custom_level(
 			entity_id, level_id, name, threshold, discount_rate, commission_bonus,
 		)
 	}
 
-	fn remove_custom_level(shop_id: u64, level_id: u8) -> sp_runtime::DispatchResult {
-		use pallet_entity_common::ShopProvider;
-		let entity_id = EntityShop::shop_entity_id(shop_id).unwrap_or(shop_id);
+	fn remove_custom_level(entity_id: u64, level_id: u8) -> sp_runtime::DispatchResult {
 		pallet_entity_member::Pallet::<Runtime>::governance_remove_custom_level(entity_id, level_id)
 	}
 
-	fn custom_level_count(shop_id: u64) -> u8 {
-		pallet_entity_member::Pallet::<Runtime>::custom_level_count(shop_id)
-	}
-
-	fn auto_register(shop_id: u64, account: &AccountId, referrer: Option<AccountId>) -> sp_runtime::DispatchResult {
-		pallet_entity_member::Pallet::<Runtime>::auto_register(shop_id, account, referrer)
-	}
-
-	fn auto_register_by_entity(entity_id: u64, account: &AccountId, referrer: Option<AccountId>) -> sp_runtime::DispatchResult {
-		pallet_entity_member::Pallet::<Runtime>::auto_register_by_entity(entity_id, account, referrer)
-	}
-
-	fn is_activated_by_entity(entity_id: u64, account: &AccountId) -> bool {
-		pallet_entity_member::EntityMembers::<Runtime>::get(entity_id, account)
-			.map(|m| m.activated)
-			.unwrap_or(false)
+	fn custom_level_count(entity_id: u64) -> u8 {
+		pallet_entity_member::Pallet::<Runtime>::custom_level_count_by_entity(entity_id)
 	}
 }
 
@@ -1228,6 +1202,7 @@ impl pallet_entity_commission::MemberProvider<AccountId> for MemberProviderBridg
 pub struct OrderCommissionBridge;
 impl pallet_entity_common::OrderCommissionHandler<AccountId, Balance> for OrderCommissionBridge {
 	fn on_order_completed(
+		entity_id: u64,
 		shop_id: u64,
 		order_id: u64,
 		buyer: &AccountId,
@@ -1236,7 +1211,7 @@ impl pallet_entity_common::OrderCommissionHandler<AccountId, Balance> for OrderC
 	) -> Result<(), sp_runtime::DispatchError> {
 		// available_pool = order_amount，commission 内部会按 max_commission_rate、source 和账户余额封顶
 		<pallet_commission_core::Pallet<Runtime> as pallet_commission_common::CommissionProvider<AccountId, Balance>>::process_commission(
-			shop_id, order_id, buyer, order_amount, order_amount, platform_fee,
+			entity_id, shop_id, order_id, buyer, order_amount, order_amount, platform_fee,
 		)
 	}
 	fn on_order_cancelled(order_id: u64) -> Result<(), sp_runtime::DispatchError> {
@@ -1250,17 +1225,10 @@ pub type EntityCommissionProvider = pallet_commission_core::Pallet<Runtime>;
 /// 桥接：购物余额 → CommissionCore（供 Transaction 模块下单时抵扣购物余额）
 pub struct ShoppingBalanceBridge;
 impl pallet_entity_common::ShoppingBalanceProvider<AccountId, Balance> for ShoppingBalanceBridge {
-	fn shopping_balance(shop_id: u64, account: &AccountId) -> Balance {
-		use pallet_entity_common::ShopProvider;
-		match EntityShop::shop_entity_id(shop_id) {
-			Some(entity_id) => pallet_commission_core::MemberShoppingBalance::<Runtime>::get(entity_id, account),
-			None => 0,
-		}
+	fn shopping_balance(entity_id: u64, account: &AccountId) -> Balance {
+		pallet_commission_core::MemberShoppingBalance::<Runtime>::get(entity_id, account)
 	}
-	fn consume_shopping_balance(shop_id: u64, account: &AccountId, amount: Balance) -> Result<(), sp_runtime::DispatchError> {
-		use pallet_entity_common::ShopProvider;
-		let entity_id = EntityShop::shop_entity_id(shop_id)
-			.ok_or(sp_runtime::DispatchError::Other("ShopNotFound"))?;
+	fn consume_shopping_balance(entity_id: u64, account: &AccountId, amount: Balance) -> Result<(), sp_runtime::DispatchError> {
 		pallet_commission_core::Pallet::<Runtime>::do_consume_shopping_balance(entity_id, account, amount)
 	}
 }
@@ -1331,9 +1299,11 @@ impl pallet_commission_core::Config for Runtime {
 	type LevelDiffPlugin = crate::CommissionLevelDiff;
 	type SingleLinePlugin = crate::CommissionSingleLine;
 	type TeamPlugin = crate::CommissionTeam;
+	type PoolRewardPlugin = crate::CommissionPoolReward;
 	type ReferralWriter = crate::CommissionReferral;
 	type LevelDiffWriter = crate::CommissionLevelDiff;
 	type TeamWriter = crate::CommissionTeam;
+	type PoolRewardWriter = crate::CommissionPoolReward;
 	type EntityReferrerProvider = EntityReferrerBridge;
 	type PlatformAccount = EntityPlatformAccount;
 	type TreasuryAccount = TreasuryAccountId;
@@ -1350,6 +1320,13 @@ impl pallet_commission_referral::Config for Runtime {
 	type MaxMultiLevels = ConstU32<15>;
 }
 
+impl pallet_commission_pool_reward::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type Currency = Balances;
+	type MemberProvider = EntityMemberProvider;
+	type MaxPoolRewardLevels = ConstU32<10>;
+}
+
 impl pallet_commission_level_diff::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
@@ -1361,13 +1338,8 @@ impl pallet_commission_level_diff::Config for Runtime {
 pub struct SingleLineStatsFromCore;
 
 impl pallet_commission_single_line::pallet::SingleLineStatsProvider<AccountId, Balance> for SingleLineStatsFromCore {
-	fn get_member_stats(shop_id: u64, account: &AccountId) -> pallet_commission_common::MemberCommissionStatsData<Balance> {
-		use pallet_entity_common::ShopProvider;
-		// M1 审计修复: shop_id 无效时返回默认空统计，避免读取 entity_id=0 的错误数据
-		match EntityShop::shop_entity_id(shop_id) {
-			Some(entity_id) => pallet_commission_core::MemberCommissionStats::<Runtime>::get(entity_id, account),
-			None => Default::default(),
-		}
+	fn get_member_stats(entity_id: u64, account: &AccountId) -> pallet_commission_common::MemberCommissionStatsData<Balance> {
+		pallet_commission_core::MemberCommissionStats::<Runtime>::get(entity_id, account)
 	}
 }
 

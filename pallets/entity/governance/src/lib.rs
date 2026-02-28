@@ -197,7 +197,6 @@ pub mod pallet {
             /// 各等级提现配置 CID（JSON 格式）
             tier_configs_cid: BoundedVec<u8, ConstU32<64>>,
             enabled: bool,
-            shopping_balance_generates_commission: bool,
         },
 
         /// 设置全局最低复购比例底线（万分比，由 Governance 设定）
@@ -1449,10 +1448,10 @@ pub mod pallet {
 
                 // ==================== 返佣配置类 ====================
                 ProposalType::CommissionModesChange { modes } => {
-                    T::CommissionProvider::set_commission_modes(shop_id, *modes)
+                    T::CommissionProvider::set_commission_modes(entity_id, *modes)
                 },
                 ProposalType::DirectRewardChange { rate } => {
-                    T::CommissionProvider::set_direct_reward_rate(shop_id, *rate)
+                    T::CommissionProvider::set_direct_reward_rate(entity_id, *rate)
                 },
                 ProposalType::MultiLevelChange { levels_cid: _, max_total_rate: _ } => {
                     // 多级分销配置需要解析 CID，暂不支持链上直接执行
@@ -1460,7 +1459,7 @@ pub mod pallet {
                 },
                 ProposalType::LevelDiffChange { normal_rate, silver_rate, gold_rate, platinum_rate, diamond_rate } => {
                     T::CommissionProvider::set_level_diff_config(
-                        shop_id,
+                        entity_id,
                         *normal_rate,
                         *silver_rate,
                         *gold_rate,
@@ -1473,13 +1472,13 @@ pub mod pallet {
                     Err(Error::<T>::ProposalTypeNotImplemented.into())
                 },
                 ProposalType::FixedAmountChange { amount } => {
-                    T::CommissionProvider::set_fixed_amount(shop_id, *amount)
+                    T::CommissionProvider::set_fixed_amount(entity_id, *amount)
                 },
                 ProposalType::FirstOrderChange { amount, rate, use_amount } => {
-                    T::CommissionProvider::set_first_order_config(shop_id, *amount, *rate, *use_amount)
+                    T::CommissionProvider::set_first_order_config(entity_id, *amount, *rate, *use_amount)
                 },
                 ProposalType::RepeatPurchaseChange { rate, min_orders } => {
-                    T::CommissionProvider::set_repeat_purchase_config(shop_id, *rate, *min_orders)
+                    T::CommissionProvider::set_repeat_purchase_config(entity_id, *rate, *min_orders)
                 },
                 ProposalType::SingleLineChange { upline_rate: _, downline_rate: _, base_upline_levels: _, base_downline_levels: _, max_upline_levels: _, max_downline_levels: _ } => {
                     // 单线收益配置较复杂，需要扩展 CommissionProvider trait
@@ -1487,23 +1486,22 @@ pub mod pallet {
                 },
 
                 // ==================== 分级提现配置类 ====================
-                ProposalType::WithdrawalConfigChange { tier_configs_cid: _, enabled, shopping_balance_generates_commission } => {
+                ProposalType::WithdrawalConfigChange { tier_configs_cid: _, enabled } => {
                     // tier_configs_cid 需要链下解析，这里只设置基本配置
                     T::CommissionProvider::set_withdrawal_config_by_governance(
-                        shop_id,
+                        entity_id,
                         *enabled,
-                        *shopping_balance_generates_commission,
                     )
                 },
 
                 ProposalType::MinRepurchaseRateChange { min_rate } => {
-                    T::CommissionProvider::set_min_repurchase_rate(shop_id, *min_rate)
+                    T::CommissionProvider::set_min_repurchase_rate(entity_id, *min_rate)
                 },
 
                 // ==================== 会员等级体系类 ====================
                 ProposalType::AddCustomLevel { level_id, name, threshold, discount_rate, commission_bonus } => {
                     T::MemberProvider::add_custom_level(
-                        shop_id,
+                        entity_id,
                         *level_id,
                         name.as_slice(),
                         (*threshold).into(),
@@ -1513,7 +1511,7 @@ pub mod pallet {
                 },
                 ProposalType::UpdateCustomLevel { level_id, name, threshold, discount_rate, commission_bonus } => {
                     T::MemberProvider::update_custom_level(
-                        shop_id,
+                        entity_id,
                         *level_id,
                         name.as_ref().map(|n| n.as_slice()),
                         threshold.map(|t| t.into()),
@@ -1522,13 +1520,13 @@ pub mod pallet {
                     )
                 },
                 ProposalType::RemoveCustomLevel { level_id } => {
-                    T::MemberProvider::remove_custom_level(shop_id, *level_id)
+                    T::MemberProvider::remove_custom_level(entity_id, *level_id)
                 },
                 ProposalType::SetUpgradeMode { mode } => {
-                    T::MemberProvider::set_upgrade_mode(shop_id, *mode)
+                    T::MemberProvider::set_upgrade_mode(entity_id, *mode)
                 },
                 ProposalType::EnableCustomLevels { enabled } => {
-                    T::MemberProvider::set_custom_levels_enabled(shop_id, *enabled)
+                    T::MemberProvider::set_custom_levels_enabled(entity_id, *enabled)
                 },
                 ProposalType::AddUpgradeRule { rule_cid: _ } => {
                     // H3 修复: 升级规则配置需要解析 CID，暂不支持链上直接执行

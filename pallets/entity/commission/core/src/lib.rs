@@ -16,7 +16,7 @@ pub use pallet_commission_common::{
     CommissionModes, CommissionOutput, CommissionPlugin, CommissionPlan, CommissionProvider,
     CommissionRecord, CommissionStatus, CommissionType,
     EntityReferrerProvider, LevelDiffPlanWriter, MemberCommissionStatsData, MemberProvider,
-    ReferralPlanWriter, TeamPlanWriter, WithdrawalMode, WithdrawalTierConfig,
+    PoolRewardPlanWriter, ReferralPlanWriter, TeamPlanWriter, WithdrawalMode, WithdrawalTierConfig,
 };
 use pallet_entity_common::ShopProvider as ShopProviderT;
 use sp_runtime::traits::Zero;
@@ -115,7 +115,6 @@ pub mod pallet {
         /// 自愿多复购奖励加成（万分比，如 500 = 5%）
         pub voluntary_bonus_rate: u16,
         pub enabled: bool,
-        pub shopping_balance_generates_commission: bool,
     }
 
     impl<MaxLevels: Get<u32>> Default for EntityWithdrawalConfig<MaxLevels> {
@@ -126,7 +125,6 @@ pub mod pallet {
                 level_overrides: BoundedVec::default(),
                 voluntary_bonus_rate: 0,
                 enabled: false,
-                shopping_balance_generates_commission: false,
             }
         }
     }
@@ -170,6 +168,9 @@ pub mod pallet {
         /// 团队业绩插件（预留）
         type TeamPlugin: CommissionPlugin<Self::AccountId, BalanceOf<Self>>;
 
+        /// 沉淀池奖励插件
+        type PoolRewardPlugin: CommissionPlugin<Self::AccountId, BalanceOf<Self>>;
+
         /// 招商推荐人查询接口
         type EntityReferrerProvider: EntityReferrerProvider<Self::AccountId>;
 
@@ -181,6 +182,9 @@ pub mod pallet {
 
         /// 团队业绩方案写入器
         type TeamWriter: TeamPlanWriter<BalanceOf<Self>>;
+
+        /// 沉淀池奖励方案写入器
+        type PoolRewardWriter: PoolRewardPlanWriter;
 
         /// 平台账户（用于招商奖金从平台费中扣除）
         type PlatformAccount: Get<Self::AccountId>;
@@ -323,6 +327,26 @@ pub mod pallet {
         ValueQuery,
     >;
 
+    /// 未分配佣金沉淀资金池 entity_id -> Balance
+    #[pallet::storage]
+    #[pallet::getter(fn unallocated_pool)]
+    pub type UnallocatedPool<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat, u64,
+        BalanceOf<T>,
+        ValueQuery,
+    >;
+
+    /// 订单未分配佣金记录 order_id -> (entity_id, shop_id, Balance)
+    /// 用于 cancel_commission 时退还未分配部分给卖家
+    #[pallet::storage]
+    pub type OrderUnallocated<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat, u64,
+        (u64, u64, BalanceOf<T>),
+        ValueQuery,
+    >;
+
     // ========================================================================
     // Events
     // ========================================================================
@@ -334,7 +358,6 @@ pub mod pallet {
         CommissionModesUpdated { entity_id: u64, modes: CommissionModes },
         CommissionDistributed {
             entity_id: u64,
-            shop_id: u64,
             order_id: u64,
             beneficiary: T::AccountId,
             amount: BalanceOf<T>,
@@ -387,6 +410,24 @@ pub mod pallet {
             shop_id: u64,
             amount: BalanceOf<T>,
         },
+        /// 未分配佣金转入沉淀资金池
+        UnallocatedCommissionPooled {
+            entity_id: u64,
+            order_id: u64,
+            amount: BalanceOf<T>,
+        },
+        /// 沉淀池奖励发放（Phase 2）
+        PoolRewardDistributed {
+            entity_id: u64,
+            order_id: u64,
+            total_distributed: BalanceOf<T>,
+        },
+        /// 沉淀池退还卖家（订单取消）
+        UnallocatedPoolRefunded {
+            entity_id: u64,
+            order_id: u64,
+            amount: BalanceOf<T>,
+        },
     }
 
     // ========================================================================
@@ -425,6 +466,10 @@ pub mod pallet {
         TargetParticipationDenied,
         /// H3: 账户不满足 Entity 参与要求，无法提取购物余额
         ParticipationRequirementNotMet,
+        /// 购物余额仅可用于购物（下单抵扣），不可直接提取为 NEX
+        ShoppingBalanceWithdrawalDisabled,
+        /// 沉淀资金池余额不足
+        InsufficientUnallocatedPool,
     }
 
     // ========================================================================
@@ -525,18 +570,18 @@ pub mod pallet {
 
                 // 如果目标不是自己，校验推荐关系
                 if target != who {
-                    if T::MemberProvider::is_member_by_entity(entity_id, &target) {
+                    if T::MemberProvider::is_member(entity_id, &target) {
                         // 已是会员 → 推荐人必须是出资人
-                        let referrer = T::MemberProvider::get_referrer_by_entity(entity_id, &target);
+                        let referrer = T::MemberProvider::get_referrer(entity_id, &target);
                         ensure!(referrer.as_ref() == Some(&who), Error::<T>::NotDirectReferral);
                     } else {
-                        // 非会员 → 自动注册，推荐人 = 出资人
-                        T::MemberProvider::auto_register_by_entity(entity_id, &target, Some(who.clone()))
+                        // 非会员 → 自动注册，推荐人 = 出资人（复购赠与 → qualified=false）
+                        T::MemberProvider::auto_register_qualified(entity_id, &target, Some(who.clone()), false)
                             .map_err(|_| Error::<T>::AutoRegisterFailed)?;
                         // H1 修复: 注册后验证 target 是否已成为正式会员
                         // APPROVAL_REQUIRED 策略下 auto_register 返回 Ok 但 target 仅进入 PendingMembers
                         ensure!(
-                            T::MemberProvider::is_member_by_entity(entity_id, &target),
+                            T::MemberProvider::is_member(entity_id, &target),
                             Error::<T>::TargetNotApprovedMember
                         );
                     }
@@ -581,7 +626,8 @@ pub mod pallet {
                 let total_to_shopping = split.repurchase.saturating_add(split.bonus);
                 let new_shopping_total = ShopShoppingTotal::<T>::get(entity_id)
                     .saturating_add(total_to_shopping);
-                let required_reserve = remaining_pending.saturating_add(new_shopping_total);
+                let unallocated = UnallocatedPool::<T>::get(entity_id);
+                let required_reserve = remaining_pending.saturating_add(new_shopping_total).saturating_add(unallocated);
                 ensure!(
                     entity_balance >= split.withdrawal.saturating_add(required_reserve),
                     Error::<T>::InsufficientCommission
@@ -643,7 +689,6 @@ pub mod pallet {
             level_overrides: BoundedVec<(u8, WithdrawalTierConfig), T::MaxCustomLevels>,
             voluntary_bonus_rate: u16,
             enabled: bool,
-            shopping_balance_generates_commission: bool,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::ensure_entity_owner(entity_id, &who)?;
@@ -684,7 +729,6 @@ pub mod pallet {
                 level_overrides,
                 voluntary_bonus_rate,
                 enabled,
-                shopping_balance_generates_commission,
             });
 
             Self::deposit_event(Event::WithdrawalConfigUpdated { entity_id });
@@ -706,6 +750,7 @@ pub mod pallet {
             T::ReferralWriter::clear_config(entity_id)?;
             T::LevelDiffWriter::clear_config(entity_id)?;
             T::TeamWriter::clear_config(entity_id)?;
+            T::PoolRewardWriter::clear_config(entity_id)?;
 
             match plan {
                 CommissionPlan::None => {
@@ -776,19 +821,18 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 提取购物余额（会员自主操作：扣减记账 + NEX 从 Entity 转入会员钱包）
+        /// [已禁用] 购物余额仅可用于购物（place_order 下单抵扣），不可直接提取为 NEX。
         ///
-        /// 会员可随时将购物余额兑换为 NEX，也可通过 `place_order` 的 `use_shopping_balance`
-        /// 参数在下单时自动抵扣。
+        /// 保留 call_index(5) 以维持链上 call index 稳定。
         #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        #[pallet::weight(Weight::from_parts(10_000_000, 1_000))]
         pub fn use_shopping_balance(
             origin: OriginFor<T>,
-            entity_id: u64,
-            amount: BalanceOf<T>,
+            _entity_id: u64,
+            _amount: BalanceOf<T>,
         ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-            Self::do_consume_shopping_balance(entity_id, &who, amount)
+            ensure_signed(origin)?;
+            Err(Error::<T>::ShoppingBalanceWithdrawalDisabled.into())
         }
     }
 
@@ -798,6 +842,7 @@ pub mod pallet {
 
     impl<T: Config> Pallet<T> {
         /// 从 shop_id 解析 entity_id
+        #[allow(dead_code)]
         fn resolve_entity_id(shop_id: u64) -> Result<u64, Error<T>> {
             T::ShopProvider::shop_entity_id(shop_id).ok_or(Error::<T>::ShopNotFound)
         }
@@ -844,11 +889,6 @@ pub mod pallet {
             amount: BalanceOf<T>,
         ) -> DispatchResult {
             ensure!(!amount.is_zero(), Error::<T>::ZeroWithdrawalAmount);
-            // M2 方案 B: 未激活会员不能直接提取 NEX，必须先通过下单消费激活
-            ensure!(
-                T::MemberProvider::is_activated_by_entity(entity_id, account),
-                Error::<T>::MemberNotActivated
-            );
 
             // H3 修复: 检查账户是否满足 Entity 的参与要求（如 mandatory KYC）
             ensure!(
@@ -917,7 +957,7 @@ pub mod pallet {
                             (*repurchase_rate, *repurchase_rate, config.voluntary_bonus_rate)
                         },
                         WithdrawalMode::LevelBased => {
-                            let level_id = T::MemberProvider::custom_level_id_by_entity(entity_id, who);
+                            let level_id = T::MemberProvider::custom_level_id(entity_id, who);
                             let tier = config.level_overrides
                                 .iter()
                                 .find(|(id, _)| *id == level_id)
@@ -973,6 +1013,7 @@ pub mod pallet {
         /// - 池 A（平台费池）：platform_fee × ReferrerShareBps → 招商推荐人奖金（EntityReferral）
         /// - 池 B（卖家池）：seller_balance × max_commission_rate → 会员返佣（4 个插件）
         pub fn process_commission(
+            entity_id: u64,
             shop_id: u64,
             order_id: u64,
             buyer: &T::AccountId,
@@ -980,7 +1021,6 @@ pub mod pallet {
             available_pool: BalanceOf<T>,
             platform_fee: BalanceOf<T>,
         ) -> DispatchResult {
-            let entity_id = Self::resolve_entity_id(shop_id)?;
             let platform_account = T::PlatformAccount::get();
 
             // ── 平台费无条件转国库（无论佣金是否配置，保障平台收入） ──
@@ -1054,7 +1094,7 @@ pub mod pallet {
                     let referrer_amount = referrer_quota.min(transferable);
                     if !referrer_amount.is_zero() {
                         Self::credit_commission(
-                            entity_id, shop_id, order_id, buyer, &referrer,
+                            entity_id, order_id, buyer, &referrer,
                             referrer_amount, CommissionType::EntityReferral, 0, now,
                         )?;
                         total_from_platform = referrer_amount;
@@ -1076,48 +1116,48 @@ pub mod pallet {
 
                 // 1. Referral Plugin
                 let (outputs, new_remaining) = T::ReferralPlugin::calculate(
-                    entity_id, shop_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
+                    entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
                 );
                 remaining = new_remaining;
                 for output in outputs {
                     Self::credit_commission(
-                        entity_id, shop_id, order_id, buyer, &output.beneficiary, output.amount,
+                        entity_id, order_id, buyer, &output.beneficiary, output.amount,
                         output.commission_type, output.level, now,
                     )?;
                 }
 
                 // 2. LevelDiff Plugin
                 let (outputs, new_remaining) = T::LevelDiffPlugin::calculate(
-                    entity_id, shop_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
+                    entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
                 );
                 remaining = new_remaining;
                 for output in outputs {
                     Self::credit_commission(
-                        entity_id, shop_id, order_id, buyer, &output.beneficiary, output.amount,
+                        entity_id, order_id, buyer, &output.beneficiary, output.amount,
                         output.commission_type, output.level, now,
                     )?;
                 }
 
                 // 3. SingleLine Plugin
                 let (outputs, new_remaining) = T::SingleLinePlugin::calculate(
-                    entity_id, shop_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
+                    entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
                 );
                 remaining = new_remaining;
                 for output in outputs {
                     Self::credit_commission(
-                        entity_id, shop_id, order_id, buyer, &output.beneficiary, output.amount,
+                        entity_id, order_id, buyer, &output.beneficiary, output.amount,
                         output.commission_type, output.level, now,
                     )?;
                 }
 
                 // 4. Team Plugin
                 let (outputs, new_remaining) = T::TeamPlugin::calculate(
-                    entity_id, shop_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
+                    entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
                 );
                 remaining = new_remaining;
                 for output in outputs {
                     Self::credit_commission(
-                        entity_id, shop_id, order_id, buyer, &output.beneficiary, output.amount,
+                        entity_id, order_id, buyer, &output.beneficiary, output.amount,
                         output.commission_type, output.level, now,
                     )?;
                 }
@@ -1125,20 +1165,77 @@ pub mod pallet {
                 total_from_seller = initial_remaining.saturating_sub(remaining);
             }
 
+            // ── Phase 1.5：未分配佣金 → 沉淀资金池 ──
+            let mut pool_funded = BalanceOf::<T>::zero();
+            if enabled_modes.contains(CommissionModes::POOL_REWARD) && !remaining.is_zero() {
+                let seller_balance_now = T::Currency::free_balance(&seller);
+                let seller_min = T::Currency::minimum_balance();
+                let seller_transferable_now = seller_balance_now.saturating_sub(seller_min);
+                let actual_pool = remaining.min(seller_transferable_now);
+                if !actual_pool.is_zero() {
+                    T::Currency::transfer(
+                        &seller,
+                        &entity_account,
+                        actual_pool,
+                        ExistenceRequirement::KeepAlive,
+                    )?;
+                    UnallocatedPool::<T>::mutate(entity_id, |pool| {
+                        *pool = pool.saturating_add(actual_pool);
+                    });
+                    OrderUnallocated::<T>::insert(order_id, (entity_id, shop_id, actual_pool));
+                    pool_funded = actual_pool;
+                    Self::deposit_event(Event::UnallocatedCommissionPooled {
+                        entity_id,
+                        order_id,
+                        amount: actual_pool,
+                    });
+                }
+            }
+
+            // ── Phase 2：沉淀池奖励（PoolRewardPlugin 从池余额分配给高等级会员） ──
+            let mut total_pool_distributed = BalanceOf::<T>::zero();
+            if enabled_modes.contains(CommissionModes::POOL_REWARD) {
+                let pool_balance = UnallocatedPool::<T>::get(entity_id);
+                if !pool_balance.is_zero() {
+                    let (outputs, new_pool_remaining) = T::PoolRewardPlugin::calculate(
+                        entity_id, buyer, order_amount, pool_balance, enabled_modes, is_first_order, buyer_stats.order_count,
+                    );
+                    let distributed = pool_balance.saturating_sub(new_pool_remaining);
+                    if !distributed.is_zero() {
+                        for output in outputs {
+                            Self::credit_commission(
+                                entity_id, order_id, buyer, &output.beneficiary, output.amount,
+                                output.commission_type, output.level, now,
+                            )?;
+                        }
+                        UnallocatedPool::<T>::mutate(entity_id, |pool| {
+                            *pool = pool.saturating_sub(distributed);
+                        });
+                        total_pool_distributed = distributed;
+                        Self::deposit_event(Event::PoolRewardDistributed {
+                            entity_id,
+                            order_id,
+                            total_distributed: distributed,
+                        });
+                    }
+                }
+            }
+
             // 更新买家订单数（Entity 级）
             MemberCommissionStats::<T>::mutate(entity_id, buyer, |stats| {
                 stats.order_count = stats.order_count.saturating_add(1);
             });
 
+            // total_distributed 仅统计从外部转入的佣金（不含池内循环）
             let total_distributed = total_from_platform.saturating_add(total_from_seller);
 
-            // 更新 Entity 统计
+            // 更新 Entity 统计（含池奖励）
             ShopCommissionTotals::<T>::mutate(entity_id, |(total, orders)| {
-                *total = total.saturating_add(total_distributed);
+                *total = total.saturating_add(total_distributed).saturating_add(total_pool_distributed);
                 *orders = orders.saturating_add(1);
             });
 
-            // 将佣金资金转入 Entity 账户（双来源分别转）
+            // 将佣金资金转入 Entity 账户（双来源分别转；池资金已在 entity_account 中）
             if !total_from_platform.is_zero() {
                 T::Currency::transfer(
                     &platform_account,
@@ -1157,11 +1254,11 @@ pub mod pallet {
                 )?;
             }
 
-            if !total_distributed.is_zero() {
+            if !total_distributed.is_zero() || !pool_funded.is_zero() {
                 Self::deposit_event(Event::CommissionFundsTransferred {
                     entity_id,
                     shop_id,
-                    amount: total_distributed,
+                    amount: total_distributed.saturating_add(pool_funded),
                 });
             }
 
@@ -1171,7 +1268,6 @@ pub mod pallet {
         /// 记录并发放返佣（Entity 级记账）
         pub fn credit_commission(
             entity_id: u64,
-            shop_id: u64,
             order_id: u64,
             buyer: &T::AccountId,
             beneficiary: &T::AccountId,
@@ -1182,7 +1278,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let record = CommissionRecord {
                 entity_id,
-                shop_id,
+                shop_id: 0,
                 order_id,
                 buyer: buyer.clone(),
                 beneficiary: beneficiary.clone(),
@@ -1211,7 +1307,6 @@ pub mod pallet {
 
             Self::deposit_event(Event::CommissionDistributed {
                 entity_id,
-                shop_id,
                 order_id,
                 beneficiary: beneficiary.clone(),
                 amount,
@@ -1236,15 +1331,25 @@ pub mod pallet {
 
             // 第一步：按 (entity_id, shop_id, is_platform) 分组汇总待退还金额
             // is_platform = true → EntityReferral（退平台），false → 会员返佣（退卖家）
+            // PoolReward 记录不参与转账退款（资金回池）
             let mut refund_groups: alloc::vec::Vec<(u64, u64, bool, BalanceOf<T>)> = alloc::vec::Vec::new();
+            let mut pool_return_groups: alloc::vec::Vec<(u64, BalanceOf<T>)> = alloc::vec::Vec::new();
 
             for record in records.iter() {
                 if record.status == CommissionStatus::Pending {
-                    let is_platform = record.commission_type == CommissionType::EntityReferral;
-                    if let Some(entry) = refund_groups.iter_mut().find(|(e, s, p, _)| *e == record.entity_id && *s == record.shop_id && *p == is_platform) {
-                        entry.3 = entry.3.saturating_add(record.amount);
+                    if record.commission_type == CommissionType::PoolReward {
+                        if let Some(entry) = pool_return_groups.iter_mut().find(|(e, _)| *e == record.entity_id) {
+                            entry.1 = entry.1.saturating_add(record.amount);
+                        } else {
+                            pool_return_groups.push((record.entity_id, record.amount));
+                        }
                     } else {
-                        refund_groups.push((record.entity_id, record.shop_id, is_platform, record.amount));
+                        let is_platform = record.commission_type == CommissionType::EntityReferral;
+                        if let Some(entry) = refund_groups.iter_mut().find(|(e, s, p, _)| *e == record.entity_id && *s == record.shop_id && *p == is_platform) {
+                            entry.3 = entry.3.saturating_add(record.amount);
+                        } else {
+                            refund_groups.push((record.entity_id, record.shop_id, is_platform, record.amount));
+                        }
                     }
                 }
             }
@@ -1292,11 +1397,20 @@ pub mod pallet {
             }
 
             // 第三步：仅取消转账成功的记录，更新统计
+            // PoolReward 记录无需转账，直接回池并取消
+            for (entity_id, return_amount) in pool_return_groups.iter() {
+                if !return_amount.is_zero() {
+                    UnallocatedPool::<T>::mutate(entity_id, |pool| {
+                        *pool = pool.saturating_add(*return_amount);
+                    });
+                }
+            }
+
             OrderCommissionRecords::<T>::mutate(order_id, |records| {
                 for record in records.iter_mut() {
                     if record.status == CommissionStatus::Pending {
-                        let is_platform = record.commission_type == CommissionType::EntityReferral;
-                        if refund_succeeded.iter().any(|(e, s, p)| *e == record.entity_id && *s == record.shop_id && *p == is_platform) {
+                        if record.commission_type == CommissionType::PoolReward {
+                            // PoolReward 记录已在上方回池，直接取消
                             MemberCommissionStats::<T>::mutate(record.entity_id, &record.beneficiary, |stats| {
                                 stats.pending = stats.pending.saturating_sub(record.amount);
                                 stats.total_earned = stats.total_earned.saturating_sub(record.amount);
@@ -1305,6 +1419,18 @@ pub mod pallet {
                                 *total = total.saturating_sub(record.amount);
                             });
                             record.status = CommissionStatus::Cancelled;
+                        } else {
+                            let is_platform = record.commission_type == CommissionType::EntityReferral;
+                            if refund_succeeded.iter().any(|(e, s, p)| *e == record.entity_id && *s == record.shop_id && *p == is_platform) {
+                                MemberCommissionStats::<T>::mutate(record.entity_id, &record.beneficiary, |stats| {
+                                    stats.pending = stats.pending.saturating_sub(record.amount);
+                                    stats.total_earned = stats.total_earned.saturating_sub(record.amount);
+                                });
+                                ShopPendingTotal::<T>::mutate(record.entity_id, |total| {
+                                    *total = total.saturating_sub(record.amount);
+                                });
+                                record.status = CommissionStatus::Cancelled;
+                            }
                         }
                     }
                 }
@@ -1335,6 +1461,30 @@ pub mod pallet {
                 }
             }
 
+            // 第五步：退还本订单沉淀池贡献（entity_account → seller）
+            let (unalloc_entity_id, unalloc_shop_id, unalloc_amount) = OrderUnallocated::<T>::get(order_id);
+            if !unalloc_amount.is_zero() {
+                let entity_account = T::EntityProvider::entity_account(unalloc_entity_id);
+                if let Some(seller) = T::ShopProvider::shop_owner(unalloc_shop_id) {
+                    if T::Currency::transfer(
+                        &entity_account,
+                        &seller,
+                        unalloc_amount,
+                        ExistenceRequirement::KeepAlive,
+                    ).is_ok() {
+                        UnallocatedPool::<T>::mutate(unalloc_entity_id, |pool| {
+                            *pool = pool.saturating_sub(unalloc_amount);
+                        });
+                        OrderUnallocated::<T>::remove(order_id);
+                        Self::deposit_event(Event::UnallocatedPoolRefunded {
+                            entity_id: unalloc_entity_id,
+                            order_id,
+                            amount: unalloc_amount,
+                        });
+                    }
+                }
+            }
+
             // CC-M1: 汇总退款结果
             let succeeded = refund_succeeded.len() as u32;
             let failed = (refund_groups.len() as u32).saturating_sub(succeeded);
@@ -1349,16 +1499,17 @@ pub mod pallet {
 // ============================================================================
 
 /// CommissionFundGuard: 佣金资金已转入 Entity 账户，Shop 不再持有佣金资金
-/// 因此 Shop 的 protected_funds 始终为 0
+/// 因此 Entity 的 protected_funds 始终为 0
 impl<T: pallet::Config> pallet_entity_common::CommissionFundGuard for pallet::Pallet<T> {
-    fn protected_funds(_shop_id: u64) -> u128 {
+    fn protected_funds(_entity_id: u64) -> u128 {
         0
     }
 }
 
-/// CommissionProvider impl: 外部接口仍接收 shop_id，内部解析 entity_id
+/// CommissionProvider impl: 统一使用 entity_id，无需 shop_id 解析
 impl<T: pallet::Config> CommissionProvider<T::AccountId, pallet::BalanceOf<T>> for pallet::Pallet<T> {
     fn process_commission(
+        entity_id: u64,
         shop_id: u64,
         order_id: u64,
         buyer: &T::AccountId,
@@ -1366,21 +1517,18 @@ impl<T: pallet::Config> CommissionProvider<T::AccountId, pallet::BalanceOf<T>> f
         available_pool: pallet::BalanceOf<T>,
         platform_fee: pallet::BalanceOf<T>,
     ) -> sp_runtime::DispatchResult {
-        pallet::Pallet::<T>::process_commission(shop_id, order_id, buyer, order_amount, available_pool, platform_fee)
+        pallet::Pallet::<T>::process_commission(entity_id, shop_id, order_id, buyer, order_amount, available_pool, platform_fee)
     }
 
     fn cancel_commission(order_id: u64) -> sp_runtime::DispatchResult {
         pallet::Pallet::<T>::cancel_commission(order_id)
     }
 
-    fn pending_commission(shop_id: u64, account: &T::AccountId) -> pallet::BalanceOf<T> {
-        match <T::ShopProvider as ShopProviderT<T::AccountId>>::shop_entity_id(shop_id) {
-            Some(entity_id) => pallet::MemberCommissionStats::<T>::get(entity_id, account).pending,
-            None => Zero::zero(),
-        }
+    fn pending_commission(entity_id: u64, account: &T::AccountId) -> pallet::BalanceOf<T> {
+        pallet::MemberCommissionStats::<T>::get(entity_id, account).pending
     }
 
-    fn set_commission_modes(shop_id: u64, modes: u16) -> sp_runtime::DispatchResult {
+    fn set_commission_modes(entity_id: u64, modes: u16) -> sp_runtime::DispatchResult {
         let allowed_modes = CommissionModes::DIRECT_REWARD
             | CommissionModes::MULTI_LEVEL
             | CommissionModes::TEAM_PERFORMANCE
@@ -1389,11 +1537,10 @@ impl<T: pallet::Config> CommissionProvider<T::AccountId, pallet::BalanceOf<T>> f
             | CommissionModes::FIRST_ORDER
             | CommissionModes::REPEAT_PURCHASE
             | CommissionModes::SINGLE_LINE_UPLINE
-            | CommissionModes::SINGLE_LINE_DOWNLINE;
+            | CommissionModes::SINGLE_LINE_DOWNLINE
+            | CommissionModes::POOL_REWARD;
         frame_support::ensure!(modes & !allowed_modes == 0, sp_runtime::DispatchError::Other("InvalidModes"));
 
-        let entity_id = <T::ShopProvider as ShopProviderT<T::AccountId>>::shop_entity_id(shop_id)
-            .ok_or(sp_runtime::DispatchError::Other("ShopNotFound"))?;
         pallet::CommissionConfigs::<T>::mutate(entity_id, |maybe| {
             let config = maybe.get_or_insert_with(pallet::CoreCommissionConfig::default);
             config.enabled_modes = CommissionModes(modes);
@@ -1401,75 +1548,54 @@ impl<T: pallet::Config> CommissionProvider<T::AccountId, pallet::BalanceOf<T>> f
         Ok(())
     }
 
-    fn set_direct_reward_rate(shop_id: u64, rate: u16) -> sp_runtime::DispatchResult {
+    fn set_direct_reward_rate(entity_id: u64, rate: u16) -> sp_runtime::DispatchResult {
         frame_support::ensure!(rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
-        let entity_id = <T::ShopProvider as ShopProviderT<T::AccountId>>::shop_entity_id(shop_id)
-            .ok_or(sp_runtime::DispatchError::Other("ShopNotFound"))?;
         <T as pallet::Config>::ReferralWriter::set_direct_rate(entity_id, rate)
     }
 
-    fn set_level_diff_config(shop_id: u64, normal: u16, silver: u16, gold: u16, platinum: u16, diamond: u16) -> sp_runtime::DispatchResult {
+    fn set_level_diff_config(entity_id: u64, normal: u16, silver: u16, gold: u16, platinum: u16, diamond: u16) -> sp_runtime::DispatchResult {
         frame_support::ensure!(normal <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
         frame_support::ensure!(silver <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
         frame_support::ensure!(gold <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
         frame_support::ensure!(platinum <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
         frame_support::ensure!(diamond <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
-        let entity_id = <T::ShopProvider as ShopProviderT<T::AccountId>>::shop_entity_id(shop_id)
-            .ok_or(sp_runtime::DispatchError::Other("ShopNotFound"))?;
         <T as pallet::Config>::LevelDiffWriter::set_global_rates(entity_id, normal, silver, gold, platinum, diamond)
     }
 
-    fn set_fixed_amount(shop_id: u64, amount: pallet::BalanceOf<T>) -> sp_runtime::DispatchResult {
-        let entity_id = <T::ShopProvider as ShopProviderT<T::AccountId>>::shop_entity_id(shop_id)
-            .ok_or(sp_runtime::DispatchError::Other("ShopNotFound"))?;
+    fn set_fixed_amount(entity_id: u64, amount: pallet::BalanceOf<T>) -> sp_runtime::DispatchResult {
         <T as pallet::Config>::ReferralWriter::set_fixed_amount(entity_id, amount)
     }
 
-    fn set_first_order_config(shop_id: u64, amount: pallet::BalanceOf<T>, rate: u16, use_amount: bool) -> sp_runtime::DispatchResult {
+    fn set_first_order_config(entity_id: u64, amount: pallet::BalanceOf<T>, rate: u16, use_amount: bool) -> sp_runtime::DispatchResult {
         frame_support::ensure!(rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
-        let entity_id = <T::ShopProvider as ShopProviderT<T::AccountId>>::shop_entity_id(shop_id)
-            .ok_or(sp_runtime::DispatchError::Other("ShopNotFound"))?;
         <T as pallet::Config>::ReferralWriter::set_first_order(entity_id, amount, rate, use_amount)
     }
 
-    fn set_repeat_purchase_config(shop_id: u64, rate: u16, min_orders: u32) -> sp_runtime::DispatchResult {
+    fn set_repeat_purchase_config(entity_id: u64, rate: u16, min_orders: u32) -> sp_runtime::DispatchResult {
         frame_support::ensure!(rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
-        let entity_id = <T::ShopProvider as ShopProviderT<T::AccountId>>::shop_entity_id(shop_id)
-            .ok_or(sp_runtime::DispatchError::Other("ShopNotFound"))?;
         <T as pallet::Config>::ReferralWriter::set_repeat_purchase(entity_id, rate, min_orders)
     }
 
     fn set_withdrawal_config_by_governance(
-        shop_id: u64,
+        entity_id: u64,
         enabled: bool,
-        shopping_balance_generates_commission: bool,
     ) -> sp_runtime::DispatchResult {
-        let entity_id = <T::ShopProvider as ShopProviderT<T::AccountId>>::shop_entity_id(shop_id)
-            .ok_or(sp_runtime::DispatchError::Other("ShopNotFound"))?;
         pallet::WithdrawalConfigs::<T>::mutate(entity_id, |maybe| {
             let config = maybe.get_or_insert_with(pallet::EntityWithdrawalConfig::default);
             config.enabled = enabled;
-            config.shopping_balance_generates_commission = shopping_balance_generates_commission;
         });
         Ok(())
     }
 
-    fn shopping_balance(shop_id: u64, account: &T::AccountId) -> pallet::BalanceOf<T> {
-        match <T::ShopProvider as ShopProviderT<T::AccountId>>::shop_entity_id(shop_id) {
-            Some(entity_id) => pallet::MemberShoppingBalance::<T>::get(entity_id, account),
-            None => Zero::zero(),
-        }
+    fn shopping_balance(entity_id: u64, account: &T::AccountId) -> pallet::BalanceOf<T> {
+        pallet::MemberShoppingBalance::<T>::get(entity_id, account)
     }
 
-    fn use_shopping_balance(shop_id: u64, account: &T::AccountId, amount: pallet::BalanceOf<T>) -> sp_runtime::DispatchResult {
-        let entity_id = <T::ShopProvider as ShopProviderT<T::AccountId>>::shop_entity_id(shop_id)
-            .ok_or(sp_runtime::DispatchError::Other("ShopNotFound"))?;
+    fn use_shopping_balance(entity_id: u64, account: &T::AccountId, amount: pallet::BalanceOf<T>) -> sp_runtime::DispatchResult {
         pallet::Pallet::<T>::do_use_shopping_balance(entity_id, account, amount)
     }
 
-    fn set_min_repurchase_rate(shop_id: u64, rate: u16) -> sp_runtime::DispatchResult {
-        let entity_id = <T::ShopProvider as ShopProviderT<T::AccountId>>::shop_entity_id(shop_id)
-            .ok_or(sp_runtime::DispatchError::Other("ShopNotFound"))?;
+    fn set_min_repurchase_rate(entity_id: u64, rate: u16) -> sp_runtime::DispatchResult {
         frame_support::ensure!(rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
         pallet::GlobalMinRepurchaseRate::<T>::insert(entity_id, rate);
         Ok(())

@@ -76,7 +76,7 @@ pub mod pallet {
 
     /// 统计查询接口（由 core pallet 实现）
     pub trait SingleLineStatsProvider<AccountId, Balance: Default> {
-        fn get_member_stats(shop_id: u64, account: &AccountId) -> MemberCommissionStatsData<Balance>;
+        fn get_member_stats(entity_id: u64, account: &AccountId) -> MemberCommissionStatsData<Balance>;
     }
 
     /// 空实现
@@ -318,7 +318,6 @@ pub mod pallet {
 impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId, pallet::BalanceOf<T>> for pallet::Pallet<T> {
     fn calculate(
         entity_id: u64,
-        _shop_id: u64,
         buyer: &T::AccountId,
         order_amount: pallet::BalanceOf<T>,
         remaining: pallet::BalanceOf<T>,

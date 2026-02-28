@@ -159,7 +159,7 @@ fn direct_reward_basic() {
 
         let modes = CommissionModes(CommissionModes::DIRECT_REWARD);
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, false, 0,
+            1, &50, 10000, 10000, modes, false, 0,
         );
 
         assert_eq!(outputs.len(), 1);
@@ -183,7 +183,7 @@ fn direct_reward_no_referrer() {
 
         let modes = CommissionModes(CommissionModes::DIRECT_REWARD);
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, false, 0,
+            1, &50, 10000, 10000, modes, false, 0,
         );
 
         assert!(outputs.is_empty());
@@ -204,7 +204,7 @@ fn direct_reward_zero_rate_skips() {
 
         let modes = CommissionModes(CommissionModes::DIRECT_REWARD);
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, false, 0,
+            1, &50, 10000, 10000, modes, false, 0,
         );
 
         assert!(outputs.is_empty());
@@ -226,7 +226,7 @@ fn direct_reward_capped_by_remaining() {
         let modes = CommissionModes(CommissionModes::DIRECT_REWARD);
         // remaining=100, order=10000, 50% of 10000 = 5000 but capped at 100
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 100, modes, false, 0,
+            1, &50, 10000, 100, modes, false, 0,
         );
 
         assert_eq!(outputs.len(), 1);
@@ -262,7 +262,7 @@ fn multi_level_basic() {
 
         let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, false, 0,
+            1, &50, 10000, 10000, modes, false, 0,
         );
 
         assert_eq!(outputs.len(), 3);
@@ -300,7 +300,7 @@ fn multi_level_max_total_rate_caps() {
 
         let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, false, 0,
+            1, &50, 10000, 10000, modes, false, 0,
         );
 
         // L1: 2000, L2: 2000 but total capped at 2500 → L2 gets 500
@@ -337,7 +337,7 @@ fn multi_level_activation_condition() {
 
         let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, false, 0,
+            1, &50, 10000, 10000, modes, false, 0,
         );
 
         // L1: account 40 不满足 → 跳过，L2: account 30 满足 → 获得 500
@@ -375,7 +375,7 @@ fn h1_multi_level_cycle_detection() {
 
         let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, false, 0,
+            1, &50, 10000, 10000, modes, false, 0,
         );
 
         // 只有 40 和 30 获得佣金，50 是 buyer 被 visited 标记，循环在 L3 被检测到
@@ -403,7 +403,7 @@ fn fixed_amount_basic() {
 
         let modes = CommissionModes(CommissionModes::FIXED_AMOUNT);
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, false, 0,
+            1, &50, 10000, 10000, modes, false, 0,
         );
 
         assert_eq!(outputs.len(), 1);
@@ -426,7 +426,7 @@ fn fixed_amount_zero_skips() {
 
         let modes = CommissionModes(CommissionModes::FIXED_AMOUNT);
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, false, 0,
+            1, &50, 10000, 10000, modes, false, 0,
         );
 
         assert!(outputs.is_empty());
@@ -452,7 +452,7 @@ fn first_order_by_amount() {
         let modes = CommissionModes(CommissionModes::FIRST_ORDER);
         // is_first_order = true
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, true, 0,
+            1, &50, 10000, 10000, modes, true, 0,
         );
 
         assert_eq!(outputs.len(), 1);
@@ -475,7 +475,7 @@ fn first_order_by_rate() {
 
         let modes = CommissionModes(CommissionModes::FIRST_ORDER);
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, true, 0,
+            1, &50, 10000, 10000, modes, true, 0,
         );
 
         assert_eq!(outputs.len(), 1);
@@ -498,7 +498,7 @@ fn first_order_not_triggered_when_not_first() {
         let modes = CommissionModes(CommissionModes::FIRST_ORDER);
         // is_first_order = false
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, false, 0,
+            1, &50, 10000, 10000, modes, false, 0,
         );
 
         assert!(outputs.is_empty());
@@ -520,7 +520,7 @@ fn h3_first_order_zero_amount_early_return() {
 
         let modes = CommissionModes(CommissionModes::FIRST_ORDER);
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, true, 0,
+            1, &50, 10000, 10000, modes, true, 0,
         );
 
         assert!(outputs.is_empty());
@@ -542,7 +542,7 @@ fn h3_first_order_zero_rate_early_return() {
 
         let modes = CommissionModes(CommissionModes::FIRST_ORDER);
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, true, 0,
+            1, &50, 10000, 10000, modes, true, 0,
         );
 
         assert!(outputs.is_empty());
@@ -568,7 +568,7 @@ fn repeat_purchase_basic() {
         let modes = CommissionModes(CommissionModes::REPEAT_PURCHASE);
         // buyer_order_count=5 >= min_orders=3
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, false, 5,
+            1, &50, 10000, 10000, modes, false, 5,
         );
 
         assert_eq!(outputs.len(), 1);
@@ -592,7 +592,7 @@ fn repeat_purchase_below_min_orders() {
         let modes = CommissionModes(CommissionModes::REPEAT_PURCHASE);
         // buyer_order_count=2 < min_orders=3
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, false, 2,
+            1, &50, 10000, 10000, modes, false, 2,
         );
 
         assert!(outputs.is_empty());
@@ -618,7 +618,7 @@ fn mode_not_enabled_returns_empty() {
         // MULTI_LEVEL mode, but config only has direct_reward
         let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, false, 0,
+            1, &50, 10000, 10000, modes, false, 0,
         );
 
         assert!(outputs.is_empty());
@@ -632,7 +632,7 @@ fn no_config_returns_empty() {
         clear_thread_locals();
         let modes = CommissionModes(CommissionModes::DIRECT_REWARD);
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, false, 0,
+            1, &50, 10000, 10000, modes, false, 0,
         );
 
         assert!(outputs.is_empty());
@@ -666,7 +666,7 @@ fn combined_direct_and_multi_level() {
 
         let modes = CommissionModes(CommissionModes::DIRECT_REWARD | CommissionModes::MULTI_LEVEL);
         let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, 1, &50, 10000, 10000, modes, false, 0,
+            1, &50, 10000, 10000, modes, false, 0,
         );
 
         // Direct: 40 gets 1000, Multi L1: 40 gets 500, Multi L2: 30 gets 300

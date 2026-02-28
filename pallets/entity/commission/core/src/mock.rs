@@ -39,8 +39,8 @@ pub fn set_entity_referrer(entity_id: u64, referrer: u64) {
     ENTITY_REFERRERS.with(|m| m.borrow_mut().insert(entity_id, referrer));
 }
 
-pub fn set_referrer(shop_id: u64, account: u64, referrer: u64) {
-    REFERRERS.with(|m| m.borrow_mut().insert((shop_id, account), referrer));
+pub fn set_referrer(entity_id: u64, account: u64, referrer: u64) {
+    REFERRERS.with(|m| m.borrow_mut().insert((entity_id, account), referrer));
 }
 
 pub fn clear_thread_locals() {
@@ -100,8 +100,8 @@ pub struct MockMemberProvider;
 
 impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
     fn is_member(_: u64, _: &u64) -> bool { true }
-    fn get_referrer(shop_id: u64, account: &u64) -> Option<u64> {
-        REFERRERS.with(|r| r.borrow().get(&(shop_id, *account)).copied())
+    fn get_referrer(entity_id: u64, account: &u64) -> Option<u64> {
+        REFERRERS.with(|r| r.borrow().get(&(entity_id, *account)).copied())
     }
     fn member_level(_: u64, _: &u64) -> Option<pallet_entity_common::MemberLevel> { None }
     fn get_member_stats(_: u64, _: &u64) -> (u32, u32, u128) { (0, 0, 0) }
@@ -109,14 +109,6 @@ impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
     fn custom_level_id(_: u64, _: &u64) -> u8 { 0 }
     fn get_level_commission_bonus(_: u64, _: u8) -> u16 { 0 }
     fn auto_register(_: u64, _: &u64, _: Option<u64>) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
-    fn is_member_by_entity(_: u64, _: &u64) -> bool { true }
-    fn get_referrer_by_entity(entity_id: u64, account: &u64) -> Option<u64> {
-        // mock: entity_id 级推荐人查询（测试中 REFERRERS key 用 shop_id，这里查 entity_id）
-        REFERRERS.with(|r| r.borrow().get(&(entity_id, *account)).copied())
-    }
-    fn custom_level_id_by_entity(_: u64, _: &u64) -> u8 { 0 }
-    fn auto_register_by_entity(_: u64, _: &u64, _: Option<u64>) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
-    fn is_activated_by_entity(_: u64, _: &u64) -> bool { true }
     fn set_custom_levels_enabled(_: u64, _: bool) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
     fn set_upgrade_mode(_: u64, _: u8) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
     fn add_custom_level(_: u64, _: u8, _: &[u8], _: u128, _: u16, _: u16) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
@@ -173,10 +165,12 @@ impl pallet_commission_core::Config for Test {
     type LevelDiffPlugin = ();
     type SingleLinePlugin = ();
     type TeamPlugin = ();
+    type PoolRewardPlugin = ();
     type EntityReferrerProvider = MockEntityReferrerProvider;
     type ReferralWriter = ();
     type LevelDiffWriter = ();
     type TeamWriter = ();
+    type PoolRewardWriter = ();
     type PlatformAccount = PlatformAccount;
     type TreasuryAccount = TreasuryAccount;
     type ReferrerShareBps = ReferrerShareBps;

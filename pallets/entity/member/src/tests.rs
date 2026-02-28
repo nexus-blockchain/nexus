@@ -64,6 +64,7 @@ fn register_member_with_referrer_works() {
 
         let alice_member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
         assert_eq!(alice_member.direct_referrals, 1);
+        assert_eq!(alice_member.qualified_referrals, 1);
         assert_eq!(alice_member.team_size, 1);
     });
 }
@@ -736,12 +737,12 @@ fn member_provider_trait_works() {
     new_test_ext().execute_with(|| {
         use crate::MemberProvider;
 
-        assert!(!<MemberPallet as MemberProvider<u64, u128>>::is_member(SHOP_1, &ALICE));
+        assert!(!<MemberPallet as MemberProvider<u64, u128>>::is_member(ENTITY_1, &ALICE));
 
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
-        assert!(<MemberPallet as MemberProvider<u64, u128>>::is_member(SHOP_1, &ALICE));
+        assert!(<MemberPallet as MemberProvider<u64, u128>>::is_member(ENTITY_1, &ALICE));
 
-        let level = <MemberPallet as MemberProvider<u64, u128>>::member_level(SHOP_1, &ALICE);
+        let level = <MemberPallet as MemberProvider<u64, u128>>::member_level(ENTITY_1, &ALICE);
         assert_eq!(level, Some(MemberLevel::Normal));
     });
 }
@@ -1189,5 +1190,135 @@ fn p4_non_expired_level_not_touched() {
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
         assert_eq!(member.custom_level_id, 0);
         assert_eq!(crate::MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE), Some(100));
+    });
+}
+
+// ============================================================================
+// MemberStatsPolicy 测试
+// ============================================================================
+
+#[test]
+fn set_member_stats_policy_works() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::MemberStatsPolicy;
+
+        // 默认策略 = 0（排除复购）
+        assert_eq!(MemberPallet::entity_member_stats_policy(ENTITY_1), MemberStatsPolicy(0));
+
+        // Owner 设置策略
+        assert_ok!(MemberPallet::set_member_stats_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1, 0b0000_0011,
+        ));
+        assert_eq!(
+            MemberPallet::entity_member_stats_policy(ENTITY_1),
+            MemberStatsPolicy(0b0000_0011),
+        );
+
+        // Admin 也可以设置
+        assert_ok!(MemberPallet::set_member_stats_policy(
+            RuntimeOrigin::signed(ADMIN), SHOP_1, 0b0000_0001,
+        ));
+        assert_eq!(
+            MemberPallet::entity_member_stats_policy(ENTITY_1),
+            MemberStatsPolicy(0b0000_0001),
+        );
+    });
+}
+
+#[test]
+fn set_member_stats_policy_rejects_invalid_bits() {
+    new_test_ext().execute_with(|| {
+        // 0b0000_0100 = 4，超出低 2 位
+        assert_noop!(
+            MemberPallet::set_member_stats_policy(RuntimeOrigin::signed(OWNER), SHOP_1, 4),
+            Error::<Test>::InvalidPolicyBits
+        );
+    });
+}
+
+#[test]
+fn set_member_stats_policy_rejects_non_owner() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            MemberPallet::set_member_stats_policy(RuntimeOrigin::signed(ALICE), SHOP_1, 0),
+            Error::<Test>::NotEntityAdmin
+        );
+    });
+}
+
+#[test]
+fn get_member_stats_default_returns_qualified() {
+    new_test_ext().execute_with(|| {
+        use crate::MemberProvider;
+
+        // ALICE 注册
+        assert_ok!(MemberPallet::register_member(
+            RuntimeOrigin::signed(ALICE), SHOP_1, None,
+        ));
+
+        // BOB 复购注册 (qualified=false)，CHARLIE 主动注册 (qualified=true)
+        MemberPallet::auto_register_by_entity(ENTITY_1, &BOB, Some(ALICE), false).unwrap();
+        MemberPallet::auto_register_by_entity(ENTITY_1, &CHARLIE, Some(ALICE), true).unwrap();
+
+        // 默认策略（0）：get_member_stats 返回 qualified_referrals
+        let (direct, _team, _spent) =
+            <MemberPallet as MemberProvider<u64, u128>>::get_member_stats(ENTITY_1, &ALICE);
+        assert_eq!(direct, 1, "默认策略下 get_member_stats 应返回 qualified_referrals=1");
+    });
+}
+
+#[test]
+fn get_member_stats_include_repurchase_direct() {
+    new_test_ext().execute_with(|| {
+        use crate::MemberProvider;
+        use pallet_entity_common::MemberStatsPolicy;
+
+        // ALICE 注册
+        assert_ok!(MemberPallet::register_member(
+            RuntimeOrigin::signed(ALICE), SHOP_1, None,
+        ));
+
+        // BOB 复购注册，CHARLIE 主动注册
+        MemberPallet::auto_register_by_entity(ENTITY_1, &BOB, Some(ALICE), false).unwrap();
+        MemberPallet::auto_register_by_entity(ENTITY_1, &CHARLIE, Some(ALICE), true).unwrap();
+
+        // 设置策略：直推含复购
+        assert_ok!(MemberPallet::set_member_stats_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1,
+            MemberStatsPolicy::INCLUDE_REPURCHASE_DIRECT,
+        ));
+
+        // get_member_stats 现在返回 direct_referrals（含复购）
+        let (direct, _team, _spent) =
+            <MemberPallet as MemberProvider<u64, u128>>::get_member_stats(ENTITY_1, &ALICE);
+        assert_eq!(direct, 2, "含复购策略下 get_member_stats 应返回 direct_referrals=2");
+    });
+}
+
+// ============================================================================
+// qualified_referrals 测试
+// ============================================================================
+
+#[test]
+fn qualified_referrals_not_incremented_for_repurchase() {
+    new_test_ext().execute_with(|| {
+        // ALICE 先注册
+        assert_ok!(MemberPallet::register_member(
+            RuntimeOrigin::signed(ALICE), SHOP_1, None,
+        ));
+
+        // BOB 通过复购赠与注册 (qualified=false)
+        MemberPallet::auto_register_by_entity(ENTITY_1, &BOB, Some(ALICE), false).unwrap();
+
+        let alice = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
+        assert_eq!(alice.direct_referrals, 1, "direct_referrals 应递增");
+        assert_eq!(alice.qualified_referrals, 0, "qualified_referrals 不应递增（复购赠与）");
+
+        // CHARLIE 主动注册推荐人 ALICE (qualified=true)
+        MemberPallet::auto_register_by_entity(ENTITY_1, &CHARLIE, Some(ALICE), true).unwrap();
+
+        let alice = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
+        assert_eq!(alice.direct_referrals, 2);
+        assert_eq!(alice.qualified_referrals, 1, "qualified_referrals 仅在 qualified=true 时递增");
     });
 }

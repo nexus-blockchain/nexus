@@ -32,7 +32,7 @@ pub mod pallet {
         BoundedVec,
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{EntityProvider, ShopProvider, MemberRegistrationPolicy};
+    use pallet_entity_common::{EntityProvider, ShopProvider, MemberRegistrationPolicy, MemberStatsPolicy};
     pub use pallet_entity_common::MemberLevel;
     use sp_runtime::traits::{Saturating, Zero};
 
@@ -220,10 +220,14 @@ pub mod pallet {
     pub struct EntityMember<AccountId, Balance, BlockNumber> {
         /// 推荐人（上级）
         pub referrer: Option<AccountId>,
-        /// 直接推荐人数
+        /// 直接推荐人数（含所有来源：主动注册 + 复购赠与）
         pub direct_referrals: u32,
-        /// 间接推荐人数（预留字段，后期扩展用）
-        pub indirect_referrals: Option<u32>,
+        /// 有效直推人数（仅含主动注册/购买触发，不含复购赠与注册）
+        pub qualified_referrals: u32,
+        /// 间接推荐人数（含所有来源）
+        pub indirect_referrals: u32,
+        /// 有效间接推荐人数（不含复购赠与注册）
+        pub qualified_indirect_referrals: u32,
         /// 团队总人数
         pub team_size: u32,
         /// 累计消费金额
@@ -403,6 +407,16 @@ pub mod pallet {
         ValueQuery,
     >;
 
+    /// 会员统计策略 entity_id -> MemberStatsPolicy
+    #[pallet::storage]
+    #[pallet::getter(fn entity_member_stats_policy)]
+    pub type EntityMemberStatsPolicy<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat, u64,
+        MemberStatsPolicy,
+        ValueQuery,
+    >;
+
     /// 待审批会员 (entity_id, account) -> referrer
     #[pallet::storage]
     pub type PendingMembers<T: Config> = StorageDoubleMap<
@@ -498,7 +512,7 @@ pub mod pallet {
         },
         /// 会员通过规则升级
         MemberUpgradedByRule {
-            shop_id: u64,
+            entity_id: u64,
             account: T::AccountId,
             rule_id: u32,
             from_level_id: u8,
@@ -516,6 +530,11 @@ pub mod pallet {
         MemberPolicyUpdated {
             entity_id: u64,
             policy: MemberRegistrationPolicy,
+        },
+        /// 会员统计策略更新
+        MemberStatsPolicyUpdated {
+            entity_id: u64,
+            policy: MemberStatsPolicy,
         },
         /// 会员待审批（APPROVAL_REQUIRED 模式）
         MemberPendingApproval {
@@ -689,7 +708,7 @@ pub mod pallet {
             }
 
             // 正常注册
-            Self::do_register_member(entity_id, shop_id, &who, referrer.clone(), true)?;
+            Self::do_register_member(entity_id, &who, referrer.clone(), true)?;
 
             Self::deposit_event(Event::MemberRegistered {
                 shop_id,
@@ -745,10 +764,11 @@ pub mod pallet {
                 }
             })?;
 
-            // 更新推荐人的直接推荐人数
+            // 更新推荐人的直接推荐人数（手动绑定 = qualified）
             Self::mutate_member_by_shop(shop_id, &referrer, |maybe_member| {
                 if let Some(ref mut m) = maybe_member {
                     m.direct_referrals = m.direct_referrals.saturating_add(1);
+                    m.qualified_referrals = m.qualified_referrals.saturating_add(1);
                 }
             })?;
 
@@ -757,8 +777,8 @@ pub mod pallet {
                 referrals.try_push(who.clone()).map_err(|_| Error::<T>::ReferralsFull)
             })?;
 
-            // 更新团队人数（entity 级别）
-            Self::update_team_size_by_entity(entity_id, &referrer);
+            // 更新团队人数 + 间接推荐人数（entity 级别，手动绑定 = qualified）
+            Self::update_team_size_by_entity(entity_id, &referrer, true);
 
             Self::deposit_event(Event::ReferrerBound {
                 shop_id,
@@ -1347,7 +1367,7 @@ pub mod pallet {
                 .ok_or(Error::<T>::PendingMemberNotFound)?;
 
             // 正式注册
-            Self::do_register_member(entity_id, shop_id, &account, referrer, true)?;
+            Self::do_register_member(entity_id, &account, referrer, true)?;
 
             Self::deposit_event(Event::MemberApproved {
                 entity_id,
@@ -1396,6 +1416,43 @@ pub mod pallet {
 
             Ok(())
         }
+
+        /// 设置会员统计策略（Entity 级别）
+        ///
+        /// 控制推荐人数的计算口径：是否将复购赠与注册的账户计入直推/间推人数
+        ///
+        /// # 参数
+        /// - `shop_id`: 任意关联 Shop（用于定位 Entity 和权限校验）
+        /// - `policy_bits`: 统计策略位标记（0=排除复购, 1=直推含复购, 2=间推含复购，可组合）
+        #[pallet::call_index(20)]
+        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        pub fn set_member_stats_policy(
+            origin: OriginFor<T>,
+            shop_id: u64,
+            policy_bits: u8,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let entity_id = T::ShopProvider::shop_entity_id(shop_id)
+                .ok_or(Error::<T>::ShopNotFound)?;
+
+            // 权限检查：Entity owner 或 admin
+            ensure!(
+                T::EntityProvider::entity_owner(entity_id).as_ref() == Some(&who)
+                    || T::EntityProvider::is_entity_admin(entity_id, &who),
+                Error::<T>::NotEntityAdmin
+            );
+
+            // 只允许低 2 位 (INCLUDE_REPURCHASE_DIRECT=1, INCLUDE_REPURCHASE_INDIRECT=2)
+            ensure!(policy_bits <= 0b0000_0011, Error::<T>::InvalidPolicyBits);
+
+            let policy = MemberStatsPolicy(policy_bits);
+            EntityMemberStatsPolicy::<T>::insert(entity_id, policy);
+
+            Self::deposit_event(Event::MemberStatsPolicyUpdated { entity_id, policy });
+
+            Ok(())
+        }
     }
 
     // ============================================================================
@@ -1438,64 +1495,66 @@ pub mod pallet {
 
         /// 注册会员内部实现（统一写入 EntityMembers[entity_id]）
         ///
-        /// `activated`: 是否立即激活。通过 repurchase_target 代注册的会员传 false，
-        /// 延迟到首次消费时激活并补偿统计。
+        /// `qualified`: 是否为有效直推（主动注册/购买触发=true，复购赠与=false）
         fn do_register_member(
             entity_id: u64,
-            shop_id: u64,
             account: &T::AccountId,
             referrer: Option<T::AccountId>,
-            activated: bool,
+            qualified: bool,
         ) -> DispatchResult {
             let now = <frame_system::Pallet<T>>::block_number();
 
             let member = EntityMember {
                 referrer: referrer.clone(),
                 direct_referrals: 0,
-                indirect_referrals: None,
+                qualified_referrals: 0,
+                indirect_referrals: 0,
+                qualified_indirect_referrals: 0,
                 team_size: 0,
                 total_spent: Zero::zero(),
                 level: MemberLevel::Normal,
                 custom_level_id: 0,
                 joined_at: now,
                 last_active_at: now,
-                activated,
+                activated: true,
             };
 
             EntityMembers::<T>::insert(entity_id, account, member);
 
-            if activated {
-                // 正常注册：立即计入统计
-                MemberCount::<T>::mutate(entity_id, |count| *count = count.saturating_add(1));
-                if let Some(ref ref_account) = referrer {
-                    Self::mutate_member_referral(entity_id, ref_account, account)?;
-                }
+            MemberCount::<T>::mutate(entity_id, |count| *count = count.saturating_add(1));
+            if let Some(ref ref_account) = referrer {
+                Self::mutate_member_referral(entity_id, ref_account, account, qualified)?;
             }
-            // activated=false: 延迟统计，等待首次消费激活
 
             Ok(())
         }
 
         /// 更新推荐人统计（entity 级别）
+        ///
+        /// `qualified`: 是否为有效直推（主动注册/购买触发=true，复购赠与=false）
         fn mutate_member_referral(
             entity_id: u64,
             ref_account: &T::AccountId,
             new_member: &T::AccountId,
+            qualified: bool,
         ) -> DispatchResult {
             // 先检查推荐索引容量（失败则回滚，不产生不一致状态）
             DirectReferrals::<T>::try_mutate(entity_id, ref_account, |referrals| {
                 referrals.try_push(new_member.clone()).map_err(|_| Error::<T>::ReferralsFull)
             })?;
 
-            // 更新推荐人的 direct_referrals
+            // 更新推荐人的 direct_referrals + qualified_referrals
             EntityMembers::<T>::mutate(entity_id, ref_account, |maybe_member| {
                 if let Some(ref mut m) = maybe_member {
                     m.direct_referrals = m.direct_referrals.saturating_add(1);
+                    if qualified {
+                        m.qualified_referrals = m.qualified_referrals.saturating_add(1);
+                    }
                 }
             });
 
-            // 更新团队人数（entity 级别）
-            Self::update_team_size_by_entity(entity_id, ref_account);
+            // 更新团队人数 + 间接推荐人数（entity 级别）
+            Self::update_team_size_by_entity(entity_id, ref_account, qualified);
 
             Ok(())
         }
@@ -1538,9 +1597,12 @@ pub mod pallet {
             false
         }
 
-        /// 更新团队人数（递归向上更新，entity 级别）
+        /// 更新团队人数 + 间接推荐人数（递归向上更新，entity 级别）
         /// H1 审计修复: 添加 visited 集合防止循环引用导致重复 +1
-        fn update_team_size_by_entity(entity_id: u64, account: &T::AccountId) {
+        ///
+        /// depth=0 是直接推荐人（team_size++，直推已在 mutate_member_referral 中单独处理）
+        /// depth>=1 是间接推荐人（team_size++ 且 indirect_referrals++）
+        fn update_team_size_by_entity(entity_id: u64, account: &T::AccountId, qualified: bool) {
             use alloc::collections::BTreeSet;
 
             let mut current = Some(account.clone());
@@ -1561,6 +1623,13 @@ pub mod pallet {
                 EntityMembers::<T>::mutate(entity_id, curr_account, |maybe_member| {
                     if let Some(ref mut m) = maybe_member {
                         m.team_size = m.team_size.saturating_add(1);
+                        // depth >= 1: 间接推荐人（depth=0 是直接推荐人，已单独计数）
+                        if depth >= 1 {
+                            m.indirect_referrals = m.indirect_referrals.saturating_add(1);
+                            if qualified {
+                                m.qualified_indirect_referrals = m.qualified_indirect_referrals.saturating_add(1);
+                            }
+                        }
                     }
                 });
 
@@ -1610,6 +1679,11 @@ pub mod pallet {
         /// 获取等级信息
         pub fn get_custom_level_info(shop_id: u64, level_id: u8) -> Option<CustomLevelOf<T>> {
             let entity_id = Self::resolve_entity_id(shop_id)?;
+            Self::get_custom_level_info_by_entity(entity_id, level_id)
+        }
+
+        /// 获取等级信息（entity_id 直达）
+        pub fn get_custom_level_info_by_entity(entity_id: u64, level_id: u8) -> Option<CustomLevelOf<T>> {
             EntityLevelSystems::<T>::get(entity_id)
                 .and_then(|s| s.levels.iter().find(|l| l.id == level_id).cloned())
         }
@@ -1621,9 +1695,23 @@ pub mod pallet {
                 .unwrap_or(0)
         }
 
+        /// 获取等级折扣率（entity_id 直达）
+        pub fn get_level_discount_by_entity(entity_id: u64, level_id: u8) -> u16 {
+            Self::get_custom_level_info_by_entity(entity_id, level_id)
+                .map(|l| l.discount_rate)
+                .unwrap_or(0)
+        }
+
         /// 获取等级返佣加成
         pub fn get_level_commission_bonus(shop_id: u64, level_id: u8) -> u16 {
             Self::get_custom_level_info(shop_id, level_id)
+                .map(|l| l.commission_bonus)
+                .unwrap_or(0)
+        }
+
+        /// 获取等级返佣加成（entity_id 直达）
+        pub fn get_level_commission_bonus_by_entity(entity_id: u64, level_id: u8) -> u16 {
+            Self::get_custom_level_info_by_entity(entity_id, level_id)
                 .map(|l| l.commission_bonus)
                 .unwrap_or(0)
         }
@@ -1641,7 +1729,16 @@ pub mod pallet {
         ) -> DispatchResult {
             let entity_id = Self::resolve_entity_id(shop_id)
                 .ok_or(Error::<T>::ShopNotFound)?;
+            Self::check_order_upgrade_rules_by_entity(entity_id, buyer, product_id, order_amount)
+        }
 
+        /// 检查订单完成时的升级规则（entity_id 直达）
+        pub fn check_order_upgrade_rules_by_entity(
+            entity_id: u64,
+            buyer: &T::AccountId,
+            product_id: u64,
+            order_amount: BalanceOf<T>,
+        ) -> DispatchResult {
             let system = match EntityUpgradeRules::<T>::get(entity_id) {
                 Some(s) if s.enabled => s,
                 _ => return Ok(()),
@@ -1685,7 +1782,13 @@ pub mod pallet {
                         member.total_spent >= *threshold
                     },
                     UpgradeTrigger::ReferralCount { count } => {
-                        member.direct_referrals >= *count
+                        let policy = EntityMemberStatsPolicy::<T>::get(entity_id);
+                        let referrals = if policy.include_repurchase_direct() {
+                            member.direct_referrals
+                        } else {
+                            member.qualified_referrals
+                        };
+                        referrals >= *count
                     },
                     UpgradeTrigger::TeamSize { size } => {
                         member.team_size >= *size
@@ -1714,7 +1817,7 @@ pub mod pallet {
             let selected = Self::resolve_conflict(&matched_rules, &system.conflict_strategy);
 
             if let Some((rule_id, target_level_id, duration, _, stackable)) = selected {
-                Self::apply_upgrade(entity_id, shop_id, buyer, rule_id, target_level_id, duration, stackable)?;
+                Self::apply_upgrade(entity_id, buyer, rule_id, target_level_id, duration, stackable)?;
             }
 
             Ok(())
@@ -1753,7 +1856,6 @@ pub mod pallet {
         /// 应用升级（entity 级别存储）
         fn apply_upgrade(
             entity_id: u64,
-            shop_id: u64,
             account: &T::AccountId,
             rule_id: u32,
             target_level_id: u8,
@@ -1821,7 +1923,7 @@ pub mod pallet {
                 });
 
                 Self::deposit_event(Event::MemberUpgradedByRule {
-                    shop_id,
+                    entity_id,
                     account: account.clone(),
                     rule_id,
                     from_level_id: old_level_id,
@@ -1865,6 +1967,11 @@ pub mod pallet {
                 Some(id) => id,
                 None => return false,
             };
+            Self::uses_custom_levels_by_entity(entity_id)
+        }
+
+        /// 检查实体是否使用自定义等级（entity_id 直达）
+        pub fn uses_custom_levels_by_entity(entity_id: u64) -> bool {
             EntityLevelSystems::<T>::get(entity_id)
                 .map(|s| s.use_custom)
                 .unwrap_or(false)
@@ -2013,6 +2120,13 @@ pub mod pallet {
                 .unwrap_or(0)
         }
 
+        /// 获取自定义等级数量（entity_id 直达）
+        pub fn custom_level_count_by_entity(entity_id: u64) -> u8 {
+            EntityLevelSystems::<T>::get(entity_id)
+                .map(|s| s.levels.len() as u8)
+                .unwrap_or(0)
+        }
+
         /// 计算会员等级
         fn calculate_level(total_spent_usdt: u64) -> MemberLevel {
             if total_spent_usdt >= T::DiamondThreshold::get() {
@@ -2037,24 +2151,18 @@ pub mod pallet {
         ) -> DispatchResult {
             let entity_id = Self::resolve_entity_id(shop_id)
                 .ok_or(Error::<T>::ShopNotFound)?;
+            Self::update_spent_by_entity(entity_id, account, amount, amount_usdt)
+        }
 
+        /// 更新会员消费金额（entity_id 直达）
+        pub fn update_spent_by_entity(
+            entity_id: u64,
+            account: &T::AccountId,
+            amount: BalanceOf<T>,
+            amount_usdt: u64,
+        ) -> DispatchResult {
             EntityMembers::<T>::mutate(entity_id, account, |maybe_member| -> DispatchResult {
                 let member = maybe_member.as_mut().ok_or(Error::<T>::NotMember)?;
-
-                // 首次消费激活（代注册会员 activated=false → true）
-                if !member.activated {
-                    member.activated = true;
-                    // 补偿注册时跳过的统计
-                    MemberCount::<T>::mutate(entity_id, |c| *c = c.saturating_add(1));
-                    if let Some(ref ref_account) = member.referrer {
-                        // best-effort: 推荐人统计失败不阻断消费
-                        let _ = Self::mutate_member_referral(entity_id, ref_account, account);
-                    }
-                    Self::deposit_event(Event::MemberActivated {
-                        entity_id,
-                        account: account.clone(),
-                    });
-                }
 
                 member.total_spent = member.total_spent.saturating_add(amount);
                 member.last_active_at = <frame_system::Pallet<T>>::block_number();
@@ -2072,7 +2180,7 @@ pub mod pallet {
                     member.level = new_level;
 
                     Self::deposit_event(Event::MemberLevelUpgraded {
-                        shop_id,
+                        shop_id: 0,
                         account: account.clone(),
                         old_level,
                         new_level,
@@ -2084,13 +2192,13 @@ pub mod pallet {
                 if let Some(expires_at) = MemberLevelExpiry::<T>::get(entity_id, account) {
                     let now = <frame_system::Pallet<T>>::block_number();
                     if now > expires_at {
-                        let recalculated = Self::calculate_custom_level(shop_id, member.total_spent);
+                        let recalculated = Self::calculate_custom_level_by_entity(entity_id, member.total_spent);
                         if recalculated != member.custom_level_id {
                             let expired_level_id = member.custom_level_id;
                             member.custom_level_id = recalculated;
 
                             Self::deposit_event(Event::MemberLevelExpired {
-                                shop_id,
+                                shop_id: 0,
                                 account: account.clone(),
                                 expired_level_id,
                                 new_level_id: recalculated,
@@ -2103,13 +2211,13 @@ pub mod pallet {
                 // 计算自定义等级（如果启用且为自动升级模式，entity 级别）
                 if let Some(system) = EntityLevelSystems::<T>::get(entity_id) {
                     if system.use_custom && system.upgrade_mode == LevelUpgradeMode::AutoUpgrade {
-                        let new_custom_level = Self::calculate_custom_level(shop_id, member.total_spent);
+                        let new_custom_level = Self::calculate_custom_level_by_entity(entity_id, member.total_spent);
                         if new_custom_level != member.custom_level_id {
                             let old_level_id = member.custom_level_id;
                             member.custom_level_id = new_custom_level;
 
                             Self::deposit_event(Event::CustomLevelUpgraded {
-                                shop_id,
+                                shop_id: 0,
                                 account: account.clone(),
                                 old_level_id,
                                 new_level_id: new_custom_level,
@@ -2173,7 +2281,7 @@ pub mod pallet {
                 return Ok(());
             }
 
-            Self::do_register_member(entity_id, shop_id, account, valid_referrer.clone(), true)?;
+            Self::do_register_member(entity_id, account, valid_referrer.clone(), true)?;
 
             Self::deposit_event(Event::MemberRegistered {
                 shop_id,
@@ -2187,10 +2295,13 @@ pub mod pallet {
         ///
         /// 与 `auto_register` 逻辑一致，但跳过 shop_id → entity_id 解析。
         /// 事件中 shop_id 字段为 0（无 shop 上下文）。
+        ///
+        /// `qualified`: 是否为有效直推（购买触发=true，复购赠与=false）
         pub fn auto_register_by_entity(
             entity_id: u64,
             account: &T::AccountId,
             referrer: Option<T::AccountId>,
+            qualified: bool,
         ) -> DispatchResult {
             if EntityMembers::<T>::contains_key(entity_id, account) {
                 return Ok(()); // 已是会员
@@ -2227,7 +2338,7 @@ pub mod pallet {
                 return Ok(());
             }
 
-            Self::do_register_member(entity_id, 0, account, valid_referrer.clone(), false)?;
+            Self::do_register_member(entity_id, account, valid_referrer.clone(), qualified)?;
 
             Self::deposit_event(Event::MemberRegistered {
                 shop_id: 0,
@@ -2244,118 +2355,134 @@ pub mod pallet {
 // MemberProvider Trait 定义
 // ============================================================================
 
-/// 会员服务接口（供其他模块调用）
+/// 会员服务接口（供其他模块调用，统一使用 entity_id）
 pub trait MemberProvider<AccountId, Balance> {
-    /// 检查是否为店铺会员
-    fn is_member(shop_id: u64, account: &AccountId) -> bool;
+    /// 检查是否为实体会员
+    fn is_member(entity_id: u64, account: &AccountId) -> bool;
 
     /// 获取会员等级
-    fn member_level(shop_id: u64, account: &AccountId) -> Option<pallet::MemberLevel>;
+    fn member_level(entity_id: u64, account: &AccountId) -> Option<pallet::MemberLevel>;
 
     /// 获取自定义等级 ID
-    fn custom_level_id(shop_id: u64, account: &AccountId) -> u8;
+    fn custom_level_id(entity_id: u64, account: &AccountId) -> u8;
 
     /// 获取等级折扣率
-    fn get_level_discount(shop_id: u64, level_id: u8) -> u16;
+    fn get_level_discount(entity_id: u64, level_id: u8) -> u16;
 
     /// 获取等级返佣加成
-    fn get_level_commission_bonus(shop_id: u64, level_id: u8) -> u16;
+    fn get_level_commission_bonus(entity_id: u64, level_id: u8) -> u16;
 
-    /// 检查店铺是否使用自定义等级
-    fn uses_custom_levels(shop_id: u64) -> bool;
+    /// 检查实体是否使用自定义等级
+    fn uses_custom_levels(entity_id: u64) -> bool;
 
     /// 获取推荐人
-    fn get_referrer(shop_id: u64, account: &AccountId) -> Option<AccountId>;
+    fn get_referrer(entity_id: u64, account: &AccountId) -> Option<AccountId>;
 
     /// 自动注册会员（首次下单时）
-    fn auto_register(shop_id: u64, account: &AccountId, referrer: Option<AccountId>) -> sp_runtime::DispatchResult;
+    fn auto_register(entity_id: u64, account: &AccountId, referrer: Option<AccountId>) -> sp_runtime::DispatchResult;
 
     /// 更新消费金额
-    fn update_spent(shop_id: u64, account: &AccountId, amount: Balance, amount_usdt: u64) -> sp_runtime::DispatchResult;
+    fn update_spent(entity_id: u64, account: &AccountId, amount: Balance, amount_usdt: u64) -> sp_runtime::DispatchResult;
 
     /// 检查订单完成时的升级规则
     fn check_order_upgrade_rules(
-        shop_id: u64,
+        entity_id: u64,
         buyer: &AccountId,
         product_id: u64,
         order_amount: Balance,
     ) -> sp_runtime::DispatchResult;
 
     /// 获取有效等级（考虑过期）
-    fn get_effective_level(shop_id: u64, account: &AccountId) -> u8;
+    fn get_effective_level(entity_id: u64, account: &AccountId) -> u8;
 
     /// 获取会员统计信息 (直推人数, 团队人数, 累计消费USDT)
-    fn get_member_stats(shop_id: u64, account: &AccountId) -> (u32, u32, u128);
+    fn get_member_stats(entity_id: u64, account: &AccountId) -> (u32, u32, u128);
 
-    /// 查询会员是否已激活（代注册会员初始未激活，首次消费后激活）
-    fn is_activated_by_entity(entity_id: u64, account: &AccountId) -> bool;
+    /// 查询会员是否已激活
+    fn is_activated(entity_id: u64, account: &AccountId) -> bool;
+
 }
 
-/// MemberProvider 实现
+/// MemberProvider 实现（统一使用 entity_id，无需 shop_id 解析）
 impl<T: pallet::Config> MemberProvider<T::AccountId, pallet::BalanceOf<T>> for pallet::Pallet<T> {
-    fn is_member(shop_id: u64, account: &T::AccountId) -> bool {
-        Self::is_member_of_shop(shop_id, account)
+    fn is_member(entity_id: u64, account: &T::AccountId) -> bool {
+        pallet::EntityMembers::<T>::contains_key(entity_id, account)
     }
 
-    fn member_level(shop_id: u64, account: &T::AccountId) -> Option<pallet::MemberLevel> {
-        Self::get_member_by_shop(shop_id, account).map(|m| m.level)
+    fn member_level(entity_id: u64, account: &T::AccountId) -> Option<pallet::MemberLevel> {
+        pallet::EntityMembers::<T>::get(entity_id, account).map(|m| m.level)
     }
 
-    fn custom_level_id(shop_id: u64, account: &T::AccountId) -> u8 {
-        // H6 审计修复: 使用 get_effective_level 检查等级过期
-        Self::get_effective_level(shop_id, account)
+    fn custom_level_id(entity_id: u64, account: &T::AccountId) -> u8 {
+        // H6 审计修复: 使用 get_effective_level_by_entity 检查等级过期
+        Self::get_effective_level_by_entity(entity_id, account)
     }
 
-    fn get_level_discount(shop_id: u64, level_id: u8) -> u16 {
-        pallet::Pallet::<T>::get_level_discount(shop_id, level_id)
+    fn get_level_discount(entity_id: u64, level_id: u8) -> u16 {
+        pallet::Pallet::<T>::get_level_discount_by_entity(entity_id, level_id)
     }
 
-    fn get_level_commission_bonus(shop_id: u64, level_id: u8) -> u16 {
-        pallet::Pallet::<T>::get_level_commission_bonus(shop_id, level_id)
+    fn get_level_commission_bonus(entity_id: u64, level_id: u8) -> u16 {
+        pallet::Pallet::<T>::get_level_commission_bonus_by_entity(entity_id, level_id)
     }
 
-    fn uses_custom_levels(shop_id: u64) -> bool {
-        pallet::Pallet::<T>::uses_custom_levels(shop_id)
+    fn uses_custom_levels(entity_id: u64) -> bool {
+        pallet::Pallet::<T>::uses_custom_levels_by_entity(entity_id)
     }
 
-    fn get_referrer(shop_id: u64, account: &T::AccountId) -> Option<T::AccountId> {
-        Self::get_member_by_shop(shop_id, account).and_then(|m| m.referrer)
+    fn get_referrer(entity_id: u64, account: &T::AccountId) -> Option<T::AccountId> {
+        pallet::EntityMembers::<T>::get(entity_id, account).and_then(|m| m.referrer)
     }
 
-    fn auto_register(shop_id: u64, account: &T::AccountId, referrer: Option<T::AccountId>) -> sp_runtime::DispatchResult {
-        pallet::Pallet::<T>::auto_register(shop_id, account, referrer)
+    fn auto_register(entity_id: u64, account: &T::AccountId, referrer: Option<T::AccountId>) -> sp_runtime::DispatchResult {
+        pallet::Pallet::<T>::auto_register_by_entity(entity_id, account, referrer, true)
     }
 
-    fn update_spent(shop_id: u64, account: &T::AccountId, amount: pallet::BalanceOf<T>, amount_usdt: u64) -> sp_runtime::DispatchResult {
-        pallet::Pallet::<T>::update_spent(shop_id, account, amount, amount_usdt)
+    fn update_spent(entity_id: u64, account: &T::AccountId, amount: pallet::BalanceOf<T>, amount_usdt: u64) -> sp_runtime::DispatchResult {
+        pallet::Pallet::<T>::update_spent_by_entity(entity_id, account, amount, amount_usdt)
     }
 
     fn check_order_upgrade_rules(
-        shop_id: u64,
+        entity_id: u64,
         buyer: &T::AccountId,
         product_id: u64,
         order_amount: pallet::BalanceOf<T>,
     ) -> sp_runtime::DispatchResult {
-        pallet::Pallet::<T>::check_order_upgrade_rules(shop_id, buyer, product_id, order_amount)
+        pallet::Pallet::<T>::check_order_upgrade_rules_by_entity(entity_id, buyer, product_id, order_amount)
     }
 
-    fn get_effective_level(shop_id: u64, account: &T::AccountId) -> u8 {
-        pallet::Pallet::<T>::get_effective_level(shop_id, account)
+    fn get_effective_level(entity_id: u64, account: &T::AccountId) -> u8 {
+        pallet::Pallet::<T>::get_effective_level_by_entity(entity_id, account)
     }
 
-    fn get_member_stats(shop_id: u64, account: &T::AccountId) -> (u32, u32, u128) {
-        Self::get_member_by_shop(shop_id, account)
+    fn get_member_stats(entity_id: u64, account: &T::AccountId) -> (u32, u32, u128) {
+        let policy = pallet::EntityMemberStatsPolicy::<T>::get(entity_id);
+        pallet::EntityMembers::<T>::get(entity_id, account)
             .map(|m| {
+                let direct = if policy.include_repurchase_direct() {
+                    m.direct_referrals
+                } else {
+                    m.qualified_referrals
+                };
                 let spent_usdt: u128 = sp_runtime::SaturatedConversion::saturated_into(m.total_spent);
-                (m.direct_referrals, m.team_size, spent_usdt)
+                (direct, m.team_size, spent_usdt)
             })
             .unwrap_or((0, 0, 0))
     }
 
-    fn is_activated_by_entity(entity_id: u64, account: &T::AccountId) -> bool {
-        pallet::EntityMembers::<T>::get(entity_id, account)
-            .map(|m| m.activated)
-            .unwrap_or(false)
+    fn is_activated(_entity_id: u64, _account: &T::AccountId) -> bool {
+        true // 激活机制已移除，所有注册会员均视为已激活
+    }
+}
+
+/// OrderMemberHandler 实现（供 Transaction 模块调用，统一使用 entity_id）
+impl<T: pallet::Config> pallet_entity_common::OrderMemberHandler<T::AccountId, pallet::BalanceOf<T>> for pallet::Pallet<T> {
+    fn auto_register(entity_id: u64, account: &T::AccountId, referrer: Option<T::AccountId>) -> sp_runtime::DispatchResult {
+        pallet::Pallet::<T>::auto_register_by_entity(entity_id, account, referrer, true)
+    }
+
+    fn update_spent(entity_id: u64, account: &T::AccountId, amount: pallet::BalanceOf<T>, amount_usdt: u64) -> sp_runtime::DispatchResult {
+        pallet::Pallet::<T>::update_spent_by_entity(entity_id, account, amount, amount_usdt)
     }
 }
 
@@ -2363,22 +2490,22 @@ impl<T: pallet::Config> MemberProvider<T::AccountId, pallet::BalanceOf<T>> for p
 pub struct NullMemberProvider;
 
 impl<AccountId, Balance> MemberProvider<AccountId, Balance> for NullMemberProvider {
-    fn is_member(_shop_id: u64, _account: &AccountId) -> bool { false }
-    fn member_level(_shop_id: u64, _account: &AccountId) -> Option<pallet::MemberLevel> { None }
-    fn custom_level_id(_shop_id: u64, _account: &AccountId) -> u8 { 0 }
-    fn get_level_discount(_shop_id: u64, _level_id: u8) -> u16 { 0 }
-    fn get_level_commission_bonus(_shop_id: u64, _level_id: u8) -> u16 { 0 }
-    fn uses_custom_levels(_shop_id: u64) -> bool { false }
-    fn get_referrer(_shop_id: u64, _account: &AccountId) -> Option<AccountId> { None }
-    fn auto_register(_shop_id: u64, _account: &AccountId, _referrer: Option<AccountId>) -> sp_runtime::DispatchResult { Ok(()) }
-    fn update_spent(_shop_id: u64, _account: &AccountId, _amount: Balance, _amount_usdt: u64) -> sp_runtime::DispatchResult { Ok(()) }
+    fn is_member(_entity_id: u64, _account: &AccountId) -> bool { false }
+    fn member_level(_entity_id: u64, _account: &AccountId) -> Option<pallet::MemberLevel> { None }
+    fn custom_level_id(_entity_id: u64, _account: &AccountId) -> u8 { 0 }
+    fn get_level_discount(_entity_id: u64, _level_id: u8) -> u16 { 0 }
+    fn get_level_commission_bonus(_entity_id: u64, _level_id: u8) -> u16 { 0 }
+    fn uses_custom_levels(_entity_id: u64) -> bool { false }
+    fn get_referrer(_entity_id: u64, _account: &AccountId) -> Option<AccountId> { None }
+    fn auto_register(_entity_id: u64, _account: &AccountId, _referrer: Option<AccountId>) -> sp_runtime::DispatchResult { Ok(()) }
+    fn update_spent(_entity_id: u64, _account: &AccountId, _amount: Balance, _amount_usdt: u64) -> sp_runtime::DispatchResult { Ok(()) }
     fn check_order_upgrade_rules(
-        _shop_id: u64,
+        _entity_id: u64,
         _buyer: &AccountId,
         _product_id: u64,
         _order_amount: Balance,
     ) -> sp_runtime::DispatchResult { Ok(()) }
-    fn get_effective_level(_shop_id: u64, _account: &AccountId) -> u8 { 0 }
-    fn get_member_stats(_shop_id: u64, _account: &AccountId) -> (u32, u32, u128) { (0, 0, 0) }
-    fn is_activated_by_entity(_entity_id: u64, _account: &AccountId) -> bool { true }
+    fn get_effective_level(_entity_id: u64, _account: &AccountId) -> u8 { 0 }
+    fn get_member_stats(_entity_id: u64, _account: &AccountId) -> (u32, u32, u128) { (0, 0, 0) }
+    fn is_activated(_entity_id: u64, _account: &AccountId) -> bool { true }
 }

@@ -337,6 +337,9 @@ mod runtime {
 	#[runtime::pallet_index(136)]
 	pub type CommissionTeam = pallet_commission_team;
 
+	#[runtime::pallet_index(137)]
+	pub type CommissionPoolReward = pallet_commission_pool_reward;
+
 	#[runtime::pallet_index(128)]
 	pub type EntityMarket = pallet_entity_market;
 
