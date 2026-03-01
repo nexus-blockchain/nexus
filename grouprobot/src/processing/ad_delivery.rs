@@ -6,6 +6,7 @@ use crate::chain::ChainClient;
 use crate::chain::types::AdCampaignInfo;
 use crate::infra::audience_tracker::AudienceTracker;
 use crate::platform::{ActionType, ExecuteAction};
+use crate::tee::key_manager::KeyManager;
 
 /// 广告投放循环 — 后台定时查询链上排期 + 发送广告 + 上报收据
 ///
@@ -15,6 +16,8 @@ pub struct AdDeliveryLoop {
     managed_groups: Arc<dashmap::DashMap<String, ManagedGroup>>,
     /// audience 追踪器
     audience_tracker: Arc<AudienceTracker>,
+    /// P5-fix: TEE 密钥管理器 (用于签名投放收据)
+    key_manager: Arc<KeyManager>,
     /// 最低 audience 门槛
     min_audience: u32,
     /// 投放间隔 (秒)
@@ -46,12 +49,14 @@ pub struct DeliveryResult {
 impl AdDeliveryLoop {
     pub fn new(
         audience_tracker: Arc<AudienceTracker>,
+        key_manager: Arc<KeyManager>,
         min_audience: u32,
         delivery_interval_secs: u64,
     ) -> Self {
         Self {
             managed_groups: Arc::new(dashmap::DashMap::new()),
             audience_tracker,
+            key_manager,
             min_audience,
             delivery_interval_secs,
         }
@@ -198,13 +203,23 @@ impl AdDeliveryLoop {
                 "广告投放成功"
             );
 
-            // 上报收据到链上
+            // P5-fix: TEE 签名投放收据
+            // 签名消息 = campaign_id(u64 LE) || community_id_hash(32) || delivery_type(u8) || audience_size(u32 LE)
+            let receipt_sig = {
+                let mut msg = Vec::with_capacity(8 + 32 + 1 + 4);
+                msg.extend_from_slice(&campaign_id.to_le_bytes());
+                msg.extend_from_slice(&group.community_id_hash);
+                msg.push(0u8); // ScheduledPost
+                msg.extend_from_slice(&audience.to_le_bytes());
+                self.key_manager.sign_receipt(&msg)
+            };
+
             if let Err(e) = chain.submit_delivery_receipt(
                 campaign_id,
                 group.community_id_hash,
                 0, // delivery_type = ScheduledPost
                 audience,
-                [0u8; 64], // 签名 placeholder (TEE 签名在实际部署时填充)
+                receipt_sig,
             ).await {
                 warn!(campaign_id, err = %e, "上报投放收据失败");
             }

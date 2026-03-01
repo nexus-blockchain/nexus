@@ -254,7 +254,7 @@ pub trait ProductProvider<AccountId, Balance> {
 
 ### OrderProvider — 订单查询接口
 
-由 `pallet-entity-transaction` 实现，供评价模块调用。
+由 `pallet-entity-order` 实现，供评价模块调用。
 
 ```rust
 pub trait OrderProvider<AccountId, Balance> {
@@ -356,7 +356,7 @@ pallet-entity-common (纯类型 crate)
     ├─► pallet-entity-shop       (ShopProvider 实现)
     ├─► pallet-entity-token      (EntityTokenProvider 实现)
     ├─► pallet-entity-service    (ProductProvider 实现)
-    ├─► pallet-entity-transaction (OrderProvider 实现)
+    ├─► pallet-entity-order (OrderProvider 实现)
     ├─► pallet-entity-member     (MemberProvider 消费方)
     ├─► pallet-entity-commission (CommissionFundGuard / OrderCommissionHandler 实现)
     ├─► pallet-entity-governance (消费方)

@@ -308,7 +308,7 @@ mod runtime {
 	pub type EntityService = pallet_entity_service;
 
 	#[runtime::pallet_index(122)]
-	pub type EntityTransaction = pallet_entity_transaction;
+	pub type EntityTransaction = pallet_entity_order;
 
 	#[runtime::pallet_index(123)]
 	pub type EntityReview = pallet_entity_review;

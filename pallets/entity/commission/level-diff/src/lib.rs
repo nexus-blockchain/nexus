@@ -302,6 +302,111 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
 }
 
 // ============================================================================
+// Token 多资产 — TokenCommissionPlugin implementation
+// ============================================================================
+
+use pallet_commission_common::MemberProvider as _MemberProviderToken;
+
+impl<T: pallet::Config> pallet::Pallet<T> {
+    /// Token 版等级极差计算（泛型，rate-based）
+    fn process_level_diff_token<TB>(
+        entity_id: u64,
+        buyer: &T::AccountId,
+        order_amount: TB,
+        remaining: &mut TB,
+        outputs: &mut alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>,
+    ) where
+        TB: sp_runtime::traits::AtLeast32BitUnsigned + Copy,
+    {
+        let global_config = pallet::LevelDiffConfigs::<T>::get(entity_id);
+        let uses_custom = T::MemberProvider::uses_custom_levels(entity_id);
+        let custom_config = pallet::CustomLevelDiffConfigs::<T>::get(entity_id);
+
+        let max_depth = if uses_custom {
+            custom_config.as_ref().map(|c| c.max_depth).unwrap_or(10)
+        } else {
+            10
+        };
+
+        let mut current_referrer = T::MemberProvider::get_referrer(entity_id, buyer);
+        let mut prev_rate: u16 = 0;
+        let mut level: u8 = 0;
+
+        while let Some(ref referrer) = current_referrer {
+            level += 1;
+            if level > max_depth { break; }
+            if remaining.is_zero() { break; }
+
+            let referrer_rate = if uses_custom {
+                let level_id = T::MemberProvider::custom_level_id(entity_id, referrer);
+                custom_config.as_ref()
+                    .and_then(|c| c.level_rates.get(level_id as usize).copied())
+                    .unwrap_or_else(|| T::MemberProvider::get_level_commission_bonus(entity_id, level_id))
+            } else {
+                let referrer_level = T::MemberProvider::member_level(entity_id, referrer)
+                    .unwrap_or(pallet_entity_common::MemberLevel::Normal);
+                global_config.as_ref()
+                    .map(|c| c.rate_for_level(referrer_level))
+                    .unwrap_or(0)
+            };
+
+            if referrer_rate > prev_rate {
+                let diff_rate = referrer_rate - prev_rate;
+                let commission = order_amount
+                    .saturating_mul(TB::from(diff_rate as u32))
+                    / TB::from(10000u32);
+                let actual = commission.min(*remaining);
+
+                if !actual.is_zero() {
+                    *remaining = remaining.saturating_sub(actual);
+                    outputs.push(pallet_commission_common::CommissionOutput {
+                        beneficiary: referrer.clone(),
+                        amount: actual,
+                        commission_type: pallet_commission_common::CommissionType::LevelDiff,
+                        level,
+                    });
+                }
+
+                prev_rate = referrer_rate;
+            }
+
+            current_referrer = T::MemberProvider::get_referrer(entity_id, referrer);
+        }
+    }
+}
+
+impl<T: pallet::Config, TB> pallet_commission_common::TokenCommissionPlugin<T::AccountId, TB>
+    for pallet::Pallet<T>
+where
+    TB: sp_runtime::traits::AtLeast32BitUnsigned + Copy + Default + core::fmt::Debug,
+{
+    fn calculate_token(
+        entity_id: u64,
+        buyer: &T::AccountId,
+        order_amount: TB,
+        remaining: TB,
+        enabled_modes: pallet_commission_common::CommissionModes,
+        _is_first_order: bool,
+        _buyer_order_count: u32,
+    ) -> (alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>, TB) {
+        use pallet_commission_common::CommissionModes;
+
+        if !enabled_modes.contains(CommissionModes::LEVEL_DIFF) {
+            return (alloc::vec::Vec::new(), remaining);
+        }
+
+        let mut remaining = remaining;
+        let mut outputs = alloc::vec::Vec::new();
+
+        pallet::Pallet::<T>::process_level_diff_token::<TB>(
+            entity_id, buyer, order_amount, &mut remaining, &mut outputs,
+        );
+
+        (outputs, remaining)
+    }
+}
+
+// ============================================================================
 // LevelDiffPlanWriter implementation
 // ============================================================================
 

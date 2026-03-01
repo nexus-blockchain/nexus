@@ -158,7 +158,7 @@ pub struct CommissionRecord<AccountId, Balance, BlockNumber> {
 
 ## 四、Storage 变更
 
-### 4.1 `pallet-entity-transaction` — Order 扩展
+### 4.1 `pallet-entity-order` — Order 扩展
 
 ```rust
 pub struct Order<AccountId, Balance, BlockNumber, MaxCidLen: Get<u32>> {
@@ -891,7 +891,7 @@ pub trait ShopProvider<AccountId> {
 |------|------|----------|
 | `pallets/entity/common/src/lib.rs` | `PaymentMethod`, `CommissionCurrency`, `PaymentPolicy` 枚举 + `OrderCommissionHandler` 扩展 + `ShopProvider` 扩展 | ~50 |
 | `pallets/entity/shop/src/lib.rs` | `Shop` 新字段 `payment_policy` + `set_payment_policy` extrinsic + `ShopProvider` impl | ~60 |
-| `pallets/entity/transaction/src/lib.rs` | `Order` 新字段 + `place_order` 双轨 + `do_complete_order` 双轨 + cancel/refund/expired 双轨 | ~150 |
+| `pallets/entity/order/src/lib.rs` | `Order` 新字段 + `place_order` 双轨 + `do_complete_order` 双轨 + cancel/refund/expired 双轨 | ~150 |
 | `pallets/entity/commission/common/src/lib.rs` | `CommissionRecord` 加 `currency` 字段 | ~10 |
 | `pallets/entity/commission/core/src/lib.rs` | 6 新 Storage + `process_token_commission` + `credit_token_commission` + `withdraw_token_commission` + `cancel_commission` 扩展 + Config 扩展 | ~250 |
 | `runtime/src/configs/mod.rs` | commission-core Config 加 `EntityToken` 绑定 | ~5 |

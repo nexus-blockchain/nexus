@@ -234,7 +234,8 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 cfg.vault_socket.clone()
             };
-            let recovery = tee::share_recovery::recover_token(&enclave, &recovery_config).await?;
+            let mut recovery = tee::share_recovery::recover_token(&enclave, &recovery_config).await?;
+            recovery.vault.set_tg_api_base_url(cfg.tg_api_base_url.clone());
             info!(source = %recovery.source, "Token 恢复完成 (spawn 模式)");
             // 生成/加载 IPC 加密密钥
             let ipc_key = tee::vault_ipc::ensure_ipc_key(&cfg.data_dir)?;
@@ -255,7 +256,8 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => {
             // inprocess 模式 (默认): 恢复 Token → 直接使用
-            let recovery = tee::share_recovery::recover_token(&enclave, &recovery_config).await?;
+            let mut recovery = tee::share_recovery::recover_token(&enclave, &recovery_config).await?;
+            recovery.vault.set_tg_api_base_url(cfg.tg_api_base_url.clone());
             info!(source = %recovery.source, "Token 恢复完成 (inprocess 模式)");
             // 如果 recovery 包含签名密钥 (非零), 可注入 EnclaveBridge
             // 当前 EnclaveBridge 已有自己的密钥, 未来 Ceremony 恢复时会用到

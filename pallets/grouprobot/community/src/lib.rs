@@ -27,6 +27,8 @@ use frame_system::pallet_prelude::*;
 use pallet_grouprobot_primitives::*;
 use scale_info::TypeInfo;
 use sp_runtime::traits::Saturating;
+use sp_core::ed25519;
+use sp_io::crypto::ed25519_verify;
 
 /// 群规则配置 (链上精简版)
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, RuntimeDebug, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
@@ -261,6 +263,12 @@ pub mod pallet {
 		FreeTierNotAllowed,
 		/// 日志未超过层级保留期限
 		RetentionPeriodNotExpired,
+		/// P2-fix: 签名验证失败 (Ed25519 签名无效或 Bot public_key 不匹配)
+		InvalidSignature,
+		/// P2-fix: Bot 未注册或 public_key 不可用
+		BotPublicKeyNotFound,
+		/// P4-fix: 调用者不是该社区绑定 Bot 的 owner
+		NotBotOwner,
 	}
 
 	// ========================================================================
@@ -270,8 +278,11 @@ pub mod pallet {
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
 		/// 提交动作日志 (Bot 执行后上链存证)
+		///
+		/// P2-fix: 链上验证 Ed25519 签名,确保日志由持有 Bot private key 的 TEE 节点产生。
+		/// 签名消息格式: community_id_hash(32) || action_type(u8) || target_hash(32) || sequence(u64 LE) || message_hash(32)
 		#[pallet::call_index(0)]
-		#[pallet::weight(Weight::from_parts(45_000_000, 8_000))]
+		#[pallet::weight(Weight::from_parts(55_000_000, 8_000))]
 		pub fn submit_action_log(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -283,11 +294,19 @@ pub mod pallet {
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 
-			// Tier gate: Free 层级不允许提交链上日志
 			ensure!(
 				T::Subscription::effective_tier(&community_id_hash).is_paid(),
 				Error::<T>::FreeTierNotAllowed
 			);
+
+			Self::verify_action_log_signature(
+				&community_id_hash,
+				&action_type,
+				&target_hash,
+				sequence,
+				&message_hash,
+				&signature,
+			)?;
 
 			let now = frame_system::Pallet::<T>::block_number();
 
@@ -398,6 +417,8 @@ pub mod pallet {
 		}
 
 		/// 批量提交动作日志
+		///
+		/// P2-fix: 每条日志独立验证 Ed25519 签名。
 		#[pallet::call_index(3)]
 		#[pallet::weight(Weight::from_parts(80_000_000, 15_000))]
 		pub fn batch_submit_logs(
@@ -407,7 +428,6 @@ pub mod pallet {
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 
-			// Tier gate: Free 层级不允许提交链上日志
 			ensure!(
 				T::Subscription::effective_tier(&community_id_hash).is_paid(),
 				Error::<T>::FreeTierNotAllowed
@@ -415,6 +435,17 @@ pub mod pallet {
 
 			ensure!(!logs.is_empty(), Error::<T>::EmptyBatch);
 			ensure!(logs.len() <= 50, Error::<T>::BatchTooLarge);
+
+			for (action_type, target_hash, sequence, message_hash, signature) in &logs {
+				Self::verify_action_log_signature(
+					&community_id_hash,
+					action_type,
+					target_hash,
+					*sequence,
+					message_hash,
+					signature,
+				)?;
+			}
 
 			let now = frame_system::Pallet::<T>::block_number();
 			let count = logs.len() as u32;
@@ -443,6 +474,8 @@ pub mod pallet {
 		}
 
 		/// 奖励声誉
+		///
+		/// P4-fix: 仅该社区绑定的 Bot owner 可操作。
 		#[pallet::call_index(5)]
 		#[pallet::weight(Weight::from_parts(35_000_000, 6_000))]
 		pub fn award_reputation(
@@ -452,6 +485,7 @@ pub mod pallet {
 			delta: u32,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
+			Self::ensure_bot_owner(&who, &community_id_hash)?;
 			ensure!(delta > 0, Error::<T>::ReputationDeltaZero);
 			ensure!(delta <= T::MaxReputationDelta::get(), Error::<T>::ReputationDeltaTooLarge);
 			Self::check_cooldown(&who, &community_id_hash, &user_hash)?;
@@ -476,6 +510,8 @@ pub mod pallet {
 		}
 
 		/// 扣除声誉
+		///
+		/// P4-fix: 仅该社区绑定的 Bot owner 可操作。
 		#[pallet::call_index(6)]
 		#[pallet::weight(Weight::from_parts(35_000_000, 6_000))]
 		pub fn deduct_reputation(
@@ -485,6 +521,7 @@ pub mod pallet {
 			delta: u32,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
+			Self::ensure_bot_owner(&who, &community_id_hash)?;
 			ensure!(delta > 0, Error::<T>::ReputationDeltaZero);
 			ensure!(delta <= T::MaxReputationDelta::get(), Error::<T>::ReputationDeltaTooLarge);
 			Self::check_cooldown(&who, &community_id_hash, &user_hash)?;
@@ -509,6 +546,8 @@ pub mod pallet {
 		}
 
 		/// 重置用户声誉 (管理员)
+		///
+		/// P4-fix: 仅该社区绑定的 Bot owner 可操作。
 		#[pallet::call_index(7)]
 		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
 		pub fn reset_reputation(
@@ -517,6 +556,7 @@ pub mod pallet {
 			user_hash: [u8; 32],
 		) -> DispatchResult {
 			let _who = ensure_signed(origin)?;
+			Self::ensure_bot_owner(&_who, &community_id_hash)?;
 
 			let old_score = MemberReputation::<T>::get(&community_id_hash, &user_hash).score;
 			MemberReputation::<T>::remove(&community_id_hash, &user_hash);
@@ -615,6 +655,47 @@ pub mod pallet {
 		/// 获取社区日志数
 		pub fn log_count_for(community_id_hash: &CommunityIdHash) -> u32 {
 			ActionLogs::<T>::get(community_id_hash).len() as u32
+		}
+
+		/// P2-fix: 验证动作日志的 Ed25519 签名
+		///
+		/// 通过 BotRegistryProvider 获取该社区绑定 Bot 的 public_key,
+		/// 重建签名消息并验证 Ed25519 签名。
+		/// 签名消息 = community_id_hash(32) || action_type_encoded || target_hash(32) || sequence(u64 LE) || message_hash(32)
+		fn verify_action_log_signature(
+			community_id_hash: &CommunityIdHash,
+			action_type: &ActionType,
+			target_hash: &[u8; 32],
+			sequence: u64,
+			message_hash: &[u8; 32],
+			signature: &[u8; 64],
+		) -> DispatchResult {
+			let pk_bytes = T::BotRegistry::bot_public_key(community_id_hash)
+				.ok_or(Error::<T>::BotPublicKeyNotFound)?;
+
+			let mut msg = alloc::vec::Vec::with_capacity(32 + 4 + 32 + 8 + 32);
+			msg.extend_from_slice(community_id_hash);
+			msg.extend_from_slice(&action_type.encode());
+			msg.extend_from_slice(target_hash);
+			msg.extend_from_slice(&sequence.to_le_bytes());
+			msg.extend_from_slice(message_hash);
+
+			let ed_sig = ed25519::Signature::from_raw(*signature);
+			let ed_pk = ed25519::Public::from_raw(pk_bytes);
+
+			ensure!(ed25519_verify(&ed_sig, &msg, &ed_pk), Error::<T>::InvalidSignature);
+			Ok(())
+		}
+
+		/// P4-fix: 检查调用者是否为该社区绑定 Bot 的 owner
+		fn ensure_bot_owner(
+			who: &T::AccountId,
+			community_id_hash: &CommunityIdHash,
+		) -> DispatchResult {
+			let owner = T::BotRegistry::bot_owner(community_id_hash)
+				.ok_or(Error::<T>::NotBotOwner)?;
+			ensure!(*who == owner, Error::<T>::NotBotOwner);
+			Ok(())
 		}
 
 		/// 检查声誉变更冷却

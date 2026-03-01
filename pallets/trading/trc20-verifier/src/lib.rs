@@ -23,6 +23,7 @@ use alloc::format;
 use sp_runtime::offchain::{http, Duration};
 use sp_core::offchain::StorageKind;
 use codec::{Encode, Decode};
+use lite_json::{JsonValue, parse_json};
 
 // ==================== 常量配置 ====================
 
@@ -192,7 +193,20 @@ pub fn save_endpoint_config(config: &EndpointConfig) {
 }
 
 /// 添加自定义端点
-pub fn add_endpoint(endpoint: &str) {
+///
+/// 🆕 H8修复: 添加 URL 格式校验（HTTPS、长度、无空白字符）
+pub fn add_endpoint(endpoint: &str) -> Result<(), &'static str> {
+    // H8: URL 格式校验
+    if !endpoint.starts_with("https://") {
+        return Err("Endpoint must use HTTPS");
+    }
+    if endpoint.len() < 10 || endpoint.len() > 256 {
+        return Err("Endpoint URL length must be 10-256 characters");
+    }
+    if endpoint.bytes().any(|b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r') {
+        return Err("Endpoint URL must not contain whitespace");
+    }
+
     let mut config = get_endpoint_config();
     let endpoint_str = String::from(endpoint);
 
@@ -202,6 +216,7 @@ pub fn add_endpoint(endpoint: &str) {
         save_endpoint_config(&config);
         log::info!(target: "trc20-verifier", "Added endpoint: {}", endpoint);
     }
+    Ok(())
 }
 
 /// 移除端点
@@ -318,8 +333,8 @@ pub fn verify_trc20_transaction(
     // 2. 发送 HTTP 请求（带故障转移）
     let response = fetch_url_with_fallback(&url)?;
 
-    // 3. 解析响应
-    parse_tron_response(&response, expected_to, expected_amount)
+    // 3. 解析响应（tx_hash 路径暂不检查 from，Phase 2 JSON 重构后可从响应提取）
+    parse_tron_response(&response, expected_to, None, expected_amount)
 }
 
 /// 简化验证接口：仅返回 bool
@@ -515,12 +530,132 @@ fn fetch_url(url: &str) -> Result<Vec<u8>, &'static str> {
     Ok(body)
 }
 
+// ==================== JSON 结构化解析辅助 (C1+C2+M5 修复) ====================
+
+/// 比较 lite-json 的 char slice key 与 &str
+fn json_key_eq(key: &[char], name: &str) -> bool {
+    key.len() == name.len() && key.iter().zip(name.chars()).all(|(a, b)| *a == b)
+}
+
+/// 将 lite-json 的 char slice 转为 String
+fn json_chars_to_string(chars: &[char]) -> String {
+    chars.iter().collect()
+}
+
+/// 从 JSON 对象字段列表中按 key 获取值引用
+fn json_obj_get<'a>(obj: &'a [(Vec<char>, JsonValue)], key: &str) -> Option<&'a JsonValue> {
+    obj.iter().find(|(k, _)| json_key_eq(k, key)).map(|(_, v)| v)
+}
+
+/// 获取 JSON 对象中的字符串字段
+fn json_obj_get_str(obj: &[(Vec<char>, JsonValue)], key: &str) -> Option<String> {
+    match json_obj_get(obj, key)? {
+        JsonValue::String(chars) => Some(json_chars_to_string(chars)),
+        _ => None,
+    }
+}
+
+/// 获取 JSON 对象中的 u64 数字字段（兼容字符串格式数字如 "50000000"）
+fn json_obj_get_u64(obj: &[(Vec<char>, JsonValue)], key: &str) -> Option<u64> {
+    match json_obj_get(obj, key)? {
+        JsonValue::Number(n) => {
+            if n.negative { return None; }
+            Some(n.integer)
+        },
+        JsonValue::String(chars) => {
+            let s: String = chars.iter().collect();
+            s.parse::<u64>().ok()
+        },
+        _ => None,
+    }
+}
+
+/// 获取 JSON 对象中的嵌套对象
+#[allow(dead_code)]
+fn json_obj_get_object<'a>(obj: &'a [(Vec<char>, JsonValue)], key: &str) -> Option<&'a [(Vec<char>, JsonValue)]> {
+    match json_obj_get(obj, key)? {
+        JsonValue::Object(inner) => Some(inner.as_slice()),
+        _ => None,
+    }
+}
+
+/// 在 JSON 树中递归搜索指定 key 的字符串值
+fn json_find_str(value: &JsonValue, key: &str) -> Option<String> {
+    match value {
+        JsonValue::Object(obj) => {
+            if let Some(s) = json_obj_get_str(obj, key) {
+                return Some(s);
+            }
+            for (_, v) in obj.iter() {
+                if let Some(s) = json_find_str(v, key) {
+                    return Some(s);
+                }
+            }
+            None
+        },
+        JsonValue::Array(arr) => {
+            for v in arr {
+                if let Some(s) = json_find_str(v, key) {
+                    return Some(s);
+                }
+            }
+            None
+        },
+        _ => None,
+    }
+}
+
+/// 在 JSON 树中递归搜索指定 key 的 u64 数字值
+fn json_find_u64(value: &JsonValue, key: &str) -> Option<u64> {
+    match value {
+        JsonValue::Object(obj) => {
+            if let Some(n) = json_obj_get_u64(obj, key) {
+                return Some(n);
+            }
+            for (_, v) in obj.iter() {
+                if let Some(n) = json_find_u64(v, key) {
+                    return Some(n);
+                }
+            }
+            None
+        },
+        JsonValue::Array(arr) => {
+            for v in arr {
+                if let Some(n) = json_find_u64(v, key) {
+                    return Some(n);
+                }
+            }
+            None
+        },
+        _ => None,
+    }
+}
+
+/// 检查 JSON 树中是否有任何字符串值完全等于 target
+fn json_has_str_value(value: &JsonValue, target: &str) -> bool {
+    match value {
+        JsonValue::String(chars) => json_chars_to_string(chars) == target,
+        JsonValue::Object(obj) => obj.iter().any(|(_, v)| json_has_str_value(v, target)),
+        JsonValue::Array(arr) => arr.iter().any(|v| json_has_str_value(v, target)),
+        _ => false,
+    }
+}
+
 // ==================== 响应解析 ====================
 
 /// 解析 TronGrid API 响应
+///
+/// ## 参数
+/// - `expected_from`: 可选，预期发送方地址（Base58）。提供时检查发送方匹配。
+///
+/// 🆕 C1+C2 修复: 使用 lite-json 结构化解析替代 contains() 子串匹配。
+/// - contractRet 按字段精确匹配（不再被响应中其他文本干扰）
+/// - USDT 合约按完整字符串值匹配（不再匹配子串）
+/// - 金额按字段名提取（不再匹配第一个 "amount:" 出现位置）
 fn parse_tron_response(
     response: &[u8],
     expected_to: &[u8],
+    expected_from: Option<&[u8]>,
     expected_amount: u64,
 ) -> Result<TronTxVerification, &'static str> {
     let response_str = core::str::from_utf8(response)
@@ -529,71 +664,85 @@ fn parse_tron_response(
     let mut result = TronTxVerification::default();
     result.expected_amount = Some(expected_amount);
 
-    // 检查是否包含成功状态
-    // ⚠️ 安全说明 (H4/H5): 字符串包含匹配在 OCW 安全边界内可接受，
-    // 但需注意恶意 API 端点可能注入匹配字符串。生产环境应限制可信端点。
-    if !response_str.contains("\"contractRet\":\"SUCCESS\"")
-        && !response_str.contains("\"contractRet\": \"SUCCESS\"") {
+    // C1修复: 使用 lite-json 结构化解析
+    let json_value = parse_json(response_str)
+        .map_err(|_| "Invalid JSON response")?;
+
+    // 1. 检查交易成功状态 — 按字段名精确查找 contractRet
+    let contract_ret = json_find_str(&json_value, "contractRet");
+    if contract_ret.as_deref() != Some("SUCCESS") {
         result.error = Some(b"Transaction not successful".to_vec());
         return Ok(result);
     }
 
-    // 🆕 M6修复: 验证 USDT 合约地址，防止其他 TRC20 代币交易冒充
-    if !response_str.contains(USDT_CONTRACT) {
+    // 2. 验证 USDT 合约地址 — 检查 JSON 树中是否有完整字符串值等于 USDT 合约
+    if !json_has_str_value(&json_value, USDT_CONTRACT) {
         result.error = Some(b"Not a USDT TRC20 transaction".to_vec());
         return Ok(result);
     }
 
-    // 🆕 L1修复: 检查确认数
-    let confirmations = extract_confirmations(response_str).unwrap_or(0);
+    // 3. 检查确认数 — 按字段名精确提取
+    let confirmations = json_find_u64(&json_value, "confirmations")
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0);
     result.confirmations = confirmations;
     if confirmations < MIN_CONFIRMATIONS {
         result.error = Some(b"Insufficient confirmations".to_vec());
         return Ok(result);
     }
 
-    // 检查收款地址
-    // H1修复: expected_to 是 Base58 字符串字节（如 "TR7NHq..."），
-    // 应直接转为 &str 匹配，而非 bytes_to_hex（会产生 ASCII hex 编码，永远不匹配）
-    let expected_to_str = core::str::from_utf8(expected_to)
-        .map_err(|_| "Invalid expected_to UTF-8")?;
-    if !response_str.contains(expected_to_str) {
-        result.error = Some(b"Recipient address mismatch".to_vec());
-        return Ok(result);
+    // 4. H6修复: 检查发送方地址
+    if let Some(expected_from_bytes) = expected_from {
+        let expected_from_str = core::str::from_utf8(expected_from_bytes)
+            .map_err(|_| "Invalid expected_from UTF-8")?;
+        // 搜索 owner_address（TronGrid v1 标准字段）或 from
+        let from_addr = json_find_str(&json_value, "owner_address")
+            .or_else(|| json_find_str(&json_value, "from"));
+        if from_addr.as_deref() != Some(expected_from_str) {
+            // 回退: 检查是否有任何字符串值匹配（兼容不同 API 格式）
+            if !json_has_str_value(&json_value, expected_from_str) {
+                result.error = Some(b"Sender address mismatch".to_vec());
+                return Ok(result);
+            }
+        }
     }
 
-    // 提取实际金额
-    let actual_amount = extract_amount(response_str);
+    // 5. 检查收款地址 — 按字段名精确查找
+    let expected_to_str = core::str::from_utf8(expected_to)
+        .map_err(|_| "Invalid expected_to UTF-8")?;
+    let to_addr = json_find_str(&json_value, "to_address")
+        .or_else(|| json_find_str(&json_value, "to"));
+    if to_addr.as_deref() != Some(expected_to_str) {
+        // 回退: 检查是否有任何字符串值匹配（兼容不同 API 格式）
+        if !json_has_str_value(&json_value, expected_to_str) {
+            result.error = Some(b"Recipient address mismatch".to_vec());
+            return Ok(result);
+        }
+    }
+
+    // 6. C2修复: 按字段名精确提取金额（不再匹配首个 "amount:" 子串位置）
+    let actual_amount = json_find_u64(&json_value, "amount");
     result.actual_amount = actual_amount;
 
-    // 计算金额匹配状态
+    // 🆕 H7修复: 统一使用 calculate_amount_status，消除重复逻辑
+    // 修复前内联版本缺少 expected==0 → Invalid 保护
     let (amount_status, is_acceptable) = match actual_amount {
         Some(actual) => {
-            // M2修复: 使用 u128 中间计算防止大金额乘法溢出
-            let min_exact = (expected_amount as u128 * 995 / 1000) as u64;  // -0.5%
-            let max_exact = (expected_amount as u128 * 1005 / 1000) as u64; // +0.5%
-            let severe_threshold = expected_amount / 2;    // 50%
-
-            if actual >= min_exact && actual <= max_exact {
-                (AmountStatus::Exact, true)
-            } else if actual > max_exact {
-                let excess = actual.saturating_sub(expected_amount);
-                log::info!(target: "trc20-verifier", "Overpaid: expected={}, actual={}, excess={}",
-                    expected_amount, actual, excess);
-                (AmountStatus::Overpaid { excess }, true)
-            } else if actual >= severe_threshold {
-                let shortage = expected_amount.saturating_sub(actual);
-                log::warn!(target: "trc20-verifier", "Underpaid: expected={}, actual={}, shortage={}",
-                    expected_amount, actual, shortage);
-                (AmountStatus::Underpaid { shortage }, false)
-            } else if actual > 0 {
-                let shortage = expected_amount.saturating_sub(actual);
-                log::error!(target: "trc20-verifier", "Severely underpaid: expected={}, actual={}",
-                    expected_amount, actual);
-                (AmountStatus::SeverelyUnderpaid { shortage }, false)
-            } else {
-                (AmountStatus::Invalid, false)
+            let status = calculate_amount_status(expected_amount, actual);
+            let acceptable = matches!(status, AmountStatus::Exact | AmountStatus::Overpaid { .. });
+            match &status {
+                AmountStatus::Overpaid { excess } =>
+                    log::info!(target: "trc20-verifier", "Overpaid: expected={}, actual={}, excess={}",
+                        expected_amount, actual, excess),
+                AmountStatus::Underpaid { shortage } =>
+                    log::warn!(target: "trc20-verifier", "Underpaid: expected={}, actual={}, shortage={}",
+                        expected_amount, actual, shortage),
+                AmountStatus::SeverelyUnderpaid { .. } =>
+                    log::error!(target: "trc20-verifier", "Severely underpaid: expected={}, actual={}",
+                        expected_amount, actual),
+                _ => {}
             }
+            (status, acceptable)
         },
         None => {
             log::error!(target: "trc20-verifier", "Failed to extract amount from response");
@@ -623,7 +772,8 @@ fn parse_tron_response(
     Ok(result)
 }
 
-/// 🆕 L1: 从响应中提取确认数
+/// 🆕 L1: 从响应中提取确认数（C1修复后仅测试使用）
+#[cfg(test)]
 fn extract_confirmations(response: &str) -> Option<u32> {
     let patterns = ["\"confirmations\":", "\"confirmations\": "];
 
@@ -644,7 +794,8 @@ fn extract_confirmations(response: &str) -> Option<u32> {
     None
 }
 
-/// 从响应中提取金额
+/// 从响应中提取金额（C2修复后仅测试使用）
+#[cfg(test)]
 fn extract_amount(response: &str) -> Option<u64> {
     let patterns = ["\"amount\":", "\"amount\": "];
 
@@ -721,8 +872,11 @@ pub fn verify_trc20_by_transfer(
     // 发送 HTTP 请求（带故障转移）
     let response = fetch_url_with_fallback(&url)?;
 
+    // 🆕 H5修复: 获取当前时间传给解析函数，用于过滤未确认转账
+    let now_ms = sp_io::offchain::timestamp().unix_millis();
+
     // 解析转账列表
-    parse_trc20_transfer_list(&response, from_str, expected_amount)
+    parse_trc20_transfer_list(&response, from_str, expected_amount, now_ms)
 }
 
 /// 解析 TronGrid TRC20 转账列表响应，搜索匹配的转账
@@ -744,87 +898,107 @@ pub fn verify_trc20_by_transfer(
 ///   "success": true
 /// }
 /// ```
+/// ## 参数
+/// - `now_ms`: 当前时间（毫秒），用于 H5 确认数近似检查。传 0 跳过检查。
+///
+/// 🆕 C1+M5 修复: 使用 lite-json 结构化解析替代 find_matching_brace + contains()。
+/// - from 地址按字段精确匹配（不再格式化 pattern 做子串搜索）
+/// - USDT 合约按完整字符串值匹配（不再子串匹配）
+/// - M5: 不再使用 find_matching_brace（不能正确处理 JSON 字符串中的 `{}`）
 pub fn parse_trc20_transfer_list(
     response: &[u8],
     expected_from: &str,
     expected_amount: u64,
+    now_ms: u64,
 ) -> Result<TransferSearchResult, &'static str> {
     let response_str = core::str::from_utf8(response)
         .map_err(|_| "Invalid UTF-8 response")?;
 
     let mut result = TransferSearchResult::default();
 
-    // 检查 API 成功标志
-    if !response_str.contains("\"success\":true") && !response_str.contains("\"success\": true") {
-        result.error = Some(b"API returned failure".to_vec());
-        return Ok(result);
-    }
+    // C1修复: 使用 lite-json 结构化解析
+    let json_value = parse_json(response_str)
+        .map_err(|_| "Invalid JSON response")?;
 
-    // 查找 "data":[ 数组开始位置
-    let data_start = match response_str.find("\"data\":[") {
-        Some(pos) => pos + 8, // skip `"data":[`
-        None => match response_str.find("\"data\": [") {
-            Some(pos) => pos + 9,
-            None => {
-                result.error = Some(b"No data array in response".to_vec());
-                return Ok(result);
-            }
+    let root_obj = match json_value.as_object() {
+        Some(obj) => obj,
+        None => {
+            result.error = Some(b"Response is not a JSON object".to_vec());
+            return Ok(result);
         }
     };
 
-    // 累计找到的最大金额（同一 from→to 可能有多笔转账）
+    // 检查 API 成功标志 — 按字段精确匹配
+    match json_obj_get(root_obj, "success") {
+        Some(JsonValue::Boolean(true)) => {},
+        _ => {
+            result.error = Some(b"API returned failure".to_vec());
+            return Ok(result);
+        }
+    }
+
+    // 获取 data 数组
+    let data_array = match json_obj_get(root_obj, "data") {
+        Some(JsonValue::Array(arr)) => arr,
+        _ => {
+            result.error = Some(b"No data array in response".to_vec());
+            return Ok(result);
+        }
+    };
+
+    // 累计匹配金额
     let mut total_matched_amount: u64 = 0;
-    let mut max_single_amount: u64 = 0; // L1修复: 独立跟踪最大单笔金额
+    let mut max_single_amount: u64 = 0;
     let mut best_tx_hash: Option<Vec<u8>> = None;
     let mut best_timestamp: Option<u64> = None;
 
-    // 遍历 data 数组中的每个条目（以 `{` 开头，`}` 结尾）
-    let data_slice = &response_str[data_start..];
-    let mut search_pos = 0;
-
-    while let Some(entry_start) = data_slice[search_pos..].find('{') {
-        let abs_start = search_pos + entry_start;
-
-        // 找到匹配的 `}` — 简单实现：支持一层嵌套（token_info 内嵌对象）
-        let entry_end = match find_matching_brace(data_slice, abs_start) {
-            Some(end) => end,
-            None => break,
+    // 遍历 data 数组中的每个转账条目
+    for entry_value in data_array.iter() {
+        let entry_obj = match entry_value.as_object() {
+            Some(obj) => obj,
+            None => continue,
         };
 
-        let entry = &data_slice[abs_start..=entry_end];
-        search_pos = entry_end + 1;
-
-        // 检查 from 地址是否匹配
-        let from_pattern1 = format!("\"from\":\"{}\"", expected_from);
-        let from_pattern2 = format!("\"from\": \"{}\"", expected_from);
-        if !entry.contains(&from_pattern1) && !entry.contains(&from_pattern2) {
+        // 检查 from 地址是否匹配 — 按字段精确比较（C1修复）
+        let from_addr = json_obj_get_str(entry_obj, "from");
+        if from_addr.as_deref() != Some(expected_from) {
             continue;
         }
 
-        // 检查是 USDT 合约（双重保险，URL 参数已过滤）
-        if !entry.contains(USDT_CONTRACT) {
+        // 检查是 USDT 合约 — 在整个 entry 中搜索完整字符串值（C1修复）
+        if !json_has_str_value(entry_value, USDT_CONTRACT) {
             continue;
         }
 
-        // 提取 value（字符串格式: "value":"50000000"）
-        if let Some(value) = extract_json_string_value(entry, "value") {
-            if let Ok(amount) = value.parse::<u64>() {
-                if amount > 0 {
-                    total_matched_amount = total_matched_amount.saturating_add(amount);
-
-                    // L1修复: 记录最大单笔的交易信息（用独立变量跟踪最大单笔金额）
-                    if best_tx_hash.is_none() || amount > max_single_amount {
-                        max_single_amount = amount;
-                        best_tx_hash = extract_json_string_value(entry, "transaction_id")
-                            .map(|s| s.as_bytes().to_vec());
-                        best_timestamp = extract_json_string_value(entry, "block_timestamp")
-                            .and_then(|s| s.parse::<u64>().ok())
-                            .or_else(|| extract_json_number(entry, "block_timestamp"));
-                    }
-
-                    log::info!(target: "trc20-verifier",
-                        "Found matching transfer: value={}, running_total={}", amount, total_matched_amount);
+        // H5修复: 检查确认数（用 block_timestamp 近似）
+        // now_ms=0 时跳过检查（用于单元测试）
+        if now_ms > 0 {
+            if let Some(ts) = json_obj_get_u64(entry_obj, "block_timestamp") {
+                let min_age_ms = (MIN_CONFIRMATIONS as u64).saturating_mul(3000).saturating_mul(2);
+                if ts > 0 && now_ms.saturating_sub(ts) < min_age_ms {
+                    log::warn!(target: "trc20-verifier",
+                        "Skipping too-recent transfer (ts={}, age={}ms < {}ms)",
+                        ts, now_ms.saturating_sub(ts), min_age_ms);
+                    continue;
                 }
+            }
+        }
+
+        // 提取 value（TronGrid 返回字符串格式: "value":"50000000"）
+        if let Some(amount) = json_obj_get_u64(entry_obj, "value") {
+            if amount > 0 {
+                total_matched_amount = total_matched_amount.saturating_add(amount);
+
+                // L1修复: 记录最大单笔的交易信息
+                if best_tx_hash.is_none() || amount > max_single_amount {
+                    max_single_amount = amount;
+                    best_tx_hash = json_obj_get_str(entry_obj, "transaction_id")
+                        .map(|s| s.into_bytes());
+                    best_timestamp = json_obj_get_u64(entry_obj, "block_timestamp");
+                }
+
+                log::info!(target: "trc20-verifier",
+                    "Found matching transfer: value={}, running_total={}", amount, total_matched_amount);
             }
         }
     }
@@ -846,7 +1020,8 @@ pub fn parse_trc20_transfer_list(
     Ok(result)
 }
 
-/// 找到匹配的 `}` 括号（支持一层嵌套）
+/// 找到匹配的 `}` 括号（支持一层嵌套）（M5修复后仅测试使用）
+#[cfg(test)]
 fn find_matching_brace(s: &str, open_pos: usize) -> Option<usize> {
     let bytes = s.as_bytes();
     let mut depth: u32 = 0;
@@ -868,8 +1043,9 @@ fn find_matching_brace(s: &str, open_pos: usize) -> Option<usize> {
     None
 }
 
-/// 从 JSON 片段中提取字符串字段值
+/// 从 JSON 片段中提取字符串字段值（C1修复后仅测试使用）
 /// 匹配 `"key":"value"` 或 `"key": "value"` 格式
+#[cfg(test)]
 fn extract_json_string_value<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     let patterns = [
         format!("\"{}\":\"", key),
@@ -887,8 +1063,9 @@ fn extract_json_string_value<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     None
 }
 
-/// 从 JSON 片段中提取数字字段值
+/// 从 JSON 片段中提取数字字段值（C1修复后仅测试使用）
 /// 匹配 `"key":12345` 或 `"key": 12345` 格式
+#[cfg(test)]
 fn extract_json_number(json: &str, key: &str) -> Option<u64> {
     let patterns = [
         format!("\"{}\":", key),
@@ -923,8 +1100,9 @@ pub fn calculate_amount_status(expected: u64, actual: u64) -> AmountStatus {
     }
 
     // M2修复: 使用 u128 中间计算防止大金额乘法溢出
-    let min_exact = (expected as u128 * 995 / 1000) as u64;  // -0.5%
-    let max_exact = (expected as u128 * 1005 / 1000) as u64; // +0.5%
+    // 🆕 M8修复: 用 min(u64::MAX) 替代裸 as u64 截断，防止极端值回绕
+    let min_exact = (expected as u128 * 995 / 1000).min(u64::MAX as u128) as u64;  // -0.5%
+    let max_exact = (expected as u128 * 1005 / 1000).min(u64::MAX as u128) as u64; // +0.5%
     let severe_threshold = expected / 2;    // 50%
 
     if actual >= min_exact && actual <= max_exact {
@@ -948,7 +1126,15 @@ pub fn bytes_to_hex(bytes: &[u8]) -> String {
 }
 
 /// 十六进制字符串转字节数组
+///
+/// 🆕 L6修复: 自动去除 0x/0X 前缀
 pub fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, &'static str> {
+    let hex = if hex.starts_with("0x") || hex.starts_with("0X") {
+        &hex[2..]
+    } else {
+        hex
+    };
+
     if hex.len() % 2 != 0 {
         return Err("Invalid hex length");
     }
@@ -1050,7 +1236,7 @@ mod tests {
     #[test]
     fn test_parse_transfer_list_exact_match() {
         let response = br#"{"data":[{"transaction_id":"abc123","from":"TBuyerXXX","to":"TSellerYYY","value":"10000000","block_timestamp":1700000000000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
-        let result = parse_trc20_transfer_list(response, "TBuyerXXX", 10_000_000).unwrap();
+        let result = parse_trc20_transfer_list(response, "TBuyerXXX", 10_000_000, 0).unwrap();
         assert!(result.found);
         assert_eq!(result.actual_amount, Some(10_000_000));
         assert_eq!(result.amount_status, AmountStatus::Exact);
@@ -1060,7 +1246,7 @@ mod tests {
     #[test]
     fn test_parse_transfer_list_overpaid() {
         let response = br#"{"data":[{"transaction_id":"tx1","from":"TBuyer","to":"TSeller","value":"15000000","block_timestamp":1700000000000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
-        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000).unwrap();
+        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000, 0).unwrap();
         assert!(result.found);
         assert_eq!(result.actual_amount, Some(15_000_000));
         assert_eq!(result.amount_status, AmountStatus::Overpaid { excess: 5_000_000 });
@@ -1069,7 +1255,7 @@ mod tests {
     #[test]
     fn test_parse_transfer_list_underpaid() {
         let response = br#"{"data":[{"transaction_id":"tx1","from":"TBuyer","to":"TSeller","value":"7000000","block_timestamp":1700000000000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
-        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000).unwrap();
+        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000, 0).unwrap();
         assert!(result.found);
         assert_eq!(result.actual_amount, Some(7_000_000));
         assert_eq!(result.amount_status, AmountStatus::Underpaid { shortage: 3_000_000 });
@@ -1078,7 +1264,7 @@ mod tests {
     #[test]
     fn test_parse_transfer_list_severely_underpaid() {
         let response = br#"{"data":[{"transaction_id":"tx1","from":"TBuyer","to":"TSeller","value":"3000000","block_timestamp":1700000000000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
-        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000).unwrap();
+        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000, 0).unwrap();
         assert!(result.found);
         assert_eq!(result.actual_amount, Some(3_000_000));
         assert_eq!(result.amount_status, AmountStatus::SeverelyUnderpaid { shortage: 7_000_000 });
@@ -1087,7 +1273,7 @@ mod tests {
     #[test]
     fn test_parse_transfer_list_no_match() {
         let response = br#"{"data":[{"transaction_id":"tx1","from":"TWrongBuyer","to":"TSeller","value":"10000000","block_timestamp":1700000000000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
-        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000).unwrap();
+        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000, 0).unwrap();
         assert!(!result.found);
         assert_eq!(result.amount_status, AmountStatus::Invalid);
     }
@@ -1095,14 +1281,14 @@ mod tests {
     #[test]
     fn test_parse_transfer_list_empty_data() {
         let response = br#"{"data":[],"success":true}"#;
-        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000).unwrap();
+        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000, 0).unwrap();
         assert!(!result.found);
     }
 
     #[test]
     fn test_parse_transfer_list_api_failure() {
         let response = br#"{"success":false,"error":"rate limit"}"#;
-        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000).unwrap();
+        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000, 0).unwrap();
         assert!(!result.found);
         assert!(result.error.is_some());
     }
@@ -1111,7 +1297,7 @@ mod tests {
     fn test_parse_transfer_list_multi_entry_accumulates() {
         // 同一 from 有两笔转账，金额应累加
         let response = br#"{"data":[{"transaction_id":"tx1","from":"TBuyer","to":"TSeller","value":"5000000","block_timestamp":1700000000000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}},{"transaction_id":"tx2","from":"TBuyer","to":"TSeller","value":"6000000","block_timestamp":1700000001000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
-        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000).unwrap();
+        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000, 0).unwrap();
         assert!(result.found);
         assert_eq!(result.actual_amount, Some(11_000_000)); // 5M + 6M = 11M
         assert_eq!(result.amount_status, AmountStatus::Overpaid { excess: 1_000_000 });
@@ -1121,7 +1307,7 @@ mod tests {
     fn test_parse_transfer_list_wrong_contract_ignored() {
         // 非 USDT 合约的转账应被忽略
         let response = br#"{"data":[{"transaction_id":"tx1","from":"TBuyer","to":"TSeller","value":"10000000","block_timestamp":1700000000000,"token_info":{"address":"TFakeContractAddress"}}],"success":true}"#;
-        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000).unwrap();
+        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000, 0).unwrap();
         assert!(!result.found);
     }
 
@@ -1167,7 +1353,7 @@ mod tests {
         // 修复后: 直接用 "TSeller..." 匹配
         let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","to_address":"TSellerAddr12345678901234567890","confirmations":100,"amount":10000000}"#;
         let expected_to = b"TSellerAddr12345678901234567890";
-        let result = parse_tron_response(response, expected_to, 10_000_000).unwrap();
+        let result = parse_tron_response(response, expected_to, None, 10_000_000).unwrap();
         assert!(result.is_valid);
         assert_eq!(result.amount_status, AmountStatus::Exact);
     }
@@ -1176,7 +1362,7 @@ mod tests {
     fn h1_parse_tron_response_address_mismatch() {
         let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","to_address":"TSellerAddr12345678901234567890","confirmations":100,"amount":10000000}"#;
         let wrong_to = b"TWrongAddr123456789012345678901";
-        let result = parse_tron_response(response, wrong_to, 10_000_000).unwrap();
+        let result = parse_tron_response(response, wrong_to, None, 10_000_000).unwrap();
         assert!(!result.is_valid);
         assert_eq!(result.error, Some(b"Recipient address mismatch".to_vec()));
     }
@@ -1201,7 +1387,7 @@ mod tests {
         // L1修复: best_tx_hash 应指向最大单笔转账，不是"大于前序总和"
         // 反例: [6M, 5M, 7M] — 7M 是最大单笔，修复前 best 停留在 6M
         let response = br#"{"data":[{"transaction_id":"tx_6m","from":"TBuyer","to":"TSeller","value":"6000000","block_timestamp":1700000000000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}},{"transaction_id":"tx_5m","from":"TBuyer","to":"TSeller","value":"5000000","block_timestamp":1700000001000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}},{"transaction_id":"tx_7m","from":"TBuyer","to":"TSeller","value":"7000000","block_timestamp":1700000002000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
-        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000).unwrap();
+        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000, 0).unwrap();
         assert!(result.found);
         assert_eq!(result.actual_amount, Some(18_000_000)); // 6M+5M+7M
         // best_tx_hash 应为最大单笔 7M 的 tx
@@ -1219,7 +1405,7 @@ mod tests {
     #[test]
     fn h1_parse_tron_response_insufficient_confirmations() {
         let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","to_address":"TSellerXXX","confirmations":5,"amount":10000000}"#;
-        let result = parse_tron_response(response, b"TSellerXXX", 10_000_000).unwrap();
+        let result = parse_tron_response(response, b"TSellerXXX", None, 10_000_000).unwrap();
         assert!(!result.is_valid);
         assert_eq!(result.confirmations, 5);
         assert_eq!(result.error, Some(b"Insufficient confirmations".to_vec()));
@@ -1228,7 +1414,7 @@ mod tests {
     #[test]
     fn h1_parse_tron_response_not_usdt_contract() {
         let response = br#"{"contractRet":"SUCCESS","contract_address":"TFakeContract","to_address":"TSellerXXX","confirmations":100,"amount":10000000}"#;
-        let result = parse_tron_response(response, b"TSellerXXX", 10_000_000).unwrap();
+        let result = parse_tron_response(response, b"TSellerXXX", None, 10_000_000).unwrap();
         assert!(!result.is_valid);
         assert_eq!(result.error, Some(b"Not a USDT TRC20 transaction".to_vec()));
     }
@@ -1236,8 +1422,158 @@ mod tests {
     #[test]
     fn h1_parse_tron_response_tx_not_successful() {
         let response = br#"{"contractRet":"REVERT","to_address":"TSellerXXX"}"#;
-        let result = parse_tron_response(response, b"TSellerXXX", 10_000_000).unwrap();
+        let result = parse_tron_response(response, b"TSellerXXX", None, 10_000_000).unwrap();
         assert!(!result.is_valid);
         assert_eq!(result.error, Some(b"Transaction not successful".to_vec()));
+    }
+
+    // ==================== Phase 1 新增回归测试 ====================
+
+    #[test]
+    fn h6_parse_tron_response_sender_address_check() {
+        let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","from":"TBuyerAddr1234567890","to_address":"TSellerAddr12345678901234567890","confirmations":100,"amount":10000000}"#;
+        // 提供正确的 from 地址 → 通过
+        let result = parse_tron_response(
+            response, b"TSellerAddr12345678901234567890", Some(b"TBuyerAddr1234567890"), 10_000_000
+        ).unwrap();
+        assert!(result.is_valid);
+    }
+
+    #[test]
+    fn h6_parse_tron_response_sender_mismatch() {
+        let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","from":"TBuyerAddr1234567890","to_address":"TSellerAddr12345678901234567890","confirmations":100,"amount":10000000}"#;
+        // 提供错误的 from 地址 → 拒绝
+        let result = parse_tron_response(
+            response, b"TSellerAddr12345678901234567890", Some(b"TWrongSender1234567890"), 10_000_000
+        ).unwrap();
+        assert!(!result.is_valid);
+        assert_eq!(result.error, Some(b"Sender address mismatch".to_vec()));
+    }
+
+    #[test]
+    fn h6_parse_tron_response_no_from_check_when_none() {
+        let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","from":"TRandomSender","to_address":"TSellerAddr12345678901234567890","confirmations":100,"amount":10000000}"#;
+        // expected_from=None → 不检查发送方（向后兼容）
+        let result = parse_tron_response(
+            response, b"TSellerAddr12345678901234567890", None, 10_000_000
+        ).unwrap();
+        assert!(result.is_valid);
+    }
+
+    #[test]
+    fn h7_parse_tron_response_expected_zero_returns_invalid() {
+        // H7修复: 内联逻辑现在统一使用 calculate_amount_status
+        // expected_amount=0 应返回 Invalid（修复前返回 Overpaid）
+        let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","to_address":"TSellerAddr12345678901234567890","confirmations":100,"amount":10000000}"#;
+        let result = parse_tron_response(
+            response, b"TSellerAddr12345678901234567890", None, 0
+        ).unwrap();
+        assert!(!result.is_valid);
+        assert_eq!(result.amount_status, AmountStatus::Invalid);
+    }
+
+    #[test]
+    fn h8_add_endpoint_rejects_http() {
+        assert_eq!(add_endpoint("http://api.example.com"), Err("Endpoint must use HTTPS"));
+    }
+
+    #[test]
+    fn h8_add_endpoint_rejects_short_url() {
+        assert_eq!(add_endpoint("https://x"), Err("Endpoint URL length must be 10-256 characters"));
+    }
+
+    #[test]
+    fn h8_add_endpoint_rejects_whitespace() {
+        assert_eq!(add_endpoint("https://api.example .com"), Err("Endpoint URL must not contain whitespace"));
+    }
+
+    #[test]
+    fn l6_hex_to_bytes_handles_0x_prefix() {
+        // L6修复: 0x 前缀应被自动去除
+        assert_eq!(hex_to_bytes("0x1234abcd").unwrap(), vec![0x12, 0x34, 0xab, 0xcd]);
+        assert_eq!(hex_to_bytes("0X1234ABCD").unwrap(), vec![0x12, 0x34, 0xab, 0xcd]);
+        // 无前缀仍然正常工作
+        assert_eq!(hex_to_bytes("1234abcd").unwrap(), vec![0x12, 0x34, 0xab, 0xcd]);
+    }
+
+    // ==================== Phase 2 新增回归测试 (C1+C2+M5) ====================
+
+    #[test]
+    fn c1_json_helpers_basic() {
+        use lite_json::parse_json;
+        let json_str = r#"{"name":"Alice","age":30,"nested":{"key":"val"}}"#;
+        let val = parse_json(json_str).unwrap();
+        assert_eq!(json_find_str(&val, "name"), Some("Alice".into()));
+        assert_eq!(json_find_u64(&val, "age"), Some(30));
+        assert_eq!(json_find_str(&val, "key"), Some("val".into()));
+        assert_eq!(json_find_str(&val, "missing"), None);
+    }
+
+    #[test]
+    fn c1_json_has_str_value_exact_match() {
+        use lite_json::parse_json;
+        // json_has_str_value should only match complete string values, not substrings
+        let json_str = r#"{"addr":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","other":"TR7NHq"}"#;
+        let val = parse_json(json_str).unwrap();
+        assert!(json_has_str_value(&val, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"));
+        assert!(json_has_str_value(&val, "TR7NHq")); // exact match of "other" field
+        assert!(!json_has_str_value(&val, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6")); // prefix, not exact
+    }
+
+    #[test]
+    fn c1_parse_tron_response_rejects_invalid_json() {
+        let response = b"this is not json";
+        let result = parse_tron_response(response, b"TSeller", None, 10_000_000);
+        assert_eq!(result, Err("Invalid JSON response"));
+    }
+
+    #[test]
+    fn c1_parse_transfer_list_rejects_invalid_json() {
+        let response = b"not json at all";
+        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000, 0);
+        assert_eq!(result, Err("Invalid JSON response"));
+    }
+
+    #[test]
+    fn c2_amount_extracted_by_field_name() {
+        // C2修复: amount 按字段名提取，不再匹配首个子串
+        // 即使有嵌套 amount 字段，也能正确提取顶层 amount
+        let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","to_address":"TSellerXXX","confirmations":100,"amount":5000000}"#;
+        let result = parse_tron_response(response, b"TSellerXXX", None, 5_000_000).unwrap();
+        assert!(result.is_valid);
+        assert_eq!(result.actual_amount, Some(5_000_000));
+        assert_eq!(result.amount_status, AmountStatus::Exact);
+    }
+
+    #[test]
+    fn m5_transfer_list_handles_braces_in_strings() {
+        // M5修复: 旧 find_matching_brace 无法处理字符串中的 {}
+        // 新 lite-json 解析器正确处理任意 JSON
+        let response = br#"{"data":[{"transaction_id":"tx{special}","from":"TBuyer","to":"TSeller","value":"10000000","block_timestamp":1700000000000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
+        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000, 0).unwrap();
+        assert!(result.found);
+        assert_eq!(result.actual_amount, Some(10_000_000));
+        assert_eq!(result.tx_hash, Some(b"tx{special}".to_vec()));
+    }
+
+    #[test]
+    fn c1_transfer_list_from_exact_match() {
+        // C1修复: from 必须精确匹配字段值，不能是子串
+        // 旧代码用 contains("\"from\":\"TBuyer\"") 可能被 "TBuyerExtra" 包含
+        let response = br#"{"data":[{"transaction_id":"tx1","from":"TBuyerExtra","to":"TSeller","value":"10000000","block_timestamp":1700000000000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
+        let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000, 0).unwrap();
+        // "TBuyerExtra" != "TBuyer" → should NOT match
+        assert!(!result.found);
+    }
+
+    #[test]
+    fn m8_calculate_amount_status_extreme_expected_no_wrap() {
+        // M8修复: expected 接近 u64::MAX 时 max_exact 不应回绕
+        let huge = u64::MAX; // 18_446_744_073_709_551_615
+        // 修复前: (u64::MAX as u128 * 1005 / 1000) as u64 会截断
+        // 修复后: .min(u64::MAX as u128) 阻止截断
+        let result = calculate_amount_status(huge, huge);
+        // huge * 995/1000 < huge < huge * 1005/1000 (capped at u64::MAX) → Exact
+        assert_eq!(result, AmountStatus::Exact);
     }
 }

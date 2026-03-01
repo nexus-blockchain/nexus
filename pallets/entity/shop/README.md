@@ -22,7 +22,7 @@ Entity (组织层)                    Shop (业务层)
 ───────────────────                ───────────────────
 • 所有权 / 治理                    • 日常运营
 • 代币发行 / 分红                  • 商品管理 (entity-service)
-• KYC / 合规                       • 订单处理 (entity-transaction)
+• KYC / 合规                       • 订单处理 (entity-order)
 • 组织金库                         • 运营资金 (shop_account)
 • 管理员权限                       • 门店管理员
        │                                  │

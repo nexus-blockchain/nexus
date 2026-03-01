@@ -181,7 +181,7 @@ pub mod pallet {
         /// 匹配最高达标的阶梯档位
         ///
         /// tiers 按 sales_threshold 升序排列，返回最后一个满足条件的档位 rate
-        fn match_tier(
+        pub(crate) fn match_tier(
             tiers: &[TeamPerformanceTier<BalanceOf<T>>],
             team_size: u32,
             total_spent: u128,
@@ -292,6 +292,107 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
         let mut outputs = alloc::vec::Vec::new();
 
         pallet::Pallet::<T>::process_team_performance(
+            entity_id, buyer, order_amount, &mut remaining, &config, &mut outputs,
+        );
+
+        (outputs, remaining)
+    }
+}
+
+// ============================================================================
+// Token 多资产 — TokenCommissionPlugin implementation
+// ============================================================================
+
+use pallet_commission_common::MemberProvider as _MemberProviderToken;
+
+impl<T: pallet::Config> pallet::Pallet<T> {
+    /// Token 版团队业绩计算（泛型，rate-based）
+    ///
+    /// 阶梯匹配逻辑与 NEX 版完全一致（基于 MemberProvider 的 team_size / total_spent）。
+    /// 仅佣金金额计算使用泛型 TB。
+    fn process_team_performance_token<TB>(
+        entity_id: u64,
+        buyer: &T::AccountId,
+        order_amount: TB,
+        remaining: &mut TB,
+        config: &pallet::TeamPerformanceConfigOf<T>,
+        outputs: &mut alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>,
+    ) where
+        TB: sp_runtime::traits::AtLeast32BitUnsigned + Copy,
+    {
+        if config.tiers.is_empty() { return; }
+
+        let mut current = T::MemberProvider::get_referrer(entity_id, buyer);
+        let mut depth: u8 = 0;
+
+        while let Some(ref ancestor) = current {
+            depth += 1;
+            if depth > config.max_depth { break; }
+            if remaining.is_zero() { break; }
+
+            let (_direct, team_size, total_spent) =
+                T::MemberProvider::get_member_stats(entity_id, ancestor);
+
+            if let Some(rate) = Self::match_tier(&config.tiers, team_size, total_spent) {
+                if rate > 0 {
+                    let commission = order_amount
+                        .saturating_mul(TB::from(rate as u32))
+                        / TB::from(10000u32);
+                    let actual = commission.min(*remaining);
+
+                    if !actual.is_zero() {
+                        *remaining = remaining.saturating_sub(actual);
+                        outputs.push(pallet_commission_common::CommissionOutput {
+                            beneficiary: ancestor.clone(),
+                            amount: actual,
+                            commission_type: pallet_commission_common::CommissionType::TeamPerformance,
+                            level: depth,
+                        });
+                    }
+
+                    if !config.allow_stacking {
+                        break;
+                    }
+                }
+            }
+
+            current = T::MemberProvider::get_referrer(entity_id, ancestor);
+        }
+    }
+}
+
+impl<T: pallet::Config, TB> pallet_commission_common::TokenCommissionPlugin<T::AccountId, TB>
+    for pallet::Pallet<T>
+where
+    TB: sp_runtime::traits::AtLeast32BitUnsigned + Copy + Default + core::fmt::Debug,
+{
+    fn calculate_token(
+        entity_id: u64,
+        buyer: &T::AccountId,
+        order_amount: TB,
+        remaining: TB,
+        enabled_modes: pallet_commission_common::CommissionModes,
+        _is_first_order: bool,
+        _buyer_order_count: u32,
+    ) -> (
+        alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>,
+        TB,
+    ) {
+        use pallet_commission_common::CommissionModes;
+
+        if !enabled_modes.contains(CommissionModes::TEAM_PERFORMANCE) {
+            return (alloc::vec::Vec::new(), remaining);
+        }
+
+        let config = match pallet::TeamPerformanceConfigs::<T>::get(entity_id) {
+            Some(c) => c,
+            None => return (alloc::vec::Vec::new(), remaining),
+        };
+
+        let mut remaining = remaining;
+        let mut outputs = alloc::vec::Vec::new();
+
+        pallet::Pallet::<T>::process_team_performance_token::<TB>(
             entity_id, buyer, order_amount, &mut remaining, &config, &mut outputs,
         );
 

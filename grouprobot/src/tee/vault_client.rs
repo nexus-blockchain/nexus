@@ -300,8 +300,8 @@ mod tests {
 
         let sock_path = vault_ipc::default_socket_path(&dir_path);
         let mut vault = TokenVault::new();
-        vault.set_telegram_token("client_test:TG_TOKEN".into());
-        vault.set_discord_token("client_test_DC_TOKEN".into());
+        vault.set_telegram_token("client_test:TG_TOKEN".to_string());
+        vault.set_discord_token("client_test_DC_TOKEN".to_string());
 
         let server = VaultServer::new(vault, sock_path.clone());
         let handle = tokio::spawn(async move {
@@ -366,7 +366,7 @@ mod tests {
     #[tokio::test]
     async fn vault_provider_trait_in_process() {
         let mut vault = TokenVault::new();
-        vault.set_telegram_token("trait_test:TOKEN".into());
+        vault.set_telegram_token("trait_test:TOKEN".to_string());
 
         let provider: Arc<dyn VaultProvider> = Arc::new(vault);
         let url = provider.build_tg_api_url("test").await.unwrap();
@@ -395,8 +395,8 @@ mod tests {
         let ipc_key = vault_ipc::ensure_ipc_key(&dir_path).unwrap();
 
         let mut vault = TokenVault::new();
-        vault.set_telegram_token("enc_test:SECRET_TG".into());
-        vault.set_discord_token("enc_test_SECRET_DC".into());
+        vault.set_telegram_token("enc_test:SECRET_TG".to_string());
+        vault.set_discord_token("enc_test_SECRET_DC".to_string());
 
         let server = VaultServer::with_encryption(vault, sock_path.clone(), ipc_key);
         let handle = tokio::spawn(async move {

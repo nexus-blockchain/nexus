@@ -46,7 +46,7 @@ pub type MallReviewOf<T> = MallReview<
 ```rust
 // runtime/src/configs/mod.rs
 impl pallet_entity_review::Config for Runtime {
-    type OrderProvider = EntityTransaction;   // 订单查询 — pallet-entity-transaction
+    type OrderProvider = EntityTransaction;   // 订单查询 — pallet-entity-order
     type ShopProvider = EntityShop;           // 店铺评分更新 — pallet-entity-shop
     type MaxCidLength = ConstU32<64>;         // CID 最大长度 64 字节
 }
@@ -128,7 +128,7 @@ pub fn submit_review(
 
 ### OrderProvider（来自 pallet-entity-common）
 
-由 `pallet-entity-transaction` 实现。
+由 `pallet-entity-order` 实现。
 
 ```rust
 pub trait OrderProvider<AccountId, Balance> {

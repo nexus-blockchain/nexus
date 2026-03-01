@@ -182,6 +182,8 @@ pub mod pallet {
         GloballyPaused,
         /// 🆕 到期队列已满
         ExpiringAtFull,
+        /// 🆕 L-2修复: 托管非争议状态（set_resolved 要求 state==1）
+        NotInDispute,
     }
 
     /// 函数级中文注释：到期处理策略接口（由 runtime 实现）。
@@ -265,7 +267,13 @@ pub mod pallet {
             let new = cur.saturating_sub(amount);
             Locked::<T>::insert(id, new);
             let escrow = Self::account();
-            T::Currency::transfer(&escrow, to, amount, ExistenceRequirement::KeepAlive)
+            // 🆕 L-3修复: 最后一笔（余额归零）使用 AllowDeath，避免 ED dust 卡住
+            let existence = if new.is_zero() {
+                ExistenceRequirement::AllowDeath
+            } else {
+                ExistenceRequirement::KeepAlive
+            };
+            T::Currency::transfer(&escrow, to, amount, existence)
                 .map_err(|_| Error::<T>::NoLock)?;
             if new.is_zero() {
                 Locked::<T>::remove(id);
@@ -342,7 +350,8 @@ pub mod pallet {
         }
         fn set_resolved(id: u64) -> DispatchResult {
             let state = LockStateOf::<T>::get(id);
-            ensure!(state == 1u8, Error::<T>::NoLock);
+            // 🆕 L-2修复: 使用专用错误码替代 NoLock
+            ensure!(state == 1u8, Error::<T>::NotInDispute);
             LockStateOf::<T>::insert(id, 0u8);
             Ok(())
         }
@@ -355,6 +364,8 @@ pub mod pallet {
             // 函数级详细中文注释：按比例分账
             // - bps: 基点（10000 = 100%），release_to 获得 bps/10000，refund_to 获得剩余
             // - 使用 Permill 进行安全的比例计算
+            // 🆕 M-NEW-1修复: trait 方法内增加 bps 上界校验，防止外部 pallet 传入非法值
+            ensure!(bps <= 10_000, Error::<T>::Insufficient);
             // 🆕 P2修复: 检查状态 - 已关闭(3)禁止重复操作（争议中允许分账裁决）
             let state = LockStateOf::<T>::get(id);
             ensure!(state != 3u8, Error::<T>::AlreadyClosed);
@@ -678,8 +689,14 @@ pub mod pallet {
             let total = expiring_ids.len() as u32;
             
             for id in expiring_ids.iter() {
-                // 跳过争议状态的订单
+                // 🆕 H-NEW-2修复: 争议中的项重新调度到未来块，而非丢弃
                 if LockStateOf::<T>::get(id) == 1u8 {
+                    // 重新调度到 1 天后重新检查（14400 blocks @ 6s/block）
+                    let recheck = n.saturating_add(14400u32.into());
+                    let _ = ExpiringAt::<T>::try_mutate(recheck, |ids| -> Result<(), ()> {
+                        ids.try_push(*id).map_err(|_| ())
+                    });
+                    // ExpiryOf 保留不动，指向原始到期块（用于审计追溯）
                     continue;
                 }
                 

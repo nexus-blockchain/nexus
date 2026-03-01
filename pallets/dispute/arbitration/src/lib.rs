@@ -246,6 +246,10 @@ pub mod pallet {
         pub created_at: BlockNumberFor<T>,
         /// 响应截止时间
         pub response_deadline: BlockNumberFor<T>,
+        /// 🆕 M-NEW-3修复: 和解详情CID（独立存储，不覆盖原始投诉详情）
+        pub settlement_cid: Option<BoundedVec<u8, T::MaxCidLen>>,
+        /// 🆕 M-NEW-3修复: 仲裁裁决CID（独立存储，不覆盖原始投诉详情）
+        pub resolution_cid: Option<BoundedVec<u8, T::MaxCidLen>>,
         /// 最后更新时间
         pub updated_at: BlockNumberFor<T>,
     }
@@ -371,6 +375,21 @@ pub mod pallet {
         /// 默认 2_592_000 ≈ 180天 (6s/block)。设为 0 禁用清理。
         #[pallet::constant]
         type ArchiveTtlBlocks: Get<u32>;
+
+        /// 🆕 M-NEW-5修复: 投诉归档延迟（区块数），投诉解决后多久可归档
+        /// 默认 432_000 ≈ 30天 (6s/block)
+        #[pallet::constant]
+        type ComplaintArchiveDelayBlocks: Get<BlockNumberFor<Self>>;
+
+        /// 🆕 M-NEW-6修复: 证据存在性检查器
+        /// 验证 evidence_id 在 pallet-evidence 中是否实际存在
+        type EvidenceExists: EvidenceExistenceChecker;
+    }
+
+    /// 🆕 M-NEW-6修复: 证据存在性检查接口
+    pub trait EvidenceExistenceChecker {
+        /// 返回指定 evidence_id 是否存在
+        fn evidence_exists(id: u64) -> bool;
     }
     
     /// 信用分更新接口
@@ -704,6 +723,8 @@ pub mod pallet {
         TooManyComplaints,
         /// 用户活跃投诉数量已达上限
         TooManyActiveComplaints,
+        /// 🆕 M-NEW-6修复: 引用的证据不存在
+        EvidenceNotFound,
     }
 
     #[pallet::call]
@@ -821,10 +842,12 @@ pub mod pallet {
                 Disputed::<T>::get(domain, id).is_none(),
                 Error::<T>::AlreadyDisputed
             );
+            // 🆕 M-NEW-6修复: 验证 evidence_id 存在性
+            ensure!(T::EvidenceExists::evidence_exists(evidence_id), Error::<T>::EvidenceNotFound);
             Disputed::<T>::insert(domain, id, ());
             EvidenceIds::<T>::try_mutate(domain, id, |v| -> Result<(), Error<T>> {
                 v.try_push(evidence_id)
-                    .map_err(|_| Error::<T>::AlreadyDisputed)?; // 复用错误占位，避免新增错误枚举
+                    .map_err(|_| Error::<T>::AlreadyDisputed)?;
                 Ok(())
             })?;
             Self::deposit_event(Event::Disputed { domain, id });
@@ -856,6 +879,8 @@ pub mod pallet {
                     Error::<T>::NotAuthorized
                 );
             }
+            // 🆕 M-NEW-6修复: 验证 evidence_id 存在性
+            ensure!(T::EvidenceExists::evidence_exists(evidence_id), Error::<T>::EvidenceNotFound);
             EvidenceIds::<T>::try_mutate(domain, id, |v| -> Result<(), Error<T>> {
                 v.try_push(evidence_id)
                     .map_err(|_| Error::<T>::AlreadyDisputed)?;
@@ -943,6 +968,8 @@ pub mod pallet {
                 },
             );
 
+            // 🆕 M-NEW-6修复: 验证 evidence_id 存在性
+            ensure!(T::EvidenceExists::evidence_exists(evidence_id), Error::<T>::EvidenceNotFound);
             // 10. 添加证据引用
             EvidenceIds::<T>::try_mutate(domain, id, |v| -> Result<(), Error<T>> {
                 v.try_push(evidence_id)
@@ -1018,6 +1045,8 @@ pub mod pallet {
             deposit_record.has_responded = true;
             TwoWayDeposits::<T>::insert(domain, id, deposit_record);
 
+            // 🆕 M-NEW-6修复: 验证 counter_evidence_id 存在性
+            ensure!(T::EvidenceExists::evidence_exists(counter_evidence_id), Error::<T>::EvidenceNotFound);
             // 9. 添加反驳证据
             EvidenceIds::<T>::try_mutate(domain, id, |v| -> Result<(), Error<T>> {
                 v.try_push(counter_evidence_id)
@@ -1123,6 +1152,8 @@ pub mod pallet {
                 status: ComplaintStatus::Submitted,
                 created_at: now,
                 response_deadline: deadline,
+                settlement_cid: None,
+                resolution_cid: None,
                 updated_at: now,
             };
 
@@ -1259,9 +1290,9 @@ pub mod pallet {
                     Error::<T>::InvalidState
                 );
 
-                // 更新
+                // 🆕 M-NEW-3修复: 使用独立字段存储和解详情，保留原始 details_cid
                 let now = frame_system::Pallet::<T>::block_number();
-                complaint.details_cid = settlement_cid;
+                complaint.settlement_cid = Some(settlement_cid);
                 complaint.status = ComplaintStatus::ResolvedSettlement;
                 complaint.updated_at = now;
 
@@ -1325,8 +1356,10 @@ pub mod pallet {
         pub fn resolve_complaint(
             origin: OriginFor<T>,
             complaint_id: u64,
-            decision: u8, // 0=投诉方胜, 1=被投诉方胜, 2=和解
+            decision: u8, // 0=投诉方胜, 1=被投诉方胜, 2=部分裁决
             reason_cid: BoundedVec<u8, T::MaxCidLen>,
+            // 🆕 L-5修复: 可选自定义分账比例（基点，仅 decision==2 时生效）
+            partial_bps: Option<u16>,
         ) -> DispatchResult {
             T::DecisionOrigin::ensure_origin(origin)?;
 
@@ -1338,17 +1371,20 @@ pub mod pallet {
                     Error::<T>::InvalidState
                 );
 
-                // 应用裁决到业务模块
+                // 🆕 L-5修复: 支持自定义分账比例，默认使用 PartialSlashBps 配置值
                 let router_decision = match decision {
                     0 => Decision::Refund,      // 投诉方胜诉 = 退款
                     1 => Decision::Release,     // 被投诉方胜诉 = 释放
-                    _ => Decision::Partial(5000), // 和解 = 50-50
+                    _ => {
+                        let bps = partial_bps.unwrap_or(T::PartialSlashBps::get());
+                        Decision::Partial(bps.min(10_000))
+                    },
                 };
                 T::Router::apply_decision(complaint.domain, complaint.object_id, router_decision)?;
 
-                // 更新状态
+                // 🆕 M-NEW-3修复: 使用独立字段存储裁决详情，保留原始 details_cid
                 let now = frame_system::Pallet::<T>::block_number();
-                complaint.details_cid = reason_cid;
+                complaint.resolution_cid = Some(reason_cid);
                 complaint.status = match decision {
                     0 => ComplaintStatus::ResolvedComplainantWin,
                     1 => ComplaintStatus::ResolvedRespondentWin,
@@ -1706,8 +1742,8 @@ pub mod pallet {
         /// 在 on_idle 中调用，每次最多处理 max_count 个
         pub fn archive_old_complaints(max_count: u32) -> u32 {
             let now = frame_system::Pallet::<T>::block_number();
-            // 归档延迟：30天 = 432000 区块（6秒/块）
-            let archive_delay: BlockNumberFor<T> = 432000u32.into();
+            // 🆕 M-NEW-5修复: 使用 Config 常量替代硬编码归档延迟
+            let archive_delay: BlockNumberFor<T> = T::ComplaintArchiveDelayBlocks::get();
             let mut archived_count = 0u32;
             let mut cursor = ComplaintArchiveCursor::<T>::get();
             let max_id = NextComplaintId::<T>::get();
@@ -1776,33 +1812,36 @@ pub mod pallet {
 
             while expired_count < max_count && cursor < max_id {
                 if let Some(mut complaint) = Complaints::<T>::get(cursor) {
-                    // 检查是否过期：状态为 Submitted 且已过响应截止时间
-                    if complaint.status == ComplaintStatus::Submitted 
-                        && now > complaint.response_deadline 
-                    {
-                        complaint.status = ComplaintStatus::Expired;
-                        complaint.updated_at = now;
+                    // 🆕 H-NEW-1修复: Submitted 且未过期时 break（后续 deadline 只会更晚）
+                    if complaint.status == ComplaintStatus::Submitted {
+                        if now > complaint.response_deadline {
+                            complaint.status = ComplaintStatus::Expired;
+                            complaint.updated_at = now;
 
-                        // AH7: 过期投诉退还押金
-                        if let Some(deposit_amount) = ComplaintDeposits::<T>::take(cursor) {
-                            let _ = T::Fungible::release(
-                                &T::RuntimeHoldReason::from(HoldReason::ComplaintDeposit),
-                                &complaint.complainant,
-                                deposit_amount,
-                                frame_support::traits::tokens::Precision::BestEffort,
-                            );
+                            // AH7: 过期投诉退还押金
+                            if let Some(deposit_amount) = ComplaintDeposits::<T>::take(cursor) {
+                                let _ = T::Fungible::release(
+                                    &T::RuntimeHoldReason::from(HoldReason::ComplaintDeposit),
+                                    &complaint.complainant,
+                                    deposit_amount,
+                                    frame_support::traits::tokens::Precision::BestEffort,
+                                );
+                            }
+
+                            Complaints::<T>::insert(cursor, &complaint);
+
+                            // 更新统计
+                            DomainStats::<T>::mutate(complaint.domain, |stats| {
+                                stats.resolved_count = stats.resolved_count.saturating_add(1);
+                                stats.expired_count = stats.expired_count.saturating_add(1);
+                            });
+
+                            Self::deposit_event(Event::ComplaintExpired { complaint_id: cursor });
+                            expired_count = expired_count.saturating_add(1);
+                        } else {
+                            // 未过期的 Submitted 投诉：停止扫描，后续 deadline 更晚
+                            break;
                         }
-
-                        Complaints::<T>::insert(cursor, &complaint);
-
-                        // 更新统计
-                        DomainStats::<T>::mutate(complaint.domain, |stats| {
-                            stats.resolved_count = stats.resolved_count.saturating_add(1);
-                            stats.expired_count = stats.expired_count.saturating_add(1);
-                        });
-
-                        Self::deposit_event(Event::ComplaintExpired { complaint_id: cursor });
-                        expired_count = expired_count.saturating_add(1);
                     }
                 }
                 cursor = cursor.saturating_add(1);

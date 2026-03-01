@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use dashmap::DashSet;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn, debug};
 
@@ -25,6 +26,8 @@ pub struct MessageRouter {
     audit_logger: Arc<AuditLogger>,
     /// 是否启用链上交互 (免注册模式=false, 跳过链上日志提交和序列号去重)
     chain_enabled: bool,
+    /// P1-fix: 本地 pending 序列号集合,防止并发 mark_sequence_processed TOCTOU 竞争
+    pending_sequences: DashSet<u64>,
 }
 
 impl MessageRouter {
@@ -44,6 +47,7 @@ impl MessageRouter {
             log_sender,
             audit_logger,
             chain_enabled,
+            pending_sequences: DashSet::new(),
         }
     }
 
@@ -145,17 +149,28 @@ impl MessageRouter {
             );
         }
 
-        // 4. 去重标记 (异步, 不阻塞响应; 免注册模式跳过)
+        // P1-fix: 先在本地 pending set 中原子性占位,防止并发实例重复提交
         if self.chain_enabled {
-            let chain_opt = self.chain.read().await.clone();
-            if let Some(chain) = chain_opt {
-                let bot_hash = self.key_manager.bot_id_hash();
-                let seq = self.sequence.current();
-                tokio::spawn(async move {
-                    if let Err(e) = chain.mark_sequence_processed(bot_hash, seq).await {
-                        warn!(error = %e, seq = seq, "序列号去重标记失败");
-                    }
-                });
+            let seq = self.sequence.current();
+            if self.pending_sequences.insert(seq) {
+                let chain_opt = self.chain.read().await.clone();
+                if let Some(chain) = chain_opt {
+                    let bot_hash = self.key_manager.bot_id_hash();
+                    let pending_ref = self.pending_sequences.clone();
+                    tokio::spawn(async move {
+                        match chain.mark_sequence_processed(bot_hash, seq).await {
+                            Ok(_) => { /* 成功: pending 条目保留,防止重入 */ }
+                            Err(e) => {
+                                warn!(error = %e, seq = seq, "序列号去重标记失败");
+                                pending_ref.remove(&seq);
+                            }
+                        }
+                    });
+                } else {
+                    self.pending_sequences.remove(&seq);
+                }
+            } else {
+                debug!(seq = seq, "序列号已在本地 pending 中, 跳过重复提交");
             }
         }
 

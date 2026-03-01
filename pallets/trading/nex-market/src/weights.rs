@@ -27,11 +27,14 @@ pub trait WeightInfo {
 ///
 /// TODO: 替换为 frame_benchmarking 生成的精确值
 impl WeightInfo for () {
-    // 0: place_sell_order — R:3(PriceProtection+TWAP+OrderId) W:4(Order+SellOrders+UserOrders+Stats) + reserve + update_best_prices(R:2000)
-    fn place_sell_order() -> Weight { Weight::from_parts(80_000_000, 6_000) }
-    // 1: place_buy_order — R:3 W:4 + reserve + deposit_calc + update_best_prices
-    fn place_buy_order() -> Weight { Weight::from_parts(80_000_000, 6_000) }
-    // 2: cancel_order — R:1(Order) W:3(Order+OrderBook+UserOrders) + unreserve + update_best_prices
+    // 0: place_sell_order — R:4(PriceProtection+TWAP+OrderId+BestAsk) W:5(Order+SellOrders+UserOrders+Stats+BestAsk) + reserve
+    // 🆕 H4: O(1) incremental best price update (was O(N) full scan)
+    fn place_sell_order() -> Weight { Weight::from_parts(50_000_000, 6_000) }
+    // 1: place_buy_order — R:4 W:5 + reserve + deposit_calc
+    // 🆕 H4: O(1) incremental best price update
+    fn place_buy_order() -> Weight { Weight::from_parts(50_000_000, 6_000) }
+    // 2: cancel_order — R:2(Order+BestPrice) W:3(Order+OrderBook+UserOrders) + unreserve
+    // 🆕 H4: conditional rescan only when cancelling best-priced order (amortized O(1))
     fn cancel_order() -> Weight { Weight::from_parts(60_000_000, 5_000) }
     // 3: reserve_sell_order — R:4(Order+PriceProtection+TWAP+CompletedBuyers) W:5(Trade+Order+OrderBook+UserOrders+AwaitingPayment) + reserve
     fn reserve_sell_order() -> Weight { Weight::from_parts(90_000_000, 8_000) }

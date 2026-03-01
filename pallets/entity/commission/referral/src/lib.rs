@@ -548,6 +548,237 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
 }
 
 // ============================================================================
+// Token 多资产 — TokenCommissionPlugin implementation
+// ============================================================================
+
+use pallet_commission_common::MemberProvider as _MemberProviderToken;
+
+/// Token 版泛型计算辅助方法
+///
+/// 与 NEX 版共用同一份 ReferralConfig（rates 为 u16 bps，对任意 Balance 类型通用）。
+/// 固定金额模式（FIXED_AMOUNT / FIRST_ORDER use_amount=true）对 Token 不生效。
+impl<T: pallet::Config> pallet::Pallet<T> {
+    fn process_direct_reward_token<TB>(
+        entity_id: u64,
+        buyer: &T::AccountId,
+        order_amount: TB,
+        remaining: &mut TB,
+        rate: u16,
+        outputs: &mut alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>,
+    ) where
+        TB: sp_runtime::traits::AtLeast32BitUnsigned + Copy,
+    {
+        if rate == 0 { return; }
+        if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
+            let commission = order_amount.saturating_mul(TB::from(rate as u32)) / TB::from(10000u32);
+            let actual = commission.min(*remaining);
+            if !actual.is_zero() {
+                *remaining = remaining.saturating_sub(actual);
+                outputs.push(pallet_commission_common::CommissionOutput {
+                    beneficiary: referrer,
+                    amount: actual,
+                    commission_type: pallet_commission_common::CommissionType::DirectReward,
+                    level: 1,
+                });
+            }
+        }
+    }
+
+    fn process_multi_level_token<TB>(
+        entity_id: u64,
+        buyer: &T::AccountId,
+        order_amount: TB,
+        remaining: &mut TB,
+        config: &pallet::MultiLevelConfigOf<T>,
+        outputs: &mut alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>,
+    ) where
+        TB: sp_runtime::traits::AtLeast32BitUnsigned + Copy,
+        T::AccountId: Ord,
+    {
+        if config.levels.is_empty() { return; }
+
+        let mut visited = alloc::collections::BTreeSet::new();
+        visited.insert(buyer.clone());
+
+        let mut current_referrer: Option<T::AccountId> = T::MemberProvider::get_referrer(entity_id, buyer);
+        let mut total_commission = TB::zero();
+        let max_commission = order_amount
+            .saturating_mul(TB::from(config.max_total_rate as u32))
+            / TB::from(10000u32);
+
+        for (level_idx, tier) in config.levels.iter().enumerate() {
+            if tier.rate == 0 {
+                if let Some(ref r) = current_referrer {
+                    visited.insert(r.clone());
+                }
+                current_referrer = current_referrer.and_then(|r: T::AccountId|
+                    T::MemberProvider::get_referrer(entity_id, &r)
+                );
+                continue;
+            }
+
+            let Some(ref referrer) = current_referrer else { break };
+            if visited.contains(referrer) { break; }
+            visited.insert(referrer.clone());
+
+            if !Self::check_tier_activation(entity_id, referrer, tier) {
+                current_referrer = T::MemberProvider::get_referrer(entity_id, referrer);
+                continue;
+            }
+
+            let commission = order_amount.saturating_mul(TB::from(tier.rate as u32)) / TB::from(10000u32);
+            let actual = commission.min(*remaining);
+            if actual.is_zero() { break; }
+
+            let level = (level_idx + 1).min(255) as u8;
+
+            let new_total = total_commission.saturating_add(actual);
+            if new_total > max_commission {
+                let can_distribute = max_commission.saturating_sub(total_commission);
+                if !can_distribute.is_zero() {
+                    *remaining = remaining.saturating_sub(can_distribute);
+                    outputs.push(pallet_commission_common::CommissionOutput {
+                        beneficiary: referrer.clone(),
+                        amount: can_distribute,
+                        commission_type: pallet_commission_common::CommissionType::MultiLevel,
+                        level,
+                    });
+                }
+                break;
+            }
+
+            *remaining = remaining.saturating_sub(actual);
+            total_commission = total_commission.saturating_add(actual);
+            outputs.push(pallet_commission_common::CommissionOutput {
+                beneficiary: referrer.clone(),
+                amount: actual,
+                commission_type: pallet_commission_common::CommissionType::MultiLevel,
+                level,
+            });
+
+            current_referrer = T::MemberProvider::get_referrer(entity_id, referrer);
+        }
+    }
+
+    fn process_first_order_token<TB>(
+        entity_id: u64,
+        buyer: &T::AccountId,
+        order_amount: TB,
+        remaining: &mut TB,
+        config: &pallet::FirstOrderConfig<pallet::BalanceOf<T>>,
+        outputs: &mut alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>,
+    ) where
+        TB: sp_runtime::traits::AtLeast32BitUnsigned + Copy,
+    {
+        // Token: 仅支持 rate 模式，use_amount=true（固定金额）跳过
+        if config.use_amount || config.rate == 0 { return; }
+        if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
+            let commission = order_amount.saturating_mul(TB::from(config.rate as u32)) / TB::from(10000u32);
+            let actual = commission.min(*remaining);
+            if !actual.is_zero() {
+                *remaining = remaining.saturating_sub(actual);
+                outputs.push(pallet_commission_common::CommissionOutput {
+                    beneficiary: referrer,
+                    amount: actual,
+                    commission_type: pallet_commission_common::CommissionType::FirstOrder,
+                    level: 1,
+                });
+            }
+        }
+    }
+
+    fn process_repeat_purchase_token<TB>(
+        entity_id: u64,
+        buyer: &T::AccountId,
+        order_amount: TB,
+        remaining: &mut TB,
+        config: &pallet::RepeatPurchaseConfig,
+        buyer_order_count: u32,
+        outputs: &mut alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>,
+    ) where
+        TB: sp_runtime::traits::AtLeast32BitUnsigned + Copy,
+    {
+        if config.rate == 0 || buyer_order_count < config.min_orders { return; }
+        if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
+            let commission = order_amount.saturating_mul(TB::from(config.rate as u32)) / TB::from(10000u32);
+            let actual = commission.min(*remaining);
+            if !actual.is_zero() {
+                *remaining = remaining.saturating_sub(actual);
+                outputs.push(pallet_commission_common::CommissionOutput {
+                    beneficiary: referrer,
+                    amount: actual,
+                    commission_type: pallet_commission_common::CommissionType::RepeatPurchase,
+                    level: 1,
+                });
+            }
+        }
+    }
+}
+
+/// TokenCommissionPlugin: 泛型 Token 佣金计算
+///
+/// 对任意 `TB: AtLeast32BitUnsigned + Copy` 实现，无需修改 Config。
+/// 共用 NEX 版 ReferralConfig 中的 rate 配置（bps），跳过固定金额模式。
+impl<T: pallet::Config, TB> pallet_commission_common::TokenCommissionPlugin<T::AccountId, TB>
+    for pallet::Pallet<T>
+where
+    TB: sp_runtime::traits::AtLeast32BitUnsigned + Copy + Default + core::fmt::Debug,
+    T::AccountId: Ord,
+{
+    fn calculate_token(
+        entity_id: u64,
+        buyer: &T::AccountId,
+        order_amount: TB,
+        remaining: TB,
+        enabled_modes: pallet_commission_common::CommissionModes,
+        is_first_order: bool,
+        buyer_order_count: u32,
+    ) -> (alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>, TB) {
+        use pallet_commission_common::CommissionModes;
+
+        let config = match pallet::ReferralConfigs::<T>::get(entity_id) {
+            Some(c) => c,
+            None => return (alloc::vec::Vec::new(), remaining),
+        };
+
+        let mut remaining = remaining;
+        let mut outputs = alloc::vec::Vec::new();
+
+        if enabled_modes.contains(CommissionModes::DIRECT_REWARD) {
+            pallet::Pallet::<T>::process_direct_reward_token::<TB>(
+                entity_id, buyer, order_amount, &mut remaining,
+                config.direct_reward.rate, &mut outputs,
+            );
+        }
+
+        if enabled_modes.contains(CommissionModes::MULTI_LEVEL) {
+            pallet::Pallet::<T>::process_multi_level_token::<TB>(
+                entity_id, buyer, order_amount, &mut remaining,
+                &config.multi_level, &mut outputs,
+            );
+        }
+
+        // FIXED_AMOUNT: 跳过（固定金额以 NEX 计价，不适用于 Token）
+
+        if enabled_modes.contains(CommissionModes::FIRST_ORDER) && is_first_order {
+            pallet::Pallet::<T>::process_first_order_token::<TB>(
+                entity_id, buyer, order_amount, &mut remaining,
+                &config.first_order, &mut outputs,
+            );
+        }
+
+        if enabled_modes.contains(CommissionModes::REPEAT_PURCHASE) {
+            pallet::Pallet::<T>::process_repeat_purchase_token::<TB>(
+                entity_id, buyer, order_amount, &mut remaining,
+                &config.repeat_purchase, buyer_order_count, &mut outputs,
+            );
+        }
+
+        (outputs, remaining)
+    }
+}
+
+// ============================================================================
 // ReferralPlanWriter implementation
 // ============================================================================
 

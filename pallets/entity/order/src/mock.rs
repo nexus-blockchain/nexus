@@ -1,6 +1,6 @@
-//! Mock runtime for pallet-entity-transaction tests
+//! Mock runtime for pallet-entity-order tests
 
-use crate as pallet_entity_transaction;
+use crate as pallet_entity_order;
 use frame_support::{
     derive_impl, parameter_types,
     traits::{ConstU32, ConstU64, ConstU16},
@@ -14,7 +14,7 @@ frame_support::construct_runtime!(
     pub enum Test {
         System: frame_system,
         Balances: pallet_balances,
-        Transaction: pallet_entity_transaction,
+        Transaction: pallet_entity_order,
     }
 );
 
@@ -287,13 +287,41 @@ impl pallet_entity_common::ProductProvider<u64, u64> for MockProductProvider {
 
 pub struct MockEntityToken;
 
+thread_local! {
+    static TOKEN_ENABLED: RefCell<HashMap<u64, bool>> = RefCell::new(HashMap::new());
+    // (entity_id, account) → free balance
+    static TOKEN_BALANCES: RefCell<HashMap<(u64, u64), u64>> = RefCell::new(HashMap::new());
+    // (entity_id, account) → reserved balance
+    static TOKEN_RESERVED: RefCell<HashMap<(u64, u64), u64>> = RefCell::new(HashMap::new());
+}
+
+#[allow(dead_code)]
+pub fn set_token_enabled(entity_id: u64, enabled: bool) {
+    TOKEN_ENABLED.with(|e| e.borrow_mut().insert(entity_id, enabled));
+}
+
+#[allow(dead_code)]
+pub fn set_token_balance(entity_id: u64, holder: u64, balance: u64) {
+    TOKEN_BALANCES.with(|b| b.borrow_mut().insert((entity_id, holder), balance));
+}
+
+#[allow(dead_code)]
+pub fn get_token_balance(entity_id: u64, holder: u64) -> u64 {
+    TOKEN_BALANCES.with(|b| b.borrow().get(&(entity_id, holder)).copied().unwrap_or(0))
+}
+
+#[allow(dead_code)]
+pub fn get_token_reserved(entity_id: u64, holder: u64) -> u64 {
+    TOKEN_RESERVED.with(|r| r.borrow().get(&(entity_id, holder)).copied().unwrap_or(0))
+}
+
 impl pallet_entity_common::EntityTokenProvider<u64, u64> for MockEntityToken {
-    fn is_token_enabled(_entity_id: u64) -> bool {
-        false
+    fn is_token_enabled(entity_id: u64) -> bool {
+        TOKEN_ENABLED.with(|e| e.borrow().get(&entity_id).copied().unwrap_or(false))
     }
 
-    fn token_balance(_entity_id: u64, _holder: &u64) -> u64 {
-        0
+    fn token_balance(entity_id: u64, holder: &u64) -> u64 {
+        TOKEN_BALANCES.with(|b| b.borrow().get(&(entity_id, *holder)).copied().unwrap_or(0))
     }
 
     fn reward_on_purchase(_: u64, _: &u64, _: u64) -> Result<u64, sp_runtime::DispatchError> {
@@ -308,16 +336,51 @@ impl pallet_entity_common::EntityTokenProvider<u64, u64> for MockEntityToken {
         Ok(())
     }
 
-    fn reserve(_: u64, _: &u64, _: u64) -> Result<(), sp_runtime::DispatchError> {
-        Ok(())
+    fn reserve(entity_id: u64, who: &u64, amount: u64) -> Result<(), sp_runtime::DispatchError> {
+        TOKEN_BALANCES.with(|b| {
+            let mut map = b.borrow_mut();
+            let bal = map.get(&(entity_id, *who)).copied().unwrap_or(0);
+            if bal < amount {
+                return Err(sp_runtime::DispatchError::Other("InsufficientTokenBalance"));
+            }
+            map.insert((entity_id, *who), bal - amount);
+            TOKEN_RESERVED.with(|r| {
+                let mut rmap = r.borrow_mut();
+                let reserved = rmap.get(&(entity_id, *who)).copied().unwrap_or(0);
+                rmap.insert((entity_id, *who), reserved + amount);
+            });
+            Ok(())
+        })
     }
 
-    fn unreserve(_: u64, _: &u64, _: u64) -> u64 {
-        0
+    fn unreserve(entity_id: u64, who: &u64, amount: u64) -> u64 {
+        TOKEN_RESERVED.with(|r| {
+            let mut rmap = r.borrow_mut();
+            let reserved = rmap.get(&(entity_id, *who)).copied().unwrap_or(0);
+            let actual = reserved.min(amount);
+            rmap.insert((entity_id, *who), reserved - actual);
+            TOKEN_BALANCES.with(|b| {
+                let mut map = b.borrow_mut();
+                let bal = map.get(&(entity_id, *who)).copied().unwrap_or(0);
+                map.insert((entity_id, *who), bal + actual);
+            });
+            actual
+        })
     }
 
-    fn repatriate_reserved(_: u64, _: &u64, _: &u64, _: u64) -> Result<u64, sp_runtime::DispatchError> {
-        Ok(0)
+    fn repatriate_reserved(entity_id: u64, from: &u64, to: &u64, amount: u64) -> Result<u64, sp_runtime::DispatchError> {
+        TOKEN_RESERVED.with(|r| {
+            let mut rmap = r.borrow_mut();
+            let reserved = rmap.get(&(entity_id, *from)).copied().unwrap_or(0);
+            let actual = reserved.min(amount);
+            rmap.insert((entity_id, *from), reserved - actual);
+            TOKEN_BALANCES.with(|b| {
+                let mut map = b.borrow_mut();
+                let bal = map.get(&(entity_id, *to)).copied().unwrap_or(0);
+                map.insert((entity_id, *to), bal + actual);
+            });
+            Ok(amount - actual) // return shortfall
+        })
     }
 
     fn get_token_type(_entity_id: u64) -> pallet_entity_common::TokenType {
@@ -385,6 +448,41 @@ impl pallet_entity_common::OrderCommissionHandler<u64, u64> for MockCommissionHa
     }
 }
 
+// ==================== Mock TokenCommissionHandler ====================
+
+pub struct MockTokenCommissionHandler;
+
+thread_local! {
+    static TOKEN_CANCELLED_ORDERS: RefCell<Vec<u64>> = RefCell::new(Vec::new());
+    static TOKEN_COMPLETED_ORDERS: RefCell<Vec<(u64, u64, u64, u64, u128, u128)>> = RefCell::new(Vec::new());
+}
+
+#[allow(dead_code)]
+pub fn get_token_cancelled_orders() -> Vec<u64> {
+    TOKEN_CANCELLED_ORDERS.with(|c| c.borrow().clone())
+}
+
+#[allow(dead_code)]
+pub fn get_token_completed_orders() -> Vec<(u64, u64, u64, u64, u128, u128)> {
+    TOKEN_COMPLETED_ORDERS.with(|c| c.borrow().clone())
+}
+
+impl pallet_entity_common::TokenOrderCommissionHandler<u64> for MockTokenCommissionHandler {
+    fn on_token_order_completed(entity_id: u64, shop_id: u64, order_id: u64, buyer: &u64, token_amount: u128, token_platform_fee: u128) -> Result<(), sp_runtime::DispatchError> {
+        TOKEN_COMPLETED_ORDERS.with(|c| c.borrow_mut().push((entity_id, shop_id, order_id, *buyer, token_amount, token_platform_fee)));
+        Ok(())
+    }
+
+    fn on_token_order_cancelled(order_id: u64) -> Result<(), sp_runtime::DispatchError> {
+        TOKEN_CANCELLED_ORDERS.with(|c| c.borrow_mut().push(order_id));
+        Ok(())
+    }
+
+    fn token_platform_fee_rate(_entity_id: u64) -> u16 { 0 }
+
+    fn entity_account(entity_id: u64) -> u64 { entity_id + 9000 }
+}
+
 // ==================== Mock PricingProvider ====================
 
 pub struct MockPricingProvider;
@@ -442,7 +540,7 @@ parameter_types! {
     pub PlatformAccount: u64 = 100;
 }
 
-impl pallet_entity_transaction::Config for Test {
+impl pallet_entity_order::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type Escrow = MockEscrow;
@@ -455,6 +553,7 @@ impl pallet_entity_transaction::Config for Test {
     type ConfirmTimeout = ConstU64<200>;
     type ServiceConfirmTimeout = ConstU64<150>;
     type CommissionHandler = MockCommissionHandler;
+    type TokenCommissionHandler = MockTokenCommissionHandler;
     type ShoppingBalance = MockShoppingBalanceProvider;
     type MemberHandler = MockMemberHandler;
     type PricingProvider = MockPricingProvider;
@@ -489,6 +588,11 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         ESCROW_STATES.with(|s| s.borrow_mut().clear());
         PRODUCT_STOCK.with(|s| s.borrow_mut().clear());
         CANCELLED_ORDERS.with(|c| c.borrow_mut().clear());
+        TOKEN_CANCELLED_ORDERS.with(|c| c.borrow_mut().clear());
+        TOKEN_COMPLETED_ORDERS.with(|c| c.borrow_mut().clear());
+        TOKEN_ENABLED.with(|e| e.borrow_mut().clear());
+        TOKEN_BALANCES.with(|b| b.borrow_mut().clear());
+        TOKEN_RESERVED.with(|r| r.borrow_mut().clear());
         SHOPPING_BALANCES.with(|b| b.borrow_mut().clear());
         MEMBER_REGISTERED.with(|r| r.borrow_mut().clear());
         MEMBER_SPENT.with(|s| s.borrow_mut().clear());

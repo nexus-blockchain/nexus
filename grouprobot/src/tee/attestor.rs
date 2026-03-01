@@ -82,13 +82,19 @@ impl Attestor {
         let tdx_quote = Self::read_tdx_quote_full(&report_data_full)?;
         let tdx_quote_hash = Self::hash_bytes(&tdx_quote);
 
-        // SGX Quote (可选)
-        let sgx_quote = Self::generate_sgx_quote(&pk_hash).unwrap_or_default();
-        let sgx_quote_hash = Self::hash_bytes(&sgx_quote);
-
-        // 提取 MRTD/MRENCLAVE
+        // 提取 MRTD (TDX Quote v4 offset 184, 48 bytes)
         let mrtd = Self::extract_mrtd(&tdx_quote);
-        let mrenclave = Self::extract_mrenclave(&sgx_quote);
+
+        // SGX Quote (TDX 模式下通常不可用 — generate_sgx_quote 需要独立 SGX SDK)
+        let sgx_quote = Self::generate_sgx_quote(&pk_hash).unwrap_or_default();
+        let (sgx_quote_hash, mrenclave) = if sgx_quote.is_empty() {
+            // TDX 模式无独立 SGX Quote: 继承 tdx_quote_hash, MRENCLAVE 取 MRTD 前 32 字节
+            let mut m = [0u8; 32];
+            m.copy_from_slice(&mrtd[..32]);
+            (tdx_quote_hash, m)
+        } else {
+            (Self::hash_bytes(&sgx_quote), Self::extract_mrenclave(&sgx_quote))
+        };
 
         // Level 4: 从 Quote 尾部提取证书链 (PEM→DER)
         let (pck_cert_der, intermediate_cert_der) = match Self::extract_cert_chain_from_quote(&tdx_quote) {

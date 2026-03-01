@@ -1098,6 +1098,57 @@ impl<AccountId, Balance> OrderCommissionHandler<AccountId, Balance> for () {
 }
 
 // ============================================================================
+// PaymentAsset — 支付资产类型
+// ============================================================================
+
+/// 订单支付资产类型
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+pub enum PaymentAsset {
+    /// NEX 原生代币支付
+    #[default]
+    Native,
+    /// Entity Token 支付
+    EntityToken,
+}
+
+// ============================================================================
+// TokenOrderCommissionHandler — Token 订单佣金处理接口
+// ============================================================================
+
+/// Token 订单佣金处理接口
+///
+/// 供 Order 模块在 Entity Token 订单完成时触发 Token 佣金计算，
+/// 无需直接依赖 commission 模块。使用 u128 避免泛型膨胀。
+pub trait TokenOrderCommissionHandler<AccountId> {
+    /// Token 订单完成时处理 Token 佣金（双源：token_platform_fee 为 Pool A 资金）
+    fn on_token_order_completed(
+        entity_id: u64,
+        shop_id: u64,
+        order_id: u64,
+        buyer: &AccountId,
+        token_amount: u128,
+        token_platform_fee: u128,
+    ) -> Result<(), DispatchError>;
+
+    /// Token 订单取消时撤销 Token 佣金
+    fn on_token_order_cancelled(order_id: u64) -> Result<(), DispatchError>;
+
+    /// 获取 Entity 级 Token 平台费率（bps，供 entity-order 计算拆分）
+    fn token_platform_fee_rate(entity_id: u64) -> u16;
+
+    /// 获取 Entity 派生账户（Token 平台费转入目标）
+    fn entity_account(entity_id: u64) -> AccountId;
+}
+
+/// 空 Token 佣金处理（无 Token 佣金系统时使用）
+impl<AccountId> TokenOrderCommissionHandler<AccountId> for () {
+    fn on_token_order_completed(_: u64, _: u64, _: u64, _: &AccountId, _: u128, _: u128) -> Result<(), DispatchError> { Ok(()) }
+    fn on_token_order_cancelled(_: u64) -> Result<(), DispatchError> { Ok(()) }
+    fn token_platform_fee_rate(_: u64) -> u16 { 0 }
+    fn entity_account(_: u64) -> AccountId { panic!("no entity_account in null impl") }
+}
+
+// ============================================================================
 // 购物余额接口
 // ============================================================================
 

@@ -82,6 +82,11 @@ pub struct BotConfig {
     pub chain_log_batch_interval: u64,
     pub chain_log_batch_size: usize,
 
+    // Telegram Local Bot API Server
+    /// Telegram API Base URL (TG_API_BASE_URL, 默认 "https://api.telegram.org")
+    /// 部署 Local Server 时改为 "http://127.0.0.1:8081"
+    pub tg_api_base_url: String,
+
     // 监控
     pub metrics_enabled: bool,
     pub log_level: String,
@@ -107,6 +112,7 @@ impl std::fmt::Debug for BotConfig {
             .field("migration_source", &self.migration_source)
             .field("ceremony_port", &self.ceremony_port)
             .field("provision_secret", &if self.provision_secret.is_empty() { "<disabled>" } else { "<REDACTED>" })
+            .field("tg_api_base_url", &self.tg_api_base_url)
             .field("metrics_enabled", &self.metrics_enabled)
             .field("log_level", &self.log_level)
             .finish()
@@ -189,6 +195,8 @@ impl BotConfig {
                 .unwrap_or_else(|_| "50".into())
                 .parse()
                 .unwrap_or(50),
+            tg_api_base_url: std::env::var("TG_API_BASE_URL")
+                .unwrap_or_else(|_| "https://api.telegram.org".into()),
             metrics_enabled: std::env::var("METRICS_ENABLED")
                 .unwrap_or_else(|_| "true".into())
                 .parse()
@@ -274,6 +282,7 @@ mod tests {
             migration_source: None,
             ceremony_port: 0,
             provision_secret: String::new(),
+            tg_api_base_url: "https://api.telegram.org".into(),
             webhook_rate_limit: 200,
             chain_log_batch_interval: 6,
             chain_log_batch_size: 50,

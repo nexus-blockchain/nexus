@@ -128,6 +128,23 @@ impl Default for NodeType {
 	}
 }
 
+/// 运营商状态
+#[derive(
+	Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, RuntimeDebug, PartialEq, Eq,
+	TypeInfo, MaxEncodedLen,
+)]
+pub enum OperatorStatus {
+	Active,
+	Suspended,
+	Deactivated,
+}
+
+impl Default for OperatorStatus {
+	fn default() -> Self {
+		Self::Active
+	}
+}
+
 /// 节点状态
 #[derive(
 	Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, RuntimeDebug, PartialEq, Eq,
@@ -486,6 +503,8 @@ pub trait BotRegistryProvider<AccountId> {
 	fn bot_public_key(bot_id_hash: &BotIdHash) -> Option<[u8; 32]>;
 	/// 获取 Bot 的存活 Peer 数量
 	fn peer_count(bot_id_hash: &BotIdHash) -> u32;
+	/// 获取 Bot 所属运营商
+	fn bot_operator(bot_id_hash: &BotIdHash) -> Option<AccountId>;
 }
 
 /// BotRegistryProvider 空实现 (用于不依赖 registry 的测试)
@@ -497,6 +516,7 @@ impl<AccountId> BotRegistryProvider<AccountId> for () {
 	fn bot_owner(_: &BotIdHash) -> Option<AccountId> { None }
 	fn bot_public_key(_: &BotIdHash) -> Option<[u8; 32]> { None }
 	fn peer_count(_: &BotIdHash) -> u32 { 0 }
+	fn bot_operator(_: &BotIdHash) -> Option<AccountId> { None }
 }
 
 /// 社区管理查询 (consensus 依赖 community)
@@ -595,6 +615,18 @@ pub trait RewardAccruer {
 
 impl RewardAccruer for () {
 	fn accrue_node_reward(_: &NodeId, _: u128) {}
+}
+
+/// Peer Uptime 记录 trait (consensus on_era_end 调用 registry pallet)
+pub trait PeerUptimeRecorder {
+	/// Era 结束时快照心跳计数并清理过期历史
+	///
+	/// - `era`: 刚结束的 Era 编号
+	fn record_era_uptime(era: u64);
+}
+
+impl PeerUptimeRecorder for () {
+	fn record_era_uptime(_: u64) {}
 }
 
 /// 订阅结算 trait (consensus on_era_end 调用 subscription pallet)

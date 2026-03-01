@@ -735,6 +735,10 @@ pub mod pallet {
 		}
 
 		/// Bot 上报投放收据
+		///
+		/// P6-fix: audience_size 在入口处即被 audience_cap 强制裁切,
+		/// 而非仅在 settle_era_ads 结算时才裁切。事件中记录裁切后的值,
+		/// 确保链上数据始终不超过质押决定的上限。
 		#[pallet::call_index(5)]
 		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
 		pub fn submit_delivery_receipt(
@@ -748,42 +752,43 @@ pub mod pallet {
 		) -> DispatchResult {
 			let _who = ensure_signed(origin)?;
 
-			// 验证 Campaign 存在且已审核通过
 			let campaign = Campaigns::<T>::get(campaign_id)
 				.ok_or(Error::<T>::CampaignNotFound)?;
 			ensure!(campaign.status == CampaignStatus::Active, Error::<T>::CampaignNotActive);
 			ensure!(campaign.review_status == AdReviewStatus::Approved, Error::<T>::CampaignNotApproved);
 
-			// M8: 检查 Campaign 是否过期
 			let now = frame_system::Pallet::<T>::block_number();
 			ensure!(now <= campaign.expires_at, Error::<T>::CampaignExpired);
 
-			// 验证节点存在且活跃
 			ensure!(T::NodeConsensus::is_node_active(&node_id), Error::<T>::NodeNotActive);
-
-			// 强制要求 TEE 节点: 非 TEE 节点不应持有 BOT_TOKEN, 无法投放广告
 			ensure!(T::NodeConsensus::is_tee_node_by_operator(&_who), Error::<T>::NodeNotTee);
-
-			// 社区未被禁止
 			ensure!(!BannedCommunities::<T>::get(&community_id_hash), Error::<T>::CommunityBanned);
 
-			// 🆕 10.6: 检查 Bot 的订阅层级功能限制
-			// 用 community_id_hash 作为 bot_id_hash 的代理查询
 			let gate = T::Subscription::effective_feature_gate(&community_id_hash);
-
-			// Free/Basic 层级没有 TEE 权限, 不允许 TEE 节点投放广告
 			ensure!(gate.tee_access, Error::<T>::TeeNotAvailableForTier);
 
-			// Pro/Enterprise 可禁用广告; 若社区无质押 (已退出广告), 拒绝收据
 			if gate.can_disable_ads {
 				let stake = CommunityAdStake::<T>::get(&community_id_hash);
 				ensure!(!stake.is_zero(), Error::<T>::AdsDisabledByTier);
 			}
 
-			// P5 L3: 社区未因突增被暂停
 			ensure!(
 				AudienceSurgePaused::<T>::get(&community_id_hash) == 0,
 				Error::<T>::CommunityAdsPaused
+			);
+
+			// P6-fix: 入口处强制裁切 audience_size 到 audience_cap
+			let cap = CommunityAudienceCap::<T>::get(&community_id_hash);
+			let effective_audience = if cap > 0 {
+				core::cmp::min(audience_size, cap)
+			} else {
+				audience_size
+			};
+
+			// P6-fix: 裁切后仍需满足最低门槛
+			ensure!(
+				effective_audience >= T::MinAudienceSize::get(),
+				Error::<T>::AudienceBelowMinimum
 			);
 
 			let now = frame_system::Pallet::<T>::block_number();
@@ -792,7 +797,7 @@ pub mod pallet {
 				campaign_id,
 				community_id_hash,
 				delivery_type,
-				audience_size,
+				audience_size: effective_audience,
 				node_id,
 				node_signature,
 				delivered_at: now,
@@ -803,7 +808,6 @@ pub mod pallet {
 				receipts.try_push(receipt).map_err(|_| Error::<T>::ReceiptsFull)
 			})?;
 
-			// 更新 campaign delivery count
 			Campaigns::<T>::mutate(campaign_id, |maybe| {
 				if let Some(c) = maybe {
 					c.total_deliveries = c.total_deliveries.saturating_add(1);
@@ -813,7 +817,7 @@ pub mod pallet {
 			Self::deposit_event(Event::DeliveryReceiptSubmitted {
 				campaign_id,
 				community_id_hash,
-				audience_size,
+				audience_size: effective_audience,
 			});
 			Ok(())
 		}

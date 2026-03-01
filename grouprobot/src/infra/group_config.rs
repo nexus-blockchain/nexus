@@ -1,15 +1,21 @@
 use std::sync::Arc;
 use dashmap::DashMap;
+use tokio::sync::mpsc;
 use tracing::{info, warn, debug};
 
 use crate::chain::ChainClient;
 use crate::chain::types::ChainCommunityConfig;
+
+/// P3-fix: 配置变更通知 (community_id_hash + 新 config)
+pub type ConfigChangeNotification = ([u8; 32], ChainCommunityConfig);
 
 /// 群配置管理器 — 本地缓存 + 链上定期同步
 pub struct ConfigManager {
     /// 本地缓存: community_id_hash → (config, last_sync_timestamp)
     cache: DashMap<[u8; 32], (ChainCommunityConfig, u64)>,
     sync_interval_secs: u64,
+    /// P3-fix: 配置变更通知通道 (发送端)
+    change_tx: Option<mpsc::UnboundedSender<ConfigChangeNotification>>,
 }
 
 impl ConfigManager {
@@ -17,7 +23,21 @@ impl ConfigManager {
         Self {
             cache: DashMap::new(),
             sync_interval_secs,
+            change_tx: None,
         }
+    }
+
+    /// P3-fix: 创建带变更通知的 ConfigManager
+    pub fn with_change_notifier(
+        sync_interval_secs: u64,
+    ) -> (Self, mpsc::UnboundedReceiver<ConfigChangeNotification>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mgr = Self {
+            cache: DashMap::new(),
+            sync_interval_secs,
+            change_tx: Some(tx),
+        };
+        (mgr, rx)
     }
 
     /// 获取群配置 (优先本地缓存)
@@ -43,6 +63,8 @@ impl ConfigManager {
     }
 
     /// 从链上同步单个群配置
+    ///
+    /// P3-fix: 当 config.version 发生变化时,通过 change_tx 通知外部重建规则引擎。
     pub async fn sync_one(&self, chain: &ChainClient, community_id_hash: [u8; 32]) {
         match chain.fetch_community_config(&community_id_hash).await {
             Ok(Some(config)) => {
@@ -50,15 +72,24 @@ impl ConfigManager {
                     .map(|v| v.0.version)
                     .unwrap_or(0);
 
-                if config.version != old_version {
+                let version_changed = config.version != old_version;
+
+                if version_changed {
                     info!(
                         community = hex::encode(community_id_hash),
                         old_version,
                         new_version = config.version,
-                        "群配置已更新"
+                        "群配置已更新, 触发规则引擎重建"
                     );
                 }
-                self.set_config(community_id_hash, config);
+
+                self.set_config(community_id_hash, config.clone());
+
+                if version_changed {
+                    if let Some(tx) = &self.change_tx {
+                        let _ = tx.send((community_id_hash, config));
+                    }
+                }
             }
             Ok(None) => {
                 debug!(community = hex::encode(community_id_hash), "链上无群配置");

@@ -46,6 +46,10 @@ impl pallet_grouprobot_registry::Config for Test {
 	type MaxEndpointLen = frame_support::traits::ConstU32<256>;
 	type PeerHeartbeatTimeout = PeerHeartbeatTimeout;
 	type Subscription = MockSubscription;
+	type MaxOperatorNameLen = frame_support::traits::ConstU32<64>;
+	type MaxOperatorContactLen = frame_support::traits::ConstU32<128>;
+	type MaxBotsPerOperator = frame_support::traits::ConstU32<10>;
+	type MaxUptimeEraHistory = frame_support::traits::ConstU32<10>;
 }
 
 pub const OWNER: u64 = 1;

@@ -317,6 +317,11 @@ pub trait MemberProvider<AccountId> {
     fn update_custom_level(entity_id: u64, level_id: u8, name: Option<&[u8]>, threshold: Option<u128>, discount_rate: Option<u16>, commission_bonus: Option<u16>) -> Result<(), DispatchError>;
     fn remove_custom_level(entity_id: u64, level_id: u8) -> Result<(), DispatchError>;
     fn custom_level_count(entity_id: u64) -> u8;
+    /// 查询指定等级的会员数量（用于沉淀池奖励 v2 等额分配）
+    fn member_count_by_level(entity_id: u64, level_id: u8) -> u32 {
+        let _ = (entity_id, level_id);
+        0
+    }
 }
 
 /// 空 MemberProvider 实现
@@ -337,6 +342,7 @@ impl<AccountId> MemberProvider<AccountId> for NullMemberProvider {
     fn update_custom_level(_: u64, _: u8, _: Option<&[u8]>, _: Option<u128>, _: Option<u16>, _: Option<u16>) -> Result<(), DispatchError> { Ok(()) }
     fn remove_custom_level(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
     fn custom_level_count(_: u64) -> u8 { 0 }
+    fn member_count_by_level(_: u64, _: u8) -> u32 { 0 }
 }
 
 // ============================================================================
@@ -440,17 +446,174 @@ impl<Balance> TeamPlanWriter<Balance> for () {
 }
 
 /// 沉淀池奖励插件写入接口（由 commission-pool-reward 实现）
+///
+/// v2: 周期性等额分配模型——level_ratios sum=10000，round_duration 为区块数
 pub trait PoolRewardPlanWriter {
     /// 设置沉淀池奖励配置
     ///
-    /// level_rates: Vec<(level_id, rate_bps)>
-    fn set_pool_reward_config(entity_id: u64, level_rates: Vec<(u8, u16)>, max_depth: u8, max_drain_rate: u16) -> Result<(), DispatchError>;
+    /// level_ratios: Vec<(level_id, ratio_bps)>, sum must equal 10000
+    /// round_duration: 轮次持续区块数
+    fn set_pool_reward_config(entity_id: u64, level_ratios: Vec<(u8, u16)>, round_duration: u32) -> Result<(), DispatchError>;
     /// 清除沉淀池奖励配置
     fn clear_config(entity_id: u64) -> Result<(), DispatchError>;
+    /// 设置 Entity Token 池奖励是否启用（默认 no-op）
+    fn set_token_pool_enabled(entity_id: u64, enabled: bool) -> Result<(), DispatchError> {
+        let _ = (entity_id, enabled);
+        Ok(())
+    }
 }
 
 /// 空 PoolRewardPlanWriter 实现
 impl PoolRewardPlanWriter for () {
-    fn set_pool_reward_config(_: u64, _: Vec<(u8, u16)>, _: u8, _: u16) -> Result<(), DispatchError> { Ok(()) }
+    fn set_pool_reward_config(_: u64, _: Vec<(u8, u16)>, _: u32) -> Result<(), DispatchError> { Ok(()) }
     fn clear_config(_: u64) -> Result<(), DispatchError> { Ok(()) }
+    fn set_token_pool_enabled(_: u64, _: bool) -> Result<(), DispatchError> { Ok(()) }
+}
+
+// ============================================================================
+// PoolBalanceProvider — 沉淀池余额读写接口
+// ============================================================================
+
+/// 沉淀池余额读写接口（由 commission-core 实现，供 pool-reward 访问）
+pub trait PoolBalanceProvider<Balance> {
+    /// 查询沉淀池余额
+    fn pool_balance(entity_id: u64) -> Balance;
+    /// 从沉淀池扣减指定金额
+    fn deduct_pool(entity_id: u64, amount: Balance) -> Result<(), DispatchError>;
+}
+
+/// 空 PoolBalanceProvider 实现
+impl<Balance: Default> PoolBalanceProvider<Balance> for () {
+    fn pool_balance(_: u64) -> Balance { Balance::default() }
+    fn deduct_pool(_: u64, _: Balance) -> Result<(), DispatchError> { Ok(()) }
+}
+
+// ============================================================================
+// Token 多资产扩展（方案 A: 全插件管线多资产化）
+// ============================================================================
+
+/// Token 佣金插件接口（与 CommissionPlugin 对称，Balance → TokenBalance）
+///
+/// 每个返佣插件额外实现此 trait，由 core 的 Token 调度管线调用。
+/// 签名与 `CommissionPlugin` 完全一致，仅类型语义不同。
+pub trait TokenCommissionPlugin<AccountId, TokenBalance> {
+    fn calculate_token(
+        entity_id: u64,
+        buyer: &AccountId,
+        order_amount: TokenBalance,
+        remaining: TokenBalance,
+        enabled_modes: CommissionModes,
+        is_first_order: bool,
+        buyer_order_count: u32,
+    ) -> (Vec<CommissionOutput<AccountId, TokenBalance>>, TokenBalance);
+}
+
+/// 空 TokenCommissionPlugin 实现
+impl<AccountId, TokenBalance> TokenCommissionPlugin<AccountId, TokenBalance> for () {
+    fn calculate_token(
+        _: u64, _: &AccountId, _: TokenBalance, remaining: TokenBalance,
+        _: CommissionModes, _: bool, _: u32,
+    ) -> (Vec<CommissionOutput<AccountId, TokenBalance>>, TokenBalance) {
+        (Vec::new(), remaining)
+    }
+}
+
+/// Token 佣金记录（与 CommissionRecord 对称，无 shop_id —— Token 佣金不区分 Shop）
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+pub struct TokenCommissionRecord<AccountId, TokenBalance, BlockNumber> {
+    pub entity_id: u64,
+    pub order_id: u64,
+    pub buyer: AccountId,
+    pub beneficiary: AccountId,
+    pub amount: TokenBalance,
+    pub commission_type: CommissionType,
+    pub level: u8,
+    pub status: CommissionStatus,
+    pub created_at: BlockNumber,
+}
+
+/// Token 佣金统计（含复购分流统计）
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+pub struct MemberTokenCommissionStatsData<TokenBalance: Default> {
+    pub total_earned: TokenBalance,
+    pub pending: TokenBalance,
+    pub withdrawn: TokenBalance,
+    pub repurchased: TokenBalance,
+    pub order_count: u32,
+}
+
+// ============================================================================
+// TokenTransferProvider — Token 转账接口（entity_id 级）
+// ============================================================================
+
+/// Token 转账接口（entity_id 级，简化 fungibles 接口）
+///
+/// 由 runtime 实现（委托 EntityTokenProvider 或 pallet-assets）。
+/// commission-core 通过此 trait 执行 Token 提现和余额查询。
+pub trait TokenTransferProvider<AccountId, TokenBalance> {
+    /// 获取指定账户在某 Entity 下的可用 Token 余额
+    fn token_balance_of(entity_id: u64, who: &AccountId) -> TokenBalance;
+
+    /// Token 转账: from → to（entity_id 级）
+    fn token_transfer(
+        entity_id: u64,
+        from: &AccountId,
+        to: &AccountId,
+        amount: TokenBalance,
+    ) -> Result<(), DispatchError>;
+}
+
+/// 空 TokenTransferProvider 实现
+impl<AccountId, TokenBalance: Default> TokenTransferProvider<AccountId, TokenBalance> for () {
+    fn token_balance_of(_: u64, _: &AccountId) -> TokenBalance { TokenBalance::default() }
+    fn token_transfer(_: u64, _: &AccountId, _: &AccountId, _: TokenBalance) -> Result<(), DispatchError> { Ok(()) }
+}
+
+// ============================================================================
+// TokenPoolBalanceProvider — Token 沉淀池余额读写接口
+// ============================================================================
+
+/// Token 沉淀池余额读写接口（由 commission-core 实现，供 pool-reward 访问）
+pub trait TokenPoolBalanceProvider<TokenBalance> {
+    fn token_pool_balance(entity_id: u64) -> TokenBalance;
+    fn deduct_token_pool(entity_id: u64, amount: TokenBalance) -> Result<(), DispatchError>;
+}
+
+/// 空 TokenPoolBalanceProvider 实现
+impl<TokenBalance: Default> TokenPoolBalanceProvider<TokenBalance> for () {
+    fn token_pool_balance(_: u64) -> TokenBalance { TokenBalance::default() }
+    fn deduct_token_pool(_: u64, _: TokenBalance) -> Result<(), DispatchError> { Ok(()) }
+}
+
+// ============================================================================
+// TokenCommissionProvider — Token 佣金服务接口（供 transaction 模块调用）
+// ============================================================================
+
+/// Token 佣金服务接口（全插件 Token 管线对外入口）
+pub trait TokenCommissionProvider<AccountId, TokenBalance> {
+    fn process_token_commission(
+        entity_id: u64,
+        shop_id: u64,
+        order_id: u64,
+        buyer: &AccountId,
+        token_order_amount: TokenBalance,
+        token_platform_fee: TokenBalance,
+    ) -> Result<(), DispatchError>;
+
+    fn cancel_token_commission(order_id: u64) -> Result<(), DispatchError>;
+
+    fn pending_token_commission(entity_id: u64, account: &AccountId) -> TokenBalance;
+
+    /// 获取 Entity 级 Token 平台费率（bps，0 = 不收费）
+    fn token_platform_fee_rate(entity_id: u64) -> u16;
+}
+
+/// 空 TokenCommissionProvider 实现
+pub struct NullTokenCommissionProvider;
+
+impl<AccountId, TokenBalance: Default> TokenCommissionProvider<AccountId, TokenBalance> for NullTokenCommissionProvider {
+    fn process_token_commission(_: u64, _: u64, _: u64, _: &AccountId, _: TokenBalance, _: TokenBalance) -> Result<(), DispatchError> { Ok(()) }
+    fn cancel_token_commission(_: u64) -> Result<(), DispatchError> { Ok(()) }
+    fn pending_token_commission(_: u64, _: &AccountId) -> TokenBalance { TokenBalance::default() }
+    fn token_platform_fee_rate(_: u64) -> u16 { 0 }
 }

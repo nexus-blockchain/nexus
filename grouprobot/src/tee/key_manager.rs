@@ -62,6 +62,11 @@ impl KeyManager {
     pub fn verify_signature(&self, message: &[u8], signature: &[u8; 64]) -> bool {
         self.enclave.verify(message, signature)
     }
+
+    /// P5-fix: 签名广告投放收据 (返回 64 字节 Ed25519 签名)
+    pub fn sign_receipt(&self, message: &[u8]) -> [u8; 64] {
+        self.enclave.sign(message)
+    }
 }
 
 /// 序列号管理器 (原子递增 + 持久化)

@@ -62,6 +62,11 @@ impl pallet_nex_market::Config for Test {
     type SeedTronAddress = SeedTronAddr;
     type VerificationGracePeriod = ConstU32<600>;  // 1h 宽限期
     type UnderpaidGracePeriod = ConstU32<1200>;    // 2h 补付窗口
+    type MaxPendingTrades = ConstU32<100>;
+    type MaxAwaitingPaymentTrades = ConstU32<100>;
+    type MaxUnderpaidTrades = ConstU32<100>;
+    type MaxExpiredOrdersPerBlock = ConstU32<10>;
+    type TxHashTtlBlocks = ConstU32<100800>;     // ~7 days (600 blocks/h × 24h × 7d)
 }
 
 pub const ALICE: u64 = 1;   // 卖家

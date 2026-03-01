@@ -1,5 +1,6 @@
 use std::path::Path;
 use tracing::{info, warn};
+use zeroize::Zeroizing;
 
 use crate::error::{BotError, BotResult};
 use crate::tee::sealed_storage::{SealedStorage, SealPolicy};
@@ -402,6 +403,44 @@ impl EnclaveBridge {
             _ => Ok(None),
         }
     }
+
+    /// 密封保存 Telegram API credentials (api_id + api_hash)
+    ///
+    /// 独立于 Shamir share, 因为 api_id/api_hash 是开发者级凭证, 不随 bot token 轮换
+    pub fn save_api_credentials(&self, api_id: &str, api_hash: &str) -> BotResult<()> {
+        let mut data = Vec::with_capacity(api_id.len() + 1 + api_hash.len());
+        data.extend_from_slice(api_id.as_bytes());
+        data.push(0);
+        data.extend_from_slice(api_hash.as_bytes());
+        self.sealed_storage.seal("tg_api_credentials.sealed", &data)?;
+        info!("Telegram API credentials 已密封保存");
+        Ok(())
+    }
+
+    /// 从密封存储加载 Telegram API credentials
+    pub fn load_api_credentials(&self) -> BotResult<Option<(Zeroizing<String>, Zeroizing<String>)>> {
+        match self.sealed_storage.unseal("tg_api_credentials.sealed") {
+            Ok(data) => {
+                if let Some(sep) = data.iter().position(|&b| b == 0) {
+                    let api_id = Zeroizing::new(
+                        String::from_utf8(data[..sep].to_vec())
+                            .map_err(|e| BotError::EnclaveError(format!("api_id UTF-8: {}", e)))?
+                    );
+                    let api_hash = Zeroizing::new(
+                        String::from_utf8(data[sep + 1..].to_vec())
+                            .map_err(|e| BotError::EnclaveError(format!("api_hash UTF-8: {}", e)))?
+                    );
+                    info!("已从密封存储加载 Telegram API credentials");
+                    Ok(Some((api_id, api_hash)))
+                } else {
+                    Err(BotError::EnclaveError(
+                        "invalid sealed api credentials format".into(),
+                    ))
+                }
+            }
+            Err(_) => Ok(None),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -501,5 +540,36 @@ mod tests {
         bridge.seal("test_seal", data).unwrap();
         let recovered = bridge.unseal("test_seal").unwrap();
         assert_eq!(&recovered, data);
+    }
+
+    #[test]
+    fn api_credentials_seal_unseal() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = EnclaveBridge::init(dir.path().to_str().unwrap(), "software").unwrap();
+
+        assert!(bridge.load_api_credentials().unwrap().is_none());
+
+        bridge.save_api_credentials("12345", "abcdef0123456789").unwrap();
+
+        let (id, hash) = bridge.load_api_credentials().unwrap().unwrap();
+        assert_eq!(id.as_str(), "12345");
+        assert_eq!(hash.as_str(), "abcdef0123456789");
+    }
+
+    #[test]
+    fn api_credentials_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        {
+            let bridge = EnclaveBridge::init(path, "software").unwrap();
+            bridge.save_api_credentials("99999", "hash_value_xyz").unwrap();
+        }
+        {
+            let bridge = EnclaveBridge::init(path, "software").unwrap();
+            let (id, hash) = bridge.load_api_credentials().unwrap().unwrap();
+            assert_eq!(id.as_str(), "99999");
+            assert_eq!(hash.as_str(), "hash_value_xyz");
+        }
     }
 }

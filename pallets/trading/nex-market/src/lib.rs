@@ -74,6 +74,8 @@ pub mod pallet {
         Filled,
         /// 已取消
         Cancelled,
+        /// 🆕 H3: 已过期（on_idle GC 自动清理）
+        Expired,
     }
 
     /// USDT 交易状态
@@ -110,6 +112,9 @@ pub mod pallet {
 
     /// TRON 地址类型（34 字节 Base58）
     pub type TronAddress = BoundedVec<u8, ConstU32<34>>;
+
+    /// 🆕 C3: TRON 交易哈希类型（64 hex 字符 = 64 字节 UTF-8，128 安全余量）
+    pub type TxHash = BoundedVec<u8, ConstU32<128>>;
 
 
     /// 订单
@@ -350,6 +355,27 @@ pub mod pallet {
         /// 买家少付 50%-99.5% 时，给予补付时间
         #[pallet::constant]
         type UnderpaidGracePeriod: Get<u32>;
+
+        /// 🆕 H2: OCW 待验证队列最大容量
+        #[pallet::constant]
+        type MaxPendingTrades: Get<u32>;
+
+        /// 🆕 H2: 待付款跟踪队列最大容量
+        #[pallet::constant]
+        type MaxAwaitingPaymentTrades: Get<u32>;
+
+        /// 🆕 H2: 少付补付跟踪队列最大容量
+        #[pallet::constant]
+        type MaxUnderpaidTrades: Get<u32>;
+
+        /// 🆕 H3: on_idle 每次过期订单 GC 最大处理数
+        #[pallet::constant]
+        type MaxExpiredOrdersPerBlock: Get<u32>;
+
+        /// 🆕 M7: UsedTxHashes 条目保留时间（区块数）
+        /// 超过此 TTL 的 tx_hash 在 on_idle 中被清理，防止无限增长
+        #[pallet::constant]
+        type TxHashTtlBlocks: Get<u32>;
     }
 
     #[pallet::pallet]
@@ -389,7 +415,130 @@ pub mod pallet {
                 true
             });
 
-            if did_work { base_weight } else { db_weight.reads(1) }
+            let mut consumed = if did_work { base_weight } else { db_weight.reads(1) };
+
+            // 🆕 H3: 过期订单 GC — 每个 on_idle 清理有限数量的过期订单
+            let gc_per_order = db_weight.reads_writes(1, 3); // read order + write order + write order_book + write user_orders
+            let max_gc = T::MaxExpiredOrdersPerBlock::get();
+            let now = <frame_system::Pallet<T>>::block_number();
+            let mut gc_count: u32 = 0;
+
+            // 清理过期卖单
+            let sell_ids = SellOrders::<T>::get();
+            let mut expired_sell_ids = Vec::new();
+            for &id in sell_ids.iter() {
+                if gc_count >= max_gc { break; }
+                if remaining_weight.all_lt(consumed.saturating_add(gc_per_order)) { break; }
+                if let Some(order) = Orders::<T>::get(id) {
+                    if now > order.expires_at
+                        && (order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled)
+                    {
+                        // 退还未成交锁定资产
+                        let unfilled = order.nex_amount.saturating_sub(order.filled_amount);
+                        if !unfilled.is_zero() {
+                            T::Currency::unreserve(&order.maker, unfilled);
+                        }
+                        let mut closed = order;
+                        closed.status = OrderStatus::Expired;
+                        Orders::<T>::insert(id, &closed);
+                        UserOrders::<T>::mutate(&closed.maker, |orders| { orders.retain(|&oid| oid != id); });
+                        expired_sell_ids.push(id);
+                        gc_count += 1;
+                        consumed = consumed.saturating_add(gc_per_order);
+                    }
+                }
+            }
+            if !expired_sell_ids.is_empty() {
+                SellOrders::<T>::mutate(|orders| {
+                    orders.retain(|id| !expired_sell_ids.contains(id));
+                });
+            }
+
+            // 清理过期买单
+            let buy_ids = BuyOrders::<T>::get();
+            let mut expired_buy_ids = Vec::new();
+            for &id in buy_ids.iter() {
+                if gc_count >= max_gc { break; }
+                if remaining_weight.all_lt(consumed.saturating_add(gc_per_order)) { break; }
+                if let Some(order) = Orders::<T>::get(id) {
+                    if now > order.expires_at
+                        && (order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled)
+                    {
+                        if !order.buyer_deposit.is_zero() {
+                            T::Currency::unreserve(&order.maker, order.buyer_deposit);
+                        }
+                        let mut closed = order;
+                        closed.status = OrderStatus::Expired;
+                        Orders::<T>::insert(id, &closed);
+                        UserOrders::<T>::mutate(&closed.maker, |orders| { orders.retain(|&oid| oid != id); });
+                        expired_buy_ids.push(id);
+                        gc_count += 1;
+                        consumed = consumed.saturating_add(gc_per_order);
+                    }
+                }
+            }
+            if !expired_buy_ids.is_empty() {
+                BuyOrders::<T>::mutate(|orders| {
+                    orders.retain(|id| !expired_buy_ids.contains(id));
+                });
+            }
+
+            // GC 后若有清理，刷新 best prices
+            if gc_count > 0 {
+                Self::refresh_best_prices();
+                consumed = consumed.saturating_add(db_weight.reads_writes(2, 2));
+            }
+
+            // 🆕 M7: UsedTxHashes TTL 清理 — cursor-based 有界遍历
+            let ttl: BlockNumberFor<T> = T::TxHashTtlBlocks::get().into();
+            let gc_per_hash = db_weight.reads_writes(1, 1);
+            let max_hash_gc: u32 = 10; // 每区块最多清理 10 条过期 tx_hash
+            let mut hash_gc_count: u32 = 0;
+
+            if remaining_weight.all_lt(consumed.saturating_add(gc_per_hash)) {
+                return consumed;
+            }
+
+            let cursor = TxHashGcCursor::<T>::get();
+            let mut iter = if let Some(ref start) = cursor {
+                UsedTxHashes::<T>::iter_from(
+                    UsedTxHashes::<T>::hashed_key_for(start)
+                )
+            } else {
+                UsedTxHashes::<T>::iter()
+            };
+
+            let mut last_key: Option<TxHash> = None;
+            let mut exhausted = true;
+
+            while hash_gc_count < max_hash_gc {
+                if remaining_weight.all_lt(consumed.saturating_add(gc_per_hash)) {
+                    exhausted = false;
+                    break;
+                }
+                match iter.next() {
+                    Some((key, (_trade_id, inserted_at))) => {
+                        consumed = consumed.saturating_add(gc_per_hash);
+                        if now > inserted_at.saturating_add(ttl) {
+                            UsedTxHashes::<T>::remove(&key);
+                            hash_gc_count += 1;
+                        }
+                        last_key = Some(key);
+                    }
+                    None => {
+                        exhausted = true;
+                        break;
+                    }
+                }
+            }
+
+            if exhausted {
+                TxHashGcCursor::<T>::kill();
+            } else if let Some(key) = last_key {
+                TxHashGcCursor::<T>::put(key);
+            }
+
+            consumed
         }
 
         fn offchain_worker(block_number: BlockNumberFor<T>) {
@@ -498,19 +647,22 @@ pub mod pallet {
     pub type UsdtTrades<T: Config> = StorageMap<_, Blake2_128Concat, u64, UsdtTrade<T>>;
 
     /// OCW 待验证队列（AwaitingVerification 状态）
+    /// 🆕 H2: 容量改为 Config::MaxPendingTrades 可配置
     #[pallet::storage]
     #[pallet::getter(fn pending_usdt_trades)]
-    pub type PendingUsdtTrades<T: Config> = StorageValue<_, BoundedVec<u64, ConstU32<100>>, ValueQuery>;
+    pub type PendingUsdtTrades<T: Config> = StorageValue<_, BoundedVec<u64, T::MaxPendingTrades>, ValueQuery>;
 
-    /// 待付款跟踪队列（AwaitingPayment 状态，供 OCW 预检扫描）
+    /// 待付款跟踪队列（OCW 预检扫描 AwaitingPayment 状态）
+    /// 🆕 H2: 容量改为 Config::MaxAwaitingPaymentTrades 可配置
     #[pallet::storage]
     #[pallet::getter(fn awaiting_payment_trades)]
-    pub type AwaitingPaymentTrades<T: Config> = StorageValue<_, BoundedVec<u64, ConstU32<100>>, ValueQuery>;
+    pub type AwaitingPaymentTrades<T: Config> = StorageValue<_, BoundedVec<u64, T::MaxAwaitingPaymentTrades>, ValueQuery>;
 
-    /// 少付补付跟踪队列（UnderpaidPending 状态，OCW 持续扫描）
+    /// 少付补付跟踪队列
+    /// 🆕 H2: 容量改为 Config::MaxUnderpaidTrades 可配置
     #[pallet::storage]
     #[pallet::getter(fn pending_underpaid_trades)]
-    pub type PendingUnderpaidTrades<T: Config> = StorageValue<_, BoundedVec<u64, ConstU32<100>>, ValueQuery>;
+    pub type PendingUnderpaidTrades<T: Config> = StorageValue<_, BoundedVec<u64, T::MaxUnderpaidTrades>, ValueQuery>;
 
     /// OCW 验证结果
     #[pallet::storage]
@@ -552,6 +704,17 @@ pub mod pallet {
     /// 已完成首笔交易的买家（L3 Sybil 防御：完成后不再享受免保证金）
     #[pallet::storage]
     pub type CompletedBuyers<T: Config> = StorageMap<_, Blake2_128Concat, T::AccountId, bool, ValueQuery>;
+
+    /// 🆕 C3: 已使用的 TRON 交易哈希（防重放攻击）
+    /// 同一 TRON tx 不能用于多笔 nex-market 交易的支付证明
+    /// 🆕 M7: 值改为 (trade_id, inserted_at_block) 用于 TTL 清理
+    #[pallet::storage]
+    #[pallet::getter(fn used_tx_hashes)]
+    pub type UsedTxHashes<T: Config> = StorageMap<_, Blake2_128Concat, TxHash, (u64, BlockNumberFor<T>)>;
+
+    /// 🆕 M7: UsedTxHashes GC 游标（cursor-based 遍历避免全表扫描）
+    #[pallet::storage]
+    pub type TxHashGcCursor<T: Config> = StorageValue<_, TxHash>;
 
     /// 买家当前活跃的免保证金交易数（L2 防 grief：每账户最多 1 笔）
     #[pallet::storage]
@@ -733,8 +896,6 @@ pub mod pallet {
         InsufficientBalance,
         /// 数量过小
         AmountTooSmall,
-        /// 数量超过可用
-        AmountExceedsAvailable,
         /// 价格为零
         ZeroPrice,
         /// 订单簿已满
@@ -775,8 +936,6 @@ pub mod pallet {
         FirstOrderAmountTooLarge,
         /// 该买家已完成过交易，不再享受免保证金
         BuyerAlreadyCompleted,
-        /// 订单不支持免保证金
-        DepositNotWaived,
         /// seed_liquidity 订单数超限
         TooManySeedOrders,
         /// 无可用的基准价格（需先 set_initial_price）
@@ -791,12 +950,14 @@ pub mod pallet {
         OrderExpired,
         /// 熔断未激活（无需解除）
         CircuitBreakerNotActive,
+        /// 🆕 L2修复: 熔断持续时间未到期
+        CircuitBreakerNotExpired,
         /// 待付款跟踪队列已满
         AwaitingPaymentQueueFull,
         /// 少付跟踪队列已满
         UnderpaidQueueFull,
-        /// 订单索引恢复失败（订单簿满）
-        OrderIndexRestoreFailed,
+        /// 🆕 C3: TRON 交易哈希已被使用（防重放）
+        TxHashAlreadyUsed,
     }
 
     // ==================== Extrinsics ====================
@@ -835,7 +996,7 @@ pub mod pallet {
                 who.clone(), OrderSide::Sell, nex_amount, usdt_price, Some(tron_addr), Zero::zero(), false,
             )?;
 
-            Self::update_best_prices();
+            Self::update_best_price_on_new_order(usdt_price, OrderSide::Sell);
 
             Self::deposit_event(Event::OrderCreated {
                 order_id, maker: who, side: OrderSide::Sell, nex_amount, usdt_price,
@@ -883,7 +1044,7 @@ pub mod pallet {
                 who.clone(), OrderSide::Buy, nex_amount, usdt_price, Some(buyer_tron), buyer_deposit, false,
             )?;
 
-            Self::update_best_prices();
+            Self::update_best_price_on_new_order(usdt_price, OrderSide::Buy);
 
             Self::deposit_event(Event::OrderCreated {
                 order_id, maker: who, side: OrderSide::Buy, nex_amount, usdt_price,
@@ -923,7 +1084,7 @@ pub mod pallet {
 
             Self::remove_from_order_book(order_id, order.side);
             UserOrders::<T>::mutate(&who, |orders| { orders.retain(|&id| id != order_id); });
-            Self::update_best_prices();
+            Self::update_best_price_on_remove(order.usdt_price, order.side);
 
             Self::deposit_event(Event::OrderCancelled { order_id });
 
@@ -943,9 +1104,8 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证买家 TRON 地址
-            ensure!(buyer_tron_address.len() == 34, Error::<T>::InvalidTronAddress);
-            ensure!(buyer_tron_address.first() == Some(&b'T'), Error::<T>::InvalidTronAddress);
+            // 🆕 H1修复: 验证买家 TRON 地址（Base58Check 完整校验，与其他 extrinsic 一致）
+            ensure!(pallet_trading_common::is_valid_tron_address(&buyer_tron_address), Error::<T>::InvalidTronAddress);
             let buyer_tron: TronAddress = buyer_tron_address.try_into().map_err(|_| Error::<T>::InvalidTronAddress)?;
 
             let mut order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
@@ -1302,17 +1462,25 @@ pub mod pallet {
         /// - Exact/Overpaid: 存储结果，等待 claim_verification_reward
         /// - Underpaid (50%-99.5%): 进入 UnderpaidPending 补付窗口
         /// - SeverelyUnderpaid (<50%) / Invalid: 直接存储结果，终裁
+        ///
+        /// 🆕 C3: tx_hash 用于防重放。同一 TRON 交易不能验证多笔订单。
         #[pallet::call_index(7)]
         #[pallet::weight(T::WeightInfo::submit_ocw_result())]
         pub fn submit_ocw_result(
             origin: OriginFor<T>,
             trade_id: u64,
             actual_amount: u64,
+            tx_hash: Option<TxHash>,
         ) -> DispatchResult {
             ensure_none(origin)?;
 
             let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
             ensure!(trade.status == UsdtTradeStatus::AwaitingVerification, Error::<T>::InvalidTradeStatus);
+
+            // 🆕 C3: 检查 tx_hash 是否已被使用
+            if let Some(ref hash) = tx_hash {
+                ensure!(!UsedTxHashes::<T>::contains_key(hash), Error::<T>::TxHashAlreadyUsed);
+            }
 
             let verification_result = Self::calculate_payment_verification_result(
                 trade.usdt_amount, actual_amount,
@@ -1358,6 +1526,13 @@ pub mod pallet {
                         trade_id, verification_result, actual_amount,
                     });
                 }
+            }
+
+            // 🆕 C3: 记录已使用的 tx_hash（防重放）
+            // 🆕 M7: 同时记录插入区块号，用于 TTL 清理
+            if let Some(hash) = tx_hash {
+                let now = <frame_system::Pallet<T>>::block_number();
+                UsedTxHashes::<T>::insert(hash, (trade_id, now));
             }
 
             Ok(())
@@ -1449,7 +1624,8 @@ pub mod pallet {
             let current_block: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
             let config = PriceProtectionStore::<T>::get().unwrap_or_default();
             ensure!(config.circuit_breaker_active, Error::<T>::CircuitBreakerNotActive);
-            ensure!(current_block >= config.circuit_breaker_until, Error::<T>::InvalidTradeStatus);
+            // 🆕 L2修复: 使用语义正确的错误名（原 InvalidTradeStatus 不匹配）
+            ensure!(current_block >= config.circuit_breaker_until, Error::<T>::CircuitBreakerNotExpired);
 
             PriceProtectionStore::<T>::mutate(|maybe| {
                 if let Some(c) = maybe {
@@ -1552,7 +1728,7 @@ pub mod pallet {
                 });
             }
 
-            Self::update_best_prices();
+            Self::refresh_best_prices();
 
             Self::deposit_event(Event::LiquiditySeeded {
                 order_count, total_nex, source: seed_account,
@@ -1566,18 +1742,26 @@ pub mod pallet {
         /// 当 OCW 预检扫描发现 AwaitingPayment 的交易已有 USDT 到账，
         /// 但买家忘记调用 confirm_payment 时，sidecar 可调用此函数
         /// 一步完成：确认付款 + 存储验证结果。
+        ///
+        /// 🆕 C3: tx_hash 用于防重放。
         #[pallet::call_index(15)]
         #[pallet::weight(T::WeightInfo::auto_confirm_payment())]
         pub fn auto_confirm_payment(
             origin: OriginFor<T>,
             trade_id: u64,
             actual_amount: u64,
+            tx_hash: Option<TxHash>,
         ) -> DispatchResult {
             ensure_none(origin)?;
 
             let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
             ensure!(trade.status == UsdtTradeStatus::AwaitingPayment, Error::<T>::InvalidTradeStatus);
             ensure!(trade.buyer_tron_address.is_some(), Error::<T>::InvalidTronAddress);
+
+            // 🆕 C3: 检查 tx_hash 是否已被使用
+            if let Some(ref hash) = tx_hash {
+                ensure!(!UsedTxHashes::<T>::contains_key(hash), Error::<T>::TxHashAlreadyUsed);
+            }
 
             let verification_result = Self::calculate_payment_verification_result(
                 trade.usdt_amount, actual_amount,
@@ -1629,6 +1813,13 @@ pub mod pallet {
                         trade_id, verification_result, actual_amount,
                     });
                 }
+            }
+
+            // 🆕 C3: 记录已使用的 tx_hash（防重放）
+            // 🆕 M7: 同时记录插入区块号，用于 TTL 清理
+            if let Some(hash) = tx_hash {
+                let now = <frame_system::Pallet<T>>::block_number();
+                UsedTxHashes::<T>::insert(hash, (trade_id, now));
             }
 
             Ok(())
@@ -1746,7 +1937,7 @@ pub mod pallet {
 
         fn validate_unsigned(source: TransactionSource, call: &Self::Call) -> TransactionValidity {
             match call {
-                Call::submit_ocw_result { trade_id, actual_amount: _ } => {
+                Call::submit_ocw_result { trade_id, actual_amount, tx_hash } => {
                     let trade = match UsdtTrades::<T>::get(trade_id) {
                         Some(t) => t,
                         None => return InvalidTransaction::Custom(10).into(),
@@ -1757,6 +1948,18 @@ pub mod pallet {
                     if OcwVerificationResults::<T>::contains_key(trade_id) {
                         return InvalidTransaction::Custom(12).into();
                     }
+                    // 🆕 C3: 在验证阶段即检查 tx_hash 重放
+                    if let Some(ref hash) = tx_hash {
+                        if UsedTxHashes::<T>::contains_key(hash) {
+                            return InvalidTransaction::Custom(13).into();
+                        }
+                    }
+                    // 🆕 C4: actual_amount 安全边界检查
+                    // 拒绝明显伪造的金额（超过预期 10 倍）防止恶意强制 Overpaid
+                    let amount_cap = trade.usdt_amount.saturating_mul(10);
+                    if *actual_amount > amount_cap {
+                        return InvalidTransaction::Custom(14).into();
+                    }
                     // 安全：拒绝 External 来源，防止任意用户注入伪造 OCW 结果
                     if matches!(source, TransactionSource::External) {
                         return InvalidTransaction::BadSigner.into();
@@ -1764,16 +1967,17 @@ pub mod pallet {
                     let priority = match source {
                         TransactionSource::Local => 100,
                         TransactionSource::InBlock => 80,
-                        TransactionSource::External => unreachable!(),
+                        TransactionSource::External => 0,
                     };
+                    // 🆕 M3: propagate(false) — unsigned 仅来自本地 OCW，不应广播给节点
                     ValidTransaction::with_tag_prefix("NexMarketOcwResult")
                         .priority(priority)
                         .longevity(10)
                         .and_provides([&(b"nex_ocw", trade_id)])
-                        .propagate(true)
+                        .propagate(false)
                         .build()
                 },
-                Call::auto_confirm_payment { trade_id, actual_amount: _ } => {
+                Call::auto_confirm_payment { trade_id, actual_amount, tx_hash } => {
                     let trade = match UsdtTrades::<T>::get(trade_id) {
                         Some(t) => t,
                         None => return InvalidTransaction::Custom(20).into(),
@@ -1784,6 +1988,17 @@ pub mod pallet {
                     if trade.buyer_tron_address.is_none() {
                         return InvalidTransaction::Custom(22).into();
                     }
+                    // 🆕 C3: 在验证阶段即检查 tx_hash 重放
+                    if let Some(ref hash) = tx_hash {
+                        if UsedTxHashes::<T>::contains_key(hash) {
+                            return InvalidTransaction::Custom(23).into();
+                        }
+                    }
+                    // 🆕 C4: actual_amount 安全边界检查
+                    let amount_cap = trade.usdt_amount.saturating_mul(10);
+                    if *actual_amount > amount_cap {
+                        return InvalidTransaction::Custom(24).into();
+                    }
                     // 安全：拒绝 External 来源，防止任意用户注入伪造自动确认
                     if matches!(source, TransactionSource::External) {
                         return InvalidTransaction::BadSigner.into();
@@ -1791,22 +2006,34 @@ pub mod pallet {
                     let priority = match source {
                         TransactionSource::Local => 90,
                         TransactionSource::InBlock => 70,
-                        TransactionSource::External => unreachable!(),
+                        TransactionSource::External => 0,
                     };
+                    // 🆕 M3: propagate(false) — unsigned 仅来自本地 OCW
                     ValidTransaction::with_tag_prefix("NexMarketAutoConfirm")
                         .priority(priority)
                         .longevity(10)
                         .and_provides([&(b"nex_auto", trade_id)])
-                        .propagate(true)
+                        .propagate(false)
                         .build()
                 },
-                Call::submit_underpaid_update { trade_id, new_actual_amount: _ } => {
+                Call::submit_underpaid_update { trade_id, new_actual_amount } => {
                     let trade = match UsdtTrades::<T>::get(trade_id) {
                         Some(t) => t,
                         None => return InvalidTransaction::Custom(30).into(),
                     };
                     if trade.status != UsdtTradeStatus::UnderpaidPending {
                         return InvalidTransaction::Custom(31).into();
+                    }
+                    // 🆕 C4: new_actual_amount 安全边界检查
+                    let amount_cap = trade.usdt_amount.saturating_mul(10);
+                    if *new_actual_amount > amount_cap {
+                        return InvalidTransaction::Custom(32).into();
+                    }
+                    // 🆕 C4: 单调递增检查（避免无效更新浪费区块空间）
+                    let previous_amount = OcwVerificationResults::<T>::get(trade_id)
+                        .map(|(_, amt)| amt).unwrap_or(0);
+                    if *new_actual_amount <= previous_amount {
+                        return InvalidTransaction::Custom(33).into();
                     }
                     // 安全：拒绝 External 来源，防止任意用户注入伪造补付金额
                     if matches!(source, TransactionSource::External) {
@@ -1815,13 +2042,14 @@ pub mod pallet {
                     let priority = match source {
                         TransactionSource::Local => 80,
                         TransactionSource::InBlock => 60,
-                        TransactionSource::External => unreachable!(),
+                        TransactionSource::External => 0,
                     };
+                    // 🆕 M3: propagate(false) — unsigned 仅来自本地 OCW
                     ValidTransaction::with_tag_prefix("NexMarketUnderpaidUpdate")
                         .priority(priority)
                         .longevity(5)
                         .and_provides([&(b"nex_upd", trade_id)])
-                        .propagate(true)
+                        .propagate(false)
                         .build()
                 },
                 _ => InvalidTransaction::Call.into(),
@@ -1843,6 +2071,7 @@ pub mod pallet {
             deposit_waived: bool,
         ) -> Result<u64, DispatchError> {
             let order_id = NextOrderId::<T>::get();
+            ensure!(order_id < u64::MAX, Error::<T>::ArithmeticOverflow);
             NextOrderId::<T>::put(order_id.saturating_add(1));
 
             let now = <frame_system::Pallet<T>>::block_number();
@@ -1920,6 +2149,7 @@ pub mod pallet {
             waived_deposit: bool,
         ) -> Result<u64, DispatchError> {
             let trade_id = NextUsdtTradeId::<T>::get();
+            ensure!(trade_id < u64::MAX, Error::<T>::ArithmeticOverflow);
             NextUsdtTradeId::<T>::put(trade_id.saturating_add(1));
 
             let now = <frame_system::Pallet<T>>::block_number();
@@ -2062,8 +2292,11 @@ pub mod pallet {
             // L3: 标记买家已完成交易 + 清理活跃免保证金计数
             Self::finalize_waived_trade_tracking(&trade.buyer, order_id);
 
+            // 🆕 M2: 缓存 Orders 读取，避免双读存储
+            let maybe_order = Orders::<T>::get(order_id);
+
             // 审计：累计 seed_liquidity 成交 USDT
-            if let Some(order) = Orders::<T>::get(order_id) {
+            if let Some(ref order) = maybe_order {
                 if order.deposit_waived {
                     CumulativeSeedUsdtSold::<T>::mutate(|total| {
                         *total = total.saturating_add(usdt_amount);
@@ -2077,7 +2310,7 @@ pub mod pallet {
             });
 
             // 更新 TWAP
-            if let Some(order) = Orders::<T>::get(order_id) {
+            if let Some(ref order) = maybe_order {
                 Self::on_trade_completed(order.usdt_price);
             }
 
@@ -2342,14 +2575,10 @@ pub mod pallet {
             Some(initial)
         }
 
-        /// 更新最优价格
-        ///
-        /// ⚠️ M3 权重注意：此函数 O(N) 遍历全部订单，最坏情况读取 2×MaxOrders 条记录。
-        /// WeightInfo benchmark 必须覆盖此开销。未来可改为增量维护避免全扫描。
-        fn update_best_prices() {
+        /// 🆕 H4: 全量刷新最优价格（仅在 GC / seed_liquidity 批量操作后调用）
+        fn refresh_best_prices() {
             let now = <frame_system::Pallet<T>>::block_number();
 
-            // 最优卖价（最低卖价），同时过滤已过期订单
             let best_ask = SellOrders::<T>::get().iter()
                 .filter_map(|&id| Orders::<T>::get(id))
                 .filter(|o| {
@@ -2363,7 +2592,6 @@ pub mod pallet {
                 None => BestAsk::<T>::kill(),
             }
 
-            // 最优买价（最高买价），同时过滤已过期订单
             let best_bid = BuyOrders::<T>::get().iter()
                 .filter_map(|&id| Orders::<T>::get(id))
                 .filter(|o| {
@@ -2375,6 +2603,69 @@ pub mod pallet {
             match best_bid {
                 Some(p) => BestBid::<T>::put(p),
                 None => BestBid::<T>::kill(),
+            }
+        }
+
+        /// 🆕 H4: 增量更新 — 新订单创建时 O(1) 比较
+        fn update_best_price_on_new_order(price: u64, side: OrderSide) {
+            match side {
+                OrderSide::Sell => {
+                    // 卖单取最低价
+                    let should_update = BestAsk::<T>::get()
+                        .map_or(true, |current| price < current);
+                    if should_update {
+                        BestAsk::<T>::put(price);
+                    }
+                }
+                OrderSide::Buy => {
+                    // 买单取最高价
+                    let should_update = BestBid::<T>::get()
+                        .map_or(true, |current| price > current);
+                    if should_update {
+                        BestBid::<T>::put(price);
+                    }
+                }
+            }
+        }
+
+        /// 🆕 H4: 增量更新 — 订单移除/取消/成交时，仅在影响当前最优价时重扫
+        fn update_best_price_on_remove(price: u64, side: OrderSide) {
+            match side {
+                OrderSide::Sell => {
+                    if BestAsk::<T>::get() == Some(price) {
+                        // 移除的恰好是最优卖价 → 需要重扫卖单找新最优
+                        let now = <frame_system::Pallet<T>>::block_number();
+                        let new_best = SellOrders::<T>::get().iter()
+                            .filter_map(|&id| Orders::<T>::get(id))
+                            .filter(|o| {
+                                (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+                                && now <= o.expires_at
+                            })
+                            .map(|o| o.usdt_price)
+                            .min();
+                        match new_best {
+                            Some(p) => BestAsk::<T>::put(p),
+                            None => BestAsk::<T>::kill(),
+                        }
+                    }
+                }
+                OrderSide::Buy => {
+                    if BestBid::<T>::get() == Some(price) {
+                        let now = <frame_system::Pallet<T>>::block_number();
+                        let new_best = BuyOrders::<T>::get().iter()
+                            .filter_map(|&id| Orders::<T>::get(id))
+                            .filter(|o| {
+                                (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+                                && now <= o.expires_at
+                            })
+                            .map(|o| o.usdt_price)
+                            .max();
+                        match new_best {
+                            Some(p) => BestBid::<T>::put(p),
+                            None => BestBid::<T>::kill(),
+                        }
+                    }
+                }
             }
         }
 
@@ -2403,11 +2694,13 @@ pub mod pallet {
                 _ => return Ok(()),
             };
 
-            let deviation_bps = if usdt_price > ref_price {
-                ((usdt_price as u128 - ref_price as u128) * 10000 / ref_price as u128) as u16
+            // 🆕 M4: 使用 saturating cast 防止 u16 截断（极端偏离 >655% 时不会回绕为小值）
+            let deviation_raw = if usdt_price > ref_price {
+                (usdt_price as u128 - ref_price as u128) * 10000 / ref_price as u128
             } else {
-                ((ref_price as u128 - usdt_price as u128) * 10000 / ref_price as u128) as u16
+                (ref_price as u128 - usdt_price as u128) * 10000 / ref_price as u128
             };
+            let deviation_bps = deviation_raw.min(u16::MAX as u128) as u16;
 
             if deviation_bps > config.max_price_deviation {
                 return Err(Error::<T>::PriceDeviationTooHigh);
@@ -2538,11 +2831,13 @@ pub mod pallet {
                 _ => return,
             };
 
-            let deviation_bps = if current_price > twap_7d {
-                ((current_price as u128 - twap_7d as u128) * 10000 / twap_7d as u128) as u16
+            // 🆕 M4: saturating cast 防止 u16 截断
+            let deviation_raw = if current_price > twap_7d {
+                (current_price as u128 - twap_7d as u128) * 10000 / twap_7d as u128
             } else {
-                ((twap_7d as u128 - current_price as u128) * 10000 / twap_7d as u128) as u16
+                (twap_7d as u128 - current_price as u128) * 10000 / twap_7d as u128
             };
+            let deviation_bps = deviation_raw.min(u16::MAX as u128) as u16;
 
             if deviation_bps > config.circuit_breaker_threshold {
                 let current_block: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
@@ -2590,7 +2885,7 @@ pub mod pallet {
             let now_ms = sp_io::offchain::timestamp().unix_millis();
             let min_timestamp = now_ms.saturating_sub(24 * 3600 * 1000);
 
-            let actual_amount = match pallet_trading_trc20_verifier::verify_trc20_by_transfer(
+            let (actual_amount, tx_hash_bytes) = match pallet_trading_trc20_verifier::verify_trc20_by_transfer(
                 buyer_tron, seller_tron, trade.usdt_amount, min_timestamp,
             ) {
                 Ok(result) => {
@@ -2598,12 +2893,12 @@ pub mod pallet {
                         log::info!(target: "nex-market-ocw",
                             "Trade {} verified: actual_amount={:?}, status={:?}",
                             trade_id, result.actual_amount, result.amount_status);
-                        result.actual_amount.unwrap_or(0)
+                        (result.actual_amount.unwrap_or(0), result.tx_hash)
                     } else {
                         log::warn!(target: "nex-market-ocw",
                             "Trade {} verification: no matching transfer found (error={:?})",
                             trade_id, result.error);
-                        0
+                        (0, None)
                     }
                 }
                 Err(e) => {
@@ -2616,8 +2911,10 @@ pub mod pallet {
 
             // 将验证结果写入 offchain local storage
             // 外部服务（sidecar）读取后调用 submit_ocw_result
+            // 🆕 C3: 包含 tx_hash 用于防重放
             let key = Self::ocw_result_key(trade_id);
-            let value = (true, actual_amount);
+            let tx_hash_for_storage: Vec<u8> = tx_hash_bytes.unwrap_or_default();
+            let value = (true, actual_amount, tx_hash_for_storage);
             sp_io::offchain::local_storage_set(
                 sp_core::offchain::StorageKind::PERSISTENT,
                 &key,
@@ -2658,8 +2955,10 @@ pub mod pallet {
                             trade_id, actual_amount);
 
                         // 写入 offchain storage，sidecar 调用 auto_confirm_payment
+                        // 🆕 C3: 包含 tx_hash 用于防重放
                         let key = Self::ocw_auto_confirm_key(trade_id);
-                        let value = (true, actual_amount);
+                        let tx_hash_for_storage: Vec<u8> = result.tx_hash.unwrap_or_default();
+                        let value = (true, actual_amount, tx_hash_for_storage);
                         sp_io::offchain::local_storage_set(
                             sp_core::offchain::StorageKind::PERSISTENT,
                             &key,

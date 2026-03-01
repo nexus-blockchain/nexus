@@ -46,7 +46,7 @@ Nexus 是一个基于 [Polkadot SDK (Substrate)](https://github.com/nicories/pol
 | **会员体系** | `entity-member` | 多级会员、推荐链、自动升级、团队统计 |
 | **佣金引擎** | `commission-core` + 4 插件 | 插件化分佣：推荐链、级差、单线、提现 |
 | **服务管理** | `entity-service` | 服务/商品上架与管理 |
-| **交易处理** | `entity-transaction` | 订单创建、支付、完成 |
+| **订单管理** | `entity-order` | 订单创建、支付、完成 |
 | **评价系统** | `entity-review` | 订单评价、店铺评分聚合 |
 | **内部市场** | `entity-market` | 实体代币 NEX/USDT 双通道交易、TWAP、熔断 |
 | **信息披露** | `entity-disclosure` | 内幕人管理、交易窗口期控制 |

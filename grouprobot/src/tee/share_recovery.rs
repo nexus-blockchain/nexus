@@ -88,7 +88,8 @@ pub async fn recover_token(
 ) -> BotResult<RecoveryResult> {
     // ── Level 1+2: 本地密封 share (+ peer if K>1) ──
     match try_share_recovery(enclave, config).await {
-        Ok(result) => {
+        Ok(mut result) => {
+            inject_sealed_api_credentials(enclave, &mut result.vault);
             info!(source = %result.source, "Token 已从 Shamir share 恢复");
             return Ok(result);
         }
@@ -101,7 +102,8 @@ pub async fn recover_token(
     if let Some(ref source_endpoint) = config.migration_source {
         info!(endpoint = %source_endpoint, "尝试 Level 3: Migration Ceremony");
         match try_migration_recovery(enclave, config, source_endpoint).await {
-            Ok(result) => {
+            Ok(mut result) => {
+                inject_sealed_api_credentials(enclave, &mut result.vault);
                 info!(source = %result.source, "Token 已从 Migration Ceremony 恢复");
                 return Ok(result);
             }
@@ -119,6 +121,20 @@ pub async fn recover_token(
     // ── Level 5: 环境变量 fallback + auto-seal (紧急恢复) ──
     warn!("⚠️ Level 1-3 均失败, 降级到 Level 5: 环境变量 fallback");
     try_env_fallback(enclave, config)
+}
+
+/// 从密封存储加载 Telegram API credentials 到 Vault
+fn inject_sealed_api_credentials(enclave: &EnclaveBridge, vault: &mut TokenVault) {
+    match enclave.load_api_credentials() {
+        Ok(Some((api_id, api_hash))) => {
+            vault.set_telegram_api_credentials(api_id, api_hash);
+            info!("已从密封存储恢复 Telegram API credentials");
+        }
+        Ok(None) => {}
+        Err(e) => {
+            warn!(error = %e, "加载密封 API credentials 失败");
+        }
+    }
 }
 
 /// 从 share 恢复 (K=1 本地, K>1 本地+peer)
@@ -388,19 +404,19 @@ fn try_env_fallback(
     let mut primary_token: Option<Zeroizing<String>>;
 
     if config.needs_telegram {
-        let token = std::env::var("BOT_TOKEN")
-            .map_err(|_| BotError::Config("BOT_TOKEN required (no share available)".into()))?;
-        primary_token = Some(Zeroizing::new(token.clone()));
+        let token = Zeroizing::new(std::env::var("BOT_TOKEN")
+            .map_err(|_| BotError::Config("BOT_TOKEN required (no share available)".into()))?);
+        primary_token = Some(token.clone());
         vault.set_telegram_token(token);
     } else {
         primary_token = None;
     }
 
     if config.needs_discord {
-        let token = std::env::var("DISCORD_BOT_TOKEN")
-            .map_err(|_| BotError::Config("DISCORD_BOT_TOKEN required (no share available)".into()))?;
+        let token = Zeroizing::new(std::env::var("DISCORD_BOT_TOKEN")
+            .map_err(|_| BotError::Config("DISCORD_BOT_TOKEN required (no share available)".into()))?);
         if primary_token.is_none() {
-            primary_token = Some(Zeroizing::new(token.clone()));
+            primary_token = Some(token.clone());
         }
         vault.set_discord_token(token);
     }
@@ -419,6 +435,22 @@ fn try_env_fallback(
                 warn!(error = %e, "auto-seal 失败, 下次启动仍需环境变量");
             }
         }
+    }
+
+    // ── Telegram API credentials (Local Bot API Server, 独立于 bot token) ──
+    if let (Ok(api_id), Ok(api_hash)) = (std::env::var("TG_API_ID"), std::env::var("TG_API_HASH")) {
+        let api_id_z = Zeroizing::new(api_id);
+        let api_hash_z = Zeroizing::new(api_hash);
+        if let Err(e) = enclave.save_api_credentials(&api_id_z, &api_hash_z) {
+            warn!(error = %e, "API credentials auto-seal 失败");
+        } else {
+            info!("Telegram API credentials 已密封保存 (下次启动自动加载)");
+        }
+        vault.set_telegram_api_credentials(api_id_z, api_hash_z);
+        std::env::remove_var("TG_API_ID");
+        std::env::remove_var("TG_API_HASH");
+    } else {
+        inject_sealed_api_credentials(enclave, &mut vault);
     }
 
     // 清除环境变量中的 token 明文

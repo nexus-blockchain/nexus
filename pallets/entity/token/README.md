@@ -6,7 +6,7 @@
 
 `pallet-entity-token` 作为 `pallet-assets` 的桥接层，为每个 Entity 提供独立的通证系统。支持 7 种通证类型（积分、治理、股权、会员、份额、债券、混合），购物奖励/兑换、分红分发、代币锁仓、转账限制（白名单/黑名单/KYC/成员闭环）等功能。
 
-同时实现 `EntityTokenProvider` trait，供 `pallet-entity-tokensale`、`pallet-entity-transaction` 等模块调用 reserve/unreserve/repatriate。
+同时实现 `EntityTokenProvider` trait，供 `pallet-entity-tokensale`、`pallet-entity-order` 等模块调用 reserve/unreserve/repatriate。
 
 ## 架构
 
@@ -164,7 +164,7 @@ impl pallet_entity_token::Config for Runtime {
 
 ## 购物奖励 / 积分兑换
 
-由 `pallet-entity-transaction`（订单模块）通过 `EntityTokenProvider` trait 调用：
+由 `pallet-entity-order`（订单模块）通过 `EntityTokenProvider` trait 调用：
 
 ```
 订单完成 → reward_on_purchase(entity_id, buyer, purchase_amount)
@@ -307,7 +307,7 @@ asset_id = ShopTokenOffset + shop_id
 ## 与其他模块的集成
 
 ```
-pallet-entity-transaction ──→ EntityTokenProvider ──→ pallet-entity-token
+pallet-entity-order ──→ EntityTokenProvider ──→ pallet-entity-token
 (订单完成/下单抵扣)             reward_on_purchase       │
                               redeem_for_discount       │ fungibles traits
                                                         ▼

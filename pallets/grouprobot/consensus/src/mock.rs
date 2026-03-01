@@ -52,6 +52,7 @@ impl BotRegistryProvider<u64> for MockBotRegistry {
 	}
 	fn bot_public_key(_: &BotIdHash) -> Option<[u8; 32]> { None }
 	fn peer_count(_: &BotIdHash) -> u32 { 0 }
+	fn bot_operator(_: &BotIdHash) -> Option<u64> { None }
 }
 
 // Mock SubscriptionProvider: bot_hash(1)=Basic, bot_hash(2)=Basic, bot_hash(10/11)=Pro, others=Free
@@ -128,6 +129,22 @@ pub fn clear_distributed_rewards() {
 	DISTRIBUTED_REWARDS.with(|v| v.borrow_mut().clear());
 }
 
+// Mock PeerUptimeRecorder
+thread_local! {
+	static RECORDED_UPTIME_ERAS: RefCell<Vec<u64>> = RefCell::new(Vec::new());
+}
+
+pub struct MockPeerUptimeRecorder;
+impl PeerUptimeRecorder for MockPeerUptimeRecorder {
+	fn record_era_uptime(era: u64) {
+		RECORDED_UPTIME_ERAS.with(|v| v.borrow_mut().push(era));
+	}
+}
+
+pub fn get_recorded_uptime_eras() -> Vec<u64> {
+	RECORDED_UPTIME_ERAS.with(|v| v.borrow().clone())
+}
+
 parameter_types! {
 	pub const MinStake: u128 = 100;
 	pub const ExitCooldown: u64 = 10;
@@ -153,6 +170,7 @@ impl pallet_grouprobot_consensus::Config for Test {
 	type SubscriptionSettler = MockSubscriptionSettler;
 	type RewardDistributor = MockRewardDistributor;
 	type Subscription = MockSubscription;
+	type PeerUptimeRecorder = MockPeerUptimeRecorder;
 }
 
 pub const OWNER: u64 = 1;

@@ -5285,6 +5285,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "lite-json"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd0e787ffe1153141a0f6f6d759fdf1cc34b1226e088444523812fd412a5cca2"
+dependencies = [
+ "lite-parser",
+]
+
+[[package]]
+name = "lite-parser"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d5f9dc37c52d889a21fd701983d02bb6a84f852c5140a6c80ef4557f7dc29e"
+dependencies = [
+ "paste",
+]
+
+[[package]]
 name = "litemap"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5953,13 +5971,13 @@ dependencies = [
  "pallet-entity-kyc",
  "pallet-entity-market",
  "pallet-entity-member",
+ "pallet-entity-order",
  "pallet-entity-registry",
  "pallet-entity-review",
  "pallet-entity-service",
  "pallet-entity-shop",
  "pallet-entity-token",
  "pallet-entity-tokensale",
- "pallet-entity-transaction",
  "pallet-escrow",
  "pallet-evidence",
  "pallet-grandpa",
@@ -6731,6 +6749,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-entity-order"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "log",
+ "pallet-balances",
+ "pallet-entity-common",
+ "pallet-escrow",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+ "sp-std",
+]
+
+[[package]]
 name = "pallet-entity-registry"
 version = "0.1.0"
 dependencies = [
@@ -6825,24 +6861,6 @@ dependencies = [
  "sp-core",
  "sp-io",
  "sp-runtime",
-]
-
-[[package]]
-name = "pallet-entity-transaction"
-version = "0.1.0"
-dependencies = [
- "frame-support",
- "frame-system",
- "log",
- "pallet-balances",
- "pallet-entity-common",
- "pallet-escrow",
- "parity-scale-codec",
- "scale-info",
- "sp-core",
- "sp-io",
- "sp-runtime",
- "sp-std",
 ]
 
 [[package]]
@@ -7222,6 +7240,7 @@ dependencies = [
 name = "pallet-trading-trc20-verifier"
 version = "0.1.0"
 dependencies = [
+ "lite-json",
  "log",
  "parity-scale-codec",
  "sp-core",

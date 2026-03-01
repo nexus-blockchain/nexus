@@ -1,7 +1,7 @@
 [package]
-name = "pallet-entity-transaction"
+name = "pallet-entity-order"
 version = "0.1.0"
-description = "NEXUS Entity 交易管理模块"
+description = "NEXUS Entity 订单管理模块"
 authors = ["NEXUS Team"]
 edition = "2021"
 license = "MIT"

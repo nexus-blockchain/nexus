@@ -120,7 +120,11 @@ where
                 let usd_u128 = usd_amount as u128;
                 let rate_u128: u128 = rate.into();
                 let cos_precision: u128 = 1_000_000_000_000u128; // 10^12
-                let nex_amount_u128 = usd_u128.saturating_mul(cos_precision) / rate_u128;
+                // 🆕 M9修复: 使用 checked_div 与 saturating_mul 风格一致
+                let nex_amount_u128 = match usd_u128.saturating_mul(cos_precision).checked_div(rate_u128) {
+                    Some(v) => v,
+                    None => return fallback,
+                };
                 
                 if let Ok(amount) = Balance::try_from(nex_amount_u128) {
                     return amount;

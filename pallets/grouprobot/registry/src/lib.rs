@@ -130,6 +130,33 @@ pub struct AttestationRecordV2<T: Config> {
 	pub api_server_quote_hash: Option<[u8; 32]>,
 }
 
+/// 运营商信息 (模型 B: 独立运营商, 多平台)
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, RuntimeDebug, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
+#[scale_info(skip_type_params(T))]
+pub struct OperatorInfo<T: Config> {
+	/// 运营商账户
+	pub owner: T::AccountId,
+	/// 运营平台 (Telegram / Discord / Slack 等)
+	pub platform: Platform,
+	/// 平台 App 标识哈希 (隐私保护, 不存原始值)
+	/// Telegram: SHA256(api_id), Discord: SHA256(application_id)
+	pub platform_app_hash: [u8; 32],
+	/// 运营商名称
+	pub name: BoundedVec<u8, T::MaxOperatorNameLen>,
+	/// 联系方式 (handle / email 等)
+	pub contact: BoundedVec<u8, T::MaxOperatorContactLen>,
+	/// 运营商状态
+	pub status: OperatorStatus,
+	/// 注册区块
+	pub registered_at: BlockNumberFor<T>,
+	/// 管辖 Bot 数量
+	pub bot_count: u32,
+	/// SLA 等级 (0=无, 1=Basic, 2=Pro, 3=Enterprise)
+	pub sla_level: u8,
+	/// 声誉分 (初始 100, 范围 0-1000)
+	pub reputation_score: u32,
+}
+
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
@@ -169,6 +196,18 @@ pub mod pallet {
 		type PeerHeartbeatTimeout: Get<BlockNumberFor<Self>>;
 		/// 订阅层级查询 (tier gate)
 		type Subscription: SubscriptionProvider;
+		/// 运营商名称最大长度
+		#[pallet::constant]
+		type MaxOperatorNameLen: Get<u32>;
+		/// 运营商联系方式最大长度
+		#[pallet::constant]
+		type MaxOperatorContactLen: Get<u32>;
+		/// 单个运营商最大 Bot 数
+		#[pallet::constant]
+		type MaxBotsPerOperator: Get<u32>;
+		/// Peer Uptime 历史保留 Era 数
+		#[pallet::constant]
+		type MaxUptimeEraHistory: Get<u32>;
 	}
 
 	// ========================================================================
@@ -254,6 +293,61 @@ pub mod pallet {
 		_, BoundedVec<(BlockNumberFor<T>, BotIdHash, bool), ConstU32<1000>>, ValueQuery,
 	>;
 
+	/// 运营商注册表: (operator_account, platform) → OperatorInfo
+	/// 同一账户可在不同平台上注册独立的运营商身份
+	#[pallet::storage]
+	pub type Operators<T: Config> = StorageDoubleMap<
+		_, Blake2_128Concat, T::AccountId,
+		Blake2_128Concat, Platform,
+		OperatorInfo<T>,
+	>;
+
+	/// 运营商的 Bot 列表: (operator_account, platform) → Vec<bot_id_hash>
+	#[pallet::storage]
+	pub type OperatorBots<T: Config> = StorageDoubleMap<
+		_, Blake2_128Concat, T::AccountId,
+		Blake2_128Concat, Platform,
+		BoundedVec<BotIdHash, T::MaxBotsPerOperator>, ValueQuery,
+	>;
+
+	/// 运营商总数
+	#[pallet::storage]
+	pub type OperatorCount<T: Config> = StorageValue<_, u32, ValueQuery>;
+
+	/// Bot → 运营商 映射: bot_id_hash → (operator_account, platform)
+	#[pallet::storage]
+	pub type BotOperator<T: Config> =
+		StorageMap<_, Blake2_128Concat, BotIdHash, (T::AccountId, Platform)>;
+
+	/// 平台 App 哈希反向索引 (防重复): (platform, app_hash) → operator_account
+	#[pallet::storage]
+	pub type PlatformAppHashIndex<T: Config> = StorageDoubleMap<
+		_, Blake2_128Concat, Platform,
+		Blake2_128Concat, [u8; 32],
+		T::AccountId,
+	>;
+
+	// ========================================================================
+	// Peer Uptime Tracking
+	// ========================================================================
+
+	/// 当前 Era 内 Peer 心跳计数 (每次 heartbeat +1, era 结束时快照并重置)
+	#[pallet::storage]
+	pub type PeerHeartbeatCount<T: Config> = StorageDoubleMap<
+		_, Blake2_128Concat, BotIdHash,
+		Blake2_128Concat, [u8; 32],
+		u32, ValueQuery,
+	>;
+
+	/// Peer 历史 Uptime 快照: (bot_id_hash, peer_pk) → BoundedVec<(era, heartbeat_count)>
+	/// 滚动窗口, 超过 MaxUptimeEraHistory 自动淘汰最老记录
+	#[pallet::storage]
+	pub type PeerEraUptime<T: Config> = StorageDoubleMap<
+		_, Blake2_128Concat, BotIdHash,
+		Blake2_128Concat, [u8; 32],
+		BoundedVec<(u64, u32), T::MaxUptimeEraHistory>, ValueQuery,
+	>;
+
 	// ========================================================================
 	// Events
 	// ========================================================================
@@ -286,6 +380,12 @@ pub mod pallet {
 		SgxAttestationSubmitted { bot_id_hash: BotIdHash, sgx_dcap_level: u8 },
 		TeeAttestationSubmitted { bot_id_hash: BotIdHash, tee_type: TeeType, dcap_level: u8 },
 		StalePeerReported { bot_id_hash: BotIdHash, public_key: [u8; 32], reporter: T::AccountId, peer_count: u32 },
+		OperatorRegistered { operator: T::AccountId, platform: Platform, platform_app_hash: [u8; 32] },
+		OperatorUpdated { operator: T::AccountId, platform: Platform },
+		OperatorDeregistered { operator: T::AccountId, platform: Platform },
+		OperatorSlaUpdated { operator: T::AccountId, platform: Platform, sla_level: u8 },
+		BotAssignedToOperator { bot_id_hash: BotIdHash, operator: T::AccountId, platform: Platform },
+		BotUnassignedFromOperator { bot_id_hash: BotIdHash, operator: T::AccountId, platform: Platform },
 	}
 
 	// ========================================================================
@@ -369,6 +469,30 @@ pub mod pallet {
 		FreeTierNotAllowed,
 		/// Peer 尚未过期, 无法举报
 		PeerNotStale,
+		/// 运营商已注册
+		OperatorAlreadyRegistered,
+		/// 运营商不存在
+		OperatorNotFound,
+		/// 不是运营商本人
+		NotOperator,
+		/// api_id_hash 已被其他运营商使用
+		ApiIdHashAlreadyUsed,
+		/// 运营商名称为空
+		OperatorNameEmpty,
+		/// 运营商名称过长
+		OperatorNameTooLong,
+		/// 运营商下 Bot 数量已满
+		MaxBotsPerOperatorReached,
+		/// Bot 已分配给运营商
+		BotAlreadyAssigned,
+		/// Bot 未分配给任何运营商
+		BotNotAssigned,
+		/// 运营商不活跃
+		OperatorNotActive,
+		/// 运营商下仍有活跃 Bot, 无法注销
+		OperatorHasActiveBots,
+		/// SLA 等级无效 (0-3)
+		InvalidSlaLevel,
 	}
 
 	// ========================================================================
@@ -1557,6 +1681,11 @@ pub mod pallet {
 					.ok_or(Error::<T>::PeerNotFound)?;
 				peer.last_seen = frame_system::Pallet::<T>::block_number();
 
+				// Uptime tracking: 累加当前 Era 心跳计数
+				PeerHeartbeatCount::<T>::mutate(&bot_id_hash, &peer_public_key, |c| {
+					*c = c.saturating_add(1);
+				});
+
 				Self::deposit_event(Event::PeerHeartbeat {
 					bot_id_hash,
 					public_key: peer_public_key,
@@ -1599,6 +1728,182 @@ pub mod pallet {
 				});
 				Ok(())
 			})
+		}
+
+		/// 注册运营商
+		///
+		/// 同一账户可在不同平台上注册独立的运营商身份。
+		/// platform_app_hash 在同一平台内全局唯一 (防重复注册)。
+		#[pallet::call_index(23)]
+		#[pallet::weight(Weight::from_parts(50_000_000, 10_000))]
+		pub fn register_operator(
+			origin: OriginFor<T>,
+			platform: Platform,
+			platform_app_hash: [u8; 32],
+			name: BoundedVec<u8, T::MaxOperatorNameLen>,
+			contact: BoundedVec<u8, T::MaxOperatorContactLen>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			ensure!(!Operators::<T>::contains_key(&who, platform), Error::<T>::OperatorAlreadyRegistered);
+			ensure!(!name.is_empty(), Error::<T>::OperatorNameEmpty);
+			ensure!(
+				!PlatformAppHashIndex::<T>::contains_key(platform, &platform_app_hash),
+				Error::<T>::ApiIdHashAlreadyUsed
+			);
+
+			let now = frame_system::Pallet::<T>::block_number();
+			let info = OperatorInfo::<T> {
+				owner: who.clone(),
+				platform,
+				platform_app_hash,
+				name,
+				contact,
+				status: OperatorStatus::Active,
+				registered_at: now,
+				bot_count: 0,
+				sla_level: 0,
+				reputation_score: 100,
+			};
+			Operators::<T>::insert(&who, platform, info);
+			PlatformAppHashIndex::<T>::insert(platform, &platform_app_hash, &who);
+			OperatorCount::<T>::mutate(|c| *c = c.saturating_add(1));
+
+			Self::deposit_event(Event::OperatorRegistered { operator: who, platform, platform_app_hash });
+			Ok(())
+		}
+
+		/// 更新运营商信息 (名称/联系方式)
+		#[pallet::call_index(24)]
+		#[pallet::weight(Weight::from_parts(35_000_000, 8_000))]
+		pub fn update_operator(
+			origin: OriginFor<T>,
+			platform: Platform,
+			name: BoundedVec<u8, T::MaxOperatorNameLen>,
+			contact: BoundedVec<u8, T::MaxOperatorContactLen>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			ensure!(!name.is_empty(), Error::<T>::OperatorNameEmpty);
+
+			Operators::<T>::try_mutate(&who, platform, |maybe_op| -> DispatchResult {
+				let op = maybe_op.as_mut().ok_or(Error::<T>::OperatorNotFound)?;
+				op.name = name;
+				op.contact = contact;
+				Ok(())
+			})?;
+
+			Self::deposit_event(Event::OperatorUpdated { operator: who, platform });
+			Ok(())
+		}
+
+		/// 注销运营商 (指定平台)
+		///
+		/// 要求: 该平台运营商下不能有任何已分配的 Bot。
+		#[pallet::call_index(25)]
+		#[pallet::weight(Weight::from_parts(40_000_000, 8_000))]
+		pub fn deregister_operator(
+			origin: OriginFor<T>,
+			platform: Platform,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let op = Operators::<T>::get(&who, platform).ok_or(Error::<T>::OperatorNotFound)?;
+			let bots = OperatorBots::<T>::get(&who, platform);
+			ensure!(bots.is_empty(), Error::<T>::OperatorHasActiveBots);
+
+			PlatformAppHashIndex::<T>::remove(platform, &op.platform_app_hash);
+			Operators::<T>::remove(&who, platform);
+			OperatorBots::<T>::remove(&who, platform);
+			OperatorCount::<T>::mutate(|c| *c = c.saturating_sub(1));
+
+			Self::deposit_event(Event::OperatorDeregistered { operator: who, platform });
+			Ok(())
+		}
+
+		/// 设置运营商 SLA 等级 (仅 Root)
+		#[pallet::call_index(26)]
+		#[pallet::weight(Weight::from_parts(25_000_000, 5_000))]
+		pub fn set_operator_sla(
+			origin: OriginFor<T>,
+			operator: T::AccountId,
+			platform: Platform,
+			sla_level: u8,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			ensure!(sla_level <= 3, Error::<T>::InvalidSlaLevel);
+
+			Operators::<T>::try_mutate(&operator, platform, |maybe_op| -> DispatchResult {
+				let op = maybe_op.as_mut().ok_or(Error::<T>::OperatorNotFound)?;
+				op.sla_level = sla_level;
+				Ok(())
+			})?;
+
+			Self::deposit_event(Event::OperatorSlaUpdated { operator, platform, sla_level });
+			Ok(())
+		}
+
+		/// 将 Bot 分配给运营商 (指定平台)
+		///
+		/// 调用者必须同时是 Bot 所有者和该平台的已注册运营商。
+		/// Bot 只能分配给一个运营商身份。
+		#[pallet::call_index(27)]
+		#[pallet::weight(Weight::from_parts(45_000_000, 10_000))]
+		pub fn assign_bot_to_operator(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			platform: Platform,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
+			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+
+			let op = Operators::<T>::get(&who, platform).ok_or(Error::<T>::OperatorNotFound)?;
+			ensure!(op.status == OperatorStatus::Active, Error::<T>::OperatorNotActive);
+			ensure!(!BotOperator::<T>::contains_key(&bot_id_hash), Error::<T>::BotAlreadyAssigned);
+
+			OperatorBots::<T>::try_mutate(&who, platform, |bots| -> DispatchResult {
+				bots.try_push(bot_id_hash).map_err(|_| Error::<T>::MaxBotsPerOperatorReached)?;
+				Ok(())
+			})?;
+			BotOperator::<T>::insert(&bot_id_hash, (&who, platform));
+
+			Operators::<T>::mutate(&who, platform, |maybe_op| {
+				if let Some(op) = maybe_op {
+					op.bot_count = op.bot_count.saturating_add(1);
+				}
+			});
+
+			Self::deposit_event(Event::BotAssignedToOperator { bot_id_hash, operator: who, platform });
+			Ok(())
+		}
+
+		/// 取消 Bot 与运营商的关联
+		///
+		/// 调用者必须是 Bot 所有者。平台信息从 BotOperator 映射自动获取。
+		#[pallet::call_index(28)]
+		#[pallet::weight(Weight::from_parts(40_000_000, 8_000))]
+		pub fn unassign_bot_from_operator(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
+			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+
+			let (operator, platform) = BotOperator::<T>::get(&bot_id_hash)
+				.ok_or(Error::<T>::BotNotAssigned)?;
+
+			OperatorBots::<T>::mutate(&operator, platform, |bots| {
+				bots.retain(|b| b != &bot_id_hash);
+			});
+			BotOperator::<T>::remove(&bot_id_hash);
+
+			Operators::<T>::mutate(&operator, platform, |maybe_op| {
+				if let Some(op) = maybe_op {
+					op.bot_count = op.bot_count.saturating_sub(1);
+				}
+			});
+
+			Self::deposit_event(Event::BotUnassignedFromOperator { bot_id_hash, operator, platform });
+			Ok(())
 		}
 	}
 
@@ -1783,6 +2088,36 @@ pub mod pallet {
 		pub fn get_peers(bot_id_hash: &BotIdHash) -> BoundedVec<PeerEndpoint<T>, T::MaxPeersPerBot> {
 			PeerRegistry::<T>::get(bot_id_hash)
 		}
+
+		/// 获取 Bot 所属运营商账户 (仅返回 AccountId)
+		pub fn bot_operator_account(bot_id_hash: &BotIdHash) -> Option<T::AccountId> {
+			BotOperator::<T>::get(bot_id_hash).map(|(acct, _)| acct)
+		}
+
+		/// 获取 Bot 所属运营商完整信息 (AccountId + Platform)
+		pub fn bot_operator_full(bot_id_hash: &BotIdHash) -> Option<(T::AccountId, Platform)> {
+			BotOperator::<T>::get(bot_id_hash)
+		}
+
+		/// 获取运营商信息 (指定平台)
+		pub fn operator_info(operator: &T::AccountId, platform: Platform) -> Option<OperatorInfo<T>> {
+			Operators::<T>::get(operator, platform)
+		}
+
+		/// 获取运营商的 Bot 列表 (指定平台)
+		pub fn operator_bots(operator: &T::AccountId, platform: Platform) -> BoundedVec<BotIdHash, T::MaxBotsPerOperator> {
+			OperatorBots::<T>::get(operator, platform)
+		}
+
+		/// 获取 Peer 当前 Era 心跳计数
+		pub fn peer_heartbeat_count(bot_id_hash: &BotIdHash, peer_pk: &[u8; 32]) -> u32 {
+			PeerHeartbeatCount::<T>::get(bot_id_hash, peer_pk)
+		}
+
+		/// 获取 Peer 历史 Uptime 记录
+		pub fn peer_era_uptime(bot_id_hash: &BotIdHash, peer_pk: &[u8; 32]) -> BoundedVec<(u64, u32), T::MaxUptimeEraHistory> {
+			PeerEraUptime::<T>::get(bot_id_hash, peer_pk)
+		}
 	}
 
 	// ========================================================================
@@ -1810,6 +2145,32 @@ pub mod pallet {
 		}
 		fn peer_count(bot_id_hash: &BotIdHash) -> u32 {
 			Self::peer_count(bot_id_hash)
+		}
+		fn bot_operator(bot_id_hash: &BotIdHash) -> Option<T::AccountId> {
+			Self::bot_operator_account(bot_id_hash)
+		}
+	}
+
+	// ========================================================================
+	// PeerUptimeRecorder 实现
+	// ========================================================================
+
+	impl<T: Config> PeerUptimeRecorder for Pallet<T> {
+		fn record_era_uptime(era: u64) {
+			// 遍历所有有心跳的 Peer, 快照到 PeerEraUptime, 然后清零
+			let mut iter = PeerHeartbeatCount::<T>::drain();
+			while let Some((bot_id_hash, peer_pk, count)) = iter.next() {
+				if count == 0 {
+					continue;
+				}
+				PeerEraUptime::<T>::mutate(&bot_id_hash, &peer_pk, |history| {
+					// 滚动窗口: 满了则移除最老的
+					if history.len() as u32 >= T::MaxUptimeEraHistory::get() {
+						history.remove(0);
+					}
+					let _ = history.try_push((era, count));
+				});
+			}
 		}
 	}
 }

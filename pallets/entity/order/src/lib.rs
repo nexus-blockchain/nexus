@@ -1,4 +1,4 @@
-//! # 商城订单管理模块 (pallet-entity-transaction)
+//! # 商城订单管理模块 (pallet-entity-order)
 //!
 //! ## 概述
 //!
@@ -38,7 +38,7 @@ pub mod pallet {
     };
     use frame_system::pallet_prelude::*;
     use pallet_escrow::pallet::Escrow as EscrowTrait;
-    use pallet_entity_common::{OrderStatus, OrderCommissionHandler, OrderMemberHandler, OrderProvider, PricingProvider, ProductCategory, ProductProvider, EntityTokenProvider, ShopProvider, ShoppingBalanceProvider};
+    use pallet_entity_common::{OrderStatus, OrderCommissionHandler, OrderMemberHandler, OrderProvider, PaymentAsset, PricingProvider, ProductCategory, ProductProvider, EntityTokenProvider, ShopProvider, ShoppingBalanceProvider, TokenOrderCommissionHandler};
     use sp_runtime::{traits::{Saturating, Zero}, SaturatedConversion};
 
     /// 货币余额类型别名
@@ -91,6 +91,10 @@ pub mod pallet {
         pub service_completed_at: Option<BlockNumber>,
         /// 托管 ID
         pub escrow_id: u64,
+        /// 支付资产类型（默认 Native = NEX）
+        pub payment_asset: PaymentAsset,
+        /// Token 支付金额（仅 EntityToken 时有效，u128 避免泛型膨胀）
+        pub token_payment_amount: u128,
     }
 
     /// 订单类型别名
@@ -180,6 +184,9 @@ pub mod pallet {
 
         /// 购物余额接口（下单时抵扣复购余额）
         type ShoppingBalance: ShoppingBalanceProvider<Self::AccountId, BalanceOf<Self>>;
+
+        /// Token 佣金处理接口（Entity Token 订单完成时触发 Token 返佣）
+        type TokenCommissionHandler: TokenOrderCommissionHandler<Self::AccountId>;
 
         /// 会员处理接口（订单完成时自动注册 + 更新消费金额）
         type MemberHandler: OrderMemberHandler<Self::AccountId, BalanceOf<Self>>;
@@ -330,6 +337,10 @@ pub mod pallet {
         ServiceOrderCannotShip,
         /// 退款理由 CID 不能为空
         EmptyReasonCid,
+        /// 实体代币未启用
+        EntityTokenNotEnabled,
+        /// Token 余额不足
+        InsufficientTokenBalance,
     }
 
     // ==================== Hooks ====================
@@ -371,6 +382,7 @@ pub mod pallet {
             shipping_cid: Option<Vec<u8>>,
             use_tokens: Option<BalanceOf<T>>,
             use_shopping_balance: Option<BalanceOf<T>>,
+            payment_asset: Option<PaymentAsset>,
         ) -> DispatchResult {
             let buyer = ensure_signed(origin)?;
 
@@ -406,29 +418,40 @@ pub mod pallet {
             let entity_id = T::ShopProvider::shop_entity_id(shop_id)
                 .ok_or(Error::<T>::ShopNotFound)?;
 
-            // 积分抵扣
+            let resolved_payment_asset = payment_asset.unwrap_or(PaymentAsset::Native);
+
+            // 积分抵扣（仅 Native 支付时可用）
             let mut final_amount = total_amount;
-            if let Some(tokens) = use_tokens {
-                if !tokens.is_zero() && T::EntityToken::is_token_enabled(entity_id) {
-                    let discount = T::EntityToken::redeem_for_discount(entity_id, &buyer, tokens)?;
-                    final_amount = final_amount.saturating_sub(discount);
+            if resolved_payment_asset == PaymentAsset::Native {
+                if let Some(tokens) = use_tokens {
+                    if !tokens.is_zero() && T::EntityToken::is_token_enabled(entity_id) {
+                        let discount = T::EntityToken::redeem_for_discount(entity_id, &buyer, tokens)?;
+                        final_amount = final_amount.saturating_sub(discount);
+                    }
                 }
-            }
-            // 购物余额抵扣（NEX 从 Entity 账户转入买家钱包，随后由 Escrow 锁定）
-            if let Some(shopping_amount) = use_shopping_balance {
-                if !shopping_amount.is_zero() {
-                    ensure!(shopping_amount <= final_amount, Error::<T>::InvalidAmount);
-                    T::ShoppingBalance::consume_shopping_balance(entity_id, &buyer, shopping_amount)?;
-                    // final_amount 不变：买家钱包已收到 NEX，Escrow 将从中锁定全额
+                // 购物余额抵扣（NEX 从 Entity 账户转入买家钱包，随后由 Escrow 锁定）
+                if let Some(shopping_amount) = use_shopping_balance {
+                    if !shopping_amount.is_zero() {
+                        ensure!(shopping_amount <= final_amount, Error::<T>::InvalidAmount);
+                        T::ShoppingBalance::consume_shopping_balance(entity_id, &buyer, shopping_amount)?;
+                        // final_amount 不变：买家钱包已收到 NEX，Escrow 将从中锁定全额
+                    }
                 }
             }
 
             // C2: 积分抵扣后金额不能为零
             ensure!(!final_amount.is_zero(), Error::<T>::InvalidAmount);
             
-            let platform_fee = final_amount
-                .saturating_mul(T::PlatformFeeRate::get().into())
-                / 10000u32.into();
+            // 平台费计算（NEX 用全局费率，Token 用 Entity 级费率）
+            // Token 平台费记录在 order.platform_fee 中但以 NEX 单位为 0（实际费用在完成时从 Token 中扣除）
+            let platform_fee = match resolved_payment_asset {
+                PaymentAsset::Native => {
+                    final_amount
+                        .saturating_mul(T::PlatformFeeRate::get().into())
+                        / 10000u32.into()
+                },
+                PaymentAsset::EntityToken => Zero::zero(),
+            };
 
             let shipping_cid: Option<BoundedVec<u8, T::MaxCidLength>> = shipping_cid
                 .map(|c| c.try_into().map_err(|_| Error::<T>::CidTooLong))
@@ -454,8 +477,22 @@ pub mod pallet {
             let order_id = NextOrderId::<T>::get();
             let now = <frame_system::Pallet<T>>::block_number();
 
-            // 锁定资金到托管（扣除积分抵扣后的金额）
-            T::Escrow::lock_from(&buyer, order_id, final_amount)?;
+            // 锁定资金：根据支付资产类型选择不同的锁定方式
+            let token_payment_amount: u128 = match resolved_payment_asset {
+                PaymentAsset::Native => {
+                    // NEX 支付：锁定 NEX 到托管
+                    T::Escrow::lock_from(&buyer, order_id, final_amount)?;
+                    0u128
+                },
+                PaymentAsset::EntityToken => {
+                    // Token 支付：验证并锁定 Entity Token
+                    ensure!(T::EntityToken::is_token_enabled(entity_id), Error::<T>::EntityTokenNotEnabled);
+                    let buyer_token_balance = T::EntityToken::token_balance(entity_id, &buyer);
+                    ensure!(buyer_token_balance >= final_amount, Error::<T>::InsufficientTokenBalance);
+                    T::EntityToken::reserve(entity_id, &buyer, final_amount)?;
+                    final_amount.saturated_into::<u128>()
+                },
+            };
 
             // 扣减库存
             T::ProductProvider::deduct_stock(product_id, quantity)?;
@@ -490,6 +527,8 @@ pub mod pallet {
                 service_started_at: None,
                 service_completed_at: None,
                 escrow_id: order_id,
+                payment_asset: resolved_payment_asset,
+                token_payment_amount,
             };
 
             Orders::<T>::insert(order_id, &order);
@@ -557,8 +596,17 @@ pub mod pallet {
                 Error::<T>::CannotCancelOrder
             );
 
-            // 退款
-            T::Escrow::refund_all(order_id, &order.buyer)?;
+            // 退款：根据支付资产类型选择不同的退款方式
+            match order.payment_asset {
+                PaymentAsset::Native => {
+                    T::Escrow::refund_all(order_id, &order.buyer)?;
+                },
+                PaymentAsset::EntityToken => {
+                    let entity_id = T::ShopProvider::shop_entity_id(order.shop_id)
+                        .unwrap_or(order.shop_id);
+                    T::EntityToken::unreserve(entity_id, &order.buyer, order.total_amount);
+                },
+            }
 
             // 恢复库存（best-effort，失败发事件）
             if T::ProductProvider::restore_stock(order.product_id, order.quantity).is_err() {
@@ -566,9 +614,7 @@ pub mod pallet {
             }
 
             // C3: 通知佣金系统订单已取消（best-effort，失败发事件）
-            if T::CommissionHandler::on_order_cancelled(order_id).is_err() {
-                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionCancel });
-            }
+            Self::cancel_commission_by_asset(&order, order_id);
 
             Orders::<T>::mutate(order_id, |maybe_order| {
                 if let Some(o) = maybe_order {
@@ -689,8 +735,17 @@ pub mod pallet {
             ensure!(order.status == OrderStatus::Disputed, Error::<T>::InvalidOrderStatus);
 
             // 解除争议锁定后退款给买家
-            T::Escrow::set_resolved(order_id)?;
-            T::Escrow::refund_all(order_id, &order.buyer)?;
+            match order.payment_asset {
+                PaymentAsset::Native => {
+                    T::Escrow::set_resolved(order_id)?;
+                    T::Escrow::refund_all(order_id, &order.buyer)?;
+                },
+                PaymentAsset::EntityToken => {
+                    let entity_id = T::ShopProvider::shop_entity_id(order.shop_id)
+                        .unwrap_or(order.shop_id);
+                    T::EntityToken::unreserve(entity_id, &order.buyer, order.total_amount);
+                },
+            }
 
             // 恢复库存（best-effort，失败发事件）
             if T::ProductProvider::restore_stock(order.product_id, order.quantity).is_err() {
@@ -698,9 +753,7 @@ pub mod pallet {
             }
 
             // C3: 通知佣金系统订单已取消（best-effort，失败发事件）
-            if T::CommissionHandler::on_order_cancelled(order_id).is_err() {
-                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionCancel });
-            }
+            Self::cancel_commission_by_asset(&order, order_id);
 
             Orders::<T>::mutate(order_id, |maybe_order| {
                 if let Some(o) = maybe_order {
@@ -786,12 +839,39 @@ pub mod pallet {
         fn do_complete_order(order_id: u64, order: &OrderOf<T>) -> DispatchResult {
             let seller_amount = order.total_amount.saturating_sub(order.platform_fee);
 
-            // 释放资金给卖家
-            T::Escrow::transfer_from_escrow(order_id, &order.seller, seller_amount)?;
+            match order.payment_asset {
+                PaymentAsset::Native => {
+                    // NEX 支付：从托管释放资金给卖家
+                    T::Escrow::transfer_from_escrow(order_id, &order.seller, seller_amount)?;
+                    // 平台费转给平台账户
+                    if !order.platform_fee.is_zero() {
+                        T::Escrow::transfer_from_escrow(order_id, &T::PlatformAccount::get(), order.platform_fee)?;
+                    }
+                },
+                PaymentAsset::EntityToken => {
+                    // Token 支付：计算 Token 平台费并拆分转账
+                    let entity_id = T::ShopProvider::shop_entity_id(order.shop_id)
+                        .unwrap_or(order.shop_id);
+                    let token_amount: u128 = order.token_payment_amount;
+                    let token_fee_rate = T::TokenCommissionHandler::token_platform_fee_rate(entity_id) as u128;
+                    let token_platform_fee = token_amount.saturating_mul(token_fee_rate) / 10000u128;
+                    let token_seller_amount = token_amount.saturating_sub(token_platform_fee);
 
-            // 平台费转给平台账户
-            if !order.platform_fee.is_zero() {
-                T::Escrow::transfer_from_escrow(order_id, &T::PlatformAccount::get(), order.platform_fee)?;
+                    // 卖家获得扣除平台费后的金额
+                    let seller_token: BalanceOf<T> = token_seller_amount.saturated_into();
+                    T::EntityToken::repatriate_reserved(
+                        entity_id, &order.buyer, &order.seller, seller_token,
+                    )?;
+
+                    // 平台费转入 entity_account（Token 平台费留在 Entity 生态内）
+                    if token_platform_fee > 0 {
+                        let entity_account = T::TokenCommissionHandler::entity_account(entity_id);
+                        let fee_token: BalanceOf<T> = token_platform_fee.saturated_into();
+                        let _ = T::EntityToken::repatriate_reserved(
+                            entity_id, &order.buyer, &entity_account, fee_token,
+                        );
+                    }
+                },
             }
 
             let now = <frame_system::Pallet<T>>::block_number();
@@ -837,15 +917,37 @@ pub mod pallet {
             }
 
             // 触发佣金计算（best-effort，失败发事件）
-            if T::CommissionHandler::on_order_completed(
-                entity_id,
-                order.shop_id,
-                order_id,
-                &order.buyer,
-                order.total_amount,
-                order.platform_fee,
-            ).is_err() {
-                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionComplete });
+            // 根据支付资产类型分支：Native → NEX 佣金，EntityToken → Token 佣金
+            match order.payment_asset {
+                PaymentAsset::Native => {
+                    if T::CommissionHandler::on_order_completed(
+                        entity_id,
+                        order.shop_id,
+                        order_id,
+                        &order.buyer,
+                        order.total_amount,
+                        order.platform_fee,
+                    ).is_err() {
+                        Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionComplete });
+                    }
+                },
+                PaymentAsset::EntityToken => {
+                    // 重新计算 Token 平台费（与上方拆分一致）
+                    let token_amount: u128 = order.token_payment_amount;
+                    let token_fee_rate = T::TokenCommissionHandler::token_platform_fee_rate(entity_id) as u128;
+                    let token_platform_fee = token_amount.saturating_mul(token_fee_rate) / 10000u128;
+
+                    if T::TokenCommissionHandler::on_token_order_completed(
+                        entity_id,
+                        order.shop_id,
+                        order_id,
+                        &order.buyer,
+                        order.token_payment_amount,
+                        token_platform_fee,
+                    ).is_err() {
+                        Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionComplete });
+                    }
+                },
             }
 
             // 发放购物积分奖励（需要 entity_id，不是 shop_id）
@@ -870,6 +972,38 @@ pub mod pallet {
                 seller_received: seller_amount,
             });
 
+            Ok(())
+        }
+
+        /// 根据支付资产类型取消佣金（best-effort，失败发事件）
+        fn cancel_commission_by_asset(order: &OrderOf<T>, order_id: u64) {
+            match order.payment_asset {
+                PaymentAsset::Native => {
+                    if T::CommissionHandler::on_order_cancelled(order_id).is_err() {
+                        Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionCancel });
+                    }
+                },
+                PaymentAsset::EntityToken => {
+                    if T::TokenCommissionHandler::on_token_order_cancelled(order_id).is_err() {
+                        Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionCancel });
+                    }
+                },
+            }
+        }
+
+        /// 根据支付资产类型退款（Token 用 unreserve，NEX 用 Escrow refund）
+        /// 返回 Ok(()) 表示成功，Err 表示 NEX escrow 退款失败
+        fn refund_by_asset(order: &OrderOf<T>, order_id: u64) -> DispatchResult {
+            match order.payment_asset {
+                PaymentAsset::Native => {
+                    T::Escrow::refund_all(order_id, &order.buyer)?;
+                },
+                PaymentAsset::EntityToken => {
+                    let entity_id = T::ShopProvider::shop_entity_id(order.shop_id)
+                        .unwrap_or(order.shop_id);
+                    T::EntityToken::unreserve(entity_id, &order.buyer, order.total_amount);
+                },
+            }
             Ok(())
         }
 
@@ -898,14 +1032,12 @@ pub mod pallet {
                         // 发货超时：自动退款
                         OrderStatus::Paid => {
                             if order.requires_shipping {
-                                // 实物商品：未发货 → 退款（Escrow 失败则跳过，避免状态不一致）
-                                if T::Escrow::refund_all(order_id, &order.buyer).is_ok() {
+                                // 实物商品：未发货 → 退款（失败则跳过，避免状态不一致）
+                                if Self::refund_by_asset(&order, order_id).is_ok() {
                                     if T::ProductProvider::restore_stock(order.product_id, order.quantity).is_err() {
                                         Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::StockRestore });
                                     }
-                                    if T::CommissionHandler::on_order_cancelled(order_id).is_err() {
-                                        Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionCancel });
-                                    }
+                                    Self::cancel_commission_by_asset(&order, order_id);
                                     Orders::<T>::mutate(order_id, |o| {
                                         if let Some(ord) = o {
                                             ord.status = OrderStatus::Refunded;
@@ -916,14 +1048,12 @@ pub mod pallet {
                                     Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::EscrowRefund });
                                 }
                             } else if order.product_category == ProductCategory::Service {
-                                // 服务类商品：卖家未开始服务 → 退款（Escrow 失败则跳过）
-                                if T::Escrow::refund_all(order_id, &order.buyer).is_ok() {
+                                // 服务类商品：卖家未开始服务 → 退款（失败则跳过）
+                                if Self::refund_by_asset(&order, order_id).is_ok() {
                                     if T::ProductProvider::restore_stock(order.product_id, order.quantity).is_err() {
                                         Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::StockRestore });
                                     }
-                                    if T::CommissionHandler::on_order_cancelled(order_id).is_err() {
-                                        Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionCancel });
-                                    }
+                                    Self::cancel_commission_by_asset(&order, order_id);
                                     Orders::<T>::mutate(order_id, |o| {
                                         if let Some(ord) = o {
                                             ord.status = OrderStatus::Refunded;

@@ -477,16 +477,35 @@ impl ProvisionState {
             let mut v = vault.write().await;
             match platform {
                 "telegram" => {
-                    v.set_telegram_token(token.to_string());
                     let mut hasher = Sha256::new();
                     hasher.update(token.as_bytes());
                     let hash: [u8; 32] = hasher.finalize().into();
                     bot_id_hash = Some(hash);
+                    v.set_telegram_token(token);
                     info!("Telegram Token 已注入 TokenVault (inprocess)");
                 }
                 "discord" => {
-                    v.set_discord_token(token.to_string());
+                    v.set_discord_token(token);
                     info!("Discord Token 已注入 TokenVault (inprocess)");
+                }
+                "telegram_api" => {
+                    // format: "api_id:api_hash"
+                    if let Some((api_id, api_hash)) = token.split_once(':') {
+                        v.set_telegram_api_credentials(
+                            api_id.to_string(),
+                            api_hash.to_string(),
+                        );
+                        drop(v);
+                        if let Err(e) = self.enclave.save_api_credentials(api_id, api_hash) {
+                            warn!(error = %e, "API credentials auto-seal 失败");
+                        }
+                        info!("Telegram API credentials 已注入 TokenVault 并密封");
+                        return Ok(None);
+                    } else {
+                        return Err(BotError::EnclaveError(
+                            "telegram_api format: api_id:api_hash".into(),
+                        ));
+                    }
                 }
                 _ => {
                     return Err(BotError::EnclaveError(

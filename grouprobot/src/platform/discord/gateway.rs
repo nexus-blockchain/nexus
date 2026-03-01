@@ -94,28 +94,30 @@ impl DiscordGateway {
             let session = self.session.lock().await;
             let token = self.vault.build_dc_auth_header().await
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
-            // RESUME payload: 从 "Bot <token>" 中提取纯 token
-            // ⚠️ 安全: 使用 Zeroizing 包裹 resume JSON, 发送后自动清零
+            // RESUME: 从 "Bot <token>" 提取纯 token, 直接构建 Message 发送
+            // 避免 Zeroizing 中间层: 消除 .to_string() 产生的未保护副本
+            // 令 token 明文仅在 tungstenite 发送缓冲区中短暂存在 (1 copy vs 2)
             let raw_token = token.strip_prefix("Bot ").unwrap_or(&token);
-            let resume_json = zeroize::Zeroizing::new(format!(
-                r#"{{"op":6,"d":{{"token":"{}","session_id":"{}","seq":{}}}}}"#,
-                raw_token,
-                session.session_id.as_deref().unwrap_or(""),
-                session.sequence.map(|s| s.to_string()).unwrap_or_else(|| "null".to_string()),
-            ));
             info!(
                 session_id = session.session_id.as_deref().unwrap_or(""),
                 seq = ?session.sequence,
                 "发送 RESUME"
             );
-            write.send(tokio_tungstenite::tungstenite::Message::Text(resume_json.to_string())).await?;
-            // resume_json (Zeroizing<String>) 在此 drop, 内存清零
-            // token (Zeroizing<String> from build_dc_auth_header) 同样自动清零
+            write.send(tokio_tungstenite::tungstenite::Message::Text(format!(
+                r#"{{"op":6,"d":{{"token":"{}","session_id":"{}","seq":{}}}}}"#,
+                raw_token,
+                session.session_id.as_deref().unwrap_or(""),
+                session.sequence.map(|s| s.to_string()).unwrap_or_else(|| "null".to_string()),
+            ))).await?;
+            // token (Zeroizing<String> from build_dc_auth_header) 在此 drop, 自动清零
         } else {
-            // 首次连接: 发送 IDENTIFY (通过 VaultProvider 构建)
-            let identify_payload = self.vault.build_dc_identify_payload(self.intents).await
+            // 首次连接: IDENTIFY (通过 VaultProvider 构建)
+            // 用 std::mem::take 提取内部 String, 避免 .to_string() 产生多余副本
+            let mut identify_payload = self.vault.build_dc_identify_payload(self.intents).await
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
-            write.send(tokio_tungstenite::tungstenite::Message::Text(identify_payload.to_string())).await?;
+            write.send(tokio_tungstenite::tungstenite::Message::Text(
+                std::mem::take(&mut *identify_payload)
+            )).await?;
             info!("发送 IDENTIFY");
         }
 

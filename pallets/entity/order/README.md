@@ -1,10 +1,10 @@
-# pallet-entity-transaction
+# pallet-entity-order
 
 > NEXUS 订单交易管理模块 — 按商品类别区分订单流程，集成 Escrow 托管与超时自动处理
 
 ## 概述
 
-`pallet-entity-transaction` 管理订单完整生命周期：下单支付、发货、确认收货、取消、退款、超时自动处理。根据商品类别（Digital / Physical / Service / Other）自动选择不同流程。
+`pallet-entity-order` 管理订单完整生命周期：下单支付、发货、确认收货、取消、退款、超时自动处理。根据商品类别（Digital / Physical / Service / Other）自动选择不同流程。
 
 ## 按类别区分的订单流程
 
@@ -18,7 +18,7 @@
 ## 架构依赖
 
 ```
-pallet-entity-transaction
+pallet-entity-order
 ├── pallet-escrow           资金托管（锁定 / 释放 / 退款）
 ├── EntityProvider          Entity 查询（entity_exists, is_entity_active）
 ├── ShopProvider            Shop 查询（shop_exists, shop_owner, update_shop_stats）
@@ -43,7 +43,7 @@ pallet-entity-transaction
 ## Config 配置
 
 ```rust
-impl pallet_entity_transaction::Config for Runtime {
+impl pallet_entity_order::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type Escrow = EscrowPallet;
@@ -277,7 +277,7 @@ impl OrderProvider<AccountId, Balance> for Pallet<T> {
 ## 测试
 
 ```bash
-cargo test -p pallet-entity-transaction
+cargo test -p pallet-entity-order
 # 29 tests: place_order(6), cancel(4), ship(2), confirm(2), refund(4),
 #           service(3), timeout(3), OrderProvider(1), stats(1), fee(1),
 #           genesis(1), integrity(1)
@@ -288,7 +288,7 @@ cargo test -p pallet-entity-transaction
 | 版本 | 日期 | 变更 |
 |------|------|------|
 | v0.1.0 | 2026-01-31 | 从 pallet-mall 拆分，初始版本 |
-| v0.1.1 | 2026-02-05 | 重命名为 pallet-entity-transaction，适配 Entity-Shop 分离架构 |
+| v0.1.1 | 2026-02-05 | 重命名为 pallet-entity-order，适配 Entity-Shop 分离架构 |
 | v0.2.0 | 2026-02-09 | 深度审查修复：积分抵扣零额校验、佣金取消通知、DecodeWithMemTracking、ExpiryQueue 溢出保护、Weight 修正、服务类库存恢复、创建 mock + 29 个测试 |
 
 ## 许可证

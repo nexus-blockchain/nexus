@@ -324,6 +324,18 @@ pub mod pallet {
     #[pallet::getter(fn member_count)]
     pub type MemberCount<T: Config> = StorageMap<_, Blake2_128Concat, u64, u32, ValueQuery>;
 
+    /// 每个等级的会员数量 (entity_id, level_id) -> count
+    /// 用于沉淀池奖励 v2 等额分配计算
+    #[pallet::storage]
+    #[pallet::getter(fn level_member_count)]
+    pub type LevelMemberCount<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat, u64,
+        Blake2_128Concat, u8,
+        u32,
+        ValueQuery,
+    >;
+
     /// 推荐关系索引 (entity_id, referrer) -> Vec<AccountId>
     #[pallet::storage]
     #[pallet::getter(fn direct_referrals)]
@@ -1022,7 +1034,12 @@ pub mod pallet {
 
             Self::mutate_member_by_shop(shop_id, &member, |maybe_member| -> DispatchResult {
                 let m = maybe_member.as_mut().ok_or(Error::<T>::NotMember)?;
+                let old_level_id = m.custom_level_id;
                 m.custom_level_id = target_level_id;
+
+                // 维护 LevelMemberCount
+                LevelMemberCount::<T>::mutate(entity_id, old_level_id, |c| *c = c.saturating_sub(1));
+                LevelMemberCount::<T>::mutate(entity_id, target_level_id, |c| *c = c.saturating_add(1));
 
                 Self::deposit_event(Event::MemberManuallyUpgraded {
                     shop_id,
@@ -1522,6 +1539,7 @@ pub mod pallet {
             EntityMembers::<T>::insert(entity_id, account, member);
 
             MemberCount::<T>::mutate(entity_id, |count| *count = count.saturating_add(1));
+            LevelMemberCount::<T>::mutate(entity_id, 0u8, |count| *count = count.saturating_add(1));
             if let Some(ref ref_account) = referrer {
                 Self::mutate_member_referral(entity_id, ref_account, account, qualified)?;
             }
@@ -1890,6 +1908,10 @@ pub mod pallet {
                     duration.map(|d| now.saturating_add(d))
                 };
 
+                // 维护 LevelMemberCount
+                LevelMemberCount::<T>::mutate(entity_id, old_level_id, |c| *c = c.saturating_sub(1));
+                LevelMemberCount::<T>::mutate(entity_id, target_level_id, |c| *c = c.saturating_add(1));
+
                 // 升级等级
                 member.custom_level_id = target_level_id;
 
@@ -2195,6 +2217,9 @@ pub mod pallet {
                         let recalculated = Self::calculate_custom_level_by_entity(entity_id, member.total_spent);
                         if recalculated != member.custom_level_id {
                             let expired_level_id = member.custom_level_id;
+                            // 维护 LevelMemberCount
+                            LevelMemberCount::<T>::mutate(entity_id, expired_level_id, |c| *c = c.saturating_sub(1));
+                            LevelMemberCount::<T>::mutate(entity_id, recalculated, |c| *c = c.saturating_add(1));
                             member.custom_level_id = recalculated;
 
                             Self::deposit_event(Event::MemberLevelExpired {
@@ -2214,6 +2239,9 @@ pub mod pallet {
                         let new_custom_level = Self::calculate_custom_level_by_entity(entity_id, member.total_spent);
                         if new_custom_level != member.custom_level_id {
                             let old_level_id = member.custom_level_id;
+                            // 维护 LevelMemberCount
+                            LevelMemberCount::<T>::mutate(entity_id, old_level_id, |c| *c = c.saturating_sub(1));
+                            LevelMemberCount::<T>::mutate(entity_id, new_custom_level, |c| *c = c.saturating_add(1));
                             member.custom_level_id = new_custom_level;
 
                             Self::deposit_event(Event::CustomLevelUpgraded {

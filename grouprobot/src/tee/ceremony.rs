@@ -93,15 +93,7 @@ impl CeremonyClient {
         // 4. 记录仪式到链上
         let ceremony_hash = self.compute_ceremony_hash(&seed, &participant_enclaves);
         let bot_pk = self.enclave.public_key_bytes();
-        // mrenclave: 使用 Enclave 公钥的 SHA256 摘要作为标识
-        // TODO: 硬件模式下应从 SGX Quote 中提取真实 MRENCLAVE
-        let mrenclave: [u8; 32] = {
-            use sha2::{Sha256, Digest};
-            let mut h = Sha256::new();
-            h.update(b"mrenclave:");
-            h.update(bot_pk);
-            h.finalize().into()
-        };
+        let mrenclave = compute_mrenclave(&self.enclave);
 
         // bot_id_hash = SHA256(bot_public_key)
         let bot_id_hash: [u8; 32] = {
@@ -709,7 +701,7 @@ pub async fn run_re_ceremony(
     }
 
     // ══ 阶段 4: 链上记录 ══
-    let mrenclave = compute_mrenclave(&my_pk);
+    let mrenclave = compute_mrenclave(enclave);
     let participant_pks: Vec<[u8; 32]> = participants.iter().map(|p| p.public_key).collect();
 
     chain.record_ceremony(
@@ -783,11 +775,38 @@ async fn distribute_share_ecdh(
     Ok(())
 }
 
-/// 计算 MRENCLAVE 标识 (TODO: 硬件模式下应从 SGX Quote 提取)
-fn compute_mrenclave(pk: &[u8; 32]) -> [u8; 32] {
+/// 计算 MRENCLAVE 标识
+///
+/// 硬件模式: 从 /dev/attestation/quote 提取真实值 (SGX→MRENCLAVE, TDX→SHA256(MRTD))
+/// 软件模式: SHA256("mrenclave-simulated:" || public_key) 作为占位
+fn compute_mrenclave(enclave: &EnclaveBridge) -> [u8; 32] {
+    if enclave.mode().is_hardware() {
+        if let Ok(quote) = std::fs::read("/dev/attestation/quote") {
+            // SGX Quote v3: MRENCLAVE at offset 112..144 (32 bytes)
+            if quote.len() >= 144 {
+                let mrenclave_bytes = &quote[112..144];
+                if mrenclave_bytes != [0u8; 32].as_slice() {
+                    let mut mrenclave = [0u8; 32];
+                    mrenclave.copy_from_slice(mrenclave_bytes);
+                    info!(mrenclave = %hex::encode(mrenclave), "从 Quote 提取真实 MRENCLAVE");
+                    return mrenclave;
+                }
+            }
+            // TDX Quote v4: MRTD at offset 184..232 (48 bytes) → SHA256 压缩到 32 bytes
+            if quote.len() >= 232 {
+                use sha2::{Sha256, Digest};
+                let mrtd = &quote[184..232];
+                let mrenclave: [u8; 32] = Sha256::digest(mrtd).into();
+                info!(mrenclave = %hex::encode(mrenclave), "从 TDX MRTD 派生 MRENCLAVE");
+                return mrenclave;
+            }
+        }
+        warn!("硬件模式但无法从 Quote 提取 MRENCLAVE, 回退到公钥派生");
+    }
     use sha2::{Sha256, Digest};
+    let pk = enclave.public_key_bytes();
     let mut h = Sha256::new();
-    h.update(b"mrenclave:");
+    h.update(b"mrenclave-simulated:");
     h.update(pk);
     h.finalize().into()
 }
@@ -846,8 +865,23 @@ pub fn handle_migration_export(
     enclave: &Arc<EnclaveBridge>,
     req: &MigrationExportRequest,
     guard: &MigrationExportGuard,
+    attestation: &AttestationGuard,
 ) -> BotResult<MigrationExportResponse> {
-    // 一次性使用守卫
+    // TEE 身份验证: 请求者必须是链上已验证的 TEE 节点
+    if !attestation.is_verified_tee {
+        warn!(requester = %req.requester_pk, "Migration 拒绝: 请求者不是已验证的 TEE 节点");
+        return Err(BotError::EnclaveError(
+            "requester is not a verified TEE node".into(),
+        ));
+    }
+    if !attestation.quote_verified {
+        warn!(requester = %req.requester_pk, "Migration 拒绝: 请求者的 Quote 未经链上验证");
+        return Err(BotError::EnclaveError(
+            "requester attestation quote not verified on-chain".into(),
+        ));
+    }
+
+    // 一次性使用守卫 (仅在 TEE 验证通过后才消耗)
     if !guard.try_export() {
         warn!("Migration export 已使用过, 拒绝重复导出");
         return Err(BotError::EnclaveError(
@@ -928,6 +962,7 @@ pub fn ceremony_routes(
     let enclave_share = enclave;
     let chain_receive = shared_chain.clone();
     let chain_receive_ecdh = shared_chain.clone();
+    let chain_migration = shared_chain.clone();
     let migration_guard = Arc::new(MigrationExportGuard::new());
 
     axum::Router::new()
@@ -1011,8 +1046,11 @@ pub fn ceremony_routes(
                             }
                         }
                         None => {
-                            warn!("⚠️ share/request: 链客户端尚未连接, AttestationGuard 未验证");
-                            AttestationGuard::unverified()
+                            warn!("⚠️ share/request: 链客户端尚未连接, 拒绝请求");
+                            return (
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                Json(serde_json::json!({"error": "chain client not available"})),
+                            );
                         }
                     };
                     drop(chain_lock);
@@ -1077,11 +1115,44 @@ pub fn ceremony_routes(
         .route("/migration/export-secret", post({
             let enc = enclave_migration;
             let guard = migration_guard;
+            let chain = chain_migration;
             move |Json(req): Json<MigrationExportRequest>| {
                 let enc = enc.clone();
                 let guard = guard.clone();
+                let chain = chain.clone();
                 async move {
-                    match handle_migration_export(&enc, &req, &guard) {
+                    let chain_lock = chain.read().await;
+                    let attestation = match chain_lock.as_ref() {
+                        Some(c) => {
+                            match c.query_attestation_guard(&req.requester_pk).await {
+                                Ok((is_tee, quote_ok)) => {
+                                    info!(
+                                        requester = %req.requester_pk,
+                                        is_verified_tee = is_tee,
+                                        quote_verified = quote_ok,
+                                        "migration-export: AttestationGuard 链上查询完成"
+                                    );
+                                    AttestationGuard::verified(is_tee, quote_ok)
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "migration-export: AttestationGuard 查询失败");
+                                    return (
+                                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                        Json(serde_json::json!({"error": "attestation query failed"})),
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            warn!("⚠️ migration-export: 链客户端尚未连接, 拒绝导出");
+                            return (
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                Json(serde_json::json!({"error": "chain client not available"})),
+                            );
+                        }
+                    };
+                    drop(chain_lock);
+                    match handle_migration_export(&enc, &req, &guard, &attestation) {
                         Ok(resp) => (axum::http::StatusCode::OK, Json(serde_json::json!(resp))),
                         Err(e) => (
                             axum::http::StatusCode::FORBIDDEN,
@@ -1344,7 +1415,8 @@ mod tests {
         let req = MigrationExportRequest { requester_pk: new_pk_hex.clone() };
 
         // 第一次导出成功
-        let resp = handle_migration_export(&enclave, &req, &guard).unwrap();
+        let attestation = AttestationGuard::verified(true, true);
+        let resp = handle_migration_export(&enclave, &req, &guard, &attestation).unwrap();
         assert!(!resp.encrypted_secret.is_empty());
         assert!(!resp.ephemeral_pk.is_empty());
         assert!(!resp.source_pk.is_empty());
@@ -1359,12 +1431,12 @@ mod tests {
         let decrypted = shamir::ecdh_decrypt_raw(&encrypted_bytes, &receiver_x25519, &ephemeral_pk).unwrap();
 
         let (sk_out, token_out) = shamir::decode_secrets(&decrypted).unwrap();
-        assert_eq!(token_out, token);
+        assert_eq!(token_out.as_str(), token);
         assert_eq!(sk_out, sk);
 
         // 第二次导出拒绝 (一次性使用)
         let req2 = MigrationExportRequest { requester_pk: new_pk_hex };
-        let result = handle_migration_export(&enclave, &req2, &guard);
+        let result = handle_migration_export(&enclave, &req2, &guard, &attestation);
         assert!(result.is_err());
     }
 
@@ -1377,8 +1449,50 @@ mod tests {
         let req = MigrationExportRequest {
             requester_pk: hex::encode([0x11; 32]),
         };
-        let result = handle_migration_export(&enclave, &req, &guard);
+        let attestation = AttestationGuard::verified(true, true);
+        let result = handle_migration_export(&enclave, &req, &guard, &attestation);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn migration_export_rejected_without_attestation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let enclave = make_enclave(path);
+
+        // 创建 share
+        let token = "test:MIGRATION_ATT_TOKEN";
+        let sk = [0xBBu8; 32];
+        let secrets = shamir::encode_secrets(token, &sk);
+        let config = shamir::ShamirConfig::new(1, 1).unwrap();
+        let shares = shamir::split(&secrets, &config).unwrap();
+        let seal_key = enclave.seal_key().unwrap();
+        let encrypted = shamir::encrypt_share(&shares[0], &seal_key).unwrap();
+        enclave.save_local_share(&encrypted).unwrap();
+
+        let guard = MigrationExportGuard::new();
+        let new_sk = ed25519_dalek::SigningKey::from_bytes(&[0xCC; 32]);
+        let req = MigrationExportRequest {
+            requester_pk: hex::encode(new_sk.verifying_key().to_bytes()),
+        };
+
+        // 未验证 → 拒绝, 一次性守卫不应被消耗
+        let att = AttestationGuard::unverified();
+        let result = handle_migration_export(&enclave, &req, &guard, &att);
+        assert!(result.is_err());
+        assert!(!guard.is_exported());
+
+        // quote_verified=false → 拒绝
+        let att = AttestationGuard::verified(true, false);
+        let result = handle_migration_export(&enclave, &req, &guard, &att);
+        assert!(result.is_err());
+        assert!(!guard.is_exported());
+
+        // 完全验证 → 成功, 守卫被消耗
+        let att = AttestationGuard::verified(true, true);
+        let result = handle_migration_export(&enclave, &req, &guard, &att);
+        assert!(result.is_ok());
+        assert!(guard.is_exported());
     }
 
     #[test]
@@ -1415,7 +1529,7 @@ mod tests {
         let decrypted = shamir::decrypt_share(&loaded, &seal_key).unwrap();
         let recovered = shamir::recover(&[decrypted.clone()], 1).unwrap();
         let (sk_out, token_out) = shamir::decode_secrets(&recovered).unwrap();
-        assert_eq!(token_out, token);
+        assert_eq!(token_out.as_str(), token);
         assert_eq!(sk_out, sk);
 
         // 验证: 可重新分片为 K=2, N=3

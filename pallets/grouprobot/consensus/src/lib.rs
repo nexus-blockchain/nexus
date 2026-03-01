@@ -106,6 +106,8 @@ pub mod pallet {
 		type RewardDistributor: EraRewardDistributor;
 		/// 订阅层级查询 (tier gate)
 		type Subscription: SubscriptionProvider;
+		/// Peer Uptime 记录 (Era 结束时调用 registry pallet)
+		type PeerUptimeRecorder: PeerUptimeRecorder;
 	}
 
 	// ========================================================================
@@ -640,6 +642,9 @@ pub mod pallet {
 				node_count,
 			);
 			let total_distributed: BalanceOf<T> = total_distributed_u128.unique_saturated_into();
+
+			// 委托 registry pallet 快照 Peer 心跳并清理历史
+			T::PeerUptimeRecorder::record_era_uptime(era);
 
 			CurrentEra::<T>::put(era.saturating_add(1));
 			EraStartBlock::<T>::put(now);

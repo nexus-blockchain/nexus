@@ -453,8 +453,8 @@ mod tests {
         let sock_path = vault_ipc::default_socket_path(&dir_path);
 
         let mut vault = TokenVault::new();
-        vault.set_telegram_token("test_tg:TOKEN123".into());
-        vault.set_discord_token("test_dc_TOKEN456".into());
+        vault.set_telegram_token("test_tg:TOKEN123".to_string());
+        vault.set_discord_token("test_dc_TOKEN456".to_string());
 
         let server = VaultServer::new(vault, sock_path.clone());
         let handle = tokio::spawn(async move {

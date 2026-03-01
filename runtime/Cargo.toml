@@ -64,7 +64,7 @@ pallet-commission-team = { workspace = true }
 pallet-commission-pool-reward = { workspace = true }
 pallet-entity-commission = { workspace = true }
 pallet-entity-service = { workspace = true }
-pallet-entity-transaction = { workspace = true }
+pallet-entity-order = { workspace = true }
 pallet-entity-market = { workspace = true }
 pallet-entity-review = { workspace = true }
 pallet-entity-disclosure = { workspace = true }
@@ -152,7 +152,7 @@ std = [
 	"pallet-commission-pool-reward/std",
 	"pallet-entity-commission/std",
 	"pallet-entity-service/std",
-	"pallet-entity-transaction/std",
+	"pallet-entity-order/std",
 	"pallet-entity-market/std",
 	"pallet-entity-review/std",
 	"pallet-entity-disclosure/std",

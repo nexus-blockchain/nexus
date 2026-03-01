@@ -32,7 +32,7 @@ members = [
     "pallets/entity/commission/pool-reward",
     "pallets/entity/commission",
     "pallets/entity/service",
-    "pallets/entity/transaction",
+    "pallets/entity/order",
     "pallets/entity/market",
     "pallets/entity/review",
     "pallets/entity/disclosure",
@@ -86,7 +86,7 @@ pallet-commission-team = { path = "./pallets/entity/commission/team", default-fe
 pallet-commission-pool-reward = { path = "./pallets/entity/commission/pool-reward", default-features = false }
 pallet-entity-commission = { path = "./pallets/entity/commission", default-features = false }
 pallet-entity-service = { path = "./pallets/entity/service", default-features = false }
-pallet-entity-transaction = { path = "./pallets/entity/transaction", default-features = false }
+pallet-entity-order = { path = "./pallets/entity/order", default-features = false }
 pallet-entity-market = { path = "./pallets/entity/market", default-features = false }
 pallet-entity-review = { path = "./pallets/entity/review", default-features = false }
 pallet-entity-disclosure = { path = "./pallets/entity/disclosure", default-features = false }

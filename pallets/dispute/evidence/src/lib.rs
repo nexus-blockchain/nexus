@@ -250,6 +250,11 @@ pub mod pallet {
         /// 默认 2_592_000 ≈ 180天 (6s/block)
         #[pallet::constant]
         type ArchiveTtlBlocks: Get<u32>;
+
+        /// 🆕 M-NEW-5修复: 归档延迟（区块数），证据创建后多久可归档
+        /// 默认 1_296_000 ≈ 90天 (6s/block)
+        #[pallet::constant]
+        type ArchiveDelayBlocks: Get<u32>;
     }
 
     #[pallet::pallet]
@@ -686,16 +691,19 @@ pub mod pallet {
                 id
             });
             
+            // 🆕 M-NEW-4修复: 拒绝所有媒体列表为空的证据提交（不再使用占位符CID）
+            ensure!(
+                !imgs.is_empty() || !vids.is_empty() || !docs.is_empty(),
+                Error::<T>::InvalidCidFormat
+            );
             // 🔮 Phase 1.5 计划：将 imgs/vids/docs 打包为JSON上传IPFS，返回content_cid
             // 当前临时方案：使用第一个媒体的CID作为content_cid
             let temp_vec: Vec<u8> = if !imgs.is_empty() {
                 imgs[0].clone().into_inner()
             } else if !vids.is_empty() {
                 vids[0].clone().into_inner()
-            } else if !docs.is_empty() {
-                docs[0].clone().into_inner()
             } else {
-                b"QmPlaceholder".to_vec()
+                docs[0].clone().into_inner()
             };
             let content_cid: BoundedVec<u8, T::MaxContentCidLen> = temp_vec.try_into()
                 .map_err(|_| Error::<T>::InvalidCidFormat)?;
@@ -793,13 +801,12 @@ pub mod pallet {
                 *n = n.saturating_add(1);
                 id
             });
+            // 🆕 M-NEW-4修复: commit_hash 要求 memo 非空（不再使用占位符CID）
+            let memo_ref = memo.as_ref().ok_or(Error::<T>::InvalidCidFormat)?;
+            ensure!(!memo_ref.is_empty(), Error::<T>::InvalidCidFormat);
             // TODO: Phase 1.5 完整实施 - 从memo或其他来源获取content_cid
             // 临时方案：转换memo为content_cid类型
-            let temp_vec2: Vec<u8> = if let Some(ref m) = memo {
-                m.clone().into_inner()
-            } else {
-                b"QmPlaceholder2".to_vec()
-            };
+            let temp_vec2: Vec<u8> = memo_ref.clone().into_inner();
             let content_cid: BoundedVec<u8, T::MaxContentCidLen> = temp_vec2.try_into()
                 .map_err(|_| Error::<T>::InvalidCidFormat)?;
             
@@ -1290,15 +1297,18 @@ pub mod pallet {
                 id
             });
             
+            // 🆕 M-NEW-4修复: 拒绝所有媒体列表为空的补充证据
+            ensure!(
+                !imgs.is_empty() || !vids.is_empty() || !docs.is_empty(),
+                Error::<T>::InvalidCidFormat
+            );
             // 8. 构建补充证据（继承父证据的domain和target_id）
             let temp_vec: Vec<u8> = if !imgs.is_empty() {
                 imgs[0].clone().into_inner()
             } else if !vids.is_empty() {
                 vids[0].clone().into_inner()
-            } else if !docs.is_empty() {
-                docs[0].clone().into_inner()
             } else {
-                b"QmPlaceholder".to_vec()
+                docs[0].clone().into_inner()
             };
             let content_cid: BoundedVec<u8, T::MaxContentCidLen> = temp_vec.try_into()
                 .map_err(|_| Error::<T>::InvalidCidFormat)?;
@@ -1320,6 +1330,12 @@ pub mod pallet {
             // 9. 存储证据
             Evidences::<T>::insert(id, &ev);
             EvidenceByTarget::<T>::insert((parent.domain, parent.target_id), id, ());
+            // 🆕 M-NEW-2修复: 同步递增 EvidenceCountByTarget（与 commit 保持一致）
+            EvidenceCountByTarget::<T>::mutate(
+                (parent.domain, parent.target_id), |c| {
+                    *c = c.saturating_add(1);
+                },
+            );
             
             // 10. 建立父子关系
             EvidenceParent::<T>::insert(id, parent_id);
@@ -1667,8 +1683,8 @@ pub mod pallet {
         /// 归档条件：证据创建时间超过 90 天（1_296_000 区块）
         pub fn archive_old_evidences(max_count: u32) -> u32 {
             let now: u32 = frame_system::Pallet::<T>::block_number().saturated_into();
-            // 归档延迟：90天 = 1_296_000 区块（6秒/块）
-            let archive_delay: u32 = 1_296_000;
+            // 🆕 M-NEW-5修复: 使用 Config 常量替代硬编码归档延迟
+            let archive_delay: u32 = T::ArchiveDelayBlocks::get();
             let mut archived_count = 0u32;
             let mut cursor = EvidenceArchiveCursor::<T>::get();
             let max_id = NextEvidenceId::<T>::get();

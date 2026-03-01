@@ -8,6 +8,7 @@
 // 各节点 SGX seal 自己的 share，启动时互验 Quote 获取 K 份重构。
 
 use rand::RngCore;
+use zeroize::Zeroizing;
 
 /// 单个分片
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -294,7 +295,9 @@ pub fn encode_secrets(bot_token: &str, signing_key: &[u8; 32]) -> Vec<u8> {
 }
 
 /// 解码 secrets → (signing_key, bot_token)
-pub fn decode_secrets(data: &[u8]) -> Result<([u8; 32], String), ShamirError> {
+///
+/// bot_token 使用 Zeroizing<String> 包裹, 防止明文残留在堆内存
+pub fn decode_secrets(data: &[u8]) -> Result<([u8; 32], Zeroizing<String>), ShamirError> {
     if data.len() < 4 + 32 + 4 {
         return Err(ShamirError::InvalidParameters("secrets data too short".into()));
     }
@@ -308,8 +311,10 @@ pub fn decode_secrets(data: &[u8]) -> Result<([u8; 32], String), ShamirError> {
     if data.len() < 40 + token_len {
         return Err(ShamirError::InvalidParameters("secrets data truncated".into()));
     }
-    let bot_token = String::from_utf8(data[40..40 + token_len].to_vec())
-        .map_err(|e| ShamirError::InvalidParameters(format!("invalid UTF-8: {}", e)))?;
+    let bot_token = Zeroizing::new(
+        String::from_utf8(data[40..40 + token_len].to_vec())
+            .map_err(|e| ShamirError::InvalidParameters(format!("invalid UTF-8: {}", e)))?
+    );
     Ok((signing_key, bot_token))
 }
 
@@ -692,7 +697,7 @@ mod tests {
         let encoded = encode_secrets(token, &sk);
         let (recovered_sk, recovered_token) = decode_secrets(&encoded).unwrap();
         assert_eq!(recovered_sk, sk);
-        assert_eq!(recovered_token, token);
+        assert_eq!(recovered_token.as_str(), token);
     }
 
     #[test]
@@ -711,7 +716,7 @@ mod tests {
         let recovered = recover(&[shares[0].clone(), shares[2].clone()], 2).unwrap();
         let (dec_sk, dec_token) = decode_secrets(&recovered).unwrap();
         assert_eq!(dec_sk, sk);
-        assert_eq!(dec_token, token);
+        assert_eq!(dec_token.as_str(), token);
     }
 
     #[test]

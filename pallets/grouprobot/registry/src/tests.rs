@@ -1995,3 +1995,566 @@ fn tee_attestation_fails_not_owner() {
 		);
 	});
 }
+
+// ============================================================================
+// Operator Tests (Multi-Platform)
+// ============================================================================
+
+fn op_name(s: &[u8]) -> frame_support::BoundedVec<u8, frame_support::traits::ConstU32<64>> {
+	s.to_vec().try_into().unwrap()
+}
+
+fn op_contact(s: &[u8]) -> frame_support::BoundedVec<u8, frame_support::traits::ConstU32<128>> {
+	s.to_vec().try_into().unwrap()
+}
+
+fn app_hash(n: u8) -> [u8; 32] {
+	let mut h = [0u8; 32];
+	h[0] = n;
+	h[31] = 0xAA; // distinguish from bot_hash
+	h
+}
+
+#[test]
+fn register_operator_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER),
+			Platform::Telegram,
+			app_hash(1),
+			op_name(b"Operator Alpha"),
+			op_contact(b"@alpha_op"),
+		));
+		let op = Operators::<Test>::get(OWNER, Platform::Telegram).unwrap();
+		assert_eq!(op.owner, OWNER);
+		assert_eq!(op.platform, Platform::Telegram);
+		assert_eq!(op.platform_app_hash, app_hash(1));
+		assert_eq!(op.status, OperatorStatus::Active);
+		assert_eq!(op.bot_count, 0);
+		assert_eq!(op.sla_level, 0);
+		assert_eq!(op.reputation_score, 100);
+		assert_eq!(OperatorCount::<Test>::get(), 1);
+		assert_eq!(PlatformAppHashIndex::<Test>::get(Platform::Telegram, app_hash(1)), Some(OWNER));
+	});
+}
+
+#[test]
+fn register_operator_rejects_duplicate_same_platform() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op1"), op_contact(b"c1"),
+		));
+		assert_noop!(
+			GroupRobotRegistry::register_operator(
+				RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(2), op_name(b"Op2"), op_contact(b"c2"),
+			),
+			Error::<Test>::OperatorAlreadyRegistered
+		);
+	});
+}
+
+#[test]
+fn register_operator_allows_different_platforms() {
+	new_test_ext().execute_with(|| {
+		// 同一账户可在 Telegram 和 Discord 上分别注册
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"TG Op"), op_contact(b"@tg"),
+		));
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Discord, app_hash(2), op_name(b"DC Op"), op_contact(b"@dc"),
+		));
+		assert_eq!(OperatorCount::<Test>::get(), 2);
+		assert!(Operators::<Test>::get(OWNER, Platform::Telegram).is_some());
+		assert!(Operators::<Test>::get(OWNER, Platform::Discord).is_some());
+	});
+}
+
+#[test]
+fn register_operator_rejects_duplicate_app_hash_same_platform() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op1"), op_contact(b"c1"),
+		));
+		assert_noop!(
+			GroupRobotRegistry::register_operator(
+				RuntimeOrigin::signed(OWNER2), Platform::Telegram, app_hash(1), op_name(b"Op2"), op_contact(b"c2"),
+			),
+			Error::<Test>::ApiIdHashAlreadyUsed
+		);
+	});
+}
+
+#[test]
+fn register_operator_allows_same_app_hash_different_platforms() {
+	new_test_ext().execute_with(|| {
+		// 同一 app_hash 在不同平台上是允许的 (不同平台的 ID 命名空间独立)
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"TG"), op_contact(b"c"),
+		));
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER2), Platform::Discord, app_hash(1), op_name(b"DC"), op_contact(b"c"),
+		));
+		assert_eq!(OperatorCount::<Test>::get(), 2);
+	});
+}
+
+#[test]
+fn register_operator_rejects_empty_name() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotRegistry::register_operator(
+				RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b""), op_contact(b"c1"),
+			),
+			Error::<Test>::OperatorNameEmpty
+		);
+	});
+}
+
+#[test]
+fn update_operator_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Old"), op_contact(b"old"),
+		));
+		assert_ok!(GroupRobotRegistry::update_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, op_name(b"New"), op_contact(b"new"),
+		));
+		let op = Operators::<Test>::get(OWNER, Platform::Telegram).unwrap();
+		assert_eq!(op.name.as_slice(), b"New");
+		assert_eq!(op.contact.as_slice(), b"new");
+	});
+}
+
+#[test]
+fn update_operator_fails_not_registered() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotRegistry::update_operator(
+				RuntimeOrigin::signed(OWNER), Platform::Telegram, op_name(b"X"), op_contact(b"y"),
+			),
+			Error::<Test>::OperatorNotFound
+		);
+	});
+}
+
+#[test]
+fn deregister_operator_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op"), op_contact(b"c"),
+		));
+		assert_eq!(OperatorCount::<Test>::get(), 1);
+
+		assert_ok!(GroupRobotRegistry::deregister_operator(RuntimeOrigin::signed(OWNER), Platform::Telegram));
+		assert!(Operators::<Test>::get(OWNER, Platform::Telegram).is_none());
+		assert!(PlatformAppHashIndex::<Test>::get(Platform::Telegram, app_hash(1)).is_none());
+		assert_eq!(OperatorCount::<Test>::get(), 0);
+	});
+}
+
+#[test]
+fn deregister_operator_fails_with_active_bots() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op"), op_contact(b"c"),
+		));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::assign_bot_to_operator(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), Platform::Telegram,
+		));
+
+		assert_noop!(
+			GroupRobotRegistry::deregister_operator(RuntimeOrigin::signed(OWNER), Platform::Telegram),
+			Error::<Test>::OperatorHasActiveBots
+		);
+	});
+}
+
+#[test]
+fn set_operator_sla_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op"), op_contact(b"c"),
+		));
+		assert_ok!(GroupRobotRegistry::set_operator_sla(RuntimeOrigin::root(), OWNER, Platform::Telegram, 2));
+		assert_eq!(Operators::<Test>::get(OWNER, Platform::Telegram).unwrap().sla_level, 2);
+	});
+}
+
+#[test]
+fn set_operator_sla_rejects_invalid_level() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op"), op_contact(b"c"),
+		));
+		assert_noop!(
+			GroupRobotRegistry::set_operator_sla(RuntimeOrigin::root(), OWNER, Platform::Telegram, 4),
+			Error::<Test>::InvalidSlaLevel
+		);
+	});
+}
+
+#[test]
+fn set_operator_sla_rejects_non_root() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op"), op_contact(b"c"),
+		));
+		assert_noop!(
+			GroupRobotRegistry::set_operator_sla(RuntimeOrigin::signed(OWNER), OWNER, Platform::Telegram, 1),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+#[test]
+fn assign_bot_to_operator_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op"), op_contact(b"c"),
+		));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::assign_bot_to_operator(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), Platform::Telegram,
+		));
+
+		assert_eq!(BotOperator::<Test>::get(bot_hash(1)), Some((OWNER, Platform::Telegram)));
+		assert_eq!(OperatorBots::<Test>::get(OWNER, Platform::Telegram).len(), 1);
+		assert_eq!(Operators::<Test>::get(OWNER, Platform::Telegram).unwrap().bot_count, 1);
+	});
+}
+
+#[test]
+fn assign_bot_rejects_not_owner() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER2), Platform::Telegram, app_hash(2), op_name(b"Op2"), op_contact(b"c"),
+		));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::assign_bot_to_operator(
+				RuntimeOrigin::signed(OWNER2), bot_hash(1), Platform::Telegram,
+			),
+			Error::<Test>::NotBotOwner
+		);
+	});
+}
+
+#[test]
+fn assign_bot_rejects_not_operator() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::assign_bot_to_operator(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), Platform::Telegram,
+			),
+			Error::<Test>::OperatorNotFound
+		);
+	});
+}
+
+#[test]
+fn assign_bot_rejects_duplicate() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op"), op_contact(b"c"),
+		));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::assign_bot_to_operator(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), Platform::Telegram,
+		));
+		assert_noop!(
+			GroupRobotRegistry::assign_bot_to_operator(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), Platform::Telegram,
+			),
+			Error::<Test>::BotAlreadyAssigned
+		);
+	});
+}
+
+#[test]
+fn unassign_bot_from_operator_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op"), op_contact(b"c"),
+		));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::assign_bot_to_operator(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), Platform::Telegram,
+		));
+		assert_eq!(Operators::<Test>::get(OWNER, Platform::Telegram).unwrap().bot_count, 1);
+
+		assert_ok!(GroupRobotRegistry::unassign_bot_from_operator(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+		));
+		assert!(BotOperator::<Test>::get(bot_hash(1)).is_none());
+		assert_eq!(OperatorBots::<Test>::get(OWNER, Platform::Telegram).len(), 0);
+		assert_eq!(Operators::<Test>::get(OWNER, Platform::Telegram).unwrap().bot_count, 0);
+	});
+}
+
+#[test]
+fn unassign_bot_fails_not_assigned() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::unassign_bot_from_operator(
+				RuntimeOrigin::signed(OWNER), bot_hash(1),
+			),
+			Error::<Test>::BotNotAssigned
+		);
+	});
+}
+
+#[test]
+fn operator_multi_bot_multi_peer_integration() {
+	new_test_ext().execute_with(|| {
+		let tg = Platform::Telegram;
+		// 注册 Telegram 运营商
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), tg, app_hash(1), op_name(b"MultiBot Op"), op_contact(b"@multi"),
+		));
+
+		// 注册 2 个 Bot (bot_hash(1) is paid tier in mock)
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(2), pk(2)));
+
+		// 将两个 Bot 都分配给 Telegram 运营商
+		assert_ok!(GroupRobotRegistry::assign_bot_to_operator(RuntimeOrigin::signed(OWNER), bot_hash(1), tg));
+		assert_ok!(GroupRobotRegistry::assign_bot_to_operator(RuntimeOrigin::signed(OWNER), bot_hash(2), tg));
+		assert_eq!(Operators::<Test>::get(OWNER, tg).unwrap().bot_count, 2);
+		assert_eq!(OperatorBots::<Test>::get(OWNER, tg).len(), 2);
+
+		// Bot 1 (paid) 注册 2 个 Peer (运营商内部多节点)
+		let ep1: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<256>> =
+			b"https://node1.example.com".to_vec().try_into().unwrap();
+		let ep2: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<256>> =
+			b"https://node2.example.com".to_vec().try_into().unwrap();
+
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), ep1,
+		));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(11), ep2,
+		));
+		assert_eq!(PeerRegistry::<Test>::get(bot_hash(1)).len(), 2);
+
+		// 验证 helper functions
+		assert_eq!(GroupRobotRegistry::bot_operator_account(&bot_hash(1)), Some(OWNER));
+		assert_eq!(GroupRobotRegistry::bot_operator_full(&bot_hash(1)), Some((OWNER, tg)));
+		assert_eq!(GroupRobotRegistry::operator_bots(&OWNER, tg).len(), 2);
+
+		// 取消分配 Bot 2
+		assert_ok!(GroupRobotRegistry::unassign_bot_from_operator(RuntimeOrigin::signed(OWNER), bot_hash(2)));
+		assert_eq!(Operators::<Test>::get(OWNER, tg).unwrap().bot_count, 1);
+		assert!(BotOperator::<Test>::get(bot_hash(2)).is_none());
+
+		// 现在可以取消 Bot 1 后注销运营商
+		assert_ok!(GroupRobotRegistry::unassign_bot_from_operator(RuntimeOrigin::signed(OWNER), bot_hash(1)));
+		assert_ok!(GroupRobotRegistry::deregister_operator(RuntimeOrigin::signed(OWNER), tg));
+		assert_eq!(OperatorCount::<Test>::get(), 0);
+	});
+}
+
+#[test]
+fn two_operators_independent_bots() {
+	new_test_ext().execute_with(|| {
+		let tg = Platform::Telegram;
+		// 两个独立运营商 (同一平台)
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), tg, app_hash(1), op_name(b"Op A"), op_contact(b"@a"),
+		));
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER2), tg, app_hash(2), op_name(b"Op B"), op_contact(b"@b"),
+		));
+		assert_eq!(OperatorCount::<Test>::get(), 2);
+
+		// 各自注册自己的 Bot
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER2), bot_hash(2), pk(2)));
+
+		assert_ok!(GroupRobotRegistry::assign_bot_to_operator(RuntimeOrigin::signed(OWNER), bot_hash(1), tg));
+		assert_ok!(GroupRobotRegistry::assign_bot_to_operator(RuntimeOrigin::signed(OWNER2), bot_hash(2), tg));
+
+		// 互不影响
+		assert_eq!(GroupRobotRegistry::bot_operator_account(&bot_hash(1)), Some(OWNER));
+		assert_eq!(GroupRobotRegistry::bot_operator_account(&bot_hash(2)), Some(OWNER2));
+		assert_eq!(GroupRobotRegistry::operator_bots(&OWNER, tg).len(), 1);
+		assert_eq!(GroupRobotRegistry::operator_bots(&OWNER2, tg).len(), 1);
+	});
+}
+
+#[test]
+fn cross_platform_operator_isolation() {
+	new_test_ext().execute_with(|| {
+		// 同一账户在 Telegram 和 Discord 上各注册运营商
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1),
+			op_name(b"TG Operator"), op_contact(b"@tg_op"),
+		));
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Discord, app_hash(2),
+			op_name(b"DC Operator"), op_contact(b"@dc_op"),
+		));
+		assert_eq!(OperatorCount::<Test>::get(), 2);
+
+		// 注册 2 个 Bot
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(2), pk(2)));
+
+		// Bot 1 分配给 Telegram 运营商, Bot 2 分配给 Discord 运营商
+		assert_ok!(GroupRobotRegistry::assign_bot_to_operator(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), Platform::Telegram,
+		));
+		assert_ok!(GroupRobotRegistry::assign_bot_to_operator(
+			RuntimeOrigin::signed(OWNER), bot_hash(2), Platform::Discord,
+		));
+
+		// 验证隔离
+		assert_eq!(GroupRobotRegistry::bot_operator_full(&bot_hash(1)), Some((OWNER, Platform::Telegram)));
+		assert_eq!(GroupRobotRegistry::bot_operator_full(&bot_hash(2)), Some((OWNER, Platform::Discord)));
+		assert_eq!(GroupRobotRegistry::operator_bots(&OWNER, Platform::Telegram).len(), 1);
+		assert_eq!(GroupRobotRegistry::operator_bots(&OWNER, Platform::Discord).len(), 1);
+		assert_eq!(Operators::<Test>::get(OWNER, Platform::Telegram).unwrap().bot_count, 1);
+		assert_eq!(Operators::<Test>::get(OWNER, Platform::Discord).unwrap().bot_count, 1);
+
+		// 注销 Telegram 运营商 (需先取消 Bot)
+		assert_ok!(GroupRobotRegistry::unassign_bot_from_operator(RuntimeOrigin::signed(OWNER), bot_hash(1)));
+		assert_ok!(GroupRobotRegistry::deregister_operator(RuntimeOrigin::signed(OWNER), Platform::Telegram));
+
+		// Discord 运营商不受影响
+		assert_eq!(OperatorCount::<Test>::get(), 1);
+		assert!(Operators::<Test>::get(OWNER, Platform::Discord).is_some());
+		assert_eq!(GroupRobotRegistry::bot_operator_full(&bot_hash(2)), Some((OWNER, Platform::Discord)));
+	});
+}
+
+// ============================================================================
+// Peer Uptime Tracking Tests
+// ============================================================================
+
+#[test]
+fn heartbeat_increments_uptime_counter() {
+	new_test_ext().execute_with(|| {
+		// bot_hash(1) => paid tier (MockSubscription)
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("n1"),
+		));
+
+		// 初始计数为 0
+		assert_eq!(GroupRobotRegistry::peer_heartbeat_count(&bot_hash(1), &pk(10)), 0);
+
+		// 发送 3 次心跳
+		for _ in 0..3 {
+			assert_ok!(GroupRobotRegistry::heartbeat_peer(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10),
+			));
+		}
+
+		assert_eq!(GroupRobotRegistry::peer_heartbeat_count(&bot_hash(1), &pk(10)), 3);
+	});
+}
+
+#[test]
+fn record_era_uptime_snapshots_and_resets() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("n1"),
+		));
+
+		// 5 次心跳
+		for _ in 0..5 {
+			assert_ok!(GroupRobotRegistry::heartbeat_peer(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10),
+			));
+		}
+		assert_eq!(GroupRobotRegistry::peer_heartbeat_count(&bot_hash(1), &pk(10)), 5);
+
+		// 模拟 Era 0 结算
+		<GroupRobotRegistry as PeerUptimeRecorder>::record_era_uptime(0);
+
+		// 计数器已重置
+		assert_eq!(GroupRobotRegistry::peer_heartbeat_count(&bot_hash(1), &pk(10)), 0);
+
+		// 历史快照已记录
+		let history = GroupRobotRegistry::peer_era_uptime(&bot_hash(1), &pk(10));
+		assert_eq!(history.len(), 1);
+		assert_eq!(history[0], (0, 5));
+	});
+}
+
+#[test]
+fn uptime_rolling_window_evicts_oldest() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("n1"),
+		));
+
+		// MaxUptimeEraHistory = 10 in mock
+		// 填满 10 个 Era + 额外 2 个
+		for era in 0..12u64 {
+			assert_ok!(GroupRobotRegistry::heartbeat_peer(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10),
+			));
+			<GroupRobotRegistry as PeerUptimeRecorder>::record_era_uptime(era);
+		}
+
+		let history = GroupRobotRegistry::peer_era_uptime(&bot_hash(1), &pk(10));
+		// 滚动窗口: 只保留最近 10 个
+		assert_eq!(history.len(), 10);
+		// 最老的应该是 era 2 (era 0, 1 被淘汰)
+		assert_eq!(history[0].0, 2);
+		assert_eq!(history[9].0, 11);
+	});
+}
+
+#[test]
+fn uptime_multiple_peers_tracked_independently() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("n1"),
+		));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(11), endpoint("n2"),
+		));
+
+		// Peer A: 3 次心跳, Peer B: 7 次心跳
+		for _ in 0..3 {
+			assert_ok!(GroupRobotRegistry::heartbeat_peer(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10),
+			));
+		}
+		for _ in 0..7 {
+			assert_ok!(GroupRobotRegistry::heartbeat_peer(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), pk(11),
+			));
+		}
+
+		<GroupRobotRegistry as PeerUptimeRecorder>::record_era_uptime(0);
+
+		let history_a = GroupRobotRegistry::peer_era_uptime(&bot_hash(1), &pk(10));
+		let history_b = GroupRobotRegistry::peer_era_uptime(&bot_hash(1), &pk(11));
+		assert_eq!(history_a[0], (0, 3));
+		assert_eq!(history_b[0], (0, 7));
+	});
+}
+
+#[test]
+fn no_heartbeat_no_uptime_record() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("n1"),
+		));
+
+		// 无心跳, 直接结算
+		<GroupRobotRegistry as PeerUptimeRecorder>::record_era_uptime(0);
+
+		let history = GroupRobotRegistry::peer_era_uptime(&bot_hash(1), &pk(10));
+		assert_eq!(history.len(), 0);
+	});
+}

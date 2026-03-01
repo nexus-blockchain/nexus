@@ -21,6 +21,12 @@ pub struct TokenVault {
     tg_token: Option<Zeroizing<String>>,
     /// Discord Bot Token (Zeroizing 包装)
     dc_token: Option<Zeroizing<String>>,
+    /// Telegram API ID (Local Bot API Server 用, Zeroizing 包装)
+    tg_api_id: Option<Zeroizing<String>>,
+    /// Telegram API Hash (Local Bot API Server 用, Zeroizing 包装)
+    tg_api_hash: Option<Zeroizing<String>>,
+    /// Telegram API Base URL (默认 https://api.telegram.org, Local Server 时改为 http://127.0.0.1:8081)
+    tg_api_base_url: Option<String>,
 }
 
 impl TokenVault {
@@ -29,12 +35,17 @@ impl TokenVault {
         Self {
             tg_token: None,
             dc_token: None,
+            tg_api_id: None,
+            tg_api_hash: None,
+            tg_api_base_url: None,
         }
     }
 
     /// 注入 Telegram Token (仅调用一次)
-    pub fn set_telegram_token(&mut self, token: String) {
-        let z = Zeroizing::new(token);
+    ///
+    /// 接受 String 或 Zeroizing<String>, 内部统一以 Zeroizing 保护
+    pub fn set_telegram_token(&mut self, token: impl Into<Zeroizing<String>>) {
+        let z: Zeroizing<String> = token.into();
         // mlock: 锁定 Token 内存页, 防止被 swap 到磁盘
         if mem_security::mlock_bytes(z.as_bytes()) {
             debug!("Telegram token memory locked (mlock)");
@@ -43,23 +54,69 @@ impl TokenVault {
     }
 
     /// 注入 Discord Token (仅调用一次)
-    pub fn set_discord_token(&mut self, token: String) {
-        let z = Zeroizing::new(token);
+    ///
+    /// 接受 String 或 Zeroizing<String>, 内部统一以 Zeroizing 保护
+    pub fn set_discord_token(&mut self, token: impl Into<Zeroizing<String>>) {
+        let z: Zeroizing<String> = token.into();
         if mem_security::mlock_bytes(z.as_bytes()) {
             debug!("Discord token memory locked (mlock)");
         }
         self.dc_token = Some(z);
     }
 
+    /// 注入 Telegram API credentials (api_id + api_hash, Local Bot API Server 用)
+    ///
+    /// api_id/api_hash 比 bot token 更敏感 — 泄露可影响开发者账号全部 bot
+    pub fn set_telegram_api_credentials(
+        &mut self,
+        api_id: impl Into<Zeroizing<String>>,
+        api_hash: impl Into<Zeroizing<String>>,
+    ) {
+        let id: Zeroizing<String> = api_id.into();
+        let hash: Zeroizing<String> = api_hash.into();
+        if mem_security::mlock_bytes(id.as_bytes()) {
+            debug!("Telegram API ID memory locked (mlock)");
+        }
+        if mem_security::mlock_bytes(hash.as_bytes()) {
+            debug!("Telegram API hash memory locked (mlock)");
+        }
+        self.tg_api_id = Some(id);
+        self.tg_api_hash = Some(hash);
+    }
+
+    /// 设置 Telegram API Base URL (Local Bot API Server 地址)
+    ///
+    /// 默认 https://api.telegram.org; 部署 Local Server 时改为 http://127.0.0.1:8081
+    pub fn set_tg_api_base_url(&mut self, url: String) {
+        self.tg_api_base_url = Some(url);
+    }
+
+    /// 获取 API credentials 引用 (用于启动 Local Bot API Server sidecar)
+    #[allow(dead_code)]
+    pub fn tg_api_credentials(&self) -> Option<(&str, &str)> {
+        match (&self.tg_api_id, &self.tg_api_hash) {
+            (Some(id), Some(hash)) => Some((id.as_str(), hash.as_str())),
+            _ => None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn has_tg_api_credentials(&self) -> bool {
+        self.tg_api_id.is_some() && self.tg_api_hash.is_some()
+    }
+
     /// 构建 Telegram API URL (Token 在内部拼接, 返回 Zeroizing<String>)
     ///
-    /// 返回值 drop 时自动清零堆内存
+    /// base URL 可配置: 默认为 Telegram 官方, 部署 Local Server 时自动切换
     pub fn build_tg_api_url(&self, method: &str) -> BotResult<Zeroizing<String>> {
         let token = self.tg_token.as_ref().ok_or_else(|| {
             BotError::EnclaveError("Telegram token not set in vault".into())
         })?;
+        let base = self.tg_api_base_url.as_deref()
+            .unwrap_or("https://api.telegram.org");
         Ok(Zeroizing::new(format!(
-            "https://api.telegram.org/bot{}/{}",
+            "{}/bot{}/{}",
+            base,
             token.as_str(),
             method
         )))
@@ -111,7 +168,7 @@ impl TokenVault {
         Ok(hash)
     }
 
-    /// 安全清零所有 Token
+    /// 安全清零所有 Token 和 credentials
     pub fn zeroize_all(&mut self) {
         // munlock before drop (Zeroizing 会清零内容, 然后 munlock 释放页锁)
         if let Some(ref t) = self.tg_token {
@@ -120,8 +177,17 @@ impl TokenVault {
         if let Some(ref t) = self.dc_token {
             mem_security::munlock_bytes(t.as_bytes());
         }
+        if let Some(ref t) = self.tg_api_id {
+            mem_security::munlock_bytes(t.as_bytes());
+        }
+        if let Some(ref t) = self.tg_api_hash {
+            mem_security::munlock_bytes(t.as_bytes());
+        }
         self.tg_token = None;
         self.dc_token = None;
+        self.tg_api_id = None;
+        self.tg_api_hash = None;
+        self.tg_api_base_url = None;
     }
 
     /// 检查 Telegram token 是否已设置
@@ -145,9 +211,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_tg_api_url() {
+    fn build_tg_api_url_default_base() {
         let mut vault = TokenVault::new();
-        vault.set_telegram_token("123456:ABCDEF".into());
+        vault.set_telegram_token("123456:ABCDEF".to_string());
         let url = vault.build_tg_api_url("sendMessage").unwrap();
         assert_eq!(
             url.as_str(),
@@ -156,9 +222,21 @@ mod tests {
     }
 
     #[test]
+    fn build_tg_api_url_custom_base() {
+        let mut vault = TokenVault::new();
+        vault.set_telegram_token("123456:ABCDEF".to_string());
+        vault.set_tg_api_base_url("http://127.0.0.1:8081".into());
+        let url = vault.build_tg_api_url("sendMessage").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "http://127.0.0.1:8081/bot123456:ABCDEF/sendMessage"
+        );
+    }
+
+    #[test]
     fn build_dc_auth_header() {
         let mut vault = TokenVault::new();
-        vault.set_discord_token("my-dc-token".into());
+        vault.set_discord_token("my-dc-token".to_string());
         let header = vault.build_dc_auth_header().unwrap();
         assert_eq!(header.as_str(), "Bot my-dc-token");
     }
@@ -166,7 +244,7 @@ mod tests {
     #[test]
     fn build_dc_identify_payload() {
         let mut vault = TokenVault::new();
-        vault.set_discord_token("dc-token-123".into());
+        vault.set_discord_token("dc-token-123".to_string());
         let payload = vault.build_dc_identify_payload(33281).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(parsed["op"], 2);
@@ -185,8 +263,8 @@ mod tests {
     #[test]
     fn zeroize_all_clears_tokens() {
         let mut vault = TokenVault::new();
-        vault.set_telegram_token("tg-token".into());
-        vault.set_discord_token("dc-token".into());
+        vault.set_telegram_token("tg-token".to_string());
+        vault.set_discord_token("dc-token".to_string());
         assert!(vault.has_telegram_token());
         assert!(vault.has_discord_token());
 
@@ -199,7 +277,7 @@ mod tests {
     #[test]
     fn derive_bot_id_hash() {
         let mut vault = TokenVault::new();
-        vault.set_telegram_token("123456:ABCDEF".into());
+        vault.set_telegram_token("123456:ABCDEF".to_string());
         let hash = vault.derive_tg_bot_id_hash().unwrap();
         assert_eq!(hash.len(), 32);
         assert_ne!(hash, [0u8; 32]);
@@ -207,5 +285,30 @@ mod tests {
         // 确定性
         let hash2 = vault.derive_tg_bot_id_hash().unwrap();
         assert_eq!(hash, hash2);
+    }
+
+    #[test]
+    fn set_and_get_api_credentials() {
+        let mut vault = TokenVault::new();
+        assert!(!vault.has_tg_api_credentials());
+        assert!(vault.tg_api_credentials().is_none());
+
+        vault.set_telegram_api_credentials("12345".to_string(), "abc123hash".to_string());
+        assert!(vault.has_tg_api_credentials());
+        let (id, hash) = vault.tg_api_credentials().unwrap();
+        assert_eq!(id, "12345");
+        assert_eq!(hash, "abc123hash");
+    }
+
+    #[test]
+    fn zeroize_all_clears_api_credentials() {
+        let mut vault = TokenVault::new();
+        vault.set_telegram_api_credentials("12345".to_string(), "abc123hash".to_string());
+        vault.set_tg_api_base_url("http://localhost:8081".into());
+        assert!(vault.has_tg_api_credentials());
+
+        vault.zeroize_all();
+        assert!(!vault.has_tg_api_credentials());
+        assert!(vault.tg_api_credentials().is_none());
     }
 }
