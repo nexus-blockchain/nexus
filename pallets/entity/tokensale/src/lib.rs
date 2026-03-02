@@ -580,6 +580,12 @@ pub mod pallet {
         DutchAuctionNotConfigured,
         /// 活跃轮次已满
         ActiveRoundsFull,
+        /// 轮次 ID 溢出
+        RoundIdOverflow,
+        /// 开始时间不能在过去
+        StartBlockInPast,
+        /// Entity 代币 unreserve 不完整
+        IncompleteUnreserve,
     }
 
     // ==================== Hooks ====================
@@ -604,7 +610,8 @@ pub mod pallet {
 
                 if should_end {
                     Self::do_auto_end_sale(round_id);
-                    weight = weight.saturating_add(T::DbWeight::get().writes(1));
+                    // M1-audit: do_auto_end_sale 包含 SaleRounds::mutate(r+w) + unreserve(r+w) + event(w)
+                    weight = weight.saturating_add(T::DbWeight::get().reads_writes(1, 3));
                 } else {
                     let _ = remaining.try_push(round_id);
                 }
@@ -648,6 +655,8 @@ pub mod pallet {
             ensure!(min_kyc_level <= 4, Error::<T>::InvalidKycLevel);
 
             let now = <frame_system::Pallet<T>>::block_number();
+            // L3-audit: start_block 不能在过去
+            ensure!(start_block >= now, Error::<T>::StartBlockInPast);
             let round_id = NextRoundId::<T>::get();
 
             let round = SaleRound {
@@ -676,7 +685,10 @@ pub mod pallet {
             };
 
             SaleRounds::<T>::insert(round_id, round);
-            NextRoundId::<T>::put(round_id.saturating_add(1));
+            // L2-audit: checked_add 防止 u64 溢出导致 ID 覆盖
+            let next_id = round_id.checked_add(1).ok_or(Error::<T>::RoundIdOverflow)?;
+
+            NextRoundId::<T>::put(next_id);
 
             EntityRounds::<T>::try_mutate(entity_id, |rounds| -> DispatchResult {
                 rounds.try_push(round_id).map_err(|_| Error::<T>::RoundsHistoryFull)?;
@@ -798,6 +810,8 @@ pub mod pallet {
                 // M3: 必须在 NotStarted 状态
                 ensure!(round.status == RoundStatus::NotStarted, Error::<T>::InvalidRoundStatus);
                 ensure!(start_price > end_price, Error::<T>::InvalidDutchAuctionConfig);
+                // L5-audit: end_price 必须 > 0，防止拍卖末期免费代币
+                ensure!(!end_price.is_zero(), Error::<T>::InvalidDutchAuctionConfig);
 
                 round.dutch_start_price = Some(start_price);
                 round.dutch_end_price = Some(end_price);
@@ -1021,6 +1035,8 @@ pub mod pallet {
                 if !round.remaining_amount.is_zero() {
                     let entity_account = T::EntityProvider::entity_account(round.entity_id);
                     T::TokenProvider::unreserve(round.entity_id, &entity_account, round.remaining_amount);
+                    // M1-fix: 清零 remaining_amount（与 do_auto_end_sale 一致）
+                    round.remaining_amount = Zero::zero();
                 }
 
                 round.status = RoundStatus::Ended;
@@ -1095,6 +1111,8 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
 
             let round = SaleRounds::<T>::get(round_id).ok_or(Error::<T>::RoundNotFound)?;
+            // M2-audit: 仅 Ended 状态允许解锁，防止 Cancelled 等状态下误操作
+            ensure!(round.status == RoundStatus::Ended, Error::<T>::InvalidRoundStatus);
 
             Subscriptions::<T>::try_mutate(round_id, &who, |maybe_sub| -> DispatchResult {
                 let sub = maybe_sub.as_mut().ok_or(Error::<T>::NotSubscribed)?;
@@ -1186,9 +1204,10 @@ pub mod pallet {
                 let sub = maybe_sub.as_mut().ok_or(Error::<T>::NotSubscribed)?;
                 ensure!(!sub.refunded, Error::<T>::AlreadyRefunded);
 
-                // 释放认购者对应的 Entity 代币锁定
+                // M5-audit: 释放认购者对应的 Entity 代币锁定，检查返回值
                 let entity_account = T::EntityProvider::entity_account(round.entity_id);
-                T::TokenProvider::unreserve(round.entity_id, &entity_account, sub.amount);
+                let remaining = T::TokenProvider::unreserve(round.entity_id, &entity_account, sub.amount);
+                ensure!(remaining.is_zero(), Error::<T>::IncompleteUnreserve);
 
                 // 退还 NEX
                 let pallet_account = Self::pallet_account();
@@ -1478,6 +1497,8 @@ pub mod pallet {
                     if !round.remaining_amount.is_zero() {
                         let entity_account = T::EntityProvider::entity_account(round.entity_id);
                         T::TokenProvider::unreserve(round.entity_id, &entity_account, round.remaining_amount);
+                        // M1-fix: 清零 remaining_amount，防止查询返回过时数据
+                        round.remaining_amount = Zero::zero();
                     }
                     let sold = round.sold_amount;
                     let count = round.participants_count;

@@ -12,6 +12,7 @@ members = [
     "pallets/trading/trc20-verifier",
     "pallets/trading/nex-market",
     "pallets/dispute/escrow",
+    "pallets/crypto/common",
     "pallets/storage/service",
     "pallets/dispute/evidence",
     "pallets/dispute/arbitration",
@@ -26,6 +27,7 @@ members = [
     "pallets/entity/commission/common",
     "pallets/entity/commission/core",
     "pallets/entity/commission/referral",
+    "pallets/entity/commission/multi-level",
     "pallets/entity/commission/level-diff",
     "pallets/entity/commission/single-line",
     "pallets/entity/commission/team",
@@ -40,6 +42,11 @@ members = [
     "pallets/entity/tokensale",
     "media-utils",
     "runtime",
+# Ads pallets (通用广告系统)
+    "pallets/ads/primitives",
+    "pallets/ads/core",
+    "pallets/ads/grouprobot",
+    "pallets/ads/entity",
 # GroupRobot pallets
     "pallets/grouprobot/primitives",
     "pallets/grouprobot/registry",
@@ -61,6 +68,7 @@ pallet-trading-trc20-verifier = { path = "./pallets/trading/trc20-verifier", def
 pallet-nex-market = { path = "./pallets/trading/nex-market", default-features = false }
 # Escrow, Referral, IPFS pallets
 pallet-escrow = { path = "./pallets/dispute/escrow", default-features = false }
+pallet-crypto-common = { path = "./pallets/crypto/common", default-features = false }
 pallet-storage-service = { path = "./pallets/storage/service", default-features = false }
 # Nexus common libraries
 media-utils = { path = "./media-utils", default-features = false }
@@ -80,6 +88,7 @@ pallet-entity-member = { path = "./pallets/entity/member", default-features = fa
 pallet-commission-common = { path = "./pallets/entity/commission/common", default-features = false }
 pallet-commission-core = { path = "./pallets/entity/commission/core", default-features = false }
 pallet-commission-referral = { path = "./pallets/entity/commission/referral", default-features = false }
+pallet-commission-multi-level = { path = "./pallets/entity/commission/multi-level", default-features = false }
 pallet-commission-level-diff = { path = "./pallets/entity/commission/level-diff", default-features = false }
 pallet-commission-single-line = { path = "./pallets/entity/commission/single-line", default-features = false }
 pallet-commission-team = { path = "./pallets/entity/commission/team", default-features = false }
@@ -92,6 +101,11 @@ pallet-entity-review = { path = "./pallets/entity/review", default-features = fa
 pallet-entity-disclosure = { path = "./pallets/entity/disclosure", default-features = false }
 pallet-entity-kyc = { path = "./pallets/entity/kyc", default-features = false }
 pallet-entity-tokensale = { path = "./pallets/entity/tokensale", default-features = false }
+# Ads pallets (通用广告系统)
+pallet-ads-primitives = { path = "./pallets/ads/primitives", default-features = false }
+pallet-ads-core = { path = "./pallets/ads/core", default-features = false }
+pallet-ads-grouprobot = { path = "./pallets/ads/grouprobot", default-features = false }
+pallet-ads-entity = { path = "./pallets/ads/entity", default-features = false }
 # GroupRobot pallets
 pallet-grouprobot-primitives = { path = "./pallets/grouprobot/primitives", default-features = false }
 pallet-grouprobot-registry = { path = "./pallets/grouprobot/registry", default-features = false }

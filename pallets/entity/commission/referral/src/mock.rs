@@ -1,5 +1,5 @@
 use crate as pallet_commission_referral;
-use frame_support::{derive_impl, parameter_types};
+use frame_support::derive_impl;
 use sp_runtime::BuildStorage;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -92,15 +92,10 @@ impl pallet_balances::Config for Test {
     type Balance = Balance;
 }
 
-parameter_types! {
-    pub const MaxMultiLevels: u32 = 15;
-}
-
 impl pallet_commission_referral::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type MemberProvider = MockMemberProvider;
-    type MaxMultiLevels = MaxMultiLevels;
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

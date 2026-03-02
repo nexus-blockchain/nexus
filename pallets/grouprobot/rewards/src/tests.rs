@@ -131,10 +131,124 @@ fn prune_old_era_rewards_works() {
 			};
 			EraRewards::<Test>::insert(era, info);
 		}
-		// MaxEraHistory=10, current_era=15 → prune era 0
+		// MaxEraHistory=10, current_era=15 → oldest_to_keep=5, prune era 0..4
 		Rewards::prune_old_era_rewards(15);
+		// H1-fix: batch prune removes all 5 stale eras in one call (max 10)
 		assert!(EraRewards::<Test>::get(0).is_none());
-		// era 1 still exists (only one pruned per call)
-		assert!(EraRewards::<Test>::get(1).is_some());
+		assert!(EraRewards::<Test>::get(1).is_none());
+		assert!(EraRewards::<Test>::get(2).is_none());
+		assert!(EraRewards::<Test>::get(3).is_none());
+		assert!(EraRewards::<Test>::get(4).is_none());
+		assert_eq!(EraCleanupCursor::<Test>::get(), 5);
+	});
+}
+
+#[test]
+fn h1_prune_batch_bounded_at_10() {
+	new_test_ext().execute_with(|| {
+		// Insert eras 0..20
+		for era in 0..20u64 {
+			let info = EraRewardInfo {
+				subscription_income: 100u128,
+				inflation_mint: 50u128,
+				total_distributed: 150u128,
+				treasury_share: 10u128,
+				node_count: 1,
+			};
+			EraRewards::<Test>::insert(era, info);
+		}
+		// MaxEraHistory=10, current_era=25 → oldest_to_keep=15
+		// cursor=0, need to prune 0..14 (15 eras), but max 10 per call
+		Rewards::prune_old_era_rewards(25);
+		assert_eq!(EraCleanupCursor::<Test>::get(), 10);
+		assert!(EraRewards::<Test>::get(9).is_none());
+		assert!(EraRewards::<Test>::get(10).is_some());
+
+		// Second call prunes remaining 5
+		Rewards::prune_old_era_rewards(25);
+		assert_eq!(EraCleanupCursor::<Test>::get(), 15);
+		assert!(EraRewards::<Test>::get(14).is_none());
+		assert!(EraRewards::<Test>::get(15).is_some());
+	});
+}
+
+#[test]
+fn h2_claim_fails_insufficient_pool_preserves_pending() {
+	new_test_ext().execute_with(|| {
+		// Set pending rewards larger than RewardPool balance
+		let pool_balance = Balances::free_balance(REWARD_POOL);
+		let excessive = pool_balance + 1;
+		NodePendingRewards::<Test>::insert(node_id(1), excessive);
+
+		assert_noop!(
+			Rewards::claim_rewards(RuntimeOrigin::signed(OPERATOR), node_id(1)),
+			Error::<Test>::RewardPoolInsufficient
+		);
+
+		// H2-fix: pending rewards NOT cleared on transfer failure
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), excessive);
+		assert_eq!(NodeTotalEarned::<Test>::get(node_id(1)), 0);
+	});
+}
+
+#[test]
+fn h3_try_claim_orphan_rewards_works() {
+	new_test_ext().execute_with(|| {
+		NodePendingRewards::<Test>::insert(node_id(1), 300u128);
+		let pool_before = Balances::free_balance(REWARD_POOL);
+		let op_before = Balances::free_balance(OPERATOR);
+
+		Rewards::try_claim_orphan_rewards(&node_id(1), &OPERATOR);
+
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 0);
+		assert_eq!(NodeTotalEarned::<Test>::get(node_id(1)), 300);
+		assert_eq!(Balances::free_balance(REWARD_POOL), pool_before - 300);
+		assert_eq!(Balances::free_balance(OPERATOR), op_before + 300);
+	});
+}
+
+#[test]
+fn h3_try_claim_orphan_no_pending_is_noop() {
+	new_test_ext().execute_with(|| {
+		let pool_before = Balances::free_balance(REWARD_POOL);
+		Rewards::try_claim_orphan_rewards(&node_id(1), &OPERATOR);
+		// No changes
+		assert_eq!(Balances::free_balance(REWARD_POOL), pool_before);
+	});
+}
+
+#[test]
+fn h3_try_claim_orphan_insufficient_pool_preserves_pending() {
+	new_test_ext().execute_with(|| {
+		let pool_balance = Balances::free_balance(REWARD_POOL);
+		let excessive = pool_balance + 1;
+		NodePendingRewards::<Test>::insert(node_id(1), excessive);
+
+		// Should not panic, just log warning
+		Rewards::try_claim_orphan_rewards(&node_id(1), &OPERATOR);
+
+		// Pending rewards preserved on failure
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), excessive);
+	});
+}
+
+#[test]
+fn h3_orphan_reward_claimer_trait_works() {
+	new_test_ext().execute_with(|| {
+		NodePendingRewards::<Test>::insert(node_id(1), 200u128);
+		<Rewards as OrphanRewardClaimer<u64>>::try_claim_orphan_rewards(&node_id(1), &OPERATOR);
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 0);
+		assert_eq!(NodeTotalEarned::<Test>::get(node_id(1)), 200);
+	});
+}
+
+#[test]
+fn m1_accrue_node_reward_emits_event() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		<Rewards as RewardAccruer>::accrue_node_reward(&node_id(1), 100);
+		System::assert_last_event(
+			Event::<Test>::RewardAccrued { node_id: node_id(1), amount: 100 }.into()
+		);
 	});
 }

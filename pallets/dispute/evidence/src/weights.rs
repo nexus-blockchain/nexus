@@ -31,6 +31,10 @@ pub trait WeightInfo {
     fn revoke_access() -> Weight;
     /// 🆕 VC2: 轮换加密密钥 (call_index 10)
     fn rotate_content_keys() -> Weight;
+    /// 🆕 VC3: 请求访问加密内容 (call_index 13)
+    fn request_access() -> Weight;
+    /// 🆕 VC3: 更新访问策略 (call_index 14)
+    fn update_access_policy() -> Weight;
 }
 
 /// 函数级中文注释：参照 Substrate 推荐的 RocksDb 权重，提供通用实现。
@@ -109,6 +113,19 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(8_u64))
             .saturating_add(T::DbWeight::get().writes(2_u64))
     }
+    fn request_access() -> Weight {
+        // 读：UserPublicKeys(r), PrivateContents(r), AccessRequests(r) = 3 reads
+        // 写：AccessRequests(w) = 1 write
+        Weight::from_parts(40_000_000, 4_000)
+            .saturating_add(T::DbWeight::get().reads(3_u64))
+            .saturating_add(T::DbWeight::get().writes(1_u64))
+    }
+    fn update_access_policy() -> Weight {
+        // 读：PrivateContents(r) = 1 read；写：PrivateContents(w) = 1 write
+        Weight::from_parts(45_000_000, 5_000)
+            .saturating_add(T::DbWeight::get().reads(1_u64))
+            .saturating_add(T::DbWeight::get().writes(1_u64))
+    }
 }
 
 /// 函数级中文注释：为测试与未接线场景提供默认实现（基于 RocksDbWeight）。
@@ -168,5 +185,15 @@ impl WeightInfo for () {
         Weight::from_parts(70_000_000, 6_000)
             .saturating_add(RocksDbWeight::get().reads(8_u64))
             .saturating_add(RocksDbWeight::get().writes(2_u64))
+    }
+    fn request_access() -> Weight {
+        Weight::from_parts(40_000_000, 4_000)
+            .saturating_add(RocksDbWeight::get().reads(3_u64))
+            .saturating_add(RocksDbWeight::get().writes(1_u64))
+    }
+    fn update_access_policy() -> Weight {
+        Weight::from_parts(45_000_000, 5_000)
+            .saturating_add(RocksDbWeight::get().reads(1_u64))
+            .saturating_add(RocksDbWeight::get().writes(1_u64))
     }
 }

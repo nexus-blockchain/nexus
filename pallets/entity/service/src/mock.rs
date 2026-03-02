@@ -9,6 +9,7 @@ use pallet_entity_common::{
     EntityProvider, EntityStatus, ShopProvider, ShopType,
     PricingProvider,
 };
+use pallet_storage_service::{IpfsPinner, SubjectType, PinTier};
 use sp_runtime::DispatchError;
 use std::cell::RefCell;
 
@@ -41,6 +42,11 @@ thread_local! {
     static SHOP_ACTIVE: RefCell<Vec<u64>> = RefCell::new(vec![1]);
     static SHOP_OWNERS: RefCell<Vec<(u64, u64)>> = RefCell::new(vec![(1, 1), (2, 2)]);
     static PRICING: RefCell<u64> = RefCell::new(1_000_000); // 1 USDT/NEX
+    static PRICE_STALE: RefCell<bool> = RefCell::new(false);
+    // IPFS Pin tracking
+    static PINNED_CIDS: RefCell<Vec<(u64, Vec<u8>)>> = RefCell::new(vec![]); // (subject_id, cid)
+    static UNPINNED_CIDS: RefCell<Vec<Vec<u8>>> = RefCell::new(vec![]);
+    static PIN_SHOULD_FAIL: RefCell<bool> = RefCell::new(false);
 }
 
 pub struct MockShopProvider;
@@ -136,6 +142,10 @@ impl PricingProvider for MockPricingProvider {
     fn get_nex_usdt_price() -> u64 {
         PRICING.with(|p| *p.borrow())
     }
+
+    fn is_price_stale() -> bool {
+        PRICE_STALE.with(|s| *s.borrow())
+    }
 }
 
 // ==================== Helper functions ====================
@@ -152,6 +162,27 @@ pub fn set_shop_active(shop_id: u64, active: bool) {
 
 pub fn set_pricing(price: u64) {
     PRICING.with(|p| *p.borrow_mut() = price);
+}
+
+pub fn set_price_stale(stale: bool) {
+    PRICE_STALE.with(|s| *s.borrow_mut() = stale);
+}
+
+pub fn set_pin_should_fail(fail: bool) {
+    PIN_SHOULD_FAIL.with(|f| *f.borrow_mut() = fail);
+}
+
+pub fn get_pinned_cids() -> Vec<(u64, Vec<u8>)> {
+    PINNED_CIDS.with(|c| c.borrow().clone())
+}
+
+pub fn get_unpinned_cids() -> Vec<Vec<u8>> {
+    UNPINNED_CIDS.with(|c| c.borrow().clone())
+}
+
+pub fn clear_pin_tracking() {
+    PINNED_CIDS.with(|c| c.borrow_mut().clear());
+    UNPINNED_CIDS.with(|c| c.borrow_mut().clear());
 }
 
 pub fn add_shop(shop_id: u64, owner: u64, active: bool) {
@@ -176,6 +207,37 @@ pub fn add_shop(shop_id: u64, owner: u64, active: bool) {
     }
 }
 
+// ==================== Mock IpfsPinner ====================
+
+pub struct MockIpfsPinner;
+
+impl IpfsPinner<u64, u128> for MockIpfsPinner {
+    fn pin_cid_for_subject(
+        _caller: u64,
+        _subject_type: SubjectType,
+        subject_id: u64,
+        cid: Vec<u8>,
+        _tier: Option<PinTier>,
+    ) -> Result<(), DispatchError> {
+        if PIN_SHOULD_FAIL.with(|f| *f.borrow()) {
+            return Err(DispatchError::Other("MockPinFailed"));
+        }
+        PINNED_CIDS.with(|c| c.borrow_mut().push((subject_id, cid)));
+        Ok(())
+    }
+
+    fn unpin_cid(
+        _caller: u64,
+        cid: Vec<u8>,
+    ) -> Result<(), DispatchError> {
+        if PIN_SHOULD_FAIL.with(|f| *f.borrow()) {
+            return Err(DispatchError::Other("MockUnpinFailed"));
+        }
+        UNPINNED_CIDS.with(|c| c.borrow_mut().push(cid));
+        Ok(())
+    }
+}
+
 // ==================== Pallet Config ====================
 
 parameter_types! {
@@ -193,6 +255,7 @@ impl pallet_entity_service::Config for Test {
     type ProductDepositUsdt = ConstU64<1_000_000>;       // 1 USDT
     type MinProductDepositCos = ConstU128<100>;           // 最小 100
     type MaxProductDepositCos = ConstU128<10_000_000_000_000>; // 最大 10_000 UNIT
+    type IpfsPinner = MockIpfsPinner;
 }
 
 // ==================== Test Externalities ====================

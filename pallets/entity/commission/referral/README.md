@@ -127,10 +127,18 @@ Layer 5: rate=1%, 需 10 直推 + 30 团队
 - `max_total_rate` 限制多级分销总返佣
 - 每种模式从 `remaining` 额度中扣除，避免超发
 
+## Token 多资产支持
+
+提供与 NEX 版对称的 Token 计算函数（泛型 `TB: AtLeast32BitUnsigned`），复用同一份 `ReferralConfig` 的 rate 配置：
+
+- `process_direct_reward_token` / `process_multi_level_token` / `process_repeat_purchase_token` / `process_first_order_token`
+- **固定金额模式不生效**：`FIXED_AMOUNT` 和 `FIRST_ORDER`（`use_amount=true`）为 NEX 计价，Token 版跳过
+
 ## Trait 实现
 
-- **`CommissionPlugin`** — 由 core 调度引擎调用，配置按 `entity_id` 查询，推荐链按 `shop_id` 查询
-- **`ReferralPlanWriter`** — 供 core 的 `init_commission_plan` 写入配置
+- **`CommissionPlugin`** — 由 core 调度引擎调用，配置按 `entity_id` 查询
+- **`TokenCommissionPlugin`** — Token 多资产返佣计算，复用 NEX 配置的 rate 参数
+- **`ReferralPlanWriter`** — 供 core 的 `init_commission_plan` 写入配置，包含防御性校验（H2）
 
 ## Events
 
@@ -143,6 +151,22 @@ Layer 5: rate=1%, 需 10 直推 + 30 团队
 | 错误 | 说明 |
 |------|------|
 | `InvalidRate` | 返佣率超过 10000 基点 |
+
+## 审计记录
+
+| ID | 级别 | 描述 |
+|----|------|------|
+| H1 | High | `process_multi_level` 推荐链无循环检测 — 若推荐链有环则无限循环。修复: 添加 `BTreeSet<AccountId>` visited 集合，重复访问时 break |
+| H2 | High | `set_first_order_config` / `set_repeat_purchase_config` 未校验 rate 上限。修复: 添加 `ensure!(rate <= 10000)` |
+| H3 | High | `process_first_order` 零值无早返回，浪费存储读取。修复: 添加 `use_amount && amount.is_zero()` / `!use_amount && rate == 0` 早返回 |
+| M2 | Medium | `process_multi_level` level 序号 `(level_idx + 1) as u8` 可溢出。修复: 添加 `.min(255)` |
+
+### 记录但未修复
+
+| ID | 级别 | 描述 |
+|----|------|------|
+| M1 | Medium | 5 个 extrinsic 硬编码 Weight，无 WeightInfo trait |
+| L1 | Low | Token 版 `_token` 函数与 NEX 版逻辑大量重复（维护风险） |
 
 ## 依赖
 

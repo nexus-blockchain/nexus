@@ -10,7 +10,6 @@
 - 返佣记账（`credit_commission`）与取消（`cancel_commission`）
 - 提现系统（四种提现模式 + 自愿复购奖励 + 指定复购目标）
 - 偿付安全（`ShopPendingTotal` + `ShopShoppingTotal` 资金锁定检查）
-- 一键初始化佣金方案（`init_commission_plan`）
 - 调度各插件（ReferralPlugin / LevelDiffPlugin / SingleLinePlugin / TeamPlugin）
 - **平台费固定分配**：招商人 50% + 国库 50%（无招商人时 100% 进国库）
 - **KYC/合规守卫**：通过 `ParticipationGuard` trait 在提现和购物余额消费前检查参与权
@@ -63,19 +62,26 @@ pub trait Config: frame_system::Config {
     type EntityProvider: EntityProvider<Self::AccountId>;
     type MemberProvider: MemberProvider<Self::AccountId>;
 
-    /// 四个返佣插件（均实现 CommissionPlugin trait）
+    /// 四个 NEX 返佣插件（均实现 CommissionPlugin trait）
     type ReferralPlugin: CommissionPlugin<Self::AccountId, BalanceOf<Self>>;
     type LevelDiffPlugin: CommissionPlugin<Self::AccountId, BalanceOf<Self>>;
     type SingleLinePlugin: CommissionPlugin<Self::AccountId, BalanceOf<Self>>;
     type TeamPlugin: CommissionPlugin<Self::AccountId, BalanceOf<Self>>;
 
+    /// 四个 Token 返佣插件（均实现 TokenCommissionPlugin trait）
+    type TokenReferralPlugin: TokenCommissionPlugin<Self::AccountId, TokenBalanceOf<Self>>;
+    type TokenLevelDiffPlugin: TokenCommissionPlugin<Self::AccountId, TokenBalanceOf<Self>>;
+    type TokenSingleLinePlugin: TokenCommissionPlugin<Self::AccountId, TokenBalanceOf<Self>>;
+    type TokenTeamPlugin: TokenCommissionPlugin<Self::AccountId, TokenBalanceOf<Self>>;
+
     /// 招商推荐人查询接口
     type EntityReferrerProvider: EntityReferrerProvider<Self::AccountId>;
 
-    /// 方案写入器（供 init_commission_plan 使用）
+    /// 方案写入器（供 Governance 桥接调用）
     type ReferralWriter: ReferralPlanWriter<BalanceOf<Self>>;
     type LevelDiffWriter: LevelDiffPlanWriter;
     type TeamWriter: TeamPlanWriter<BalanceOf<Self>>;
+    type PoolRewardWriter: PoolRewardPlanWriter;
 
     /// 平台账户（用于招商奖金从平台费中扣除）
     type PlatformAccount: Get<Self::AccountId>;
@@ -84,15 +90,29 @@ pub trait Config: frame_system::Config {
     type TreasuryAccount: Get<Self::AccountId>;
 
     /// 招商推荐人分佣比例（基点，5000 = 平台费的 50%）
-    /// 全局固定：平台费 = referrer 50% + 国库 50%
     #[pallet::constant]
     type ReferrerShareBps: Get<u16>;
+
+    /// Token 订单平台费率（基点，全局固定，100 = 1%）
+    #[pallet::constant]
+    type TokenPlatformFeeRate: Get<u16>;
 
     #[pallet::constant]
     type MaxCommissionRecordsPerOrder: Get<u32>;
 
     #[pallet::constant]
     type MaxCustomLevels: Get<u32>;
+
+    /// 关闭 POOL_REWARD 后提取沉淀池资金的冷却期（区块数）
+    #[pallet::constant]
+    type PoolRewardWithdrawCooldown: Get<BlockNumber>;
+
+    /// Entity Token 余额类型
+    type TokenBalance: FullCodec + MaxEncodedLen + TypeInfo + Copy + Default
+        + Debug + AtLeast32BitUnsigned + From<u32> + Into<u128>;
+
+    /// Token 转账接口（entity_id 级）
+    type TokenTransferProvider: TokenTransferProvider<Self::AccountId, TokenBalanceOf<Self>>;
 
     /// Entity 参与权守卫（KYC / 合规检查）
     /// 默认使用 `()` 允许所有操作（无 KYC 要求）
@@ -115,6 +135,16 @@ pub trait Config: frame_system::Config {
 | `MemberLastCredited` | `DoubleMap<u64, AccountId, BlockNumber>` | 最后入账区块（ValueQuery，用于冻结期检查） |
 | `GlobalMinRepurchaseRate` | `Map<u64, u16>` | Governance 全局最低复购比例（ValueQuery） |
 | `OrderTreasuryTransfer` | `Map<u64, Balance>` | 订单平台费转国库金额（ValueQuery，用于取消退款） |
+| `MemberTokenCommissionStats` | `DoubleMap<u64, AccountId, MemberTokenCommissionStatsData>` | Token 佣金统计（ValueQuery） |
+| `OrderTokenCommissionRecords` | `Map<u64, BoundedVec<TokenCommissionRecord>>` | Token 订单佣金记录（ValueQuery） |
+| `TokenPendingTotal` | `Map<u64, TokenBalance>` | Token 待提取佣金总额（ValueQuery） |
+| `UnallocatedTokenPool` | `Map<u64, TokenBalance>` | Token 未分配沉淀池（ValueQuery） |
+| `OrderTokenUnallocated` | `Map<u64, (u64, u64, TokenBalance)>` | Token 订单沉淀记录（ValueQuery） |
+| `MemberTokenShoppingBalance` | `DoubleMap<u64, AccountId, TokenBalance>` | Token 购物余额（ValueQuery） |
+| `TokenShoppingTotal` | `Map<u64, TokenBalance>` | Token 购物余额总额（ValueQuery，资金锁定） |
+| `TokenWithdrawalConfigs` | `Map<u64, EntityWithdrawalConfig>` | Token 提现配置（OptionQuery） |
+| `GlobalMinTokenRepurchaseRate` | `Map<u64, u16>` | Token Governance 全局最低复购比例（ValueQuery） |
+| `EntityTokenAccountedBalance` | `Map<u64, TokenBalance>` | Entity Token 已知渠道余额（用于 sweep 检测外部转入） |
 
 ## 核心结构体
 
@@ -155,7 +185,12 @@ pub struct EntityWithdrawalConfig<MaxLevels: Get<u32>> {
 | 3 | `withdraw_commission` | 会员 | 提取返佣（支持四种提现模式 + 指定复购目标） |
 | 4 | `set_withdrawal_config` | Entity Owner | 设置提现配置（含 level_id 唯一性校验） |
 | 5 | `use_shopping_balance` | ~~会员~~ **已禁用** | 购物余额仅可用于购物（下单抵扣），不可直接提取为 NEX → `ShoppingBalanceWithdrawalDisabled` |
-| 6 | `init_commission_plan` | Entity Owner | 一键初始化佣金方案（None/DirectOnly/MultiLevel/LevelDiff/Custom） |
+| 6 | `init_commission_plan` | ~~Entity Owner~~ **已禁用** | 过度设计，前端改用 `utility.batch` 组合分步 extrinsics → `CommissionPlanDisabled` |
+| 8 | `withdraw_token_commission` | 会员 | 提取 Token 佣金（与 NEX 提现对称，含复购目标） |
+| 10 | `set_token_withdrawal_config` | Entity Owner | 设置 Token 提现配置（与 NEX 对称，独立存储） |
+| 11 | `set_global_min_token_repurchase_rate` | Root | 设置 Token Governance 全局最低复购比例 |
+| 12 | `withdraw_entity_funds` | Entity Owner | 提取 Entity NEX 自由余额（需保留 PendingTotal + ShoppingTotal + UnallocatedPool） |
+| 13 | `withdraw_entity_token_funds` | Entity Owner | 提取 Entity Token 自由余额（需保留 TokenPendingTotal + TokenShoppingTotal + UnallocatedTokenPool） |
 
 ### set_withdrawal_config 校验规则
 
@@ -298,7 +333,7 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 | `CommissionDistributed` | entity_id, shop_id, order_id, beneficiary, amount, commission_type, level | 返佣发放 |
 | `CommissionWithdrawn` | entity_id, account, amount | 返佣提取 |
 | `CommissionCancelled` | order_id, refund_succeeded, refund_failed | 返佣取消（CC-M1 审计修复：含成功/失败计数） |
-| `CommissionPlanInitialized` | entity_id, plan | 佣金方案初始化 |
+| `CommissionPlanRemoved` | entity_id | [占位] init_commission_plan 已移除 |
 | `TieredWithdrawal` | entity_id, account, **repurchase_target**, withdrawn_amount, repurchase_amount, bonus_amount | 分级提现（M3 修复: 含购物余额实际接收账户） |
 | `WithdrawalConfigUpdated` | entity_id | 提现配置更新 |
 | `ShoppingBalanceUsed` | entity_id, account, amount | 购物余额使用 |
@@ -334,6 +369,7 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 | `TargetParticipationDenied` | H3: 复购目标不满足 Entity 参与要求（如 mandatory KYC） |
 | `ParticipationRequirementNotMet` | H3: 账户不满足 Entity 参与要求，无法消费购物余额 |
 | `ShoppingBalanceWithdrawalDisabled` | 购物余额仅可用于购物，不可直接提取为 NEX |
+| `CommissionPlanDisabled` | init_commission_plan 已禁用，请使用 utility.batch 组合分步 extrinsics |
 
 ## Trait 实现
 
@@ -405,7 +441,7 @@ Runtime 通过 `KycParticipationGuard` 桥接 `pallet-entity-kyc::can_participat
 - **process_commission（国库）**: 50_50_split / full_to_treasury / no_transfer_zero / capped_by_balance
 - **cancel_commission**: refunds_all（双来源 + 国库退款）
 - **未配置佣金**: treasury_receives_even_without_config
-- **init_commission_plan**: works
+- **init_commission_plan**: is_disabled（验证已禁用）
 - **set_withdrawal_config**: m1_rejects_duplicate_level_id
 - **提现审计**: h1_withdraw_blocked_when_config_disabled / h1_withdraw_allowed_when_no_config
 - **统计修复**: h3_repurchased_includes_bonus

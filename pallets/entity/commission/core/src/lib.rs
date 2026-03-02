@@ -13,31 +13,16 @@ extern crate alloc;
 
 pub use pallet::*;
 pub use pallet_commission_common::{
-    CommissionModes, CommissionOutput, CommissionPlugin, CommissionPlan, CommissionProvider,
+    CommissionModes, CommissionOutput, CommissionPlugin, CommissionProvider,
     CommissionRecord, CommissionStatus, CommissionType,
     EntityReferrerProvider, LevelDiffPlanWriter, MemberCommissionStatsData, MemberProvider,
-    PoolRewardPlanWriter, ReferralPlanWriter, TeamPlanWriter, WithdrawalMode, WithdrawalTierConfig,
+    MultiLevelPlanWriter, PoolRewardPlanWriter, ReferralPlanWriter, TeamPlanWriter,
+    WithdrawalMode, WithdrawalTierConfig,
     TokenCommissionPlugin, TokenCommissionRecord, MemberTokenCommissionStatsData,
     TokenTransferProvider as TokenTransferProviderT,
+    ParticipationGuard,
 };
-use pallet_entity_common::ShopProvider as ShopProviderT;
 use sp_runtime::traits::Zero;
-
-/// Entity 参与权守卫（H3 修复: KYC / 合规检查接口）
-///
-/// 在 `withdraw_commission` 和 `do_consume_shopping_balance` 中调用，
-/// 确保 target 账户满足 Entity 的参与要求（如 mandatory KYC）。
-/// 默认空实现允许所有操作（适用于未配置 KYC 的 Entity）。
-pub trait ParticipationGuard<AccountId> {
-    fn can_participate(entity_id: u64, account: &AccountId) -> bool;
-}
-
-/// 默认空实现（无 KYC 系统时使用，所有账户均允许）
-impl<AccountId> ParticipationGuard<AccountId> for () {
-    fn can_participate(_entity_id: u64, _account: &AccountId) -> bool {
-        true
-    }
-}
 
 #[cfg(test)]
 mod mock;
@@ -53,7 +38,7 @@ pub mod pallet {
     };
     use frame_system::pallet_prelude::*;
     use pallet_entity_common::{EntityProvider, ShopProvider};
-    use pallet_commission_common::{CommissionPlan, ReferralPlanWriter, LevelDiffPlanWriter, TeamPlanWriter};
+    use pallet_commission_common::{ReferralPlanWriter, LevelDiffPlanWriter, TeamPlanWriter, MultiLevelPlanWriter};
     use sp_runtime::traits::{Saturating, Zero};
 
     pub type BalanceOf<T> =
@@ -171,6 +156,9 @@ pub mod pallet {
         /// 推荐链返佣插件
         type ReferralPlugin: CommissionPlugin<Self::AccountId, BalanceOf<Self>>;
 
+        /// 多级分销返佣插件
+        type MultiLevelPlugin: CommissionPlugin<Self::AccountId, BalanceOf<Self>>;
+
         /// 等级极差返佣插件
         type LevelDiffPlugin: CommissionPlugin<Self::AccountId, BalanceOf<Self>>;
 
@@ -185,6 +173,9 @@ pub mod pallet {
 
         /// 推荐链方案写入器
         type ReferralWriter: ReferralPlanWriter<BalanceOf<Self>>;
+
+        /// 多级分销方案写入器
+        type MultiLevelWriter: MultiLevelPlanWriter;
 
         /// 等级极差方案写入器
         type LevelDiffWriter: LevelDiffPlanWriter;
@@ -245,6 +236,9 @@ pub mod pallet {
 
         /// Token 版推荐链插件
         type TokenReferralPlugin: TokenCommissionPlugin<Self::AccountId, TokenBalanceOf<Self>>;
+
+        /// Token 版多级分销插件
+        type TokenMultiLevelPlugin: TokenCommissionPlugin<Self::AccountId, TokenBalanceOf<Self>>;
 
         /// Token 版等级极差插件
         type TokenLevelDiffPlugin: TokenCommissionPlugin<Self::AccountId, TokenBalanceOf<Self>>;
@@ -478,6 +472,17 @@ pub mod pallet {
         EntityWithdrawalConfigOf<T>,
     >;
 
+    /// Token 会员最后入账区块 (entity_id, account) → BlockNumber（用于 Token 独立冻结期检查）
+    /// P3 审计修复: Token 冻结期与 NEX 完全解耦，各自独立管理
+    #[pallet::storage]
+    pub type MemberTokenLastCredited<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat, u64,
+        Blake2_128Concat, T::AccountId,
+        BlockNumberFor<T>,
+        ValueQuery,
+    >;
+
     /// Token 全局最低复购比例 entity_id → u16（万分比，由 Governance 设定）
     #[pallet::storage]
     #[pallet::getter(fn global_min_token_repurchase_rate)]
@@ -531,7 +536,9 @@ pub mod pallet {
         },
         /// CC-M1 审计修复: 增加成功/失败计数，便于链上追踪部分退款
         CommissionCancelled { order_id: u64, refund_succeeded: u32, refund_failed: u32 },
-        CommissionPlanInitialized { entity_id: u64, plan: CommissionPlan },
+        /// [已移除] init_commission_plan 过度设计，前端改用 utility.batch 组合分步 extrinsics。
+        /// 保留占位以维持事件索引稳定。
+        CommissionPlanRemoved { entity_id: u64 },
         WithdrawalCooldownNotMet { entity_id: u64, account: T::AccountId, earliest_block: BlockNumberFor<T> },
         TieredWithdrawal {
             entity_id: u64,
@@ -703,6 +710,8 @@ pub mod pallet {
         InsufficientEntityTokenFunds,
         /// POOL_REWARD 关闭后冷却期未满，暂时不可提取沉淀池资金
         PoolRewardCooldownActive,
+        /// init_commission_plan 已禁用，请使用 utility.batch 组合分步 extrinsics
+        CommissionPlanDisabled,
     }
 
     // ========================================================================
@@ -721,6 +730,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::ensure_entity_owner(entity_id, &who)?;
+            ensure!(modes.is_valid(), Error::<T>::InvalidCommissionRate);
 
             let old_has_pool = CommissionConfigs::<T>::get(entity_id)
                 .map(|c| c.enabled_modes.contains(CommissionModes::POOL_REWARD))
@@ -807,6 +817,12 @@ pub mod pallet {
             repurchase_target: Option<T::AccountId>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+
+            // H1 审计修复: NEX 提现也需检查参与权（与 Token 提现一致）
+            ensure!(
+                T::ParticipationGuard::can_participate(entity_id, &who),
+                Error::<T>::ParticipationRequirementNotMet
+            );
 
             // 确定复购目标账户
             let target = repurchase_target.unwrap_or_else(|| who.clone());
@@ -983,110 +999,18 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 一键初始化佣金方案（Entity 级）
+        /// [已禁用] init_commission_plan 过度设计，前端改用 utility.batch 组合：
+        /// set_commission_modes + set_commission_rate + enable_commission + 各插件配置 extrinsics。
+        ///
+        /// 保留 call_index(6) 以维持链上 call index 稳定。
         #[pallet::call_index(6)]
-        #[pallet::weight(Weight::from_parts(60_000_000, 5_000))]
+        #[pallet::weight(Weight::from_parts(10_000_000, 1_000))]
         pub fn init_commission_plan(
             origin: OriginFor<T>,
-            entity_id: u64,
-            plan: CommissionPlan,
+            _entity_id: u64,
         ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-            Self::ensure_entity_owner(entity_id, &who)?;
-
-            let old_has_pool = CommissionConfigs::<T>::get(entity_id)
-                .map(|c| c.enabled_modes.contains(CommissionModes::POOL_REWARD))
-                .unwrap_or(false);
-
-            // 先清除旧配置（entity_id 作为 key）
-            T::ReferralWriter::clear_config(entity_id)?;
-            T::LevelDiffWriter::clear_config(entity_id)?;
-            T::TeamWriter::clear_config(entity_id)?;
-            T::PoolRewardWriter::clear_config(entity_id)?;
-
-            match plan {
-                CommissionPlan::None => {
-                    CommissionConfigs::<T>::insert(entity_id, CoreCommissionConfig {
-                        enabled_modes: CommissionModes(CommissionModes::NONE),
-                        max_commission_rate: 0,
-                        enabled: false,
-                        withdrawal_cooldown: 0,
-                    });
-                }
-                CommissionPlan::DirectOnly { rate } => {
-                    ensure!(rate <= 10000, Error::<T>::InvalidCommissionRate);
-                    CommissionConfigs::<T>::insert(entity_id, CoreCommissionConfig {
-                        enabled_modes: CommissionModes(CommissionModes::DIRECT_REWARD),
-                        max_commission_rate: rate,
-                        enabled: true,
-                        withdrawal_cooldown: 0,
-                    });
-                    T::ReferralWriter::set_direct_rate(entity_id, rate)?;
-                }
-                CommissionPlan::MultiLevel { levels, base_rate } => {
-                    ensure!(base_rate <= 10000, Error::<T>::InvalidCommissionRate);
-                    ensure!(levels > 0 && levels <= 15, Error::<T>::InvalidCommissionRate);
-
-                    let mut level_rates = alloc::vec::Vec::new();
-                    let mut current_rate = base_rate;
-                    let mut total_rate: u16 = 0;
-                    for _ in 0..levels {
-                        level_rates.push(current_rate);
-                        total_rate = total_rate.saturating_add(current_rate);
-                        current_rate = current_rate * 80 / 100;
-                    }
-
-                    CommissionConfigs::<T>::insert(entity_id, CoreCommissionConfig {
-                        enabled_modes: CommissionModes(
-                            CommissionModes::DIRECT_REWARD | CommissionModes::MULTI_LEVEL
-                        ),
-                        max_commission_rate: total_rate.min(10000),
-                        enabled: true,
-                        withdrawal_cooldown: 0,
-                    });
-                    T::ReferralWriter::set_direct_rate(entity_id, base_rate)?;
-                    T::ReferralWriter::set_multi_level(entity_id, level_rates, total_rate.min(10000))?;
-                }
-                CommissionPlan::LevelDiff { ref level_rates } => {
-                    let mut max_rate = 0u16;
-                    for &rate in level_rates.iter() {
-                        ensure!(rate <= 10000, Error::<T>::InvalidCommissionRate);
-                        if rate > max_rate { max_rate = rate; }
-                    }
-                    CommissionConfigs::<T>::insert(entity_id, CoreCommissionConfig {
-                        enabled_modes: CommissionModes(
-                            CommissionModes::DIRECT_REWARD | CommissionModes::LEVEL_DIFF
-                        ),
-                        max_commission_rate: max_rate,
-                        enabled: true,
-                        withdrawal_cooldown: 0,
-                    });
-                    let depth = level_rates.len() as u8;
-                    T::LevelDiffWriter::set_level_rates(entity_id, level_rates.to_vec(), depth)?;
-                }
-                CommissionPlan::Custom => {
-                    CommissionConfigs::<T>::insert(entity_id, CoreCommissionConfig {
-                        enabled_modes: CommissionModes(CommissionModes::NONE),
-                        max_commission_rate: 10000,
-                        enabled: true,
-                        withdrawal_cooldown: 0,
-                    });
-                }
-            }
-
-            // 跟踪 POOL_REWARD 开关变化
-            let new_has_pool = CommissionConfigs::<T>::get(entity_id)
-                .map(|c| c.enabled_modes.contains(CommissionModes::POOL_REWARD))
-                .unwrap_or(false);
-            if old_has_pool && !new_has_pool {
-                let now = <frame_system::Pallet<T>>::block_number();
-                PoolRewardDisabledAt::<T>::insert(entity_id, now);
-            } else if !old_has_pool && new_has_pool {
-                PoolRewardDisabledAt::<T>::remove(entity_id);
-            }
-
-            Self::deposit_event(Event::CommissionPlanInitialized { entity_id, plan });
-            Ok(())
+            ensure_signed(origin)?;
+            Err(Error::<T>::CommissionPlanDisabled.into())
         }
 
         /// [已禁用] 购物余额仅可用于购物（place_order 下单抵扣），不可直接提取为 NEX。
@@ -1131,10 +1055,21 @@ pub mod pallet {
                 _ => {},
             }
 
-            // 校验 level_overrides 无重复 level_id
-            for (i, (id_a, _)) in level_overrides.iter().enumerate() {
-                for (id_b, _) in level_overrides.iter().skip(i + 1) {
-                    ensure!(id_a != id_b, Error::<T>::DuplicateLevelId);
+            // H2 审计修复: 与 NEX set_withdrawal_config 一致的 tier 和验证
+            ensure!(
+                default_tier.withdrawal_rate.saturating_add(default_tier.repurchase_rate) == 10000,
+                Error::<T>::InvalidWithdrawalConfig
+            );
+
+            // M3 审计修复: 使用 BTreeSet O(n log n) 替代 O(n²) 重复检查
+            {
+                let mut seen_ids = alloc::collections::BTreeSet::new();
+                for (level_id, tier) in level_overrides.iter() {
+                    ensure!(seen_ids.insert(*level_id), Error::<T>::DuplicateLevelId);
+                    ensure!(
+                        tier.withdrawal_rate.saturating_add(tier.repurchase_rate) == 10000,
+                        Error::<T>::InvalidWithdrawalConfig
+                    );
                 }
             }
 
@@ -1228,11 +1163,12 @@ pub mod pallet {
                     ensure!(wc.enabled, Error::<T>::WithdrawalConfigNotEnabled);
                 }
 
-                // 冻结期检查（共用 NEX 冻结期配置）
+                // P3 审计修复: Token 冻结期使用独立的 MemberTokenLastCredited
+                // 不再共用 NEX 的 MemberLastCredited，实现完全解耦
                 if let Some(config) = CommissionConfigs::<T>::get(entity_id) {
                     if config.withdrawal_cooldown > 0 {
                         let now = <frame_system::Pallet<T>>::block_number();
-                        let last = MemberLastCredited::<T>::get(entity_id, &who);
+                        let last = MemberTokenLastCredited::<T>::get(entity_id, &who);
                         let cooldown: BlockNumberFor<T> = config.withdrawal_cooldown.into();
                         ensure!(now >= last.saturating_add(cooldown),
                             Error::<T>::WithdrawalCooldownNotMet);
@@ -1857,7 +1793,7 @@ pub mod pallet {
                     let referrer_amount = referrer_quota.min(transferable);
                     if !referrer_amount.is_zero() {
                         Self::credit_commission(
-                            entity_id, order_id, buyer, &referrer,
+                            entity_id, shop_id, order_id, buyer, &referrer,
                             referrer_amount, CommissionType::EntityReferral, 0, now,
                         )?;
                         total_from_platform = referrer_amount;
@@ -1884,43 +1820,55 @@ pub mod pallet {
                 remaining = new_remaining;
                 for output in outputs {
                     Self::credit_commission(
-                        entity_id, order_id, buyer, &output.beneficiary, output.amount,
+                        entity_id, shop_id, order_id, buyer, &output.beneficiary, output.amount,
                         output.commission_type, output.level, now,
                     )?;
                 }
 
-                // 2. LevelDiff Plugin
+                // 2. MultiLevel Plugin
+                let (outputs, new_remaining) = T::MultiLevelPlugin::calculate(
+                    entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
+                );
+                remaining = new_remaining;
+                for output in outputs {
+                    Self::credit_commission(
+                        entity_id, shop_id, order_id, buyer, &output.beneficiary, output.amount,
+                        output.commission_type, output.level, now,
+                    )?;
+                }
+
+                // 3. LevelDiff Plugin
                 let (outputs, new_remaining) = T::LevelDiffPlugin::calculate(
                     entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
                 );
                 remaining = new_remaining;
                 for output in outputs {
                     Self::credit_commission(
-                        entity_id, order_id, buyer, &output.beneficiary, output.amount,
+                        entity_id, shop_id, order_id, buyer, &output.beneficiary, output.amount,
                         output.commission_type, output.level, now,
                     )?;
                 }
 
-                // 3. SingleLine Plugin
+                // 4. SingleLine Plugin
                 let (outputs, new_remaining) = T::SingleLinePlugin::calculate(
                     entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
                 );
                 remaining = new_remaining;
                 for output in outputs {
                     Self::credit_commission(
-                        entity_id, order_id, buyer, &output.beneficiary, output.amount,
+                        entity_id, shop_id, order_id, buyer, &output.beneficiary, output.amount,
                         output.commission_type, output.level, now,
                     )?;
                 }
 
-                // 4. Team Plugin
+                // 5. Team Plugin
                 let (outputs, new_remaining) = T::TeamPlugin::calculate(
                     entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
                 );
                 remaining = new_remaining;
                 for output in outputs {
                     Self::credit_commission(
-                        entity_id, order_id, buyer, &output.beneficiary, output.amount,
+                        entity_id, shop_id, order_id, buyer, &output.beneficiary, output.amount,
                         output.commission_type, output.level, now,
                     )?;
                 }
@@ -2005,6 +1953,7 @@ pub mod pallet {
         /// 记录并发放返佣（Entity 级记账）
         pub fn credit_commission(
             entity_id: u64,
+            shop_id: u64,
             order_id: u64,
             buyer: &T::AccountId,
             beneficiary: &T::AccountId,
@@ -2015,7 +1964,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let record = CommissionRecord {
                 entity_id,
-                shop_id: 0,
+                shop_id,
                 order_id,
                 buyer: buyer.clone(),
                 beneficiary: beneficiary.clone(),
@@ -2119,7 +2068,15 @@ pub mod pallet {
             let entity_token_balance = T::TokenTransferProvider::token_balance_of(
                 entity_id, &entity_account,
             );
-            let mut remaining = max_commission.min(entity_token_balance);
+            // H1 审计修复: Token 佣金预算必须扣除已承诺的 Token 额度
+            // （包括待提现佣金、购物余额、沉淀池）避免跨订单重复承诺
+            // NEX 管线无此问题——转账即时发生，seller 余额自然递减；
+            // Token 管线是纯记账模式，entity_token_balance 不变，需手动扣除。
+            let committed = TokenPendingTotal::<T>::get(entity_id)
+                .saturating_add(TokenShoppingTotal::<T>::get(entity_id))
+                .saturating_add(UnallocatedTokenPool::<T>::get(entity_id));
+            let available_token = entity_token_balance.saturating_sub(committed);
+            let mut remaining = max_commission.min(available_token);
 
             if !remaining.is_zero() {
                 // 1. Token Referral Plugin
@@ -2135,7 +2092,20 @@ pub mod pallet {
                     )?;
                 }
 
-                // 2. Token LevelDiff Plugin
+                // 2. Token MultiLevel Plugin
+                let (outputs, new_remaining) = T::TokenMultiLevelPlugin::calculate_token(
+                    entity_id, buyer, token_order_amount, remaining,
+                    enabled_modes, is_first_order, buyer_stats.order_count,
+                );
+                remaining = new_remaining;
+                for output in outputs {
+                    Self::credit_token_commission(
+                        entity_id, order_id, buyer, &output.beneficiary,
+                        output.amount, output.commission_type, output.level, now,
+                    )?;
+                }
+
+                // 3. Token LevelDiff Plugin
                 let (outputs, new_remaining) = T::TokenLevelDiffPlugin::calculate_token(
                     entity_id, buyer, token_order_amount, remaining,
                     enabled_modes, is_first_order, buyer_stats.order_count,
@@ -2148,7 +2118,7 @@ pub mod pallet {
                     )?;
                 }
 
-                // 3. Token SingleLine Plugin
+                // 4. Token SingleLine Plugin
                 let (outputs, new_remaining) = T::TokenSingleLinePlugin::calculate_token(
                     entity_id, buyer, token_order_amount, remaining,
                     enabled_modes, is_first_order, buyer_stats.order_count,
@@ -2161,7 +2131,7 @@ pub mod pallet {
                     )?;
                 }
 
-                // 4. Token Team Plugin
+                // 5. Token Team Plugin
                 let (outputs, new_remaining) = T::TokenTeamPlugin::calculate_token(
                     entity_id, buyer, token_order_amount, remaining,
                     enabled_modes, is_first_order, buyer_stats.order_count,
@@ -2229,6 +2199,9 @@ pub mod pallet {
             TokenPendingTotal::<T>::mutate(entity_id, |total| {
                 *total = total.saturating_add(amount);
             });
+
+            // P3 审计修复: Token 入账更新独立冻结时间（与 NEX 的 MemberLastCredited 解耦）
+            MemberTokenLastCredited::<T>::insert(entity_id, beneficiary, now);
 
             Self::deposit_event(Event::TokenCommissionDistributed {
                 entity_id, order_id,
@@ -2572,10 +2545,24 @@ impl<T: pallet::Config> CommissionProvider<T::AccountId, pallet::BalanceOf<T>> f
             | CommissionModes::POOL_REWARD;
         frame_support::ensure!(modes & !allowed_modes == 0, sp_runtime::DispatchError::Other("InvalidModes"));
 
+        // H4 审计修复: 跟踪 POOL_REWARD 开关变化（与 extrinsic 版本一致）
+        let old_has_pool = pallet::CommissionConfigs::<T>::get(entity_id)
+            .map(|c| c.enabled_modes.contains(CommissionModes::POOL_REWARD))
+            .unwrap_or(false);
+        let new_has_pool = CommissionModes(modes).contains(CommissionModes::POOL_REWARD);
+
         pallet::CommissionConfigs::<T>::mutate(entity_id, |maybe| {
             let config = maybe.get_or_insert_with(pallet::CoreCommissionConfig::default);
             config.enabled_modes = CommissionModes(modes);
         });
+
+        if old_has_pool && !new_has_pool {
+            let now = <frame_system::Pallet<T>>::block_number();
+            pallet::PoolRewardDisabledAt::<T>::insert(entity_id, now);
+        } else if !old_has_pool && new_has_pool {
+            pallet::PoolRewardDisabledAt::<T>::remove(entity_id);
+        }
+
         Ok(())
     }
 
@@ -2646,7 +2633,7 @@ impl<T: pallet::Config> pallet_commission_common::PoolBalanceProvider<pallet::Ba
     fn deduct_pool(entity_id: u64, amount: pallet::BalanceOf<T>) -> Result<(), sp_runtime::DispatchError> {
         pallet::UnallocatedPool::<T>::try_mutate(entity_id, |pool| {
             frame_support::ensure!(*pool >= amount, sp_runtime::DispatchError::Other("InsufficientPool"));
-            *pool -= amount;
+            *pool = sp_runtime::Saturating::saturating_sub(*pool, amount);
             Ok(())
         })
     }
@@ -2666,7 +2653,7 @@ impl<T: pallet::Config> pallet_commission_common::TokenPoolBalanceProvider<palle
     fn deduct_token_pool(entity_id: u64, amount: pallet::TokenBalanceOf<T>) -> Result<(), sp_runtime::DispatchError> {
         pallet::UnallocatedTokenPool::<T>::try_mutate(entity_id, |pool| {
             frame_support::ensure!(*pool >= amount, sp_runtime::DispatchError::Other("InsufficientTokenPool"));
-            *pool -= amount;
+            *pool = sp_runtime::Saturating::saturating_sub(*pool, amount);
             Ok(())
         })
     }

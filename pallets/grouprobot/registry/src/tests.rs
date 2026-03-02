@@ -2775,3 +2775,233 @@ fn m3_report_stale_peer_clears_heartbeat_count() {
 		assert_eq!(GroupRobotRegistry::peer_heartbeat_count(&bot_hash(1), &pk(10)), 0);
 	});
 }
+
+// ============================================================================
+// Phase 6 回归测试
+// ============================================================================
+
+/// P6-H1: refresh_attestation 支持 V2 存储 (submit_tee_attestation 路径)
+#[test]
+fn p6_h1_refresh_attestation_works_with_v2() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		// 通过 submit_tee_attestation 写入 V2
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_dcap_quote(&mrtd(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+		assert_ok!(GroupRobotRegistry::submit_tee_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			bounded, None, None, None,
+		));
+		assert!(AttestationsV2::<Test>::get(bot_hash(1)).is_some());
+		assert!(Attestations::<Test>::get(bot_hash(1)).is_none());
+
+		// refresh_attestation 应该成功刷新 V2
+		assert_ok!(GroupRobotRegistry::refresh_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			[0xAA; 32], None, mrtd(1), None,
+		));
+
+		// V2 记录已更新
+		let v2 = AttestationsV2::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(v2.primary_quote_hash, [0xAA; 32]);
+		// V1 仍不存在
+		assert!(Attestations::<Test>::get(bot_hash(1)).is_none());
+	});
+}
+
+/// P6-H1: refresh_attestation 仍然支持 V1 存储
+#[test]
+fn p6_h1_refresh_attestation_still_works_with_v1() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		// 通过 submit_attestation 写入 V1
+		assert_ok!(GroupRobotRegistry::submit_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			[0x11; 32], None, mrtd(1), None,
+		));
+		assert!(Attestations::<Test>::get(bot_hash(1)).is_some());
+
+		// refresh 应该成功
+		assert_ok!(GroupRobotRegistry::refresh_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			[0x22; 32], None, mrtd(1), None,
+		));
+		let v1 = Attestations::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(v1.tdx_quote_hash, [0x22; 32]);
+	});
+}
+
+/// P6-H1: refresh_attestation 无证明时仍失败
+#[test]
+fn p6_h1_refresh_attestation_fails_no_attestation() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		assert_noop!(
+			GroupRobotRegistry::refresh_attestation(
+				RuntimeOrigin::signed(OWNER), bot_hash(1),
+				[0x11; 32], None, mrtd(1), None,
+			),
+			Error::<Test>::AttestationNotFound
+		);
+	});
+}
+
+/// P6-H2: heartbeat_peer 拒绝已停用 Bot
+#[test]
+fn p6_h2_heartbeat_peer_rejects_deactivated_bot() {
+	new_test_ext().execute_with(|| {
+		// bot_hash(1) => paid tier
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://n1:8443"),
+		));
+
+		// 心跳正常工作
+		assert_ok!(GroupRobotRegistry::heartbeat_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10),
+		));
+
+		// 手动设置 Bot 为 Deactivated (绕过 deactivate_bot 清理 peer 的逻辑, 保留 peer)
+		Bots::<Test>::mutate(bot_hash(1), |maybe_bot| {
+			if let Some(bot) = maybe_bot {
+				bot.status = BotStatus::Deactivated;
+			}
+		});
+
+		// P6-H2: 心跳应失败
+		assert_noop!(
+			GroupRobotRegistry::heartbeat_peer(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10),
+			),
+			Error::<Test>::BotNotActive
+		);
+	});
+}
+
+/// P6-H3: deactivate_bot 清理证明、Nonce、Peer 存储
+#[test]
+fn p6_h3_deactivate_bot_clears_attestations_and_peers() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		// 提交 V1 证明
+		assert_ok!(GroupRobotRegistry::submit_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			[0x11; 32], None, mrtd(1), None,
+		));
+		assert!(Attestations::<Test>::get(bot_hash(1)).is_some());
+
+		// 请求 nonce
+		assert_ok!(GroupRobotRegistry::request_attestation_nonce(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+		));
+		assert!(AttestationNonces::<Test>::get(bot_hash(1)).is_some());
+
+		// 注册 Peer + 心跳
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://n1:8443"),
+		));
+		assert_ok!(GroupRobotRegistry::heartbeat_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10),
+		));
+		assert_eq!(GroupRobotRegistry::peer_count(&bot_hash(1)), 1);
+		assert_eq!(GroupRobotRegistry::peer_heartbeat_count(&bot_hash(1), &pk(10)), 1);
+
+		// 停用
+		assert_ok!(GroupRobotRegistry::deactivate_bot(RuntimeOrigin::signed(OWNER), bot_hash(1)));
+
+		// P6-H3: 所有相关存储必须已清理
+		assert!(Attestations::<Test>::get(bot_hash(1)).is_none());
+		assert!(AttestationsV2::<Test>::get(bot_hash(1)).is_none());
+		assert!(AttestationNonces::<Test>::get(bot_hash(1)).is_none());
+		assert_eq!(GroupRobotRegistry::peer_count(&bot_hash(1)), 0);
+		assert_eq!(GroupRobotRegistry::peer_heartbeat_count(&bot_hash(1), &pk(10)), 0);
+	});
+}
+
+/// P6-H3: deactivate_bot 清理 V2 证明
+#[test]
+fn p6_h3_deactivate_bot_clears_v2_attestation() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		// 通过 submit_tee_attestation 写入 V2
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_dcap_quote(&mrtd(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+		assert_ok!(GroupRobotRegistry::submit_tee_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			bounded, None, None, None,
+		));
+		assert!(AttestationsV2::<Test>::get(bot_hash(1)).is_some());
+
+		// 停用
+		assert_ok!(GroupRobotRegistry::deactivate_bot(RuntimeOrigin::signed(OWNER), bot_hash(1)));
+
+		// V2 必须已清理
+		assert!(AttestationsV2::<Test>::get(bot_hash(1)).is_none());
+		let bot = Bots::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(bot.status, BotStatus::Deactivated);
+	});
+}
+
+/// P6-M1: bind_community 可从已停用 Bot 重新绑定
+#[test]
+fn p6_m1_bind_community_rebinds_from_deactivated_bot() {
+	new_test_ext().execute_with(|| {
+		// Bot 1 绑定社区
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::bind_community(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), community_hash(1), Platform::Telegram,
+		));
+		assert_eq!(Bots::<Test>::get(bot_hash(1)).unwrap().community_count, 1);
+
+		// 停用 Bot 1
+		assert_ok!(GroupRobotRegistry::deactivate_bot(RuntimeOrigin::signed(OWNER), bot_hash(1)));
+
+		// Bot 2 尝试绑定同一社区 — P6-M1 修复后应成功
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(2), pk(2)));
+		assert_ok!(GroupRobotRegistry::bind_community(
+			RuntimeOrigin::signed(OWNER), bot_hash(2), community_hash(1), Platform::Telegram,
+		));
+
+		// 新绑定生效
+		let binding = CommunityBindings::<Test>::get(community_hash(1)).unwrap();
+		assert_eq!(binding.bot_id_hash, bot_hash(2));
+		assert_eq!(Bots::<Test>::get(bot_hash(2)).unwrap().community_count, 1);
+		// 旧 Bot 的 community_count 已递减
+		assert_eq!(Bots::<Test>::get(bot_hash(1)).unwrap().community_count, 0);
+	});
+}
+
+/// P6-M1: bind_community 对活跃 Bot 仍拒绝重复绑定
+#[test]
+fn p6_m1_bind_community_rejects_active_bot_rebind() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(2), pk(2)));
+
+		assert_ok!(GroupRobotRegistry::bind_community(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), community_hash(1), Platform::Telegram,
+		));
+
+		// Bot 1 仍活跃, Bot 2 不应抢占
+		assert_noop!(
+			GroupRobotRegistry::bind_community(
+				RuntimeOrigin::signed(OWNER), bot_hash(2), community_hash(1), Platform::Telegram,
+			),
+			Error::<Test>::CommunityAlreadyBound
+		);
+	});
+}

@@ -573,6 +573,11 @@ pub mod pallet {
         GovernanceConfigLocked {
             entity_id: u64,
         },
+        /// 治理模式同步到 registry 失败（两侧可能不一致）
+        GovernanceSyncFailed {
+            entity_id: u64,
+            mode: GovernanceMode,
+        },
     }
 
     // ==================== 错误 ====================
@@ -636,6 +641,8 @@ pub mod pallet {
         ExecutionDelayTooShort,
         /// FullDAO 需要先发行代币
         TokenNotEnabledForDAO,
+        /// 提案 ID 溢出
+        ProposalIdOverflow,
     }
 
     // ==================== Extrinsics ====================
@@ -751,7 +758,9 @@ pub mod pallet {
             Proposals::<T>::insert(proposal_id, proposal);
             entity_proposals.try_push(proposal_id).map_err(|_| Error::<T>::TooManyActiveProposals)?;
             EntityProposals::<T>::insert(entity_id, entity_proposals);
-            NextProposalId::<T>::put(proposal_id.saturating_add(1));
+            // L1-fix: checked_add 防止 u64 溢出导致 ID 覆盖
+            let next_id = proposal_id.checked_add(1).ok_or(Error::<T>::ProposalIdOverflow)?;
+            NextProposalId::<T>::put(next_id);
 
             Self::deposit_event(Event::ProposalCreated {
                 proposal_id,
@@ -1065,7 +1074,9 @@ pub mod pallet {
             });
 
             // C2: 同步 registry 侧
-            let _ = T::EntityProvider::set_governance_mode(entity_id, mode);
+            if T::EntityProvider::set_governance_mode(entity_id, mode).is_err() {
+                Self::deposit_event(Event::GovernanceSyncFailed { entity_id, mode });
+            }
 
             Self::deposit_event(Event::GovernanceConfigUpdated {
                 entity_id,
@@ -1199,6 +1210,20 @@ pub mod pallet {
                 },
                 ProposalType::SetUpgradeMode { mode } => {
                     ensure!(*mode <= 2, Error::<T>::InvalidParameter);
+                },
+                // H1: VotingPeriodChange 必须 >= MinVotingPeriod，防止通过提案绕过最小投票期保护
+                ProposalType::VotingPeriodChange { new_period_blocks } => {
+                    let period: BlockNumberFor<T> = (*new_period_blocks).into();
+                    ensure!(period >= T::MinVotingPeriod::get(), Error::<T>::VotingPeriodTooShort);
+                },
+                // H2: UpdateCustomLevel 的费率验证（与 AddCustomLevel 一致）
+                ProposalType::UpdateCustomLevel { discount_rate, commission_bonus, .. } => {
+                    if let Some(dr) = discount_rate {
+                        ensure!(*dr <= 10000, Error::<T>::InvalidParameter);
+                    }
+                    if let Some(cb) = commission_bonus {
+                        ensure!(*cb <= 10000, Error::<T>::InvalidParameter);
+                    }
                 },
                 _ => {},
             }
@@ -1412,10 +1437,12 @@ pub mod pallet {
 
                 // ==================== 治理参数类 ====================
                 ProposalType::VotingPeriodChange { new_period_blocks } => {
-                    // H2 修复: 直接使用 proposal.entity_id，不再经 shop_entity_id 二次解析
+                    // H1 防御: 执行时再次验证最小投票期（runtime 升级可能提高下限）
+                    let period: BlockNumberFor<T> = (*new_period_blocks).into();
+                    ensure!(period >= T::MinVotingPeriod::get(), Error::<T>::VotingPeriodTooShort);
                     GovernanceConfigs::<T>::mutate(entity_id, |maybe_config| {
                         let config = maybe_config.get_or_insert_with(GovernanceConfigOf::<T>::default);
-                        config.voting_period = (*new_period_blocks).into();
+                        config.voting_period = period;
                     });
                     Ok(())
                 },

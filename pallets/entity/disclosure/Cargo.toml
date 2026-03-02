@@ -31,8 +31,6 @@ std = [
     "frame-system/std",
     "sp-runtime/std",
     "pallet-entity-common/std",
-    "sp-core/std",
-    "sp-io/std",
 ]
 runtime-benchmarks = [
     "frame-support/runtime-benchmarks",

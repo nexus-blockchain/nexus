@@ -58,6 +58,7 @@ pallet-entity-member = { workspace = true }
 pallet-commission-common = { workspace = true }
 pallet-commission-core = { workspace = true }
 pallet-commission-referral = { workspace = true }
+pallet-commission-multi-level = { workspace = true }
 pallet-commission-level-diff = { workspace = true }
 pallet-commission-single-line = { workspace = true }
 pallet-commission-team = { workspace = true }
@@ -78,6 +79,11 @@ pallet-grouprobot-subscription = { workspace = true }
 pallet-grouprobot-rewards = { workspace = true }
 pallet-grouprobot-community = { workspace = true }
 pallet-grouprobot-ceremony = { workspace = true }
+# Ads pallets (modular advertising engine)
+pallet-ads-primitives = { workspace = true }
+pallet-ads-core = { workspace = true }
+pallet-ads-grouprobot = { workspace = true }
+pallet-ads-entity = { workspace = true }
 scale-info = { features = ["derive", "serde"], workspace = true }
 serde_json = { workspace = true, default-features = false, features = ["alloc"] }
 sp-api = { version = "40.0.0", workspace = true }
@@ -146,6 +152,7 @@ std = [
 	"pallet-commission-common/std",
 	"pallet-commission-core/std",
 	"pallet-commission-referral/std",
+	"pallet-commission-multi-level/std",
 	"pallet-commission-level-diff/std",
 	"pallet-commission-single-line/std",
 	"pallet-commission-team/std",
@@ -166,6 +173,11 @@ std = [
 	"pallet-grouprobot-rewards/std",
 	"pallet-grouprobot-community/std",
 	"pallet-grouprobot-ceremony/std",
+	# Ads pallets std
+	"pallet-ads-primitives/std",
+	"pallet-ads-core/std",
+	"pallet-ads-grouprobot/std",
+	"pallet-ads-entity/std",
 	"scale-info/std",
 	"serde_json/std",
 	"sp-api/std",

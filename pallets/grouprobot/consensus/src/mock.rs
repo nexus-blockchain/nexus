@@ -137,6 +137,22 @@ pub fn clear_distributed_rewards() {
 	DISTRIBUTED_REWARDS.with(|v| v.borrow_mut().clear());
 }
 
+// Mock OrphanRewardClaimer (H3-fix)
+thread_local! {
+	static ORPHAN_CLAIMS: RefCell<Vec<(NodeId, u64)>> = RefCell::new(Vec::new());
+}
+
+pub struct MockOrphanRewardClaimer;
+impl OrphanRewardClaimer<u64> for MockOrphanRewardClaimer {
+	fn try_claim_orphan_rewards(node_id: &NodeId, operator: &u64) {
+		ORPHAN_CLAIMS.with(|v| v.borrow_mut().push((*node_id, *operator)));
+	}
+}
+
+pub fn get_orphan_claims() -> Vec<(NodeId, u64)> {
+	ORPHAN_CLAIMS.with(|v| v.borrow().clone())
+}
+
 // Mock PeerUptimeRecorder
 thread_local! {
 	static RECORDED_UPTIME_ERAS: RefCell<Vec<u64>> = RefCell::new(Vec::new());
@@ -179,6 +195,7 @@ impl pallet_grouprobot_consensus::Config for Test {
 	type RewardDistributor = MockRewardDistributor;
 	type Subscription = MockSubscription;
 	type PeerUptimeRecorder = MockPeerUptimeRecorder;
+	type OrphanRewardClaimer = MockOrphanRewardClaimer;
 }
 
 pub const OWNER: u64 = 1;

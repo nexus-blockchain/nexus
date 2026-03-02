@@ -337,6 +337,12 @@ pub mod pallet {
         WithdrawBelowMinimum,
         /// 提取金额为零
         ZeroWithdrawAmount,
+        /// Shop ID 溢出
+        ShopIdOverflow,
+        /// CID 不能为空
+        EmptyCid,
+        /// 充值金额为零
+        ZeroFundAmount,
     }
 
     // ========================================================================
@@ -413,9 +419,11 @@ pub mod pallet {
                     shop.name = n;
                 }
                 if let Some(cid) = logo_cid {
+                    ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
                     shop.logo_cid = Some(cid);
                 }
                 if let Some(cid) = description_cid {
+                    ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
                     shop.description_cid = Some(cid);
                 }
                 
@@ -498,6 +506,8 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             
+            ensure!(!amount.is_zero(), Error::<T>::ZeroFundAmount);
+
             Shops::<T>::try_mutate(shop_id, |maybe_shop| -> DispatchResult {
                 let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
                 
@@ -605,9 +615,11 @@ pub mod pallet {
                 
                 shop.location = location;
                 if let Some(cid) = address_cid {
+                    ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
                     shop.address_cid = Some(cid);
                 }
                 if let Some(cid) = business_hours_cid {
+                    ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
                     shop.business_hours_cid = Some(cid);
                 }
                 
@@ -753,6 +765,7 @@ pub mod pallet {
 
             let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
             ensure!(Self::can_manage_shop(&shop, &who), Error::<T>::NotAuthorized);
+            ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
 
             ShopPointsConfigs::<T>::try_mutate(shop_id, |maybe_config| -> DispatchResult {
                 let config = maybe_config.as_mut().ok_or(Error::<T>::PointsNotEnabled)?;
@@ -786,6 +799,9 @@ pub mod pallet {
 
             ensure!(!amount.is_zero(), Error::<T>::InsufficientPointsBalance);
             ensure!(who != to, Error::<T>::InvalidConfig);
+
+            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
+            ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
 
             let config = ShopPointsConfigs::<T>::get(shop_id)
                 .ok_or(Error::<T>::PointsNotEnabled)?;
@@ -956,6 +972,7 @@ pub mod pallet {
             is_primary: bool,
         ) -> Result<u64, DispatchError> {
             let shop_id = NextShopId::<T>::get();
+            ensure!(shop_id < u64::MAX, Error::<T>::ShopIdOverflow);
             let now = <frame_system::Pallet<T>>::block_number();
 
             let shop = Shop {
@@ -1098,7 +1115,9 @@ pub mod pallet {
                 shop.rating_total = shop.rating_total.saturating_add(clamped_rating.saturating_mul(100));
                 shop.rating_count = shop.rating_count.saturating_add(1);
                 // rating = rating_total / rating_count，无精度损失累积
-                shop.rating = (shop.rating_total / shop.rating_count as u64).min(500) as u16;
+                if shop.rating_count > 0 {
+                    shop.rating = (shop.rating_total / shop.rating_count as u64).min(500) as u16;
+                }
                 Ok(())
             })
         }
@@ -1117,11 +1136,12 @@ pub mod pallet {
             let available = balance.saturating_sub(protected);
             ensure!(available >= amount_balance, Error::<T>::InsufficientOperatingFund);
             
-            // 扣减运营资金（销毁，费用已由 Entity 层 deduct_operating_fee 处理）
-            let _imbalance = T::Currency::withdraw(
+            // 扣减运营资金 → 转给 Entity 账户（非销毁）
+            let entity_account = T::EntityProvider::entity_account(shop.entity_id);
+            T::Currency::transfer(
                 &shop_account,
+                &entity_account,
                 amount_balance,
-                frame_support::traits::WithdrawReasons::TRANSFER,
                 ExistenceRequirement::KeepAlive,
             )?;
             
@@ -1176,6 +1196,7 @@ pub mod pallet {
         fn pause_shop(shop_id: u64) -> Result<(), DispatchError> {
             Shops::<T>::try_mutate(shop_id, |maybe_shop| -> Result<(), DispatchError> {
                 let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+                ensure!(shop.status == ShopOperatingStatus::Active, Error::<T>::ShopAlreadyPaused);
                 shop.status = ShopOperatingStatus::Paused;
                 Self::deposit_event(Event::ShopPaused { shop_id });
                 Ok(())
@@ -1185,6 +1206,7 @@ pub mod pallet {
         fn resume_shop(shop_id: u64) -> Result<(), DispatchError> {
             Shops::<T>::try_mutate(shop_id, |maybe_shop| -> Result<(), DispatchError> {
                 let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+                ensure!(shop.status.can_resume(), Error::<T>::ShopNotPaused);
                 shop.status = ShopOperatingStatus::Active;
                 Self::deposit_event(Event::ShopResumed { shop_id });
                 Ok(())
@@ -1195,6 +1217,9 @@ pub mod pallet {
             Shops::<T>::try_mutate(shop_id, |maybe_shop| -> Result<(), DispatchError> {
                 let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
                 shop.status = ShopOperatingStatus::Closed;
+
+                // H4: 注销 Entity-Shop 关联（与 close_shop extrinsic 保持一致）
+                let _ = T::EntityProvider::unregister_shop(shop.entity_id, shop_id);
 
                 // M3: 清理积分数据
                 ShopPointsConfigs::<T>::remove(shop_id);

@@ -27,10 +27,20 @@ pub struct TeamPerformanceConfig<Balance, MaxTiers: Get<u32>> {
     pub tiers: BoundedVec<TeamPerformanceTier<Balance>, MaxTiers>, // 按 sales_threshold 升序
     pub max_depth: u8,        // 沿推荐链向上最大遍历深度（1-30）
     pub allow_stacking: bool, // 是否允许多层叠加
+    pub threshold_mode: SalesThresholdMode, // 门槛数据源模式
 }
 ```
 
-**Default:** `max_depth = 5`，`allow_stacking = false`，`tiers` 为空
+### SalesThresholdMode — 门槛数据源模式
+
+```rust
+pub enum SalesThresholdMode {
+    Nex = 0,  // 使用 get_member_stats 返回的 total_spent（NEX Balance 转 u128）
+    Usdt = 1, // 使用 get_member_spent_usdt 返回的 USDT 累计（精度 10^6）
+}
+```
+
+**Default:** `max_depth = 5`，`allow_stacking = false`，`threshold_mode = Nex`，`tiers` 为空
 
 ## Storage
 
@@ -53,6 +63,7 @@ fn set_team_performance_config(
     tiers: BoundedVec<TeamPerformanceTier<BalanceOf<T>>, T::MaxTeamTiers>,
     max_depth: u8,
     allow_stacking: bool,
+    threshold_mode: SalesThresholdMode,
 ) -> DispatchResult
 ```
 
@@ -75,6 +86,7 @@ buyer 下单
   → 沿推荐链向上遍历（最多 max_depth 层）
     → 跳过未激活会员（is_activated 检查）
     → 对每个激活上级查询 (team_size, total_spent)
+    → total_spent 来源由 threshold_mode 决定（Nex=NEX 累计, Usdt=USDT 累计）
     → match_tier: 匹配最高达标阶梯档位
     → commission = order_amount × rate / 10000
     → actual = min(commission, remaining)
@@ -134,12 +146,13 @@ fn set_team_config(
     tiers: Vec<(u128, u32, u16)>,  // (threshold, min_team_size, rate)
     max_depth: u8,
     allow_stacking: bool,
+    threshold_mode: u8,            // 0=Nex, 1=Usdt
 ) -> Result<(), DispatchError>
 
 fn clear_config(entity_id: u64) -> Result<(), DispatchError>
 ```
 
-`set_team_config` 内部调用 `validate_config` 执行与 extrinsic 相同的全量校验。
+`set_team_config` 直接写入存储（无 `validate_config` 校验），调用方需确保参数正确。
 
 ## Config
 

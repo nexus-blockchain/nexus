@@ -373,12 +373,8 @@ pub mod pallet {
         ProviderNotFound,
         /// 提供者已存在
         ProviderAlreadyExists,
-        /// 不是认证提供者
-        NotAProvider,
         /// 提供者不活跃
         ProviderNotActive,
-        /// 无权限
-        Unauthorized,
         /// CID 过长
         CidTooLong,
         /// 名称过长
@@ -389,8 +385,6 @@ pub mod pallet {
         InvalidKycStatus,
         /// 无效的 KYC 级别
         InvalidKycLevel,
-        /// 实体要求不存在
-        EntityRequirementNotFound,
         /// KYC 级别不满足要求
         InsufficientKycLevel,
         /// 高风险国家
@@ -552,7 +546,11 @@ pub mod pallet {
             ensure!(provider.active, Error::<T>::ProviderNotActive);
 
             let details_bounded = details_cid
-                .map(|cid| cid.try_into().map_err(|_| Error::<T>::CidTooLong))
+                .map(|cid| {
+                    // M1: 不接受空 CID
+                    ensure!(!cid.is_empty(), Error::<T>::EmptyDataCid);
+                    cid.try_into().map_err(|_| Error::<T>::CidTooLong)
+                })
                 .transpose()?;
 
             KycRecords::<T>::try_mutate(&account, |maybe_record| -> DispatchResult {
@@ -590,7 +588,11 @@ pub mod pallet {
 
             KycRecords::<T>::try_mutate(&account, |maybe_record| -> DispatchResult {
                 let record = maybe_record.as_mut().ok_or(Error::<T>::KycNotFound)?;
-                ensure!(record.status == KycStatus::Approved, Error::<T>::InvalidKycStatus);
+                // H2: 管理员可以撤销 Approved 或 Expired 状态的 KYC
+                ensure!(
+                    record.status == KycStatus::Approved || record.status == KycStatus::Expired,
+                    Error::<T>::InvalidKycStatus
+                );
 
                 record.status = KycStatus::Revoked;
                 record.rejection_reason = Some(reason);
@@ -627,7 +629,10 @@ pub mod pallet {
             ensure!(!name.is_empty(), Error::<T>::EmptyProviderName);
 
             let name_bounded: BoundedVec<u8, T::MaxProviderNameLength> = 
-                name.clone().try_into().map_err(|_| Error::<T>::NameTooLong)?;
+                name.try_into().map_err(|_| Error::<T>::NameTooLong)?;
+
+            // M2: 事件使用 bounded 后的值
+            let name_for_event = name_bounded.to_vec();
 
             let provider = KycProvider {
                 account: provider_account.clone(),
@@ -644,7 +649,7 @@ pub mod pallet {
 
             Self::deposit_event(Event::ProviderRegistered {
                 provider: provider_account,
-                name,
+                name: name_for_event,
                 provider_type,
             });
             Ok(())

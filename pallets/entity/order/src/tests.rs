@@ -942,3 +942,171 @@ fn token_place_order_none_defaults_to_native() {
         assert_eq!(order.platform_fee, 2); // 100 * 200 / 10000 = 2
     });
 }
+
+// ==================== Audit regression tests ====================
+
+// H2: stock=0 应拒绝购买（不再当作"无限库存"）
+#[test]
+fn h2_zero_stock_rejects_purchase() {
+    new_test_ext().execute_with(|| {
+        set_product_stock(1, 0); // Physical product, stock=0
+        assert_noop!(
+            Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None),
+            Error::<Test>::InsufficientStock
+        );
+    });
+}
+
+// H3: ship_order 拒绝空 tracking_cid
+#[test]
+fn h3_ship_order_rejects_empty_tracking_cid() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_noop!(
+            Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"".to_vec()),
+            Error::<Test>::EmptyTrackingCid
+        );
+    });
+}
+
+// H4: start_service 写入 ExpiryQueue，服务超时后自动退款
+#[test]
+fn h4_service_start_timeout_auto_refunds() {
+    new_test_ext().execute_with(|| {
+        // Product 3 = Service, ShipTimeout=100, ServiceConfirmTimeout=150
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None));
+
+        // Start service at block 10
+        System::set_block_number(10);
+        assert_ok!(Transaction::start_service(RuntimeOrigin::signed(SELLER), 1));
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.status, OrderStatus::Shipped);
+        assert!(order.service_started_at.is_some());
+
+        // ServiceConfirmTimeout entry at block 10+150=160
+        let queue = crate::ExpiryQueue::<Test>::get(160u64);
+        assert!(queue.contains(&1), "start_service should enqueue to ExpiryQueue");
+
+        // At block 101 (ShipTimeout from place_order), service is still in progress
+        // and 101 < 10+150=160, so should NOT be refunded
+        run_to_block(101);
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Shipped);
+
+        // At block 160 (ServiceConfirmTimeout from start_service), auto-refund
+        run_to_block(160);
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Refunded);
+    });
+}
+
+// H4: 服务正常完成后确认不受影响
+#[test]
+fn h4_service_normal_flow_unaffected() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None));
+
+        System::set_block_number(10);
+        assert_ok!(Transaction::start_service(RuntimeOrigin::signed(SELLER), 1));
+
+        System::set_block_number(20);
+        assert_ok!(Transaction::complete_service(RuntimeOrigin::signed(SELLER), 1));
+
+        System::set_block_number(25);
+        assert_ok!(Transaction::confirm_service(RuntimeOrigin::signed(BUYER), 1));
+
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.status, OrderStatus::Completed);
+    });
+}
+
+// M3: do_complete_order 的 reward_on_purchase 使用正确的 entity_id
+#[test]
+fn m3_reward_uses_resolved_entity_id() {
+    new_test_ext().execute_with(|| {
+        // Digital product auto-completes → do_complete_order → reward_on_purchase
+        // This test verifies it doesn't panic and completes successfully
+        assert_ok!(Transaction::place_order(
+            RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None,
+        ));
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.status, OrderStatus::Completed);
+    });
+}
+
+// ==================== Audit Round 3 回归测试 ====================
+
+// C1: EntityToken 订单可以成功申请退款（修复前会因 Escrow::set_disputed 失败）
+#[test]
+fn c1_token_order_request_refund_works() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        set_token_enabled(entity_id, true);
+        set_token_balance(entity_id, BUYER, 10_000);
+
+        // 用 EntityToken 下单（服务类产品不需要 shipping_cid）
+        assert_ok!(Transaction::place_order(
+            RuntimeOrigin::signed(BUYER), 3, 1,
+            None, None, None,
+            Some(PaymentAsset::EntityToken),
+        ));
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.payment_asset, PaymentAsset::EntityToken);
+        assert_eq!(order.status, OrderStatus::Paid);
+
+        // EntityToken 订单申请退款（修复前此处会因 NoLock 失败）
+        assert_ok!(Transaction::request_refund(
+            RuntimeOrigin::signed(BUYER), 1, b"reason_cid".to_vec(),
+        ));
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.status, OrderStatus::Disputed);
+    });
+}
+
+// C1: Native 订单退款仍通过 Escrow::set_disputed（行为不变）
+#[test]
+fn c1_native_order_request_refund_still_uses_escrow() {
+    new_test_ext().execute_with(|| {
+        // 服务类产品不需要 shipping_cid
+        assert_ok!(Transaction::place_order(
+            RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None,
+        ));
+        assert_ok!(Transaction::request_refund(
+            RuntimeOrigin::signed(BUYER), 1, b"reason_cid".to_vec(),
+        ));
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.status, OrderStatus::Disputed);
+    });
+}
+
+// C1: EntityToken 订单退款后卖家可同意退款，Token 被 unreserve
+#[test]
+fn c1_token_order_approve_refund_unreserves_tokens() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        set_token_enabled(entity_id, true);
+        set_token_balance(entity_id, BUYER, 10_000);
+
+        // 服务类产品不需要 shipping_cid
+        assert_ok!(Transaction::place_order(
+            RuntimeOrigin::signed(BUYER), 3, 1,
+            None, None, None,
+            Some(PaymentAsset::EntityToken),
+        ));
+
+        // 买家申请退款
+        assert_ok!(Transaction::request_refund(
+            RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec(),
+        ));
+
+        // 卖家同意退款
+        assert_ok!(Transaction::approve_refund(
+            RuntimeOrigin::signed(SELLER), 1,
+        ));
+
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.status, OrderStatus::Refunded);
+
+        // Token 已退回买家（unreserved）
+        let reserved = get_token_reserved(entity_id, BUYER);
+        assert_eq!(reserved, 0);
+    });
+}

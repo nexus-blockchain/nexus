@@ -225,6 +225,20 @@ impl ChainClient {
     }
 
     // ========================================================================
+    // Reward System Transactions (L1-fix: 链下奖励领取)
+    // ========================================================================
+
+    /// 领取节点待领取奖励
+    pub async fn claim_rewards(&self, node_id: [u8; 32]) -> BotResult<()> {
+        let tx = subxt::dynamic::tx(
+            "GroupRobotRewards", "claim_rewards",
+            vec![Value::from_bytes(node_id)],
+        );
+
+        self.submit_and_watch(tx, "claim_rewards").await
+    }
+
+    // ========================================================================
     // Ad System Transactions (广告系统)
     // ========================================================================
 
@@ -255,7 +269,8 @@ impl ChainClient {
                 Value::from_bytes(community_id_hash),
                 delivery_type_val,
                 Value::u128(audience_size as u128),
-                Value::u128(node_id as u128),
+                // H6-fix: NodeId 链上类型为 [u8; 4], 需转为字节数组
+                Value::from_bytes(node_id.to_le_bytes()),
                 Value::from_bytes(node_signature),
             ],
         );

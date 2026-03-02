@@ -108,6 +108,8 @@ pub mod pallet {
 		type Subscription: SubscriptionProvider;
 		/// Peer Uptime 记录 (Era 结束时调用 registry pallet)
 		type PeerUptimeRecorder: PeerUptimeRecorder;
+		/// H3-fix: 节点退出时领取残留奖励
+		type OrphanRewardClaimer: OrphanRewardClaimer<Self::AccountId>;
 	}
 
 	// ========================================================================
@@ -362,6 +364,9 @@ pub mod pallet {
 				now.saturating_sub(exit_block) >= T::ExitCooldownPeriod::get(),
 				Error::<T>::CooldownNotComplete
 			);
+
+			// H3-fix: 节点退出前尝试领取残留奖励 (best-effort)
+			T::OrphanRewardClaimer::try_claim_orphan_rewards(&node_id, &who);
 
 			let stake = node.stake;
 			T::Currency::unreserve(&who, stake);

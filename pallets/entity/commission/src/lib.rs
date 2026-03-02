@@ -5,7 +5,8 @@
 //! 插件化架构，由以下子模块组成：
 //! - `pallet-commission-common` — 共享类型 + CommissionPlugin trait
 //! - `pallet-commission-core` — 调度引擎 + 记账 + 提现 + 偿付安全
-//! - `pallet-commission-referral` — 推荐链返佣（Direct/Multi/Fixed/First/Repeat）
+//! - `pallet-commission-referral` — 推荐链返佣（Direct/Fixed/First/Repeat）
+//! - `pallet-commission-multi-level` — 多级分销返佣（N 层推荐链 + 激活条件）
 //! - `pallet-commission-level-diff` — 等级极差返佣
 //! - `pallet-commission-single-line` — 单线收益（上线/下线）
 //! - `pallet-commission-pool-reward` — 沉淀池奖励（未分配佣金回馈高级别会员）
@@ -16,15 +17,17 @@
 pub use pallet_commission_common;
 pub use pallet_commission_core;
 pub use pallet_commission_referral;
+pub use pallet_commission_multi_level;
 pub use pallet_commission_level_diff;
 pub use pallet_commission_single_line;
 pub use pallet_commission_pool_reward;
 
 // Re-export commonly used traits and types at crate root
 pub use pallet_commission_common::{
-    CommissionModes, CommissionOutput, CommissionPlugin, CommissionPlan, CommissionProvider,
+    CommissionModes, CommissionOutput, CommissionPlugin, CommissionProvider,
     CommissionRecord, CommissionStatus, CommissionType,
     LevelDiffPlanWriter, MemberCommissionStatsData, MemberProvider,
-    NullCommissionProvider, NullMemberProvider, PoolRewardPlanWriter, ReferralPlanWriter,
+    MultiLevelPlanWriter, NullCommissionProvider, NullMemberProvider,
+    PoolRewardPlanWriter, ReferralPlanWriter,
     WithdrawalTierConfig,
 };

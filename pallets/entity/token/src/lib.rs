@@ -456,8 +456,8 @@ pub mod pallet {
         ExceedsMaxSupply,
         /// 通证类型不支持此操作
         TokenTypeNotSupported,
-        /// 不允许该通证类型
-        TokenTypeNotAllowed,
+        /// 变更为相同通证类型
+        SameTokenType,
         // ========== Phase 8 新增错误：转账限制 ==========
         /// 接收方不在白名单
         ReceiverNotInWhitelist,
@@ -477,6 +477,8 @@ pub mod pallet {
         InvalidLockDuration,
         /// 分红接收人过多
         TooManyRecipients,
+        /// 分红总额为零
+        ZeroDividendAmount,
         /// 分红总额不匹配
         DividendAmountMismatch,
         /// 兑换限额设置无效（min > max）
@@ -655,6 +657,8 @@ pub mod pallet {
             // 检查代币是否启用
             let config = EntityTokenConfigs::<T>::get(entity_id).ok_or(Error::<T>::TokenNotEnabled)?;
             ensure!(config.enabled, Error::<T>::TokenNotEnabled);
+            // M3: 铸造需要 Entity 处于活跃状态
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             // T-L1 审计修复: 禁止铸造零数量
             ensure!(!amount.is_zero(), Error::<T>::ZeroAmount);
 
@@ -689,6 +693,9 @@ pub mod pallet {
             let config = EntityTokenConfigs::<T>::get(entity_id).ok_or(Error::<T>::TokenNotEnabled)?;
             ensure!(config.enabled, Error::<T>::TokenNotEnabled);
             ensure!(config.transferable, Error::<T>::TransferNotAllowed);
+
+            // M1: 禁止零数量转账
+            ensure!(!amount.is_zero(), Error::<T>::ZeroAmount);
 
             // Phase 8: 检查转账限制
             Self::check_transfer_restriction(entity_id, &config, &to)?;
@@ -775,9 +782,13 @@ pub mod pallet {
 
             // 检查分红配置
             let config = EntityTokenConfigs::<T>::get(entity_id).ok_or(Error::<T>::TokenNotEnabled)?;
+            // H1: 通证必须启用
+            ensure!(config.enabled, Error::<T>::TokenNotEnabled);
             ensure!(config.dividend_config.enabled, Error::<T>::DividendNotEnabled);
             // M6: 检查通证类型是否支持分红
             ensure!(config.token_type.has_dividend_rights(), Error::<T>::TokenTypeNotSupported);
+            // M2: 禁止零总额分红（防止滥用重置冷却计时器）
+            ensure!(!total_amount.is_zero(), Error::<T>::ZeroDividendAmount);
 
             let now = <frame_system::Pallet<T>>::block_number();
             let last = config.dividend_config.last_distribution;
@@ -939,6 +950,12 @@ pub mod pallet {
 
             ensure!(!unlocked_total.is_zero(), Error::<T>::UnlockTimeNotReached);
 
+            // M4: 清理空存储条目
+            let remaining = LockedTokens::<T>::get(entity_id, &who);
+            if remaining.is_empty() {
+                LockedTokens::<T>::remove(entity_id, &who);
+            }
+
             Self::deposit_event(Event::TokensUnlocked {
                 entity_id,
                 holder: who,
@@ -964,6 +981,8 @@ pub mod pallet {
             let old_type = EntityTokenConfigs::<T>::try_mutate(entity_id, |maybe_config| -> Result<TokenType, DispatchError> {
                 let config = maybe_config.as_mut().ok_or(Error::<T>::TokenNotEnabled)?;
                 let old = config.token_type;
+                // H2: 禁止变更为相同类型（防止意外重置自定义转账限制配置）
+                ensure!(old != new_type, Error::<T>::SameTokenType);
                 config.token_type = new_type;
                 
                 // 根据新类型更新可转让性

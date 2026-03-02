@@ -20,6 +20,8 @@ thread_local! {
     static POOL_BALANCES: RefCell<BTreeMap<u64, Balance>> = RefCell::new(BTreeMap::new());
     static TOKEN_POOL_BALANCES: RefCell<BTreeMap<u64, Balance>> = RefCell::new(BTreeMap::new());
     static TOKEN_BALANCES: RefCell<BTreeMap<(u64, u64), Balance>> = RefCell::new(BTreeMap::new());
+    static KYC_BLOCKED: RefCell<BTreeMap<(u64, u64), bool>> = RefCell::new(BTreeMap::new());
+    static ENTITY_INACTIVE: RefCell<BTreeMap<u64, bool>> = RefCell::new(BTreeMap::new());
 }
 
 fn clear_mocks() {
@@ -30,6 +32,16 @@ fn clear_mocks() {
     POOL_BALANCES.with(|p| p.borrow_mut().clear());
     TOKEN_POOL_BALANCES.with(|p| p.borrow_mut().clear());
     TOKEN_BALANCES.with(|m| m.borrow_mut().clear());
+    KYC_BLOCKED.with(|k| k.borrow_mut().clear());
+    ENTITY_INACTIVE.with(|e| e.borrow_mut().clear());
+}
+
+fn set_kyc_blocked(entity_id: u64, account: u64) {
+    KYC_BLOCKED.with(|k| k.borrow_mut().insert((entity_id, account), true));
+}
+
+fn set_entity_inactive(entity_id: u64) {
+    ENTITY_INACTIVE.with(|e| e.borrow_mut().insert(entity_id, true));
 }
 
 fn set_member(entity_id: u64, account: u64, level: u8) {
@@ -113,6 +125,15 @@ impl pallet_commission_common::TokenTransferProvider<u64, Balance> for MockToken
     }
 }
 
+// -- Mock ParticipationGuard --
+pub struct MockParticipationGuard;
+
+impl pallet_commission_common::ParticipationGuard<u64> for MockParticipationGuard {
+    fn can_participate(entity_id: u64, account: &u64) -> bool {
+        !KYC_BLOCKED.with(|k| k.borrow().get(&(entity_id, *account)).copied().unwrap_or(false))
+    }
+}
+
 // -- Mock MemberProvider --
 pub struct MockMemberProvider;
 
@@ -146,8 +167,12 @@ impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
 pub struct MockEntityProvider;
 
 impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
-    fn entity_exists(_: u64) -> bool { true }
-    fn is_entity_active(_: u64) -> bool { true }
+    fn entity_exists(entity_id: u64) -> bool {
+        !ENTITY_INACTIVE.with(|e| e.borrow().get(&entity_id).copied().unwrap_or(false))
+    }
+    fn is_entity_active(entity_id: u64) -> bool {
+        !ENTITY_INACTIVE.with(|e| e.borrow().get(&entity_id).copied().unwrap_or(false))
+    }
     fn entity_status(_: u64) -> Option<pallet_entity_common::EntityStatus> { None }
     fn entity_owner(_: u64) -> Option<u64> { Some(999) }
     fn entity_account(entity_id: u64) -> u64 { entity_id + 9000 }
@@ -207,6 +232,8 @@ impl pallet::Config for Test {
     type TokenBalance = u128;
     type TokenPoolBalanceProvider = MockTokenPoolBalanceProvider;
     type TokenTransferProvider = MockTokenTransferProvider;
+    type ParticipationGuard = MockParticipationGuard;
+    type WeightInfo = ();
 }
 
 /// Entity account = entity_id + 9000
@@ -1330,4 +1357,491 @@ fn m1_round_id_overflow_rejected() {
             Error::<Test>::RoundIdOverflow
         );
     });
+}
+
+// ====================================================================
+// PR-H1: ParticipationGuard blocks pool reward claim
+// ====================================================================
+
+#[test]
+fn pr_h1_claim_blocked_when_participation_denied() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        let account = 10u64;
+        setup_config(entity_id);
+        set_member(entity_id, account, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+
+        // Block account via KYC
+        set_kyc_blocked(entity_id, account);
+
+        assert_noop!(
+            CommissionPoolReward::claim_pool_reward(
+                RuntimeOrigin::signed(account), entity_id,
+            ),
+            Error::<Test>::ParticipationRequirementNotMet
+        );
+    });
+}
+
+// ====================================================================
+// Round 2 审计回归测试
+// ====================================================================
+
+/// H2: set_pool_reward_config 更新配置后旧快照被清除，下次 claim 创建新快照
+#[test]
+fn h2_config_update_invalidates_current_round() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id); // level_1=5000, level_2=5000
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+
+        // 创建轮次快照
+        assert_ok!(CommissionPoolReward::force_new_round(
+            RuntimeOrigin::root(), entity_id,
+        ));
+        let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
+        assert_eq!(round.round_id, 1);
+        // per_member for level_1 = 10000 * 5000/10000 / 1 = 5000
+        assert_eq!(round.level_snapshots[0].per_member_reward, 5000);
+
+        // 更新配置: 移除 level_2, 添加 level_3
+        let new_ratios = vec![(1u8, 3000u16), (3u8, 7000u16)];
+        assert_ok!(CommissionPoolReward::set_pool_reward_config(
+            RuntimeOrigin::root(), entity_id, new_ratios.try_into().unwrap(), 100,
+        ));
+
+        // CurrentRound 应被清除
+        assert!(pallet::CurrentRound::<Test>::get(entity_id).is_none());
+
+        // 下次 claim 应创建新快照
+        set_level_count(entity_id, 3, 2);
+        assert_ok!(CommissionPoolReward::claim_pool_reward(
+            RuntimeOrigin::signed(10), entity_id,
+        ));
+        let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
+        // M2-R3: round_id 单调递增（old=1 → new=2），不再重置为 1
+        assert_eq!(round.round_id, 2);
+        // 新快照应有 level_1 和 level_3（不是 level_2）
+        assert_eq!(round.level_snapshots.len(), 2);
+        assert_eq!(round.level_snapshots[0].level_id, 1);
+        assert_eq!(round.level_snapshots[1].level_id, 3);
+    });
+}
+
+/// H2: PlanWriter 更新配置也清除当前轮次
+#[test]
+fn h2_plan_writer_config_update_invalidates_round() {
+    new_test_ext().execute_with(|| {
+        use pallet_commission_common::PoolRewardPlanWriter;
+        let entity_id = 1u64;
+        assert_ok!(<pallet::Pallet<Test> as PoolRewardPlanWriter>::set_pool_reward_config(
+            entity_id, vec![(1, 5000), (2, 5000)], 100,
+        ));
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+
+        // 创建快照
+        assert_ok!(CommissionPoolReward::force_new_round(
+            RuntimeOrigin::root(), entity_id,
+        ));
+        assert!(pallet::CurrentRound::<Test>::get(entity_id).is_some());
+
+        // PlanWriter 更新配置
+        assert_ok!(<pallet::Pallet<Test> as PoolRewardPlanWriter>::set_pool_reward_config(
+            entity_id, vec![(1, 3000), (2, 7000)], 200,
+        ));
+
+        // 快照应被清除
+        assert!(pallet::CurrentRound::<Test>::get(entity_id).is_none());
+    });
+}
+
+/// H2: 用户在旧快照中已 claim，配置更新后 LastClaimedRound 被清除，可立即 claim 新轮次
+#[test]
+fn h2_config_update_mid_round_allows_reclaim() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 20_000);
+
+        // 用户在 round 1 领取
+        assert_ok!(CommissionPoolReward::claim_pool_reward(
+            RuntimeOrigin::signed(10), entity_id,
+        ));
+        assert_eq!(pallet::LastClaimedRound::<Test>::get(entity_id, 10), 1);
+
+        // 管理员更新配置（清除 CurrentRound + LastClaimedRound）
+        let new_ratios = vec![(1u8, 10000u16)];
+        assert_ok!(CommissionPoolReward::set_pool_reward_config(
+            RuntimeOrigin::root(), entity_id, new_ratios.try_into().unwrap(), 100,
+        ));
+
+        // M2-R3: LastClaimedRound 不再被 clear_prefix 清除，保留历史值
+        assert_eq!(pallet::LastClaimedRound::<Test>::get(entity_id, 10), 1);
+
+        // 用户可以立即 claim 新轮次（round_id=2, last_claimed=1 → 1 < 2 通过）
+        assert_ok!(CommissionPoolReward::claim_pool_reward(
+            RuntimeOrigin::signed(10), entity_id,
+        ));
+        assert_eq!(pallet::LastClaimedRound::<Test>::get(entity_id, 10), 2);
+    });
+}
+
+/// M2: Banned/Closed Entity 的会员不能领取池奖励
+#[test]
+fn m2_claim_rejects_entity_not_active() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+
+        // Entity 被封禁
+        set_entity_inactive(entity_id);
+
+        assert_noop!(
+            CommissionPoolReward::claim_pool_reward(
+                RuntimeOrigin::signed(10), entity_id,
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+/// M2: Entity 激活时领取正常
+#[test]
+fn m2_claim_works_when_entity_active() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+
+        // Entity 默认活跃
+        assert_ok!(CommissionPoolReward::claim_pool_reward(
+            RuntimeOrigin::signed(10), entity_id,
+        ));
+    });
+}
+
+// ====================================================================
+// Round 3 审计回归测试
+// ====================================================================
+
+/// M1-R3: set_token_pool_enabled 使当前轮次失效，启用后新轮次包含 token 快照
+#[test]
+fn m1_r3_token_enable_invalidates_round_and_adds_token_snapshot() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id); // token_pool_enabled = false
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        set_token_pool_balance(entity_id, 5_000);
+        set_token_balance(entity_id, ENTITY_ACCOUNT, 5_000);
+
+        // 创建轮次（无 token 快照）
+        assert_ok!(CommissionPoolReward::force_new_round(
+            RuntimeOrigin::root(), entity_id,
+        ));
+        let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
+        assert_eq!(round.round_id, 1);
+        assert!(round.token_level_snapshots.is_none());
+
+        // 启用 token 池 → 当前轮次应失效
+        assert_ok!(CommissionPoolReward::set_token_pool_enabled(
+            RuntimeOrigin::root(), entity_id, true,
+        ));
+        assert!(pallet::CurrentRound::<Test>::get(entity_id).is_none());
+
+        // 下次 claim 创建新轮次，应包含 token 快照
+        assert_ok!(CommissionPoolReward::claim_pool_reward(
+            RuntimeOrigin::signed(10), entity_id,
+        ));
+        let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
+        assert_eq!(round.round_id, 2); // 单调递增
+        assert!(round.token_level_snapshots.is_some());
+
+        // 验证 token 已转入用户
+        assert!(get_token_balance(entity_id, 10) > 0);
+    });
+}
+
+/// M1-R3: set_token_pool_enabled 禁用后立即生效，新轮次无 token 快照
+#[test]
+fn m1_r3_token_disable_invalidates_round_removes_token_snapshot() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config_with_token(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        set_token_pool_balance(entity_id, 5_000);
+
+        // 创建轮次（有 token 快照）
+        assert_ok!(CommissionPoolReward::force_new_round(
+            RuntimeOrigin::root(), entity_id,
+        ));
+        let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
+        assert!(round.token_level_snapshots.is_some());
+
+        // 禁用 token 池 → 当前轮次应失效
+        assert_ok!(CommissionPoolReward::set_token_pool_enabled(
+            RuntimeOrigin::root(), entity_id, false,
+        ));
+        assert!(pallet::CurrentRound::<Test>::get(entity_id).is_none());
+
+        // 下次 claim 创建新轮次，不应包含 token 快照
+        assert_ok!(CommissionPoolReward::claim_pool_reward(
+            RuntimeOrigin::signed(10), entity_id,
+        ));
+        let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
+        assert!(round.token_level_snapshots.is_none());
+    });
+}
+
+/// M2-R3: 配置更新后 round_id 保持单调递增，LastClaimedRound 不被清除
+#[test]
+fn m2_r3_config_update_round_id_monotonic() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 100_000);
+
+        // 连续 claim 3 轮
+        for i in 0..3u64 {
+            System::set_block_number(1 + i * 101);
+            assert_ok!(CommissionPoolReward::claim_pool_reward(
+                RuntimeOrigin::signed(10), entity_id,
+            ));
+        }
+        assert_eq!(pallet::LastClaimedRound::<Test>::get(entity_id, 10), 3);
+
+        // 更新配置
+        let new_ratios = vec![(1u8, 10000u16)];
+        assert_ok!(CommissionPoolReward::set_pool_reward_config(
+            RuntimeOrigin::root(), entity_id, new_ratios.try_into().unwrap(), 100,
+        ));
+
+        // LastClaimedRound 保留（不再 clear_prefix）
+        assert_eq!(pallet::LastClaimedRound::<Test>::get(entity_id, 10), 3);
+
+        // 新轮次 round_id = 4（old=3 → 3+1=4）
+        assert_ok!(CommissionPoolReward::claim_pool_reward(
+            RuntimeOrigin::signed(10), entity_id,
+        ));
+        let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
+        assert_eq!(round.round_id, 4);
+        assert_eq!(pallet::LastClaimedRound::<Test>::get(entity_id, 10), 4);
+    });
+}
+
+/// M2-R3: 多次配置更新 round_id 始终递增
+#[test]
+fn m2_r3_multiple_config_updates_round_id_keeps_increasing() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 100_000);
+
+        // Round 1
+        assert_ok!(CommissionPoolReward::claim_pool_reward(
+            RuntimeOrigin::signed(10), entity_id,
+        ));
+        assert_eq!(pallet::CurrentRound::<Test>::get(entity_id).unwrap().round_id, 1);
+
+        // Config update #1
+        let ratios = vec![(1u8, 10000u16)];
+        assert_ok!(CommissionPoolReward::set_pool_reward_config(
+            RuntimeOrigin::root(), entity_id, ratios.try_into().unwrap(), 100,
+        ));
+
+        // Config update #2 (no claim in between)
+        let ratios2 = vec![(1u8, 4000u16), (2u8, 6000u16)];
+        assert_ok!(CommissionPoolReward::set_pool_reward_config(
+            RuntimeOrigin::root(), entity_id, ratios2.try_into().unwrap(), 100,
+        ));
+
+        // LastRoundId should still be 1 from the original round
+        // Next claim creates round 2
+        assert_ok!(CommissionPoolReward::claim_pool_reward(
+            RuntimeOrigin::signed(10), entity_id,
+        ));
+        assert_eq!(pallet::CurrentRound::<Test>::get(entity_id).unwrap().round_id, 2);
+    });
+}
+
+/// L1-R3: PlanWriter set_pool_reward_config 发出 PoolRewardConfigUpdated 事件
+#[test]
+fn l1_r3_plan_writer_emits_config_event() {
+    new_test_ext().execute_with(|| {
+        use pallet_commission_common::PoolRewardPlanWriter;
+        System::reset_events();
+
+        assert_ok!(<pallet::Pallet<Test> as PoolRewardPlanWriter>::set_pool_reward_config(
+            1, vec![(1, 10000)], 100,
+        ));
+
+        let events = System::events();
+        assert!(
+            events.iter().any(|e| matches!(
+                &e.event,
+                RuntimeEvent::CommissionPoolReward(pallet::Event::PoolRewardConfigUpdated { entity_id: 1 })
+            )),
+            "PlanWriter should emit PoolRewardConfigUpdated event"
+        );
+    });
+}
+
+/// L1-R3: PlanWriter set_token_pool_enabled 发出 TokenPoolEnabledUpdated 事件
+#[test]
+fn l1_r3_plan_writer_emits_token_event() {
+    new_test_ext().execute_with(|| {
+        use pallet_commission_common::PoolRewardPlanWriter;
+        assert_ok!(<pallet::Pallet<Test> as PoolRewardPlanWriter>::set_pool_reward_config(
+            1, vec![(1, 10000)], 100,
+        ));
+
+        System::reset_events();
+        assert_ok!(<pallet::Pallet<Test> as PoolRewardPlanWriter>::set_token_pool_enabled(1, true));
+
+        let events = System::events();
+        assert!(
+            events.iter().any(|e| matches!(
+                &e.event,
+                RuntimeEvent::CommissionPoolReward(pallet::Event::TokenPoolEnabledUpdated { entity_id: 1, enabled: true })
+            )),
+            "PlanWriter should emit TokenPoolEnabledUpdated event"
+        );
+    });
+}
+
+// ====================================================================
+// Round 4 审计回归测试
+// ====================================================================
+
+/// L1-R4: 幂等 set_token_pool_enabled 不应使当前轮次失效
+#[test]
+fn l1_r4_idempotent_token_toggle_preserves_round() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config_with_token(entity_id); // token_pool_enabled = true
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        set_token_pool_balance(entity_id, 5_000);
+
+        // 创建轮次
+        assert_ok!(CommissionPoolReward::force_new_round(
+            RuntimeOrigin::root(), entity_id,
+        ));
+        let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
+        assert_eq!(round.round_id, 1);
+
+        // 幂等调用: 已经是 true，再次设置 true → 轮次应保留
+        assert_ok!(CommissionPoolReward::set_token_pool_enabled(
+            RuntimeOrigin::root(), entity_id, true,
+        ));
+        let round_after = pallet::CurrentRound::<Test>::get(entity_id);
+        assert!(round_after.is_some(), "Idempotent toggle should NOT invalidate round");
+        assert_eq!(round_after.unwrap().round_id, 1);
+    });
+}
+
+/// L1-R4: PlanWriter 幂等 set_token_pool_enabled 不应使当前轮次失效
+#[test]
+fn l1_r4_plan_writer_idempotent_token_toggle_preserves_round() {
+    new_test_ext().execute_with(|| {
+        use pallet_commission_common::PoolRewardPlanWriter;
+        let entity_id = 1u64;
+        assert_ok!(<pallet::Pallet<Test> as PoolRewardPlanWriter>::set_pool_reward_config(
+            entity_id, vec![(1, 5000), (2, 5000)], 100,
+        ));
+        assert_ok!(<pallet::Pallet<Test> as PoolRewardPlanWriter>::set_token_pool_enabled(entity_id, true));
+
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        set_token_pool_balance(entity_id, 5_000);
+
+        // 创建轮次
+        assert_ok!(CommissionPoolReward::force_new_round(
+            RuntimeOrigin::root(), entity_id,
+        ));
+        assert_eq!(pallet::CurrentRound::<Test>::get(entity_id).unwrap().round_id, 1);
+
+        // PlanWriter 幂等调用
+        assert_ok!(<pallet::Pallet<Test> as PoolRewardPlanWriter>::set_token_pool_enabled(entity_id, true));
+        assert!(pallet::CurrentRound::<Test>::get(entity_id).is_some(),
+            "PlanWriter idempotent toggle should NOT invalidate round");
+    });
+}
+
+/// L1-R4: 实际变更仍然正确失效轮次（非幂等时）
+#[test]
+fn l1_r4_actual_change_still_invalidates_round() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config_with_token(entity_id); // enabled = true
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        set_token_pool_balance(entity_id, 5_000);
+
+        assert_ok!(CommissionPoolReward::force_new_round(
+            RuntimeOrigin::root(), entity_id,
+        ));
+        assert!(pallet::CurrentRound::<Test>::get(entity_id).is_some());
+
+        // 实际变更: true → false → 轮次应失效
+        assert_ok!(CommissionPoolReward::set_token_pool_enabled(
+            RuntimeOrigin::root(), entity_id, false,
+        ));
+        assert!(pallet::CurrentRound::<Test>::get(entity_id).is_none(),
+            "Actual change should invalidate round");
+    });
+}
+
+/// M1-R4: Weight 值合理性检查 — 非零且在预期范围内
+#[test]
+fn m1_r4_weight_values_are_reasonable() {
+    use crate::weights::{WeightInfo, SubstrateWeight};
+
+    let w1 = SubstrateWeight::set_pool_reward_config();
+    assert!(w1.ref_time() >= 45_000_000, "set_pool_reward_config ref_time too low");
+    assert!(w1.proof_size() >= 5_000, "set_pool_reward_config proof_size too low");
+
+    let w2 = SubstrateWeight::claim_pool_reward();
+    assert!(w2.ref_time() >= 150_000_000, "claim_pool_reward ref_time too low");
+    assert!(w2.proof_size() >= 15_000, "claim_pool_reward proof_size too low");
+
+    let w3 = SubstrateWeight::force_new_round();
+    assert!(w3.ref_time() >= 100_000_000, "force_new_round ref_time too low");
+    assert!(w3.proof_size() >= 10_000, "force_new_round proof_size too low");
+
+    let w4 = SubstrateWeight::set_token_pool_enabled();
+    assert!(w4.ref_time() >= 40_000_000, "set_token_pool_enabled ref_time too low");
+    assert!(w4.proof_size() >= 4_000, "set_token_pool_enabled proof_size too low");
 }

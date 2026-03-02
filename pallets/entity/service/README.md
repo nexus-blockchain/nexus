@@ -13,6 +13,7 @@ pallet-entity-service
 ├── EntityProvider          Entity 查询（保留，当前由 ShopProvider::is_shop_active 隐式检查）
 ├── ShopProvider            Shop 查询（shop_exists, shop_owner, shop_account, is_shop_active）
 ├── PricingProvider         NEX/USDT 价格（get_nex_usdt_price，用于计算等值押金）
+├── IpfsPinner              IPFS Pin 管理（pallet-storage-service 提供，商品 CID 持久化）
 └── ProductProvider trait   供 pallet-entity-order 调用库存/价格/类别查询
 ```
 
@@ -52,6 +53,7 @@ impl pallet_entity_service::Config for Runtime {
     type ProductDepositUsdt = ConstU64<1_000_000>;       // 1 USDT (精度 10^6)
     type MinProductDepositCos = ConstU128<{ UNIT / 100 }>; // 0.01 NEX
     type MaxProductDepositCos = ConstU128<{ 10 * UNIT }>;  // 10 NEX
+    type IpfsPinner = pallet_storage_service::Pallet<Runtime>; // IPFS Pin 管理
 }
 ```
 
@@ -60,12 +62,13 @@ impl pallet_entity_service::Config for Runtime {
 | `Currency` | 货币类型 |
 | `EntityProvider` | Entity 查询接口（保留，由 ShopProvider 隐式使用） |
 | `ShopProvider` | Shop 查询 + 派生账户 + 权限验证 |
-| `PricingProvider` | NEX/USDT 实时价格（`get_cos_usdt_price()`） |
+| `PricingProvider` | NEX/USDT 实时价格（`get_nex_usdt_price()`） |
 | `MaxProductsPerShop` | 每店铺最大商品数上限 |
 | `MaxCidLength` | IPFS CID 最大字节数 |
 | `ProductDepositUsdt` | 押金 USDT 金额（精度 10^6） |
 | `MinProductDepositCos` | 押金 NEX 下限 |
 | `MaxProductDepositCos` | 押金 NEX 上限 |
+| `IpfsPinner` | IPFS Pin 管理接口（`pallet-storage-service` 提供，用于商品元数据 CID 持久化） |
 
 ## 数据结构
 
@@ -162,6 +165,7 @@ pub struct ProductStatistics {
 8. `Currency::transfer`（KeepAlive）从店铺账户转押金到 Pallet 账户
 9. 创建商品（状态 `Draft`），写入 `Products` + `ShopProducts` + `ProductDeposits`
 10. `NextProductId` 自增，更新 `ProductStats.total_products`
+11. **IPFS Pin**: 固定 3 个 CID（name/images/detail）到存储网络（best-effort，失败不阻断创建）
 
 ### delete_product 详细流程
 
@@ -169,8 +173,9 @@ pub struct ProductStatistics {
 2. 状态必须为 `Draft` 或 `OffShelf`
 3. 从 `ProductDeposits` 取出押金记录（`take` 同时删除），**记录不存在则返回 `DepositNotFound`**（v0.4.0）
 4. `Currency::transfer`（AllowDeath）从 Pallet 账户退还押金到店铺派生账户
-5. 删除 `Products`、从 `ShopProducts` 移除
-6. 更新 `ProductStats`（total_products -1）
+5. **IPFS Unpin**: 取消固定 3 个 CID（best-effort）
+6. 删除 `Products`、从 `ShopProducts` 移除
+7. 更新 `ProductStats`（total_products -1）
 
 ## 商品状态机
 
@@ -267,6 +272,8 @@ impl ProductProvider<AccountId, Balance> for Pallet<T> {
 | `pallet_account()` | 返回押金托管 Pallet 账户 `PalletId(*b"et/prod/")` |
 | `calculate_product_deposit()` | 计算当前 1 USDT 等值 NEX 押金（含 clamp） |
 | `get_current_deposit()` | 供前端查询当前押金金额（调用 `calculate_product_deposit`） |
+| `pin_product_cid()` | IPFS Pin 商品 CID（best-effort，失败仅记录日志） |
+| `unpin_product_cid()` | IPFS Unpin 商品 CID（best-effort，失败仅记录日志） |
 
 ## Events
 
@@ -276,7 +283,8 @@ impl ProductProvider<AccountId, Balance> for Pallet<T> {
 | `ProductUpdated` | `product_id` | `update_product` |
 | `ProductStatusChanged` | `product_id`, `status` | `publish_product` / `unpublish_product` |
 | `ProductDeleted` | `product_id`, `deposit_refunded` | `delete_product` |
-| `StockUpdated` | `product_id`, `new_stock` | `deduct_stock` / `restore_stock` / `add_sold_count`（trait 内部） |
+| `StockUpdated` | `product_id`, `new_stock` | `deduct_stock` / `restore_stock`（trait 内部） |
+| `SoldCountUpdated` | `product_id`, `sold_count` | `add_sold_count`（trait 内部） |
 
 ## Errors
 
@@ -295,7 +303,8 @@ impl ProductProvider<AccountId, Balance> for Pallet<T> {
 | `PriceUnavailable` | `calculate_product_deposit` | NEX/USDT 价格为 0 |
 | `ArithmeticOverflow` | `calculate_product_deposit` | 押金计算溢出 |
 | `InvalidPrice` | `create_product`, `update_product` | 商品价格不能为 0 |
-| `EmptyCid` | `create_product`, `update_product` | name_cid 不能为空 |
+| `EmptyCid` | `create_product`, `update_product` | CID 不能为空（name/images/detail） |
+| `CannotClearStockWhileOnSale` | `update_product` | 在售商品不可将 stock 设为 0（stock=0 仅创建时表示无限库存） |
 
 ## 权限模型
 
@@ -314,24 +323,25 @@ impl ProductProvider<AccountId, Balance> for Pallet<T> {
 
 ```bash
 cargo test -p pallet-entity-service
-# 56 tests (mock runtime + 单元测试)
+# 70 tests (mock runtime + 单元测试)
 ```
 
 ### 测试覆盖
 
 | 类别 | 测试数 | 覆盖内容 |
 |------|--------|----------|
-| `create_product` | 8 | 正常创建、零价格、空 name_cid、店铺不存在/未激活/非店主、CID 过长、数量上限、无限库存 |
-| `update_product` | 5 | 部分更新、非店主、零价格、空 name_cid、补货 SoldOut→OnSale（含 Shop 激活检查） |
+| `create_product` | 10 | 正常创建、零价格、空 name_cid/images_cid/detail_cid、店铺不存在/未激活/非店主、CID 过长、数量上限、无限库存 |
+| `update_product` | 9 | 部分更新、非店主、零价格、空 name_cid/images_cid/detail_cid、补货 SoldOut→OnSale（含 Shop 激活检查）、stock=0 防护（OnSale/Draft） |
 | `publish_product` | 5 | 正常上架、重复上架、SoldOut 不可上架、从 OffShelf 上架、Shop 未激活 |
 | `unpublish_product` | 4 | 正常下架、Draft 不可下架、重复下架、SoldOut 下架 |
 | `delete_product` | 6 | Draft 删除、OffShelf 删除、OnSale 不可删、SoldOut 不可删、非店主、**押金记录缺失** |
 | `ProductProvider` | 7 | 基本查询、扣库存、售罄、库存不足、无限库存扣减/恢复、销量累加 |
-| 押金机制 | 5 | 押金计算、min/max clamp、价格为零、删除退还 |
+| 押金机制 | 6 | 押金计算、min/max clamp、价格为零、删除退还、stale price 返回 min |
 | 统计一致性 | 1 | 多商品混合操作后 on_sale_products 精确验证 |
 | ShopProducts 索引 | 1 | 创建+删除后索引正确 |
-| 事件发出 | 2 | deduct_stock / restore_stock 发出 StockUpdated 事件 |
-| **审计回归** | **7** | deduct_stock 拒绝 Draft/OffShelf/SoldOut、restore_stock 拒绝 Draft、restore_stock OffShelf 仅增库存、SoldOut→OnSale 恢复、delete_product 押金缺失 |
+| 事件发出 | 3 | deduct_stock / restore_stock 发出 StockUpdated 事件、add_sold_count 发出 SoldCountUpdated 事件 |
+| **审计回归** | **8** | deduct_stock 拒绝 Draft/OffShelf/SoldOut、restore_stock 拒绝 Draft、restore_stock OffShelf 仅增库存、SoldOut→OnSale 恢复、delete_product 押金缺失、**OffShelf+stock=0 恢复库存** |
+| **IPFS Pin 集成** | **5** | 创建固定 3 CID、更新 unpin 旧+pin 新、未变 CID 不触发 pin、删除 unpin 全部、pin 失败不阻断创建 |
 
 ## 审查修复清单
 
@@ -359,6 +369,17 @@ cargo test -p pallet-entity-service
 | M2 | Medium | `restore_stock` 添加 `ensure!(status != Draft)` 防御性校验，防止对 Draft 商品静默修改库存 |
 | M3 | Medium | `delete_product` 押金记录缺失时返回 `DepositNotFound` 错误，替代原有静默 fallback 为 0 的行为，保障数据一致性 |
 
+### v0.5.0 审查修复
+
+| 编号 | 优先级 | 修复内容 |
+|------|--------|----------|
+| H1 | High | `restore_stock` 条件扩展包含 OffShelf — 售罄后下架的商品（stock=0, OffShelf）订单取消时库存可正确恢复，之前静默丢弃 |
+| H2 | High | `add_sold_count` 发出新的 `SoldCountUpdated` 事件替代语义错误的 `StockUpdated`（sold_count 变更却报告 stock 值） |
+| M1 | Medium | `update_product` 在售商品禁止设置 stock=0（`CannotClearStockWhileOnSale`），防止有限库存隐式转为无限库存 |
+| M2 | Medium | `create_product`/`update_product` 添加 `images_cid`/`detail_cid` 非空校验（与 `name_cid` 一致） |
+| M3 | Medium | 补充 `is_price_stale()` 路径测试覆盖（Mock 添加 stale 状态） |
+| L1 | Low | README 函数名 `get_cos_usdt_price` → `get_nex_usdt_price` |
+
 ## 版本历史
 
 | 版本 | 日期 | 变更 |
@@ -368,6 +389,8 @@ cargo test -p pallet-entity-service
 | v0.2.1 | 2026-02-05 | 重命名为 pallet-entity-service，适配 Entity-Shop 分离架构 |
 | v0.3.0 | 2026-02-09 | 深度审查修复（11 项），创建 mock+tests（42 tests） |
 | v0.4.0 | 2026-02-26 | 深度审查修复（3 项），强化 trait 接口防御性校验 + 押金一致性保护（56 tests） |
+| v0.5.0 | 2026-03-02 | 深度审查修复（6 项）：H1 restore_stock OffShelf 恢复、H2 SoldCountUpdated 事件、M1 OnSale stock=0 防护、M2 空 CID 校验、M3 stale price 测试、L1 README typo（65 tests） |
+| v0.6.0 | 2026-03-02 | IPFS Pin 集成：商品 CID 自动 pin/unpin（IpfsPinner trait + SubjectType::Product），创建 pin 3 CID、更新 unpin 旧+pin 新、删除 unpin 全部，best-effort 不阻断业务流程（70 tests） |
 
 ## 许可证
 

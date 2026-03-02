@@ -1110,3 +1110,146 @@ fn fulldao_requires_token_enabled() {
         ));
     });
 }
+
+// ==================== H1: VotingPeriodChange 提案最小投票期验证 ====================
+
+#[test]
+fn h1_voting_period_change_rejects_below_min() {
+    // VotingPeriodChange 提案的 new_period_blocks 必须 >= MinVotingPeriod (10)
+    ExtBuilder::build().execute_with(|| {
+        // new_period_blocks = 5 < MinVotingPeriod(10)，创建应失败
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::VotingPeriodChange { new_period_blocks: 5 },
+                b"Short period".to_vec(), None,
+            ),
+            Error::<Test>::VotingPeriodTooShort
+        );
+        // new_period_blocks = 0，极端情况
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::VotingPeriodChange { new_period_blocks: 0 },
+                b"Zero period".to_vec(), None,
+            ),
+            Error::<Test>::VotingPeriodTooShort
+        );
+    });
+}
+
+#[test]
+fn h1_voting_period_change_accepts_valid() {
+    // new_period_blocks >= MinVotingPeriod (10) 应成功
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::VotingPeriodChange { new_period_blocks: 10 },
+            b"Min period".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::VotingPeriodChange { new_period_blocks: 200 },
+            b"Long period".to_vec(), None,
+        ));
+    });
+}
+
+// ==================== H2: UpdateCustomLevel 费率验证 ====================
+
+#[test]
+fn h2_update_custom_level_rejects_invalid_rates() {
+    ExtBuilder::build().execute_with(|| {
+        // discount_rate > 10000 应失败
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::UpdateCustomLevel {
+                    level_id: 0,
+                    name: None,
+                    threshold: None,
+                    discount_rate: Some(10001),
+                    commission_bonus: None,
+                },
+                b"Bad rate".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        // commission_bonus > 10000 应失败
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::UpdateCustomLevel {
+                    level_id: 0,
+                    name: None,
+                    threshold: None,
+                    discount_rate: None,
+                    commission_bonus: Some(50000),
+                },
+                b"Bad bonus".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        // 合法值应成功
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::UpdateCustomLevel {
+                level_id: 0,
+                name: None,
+                threshold: None,
+                discount_rate: Some(10000),
+                commission_bonus: Some(5000),
+            },
+            b"Valid update".to_vec(), None,
+        ));
+    });
+}
+
+// ==================== M1: VotingPeriodChange 执行时防御验证 ====================
+
+#[test]
+fn m1_execute_voting_period_change_validates_minimum() {
+    // 即使提案创建时合法，执行时也再次验证最小投票期
+    // 模拟场景：提案创建时 MinVotingPeriod=10，提案 new_period_blocks=10，
+    // 正常流程通过投票+执行应成功
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        // 配置 FullDAO 模式以允许治理参数提案
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), 1,
+            GovernanceMode::FullDAO, None, None, None, None, None, None,
+        ));
+
+        // 创建合法的 VotingPeriodChange 提案
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::VotingPeriodChange { new_period_blocks: 50 },
+            b"Change period".to_vec(), None,
+        ));
+
+        // 投票通过
+        assert_ok!(EntityGovernance::vote(
+            RuntimeOrigin::signed(BOB), 0, VoteType::Yes,
+        ));
+
+        // 跳过投票期
+        advance_blocks(101);
+
+        // 最终确定
+        assert_ok!(EntityGovernance::finalize_voting(
+            RuntimeOrigin::signed(ALICE), 0,
+        ));
+
+        // 跳过执行延迟
+        advance_blocks(51);
+
+        // 执行应成功
+        assert_ok!(EntityGovernance::execute_proposal(
+            RuntimeOrigin::signed(ALICE), 0,
+        ));
+
+        // 验证投票期已更新
+        let config = GovernanceConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.voting_period, 50);
+    });
+}

@@ -1,0 +1,2254 @@
+{
+  "totalCases": 422,
+  "coveredCases": 136,
+  "coveragePercent": 32,
+  "byModule": {
+    "Entity Registry": {
+      "total": 26,
+      "covered": 9,
+      "percent": 35
+    },
+    "Entity Shop": {
+      "total": 18,
+      "covered": 1,
+      "percent": 6
+    },
+    "Entity Service": {
+      "total": 8,
+      "covered": 2,
+      "percent": 25
+    },
+    "Entity Order": {
+      "total": 14,
+      "covered": 8,
+      "percent": 57
+    },
+    "Entity Review": {
+      "total": 4,
+      "covered": 0,
+      "percent": 0
+    },
+    "Entity Token": {
+      "total": 16,
+      "covered": 6,
+      "percent": 38
+    },
+    "Entity Governance": {
+      "total": 15,
+      "covered": 6,
+      "percent": 40
+    },
+    "Entity Member": {
+      "total": 28,
+      "covered": 10,
+      "percent": 36
+    },
+    "Commission 模块群": {
+      "total": 36,
+      "covered": 9,
+      "percent": 25
+    },
+    "Entity Disclosure": {
+      "total": 9,
+      "covered": 0,
+      "percent": 0
+    },
+    "Entity KYC": {
+      "total": 14,
+      "covered": 8,
+      "percent": 57
+    },
+    "Entity TokenSale": {
+      "total": 19,
+      "covered": 13,
+      "percent": 68
+    },
+    "交易市场模块": {
+      "total": 43,
+      "covered": 9,
+      "percent": 21
+    },
+    "Escrow": {
+      "total": 12,
+      "covered": 0,
+      "percent": 0
+    },
+    "Evidence": {
+      "total": 11,
+      "covered": 1,
+      "percent": 9
+    },
+    "Arbitration": {
+      "total": 14,
+      "covered": 6,
+      "percent": 43
+    },
+    "Storage Service": {
+      "total": 24,
+      "covered": 15,
+      "percent": 63
+    },
+    "GroupRobot Registry": {
+      "total": 33,
+      "covered": 5,
+      "percent": 15
+    },
+    "GroupRobot Consensus": {
+      "total": 11,
+      "covered": 10,
+      "percent": 91
+    },
+    "GroupRobot Subscription": {
+      "total": 8,
+      "covered": 0,
+      "percent": 0
+    },
+    "GroupRobot Community": {
+      "total": 15,
+      "covered": 0,
+      "percent": 0
+    },
+    "GroupRobot Ceremony": {
+      "total": 10,
+      "covered": 0,
+      "percent": 0
+    },
+    "GroupRobot Rewards": {
+      "total": 7,
+      "covered": 0,
+      "percent": 0
+    },
+    "GroupRobot Ads": {
+      "total": 27,
+      "covered": 18,
+      "percent": 67
+    }
+  },
+  "byPriority": {
+    "P0": {
+      "total": 121,
+      "covered": 72,
+      "percent": 60
+    },
+    "P1": {
+      "total": 243,
+      "covered": 58,
+      "percent": 24
+    },
+    "P2": {
+      "total": 58,
+      "covered": 6,
+      "percent": 10
+    }
+  },
+  "uncoveredP0": [
+    {
+      "id": "ER-005",
+      "module": "Entity Registry",
+      "description": "余额不足支付初始资金被拒绝",
+      "role": "R2",
+      "type": "负向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "SH-002",
+      "module": "Entity Shop",
+      "description": "实体未激活时创建被拒绝",
+      "role": "R2",
+      "type": "负向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "SH-011",
+      "module": "Entity Shop",
+      "description": "提取超过可用余额(扣除 pending+shopping 佣金保护)被拒绝",
+      "role": "R2",
+      "type": "安全",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "OD-002",
+      "module": "Entity Order",
+      "description": "place_order(shopping_balance)：购物余额抵扣下单",
+      "role": "R5",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "OD-011",
+      "module": "Entity Order",
+      "description": "订单完成触发 update_spent（等级升级 + USDT 独立追踪）",
+      "role": "集成",
+      "type": "流程",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "MB-006",
+      "module": "Entity Member",
+      "description": "下单时自动注册（ensure_member）",
+      "role": "系统",
+      "type": "流程",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "MB-023",
+      "module": "Entity Member",
+      "description": "规则触发自动升级（订单路径: update_spent → evaluate_rules）",
+      "role": "系统",
+      "type": "流程",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "MB-024",
+      "module": "Entity Member",
+      "description": "规则触发自动升级（推荐路径: bind_referrer → evaluate_rules）",
+      "role": "系统",
+      "type": "流程",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "MB-027",
+      "module": "Entity Member",
+      "description": "update_spent 检测过期等级并修正（审计 P4 回归）",
+      "role": "系统",
+      "type": "功能",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "MB-028",
+      "module": "Entity Member",
+      "description": "USDT 消费独立追踪 MemberSpentUsdt（审计 P3 回归）",
+      "role": "系统",
+      "type": "功能",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "NM-004",
+      "module": "交易市场模块",
+      "description": "submit_ocw_result：OCW 验证 USDT 到账（tx_hash 防重放）",
+      "role": "R19",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "NM-011",
+      "module": "交易市场模块",
+      "description": "价格偏离 TWAP 超阈值被拒绝",
+      "role": "R9",
+      "type": "安全",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "NM-012",
+      "module": "交易市场模块",
+      "description": "熔断触发 → 所有交易暂停",
+      "role": "系统",
+      "type": "安全",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "NM-016",
+      "module": "交易市场模块",
+      "description": "Exact(99.5%~100.5%)：全额释放 + 退保证金",
+      "role": "R19",
+      "type": "功能",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "NM-018",
+      "module": "交易市场模块",
+      "description": "Underpaid(50%~99.5%) → 补付窗口(2h)",
+      "role": "R19",
+      "type": "功能",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "NM-021",
+      "module": "交易市场模块",
+      "description": "submit_underpaid_update：OCW 补付窗口内更新金额",
+      "role": "R19",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "NM-023",
+      "module": "交易市场模块",
+      "description": "finalize_underpaid：补付终裁（梯度没收: ≥99.5%→0%, 95%~99.5%→20%, 80%~95%→50%, <80%→100%）",
+      "role": "R19",
+      "type": "功能",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "NM-024",
+      "module": "交易市场模块",
+      "description": "process_timeout(AwaitingPayment)：退 NEX + 没收保证金",
+      "role": "R20",
+      "type": "超时",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "EM-001",
+      "module": "交易市场模块",
+      "description": "place_sell_order / place_buy_order：NEX 对价挂卖单/买单",
+      "role": "R8",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "EM-002",
+      "module": "交易市场模块",
+      "description": "take_order：吃单（部分/全部成交）",
+      "role": "R8",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "ES-001",
+      "module": "Escrow",
+      "description": "lock：锁定资金",
+      "role": "授权模块",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "ES-003",
+      "module": "Escrow",
+      "description": "release：释放资金给收款人",
+      "role": "授权模块",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "ES-004",
+      "module": "Escrow",
+      "description": "refund：退款给付款人",
+      "role": "授权模块",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "ES-008",
+      "module": "Escrow",
+      "description": "争议状态下普通释放/退款被拒绝（DisputeActive，审计 EM2）",
+      "role": "授权模块",
+      "type": "安全",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "AR-001",
+      "module": "Arbitration",
+      "description": "dispute：发起仲裁",
+      "role": "R5/R6",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "AR-004",
+      "module": "Arbitration",
+      "description": "arbitrate：仲裁裁决（Root/委员会）",
+      "role": "R1/R11",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "AR-005",
+      "module": "Arbitration",
+      "description": "非授权无法裁决",
+      "role": "R20",
+      "type": "权限",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "GR-008",
+      "module": "GroupRobot Registry",
+      "description": "approve_mrtd / approve_mrenclave：审批白名单",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "GR-010",
+      "module": "GroupRobot Registry",
+      "description": "request_attestation_nonce：请求证明 nonce",
+      "role": "R12",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "GR-011",
+      "module": "GroupRobot Registry",
+      "description": "submit_verified_attestation：提交已验证 TDX 证明",
+      "role": "R12",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "GR-012",
+      "module": "GroupRobot Registry",
+      "description": "submit_dcap_attestation：提交 DCAP 单 Quote（Level 2/3）",
+      "role": "R12",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "GR-013",
+      "module": "GroupRobot Registry",
+      "description": "submit_dcap_dual_attestation：提交双 Quote（Bot + API Server）",
+      "role": "R12",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "GR-017",
+      "module": "GroupRobot Registry",
+      "description": "篡改 MRTD → body 签名无效 → 拒绝",
+      "role": "R12",
+      "type": "安全",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "GR-018",
+      "module": "GroupRobot Registry",
+      "description": "篡改 report_data → 签名无效 → 拒绝",
+      "role": "R12",
+      "type": "安全",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "GR-019",
+      "module": "GroupRobot Registry",
+      "description": "伪造 Quote → 无合法 ECDSA 签名 → 拒绝",
+      "role": "R12",
+      "type": "安全",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "GR-021",
+      "module": "GroupRobot Registry",
+      "description": "双 Quote 必须绑定同一 bot.public_key",
+      "role": "R12",
+      "type": "安全",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "GR-024",
+      "module": "GroupRobot Registry",
+      "description": "register_peer：注册 Peer（需 TEE + 付费订阅）",
+      "role": "R12",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "GR-025",
+      "module": "GroupRobot Registry",
+      "description": "Free tier 注册被拒绝（FreeTierNotAllowed）",
+      "role": "R12",
+      "type": "安全",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "GR-027",
+      "module": "GroupRobot Registry",
+      "description": "heartbeat_peer：心跳（更新 last_seen + 付费检查）",
+      "role": "R12",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "SB-001",
+      "module": "GroupRobot Subscription",
+      "description": "subscribe：订阅 Bot 服务（Basic/Pro/Enterprise）",
+      "role": "R17",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "SB-007",
+      "module": "GroupRobot Subscription",
+      "description": "effective_tier 返回正确层级（is_paid() 检查）",
+      "role": "系统",
+      "type": "功能",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "GC-001",
+      "module": "GroupRobot Community",
+      "description": "submit_action_log：提交动作日志（Ed25519 签名验证）",
+      "role": "R12",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "GC-002",
+      "module": "GroupRobot Community",
+      "description": "Free tier 提交被拒绝（FreeTierNotAllowed）",
+      "role": "R12",
+      "type": "安全",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "GC-003",
+      "module": "GroupRobot Community",
+      "description": "签名无效被拒绝",
+      "role": "R12",
+      "type": "安全",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "CE-001",
+      "module": "GroupRobot Ceremony",
+      "description": "record_ceremony：记录仪式（Shamir 参数 + Enclave 白名单）",
+      "role": "R12",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "CE-002",
+      "module": "GroupRobot Ceremony",
+      "description": "participant_count < k 被拒绝（InsufficientParticipants，审计 H1）",
+      "role": "R12",
+      "type": "安全",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "CE-003",
+      "module": "GroupRobot Ceremony",
+      "description": "Free tier 被拒绝（FreeTierNotAllowed）",
+      "role": "R12",
+      "type": "安全",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "CE-004",
+      "module": "GroupRobot Ceremony",
+      "description": "bot_id_hash 正确存储（非 blake2_256 派生，审计 C1）",
+      "role": "R12",
+      "type": "安全",
+      "priority": "P0",
+      "covered": false
+    },
+    {
+      "id": "RW-001",
+      "module": "GroupRobot Rewards",
+      "description": "claim_rewards：领取节点奖励（审计 H2: 先转账后清存储）",
+      "role": "R13",
+      "type": "正向",
+      "priority": "P0",
+      "covered": false
+    }
+  ],
+  "uncoveredP1": [
+    {
+      "id": "ER-002",
+      "module": "Entity Registry",
+      "description": "创建不同 EntityType（Enterprise/DAO/Community/Project/Fund/Custom）",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "ER-003",
+      "module": "Entity Registry",
+      "description": "创建实体时绑定推荐人（referrer 参数）",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "ER-004",
+      "module": "Entity Registry",
+      "description": "名称为空/超过 BoundedVec 限长被拒绝",
+      "role": "R2",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "ER-006",
+      "module": "Entity Registry",
+      "description": "超过 MaxEntitiesPerUser(3) 被拒绝",
+      "role": "R2",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "ER-008",
+      "module": "Entity Registry",
+      "description": "update_entity：Owner/Admin 更新实体名称和 logo",
+      "role": "R2/R3",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "ER-010",
+      "module": "Entity Registry",
+      "description": "request_close_entity：Owner 申请关闭→PendingClose",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "ER-017",
+      "module": "Entity Registry",
+      "description": "恢复时资金不足被拒绝",
+      "role": "R1",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "ER-018",
+      "module": "Entity Registry",
+      "description": "ban_entity：治理封禁实体（可选没收资金）",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "ER-019",
+      "module": "Entity Registry",
+      "description": "add_admin/remove_admin：添加/移除管理员，超过 10 人被拒绝",
+      "role": "R2",
+      "type": "正向+负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "ER-020",
+      "module": "Entity Registry",
+      "description": "transfer_ownership：转移所有权",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SH-003",
+      "module": "Entity Shop",
+      "description": "超过 MaxShopsPerEntity(16) 被拒绝",
+      "role": "R2",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SH-004",
+      "module": "Entity Shop",
+      "description": "update_shop：更新名称/logo/描述",
+      "role": "R4",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SH-005",
+      "module": "Entity Shop",
+      "description": "空 CID (logo_cid/description_cid) 被拒绝 (EmptyCid)",
+      "role": "R4",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SH-006",
+      "module": "Entity Shop",
+      "description": "set_location：设置位置/营业时间，空 address_cid 被拒绝",
+      "role": "R4",
+      "type": "正向+负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SH-007",
+      "module": "Entity Shop",
+      "description": "非授权账户更新被拒绝",
+      "role": "R20",
+      "type": "权限",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SH-008",
+      "module": "Entity Shop",
+      "description": "add_manager/remove_manager：添加/移除店铺管理员",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SH-009",
+      "module": "Entity Shop",
+      "description": "fund_operating：充值运营资金，零金额被拒绝 (ZeroFundAmount)",
+      "role": "R2/R4",
+      "type": "正向+负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SH-010",
+      "module": "Entity Shop",
+      "description": "withdraw_operating_fund：提取运营资金",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SH-012",
+      "module": "Entity Shop",
+      "description": "pause_shop/resume_shop：暂停/恢复店铺",
+      "role": "R2/R4",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SH-013",
+      "module": "Entity Shop",
+      "description": "已关闭 Shop 不可 pause/resume (状态校验)",
+      "role": "R2",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SH-014",
+      "module": "Entity Shop",
+      "description": "close_shop：关闭店铺（调用 unregister_shop）",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SH-015",
+      "module": "Entity Shop",
+      "description": "enable_points/disable_points：启用/禁用积分系统",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SH-017",
+      "module": "Entity Shop",
+      "description": "transfer_points：用户间转移积分（已关闭店铺被拒绝）",
+      "role": "R20",
+      "type": "正向+负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SH-018",
+      "module": "Entity Shop",
+      "description": "积分余额不足转移被拒绝",
+      "role": "R20",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SV-002",
+      "module": "Entity Service",
+      "description": "update_product：更新商品信息",
+      "role": "R4/R6",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SV-004",
+      "module": "Entity Service",
+      "description": "delete_product：删除商品（退还押金到店铺派生账户）",
+      "role": "R4/R6",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SV-006",
+      "module": "Entity Service",
+      "description": "非授权账户操作被拒绝",
+      "role": "R20",
+      "type": "权限",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SV-007",
+      "module": "Entity Service",
+      "description": "店铺暂停时无法创建/上架",
+      "role": "R4",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "OD-003",
+      "module": "Entity Order",
+      "description": "place_order(Token)：Token 支付订单",
+      "role": "R5",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "OD-008",
+      "module": "Entity Order",
+      "description": "数字商品不可取消/退款",
+      "role": "R5",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "OD-009",
+      "module": "Entity Order",
+      "description": "request_refund→approve_refund：申请退款→卖家同意→退款",
+      "role": "R5→R6",
+      "type": "流程",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "OD-010",
+      "module": "Entity Order",
+      "description": "start_service→complete_service→confirm_service：服务类订单流程",
+      "role": "R6→R5",
+      "type": "流程",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "RV-001",
+      "module": "Entity Review",
+      "description": "submit_review：买家提交评价（关联已完成订单）",
+      "role": "R5",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "RV-002",
+      "module": "Entity Review",
+      "description": "未完成订单不能评价",
+      "role": "R5",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "RV-003",
+      "module": "Entity Review",
+      "description": "非订单买家不能评价",
+      "role": "R20",
+      "type": "权限",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "TK-002",
+      "module": "Entity Token",
+      "description": "update_token_config：更新配置",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "TK-003",
+      "module": "Entity Token",
+      "description": "set_max_supply：设置最大供应量",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "TK-006",
+      "module": "Entity Token",
+      "description": "超 max_supply 铸造被拒绝",
+      "role": "R2",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "TK-008",
+      "module": "Entity Token",
+      "description": "lock_tokens + unlock_tokens：锁仓+解锁（仅移除已到期条目）",
+      "role": "R2/R8",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "TK-009",
+      "module": "Entity Token",
+      "description": "全部未到期返回 UnlockTimeNotReached（审计 H1 回归）",
+      "role": "R8",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "TK-010",
+      "module": "Entity Token",
+      "description": "无锁仓返回 NoLockedTokens（审计 H1 回归）",
+      "role": "R8",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "TK-013",
+      "module": "Entity Token",
+      "description": "白名单模式下仅白名单可转账",
+      "role": "R8",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "TK-015",
+      "module": "Entity Token",
+      "description": "add_to_whitelist/remove_from_whitelist：添加/移除白名单",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "TK-016",
+      "module": "Entity Token",
+      "description": "add_to_blacklist/remove_from_blacklist：添加/移除黑名单",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GV-005",
+      "module": "Entity Governance",
+      "description": "超过 MaxActiveProposals(10) 被拒绝",
+      "role": "R8",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GV-007",
+      "module": "Entity Governance",
+      "description": "投票期结束后无法投票",
+      "role": "R8",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GV-008",
+      "module": "Entity Governance",
+      "description": "快照区块防闪贷保护（首次持有时间检查）",
+      "role": "R8",
+      "type": "安全",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GV-010",
+      "module": "Entity Governance",
+      "description": "未达法定人数 (quorum_threshold) 否决",
+      "role": "R20",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GV-012",
+      "module": "Entity Governance",
+      "description": "VotingPeriodChange 执行验证 ≥ MinVotingPeriod（审计 H1 回归）",
+      "role": "系统",
+      "type": "安全",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GV-013",
+      "module": "Entity Governance",
+      "description": "cancel_proposal：提案者/店主取消",
+      "role": "R8/R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GV-014",
+      "module": "Entity Governance",
+      "description": "veto_proposal：管理员否决（需 admin_veto_enabled）",
+      "role": "R2/R3",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GV-015",
+      "module": "Entity Governance",
+      "description": "41 种提案类型执行：商品/店铺/代币/财务/治理/返佣/提现/会员/社区",
+      "role": "集成",
+      "type": "流程",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "MB-013",
+      "module": "Entity Member",
+      "description": "超过 MaxCustomLevels(10) 被拒绝",
+      "role": "R2",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "MB-014",
+      "module": "Entity Member",
+      "description": "update_custom_level / remove_custom_level：更新/删除等级",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "MB-018",
+      "module": "Entity Member",
+      "description": "init_upgrade_rule_system：初始化升级规则系统",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "MB-019",
+      "module": "Entity Member",
+      "description": "add_upgrade_rule：添加规则（PurchaseProduct/ReferralCount/TeamSize/TotalSpent/OrderCount）",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "MB-020",
+      "module": "Entity Member",
+      "description": "新触发器：ReferralLevelCount / TotalSpentUsdt / SingleOrderUsdt",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "MB-021",
+      "module": "Entity Member",
+      "description": "update_upgrade_rule / remove_upgrade_rule：更新/删除规则",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "MB-025",
+      "module": "Entity Member",
+      "description": "升级后级联检查推荐人 ReferralLevelCount 规则",
+      "role": "系统",
+      "type": "流程",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "MB-026",
+      "module": "Entity Member",
+      "description": "等级过期 → get_effective_level 返回回退等级",
+      "role": "系统",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-005",
+      "module": "Commission 模块群",
+      "description": "withdraw_token_commission：提现 Token 佣金",
+      "role": "R7",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-006",
+      "module": "Commission 模块群",
+      "description": "自愿复购到购物余额",
+      "role": "R7",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-012",
+      "module": "Commission 模块群",
+      "description": "withdraw_entity_funds：提取 Entity NEX 资金",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-015",
+      "module": "Commission 模块群",
+      "description": "池 A（平台费池）→ Entity 推荐人获得 ReferrerShareBps 分成",
+      "role": "系统",
+      "type": "流程",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-017",
+      "module": "Commission 模块群",
+      "description": "池 B → LevelDiff 级差佣金",
+      "role": "系统",
+      "type": "流程",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-018",
+      "module": "Commission 模块群",
+      "description": "池 B → SingleLine 单线佣金（order_amount × rate / 10000）",
+      "role": "系统",
+      "type": "流程",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-019",
+      "module": "Commission 模块群",
+      "description": "池 B → Team 团队佣金",
+      "role": "系统",
+      "type": "流程",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-020",
+      "module": "Commission 模块群",
+      "description": "池 B → PoolReward 沉淀池分配",
+      "role": "系统",
+      "type": "流程",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-022",
+      "module": "Commission 模块群",
+      "description": "do_cancel_token_commission：Token 佣金独立取消",
+      "role": "系统",
+      "type": "流程",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-023",
+      "module": "Commission 模块群",
+      "description": "Token 订单双路佣金分配（process_token_commission）",
+      "role": "系统",
+      "type": "流程",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-024",
+      "module": "Commission 模块群",
+      "description": "KYC 参与检查（KycParticipationGuard）",
+      "role": "R7",
+      "type": "安全",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-025",
+      "module": "Commission 模块群",
+      "description": "Referral: set_direct_reward_config / set_multi_level_config / set_fixed_amount_config / set_first_order_config / set_repeat_purchase_config",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-026",
+      "module": "Commission 模块群",
+      "description": "Referral: 多级推荐佣金费率验证",
+      "role": "系统",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-027",
+      "module": "Commission 模块群",
+      "description": "LevelDiff: set_level_diff_config（级差比例 bps）",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-028",
+      "module": "Commission 模块群",
+      "description": "LevelDiff: 级差计算（上级 - 下级差值）",
+      "role": "系统",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-029",
+      "module": "Commission 模块群",
+      "description": "SingleLine: set_single_line_config（upline/downline 费率 + 基础/最大层数）",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-032",
+      "module": "Commission 模块群",
+      "description": "Team: set_team_performance_config（团队业绩返佣配置）",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-033",
+      "module": "Commission 模块群",
+      "description": "PoolReward: set_pool_reward_config（NEX + Token 双池配置）",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CM-034",
+      "module": "Commission 模块群",
+      "description": "PoolReward: claim_pool_reward（用户领取沉淀池奖励，冷却期 ~7 天）",
+      "role": "R7",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "DC-001",
+      "module": "Entity Disclosure",
+      "description": "configure_disclosure：配置披露设置（级别/间隔）",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "DC-002",
+      "module": "Entity Disclosure",
+      "description": "publish_disclosure：发布披露（年度/季度/月度/事件驱动）",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "DC-005",
+      "module": "Entity Disclosure",
+      "description": "add_insider / remove_insider：添加/移除内幕人员（≤50 人）",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "DC-006",
+      "module": "Entity Disclosure",
+      "description": "start_blackout / end_blackout：手动开始/结束黑窗口期",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "DC-008",
+      "module": "Entity Disclosure",
+      "description": "publish_announcement / update_announcement / withdraw_announcement：公告 CRUD",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "KY-005",
+      "module": "Entity KYC",
+      "description": "Provider 等级不够不能批准高级别",
+      "role": "R10",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "KY-006",
+      "module": "Entity KYC",
+      "description": "reject_kyc：拒绝 KYC（检查 provider 等级）",
+      "role": "R10",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "KY-008",
+      "module": "Entity KYC",
+      "description": "register_provider / remove_provider：注册/移除 Provider",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "KY-013",
+      "module": "Entity KYC",
+      "description": "宽限期内仍可参与实体活动",
+      "role": "系统",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "KY-014",
+      "module": "Entity KYC",
+      "description": "过期后 can_participate_in_entity = false",
+      "role": "系统",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "TS-002",
+      "module": "Entity TokenSale",
+      "description": "create_sale_round(DutchAuction)：创建荷兰拍卖轮次",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "TS-008",
+      "module": "Entity TokenSale",
+      "description": "DutchAuction 未配置不能开始",
+      "role": "R2",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "TS-011",
+      "module": "Entity TokenSale",
+      "description": "白名单模式下非白名单被拒绝",
+      "role": "R5",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "TS-013",
+      "module": "Entity TokenSale",
+      "description": "提前结束（未到 end_block 且未售罄）被拒绝",
+      "role": "R2",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "TS-019",
+      "module": "Entity TokenSale",
+      "description": "withdraw_funds：提取募集资金（仅 Ended/Completed）",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "NM-013",
+      "module": "交易市场模块",
+      "description": "lift_circuit_breaker：手动解除熔断",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "NM-014",
+      "module": "交易市场模块",
+      "description": "configure_price_protection / set_initial_price：设置价格保护/基准价格",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "NM-015",
+      "module": "交易市场模块",
+      "description": "TWAP 三阶段：冷启动(InitialPrice) → 过渡期(max(24h,Initial)) → 成熟期(7d TWAP)",
+      "role": "系统",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "NM-017",
+      "module": "交易市场模块",
+      "description": "Overpaid(≥100.5%)：全额释放 + 退保证金",
+      "role": "R19",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "NM-019",
+      "module": "交易市场模块",
+      "description": "SeverelyUnderpaid(<50%)：按比例释放 + 没收保证金",
+      "role": "R19",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "NM-020",
+      "module": "交易市场模块",
+      "description": "Invalid(=0)：不释放 + 没收保证金",
+      "role": "R19",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "NM-022",
+      "module": "交易市场模块",
+      "description": "累计达 99.5% 自动升级为 Exact",
+      "role": "R19",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "NM-025",
+      "module": "交易市场模块",
+      "description": "process_timeout(AwaitingVerification) + 宽限期(1h)",
+      "role": "R20",
+      "type": "超时",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "NM-026",
+      "module": "交易市场模块",
+      "description": "process_timeout(UnderpaidPending)",
+      "role": "R20",
+      "type": "超时",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "NM-027",
+      "module": "交易市场模块",
+      "description": "auto_confirm_payment：买家忘确认时 OCW 代付确认",
+      "role": "R19",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "EM-003",
+      "module": "交易市场模块",
+      "description": "cancel_order：取消订单",
+      "role": "R8",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "EM-004",
+      "module": "交易市场模块",
+      "description": "market_buy / market_sell：市价买入/卖出（滑点保护 max_cost/min_receive）",
+      "role": "R8",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "EM-005",
+      "module": "交易市场模块",
+      "description": "configure_market：配置实体市场（手续费/最小金额等）",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "EM-006",
+      "module": "交易市场模块",
+      "description": "configure_price_protection：价格保护配置（max_slippage/circuit_breaker）",
+      "role": "R2",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "EM-008",
+      "module": "交易市场模块",
+      "description": "place_usdt_sell_order / place_usdt_buy_order：USDT 对价挂单",
+      "role": "R8",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "EM-009",
+      "module": "交易市场模块",
+      "description": "reserve_usdt_sell_order / accept_usdt_buy_order：USDT 吃单（锁定 Token + 保证金）",
+      "role": "R8",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "EM-010",
+      "module": "交易市场模块",
+      "description": "confirm_usdt_payment → verify_usdt_payment(OCW) → 结算",
+      "role": "R8 → R19",
+      "type": "流程",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "EM-011",
+      "module": "交易市场模块",
+      "description": "submit_ocw_result / claim_verification_reward：OCW 结果提交 + 奖励领取",
+      "role": "R19",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "EM-013",
+      "module": "交易市场模块",
+      "description": "process_usdt_timeout：USDT 交易超时处理（买家保证金没收）",
+      "role": "R20",
+      "type": "超时",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "ES-002",
+      "module": "Escrow",
+      "description": "lock_with_nonce：幂等锁定（nonce 严格递增）",
+      "role": "授权模块",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "ES-005",
+      "module": "Escrow",
+      "description": "release_split：分账释放（多方，合计 ≤ 托管余额）",
+      "role": "授权模块",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "ES-006",
+      "module": "Escrow",
+      "description": "已关闭 ID 重复锁定被拒绝（AlreadyClosed，审计 EH3）",
+      "role": "授权模块",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "ES-007",
+      "module": "Escrow",
+      "description": "dispute：进入争议状态",
+      "role": "授权模块",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "ES-009",
+      "module": "Escrow",
+      "description": "apply_decision_release_all / refund_all / partial_bps：仲裁三种模式",
+      "role": "R1/R11",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "ES-010",
+      "module": "Escrow",
+      "description": "set_pause：全局暂停时所有操作被拒绝",
+      "role": "R1",
+      "type": "安全",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "EV-002",
+      "module": "Evidence",
+      "description": "超过 MaxImg/MaxVid/MaxDoc 被拒绝（审计 VH1）",
+      "role": "R5/R6",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "EV-003",
+      "module": "Evidence",
+      "description": "commit_hash：提交哈希承诺",
+      "role": "R5/R6",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "EV-004",
+      "module": "Evidence",
+      "description": "append_evidence：追加证据（bounds 验证，审计 VH2）",
+      "role": "R5/R6",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "EV-005",
+      "module": "Evidence",
+      "description": "update_evidence_manifest：修改待处理证据（编辑窗口内）",
+      "role": "R5/R6",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "EV-006",
+      "module": "Evidence",
+      "description": "link / unlink：链接/取消链接证据到目标",
+      "role": "授权模块",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "EV-008",
+      "module": "Evidence",
+      "description": "register_public_key：注册用户公钥",
+      "role": "R20",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "EV-009",
+      "module": "Evidence",
+      "description": "store_private_content：存储私密内容",
+      "role": "R20",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "EV-010",
+      "module": "Evidence",
+      "description": "grant_access / revoke_access：授予/撤销访问权限",
+      "role": "R20",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "AR-002",
+      "module": "Arbitration",
+      "description": "dispute_with_evidence_id：带 evidence_id 发起",
+      "role": "R5/R6",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "AR-003",
+      "module": "Arbitration",
+      "description": "append_evidence_id：补充证据（审计 AH1: auth 检查）",
+      "role": "R5/R6",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "AR-006",
+      "module": "Arbitration",
+      "description": "dispute_with_two_way_deposit：双方押金仲裁",
+      "role": "R5",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "AR-007",
+      "module": "Arbitration",
+      "description": "respond_to_dispute：应诉方响应",
+      "role": "R6",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SS-007",
+      "module": "Storage Service",
+      "description": "update_operator：更新运营者元信息",
+      "role": "R14",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SS-009",
+      "module": "Storage Service",
+      "description": "pause_operator / resume_operator：暂停/恢复",
+      "role": "R14",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SS-011",
+      "module": "Storage Service",
+      "description": "report_probe：运营者自证在线",
+      "role": "R14",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SS-012",
+      "module": "Storage Service",
+      "description": "operator_claim_rewards：领取奖励",
+      "role": "R14",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SS-014",
+      "module": "Storage Service",
+      "description": "mark_pin_failed：标记 Pin 失败",
+      "role": "R19",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SS-023",
+      "module": "Storage Service",
+      "description": "slash_operator：扣罚保证金",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SS-024",
+      "module": "Storage Service",
+      "description": "emergency_pause_billing：紧急暂停计费",
+      "role": "R1",
+      "type": "安全",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GR-005",
+      "module": "GroupRobot Registry",
+      "description": "bind_user_platform：用户绑定平台身份",
+      "role": "R20",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GR-007",
+      "module": "GroupRobot Registry",
+      "description": "refresh_attestation：刷新 TEE 证明（24h 周期）",
+      "role": "R12",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GR-009",
+      "module": "GroupRobot Registry",
+      "description": "revoke_mrtd / revoke_mrenclave：撤销白名单",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GR-014",
+      "module": "GroupRobot Registry",
+      "description": "submit_dcap_full_attestation：完整证书链（Level 4）",
+      "role": "R12",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GR-015",
+      "module": "GroupRobot Registry",
+      "description": "submit_sgx_attestation：提交 SGX 证明",
+      "role": "R12",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GR-016",
+      "module": "GroupRobot Registry",
+      "description": "submit_tee_attestation：统一 TEE 证明入口",
+      "role": "R12",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GR-020",
+      "module": "GroupRobot Registry",
+      "description": "错误 PCK → QE Report 签名失败 → 拒绝（Level 3）",
+      "role": "R12",
+      "type": "安全",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GR-022",
+      "module": "GroupRobot Registry",
+      "description": "approve_api_server_mrtd：审批 API Server MRTD",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GR-023",
+      "module": "GroupRobot Registry",
+      "description": "register_pck_key：注册 PCK Key",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GR-026",
+      "module": "GroupRobot Registry",
+      "description": "deregister_peer：注销 Peer",
+      "role": "R12",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GR-028",
+      "module": "GroupRobot Registry",
+      "description": "report_stale_peer：举报过期 Peer",
+      "role": "R20",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GR-029",
+      "module": "GroupRobot Registry",
+      "description": "register_operator：注册运营商（platform_app_hash 唯一）",
+      "role": "R18",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GR-030",
+      "module": "GroupRobot Registry",
+      "description": "同平台 platform_app_hash 重复被拒绝",
+      "role": "R18",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GR-031",
+      "module": "GroupRobot Registry",
+      "description": "update_operator / deregister_operator：更新/注销",
+      "role": "R18",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GR-033",
+      "module": "GroupRobot Registry",
+      "description": "assign_bot_to_operator：分配 Bot 到运营商",
+      "role": "R12",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CN-007",
+      "module": "GroupRobot Consensus",
+      "description": "slash_equivocation：执行 Slash（Root）",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SB-002",
+      "module": "GroupRobot Subscription",
+      "description": "deposit_subscription：充值续期",
+      "role": "R17",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SB-003",
+      "module": "GroupRobot Subscription",
+      "description": "cancel_subscription：取消订阅",
+      "role": "R17",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SB-004",
+      "module": "GroupRobot Subscription",
+      "description": "change_tier：变更层级",
+      "role": "R17",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SB-005",
+      "module": "GroupRobot Subscription",
+      "description": "commit_ads：广告承诺订阅",
+      "role": "R17",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "SB-008",
+      "module": "GroupRobot Subscription",
+      "description": "过期订阅降级为 Free",
+      "role": "系统",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GC-004",
+      "module": "GroupRobot Community",
+      "description": "序列号重复被拒绝（去重）",
+      "role": "R12",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GC-005",
+      "module": "GroupRobot Community",
+      "description": "batch_submit_logs：批量提交（每条独立验证）",
+      "role": "R12",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GC-006",
+      "module": "GroupRobot Community",
+      "description": "set_node_requirement：设置节点准入策略",
+      "role": "R15",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GC-007",
+      "module": "GroupRobot Community",
+      "description": "update_community_config：更新配置（CAS 乐观锁）",
+      "role": "R15",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GC-008",
+      "module": "GroupRobot Community",
+      "description": "版本号不匹配被拒绝（CAS 冲突）",
+      "role": "R15",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GC-009",
+      "module": "GroupRobot Community",
+      "description": "reward_reputation / deduct_reputation / reset_reputation：声誉管理（Bot owner）",
+      "role": "R12",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GC-010",
+      "module": "GroupRobot Community",
+      "description": "非 Bot owner 操作声誉被拒绝",
+      "role": "R20",
+      "type": "权限",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GC-011",
+      "module": "GroupRobot Community",
+      "description": "update_active_members：更新活跃成员数",
+      "role": "R12",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GC-012",
+      "module": "GroupRobot Community",
+      "description": "clear_expired_logs：清理过期日志（max_age_blocks > 0）",
+      "role": "R20",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GC-013",
+      "module": "GroupRobot Community",
+      "description": "max_age_blocks = 0 被拒绝（防擦除全部）",
+      "role": "R20",
+      "type": "安全",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "GC-014",
+      "module": "GroupRobot Community",
+      "description": "付费: log_retention_days > 0 时强制最小间隔（days × 14400）",
+      "role": "系统",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CE-005",
+      "module": "GroupRobot Ceremony",
+      "description": "revoke_ceremony：撤销仪式（Root）",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CE-006",
+      "module": "GroupRobot Ceremony",
+      "description": "approve_ceremony_enclave / remove_ceremony_enclave：白名单管理",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CE-007",
+      "module": "GroupRobot Ceremony",
+      "description": "force_re_ceremony：强制 re-ceremony（仅 Active 状态，审计 H2）",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CE-008",
+      "module": "GroupRobot Ceremony",
+      "description": "已撤销/过期仪式不可 re-ceremony（CeremonyNotActive）",
+      "role": "R1",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "CE-010",
+      "module": "GroupRobot Ceremony",
+      "description": "CeremonyAtRisk 检测（on_initialize 使用 record.bot_id_hash）",
+      "role": "系统",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "RW-002",
+      "module": "GroupRobot Rewards",
+      "description": "无可领奖励被拒绝",
+      "role": "R13",
+      "type": "负向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "RW-003",
+      "module": "GroupRobot Rewards",
+      "description": "set_reward_params：设置奖励参数（Root）",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "RW-005",
+      "module": "GroupRobot Rewards",
+      "description": "TEE 节点奖励倍数正确应用",
+      "role": "系统",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "RW-006",
+      "module": "GroupRobot Rewards",
+      "description": "finalize_exit 前尝试领取孤儿奖励（审计 H3: OrphanRewardClaimer）",
+      "role": "系统",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "AD-015",
+      "module": "GroupRobot Ads",
+      "description": "community_block_advertiser / community_unblock_advertiser：社区拉黑/取消",
+      "role": "R15",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "AD-017",
+      "module": "GroupRobot Ads",
+      "description": "非管理员操作社区偏好被拒绝",
+      "role": "R20",
+      "type": "权限",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "AD-023",
+      "module": "GroupRobot Ads",
+      "description": "突增超阈值 → 自动暂停 2 个 Era",
+      "role": "系统",
+      "type": "功能",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "AD-025",
+      "module": "GroupRobot Ads",
+      "description": "set_tee_ad_share：设置 TEE 节点广告分成（community+tee ≤ 100）",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "AD-026",
+      "module": "GroupRobot Ads",
+      "description": "set_community_ad_share：设置社区分成（community ≥ 50）",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    },
+    {
+      "id": "AD-027",
+      "module": "GroupRobot Ads",
+      "description": "set_community_admin：设置/变更社区管理员",
+      "role": "R1",
+      "type": "正向",
+      "priority": "P1",
+      "covered": false
+    }
+  ]
+}

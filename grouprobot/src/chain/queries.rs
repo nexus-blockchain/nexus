@@ -180,8 +180,20 @@ impl ChainClient {
                 debug!(raw = ?decoded, "社区配置原始数据");
 
                 let node_requirement = decoded.at("node_requirement")
-                    .and_then(|v| v.as_u128())
-                    .unwrap_or(0) as u8;
+                    .and_then(|v| {
+                        use subxt::ext::scale_value::ValueDef;
+                        match &v.value {
+                            ValueDef::Variant(variant) => match variant.name.as_str() {
+                                "Any" => Some(0u8),
+                                "TeeOnly" => Some(1),
+                                "TeePreferred" => Some(2),
+                                "MinTee" => Some(3),
+                                _ => Some(1), // default TeeOnly
+                            },
+                            _ => v.as_u128().map(|n| n as u8),
+                        }
+                    })
+                    .unwrap_or(1); // default TeeOnly
                 let anti_flood_enabled = decoded.at("anti_flood_enabled")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
@@ -192,8 +204,19 @@ impl ChainClient {
                     .and_then(|v| v.as_u128())
                     .unwrap_or(3) as u8;
                 let warn_action = decoded.at("warn_action")
-                    .and_then(|v| v.as_u128())
-                    .unwrap_or(0) as u8;
+                    .and_then(|v| {
+                        use subxt::ext::scale_value::ValueDef;
+                        match &v.value {
+                            ValueDef::Variant(variant) => match variant.name.as_str() {
+                                "Kick" => Some(0u8),
+                                "Ban" => Some(1),
+                                "Mute" => Some(2),
+                                _ => Some(0), // default Kick
+                            },
+                            _ => v.as_u128().map(|n| n as u8),
+                        }
+                    })
+                    .unwrap_or(0); // default Kick (matches on-chain default)
                 let welcome_enabled = decoded.at("welcome_enabled")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
@@ -598,16 +621,19 @@ impl ChainClient {
                     .and_then(|v| v.as_u128())
                     .unwrap_or(1) as u8;
 
-                // status: Active=0
+                // H7-fix: status/review_status 是 SCALE 枚举, 需匹配 variant 名称
                 let is_active = decoded.at("status")
-                    .and_then(|v| v.as_u128())
-                    .map(|s| s == 0)
+                    .map(|v| {
+                        use subxt::ext::scale_value::ValueDef;
+                        matches!(&v.value, ValueDef::Variant(var) if var.name == "Active")
+                    })
                     .unwrap_or(false);
 
-                // review_status: Approved=1
                 let is_approved = decoded.at("review_status")
-                    .and_then(|v| v.as_u128())
-                    .map(|s| s == 1)
+                    .map(|v| {
+                        use subxt::ext::scale_value::ValueDef;
+                        matches!(&v.value, ValueDef::Variant(var) if var.name == "Approved")
+                    })
                     .unwrap_or(false);
 
                 let advertiser = decoded.at("advertiser")
@@ -626,6 +652,52 @@ impl ChainClient {
                 }))
             }
             None => Ok(None),
+        }
+    }
+
+    // ========================================================================
+    // Reward System Queries (L1-fix: 链下奖励查询)
+    // ========================================================================
+
+    /// 查询节点待领取奖励
+    pub async fn query_pending_rewards(&self, node_id: &[u8; 32]) -> BotResult<u128> {
+        let query = subxt::dynamic::storage(
+            "GroupRobotRewards", "NodePendingRewards",
+            vec![Value::from_bytes(node_id)],
+        );
+        let result = self.api().storage().at_latest().await
+            .map_err(|e| BotError::QueryFailed(format!("storage access: {}", e)))?
+            .fetch(&query).await
+            .map_err(|e| BotError::QueryFailed(format!("fetch pending rewards: {}", e)))?;
+
+        match result {
+            Some(val) => {
+                let decoded = val.to_value()
+                    .map_err(|e| BotError::QueryFailed(format!("decode pending rewards: {}", e)))?;
+                Ok(decoded.as_u128().unwrap_or(0))
+            }
+            None => Ok(0),
+        }
+    }
+
+    /// 查询节点累计已领取奖励
+    pub async fn query_total_earned(&self, node_id: &[u8; 32]) -> BotResult<u128> {
+        let query = subxt::dynamic::storage(
+            "GroupRobotRewards", "NodeTotalEarned",
+            vec![Value::from_bytes(node_id)],
+        );
+        let result = self.api().storage().at_latest().await
+            .map_err(|e| BotError::QueryFailed(format!("storage access: {}", e)))?
+            .fetch(&query).await
+            .map_err(|e| BotError::QueryFailed(format!("fetch total earned: {}", e)))?;
+
+        match result {
+            Some(val) => {
+                let decoded = val.to_value()
+                    .map_err(|e| BotError::QueryFailed(format!("decode total earned: {}", e)))?;
+                Ok(decoded.as_u128().unwrap_or(0))
+            }
+            None => Ok(0),
         }
     }
 

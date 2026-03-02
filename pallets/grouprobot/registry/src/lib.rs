@@ -682,6 +682,16 @@ pub mod pallet {
 				});
 			}
 
+			// P6-H3 fix: 清理证明、Nonce、Peer 相关存储
+			Attestations::<T>::remove(&bot_id_hash);
+			AttestationsV2::<T>::remove(&bot_id_hash);
+			AttestationNonces::<T>::remove(&bot_id_hash);
+			// 清理所有 Peer 的心跳计数, 然后清空 Peer 列表
+			let peers = PeerRegistry::<T>::take(&bot_id_hash);
+			for peer in peers.iter() {
+				PeerHeartbeatCount::<T>::remove(&bot_id_hash, &peer.public_key);
+			}
+
 			Self::deposit_event(Event::BotDeactivated { bot_id_hash });
 			Ok(())
 		}
@@ -699,10 +709,24 @@ pub mod pallet {
 			let bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
 			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
 			ensure!(bot.status == BotStatus::Active, Error::<T>::BotNotActive);
-			ensure!(
-				!CommunityBindings::<T>::contains_key(&community_id_hash),
-				Error::<T>::CommunityAlreadyBound
-			);
+
+			// P6-M1 fix: 如果社区已绑定到已停用的 Bot, 自动解绑后允许重新绑定
+			if let Some(existing) = CommunityBindings::<T>::get(&community_id_hash) {
+				let existing_active = Bots::<T>::get(&existing.bot_id_hash)
+					.map(|b| b.status == BotStatus::Active)
+					.unwrap_or(false);
+				if existing_active {
+					return Err(Error::<T>::CommunityAlreadyBound.into());
+				}
+				// 旧 Bot 已停用或已删除, 清理旧绑定
+				CommunityBindings::<T>::remove(&community_id_hash);
+				Bots::<T>::mutate(&existing.bot_id_hash, |maybe_bot| {
+					if let Some(old_bot) = maybe_bot {
+						old_bot.community_count = old_bot.community_count.saturating_sub(1);
+					}
+				});
+				Self::deposit_event(Event::CommunityUnbound { community_id_hash });
+			}
 
 			let now = frame_system::Pallet::<T>::block_number();
 			let binding = CommunityBinding::<T> {
@@ -844,7 +868,10 @@ pub mod pallet {
 			let bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
 			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
 			ensure!(bot.status == BotStatus::Active, Error::<T>::BotNotActive);
-			ensure!(Attestations::<T>::contains_key(&bot_id_hash), Error::<T>::AttestationNotFound);
+			// P6-H1 fix: 检查 V1 或 V2 证明是否存在
+			let has_v2 = AttestationsV2::<T>::contains_key(&bot_id_hash);
+			let has_v1 = Attestations::<T>::contains_key(&bot_id_hash);
+			ensure!(has_v1 || has_v2, Error::<T>::AttestationNotFound);
 
 			ensure!(ApprovedMrtd::<T>::contains_key(&mrtd), Error::<T>::MrtdNotApproved);
 			if let Some(ref mre) = mrenclave {
@@ -855,23 +882,46 @@ pub mod pallet {
 			let expires_at = now.saturating_add(T::AttestationValidityBlocks::get());
 			let is_dual = sgx_quote_hash.is_some() && mrenclave.is_some();
 
-			let record = AttestationRecord::<T> {
-				bot_id_hash,
-				tdx_quote_hash,
-				sgx_quote_hash,
-				mrtd,
-				mrenclave,
-				attester: who,
-				attested_at: now,
-				expires_at,
-				is_dual_attestation: is_dual,
-				quote_verified: false,
-				dcap_level: 0,
-				api_server_mrtd: None,
-				api_server_quote_hash: None,
-			};
-			Attestations::<T>::insert(&bot_id_hash, record);
-			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false)?;
+			// P6-H1 fix: V2 证明刷新到 V2, V1 刷新到 V1
+			if has_v2 {
+				let old_v2 = AttestationsV2::<T>::get(&bot_id_hash).expect("checked above");
+				let record = AttestationRecordV2::<T> {
+					bot_id_hash,
+					primary_quote_hash: tdx_quote_hash,
+					secondary_quote_hash: sgx_quote_hash,
+					primary_measurement: mrtd,
+					mrenclave,
+					tee_type: old_v2.tee_type,
+					attester: who,
+					attested_at: now,
+					expires_at,
+					is_dual_attestation: is_dual,
+					quote_verified: false,
+					dcap_level: 0,
+					api_server_mrtd: None,
+					api_server_quote_hash: None,
+				};
+				AttestationsV2::<T>::insert(&bot_id_hash, record);
+				Self::enqueue_attestation_expiry(expires_at, bot_id_hash, true)?;
+			} else {
+				let record = AttestationRecord::<T> {
+					bot_id_hash,
+					tdx_quote_hash,
+					sgx_quote_hash,
+					mrtd,
+					mrenclave,
+					attester: who,
+					attested_at: now,
+					expires_at,
+					is_dual_attestation: is_dual,
+					quote_verified: false,
+					dcap_level: 0,
+					api_server_mrtd: None,
+					api_server_quote_hash: None,
+				};
+				Attestations::<T>::insert(&bot_id_hash, record);
+				Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false)?;
+			}
 
 			// 刷新 node_type
 			let now_u64: u64 = now.unique_saturated_into();
@@ -1736,6 +1786,8 @@ pub mod pallet {
 			let who = ensure_signed(origin)?;
 			let bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
 			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+			// P6-H2 fix: 停用的 Bot 不应接受心跳 (避免积累无意义 uptime 数据)
+			ensure!(bot.status == BotStatus::Active, Error::<T>::BotNotActive);
 
 			// Tier gate: Free 层级不允许 Peer 心跳
 			ensure!(

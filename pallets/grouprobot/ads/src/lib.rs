@@ -1,8 +1,22 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+#![deprecated(
+	note = "此 pallet 已拆分为三层模块化架构，请迁移到:\n\
+		- pallet-ads-primitives (通用广告类型 + trait)\n\
+		- pallet-ads-core (通用广告引擎)\n\
+		- pallet-ads-grouprobot (GroupRobot 适配层)\n\
+		此 crate 保留仅供参考，不再注册到 runtime。"
+)]
 
 //! # Pallet GroupRobot Ads — 群组广告竞价 + CPM 结算 + 质押反作弊 + 双向偏好控制
 //!
-//! ## 功能
+//! > **⚠️ DEPRECATED**: 此 pallet 已拆分为模块化架构:
+//! > - [`pallet-ads-primitives`] — 通用广告类型 + 核心 trait
+//! > - [`pallet-ads-core`] — 通用广告引擎 (Campaign CRUD, Escrow, 偏好, Slash, 收入)
+//! > - [`pallet-ads-grouprobot`] — GroupRobot 适配层 (TEE 验证, audience, 反作弊, 节点奖励)
+//! >
+//! > 新代码请使用上述三个 crate。此 crate 不再注册到 runtime。
+//!
+//! ## 功能 (历史参考)
 //! - Campaign CRUD (创建/追加预算/暂停/取消/审核/举报)
 //! - CPM 竞价 + Vickrey 第二价格拍卖
 //! - Bot 投放收据上报 + Era 结算 (60/25/15 或 70/20/10 分成)
@@ -499,6 +513,21 @@ pub mod pallet {
 			registrar: T::AccountId,
 			count: u32,
 		},
+		/// 社区管理员已变更
+		CommunityAdminUpdated {
+			community_id_hash: CommunityIdHash,
+			new_admin: T::AccountId,
+		},
+		/// 广告主取消指定社区 (移除白名单)
+		AdvertiserUnpreferredCommunity {
+			advertiser: T::AccountId,
+			community_id_hash: CommunityIdHash,
+		},
+		/// 社区取消指定广告主 (移除白名单)
+		CommunityUnpreferredAdvertiser {
+			community_id_hash: CommunityIdHash,
+			advertiser: T::AccountId,
+		},
 	}
 
 	// ========================================================================
@@ -575,6 +604,12 @@ pub mod pallet {
 		TeeNotAvailableForTier,
 		/// G4: 私有广告注册次数必须 > 0
 		ZeroPrivateAdCount,
+		/// Campaign ID 溢出
+		CampaignIdOverflow,
+		/// 过期时间无效 (必须晚于当前区块)
+		InvalidExpiry,
+		/// M2: 调用者不是该 node_id 的运营者
+		NodeOperatorMismatch,
 	}
 
 	// ========================================================================
@@ -605,13 +640,18 @@ pub mod pallet {
 			ensure!(bid_per_mille >= T::MinBidPerMille::get(), Error::<T>::BidTooLow);
 			ensure!(!total_budget.is_zero(), Error::<T>::ZeroBudget);
 
+			let now = frame_system::Pallet::<T>::block_number();
+			// M1-fix: 过期时间必须晚于当前区块
+			ensure!(expires_at > now, Error::<T>::InvalidExpiry);
+
+			// H3-fix: Campaign ID 溢出检查
+			let id = NextCampaignId::<T>::get();
+			ensure!(id < u64::MAX, Error::<T>::CampaignIdOverflow);
+
 			// 锁定预算
 			T::Currency::reserve(&who, total_budget)?;
 
-			let id = NextCampaignId::<T>::get();
 			NextCampaignId::<T>::put(id.saturating_add(1));
-
-			let now = frame_system::Pallet::<T>::block_number();
 
 			let campaign = AdCampaign::<T> {
 				advertiser: who.clone(),
@@ -787,6 +827,11 @@ pub mod pallet {
 
 			ensure!(T::NodeConsensus::is_node_active(&node_id), Error::<T>::NodeNotActive);
 			ensure!(T::NodeConsensus::is_tee_node_by_operator(&_who), Error::<T>::NodeNotTee);
+			// M2-fix: 验证调用者是该 node_id 的运营者, 防止跨节点伪造收据
+			ensure!(
+				T::NodeConsensus::node_operator(&node_id) == Some(_who.clone()),
+				Error::<T>::NodeOperatorMismatch
+			);
 			ensure!(!BannedCommunities::<T>::get(&community_id_hash), Error::<T>::CommunityBanned);
 
 			let gate = T::Subscription::effective_feature_gate(&community_id_hash);
@@ -928,12 +973,23 @@ pub mod pallet {
 			}
 
 			// 执行转账 (C1+H4: 全额转入国库, 错误传播)
-			for (campaign_id, actual_cost, community_share, node_share, node_id, advertiser) in settle_items.iter() {
+			// H1-fix: 重新读取 escrow 并重算 actual_cost, 防止同一 campaign 多条收据时
+			//         快照值陈旧导致 unreserve 不足 → 转账失败 → 整个结算回滚
+			for (campaign_id, _snapshot_cost, _snapshot_community, _snapshot_node, node_id, advertiser) in settle_items.iter() {
+				// H1-fix: 用当前 escrow 重算 actual_cost
+				let current_escrow = CampaignEscrow::<T>::get(campaign_id);
+				let adjusted_cost = core::cmp::min(*_snapshot_cost, current_escrow);
+				if adjusted_cost.is_zero() {
+					continue;
+				}
+				let adjusted_community = Self::percent_of(adjusted_cost, community_pct);
+				let adjusted_node = Self::percent_of(adjusted_cost, tee_pct);
+
 				// 解锁 advertiser 的 reserve
-				T::Currency::unreserve(advertiser, *actual_cost);
+				T::Currency::unreserve(advertiser, adjusted_cost);
 
 				// C1-fix: node_share 转入奖励池, 其余转入国库
-				let treasury_portion = actual_cost.saturating_sub(*node_share);
+				let treasury_portion = adjusted_cost.saturating_sub(adjusted_node);
 				T::Currency::transfer(
 					advertiser,
 					&treasury,
@@ -941,46 +997,46 @@ pub mod pallet {
 					ExistenceRequirement::AllowDeath,
 				).map_err(|_| Error::<T>::SettlementTransferFailed)?;
 
-				if !node_share.is_zero() {
+				if !adjusted_node.is_zero() {
 					let reward_pool = T::RewardPoolAccount::get();
 					T::Currency::transfer(
 						advertiser,
 						&reward_pool,
-						*node_share,
+						adjusted_node,
 						ExistenceRequirement::AllowDeath,
 					).map_err(|_| Error::<T>::SettlementTransferFailed)?;
 
 					// 节点收入记账 (10.4: 通过 RewardPool trait 写入统一奖励池)
-					let share_u128: u128 = (*node_share).unique_saturated_into();
+					let share_u128: u128 = adjusted_node.unique_saturated_into();
 					T::RewardPool::accrue_node_reward(node_id, share_u128);
 					Self::deposit_event(Event::NodeAdRewardAccrued {
 						node_id: *node_id,
-						amount: *node_share,
+						amount: adjusted_node,
 					});
 				}
 
 				// 社区收入记账
 				CommunityClaimable::<T>::mutate(&community_id_hash, |c| {
-					*c = c.saturating_add(*community_share);
+					*c = c.saturating_add(adjusted_community);
 				});
 
 				// 更新 escrow
 				CampaignEscrow::<T>::mutate(campaign_id, |e| {
-					*e = e.saturating_sub(*actual_cost);
+					*e = e.saturating_sub(adjusted_cost);
 				});
 
 				// 更新 campaign spent
 				Campaigns::<T>::mutate(campaign_id, |maybe| {
 					if let Some(c) = maybe {
-						c.spent = c.spent.saturating_add(*actual_cost);
+						c.spent = c.spent.saturating_add(adjusted_cost);
 						if CampaignEscrow::<T>::get(campaign_id).is_zero() {
 							c.status = CampaignStatus::Exhausted;
 						}
 					}
 				});
 
-				total_cost = total_cost.saturating_add(*actual_cost);
-				community_share_total = community_share_total.saturating_add(*community_share);
+				total_cost = total_cost.saturating_add(adjusted_cost);
+				community_share_total = community_share_total.saturating_add(adjusted_community);
 			}
 
 			// M7: 结算完毕, 清空本 Era 收据
@@ -1304,36 +1360,40 @@ pub mod pallet {
 
 			let slash_pct = T::AdSlashPercentage::get();
 			let slash_amount = Self::percent_of(stake, slash_pct);
+			let mut actual_slashed = BalanceOf::<T>::zero();
 
 			if !slash_amount.is_zero() {
-				// C2: 从社区管理员的 reserve 中释放 slash_amount, 再转给举报者/国库
 				let admin = CommunityAdmin::<T>::get(&community_id_hash)
 					.ok_or(Error::<T>::NotCommunityAdmin)?;
 
-				// unreserve 管理员的质押 (实际从 reserved balance 释放到 free)
-				T::Currency::unreserve(&admin, slash_amount);
+				// C1-fix: unreserve 返回未能释放的余量, 用实际释放量做后续计算
+				let unreserve_remainder = T::Currency::unreserve(&admin, slash_amount);
+				actual_slashed = slash_amount.saturating_sub(unreserve_remainder);
 
-				// 50% 给举报者, 50% 入国库
-				let reporter_share = Self::percent_of(slash_amount, 50u32);
-				let treasury_share = slash_amount.saturating_sub(reporter_share);
-				let treasury = T::TreasuryAccount::get();
+				if !actual_slashed.is_zero() {
+					// 50% 给举报者, 50% 入国库
+					let reporter_share = Self::percent_of(actual_slashed, 50u32);
+					let treasury_share = actual_slashed.saturating_sub(reporter_share);
+					let treasury = T::TreasuryAccount::get();
 
-				if !reporter_share.is_zero() {
-					let _ = T::Currency::transfer(
-						&admin, &reporter, reporter_share,
-						ExistenceRequirement::AllowDeath,
-					);
+					// C1-fix: 传播转账错误, 不再静默忽略
+					if !reporter_share.is_zero() {
+						T::Currency::transfer(
+							&admin, &reporter, reporter_share,
+							ExistenceRequirement::AllowDeath,
+						).map_err(|_| Error::<T>::SettlementTransferFailed)?;
+					}
+					if !treasury_share.is_zero() {
+						T::Currency::transfer(
+							&admin, &treasury, treasury_share,
+							ExistenceRequirement::AllowDeath,
+						).map_err(|_| Error::<T>::SettlementTransferFailed)?;
+					}
 				}
-				if !treasury_share.is_zero() {
-					let _ = T::Currency::transfer(
-						&admin, &treasury, treasury_share,
-						ExistenceRequirement::AllowDeath,
-					);
-				}
 
-				// C3: 更新管理员个人质押记录
+				// C3: 更新管理员个人质押记录 (使用 actual_slashed)
 				let personal = CommunityStakers::<T>::get(&community_id_hash, &admin);
-				let new_personal = personal.saturating_sub(slash_amount);
+				let new_personal = personal.saturating_sub(actual_slashed);
 				if new_personal.is_zero() {
 					CommunityStakers::<T>::remove(&community_id_hash, &admin);
 				} else {
@@ -1341,8 +1401,8 @@ pub mod pallet {
 				}
 			}
 
-			// 减少质押
-			let new_stake = stake.saturating_sub(slash_amount);
+			// C1-fix: 使用 actual_slashed 减少质押
+			let new_stake = stake.saturating_sub(actual_slashed);
 			CommunityAdStake::<T>::insert(&community_id_hash, new_stake);
 
 			// audience_cap 砍半
@@ -1355,7 +1415,7 @@ pub mod pallet {
 
 			Self::deposit_event(Event::CommunitySlashed {
 				community_id_hash,
-				slashed_amount: slash_amount,
+				slashed_amount: actual_slashed,
 				slash_count: count,
 			});
 
@@ -1400,7 +1460,9 @@ pub mod pallet {
 			audience_size: u32,
 			node_id_prefix: u32,
 		) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
+			let who = ensure_signed(origin)?;
+			// H2-fix: 仅 TEE 节点运营者可上报 audience 统计
+			ensure!(T::NodeConsensus::is_tee_node_by_operator(&who), Error::<T>::NodeNotTee);
 			ensure!(!BannedCommunities::<T>::get(&community_id_hash), Error::<T>::CommunityBanned);
 
 			NodeAudienceReports::<T>::try_mutate(&community_id_hash, |reports| {
@@ -1526,7 +1588,12 @@ pub mod pallet {
 			new_admin: T::AccountId,
 		) -> DispatchResult {
 			ensure_root(origin)?;
-			CommunityAdmin::<T>::insert(&community_id_hash, new_admin);
+			CommunityAdmin::<T>::insert(&community_id_hash, new_admin.clone());
+			// M2-fix: 发出事件以便链下跟踪管理员变更
+			Self::deposit_event(Event::CommunityAdminUpdated {
+				community_id_hash,
+				new_admin,
+			});
 			Ok(())
 		}
 
@@ -1571,6 +1638,56 @@ pub mod pallet {
 			});
 			Ok(())
 		}
+
+		/// M5-fix: 广告主取消指定社区 (移除白名单)
+		#[pallet::call_index(26)]
+		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		pub fn advertiser_unprefer_community(
+			origin: OriginFor<T>,
+			community_id_hash: CommunityIdHash,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			AdvertiserWhitelist::<T>::try_mutate(&who, |list| {
+				let pos = list.iter().position(|h| h == &community_id_hash)
+					.ok_or(Error::<T>::NotWhitelisted)?;
+				list.swap_remove(pos);
+				Ok::<(), DispatchError>(())
+			})?;
+
+			Self::deposit_event(Event::AdvertiserUnpreferredCommunity {
+				advertiser: who,
+				community_id_hash,
+			});
+			Ok(())
+		}
+
+		/// M5-fix: 社区取消指定广告主 (移除白名单, H3: 仅社区管理员)
+		#[pallet::call_index(27)]
+		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		pub fn community_unprefer_advertiser(
+			origin: OriginFor<T>,
+			community_id_hash: CommunityIdHash,
+			advertiser: T::AccountId,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let admin = CommunityAdmin::<T>::get(&community_id_hash)
+				.ok_or(Error::<T>::NotCommunityAdmin)?;
+			ensure!(admin == who, Error::<T>::NotCommunityAdmin);
+
+			CommunityWhitelist::<T>::try_mutate(&community_id_hash, |list| {
+				let pos = list.iter().position(|a| a == &advertiser)
+					.ok_or(Error::<T>::NotWhitelisted)?;
+				list.swap_remove(pos);
+				Ok::<(), DispatchError>(())
+			})?;
+
+			Self::deposit_event(Event::CommunityUnpreferredAdvertiser {
+				community_id_hash,
+				advertiser,
+			});
+			Ok(())
+		}
 	}
 
 	// ========================================================================
@@ -1586,12 +1703,12 @@ pub mod pallet {
 		/// - WelcomeEmbed:   30 (三折)
 		fn compute_cpm_cost(bid_per_mille: BalanceOf<T>, audience: u32, delivery_type: &AdDeliveryType) -> BalanceOf<T> {
 			let audience_balance: BalanceOf<T> = audience.into();
-			let thousand: BalanceOf<T> = 1000u32.into();
 			let multiplier: BalanceOf<T> = delivery_type.cpm_multiplier_bps().into();
-			let hundred: BalanceOf<T> = 100u32.into();
-			// bid * audience / 1000 * multiplier / 100
-			bid_per_mille.saturating_mul(audience_balance) / thousand
-				* multiplier / hundred
+			let divisor: BalanceOf<T> = 100_000u32.into(); // 1000 * 100
+			// L2-fix: 先乘后除, 减少整数除法精度损失
+			// bid * audience * multiplier / (1000 * 100)
+			bid_per_mille.saturating_mul(audience_balance)
+				.saturating_mul(multiplier) / divisor
 		}
 
 		/// 百分比计算: value * pct / 100

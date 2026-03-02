@@ -15,12 +15,18 @@ sp-core = { workspace = true, default-features = false }
 frame-benchmarking = { workspace = true, default-features = false, optional = true }
 log = { workspace = true, default-features = false }
 
+# 加密内容公共类型（PrivateContent、AccessPolicy 等）
+pallet-crypto-common = { workspace = true, default-features = false }
 # 函数级中文注释：pallet-storage-service依赖用于IpfsPinner trait
 pallet-storage-service = { workspace = true, default-features = false }
 # 函数级中文注释：pallet-storage-lifecycle依赖用于block_to_year_month
 pallet-storage-lifecycle = { workspace = true, default-features = false }
 # 函数级中文注释：media-utils依赖用于承诺哈希计算和CID验证
 media-utils = { workspace = true, default-features = false }
+
+[dev-dependencies]
+sp-io = { workspace = true }
+sp-core = { workspace = true }
 
 [features]
 default = ["std"]
@@ -33,6 +39,7 @@ std = [
   "sp-core/std",
   "frame-benchmarking?/std",
   "log/std",
+  "pallet-crypto-common/std",
   "pallet-storage-service/std",
   "pallet-storage-lifecycle/std",
   "media-utils/std",

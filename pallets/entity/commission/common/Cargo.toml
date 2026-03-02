@@ -12,8 +12,6 @@ scale-info = { features = ["derive"], workspace = true }
 frame-support = { workspace = true }
 sp-runtime = { workspace = true }
 
-pallet-entity-common = { path = "../../common", default-features = false }
-
 [features]
 default = ["std"]
 std = [
@@ -21,5 +19,4 @@ std = [
     "scale-info/std",
     "frame-support/std",
     "sp-runtime/std",
-    "pallet-entity-common/std",
 ]

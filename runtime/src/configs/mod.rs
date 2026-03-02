@@ -1060,6 +1060,7 @@ impl pallet_entity_service::Config for Runtime {
 	type ProductDepositUsdt = ConstU64<1_000_000>;  // 1 USDT
 	type MinProductDepositCos = ConstU128<{ UNIT / 100 }>;
 	type MaxProductDepositCos = ConstU128<{ 10 * UNIT }>;
+	type IpfsPinner = pallet_storage_service::Pallet<Runtime>;
 }
 
 impl pallet_entity_order::Config for Runtime {
@@ -1083,9 +1084,11 @@ impl pallet_entity_order::Config for Runtime {
 }
 
 impl pallet_entity_review::Config for Runtime {
+	type EntityProvider = EntityRegistry;
 	type OrderProvider = EntityTransaction;
 	type ShopProvider = EntityShop;
 	type MaxCidLength = ConstU32<64>;
+	type MaxReviewsPerUser = ConstU32<500>;
 	type WeightInfo = pallet_entity_review::weights::SubstrateWeight<Runtime>;
 }
 
@@ -1362,10 +1365,12 @@ impl pallet_commission_core::Config for Runtime {
 	type EntityProvider = EntityRegistry;
 	type MemberProvider = EntityMemberProvider;
 	type ReferralPlugin = crate::CommissionReferral;
+	type MultiLevelPlugin = crate::CommissionMultiLevel;
 	type LevelDiffPlugin = crate::CommissionLevelDiff;
 	type SingleLinePlugin = crate::CommissionSingleLine;
 	type TeamPlugin = crate::CommissionTeam;
 	type ReferralWriter = crate::CommissionReferral;
+	type MultiLevelWriter = crate::CommissionMultiLevel;
 	type LevelDiffWriter = crate::CommissionLevelDiff;
 	type TeamWriter = crate::CommissionTeam;
 	type PoolRewardWriter = crate::CommissionPoolReward;
@@ -1381,6 +1386,7 @@ impl pallet_commission_core::Config for Runtime {
 	// Token 多资产扩展
 	type TokenBalance = u128;
 	type TokenReferralPlugin = crate::CommissionReferral;
+	type TokenMultiLevelPlugin = crate::CommissionMultiLevel;
 	type TokenLevelDiffPlugin = crate::CommissionLevelDiff;
 	type TokenSingleLinePlugin = crate::CommissionSingleLine;
 	type TokenTeamPlugin = crate::CommissionTeam;
@@ -1391,11 +1397,12 @@ impl pallet_commission_referral::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type MemberProvider = EntityMemberProvider;
-	type MaxMultiLevels = ConstU32<15>;
 }
 
-parameter_types! {
-	pub const PoolRewardDefaultRoundDuration: BlockNumber = 43_200; // ~3 days @6s/block
+impl pallet_commission_multi_level::Config for Runtime {
+	type MemberProvider = EntityMemberProvider;
+	type MaxMultiLevels = ConstU32<15>;
+	type WeightInfo = pallet_commission_multi_level::weights::SubstrateWeight<Runtime>;
 }
 
 impl pallet_commission_pool_reward::Config for Runtime {
@@ -1410,6 +1417,8 @@ impl pallet_commission_pool_reward::Config for Runtime {
 	type TokenBalance = u128;
 	type TokenPoolBalanceProvider = pallet_commission_core::Pallet<Runtime>;
 	type TokenTransferProvider = TokenTransferProviderBridge;
+	type ParticipationGuard = KycParticipationGuard;
+	type WeightInfo = pallet_commission_pool_reward::weights::SubstrateWeight;
 }
 
 impl pallet_commission_level_diff::Config for Runtime {
@@ -1656,6 +1665,7 @@ impl pallet_grouprobot_consensus::Config for Runtime {
 	type RewardDistributor = pallet_grouprobot_rewards::Pallet<Runtime>;
 	type Subscription = pallet_grouprobot_subscription::Pallet<Runtime>;
 	type PeerUptimeRecorder = pallet_grouprobot_registry::Pallet<Runtime>;
+	type OrphanRewardClaimer = pallet_grouprobot_rewards::Pallet<Runtime>;
 }
 
 /// 订阅 EraStartBlock 提供者: 从 consensus 读取
@@ -1687,8 +1697,7 @@ impl pallet_grouprobot_subscription::Config for Runtime {
 	type EraLength = GrEraLength;
 	type EraStartBlockProvider = GrEraStartBlockProvider;
 	type CurrentEraProvider = GrCurrentEraProvider;
-	// AdDelivery: 当 ads pallet 接入 runtime 后替换为 pallet_grouprobot_ads::Pallet<Runtime>
-	type AdDelivery = ();
+	type AdDelivery = AdsDeliveryBridge;
 	type AdBasicThreshold = ConstU32<3>;
 	type AdProThreshold = ConstU32<6>;
 	type AdEnterpriseThreshold = ConstU32<11>;
@@ -1734,4 +1743,77 @@ impl pallet_grouprobot_ceremony::Config for Runtime {
 	type CeremonyCheckInterval = GrCeremonyCheckInterval;
 	type BotRegistry = GrBotRegistryBridge;
 	type Subscription = pallet_grouprobot_subscription::Pallet<Runtime>;
+}
+
+// ============================================================================
+// Ads Pallets Config (模块化广告引擎)
+// ============================================================================
+
+/// 桥接: pallet-ads-core → subscription 的 AdDeliveryProvider
+/// ads-primitives::AdDeliveryCountProvider 与 grouprobot-primitives::AdDeliveryProvider 方法签名相同
+pub struct AdsDeliveryBridge;
+
+impl pallet_grouprobot_primitives::AdDeliveryProvider for AdsDeliveryBridge {
+	fn era_delivery_count(community_id_hash: &pallet_grouprobot_primitives::CommunityIdHash) -> u32 {
+		use pallet_ads_primitives::AdDeliveryCountProvider;
+		pallet_ads_core::Pallet::<Runtime>::era_delivery_count(community_id_hash)
+	}
+	fn reset_era_deliveries(community_id_hash: &pallet_grouprobot_primitives::CommunityIdHash) {
+		use pallet_ads_primitives::AdDeliveryCountProvider;
+		pallet_ads_core::Pallet::<Runtime>::reset_era_deliveries(community_id_hash)
+	}
+}
+
+parameter_types! {
+	/// 最低 CPM 出价: 0.001 NEX
+	pub const AdsMinBidPerMille: Balance = UNIT / 1000;
+	/// 私有广告注册费: 1 NEX
+	pub const AdsPrivateAdRegistrationFee: Balance = UNIT;
+}
+
+impl pallet_ads_core::pallet::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type Currency = Balances;
+	type MaxAdTextLength = ConstU32<256>;
+	type MaxAdUrlLength = ConstU32<512>;
+	type MaxReceiptsPerPlacement = ConstU32<1000>;
+	type MaxAdvertiserBlacklist = ConstU32<100>;
+	type MaxAdvertiserWhitelist = ConstU32<100>;
+	type MaxPlacementBlacklist = ConstU32<100>;
+	type MaxPlacementWhitelist = ConstU32<100>;
+	type MinBidPerMille = AdsMinBidPerMille;
+	type MinAudienceSize = ConstU32<10>;
+	type AdSlashPercentage = ConstU32<30>;
+	type TreasuryAccount = TreasuryAccountId;
+	// 适配层: 由 pallet-ads-grouprobot 提供实现
+	type DeliveryVerifier = pallet_ads_grouprobot::Pallet<Runtime>;
+	type PlacementAdmin = pallet_ads_grouprobot::Pallet<Runtime>;
+	type RevenueDistributor = pallet_ads_grouprobot::Pallet<Runtime>;
+	type PrivateAdRegistrationFee = AdsPrivateAdRegistrationFee;
+}
+
+impl pallet_ads_grouprobot::pallet::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type Currency = Balances;
+	type NodeConsensus = GrNodeConsensusBridge;
+	type Subscription = pallet_grouprobot_subscription::Pallet<Runtime>;
+	type RewardPool = pallet_grouprobot_rewards::Pallet<Runtime>;
+	type BotRegistry = GrBotRegistryBridge;
+	type TreasuryAccount = TreasuryAccountId;
+	type RewardPoolAccount = RewardPoolAccountId;
+	type AudienceSurgeThresholdPct = ConstU32<100>;   // 允许 100% audience 增长
+	type NodeDeviationThresholdPct = ConstU32<20>;     // 20% 多节点偏差
+	type AdSlashPercentage = ConstU32<30>;             // 30% slash
+}
+
+impl pallet_ads_entity::pallet::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type Currency = Balances;
+	type EntityProvider = pallet_entity_registry::Pallet<Runtime>;
+	type ShopProvider = pallet_entity_shop::Pallet<Runtime>;
+	type TreasuryAccount = TreasuryAccountId;
+	type PlatformAdShareBps = ConstU16<2000>;          // 平台 20%
+	type AdPlacementDeposit = AdsPrivateAdRegistrationFee; // 1 NEX (复用)
+	type MaxPlacementsPerEntity = ConstU32<20>;
+	type DefaultDailyImpressionCap = ConstU32<10_000>;
 }

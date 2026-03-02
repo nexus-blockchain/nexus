@@ -23,7 +23,7 @@
 | Basic | 邮箱/手机验证 | `BasicKycValidity` | ✅ |
 | Standard | 身份证件 | `StandardKycValidity` | ✅ |
 | Enhanced | 地址 + 资金来源 | `EnhancedKycValidity` | ✅ |
-| Institutional | 企业文件 + 受益人 | `EnhancedKycValidity` | ✅ (最高) |
+| Institutional | 企业文件 + 受益人 | `InstitutionalKycValidity` | ✅ (最高) |
 
 > KycLevel 实现 `PartialOrd + Ord`，支持 `>=` 比较。
 

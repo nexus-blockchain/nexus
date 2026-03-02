@@ -44,6 +44,7 @@ pub mod pallet {
     };
     use frame_system::pallet_prelude::*;
     use pallet_entity_common::{PricingProvider, ProductCategory, ProductProvider, ProductStatus, EntityProvider, ShopProvider};
+    use pallet_storage_service::{IpfsPinner, SubjectType, PinTier};
     use sp_runtime::{
         traits::{AccountIdConversion, Zero},
         SaturatedConversion,
@@ -140,6 +141,9 @@ pub mod pallet {
         /// 最大押金 NEX
         #[pallet::constant]
         type MaxProductDepositCos: Get<BalanceOf<Self>>;
+
+        /// IPFS Pin 管理接口（用于商品元数据 CID 持久化）
+        type IpfsPinner: IpfsPinner<Self::AccountId, BalanceOf<Self>>;
     }
 
     #[pallet::pallet]
@@ -216,6 +220,8 @@ pub mod pallet {
         },
         /// 库存已更新
         StockUpdated { product_id: u64, new_stock: u32 },
+        /// 销量已更新
+        SoldCountUpdated { product_id: u64, sold_count: u32 },
     }
 
     // ==================== 错误 ====================
@@ -250,6 +256,8 @@ pub mod pallet {
         InvalidPrice,
         /// CID 内容不能为空
         EmptyCid,
+        /// 在售商品不可将库存设为 0（stock=0 仅在创建时表示无限库存）
+        CannotClearStockWhileOnSale,
     }
 
     // ==================== Extrinsics ====================
@@ -274,8 +282,10 @@ pub mod pallet {
             // H4: 商品价格不能为零
             ensure!(!price.is_zero(), Error::<T>::InvalidPrice);
 
-            // H2: name_cid 不能为空
+            // H2: CID 不能为空
             ensure!(!name_cid.is_empty(), Error::<T>::EmptyCid);
+            ensure!(!images_cid.is_empty(), Error::<T>::EmptyCid);
+            ensure!(!detail_cid.is_empty(), Error::<T>::EmptyCid);
 
             // 验证店铺
             ensure!(T::ShopProvider::shop_exists(shop_id), Error::<T>::ShopNotFound);
@@ -334,10 +344,17 @@ pub mod pallet {
                 updated_at: now,
             };
 
+            // 提取 CID 引用用于后续 IPFS Pin（product 将被 move）
+            let pin_name_cid = product.name_cid.clone();
+            let pin_images_cid = product.images_cid.clone();
+            let pin_detail_cid = product.detail_cid.clone();
+
             Products::<T>::insert(product_id, product);
             ShopProducts::<T>::try_mutate(shop_id, |ids| ids.try_push(product_id))
                 .map_err(|_| Error::<T>::MaxProductsReached)?;
-            NextProductId::<T>::put(product_id.saturating_add(1));
+            // L1-fix: checked_add 防止 u64 溢出导致 ID 覆盖
+            let next_id = product_id.checked_add(1).ok_or(Error::<T>::ArithmeticOverflow)?;
+            NextProductId::<T>::put(next_id);
 
             // 记录押金信息
             ProductDeposits::<T>::insert(product_id, ProductDepositInfo {
@@ -349,6 +366,11 @@ pub mod pallet {
             ProductStats::<T>::mutate(|stats| {
                 stats.total_products = stats.total_products.saturating_add(1);
             });
+
+            // IPFS Pin: 固定商品元数据 CID（best-effort，pin 失败不阻断商品创建）
+            Self::pin_product_cid(&who, product_id, &pin_name_cid);
+            Self::pin_product_cid(&who, product_id, &pin_images_cid);
+            Self::pin_product_cid(&who, product_id, &pin_detail_cid);
 
             Self::deposit_event(Event::ProductCreated {
                 product_id,
@@ -384,19 +406,36 @@ pub mod pallet {
                 if let Some(c) = name_cid {
                     // H2: name_cid 不能为空
                     ensure!(!c.is_empty(), Error::<T>::EmptyCid);
+                    let old_cid = product.name_cid.clone();
                     product.name_cid = c.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+                    // IPFS: unpin old + pin new (best-effort)
+                    Self::unpin_product_cid(&who, &old_cid);
+                    Self::pin_product_cid(&who, product_id, &product.name_cid);
                 }
                 if let Some(c) = images_cid {
+                    ensure!(!c.is_empty(), Error::<T>::EmptyCid);
+                    let old_cid = product.images_cid.clone();
                     product.images_cid = c.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+                    Self::unpin_product_cid(&who, &old_cid);
+                    Self::pin_product_cid(&who, product_id, &product.images_cid);
                 }
                 if let Some(c) = detail_cid {
+                    ensure!(!c.is_empty(), Error::<T>::EmptyCid);
+                    let old_cid = product.detail_cid.clone();
                     product.detail_cid = c.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+                    Self::unpin_product_cid(&who, &old_cid);
+                    Self::pin_product_cid(&who, product_id, &product.detail_cid);
                 }
                 if let Some(p) = price {
                     ensure!(!p.is_zero(), Error::<T>::InvalidPrice);
                     product.price = p;
                 }
                 if let Some(s) = stock {
+                    // M1: 在售商品不可将库存设为 0（stock=0 双重语义：创建时=无限，运行时=售罄）
+                    ensure!(
+                        !(s == 0 && product.status == ProductStatus::OnSale),
+                        Error::<T>::CannotClearStockWhileOnSale
+                    );
                     product.stock = s;
                     if s > 0 && product.status == ProductStatus::SoldOut {
                         // H1: 补货恢复上架时检查 Shop 激活状态
@@ -527,6 +566,11 @@ pub mod pallet {
             )?;
             let deposit_refunded = deposit_info.amount;
 
+            // IPFS Unpin: 取消固定商品元数据 CID（best-effort）
+            Self::unpin_product_cid(&who, &product.name_cid);
+            Self::unpin_product_cid(&who, &product.images_cid);
+            Self::unpin_product_cid(&who, &product.detail_cid);
+
             // 删除商品
             Products::<T>::remove(product_id);
 
@@ -592,6 +636,46 @@ pub mod pallet {
         pub fn get_current_deposit() -> Result<BalanceOf<T>, sp_runtime::DispatchError> {
             Self::calculate_product_deposit()
         }
+
+        /// IPFS Pin 商品 CID（best-effort：失败仅记录日志，不阻断业务流程）
+        fn pin_product_cid(
+            caller: &T::AccountId,
+            product_id: u64,
+            cid: &BoundedVec<u8, T::MaxCidLength>,
+        ) {
+            let cid_vec: Vec<u8> = cid.clone().into_inner();
+            if let Err(e) = T::IpfsPinner::pin_cid_for_subject(
+                caller.clone(),
+                SubjectType::Product,
+                product_id,
+                cid_vec,
+                Some(PinTier::Standard),
+            ) {
+                log::warn!(
+                    target: "entity-service",
+                    "Failed to pin CID for product {}: {:?}",
+                    product_id, e
+                );
+            }
+        }
+
+        /// IPFS Unpin 商品 CID（best-effort：失败仅记录日志）
+        fn unpin_product_cid(
+            caller: &T::AccountId,
+            cid: &BoundedVec<u8, T::MaxCidLength>,
+        ) {
+            let cid_vec: Vec<u8> = cid.clone().into_inner();
+            if let Err(e) = T::IpfsPinner::unpin_cid(
+                caller.clone(),
+                cid_vec,
+            ) {
+                log::warn!(
+                    target: "entity-service",
+                    "Failed to unpin CID: {:?}",
+                    e
+                );
+            }
+        }
     }
 
     // ==================== ProductProvider 实现 ====================
@@ -651,7 +735,8 @@ pub mod pallet {
             Products::<T>::try_mutate(product_id, |maybe_product| -> Result<(), sp_runtime::DispatchError> {
                 let product = maybe_product.as_mut().ok_or(Error::<T>::ProductNotFound)?;
                 ensure!(product.status != ProductStatus::Draft, Error::<T>::InvalidProductStatus);
-                if product.stock > 0 || product.status == ProductStatus::SoldOut {
+                // H1: 包含 OffShelf — 售罄后下架的商品（stock=0, OffShelf）也需恢复库存
+                if product.stock > 0 || product.status == ProductStatus::SoldOut || product.status == ProductStatus::OffShelf {
                     let was_sold_out = product.status == ProductStatus::SoldOut;
                     product.stock = product.stock.saturating_add(quantity);
                     if was_sold_out {
@@ -675,10 +760,10 @@ pub mod pallet {
             Products::<T>::try_mutate(product_id, |maybe_product| -> Result<(), sp_runtime::DispatchError> {
                 let product = maybe_product.as_mut().ok_or(Error::<T>::ProductNotFound)?;
                 product.sold_count = product.sold_count.saturating_add(quantity);
-                // M2: 发出库存更新事件（sold_count 变更）
-                Self::deposit_event(Event::StockUpdated {
+                // H2: 发出销量更新事件（非库存事件）
+                Self::deposit_event(Event::SoldCountUpdated {
                     product_id,
-                    new_stock: product.stock,
+                    sold_count: product.sold_count,
                 });
                 Ok(())
             })

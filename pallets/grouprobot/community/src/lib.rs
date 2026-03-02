@@ -345,7 +345,8 @@ pub mod pallet {
 			community_id_hash: CommunityIdHash,
 			requirement: NodeRequirement,
 		) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
+			let who = ensure_signed(origin)?;
+			Self::ensure_bot_owner(&who, &community_id_hash)?;
 			let current = CommunityNodeRequirement::<T>::get(&community_id_hash);
 			ensure!(current != requirement, Error::<T>::SameNodeRequirement);
 
@@ -377,7 +378,8 @@ pub mod pallet {
 			ads_enabled: bool,
 			language: [u8; 2],
 		) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
+			let who = ensure_signed(origin)?;
+			Self::ensure_bot_owner(&who, &community_id_hash)?;
 
 			let new_version = expected_version.saturating_add(1);
 
@@ -578,7 +580,8 @@ pub mod pallet {
 			community_id_hash: CommunityIdHash,
 			active_members: u32,
 		) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
+			let who = ensure_signed(origin)?;
+			Self::ensure_bot_owner(&who, &community_id_hash)?;
 
 			CommunityConfigs::<T>::try_mutate(&community_id_hash, |maybe_config| {
 				let config = maybe_config.as_mut().ok_or(Error::<T>::CommunityNotFound)?;

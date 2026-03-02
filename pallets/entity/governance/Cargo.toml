@@ -40,9 +40,6 @@ std = [
 	"pallet-entity-registry/std",
 	"pallet-entity-token/std",
 	"pallet-entity-commission/std",
-	"sp-core/std",
-	"sp-io/std",
-	"pallet-balances/std",
 ]
 runtime-benchmarks = [
 	"frame-support/runtime-benchmarks",

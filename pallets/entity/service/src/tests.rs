@@ -1098,3 +1098,316 @@ fn delete_product_fails_without_deposit_record() {
         assert!(Products::<Test>::get(0).is_some());
     });
 }
+
+// ==================== H1: restore_stock OffShelf+stock=0 ====================
+
+#[test]
+fn h1_restore_stock_works_for_offshelf_soldout_product() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product(); // stock=100
+        assert_ok!(EntityService::publish_product(RuntimeOrigin::signed(1), 0));
+
+        // 全部售出 → SoldOut
+        assert_ok!(<EntityService as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::SoldOut);
+
+        // 店主下架 → OffShelf (stock=0)
+        assert_ok!(EntityService::unpublish_product(RuntimeOrigin::signed(1), 0));
+        let product = Products::<Test>::get(0).unwrap();
+        assert_eq!(product.status, ProductStatus::OffShelf);
+        assert_eq!(product.stock, 0);
+
+        // H1: 订单取消恢复库存 — 之前此处会静默丢弃
+        assert_ok!(<EntityService as ProductProvider<u64, u128>>::restore_stock(0, 30));
+
+        let product = Products::<Test>::get(0).unwrap();
+        assert_eq!(product.stock, 30);
+        // 状态保持 OffShelf（店主手动下架的，不应自动上架）
+        assert_eq!(product.status, ProductStatus::OffShelf);
+    });
+}
+
+// ==================== H2: SoldCountUpdated 事件 ====================
+
+#[test]
+fn h2_add_sold_count_emits_sold_count_updated_event() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product();
+
+        System::reset_events();
+        assert_ok!(<EntityService as ProductProvider<u64, u128>>::add_sold_count(0, 5));
+
+        let events = System::events();
+        // 应发出 SoldCountUpdated 而非 StockUpdated
+        let found_sold = events.iter().any(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::EntityService(Event::SoldCountUpdated { product_id: 0, sold_count: 5 })
+            )
+        });
+        assert!(found_sold, "SoldCountUpdated event should be emitted");
+
+        let found_stock = events.iter().any(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::EntityService(Event::StockUpdated { .. })
+            )
+        });
+        assert!(!found_stock, "StockUpdated should NOT be emitted by add_sold_count");
+    });
+}
+
+// ==================== M1: OnSale stock=0 防护 ====================
+
+#[test]
+fn m1_update_product_rejects_zero_stock_while_on_sale() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+        assert_ok!(EntityService::publish_product(RuntimeOrigin::signed(1), 0));
+
+        // 在售商品不可将 stock 设为 0（避免隐式转无限库存）
+        assert_noop!(
+            EntityService::update_product(
+                RuntimeOrigin::signed(1),
+                0,
+                None, None, None, None,
+                Some(0), // stock=0 on OnSale
+                None,
+            ),
+            Error::<Test>::CannotClearStockWhileOnSale
+        );
+
+        // stock 应未变
+        assert_eq!(Products::<Test>::get(0).unwrap().stock, 100);
+    });
+}
+
+#[test]
+fn m1_update_product_allows_zero_stock_on_draft() {
+    new_test_ext().execute_with(|| {
+        create_default_product(); // Draft
+
+        // Draft 状态可以设置 stock=0（表示无限库存）
+        assert_ok!(EntityService::update_product(
+            RuntimeOrigin::signed(1),
+            0,
+            None, None, None, None,
+            Some(0),
+            None,
+        ));
+        assert_eq!(Products::<Test>::get(0).unwrap().stock, 0);
+    });
+}
+
+// ==================== M2: 空 CID 校验 ====================
+
+#[test]
+fn m2_create_product_rejects_empty_images_cid() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityService::create_product(
+                RuntimeOrigin::signed(1),
+                1,
+                b"QmName".to_vec(),
+                vec![],  // 空 images_cid
+                b"QmDetail".to_vec(),
+                1_000u128,
+                100,
+                ProductCategory::Physical,
+            ),
+            Error::<Test>::EmptyCid
+        );
+    });
+}
+
+#[test]
+fn m2_create_product_rejects_empty_detail_cid() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityService::create_product(
+                RuntimeOrigin::signed(1),
+                1,
+                b"QmName".to_vec(),
+                b"QmImages".to_vec(),
+                vec![],  // 空 detail_cid
+                1_000u128,
+                100,
+                ProductCategory::Physical,
+            ),
+            Error::<Test>::EmptyCid
+        );
+    });
+}
+
+#[test]
+fn m2_update_product_rejects_empty_images_cid() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+
+        assert_noop!(
+            EntityService::update_product(
+                RuntimeOrigin::signed(1),
+                0,
+                None,
+                Some(vec![]),  // 空 images_cid
+                None, None, None, None,
+            ),
+            Error::<Test>::EmptyCid
+        );
+    });
+}
+
+#[test]
+fn m2_update_product_rejects_empty_detail_cid() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+
+        assert_noop!(
+            EntityService::update_product(
+                RuntimeOrigin::signed(1),
+                0,
+                None, None,
+                Some(vec![]),  // 空 detail_cid
+                None, None, None,
+            ),
+            Error::<Test>::EmptyCid
+        );
+    });
+}
+
+// ==================== IPFS Pin 集成测试 ====================
+
+#[test]
+fn ipfs_create_product_pins_three_cids() {
+    new_test_ext().execute_with(|| {
+        clear_pin_tracking();
+
+        create_default_product();
+
+        let pinned = get_pinned_cids();
+        assert_eq!(pinned.len(), 3, "create_product should pin 3 CIDs");
+        // 所有 CID 关联到 product_id=0
+        assert!(pinned.iter().all(|(id, _)| *id == 0));
+        assert_eq!(pinned[0].1, b"QmName".to_vec());
+        assert_eq!(pinned[1].1, b"QmImages".to_vec());
+        assert_eq!(pinned[2].1, b"QmDetail".to_vec());
+        assert!(get_unpinned_cids().is_empty());
+    });
+}
+
+#[test]
+fn ipfs_update_product_unpins_old_pins_new() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+        clear_pin_tracking();
+
+        assert_ok!(EntityService::update_product(
+            RuntimeOrigin::signed(1),
+            0,
+            Some(b"QmNewName".to_vec()),
+            None,
+            Some(b"QmNewDetail".to_vec()),
+            None, None, None,
+        ));
+
+        let pinned = get_pinned_cids();
+        let unpinned = get_unpinned_cids();
+
+        // 2 CIDs changed → 2 unpins + 2 pins
+        assert_eq!(unpinned.len(), 2);
+        assert_eq!(pinned.len(), 2);
+        // 旧 CID 被 unpin
+        assert!(unpinned.contains(&b"QmName".to_vec()));
+        assert!(unpinned.contains(&b"QmDetail".to_vec()));
+        // 新 CID 被 pin
+        assert!(pinned.iter().any(|(_, c)| c == &b"QmNewName".to_vec()));
+        assert!(pinned.iter().any(|(_, c)| c == &b"QmNewDetail".to_vec()));
+    });
+}
+
+#[test]
+fn ipfs_update_product_unchanged_fields_no_pin() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+        clear_pin_tracking();
+
+        // 仅更新价格和库存，CID 不变 → 不应有 pin/unpin
+        assert_ok!(EntityService::update_product(
+            RuntimeOrigin::signed(1),
+            0,
+            None, None, None,
+            Some(2_000u128),
+            Some(50),
+            None,
+        ));
+
+        assert!(get_pinned_cids().is_empty(), "no CID changed, no pin expected");
+        assert!(get_unpinned_cids().is_empty(), "no CID changed, no unpin expected");
+    });
+}
+
+#[test]
+fn ipfs_delete_product_unpins_all_cids() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+        clear_pin_tracking();
+
+        assert_ok!(EntityService::delete_product(RuntimeOrigin::signed(1), 0));
+
+        let unpinned = get_unpinned_cids();
+        assert_eq!(unpinned.len(), 3, "delete_product should unpin 3 CIDs");
+        assert!(unpinned.contains(&b"QmName".to_vec()));
+        assert!(unpinned.contains(&b"QmImages".to_vec()));
+        assert!(unpinned.contains(&b"QmDetail".to_vec()));
+    });
+}
+
+#[test]
+fn ipfs_pin_failure_does_not_block_create() {
+    new_test_ext().execute_with(|| {
+        set_pin_should_fail(true);
+
+        // pin 失败不应阻断商品创建
+        assert_ok!(EntityService::create_product(
+            RuntimeOrigin::signed(1),
+            1,
+            b"QmName".to_vec(),
+            b"QmImages".to_vec(),
+            b"QmDetail".to_vec(),
+            1_000_000_000_000u128,
+            100,
+            ProductCategory::Physical,
+        ));
+
+        // 商品应正常存在
+        assert!(Products::<Test>::get(0).is_some());
+        assert_eq!(NextProductId::<Test>::get(), 1);
+
+        set_pin_should_fail(false);
+    });
+}
+
+// ==================== M3: stale price 路径 ====================
+
+#[test]
+fn m3_stale_price_returns_min_deposit() {
+    new_test_ext().execute_with(|| {
+        // 正常价格 => 正常押金
+        let normal_deposit = EntityService::calculate_product_deposit().unwrap();
+        assert_eq!(normal_deposit, 1_000_000_000_000u128); // 1 UNIT
+
+        // 标记价格过时 => 返回 min_deposit
+        set_price_stale(true);
+        let stale_deposit = EntityService::calculate_product_deposit().unwrap();
+        assert_eq!(stale_deposit, 100u128); // MinProductDepositCos
+
+        // 恢复
+        set_price_stale(false);
+        let restored = EntityService::calculate_product_deposit().unwrap();
+        assert_eq!(restored, normal_deposit);
+    });
+}

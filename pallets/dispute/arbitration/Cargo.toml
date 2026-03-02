@@ -21,6 +21,11 @@ pallet-storage-service = { workspace = true }
 pallet-storage-lifecycle = { workspace = true }
 pallet-trading-common = { workspace = true }
 
+[dev-dependencies]
+sp-io = { workspace = true }
+sp-core = { workspace = true }
+pallet-balances = { workspace = true }
+
 [features]
 default = ["std"]
 std = [

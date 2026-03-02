@@ -9,7 +9,7 @@ use sp_runtime::{
     BuildStorage,
 };
 use sp_core::ConstU64;
-use pallet_entity_common::{OrderProvider, ShopProvider, ShopType, ShopOperatingStatus, EffectiveShopStatus};
+use pallet_entity_common::{EntityProvider, EntityStatus, OrderProvider, ShopProvider, ShopType, ShopOperatingStatus, EffectiveShopStatus};
 use sp_runtime::DispatchError;
 use core::cell::RefCell;
 
@@ -20,6 +20,9 @@ type Block = frame_system::mocking::MockBlock<Test>;
 pub const BUYER: u64 = 1;
 pub const BUYER2: u64 = 2;
 pub const OTHER: u64 = 3;
+pub const ENTITY_OWNER: u64 = 10;
+pub const ENTITY_ADMIN: u64 = 11;
+pub const ENTITY_1: u64 = 1000;
 
 // ==================== Mock 状态 ====================
 
@@ -32,6 +35,10 @@ thread_local! {
     static ACTIVE_SHOPS: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
     // Whether update_shop_rating should fail
     static SHOP_RATING_FAIL: RefCell<bool> = RefCell::new(false);
+    // EntityProvider mock state: entity_id -> (owner, active, admins)
+    static ENTITIES: RefCell<std::collections::HashMap<u64, (u64, bool, Vec<u64>)>> = RefCell::new(std::collections::HashMap::new());
+    // Shop -> Entity mapping
+    static SHOP_ENTITY: RefCell<std::collections::HashMap<u64, u64>> = RefCell::new(std::collections::HashMap::new());
 }
 
 pub fn add_order(order_id: u64, buyer: u64, shop_id: u64, completed: bool) {
@@ -51,11 +58,21 @@ pub fn get_shop_rating(shop_id: u64) -> Option<(u64, u64)> {
     SHOP_RATINGS.with(|r| r.borrow().get(&shop_id).copied())
 }
 
+pub fn add_entity(entity_id: u64, owner: u64, active: bool, admins: Vec<u64>) {
+    ENTITIES.with(|e| e.borrow_mut().insert(entity_id, (owner, active, admins)));
+}
+
+pub fn set_shop_entity(shop_id: u64, entity_id: u64) {
+    SHOP_ENTITY.with(|m| m.borrow_mut().insert(shop_id, entity_id));
+}
+
 pub fn reset_mock_state() {
     ORDERS.with(|o| o.borrow_mut().clear());
     SHOP_RATINGS.with(|r| r.borrow_mut().clear());
     ACTIVE_SHOPS.with(|s| s.borrow_mut().clear());
     SHOP_RATING_FAIL.with(|f| *f.borrow_mut() = false);
+    ENTITIES.with(|e| e.borrow_mut().clear());
+    SHOP_ENTITY.with(|m| m.borrow_mut().clear());
 }
 
 // ==================== Mock OrderProvider ====================
@@ -109,7 +126,9 @@ impl ShopProvider<u64> for MockShopProvider {
         ACTIVE_SHOPS.with(|s| s.borrow().contains(&shop_id))
     }
 
-    fn shop_entity_id(_shop_id: u64) -> Option<u64> { None }
+    fn shop_entity_id(shop_id: u64) -> Option<u64> {
+        SHOP_ENTITY.with(|m| m.borrow().get(&shop_id).copied())
+    }
     fn shop_owner(_shop_id: u64) -> Option<u64> { None }
     fn shop_account(_shop_id: u64) -> u64 { 0 }
     fn shop_type(_shop_id: u64) -> Option<ShopType> { None }
@@ -202,10 +221,54 @@ impl pallet_balances::Config for Test {
 
 // ==================== pallet_entity_review ====================
 
+// ==================== Mock EntityProvider ====================
+
+pub struct MockEntityProvider;
+
+impl EntityProvider<u64> for MockEntityProvider {
+    fn entity_exists(entity_id: u64) -> bool {
+        ENTITIES.with(|e| e.borrow().contains_key(&entity_id))
+    }
+
+    fn is_entity_active(entity_id: u64) -> bool {
+        ENTITIES.with(|e| e.borrow().get(&entity_id).map(|(_, active, _)| *active).unwrap_or(false))
+    }
+
+    fn entity_status(entity_id: u64) -> Option<EntityStatus> {
+        ENTITIES.with(|e| e.borrow().get(&entity_id).map(|(_, active, _)| {
+            if *active { EntityStatus::Active } else { EntityStatus::Suspended }
+        }))
+    }
+
+    fn entity_owner(entity_id: u64) -> Option<u64> {
+        ENTITIES.with(|e| e.borrow().get(&entity_id).map(|(owner, _, _)| *owner))
+    }
+
+    fn entity_account(_entity_id: u64) -> u64 { 0 }
+
+    fn update_entity_stats(_entity_id: u64, _sales_amount: u128, _order_count: u32) -> Result<(), DispatchError> {
+        Ok(())
+    }
+
+    fn update_entity_rating(_entity_id: u64, _rating: u8) -> Result<(), DispatchError> {
+        Ok(())
+    }
+
+    fn is_entity_admin(entity_id: u64, account: &u64) -> bool {
+        ENTITIES.with(|e| {
+            e.borrow().get(&entity_id).map(|(owner, _, admins)| {
+                *account == *owner || admins.contains(account)
+            }).unwrap_or(false)
+        })
+    }
+}
+
 impl pallet_entity_review::Config for Test {
+    type EntityProvider = MockEntityProvider;
     type OrderProvider = MockOrderProvider;
     type ShopProvider = MockShopProvider;
     type MaxCidLength = ConstU32<64>;
+    type MaxReviewsPerUser = ConstU32<100>;
     type WeightInfo = ();
 }
 

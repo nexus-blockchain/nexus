@@ -7,7 +7,7 @@ RA-TLS 仪式审计系统，管理 Shamir 密钥分割仪式的链上记录、En
 ## 设计理念
 
 - **Enclave 白名单**：仪式必须使用经治理审批的 Ceremony Enclave（mrenclave）
-- **Shamir 参数验证**：链上校验 k-of-n 参数合法性（k>0, k≤n, n≤254）
+- **Shamir 参数验证**：链上校验 k-of-n 参数合法性（k>0, k≤n, n≤254, participant_count≥k）
 - **仪式替代**：新仪式自动标记旧仪式为 `Superseded`
 - **自动过期**：`on_initialize` 周期扫描，过期仪式自动清除活跃状态
 - **强制重仪式**：安全事件时 Root 可强制撤销并触发 re-ceremony
@@ -47,6 +47,9 @@ pub struct CeremonyRecord<T: Config> {
     pub created_at: BlockNumberFor<T>,
     pub status: CeremonyStatus,         // Active/Superseded/Revoked/Expired
     pub expires_at: BlockNumberFor<T>,
+    pub is_re_ceremony: bool,           // 是否为 Re-ceremony
+    pub supersedes: Option<[u8; 32]>,   // 替代的旧仪式哈希
+    pub bot_id_hash: [u8; 32],          // Bot ID 哈希 (供 on_initialize 查询)
 }
 ```
 
@@ -73,6 +76,13 @@ pub struct CeremonyEnclaveInfo {
 | `EmptyParticipants` | 参与者列表为空 |
 | `TooManyParticipants` | 参与者超过 MaxParticipants |
 | `CeremonyHistoryFull` | 仪式历史已满 |
+| `FreeTierNotAllowed` | Free 层级不允许使用此功能 |
+| `NotBotOwner` | 调用者不是 Bot 所有者 |
+| `BotNotFound` | Bot 不存在 |
+| `BotPublicKeyMismatch` | Bot 公钥不匹配 |
+| `InsufficientParticipants` | 参与者数量不足以恢复 secret (< k) |
+| `CeremonyNotActive` | 仪式不是活跃状态 |
+| `DescriptionTooLong` | 描述超过 128 bytes |
 
 ## 配置参数
 
@@ -83,16 +93,21 @@ pub struct CeremonyEnclaveInfo {
 | `CeremonyValidityBlocks` | 仪式有效期（区块数） |
 | `CeremonyCheckInterval` | 过期检查间隔（区块数） |
 | `BotRegistry` | Bot 注册查询（`BotRegistryProvider`） |
+| `Subscription` | 订阅层级查询（`SubscriptionProvider`，Tier gate） |
 
 ## Hooks
 
-- **`on_initialize`**：每 `CeremonyCheckInterval` 个区块扫描活跃仪式，过期的标记为 `Expired` 并清除 `ActiveCeremony`
+- **`on_initialize`**：每 `CeremonyCheckInterval` 个区块扫描活跃仪式：
+  - 过期仪式标记为 `Expired` 并清除 `ActiveCeremony`，发出 `CeremonyExpired` 事件
+  - 活跃仪式的 peer 数量 ≤ k 时发出 `CeremonyAtRisk` 风险事件
 
 ## Trait 实现
 
 实现 `CeremonyProvider`，供其他子 pallet 查询：
 - `is_ceremony_active(bot_public_key)` — 仪式是否活跃
 - `ceremony_shamir_params(bot_public_key)` — 获取 (k, n) 参数
+- `active_ceremony_hash(bot_public_key)` — 获取活跃仪式哈希
+- `ceremony_participant_count(bot_public_key)` — 获取参与者数量
 
 ## 仪式状态机
 

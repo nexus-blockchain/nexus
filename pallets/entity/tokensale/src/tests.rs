@@ -1034,3 +1034,172 @@ fn dutch_auction_start_requires_configure() {
         assert_ok!(EntityTokenSale::start_sale(RuntimeOrigin::signed(CREATOR), 0));
     });
 }
+
+// ==================== M2-audit: unlock_tokens 拒绝非 Ended 状态 ====================
+
+#[test]
+fn m2_unlock_tokens_rejects_non_ended_status() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+
+        // 认购
+        assert_ok!(EntityTokenSale::subscribe(
+            RuntimeOrigin::signed(BUYER), round_id, 100u128, None,
+        ));
+
+        // 推进到结束后
+        frame_system::Pallet::<Test>::set_block_number(101);
+        // 结束发售
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // claim_tokens（Ended 状态）
+        assert_ok!(EntityTokenSale::claim_tokens(RuntimeOrigin::signed(BUYER), round_id));
+
+        // unlock 在 Ended 状态下应成功（设置无锁仓，全部可解锁）
+        // 由于默认 VestingType::None, claim_tokens 已解锁全部，所以 unlock 会返回 NoTokensToUnlock
+        assert_noop!(
+            EntityTokenSale::unlock_tokens(RuntimeOrigin::signed(BUYER), round_id),
+            Error::<Test>::NoTokensToUnlock
+        );
+
+        // 验证状态为 Ended（不是其他状态）
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.status, RoundStatus::Ended);
+    });
+}
+
+#[test]
+fn m2_unlock_tokens_rejects_cancelled_status() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+
+        // 认购
+        assert_ok!(EntityTokenSale::subscribe(
+            RuntimeOrigin::signed(BUYER), round_id, 100u128, None,
+        ));
+
+        // 取消发售
+        assert_ok!(EntityTokenSale::cancel_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // unlock_tokens 在 Cancelled 状态下应被拒绝
+        assert_noop!(
+            EntityTokenSale::unlock_tokens(RuntimeOrigin::signed(BUYER), round_id),
+            Error::<Test>::InvalidRoundStatus
+        );
+    });
+}
+
+// ==================== L3-audit: create_sale_round 拒绝过去的 start_block ====================
+
+#[test]
+fn l3_create_sale_round_rejects_start_block_in_past() {
+    new_test_ext().execute_with(|| {
+        // 推进到 block 50
+        frame_system::Pallet::<Test>::set_block_number(50);
+
+        // start_block=10 < now=50 应被拒绝
+        assert_noop!(
+            EntityTokenSale::create_sale_round(
+                RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+                SaleMode::FixedPrice, 1_000_000u128,
+                10u64.into(), 100u64.into(), false, 0,
+            ),
+            Error::<Test>::StartBlockInPast
+        );
+
+        // start_block=50 == now=50 应通过
+        assert_ok!(EntityTokenSale::create_sale_round(
+            RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+            SaleMode::FixedPrice, 1_000_000u128,
+            50u64.into(), 100u64.into(), false, 0,
+        ));
+    });
+}
+
+// ==================== L5-audit: configure_dutch_auction 拒绝 end_price=0 ====================
+
+#[test]
+fn l5_dutch_auction_rejects_zero_end_price() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityTokenSale::create_sale_round(
+            RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+            SaleMode::DutchAuction, 1_000_000u128,
+            10u64.into(), 100u64.into(), false, 0,
+        ));
+
+        // end_price=0 应被拒绝
+        assert_noop!(
+            EntityTokenSale::configure_dutch_auction(
+                RuntimeOrigin::signed(CREATOR), 0, 1000u128, 0u128,
+            ),
+            Error::<Test>::InvalidDutchAuctionConfig
+        );
+
+        // end_price=1 应通过
+        assert_ok!(EntityTokenSale::configure_dutch_auction(
+            RuntimeOrigin::signed(CREATOR), 0, 1000u128, 1u128,
+        ));
+    });
+}
+
+// ==================== Audit Round 3 回归测试 ====================
+
+// M1: end_sale 后 remaining_amount 应归零
+#[test]
+fn m1_end_sale_zeros_remaining_amount() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        // 认购部分代币
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+
+        // 推进到 end_block 之后并手动结束
+        frame_system::Pallet::<Test>::set_block_number(101);
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.status, RoundStatus::Ended);
+        // M1-fix: remaining_amount 应为 0（修复前保留原始值 999_900）
+        assert_eq!(round.remaining_amount, 0u128);
+        assert_eq!(round.sold_amount, 100u128);
+    });
+}
+
+// M1: on_initialize 自动结束后 remaining_amount 应归零
+#[test]
+fn m1_auto_end_sale_zeros_remaining_amount() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        // 认购部分代币
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 500u128, None));
+
+        // 推进到 end_block+1，触发 on_initialize 自动结束
+        frame_system::Pallet::<Test>::set_block_number(101);
+        <EntityTokenSale as Hooks<u64>>::on_initialize(101);
+
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.status, RoundStatus::Ended);
+        // M1-fix: remaining_amount 应为 0
+        assert_eq!(round.remaining_amount, 0u128);
+        assert_eq!(round.sold_amount, 500u128);
+    });
+}
+
+// ==================== L2-audit: NextRoundId overflow ====================
+
+#[test]
+fn l2_next_round_id_overflow_detected() {
+    new_test_ext().execute_with(|| {
+        // 手动将 NextRoundId 设置为 u64::MAX
+        NextRoundId::<Test>::put(u64::MAX);
+
+        // 创建轮次时应检测到溢出
+        assert_noop!(
+            EntityTokenSale::create_sale_round(
+                RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+                SaleMode::FixedPrice, 1_000_000u128,
+                10u64.into(), 100u64.into(), false, 0,
+            ),
+            Error::<Test>::RoundIdOverflow
+        );
+    });
+}

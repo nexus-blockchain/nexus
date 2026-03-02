@@ -11,6 +11,15 @@ use codec::{Decode, Encode, MaxEncodedLen};
 use frame_support::pallet_prelude::*;
 use scale_info::TypeInfo;
 
+// Re-export 通用广告类型 (已迁移到 ads-primitives)
+pub use pallet_ads_primitives::{
+	CampaignStatus, AdReviewStatus, AdPreference, PlacementId,
+	AdScheduleProvider as GenericAdScheduleProvider,
+	AdDeliveryCountProvider as GenericAdDeliveryCountProvider,
+	DeliveryVerifier, PlacementAdminProvider, RevenueDistributor,
+	PlacementStakeProvider, DeliveryMethod,
+};
+
 // ============================================================================
 // Type Aliases
 // ============================================================================
@@ -426,64 +435,8 @@ impl Default for AdTargetTag {
 	}
 }
 
-/// 双向偏好控制 (广告主 ⇄ 群组)
-#[derive(
-	Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, RuntimeDebug, PartialEq, Eq,
-	TypeInfo, MaxEncodedLen,
-)]
-pub enum AdPreference {
-	/// 默认: 允许
-	Allow,
-	/// 拉黑
-	Blocked,
-	/// 指定/白名单 (优先匹配)
-	Preferred,
-}
-
-impl Default for AdPreference {
-	fn default() -> Self {
-		Self::Allow
-	}
-}
-
-/// 广告活动状态
-#[derive(
-	Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, RuntimeDebug, PartialEq, Eq,
-	TypeInfo, MaxEncodedLen,
-)]
-pub enum CampaignStatus {
-	Active,
-	Paused,
-	/// 预算耗尽
-	Exhausted,
-	Expired,
-	Cancelled,
-}
-
-impl Default for CampaignStatus {
-	fn default() -> Self {
-		Self::Active
-	}
-}
-
-/// 广告审核状态
-#[derive(
-	Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, RuntimeDebug, PartialEq, Eq,
-	TypeInfo, MaxEncodedLen,
-)]
-pub enum AdReviewStatus {
-	Pending,
-	Approved,
-	Rejected,
-	/// 社区举报
-	Flagged,
-}
-
-impl Default for AdReviewStatus {
-	fn default() -> Self {
-		Self::Pending
-	}
-}
+// NOTE: AdPreference, CampaignStatus, AdReviewStatus 已迁移至 pallet-ads-primitives
+// 通过顶部 `pub use pallet_ads_primitives::{...}` 重导出, 保持向后兼容
 
 // ============================================================================
 // Ceremony Types
@@ -671,6 +624,16 @@ pub trait SubscriptionSettler {
 
 impl SubscriptionSettler for () {
 	fn settle_era() -> u128 { 0 }
+}
+
+/// H3-fix: 节点退出时领取残留奖励 (consensus finalize_exit 调用 rewards pallet)
+pub trait OrphanRewardClaimer<AccountId> {
+	/// 尝试将节点残留奖励转给 operator (best-effort, 失败不阻断退出)
+	fn try_claim_orphan_rewards(node_id: &NodeId, operator: &AccountId);
+}
+
+impl<AccountId> OrphanRewardClaimer<AccountId> for () {
+	fn try_claim_orphan_rewards(_: &NodeId, _: &AccountId) {}
 }
 
 /// Era 奖励分配 trait (consensus on_era_end 调用 rewards pallet)

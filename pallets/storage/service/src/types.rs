@@ -65,6 +65,8 @@ pub enum SubjectType {
     Arbitration,
     /// 用户档案（头像、认证材料、简介图）
     UserProfile,
+    /// 商品元数据（名称、图片、详情 CID）- 商品在售期间持久保存
+    Product,
     /// 通用存储（默认类型）
     General,
     /// 自定义域（预留扩展）
@@ -779,6 +781,7 @@ impl StorageLayerConfig {
             SubjectType::Swap => Self::swap_default(),
             SubjectType::Arbitration => Self::arbitration_default(),
             SubjectType::UserProfile => Self::user_profile_default(),
+            SubjectType::Product => Self::general_default(),
             SubjectType::General => Self::general_default(),
             SubjectType::Custom(_) => Self::general_default(),
         }

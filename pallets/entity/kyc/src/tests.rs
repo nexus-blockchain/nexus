@@ -823,6 +823,91 @@ fn m2_grace_period_extends_participation() {
     });
 }
 
+// ==================== H2-new: revoke_kyc 支持 Expired 状态 ====================
+
+#[test]
+fn h2_revoke_kyc_works_on_expired_record() {
+    new_test_ext().execute_with(|| {
+        setup_provider();
+        submit_and_approve(USER, KycLevel::Standard);
+
+        // StandardKycValidity = 500, 手动设置过期状态
+        System::set_block_number(502);
+
+        // 先将记录标记为 Expired（模拟过期场景）
+        KycRecords::<Test>::mutate(USER, |maybe| {
+            if let Some(record) = maybe {
+                record.status = KycStatus::Expired;
+            }
+        });
+
+        // H2: 管理员可以撤销 Expired 状态的 KYC
+        assert_ok!(EntityKyc::revoke_kyc(
+            RuntimeOrigin::root(), USER, RejectionReason::SuspiciousActivity,
+        ));
+        assert_eq!(KycRecords::<Test>::get(USER).unwrap().status, KycStatus::Revoked);
+    });
+}
+
+#[test]
+fn h2_revoke_kyc_still_rejects_pending() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), KycLevel::Basic, b"data".to_vec(), *b"CN",
+        ));
+        // Pending 状态仍然不能撤销
+        assert_noop!(
+            EntityKyc::revoke_kyc(RuntimeOrigin::root(), USER, RejectionReason::Other),
+            Error::<Test>::InvalidKycStatus
+        );
+    });
+}
+
+// ==================== M1-new: reject_kyc 拒绝空 details_cid ====================
+
+#[test]
+fn m1_reject_kyc_rejects_empty_details_cid() {
+    new_test_ext().execute_with(|| {
+        setup_provider();
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), KycLevel::Standard, b"data".to_vec(), *b"CN",
+        ));
+
+        // Some(vec![]) 空 CID 应被拒绝
+        assert_noop!(
+            EntityKyc::reject_kyc(
+                RuntimeOrigin::signed(PROVIDER), USER,
+                RejectionReason::UnclearDocument, Some(vec![]),
+            ),
+            Error::<Test>::EmptyDataCid
+        );
+
+        // None 仍然可以
+        assert_ok!(EntityKyc::reject_kyc(
+            RuntimeOrigin::signed(PROVIDER), USER,
+            RejectionReason::UnclearDocument, None,
+        ));
+    });
+}
+
+#[test]
+fn m1_reject_kyc_accepts_nonempty_details_cid() {
+    new_test_ext().execute_with(|| {
+        setup_provider();
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), KycLevel::Standard, b"data".to_vec(), *b"CN",
+        ));
+
+        // 非空 CID 应接受
+        assert_ok!(EntityKyc::reject_kyc(
+            RuntimeOrigin::signed(PROVIDER), USER,
+            RejectionReason::UnclearDocument, Some(b"QmRejectDetails".to_vec()),
+        ));
+        let record = KycRecords::<Test>::get(USER).unwrap();
+        assert!(record.rejection_details_cid.is_some());
+    });
+}
+
 // ==================== M3-audit: Institutional 独立有效期 ====================
 
 #[test]

@@ -1,7 +1,9 @@
 use crate::mock::*;
 use crate::pallet::*;
 use frame_support::{assert_ok, assert_noop};
-use pallet_commission_common::{CommissionModes, CommissionType, MemberProvider, WithdrawalMode, WithdrawalTierConfig};
+use frame_support::BoundedVec;
+use frame_support::traits::ConstU32;
+use pallet_commission_common::{CommissionModes, CommissionStatus, CommissionType, MemberProvider, WithdrawalMode, WithdrawalTierConfig};
 
 // ============================================================================
 // Helpers
@@ -406,16 +408,15 @@ fn m1_set_withdrawal_config_rejects_duplicate_level_id() {
 // ============================================================================
 
 #[test]
-fn init_commission_plan_works() {
+fn init_commission_plan_is_disabled() {
     new_test_ext().execute_with(|| {
-        assert_ok!(CommissionCore::init_commission_plan(
-            RuntimeOrigin::signed(SELLER),
-            ENTITY_ID,
-            pallet_commission_common::CommissionPlan::DirectOnly { rate: 500 },
-        ));
-        let config = CommissionConfigs::<Test>::get(ENTITY_ID).unwrap();
-        assert_eq!(config.max_commission_rate, 500);
-        assert_eq!(config.enabled, true);
+        assert_noop!(
+            CommissionCore::init_commission_plan(
+                RuntimeOrigin::signed(SELLER),
+                ENTITY_ID,
+            ),
+            crate::Error::<Test>::CommissionPlanDisabled
+        );
     });
 }
 
@@ -783,8 +784,8 @@ fn h3_consume_shopping_balance_blocked_when_participation_denied() {
 }
 
 #[test]
-fn h3_self_withdraw_not_checked_by_participation_guard() {
-    // target=self 时不经过 ParticipationGuard 检查（只在 target != who 分支中检查）
+fn h1_self_withdraw_blocked_by_participation_guard() {
+    // H1 审计修复: target=self 也经过 ParticipationGuard 检查（与 Token 提现一致）
     new_test_ext().execute_with(|| {
         fund(entity_account(ENTITY_ID), 100_000);
         MemberCommissionStats::<Test>::mutate(ENTITY_ID, &REFERRER, |s| {
@@ -795,14 +796,17 @@ fn h3_self_withdraw_not_checked_by_participation_guard() {
         // 标记 REFERRER 自己不满足参与要求
         block_participation(ENTITY_ID, REFERRER);
 
-        // target=self（None）→ 不进入 target != who 分支 → 不检查 ParticipationGuard
-        assert_ok!(CommissionCore::withdraw_commission(
-            RuntimeOrigin::signed(REFERRER),
-            ENTITY_ID,
-            Some(5_000),
-            None,
-            None, // target = self
-        ));
+        // H1: target=self 也被阻止
+        assert_noop!(
+            CommissionCore::withdraw_commission(
+                RuntimeOrigin::signed(REFERRER),
+                ENTITY_ID,
+                Some(5_000),
+                None,
+                None, // target = self
+            ),
+            Error::<Test>::ParticipationRequirementNotMet
+        );
     });
 }
 
@@ -989,9 +993,10 @@ fn token_withdraw_cooldown_enforced() {
             withdrawal_cooldown: 100, // 100 blocks 冻结期
         });
 
-        // MemberLastCredited 模拟为 block 1（当前 block=1），cooldown=100
+        // P3 审计修复: Token 冻结期使用独立的 MemberTokenLastCredited
+        // MemberTokenLastCredited 模拟为 block 1（当前 block=1），cooldown=100
         // now(1) < last(1) + cooldown(100) = 101 → 应被拒绝
-        crate::pallet::MemberLastCredited::<Test>::insert(ENTITY_ID, REFERRER, 1u64);
+        crate::pallet::MemberTokenLastCredited::<Test>::insert(ENTITY_ID, REFERRER, 1u64);
 
         assert_noop!(
             CommissionCore::withdraw_token_commission(
@@ -2450,6 +2455,369 @@ fn p2_consume_token_shopping_balance_blocked_by_kyc() {
         assert_noop!(
             CommissionCore::do_consume_token_shopping_balance(ENTITY_ID, &REFERRER, 1_000),
             Error::<Test>::ParticipationRequirementNotMet
+        );
+    });
+}
+
+// ============================================================================
+// 审计回归测试
+// ============================================================================
+
+#[test]
+fn h2_set_token_withdrawal_config_rejects_invalid_tier_sum() {
+    // H2: default_tier.withdrawal_rate + repurchase_rate 必须等于 10000
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            CommissionCore::set_token_withdrawal_config(
+                RuntimeOrigin::signed(SELLER),
+                ENTITY_ID,
+                WithdrawalMode::FixedRate { repurchase_rate: 3000 },
+                WithdrawalTierConfig { repurchase_rate: 5000, withdrawal_rate: 4000 }, // sum=9000
+                Default::default(),
+                0,
+                true,
+            ),
+            Error::<Test>::InvalidWithdrawalConfig
+        );
+
+        // 正确的 tier sum 应成功
+        assert_ok!(CommissionCore::set_token_withdrawal_config(
+            RuntimeOrigin::signed(SELLER),
+            ENTITY_ID,
+            WithdrawalMode::FixedRate { repurchase_rate: 3000 },
+            WithdrawalTierConfig { repurchase_rate: 3000, withdrawal_rate: 7000 }, // sum=10000
+            Default::default(),
+            0,
+            true,
+        ));
+    });
+}
+
+#[test]
+fn h2_set_token_withdrawal_config_rejects_invalid_override_tier_sum() {
+    // H2: level_overrides tier sum 也必须等于 10000
+    new_test_ext().execute_with(|| {
+        let bad_overrides: BoundedVec<(u8, WithdrawalTierConfig), ConstU32<10>> =
+            BoundedVec::try_from(vec![
+                (1, WithdrawalTierConfig { repurchase_rate: 6000, withdrawal_rate: 6000 }), // sum=12000
+            ]).unwrap();
+        assert_noop!(
+            CommissionCore::set_token_withdrawal_config(
+                RuntimeOrigin::signed(SELLER),
+                ENTITY_ID,
+                WithdrawalMode::LevelBased,
+                WithdrawalTierConfig { repurchase_rate: 3000, withdrawal_rate: 7000 },
+                bad_overrides,
+                0,
+                true,
+            ),
+            Error::<Test>::InvalidWithdrawalConfig
+        );
+    });
+}
+
+// ============================================================================
+// H1 审计修复 (Round 4): Token 佣金预算扣除已承诺额度
+// ============================================================================
+
+#[test]
+fn h1_token_budget_deducts_committed_amounts() {
+    // H1: process_token_commission 第二笔订单的预算应扣除第一笔的已承诺额度
+    // 防止跨订单重复承诺同一批 Token
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        set_token_balance(ENTITY_ID, ea, 15_000); // 余额有限
+        setup_token_config(5000, true); // 50% max, pool_reward=true
+
+        // Order 1: amount=20000, max_commission=10000, available=15000 → remaining=10000
+        assert_ok!(CommissionCore::process_token_commission(
+            ENTITY_ID, SHOP_ID, 7001, &BUYER, 20_000, 0,
+        ));
+        // 插件为空 → 10000 全部入沉淀池
+        assert_eq!(UnallocatedTokenPool::<Test>::get(ENTITY_ID), 10_000);
+
+        // Order 2: amount=20000, max_commission=10000
+        // H1 修复后: available = 15000 - 10000(committed) = 5000 → remaining = min(10000, 5000) = 5000
+        // 修复前: available = 15000 → remaining = min(10000, 15000) = 10000 (超额承诺!)
+        assert_ok!(CommissionCore::process_token_commission(
+            ENTITY_ID, SHOP_ID, 7002, &BUYER, 20_000, 0,
+        ));
+        // 第二笔只应承诺 5000（而非 10000）
+        assert_eq!(UnallocatedTokenPool::<Test>::get(ENTITY_ID), 15_000);
+
+        // 总承诺 = 15000 = entity_balance，不超额
+    });
+}
+
+#[test]
+fn h1_token_budget_zero_when_fully_committed() {
+    // 当已承诺额度 ≥ entity_balance 时，新订单应零分配
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        set_token_balance(ENTITY_ID, ea, 10_000);
+        setup_token_config(5000, true);
+
+        // Order 1: 全部可用余额被承诺
+        assert_ok!(CommissionCore::process_token_commission(
+            ENTITY_ID, SHOP_ID, 7003, &BUYER, 20_000, 0,
+        ));
+        assert_eq!(UnallocatedTokenPool::<Test>::get(ENTITY_ID), 10_000);
+
+        // Order 2: available = 10000 - 10000 = 0 → remaining = 0
+        assert_ok!(CommissionCore::process_token_commission(
+            ENTITY_ID, SHOP_ID, 7004, &BUYER, 20_000, 0,
+        ));
+        // 沉淀池不应增长
+        assert_eq!(UnallocatedTokenPool::<Test>::get(ENTITY_ID), 10_000);
+
+        // 第二笔订单的 unallocated 应为 0
+        let (_, _, amt) = OrderTokenUnallocated::<Test>::get(7004u64);
+        assert_eq!(amt, 0);
+    });
+}
+
+#[test]
+fn h1_token_budget_accounts_for_pending_and_shopping() {
+    // 验证 committed 包含 TokenPendingTotal + TokenShoppingTotal + UnallocatedTokenPool
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        set_token_balance(ENTITY_ID, ea, 30_000);
+        setup_token_config(5000, true);
+
+        // 手动注入各类已承诺额度
+        inject_token_pending(ENTITY_ID, REFERRER, 8_000);   // TokenPendingTotal = 8000
+        TokenShoppingTotal::<Test>::insert(ENTITY_ID, 7_000u128); // TokenShoppingTotal = 7000
+        UnallocatedTokenPool::<Test>::insert(ENTITY_ID, 5_000u128); // UnallocatedTokenPool = 5000
+        // committed = 8000 + 7000 + 5000 = 20000
+        // available = 30000 - 20000 = 10000
+
+        assert_ok!(CommissionCore::process_token_commission(
+            ENTITY_ID, SHOP_ID, 7005, &BUYER, 40_000, 0,
+        ));
+        // max_commission = 40000 * 5000 / 10000 = 20000
+        // remaining = min(20000, 10000) = 10000
+        // 插件为空 → 10000 入沉淀池
+        assert_eq!(UnallocatedTokenPool::<Test>::get(ENTITY_ID), 5_000 + 10_000);
+    });
+}
+
+#[test]
+fn h3_cancel_commission_refunds_pool_b_via_shop_id() {
+    // H3: credit_commission 现在存储真实 shop_id，cancel_commission 可正确退款
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        fund(ea, 1);
+        fund(PLATFORM, 1_000_000);
+        fund(SELLER, 200_000);
+        setup_config(5000); // max_commission_rate = 50%
+
+        // 处理佣金（Pool B 需要 seller 有余额）
+        assert_ok!(CommissionCore::process_commission(
+            ENTITY_ID, SHOP_ID, 999, &BUYER, 100_000u128, 100_000u128, 10_000u128,
+        ));
+
+        // 验证记录中的 shop_id 不为 0
+        let records = OrderCommissionRecords::<Test>::get(999);
+        for record in records.iter() {
+            if record.commission_type != CommissionType::EntityReferral {
+                assert_eq!(record.shop_id, SHOP_ID, "Pool B records should have real shop_id");
+            }
+        }
+
+        // 取消佣金 — 应成功退款
+        assert_ok!(CommissionCore::cancel_commission(999));
+
+        // 验证 Pool B 记录被取消
+        let records_after = OrderCommissionRecords::<Test>::get(999);
+        for record in records_after.iter() {
+            assert_eq!(record.status, CommissionStatus::Cancelled);
+        }
+    });
+}
+
+#[test]
+fn h4_trait_set_commission_modes_tracks_pool_reward() {
+    // H4: CommissionProvider::set_commission_modes 现在跟踪 POOL_REWARD 变化
+    use pallet_commission_common::CommissionProvider;
+    new_test_ext().execute_with(|| {
+        // 开启 POOL_REWARD
+        assert_ok!(<CommissionCore as CommissionProvider<u64, u128>>::set_commission_modes(
+            ENTITY_ID,
+            CommissionModes::DIRECT_REWARD | CommissionModes::POOL_REWARD,
+        ));
+        assert!(PoolRewardDisabledAt::<Test>::get(ENTITY_ID).is_none());
+
+        // 关闭 POOL_REWARD → 应记录关闭时间
+        System::set_block_number(42);
+        assert_ok!(<CommissionCore as CommissionProvider<u64, u128>>::set_commission_modes(
+            ENTITY_ID,
+            CommissionModes::DIRECT_REWARD,
+        ));
+        assert_eq!(PoolRewardDisabledAt::<Test>::get(ENTITY_ID), Some(42));
+
+        // 重新开启 POOL_REWARD → 应清除关闭记录
+        assert_ok!(<CommissionCore as CommissionProvider<u64, u128>>::set_commission_modes(
+            ENTITY_ID,
+            CommissionModes::DIRECT_REWARD | CommissionModes::POOL_REWARD,
+        ));
+        assert!(PoolRewardDisabledAt::<Test>::get(ENTITY_ID).is_none());
+    });
+}
+
+// ============================================================================
+// P3 审计修复: Token 冻结期与 NEX 完全解耦回归测试
+// ============================================================================
+
+#[test]
+fn p3_nex_credit_does_not_freeze_token_withdrawal() {
+    // NEX 入账更新 MemberLastCredited，不应阻止 Token 提现
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        inject_token_pending(ENTITY_ID, REFERRER, 10_000);
+        set_token_balance(ENTITY_ID, ea, 50_000);
+
+        // 设置 100 blocks 冻结期
+        CommissionConfigs::<Test>::insert(ENTITY_ID, CoreCommissionConfig {
+            enabled_modes: CommissionModes(CommissionModes::DIRECT_REWARD),
+            max_commission_rate: 10000,
+            enabled: true,
+            withdrawal_cooldown: 100,
+        });
+
+        // 模拟 NEX 入账 → 更新 MemberLastCredited
+        System::set_block_number(50);
+        crate::pallet::MemberLastCredited::<Test>::insert(ENTITY_ID, REFERRER, 50u64);
+        // MemberTokenLastCredited 未被更新（默认 0）
+
+        // Token 提现不应被 NEX 冻结期阻止
+        // now(50) >= token_last(0) + cooldown(100) = 100 → false, 但 0 + 100 = 100 > 50
+        // 需要推进到 block 100
+        System::set_block_number(100);
+        assert_ok!(CommissionCore::withdraw_token_commission(
+            RuntimeOrigin::signed(REFERRER),
+            ENTITY_ID,
+            None,
+            None,
+            None,
+        ));
+
+        let stats = MemberTokenCommissionStats::<Test>::get(ENTITY_ID, REFERRER);
+        assert_eq!(stats.pending, 0);
+        assert_eq!(stats.withdrawn, 10_000);
+    });
+}
+
+#[test]
+fn p3_token_credit_does_not_freeze_nex_withdrawal() {
+    // Token 入账更新 MemberTokenLastCredited，不应阻止 NEX 提现
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        fund(ea, 500_000);
+        // 注入 NEX pending 佣金
+        MemberCommissionStats::<Test>::mutate(ENTITY_ID, &REFERRER, |stats| {
+            stats.total_earned = 10_000;
+            stats.pending = 10_000;
+        });
+        ShopPendingTotal::<Test>::insert(ENTITY_ID, 10_000u128);
+
+        // 设置 100 blocks 冻结期
+        CommissionConfigs::<Test>::insert(ENTITY_ID, CoreCommissionConfig {
+            enabled_modes: CommissionModes(CommissionModes::DIRECT_REWARD),
+            max_commission_rate: 10000,
+            enabled: true,
+            withdrawal_cooldown: 100,
+        });
+
+        // 模拟 Token 入账 → 更新 MemberTokenLastCredited（block 50）
+        System::set_block_number(50);
+        crate::pallet::MemberTokenLastCredited::<Test>::insert(ENTITY_ID, REFERRER, 50u64);
+        // MemberLastCredited 未被更新（默认 0）
+
+        // NEX 提现不应被 Token 冻结期影响
+        // now(50) >= nex_last(0) + cooldown(100) = 100 → false
+        System::set_block_number(100);
+        assert_ok!(CommissionCore::withdraw_commission(
+            RuntimeOrigin::signed(REFERRER),
+            ENTITY_ID,
+            None,
+            None,
+            None,
+        ));
+
+        let stats = MemberCommissionStats::<Test>::get(ENTITY_ID, REFERRER);
+        assert_eq!(stats.pending, 0);
+    });
+}
+
+#[test]
+fn p3_token_cooldown_independent_from_nex_cooldown() {
+    // Token 和 NEX 各自入账、各自冻结，互不干扰
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        inject_token_pending(ENTITY_ID, REFERRER, 10_000);
+        set_token_balance(ENTITY_ID, ea, 50_000);
+
+        CommissionConfigs::<Test>::insert(ENTITY_ID, CoreCommissionConfig {
+            enabled_modes: CommissionModes(CommissionModes::DIRECT_REWARD),
+            max_commission_rate: 10000,
+            enabled: true,
+            withdrawal_cooldown: 100,
+        });
+
+        // Token 入账在 block 200
+        System::set_block_number(200);
+        crate::pallet::MemberTokenLastCredited::<Test>::insert(ENTITY_ID, REFERRER, 200u64);
+        // NEX 入账在 block 10（很早）
+        crate::pallet::MemberLastCredited::<Test>::insert(ENTITY_ID, REFERRER, 10u64);
+
+        // 在 block 250: NEX 冻结期早已过（10+100=110 < 250），Token 冻结期未过（200+100=300 > 250）
+        System::set_block_number(250);
+
+        // Token 应被拒绝
+        assert_noop!(
+            CommissionCore::withdraw_token_commission(
+                RuntimeOrigin::signed(REFERRER),
+                ENTITY_ID,
+                None,
+                None,
+                None,
+            ),
+            Error::<Test>::WithdrawalCooldownNotMet
+        );
+
+        // 推进到 block 300: Token 冻结期也过了
+        System::set_block_number(300);
+        assert_ok!(CommissionCore::withdraw_token_commission(
+            RuntimeOrigin::signed(REFERRER),
+            ENTITY_ID,
+            None,
+            None,
+            None,
+        ));
+    });
+}
+
+#[test]
+fn p3_credit_token_commission_writes_token_last_credited() {
+    // credit_token_commission 应写入 MemberTokenLastCredited，不写 MemberLastCredited
+    new_test_ext().execute_with(|| {
+        System::set_block_number(42);
+
+        assert_ok!(CommissionCore::credit_token_commission(
+            ENTITY_ID, 1, &BUYER, &REFERRER,
+            5_000u128, CommissionType::DirectReward, 1, 42u64,
+        ));
+
+        // MemberTokenLastCredited 应被更新
+        assert_eq!(
+            crate::pallet::MemberTokenLastCredited::<Test>::get(ENTITY_ID, REFERRER),
+            42u64
+        );
+
+        // MemberLastCredited 不应被更新（保持默认值 0）
+        assert_eq!(
+            crate::pallet::MemberLastCredited::<Test>::get(ENTITY_ID, REFERRER),
+            0u64
         );
     });
 }

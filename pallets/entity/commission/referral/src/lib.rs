@@ -1,11 +1,12 @@
 //! # Commission Referral Plugin (pallet-commission-referral)
 //!
-//! 推荐链返佣插件，包含 5 种模式：
+//! 推荐链返佣插件，包含 4 种模式：
 //! - 直推奖励 (DirectReward)
-//! - 多级分销 (MultiLevel) — N 层 + 激活条件
 //! - 固定金额 (FixedAmount)
 //! - 首单奖励 (FirstOrder)
 //! - 复购奖励 (RepeatPurchase)
+//!
+//! 注: 多级分销 (MultiLevel) 已分离为独立 pallet: `pallet-commission-multi-level`
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -19,14 +20,13 @@ pub mod pallet {
     use alloc::vec::Vec;
     use frame_support::{
         pallet_prelude::*,
-        traits::{Currency, Get},
+        traits::Currency,
     };
     use frame_system::pallet_prelude::*;
     use pallet_commission_common::{
         CommissionOutput, CommissionType, MemberProvider,
     };
     use sp_runtime::traits::{Saturating, Zero};
-    use alloc::collections::BTreeSet;
 
     pub type BalanceOf<T> =
         <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
@@ -40,34 +40,6 @@ pub mod pallet {
     pub struct DirectRewardConfig {
         pub rate: u16,
     }
-
-    /// 多级分销层级配置
-    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
-    pub struct MultiLevelTier {
-        pub rate: u16,
-        pub required_directs: u32,
-        pub required_team_size: u32,
-        pub required_spent: u128,
-    }
-
-    /// 多级分销配置
-    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
-    #[scale_info(skip_type_params(MaxLevels))]
-    pub struct MultiLevelConfig<MaxLevels: Get<u32>> {
-        pub levels: BoundedVec<MultiLevelTier, MaxLevels>,
-        pub max_total_rate: u16,
-    }
-
-    impl<MaxLevels: Get<u32>> Default for MultiLevelConfig<MaxLevels> {
-        fn default() -> Self {
-            Self {
-                levels: BoundedVec::default(),
-                max_total_rate: 1500,
-            }
-        }
-    }
-
-    pub type MultiLevelConfigOf<T> = MultiLevelConfig<<T as Config>::MaxMultiLevels>;
 
     /// 固定金额配置
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
@@ -102,22 +74,19 @@ pub mod pallet {
         pub min_orders: u32,
     }
 
-    /// 推荐链返佣总配置（per-shop）
+    /// 推荐链返佣总配置（per-entity）
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
-    #[scale_info(skip_type_params(MaxLevels))]
-    pub struct ReferralConfig<Balance, MaxLevels: Get<u32>> {
+    pub struct ReferralConfig<Balance> {
         pub direct_reward: DirectRewardConfig,
-        pub multi_level: MultiLevelConfig<MaxLevels>,
         pub fixed_amount: FixedAmountConfig<Balance>,
         pub first_order: FirstOrderConfig<Balance>,
         pub repeat_purchase: RepeatPurchaseConfig,
     }
 
-    impl<Balance: Default, MaxLevels: Get<u32>> Default for ReferralConfig<Balance, MaxLevels> {
+    impl<Balance: Default> Default for ReferralConfig<Balance> {
         fn default() -> Self {
             Self {
                 direct_reward: DirectRewardConfig::default(),
-                multi_level: MultiLevelConfig::default(),
                 fixed_amount: FixedAmountConfig::default(),
                 first_order: FirstOrderConfig::default(),
                 repeat_purchase: RepeatPurchaseConfig::default(),
@@ -125,7 +94,7 @@ pub mod pallet {
         }
     }
 
-    pub type ReferralConfigOf<T> = ReferralConfig<BalanceOf<T>, <T as Config>::MaxMultiLevels>;
+    pub type ReferralConfigOf<T> = ReferralConfig<BalanceOf<T>>;
 
     // ========================================================================
     // Pallet Config
@@ -136,9 +105,6 @@ pub mod pallet {
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
         type Currency: Currency<Self::AccountId>;
         type MemberProvider: MemberProvider<Self::AccountId>;
-
-        #[pallet::constant]
-        type MaxMultiLevels: Get<u32>;
     }
 
     #[pallet::pallet]
@@ -196,30 +162,6 @@ pub mod pallet {
             ReferralConfigs::<T>::mutate(entity_id, |maybe| {
                 let config = maybe.get_or_insert_with(ReferralConfig::default);
                 config.direct_reward.rate = rate;
-            });
-
-            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
-            Ok(())
-        }
-
-        /// 设置多级分销配置
-        #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(45_000_000, 4_000))]
-        pub fn set_multi_level_config(
-            origin: OriginFor<T>,
-            entity_id: u64,
-            levels: BoundedVec<MultiLevelTier, T::MaxMultiLevels>,
-            max_total_rate: u16,
-        ) -> DispatchResult {
-            ensure_root(origin)?;
-            for tier in levels.iter() {
-                ensure!(tier.rate <= 10000, Error::<T>::InvalidRate);
-            }
-            ensure!(max_total_rate <= 10000, Error::<T>::InvalidRate);
-
-            ReferralConfigs::<T>::mutate(entity_id, |maybe| {
-                let config = maybe.get_or_insert_with(ReferralConfig::default);
-                config.multi_level = MultiLevelConfig { levels, max_total_rate };
             });
 
             Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
@@ -318,96 +260,6 @@ pub mod pallet {
                     });
                 }
             }
-        }
-
-        pub fn process_multi_level(
-            entity_id: u64,
-            buyer: &T::AccountId,
-            order_amount: BalanceOf<T>,
-            remaining: &mut BalanceOf<T>,
-            config: &MultiLevelConfigOf<T>,
-            outputs: &mut Vec<CommissionOutput<T::AccountId, BalanceOf<T>>>,
-        ) where T::AccountId: Ord {
-            if config.levels.is_empty() { return; }
-
-            // H1 审计修复: 循环检测 — 防止环形推荐链下同一推荐人重复获得佣金
-            let mut visited = BTreeSet::new();
-            visited.insert(buyer.clone());
-
-            let mut current_referrer = T::MemberProvider::get_referrer(entity_id, buyer);
-            let mut total_commission = BalanceOf::<T>::zero();
-            let max_commission = order_amount
-                .saturating_mul(config.max_total_rate.into())
-                / 10000u32.into();
-
-            for (level_idx, tier) in config.levels.iter().enumerate() {
-                if tier.rate == 0 {
-                    if let Some(ref r) = current_referrer {
-                        visited.insert(r.clone());
-                    }
-                    current_referrer = current_referrer.and_then(|r| T::MemberProvider::get_referrer(entity_id, &r));
-                    continue;
-                }
-
-                let Some(ref referrer) = current_referrer else { break };
-
-                // H1: 检测循环
-                if visited.contains(referrer) { break; }
-                visited.insert(referrer.clone());
-
-                if !Self::check_tier_activation(entity_id, referrer, tier) {
-                    current_referrer = T::MemberProvider::get_referrer(entity_id, referrer);
-                    continue;
-                }
-
-                let commission = order_amount.saturating_mul(tier.rate.into()) / 10000u32.into();
-                let actual = commission.min(*remaining);
-                if actual.is_zero() { break; }
-
-                // M2 审计修复: level u8 溢出防护
-                let level = (level_idx + 1).min(255) as u8;
-
-                let new_total = total_commission.saturating_add(actual);
-                if new_total > max_commission {
-                    let can_distribute = max_commission.saturating_sub(total_commission);
-                    if !can_distribute.is_zero() {
-                        *remaining = remaining.saturating_sub(can_distribute);
-                        outputs.push(CommissionOutput {
-                            beneficiary: referrer.clone(),
-                            amount: can_distribute,
-                            commission_type: CommissionType::MultiLevel,
-                            level,
-                        });
-                    }
-                    break;
-                }
-
-                *remaining = remaining.saturating_sub(actual);
-                total_commission = total_commission.saturating_add(actual);
-                outputs.push(CommissionOutput {
-                    beneficiary: referrer.clone(),
-                    amount: actual,
-                    commission_type: CommissionType::MultiLevel,
-                    level,
-                });
-
-                current_referrer = T::MemberProvider::get_referrer(entity_id, referrer);
-            }
-        }
-
-        pub fn check_tier_activation(
-            entity_id: u64,
-            account: &T::AccountId,
-            tier: &MultiLevelTier,
-        ) -> bool {
-            if tier.required_directs == 0 && tier.required_team_size == 0 && tier.required_spent == 0 {
-                return true;
-            }
-            let (direct_referrals, team_size, total_spent) = T::MemberProvider::get_member_stats(entity_id, account);
-            if tier.required_directs > 0 && direct_referrals < tier.required_directs { return false; }
-            if tier.required_team_size > 0 && team_size < tier.required_team_size { return false; }
-            if tier.required_spent > 0 && total_spent < tier.required_spent { return false; }
-            true
         }
 
         pub fn process_fixed_amount(
@@ -519,12 +371,6 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
             );
         }
 
-        if enabled_modes.contains(CommissionModes::MULTI_LEVEL) {
-            pallet::Pallet::<T>::process_multi_level(
-                entity_id, buyer, order_amount, &mut remaining, &config.multi_level, &mut outputs,
-            );
-        }
-
         if enabled_modes.contains(CommissionModes::FIXED_AMOUNT) {
             pallet::Pallet::<T>::process_fixed_amount(
                 entity_id, buyer, &mut remaining, &config.fixed_amount, &mut outputs,
@@ -551,7 +397,7 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
 // Token 多资产 — TokenCommissionPlugin implementation
 // ============================================================================
 
-use pallet_commission_common::MemberProvider as _MemberProviderToken;
+use pallet_commission_common::MemberProvider as _;
 
 /// Token 版泛型计算辅助方法
 ///
@@ -581,82 +427,6 @@ impl<T: pallet::Config> pallet::Pallet<T> {
                     level: 1,
                 });
             }
-        }
-    }
-
-    fn process_multi_level_token<TB>(
-        entity_id: u64,
-        buyer: &T::AccountId,
-        order_amount: TB,
-        remaining: &mut TB,
-        config: &pallet::MultiLevelConfigOf<T>,
-        outputs: &mut alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>,
-    ) where
-        TB: sp_runtime::traits::AtLeast32BitUnsigned + Copy,
-        T::AccountId: Ord,
-    {
-        if config.levels.is_empty() { return; }
-
-        let mut visited = alloc::collections::BTreeSet::new();
-        visited.insert(buyer.clone());
-
-        let mut current_referrer: Option<T::AccountId> = T::MemberProvider::get_referrer(entity_id, buyer);
-        let mut total_commission = TB::zero();
-        let max_commission = order_amount
-            .saturating_mul(TB::from(config.max_total_rate as u32))
-            / TB::from(10000u32);
-
-        for (level_idx, tier) in config.levels.iter().enumerate() {
-            if tier.rate == 0 {
-                if let Some(ref r) = current_referrer {
-                    visited.insert(r.clone());
-                }
-                current_referrer = current_referrer.and_then(|r: T::AccountId|
-                    T::MemberProvider::get_referrer(entity_id, &r)
-                );
-                continue;
-            }
-
-            let Some(ref referrer) = current_referrer else { break };
-            if visited.contains(referrer) { break; }
-            visited.insert(referrer.clone());
-
-            if !Self::check_tier_activation(entity_id, referrer, tier) {
-                current_referrer = T::MemberProvider::get_referrer(entity_id, referrer);
-                continue;
-            }
-
-            let commission = order_amount.saturating_mul(TB::from(tier.rate as u32)) / TB::from(10000u32);
-            let actual = commission.min(*remaining);
-            if actual.is_zero() { break; }
-
-            let level = (level_idx + 1).min(255) as u8;
-
-            let new_total = total_commission.saturating_add(actual);
-            if new_total > max_commission {
-                let can_distribute = max_commission.saturating_sub(total_commission);
-                if !can_distribute.is_zero() {
-                    *remaining = remaining.saturating_sub(can_distribute);
-                    outputs.push(pallet_commission_common::CommissionOutput {
-                        beneficiary: referrer.clone(),
-                        amount: can_distribute,
-                        commission_type: pallet_commission_common::CommissionType::MultiLevel,
-                        level,
-                    });
-                }
-                break;
-            }
-
-            *remaining = remaining.saturating_sub(actual);
-            total_commission = total_commission.saturating_add(actual);
-            outputs.push(pallet_commission_common::CommissionOutput {
-                beneficiary: referrer.clone(),
-                amount: actual,
-                commission_type: pallet_commission_common::CommissionType::MultiLevel,
-                level,
-            });
-
-            current_referrer = T::MemberProvider::get_referrer(entity_id, referrer);
         }
     }
 
@@ -751,13 +521,6 @@ where
             );
         }
 
-        if enabled_modes.contains(CommissionModes::MULTI_LEVEL) {
-            pallet::Pallet::<T>::process_multi_level_token::<TB>(
-                entity_id, buyer, order_amount, &mut remaining,
-                &config.multi_level, &mut outputs,
-            );
-        }
-
         // FIXED_AMOUNT: 跳过（固定金额以 NEX 计价，不适用于 Token）
 
         if enabled_modes.contains(CommissionModes::FIRST_ORDER) && is_first_order {
@@ -789,26 +552,6 @@ impl<T: pallet::Config> pallet_commission_common::ReferralPlanWriter<pallet::Bal
         pallet::ReferralConfigs::<T>::mutate(entity_id, |maybe| {
             let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
             config.direct_reward.rate = rate;
-        });
-        Ok(())
-    }
-
-    fn set_multi_level(entity_id: u64, level_rates: alloc::vec::Vec<u16>, max_total_rate: u16) -> Result<(), sp_runtime::DispatchError> {
-        // H2 审计修复: 防御性校验
-        frame_support::ensure!(max_total_rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
-        for &rate in level_rates.iter() {
-            frame_support::ensure!(rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
-        }
-        // H3 审计修复(前轮): 超过 MaxMultiLevels 时返回错误而非静默清空
-        let bounded: frame_support::BoundedVec<pallet::MultiLevelTier, T::MaxMultiLevels> = level_rates
-            .into_iter()
-            .map(|rate| pallet::MultiLevelTier { rate, required_directs: 0, required_team_size: 0, required_spent: 0 })
-            .collect::<alloc::vec::Vec<_>>()
-            .try_into()
-            .map_err(|_| sp_runtime::DispatchError::Other("TooManyLevels"))?;
-        pallet::ReferralConfigs::<T>::mutate(entity_id, |maybe| {
-            let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
-            config.multi_level = pallet::MultiLevelConfig { levels: bounded, max_total_rate };
         });
         Ok(())
     }

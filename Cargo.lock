@@ -5951,6 +5951,10 @@ dependencies = [
  "frame-system-rpc-runtime-api",
  "frame-try-runtime",
  "hex",
+ "pallet-ads-core",
+ "pallet-ads-entity",
+ "pallet-ads-grouprobot",
+ "pallet-ads-primitives",
  "pallet-arbitration",
  "pallet-assets",
  "pallet-aura",
@@ -5959,6 +5963,7 @@ dependencies = [
  "pallet-commission-common",
  "pallet-commission-core",
  "pallet-commission-level-diff",
+ "pallet-commission-multi-level",
  "pallet-commission-pool-reward",
  "pallet-commission-referral",
  "pallet-commission-single-line",
@@ -6298,11 +6303,74 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-ads-core"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "log",
+ "pallet-ads-primitives",
+ "pallet-balances",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+]
+
+[[package]]
+name = "pallet-ads-entity"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "log",
+ "pallet-ads-core",
+ "pallet-ads-primitives",
+ "pallet-balances",
+ "pallet-entity-common",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+]
+
+[[package]]
+name = "pallet-ads-grouprobot"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "log",
+ "pallet-ads-core",
+ "pallet-ads-primitives",
+ "pallet-balances",
+ "pallet-grouprobot-primitives",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+]
+
+[[package]]
+name = "pallet-ads-primitives"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-runtime",
+]
+
+[[package]]
 name = "pallet-arbitration"
 version = "0.1.0"
 dependencies = [
  "frame-support",
  "frame-system",
+ "pallet-balances",
  "pallet-escrow",
  "pallet-storage-lifecycle",
  "pallet-storage-service",
@@ -6311,6 +6379,7 @@ dependencies = [
  "scale-info",
  "sp-arithmetic",
  "sp-core",
+ "sp-io",
  "sp-runtime",
 ]
 
@@ -6480,7 +6549,6 @@ name = "pallet-commission-common"
 version = "0.1.0"
 dependencies = [
  "frame-support",
- "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
  "sp-runtime",
@@ -6513,6 +6581,21 @@ dependencies = [
  "pallet-balances",
  "pallet-commission-common",
  "pallet-entity-common",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-io",
+ "sp-runtime",
+ "sp-std",
+]
+
+[[package]]
+name = "pallet-commission-multi-level"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "pallet-balances",
+ "pallet-commission-common",
  "parity-scale-codec",
  "scale-info",
  "sp-io",
@@ -6641,12 +6724,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-crypto-common"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-runtime",
+ "sp-std",
+]
+
+[[package]]
 name = "pallet-entity-commission"
 version = "0.2.0"
 dependencies = [
  "pallet-commission-common",
  "pallet-commission-core",
  "pallet-commission-level-diff",
+ "pallet-commission-multi-level",
  "pallet-commission-pool-reward",
  "pallet-commission-referral",
  "pallet-commission-single-line",
@@ -6786,10 +6883,11 @@ dependencies = [
 
 [[package]]
 name = "pallet-entity-review"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "frame-support",
  "frame-system",
+ "log",
  "pallet-balances",
  "pallet-entity-common",
  "parity-scale-codec",
@@ -6805,8 +6903,10 @@ version = "0.1.0"
 dependencies = [
  "frame-support",
  "frame-system",
+ "log",
  "pallet-balances",
  "pallet-entity-common",
+ "pallet-storage-service",
  "parity-scale-codec",
  "scale-info",
  "sp-core",
@@ -6887,11 +6987,13 @@ dependencies = [
  "frame-system",
  "log",
  "media-utils",
+ "pallet-crypto-common",
  "pallet-storage-lifecycle",
  "pallet-storage-service",
  "parity-scale-codec",
  "scale-info",
  "sp-core",
+ "sp-io",
  "sp-runtime",
 ]
 
@@ -6985,6 +7087,7 @@ name = "pallet-grouprobot-primitives"
 version = "0.1.0"
 dependencies = [
  "frame-support",
+ "pallet-ads-primitives",
  "parity-scale-codec",
  "scale-info",
  "sp-runtime",

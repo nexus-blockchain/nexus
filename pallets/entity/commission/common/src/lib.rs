@@ -33,6 +33,24 @@ impl CommissionModes {
     pub const SINGLE_LINE_DOWNLINE: u16 = 0b1_0000_0000;
     pub const POOL_REWARD: u16 = 0b10_0000_0000;
 
+    /// 所有已定义模式位的并集（单一事实来源）
+    pub const ALL_VALID: u16 =
+        Self::DIRECT_REWARD
+        | Self::MULTI_LEVEL
+        | Self::TEAM_PERFORMANCE
+        | Self::LEVEL_DIFF
+        | Self::FIXED_AMOUNT
+        | Self::FIRST_ORDER
+        | Self::REPEAT_PURCHASE
+        | Self::SINGLE_LINE_UPLINE
+        | Self::SINGLE_LINE_DOWNLINE
+        | Self::POOL_REWARD;
+
+    /// 检查是否仅包含已定义的模式位（无未知高位）
+    pub fn is_valid(&self) -> bool {
+        self.0 & !Self::ALL_VALID == 0
+    }
+
     pub fn contains(&self, flag: u16) -> bool {
         self.0 & flag != 0
     }
@@ -125,6 +143,13 @@ impl Default for WithdrawalTierConfig {
     }
 }
 
+impl WithdrawalTierConfig {
+    /// 校验 withdrawal_rate + repurchase_rate == 10000
+    pub fn is_valid(&self) -> bool {
+        self.withdrawal_rate.saturating_add(self.repurchase_rate) == 10000
+    }
+}
+
 /// 提现模式
 ///
 /// 决定佣金提现时复购比率的确定方式。
@@ -152,7 +177,7 @@ impl Default for WithdrawalMode {
 // ============================================================================
 
 /// 单条返佣输出（插件计算结果）
-#[derive(Clone, RuntimeDebug)]
+#[derive(Clone, PartialEq, Eq, RuntimeDebug)]
 pub struct CommissionOutput<AccountId, Balance> {
     pub beneficiary: AccountId,
     pub amount: Balance,
@@ -361,27 +386,6 @@ impl<AccountId> EntityReferrerProvider<AccountId> for () {
 }
 
 // ============================================================================
-// CommissionPlan — 一键初始化佣金方案
-// ============================================================================
-
-/// 佣金方案模板
-#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
-pub enum CommissionPlan {
-    /// 无佣金（关闭所有返佣）
-    None,
-    /// 直推返佣（推荐人获得订单金额的 rate 基点）
-    DirectOnly { rate: u16 },
-    /// 多级分销（levels 级，每级 base_rate 基点，逐级递减 20%）
-    MultiLevel { levels: u8, base_rate: u16 },
-    /// 等级极差（按自定义等级配置比例，单位基点，最多 10 级）
-    LevelDiff {
-        level_rates: BoundedVec<u16, ConstU32<10>>,
-    },
-    /// 自定义（仅启用佣金开关，参数后续手动配置）
-    Custom,
-}
-
-// ============================================================================
 // PlanWriter Traits — 插件写入接口
 // ============================================================================
 
@@ -389,8 +393,6 @@ pub enum CommissionPlan {
 pub trait ReferralPlanWriter<Balance> {
     /// 设置直推奖励比例
     fn set_direct_rate(entity_id: u64, rate: u16) -> Result<(), DispatchError>;
-    /// 设置多级分销（每级比例列表 + 上限比例）
-    fn set_multi_level(entity_id: u64, level_rates: Vec<u16>, max_total_rate: u16) -> Result<(), DispatchError>;
     /// 设置固定金额奖励
     fn set_fixed_amount(entity_id: u64, amount: Balance) -> Result<(), DispatchError>;
     /// 设置首单奖励
@@ -404,11 +406,24 @@ pub trait ReferralPlanWriter<Balance> {
 /// 空 ReferralPlanWriter 实现
 impl<Balance> ReferralPlanWriter<Balance> for () {
     fn set_direct_rate(_: u64, _: u16) -> Result<(), DispatchError> { Ok(()) }
-    fn set_multi_level(_: u64, _: Vec<u16>, _: u16) -> Result<(), DispatchError> { Ok(()) }
     fn set_fixed_amount(_: u64, _: Balance) -> Result<(), DispatchError> { Ok(()) }
     fn set_first_order(_: u64, _: Balance, _: u16, _: bool) -> Result<(), DispatchError> { Ok(()) }
     fn set_repeat_purchase(_: u64, _: u16, _: u32) -> Result<(), DispatchError> { Ok(()) }
     fn clear_config(_: u64) -> Result<(), DispatchError> { Ok(()) }
+}
+
+/// 多级分销插件写入接口（由 commission-multi-level 实现）
+pub trait MultiLevelPlanWriter {
+    /// 设置多级分销（每级比例列表 + 上限比例）
+    fn set_multi_level(entity_id: u64, level_rates: Vec<u16>, max_total_rate: u16) -> Result<(), DispatchError>;
+    /// 清除多级分销配置
+    fn clear_multi_level_config(entity_id: u64) -> Result<(), DispatchError>;
+}
+
+/// 空 MultiLevelPlanWriter 实现
+impl MultiLevelPlanWriter for () {
+    fn set_multi_level(_: u64, _: Vec<u16>, _: u16) -> Result<(), DispatchError> { Ok(()) }
+    fn clear_multi_level_config(_: u64) -> Result<(), DispatchError> { Ok(()) }
 }
 
 /// 等级极差插件写入接口（由 commission-level-diff 实现）
@@ -603,6 +618,26 @@ pub trait TokenCommissionProvider<AccountId, TokenBalance> {
 
     /// 获取 Entity 级 Token 平台费率（bps，0 = 不收费）
     fn token_platform_fee_rate(entity_id: u64) -> u16;
+}
+
+// ============================================================================
+// ParticipationGuard — Entity 参与权守卫（KYC / 合规检查）
+// ============================================================================
+
+/// Entity 参与权守卫（KYC / 合规检查接口）
+///
+/// 在 `withdraw_commission`、`claim_pool_reward`、`do_consume_shopping_balance` 中调用，
+/// 确保 target 账户满足 Entity 的参与要求（如 mandatory KYC）。
+/// 默认空实现允许所有操作（适用于未配置 KYC 的 Entity）。
+pub trait ParticipationGuard<AccountId> {
+    fn can_participate(entity_id: u64, account: &AccountId) -> bool;
+}
+
+/// 默认空实现（无 KYC 系统时使用，所有账户均允许）
+impl<AccountId> ParticipationGuard<AccountId> for () {
+    fn can_participate(_entity_id: u64, _account: &AccountId) -> bool {
+        true
+    }
 }
 
 /// 空 TokenCommissionProvider 实现

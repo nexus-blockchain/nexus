@@ -9,6 +9,7 @@ use pallet_grouprobot_primitives::*;
 #[test]
 fn submit_action_log_works() {
 	new_test_ext().execute_with(|| {
+		let sig = test_sign(&community_hash(1), &ActionType::Ban, &[1u8; 32], 42, &[2u8; 32]);
 		assert_ok!(GroupRobotCommunity::submit_action_log(
 			RuntimeOrigin::signed(OWNER),
 			community_hash(1),
@@ -16,7 +17,7 @@ fn submit_action_log_works() {
 			[1u8; 32],
 			42,
 			[2u8; 32],
-			[3u8; 64],
+			sig,
 		));
 		assert_eq!(ActionLogs::<Test>::get(community_hash(1)).len(), 1);
 		assert_eq!(LogCount::<Test>::get(), 1);
@@ -33,6 +34,7 @@ fn submit_action_log_fails_full() {
 	new_test_ext().execute_with(|| {
 		// MaxLogsPerCommunity = 10
 		for i in 0..10u64 {
+			let sig = test_sign(&community_hash(1), &ActionType::Kick, &[1u8; 32], i, &[2u8; 32]);
 			assert_ok!(GroupRobotCommunity::submit_action_log(
 				RuntimeOrigin::signed(OWNER),
 				community_hash(1),
@@ -40,9 +42,10 @@ fn submit_action_log_fails_full() {
 				[1u8; 32],
 				i,
 				[2u8; 32],
-				[3u8; 64],
+				sig,
 			));
 		}
+		let sig = test_sign(&community_hash(1), &ActionType::Kick, &[1u8; 32], 99, &[2u8; 32]);
 		assert_noop!(
 			GroupRobotCommunity::submit_action_log(
 				RuntimeOrigin::signed(OWNER),
@@ -51,7 +54,7 @@ fn submit_action_log_fails_full() {
 				[1u8; 32],
 				99,
 				[2u8; 32],
-				[3u8; 64],
+				sig,
 			),
 			Error::<Test>::LogsFull
 		);
@@ -159,9 +162,11 @@ fn update_community_config_cas_conflict() {
 #[test]
 fn batch_submit_logs_works() {
 	new_test_ext().execute_with(|| {
+		let sig1 = test_sign(&community_hash(1), &ActionType::Ban, &[1u8; 32], 1, &[2u8; 32]);
+		let sig2 = test_sign(&community_hash(1), &ActionType::Kick, &[4u8; 32], 2, &[5u8; 32]);
 		let logs = vec![
-			(ActionType::Ban, [1u8; 32], 1u64, [2u8; 32], [3u8; 64]),
-			(ActionType::Kick, [4u8; 32], 2u64, [5u8; 32], [6u8; 64]),
+			(ActionType::Ban, [1u8; 32], 1u64, [2u8; 32], sig1),
+			(ActionType::Kick, [4u8; 32], 2u64, [5u8; 32], sig2),
 		];
 		assert_ok!(GroupRobotCommunity::batch_submit_logs(
 			RuntimeOrigin::signed(OWNER),
@@ -196,20 +201,22 @@ fn clear_expired_logs_works() {
 	new_test_ext().execute_with(|| {
 		// Basic tier: log_retention_days=30, min_retention_blocks=432000
 		// Submit at block 1
+		let sig1 = test_sign(&community_hash(1), &ActionType::Ban, &[1u8; 32], 1, &[2u8; 32]);
 		assert_ok!(GroupRobotCommunity::submit_action_log(
 			RuntimeOrigin::signed(OWNER),
 			community_hash(1),
-			ActionType::Ban, [1u8; 32], 1, [2u8; 32], [3u8; 64],
+			ActionType::Ban, [1u8; 32], 1, [2u8; 32], sig1,
 		));
 
 		// Advance well past retention period
 		System::set_block_number(500_000);
 
 		// Submit another at block 500000
+		let sig2 = test_sign(&community_hash(1), &ActionType::Kick, &[1u8; 32], 2, &[2u8; 32]);
 		assert_ok!(GroupRobotCommunity::submit_action_log(
 			RuntimeOrigin::signed(OWNER),
 			community_hash(1),
-			ActionType::Kick, [1u8; 32], 2, [2u8; 32], [3u8; 64],
+			ActionType::Kick, [1u8; 32], 2, [2u8; 32], sig2,
 		));
 
 		// Clear logs older than 432000 blocks (meets Basic tier retention)
@@ -322,10 +329,11 @@ fn update_active_members_works() {
 #[test]
 fn update_active_members_fails_no_config() {
 	new_test_ext().execute_with(|| {
+		// community_hash(1) has valid bot_owner but no config created yet
 		assert_noop!(
 			GroupRobotCommunity::update_active_members(
 				RuntimeOrigin::signed(OWNER),
-				community_hash(99),
+				community_hash(1),
 				100,
 			),
 			Error::<Test>::CommunityNotFound
@@ -468,17 +476,17 @@ fn cooldown_enforced() {
 }
 
 #[test]
-fn cooldown_different_operator_independent() {
+fn cooldown_different_target_same_block() {
 	new_test_ext().execute_with(|| {
+		// Same operator, two different targets in same block → both succeed (no cooldown)
 		assert_ok!(GroupRobotCommunity::award_reputation(
 			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 5,
 		));
-
-		// Different operator, same target → no cooldown
 		assert_ok!(GroupRobotCommunity::award_reputation(
-			RuntimeOrigin::signed(OTHER), community_hash(1), user_hash(1), 5,
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(2), 5,
 		));
-		assert_eq!(MemberReputation::<Test>::get(community_hash(1), user_hash(1)).score, 10);
+		assert_eq!(MemberReputation::<Test>::get(community_hash(1), user_hash(1)).score, 5);
+		assert_eq!(MemberReputation::<Test>::get(community_hash(1), user_hash(2)).score, 5);
 	});
 }
 
@@ -530,6 +538,7 @@ fn delta_zero_rejected() {
 #[test]
 fn global_reputation_aggregates_communities() {
 	new_test_ext().execute_with(|| {
+		// community_hash(1) and community_hash(2) both have OWNER as bot_owner
 		assert_ok!(GroupRobotCommunity::award_reputation(
 			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 10,
 		));
@@ -563,7 +572,7 @@ fn reputation_provider_trait() {
 #[test]
 fn reset_reputation_adjusts_global() {
 	new_test_ext().execute_with(|| {
-		// Award in two communities
+		// Award in two communities (both have OWNER as bot_owner)
 		assert_ok!(GroupRobotCommunity::award_reputation(
 			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 10,
 		));
@@ -591,12 +600,13 @@ fn reset_reputation_adjusts_global() {
 fn submit_action_log_fails_free_tier() {
 	new_test_ext().execute_with(|| {
 		// community_hash(2) → Free tier in MockSubscription
+		let sig = test_sign(&community_hash(2), &ActionType::Ban, &[1u8; 32], 1, &[2u8; 32]);
 		assert_noop!(
 			GroupRobotCommunity::submit_action_log(
-				RuntimeOrigin::signed(OTHER),
+				RuntimeOrigin::signed(OWNER),
 				community_hash(2),
 				ActionType::Ban,
-				[1u8; 32], 1, [2u8; 32], [3u8; 64],
+				[1u8; 32], 1, [2u8; 32], sig,
 			),
 			Error::<Test>::FreeTierNotAllowed
 		);
@@ -606,11 +616,12 @@ fn submit_action_log_fails_free_tier() {
 #[test]
 fn batch_submit_logs_fails_free_tier() {
 	new_test_ext().execute_with(|| {
+		let sig = test_sign(&community_hash(2), &ActionType::Ban, &[1u8; 32], 1, &[2u8; 32]);
 		assert_noop!(
 			GroupRobotCommunity::batch_submit_logs(
-				RuntimeOrigin::signed(OTHER),
+				RuntimeOrigin::signed(OWNER),
 				community_hash(2),
-				vec![(ActionType::Ban, [1u8; 32], 1, [2u8; 32], [3u8; 64])],
+				vec![(ActionType::Ban, [1u8; 32], 1, [2u8; 32], sig)],
 			),
 			Error::<Test>::FreeTierNotAllowed
 		);
@@ -622,11 +633,12 @@ fn clear_expired_logs_enforces_retention_period() {
 	new_test_ext().execute_with(|| {
 		// community_hash(1) → Basic tier (log_retention_days=30, min blocks=30*14400=432000)
 		// Submit a log first
+		let sig = test_sign(&community_hash(1), &ActionType::Ban, &[1u8; 32], 1, &[2u8; 32]);
 		assert_ok!(GroupRobotCommunity::submit_action_log(
 			RuntimeOrigin::signed(OWNER),
 			community_hash(1),
 			ActionType::Ban,
-			[1u8; 32], 1, [2u8; 32], [3u8; 64],
+			[1u8; 32], 1, [2u8; 32], sig,
 		));
 
 		// Try to clear with max_age_blocks < 432000 → RetentionPeriodNotExpired
@@ -637,6 +649,94 @@ fn clear_expired_logs_enforces_retention_period() {
 				100, // too small
 			),
 			Error::<Test>::RetentionPeriodNotExpired
+		);
+	});
+}
+
+// ============================================================================
+// H1-H3: Authorization checks (ensure_bot_owner)
+// ============================================================================
+
+#[test]
+fn h1_set_node_requirement_rejects_non_owner() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotCommunity::set_node_requirement(
+				RuntimeOrigin::signed(OTHER),
+				community_hash(1),
+				NodeRequirement::Any,
+			),
+			Error::<Test>::NotBotOwner
+		);
+	});
+}
+
+#[test]
+fn h2_update_community_config_rejects_non_owner() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotCommunity::update_community_config(
+				RuntimeOrigin::signed(OTHER),
+				community_hash(1),
+				0,
+				true, 10, 3, WarnAction::Kick,
+				false, false, *b"en",
+			),
+			Error::<Test>::NotBotOwner
+		);
+	});
+}
+
+#[test]
+fn h3_update_active_members_rejects_non_owner() {
+	new_test_ext().execute_with(|| {
+		// First create config so we can test auth, not CommunityNotFound
+		assert_ok!(GroupRobotCommunity::update_community_config(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1),
+			0,
+			true, 10, 3, WarnAction::Kick,
+			false, false, *b"en",
+		));
+		assert_noop!(
+			GroupRobotCommunity::update_active_members(
+				RuntimeOrigin::signed(OTHER),
+				community_hash(1),
+				100,
+			),
+			Error::<Test>::NotBotOwner
+		);
+	});
+}
+
+#[test]
+fn h4_submit_action_log_rejects_invalid_signature() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotCommunity::submit_action_log(
+				RuntimeOrigin::signed(OWNER),
+				community_hash(1),
+				ActionType::Ban,
+				[1u8; 32], 42, [2u8; 32],
+				[0u8; 64], // invalid signature
+			),
+			Error::<Test>::InvalidSignature
+		);
+	});
+}
+
+#[test]
+fn h5_reputation_rejects_non_bot_owner() {
+	new_test_ext().execute_with(|| {
+		// community_hash(3) has no bot_owner → NotBotOwner
+		assert_noop!(
+			GroupRobotCommunity::award_reputation(
+				RuntimeOrigin::signed(OWNER),
+				community_hash(3),
+				user_hash(1),
+				5,
+			),
+			Error::<Test>::NotBotOwner
 		);
 	});
 }

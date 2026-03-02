@@ -1826,6 +1826,7 @@ pub mod pallet {
                 SubjectType::Swap => 7,
                 SubjectType::Arbitration => 8,
                 SubjectType::UserProfile => 9,
+                SubjectType::Product => 10,
                 SubjectType::General => 98,
                 SubjectType::Custom(_) => 99,
             }
@@ -2436,6 +2437,7 @@ pub mod pallet {
                 SubjectType::Swap => 7,               // Swap兑换
                 SubjectType::Arbitration => 8,        // 仲裁证据
                 SubjectType::UserProfile => 9,        // 用户档案
+                SubjectType::Product => 10,            // 商品元数据
                 SubjectType::General => 98,           // 通用存储
                 SubjectType::Custom(_) => 99,         // 自定义域统一使用99
             };

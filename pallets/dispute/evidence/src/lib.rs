@@ -7,11 +7,17 @@ extern crate alloc;
 pub use pallet::*;
 use sp_core::Get;
 
+#[cfg(test)]
+mod mock;
+#[cfg(test)]
+mod tests;
+
 // 函数级中文注释：导入log用于记录自动pin失败的警告
 extern crate log;
 // 函数级中文注释：导入pallet_memo_ipfs用于IpfsPinner trait
 extern crate pallet_storage_service;
 use pallet_storage_service::IpfsPinner;
+extern crate pallet_crypto_common;
 
 // 函数级中文注释：权重模块导入，提供 WeightInfo 接口用于基于输入规模计算交易权重。
 #[cfg(feature = "runtime-benchmarks")]
@@ -365,6 +371,19 @@ pub mod pallet {
     pub type KeyRotationCounter<T: Config> =
         StorageMap<_, Blake2_128Concat, u64, u32, ValueQuery>;
 
+    /// 访问请求存储：(content_id, requester) → 请求区块号
+    /// 用户请求访问加密内容后，创建者可通过 grant_access 批准
+    #[pallet::storage]
+    pub type AccessRequests<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        u64, // content_id
+        Blake2_128Concat,
+        T::AccountId, // requester
+        BlockNumberFor<T>, // requested_at
+        OptionQuery,
+    >;
+
     // ==================== 存储膨胀防护：归档机制 ====================
 
     /// 归档证据存储（精简摘要，~50字节/条）
@@ -585,6 +604,20 @@ pub mod pallet {
             evidence_id: u64,
             manifest_cid: BoundedVec<u8, T::MaxContentCidLen>,
         },
+
+        // === 解密流程事件 ===
+
+        /// 用户请求访问加密内容（等待创建者批准）
+        AccessRequested {
+            content_id: u64,
+            requester: T::AccountId,
+        },
+
+        /// 访问策略已更新
+        AccessPolicyUpdated {
+            content_id: u64,
+            updated_by: T::AccountId,
+        },
     }
 
     #[pallet::error]
@@ -644,6 +677,15 @@ pub mod pallet {
         EditWindowExpired,
         /// 待处理队列已满
         PendingQueueFull,
+
+        // === 解密流程错误 ===
+
+        /// 用户已提交过访问请求
+        AlreadyRequested,
+        /// 用户已被授权访问（无需重复请求）
+        AlreadyAuthorized,
+        /// 不能向自己发送访问请求
+        SelfAccessRequest,
     }
 
     #[allow(deprecated)]
@@ -1036,7 +1078,13 @@ pub mod pallet {
 
             let now = <frame_system::Pallet<T>>::block_number();
 
-            let content = private_content::PrivateContent {
+            let content = pallet_crypto_common::PrivateContent::<
+                T::AccountId,
+                BlockNumberFor<T>,
+                T::MaxCidLen,
+                T::MaxAuthorizedUsers,
+                T::MaxKeyLen,
+            > {
                 id: content_id,
                 ns,
                 subject_id,
@@ -1112,6 +1160,9 @@ pub mod pallet {
                 }
 
                 content.updated_at = <frame_system::Pallet<T>>::block_number();
+
+                // 自动清除该用户的待处理访问请求（如果有）
+                AccessRequests::<T>::remove(content_id, &user);
 
                 Self::deposit_event(Event::AccessGranted {
                     content_id,
@@ -1210,7 +1261,10 @@ pub mod pallet {
                     *c
                 });
 
-                let rotation_record = private_content::KeyRotationRecord {
+                let rotation_record = pallet_crypto_common::KeyRotationRecord::<
+                    T::AccountId,
+                    BlockNumberFor<T>,
+                > {
                     content_id,
                     rotation_round,
                     rotated_at: content.updated_at,
@@ -1440,6 +1494,89 @@ pub mod pallet {
             Ok(())
         }
 
+        // === 解密流程 Extrinsics ===
+
+        /// 请求访问加密内容
+        ///
+        /// 用户在已注册公钥的前提下，向创建者发送访问请求。
+        /// 创建者通过 `grant_access` 批准后，用户即可获取解密密钥包。
+        #[pallet::call_index(13)]
+        #[pallet::weight(T::WeightInfo::request_access())]
+        pub fn request_access(
+            origin: OriginFor<T>,
+            content_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            // 验证用户已注册公钥
+            ensure!(
+                UserPublicKeys::<T>::contains_key(&who),
+                Error::<T>::PublicKeyNotRegistered
+            );
+
+            // 验证内容存在
+            let content = PrivateContents::<T>::get(content_id)
+                .ok_or(Error::<T>::PrivateContentNotFound)?;
+
+            // 不能向自己请求访问
+            ensure!(content.creator != who, Error::<T>::SelfAccessRequest);
+
+            // 检查是否已被授权
+            ensure!(
+                !Self::can_access_private_content(content_id, &who),
+                Error::<T>::AlreadyAuthorized
+            );
+
+            // 检查是否已请求过
+            ensure!(
+                !AccessRequests::<T>::contains_key(content_id, &who),
+                Error::<T>::AlreadyRequested
+            );
+
+            let now = <frame_system::Pallet<T>>::block_number();
+            AccessRequests::<T>::insert(content_id, &who, now);
+
+            Self::deposit_event(Event::AccessRequested {
+                content_id,
+                requester: who,
+            });
+
+            Ok(())
+        }
+
+        /// 更新加密内容的访问策略
+        ///
+        /// 仅创建者可更改访问策略。注意：更改策略不会自动添加/移除密钥包，
+        /// 创建者需配合 `grant_access` / `revoke_access` / `rotate_content_keys` 使用。
+        #[pallet::call_index(14)]
+        #[pallet::weight(T::WeightInfo::update_access_policy())]
+        pub fn update_access_policy(
+            origin: OriginFor<T>,
+            content_id: u64,
+            new_policy: private_content::AccessPolicy<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            PrivateContents::<T>::try_mutate(content_id, |maybe_content| -> DispatchResult {
+                let content = maybe_content
+                    .as_mut()
+                    .ok_or(Error::<T>::PrivateContentNotFound)?;
+
+                // 权限检查：仅创建者可更新策略
+                ensure!(content.creator == who, Error::<T>::AccessDenied);
+
+                content.access_policy = new_policy;
+                content.updated_at = <frame_system::Pallet<T>>::block_number();
+
+                Self::deposit_event(Event::AccessPolicyUpdated {
+                    content_id,
+                    updated_by: who,
+                });
+
+                Ok(())
+            })
+        }
+
         // 只读接口应放置在 inherent impl 中，而非 extrinsics 块。
     }
 
@@ -1534,6 +1671,18 @@ pub mod pallet {
         fn get_decryption_key(content_id: u64, user: &AccountId) -> Option<Vec<u8>>;
     }
 
+    /// PrivateContentProvider 实现：供其他 pallet 低耦合查询加密内容权限和密钥
+    impl<T: Config> PrivateContentProvider<T::AccountId> for Pallet<T> {
+        fn can_access(content_id: u64, user: &T::AccountId) -> bool {
+            Self::can_access_private_content(content_id, user)
+        }
+
+        fn get_decryption_key(content_id: u64, user: &T::AccountId) -> Option<Vec<u8>> {
+            Self::get_encrypted_key_for_user(content_id, user)
+                .map(|k| k.into_inner())
+        }
+    }
+
     impl<T: Config> Pallet<T> {
         // ===== 私密内容查询方法 =====
 
@@ -1545,21 +1694,26 @@ pub mod pallet {
                     return true;
                 }
 
+                // 检查是否持有加密密钥包（由创建者通过 grant_access 显式授予）
+                if content.encrypted_keys.iter().any(|(u, _)| u == user) {
+                    return true;
+                }
+
                 // 检查访问策略
                 match &content.access_policy {
-                    private_content::AccessPolicy::OwnerOnly => false,
-                    private_content::AccessPolicy::SharedWith(users) => {
+                    pallet_crypto_common::AccessPolicy::OwnerOnly => false,
+                    pallet_crypto_common::AccessPolicy::SharedWith(users) => {
                         users.iter().any(|u| u == user)
                     }
-                    private_content::AccessPolicy::TimeboxedAccess { users, expires_at } => {
+                    pallet_crypto_common::AccessPolicy::TimeboxedAccess { users, expires_at } => {
                         let now = <frame_system::Pallet<T>>::block_number();
                         now <= *expires_at && users.iter().any(|u| u == user)
                     }
-                    private_content::AccessPolicy::GovernanceControlled => {
+                    pallet_crypto_common::AccessPolicy::GovernanceControlled => {
                         // TODO: 实现治理权限检查
                         false
                     }
-                    private_content::AccessPolicy::RoleBased(_role) => {
+                    pallet_crypto_common::AccessPolicy::RoleBased(_role) => {
                         // TODO: 实现基于角色的权限检查
                         false
                     }
@@ -1605,6 +1759,58 @@ pub mod pallet {
             PrivateContentBySubject::<T>::iter_prefix((ns, subject_id))
                 .map(|(content_id, _)| content_id)
                 .collect()
+        }
+
+        /// 获取解密所需的全部信息（供客户端调用）
+        ///
+        /// 返回：(cid, content_hash, encryption_method, encrypted_key)
+        /// 如果用户无权访问，返回 None
+        pub fn get_decryption_info(
+            content_id: u64,
+            user: &T::AccountId,
+        ) -> Option<(Vec<u8>, sp_core::H256, u8, Vec<u8>)> {
+            let content = PrivateContents::<T>::get(content_id)?;
+            if !Self::can_access_private_content(content_id, user) {
+                return None;
+            }
+            let encrypted_key = content
+                .encrypted_keys
+                .iter()
+                .find(|(u, _)| u == user)
+                .map(|(_, k)| k.clone().into_inner())?;
+            Some((
+                content.cid.into_inner(),
+                content.content_hash,
+                content.encryption_method,
+                encrypted_key,
+            ))
+        }
+
+        /// 获取加密内容的公开元数据（不含密钥包）
+        ///
+        /// 任何人可查询：id, ns, subject_id, cid, encryption_method, creator, access_policy 类型
+        pub fn get_content_metadata(
+            content_id: u64,
+        ) -> Option<(u64, [u8; 8], u64, Vec<u8>, u8, T::AccountId, u8)> {
+            let c = PrivateContents::<T>::get(content_id)?;
+            let policy_tag: u8 = match &c.access_policy {
+                pallet_crypto_common::AccessPolicy::OwnerOnly => 0,
+                pallet_crypto_common::AccessPolicy::SharedWith(_) => 1,
+                pallet_crypto_common::AccessPolicy::TimeboxedAccess { .. } => 2,
+                pallet_crypto_common::AccessPolicy::GovernanceControlled => 3,
+                pallet_crypto_common::AccessPolicy::RoleBased(_) => 4,
+            };
+            Some((c.id, c.ns, c.subject_id, c.cid.into_inner(), c.encryption_method, c.creator, policy_tag))
+        }
+
+        /// 列出某加密内容的所有待处理访问请求
+        pub fn list_access_requests(content_id: u64) -> Vec<(T::AccountId, BlockNumberFor<T>)> {
+            AccessRequests::<T>::iter_prefix(content_id).collect()
+        }
+
+        /// 获取用户的注册公钥
+        pub fn get_user_public_key(user: &T::AccountId) -> Option<UserPublicKey<T>> {
+            UserPublicKeys::<T>::get(user)
         }
 
         /// 函数级中文注释：限频检查并计数。

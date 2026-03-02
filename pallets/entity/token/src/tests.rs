@@ -903,3 +903,133 @@ fn whitelist_input_length_limited() {
         );
     });
 }
+
+// ==================== Audit v2 regression tests ====================
+
+#[test]
+fn h1_distribute_dividend_rejects_when_token_disabled() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::change_token_type(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, TokenType::Equity,
+        ));
+        assert_ok!(EntityToken::configure_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, true, 5,
+        ));
+        // 禁用代币
+        assert_ok!(EntityToken::update_token_config(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, None, None,
+            None, None, None, Some(false),
+        ));
+        // 分红应失败：代币已禁用
+        assert_noop!(
+            EntityToken::distribute_dividend(
+                RuntimeOrigin::signed(OWNER), SHOP_ID, 100, vec![(USER_A, 100)],
+            ),
+            Error::<Test>::TokenNotEnabled
+        );
+    });
+}
+
+#[test]
+fn h2_change_token_type_rejects_same_type() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        // 默认类型是 Points，尝试再次设置为 Points
+        assert_noop!(
+            EntityToken::change_token_type(
+                RuntimeOrigin::signed(OWNER), SHOP_ID, TokenType::Points,
+            ),
+            Error::<Test>::SameTokenType
+        );
+        // 变更为 Equity 应成功
+        assert_ok!(EntityToken::change_token_type(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, TokenType::Equity,
+        ));
+        // 再次设置为 Equity 应失败
+        assert_noop!(
+            EntityToken::change_token_type(
+                RuntimeOrigin::signed(OWNER), SHOP_ID, TokenType::Equity,
+            ),
+            Error::<Test>::SameTokenType
+        );
+    });
+}
+
+#[test]
+fn m1_transfer_tokens_rejects_zero_amount() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::update_token_config(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, None, None,
+            None, None, Some(true), None,
+        ));
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 1000,
+        ));
+        assert_noop!(
+            EntityToken::transfer_tokens(
+                RuntimeOrigin::signed(USER_A), SHOP_ID, USER_B, 0,
+            ),
+            Error::<Test>::ZeroAmount
+        );
+    });
+}
+
+#[test]
+fn m2_distribute_dividend_rejects_zero_total() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::change_token_type(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, TokenType::Equity,
+        ));
+        assert_ok!(EntityToken::configure_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, true, 5,
+        ));
+        // 零总额分红应失败
+        assert_noop!(
+            EntityToken::distribute_dividend(
+                RuntimeOrigin::signed(OWNER), SHOP_ID, 0, vec![],
+            ),
+            Error::<Test>::ZeroDividendAmount
+        );
+    });
+}
+
+#[test]
+fn m3_mint_tokens_rejects_inactive_entity() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        // 停用实体
+        deactivate_entity(SHOP_ID);
+        assert_noop!(
+            EntityToken::mint_tokens(
+                RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 100,
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn m4_unlock_tokens_cleans_empty_storage() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 1000,
+        ));
+        assert_ok!(EntityToken::lock_tokens(
+            RuntimeOrigin::signed(USER_A), SHOP_ID, 500, 5,
+        ));
+        // 推进到解锁时间后
+        run_to_block(7);
+        assert_ok!(EntityToken::unlock_tokens(
+            RuntimeOrigin::signed(USER_A), SHOP_ID,
+        ));
+        // 存储应已清理（不再包含空条目）
+        let locks = EntityToken::locked_tokens(SHOP_ID, &USER_A);
+        assert!(locks.is_empty());
+        // 验证 LockedTokens 存储项已被完全移除
+        assert!(!crate::LockedTokens::<Test>::contains_key(SHOP_ID, &USER_A));
+    });
+}

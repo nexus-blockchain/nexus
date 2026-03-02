@@ -46,6 +46,8 @@ pub struct CeremonyRecord<T: Config> {
 	pub is_re_ceremony: bool,
 	/// 替代的旧仪式哈希 (Re-ceremony 时填写)
 	pub supersedes: Option<[u8; 32]>,
+	/// C1-fix: 存储 bot_id_hash 以供 on_initialize 使用 (避免哈希函数不一致)
+	pub bot_id_hash: [u8; 32],
 }
 
 /// Ceremony Enclave 信息
@@ -187,6 +189,12 @@ pub mod pallet {
 		BotNotFound,
 		/// Bot 公钥不匹配
 		BotPublicKeyMismatch,
+		/// H1-fix: 参与者数量不足以恢复 secret (participant_count < k)
+		InsufficientParticipants,
+		/// H2-fix: 仪式不是活跃状态 (已撤销/已过期/已替代)
+		CeremonyNotActive,
+		/// M1-fix: 描述过长 (超过 128 bytes)
+		DescriptionTooLong,
 	}
 
 	// ========================================================================
@@ -218,8 +226,8 @@ pub mod pallet {
 						expired.push((ceremony_hash, bot_pk));
 					} else {
 						// G5: CeremonyAtRisk 检测 — peer 数量 <= k 时触发风险事件
-						let bot_id_hash = sp_core::hashing::blake2_256(&bot_pk);
-						let peer_count = T::BotRegistry::peer_count(&bot_id_hash);
+						// C1-fix: 使用存储的 bot_id_hash (原 blake2_256 与链下 SHA256 不一致)
+						let peer_count = T::BotRegistry::peer_count(&record.bot_id_hash);
 						reads += 1;
 						if peer_count > 0 && peer_count <= record.k as u32 {
 							at_risk.push((ceremony_hash, record.k));
@@ -293,6 +301,8 @@ pub mod pallet {
 			ensure!(!Ceremonies::<T>::contains_key(&ceremony_hash), Error::<T>::CeremonyAlreadyExists);
 			ensure!(k > 0 && k <= n && n <= 254, Error::<T>::InvalidShamirParams);
 			ensure!(!participant_enclaves.is_empty(), Error::<T>::EmptyParticipants);
+			// H1-fix: 参与者数量必须 >= k (否则无法恢复 secret)
+			ensure!(participant_enclaves.len() >= k as usize, Error::<T>::InsufficientParticipants);
 
 			// 验证 ceremony enclave 白名单
 			ensure!(
@@ -321,6 +331,8 @@ pub mod pallet {
 				expires_at,
 				is_re_ceremony: false,
 				supersedes: None,
+				// C1-fix: 存储 bot_id_hash 以供 on_initialize peer_count 查询
+				bot_id_hash,
 			};
 
 			// G2: 如果已有活跃仪式，标记为 Superseded，记录 Re-ceremony 关系
@@ -402,8 +414,9 @@ pub mod pallet {
 			);
 
 			let now = frame_system::Pallet::<T>::block_number();
+			// M1-fix: 描述过长时返回错误而非静默截断为空
 			let bounded_desc: BoundedVec<u8, ConstU32<128>> =
-				description.try_into().unwrap_or_default();
+				description.try_into().map_err(|_| Error::<T>::DescriptionTooLong)?;
 
 			let now_u64: u64 = now.unique_saturated_into();
 			let info = CeremonyEnclaveInfo {
@@ -444,6 +457,11 @@ pub mod pallet {
 			ensure_root(origin)?;
 
 			let record = Ceremonies::<T>::get(&ceremony_hash).ok_or(Error::<T>::CeremonyNotFound)?;
+			// H2-fix: 仅活跃仪式可被强制 re-ceremony
+			ensure!(
+				matches!(record.status, CeremonyStatus::Active),
+				Error::<T>::CeremonyNotActive
+			);
 
 			let now = frame_system::Pallet::<T>::block_number();
 			let now_u64: u64 = now.unique_saturated_into();

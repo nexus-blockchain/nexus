@@ -1,5 +1,5 @@
 use crate::{mock::*, pallet::*};
-use frame_support::{assert_noop, assert_ok};
+use frame_support::{assert_noop, assert_ok, traits::Currency};
 use pallet_entity_common::{EntityStatus, EntityType, GovernanceMode, EntityProvider};
 
 // ==================== Helper ====================
@@ -1637,5 +1637,165 @@ fn h1_empty_cid_becomes_none() {
         // 空 CID 应被转为 None，不浪费存储
         assert!(entity.logo_cid.is_none());
         assert!(entity.description_cid.is_none());
+    });
+}
+
+// ==================== Round 5 审计回归测试 ====================
+
+#[test]
+fn h1_create_entity_rejects_at_max_entity_id() {
+    new_test_ext().execute_with(|| {
+        // 将 NextEntityId 设为 u64::MAX，模拟溢出边界
+        NextEntityId::<Test>::put(u64::MAX);
+        assert_noop!(
+            EntityRegistry::create_entity(
+                RuntimeOrigin::signed(ALICE),
+                b"Overflow".to_vec(),
+                None,
+                None,
+                None,
+            ),
+            Error::<Test>::ArithmeticOverflow
+        );
+    });
+}
+
+#[test]
+fn h2_approve_entity_clears_governance_suspended() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+
+        // 治理暂停 → 申请关闭 → 审批关闭 → 重开 → 审批通过
+        assert_ok!(EntityRegistry::suspend_entity(RuntimeOrigin::root(), id));
+        assert!(GovernanceSuspended::<Test>::get(id));
+
+        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
+        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        // L2: approve_close_entity 也应清理
+        assert!(!GovernanceSuspended::<Test>::get(id));
+
+        assert_ok!(EntityRegistry::reopen_entity(RuntimeOrigin::signed(ALICE), id));
+        // reopen 不清理（Pending 状态，治理标记无语义），但 approve_close 已清理
+        assert!(!GovernanceSuspended::<Test>::get(id));
+
+        assert_ok!(EntityRegistry::approve_entity(RuntimeOrigin::root(), id));
+        // H2: approve_entity 也主动清理，确保新生命周期干净
+        assert!(!GovernanceSuspended::<Test>::get(id));
+
+        let entity = Entities::<Test>::get(id).unwrap();
+        assert_eq!(entity.status, EntityStatus::Active);
+    });
+}
+
+#[test]
+fn h2_stale_governance_flag_no_longer_blocks_auto_resume() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+
+        // 模拟前世治理暂停 → 关闭 → 重开 → 审批
+        assert_ok!(EntityRegistry::suspend_entity(RuntimeOrigin::root(), id));
+        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
+        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        assert_ok!(EntityRegistry::reopen_entity(RuntimeOrigin::signed(ALICE), id));
+        assert_ok!(EntityRegistry::approve_entity(RuntimeOrigin::root(), id));
+
+        // 新生命周期：资金耗尽 → auto-suspend → top_up 应自动恢复
+        // 先耗尽资金至触发暂停
+        let treasury = EntityRegistry::entity_treasury_account(id);
+        let balance = Balances::free_balance(&treasury);
+        // 扣除到低于 MinOperatingBalance 触发 auto-suspend
+        let deduct = balance.saturating_sub(50_000_000_000); // 留 0.05 token < MinOperatingBalance(0.1)
+        if deduct > 0 {
+            let _ = <<Test as crate::Config>::Currency as Currency<u64>>::transfer(
+                &treasury,
+                &99, // platform
+                deduct,
+                frame_support::traits::ExistenceRequirement::AllowDeath,
+            );
+        }
+
+        // 检查实体仍为 Active（手动扣款不触发 auto-suspend）
+        // 通过 deduct_operating_fee 触发 auto-suspend
+        let small_fee = 40_000_000_000; // 0.04 token
+        let _ = EntityRegistry::deduct_operating_fee(id, small_fee, crate::FeeType::TransactionFee);
+        let entity = Entities::<Test>::get(id).unwrap();
+        assert_eq!(entity.status, EntityStatus::Suspended);
+
+        // top_up 应自动恢复（GovernanceSuspended 已在 approve_entity 中清理）
+        assert_ok!(EntityRegistry::top_up_fund(
+            RuntimeOrigin::signed(ALICE),
+            id,
+            10_000_000_000_000, // 10 tokens
+        ));
+        let entity = Entities::<Test>::get(id).unwrap();
+        assert_eq!(entity.status, EntityStatus::Active);
+    });
+}
+
+#[test]
+fn m1_update_entity_empty_metadata_uri_becomes_none() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+
+        // 先设置非空 metadata_uri
+        assert_ok!(EntityRegistry::update_entity(
+            RuntimeOrigin::signed(ALICE),
+            id,
+            None,
+            None,
+            None,
+            Some(b"ipfs://Qm123".to_vec()),
+        ));
+        let entity = Entities::<Test>::get(id).unwrap();
+        assert!(entity.metadata_uri.is_some());
+
+        // 空 vec 应清除为 None
+        assert_ok!(EntityRegistry::update_entity(
+            RuntimeOrigin::signed(ALICE),
+            id,
+            None,
+            None,
+            None,
+            Some(vec![]),
+        ));
+        let entity = Entities::<Test>::get(id).unwrap();
+        assert!(entity.metadata_uri.is_none());
+    });
+}
+
+#[test]
+fn m2_set_governance_mode_rejects_banned_entity() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+
+        // ban entity
+        assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, true));
+        let entity = Entities::<Test>::get(id).unwrap();
+        assert_eq!(entity.status, EntityStatus::Banned);
+
+        // set_governance_mode 应拒绝
+        assert!(
+            <EntityRegistry as EntityProvider<u64>>::set_governance_mode(id, GovernanceMode::FullDAO)
+                .is_err()
+        );
+    });
+}
+
+#[test]
+fn m2_set_governance_mode_rejects_closed_entity() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+
+        // close entity
+        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
+        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        let entity = Entities::<Test>::get(id).unwrap();
+        assert_eq!(entity.status, EntityStatus::Closed);
+
+        // set_governance_mode 应拒绝
+        assert!(
+            <EntityRegistry as EntityProvider<u64>>::set_governance_mode(id, GovernanceMode::FullDAO)
+                .is_err()
+        );
     });
 }

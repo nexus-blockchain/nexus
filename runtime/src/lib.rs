@@ -328,6 +328,9 @@ mod runtime {
 	#[runtime::pallet_index(133)]
 	pub type CommissionReferral = pallet_commission_referral;
 
+	#[runtime::pallet_index(138)]
+	pub type CommissionMultiLevel = pallet_commission_multi_level;
+
 	#[runtime::pallet_index(134)]
 	pub type CommissionLevelDiff = pallet_commission_level_diff;
 
@@ -373,4 +376,17 @@ mod runtime {
 
 	#[runtime::pallet_index(155)]
 	pub type GroupRobotRewards = pallet_grouprobot_rewards;
+
+	// ============================================================================
+	// Ads Pallets (模块化广告引擎)
+	// ============================================================================
+
+	#[runtime::pallet_index(160)]
+	pub type AdsCore = pallet_ads_core;
+
+	#[runtime::pallet_index(161)]
+	pub type AdsGroupRobot = pallet_ads_grouprobot;
+
+	#[runtime::pallet_index(162)]
+	pub type AdsEntity = pallet_ads_entity;
 }

@@ -1,0 +1,33 @@
+[package]
+name = "pallet-crypto-common"
+version = "0.1.0"
+description = "NEXUS 加密内容公共类型：PrivateContent、AccessPolicy、UserPublicKey — 供 evidence、arbitration、kyc、order 等 pallet 共享"
+authors = ["NEXUS Team"]
+edition = "2021"
+license = "MIT"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[dependencies]
+codec = { features = ["derive"], workspace = true }
+scale-info = { features = ["derive"], workspace = true }
+frame-support = { workspace = true }
+frame-system = { workspace = true }
+sp-core = { workspace = true }
+sp-runtime = { workspace = true }
+sp-std = { workspace = true }
+
+[features]
+default = ["std"]
+std = [
+    "codec/std",
+    "scale-info/std",
+    "frame-support/std",
+    "frame-system/std",
+    "sp-core/std",
+    "sp-runtime/std",
+    "sp-std/std",
+]
+runtime-benchmarks = []
+try-runtime = []

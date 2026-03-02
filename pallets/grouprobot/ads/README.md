@@ -1,8 +1,21 @@
 # pallet-grouprobot-ads
 
+> **⚠️ DEPRECATED** — 此 pallet 已拆分为三层模块化架构:
+>
+> | 新 crate | 路径 | 职责 |
+> |---------|------|------|
+> | `pallet-ads-primitives` | `pallets/ads/primitives/` | 通用广告类型 + 核心 trait |
+> | `pallet-ads-core` | `pallets/ads/core/` | 通用广告引擎 (Campaign CRUD, Escrow, 偏好, Slash, 收入) |
+> | `pallet-ads-grouprobot` | `pallets/ads/grouprobot/` | GroupRobot 适配层 (TEE 验证, audience, 反作弊, 节点奖励) |
+>
+> 新代码请使用上述 crate。Runtime 已注册 `AdsCore`(index 160) + `AdsGroupRobot`(index 161)。
+> 此 crate 保留仅供历史参考，不再注册到 runtime。
+
+---
+
 群组广告竞价 + CPM 结算 + 质押反作弊 + 双向偏好控制。
 
-## 概述
+## 概述 (历史参考)
 
 本 Pallet 为 GroupRobot 生态提供完整的去中心化广告系统，支持广告主创建 Campaign 并通过 CPM（每千人触达）竞价模式向社区投放广告。社区通过质押获取 audience 上限，Bot 节点上报投放收据后按 Era 结算，收入在社区、国库和节点之间按比例分成。
 

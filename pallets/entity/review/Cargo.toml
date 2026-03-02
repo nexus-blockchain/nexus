@@ -1,6 +1,6 @@
 [package]
 name = "pallet-entity-review"
-version = "0.2.0"
+version = "0.4.0"
 description = "NEXUS Entity 评价管理模块"
 authors = ["NEXUS Team"]
 edition = "2021"
@@ -14,6 +14,8 @@ codec = { features = ["derive"], workspace = true }
 scale-info = { features = ["derive"], workspace = true }
 frame-support = { workspace = true }
 frame-system = { workspace = true }
+
+log = { workspace = true }
 
 # 内部依赖
 pallet-entity-common = { path = "../common", default-features = false }
@@ -32,6 +34,7 @@ std = [
     "frame-support/std",
     "frame-system/std",
     "pallet-entity-common/std",
+    "log/std",
 ]
 runtime-benchmarks = [
     "frame-support/runtime-benchmarks",

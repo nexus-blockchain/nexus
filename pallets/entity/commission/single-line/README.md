@@ -146,9 +146,18 @@ CommissionPlugin::calculate()
 - 已在单链中的用户不会重复加入
 - 单链满（`MaxSingleLineLength`）时发出 `SingleLineJoinFailed` 事件
 
+## Token 多资产支持
+
+提供与 NEX 版对称的 Token 计算函数（泛型 `TB: AtLeast32BitUnsigned`）：
+
+- `process_upline_token` / `process_downline_token`
+- `extra_levels` 计算仍基于 NEX `total_earned`（通过 `StatsProvider`），不使用 Token 收益
+- 单链维护（`add_to_single_line`）仅在 NEX 版 `CommissionPlugin::calculate` 中触发
+
 ## Trait 实现
 
 - **`CommissionPlugin`** — 由 core 调度引擎调用，配置和单链均按 `entity_id` 查询（跨店共享单链）
+- **`TokenCommissionPlugin`** — Token 多资产返佣计算
 
 ## Events
 
@@ -167,6 +176,20 @@ CommissionPlugin::calculate()
 | `InvalidRate` | 收益率超过 1000 基点 |
 | `SingleLineFull` | 消费单链已满 |
 | `InvalidLevels` | upline_levels 和 downline_levels 不能同时为 0 |
+
+## 审计记录
+
+| ID | 级别 | 描述 |
+|----|------|------|
+| C2 | Critical | `process_upline`/`process_downline` 佣金计算使用 `beneficiary.total_earned * rate`（累计值，无限增长）。修复: 改为 `order_amount * rate / 10000`，添加 `order_amount` 参数 |
+| H4 | High | `calc_extra_levels` 中 `(earned/threshold) as u8` 可溢出。修复: 添加 `.min(255)` |
+
+### 记录但未修复
+
+| ID | 级别 | 描述 |
+|----|------|------|
+| M1 | Medium | 3 个 extrinsic 硬编码 Weight，无 WeightInfo trait |
+| L1 | Low | Token 版 `_token` 函数与 NEX 版逻辑大量重复（维护风险） |
 
 ## 依赖
 

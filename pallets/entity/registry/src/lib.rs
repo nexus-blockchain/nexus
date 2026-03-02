@@ -390,6 +390,11 @@ pub mod pallet {
             entity_id: u64,
             referrer: T::AccountId,
         },
+        /// 封禁时资金退还失败（资金滞留在 treasury 账户，需人工干预）
+        FundRefundFailed {
+            entity_id: u64,
+            amount: BalanceOf<T>,
+        },
     }
 
     // ==================== 错误 ====================
@@ -523,8 +528,9 @@ pub mod pallet {
             // 计算初始金库资金（50 USDT 等值 NEX）
             let initial_fund = Self::calculate_initial_fund()?;
             
-            // 生成 Entity ID 和金库账户
+            // H1: Entity ID 溢出保护（与 pallet-entity-shop H5 同类问题）
             let entity_id = NextEntityId::<T>::get();
+            ensure!(entity_id < u64::MAX, Error::<T>::ArithmeticOverflow);
             let treasury_account = Self::entity_treasury_account(entity_id);
             
             // 转入金库账户
@@ -633,9 +639,9 @@ pub mod pallet {
                 if let Some(c) = description_cid {
                     entity.description_cid = if c.is_empty() { None } else { Some(c.try_into().map_err(|_| Error::<T>::CidTooLong)?) };
                 }
-                // M2: 支持更新 metadata_uri
+                // M2: 支持更新 metadata_uri（M1: 空值转 None，与 logo/desc 一致）
                 if let Some(uri) = metadata_uri {
-                    entity.metadata_uri = Some(uri.try_into().map_err(|_| Error::<T>::CidTooLong)?);
+                    entity.metadata_uri = if uri.is_empty() { None } else { Some(uri.try_into().map_err(|_| Error::<T>::CidTooLong)?) };
                 }
 
                 Ok(())
@@ -762,6 +768,10 @@ pub mod pallet {
                 stats.active_entities = stats.active_entities.saturating_add(1);
             });
 
+            // H2: 清除前世遗留的治理暂停标记，防止新生命周期中
+            // 资金耗尽 → auto-suspend 后 top_up_fund 无法自动恢复
+            GovernanceSuspended::<T>::remove(entity_id);
+
             // reopen_entity 恢复路径：Shop 之前被 force_close（终态写入），
             // 需要显式恢复为 Active（遍历所有关联 Shop）
             for sid in EntityShops::<T>::get(entity_id).iter() {
@@ -812,6 +822,8 @@ pub mod pallet {
             });
 
             EntityCloseRequests::<T>::remove(entity_id);
+            // L2: 清理可能遗留的治理暂停标记
+            GovernanceSuspended::<T>::remove(entity_id);
 
             // 清理用户实体索引
             UserEntity::<T>::mutate(&entity.owner, |entities| {
@@ -934,12 +946,14 @@ pub mod pallet {
                     }
                 } else {
                     // H2 修复: 退还失败不应阻止封禁（owner 账户可能已被 reaped）
-                    let _ = T::Currency::transfer(
+                    if T::Currency::transfer(
                         &treasury_account,
                         &entity.owner,
                         balance,
                         ExistenceRequirement::AllowDeath,
-                    );
+                    ).is_err() {
+                        Self::deposit_event(Event::FundRefundFailed { entity_id, amount: balance });
+                    }
                 }
             }
 
@@ -1684,9 +1698,14 @@ pub mod pallet {
         }
 
         // C2: 治理 pallet 同步调用 — 更新 Entity.governance_mode 字段
+        // M2: 添加状态校验，拒绝对 Banned/Closed 实体的修改
         fn set_governance_mode(entity_id: u64, mode: GovernanceMode) -> Result<(), sp_runtime::DispatchError> {
             Entities::<T>::try_mutate(entity_id, |maybe_entity| -> Result<(), sp_runtime::DispatchError> {
                 let entity = maybe_entity.as_mut().ok_or(Error::<T>::EntityNotFound)?;
+                ensure!(
+                    entity.status != EntityStatus::Banned && entity.status != EntityStatus::Closed,
+                    Error::<T>::InvalidEntityStatus
+                );
                 entity.governance_mode = mode;
                 Ok(())
             })

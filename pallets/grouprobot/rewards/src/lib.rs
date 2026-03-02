@@ -89,6 +89,10 @@ pub mod pallet {
 	pub enum Event<T: Config> {
 		RewardsClaimed { node_id: NodeId, amount: BalanceOf<T> },
 		EraCompleted { era: u64, total_distributed: BalanceOf<T> },
+		/// 节点奖励已累加 (ads 或 Era 分配)
+		RewardAccrued { node_id: NodeId, amount: BalanceOf<T> },
+		/// 节点退出时残留奖励已自动领取
+		OrphanRewardsClaimed { node_id: NodeId, operator: T::AccountId, amount: BalanceOf<T> },
 	}
 
 	// ========================================================================
@@ -103,6 +107,8 @@ pub mod pallet {
 		NotOperator,
 		/// 无待领取奖励
 		NoPendingRewards,
+		/// 奖励池余额不足
+		RewardPoolInsufficient,
 	}
 
 	// ========================================================================
@@ -120,25 +126,7 @@ pub mod pallet {
 				.ok_or(Error::<T>::NodeNotFound)?;
 			ensure!(operator == who, Error::<T>::NotOperator);
 
-			let pending = NodePendingRewards::<T>::get(&node_id);
-			ensure!(!pending.is_zero(), Error::<T>::NoPendingRewards);
-
-			// C1-fix: 从奖励池转账给操作者 (不再铸币)
-			let reward_pool = T::RewardPoolAccount::get();
-			T::Currency::transfer(
-				&reward_pool,
-				&who,
-				pending,
-				ExistenceRequirement::AllowDeath,
-			)?;
-
-			NodePendingRewards::<T>::remove(&node_id);
-			NodeTotalEarned::<T>::mutate(&node_id, |total| {
-				*total = total.saturating_add(pending);
-			});
-
-			Self::deposit_event(Event::RewardsClaimed { node_id, amount: pending });
-			Ok(())
+			Self::do_claim_rewards(&node_id, &who)
 		}
 	}
 
@@ -147,6 +135,62 @@ pub mod pallet {
 	// ========================================================================
 
 	impl<T: Config> Pallet<T> {
+		/// H2-fix: 内部领取逻辑 — 先转账后清除存储
+		fn do_claim_rewards(node_id: &NodeId, recipient: &T::AccountId) -> DispatchResult {
+			let pending = NodePendingRewards::<T>::get(node_id);
+			ensure!(!pending.is_zero(), Error::<T>::NoPendingRewards);
+
+			// H2-fix: 先转账, 成功后再清除存储 (防止转账失败导致奖励丢失)
+			let reward_pool = T::RewardPoolAccount::get();
+			T::Currency::transfer(
+				&reward_pool,
+				recipient,
+				pending,
+				ExistenceRequirement::AllowDeath,
+			).map_err(|_| Error::<T>::RewardPoolInsufficient)?;
+
+			NodePendingRewards::<T>::remove(node_id);
+			NodeTotalEarned::<T>::mutate(node_id, |total| {
+				*total = total.saturating_add(pending);
+			});
+
+			Self::deposit_event(Event::RewardsClaimed { node_id: *node_id, amount: pending });
+			Ok(())
+		}
+
+		/// H3-fix: 节点退出时自动领取残留奖励 (best-effort, 失败不阻断退出)
+		pub fn try_claim_orphan_rewards(node_id: &NodeId, operator: &T::AccountId) {
+			let pending = NodePendingRewards::<T>::get(node_id);
+			if pending.is_zero() {
+				return;
+			}
+			let reward_pool = T::RewardPoolAccount::get();
+			match T::Currency::transfer(
+				&reward_pool,
+				operator,
+				pending,
+				ExistenceRequirement::AllowDeath,
+			) {
+				Ok(_) => {
+					NodePendingRewards::<T>::remove(node_id);
+					NodeTotalEarned::<T>::mutate(node_id, |total| {
+						*total = total.saturating_add(pending);
+					});
+					Self::deposit_event(Event::OrphanRewardsClaimed {
+						node_id: *node_id,
+						operator: operator.clone(),
+						amount: pending,
+					});
+				}
+				Err(_) => {
+					log::warn!(
+						"Failed to claim orphan rewards for node {:?}, amount: {:?}",
+						node_id, pending
+					);
+				}
+			}
+		}
+
 		/// 向节点分配奖励并记录 Era 信息
 		pub fn distribute_and_record_era(
 			era: u64,
@@ -160,7 +204,8 @@ pub mod pallet {
 			// C1-fix: 铸币通胀部分到奖励池 (订阅费节点份额已由 subscription pallet 转入)
 			if !inflation.is_zero() {
 				let reward_pool = T::RewardPoolAccount::get();
-				let _ = T::Currency::deposit_creating(&reward_pool, inflation);
+				// L2-fix: deposit_creating 返回 PositiveImbalance, drop 时自增 TotalIssuance
+				let _imbalance = T::Currency::deposit_creating(&reward_pool, inflation);
 			}
 
 			let mut total_weight: u128 = 0;
@@ -198,19 +243,22 @@ pub mod pallet {
 			total_distributed
 		}
 
-		/// 清理过期 EraRewards
+		/// H1-fix: 清理过期 EraRewards (每次最多清理 MAX_PRUNE_PER_CALL 条)
 		pub fn prune_old_era_rewards(current_era: u64) {
+			const MAX_PRUNE_PER_CALL: u64 = 10;
 			let max_history = T::MaxEraHistory::get();
 			if current_era <= max_history {
 				return;
 			}
 			let oldest_to_keep = current_era.saturating_sub(max_history);
-			let cursor = EraCleanupCursor::<T>::get();
-			if cursor < oldest_to_keep {
-				let to_delete = cursor;
-				EraRewards::<T>::remove(to_delete);
-				EraCleanupCursor::<T>::put(to_delete.saturating_add(1));
+			let mut cursor = EraCleanupCursor::<T>::get();
+			let mut pruned = 0u64;
+			while cursor < oldest_to_keep && pruned < MAX_PRUNE_PER_CALL {
+				EraRewards::<T>::remove(cursor);
+				cursor = cursor.saturating_add(1);
+				pruned += 1;
 			}
+			EraCleanupCursor::<T>::put(cursor);
 		}
 	}
 
@@ -225,7 +273,22 @@ pub mod pallet {
 				NodePendingRewards::<T>::mutate(node_id, |pending| {
 					*pending = pending.saturating_add(balance);
 				});
+				// M1-fix: 发出事件以提供链上审计轨迹
+				Self::deposit_event(Event::RewardAccrued {
+					node_id: *node_id,
+					amount: balance,
+				});
 			}
+		}
+	}
+
+	// ========================================================================
+	// OrphanRewardClaimer 实现 (H3-fix)
+	// ========================================================================
+
+	impl<T: Config> OrphanRewardClaimer<T::AccountId> for Pallet<T> {
+		fn try_claim_orphan_rewards(node_id: &NodeId, operator: &T::AccountId) {
+			Self::try_claim_orphan_rewards(node_id, operator);
 		}
 	}
 

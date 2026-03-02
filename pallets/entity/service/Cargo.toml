@@ -16,9 +16,11 @@ frame-support = { workspace = true }
 frame-system = { workspace = true }
 sp-runtime = { workspace = true }
 sp-std = { workspace = true }
+log = { workspace = true }
 
 # 内部依赖
 pallet-entity-common = { path = "../common", default-features = false }
+pallet-storage-service = { path = "../../storage/service", default-features = false }
 
 [dev-dependencies]
 pallet-balances = { workspace = true, features = ["std"] }
@@ -35,6 +37,8 @@ std = [
     "sp-runtime/std",
     "sp-std/std",
     "pallet-entity-common/std",
+    "pallet-storage-service/std",
+    "log/std",
 ]
 runtime-benchmarks = [
     "frame-support/runtime-benchmarks",

@@ -723,3 +723,174 @@ fn multiple_shops_per_entity_works() {
         assert_eq!(Shop::shops(2).unwrap().shop_type, ShopType::PhysicalStore);
     });
 }
+
+// ============================================================================
+// H2: update_shop / set_location reject empty CID
+// ============================================================================
+
+#[test]
+fn h2_update_shop_rejects_empty_logo_cid() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        let empty_cid: BoundedVec<u8, MaxCidLength> = BoundedVec::default();
+        assert_noop!(
+            Shop::update_shop(RuntimeOrigin::signed(1), 1, None, Some(empty_cid), None),
+            Error::<Test>::EmptyCid
+        );
+    });
+}
+
+#[test]
+fn h2_update_shop_rejects_empty_description_cid() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        let empty_cid: BoundedVec<u8, MaxCidLength> = BoundedVec::default();
+        assert_noop!(
+            Shop::update_shop(RuntimeOrigin::signed(1), 1, None, None, Some(empty_cid)),
+            Error::<Test>::EmptyCid
+        );
+    });
+}
+
+#[test]
+fn h2_set_location_rejects_empty_address_cid() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        let empty_cid: BoundedVec<u8, MaxCidLength> = BoundedVec::default();
+        assert_noop!(
+            Shop::set_location(RuntimeOrigin::signed(1), 1, None, Some(empty_cid), None),
+            Error::<Test>::EmptyCid
+        );
+    });
+}
+
+// ============================================================================
+// H3: trait pause_shop / resume_shop state validation
+// ============================================================================
+
+#[test]
+fn h3_trait_pause_rejects_closed_shop() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
+
+        // trait pause_shop should reject closed shop
+        assert_noop!(
+            <Shop as ShopProvider<u64>>::pause_shop(1),
+            Error::<Test>::ShopAlreadyPaused
+        );
+    });
+}
+
+#[test]
+fn h3_trait_resume_rejects_closed_shop() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
+
+        // trait resume_shop should reject closed shop
+        assert_noop!(
+            <Shop as ShopProvider<u64>>::resume_shop(1),
+            Error::<Test>::ShopNotPaused
+        );
+    });
+}
+
+// ============================================================================
+// M1: update_points_config rejects closed shop
+// ============================================================================
+
+#[test]
+fn m1_update_points_config_rejects_closed_shop() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        // Enable points first
+        let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+        assert_ok!(Shop::enable_points(
+            RuntimeOrigin::signed(1), 1, name, symbol, 500, 1000, true,
+        ));
+
+        // Close shop
+        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
+
+        // M1: update_points_config should fail
+        assert_noop!(
+            Shop::update_points_config(RuntimeOrigin::signed(1), 1, Some(200), None, None),
+            Error::<Test>::ShopAlreadyClosed
+        );
+    });
+}
+
+// ============================================================================
+// M2: transfer_points rejects closed shop
+// ============================================================================
+
+#[test]
+fn m2_transfer_points_rejects_closed_shop() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+        assert_ok!(Shop::enable_points(
+            RuntimeOrigin::signed(1), 1, name, symbol, 500, 1000, true,
+        ));
+
+        // Issue points to account 2
+        assert_ok!(Shop::issue_points(1, &2, 500));
+
+        // Close shop
+        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
+
+        // M2: transfer_points should fail on closed shop
+        assert_noop!(
+            Shop::transfer_points(RuntimeOrigin::signed(2), 1, 3, 100),
+            Error::<Test>::ShopAlreadyClosed
+        );
+    });
+}
+
+// ============================================================================
+// M4: fund_operating rejects zero amount
+// ============================================================================
+
+#[test]
+fn m4_fund_operating_rejects_zero_amount() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        assert_noop!(
+            Shop::fund_operating(RuntimeOrigin::signed(1), 1, 0),
+            Error::<Test>::ZeroFundAmount
+        );
+    });
+}

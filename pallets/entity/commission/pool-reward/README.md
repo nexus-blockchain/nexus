@@ -424,7 +424,7 @@ pallet-commission-common = { path = "../common" }
 | `claim_dual_pool_nex_and_token` | NEX + Token 同步领取 |
 | `claim_token_best_effort_nex_still_works` | Token 失败不影响 NEX |
 
-### 审计回归测试（8）
+### 审计回归测试 Round 1（8）
 
 | 测试 | 覆盖场景 |
 |------|----------|
@@ -436,6 +436,16 @@ pallet-commission-common = { path = "../common" }
 | `h2_plan_writer_preserves_token_pool_enabled` | PlanWriter 更新配置保留 token 开关 |
 | `h3_clear_config_resets_last_claimed_round` | clear_config 清理全部 4 项存储 |
 | `m1_round_id_overflow_rejected` | round_id=u64::MAX 时拒绝创建新轮 |
+
+### 审计回归测试 Round 2（5）
+
+| 测试 | 覆盖场景 |
+|------|----------|
+| `h2_config_update_invalidates_current_round` | 配置变更清除旧快照，新 claim 创建含新 level_id 的快照 |
+| `h2_plan_writer_config_update_invalidates_round` | PlanWriter 路径同样清除旧快照 |
+| `h2_config_update_mid_round_allows_reclaim` | 配置更新后 LastClaimedRound 被清除，用户可立即 claim 新轮 |
+| `m2_claim_rejects_entity_not_active` | Banned/Closed Entity 的会员不能领取 |
+| `m2_claim_works_when_entity_active` | 正常 Entity 领取不受影响 |
 
 ### 边界与集成测试（12）
 
@@ -456,9 +466,11 @@ pallet-commission-common = { path = "../common" }
 
 ## 审计与优化记录
 
+### Round 1
+
 **审计日期**: 2026-03-02
 
-### 安全修复
+#### 安全修复
 
 | ID | 严重度 | 描述 | 修复 |
 |----|--------|------|------|
@@ -467,7 +479,7 @@ pallet-commission-common = { path = "../common" }
 | H3 | High | `clear_config` 仅清理 2 项存储，`LastClaimedRound` 残留导致用户无法领取新轮奖励 | 清理全部 4 项存储（含 `LastClaimedRound` + `ClaimRecords`） |
 | M1 | Medium | `create_new_round` 当 `round_id = u64::MAX` 时 `saturating_add(1)` 不变，产生重复 ID | 添加 `ensure!(old_round_id < u64::MAX, RoundIdOverflow)` |
 
-### 冗余清理
+#### 冗余清理
 
 | ID | 类型 | 描述 |
 |----|------|------|
@@ -480,8 +492,95 @@ pallet-commission-common = { path = "../common" }
 | R7 | 多余属性 | 测试辅助函数上无用的 `#[allow(dead_code)]` → 移除 |
 | R8 | 死依赖 | `sp-std` 在 Cargo.toml 中声明但代码未使用 → 移除 |
 
-### 未修复（记录）
+### Round 2
+
+**审计日期**: 2026-03-03
+
+#### 安全修复
+
+| ID | 严重度 | 描述 | 修复 |
+|----|--------|------|------|
+| H2-R2 | High | `set_pool_reward_config` 更新配置（level_ratios / round_duration）后不清除 `CurrentRound`，旧快照中的 level_id 集合/比率与新配置不一致。用户可能因 `LevelNotInSnapshot` 无法领取，或按旧比率领取错误金额 | extrinsic 和 PlanWriter 两条路径均清除 `CurrentRound` + `LastClaimedRound`，强制下次 claim 创建新快照 |
+| M2-R2 | Medium | `claim_pool_reward` 不检查 Entity 是否存在/激活，Banned/Closed Entity 的会员仍可继续领取沉淀池奖励 | 添加 `ensure!(EntityProvider::is_entity_active(entity_id), EntityNotActive)` 前置检查 |
+
+#### 其他修复
+
+| ID | 类型 | 描述 |
+|----|------|------|
+| L1-R2 | Low | `Cargo.toml` `try-runtime` feature 缺少 `sp-runtime/try-runtime` |
+| L1 | Low | 4 个 extrinsic 硬编码 Weight → 新建 `weights.rs`，定义 `WeightInfo` trait + `SubstrateWeight` 估算实现（基于 DB read/write 分析），Config 新增 `type WeightInfo` |
+| L2-R2 | Low | `PoolRewardDefaultRoundDuration` parameter_types 在 runtime 声明但 pallet 从未使用 → 从 runtime 删除死常量 |
+| M3-R2 | Medium | NEX 转账在 `deduct_pool` 之前执行 → 调整为「先扣记账（deduct_pool）、后转实物（Currency::transfer）」。Token 路径保持 transfer-first 顺序（best-effort 无法事务回滚） |
+
+#### 未修复（记录）
 
 | ID | 严重度 | 描述 |
 |----|--------|------|
-| L1 | Low | 4 个 extrinsic 硬编码 Weight，无 WeightInfo（需 benchmark 框架） |
+| M1-R2 | Medium | `build_level_snapshots` 整除截断导致尘埃累积：`pool * ratio / 10000 / count` 的截断余额永久留池。高等级人数少时损失比例可观（设计权衡：尘埃自动滚入下轮，无资金丢失） |
+
+### Round 3
+
+**审计日期**: 2026-03-03
+
+#### 安全修复
+
+| ID | 严重度 | 描述 | 修复 |
+|----|--------|------|------|
+| M1-R3 | Medium | `set_token_pool_enabled` (extrinsic + PlanWriter) 不使当前轮次失效。mid-round 启用→本轮无 token 快照用户无法领 token；mid-round 禁用→本轮仍可领 token | extrinsic 和 PlanWriter 切换后调用 `invalidate_current_round`，立即生效 |
+| M2-R3 | Medium | `set_pool_reward_config` 使用 `clear_prefix(u32::MAX)` 清除 `LastClaimedRound`，写入量 O(n) 随用户数增长，weight 仅声明 2 writes 严重低估。根因：`CurrentRound::remove` 后 round_id 重置为 1 | 新增 `LastRoundId` 存储保持 round_id 单调递增；`invalidate_current_round` helper 保存 round_id 后移除轮次；消除 `clear_prefix` |
+
+#### 其他修复
+
+| ID | 类型 | 描述 |
+|----|------|------|
+| L1-R3 | Low | PlanWriter 三个方法（`set_pool_reward_config`, `clear_config`, `set_token_pool_enabled`）不 emit 事件 → off-chain indexer 无法感知 governance 配置变更。修复：每个方法末尾 `deposit_event` |
+| L2-R3 | Low | `Cargo.toml` `runtime-benchmarks` feature 缺 `sp-runtime/runtime-benchmarks` → 已补充 |
+
+#### 新增存储
+
+| 名称 | 类型 | 说明 |
+|------|------|------|
+| `LastRoundId<T>` | `StorageMap<u64, u64, ValueQuery>` | 配置变更后保留上一轮次 ID，保持 round_id 单调递增 |
+
+#### 新增测试 (6)
+
+| 测试名 | 覆盖 |
+|--------|------|
+| `m1_r3_token_enable_invalidates_round_and_adds_token_snapshot` | M1-R3 启用 token 池立即生效 |
+| `m1_r3_token_disable_invalidates_round_removes_token_snapshot` | M1-R3 禁用 token 池立即生效 |
+| `m2_r3_config_update_round_id_monotonic` | M2-R3 配置更新后 round_id 递增 + LastClaimedRound 保留 |
+| `m2_r3_multiple_config_updates_round_id_keeps_increasing` | M2-R3 多次配置更新 round_id 始终递增 |
+| `l1_r3_plan_writer_emits_config_event` | L1-R3 PlanWriter emit PoolRewardConfigUpdated |
+| `l1_r3_plan_writer_emits_token_event` | L1-R3 PlanWriter emit TokenPoolEnabledUpdated |
+
+#### 修改已有测试 (2)
+
+| 测试名 | 变更 |
+|--------|------|
+| `h2_config_update_invalidates_current_round` | round_id 断言 1→2（单调递增） |
+| `h2_config_update_mid_round_allows_reclaim` | LastClaimedRound 不再清零，round_id 2 |
+
+**累计测试**: 64 (was 58) ✅ · `cargo check -p nexus-runtime` ✅
+
+### Round 4
+
+**审计日期**: 2026-03-03
+
+#### 修复
+
+| ID | 严重度 | 描述 | 修复 |
+|----|--------|------|------|
+| M1-R4 | Medium | `weights.rs` DB read/write 计数在 R3 修复后未同步更新。`set_pool_reward_config` 实际 reads(2)+writes(3) 但声明 reads(1)+writes(2)；`set_token_pool_enabled` 实际 reads(2)+writes(3) 但声明 reads(1)+writes(1)；`force_new_round` 缺少 `member_count_by_level` 读取；注释引用已删除的 `clear_prefix` | 更新全部 4 个 extrinsic 的 DB 计数、proof_size、注释 |
+| L1-R4 | Low | `set_token_pool_enabled` (extrinsic + PlanWriter) 幂等调用（如 enabled=true 时再次设 true）仍触发 `invalidate_current_round`，浪费有效快照 | 添加 `changed` 标志，仅在值实际变更时才失效轮次 |
+| L2-R4 | Low | `clear_config` (PlanWriter) 使用 `clear_prefix(u32::MAX)` 清除 `LastClaimedRound` + `ClaimRecords`，写入量 O(n)。调用方需在自身 weight 中计入此开销 | 添加文档注释说明 weight 责任归属 |
+
+#### 新增测试 (4)
+
+| 测试名 | 覆盖 |
+|--------|------|
+| `l1_r4_idempotent_token_toggle_preserves_round` | L1-R4 幂等 extrinsic 调用不失效轮次 |
+| `l1_r4_plan_writer_idempotent_token_toggle_preserves_round` | L1-R4 幂等 PlanWriter 调用不失效轮次 |
+| `l1_r4_actual_change_still_invalidates_round` | L1-R4 实际变更仍正确失效轮次 |
+| `m1_r4_weight_values_are_reasonable` | M1-R4 Weight 值非零且在预期范围内 |
+
+**累计测试**: 68 (was 64) ✅ · `cargo check -p nexus-runtime` ✅

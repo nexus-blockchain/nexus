@@ -226,6 +226,15 @@ pub fn register_inactive_shop(shop_id: u64, owner: u64) {
     SHOPS.with(|s| s.borrow_mut().insert(shop_id, (owner, false)));
 }
 
+/// 停用实体（将 active 设为 false）
+pub fn deactivate_entity(entity_id: u64) {
+    SHOPS.with(|s| {
+        if let Some(entry) = s.borrow_mut().get_mut(&entity_id) {
+            entry.1 = false;
+        }
+    });
+}
+
 /// 设置 KYC 级别
 pub fn set_kyc_level(who: u64, level: u8) {
     KYC_LEVELS.with(|k| k.borrow_mut().insert(who, level));

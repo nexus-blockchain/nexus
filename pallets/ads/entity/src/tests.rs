@@ -1,0 +1,579 @@
+use crate::{mock::*, *};
+use frame_support::{assert_noop, assert_ok};
+
+// ============================================================================
+// register_entity_placement
+// ============================================================================
+
+#[test]
+fn register_entity_placement_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE),
+			1,
+		));
+
+		let pid = entity_placement_id(1);
+		let info = pallet::RegisteredPlacements::<Test>::get(&pid).unwrap();
+		assert_eq!(info.entity_id, 1);
+		assert_eq!(info.shop_id, 0);
+		assert_eq!(info.level, PlacementLevel::Entity);
+		assert!(info.active);
+		assert_eq!(info.daily_impression_cap, 1000);
+		assert_eq!(info.registered_by, ALICE);
+
+		// 保证金已扣除
+		assert_eq!(pallet::PlacementDeposits::<Test>::get(&pid), 100);
+
+		// Entity placement IDs 列表
+		let ids = pallet::EntityPlacementIds::<Test>::get(1);
+		assert_eq!(ids.len(), 1);
+		assert_eq!(ids[0], pid);
+	});
+}
+
+#[test]
+fn register_entity_placement_by_admin_works() {
+	new_test_ext().execute_with(|| {
+		// BOB is admin for entity_id=1
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(BOB),
+			1,
+		));
+		let pid = entity_placement_id(1);
+		assert!(pallet::RegisteredPlacements::<Test>::contains_key(&pid));
+	});
+}
+
+#[test]
+fn register_entity_placement_fails_not_admin() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			AdsEntity::register_entity_placement(RuntimeOrigin::signed(CHARLIE), 1),
+			Error::<Test>::NotEntityAdmin
+		);
+	});
+}
+
+#[test]
+fn register_entity_placement_fails_entity_not_found() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 99),
+			Error::<Test>::EntityNotFound
+		);
+	});
+}
+
+#[test]
+fn register_entity_placement_fails_entity_not_active() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 2),
+			Error::<Test>::EntityNotActive
+		);
+	});
+}
+
+#[test]
+fn register_entity_placement_fails_already_registered() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		assert_noop!(
+			AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 1),
+			Error::<Test>::PlacementAlreadyRegistered
+		);
+	});
+}
+
+#[test]
+fn register_entity_placement_fails_banned() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::ban_entity(RuntimeOrigin::root(), 1));
+		assert_noop!(
+			AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 1),
+			Error::<Test>::EntityBanned
+		);
+	});
+}
+
+// ============================================================================
+// register_shop_placement
+// ============================================================================
+
+#[test]
+fn register_shop_placement_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_shop_placement(
+			RuntimeOrigin::signed(ALICE),
+			1,
+			10,
+		));
+
+		let pid = shop_placement_id(10);
+		let info = pallet::RegisteredPlacements::<Test>::get(&pid).unwrap();
+		assert_eq!(info.entity_id, 1);
+		assert_eq!(info.shop_id, 10);
+		assert_eq!(info.level, PlacementLevel::Shop);
+		assert!(info.active);
+	});
+}
+
+#[test]
+fn register_shop_placement_by_manager_works() {
+	new_test_ext().execute_with(|| {
+		// CHARLIE is shop manager for shop_id=10
+		assert_ok!(AdsEntity::register_shop_placement(
+			RuntimeOrigin::signed(CHARLIE),
+			1,
+			10,
+		));
+	});
+}
+
+#[test]
+fn register_shop_placement_fails_shop_not_found() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			AdsEntity::register_shop_placement(RuntimeOrigin::signed(ALICE), 1, 99),
+			Error::<Test>::ShopNotFound
+		);
+	});
+}
+
+#[test]
+fn register_shop_placement_fails_shop_not_active() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			AdsEntity::register_shop_placement(RuntimeOrigin::signed(ALICE), 1, 20),
+			Error::<Test>::ShopNotActive
+		);
+	});
+}
+
+#[test]
+fn register_shop_placement_fails_entity_mismatch() {
+	new_test_ext().execute_with(|| {
+		// shop_id=10 belongs to entity_id=1, but we claim entity_id=2
+		assert_noop!(
+			AdsEntity::register_shop_placement(RuntimeOrigin::signed(ALICE), 2, 10),
+			Error::<Test>::EntityNotActive  // entity 2 is not active
+		);
+	});
+}
+
+// ============================================================================
+// deregister_placement
+// ============================================================================
+
+#[test]
+fn deregister_placement_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+
+		let pid = entity_placement_id(1);
+		let balance_before = Balances::free_balance(ALICE);
+
+		assert_ok!(AdsEntity::deregister_placement(
+			RuntimeOrigin::signed(ALICE),
+			pid,
+		));
+
+		assert!(!pallet::RegisteredPlacements::<Test>::contains_key(&pid));
+		// 保证金已退还
+		assert_eq!(Balances::free_balance(ALICE), balance_before + 100);
+		// 列表已清理
+		assert!(pallet::EntityPlacementIds::<Test>::get(1).is_empty());
+	});
+}
+
+#[test]
+fn deregister_placement_fails_not_registered() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			AdsEntity::deregister_placement(
+				RuntimeOrigin::signed(ALICE),
+				[0u8; 32],
+			),
+			Error::<Test>::PlacementNotRegistered
+		);
+	});
+}
+
+#[test]
+fn deregister_placement_fails_not_admin() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		let pid = entity_placement_id(1);
+
+		// CHARLIE is neither owner, admin, nor registrant
+		assert_noop!(
+			AdsEntity::deregister_placement(RuntimeOrigin::signed(CHARLIE), pid),
+			Error::<Test>::NotEntityAdmin
+		);
+	});
+}
+
+// ============================================================================
+// set_placement_active
+// ============================================================================
+
+#[test]
+fn set_placement_active_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		let pid = entity_placement_id(1);
+
+		// 禁用
+		assert_ok!(AdsEntity::set_placement_active(
+			RuntimeOrigin::signed(ALICE), pid, false,
+		));
+		let info = pallet::RegisteredPlacements::<Test>::get(&pid).unwrap();
+		assert!(!info.active);
+
+		// 重新启用
+		assert_ok!(AdsEntity::set_placement_active(
+			RuntimeOrigin::signed(ALICE), pid, true,
+		));
+		let info = pallet::RegisteredPlacements::<Test>::get(&pid).unwrap();
+		assert!(info.active);
+	});
+}
+
+// ============================================================================
+// set_impression_cap
+// ============================================================================
+
+#[test]
+fn set_impression_cap_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		let pid = entity_placement_id(1);
+
+		assert_ok!(AdsEntity::set_impression_cap(
+			RuntimeOrigin::signed(ALICE), pid, 5000,
+		));
+		let info = pallet::RegisteredPlacements::<Test>::get(&pid).unwrap();
+		assert_eq!(info.daily_impression_cap, 5000);
+	});
+}
+
+// ============================================================================
+// set_entity_ad_share
+// ============================================================================
+
+#[test]
+fn set_entity_ad_share_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::set_entity_ad_share(
+			RuntimeOrigin::signed(ALICE), 1, 9000,
+		));
+		assert_eq!(pallet::EntityAdShareBps::<Test>::get(1), 9000);
+	});
+}
+
+#[test]
+fn set_entity_ad_share_fails_invalid_bps() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			AdsEntity::set_entity_ad_share(RuntimeOrigin::signed(ALICE), 1, 10001),
+			Error::<Test>::InvalidShareBps
+		);
+	});
+}
+
+#[test]
+fn set_entity_ad_share_fails_not_owner() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			AdsEntity::set_entity_ad_share(RuntimeOrigin::signed(CHARLIE), 1, 9000),
+			Error::<Test>::NotEntityAdmin
+		);
+	});
+}
+
+// ============================================================================
+// ban / unban entity
+// ============================================================================
+
+#[test]
+fn ban_unban_entity_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::ban_entity(RuntimeOrigin::root(), 1));
+		assert!(pallet::BannedEntities::<Test>::get(1));
+
+		assert_ok!(AdsEntity::unban_entity(RuntimeOrigin::root(), 1));
+		assert!(!pallet::BannedEntities::<Test>::get(1));
+	});
+}
+
+#[test]
+fn ban_entity_fails_not_root() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			AdsEntity::ban_entity(RuntimeOrigin::signed(ALICE), 1),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+// ============================================================================
+// DeliveryVerifier trait 实现
+// ============================================================================
+
+#[test]
+fn delivery_verifier_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		let pid = entity_placement_id(1);
+
+		// ALICE (entity owner) 提交展示量
+		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
+			&ALICE, &pid, 500,
+		);
+		assert_ok!(&result);
+		assert_eq!(result.unwrap(), 500);
+
+		// 展示量已记录
+		assert_eq!(pallet::DailyImpressions::<Test>::get(&pid), 500);
+		assert_eq!(pallet::TotalImpressions::<Test>::get(&pid), 500);
+	});
+}
+
+#[test]
+fn delivery_verifier_caps_audience() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		let pid = entity_placement_id(1);
+
+		// 默认 cap = 1000, 提交 1500 → 只算 1000
+		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
+			&ALICE, &pid, 1500,
+		);
+		assert_eq!(result.unwrap(), 1000);
+
+		// 再提交 500 → 剩余 0, 应该失败
+		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
+			&ALICE, &pid, 500,
+		);
+		assert_noop!(result, Error::<Test>::DailyImpressionCapReached);
+	});
+}
+
+#[test]
+fn delivery_verifier_fails_not_registered() {
+	new_test_ext().execute_with(|| {
+		let pid = entity_placement_id(1);
+		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
+			&ALICE, &pid, 100,
+		);
+		assert_noop!(result, Error::<Test>::PlacementNotRegistered);
+	});
+}
+
+#[test]
+fn delivery_verifier_fails_not_active() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		let pid = entity_placement_id(1);
+
+		// 禁用广告位
+		assert_ok!(AdsEntity::set_placement_active(
+			RuntimeOrigin::signed(ALICE), pid, false,
+		));
+
+		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
+			&ALICE, &pid, 100,
+		);
+		assert_noop!(result, Error::<Test>::PlacementNotActive);
+	});
+}
+
+#[test]
+fn delivery_verifier_fails_banned() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		let pid = entity_placement_id(1);
+
+		assert_ok!(AdsEntity::ban_entity(RuntimeOrigin::root(), 1));
+
+		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
+			&ALICE, &pid, 100,
+		);
+		assert_noop!(result, Error::<Test>::EntityBanned);
+	});
+}
+
+#[test]
+fn delivery_verifier_fails_not_authorized() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		let pid = entity_placement_id(1);
+
+		// 用户 4 既不是 owner 也不是 admin
+		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
+			&4u64, &pid, 100,
+		);
+		assert_noop!(result, Error::<Test>::NotEntityAdmin);
+	});
+}
+
+#[test]
+fn delivery_verifier_shop_manager_authorized() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_shop_placement(
+			RuntimeOrigin::signed(ALICE), 1, 10,
+		));
+		let pid = shop_placement_id(10);
+
+		// CHARLIE 是 shop manager, 可以提交展示量
+		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
+			&CHARLIE, &pid, 200,
+		);
+		assert_ok!(&result);
+		assert_eq!(result.unwrap(), 200);
+	});
+}
+
+// ============================================================================
+// PlacementAdminProvider trait 实现
+// ============================================================================
+
+#[test]
+fn placement_admin_entity_level() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		let pid = entity_placement_id(1);
+
+		let admin = <AdsEntity as pallet_ads_primitives::PlacementAdminProvider<u64>>::placement_admin(&pid);
+		assert_eq!(admin, Some(ALICE));
+	});
+}
+
+#[test]
+fn placement_admin_shop_level() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_shop_placement(
+			RuntimeOrigin::signed(ALICE), 1, 10,
+		));
+		let pid = shop_placement_id(10);
+
+		let admin = <AdsEntity as pallet_ads_primitives::PlacementAdminProvider<u64>>::placement_admin(&pid);
+		// shop_owner returns ALICE
+		assert_eq!(admin, Some(ALICE));
+	});
+}
+
+#[test]
+fn placement_banned_check() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		let pid = entity_placement_id(1);
+
+		assert!(!<AdsEntity as pallet_ads_primitives::PlacementAdminProvider<u64>>::is_placement_banned(&pid));
+
+		assert_ok!(AdsEntity::ban_entity(RuntimeOrigin::root(), 1));
+		assert!(<AdsEntity as pallet_ads_primitives::PlacementAdminProvider<u64>>::is_placement_banned(&pid));
+	});
+}
+
+// ============================================================================
+// RevenueDistributor trait 实现
+// ============================================================================
+
+#[test]
+fn revenue_distributor_default_split() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		let pid = entity_placement_id(1);
+
+		// 默认: platform 20%, entity 80%
+		let result = <AdsEntity as pallet_ads_primitives::RevenueDistributor<u64, u128>>::distribute(
+			&pid, 10_000, &99,
+		);
+		assert_eq!(result.unwrap(), 8_000); // 80%
+	});
+}
+
+#[test]
+fn revenue_distributor_custom_split() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		let pid = entity_placement_id(1);
+
+		// 自定义: entity 拿 9000 基点 = 90%
+		assert_ok!(AdsEntity::set_entity_ad_share(
+			RuntimeOrigin::signed(ALICE), 1, 9000,
+		));
+
+		let result = <AdsEntity as pallet_ads_primitives::RevenueDistributor<u64, u128>>::distribute(
+			&pid, 10_000, &99,
+		);
+		assert_eq!(result.unwrap(), 9_000); // 90%
+	});
+}
+
+// ============================================================================
+// Helper functions
+// ============================================================================
+
+#[test]
+fn placement_id_encoding() {
+	let eid = entity_placement_id(1);
+	let sid = shop_placement_id(10);
+	// 不同输入产生不同 hash
+	assert_ne!(eid, sid);
+	// 相同输入产生相同 hash
+	assert_eq!(entity_placement_id(1), entity_placement_id(1));
+	assert_eq!(shop_placement_id(10), shop_placement_id(10));
+}
+
+#[test]
+fn bps_of_calculation() {
+	new_test_ext().execute_with(|| {
+		assert_eq!(AdsEntity::bps_of(10_000u128, 2000), 2_000);  // 20%
+		assert_eq!(AdsEntity::bps_of(10_000u128, 8000), 8_000);  // 80%
+		assert_eq!(AdsEntity::bps_of(10_000u128, 10000), 10_000); // 100%
+		assert_eq!(AdsEntity::bps_of(10_000u128, 0), 0);          // 0%
+	});
+}
+
+#[test]
+fn effective_entity_share_defaults() {
+	new_test_ext().execute_with(|| {
+		// 未自定义: 10000 - 2000(platform) = 8000
+		assert_eq!(AdsEntity::effective_entity_share_bps(1), 8000);
+
+		// 自定义后
+		pallet::EntityAdShareBps::<Test>::insert(1, 9000u16);
+		assert_eq!(AdsEntity::effective_entity_share_bps(1), 9000);
+	});
+}

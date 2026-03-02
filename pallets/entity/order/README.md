@@ -20,7 +20,6 @@
 ```
 pallet-entity-order
 ├── pallet-escrow           资金托管（锁定 / 释放 / 退款）
-├── EntityProvider          Entity 查询（entity_exists, is_entity_active）
 ├── ShopProvider            Shop 查询（shop_exists, shop_owner, update_shop_stats）
 ├── ProductProvider         商品查询（price, stock, category, deduct_stock, restore_stock）
 ├── EntityTokenProvider     积分抵扣（redeem_for_discount, reward_on_purchase）
@@ -47,7 +46,6 @@ impl pallet_entity_order::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type Escrow = EscrowPallet;
-    type EntityProvider = EntityRegistry;
     type ShopProvider = EntityShop;
     type ProductProvider = EntityService;
     type EntityToken = EntityTokenPallet;
@@ -65,7 +63,6 @@ impl pallet_entity_order::Config for Runtime {
 |------|------|
 | `Currency` | 货币类型 |
 | `Escrow` | Escrow 托管接口（lock_from / transfer_from_escrow / refund_all） |
-| `EntityProvider` | Entity 查询 |
 | `ShopProvider` | Shop 查询 + 统计更新 |
 | `ProductProvider` | 商品查询 + 库存管理 |
 | `EntityToken` | 积分抵扣 + 购物奖励 |
@@ -79,10 +76,10 @@ impl pallet_entity_order::Config for Runtime {
 
 ## 数据结构
 
-### MallOrder
+### Order
 
 ```rust
-pub struct MallOrder<AccountId, Balance, BlockNumber, MaxCidLen: Get<u32>> {
+pub struct Order<AccountId, Balance, BlockNumber, MaxCidLen: Get<u32>> {
     pub id: u64,
     pub shop_id: u64,
     pub product_id: u64,
@@ -96,7 +93,7 @@ pub struct MallOrder<AccountId, Balance, BlockNumber, MaxCidLen: Get<u32>> {
     pub requires_shipping: bool,
     pub shipping_cid: Option<BoundedVec<u8, MaxCidLen>>,
     pub tracking_cid: Option<BoundedVec<u8, MaxCidLen>>,
-    pub status: MallOrderStatus,
+    pub status: OrderStatus,
     pub created_at: BlockNumber,
     pub paid_at: Option<BlockNumber>,
     pub shipped_at: Option<BlockNumber>,
@@ -107,7 +104,7 @@ pub struct MallOrder<AccountId, Balance, BlockNumber, MaxCidLen: Get<u32>> {
 }
 ```
 
-### MallOrderStatus（定义于 pallet-entity-common）
+### OrderStatus（定义于 pallet-entity-common）
 
 | 状态 | 说明 |
 |------|------|
@@ -152,7 +149,7 @@ pub struct OrderStatistics<Balance: Default> {
 | 3 | `confirm_receipt(order_id)` | 买家 | 确认收货，释放资金 |
 | 4 | `request_refund(order_id, reason_cid)` | 买家 | 申请退款，状态 → Disputed |
 | 5 | `approve_refund(order_id)` | 卖家 | 同意退款，全额退回买家，通知佣金取消 |
-| 6 | `start_service(order_id)` | 卖家 | 开始服务（仅 Service 类） |
+| 6 | `start_service(order_id)` | 卖家 | 开始服务（仅 Service 类），写入 ServiceConfirmTimeout 超时队列 |
 | 7 | `complete_service(order_id)` | 卖家 | 标记服务完成（仅 Service 类） |
 | 8 | `confirm_service(order_id)` | 买家 | 确认服务完成，释放资金 |
 
@@ -187,7 +184,8 @@ pub struct OrderStatistics<Balance: Default> {
 |------|----------|----------|
 | 发货超时 | `ShipTimeout` | 退款给买家，恢复库存 |
 | 确认超时 | `ConfirmTimeout` | 自动确认收货，释放资金 |
-| 服务开始超时 | `ShipTimeout` | 退款给买家 |
+| 服务开始超时 | `ShipTimeout` | 退款给买家（卖家未开始服务） |
+| 服务完成超时 | `ServiceConfirmTimeout` | 退款给买家（卖家已开始但未完成服务） |
 | 服务确认超时 | `ServiceConfirmTimeout` | 自动确认服务，释放资金 |
 
 - 每次 `on_idle` 最多处理 20 个订单
@@ -278,9 +276,9 @@ impl OrderProvider<AccountId, Balance> for Pallet<T> {
 
 ```bash
 cargo test -p pallet-entity-order
-# 29 tests: place_order(6), cancel(4), ship(2), confirm(2), refund(4),
-#           service(3), timeout(3), OrderProvider(1), stats(1), fee(1),
-#           genesis(1), integrity(1)
+# 56 tests: place_order(6), cancel(4), ship(2), confirm(2), refund(4),
+#           service(5), timeout(3), OrderProvider(1), stats(1), fee(1),
+#           member(3), token(8), audit_regression(5), expiry_queue(1)
 ```
 
 ## 版本历史
@@ -290,6 +288,7 @@ cargo test -p pallet-entity-order
 | v0.1.0 | 2026-01-31 | 从 pallet-mall 拆分，初始版本 |
 | v0.1.1 | 2026-02-05 | 重命名为 pallet-entity-order，适配 Entity-Shop 分离架构 |
 | v0.2.0 | 2026-02-09 | 深度审查修复：积分抵扣零额校验、佣金取消通知、DecodeWithMemTracking、ExpiryQueue 溢出保护、Weight 修正、服务类库存恢复、创建 mock + 29 个测试 |
+| v0.3.0 | 2026-03-04 | 深度审计修复：库存零值校验(H2)、空物流CID校验(H3)、服务超时保护(H4)、reward_on_purchase entity_id修复(M3)、log/std features(M2)、README数据结构名称更正(M4/M5) + 56 个测试 |
 
 ## 许可证
 

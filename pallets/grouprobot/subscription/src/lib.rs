@@ -140,6 +140,10 @@ pub mod pallet {
 	pub type AdCommitments<T: Config> =
 		StorageMap<_, Blake2_128Concat, BotIdHash, AdCommitmentRecord<T>>;
 
+	/// M5: 广告承诺结算游标
+	#[pallet::storage]
+	pub type AdCommitmentSettleCursor<T: Config> = StorageValue<_, BotIdHash>;
+
 	// ========================================================================
 	// Events
 	// ========================================================================
@@ -205,6 +209,10 @@ pub mod pallet {
 		AdCommitmentAlreadyCancelled,
 		/// 承诺广告数不足 (未达 Basic 阈值)
 		CommitmentBelowMinimum,
+		/// 充值金额不能为零
+		ZeroDepositAmount,
+		/// 订阅未处于活跃状态 (已取消或已暂停)
+		SubscriptionNotActive,
 	}
 
 	// ========================================================================
@@ -264,6 +272,7 @@ pub mod pallet {
 			amount: BalanceOf<T>,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
+			ensure!(!amount.is_zero(), Error::<T>::ZeroDepositAmount);
 			let sub = Subscriptions::<T>::get(&bot_id_hash).ok_or(Error::<T>::SubscriptionNotFound)?;
 			ensure!(sub.status != SubscriptionStatus::Cancelled, Error::<T>::SubscriptionAlreadyCancelled);
 			ensure!(sub.owner == who, Error::<T>::NotSubscriptionOwner);
@@ -273,13 +282,16 @@ pub mod pallet {
 				*escrow = escrow.saturating_add(amount);
 			});
 
-			// 如果是 PastDue/Suspended，重新激活
+			// M1-fix: 仅在充值后余额覆盖至少一个 Era 费用时才重新激活
 			if sub.status == SubscriptionStatus::PastDue || sub.status == SubscriptionStatus::Suspended {
-				Subscriptions::<T>::mutate(&bot_id_hash, |maybe_sub| {
-					if let Some(s) = maybe_sub {
-						s.status = SubscriptionStatus::Active;
-					}
-				});
+				let new_escrow = SubscriptionEscrow::<T>::get(&bot_id_hash);
+				if new_escrow >= sub.fee_per_era {
+					Subscriptions::<T>::mutate(&bot_id_hash, |maybe_sub| {
+						if let Some(s) = maybe_sub {
+							s.status = SubscriptionStatus::Active;
+						}
+					});
+				}
 			}
 
 			Self::deposit_event(Event::SubscriptionDeposited { bot_id_hash, amount });
@@ -326,12 +338,12 @@ pub mod pallet {
 			}
 			if !prorated_fee.is_zero() {
 				let treasury = T::TreasuryAccount::get();
-				let _ = T::Currency::transfer(
+				T::Currency::transfer(
 					&who,
 					&treasury,
 					prorated_fee,
 					ExistenceRequirement::AllowDeath,
-				);
+				).map_err(|_| Error::<T>::SubscriptionFeeTransferFailed)?;
 			}
 
 			Self::deposit_event(Event::SubscriptionCancelledWithProration {
@@ -355,6 +367,10 @@ pub mod pallet {
 			Subscriptions::<T>::try_mutate(&bot_id_hash, |maybe_sub| -> DispatchResult {
 				let sub = maybe_sub.as_mut().ok_or(Error::<T>::SubscriptionNotFound)?;
 				ensure!(sub.owner == who, Error::<T>::NotBotOwner);
+				ensure!(
+					matches!(sub.status, SubscriptionStatus::Active | SubscriptionStatus::PastDue),
+					Error::<T>::SubscriptionNotActive
+				);
 				ensure!(sub.tier != new_tier, Error::<T>::SameTier);
 
 				let old_tier = sub.tier;
@@ -392,6 +408,8 @@ pub mod pallet {
 				Error::<T>::NotBotOwner
 			);
 			ensure!(!AdCommitments::<T>::contains_key(&bot_id_hash), Error::<T>::AdCommitmentAlreadyExists);
+			// L1-fix: 与 subscribe 一致, 要求 Bot 已分配运营者
+			ensure!(T::BotRegistry::bot_operator(&bot_id_hash).is_some(), Error::<T>::BotHasNoOperator);
 
 			let tier = Self::ads_to_tier(committed_ads_per_era);
 			ensure!(tier.is_paid(), Error::<T>::CommitmentBelowMinimum);
@@ -525,7 +543,8 @@ pub mod pallet {
 			let mut last_key: Option<BotIdHash> = None;
 			for (bot_hash, sub) in iter {
 				if settled >= max_settle {
-					last_key = Some(bot_hash);
+					// C1-fix: 不更新 last_key — cursor 应保持为最后已处理的 key
+					// iter_from 从给定 key 之后开始, 若设为未处理 key 则该条目被永久跳过
 					SubscriptionSettlePending::<T>::put(true);
 					break;
 				}
@@ -552,24 +571,32 @@ pub mod pallet {
 					let node_recipient = T::BotRegistry::bot_operator(&sub.bot_id_hash)
 						.unwrap_or_else(|| reward_pool.clone());
 
-					let _ = T::Currency::transfer(
+					// H3-fix: 检查转账结果, 转账失败则不计入收入
+					let node_ok = T::Currency::transfer(
 						&sub.owner,
 						&node_recipient,
 						node_share,
 						ExistenceRequirement::AllowDeath,
-					);
-					let _ = T::Currency::transfer(
+					).is_ok();
+					let treasury_ok = T::Currency::transfer(
 						&sub.owner,
 						&treasury,
 						treasury_share,
 						ExistenceRequirement::AllowDeath,
-					);
-					subscription_income = subscription_income.saturating_add(sub.fee_per_era);
-
-					Self::deposit_event(Event::SubscriptionFeeCollected {
-						bot_id_hash: sub.bot_id_hash,
-						amount: sub.fee_per_era,
-					});
+					).is_ok();
+					if node_ok && treasury_ok {
+						subscription_income = subscription_income.saturating_add(sub.fee_per_era);
+						// H1-fix: 仅在转账成功时发出事件
+						Self::deposit_event(Event::SubscriptionFeeCollected {
+							bot_id_hash: sub.bot_id_hash,
+							amount: sub.fee_per_era,
+						});
+					} else {
+						log::warn!(
+							"⚠️ Subscription fee transfer failed for bot {:?}: node_ok={}, treasury_ok={}",
+							sub.bot_id_hash, node_ok, treasury_ok,
+						);
+					}
 				} else {
 					let bot_hash_inner = sub.bot_id_hash;
 					Subscriptions::<T>::mutate(&bot_hash_inner, |maybe_sub| {
@@ -602,11 +629,26 @@ pub mod pallet {
 		/// - 未达标: underdelivery_eras++, 超过阈值则降级为 Cancelled
 		pub fn settle_ad_commitments() {
 			let max_underdelivery = T::MaxUnderdeliveryEras::get();
+			// M5-fix: 游标分页, 复用 MaxSubscriptionSettlePerEra 限制
+			let max_settle = T::MaxSubscriptionSettlePerEra::get();
+			let mut settled = 0u32;
 
-			let all_commitments: alloc::vec::Vec<(BotIdHash, AdCommitmentRecord<T>)> =
-				AdCommitments::<T>::iter().collect();
+			let iter = match AdCommitmentSettleCursor::<T>::get() {
+				Some(cursor) => AdCommitments::<T>::iter_from(
+					AdCommitments::<T>::hashed_key_for(&cursor),
+				),
+				None => AdCommitments::<T>::iter(),
+			};
 
-			for (bot_hash, record) in all_commitments {
+			let mut last_key: Option<BotIdHash> = None;
+			for (bot_hash, record) in iter {
+				if settled >= max_settle {
+					// C1-fix: 不更新 last_key, 避免跳过未处理条目
+					break;
+				}
+				settled += 1;
+				last_key = Some(bot_hash);
+
 				if record.status == AdCommitmentStatus::Cancelled {
 					continue;
 				}
@@ -659,6 +701,13 @@ pub mod pallet {
 
 				// 重置社区投放计数
 				T::AdDelivery::reset_era_deliveries(&record.community_id_hash);
+			}
+
+			// M5-fix: 更新游标
+			if settled < max_settle {
+				AdCommitmentSettleCursor::<T>::kill();
+			} else if let Some(key) = last_key {
+				AdCommitmentSettleCursor::<T>::put(key);
 			}
 		}
 	}

@@ -228,11 +228,13 @@ impl pallet_commission_core::Config for Test {
     type EntityProvider = MockEntityProvider;
     type MemberProvider = MockMemberProvider;
     type ReferralPlugin = ();
+    type MultiLevelPlugin = ();
     type LevelDiffPlugin = ();
     type SingleLinePlugin = ();
     type TeamPlugin = ();
     type EntityReferrerProvider = MockEntityReferrerProvider;
     type ReferralWriter = ();
+    type MultiLevelWriter = ();
     type LevelDiffWriter = ();
     type TeamWriter = ();
     type PoolRewardWriter = ();
@@ -246,6 +248,7 @@ impl pallet_commission_core::Config for Test {
     type PoolRewardWithdrawCooldown = PoolRewardWithdrawCooldown;
     type TokenBalance = u128;
     type TokenReferralPlugin = ();
+    type TokenMultiLevelPlugin = ();
     type TokenLevelDiffPlugin = ();
     type TokenSingleLinePlugin = ();
     type TokenTeamPlugin = ();

@@ -210,13 +210,13 @@ pub mod pallet {
                 let threshold_u128: u128 =
                     sp_runtime::SaturatedConversion::saturated_into(tier.sales_threshold);
 
-                if total_spent >= threshold_u128
-                    && (tier.min_team_size == 0 || team_size >= tier.min_team_size)
-                {
-                    matched_rate = Some(tier.rate);
-                } else {
-                    // 阶梯是升序的，一旦不满足更高档位就可以停了
+                // TM-M1 审计修复: 仅在 sales_threshold 不满足时 break（阶梯升序保证）。
+                // min_team_size 不要求单调递增，跳过但不 break，以免遗漏更高档位。
+                if total_spent < threshold_u128 {
                     break;
+                }
+                if tier.min_team_size == 0 || team_size >= tier.min_team_size {
+                    matched_rate = Some(tier.rate);
                 }
             }
 
@@ -444,6 +444,23 @@ impl<T: pallet::Config> pallet_commission_common::TeamPlanWriter<pallet::Balance
         allow_stacking: bool,
         threshold_mode: u8,
     ) -> Result<(), sp_runtime::DispatchError> {
+        // TM-M2 审计修复: PlanWriter 路径与 extrinsic 一致的参数校验
+        frame_support::ensure!(!tiers.is_empty(), sp_runtime::DispatchError::Other("EmptyTiers"));
+        frame_support::ensure!(
+            max_depth > 0 && max_depth <= 30,
+            sp_runtime::DispatchError::Other("InvalidMaxDepth")
+        );
+        for &(_, _, rate) in tiers.iter() {
+            frame_support::ensure!(rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
+        }
+        // 校验阶梯门槛严格递增
+        for window in tiers.windows(2) {
+            frame_support::ensure!(
+                window[1].0 > window[0].0,
+                sp_runtime::DispatchError::Other("TiersNotAscending")
+            );
+        }
+
         let bounded: frame_support::BoundedVec<
             pallet::TeamPerformanceTier<pallet::BalanceOf<T>>,
             T::MaxTeamTiers,
@@ -996,6 +1013,91 @@ mod tests {
 
             // USDT 1_000_000 < 2_000_000 threshold → no match despite huge NEX spent
             assert!(outputs.is_empty());
+        });
+    }
+
+    // ====================================================================
+    // TM-M1: match_tier non-monotonic min_team_size
+    // ====================================================================
+
+    #[test]
+    fn tm_m1_non_monotonic_team_size_matches_higher_tier() {
+        new_test_ext().execute_with(|| {
+            clear_thread_locals();
+            setup_chain(1);
+            // account 40: high spent, moderate team_size
+            // Fails tier0 (min_team_size=50) but matches tier1 (min_team_size=5)
+            set_stats(1, 40, 3, 10, 20000);
+
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 50, rate: 100 },
+                pallet::TeamPerformanceTier { sales_threshold: 5000, min_team_size: 5, rate: 300 },
+            ];
+            assert_ok!(CommissionTeam::set_team_performance_config(
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false, pallet::SalesThresholdMode::Nex,
+            ));
+
+            use pallet_commission_common::CommissionPlugin;
+            let modes = CommissionModes(CommissionModes::TEAM_PERFORMANCE);
+            let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+                1, &50, 10000, 10000, modes, false, 0,
+            );
+
+            // Before fix: would break at tier0 (team_size fail), never check tier1
+            // After fix: skips tier0, matches tier1 (rate=300)
+            assert_eq!(outputs.len(), 1);
+            assert_eq!(outputs[0].beneficiary, 40);
+            assert_eq!(outputs[0].amount, 300); // 10000 * 300 / 10000
+            assert_eq!(remaining, 9700);
+        });
+    }
+
+    // ====================================================================
+    // TM-M2: PlanWriter validation
+    // ====================================================================
+
+    #[test]
+    fn tm_m2_plan_writer_rejects_empty_tiers() {
+        new_test_ext().execute_with(|| {
+            use pallet_commission_common::TeamPlanWriter;
+            assert!(<pallet::Pallet<Test> as TeamPlanWriter<Balance>>::set_team_config(
+                1, vec![], 5, false, 0,
+            ).is_err());
+        });
+    }
+
+    #[test]
+    fn tm_m2_plan_writer_rejects_invalid_rate() {
+        new_test_ext().execute_with(|| {
+            use pallet_commission_common::TeamPlanWriter;
+            assert!(<pallet::Pallet<Test> as TeamPlanWriter<Balance>>::set_team_config(
+                1, vec![(1000, 5, 10001)], 5, false, 0,
+            ).is_err());
+        });
+    }
+
+    #[test]
+    fn tm_m2_plan_writer_rejects_invalid_depth() {
+        new_test_ext().execute_with(|| {
+            use pallet_commission_common::TeamPlanWriter;
+            // depth=0
+            assert!(<pallet::Pallet<Test> as TeamPlanWriter<Balance>>::set_team_config(
+                1, vec![(1000, 5, 200)], 0, false, 0,
+            ).is_err());
+            // depth=31
+            assert!(<pallet::Pallet<Test> as TeamPlanWriter<Balance>>::set_team_config(
+                1, vec![(1000, 5, 200)], 31, false, 0,
+            ).is_err());
+        });
+    }
+
+    #[test]
+    fn tm_m2_plan_writer_rejects_non_ascending_thresholds() {
+        new_test_ext().execute_with(|| {
+            use pallet_commission_common::TeamPlanWriter;
+            assert!(<pallet::Pallet<Test> as TeamPlanWriter<Balance>>::set_team_config(
+                1, vec![(5000, 0, 200), (1000, 0, 100)], 5, false, 0,
+            ).is_err());
         });
     }
 }

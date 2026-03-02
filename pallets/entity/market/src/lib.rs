@@ -228,6 +228,8 @@ pub mod pallet {
         DepositForfeit,
         /// 验证奖励发放
         VerificationReward,
+        /// 队列 push 失败（交易可能脱离跟踪队列）
+        QueuePushFailed,
     }
 
     // ==================== Phase 4: 订单簿深度数据结构 ====================
@@ -2191,7 +2193,9 @@ pub mod pallet {
 
                     // 从 PendingUsdtTrades 移到 PendingUnderpaidTrades
                     PendingUsdtTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
-                    let _ = PendingUnderpaidTrades::<T>::try_mutate(|p| { p.try_push(trade_id) });
+                    if PendingUnderpaidTrades::<T>::try_mutate(|p| { p.try_push(trade_id) }).is_err() {
+                        Self::deposit_event(Event::MarketOperationFailed { trade_id, operation: MarketOperation::QueuePushFailed });
+                    }
 
                     OcwVerificationResults::<T>::insert(trade_id, (verification_result, actual_amount));
 
@@ -2278,7 +2282,9 @@ pub mod pallet {
                 UsdtTrades::<T>::insert(trade_id, &trade);
 
                 PendingUnderpaidTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
-                let _ = PendingUsdtTrades::<T>::try_mutate(|p| { p.try_push(trade_id) });
+                if PendingUsdtTrades::<T>::try_mutate(|p| { p.try_push(trade_id) }).is_err() {
+                    Self::deposit_event(Event::MarketOperationFailed { trade_id, operation: MarketOperation::QueuePushFailed });
+                }
             }
 
             Ok(())

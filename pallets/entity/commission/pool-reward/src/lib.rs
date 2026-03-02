@@ -17,7 +17,9 @@
 
 extern crate alloc;
 
+pub mod weights;
 pub use pallet::*;
+pub use weights::WeightInfo;
 
 #[frame_support::pallet]
 pub mod pallet {
@@ -30,6 +32,7 @@ pub mod pallet {
     use pallet_commission_common::{
         MemberProvider, PoolBalanceProvider, TokenPoolBalanceProvider,
         TokenTransferProvider as TokenTransferProviderT,
+        ParticipationGuard,
     };
     use pallet_entity_common::EntityProvider;
     use sp_runtime::traits::{Saturating, Zero};
@@ -159,6 +162,13 @@ pub mod pallet {
 
         /// Token 转账接口（entity_id 级）
         type TokenTransferProvider: TokenTransferProviderT<Self::AccountId, TokenBalanceOf<Self>>;
+
+        /// Entity 参与权守卫（KYC / 合规检查）
+        /// 默认使用 `()` 允许所有操作（无 KYC 要求）
+        type ParticipationGuard: ParticipationGuard<Self::AccountId>;
+
+        /// 权重信息（L1 审计修复: 替换硬编码 Weight）
+        type WeightInfo: WeightInfo;
     }
 
     #[pallet::pallet]
@@ -185,6 +195,11 @@ pub mod pallet {
         Blake2_128Concat, u64,
         RoundInfoOf<T>,
     >;
+
+    /// 上一轮次 ID（配置变更后保留，用于保持 round_id 单调递增）
+    /// M2-R3 审计修复: 消除 set_pool_reward_config 中的 clear_prefix(LastClaimedRound)
+    #[pallet::storage]
+    pub type LastRoundId<T: Config> = StorageMap<_, Blake2_128Concat, u64, u64, ValueQuery>;
 
     /// 用户最后领取的轮次 ID（防双领）
     #[pallet::storage]
@@ -237,6 +252,12 @@ pub mod pallet {
         TokenPoolEnabledUpdated { entity_id: u64, enabled: bool },
         /// 管理员强制开启新轮次
         RoundForced { entity_id: u64, round_id: u64 },
+        /// Token 回滚转账失败（可能导致 token 泄漏，需人工干预）
+        TokenTransferRollbackFailed {
+            entity_id: u64,
+            account: T::AccountId,
+            amount: TokenBalanceOf<T>,
+        },
     }
 
     #[pallet::error]
@@ -265,10 +286,14 @@ pub mod pallet {
         InsufficientPool,
         /// Entity 未配置沉淀池奖励
         ConfigNotFound,
+        /// Entity 不存在或未激活
+        EntityNotActive,
         /// 等级未在快照中
         LevelNotInSnapshot,
         /// round_id 已达 u64::MAX，无法创建新轮次
         RoundIdOverflow,
+        /// 账户未满足 Entity 参与要求（如 KYC）
+        ParticipationRequirementNotMet,
     }
 
     // ========================================================================
@@ -279,7 +304,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// 设置沉淀池奖励配置（Root / Governance）
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(45_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_pool_reward_config())]
         pub fn set_pool_reward_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -302,22 +327,36 @@ pub mod pallet {
                 token_pool_enabled,
             });
 
+            // H2 审计修复: 配置变更时使当前轮次失效，强制下次 claim 创建新快照
+            // M2-R3 审计修复: 用 invalidate_current_round 保持 round_id 单调递增，
+            //   消除 clear_prefix(LastClaimedRound) 的 O(n) 无界写入
+            Self::invalidate_current_round(entity_id);
+
             Self::deposit_event(Event::PoolRewardConfigUpdated { entity_id });
             Ok(())
         }
 
         /// 用户领取沉淀池奖励（NEX + Token 双池统一入口）
         #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::claim_pool_reward())]
         pub fn claim_pool_reward(
             origin: OriginFor<T>,
             entity_id: u64,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
+            // M2 审计修复: Entity 激活状态检查（Banned/Closed Entity 不应分配池奖励）
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+
             // 1. 资格检查
             ensure!(T::MemberProvider::is_member(entity_id, &who), Error::<T>::NotMember);
             ensure!(T::MemberProvider::is_activated(entity_id, &who), Error::<T>::MemberNotActivated);
+
+            // PR-H1 审计修复: 池奖励领取需检查参与权（与 withdraw_commission 一致）
+            ensure!(
+                T::ParticipationGuard::can_participate(entity_id, &who),
+                Error::<T>::ParticipationRequirementNotMet
+            );
 
             let config = PoolRewardConfigs::<T>::get(entity_id)
                 .ok_or(Error::<T>::ConfigNotFound)?;
@@ -352,14 +391,17 @@ pub mod pallet {
                 r
             };
 
-            // 6. NEX 池偿付检查 + 转账
+            // 6. NEX 池偿付：先扣记账、后转实物
             let pool = T::PoolBalanceProvider::pool_balance(entity_id);
             ensure!(pool >= reward, Error::<T>::InsufficientPool);
+            // M3-R2 审计修复: deduct_pool 在 transfer 之前，符合「先扣记账、后转实物」最佳实践
+            T::PoolBalanceProvider::deduct_pool(entity_id, reward)?;
             let entity_account = T::EntityProvider::entity_account(entity_id);
             T::Currency::transfer(&entity_account, &who, reward, ExistenceRequirement::KeepAlive)?;
 
             // 7. Token 部分（best-effort：失败不影响 NEX 领取）
-            // M3 审计修复: deduct_token_pool 失败时回滚转账，保持池余额一致性
+            // 注：Token 采用 transfer-first 顺序，因为 best-effort 路径不走 `?`
+            //     不会触发 Substrate 事务回滚，且无 "add_back" 接口回滚记账扣减
             let mut token_reward = TokenBalanceOf::<T>::default();
             if let Some(ref mut token_snapshots) = round.token_level_snapshots {
                 if let Some(token_snap) = token_snapshots.iter_mut().find(|s| s.level_id == user_level) {
@@ -377,9 +419,15 @@ pub mod pallet {
                                     token_reward = tr;
                                 } else {
                                     // 池扣减失败，回滚转账
-                                    let _ = T::TokenTransferProvider::token_transfer(
+                                    if T::TokenTransferProvider::token_transfer(
                                         entity_id, &who, &entity_account, tr,
-                                    );
+                                    ).is_err() {
+                                        Self::deposit_event(Event::TokenTransferRollbackFailed {
+                                            entity_id,
+                                            account: who.clone(),
+                                            amount: tr,
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -388,7 +436,6 @@ pub mod pallet {
             }
 
             // 8. 状态更新
-            T::PoolBalanceProvider::deduct_pool(entity_id, reward)?;
             let round_id = round.round_id;
             round.level_snapshots[nex_snap_idx].claimed_count += 1;
             CurrentRound::<T>::insert(entity_id, round);
@@ -423,7 +470,7 @@ pub mod pallet {
 
         /// 强制开启新轮次（Root）
         #[pallet::call_index(2)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::force_new_round())]
         pub fn force_new_round(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -446,18 +493,27 @@ pub mod pallet {
 
         /// 启用/禁用 Entity Token 池分配（Root）
         #[pallet::call_index(3)]
-        #[pallet::weight(Weight::from_parts(30_000_000, 3_000))]
+        #[pallet::weight(T::WeightInfo::set_token_pool_enabled())]
         pub fn set_token_pool_enabled(
             origin: OriginFor<T>,
             entity_id: u64,
             enabled: bool,
         ) -> DispatchResult {
             ensure_root(origin)?;
+            let mut changed = false;
             PoolRewardConfigs::<T>::try_mutate(entity_id, |maybe| -> DispatchResult {
                 let config = maybe.as_mut().ok_or(Error::<T>::ConfigNotFound)?;
-                config.token_pool_enabled = enabled;
+                if config.token_pool_enabled != enabled {
+                    config.token_pool_enabled = enabled;
+                    changed = true;
+                }
                 Ok(())
             })?;
+            // M1-R3 审计修复: token 启用/禁用立即生效，使当前轮次失效
+            // L1-R4 审计修复: 仅在值实际变更时才失效轮次，避免幂等调用浪费快照
+            if changed {
+                Self::invalidate_current_round(entity_id);
+            }
             Self::deposit_event(Event::TokenPoolEnabledUpdated { entity_id, enabled });
             Ok(())
         }
@@ -468,11 +524,21 @@ pub mod pallet {
     // ========================================================================
 
     impl<T: Config> Pallet<T> {
+        /// M2-R3 审计修复: 使当前轮次失效，保留 round_id 到 LastRoundId 保持单调递增
+        pub(crate) fn invalidate_current_round(entity_id: u64) {
+            if let Some(round) = CurrentRound::<T>::get(entity_id) {
+                LastRoundId::<T>::insert(entity_id, round.round_id);
+            }
+            CurrentRound::<T>::remove(entity_id);
+        }
+
         /// 校验等级比率配置：无重复 level_id、每个 ratio ∈ (0, 10000]、总和 = 10000
         pub(crate) fn validate_level_ratios(ratios: &[(u8, u16)]) -> DispatchResult {
-            for i in 0..ratios.len() {
-                for j in (i + 1)..ratios.len() {
-                    ensure!(ratios[i].0 != ratios[j].0, Error::<T>::DuplicateLevelId);
+            // M1 审计修复: O(n log n) BTreeSet 替代 O(n²) 嵌套循环
+            {
+                let mut seen_ids = alloc::collections::BTreeSet::new();
+                for (level_id, _) in ratios.iter() {
+                    ensure!(seen_ids.insert(*level_id), Error::<T>::DuplicateLevelId);
                 }
             }
             let mut sum: u16 = 0;
@@ -501,12 +567,15 @@ pub mod pallet {
                 } else {
                     Zero::zero()
                 };
-                let _ = snapshots.try_push(LevelSnapshot {
+                // M2 审计修复: try_push 失败时触发 defensive（不应发生，边界与 config 一致）
+                if snapshots.try_push(LevelSnapshot {
                     level_id,
                     member_count: count,
                     per_member_reward: per_member,
                     claimed_count: 0,
-                });
+                }).is_err() {
+                    frame_support::defensive!("pool-reward: snapshot overflow in build_level_snapshots");
+                }
             }
             snapshots
         }
@@ -535,7 +604,7 @@ pub mod pallet {
             let pool_balance = T::PoolBalanceProvider::pool_balance(entity_id);
             let old_round_id = CurrentRound::<T>::get(entity_id)
                 .map(|r| r.round_id)
-                .unwrap_or(0);
+                .unwrap_or_else(|| LastRoundId::<T>::get(entity_id));
 
             // M1 审计修复: 防止 round_id 在 u64::MAX 时 saturating_add(1) 不变导致重复 ID
             frame_support::ensure!(old_round_id < u64::MAX, Error::<T>::RoundIdOverflow);
@@ -614,24 +683,49 @@ impl<T: pallet::Config> pallet_commission_common::PoolRewardPlanWriter for palle
             round_duration: rd,
             token_pool_enabled,
         });
+
+        // M2-R3 审计修复: 用 invalidate_current_round 保持 round_id 单调递增
+        pallet::Pallet::<T>::invalidate_current_round(entity_id);
+
+        // L1-R3 审计修复: PlanWriter 路径也需 emit 事件，供 off-chain indexer 感知
+        Self::deposit_event(pallet::Event::PoolRewardConfigUpdated { entity_id });
+
         Ok(())
     }
 
+    /// L2-R4 注意: clear_prefix(u32::MAX) 写入量 O(n)，n = entity 下会员数。
+    /// 调用方（如 governance pallet）需在自身 weight 中计入此开销。
+    /// 此操作仅在 Entity 完全删除/停用时调用，频率极低，故保留。
     fn clear_config(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
         pallet::PoolRewardConfigs::<T>::remove(entity_id);
         pallet::CurrentRound::<T>::remove(entity_id);
+        pallet::LastRoundId::<T>::remove(entity_id);
         // H3: clear LastClaimedRound and ClaimRecords for this entity
         let _ = pallet::LastClaimedRound::<T>::clear_prefix(entity_id, u32::MAX, None);
         let _ = pallet::ClaimRecords::<T>::clear_prefix(entity_id, u32::MAX, None);
+        // L1-R3 审计修复: emit 事件
+        Self::deposit_event(pallet::Event::PoolRewardConfigUpdated { entity_id });
         Ok(())
     }
 
     fn set_token_pool_enabled(entity_id: u64, enabled: bool) -> Result<(), sp_runtime::DispatchError> {
+        let mut changed = false;
         pallet::PoolRewardConfigs::<T>::try_mutate(entity_id, |maybe| -> Result<(), sp_runtime::DispatchError> {
             let config = maybe.as_mut().ok_or(sp_runtime::DispatchError::Other("ConfigNotFound"))?;
-            config.token_pool_enabled = enabled;
+            if config.token_pool_enabled != enabled {
+                config.token_pool_enabled = enabled;
+                changed = true;
+            }
             Ok(())
-        })
+        })?;
+        // M1-R3 审计修复: token 启用/禁用立即生效
+        // L1-R4 审计修复: 仅在值实际变更时才失效轮次
+        if changed {
+            pallet::Pallet::<T>::invalidate_current_round(entity_id);
+        }
+        // L1-R3 审计修复: emit 事件
+        Self::deposit_event(pallet::Event::TokenPoolEnabledUpdated { entity_id, enabled });
+        Ok(())
     }
 }
 

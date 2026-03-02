@@ -15,6 +15,7 @@ pub use pallet::*;
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
+    use alloc::collections::BTreeSet;
     use alloc::vec::Vec;
     use frame_support::{
         pallet_prelude::*,
@@ -96,6 +97,7 @@ pub mod pallet {
     pub enum Error<T> {
         InvalidRate,
         InvalidMaxDepth,
+        EmptyLevelRates,
     }
 
     // ========================================================================
@@ -117,6 +119,7 @@ pub mod pallet {
         ) -> DispatchResult {
             ensure_root(origin)?;
 
+            ensure!(!level_rates.is_empty(), Error::<T>::EmptyLevelRates);
             for rate in level_rates.iter() {
                 ensure!(*rate <= 10000, Error::<T>::InvalidRate);
             }
@@ -143,7 +146,7 @@ pub mod pallet {
             order_amount: BalanceOf<T>,
             remaining: &mut BalanceOf<T>,
             outputs: &mut Vec<CommissionOutput<T::AccountId, BalanceOf<T>>>,
-        ) {
+        ) where T::AccountId: Ord {
             let config = CustomLevelDiffConfigs::<T>::get(entity_id);
 
             let max_depth = config.as_ref().map(|c| c.max_depth).unwrap_or(10);
@@ -151,8 +154,11 @@ pub mod pallet {
             let mut current_referrer = T::MemberProvider::get_referrer(entity_id, buyer);
             let mut prev_rate: u16 = 0;
             let mut level: u8 = 0;
+            // H1 审计修复: 循环检测，防止推荐链有环时无限循环
+            let mut visited = BTreeSet::new();
 
             while let Some(ref referrer) = current_referrer {
+                if !visited.insert(referrer.clone()) { break; }
                 level += 1;
                 if level > max_depth { break; }
                 // M2 审计修复: 额度耗尽后提前退出，避免无意义的 storage read
@@ -236,6 +242,7 @@ impl<T: pallet::Config> pallet::Pallet<T> {
         outputs: &mut alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>,
     ) where
         TB: sp_runtime::traits::AtLeast32BitUnsigned + Copy,
+        T::AccountId: Ord,
     {
         let config = pallet::CustomLevelDiffConfigs::<T>::get(entity_id);
 
@@ -244,8 +251,11 @@ impl<T: pallet::Config> pallet::Pallet<T> {
         let mut current_referrer = T::MemberProvider::get_referrer(entity_id, buyer);
         let mut prev_rate: u16 = 0;
         let mut level: u8 = 0;
+        // H1 审计修复: 循环检测
+        let mut visited = alloc::collections::BTreeSet::new();
 
         while let Some(ref referrer) = current_referrer {
+            if !visited.insert(referrer.clone()) { break; }
             level += 1;
             if level > max_depth { break; }
             if remaining.is_zero() { break; }
@@ -327,6 +337,8 @@ impl<T: pallet::Config> pallet_commission_common::LevelDiffPlanWriter for pallet
             level_rates: bounded_rates,
             max_depth,
         });
+        // M1 审计修复: trait 路径也发出事件
+        pallet::Pallet::<T>::deposit_event(pallet::Event::LevelDiffConfigUpdated { entity_id });
         Ok(())
     }
 
@@ -921,6 +933,124 @@ mod tests {
 
             assert!(outputs.is_empty());
             assert_eq!(remaining, 10000);
+        });
+    }
+
+    // ========================================================================
+    // H1: 推荐链循环检测
+    // ========================================================================
+
+    #[test]
+    fn h1_referral_cycle_does_not_loop_forever() {
+        new_test_ext().execute_with(|| {
+            let entity_id = 1u64;
+
+            // 循环推荐链: 50 → 40 → 30 → 40 (cycle!)
+            REFERRERS.with(|r| {
+                let mut m = r.borrow_mut();
+                m.insert((entity_id, 50), 40);
+                m.insert((entity_id, 40), 30);
+                m.insert((entity_id, 30), 40); // cycle back to 40
+            });
+
+            CUSTOM_LEVEL_IDS.with(|c| {
+                let mut m = c.borrow_mut();
+                m.insert((entity_id, 40), 0);
+                m.insert((entity_id, 30), 1);
+            });
+
+            LEVEL_BONUSES.with(|l| {
+                let mut m = l.borrow_mut();
+                m.insert((entity_id, 0), 300);
+                m.insert((entity_id, 1), 600);
+            });
+
+            let mut remaining: Balance = 10000;
+            let mut outputs = alloc::vec::Vec::new();
+            pallet::Pallet::<Test>::process_level_diff(
+                entity_id, &50, 10000, &mut remaining, &mut outputs,
+            );
+
+            // 40: rate=300, diff=300 → 300
+            // 30: rate=600, diff=300 → 300
+            // 40 again → visited, break (cycle detected)
+            assert_eq!(outputs.len(), 2);
+            assert_eq!(outputs[0].beneficiary, 40);
+            assert_eq!(outputs[0].amount, 300);
+            assert_eq!(outputs[1].beneficiary, 30);
+            assert_eq!(outputs[1].amount, 300);
+            assert_eq!(remaining, 10000 - 600);
+        });
+    }
+
+    #[test]
+    fn h1_self_referral_cycle_breaks_immediately() {
+        new_test_ext().execute_with(|| {
+            let entity_id = 1u64;
+
+            // 自推荐: 50 → 40 → 40 (self-cycle)
+            REFERRERS.with(|r| {
+                let mut m = r.borrow_mut();
+                m.insert((entity_id, 50), 40);
+                m.insert((entity_id, 40), 40); // self-referral
+            });
+
+            CUSTOM_LEVEL_IDS.with(|c| c.borrow_mut().insert((entity_id, 40), 0));
+            LEVEL_BONUSES.with(|l| l.borrow_mut().insert((entity_id, 0), 500));
+
+            let mut remaining: Balance = 10000;
+            let mut outputs = alloc::vec::Vec::new();
+            pallet::Pallet::<Test>::process_level_diff(
+                entity_id, &50, 10000, &mut remaining, &mut outputs,
+            );
+
+            // 40: rate=500, diff=500 → 500
+            // 40 again → visited, break
+            assert_eq!(outputs.len(), 1);
+            assert_eq!(outputs[0].amount, 500);
+        });
+    }
+
+    // ========================================================================
+    // H2: 空 level_rates 拒绝
+    // ========================================================================
+
+    #[test]
+    fn h2_set_config_rejects_empty_level_rates() {
+        new_test_ext().execute_with(|| {
+            let empty_rates = frame_support::BoundedVec::try_from(vec![]).unwrap();
+            assert!(pallet::Pallet::<Test>::set_level_diff_config(
+                frame_system::RawOrigin::Root.into(), 1, empty_rates, 10,
+            ).is_err());
+
+            // 确认存储未被写入
+            assert!(pallet::CustomLevelDiffConfigs::<Test>::get(1).is_none());
+        });
+    }
+
+    // ========================================================================
+    // M1: trait 路径发出事件
+    // ========================================================================
+
+    #[test]
+    fn m1_set_level_rates_trait_emits_event() {
+        new_test_ext().execute_with(|| {
+            use pallet_commission_common::LevelDiffPlanWriter;
+            let entity_id = 42u64;
+
+            assert_ok!(<pallet::Pallet<Test> as LevelDiffPlanWriter>::set_level_rates(
+                entity_id, vec![100, 200], 5
+            ));
+
+            // 检查事件
+            let events = frame_system::Pallet::<Test>::events();
+            let found = events.iter().any(|e| {
+                matches!(
+                    e.event,
+                    RuntimeEvent::CommissionLevelDiff(pallet::Event::LevelDiffConfigUpdated { entity_id: 42 })
+                )
+            });
+            assert!(found, "LevelDiffConfigUpdated event should be emitted via trait path");
         });
     }
 }

@@ -30,17 +30,19 @@ impl SubscriptionProvider for MockSubscription {
 
 pub struct MockBotRegistry;
 impl BotRegistryProvider<u64> for MockBotRegistry {
-	fn is_bot_active(bot_id_hash: &BotIdHash) -> bool { bot_id_hash[0] == 1 }
+	fn is_bot_active(bot_id_hash: &BotIdHash) -> bool { bot_id_hash[0] <= 2 }
 	fn is_tee_node(_: &BotIdHash) -> bool { false }
 	fn has_dual_attestation(_: &BotIdHash) -> bool { false }
 	fn is_attestation_fresh(_: &BotIdHash) -> bool { false }
 	fn bot_owner(bot_id_hash: &BotIdHash) -> Option<u64> {
-		if bot_id_hash[0] == 1 { Some(OWNER) } else { None }
+		if bot_id_hash[0] <= 2 { Some(OWNER) } else { None }
 	}
-	fn bot_public_key(_: &BotIdHash) -> Option<[u8; 32]> { None }
+	fn bot_public_key(bot_id_hash: &BotIdHash) -> Option<[u8; 32]> {
+		if bot_id_hash[0] <= 2 { Some(test_public_key()) } else { None }
+	}
 	fn peer_count(_: &BotIdHash) -> u32 { 0 }
 	fn bot_operator(bot_id_hash: &BotIdHash) -> Option<u64> {
-		if bot_id_hash[0] == 1 { Some(OWNER) } else { None }
+		if bot_id_hash[0] <= 2 { Some(OWNER) } else { None }
 	}
 }
 
@@ -55,6 +57,36 @@ impl pallet_grouprobot_community::Config for Test {
 
 pub const OWNER: u64 = 1;
 pub const OTHER: u64 = 2;
+
+/// 测试用 Ed25519 密钥对 (确定性种子)
+use sp_core::ed25519;
+use sp_core::Pair;
+
+pub fn test_keypair() -> ed25519::Pair {
+	ed25519::Pair::from_seed(&[1u8; 32])
+}
+
+pub fn test_public_key() -> [u8; 32] {
+	test_keypair().public().0
+}
+
+/// 生成测试用 Ed25519 签名
+pub fn test_sign(
+	community_id_hash: &[u8; 32],
+	action_type: &pallet_grouprobot_primitives::ActionType,
+	target_hash: &[u8; 32],
+	sequence: u64,
+	message_hash: &[u8; 32],
+) -> [u8; 64] {
+	use codec::Encode;
+	let mut msg = Vec::with_capacity(32 + 4 + 32 + 8 + 32);
+	msg.extend_from_slice(community_id_hash);
+	msg.extend_from_slice(&action_type.encode());
+	msg.extend_from_slice(target_hash);
+	msg.extend_from_slice(&sequence.to_le_bytes());
+	msg.extend_from_slice(message_hash);
+	test_keypair().sign(&msg).0
+}
 
 pub fn community_hash(n: u8) -> CommunityIdHash {
 	let mut h = [0u8; 32];
