@@ -135,6 +135,7 @@ mod tests {
             message_type: None,
             callback_query_id: None,
             callback_data: None,
+            channel_id: None,
         }
     }
 
@@ -157,6 +158,7 @@ mod tests {
             message_type: None,
             callback_query_id: None,
             callback_data: None,
+            channel_id: None,
         }
     }
 

@@ -481,11 +481,11 @@ impl ProvisionState {
                     hasher.update(token.as_bytes());
                     let hash: [u8; 32] = hasher.finalize().into();
                     bot_id_hash = Some(hash);
-                    v.set_telegram_token(token);
+                    v.set_telegram_token(token.clone());
                     info!("Telegram Token 已注入 TokenVault (inprocess)");
                 }
                 "discord" => {
-                    v.set_discord_token(token);
+                    v.set_discord_token(token.clone());
                     info!("Discord Token 已注入 TokenVault (inprocess)");
                 }
                 "telegram_api" => {

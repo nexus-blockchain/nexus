@@ -18,6 +18,8 @@ pub struct PlatformEvent {
     pub content: Option<String>,
     pub raw_event: serde_json::Value,
     pub timestamp: u64,
+    /// 频道/会话 ID (Discord: channel_id, Telegram: chat_id = group_id)
+    pub channel_id: Option<String>,
 }
 
 /// 消息上下文 (规则引擎输入)
@@ -40,6 +42,8 @@ pub struct MessageContext {
     pub callback_query_id: Option<String>,
     /// CallbackQuery data
     pub callback_data: Option<String>,
+    /// 频道/会话 ID (Discord: channel_id, Telegram: chat_id = group_id)
+    pub channel_id: Option<String>,
 }
 
 /// 执行动作
@@ -55,6 +59,8 @@ pub struct ExecuteAction {
     pub inline_keyboard: Option<serde_json::Value>,
     /// CallbackQuery ID (用于 answerCallbackQuery)
     pub callback_query_id: Option<String>,
+    /// 频道/会话 ID (Discord: channel_id; Telegram: 与 group_id 相同)
+    pub channel_id: Option<String>,
 }
 
 /// 动作类型

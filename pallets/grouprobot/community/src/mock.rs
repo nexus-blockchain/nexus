@@ -39,6 +39,9 @@ impl BotRegistryProvider<u64> for MockBotRegistry {
 	}
 	fn bot_public_key(_: &BotIdHash) -> Option<[u8; 32]> { None }
 	fn peer_count(_: &BotIdHash) -> u32 { 0 }
+	fn bot_operator(bot_id_hash: &BotIdHash) -> Option<u64> {
+		if bot_id_hash[0] == 1 { Some(OWNER) } else { None }
+	}
 }
 
 impl pallet_grouprobot_community::Config for Test {

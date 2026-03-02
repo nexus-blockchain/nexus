@@ -33,7 +33,6 @@ pub mod pallet {
     };
     use frame_system::pallet_prelude::*;
     use pallet_entity_common::{EntityProvider, ShopProvider, MemberRegistrationPolicy, MemberStatsPolicy};
-    pub use pallet_entity_common::MemberLevel;
     use sp_runtime::traits::{Saturating, Zero};
 
     /// 货币余额类型别名
@@ -232,8 +231,6 @@ pub mod pallet {
         pub team_size: u32,
         /// 累计消费金额
         pub total_spent: Balance,
-        /// 会员等级（全局默认体系）
-        pub level: MemberLevel,
         /// 自定义等级 ID（店铺自定义体系，0 表示最低级）
         pub custom_level_id: u8,
         /// 加入时间
@@ -276,22 +273,6 @@ pub mod pallet {
         /// 最大自定义等级数量
         #[pallet::constant]
         type MaxCustomLevels: Get<u32>;
-
-        /// 银卡会员消费阈值（USDT，6位精度）
-        #[pallet::constant]
-        type SilverThreshold: Get<u64>;
-
-        /// 金卡会员消费阈值（USDT，6位精度）
-        #[pallet::constant]
-        type GoldThreshold: Get<u64>;
-
-        /// 白金会员消费阈值（USDT，6位精度）
-        #[pallet::constant]
-        type PlatinumThreshold: Get<u64>;
-
-        /// 钻石会员消费阈值（USDT，6位精度）
-        #[pallet::constant]
-        type DiamondThreshold: Get<u64>;
 
         /// 最大升级规则数量
         #[pallet::constant]
@@ -386,18 +367,6 @@ pub mod pallet {
         ValueQuery,
     >;
 
-    /// P3 修复: 会员累计消费 USDT (entity_id, account) -> total_spent_usdt
-    /// 独立存储避免 EntityMember 结构变更和存储迁移
-    #[pallet::storage]
-    #[pallet::getter(fn member_spent_usdt)]
-    pub type MemberSpentUsdt<T: Config> = StorageDoubleMap<
-        _,
-        Blake2_128Concat, u64,
-        Blake2_128Concat, T::AccountId,
-        u64,
-        ValueQuery,
-    >;
-
     /// 会员订单数量 (entity_id, account) -> order_count
     #[pallet::storage]
     #[pallet::getter(fn member_order_count)]
@@ -456,13 +425,6 @@ pub mod pallet {
             shop_id: u64,
             account: T::AccountId,
             referrer: T::AccountId,
-        },
-        /// 会员升级
-        MemberLevelUpgraded {
-            shop_id: u64,
-            account: T::AccountId,
-            old_level: MemberLevel,
-            new_level: MemberLevel,
         },
         /// 自定义等级升级
         CustomLevelUpgraded {
@@ -1167,12 +1129,12 @@ pub mod pallet {
             ensure!(!name.is_empty(), Error::<T>::EmptyRuleName);
 
             // H4 审计修复: 验证 target_level_id 对应的等级存在
-            if let Some(level_system) = EntityLevelSystems::<T>::get(entity_id) {
-                ensure!(
-                    (target_level_id as usize) < level_system.levels.len(),
-                    Error::<T>::InvalidTargetLevel
-                );
-            }
+            let level_system = EntityLevelSystems::<T>::get(entity_id)
+                .ok_or(Error::<T>::LevelSystemNotInitialized)?;
+            ensure!(
+                (target_level_id as usize) < level_system.levels.len(),
+                Error::<T>::InvalidTargetLevel
+            );
 
             EntityUpgradeRules::<T>::try_mutate(entity_id, |maybe_system| -> DispatchResult {
                 let system = maybe_system.as_mut().ok_or(Error::<T>::UpgradeRuleSystemNotInitialized)?;
@@ -1529,7 +1491,6 @@ pub mod pallet {
                 qualified_indirect_referrals: 0,
                 team_size: 0,
                 total_spent: Zero::zero(),
-                level: MemberLevel::Normal,
                 custom_level_id: 0,
                 joined_at: now,
                 last_active_at: now,
@@ -1757,6 +1718,13 @@ pub mod pallet {
             product_id: u64,
             order_amount: BalanceOf<T>,
         ) -> DispatchResult {
+            // 无论规则系统是否存在，始终追踪订单数量
+            if EntityMembers::<T>::contains_key(entity_id, buyer) {
+                MemberOrderCount::<T>::mutate(entity_id, buyer, |count| {
+                    *count = count.saturating_add(1);
+                });
+            }
+
             let system = match EntityUpgradeRules::<T>::get(entity_id) {
                 Some(s) if s.enabled => s,
                 _ => return Ok(()),
@@ -1766,11 +1734,6 @@ pub mod pallet {
                 Some(m) => m,
                 None => return Ok(()),
             };
-
-            // 更新订单数量（entity 级别）
-            MemberOrderCount::<T>::mutate(entity_id, buyer, |count| {
-                *count = count.saturating_add(1);
-            });
 
             let order_count = MemberOrderCount::<T>::get(entity_id, buyer);
 
@@ -1894,8 +1857,11 @@ pub mod pallet {
 
                 let old_level_id = member.custom_level_id;
 
-                // 检查是否需要升级
-                if target_level_id <= old_level_id && !stackable {
+                // 检查是否需要升级（绝不降级）
+                if target_level_id < old_level_id {
+                    return Ok(());
+                }
+                if target_level_id == old_level_id && !stackable {
                     return Ok(());
                 }
 
@@ -2149,21 +2115,6 @@ pub mod pallet {
                 .unwrap_or(0)
         }
 
-        /// 计算会员等级
-        fn calculate_level(total_spent_usdt: u64) -> MemberLevel {
-            if total_spent_usdt >= T::DiamondThreshold::get() {
-                MemberLevel::Diamond
-            } else if total_spent_usdt >= T::PlatinumThreshold::get() {
-                MemberLevel::Platinum
-            } else if total_spent_usdt >= T::GoldThreshold::get() {
-                MemberLevel::Gold
-            } else if total_spent_usdt >= T::SilverThreshold::get() {
-                MemberLevel::Silver
-            } else {
-                MemberLevel::Normal
-            }
-        }
-
         /// 更新会员消费金额
         pub fn update_spent(
             shop_id: u64,
@@ -2181,33 +2132,13 @@ pub mod pallet {
             entity_id: u64,
             account: &T::AccountId,
             amount: BalanceOf<T>,
-            amount_usdt: u64,
+            _amount_usdt: u64,
         ) -> DispatchResult {
             EntityMembers::<T>::mutate(entity_id, account, |maybe_member| -> DispatchResult {
                 let member = maybe_member.as_mut().ok_or(Error::<T>::NotMember)?;
 
                 member.total_spent = member.total_spent.saturating_add(amount);
                 member.last_active_at = <frame_system::Pallet<T>>::block_number();
-
-                // P3 修复: 累计 USDT 消费到独立存储，用于全局等级计算
-                // 避免 Balance(NEX) 与 u64(USDT) 精度不匹配的问题
-                let current_spent_usdt = MemberSpentUsdt::<T>::mutate(entity_id, account, |usdt| {
-                    *usdt = usdt.saturating_add(amount_usdt);
-                    *usdt
-                });
-                let new_level = Self::calculate_level(current_spent_usdt);
-
-                if new_level != member.level {
-                    let old_level = member.level;
-                    member.level = new_level;
-
-                    Self::deposit_event(Event::MemberLevelUpgraded {
-                        shop_id: 0,
-                        account: account.clone(),
-                        old_level,
-                        new_level,
-                    });
-                }
 
                 // P4 修复: 检查自定义等级是否已过期，若过期则立即修正存储
                 // 确保后续比较基于正确的 custom_level_id
@@ -2234,10 +2165,15 @@ pub mod pallet {
                 }
 
                 // 计算自定义等级（如果启用且为自动升级模式，entity 级别）
+                // 如果会员有活跃的规则升级（未过期），不执行自动降级
+                let has_active_rule_upgrade = MemberLevelExpiry::<T>::get(entity_id, account)
+                    .map(|exp| <frame_system::Pallet<T>>::block_number() <= exp)
+                    .unwrap_or(false);
                 if let Some(system) = EntityLevelSystems::<T>::get(entity_id) {
                     if system.use_custom && system.upgrade_mode == LevelUpgradeMode::AutoUpgrade {
                         let new_custom_level = Self::calculate_custom_level_by_entity(entity_id, member.total_spent);
-                        if new_custom_level != member.custom_level_id {
+                        if new_custom_level != member.custom_level_id
+                            && !(has_active_rule_upgrade && new_custom_level < member.custom_level_id) {
                             let old_level_id = member.custom_level_id;
                             // 维护 LevelMemberCount
                             LevelMemberCount::<T>::mutate(entity_id, old_level_id, |c| *c = c.saturating_sub(1));
@@ -2388,9 +2324,6 @@ pub trait MemberProvider<AccountId, Balance> {
     /// 检查是否为实体会员
     fn is_member(entity_id: u64, account: &AccountId) -> bool;
 
-    /// 获取会员等级
-    fn member_level(entity_id: u64, account: &AccountId) -> Option<pallet::MemberLevel>;
-
     /// 获取自定义等级 ID
     fn custom_level_id(entity_id: u64, account: &AccountId) -> u8;
 
@@ -2428,17 +2361,12 @@ pub trait MemberProvider<AccountId, Balance> {
 
     /// 查询会员是否已激活
     fn is_activated(entity_id: u64, account: &AccountId) -> bool;
-
 }
 
 /// MemberProvider 实现（统一使用 entity_id，无需 shop_id 解析）
 impl<T: pallet::Config> MemberProvider<T::AccountId, pallet::BalanceOf<T>> for pallet::Pallet<T> {
     fn is_member(entity_id: u64, account: &T::AccountId) -> bool {
         pallet::EntityMembers::<T>::contains_key(entity_id, account)
-    }
-
-    fn member_level(entity_id: u64, account: &T::AccountId) -> Option<pallet::MemberLevel> {
-        pallet::EntityMembers::<T>::get(entity_id, account).map(|m| m.level)
     }
 
     fn custom_level_id(entity_id: u64, account: &T::AccountId) -> u8 {
@@ -2512,6 +2440,10 @@ impl<T: pallet::Config> pallet_entity_common::OrderMemberHandler<T::AccountId, p
     fn update_spent(entity_id: u64, account: &T::AccountId, amount: pallet::BalanceOf<T>, amount_usdt: u64) -> sp_runtime::DispatchResult {
         pallet::Pallet::<T>::update_spent_by_entity(entity_id, account, amount, amount_usdt)
     }
+
+    fn check_order_upgrade_rules(entity_id: u64, buyer: &T::AccountId, product_id: u64, order_amount: pallet::BalanceOf<T>, _amount_usdt: u64) -> sp_runtime::DispatchResult {
+        pallet::Pallet::<T>::check_order_upgrade_rules_by_entity(entity_id, buyer, product_id, order_amount)
+    }
 }
 
 /// 空实现（用于测试或不需要会员功能的场景）
@@ -2519,7 +2451,6 @@ pub struct NullMemberProvider;
 
 impl<AccountId, Balance> MemberProvider<AccountId, Balance> for NullMemberProvider {
     fn is_member(_entity_id: u64, _account: &AccountId) -> bool { false }
-    fn member_level(_entity_id: u64, _account: &AccountId) -> Option<pallet::MemberLevel> { None }
     fn custom_level_id(_entity_id: u64, _account: &AccountId) -> u8 { 0 }
     fn get_level_discount(_entity_id: u64, _level_id: u8) -> u16 { 0 }
     fn get_level_commission_bonus(_entity_id: u64, _level_id: u8) -> u16 { 0 }

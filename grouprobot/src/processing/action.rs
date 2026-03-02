@@ -122,7 +122,7 @@ impl ActionDecision {
     }
 
     /// 转换为平台执行动作
-    pub fn to_execute_action(&self, group_id: &str) -> ExecuteAction {
+    pub fn to_execute_action(&self, group_id: &str, channel_id: Option<&str>) -> ExecuteAction {
         ExecuteAction {
             action_type: self.action_type,
             group_id: group_id.to_string(),
@@ -132,6 +132,7 @@ impl ActionDecision {
             duration_secs: self.duration_secs,
             inline_keyboard: None,
             callback_query_id: None,
+            channel_id: channel_id.map(|s| s.to_string()),
         }
     }
 }

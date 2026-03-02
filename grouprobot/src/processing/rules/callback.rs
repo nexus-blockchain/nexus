@@ -88,6 +88,7 @@ mod tests {
             message_type: None,
             callback_query_id: Some("cb_123".into()),
             callback_data: Some(data.into()),
+            channel_id: None,
         }
     }
 
@@ -146,6 +147,7 @@ mod tests {
             message_type: None,
             callback_query_id: None,
             callback_data: None,
+            channel_id: None,
         };
         assert!(rule.evaluate(&ctx, &store).await.is_none());
     }

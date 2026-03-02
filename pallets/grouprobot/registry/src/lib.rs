@@ -386,6 +386,10 @@ pub mod pallet {
 		OperatorSlaUpdated { operator: T::AccountId, platform: Platform, sla_level: u8 },
 		BotAssignedToOperator { bot_id_hash: BotIdHash, operator: T::AccountId, platform: Platform },
 		BotUnassignedFromOperator { bot_id_hash: BotIdHash, operator: T::AccountId, platform: Platform },
+		/// L1-fix: MRTD 已从白名单撤销
+		MrtdRevoked { mrtd: [u8; 48] },
+		/// L1-fix: MRENCLAVE 已从白名单撤销
+		MrenclaveRevoked { mrenclave: [u8; 32] },
 	}
 
 	// ========================================================================
@@ -493,6 +497,14 @@ pub mod pallet {
 		OperatorHasActiveBots,
 		/// SLA 等级无效 (0-3)
 		InvalidSlaLevel,
+		/// H2-fix: 证明过期队列已满
+		ExpiryQueueFull,
+		/// L1-fix: MRTD 不在白名单中 (撤销时)
+		MrtdNotFound,
+		/// L1-fix: MRENCLAVE 不在白名单中 (撤销时)
+		MrenclaveNotFound,
+		/// L2-fix: PCK 公钥已注册
+		PckKeyAlreadyRegistered,
 	}
 
 	// ========================================================================
@@ -636,6 +648,7 @@ pub mod pallet {
 			})?;
 			// H1-fix: 移除旧的 attestation 记录
 			Attestations::<T>::remove(&bot_id_hash);
+			AttestationsV2::<T>::remove(&bot_id_hash); // C1-fix: V2 记录也必须清除
 			AttestationNonces::<T>::remove(&bot_id_hash);
 			Self::deposit_event(Event::PublicKeyUpdated { bot_id_hash, new_key });
 			Ok(())
@@ -656,6 +669,19 @@ pub mod pallet {
 				bot.status = BotStatus::Deactivated;
 				Ok(())
 			})?;
+
+			// L3-fix: 清理运营商分配关系
+			if let Some((operator, platform)) = BotOperator::<T>::take(&bot_id_hash) {
+				OperatorBots::<T>::mutate(&operator, platform, |bots| {
+					bots.retain(|b| b != &bot_id_hash);
+				});
+				Operators::<T>::mutate(&operator, platform, |maybe_op| {
+					if let Some(op) = maybe_op {
+						op.bot_count = op.bot_count.saturating_sub(1);
+					}
+				});
+			}
+
 			Self::deposit_event(Event::BotDeactivated { bot_id_hash });
 			Ok(())
 		}
@@ -784,7 +810,7 @@ pub mod pallet {
 			};
 
 			Attestations::<T>::insert(&bot_id_hash, record);
-			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false);
+			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false)?;
 
 			// 更新 BotInfo 的 node_type
 			let now_u64: u64 = now.unique_saturated_into();
@@ -845,7 +871,7 @@ pub mod pallet {
 				api_server_quote_hash: None,
 			};
 			Attestations::<T>::insert(&bot_id_hash, record);
-			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false);
+			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false)?;
 
 			// 刷新 node_type
 			let now_u64: u64 = now.unique_saturated_into();
@@ -959,7 +985,7 @@ pub mod pallet {
 				api_server_quote_hash: None,
 			};
 			Attestations::<T>::insert(&bot_id_hash, record);
-			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false);
+			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false)?;
 
 			let now_u64: u64 = now.unique_saturated_into();
 			let expires_u64: u64 = expires_at.unique_saturated_into();
@@ -1026,6 +1052,34 @@ pub mod pallet {
 			Ok(())
 		}
 
+		/// L1-fix: 撤销 MRTD 白名单 (发现固件漏洞时使用)
+		#[pallet::call_index(29)]
+		#[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+		pub fn revoke_mrtd(
+			origin: OriginFor<T>,
+			mrtd: [u8; 48],
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			ensure!(ApprovedMrtd::<T>::contains_key(&mrtd), Error::<T>::MrtdNotFound);
+			ApprovedMrtd::<T>::remove(&mrtd);
+			Self::deposit_event(Event::MrtdRevoked { mrtd });
+			Ok(())
+		}
+
+		/// L1-fix: 撤销 MRENCLAVE 白名单 (发现 enclave 漏洞时使用)
+		#[pallet::call_index(30)]
+		#[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+		pub fn revoke_mrenclave(
+			origin: OriginFor<T>,
+			mrenclave: [u8; 32],
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			ensure!(ApprovedMrenclave::<T>::contains_key(&mrenclave), Error::<T>::MrenclaveNotFound);
+			ApprovedMrenclave::<T>::remove(&mrenclave);
+			Self::deposit_event(Event::MrenclaveRevoked { mrenclave });
+			Ok(())
+		}
+
 		/// 审批 API Server MRTD 到白名单 (双 Quote 证明)
 		#[pallet::call_index(12)]
 		#[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
@@ -1056,6 +1110,8 @@ pub mod pallet {
 			pck_public_key: [u8; 64],
 		) -> DispatchResult {
 			ensure_root(origin)?;
+			// L2-fix: 防止意外覆盖已注册的 PCK key
+			ensure!(!RegisteredPckKeys::<T>::contains_key(&platform_id), Error::<T>::PckKeyAlreadyRegistered);
 			let now = frame_system::Pallet::<T>::block_number();
 			RegisteredPckKeys::<T>::insert(&platform_id, (pck_public_key, now));
 			Self::deposit_event(Event::PckKeyRegistered { platform_id });
@@ -1146,7 +1202,7 @@ pub mod pallet {
 				api_server_quote_hash: None,
 			};
 			Attestations::<T>::insert(&bot_id_hash, record);
-			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false);
+			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false)?;
 
 			let now_u64: u64 = now.unique_saturated_into();
 			let expires_u64: u64 = expires_at.unique_saturated_into();
@@ -1270,7 +1326,7 @@ pub mod pallet {
 				api_server_quote_hash: Some(api_server_quote_hash),
 			};
 			Attestations::<T>::insert(&bot_id_hash, record);
-			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false);
+			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false)?;
 
 			let now_u64: u64 = now.unique_saturated_into();
 			let expires_u64: u64 = expires_at.unique_saturated_into();
@@ -1371,7 +1427,7 @@ pub mod pallet {
 				api_server_quote_hash: None,
 			};
 			Attestations::<T>::insert(&bot_id_hash, record);
-			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false);
+			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false)?;
 
 			let now_u64: u64 = now.unique_saturated_into();
 			let expires_u64: u64 = expires_at.unique_saturated_into();
@@ -1455,6 +1511,15 @@ pub mod pallet {
 			let expected_hash = sp_core::hashing::sha2_256(&bot.public_key);
 			ensure!(sgx_report_data[..32] == expected_hash[..], Error::<T>::QuoteReportDataMismatch);
 
+			// M1-fix: Nonce 验证 (防重放)
+			let now = frame_system::Pallet::<T>::block_number();
+			let (stored_nonce, issued_at) = AttestationNonces::<T>::get(&bot_id_hash)
+				.ok_or(Error::<T>::NonceMissing)?;
+			let nonce_deadline = issued_at.saturating_add(T::AttestationValidityBlocks::get());
+			ensure!(now <= nonce_deadline, Error::<T>::NonceExpired);
+			ensure!(sgx_report_data[32..64] == stored_nonce[..], Error::<T>::NonceMismatch);
+			AttestationNonces::<T>::remove(&bot_id_hash);
+
 			// ── MRENCLAVE 白名单检查 ──
 			ensure!(ApprovedMrenclave::<T>::contains_key(&mrenclave), Error::<T>::MrenclaveNotApproved);
 
@@ -1466,7 +1531,6 @@ pub mod pallet {
 			Attestations::<T>::insert(&bot_id_hash, record);
 
 			// ── 更新 BotInfo.node_type 的 mrenclave + sgx_attested_at ──
-			let now = frame_system::Pallet::<T>::block_number();
 			let now_u64: u64 = now.unique_saturated_into();
 			Bots::<T>::mutate(&bot_id_hash, |maybe_bot| {
 				if let Some(bot) = maybe_bot {
@@ -1560,7 +1624,7 @@ pub mod pallet {
 				api_server_quote_hash: None,
 			};
 			AttestationsV2::<T>::insert(&bot_id_hash, record);
-			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, true);
+			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, true)?;
 
 			// ── Step 6: 更新 NodeType → TeeNodeV2 ──
 			let now_u64: u64 = now.unique_saturated_into();
@@ -1649,6 +1713,9 @@ pub mod pallet {
 					.ok_or(Error::<T>::PeerNotFound)?;
 				peers.swap_remove(idx);
 
+				// M5-fix: 清理该 Peer 的心跳计数
+				PeerHeartbeatCount::<T>::remove(&bot_id_hash, &peer_public_key);
+
 				Self::deposit_event(Event::PeerDeregistered {
 					bot_id_hash,
 					public_key: peer_public_key,
@@ -1719,6 +1786,9 @@ pub mod pallet {
 				);
 
 				peers.swap_remove(idx);
+
+				// M3-fix: 清理该 Peer 的心跳计数
+				PeerHeartbeatCount::<T>::remove(&bot_id_hash, &peer_public_key);
 
 				Self::deposit_event(Event::StalePeerReported {
 					bot_id_hash,
@@ -1912,11 +1982,14 @@ pub mod pallet {
 	// ========================================================================
 
 	impl<T: Config> Pallet<T> {
-		/// P3: 将证明过期信息追加到过期队列 (队列满时静默丢弃)
-		fn enqueue_attestation_expiry(expires_at: BlockNumberFor<T>, bot_id_hash: BotIdHash, is_v2: bool) {
-			AttestationExpiryQueue::<T>::mutate(|queue| {
-				let _ = queue.try_push((expires_at, bot_id_hash, is_v2));
-			});
+		/// P3: 将证明过期信息追加到过期队列
+		/// H2-fix: 队列满时返回错误而非静默丢弃, 防止证明永不过期
+		fn enqueue_attestation_expiry(expires_at: BlockNumberFor<T>, bot_id_hash: BotIdHash, is_v2: bool) -> DispatchResult {
+			AttestationExpiryQueue::<T>::try_mutate(|queue| {
+				queue.try_push((expires_at, bot_id_hash, is_v2))
+					.map_err(|_| Error::<T>::ExpiryQueueFull)?;
+				Ok(())
+			})
 		}
 
 		/// 将 DCAP 错误转换为 DispatchError
@@ -2157,7 +2230,10 @@ pub mod pallet {
 
 	impl<T: Config> PeerUptimeRecorder for Pallet<T> {
 		fn record_era_uptime(era: u64) {
-			// 遍历所有有心跳的 Peer, 快照到 PeerEraUptime, 然后清零
+			// M2-fix: 加 batch limit 防止大网络下单次 drain 超重
+			// 未处理的条目保留在 storage, 下一 era 累加后一并快照
+			const MAX_BATCH: u32 = 500;
+			let mut processed = 0u32;
 			let mut iter = PeerHeartbeatCount::<T>::drain();
 			while let Some((bot_id_hash, peer_pk, count)) = iter.next() {
 				if count == 0 {
@@ -2170,7 +2246,12 @@ pub mod pallet {
 					}
 					let _ = history.try_push((era, count));
 				});
+				processed += 1;
+				if processed >= MAX_BATCH {
+					break;
+				}
 			}
+			// drop(iter) — 剩余条目保留在 storage, 下次 era 处理
 		}
 	}
 }

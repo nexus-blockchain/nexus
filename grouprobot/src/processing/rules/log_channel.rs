@@ -107,6 +107,7 @@ mod tests {
             message_type: None,
             callback_query_id: None,
             callback_data: None,
+            channel_id: None,
         };
         let log = LogChannelRule::format_log(&ctx, "Warned for spam");
         assert!(log.contains("Alice"));
@@ -156,6 +157,7 @@ mod tests {
             message_type: None,
             callback_query_id: None,
             callback_data: None,
+            channel_id: None,
         };
         assert!(rule.evaluate(&ctx, &store).await.is_none());
     }

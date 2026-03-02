@@ -169,13 +169,6 @@ impl pallet_entity_common::ShopProvider<u64> for MockShopProvider {
 // Pallet Config
 // ============================================================================
 
-parameter_types! {
-    pub const SilverThreshold: u64 = 100_000_000;   // 100 USDT
-    pub const GoldThreshold: u64 = 500_000_000;      // 500 USDT
-    pub const PlatinumThreshold: u64 = 2_000_000_000; // 2000 USDT
-    pub const DiamondThreshold: u64 = 10_000_000_000; // 10000 USDT
-}
-
 impl pallet_entity_member::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
@@ -183,10 +176,6 @@ impl pallet_entity_member::Config for Test {
     type ShopProvider = MockShopProvider;
     type MaxDirectReferrals = ConstU32<50>;
     type MaxCustomLevels = ConstU32<10>;
-    type SilverThreshold = SilverThreshold;
-    type GoldThreshold = GoldThreshold;
-    type PlatinumThreshold = PlatinumThreshold;
-    type DiamondThreshold = DiamondThreshold;
     type MaxUpgradeRules = ConstU32<10>;
     type MaxUpgradeHistory = ConstU32<50>;
 }

@@ -112,6 +112,25 @@ process_level_diff(entity_id, shop_id, buyer, order_amount, remaining)
 | `InvalidRate` | 返佣率超过 10000 基点 |
 | `InvalidMaxDepth` | max_depth 不在 1-20 范围内 |
 
+## 审计记录
+
+### 已修复
+
+| ID | 级别 | 描述 |
+|----|------|------|
+| H1 | High | `LevelDiffPlanWriter::set_global_rates` trait 方法无 rate 校验，任意值可写入存储；`init_commission_plan` LevelDiff 路径仅校验 diamond。修复: 两处均添加全部 5 个 `ensure!(rate <= 10000)` |
+| M1 | Medium | `process_level_diff` / `process_level_diff_token` 无条件读取两套配置（全局+自定义），浪费一次 storage read。修复: 根据 `uses_custom` 按需读取 |
+
+### 记录但未修复
+
+| ID | 级别 | 描述 |
+|----|------|------|
+| M2 | Medium | 两个 extrinsic 硬编码 weight，无 WeightInfo 配置化 |
+| M3 | Medium | `init_commission_plan` LevelDiff 启用了无用的 `DIRECT_REWARD` 位标志（referral config 已 clear） |
+| L1 | Low | 无等级率单调递增校验（无害但易误配） |
+| L2 | Low | Token 版 `process_level_diff_token` 与 NEX 版完全重复（维护风险） |
+| L3 | Low | trait 方法 `set_global_rates`/`clear_config` 不发出事件 |
+
 ## 依赖
 
 ```toml

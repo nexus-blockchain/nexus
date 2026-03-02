@@ -8,6 +8,8 @@
 
 extern crate alloc;
 
+use pallet_commission_common::MemberProvider as _;
+
 pub use pallet::*;
 
 #[frame_support::pallet]
@@ -22,7 +24,6 @@ pub mod pallet {
     use pallet_commission_common::{
         CommissionModes, CommissionOutput, CommissionType, MemberProvider,
     };
-    use pallet_entity_common::MemberLevel;
     use sp_runtime::traits::{Saturating, Zero};
 
     pub type BalanceOf<T> =
@@ -32,29 +33,7 @@ pub mod pallet {
     // Config structs
     // ========================================================================
 
-    /// 全局等级差价配置
-    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
-    pub struct LevelDiffConfig {
-        pub normal_rate: u16,
-        pub silver_rate: u16,
-        pub gold_rate: u16,
-        pub platinum_rate: u16,
-        pub diamond_rate: u16,
-    }
-
-    impl LevelDiffConfig {
-        pub fn rate_for_level(&self, level: MemberLevel) -> u16 {
-            match level {
-                MemberLevel::Normal => self.normal_rate,
-                MemberLevel::Silver => self.silver_rate,
-                MemberLevel::Gold => self.gold_rate,
-                MemberLevel::Platinum => self.platinum_rate,
-                MemberLevel::Diamond => self.diamond_rate,
-            }
-        }
-    }
-
-    /// 自定义等级极差配置
+    /// 等级极差配置（统一使用自定义等级体系）
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     #[scale_info(skip_type_params(MaxLevels))]
     pub struct CustomLevelDiffConfig<MaxLevels: Get<u32>> {
@@ -94,16 +73,7 @@ pub mod pallet {
     // Storage
     // ========================================================================
 
-    /// 全局等级差价配置 entity_id -> LevelDiffConfig
-    #[pallet::storage]
-    #[pallet::getter(fn level_diff_config)]
-    pub type LevelDiffConfigs<T: Config> = StorageMap<
-        _,
-        Blake2_128Concat, u64,
-        LevelDiffConfig,
-    >;
-
-    /// 自定义等级极差配置 entity_id -> CustomLevelDiffConfig
+    /// 等级极差配置 entity_id -> CustomLevelDiffConfig
     #[pallet::storage]
     #[pallet::getter(fn custom_level_diff_config)]
     pub type CustomLevelDiffConfigs<T: Config> = StorageMap<
@@ -120,7 +90,6 @@ pub mod pallet {
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
         LevelDiffConfigUpdated { entity_id: u64 },
-        CustomLevelDiffConfigUpdated { entity_id: u64 },
     }
 
     #[pallet::error]
@@ -135,46 +104,12 @@ pub mod pallet {
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        /// 设置全局等级差价配置
+        /// 设置等级极差配置
         ///
-        /// CLD-H1 审计修复: 参数统一为 entity_id，与插件查询键一致
-        #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
-        pub fn set_level_diff_config(
-            origin: OriginFor<T>,
-            entity_id: u64,
-            normal_rate: u16,
-            silver_rate: u16,
-            gold_rate: u16,
-            platinum_rate: u16,
-            diamond_rate: u16,
-        ) -> DispatchResult {
-            ensure_root(origin)?;
-
-            ensure!(normal_rate <= 10000, Error::<T>::InvalidRate);
-            ensure!(silver_rate <= 10000, Error::<T>::InvalidRate);
-            ensure!(gold_rate <= 10000, Error::<T>::InvalidRate);
-            ensure!(platinum_rate <= 10000, Error::<T>::InvalidRate);
-            ensure!(diamond_rate <= 10000, Error::<T>::InvalidRate);
-
-            LevelDiffConfigs::<T>::insert(entity_id, LevelDiffConfig {
-                normal_rate,
-                silver_rate,
-                gold_rate,
-                platinum_rate,
-                diamond_rate,
-            });
-
-            Self::deposit_event(Event::LevelDiffConfigUpdated { entity_id });
-            Ok(())
-        }
-
-        /// 设置自定义等级极差配置
-        ///
-        /// CLD-H1 审计修复: 参数统一为 entity_id
+        /// level_rates: 每个自定义等级对应的极差比例（bps），索引 = custom_level_id
         #[pallet::call_index(1)]
         #[pallet::weight(Weight::from_parts(45_000_000, 4_000))]
-        pub fn set_custom_level_diff_config(
+        pub fn set_level_diff_config(
             origin: OriginFor<T>,
             entity_id: u64,
             level_rates: BoundedVec<u16, T::MaxCustomLevels>,
@@ -192,7 +127,7 @@ pub mod pallet {
                 max_depth,
             });
 
-            Self::deposit_event(Event::CustomLevelDiffConfigUpdated { entity_id });
+            Self::deposit_event(Event::LevelDiffConfigUpdated { entity_id });
             Ok(())
         }
     }
@@ -209,15 +144,9 @@ pub mod pallet {
             remaining: &mut BalanceOf<T>,
             outputs: &mut Vec<CommissionOutput<T::AccountId, BalanceOf<T>>>,
         ) {
-            let global_config = LevelDiffConfigs::<T>::get(entity_id);
-            let uses_custom = T::MemberProvider::uses_custom_levels(entity_id);
-            let custom_config = CustomLevelDiffConfigs::<T>::get(entity_id);
+            let config = CustomLevelDiffConfigs::<T>::get(entity_id);
 
-            let max_depth = if uses_custom {
-                custom_config.as_ref().map(|c| c.max_depth).unwrap_or(10)
-            } else {
-                10
-            };
+            let max_depth = config.as_ref().map(|c| c.max_depth).unwrap_or(10);
 
             let mut current_referrer = T::MemberProvider::get_referrer(entity_id, buyer);
             let mut prev_rate: u16 = 0;
@@ -229,20 +158,12 @@ pub mod pallet {
                 // M2 审计修复: 额度耗尽后提前退出，避免无意义的 storage read
                 if remaining.is_zero() { break; }
 
-                let referrer_rate = if uses_custom {
-                    let level_id = T::MemberProvider::custom_level_id(entity_id, referrer);
-                    // P1/P2 修复: CustomLevelDiffConfig 优先；无配置或 level_id 越界时
-                    // 回退到 CustomLevel.commission_bonus（通过 MemberProvider）
-                    custom_config.as_ref()
-                        .and_then(|c| c.level_rates.get(level_id as usize).copied())
-                        .unwrap_or_else(|| T::MemberProvider::get_level_commission_bonus(entity_id, level_id))
-                } else {
-                    let referrer_level = T::MemberProvider::member_level(entity_id, referrer)
-                        .unwrap_or(MemberLevel::Normal);
-                    global_config.as_ref()
-                        .map(|c| c.rate_for_level(referrer_level))
-                        .unwrap_or(0)
-                };
+                let level_id = T::MemberProvider::custom_level_id(entity_id, referrer);
+                // P1/P2 修复: CustomLevelDiffConfig 优先；无配置或 level_id 越界时
+                // 回退到 CustomLevel.commission_bonus（通过 MemberProvider）
+                let referrer_rate = config.as_ref()
+                    .and_then(|c| c.level_rates.get(level_id as usize).copied())
+                    .unwrap_or_else(|| T::MemberProvider::get_level_commission_bonus(entity_id, level_id));
 
                 if referrer_rate > prev_rate {
                     let diff_rate = referrer_rate - prev_rate;
@@ -305,8 +226,6 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
 // Token 多资产 — TokenCommissionPlugin implementation
 // ============================================================================
 
-use pallet_commission_common::MemberProvider as _MemberProviderToken;
-
 impl<T: pallet::Config> pallet::Pallet<T> {
     /// Token 版等级极差计算（泛型，rate-based）
     fn process_level_diff_token<TB>(
@@ -318,15 +237,9 @@ impl<T: pallet::Config> pallet::Pallet<T> {
     ) where
         TB: sp_runtime::traits::AtLeast32BitUnsigned + Copy,
     {
-        let global_config = pallet::LevelDiffConfigs::<T>::get(entity_id);
-        let uses_custom = T::MemberProvider::uses_custom_levels(entity_id);
-        let custom_config = pallet::CustomLevelDiffConfigs::<T>::get(entity_id);
+        let config = pallet::CustomLevelDiffConfigs::<T>::get(entity_id);
 
-        let max_depth = if uses_custom {
-            custom_config.as_ref().map(|c| c.max_depth).unwrap_or(10)
-        } else {
-            10
-        };
+        let max_depth = config.as_ref().map(|c| c.max_depth).unwrap_or(10);
 
         let mut current_referrer = T::MemberProvider::get_referrer(entity_id, buyer);
         let mut prev_rate: u16 = 0;
@@ -337,18 +250,10 @@ impl<T: pallet::Config> pallet::Pallet<T> {
             if level > max_depth { break; }
             if remaining.is_zero() { break; }
 
-            let referrer_rate = if uses_custom {
-                let level_id = T::MemberProvider::custom_level_id(entity_id, referrer);
-                custom_config.as_ref()
-                    .and_then(|c| c.level_rates.get(level_id as usize).copied())
-                    .unwrap_or_else(|| T::MemberProvider::get_level_commission_bonus(entity_id, level_id))
-            } else {
-                let referrer_level = T::MemberProvider::member_level(entity_id, referrer)
-                    .unwrap_or(pallet_entity_common::MemberLevel::Normal);
-                global_config.as_ref()
-                    .map(|c| c.rate_for_level(referrer_level))
-                    .unwrap_or(0)
-            };
+            let level_id = T::MemberProvider::custom_level_id(entity_id, referrer);
+            let referrer_rate = config.as_ref()
+                .and_then(|c| c.level_rates.get(level_id as usize).copied())
+                .unwrap_or_else(|| T::MemberProvider::get_level_commission_bonus(entity_id, level_id));
 
             if referrer_rate > prev_rate {
                 let diff_rate = referrer_rate - prev_rate;
@@ -411,19 +316,21 @@ where
 // ============================================================================
 
 impl<T: pallet::Config> pallet_commission_common::LevelDiffPlanWriter for pallet::Pallet<T> {
-    fn set_global_rates(entity_id: u64, normal: u16, silver: u16, gold: u16, platinum: u16, diamond: u16) -> Result<(), sp_runtime::DispatchError> {
-        pallet::LevelDiffConfigs::<T>::insert(entity_id, pallet::LevelDiffConfig {
-            normal_rate: normal,
-            silver_rate: silver,
-            gold_rate: gold,
-            platinum_rate: platinum,
-            diamond_rate: diamond,
+    fn set_level_rates(entity_id: u64, level_rates: alloc::vec::Vec<u16>, max_depth: u8) -> Result<(), sp_runtime::DispatchError> {
+        for rate in level_rates.iter() {
+            frame_support::ensure!(*rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
+        }
+        frame_support::ensure!(max_depth > 0 && max_depth <= 20, sp_runtime::DispatchError::Other("InvalidMaxDepth"));
+        let bounded_rates: frame_support::BoundedVec<u16, T::MaxCustomLevels> =
+            level_rates.try_into().map_err(|_| sp_runtime::DispatchError::Other("TooManyLevels"))?;
+        pallet::CustomLevelDiffConfigs::<T>::insert(entity_id, pallet::CustomLevelDiffConfig {
+            level_rates: bounded_rates,
+            max_depth,
         });
         Ok(())
     }
 
     fn clear_config(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
-        pallet::LevelDiffConfigs::<T>::remove(entity_id);
         pallet::CustomLevelDiffConfigs::<T>::remove(entity_id);
         Ok(())
     }
@@ -447,18 +354,14 @@ mod tests {
     // ---- Thread-local mock state ----
     thread_local! {
         static REFERRERS: RefCell<BTreeMap<(u64, u64), u64>> = RefCell::new(BTreeMap::new());
-        static CUSTOM_LEVELS: RefCell<bool> = RefCell::new(false);
         static CUSTOM_LEVEL_IDS: RefCell<BTreeMap<(u64, u64), u8>> = RefCell::new(BTreeMap::new());
         static LEVEL_BONUSES: RefCell<BTreeMap<(u64, u8), u16>> = RefCell::new(BTreeMap::new());
-        static MEMBER_LEVELS: RefCell<BTreeMap<(u64, u64), pallet_entity_common::MemberLevel>> = RefCell::new(BTreeMap::new());
     }
 
     fn clear_mocks() {
         REFERRERS.with(|r| r.borrow_mut().clear());
-        CUSTOM_LEVELS.with(|c| *c.borrow_mut() = false);
         CUSTOM_LEVEL_IDS.with(|c| c.borrow_mut().clear());
         LEVEL_BONUSES.with(|l| l.borrow_mut().clear());
-        MEMBER_LEVELS.with(|m| m.borrow_mut().clear());
     }
 
     pub struct MockMemberProvider;
@@ -468,13 +371,8 @@ mod tests {
         fn get_referrer(entity_id: u64, account: &u64) -> Option<u64> {
             REFERRERS.with(|r| r.borrow().get(&(entity_id, *account)).copied())
         }
-        fn member_level(entity_id: u64, account: &u64) -> Option<pallet_entity_common::MemberLevel> {
-            MEMBER_LEVELS.with(|m| m.borrow().get(&(entity_id, *account)).copied())
-        }
         fn get_member_stats(_: u64, _: &u64) -> (u32, u32, u128) { (0, 0, 0) }
-        fn uses_custom_levels(_entity_id: u64) -> bool {
-            CUSTOM_LEVELS.with(|c| *c.borrow())
-        }
+        fn uses_custom_levels(_entity_id: u64) -> bool { true }
         fn custom_level_id(entity_id: u64, account: &u64) -> u8 {
             CUSTOM_LEVEL_IDS.with(|c| c.borrow().get(&(entity_id, *account)).copied().unwrap_or(0))
         }
@@ -553,9 +451,6 @@ mod tests {
             // 推荐链: 50 → 40 → 30
             setup_chain(entity_id);
 
-            // 启用自定义等级
-            CUSTOM_LEVELS.with(|c| *c.borrow_mut() = true);
-
             // 设置等级: 40=level_0, 30=level_1
             CUSTOM_LEVEL_IDS.with(|c| {
                 let mut m = c.borrow_mut();
@@ -595,7 +490,6 @@ mod tests {
             let entity_id = 1u64;
 
             setup_chain(entity_id);
-            CUSTOM_LEVELS.with(|c| *c.borrow_mut() = true);
 
             CUSTOM_LEVEL_IDS.with(|c| {
                 let mut m = c.borrow_mut();
@@ -612,7 +506,7 @@ mod tests {
 
             // CustomLevelDiffConfig 配置 = 500, 800 → 应优先使用
             let level_rates = frame_support::BoundedVec::try_from(vec![500u16, 800]).unwrap();
-            assert_ok!(pallet::Pallet::<Test>::set_custom_level_diff_config(
+            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
                 frame_system::RawOrigin::Root.into(),
                 entity_id,
                 level_rates,
@@ -644,7 +538,6 @@ mod tests {
             let entity_id = 1u64;
 
             setup_chain(entity_id);
-            CUSTOM_LEVELS.with(|c| *c.borrow_mut() = true);
 
             // 3 个自定义等级（id=0,1,2），但 CustomLevelDiffConfig 只有 2 条 rate
             CUSTOM_LEVEL_IDS.with(|c| {
@@ -662,7 +555,7 @@ mod tests {
 
             // level_rates 只有 2 个元素: [300, 600]
             let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600]).unwrap();
-            assert_ok!(pallet::Pallet::<Test>::set_custom_level_diff_config(
+            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
                 frame_system::RawOrigin::Root.into(),
                 entity_id,
                 level_rates,
@@ -696,14 +589,13 @@ mod tests {
 
             // 50 → 40
             REFERRERS.with(|r| r.borrow_mut().insert((entity_id, 50), 40));
-            CUSTOM_LEVELS.with(|c| *c.borrow_mut() = true);
 
             // level_id=2 超出 level_rates（空配置）
             CUSTOM_LEVEL_IDS.with(|c| c.borrow_mut().insert((entity_id, 40), 2));
             // 不设置 commission_bonus → 回退为 0
 
             let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600]).unwrap();
-            assert_ok!(pallet::Pallet::<Test>::set_custom_level_diff_config(
+            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
                 frame_system::RawOrigin::Root.into(),
                 entity_id,
                 level_rates,
@@ -745,7 +637,6 @@ mod tests {
             let entity_id = 1u64;
 
             REFERRERS.with(|r| r.borrow_mut().insert((entity_id, 50), 40));
-            CUSTOM_LEVELS.with(|c| *c.borrow_mut() = true);
             CUSTOM_LEVEL_IDS.with(|c| c.borrow_mut().insert((entity_id, 40), 0));
             LEVEL_BONUSES.with(|l| l.borrow_mut().insert((entity_id, 0), 500));
 
@@ -765,27 +656,271 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn set_custom_config_validates_rates() {
+    fn set_config_validates_rates() {
         new_test_ext().execute_with(|| {
             let rates = frame_support::BoundedVec::try_from(vec![10001u16]).unwrap();
-            assert!(pallet::Pallet::<Test>::set_custom_level_diff_config(
+            assert!(pallet::Pallet::<Test>::set_level_diff_config(
                 frame_system::RawOrigin::Root.into(), 1, rates, 10,
             ).is_err());
         });
     }
 
     #[test]
-    fn set_custom_config_validates_depth() {
+    fn set_config_validates_depth() {
         new_test_ext().execute_with(|| {
             let rates = frame_support::BoundedVec::try_from(vec![100u16]).unwrap();
             // depth=0 invalid
-            assert!(pallet::Pallet::<Test>::set_custom_level_diff_config(
+            assert!(pallet::Pallet::<Test>::set_level_diff_config(
                 frame_system::RawOrigin::Root.into(), 1, rates.clone(), 0,
             ).is_err());
             // depth=21 invalid
-            assert!(pallet::Pallet::<Test>::set_custom_level_diff_config(
+            assert!(pallet::Pallet::<Test>::set_level_diff_config(
                 frame_system::RawOrigin::Root.into(), 1, rates, 21,
             ).is_err());
+        });
+    }
+
+    // ========================================================================
+    // set_level_rates trait 路径校验
+    // ========================================================================
+
+    #[test]
+    fn set_level_rates_rejects_invalid_rate() {
+        new_test_ext().execute_with(|| {
+            use pallet_commission_common::LevelDiffPlanWriter;
+
+            assert!(<pallet::Pallet<Test> as LevelDiffPlanWriter>::set_level_rates(
+                1, vec![10001], 5
+            ).is_err());
+            // valid
+            assert_ok!(<pallet::Pallet<Test> as LevelDiffPlanWriter>::set_level_rates(
+                1, vec![100, 200, 300], 5
+            ));
+            let config = pallet::CustomLevelDiffConfigs::<Test>::get(1).unwrap();
+            assert_eq!(config.level_rates.len(), 3);
+            assert_eq!(config.max_depth, 5);
+        });
+    }
+
+    // ========================================================================
+    // 自定义等级体系基础测试
+    // ========================================================================
+
+    #[test]
+    fn custom_level_diff_basic() {
+        new_test_ext().execute_with(|| {
+            let entity_id = 1u64;
+
+            // 推荐链: buyer(50) → A(40,level0) → B(30,level1) → C(20,level2)
+            setup_chain(entity_id);
+            CUSTOM_LEVEL_IDS.with(|c| {
+                let mut m = c.borrow_mut();
+                m.insert((entity_id, 40), 0);
+                m.insert((entity_id, 30), 1);
+                m.insert((entity_id, 20), 2);
+            });
+
+            let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600, 900]).unwrap();
+            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
+                frame_system::RawOrigin::Root.into(),
+                entity_id, level_rates, 10,
+            ));
+
+            let mut remaining: Balance = 10000;
+            let mut outputs = alloc::vec::Vec::new();
+            pallet::Pallet::<Test>::process_level_diff(
+                entity_id, &50, 10000, &mut remaining, &mut outputs,
+            );
+
+            // A: rate=300, prev=0, diff=300 → 300
+            // B: rate=600, prev=300, diff=300 → 300
+            // C: rate=900, prev=600, diff=300 → 300
+            assert_eq!(outputs.len(), 3);
+            assert_eq!(outputs[0].beneficiary, 40);
+            assert_eq!(outputs[0].amount, 300);
+            assert_eq!(outputs[1].beneficiary, 30);
+            assert_eq!(outputs[1].amount, 300);
+            assert_eq!(outputs[2].beneficiary, 20);
+            assert_eq!(outputs[2].amount, 300);
+            assert_eq!(remaining, 10000 - 900);
+        });
+    }
+
+    // ========================================================================
+    // 额度耗尽提前退出测试
+    // ========================================================================
+
+    #[test]
+    fn remaining_exhaustion_caps_commission() {
+        new_test_ext().execute_with(|| {
+            let entity_id = 1u64;
+
+            // 推荐链: 50 → 40 → 30 → 20
+            setup_chain(entity_id);
+            CUSTOM_LEVEL_IDS.with(|c| {
+                let mut m = c.borrow_mut();
+                m.insert((entity_id, 40), 0);
+                m.insert((entity_id, 30), 1);
+                m.insert((entity_id, 20), 2);
+            });
+            LEVEL_BONUSES.with(|l| {
+                let mut m = l.borrow_mut();
+                m.insert((entity_id, 0), 500);   // 5%
+                m.insert((entity_id, 1), 1000);  // 10%
+                m.insert((entity_id, 2), 1500);  // 15%
+            });
+
+            // 订单 10000，但 remaining 只有 600
+            let mut remaining: Balance = 600;
+            let mut outputs = alloc::vec::Vec::new();
+            pallet::Pallet::<Test>::process_level_diff(
+                entity_id, &50, 10000, &mut remaining, &mut outputs,
+            );
+
+            // 40: rate=500, diff=500 → 10000×500/10000=500, actual=min(500,600)=500, remaining=100
+            // 30: rate=1000, diff=500 → 500, actual=min(500,100)=100, remaining=0
+            // 20: remaining=0 → break
+            assert_eq!(outputs.len(), 2);
+            assert_eq!(outputs[0].amount, 500);
+            assert_eq!(outputs[1].amount, 100); // capped by remaining
+            assert_eq!(remaining, 0);
+        });
+    }
+
+    // ========================================================================
+    // 相同等级跳过测试
+    // ========================================================================
+
+    #[test]
+    fn same_level_referrers_skipped() {
+        new_test_ext().execute_with(|| {
+            let entity_id = 1u64;
+
+            // 50 → 40(level1) → 30(level1) → 20(level2)
+            setup_chain(entity_id);
+            CUSTOM_LEVEL_IDS.with(|c| {
+                let mut m = c.borrow_mut();
+                m.insert((entity_id, 40), 1);
+                m.insert((entity_id, 30), 1);
+                m.insert((entity_id, 20), 2);
+            });
+
+            let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600, 900]).unwrap();
+            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
+                frame_system::RawOrigin::Root.into(),
+                entity_id, level_rates, 10,
+            ));
+
+            let mut remaining: Balance = 10000;
+            let mut outputs = alloc::vec::Vec::new();
+            pallet::Pallet::<Test>::process_level_diff(
+                entity_id, &50, 10000, &mut remaining, &mut outputs,
+            );
+
+            // 40: rate=600(level1), prev=0, diff=600 → 600
+            // 30: rate=600(level1), prev=600, diff=0 → skipped
+            // 20: rate=900(level2), prev=600, diff=300 → 300
+            assert_eq!(outputs.len(), 2);
+            assert_eq!(outputs[0].beneficiary, 40);
+            assert_eq!(outputs[0].amount, 600);
+            assert_eq!(outputs[1].beneficiary, 20);
+            assert_eq!(outputs[1].amount, 300);
+        });
+    }
+
+    // ========================================================================
+    // max_depth 限制测试
+    // ========================================================================
+
+    #[test]
+    fn max_depth_limits_traversal() {
+        new_test_ext().execute_with(|| {
+            let entity_id = 1u64;
+
+            // 长链: 50 → 40 → 30 → 20 → 10
+            setup_chain(entity_id);
+            CUSTOM_LEVEL_IDS.with(|c| {
+                let mut m = c.borrow_mut();
+                m.insert((entity_id, 40), 0);
+                m.insert((entity_id, 30), 1);
+                m.insert((entity_id, 20), 2);
+                m.insert((entity_id, 10), 3);
+            });
+            LEVEL_BONUSES.with(|l| {
+                let mut m = l.borrow_mut();
+                m.insert((entity_id, 0), 300);
+                m.insert((entity_id, 1), 600);
+                m.insert((entity_id, 2), 900);
+                m.insert((entity_id, 3), 1200);
+            });
+
+            // max_depth=2 → 只遍历前 2 层
+            let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600, 900, 1200]).unwrap();
+            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
+                frame_system::RawOrigin::Root.into(),
+                entity_id, level_rates, 2,
+            ));
+
+            let mut remaining: Balance = 10000;
+            let mut outputs = alloc::vec::Vec::new();
+            pallet::Pallet::<Test>::process_level_diff(
+                entity_id, &50, 10000, &mut remaining, &mut outputs,
+            );
+
+            // 只有 40(depth=1) 和 30(depth=2)，20(depth=3) 被 max_depth=2 截断
+            assert_eq!(outputs.len(), 2);
+            assert_eq!(outputs[0].beneficiary, 40);
+            assert_eq!(outputs[1].beneficiary, 30);
+        });
+    }
+
+    // ========================================================================
+    // clear_config 清除测试
+    // ========================================================================
+
+    #[test]
+    fn clear_config_removes_config() {
+        new_test_ext().execute_with(|| {
+            use pallet_commission_common::LevelDiffPlanWriter;
+            let entity_id = 1u64;
+
+            // 设置配置
+            let level_rates = frame_support::BoundedVec::try_from(vec![300u16]).unwrap();
+            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
+                frame_system::RawOrigin::Root.into(), entity_id, level_rates, 5,
+            ));
+            assert!(pallet::CustomLevelDiffConfigs::<Test>::get(entity_id).is_some());
+
+            // clear_config 应清除配置
+            assert_ok!(<pallet::Pallet<Test> as LevelDiffPlanWriter>::clear_config(entity_id));
+            assert!(pallet::CustomLevelDiffConfigs::<Test>::get(entity_id).is_none());
+        });
+    }
+
+    // ========================================================================
+    // 空推荐链测试
+    // ========================================================================
+
+    #[test]
+    fn empty_referral_chain_produces_no_output() {
+        new_test_ext().execute_with(|| {
+            let entity_id = 1u64;
+
+            // 不设置推荐链 → buyer 无推荐人
+            let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600, 900]).unwrap();
+            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
+                frame_system::RawOrigin::Root.into(),
+                entity_id, level_rates, 10,
+            ));
+
+            let mut remaining: Balance = 10000;
+            let mut outputs = alloc::vec::Vec::new();
+            pallet::Pallet::<Test>::process_level_diff(
+                entity_id, &50, 10000, &mut remaining, &mut outputs,
+            );
+
+            assert!(outputs.is_empty());
+            assert_eq!(remaining, 10000);
         });
     }
 }

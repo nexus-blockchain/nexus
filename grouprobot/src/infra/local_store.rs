@@ -6,6 +6,8 @@ pub struct LocalStore {
     counters: DashMap<String, (u64, u64, u64)>,
     /// 指纹去重: fingerprint → (timestamp, ttl_secs)
     fingerprints: DashMap<String, (u64, u64)>,
+    /// L1 修复: 双桶滑动窗口计数器: key → (prev_count, curr_count, curr_window_start, window_secs)
+    sliding_counters: DashMap<String, (u64, u64, u64, u64)>,
 }
 
 impl Default for LocalStore {
@@ -19,6 +21,7 @@ impl LocalStore {
         Self {
             counters: DashMap::new(),
             fingerprints: DashMap::new(),
+            sliding_counters: DashMap::new(),
         }
     }
 
@@ -58,6 +61,42 @@ impl LocalStore {
         false
     }
 
+    /// L1 修复: 双桶滑动窗口计数器
+    ///
+    /// 使用前一窗口和当前窗口的加权估算，避免窗口边界突发:
+    ///   estimated = prev_count * (1 - elapsed_fraction) + curr_count
+    /// 参考: Cloudflare / Redis 滑动窗口算法
+    pub fn increment_counter_sliding(&self, key: &str, window_secs: u64) -> u64 {
+        let now = now_secs();
+        let mut entry = self.sliding_counters.entry(key.to_string())
+            .or_insert((0, 0, now, window_secs));
+        let (prev, curr, win_start, _ws) = entry.value_mut();
+
+        if now - *win_start >= window_secs * 2 {
+            // 两个窗口都过期了，完全重置
+            *prev = 0;
+            *curr = 1;
+            *win_start = now;
+        } else if now - *win_start >= window_secs {
+            // 当前窗口过期，滑动: curr → prev
+            *prev = *curr;
+            *curr = 1;
+            *win_start = now;
+        } else {
+            *curr += 1;
+        }
+
+        // 计算加权估算值
+        let elapsed = now.saturating_sub(*win_start);
+        let fraction = if window_secs > 0 {
+            (elapsed as f64) / (window_secs as f64)
+        } else {
+            1.0
+        };
+        let estimated = (*prev as f64) * (1.0 - fraction) + (*curr as f64);
+        estimated.ceil() as u64
+    }
+
     /// 清理过期条目
     /// 使用每个条目自带的窗口时长 (H3 修复: 防止 WarnTracker 30 天计数器被误清理)
     pub fn cleanup_expired(&self) {
@@ -69,6 +108,10 @@ impl LocalStore {
         // 清理过期指纹: 超过 TTL 2 倍的才移除
         self.fingerprints.retain(|_, (ts, ttl)| {
             now - *ts < (*ttl).max(60) * 2
+        });
+        // 清理过期滑动窗口计数器
+        self.sliding_counters.retain(|_, (_, _, start, window)| {
+            now - *start < (*window).max(60) * 2
         });
     }
 

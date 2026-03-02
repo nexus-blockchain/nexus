@@ -137,6 +137,8 @@ pub mod pallet {
         MemberUpdate,
         /// 订单自动完成
         AutoComplete,
+        /// 升级规则检查
+        UpgradeRuleCheck,
     }
 
     #[pallet::config]
@@ -905,6 +907,18 @@ pub mod pallet {
                 amount_usdt,
             ).is_err() {
                 Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::MemberUpdate });
+            }
+
+            // 触发升级规则引擎（best-effort，失败发事件）
+            // update_spent 先执行，确保 total_spent 已含本单；规则引擎读取最新 member 快照
+            if T::MemberHandler::check_order_upgrade_rules(
+                entity_id,
+                &order.buyer,
+                order.product_id,
+                order.total_amount,
+                amount_usdt,
+            ).is_err() {
+                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::UpgradeRuleCheck });
             }
 
             // 更新店铺统计（best-effort，失败发事件）

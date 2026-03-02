@@ -146,6 +146,7 @@ mod tests {
             message_type: None,
             callback_query_id: None,
             callback_data: None,
+            channel_id: None,
         }
     }
 
@@ -168,6 +169,7 @@ mod tests {
             message_type: None,
             callback_query_id: None,
             callback_data: None,
+            channel_id: None,
         }
     }
 
@@ -190,6 +192,7 @@ mod tests {
             message_type: None,
             callback_query_id: Some("cb_1".into()),
             callback_data: Some(data.into()),
+            channel_id: None,
         }
     }
 

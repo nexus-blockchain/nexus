@@ -225,20 +225,25 @@ impl PlatformExecutor for DiscordExecutor {
             ActionType::Unmute => self.remove_timeout(&action.group_id, &action.target_user).await,
             ActionType::SendMessage => {
                 if let Some(ref msg) = action.message {
-                    self.send_message(&action.group_id, msg).await
+                    // M1 修复: 优先使用 channel_id (Discord 需要 channel_id 而非 guild_id)
+                    let channel = action.channel_id.as_deref().unwrap_or(&action.group_id);
+                    self.send_message(channel, msg).await
                 } else {
                     Ok(())
                 }
             }
             ActionType::Unban => self.unban_member(&action.group_id, &action.target_user).await,
             ActionType::DeleteMessage => {
-                // DeleteMessage 需要 channel_id + message_id, 当前 ExecuteAction 结构不支持
-                // group_id 在 Discord 是 guild_id 而非 channel_id, 故无法正确执行
-                warn!(action = ?action.action_type, "Discord DeleteMessage 需要 channel_id + message_id, 当前 ExecuteAction 结构不支持");
-                Err(BotError::PlatformApi {
-                    platform: "discord".into(),
-                    message: "DeleteMessage not supported: ExecuteAction lacks channel_id and message_id fields".into(),
-                })
+                // M1 修复: 使用 channel_id + target_user(message_id) 正确删除消息
+                if let Some(ref channel_id) = action.channel_id {
+                    self.delete_message(channel_id, &action.target_user).await
+                } else {
+                    warn!(action = ?action.action_type, "Discord DeleteMessage 缺少 channel_id");
+                    Err(BotError::PlatformApi {
+                        platform: "discord".into(),
+                        message: "DeleteMessage requires channel_id".into(),
+                    })
+                }
             }
             other => {
                 // H1 修复: 未实现的动作显式返回错误, 而非静默成功

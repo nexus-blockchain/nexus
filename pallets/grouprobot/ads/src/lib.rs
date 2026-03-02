@@ -162,6 +162,9 @@ pub mod pallet {
 		/// 国库账户
 		type TreasuryAccount: Get<Self::AccountId>;
 
+		/// C1-fix: 奖励池账户 (广告节点份额转入, 统一由 rewards pallet claim)
+		type RewardPoolAccount: Get<Self::AccountId>;
+
 		/// 节点共识查询 (用于验证节点状态 + TEE 状态)
 		type NodeConsensus: NodeConsensusProvider<Self::AccountId>;
 
@@ -173,6 +176,10 @@ pub mod pallet {
 
 		/// 🆕 10.9: Bot 注册查询 (用于绑定 CommunityAdmin 到 Bot Owner)
 		type BotRegistry: BotRegistryProvider<Self::AccountId>;
+
+		/// G4: 私有广告注册费用 (社区主自报价格下广告, 收取少量注册费用)
+		#[pallet::constant]
+		type PrivateAdRegistrationFee: Get<BalanceOf<Self>>;
 	}
 
 	// ========================================================================
@@ -307,6 +314,16 @@ pub mod pallet {
 	/// 🆕 10.5: 社区广告分成百分比 (默认 80, 即 80%). 可通过治理调整.
 	#[pallet::storage]
 	pub type CommunityAdPct<T: Config> = StorageValue<_, u32, ValueQuery>;
+
+	/// 社区本 Era 广告投放次数 (供 subscription pallet 广告承诺达标检查)
+	#[pallet::storage]
+	pub type CommunityEraDeliveries<T: Config> =
+		StorageMap<_, Blake2_128Concat, CommunityIdHash, u32, ValueQuery>;
+
+	/// G4: 社区私有广告注册次数 (计数)
+	#[pallet::storage]
+	pub type PrivateAdCount<T: Config> =
+		StorageMap<_, Blake2_128Concat, CommunityIdHash, u32, ValueQuery>;
 
 	// ---- Phase 5: 反作弊 ----
 
@@ -476,6 +493,12 @@ pub mod pallet {
 		CommunityAdPercentUpdated {
 			community_pct: u32,
 		},
+		/// G4: 私有广告已注册
+		PrivateAdRegistered {
+			community_id_hash: CommunityIdHash,
+			registrar: T::AccountId,
+			count: u32,
+		},
 	}
 
 	// ========================================================================
@@ -550,6 +573,8 @@ pub mod pallet {
 		AdsDisabledByTier,
 		/// 🆕 10.6: Bot 订阅层级不支持 TEE 功能
 		TeeNotAvailableForTier,
+		/// G4: 私有广告注册次数必须 > 0
+		ZeroPrivateAdCount,
 	}
 
 	// ========================================================================
@@ -808,6 +833,9 @@ pub mod pallet {
 				receipts.try_push(receipt).map_err(|_| Error::<T>::ReceiptsFull)
 			})?;
 
+			// 递增社区 Era 投放计数 (供广告承诺达标检查)
+			CommunityEraDeliveries::<T>::mutate(&community_id_hash, |c| *c = c.saturating_add(1));
+
 			Campaigns::<T>::mutate(campaign_id, |maybe| {
 				if let Some(c) = maybe {
 					c.total_deliveries = c.total_deliveries.saturating_add(1);
@@ -881,7 +909,7 @@ pub mod pallet {
 					receipt.audience_size
 				};
 				if let Some(campaign) = Campaigns::<T>::get(receipt.campaign_id) {
-					let cost = Self::compute_cpm_cost(campaign.bid_per_mille, effective);
+					let cost = Self::compute_cpm_cost(campaign.bid_per_mille, effective, &receipt.delivery_type);
 					let escrow = CampaignEscrow::<T>::get(receipt.campaign_id);
 					let actual_cost = core::cmp::min(cost, escrow);
 					if !actual_cost.is_zero() {
@@ -904,17 +932,25 @@ pub mod pallet {
 				// 解锁 advertiser 的 reserve
 				T::Currency::unreserve(advertiser, *actual_cost);
 
-				// C1: 将全部 actual_cost 从广告主转入国库
-				// H4: 错误传播, 不再静默忽略
+				// C1-fix: node_share 转入奖励池, 其余转入国库
+				let treasury_portion = actual_cost.saturating_sub(*node_share);
 				T::Currency::transfer(
 					advertiser,
 					&treasury,
-					*actual_cost,
+					treasury_portion,
 					ExistenceRequirement::AllowDeath,
 				).map_err(|_| Error::<T>::SettlementTransferFailed)?;
 
-				// 节点收入记账 (10.4: 通过 RewardPool trait 写入统一奖励池, 由 rewards pallet 统一 claim)
 				if !node_share.is_zero() {
+					let reward_pool = T::RewardPoolAccount::get();
+					T::Currency::transfer(
+						advertiser,
+						&reward_pool,
+						*node_share,
+						ExistenceRequirement::AllowDeath,
+					).map_err(|_| Error::<T>::SettlementTransferFailed)?;
+
+					// 节点收入记账 (10.4: 通过 RewardPool trait 写入统一奖励池)
 					let share_u128: u128 = (*node_share).unique_saturated_into();
 					T::RewardPool::accrue_node_reward(node_id, share_u128);
 					Self::deposit_event(Event::NodeAdRewardAccrued {
@@ -1493,6 +1529,48 @@ pub mod pallet {
 			CommunityAdmin::<T>::insert(&community_id_hash, new_admin);
 			Ok(())
 		}
+
+		/// G4: 私域广告自助登记
+		///
+		/// 社区管理员登记链下/私域广告投放次数, 缴纳登记费 (转入国库).
+		/// 登记的投放次数计入 CommunityEraDeliveries, 用于广告承诺达标检查.
+		/// 这为群主提供了一个将链下广告活动"上链"的途径, 同时为平台产生收入.
+		#[pallet::call_index(25)]
+		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		pub fn register_private_ad(
+			origin: OriginFor<T>,
+			community_id_hash: CommunityIdHash,
+			count: u32,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			ensure!(count > 0, Error::<T>::ZeroPrivateAdCount);
+
+			let admin = CommunityAdmin::<T>::get(&community_id_hash)
+				.ok_or(Error::<T>::NotCommunityAdmin)?;
+			ensure!(admin == who, Error::<T>::NotCommunityAdmin);
+
+			let fee = T::PrivateAdRegistrationFee::get()
+				.saturating_mul(count.into());
+			if !fee.is_zero() {
+				let treasury = T::TreasuryAccount::get();
+				T::Currency::transfer(
+					&who,
+					&treasury,
+					fee,
+					ExistenceRequirement::AllowDeath,
+				)?;
+			}
+
+			PrivateAdCount::<T>::mutate(&community_id_hash, |c| *c = c.saturating_add(count));
+			CommunityEraDeliveries::<T>::mutate(&community_id_hash, |c| *c = c.saturating_add(count));
+
+			Self::deposit_event(Event::PrivateAdRegistered {
+				community_id_hash,
+				registrar: who,
+				count,
+			});
+			Ok(())
+		}
 	}
 
 	// ========================================================================
@@ -1500,12 +1578,20 @@ pub mod pallet {
 	// ========================================================================
 
 	impl<T: Config> Pallet<T> {
-		/// 计算 CPM 费用: bid_per_mille * audience / 1000
-		fn compute_cpm_cost(bid_per_mille: BalanceOf<T>, audience: u32) -> BalanceOf<T> {
+		/// 计算 CPM 费用: bid_per_mille * audience / 1000 * multiplier / 100
+		///
+		/// multiplier 由投放类型决定 (基点, 100=1.0x):
+		/// - ScheduledPost: 100 (全额)
+		/// - ReplyFooter:    50 (半价)
+		/// - WelcomeEmbed:   30 (三折)
+		fn compute_cpm_cost(bid_per_mille: BalanceOf<T>, audience: u32, delivery_type: &AdDeliveryType) -> BalanceOf<T> {
 			let audience_balance: BalanceOf<T> = audience.into();
 			let thousand: BalanceOf<T> = 1000u32.into();
-			// bid * audience / 1000
+			let multiplier: BalanceOf<T> = delivery_type.cpm_multiplier_bps().into();
+			let hundred: BalanceOf<T> = 100u32.into();
+			// bid * audience / 1000 * multiplier / 100
 			bid_per_mille.saturating_mul(audience_balance) / thousand
+				* multiplier / hundred
 		}
 
 		/// 百分比计算: value * pct / 100
@@ -1591,6 +1677,20 @@ pub mod pallet {
 		fn community_ad_revenue(community_id_hash: &CommunityIdHash) -> u128 {
 			let revenue = CommunityTotalRevenue::<T>::get(community_id_hash);
 			revenue.try_into().unwrap_or(0u128)
+		}
+	}
+
+	// ========================================================================
+	// AdDeliveryProvider 实现
+	// ========================================================================
+
+	impl<T: Config> AdDeliveryProvider for Pallet<T> {
+		fn era_delivery_count(community_id_hash: &CommunityIdHash) -> u32 {
+			CommunityEraDeliveries::<T>::get(community_id_hash)
+		}
+
+		fn reset_era_deliveries(community_id_hash: &CommunityIdHash) {
+			CommunityEraDeliveries::<T>::remove(community_id_hash);
 		}
 	}
 }

@@ -83,6 +83,7 @@ mod tests {
             message_type: msg_type.map(|s| s.to_string()),
             callback_query_id: None,
             callback_data: None,
+            channel_id: None,
         }
     }
 

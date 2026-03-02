@@ -521,40 +521,6 @@ pub enum ProductCategory {
 }
 
 // ============================================================================
-// 会员相关类型
-// ============================================================================
-
-/// 会员等级（数值越大级别越高）
-#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
-pub enum MemberLevel {
-    #[default]
-    Normal = 0,     // 普通会员
-    Silver = 1,     // 银卡会员
-    Gold = 2,       // 金卡会员
-    Platinum = 3,   // 白金会员
-    Diamond = 4,    // 钻石会员
-}
-
-impl MemberLevel {
-    /// 返回等级数值（用于排序和比较）
-    pub fn rank(&self) -> u8 {
-        *self as u8
-    }
-}
-
-impl PartialOrd for MemberLevel {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for MemberLevel {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.rank().cmp(&other.rank())
-    }
-}
-
-// ============================================================================
 // 订单相关类型
 // ============================================================================
 
@@ -1180,12 +1146,15 @@ pub trait OrderMemberHandler<AccountId, Balance> {
     fn auto_register(entity_id: u64, account: &AccountId, referrer: Option<AccountId>) -> Result<(), DispatchError>;
     /// 更新消费金额（订单完成时，amount=NEX, amount_usdt=USDT 精度值）
     fn update_spent(entity_id: u64, account: &AccountId, amount: Balance, amount_usdt: u64) -> Result<(), DispatchError>;
+    /// 检查订单完成时的升级规则（触发规则引擎评估）
+    fn check_order_upgrade_rules(entity_id: u64, buyer: &AccountId, product_id: u64, order_amount: Balance, amount_usdt: u64) -> Result<(), DispatchError>;
 }
 
 /// 空会员处理（无会员系统时使用）
 impl<AccountId, Balance> OrderMemberHandler<AccountId, Balance> for () {
     fn auto_register(_: u64, _: &AccountId, _: Option<AccountId>) -> Result<(), DispatchError> { Ok(()) }
     fn update_spent(_: u64, _: &AccountId, _: Balance, _: u64) -> Result<(), DispatchError> { Ok(()) }
+    fn check_order_upgrade_rules(_: u64, _: &AccountId, _: u64, _: Balance, _: u64) -> Result<(), DispatchError> { Ok(()) }
 }
 
 /// 空定价提供者（测试用）

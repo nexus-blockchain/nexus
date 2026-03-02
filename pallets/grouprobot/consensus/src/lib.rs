@@ -230,6 +230,14 @@ pub mod pallet {
 		AlreadyTeeVerified,
 		/// Free 层级不允许使用此功能
 		FreeTierNotAllowed,
+		/// Equivocation 证据无效 (相同消息哈希或签名)
+		InvalidEquivocationEvidence,
+		/// Equivocation 记录不存在
+		EquivocationNotFound,
+		/// 调用者不是 Bot 操作者或所有者
+		NotBotOperator,
+		/// TEE 奖励参数超出允许范围
+		InvalidTeeRewardParams,
 	}
 
 	// ========================================================================
@@ -318,7 +326,11 @@ pub mod pallet {
 			Nodes::<T>::try_mutate(&node_id, |maybe_node| -> DispatchResult {
 				let node = maybe_node.as_mut().ok_or(Error::<T>::NodeNotFound)?;
 				ensure!(node.operator == who, Error::<T>::NotOperator);
-				ensure!(node.status == NodeStatus::Active, Error::<T>::NodeNotActive);
+				// H5-fix: 允许 Suspended 节点退出 (slash 后可回收剩余质押)
+				ensure!(
+					node.status == NodeStatus::Active || node.status == NodeStatus::Suspended,
+					Error::<T>::NodeNotActive
+				);
 				ensure!(!ExitRequests::<T>::contains_key(&node_id), Error::<T>::AlreadyExiting);
 				node.status = NodeStatus::Exiting;
 				Ok(())
@@ -357,6 +369,8 @@ pub mod pallet {
 			Nodes::<T>::remove(&node_id);
 			OperatorNodes::<T>::remove(&who);
 			ExitRequests::<T>::remove(&node_id);
+			// H4-fix: 清理 NodeBotBinding 防止存储泄漏
+			NodeBotBinding::<T>::remove(&node_id);
 
 			Self::deposit_event(Event::ExitFinalized { node_id, stake_returned: stake });
 			Ok(())
@@ -376,6 +390,9 @@ pub mod pallet {
 		) -> DispatchResult {
 			let reporter = ensure_signed(origin)?;
 			ensure!(Nodes::<T>::contains_key(&node_id), Error::<T>::NodeNotFound);
+			// H1-fix: 验证 equivocation 证据有效性 (两条消息必须不同)
+			ensure!(msg_hash_a != msg_hash_b, Error::<T>::InvalidEquivocationEvidence);
+			ensure!(signature_a != signature_b, Error::<T>::InvalidEquivocationEvidence);
 			ensure!(
 				!EquivocationRecords::<T>::contains_key(&node_id, sequence),
 				Error::<T>::EquivocationAlreadyReported
@@ -410,7 +427,8 @@ pub mod pallet {
 			ensure_root(origin)?;
 
 			EquivocationRecords::<T>::try_mutate(&node_id, sequence, |maybe_record| -> DispatchResult {
-				let record = maybe_record.as_mut().ok_or(Error::<T>::NodeNotFound)?;
+				// M3-fix: 使用正确的错误码
+				let record = maybe_record.as_mut().ok_or(Error::<T>::EquivocationNotFound)?;
 				record.resolved = true;
 				Ok(())
 			})?;
@@ -426,12 +444,17 @@ pub mod pallet {
 					if let Some(n) = maybe_node {
 						n.stake = n.stake.saturating_sub(actual_slashed);
 						n.status = NodeStatus::Suspended;
+						// H8-fix: 重置 TEE 状态防止陈旧标记
+						n.is_tee_node = false;
 					}
 				});
 
 				ActiveNodeList::<T>::mutate(|list| {
 					list.retain(|id| id != &node_id);
 				});
+
+				// M2-fix: 清理被 Slash 节点的 Bot 绑定
+				NodeBotBinding::<T>::remove(&node_id);
 
 				Self::deposit_event(Event::NodeSlashed { node_id, amount: actual_slashed });
 			}
@@ -446,13 +469,22 @@ pub mod pallet {
 			bot_id_hash: BotIdHash,
 			sequence: u64,
 		) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
+			let who = ensure_signed(origin)?;
 
 			// Tier gate: Free 层级不允许链上序列号去重
 			ensure!(
 				T::Subscription::effective_tier(&bot_id_hash).is_paid(),
 				Error::<T>::FreeTierNotAllowed
 			);
+
+			// H2-fix: 验证调用者是 Bot 所有者或操作者
+			let is_owner = T::BotRegistry::bot_owner(&bot_id_hash)
+				.map(|owner| owner == who)
+				.unwrap_or(false);
+			let is_operator = T::BotRegistry::bot_operator(&bot_id_hash)
+				.map(|op| op == who)
+				.unwrap_or(false);
+			ensure!(is_owner || is_operator, Error::<T>::NotBotOperator);
 
 			if ProcessedSequences::<T>::contains_key(&bot_id_hash, sequence) {
 				Self::deposit_event(Event::SequenceDuplicate { bot_id_hash, sequence });
@@ -514,6 +546,9 @@ pub mod pallet {
 			sgx_bonus: u32,
 		) -> DispatchResult {
 			ensure_root(origin)?;
+			// H6-fix: 上限校验 (tee_multiplier 最大 50000=5x, sgx_bonus 最大 10000=1x)
+			ensure!(tee_multiplier <= 50_000, Error::<T>::InvalidTeeRewardParams);
+			ensure!(sgx_bonus <= 10_000, Error::<T>::InvalidTeeRewardParams);
 			TeeRewardMultiplier::<T>::put(tee_multiplier);
 			SgxEnclaveBonus::<T>::put(sgx_bonus);
 			Self::deposit_event(Event::TeeRewardParamsUpdated { tee_multiplier, sgx_bonus });
@@ -581,22 +616,25 @@ pub mod pallet {
 			}
 
 			// 1. 委托 subscription pallet 结算订阅费
+			//    80% node_share 已由 subscription pallet 直接转给 Bot 运营者
+			//    10% → Treasury, 10% → Agent (由 subscription pallet 内部完成)
 			let subscription_income_u128 = T::SubscriptionSettler::settle_era();
 			let subscription_income: BalanceOf<T> = subscription_income_u128.unique_saturated_into();
 
-			// 2. 拆分: 80% 节点, 10% 国库, 10% agent
-			let node_share = subscription_income * 80u32.into() / 100u32.into();
+			// 2. 计算份额 (仅用于 EraRewardInfo 记录)
 			let treasury_share = subscription_income * 10u32.into() / 100u32.into();
 
-			// 3. 铸币通胀
+			// 3. 通胀额度 (由 rewards pallet 在 distribute_and_record 时铸币到 RewardPool)
 			let inflation = T::InflationPerEra::get();
 
-			// 4. 可分配总额 (节点部分 + 通胀)
-			let total_pool = node_share.saturating_add(inflation);
+			// 4. 可分配总额 = 仅通胀 (订阅 node_share 已全部直接分配给运营者, 不参与权重分配)
+			let total_pool = inflation;
 
-			// 5. 检查 TEE 证明有效性, 过期则降级
+			// M1-fix: 合并 TEE 检查 + 权重计算为单次循环, 避免双重 Nodes::get()
+			let mut weights: alloc::vec::Vec<(NodeId, u128)> = alloc::vec::Vec::new();
 			for node_id in active_nodes.iter() {
-				if let Some(node) = Nodes::<T>::get(node_id) {
+				if let Some(mut node) = Nodes::<T>::get(node_id) {
+					// 5. 检查 TEE 证明有效性, 过期则降级
 					if node.is_tee_node {
 						let still_valid = NodeBotBinding::<T>::get(node_id)
 							.map(|bot_hash| {
@@ -605,24 +643,15 @@ pub mod pallet {
 							})
 							.unwrap_or(false);
 						if !still_valid {
-							Nodes::<T>::mutate(node_id, |maybe_node| {
-								if let Some(n) = maybe_node {
-									n.is_tee_node = false;
-								}
-							});
+							node.is_tee_node = false;
+							Nodes::<T>::insert(node_id, &node);
 							NodeBotBinding::<T>::remove(node_id);
 							Self::deposit_event(Event::NodeTeeStatusChanged {
 								node_id: *node_id, is_tee: false,
 							});
 						}
 					}
-				}
-			}
-
-			// 6. 计算节点权重
-			let mut weights: alloc::vec::Vec<(NodeId, u128)> = alloc::vec::Vec::new();
-			for node_id in active_nodes.iter() {
-				if let Some(node) = Nodes::<T>::get(node_id) {
+					// 6. 计算节点权重 (使用已更新的 node)
 					let w = Self::compute_node_weight(&node, node_id);
 					weights.push((*node_id, w));
 				}

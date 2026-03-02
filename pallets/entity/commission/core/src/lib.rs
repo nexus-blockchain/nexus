@@ -1047,17 +1047,22 @@ pub mod pallet {
                     T::ReferralWriter::set_direct_rate(entity_id, base_rate)?;
                     T::ReferralWriter::set_multi_level(entity_id, level_rates, total_rate.min(10000))?;
                 }
-                CommissionPlan::LevelDiff { normal, silver, gold, platinum, diamond } => {
-                    ensure!(diamond <= 10000, Error::<T>::InvalidCommissionRate);
+                CommissionPlan::LevelDiff { ref level_rates } => {
+                    let mut max_rate = 0u16;
+                    for &rate in level_rates.iter() {
+                        ensure!(rate <= 10000, Error::<T>::InvalidCommissionRate);
+                        if rate > max_rate { max_rate = rate; }
+                    }
                     CommissionConfigs::<T>::insert(entity_id, CoreCommissionConfig {
                         enabled_modes: CommissionModes(
                             CommissionModes::DIRECT_REWARD | CommissionModes::LEVEL_DIFF
                         ),
-                        max_commission_rate: diamond,
+                        max_commission_rate: max_rate,
                         enabled: true,
                         withdrawal_cooldown: 0,
                     });
-                    T::LevelDiffWriter::set_global_rates(entity_id, normal, silver, gold, platinum, diamond)?;
+                    let depth = level_rates.len() as u8;
+                    T::LevelDiffWriter::set_level_rates(entity_id, level_rates.to_vec(), depth)?;
                 }
                 CommissionPlan::Custom => {
                     CommissionConfigs::<T>::insert(entity_id, CoreCommissionConfig {
@@ -2579,13 +2584,12 @@ impl<T: pallet::Config> CommissionProvider<T::AccountId, pallet::BalanceOf<T>> f
         <T as pallet::Config>::ReferralWriter::set_direct_rate(entity_id, rate)
     }
 
-    fn set_level_diff_config(entity_id: u64, normal: u16, silver: u16, gold: u16, platinum: u16, diamond: u16) -> sp_runtime::DispatchResult {
-        frame_support::ensure!(normal <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
-        frame_support::ensure!(silver <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
-        frame_support::ensure!(gold <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
-        frame_support::ensure!(platinum <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
-        frame_support::ensure!(diamond <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
-        <T as pallet::Config>::LevelDiffWriter::set_global_rates(entity_id, normal, silver, gold, platinum, diamond)
+    fn set_level_diff_config(entity_id: u64, level_rates: alloc::vec::Vec<u16>) -> sp_runtime::DispatchResult {
+        for &rate in level_rates.iter() {
+            frame_support::ensure!(rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
+        }
+        let depth = level_rates.len() as u8;
+        <T as pallet::Config>::LevelDiffWriter::set_level_rates(entity_id, level_rates, depth)
     }
 
     fn set_fixed_amount(entity_id: u64, amount: pallet::BalanceOf<T>) -> sp_runtime::DispatchResult {

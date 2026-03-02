@@ -52,7 +52,15 @@ impl BotRegistryProvider<u64> for MockBotRegistry {
 	}
 	fn bot_public_key(_: &BotIdHash) -> Option<[u8; 32]> { None }
 	fn peer_count(_: &BotIdHash) -> u32 { 0 }
-	fn bot_operator(_: &BotIdHash) -> Option<u64> { None }
+	fn bot_operator(bot_id_hash: &BotIdHash) -> Option<u64> {
+		match bot_id_hash[0] {
+			1 => Some(OPERATOR),
+			2 => Some(OPERATOR2),
+			10 => Some(OPERATOR),
+			11 => Some(OPERATOR2),
+			_ => None,
+		}
+	}
 }
 
 // Mock SubscriptionProvider: bot_hash(1)=Basic, bot_hash(2)=Basic, bot_hash(10/11)=Pro, others=Free

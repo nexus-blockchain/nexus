@@ -42,18 +42,21 @@ impl NodeConsensusProvider<u64> for MockNodeConsensus {
 
 parameter_types! {
 	pub const MaxEraHist: u64 = 10;
+	pub const RewardPoolAcct: u64 = 100;
 }
 
 impl pallet_grouprobot_rewards::Config for Test {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type NodeConsensus = MockNodeConsensus;
+	type RewardPoolAccount = RewardPoolAcct;
 	type MaxEraHistory = MaxEraHist;
 }
 
 pub const OPERATOR: u64 = 10;
 pub const OPERATOR2: u64 = 11;
 pub const OTHER: u64 = 99;
+pub const REWARD_POOL: u64 = 100;
 
 pub fn node_id(n: u8) -> NodeId {
 	let mut id = [0u8; 32];
@@ -68,6 +71,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 			(OPERATOR, 100_000),
 			(OPERATOR2, 100_000),
 			(OTHER, 100_000),
+			(REWARD_POOL, 1_000_000),
 		],
 		dev_accounts: None,
 	}

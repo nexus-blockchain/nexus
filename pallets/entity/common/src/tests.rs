@@ -305,32 +305,6 @@ fn shop_operating_status_can_resume() {
 }
 
 // ============================================================================
-// MemberLevel tests
-// ============================================================================
-
-#[test]
-fn member_level_ordering() {
-    assert!(MemberLevel::Normal < MemberLevel::Silver);
-    assert!(MemberLevel::Silver < MemberLevel::Gold);
-    assert!(MemberLevel::Gold < MemberLevel::Platinum);
-    assert!(MemberLevel::Platinum < MemberLevel::Diamond);
-}
-
-#[test]
-fn member_level_rank() {
-    assert_eq!(MemberLevel::Normal.rank(), 0);
-    assert_eq!(MemberLevel::Silver.rank(), 1);
-    assert_eq!(MemberLevel::Gold.rank(), 2);
-    assert_eq!(MemberLevel::Platinum.rank(), 3);
-    assert_eq!(MemberLevel::Diamond.rank(), 4);
-}
-
-#[test]
-fn member_level_default_is_normal() {
-    assert_eq!(MemberLevel::default(), MemberLevel::Normal);
-}
-
-// ============================================================================
 // NullPricingProvider test
 // ============================================================================
 

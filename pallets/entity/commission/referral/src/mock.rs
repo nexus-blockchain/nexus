@@ -53,7 +53,6 @@ impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
     fn get_referrer(entity_id: u64, account: &u64) -> Option<u64> {
         REFERRERS.with(|r| r.borrow().get(&(entity_id, *account)).copied())
     }
-    fn member_level(_: u64, _: &u64) -> Option<pallet_entity_common::MemberLevel> { None }
     fn get_member_stats(entity_id: u64, account: &u64) -> (u32, u32, u128) {
         MEMBER_STATS.with(|s| s.borrow().get(&(entity_id, *account)).copied().unwrap_or((0, 0, 0)))
     }

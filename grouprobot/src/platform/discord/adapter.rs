@@ -5,6 +5,44 @@ pub struct DiscordAdapter;
 
 impl DiscordAdapter {
     pub fn new() -> Self { Self }
+
+    /// L3 修复: 从 Discord MESSAGE_CREATE 事件中检测媒体类型
+    fn detect_message_type(raw: &serde_json::Value) -> Option<String> {
+        let d = raw.get("d")?;
+
+        // Discord sticker_items
+        if let Some(stickers) = d.get("sticker_items").and_then(|s| s.as_array()) {
+            if !stickers.is_empty() {
+                return Some("sticker".into());
+            }
+        }
+
+        // Discord attachments (图片/视频/音频/文件)
+        if let Some(attachments) = d.get("attachments").and_then(|a| a.as_array()) {
+            for att in attachments {
+                if let Some(content_type) = att.get("content_type").and_then(|c| c.as_str()) {
+                    if content_type.starts_with("image/") {
+                        return Some("photo".into());
+                    } else if content_type.starts_with("video/") {
+                        return Some("video".into());
+                    } else if content_type.starts_with("audio/") {
+                        return Some("audio".into());
+                    }
+                }
+                // 有附件但无法识别类型 → document
+                return Some("document".into());
+            }
+        }
+
+        // Discord embeds (链接预览等)
+        if let Some(embeds) = d.get("embeds").and_then(|e| e.as_array()) {
+            if !embeds.is_empty() {
+                return Some("forward".into());
+            }
+        }
+
+        None
+    }
 }
 
 impl PlatformAdapter for DiscordAdapter {
@@ -32,6 +70,7 @@ impl PlatformAdapter for DiscordAdapter {
                     content: Some(content.to_string()),
                     raw_event: raw.clone(),
                     timestamp: 0,
+                    channel_id: d.get("channel_id").and_then(|c| c.as_str()).map(|s| s.to_string()),
                 })
             }
             "GUILD_MEMBER_ADD" => {
@@ -46,6 +85,7 @@ impl PlatformAdapter for DiscordAdapter {
                     content: None,
                     raw_event: raw.clone(),
                     timestamp: 0,
+                    channel_id: None,
                 })
             }
             _ => None,
@@ -80,9 +120,10 @@ impl PlatformAdapter for DiscordAdapter {
             command_args: args,
             is_join_request: event.event_type == "member_join",
             is_admin: false,
-            message_type: None,
+            message_type: Self::detect_message_type(&event.raw_event),
             callback_query_id: None,
             callback_data: None,
+            channel_id: event.channel_id.clone(),
         }
     }
 }

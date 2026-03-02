@@ -523,6 +523,10 @@ impl pallet_entity_common::OrderMemberHandler<u64, u64> for MockMemberHandler {
         MEMBER_SPENT.with(|s| s.borrow_mut().push((entity_id, *account, amount, amount_usdt)));
         Ok(())
     }
+
+    fn check_order_upgrade_rules(_entity_id: u64, _buyer: &u64, _product_id: u64, _order_amount: u64, _amount_usdt: u64) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
 }
 
 // ==================== Test Constants ====================

@@ -172,6 +172,11 @@ parameter_types! {
 	// 2. 销毁账户 - 专用于代币销毁，必须独立
 	pub const BurnPalletId: frame_support::PalletId = frame_support::PalletId(*b"py/burn!");
 	pub BurnAccountId: AccountId = BurnPalletId::get().into_account_truncating();
+
+	// 3. 奖励池账户 - 节点奖励资金池 (订阅费 fallback + 通胀铸币)
+	pub const RewardPoolPalletId: frame_support::PalletId = frame_support::PalletId(*b"py/rwdpl");
+	pub RewardPoolAccountId: AccountId = RewardPoolPalletId::get().into_account_truncating();
+
 }
 
 // ============================================================================
@@ -1136,11 +1141,6 @@ impl pallet_entity_commission::MemberProvider<AccountId> for MemberProviderBridg
 			.and_then(|m| m.referrer)
 	}
 
-	fn member_level(entity_id: u64, account: &AccountId) -> Option<pallet_entity_common::MemberLevel> {
-		pallet_entity_member::EntityMembers::<Runtime>::get(entity_id, account)
-			.map(|m| m.level)
-	}
-
 	fn get_member_stats(entity_id: u64, account: &AccountId) -> (u32, u32, u128) {
 		pallet_entity_member::EntityMembers::<Runtime>::get(entity_id, account)
 			.map(|m| {
@@ -1332,10 +1332,6 @@ impl pallet_entity_member::Config for Runtime {
 	type ShopProvider = EntityShop;
 	type MaxDirectReferrals = ConstU32<1000>;
 	type MaxCustomLevels = ConstU32<10>;
-	type SilverThreshold = ConstU64<100_000_000>;    // 100 USDT
-	type GoldThreshold = ConstU64<500_000_000>;      // 500 USDT
-	type PlatinumThreshold = ConstU64<2000_000_000>; // 2000 USDT
-	type DiamondThreshold = ConstU64<10000_000_000>; // 10000 USDT
 	type MaxUpgradeRules = ConstU32<50>;
 	type MaxUpgradeHistory = ConstU32<100>;
 }
@@ -1409,7 +1405,6 @@ impl pallet_commission_pool_reward::Config for Runtime {
 	type EntityProvider = EntityRegistry;
 	type PoolBalanceProvider = pallet_commission_core::Pallet<Runtime>;
 	type MaxPoolRewardLevels = ConstU32<10>;
-	type DefaultRoundDuration = PoolRewardDefaultRoundDuration;
 	type MaxClaimHistory = ConstU32<20>;
 	// Token 多资产扩展
 	type TokenBalance = u128;
@@ -1433,6 +1428,15 @@ impl pallet_commission_single_line::pallet::SingleLineStatsProvider<AccountId, B
 	}
 }
 
+/// 桥接：EntityMember 的会员等级 → SingleLine 的 MemberLevelProvider
+pub struct SingleLineLevelFromMember;
+
+impl pallet_commission_single_line::pallet::SingleLineMemberLevelProvider<AccountId> for SingleLineLevelFromMember {
+	fn custom_level_id(entity_id: u64, account: &AccountId) -> u8 {
+		pallet_entity_member::Pallet::<Runtime>::get_effective_level_by_entity(entity_id, account)
+	}
+}
+
 impl pallet_commission_team::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
@@ -1444,6 +1448,7 @@ impl pallet_commission_single_line::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type StatsProvider = SingleLineStatsFromCore;
+	type MemberLevelProvider = SingleLineLevelFromMember;
 	type MaxSingleLineLength = ConstU32<50>;
 }
 
@@ -1677,10 +1682,17 @@ impl pallet_grouprobot_subscription::Config for Runtime {
 	type ProFeePerEra = GrProFeePerEra;
 	type EnterpriseFeePerEra = GrEnterpriseFeePerEra;
 	type TreasuryAccount = TreasuryAccountId;
+	type RewardPoolAccount = RewardPoolAccountId;
 	type MaxSubscriptionSettlePerEra = ConstU32<200>;
 	type EraLength = GrEraLength;
 	type EraStartBlockProvider = GrEraStartBlockProvider;
 	type CurrentEraProvider = GrCurrentEraProvider;
+	// AdDelivery: 当 ads pallet 接入 runtime 后替换为 pallet_grouprobot_ads::Pallet<Runtime>
+	type AdDelivery = ();
+	type AdBasicThreshold = ConstU32<3>;
+	type AdProThreshold = ConstU32<6>;
+	type AdEnterpriseThreshold = ConstU32<11>;
+	type MaxUnderdeliveryEras = ConstU8<3>;
 }
 
 /// NodeConsensus Bridge: 从 consensus pallet 读取节点信息
@@ -1701,6 +1713,7 @@ impl pallet_grouprobot_rewards::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type NodeConsensus = GrNodeConsensusBridge;
+	type RewardPoolAccount = RewardPoolAccountId;
 	type MaxEraHistory = GrMaxEraHistory;
 }
 

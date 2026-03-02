@@ -38,6 +38,23 @@ pub struct SubscriptionRecord<T: Config> {
 	pub status: SubscriptionStatus,
 }
 
+/// 广告承诺订阅记录
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, RuntimeDebug, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
+#[scale_info(skip_type_params(T))]
+pub struct AdCommitmentRecord<T: Config> {
+	pub owner: T::AccountId,
+	pub bot_id_hash: BotIdHash,
+	pub community_id_hash: CommunityIdHash,
+	/// 每 Era 承诺接受的广告数
+	pub committed_ads_per_era: u32,
+	/// 对应的权益层级
+	pub effective_tier: SubscriptionTier,
+	/// 连续未达标 Era 数
+	pub underdelivery_eras: u8,
+	pub status: AdCommitmentStatus,
+	pub started_at: BlockNumberFor<T>,
+}
+
 type BalanceOf<T> =
 	<<T as Config>::Currency as frame_support::traits::Currency<<T as frame_system::Config>::AccountId>>::Balance;
 
@@ -64,8 +81,10 @@ pub mod pallet {
 		/// Enterprise 层级每 Era 费用
 		#[pallet::constant]
 		type EnterpriseFeePerEra: Get<BalanceOf<Self>>;
-		/// 国库账户 (订阅费转入)
+		/// 国库账户 (订阅费 10% 转入)
 		type TreasuryAccount: Get<Self::AccountId>;
+		/// 奖励池账户 (订阅费 80% 节点份额转入)
+		type RewardPoolAccount: Get<Self::AccountId>;
 		/// 每次 Era 结算最多处理的订阅数 (游标分页)
 		#[pallet::constant]
 		type MaxSubscriptionSettlePerEra: Get<u32>;
@@ -76,6 +95,22 @@ pub mod pallet {
 		type EraStartBlockProvider: Get<BlockNumberFor<Self>>;
 		/// 当前 Era 编号查询
 		type CurrentEraProvider: Get<u64>;
+
+		/// 广告投放计数查询 (从 ads pallet 读取社区投放次数)
+		type AdDelivery: AdDeliveryProvider;
+
+		/// 广告承诺阈值: Basic 层级最低广告数/Era
+		#[pallet::constant]
+		type AdBasicThreshold: Get<u32>;
+		/// 广告承诺阈值: Pro 层级最低广告数/Era
+		#[pallet::constant]
+		type AdProThreshold: Get<u32>;
+		/// 广告承诺阈值: Enterprise 层级最低广告数/Era
+		#[pallet::constant]
+		type AdEnterpriseThreshold: Get<u32>;
+		/// 连续未达标最大 Era 数 (超过则降级为 Free)
+		#[pallet::constant]
+		type MaxUnderdeliveryEras: Get<u8>;
 	}
 
 	// ========================================================================
@@ -100,6 +135,11 @@ pub mod pallet {
 	#[pallet::storage]
 	pub type SubscriptionSettlePending<T: Config> = StorageValue<_, bool, ValueQuery>;
 
+	/// 广告承诺订阅表: bot_id_hash → AdCommitmentRecord
+	#[pallet::storage]
+	pub type AdCommitments<T: Config> =
+		StorageMap<_, Blake2_128Concat, BotIdHash, AdCommitmentRecord<T>>;
+
 	// ========================================================================
 	// Events
 	// ========================================================================
@@ -117,6 +157,16 @@ pub mod pallet {
 		SubscriptionFeeCollected { bot_id_hash: BotIdHash, amount: BalanceOf<T> },
 		/// 取消订阅时按比例扣除当期费用
 		SubscriptionCancelledWithProration { bot_id_hash: BotIdHash, prorated_fee: BalanceOf<T>, refunded: BalanceOf<T> },
+		/// 广告承诺订阅已创建
+		AdCommitted { bot_id_hash: BotIdHash, community_id_hash: CommunityIdHash, committed_ads_per_era: u32, tier: SubscriptionTier },
+		/// 广告承诺订阅已取消
+		AdCommitmentCancelled { bot_id_hash: BotIdHash },
+		/// 广告承诺达标检查通过
+		AdCommitmentFulfilled { bot_id_hash: BotIdHash, delivered: u32, committed: u32 },
+		/// 广告承诺未达标
+		AdCommitmentUnderdelivered { bot_id_hash: BotIdHash, delivered: u32, committed: u32, consecutive: u8 },
+		/// 广告承诺因连续未达标而降级
+		AdCommitmentDowngraded { bot_id_hash: BotIdHash },
 	}
 
 	// ========================================================================
@@ -145,6 +195,16 @@ pub mod pallet {
 		SubscriptionFeeTransferFailed,
 		/// 仅订阅 Owner 可充值
 		NotSubscriptionOwner,
+		/// Bot 未分配运营者 (订阅前必须 assign_bot_to_operator)
+		BotHasNoOperator,
+		/// 广告承诺已存在
+		AdCommitmentAlreadyExists,
+		/// 广告承诺不存在
+		AdCommitmentNotFound,
+		/// 广告承诺已取消
+		AdCommitmentAlreadyCancelled,
+		/// 承诺广告数不足 (未达 Basic 阈值)
+		CommitmentBelowMinimum,
 	}
 
 	// ========================================================================
@@ -170,6 +230,7 @@ pub mod pallet {
 				Error::<T>::NotBotOwner
 			);
 			ensure!(!Subscriptions::<T>::contains_key(&bot_id_hash), Error::<T>::SubscriptionAlreadyExists);
+			ensure!(T::BotRegistry::bot_operator(&bot_id_hash).is_some(), Error::<T>::BotHasNoOperator);
 
 			let fee = Self::tier_fee(&tier);
 			ensure!(deposit >= fee, Error::<T>::InsufficientDeposit);
@@ -304,6 +365,77 @@ pub mod pallet {
 				Ok(())
 			})
 		}
+
+		/// 广告承诺订阅: 群主承诺社区接受 N 条广告/Era, 换取对应层级权益
+		///
+		/// ## 双重收益政策 (G3)
+		///
+		/// 广告承诺路径同时产生两项收益:
+		/// 1. **订阅层级权益** — 由承诺数量决定 (ads_to_tier 映射)
+		/// 2. **广告分成收入** — 由实际投放的 CPM 广告产生 (CommunityClaimable)
+		///
+		/// 这是正确的激励设计: 群主用用户注意力换取服务, 广告收入是对用户体验
+		/// 成本的补偿。阈值参数 (AdBasicThreshold/AdProThreshold/AdEnterpriseThreshold)
+		/// 由治理设定, 需确保承诺门槛高于纯收益换算值, 以维持付费订阅的吸引力。
+		#[pallet::call_index(4)]
+		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		pub fn commit_ads(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			community_id_hash: CommunityIdHash,
+			committed_ads_per_era: u32,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			ensure!(T::BotRegistry::is_bot_active(&bot_id_hash), Error::<T>::BotNotRegistered);
+			ensure!(
+				T::BotRegistry::bot_owner(&bot_id_hash) == Some(who.clone()),
+				Error::<T>::NotBotOwner
+			);
+			ensure!(!AdCommitments::<T>::contains_key(&bot_id_hash), Error::<T>::AdCommitmentAlreadyExists);
+
+			let tier = Self::ads_to_tier(committed_ads_per_era);
+			ensure!(tier.is_paid(), Error::<T>::CommitmentBelowMinimum);
+
+			let now = frame_system::Pallet::<T>::block_number();
+			let record = AdCommitmentRecord::<T> {
+				owner: who,
+				bot_id_hash,
+				community_id_hash,
+				committed_ads_per_era,
+				effective_tier: tier,
+				underdelivery_eras: 0,
+				status: AdCommitmentStatus::Active,
+				started_at: now,
+			};
+			AdCommitments::<T>::insert(&bot_id_hash, record);
+
+			Self::deposit_event(Event::AdCommitted {
+				bot_id_hash,
+				community_id_hash,
+				committed_ads_per_era,
+				tier,
+			});
+			Ok(())
+		}
+
+		/// 取消广告承诺订阅
+		#[pallet::call_index(5)]
+		#[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
+		pub fn cancel_ad_commitment(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			AdCommitments::<T>::try_mutate(&bot_id_hash, |maybe| -> DispatchResult {
+				let record = maybe.as_mut().ok_or(Error::<T>::AdCommitmentNotFound)?;
+				ensure!(record.owner == who, Error::<T>::NotBotOwner);
+				ensure!(record.status != AdCommitmentStatus::Cancelled, Error::<T>::AdCommitmentAlreadyCancelled);
+				record.status = AdCommitmentStatus::Cancelled;
+				Ok(())
+			})?;
+			Self::deposit_event(Event::AdCommitmentCancelled { bot_id_hash });
+			Ok(())
+		}
 	}
 
 	// ========================================================================
@@ -321,15 +453,51 @@ pub mod pallet {
 			}
 		}
 
-		/// 查询 Bot 的有效层级
+		/// 广告承诺数量 → 对应层级
+		pub fn ads_to_tier(ads_per_era: u32) -> SubscriptionTier {
+			let enterprise = T::AdEnterpriseThreshold::get();
+			let pro = T::AdProThreshold::get();
+			let basic = T::AdBasicThreshold::get();
+			if ads_per_era >= enterprise {
+				SubscriptionTier::Enterprise
+			} else if ads_per_era >= pro {
+				SubscriptionTier::Pro
+			} else if ads_per_era >= basic {
+				SubscriptionTier::Basic
+			} else {
+				SubscriptionTier::Free
+			}
+		}
+
+		/// 层级排序值 (用于取 max)
+		fn tier_rank(tier: &SubscriptionTier) -> u8 {
+			match tier {
+				SubscriptionTier::Free => 0,
+				SubscriptionTier::Basic => 1,
+				SubscriptionTier::Pro => 2,
+				SubscriptionTier::Enterprise => 3,
+			}
+		}
+
+		/// 查询 Bot 的有效层级 (综合付费订阅 + 广告承诺, 取较高者)
 		pub fn effective_tier(bot_id_hash: &BotIdHash) -> SubscriptionTier {
-			match Subscriptions::<T>::get(bot_id_hash) {
+			let paid_tier = match Subscriptions::<T>::get(bot_id_hash) {
 				Some(sub) => match sub.status {
-					SubscriptionStatus::Active => sub.tier,
-					SubscriptionStatus::PastDue => sub.tier,
+					SubscriptionStatus::Active | SubscriptionStatus::PastDue => sub.tier,
 					_ => SubscriptionTier::Free,
 				},
 				None => SubscriptionTier::Free,
+			};
+
+			let ad_tier = match AdCommitments::<T>::get(bot_id_hash) {
+				Some(c) if c.status == AdCommitmentStatus::Active => c.effective_tier,
+				_ => SubscriptionTier::Free,
+			};
+
+			if Self::tier_rank(&ad_tier) > Self::tier_rank(&paid_tier) {
+				ad_tier
+			} else {
+				paid_tier
 			}
 		}
 
@@ -340,7 +508,7 @@ pub mod pallet {
 
 		/// Era 订阅费结算 (游标分页)
 		///
-		/// 返回本次结算收取的总收入
+		/// 返回本次结算收取的总收入 (80% 已直接转给 Bot 运营者)
 		pub fn settle_era_subscriptions() -> BalanceOf<T> {
 			let treasury = T::TreasuryAccount::get();
 			let max_settle = T::MaxSubscriptionSettlePerEra::get();
@@ -373,10 +541,27 @@ pub mod pallet {
 						*e = e.saturating_sub(sub.fee_per_era);
 					});
 					T::Currency::unreserve(&sub.owner, sub.fee_per_era);
+
+					// 90/10 拆分 (运营者 90%, 国库 10%)
+					let node_share = sub.fee_per_era * 90u32.into() / 100u32.into();
+					let treasury_share = sub.fee_per_era.saturating_sub(node_share);
+
+					let reward_pool = T::RewardPoolAccount::get();
+
+					// node_share: 直接转给 Bot 运营者 (subscribe 已确保运营者存在)
+					let node_recipient = T::BotRegistry::bot_operator(&sub.bot_id_hash)
+						.unwrap_or_else(|| reward_pool.clone());
+
+					let _ = T::Currency::transfer(
+						&sub.owner,
+						&node_recipient,
+						node_share,
+						ExistenceRequirement::AllowDeath,
+					);
 					let _ = T::Currency::transfer(
 						&sub.owner,
 						&treasury,
-						sub.fee_per_era,
+						treasury_share,
 						ExistenceRequirement::AllowDeath,
 					);
 					subscription_income = subscription_income.saturating_add(sub.fee_per_era);
@@ -409,6 +594,73 @@ pub mod pallet {
 
 			subscription_income
 		}
+
+		/// Era 广告承诺达标检查
+		///
+		/// 遍历所有 AdCommitments, 检查实际投放是否达标:
+		/// - 达标: 重置 underdelivery_eras
+		/// - 未达标: underdelivery_eras++, 超过阈值则降级为 Cancelled
+		pub fn settle_ad_commitments() {
+			let max_underdelivery = T::MaxUnderdeliveryEras::get();
+
+			let all_commitments: alloc::vec::Vec<(BotIdHash, AdCommitmentRecord<T>)> =
+				AdCommitments::<T>::iter().collect();
+
+			for (bot_hash, record) in all_commitments {
+				if record.status == AdCommitmentStatus::Cancelled {
+					continue;
+				}
+
+				let delivered = T::AdDelivery::era_delivery_count(&record.community_id_hash);
+				let committed = record.committed_ads_per_era;
+
+				if delivered >= committed {
+					// 达标: 重置计数
+					AdCommitments::<T>::mutate(&bot_hash, |maybe| {
+						if let Some(r) = maybe {
+							r.underdelivery_eras = 0;
+							r.status = AdCommitmentStatus::Active;
+						}
+					});
+					Self::deposit_event(Event::AdCommitmentFulfilled {
+						bot_id_hash: bot_hash,
+						delivered,
+						committed,
+					});
+				} else {
+					// 未达标
+					let new_count = record.underdelivery_eras.saturating_add(1);
+					if new_count >= max_underdelivery {
+						// 连续未达标超限: 降级
+						AdCommitments::<T>::mutate(&bot_hash, |maybe| {
+							if let Some(r) = maybe {
+								r.status = AdCommitmentStatus::Cancelled;
+								r.underdelivery_eras = new_count;
+							}
+						});
+						Self::deposit_event(Event::AdCommitmentDowngraded {
+							bot_id_hash: bot_hash,
+						});
+					} else {
+						AdCommitments::<T>::mutate(&bot_hash, |maybe| {
+							if let Some(r) = maybe {
+								r.underdelivery_eras = new_count;
+								r.status = AdCommitmentStatus::Underdelivery;
+							}
+						});
+						Self::deposit_event(Event::AdCommitmentUnderdelivered {
+							bot_id_hash: bot_hash,
+							delivered,
+							committed,
+							consecutive: new_count,
+						});
+					}
+				}
+
+				// 重置社区投放计数
+				T::AdDelivery::reset_era_deliveries(&record.community_id_hash);
+			}
+		}
 	}
 
 	// ========================================================================
@@ -430,8 +682,9 @@ pub mod pallet {
 
 	impl<T: Config> SubscriptionSettler for Pallet<T> {
 		fn settle_era() -> u128 {
-			let income = Self::settle_era_subscriptions();
-			income.unique_saturated_into()
+			let income = Self::settle_era_subscriptions().unique_saturated_into();
+			Self::settle_ad_commitments();
+			income
 		}
 	}
 }

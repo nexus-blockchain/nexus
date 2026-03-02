@@ -49,10 +49,11 @@ impl PlatformAdapter for TelegramAdapter {
             let msg = cb.get("message")?;
             let chat = msg.get("chat")?;
             let data = cb.get("data").and_then(|d| d.as_str()).unwrap_or("");
+            let chat_id = chat.get("id")?.to_string();
             return Some(PlatformEvent {
                 platform: "telegram".into(),
                 event_type: "callback_query".into(),
-                group_id: chat.get("id")?.to_string(),
+                group_id: chat_id.clone(),
                 sender_id: from.get("id")?.to_string(),
                 sender_name: from.get("first_name")
                     .and_then(|n| n.as_str())
@@ -62,6 +63,7 @@ impl PlatformAdapter for TelegramAdapter {
                 content: Some(data.to_string()),
                 raw_event: raw.clone(),
                 timestamp: msg.get("date").and_then(|d| d.as_u64()).unwrap_or(0),
+                channel_id: Some(chat_id),
             });
         }
 
@@ -70,10 +72,11 @@ impl PlatformAdapter for TelegramAdapter {
             let from = msg.get("from")?;
             let text = msg.get("text").and_then(|t| t.as_str()).unwrap_or("");
 
+            let chat_id = chat.get("id")?.to_string();
             Some(PlatformEvent {
                 platform: "telegram".into(),
                 event_type: if text.starts_with('/') { "command".into() } else { "message".into() },
-                group_id: chat.get("id")?.to_string(),
+                group_id: chat_id.clone(),
                 sender_id: from.get("id")?.to_string(),
                 sender_name: from.get("first_name")
                     .and_then(|n| n.as_str())
@@ -83,15 +86,17 @@ impl PlatformAdapter for TelegramAdapter {
                 content: Some(text.to_string()),
                 raw_event: raw.clone(),
                 timestamp: msg.get("date").and_then(|d| d.as_u64()).unwrap_or(0),
+                channel_id: Some(chat_id),
             })
         } else if let Some(jr) = join_request {
             let chat = jr.get("chat")?;
             let from = jr.get("from")?;
 
+            let chat_id = chat.get("id")?.to_string();
             Some(PlatformEvent {
                 platform: "telegram".into(),
                 event_type: "join_request".into(),
-                group_id: chat.get("id")?.to_string(),
+                group_id: chat_id.clone(),
                 sender_id: from.get("id")?.to_string(),
                 sender_name: from.get("first_name")
                     .and_then(|n| n.as_str())
@@ -101,6 +106,7 @@ impl PlatformAdapter for TelegramAdapter {
                 content: jr.get("bio").and_then(|b| b.as_str()).map(|s| s.to_string()),
                 raw_event: raw.clone(),
                 timestamp: jr.get("date").and_then(|d| d.as_u64()).unwrap_or(0),
+                channel_id: Some(chat_id),
             })
         } else {
             None
@@ -154,6 +160,7 @@ impl PlatformAdapter for TelegramAdapter {
             message_type,
             callback_query_id,
             callback_data,
+            channel_id: event.channel_id.clone(),
         }
     }
 }

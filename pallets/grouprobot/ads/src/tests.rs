@@ -1024,13 +1024,13 @@ fn tee_bonus_comes_from_treasury_share() {
 		));
 
 		let expected_cost = UNIT / 2;
-		let community_share = expected_cost * 80 / 100;
+		let _community_share = expected_cost * 80 / 100;
 		let tee_node_share = expected_cost * 15 / 100; // 15%
-		// 国库 = 剩余 (5%)
-		// C1: 全部 actual_cost 都转入国库, 国库变化 = expected_cost
+		// C1-fix: node_share 转入 RewardPool, 其余转入国库
+		// 国库变化 = expected_cost - tee_node_share
 		let treasury_after = pallet_balances::Pallet::<Test>::free_balance(TREASURY);
 		let treasury_change = treasury_after - treasury_before;
-		assert_eq!(treasury_change, expected_cost);
+		assert_eq!(treasury_change, expected_cost - tee_node_share);
 	});
 }
 

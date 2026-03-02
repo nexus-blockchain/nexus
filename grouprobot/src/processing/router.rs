@@ -82,7 +82,7 @@ impl MessageRouter {
 
         // 2. 执行动作
         if let Some(ref action_decision) = decision.action {
-            let execute_action = action_decision.to_execute_action(&ctx.group_id);
+            let execute_action = action_decision.to_execute_action(&ctx.group_id, ctx.channel_id.as_deref());
             let receipt = executor.execute(&execute_action).await?;
 
             // 3. 签名 + 入队链上日志 (免注册模式跳过)
@@ -127,13 +127,14 @@ impl MessageRouter {
             if let Some(log_channel) = self.audit_logger.get_log_channel(&ctx.group_id) {
                 let log_action = crate::platform::ExecuteAction {
                     action_type: crate::platform::ActionType::SendMessage,
-                    group_id: log_channel,
+                    group_id: log_channel.clone(),
                     target_user: String::new(),
                     reason: None,
                     message: Some(audit_msg),
                     duration_secs: None,
                     inline_keyboard: None,
                     callback_query_id: None,
+                    channel_id: Some(log_channel),
                 };
                 if let Err(e) = executor.execute(&log_action).await {
                     warn!(error = %e, "审计日志转发失败");

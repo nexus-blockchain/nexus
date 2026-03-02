@@ -32,14 +32,26 @@ impl ChainClient {
         bot_id_hash: [u8; 32],
         bundle: &AttestationBundle,
     ) -> BotResult<()> {
+        // C2 fix: 链上期望 Option<[u8; 32]>, 需用 unnamed_variant 包装
+        let sgx_quote_hash_val = if bundle.sgx_quote_hash == [0u8; 32] {
+            Value::unnamed_variant("None", vec![])
+        } else {
+            Value::unnamed_variant("Some", vec![Value::from_bytes(bundle.sgx_quote_hash)])
+        };
+        let mrenclave_val = if bundle.mrenclave == [0u8; 32] {
+            Value::unnamed_variant("None", vec![])
+        } else {
+            Value::unnamed_variant("Some", vec![Value::from_bytes(bundle.mrenclave)])
+        };
+
         let tx = subxt::dynamic::tx(
             "GroupRobotRegistry", "submit_attestation",
             vec![
                 Value::from_bytes(bot_id_hash),
                 Value::from_bytes(bundle.tdx_quote_hash),
-                Value::from_bytes(bundle.sgx_quote_hash),
+                sgx_quote_hash_val,
                 Value::from_bytes(bundle.mrtd),
-                Value::from_bytes(bundle.mrenclave),
+                mrenclave_val,
             ],
         );
 
@@ -186,14 +198,26 @@ impl ChainClient {
         bot_id_hash: [u8; 32],
         bundle: &AttestationBundle,
     ) -> BotResult<()> {
+        // C2 fix: 链上期望 Option<[u8; 32]>, 需用 unnamed_variant 包装
+        let sgx_quote_hash_val = if bundle.sgx_quote_hash == [0u8; 32] {
+            Value::unnamed_variant("None", vec![])
+        } else {
+            Value::unnamed_variant("Some", vec![Value::from_bytes(bundle.sgx_quote_hash)])
+        };
+        let mrenclave_val = if bundle.mrenclave == [0u8; 32] {
+            Value::unnamed_variant("None", vec![])
+        } else {
+            Value::unnamed_variant("Some", vec![Value::from_bytes(bundle.mrenclave)])
+        };
+
         let tx = subxt::dynamic::tx(
             "GroupRobotRegistry", "refresh_attestation",
             vec![
                 Value::from_bytes(bot_id_hash),
                 Value::from_bytes(bundle.tdx_quote_hash),
-                Value::from_bytes(bundle.sgx_quote_hash),
+                sgx_quote_hash_val,
                 Value::from_bytes(bundle.mrtd),
-                Value::from_bytes(bundle.mrenclave),
+                mrenclave_val,
             ],
         );
 
@@ -211,13 +235,17 @@ impl ChainClient {
         community_id_hash: [u8; 32],
         delivery_type: u8,
         audience_size: u32,
+        node_id: u32,
         node_signature: [u8; 64],
     ) -> BotResult<()> {
         let delivery_type_val = match delivery_type {
             0 => Value::unnamed_variant("ScheduledPost", vec![]),
             1 => Value::unnamed_variant("ReplyFooter", vec![]),
             2 => Value::unnamed_variant("WelcomeEmbed", vec![]),
-            _ => Value::unnamed_variant("ScheduledPost", vec![]),
+            _ => {
+                warn!(delivery_type, "未知广告投放类型，回退为 ScheduledPost");
+                Value::unnamed_variant("ScheduledPost", vec![])
+            }
         };
 
         let tx = subxt::dynamic::tx(
@@ -227,6 +255,7 @@ impl ChainClient {
                 Value::from_bytes(community_id_hash),
                 delivery_type_val,
                 Value::u128(audience_size as u128),
+                Value::u128(node_id as u128),
                 Value::from_bytes(node_signature),
             ],
         );
@@ -285,7 +314,7 @@ impl ChainClient {
 
     /// 提交单条动作日志
     pub async fn submit_action_log(&self, log: &PendingActionLog) -> BotResult<()> {
-        let action_type_value = Value::u128(log.action_type as u128);
+        let action_type_value = encode_action_type(log.action_type);
 
         let tx = subxt::dynamic::tx(
             "GroupRobotCommunity", "submit_action_log",
@@ -314,7 +343,7 @@ impl ChainClient {
 
         let log_values: Vec<Value> = logs.iter().map(|log| {
             Value::unnamed_composite(vec![
-                Value::u128(log.action_type as u128),
+                encode_action_type(log.action_type),
                 Value::from_bytes(log.target_hash),
                 Value::u128(log.sequence as u128),
                 Value::from_bytes(log.message_hash),
@@ -418,32 +447,73 @@ impl ChainClient {
         self.submit_and_watch(tx, "record_ceremony").await
     }
 
-    /// 通用交易提交 + 等待 finalized
+    /// 通用交易提交 + 等待 finalized (M4 fix: 含指数退避重试)
     async fn submit_and_watch(
         &self,
         tx: subxt::tx::DynamicPayload,
         label: &str,
     ) -> BotResult<()> {
-        match self.api().tx()
-            .sign_and_submit_then_watch_default(&tx, self.signer())
-            .await
-        {
-            Ok(progress) => {
-                match progress.wait_for_finalized_success().await {
-                    Ok(_events) => {
-                        info!(call = label, "交易已上链");
-                        Ok(())
-                    }
-                    Err(e) => {
-                        warn!(call = label, error = %e, "交易上链等待失败");
-                        Err(BotError::TransactionFailed(format!("{}: {}", label, e)))
+        const MAX_RETRIES: u32 = 3;
+        let mut last_err = String::new();
+
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                let delay = Duration::from_secs(1 << attempt); // 2s, 4s, 8s
+                warn!(call = label, attempt, delay_secs = ?delay, "重试交易提交...");
+                tokio::time::sleep(delay).await;
+            }
+
+            match self.api().tx()
+                .sign_and_submit_then_watch_default(&tx, self.signer())
+                .await
+            {
+                Ok(progress) => {
+                    match progress.wait_for_finalized_success().await {
+                        Ok(_events) => {
+                            info!(call = label, "交易已上链");
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            // Dispatch 错误不可重试 (如 BotNotFound, NotBotOwner 等)
+                            if err_str.contains("Module") || err_str.contains("dispatch") {
+                                warn!(call = label, error = %e, "交易 dispatch 错误 (不可重试)");
+                                return Err(BotError::TransactionFailed(format!("{}: {}", label, e)));
+                            }
+                            warn!(call = label, error = %e, attempt, "交易上链等待失败");
+                            last_err = format!("{}: {}", label, e);
+                        }
                     }
                 }
+                Err(e) => {
+                    warn!(call = label, error = %e, attempt, "交易提交失败");
+                    last_err = format!("{}: {}", label, e);
+                }
             }
-            Err(e) => {
-                warn!(call = label, error = %e, "交易提交失败");
-                Err(BotError::TransactionFailed(format!("{}: {}", label, e)))
-            }
+        }
+
+        Err(BotError::TransactionFailed(format!("{} ({}次重试后)", last_err, MAX_RETRIES)))
+    }
+}
+
+/// C3 fix: 将 u8 动作类型编码为链上 ActionType SCALE 枚举变体
+///
+/// 链上定义: enum ActionType { Kick, Ban, Mute, Warn, Unmute, Unban, Promote, Demote, Welcome, ConfigUpdate(ConfigUpdateAction) }
+fn encode_action_type(action_type: u8) -> Value {
+    match action_type {
+        0 => Value::unnamed_variant("Kick", vec![]),
+        1 => Value::unnamed_variant("Ban", vec![]),
+        2 => Value::unnamed_variant("Mute", vec![]),
+        3 => Value::unnamed_variant("Warn", vec![]),
+        4 => Value::unnamed_variant("Unmute", vec![]),
+        5 => Value::unnamed_variant("Unban", vec![]),
+        6 => Value::unnamed_variant("Promote", vec![]),
+        7 => Value::unnamed_variant("Demote", vec![]),
+        8 => Value::unnamed_variant("Welcome", vec![]),
+        // ConfigUpdate(ConfigUpdateAction) 需要内嵌子枚举, 链下暂不支持
+        _ => {
+            tracing::warn!(action_type, "未知 ActionType, 回退为 Kick");
+            Value::unnamed_variant("Kick", vec![])
         }
     }
 }

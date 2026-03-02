@@ -51,6 +51,19 @@ pub mod pallet {
         pub rate: u16,
     }
 
+    /// 团队业绩门槛数据源模式
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    pub enum SalesThresholdMode {
+        /// 使用 get_member_stats 返回的 total_spent（NEX Balance 转 u128）
+        Nex = 0,
+        /// 使用 get_member_spent_usdt 返回的 USDT 累计（精度 10^6）
+        Usdt = 1,
+    }
+
+    impl Default for SalesThresholdMode {
+        fn default() -> Self { Self::Nex }
+    }
+
     /// 团队业绩返佣配置（per-entity）
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     #[scale_info(skip_type_params(MaxTiers))]
@@ -61,6 +74,8 @@ pub mod pallet {
         pub max_depth: u8,
         /// 是否允许多层叠加（false = 仅最近一个达标上级获得奖金）
         pub allow_stacking: bool,
+        /// 门槛数据源模式（Nex=使用 NEX 累计, Usdt=使用 MemberSpentUsdt）
+        pub threshold_mode: SalesThresholdMode,
     }
 
     impl<Balance: Default, MaxTiers: Get<u32>> Default for TeamPerformanceConfig<Balance, MaxTiers> {
@@ -69,6 +84,7 @@ pub mod pallet {
                 tiers: BoundedVec::default(),
                 max_depth: 5,
                 allow_stacking: false,
+                threshold_mode: SalesThresholdMode::Nex,
             }
         }
     }
@@ -144,6 +160,7 @@ pub mod pallet {
             tiers: BoundedVec<TeamPerformanceTier<BalanceOf<T>>, T::MaxTeamTiers>,
             max_depth: u8,
             allow_stacking: bool,
+            threshold_mode: SalesThresholdMode,
         ) -> DispatchResult {
             ensure_root(origin)?;
             ensure!(!tiers.is_empty(), Error::<T>::EmptyTiers);
@@ -166,6 +183,7 @@ pub mod pallet {
                 tiers,
                 max_depth,
                 allow_stacking,
+                threshold_mode,
             });
 
             Self::deposit_event(Event::TeamPerformanceConfigUpdated { entity_id });
@@ -225,8 +243,14 @@ pub mod pallet {
                 if remaining.is_zero() { break; }
 
                 // 查询团队统计：(direct_referrals, team_size, total_spent)
-                let (_direct, team_size, total_spent) =
+                let (_direct, team_size, nex_spent) =
                     T::MemberProvider::get_member_stats(entity_id, ancestor);
+                let total_spent = match config.threshold_mode {
+                    SalesThresholdMode::Nex => nex_spent,
+                    SalesThresholdMode::Usdt => {
+                        T::MemberProvider::get_member_spent_usdt(entity_id, ancestor) as u128
+                    }
+                };
 
                 if let Some(rate) = Self::match_tier(&config.tiers, team_size, total_spent) {
                     if rate > 0 {
@@ -330,8 +354,14 @@ impl<T: pallet::Config> pallet::Pallet<T> {
             if depth > config.max_depth { break; }
             if remaining.is_zero() { break; }
 
-            let (_direct, team_size, total_spent) =
+            let (_direct, team_size, nex_spent) =
                 T::MemberProvider::get_member_stats(entity_id, ancestor);
+            let total_spent = match config.threshold_mode {
+                pallet::SalesThresholdMode::Nex => nex_spent,
+                pallet::SalesThresholdMode::Usdt => {
+                    T::MemberProvider::get_member_spent_usdt(entity_id, ancestor) as u128
+                }
+            };
 
             if let Some(rate) = Self::match_tier(&config.tiers, team_size, total_spent) {
                 if rate > 0 {
@@ -412,6 +442,7 @@ impl<T: pallet::Config> pallet_commission_common::TeamPlanWriter<pallet::Balance
         tiers: alloc::vec::Vec<(u128, u32, u16)>,
         max_depth: u8,
         allow_stacking: bool,
+        threshold_mode: u8,
     ) -> Result<(), sp_runtime::DispatchError> {
         let bounded: frame_support::BoundedVec<
             pallet::TeamPerformanceTier<pallet::BalanceOf<T>>,
@@ -427,12 +458,19 @@ impl<T: pallet::Config> pallet_commission_common::TeamPlanWriter<pallet::Balance
             .try_into()
             .map_err(|_| sp_runtime::DispatchError::Other("TooManyTiers"))?;
 
+        let mode = if threshold_mode == 1 {
+            pallet::SalesThresholdMode::Usdt
+        } else {
+            pallet::SalesThresholdMode::Nex
+        };
+
         pallet::TeamPerformanceConfigs::<T>::insert(
             entity_id,
             pallet::TeamPerformanceConfig {
                 tiers: bounded,
                 max_depth,
                 allow_stacking,
+                threshold_mode: mode,
             },
         );
         Ok(())
@@ -468,6 +506,7 @@ mod tests {
     thread_local! {
         static REFERRERS: RefCell<BTreeMap<(u64, u64), u64>> = RefCell::new(BTreeMap::new());
         static MEMBER_STATS: RefCell<BTreeMap<(u64, u64), (u32, u32, u128)>> = RefCell::new(BTreeMap::new());
+        static MEMBER_SPENT_USDT: RefCell<BTreeMap<(u64, u64), u64>> = RefCell::new(BTreeMap::new());
     }
 
     pub struct MockMemberProvider;
@@ -477,7 +516,6 @@ mod tests {
         fn get_referrer(entity_id: u64, account: &u64) -> Option<u64> {
             REFERRERS.with(|r| r.borrow().get(&(entity_id, *account)).copied())
         }
-        fn member_level(_: u64, _: &u64) -> Option<pallet_entity_common::MemberLevel> { None }
         fn get_member_stats(entity_id: u64, account: &u64) -> (u32, u32, u128) {
             MEMBER_STATS.with(|s| s.borrow().get(&(entity_id, *account)).copied().unwrap_or((0, 0, 0)))
         }
@@ -491,6 +529,9 @@ mod tests {
         fn update_custom_level(_: u64, _: u8, _: Option<&[u8]>, _: Option<u128>, _: Option<u16>, _: Option<u16>) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
         fn remove_custom_level(_: u64, _: u8) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
         fn custom_level_count(_: u64) -> u8 { 0 }
+        fn get_member_spent_usdt(entity_id: u64, account: &u64) -> u64 {
+            MEMBER_SPENT_USDT.with(|s| s.borrow().get(&(entity_id, *account)).copied().unwrap_or(0))
+        }
     }
 
     // -- Mock Runtime --
@@ -547,9 +588,16 @@ mod tests {
         });
     }
 
+    fn set_spent_usdt(entity_id: u64, account: u64, usdt: u64) {
+        MEMBER_SPENT_USDT.with(|s| {
+            s.borrow_mut().insert((entity_id, account), usdt);
+        });
+    }
+
     fn clear_thread_locals() {
         REFERRERS.with(|r| r.borrow_mut().clear());
         MEMBER_STATS.with(|s| s.borrow_mut().clear());
+        MEMBER_SPENT_USDT.with(|s| s.borrow_mut().clear());
     }
 
     // ====================================================================
@@ -569,11 +617,13 @@ mod tests {
                 tiers.try_into().unwrap(),
                 10,
                 false,
+                pallet::SalesThresholdMode::Nex,
             ));
             let config = pallet::TeamPerformanceConfigs::<Test>::get(1).unwrap();
             assert_eq!(config.tiers.len(), 2);
             assert_eq!(config.max_depth, 10);
             assert!(!config.allow_stacking);
+            assert_eq!(config.threshold_mode, pallet::SalesThresholdMode::Nex);
         });
     }
 
@@ -583,7 +633,7 @@ mod tests {
             let tiers: Vec<pallet::TeamPerformanceTier<Balance>> = vec![];
             assert_noop!(
                 CommissionTeam::set_team_performance_config(
-                    RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 5, false,
+                    RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
                 ),
                 Error::<Test>::EmptyTiers
             );
@@ -598,7 +648,7 @@ mod tests {
             ];
             assert_noop!(
                 CommissionTeam::set_team_performance_config(
-                    RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 5, false,
+                    RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
                 ),
                 Error::<Test>::InvalidRate
             );
@@ -613,7 +663,7 @@ mod tests {
             ];
             assert_noop!(
                 CommissionTeam::set_team_performance_config(
-                    RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 0, false,
+                    RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 0, false, pallet::SalesThresholdMode::Nex,
                 ),
                 Error::<Test>::InvalidMaxDepth
             );
@@ -628,7 +678,7 @@ mod tests {
             ];
             assert_noop!(
                 CommissionTeam::set_team_performance_config(
-                    RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 31, false,
+                    RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 31, false, pallet::SalesThresholdMode::Nex,
                 ),
                 Error::<Test>::InvalidMaxDepth
             );
@@ -644,7 +694,7 @@ mod tests {
             ];
             assert_noop!(
                 CommissionTeam::set_team_performance_config(
-                    RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 5, false,
+                    RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
                 ),
                 Error::<Test>::TiersNotAscending
             );
@@ -659,7 +709,7 @@ mod tests {
             ];
             assert_noop!(
                 CommissionTeam::set_team_performance_config(
-                    RuntimeOrigin::signed(1), 1, tiers.try_into().unwrap(), 5, false,
+                    RuntimeOrigin::signed(1), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
                 ),
                 sp_runtime::DispatchError::BadOrigin
             );
@@ -693,7 +743,7 @@ mod tests {
                 pallet::TeamPerformanceTier { sales_threshold: 100, min_team_size: 0, rate: 500 },
             ];
             assert_ok!(CommissionTeam::set_team_performance_config(
-                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 5, false,
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
             ));
 
             use pallet_commission_common::CommissionPlugin;
@@ -721,7 +771,7 @@ mod tests {
                 pallet::TeamPerformanceTier { sales_threshold: 10000, min_team_size: 20, rate: 500 },
             ];
             assert_ok!(CommissionTeam::set_team_performance_config(
-                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false,
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false, pallet::SalesThresholdMode::Nex,
             ));
 
             use pallet_commission_common::CommissionPlugin;
@@ -754,7 +804,7 @@ mod tests {
                 pallet::TeamPerformanceTier { sales_threshold: 10000, min_team_size: 20, rate: 500 },
             ];
             assert_ok!(CommissionTeam::set_team_performance_config(
-                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, true, // allow_stacking
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, true, pallet::SalesThresholdMode::Nex, // allow_stacking
             ));
 
             use pallet_commission_common::CommissionPlugin;
@@ -785,7 +835,7 @@ mod tests {
                 pallet::TeamPerformanceTier { sales_threshold: 3000, min_team_size: 5, rate: 200 },
             ];
             assert_ok!(CommissionTeam::set_team_performance_config(
-                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false,
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false, pallet::SalesThresholdMode::Nex,
             ));
 
             use pallet_commission_common::CommissionPlugin;
@@ -811,7 +861,7 @@ mod tests {
                 pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 5000 }, // 50%
             ];
             assert_ok!(CommissionTeam::set_team_performance_config(
-                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false,
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false, pallet::SalesThresholdMode::Nex,
             ));
 
             use pallet_commission_common::CommissionPlugin;
@@ -840,7 +890,7 @@ mod tests {
                 pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 300 },
             ];
             assert_ok!(CommissionTeam::set_team_performance_config(
-                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 2, false, // max_depth=2
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 2, false, pallet::SalesThresholdMode::Nex, // max_depth=2
             ));
 
             use pallet_commission_common::CommissionPlugin;
@@ -864,6 +914,7 @@ mod tests {
                 vec![(1000, 5, 200), (5000, 20, 500)],
                 8,
                 true,
+                0, // Nex mode
             ));
             let config = pallet::TeamPerformanceConfigs::<Test>::get(1).unwrap();
             assert_eq!(config.tiers.len(), 2);
@@ -871,9 +922,80 @@ mod tests {
             assert_eq!(config.tiers[1].sales_threshold, 5000);
             assert_eq!(config.max_depth, 8);
             assert!(config.allow_stacking);
+            assert_eq!(config.threshold_mode, pallet::SalesThresholdMode::Nex);
+
+            // Usdt mode via PlanWriter
+            assert_ok!(<pallet::Pallet<Test> as TeamPlanWriter<Balance>>::set_team_config(
+                2,
+                vec![(50_000_000, 5, 300)],
+                5,
+                false,
+                1, // Usdt mode
+            ));
+            let config2 = pallet::TeamPerformanceConfigs::<Test>::get(2).unwrap();
+            assert_eq!(config2.threshold_mode, pallet::SalesThresholdMode::Usdt);
 
             assert_ok!(<pallet::Pallet<Test> as TeamPlanWriter<Balance>>::clear_config(1));
             assert!(pallet::TeamPerformanceConfigs::<Test>::get(1).is_none());
+        });
+    }
+
+    #[test]
+    fn usdt_mode_uses_member_spent_usdt() {
+        new_test_ext().execute_with(|| {
+            clear_thread_locals();
+            setup_chain(1);
+            // account 40: NEX spent=100 (low), but USDT spent=5_000_000 (5 USDT, 10^6 precision)
+            set_stats(1, 40, 3, 10, 100);
+            set_spent_usdt(1, 40, 5_000_000);
+
+            // Threshold in USDT: 3_000_000 = 3 USDT
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 3_000_000, min_team_size: 5, rate: 200 },
+            ];
+            assert_ok!(CommissionTeam::set_team_performance_config(
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false, pallet::SalesThresholdMode::Usdt,
+            ));
+
+            use pallet_commission_common::CommissionPlugin;
+            let modes = CommissionModes(CommissionModes::TEAM_PERFORMANCE);
+            let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+                1, &50, 10000, 10000, modes, false, 0,
+            );
+
+            // USDT mode: 5_000_000 >= 3_000_000 threshold, team_size 10 >= 5 → matched
+            assert_eq!(outputs.len(), 1);
+            assert_eq!(outputs[0].beneficiary, 40);
+            assert_eq!(outputs[0].amount, 200); // 10000 * 200 / 10000
+            assert_eq!(remaining, 9800);
+        });
+    }
+
+    #[test]
+    fn usdt_mode_nex_spent_ignored() {
+        new_test_ext().execute_with(|| {
+            clear_thread_locals();
+            setup_chain(1);
+            // account 40: high NEX spent but low USDT spent
+            set_stats(1, 40, 3, 10, 999_999_999);
+            set_spent_usdt(1, 40, 1_000_000); // only 1 USDT
+
+            // Threshold 2 USDT
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 2_000_000, min_team_size: 0, rate: 500 },
+            ];
+            assert_ok!(CommissionTeam::set_team_performance_config(
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false, pallet::SalesThresholdMode::Usdt,
+            ));
+
+            use pallet_commission_common::CommissionPlugin;
+            let modes = CommissionModes(CommissionModes::TEAM_PERFORMANCE);
+            let (outputs, _) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+                1, &50, 10000, 10000, modes, false, 0,
+            );
+
+            // USDT 1_000_000 < 2_000_000 threshold → no match despite huge NEX spent
+            assert!(outputs.is_empty());
         });
     }
 }

@@ -234,11 +234,7 @@ pub trait CommissionProvider<AccountId, Balance> {
 
     fn set_level_diff_config(
         entity_id: u64,
-        normal_rate: u16,
-        silver_rate: u16,
-        gold_rate: u16,
-        platinum_rate: u16,
-        diamond_rate: u16,
+        level_rates: Vec<u16>,
     ) -> Result<(), DispatchError>;
 
     fn set_fixed_amount(entity_id: u64, amount: Balance) -> Result<(), DispatchError>;
@@ -275,7 +271,7 @@ impl<AccountId, Balance: Default> CommissionProvider<AccountId, Balance> for Nul
     fn pending_commission(_: u64, _: &AccountId) -> Balance { Balance::default() }
     fn set_commission_modes(_: u64, _: u16) -> Result<(), DispatchError> { Ok(()) }
     fn set_direct_reward_rate(_: u64, _: u16) -> Result<(), DispatchError> { Ok(()) }
-    fn set_level_diff_config(_: u64, _: u16, _: u16, _: u16, _: u16, _: u16) -> Result<(), DispatchError> { Ok(()) }
+    fn set_level_diff_config(_: u64, _: Vec<u16>) -> Result<(), DispatchError> { Ok(()) }
     fn set_fixed_amount(_: u64, _: Balance) -> Result<(), DispatchError> { Ok(()) }
     fn set_first_order_config(_: u64, _: Balance, _: u16, _: bool) -> Result<(), DispatchError> { Ok(()) }
     fn set_repeat_purchase_config(_: u64, _: u16, _: u32) -> Result<(), DispatchError> { Ok(()) }
@@ -293,7 +289,6 @@ impl<AccountId, Balance: Default> CommissionProvider<AccountId, Balance> for Nul
 pub trait MemberProvider<AccountId> {
     fn is_member(entity_id: u64, account: &AccountId) -> bool;
     fn get_referrer(entity_id: u64, account: &AccountId) -> Option<AccountId>;
-    fn member_level(entity_id: u64, account: &AccountId) -> Option<pallet_entity_common::MemberLevel>;
     fn get_member_stats(entity_id: u64, account: &AccountId) -> (u32, u32, u128);
     fn uses_custom_levels(entity_id: u64) -> bool;
     fn custom_level_id(entity_id: u64, account: &AccountId) -> u8;
@@ -322,6 +317,11 @@ pub trait MemberProvider<AccountId> {
         let _ = (entity_id, level_id);
         0
     }
+    /// 查询会员 USDT 累计消费（独立存储 MemberSpentUsdt，精度 10^6）
+    fn get_member_spent_usdt(entity_id: u64, account: &AccountId) -> u64 {
+        let _ = (entity_id, account);
+        0
+    }
 }
 
 /// 空 MemberProvider 实现
@@ -330,7 +330,6 @@ pub struct NullMemberProvider;
 impl<AccountId> MemberProvider<AccountId> for NullMemberProvider {
     fn is_member(_: u64, _: &AccountId) -> bool { false }
     fn get_referrer(_: u64, _: &AccountId) -> Option<AccountId> { None }
-    fn member_level(_: u64, _: &AccountId) -> Option<pallet_entity_common::MemberLevel> { None }
     fn get_member_stats(_: u64, _: &AccountId) -> (u32, u32, u128) { (0, 0, 0) }
     fn uses_custom_levels(_: u64) -> bool { false }
     fn custom_level_id(_: u64, _: &AccountId) -> u8 { 0 }
@@ -343,6 +342,7 @@ impl<AccountId> MemberProvider<AccountId> for NullMemberProvider {
     fn remove_custom_level(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
     fn custom_level_count(_: u64) -> u8 { 0 }
     fn member_count_by_level(_: u64, _: u8) -> u32 { 0 }
+    fn get_member_spent_usdt(_: u64, _: &AccountId) -> u64 { 0 }
 }
 
 // ============================================================================
@@ -373,13 +373,9 @@ pub enum CommissionPlan {
     DirectOnly { rate: u16 },
     /// 多级分销（levels 级，每级 base_rate 基点，逐级递减 20%）
     MultiLevel { levels: u8, base_rate: u16 },
-    /// 等级极差（5 级固定比例，单位基点）
+    /// 等级极差（按自定义等级配置比例，单位基点，最多 10 级）
     LevelDiff {
-        normal: u16,
-        silver: u16,
-        gold: u16,
-        platinum: u16,
-        diamond: u16,
+        level_rates: BoundedVec<u16, ConstU32<10>>,
     },
     /// 自定义（仅启用佣金开关，参数后续手动配置）
     Custom,
@@ -417,15 +413,15 @@ impl<Balance> ReferralPlanWriter<Balance> for () {
 
 /// 等级极差插件写入接口（由 commission-level-diff 实现）
 pub trait LevelDiffPlanWriter {
-    /// 设置全局 5 级极差比例
-    fn set_global_rates(entity_id: u64, normal: u16, silver: u16, gold: u16, platinum: u16, diamond: u16) -> Result<(), DispatchError>;
+    /// 设置自定义等级极差比例（level_rates: 每个自定义等级对应的 bps）
+    fn set_level_rates(entity_id: u64, level_rates: Vec<u16>, max_depth: u8) -> Result<(), DispatchError>;
     /// 清除等级极差配置
     fn clear_config(entity_id: u64) -> Result<(), DispatchError>;
 }
 
 /// 空 LevelDiffPlanWriter 实现
 impl LevelDiffPlanWriter for () {
-    fn set_global_rates(_: u64, _: u16, _: u16, _: u16, _: u16, _: u16) -> Result<(), DispatchError> { Ok(()) }
+    fn set_level_rates(_: u64, _: Vec<u16>, _: u8) -> Result<(), DispatchError> { Ok(()) }
     fn clear_config(_: u64) -> Result<(), DispatchError> { Ok(()) }
 }
 
@@ -434,14 +430,15 @@ pub trait TeamPlanWriter<Balance> {
     /// 设置团队业绩阶梯配置
     ///
     /// tiers: Vec<(sales_threshold_u128, min_team_size, rate_bps)>
-    fn set_team_config(entity_id: u64, tiers: Vec<(u128, u32, u16)>, max_depth: u8, allow_stacking: bool) -> Result<(), DispatchError>;
+    /// threshold_mode: 0=Nex, 1=Usdt
+    fn set_team_config(entity_id: u64, tiers: Vec<(u128, u32, u16)>, max_depth: u8, allow_stacking: bool, threshold_mode: u8) -> Result<(), DispatchError>;
     /// 清除团队业绩配置
     fn clear_config(entity_id: u64) -> Result<(), DispatchError>;
 }
 
 /// 空 TeamPlanWriter 实现
 impl<Balance> TeamPlanWriter<Balance> for () {
-    fn set_team_config(_: u64, _: Vec<(u128, u32, u16)>, _: u8, _: bool) -> Result<(), DispatchError> { Ok(()) }
+    fn set_team_config(_: u64, _: Vec<(u128, u32, u16)>, _: u8, _: bool, _: u8) -> Result<(), DispatchError> { Ok(()) }
     fn clear_config(_: u64) -> Result<(), DispatchError> { Ok(()) }
 }
 

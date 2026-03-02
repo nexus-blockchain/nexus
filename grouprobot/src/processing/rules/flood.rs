@@ -31,7 +31,8 @@ impl Rule for FloodRule {
         }
 
         let key = format!("flood:{}:{}", ctx.group_id, ctx.sender_id);
-        let count = store.increment_counter(&key, 60); // 60 秒窗口
+        // L1 修复: 使用双桶滑动窗口，避免窗口边界突发
+        let count = store.increment_counter_sliding(&key, 60); // 60 秒窗口
 
         if count > self.limit as u64 {
             Some(ActionDecision::mute(
@@ -65,6 +66,7 @@ mod tests {
             message_type: None,
             callback_query_id: None,
             callback_data: None,
+            channel_id: None,
         }
     }
 

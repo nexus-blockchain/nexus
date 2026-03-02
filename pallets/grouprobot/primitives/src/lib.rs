@@ -209,9 +209,6 @@ impl SubscriptionTier {
 				forced_ads_per_day: 2,
 				can_disable_ads: false,
 				tee_access: false,
-				ad_revenue_community_pct: 60,
-				ad_revenue_treasury_pct: 25,
-				ad_revenue_node_pct: 15,
 			},
 			Self::Basic => TierFeatureGate {
 				max_rules: 10,
@@ -219,9 +216,6 @@ impl SubscriptionTier {
 				forced_ads_per_day: 0,
 				can_disable_ads: true,
 				tee_access: false,
-				ad_revenue_community_pct: 70,
-				ad_revenue_treasury_pct: 20,
-				ad_revenue_node_pct: 10,
 			},
 			Self::Pro => TierFeatureGate {
 				max_rules: 50,
@@ -229,9 +223,6 @@ impl SubscriptionTier {
 				forced_ads_per_day: 0,
 				can_disable_ads: true,
 				tee_access: true,
-				ad_revenue_community_pct: 0,
-				ad_revenue_treasury_pct: 0,
-				ad_revenue_node_pct: 0,
 			},
 			Self::Enterprise => TierFeatureGate {
 				max_rules: u16::MAX,
@@ -239,9 +230,6 @@ impl SubscriptionTier {
 				forced_ads_per_day: 0,
 				can_disable_ads: true,
 				tee_access: true,
-				ad_revenue_community_pct: 0,
-				ad_revenue_treasury_pct: 0,
-				ad_revenue_node_pct: 0,
 			},
 		}
 	}
@@ -263,12 +251,6 @@ pub struct TierFeatureGate {
 	pub can_disable_ads: bool,
 	/// 是否可使用 TEE 节点
 	pub tee_access: bool,
-	/// 广告收入分成: 社区 % (deprecated: 实际由 ads pallet 治理配置)
-	pub ad_revenue_community_pct: u8,
-	/// 广告收入分成: 国库 % (deprecated: 实际由 ads pallet 治理配置)
-	pub ad_revenue_treasury_pct: u8,
-	/// 广告收入分成: 节点 % (deprecated: 实际由 ads pallet 治理配置)
-	pub ad_revenue_node_pct: u8,
 }
 
 /// 订阅状态
@@ -284,6 +266,26 @@ pub enum SubscriptionStatus {
 }
 
 impl Default for SubscriptionStatus {
+	fn default() -> Self {
+		Self::Active
+	}
+}
+
+/// 广告承诺订阅状态
+#[derive(
+	Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, RuntimeDebug, PartialEq, Eq,
+	TypeInfo, MaxEncodedLen,
+)]
+pub enum AdCommitmentStatus {
+	/// 正常履约中
+	Active,
+	/// 未达标 (连续 N 个 Era 投放不足)
+	Underdelivery,
+	/// 已取消
+	Cancelled,
+}
+
+impl Default for AdCommitmentStatus {
 	fn default() -> Self {
 		Self::Active
 	}
@@ -378,6 +380,22 @@ pub enum AdDeliveryType {
 	ReplyFooter,
 	/// 嵌入欢迎消息
 	WelcomeEmbed,
+}
+
+impl AdDeliveryType {
+	/// CPM 定价系数 (基点, 100 = 1.0x)
+	///
+	/// 按投放侵入性差异化定价:
+	/// - ScheduledPost: 100 (1.0x) — 独立消息推送, 最具侵入性
+	/// - ReplyFooter:    50 (0.5x) — 回复底部附带, 低侵入性
+	/// - WelcomeEmbed:   30 (0.3x) — 仅新成员可见, 最低侵入性
+	pub fn cpm_multiplier_bps(&self) -> u32 {
+		match self {
+			Self::ScheduledPost => 100,
+			Self::ReplyFooter => 50,
+			Self::WelcomeEmbed => 30,
+		}
+	}
 }
 
 impl Default for AdDeliveryType {
@@ -576,6 +594,19 @@ impl AdScheduleProvider for () {
 	fn community_ad_revenue(_: &CommunityIdHash) -> u128 { 0 }
 }
 
+/// 广告投放计数查询 (subscription 依赖 ads)
+pub trait AdDeliveryProvider {
+	/// 查询社区在当前 Era 的广告投放次数
+	fn era_delivery_count(community_id_hash: &CommunityIdHash) -> u32;
+	/// 重置社区的 Era 投放计数 (Era 结算后调用)
+	fn reset_era_deliveries(community_id_hash: &CommunityIdHash);
+}
+
+impl AdDeliveryProvider for () {
+	fn era_delivery_count(_: &CommunityIdHash) -> u32 { 0 }
+	fn reset_era_deliveries(_: &CommunityIdHash) {}
+}
+
 /// 节点共识查询 (community 可选依赖 consensus)
 pub trait NodeConsensusProvider<AccountId> {
 	fn is_node_active(node_id: &NodeId) -> bool;
@@ -632,6 +663,9 @@ impl PeerUptimeRecorder for () {
 /// 订阅结算 trait (consensus on_era_end 调用 subscription pallet)
 pub trait SubscriptionSettler {
 	/// 结算当前 Era 的订阅费, 返回本次收取的总收入 (u128)
+	///
+	/// 80% node_share 已由 subscription pallet 直接转给 Bot 运营者,
+	/// 不再进入 RewardPool 参与权重分配。
 	fn settle_era() -> u128;
 }
 

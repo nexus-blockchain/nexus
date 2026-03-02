@@ -161,19 +161,9 @@ pub mod pallet {
             levels_cid: BoundedVec<u8, ConstU32<64>>,
             max_total_rate: u16,
         },
-        /// 等级差价配置（全局等级）
+        /// 等级极差配置（自定义等级，最多 10 级）
         LevelDiffChange {
-            normal_rate: u16,
-            silver_rate: u16,
-            gold_rate: u16,
-            platinum_rate: u16,
-            diamond_rate: u16,
-        },
-        /// 自定义等级极差配置
-        CustomLevelDiffChange {
-            /// 各等级返佣率 CID（JSON 格式）
-            rates_cid: BoundedVec<u8, ConstU32<64>>,
-            max_depth: u8,
+            level_rates: BoundedVec<u16, ConstU32<10>>,
         },
         /// 固定金额配置
         FixedAmountChange { amount: Balance },
@@ -1185,12 +1175,10 @@ pub mod pallet {
                 ProposalType::MultiLevelChange { max_total_rate, .. } => {
                     ensure!(*max_total_rate <= 10000, Error::<T>::InvalidParameter);
                 },
-                ProposalType::LevelDiffChange { normal_rate, silver_rate, gold_rate, platinum_rate, diamond_rate } => {
-                    ensure!(*normal_rate <= 10000, Error::<T>::InvalidParameter);
-                    ensure!(*silver_rate <= 10000, Error::<T>::InvalidParameter);
-                    ensure!(*gold_rate <= 10000, Error::<T>::InvalidParameter);
-                    ensure!(*platinum_rate <= 10000, Error::<T>::InvalidParameter);
-                    ensure!(*diamond_rate <= 10000, Error::<T>::InvalidParameter);
+                ProposalType::LevelDiffChange { ref level_rates } => {
+                    for rate in level_rates.iter() {
+                        ensure!(*rate <= 10000, Error::<T>::InvalidParameter);
+                    }
                 },
                 ProposalType::FirstOrderChange { rate, .. } => {
                     ensure!(*rate <= 10000, Error::<T>::InvalidParameter);
@@ -1457,19 +1445,11 @@ pub mod pallet {
                     // 多级分销配置需要解析 CID，暂不支持链上直接执行
                     Err(Error::<T>::ProposalTypeNotImplemented.into())
                 },
-                ProposalType::LevelDiffChange { normal_rate, silver_rate, gold_rate, platinum_rate, diamond_rate } => {
+                ProposalType::LevelDiffChange { ref level_rates } => {
                     T::CommissionProvider::set_level_diff_config(
                         entity_id,
-                        *normal_rate,
-                        *silver_rate,
-                        *gold_rate,
-                        *platinum_rate,
-                        *diamond_rate,
+                        level_rates.to_vec(),
                     )
-                },
-                ProposalType::CustomLevelDiffChange { rates_cid: _, max_depth: _ } => {
-                    // 自定义等级极差配置需要解析 CID，暂不支持链上直接执行
-                    Err(Error::<T>::ProposalTypeNotImplemented.into())
                 },
                 ProposalType::FixedAmountChange { amount } => {
                     T::CommissionProvider::set_fixed_amount(entity_id, *amount)

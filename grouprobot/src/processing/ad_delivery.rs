@@ -22,6 +22,8 @@ pub struct AdDeliveryLoop {
     min_audience: u32,
     /// 投放间隔 (秒)
     delivery_interval_secs: u64,
+    /// C1 fix: 链上节点 ID (链上 submit_delivery_receipt 必填)
+    node_id: u32,
 }
 
 /// 管理的群组信息
@@ -52,6 +54,7 @@ impl AdDeliveryLoop {
         key_manager: Arc<KeyManager>,
         min_audience: u32,
         delivery_interval_secs: u64,
+        node_id: u32,
     ) -> Self {
         Self {
             managed_groups: Arc::new(dashmap::DashMap::new()),
@@ -59,6 +62,7 @@ impl AdDeliveryLoop {
             key_manager,
             min_audience,
             delivery_interval_secs,
+            node_id,
         }
     }
 
@@ -191,6 +195,7 @@ impl AdDeliveryLoop {
             duration_secs: None,
             inline_keyboard: None,
             callback_query_id: None,
+            channel_id: Some(group.platform_group_id.clone()),
         };
 
         let success = send_message(action).await;
@@ -219,6 +224,7 @@ impl AdDeliveryLoop {
                 group.community_id_hash,
                 0, // delivery_type = ScheduledPost
                 audience,
+                self.node_id,
                 receipt_sig,
             ).await {
                 warn!(campaign_id, err = %e, "上报投放收据失败");
@@ -288,6 +294,15 @@ fn format_ad_message(text: &str, url: &str) -> String {
 mod tests {
     use super::*;
 
+    fn make_test_delivery(tracker: Arc<AudienceTracker>, min_audience: u32, interval_secs: u64) -> AdDeliveryLoop {
+        use crate::tee::enclave_bridge::EnclaveBridge;
+        use crate::tee::key_manager::KeyManager;
+        let dir = tempfile::tempdir().unwrap();
+        let enclave = Arc::new(EnclaveBridge::init(dir.path().to_str().unwrap(), "software").unwrap());
+        let km = Arc::new(KeyManager::new(enclave, [0u8; 32]));
+        AdDeliveryLoop::new(tracker, km, min_audience, interval_secs, 0)
+    }
+
     #[test]
     fn format_ad_message_works() {
         let msg = format_ad_message("Try Nexus DEX", "https://nexus.app");
@@ -300,7 +315,7 @@ mod tests {
     #[test]
     fn register_and_stats() {
         let tracker = Arc::new(AudienceTracker::new());
-        let delivery = AdDeliveryLoop::new(tracker, 20, 300);
+        let delivery = make_test_delivery(tracker, 20, 300);
 
         delivery.register_group("aabb".into(), ManagedGroup {
             community_id_hash: [0xaa; 32],
@@ -329,7 +344,7 @@ mod tests {
     #[test]
     fn set_ads_enabled() {
         let tracker = Arc::new(AudienceTracker::new());
-        let delivery = AdDeliveryLoop::new(tracker, 20, 300);
+        let delivery = make_test_delivery(tracker, 20, 300);
 
         delivery.register_group("aabb".into(), ManagedGroup {
             community_id_hash: [0xaa; 32],
@@ -348,7 +363,7 @@ mod tests {
     #[test]
     fn reset_daily_counts() {
         let tracker = Arc::new(AudienceTracker::new());
-        let delivery = AdDeliveryLoop::new(tracker, 20, 300);
+        let delivery = make_test_delivery(tracker, 20, 300);
 
         delivery.register_group("aabb".into(), ManagedGroup {
             community_id_hash: [0xaa; 32],

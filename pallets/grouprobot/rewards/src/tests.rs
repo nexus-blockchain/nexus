@@ -8,9 +8,16 @@ fn claim_rewards_works() {
 		// Seed pending rewards
 		NodePendingRewards::<Test>::insert(node_id(1), 500u128);
 
+		let pool_before = Balances::free_balance(REWARD_POOL);
+		let op_before = Balances::free_balance(OPERATOR);
+
 		assert_ok!(Rewards::claim_rewards(RuntimeOrigin::signed(OPERATOR), node_id(1)));
 		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 0);
 		assert_eq!(NodeTotalEarned::<Test>::get(node_id(1)), 500);
+
+		// C1-fix: rewards transferred from RewardPool, not minted
+		assert_eq!(Balances::free_balance(REWARD_POOL), pool_before - 500);
+		assert_eq!(Balances::free_balance(OPERATOR), op_before + 500);
 	});
 }
 
@@ -60,6 +67,8 @@ fn accrue_node_reward_works() {
 #[test]
 fn distribute_and_record_era_works() {
 	new_test_ext().execute_with(|| {
+		let pool_before = Balances::free_balance(REWARD_POOL);
+
 		let weights = vec![(node_id(1), 100u128), (node_id(2), 100u128)];
 		let distributed = Rewards::distribute_and_record_era(
 			0, 1000u128, 800u128, 200u128, 100u128, &weights, 2,
@@ -68,6 +77,9 @@ fn distribute_and_record_era_works() {
 		assert_eq!(distributed, 1000);
 		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 500);
 		assert_eq!(NodePendingRewards::<Test>::get(node_id(2)), 500);
+
+		// C1-fix: inflation (200) minted to RewardPool
+		assert_eq!(Balances::free_balance(REWARD_POOL), pool_before + 200);
 
 		// Era info recorded
 		let info = EraRewards::<Test>::get(0).unwrap();

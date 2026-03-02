@@ -45,6 +45,13 @@ impl BotRegistryProvider<u64> for MockBotRegistry {
 	fn peer_count(bot_id_hash: &BotIdHash) -> u32 {
 		if bot_id_hash[0] == 1 { 3 } else { 0 }
 	}
+	fn bot_operator(bot_id_hash: &BotIdHash) -> Option<u64> {
+		match bot_id_hash[0] {
+			1 => Some(OWNER),
+			2 => Some(OTHER),
+			_ => None,
+		}
+	}
 }
 
 parameter_types! {

@@ -2,13 +2,15 @@
 
 > 路径：`pallets/grouprobot/consensus/`
 
-节点共识系统，提供节点质押、TEE 加权奖励分配、消息去重、订阅管理、Equivocation 举报与 Slash。
+节点共识系统，提供节点质押、TEE 加权奖励分配、消息去重、Era 编排、Equivocation 举报与 Slash。
+
+> **注意**: 订阅管理和奖励领取已拆分到 `pallet-grouprobot-subscription` 和 `pallet-grouprobot-rewards`。
 
 ## 设计理念
 
 - **质押准入**：节点注册时锁定最低质押（`MinStake`），退出需经冷却期
-- **TEE 加权奖励**：TEE 节点获得 `TeeRewardMultiplier` 倍奖励权重
-- **Era 经济模型**：每 Era 收取订阅费 + 铸币通胀，按权重分配给活跃节点
+- **TEE 专属奖励**：仅 TEE 节点参与 Era 奖励分配，非 TEE 节点权重为 0
+- **Era 经济模型**：每 Era 收取订阅费 + 铸币通胀，按 TEE 权重分配给活跃 TEE 节点
 - **Equivocation 惩罚**：同序列双签举报 → Root 执行 Slash（质押百分比罚没）
 - **消息去重**：`ProcessedSequences` 防止重复处理同一消息
 
@@ -20,27 +22,19 @@
 | 0 | `register_node` | Signed | 注册节点 + 质押锁定 |
 | 1 | `request_exit` | Signed | 申请退出（进入冷却期） |
 | 2 | `finalize_exit` | Signed | 完成退出 + 退还质押 |
-| 11 | `set_node_tee_status` | Signed | 设置节点 TEE 状态 |
+| 11 | `verify_node_tee` | Signed | 通过 Registry 证明验证节点 TEE 状态 |
 
 ### Equivocation
 | call_index | 方法 | Origin | 说明 |
 |:---:|------|:---:|------|
-| 3 | `report_equivocation` | Signed | 举报双签（同序列不同消息+签名） |
+| 3 | `report_equivocation` | Signed | 举报双签（同序列不同消息+签名，需证据不同） |
 | 4 | `slash_equivocation` | Root | 执行 Slash（罚没质押百分比，暂停节点） |
 
-### 订阅管理
+### 去重与治理
 | call_index | 方法 | Origin | 说明 |
 |:---:|------|:---:|------|
-| 5 | `subscribe` | Signed | 订阅 Bot 服务（Basic/Pro/Enterprise） |
-| 6 | `deposit_subscription` | Signed | 充值订阅（PastDue/Suspended 自动恢复） |
-| 7 | `cancel_subscription` | Signed | 取消订阅（退还 Escrow 余额） |
-| 8 | `change_tier` | Signed | 变更订阅层级 |
-
-### 奖励与去重
-| call_index | 方法 | Origin | 说明 |
-|:---:|------|:---:|------|
-| 9 | `claim_rewards` | Signed | 领取节点奖励（铸币给操作者） |
-| 10 | `mark_sequence_processed` | Signed | 标记消息序列已处理（去重） |
+| 10 | `mark_sequence_processed` | Signed | 标记消息序列已处理（需 Bot 授权） |
+| 12 | `set_tee_reward_params` | Root | 设置 TEE 奖励参数 |
 
 ## 存储
 
@@ -57,11 +51,10 @@
 |--------|------|------|
 | `ProcessedSequences` | `DoubleMap<BotIdHash, u64, BlockNumber>` | 已处理的消息序列 |
 
-### 订阅
+### TEE 绑定
 | 存储项 | 类型 | 说明 |
 |--------|------|------|
-| `Subscriptions` | `Map<BotIdHash, Subscription>` | 订阅信息 |
-| `SubscriptionEscrow` | `Map<BotIdHash, Balance>` | 订阅预存余额 |
+| `NodeBotBinding` | `Map<NodeId, BotIdHash>` | 节点→Bot TEE 绑定 |
 
 ### Equivocation
 | 存储项 | 类型 | 说明 |
@@ -73,11 +66,8 @@
 |--------|------|------|
 | `CurrentEra` | `u64` | 当前 Era |
 | `EraStartBlock` | `BlockNumber` | Era 起始区块 |
-| `NodePendingRewards` | `Map<NodeId, Balance>` | 待领取奖励 |
-| `NodeTotalEarned` | `Map<NodeId, Balance>` | 累计已领取 |
-| `TeeRewardMultiplier` | `u32` | TEE 奖励倍数（bps, 15000=1.5x） |
+| `TeeRewardMultiplier` | `u32` | TEE 奖励倍数（bps, 0=默认10000=1.0x, 15000=1.5x） |
 | `SgxEnclaveBonus` | `u32` | SGX 双证明额外奖励（bps） |
-| `EraRewards` | `Map<u64, EraRewardInfo>` | Era 奖励记录 |
 
 ## 主要类型
 
@@ -96,27 +86,18 @@ pub struct ProjectNode<T: Config> {
 }
 ```
 
-### Subscription（订阅信息）
+### EquivocationRecord（双签证据）
 ```rust
-pub struct Subscription<T: Config> {
-    pub owner: T::AccountId,
-    pub bot_id_hash: BotIdHash,
-    pub tier: SubscriptionTier,     // Basic/Pro/Enterprise
-    pub fee_per_era: BalanceOf<T>,
-    pub started_at: BlockNumberFor<T>,
-    pub paid_until_era: u64,
-    pub status: SubscriptionStatus, // Active/PastDue/Suspended/Cancelled
-}
-```
-
-### EraRewardInfo（Era 奖励信息）
-```rust
-pub struct EraRewardInfo<Balance> {
-    pub subscription_income: Balance,   // 订阅收入
-    pub inflation_mint: Balance,        // 通胀铸币
-    pub total_distributed: Balance,     // 分配给节点的总额
-    pub treasury_share: Balance,        // 国库份额
-    pub node_count: u32,                // 活跃节点数
+pub struct EquivocationRecord<T: Config> {
+    pub node_id: NodeId,
+    pub sequence: u64,
+    pub msg_hash_a: [u8; 32],
+    pub signature_a: [u8; 64],
+    pub msg_hash_b: [u8; 32],
+    pub signature_b: [u8; 64],
+    pub reporter: T::AccountId,
+    pub reported_at: BlockNumberFor<T>,
+    pub resolved: bool,
 }
 ```
 
@@ -129,9 +110,10 @@ pub struct EraRewardInfo<Balance> {
 2. 拆分订阅收入：80% 节点 + 10% 国库 + 10% Agent
 3. 铸币通胀：InflationPerEra
 4. 可分配总额 = 节点份额 + 通胀
-5. 按权重分配：weight = reputation × 100 × tee_factor / 10000
-   - 普通节点 tee_factor = 10000 (1.0x)
-   - TEE 节点 tee_factor = TeeRewardMultiplier (默认 15000 = 1.5x)
+5. 按权重分配（仅 TEE 节点参与）：
+   - 非 TEE 节点 weight = 0（不参与分配）
+   - TEE 节点 weight = reputation × 100 × TeeRewardMultiplier / 10000
+   - SGX 双证明 weight = reputation × 100 × (TeeRewardMultiplier + SgxEnclaveBonus) / 10000
 ```
 
 ## 错误
@@ -149,15 +131,15 @@ pub struct EraRewardInfo<Balance> {
 | `NotExiting` | 节点不在退出状态 |
 | `BotNotRegistered` | Bot 未注册 |
 | `NotBotOwner` | 不是 Bot 所有者 |
-| `SubscriptionAlreadyExists` | 订阅已存在 |
-| `SubscriptionNotFound` | 订阅不存在 |
-| `SubscriptionAlreadyCancelled` | 订阅已取消 |
-| `SameTier` | 层级未变更 |
-| `InsufficientDeposit` | 预存不足 |
-| `NoPendingRewards` | 无待领取奖励 |
 | `EquivocationAlreadyReported` | 已举报 |
 | `SequenceAlreadyProcessed` | 序列已处理 |
-| `SameTeeStatus` | TEE 状态未变更 |
+| `BotOwnerMismatch` | Bot 所有者与操作者不匹配 |
+| `AttestationNotValid` | TEE 证明无效或已过期 |
+| `AlreadyTeeVerified` | 节点已是 TEE 节点 |
+| `FreeTierNotAllowed` | Free 层级不允许此功能 |
+| `InvalidEquivocationEvidence` | 双签证据无效（相同哈希或签名） |
+| `EquivocationNotFound` | 双签记录不存在 |
+| `NotBotOperator` | 调用者不是 Bot 操作者或所有者 |
 
 ## 配置参数
 
@@ -170,14 +152,20 @@ pub struct EraRewardInfo<Balance> {
 | `EraLength` | Era 长度（区块数） |
 | `InflationPerEra` | 每 Era 通胀铸币量 |
 | `SlashPercentage` | Slash 百分比（如 10 = 10%） |
-| `BasicFeePerEra` | Basic 层级每 Era 费用 |
-| `ProFeePerEra` | Pro 层级每 Era 费用 |
-| `EnterpriseFeePerEra` | Enterprise 层级每 Era 费用 |
 | `BotRegistry` | Bot 注册查询（`BotRegistryProvider`） |
+| `SequenceTtlBlocks` | ProcessedSequences 过期区块数 |
+| `MaxSequenceCleanupPerBlock` | 每块最多清理的过期序列数 |
+| `SubscriptionSettler` | 订阅结算（`SubscriptionSettler`） |
+| `RewardDistributor` | 奖励分配（`EraRewardDistributor`） |
+| `Subscription` | 订阅层级查询（`SubscriptionProvider`） |
+| `PeerUptimeRecorder` | Peer Uptime 记录（`PeerUptimeRecorder`） |
 
 ## Hooks
 
-- **`on_initialize`**：检测 Era 边界（`n - era_start >= EraLength`），触发 `on_era_end` 执行订阅扣费 + 奖励分配
+- **`on_initialize`**：
+  1. 清理过期 `ProcessedSequences`（游标式，每块最多 `MaxSequenceCleanupPerBlock` 条）
+  2. 检测 Era 边界（`n - era_start >= EraLength`），触发 `on_era_end`
+  3. `on_era_end`: 结算订阅 → TEE 验证降级 → 权重计算 → 奖励分配 → Uptime 快照
 
 ## Trait 实现
 

@@ -11,6 +11,11 @@ extern crate alloc;
 
 pub use pallet::*;
 
+#[cfg(test)]
+mod mock;
+#[cfg(test)]
+mod tests;
+
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
@@ -58,6 +63,13 @@ pub mod pallet {
         }
     }
 
+    /// 按会员等级自定义的层数配置
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    pub struct LevelBasedLevels {
+        pub upline_levels: u8,
+        pub downline_levels: u8,
+    }
+
     // ========================================================================
     // Pallet Config
     // ========================================================================
@@ -69,6 +81,9 @@ pub mod pallet {
 
         /// 用于查询买家累计收益（从 core 的 MemberCommissionStats 读取）
         type StatsProvider: SingleLineStatsProvider<Self::AccountId, BalanceOf<Self>>;
+
+        /// 用于查询买家会员等级 ID（可选，用于按等级自定义层数）
+        type MemberLevelProvider: SingleLineMemberLevelProvider<Self::AccountId>;
 
         #[pallet::constant]
         type MaxSingleLineLength: Get<u32>;
@@ -84,6 +99,17 @@ pub mod pallet {
         fn get_member_stats(_: u64, _: &AccountId) -> MemberCommissionStatsData<Balance> {
             MemberCommissionStatsData::default()
         }
+    }
+
+    /// 会员等级查询接口（用于按等级自定义层数）
+    pub trait SingleLineMemberLevelProvider<AccountId> {
+        /// 返回买家的有效自定义等级 ID（考虑过期回退）
+        fn custom_level_id(entity_id: u64, account: &AccountId) -> u8;
+    }
+
+    /// 空实现（不区分等级，所有查询返回默认值）
+    impl<AccountId> SingleLineMemberLevelProvider<AccountId> for () {
+        fn custom_level_id(_: u64, _: &AccountId) -> u8 { 0 }
     }
 
     #[pallet::pallet]
@@ -122,6 +148,16 @@ pub mod pallet {
         u32,
     >;
 
+    /// 等级层数覆盖 (entity_id, custom_level_id) -> LevelBasedLevels
+    #[pallet::storage]
+    #[pallet::getter(fn custom_level_overrides)]
+    pub type SingleLineCustomLevelOverrides<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat, u64,
+        Blake2_128Concat, u8,
+        LevelBasedLevels,
+    >;
+
     // ========================================================================
     // Events / Errors
     // ========================================================================
@@ -133,12 +169,17 @@ pub mod pallet {
         AddedToSingleLine { entity_id: u64, account: T::AccountId, index: u32 },
         /// 单链加入失败（可能链已满，需人工干预）
         SingleLineJoinFailed { entity_id: u64, account: T::AccountId },
+        /// 按等级自定义层数已更新
+        LevelBasedLevelsUpdated { entity_id: u64, level_id: u8 },
+        /// 按等级自定义层数已移除
+        LevelBasedLevelsRemoved { entity_id: u64, level_id: u8 },
     }
 
     #[pallet::error]
     pub enum Error<T> {
         InvalidRate,
         SingleLineFull,
+        InvalidLevels,
     }
 
     // ========================================================================
@@ -179,6 +220,48 @@ pub mod pallet {
             Self::deposit_event(Event::SingleLineConfigUpdated { entity_id });
             Ok(())
         }
+
+        /// 设置按会员等级自定义的收益层数
+        ///
+        /// 当买家拥有对应等级时，使用此处的 upline_levels/downline_levels 替代
+        /// SingleLineConfig 中的 base_upline_levels/base_downline_levels。
+        ///
+        /// level_id 为自定义等级 ID（对应 EntityLevelSystems）
+        #[pallet::call_index(1)]
+        #[pallet::weight(Weight::from_parts(30_000_000, 4_000))]
+        pub fn set_level_based_levels(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            level_id: u8,
+            upline_levels: u8,
+            downline_levels: u8,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(upline_levels > 0 || downline_levels > 0, Error::<T>::InvalidLevels);
+
+            let levels = LevelBasedLevels { upline_levels, downline_levels };
+            SingleLineCustomLevelOverrides::<T>::insert(entity_id, level_id, levels);
+
+            Self::deposit_event(Event::LevelBasedLevelsUpdated { entity_id, level_id });
+            Ok(())
+        }
+
+        /// 移除指定等级的自定义层数配置（回退到 SingleLineConfig 基础值）
+        #[pallet::call_index(2)]
+        #[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+        pub fn remove_level_based_levels(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            level_id: u8,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            // M3 修复: 仅在存在时移除并发出事件，避免幽灵事件
+            if SingleLineCustomLevelOverrides::<T>::contains_key(entity_id, level_id) {
+                SingleLineCustomLevelOverrides::<T>::remove(entity_id, level_id);
+                Self::deposit_event(Event::LevelBasedLevelsRemoved { entity_id, level_id });
+            }
+            Ok(())
+        }
     }
 
     // ========================================================================
@@ -186,6 +269,22 @@ pub mod pallet {
     // ========================================================================
 
     impl<T: Config> Pallet<T> {
+        /// 获取买家的有效基础层数
+        ///
+        /// 查询买家的自定义等级 ID，并检查是否有对应的层数覆盖。
+        /// 无覆盖时回退到 config 基础值。
+        pub(crate) fn effective_base_levels(
+            entity_id: u64,
+            buyer: &T::AccountId,
+            config: &SingleLineConfig<BalanceOf<T>>,
+        ) -> (u8, u8) {
+            let level_id = T::MemberLevelProvider::custom_level_id(entity_id, buyer);
+            if let Some(o) = SingleLineCustomLevelOverrides::<T>::get(entity_id, level_id) {
+                return (o.upline_levels, o.downline_levels);
+            }
+            (config.base_upline_levels, config.base_downline_levels)
+        }
+
         /// 将用户加入单链（首次消费时调用）
         pub fn add_to_single_line(entity_id: u64, account: &T::AccountId) -> DispatchResult {
             if SingleLineIndex::<T>::contains_key(entity_id, account) {
@@ -220,6 +319,7 @@ pub mod pallet {
             order_amount: BalanceOf<T>,
             remaining: &mut BalanceOf<T>,
             config: &SingleLineConfig<BalanceOf<T>>,
+            base_up: u8,
             outputs: &mut Vec<CommissionOutput<T::AccountId, BalanceOf<T>>>,
         ) {
             if config.upline_rate == 0 { return; }
@@ -233,7 +333,7 @@ pub mod pallet {
             let line = SingleLines::<T>::get(entity_id);
             let buyer_stats = T::StatsProvider::get_member_stats(entity_id, buyer);
             let extra_levels = Self::calc_extra_levels(config.level_increment_threshold, buyer_stats.total_earned);
-            let max_levels = config.base_upline_levels
+            let max_levels = base_up
                 .saturating_add(extra_levels)
                 .min(config.max_upline_levels) as u32;
 
@@ -267,6 +367,7 @@ pub mod pallet {
             order_amount: BalanceOf<T>,
             remaining: &mut BalanceOf<T>,
             config: &SingleLineConfig<BalanceOf<T>>,
+            base_down: u8,
             outputs: &mut Vec<CommissionOutput<T::AccountId, BalanceOf<T>>>,
         ) {
             if config.downline_rate == 0 { return; }
@@ -282,7 +383,7 @@ pub mod pallet {
 
             let buyer_stats = T::StatsProvider::get_member_stats(entity_id, buyer);
             let extra_levels = Self::calc_extra_levels(config.level_increment_threshold, buyer_stats.total_earned);
-            let max_levels = config.base_downline_levels
+            let max_levels = base_down
                 .saturating_add(extra_levels)
                 .min(config.max_downline_levels) as u32;
 
@@ -343,12 +444,15 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
         let mut remaining = remaining;
         let mut outputs = alloc::vec::Vec::new();
 
+        // M1 性能修复: 预计算等级基础层数，避免 upline+downline 各调用一次
+        let (base_up, base_down) = pallet::Pallet::<T>::effective_base_levels(entity_id, buyer, &config);
+
         if has_upline {
-            pallet::Pallet::<T>::process_upline(entity_id, buyer, order_amount, &mut remaining, &config, &mut outputs);
+            pallet::Pallet::<T>::process_upline(entity_id, buyer, order_amount, &mut remaining, &config, base_up, &mut outputs);
         }
 
         if has_downline {
-            pallet::Pallet::<T>::process_downline(entity_id, buyer, order_amount, &mut remaining, &config, &mut outputs);
+            pallet::Pallet::<T>::process_downline(entity_id, buyer, order_amount, &mut remaining, &config, base_down, &mut outputs);
         }
 
         // 首次消费加入单链（Entity 级，失败发事件）
@@ -379,6 +483,7 @@ impl<T: pallet::Config> pallet::Pallet<T> {
         order_amount: TB,
         remaining: &mut TB,
         config: &pallet::SingleLineConfig<pallet::BalanceOf<T>>,
+        base_up: u8,
         outputs: &mut alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>,
     ) where
         TB: sp_runtime::traits::AtLeast32BitUnsigned + Copy,
@@ -394,7 +499,7 @@ impl<T: pallet::Config> pallet::Pallet<T> {
         let line = pallet::SingleLines::<T>::get(entity_id);
         let buyer_stats = T::StatsProvider::get_member_stats(entity_id, buyer);
         let extra_levels = Self::calc_extra_levels(config.level_increment_threshold, buyer_stats.total_earned);
-        let max_levels = config.base_upline_levels
+        let max_levels = base_up
             .saturating_add(extra_levels)
             .min(config.max_upline_levels) as u32;
 
@@ -428,6 +533,7 @@ impl<T: pallet::Config> pallet::Pallet<T> {
         order_amount: TB,
         remaining: &mut TB,
         config: &pallet::SingleLineConfig<pallet::BalanceOf<T>>,
+        base_down: u8,
         outputs: &mut alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>,
     ) where
         TB: sp_runtime::traits::AtLeast32BitUnsigned + Copy,
@@ -445,7 +551,7 @@ impl<T: pallet::Config> pallet::Pallet<T> {
 
         let buyer_stats = T::StatsProvider::get_member_stats(entity_id, buyer);
         let extra_levels = Self::calc_extra_levels(config.level_increment_threshold, buyer_stats.total_earned);
-        let max_levels = config.base_downline_levels
+        let max_levels = base_down
             .saturating_add(extra_levels)
             .min(config.max_downline_levels) as u32;
 
@@ -503,15 +609,18 @@ where
         let mut remaining = remaining;
         let mut outputs = alloc::vec::Vec::new();
 
+        // M1 性能修复: 预计算等级基础层数，避免 upline+downline 各调用一次
+        let (base_up, base_down) = pallet::Pallet::<T>::effective_base_levels(entity_id, buyer, &config);
+
         if has_upline {
             pallet::Pallet::<T>::process_upline_token::<TB>(
-                entity_id, buyer, order_amount, &mut remaining, &config, &mut outputs,
+                entity_id, buyer, order_amount, &mut remaining, &config, base_up, &mut outputs,
             );
         }
 
         if has_downline {
             pallet::Pallet::<T>::process_downline_token::<TB>(
-                entity_id, buyer, order_amount, &mut remaining, &config, &mut outputs,
+                entity_id, buyer, order_amount, &mut remaining, &config, base_down, &mut outputs,
             );
         }
 

@@ -133,6 +133,7 @@ mod tests {
             message_type: None,
             callback_query_id: None,
             callback_data: None,
+            channel_id: None,
         };
         // ApproveRule 本身返回 None, 白名单逻辑在 RuleEngine 层面处理
         assert!(rule.evaluate(&ctx, &store).await.is_none());

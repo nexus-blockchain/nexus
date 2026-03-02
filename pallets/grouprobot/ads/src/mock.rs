@@ -34,6 +34,7 @@ use frame_support::traits::ConstU128;
 
 parameter_types! {
 	pub const TreasuryAccountId: u64 = 999;
+	pub const RewardPoolAccountId: u64 = 998;
 }
 
 // ============================================================================
@@ -119,6 +120,13 @@ impl BotRegistryProvider<u64> for MockBotRegistry {
 	}
 	fn bot_public_key(_: &BotIdHash) -> Option<[u8; 32]> { None }
 	fn peer_count(_: &BotIdHash) -> u32 { 0 }
+	fn bot_operator(bot_id_hash: &BotIdHash) -> Option<u64> {
+		match bot_id_hash[0] {
+			1 => Some(BOT_OWNER),
+			2 => Some(BOT_OWNER2),
+			_ => None,
+		}
+	}
 }
 
 impl pallet_grouprobot_ads::Config for Test {
@@ -137,10 +145,12 @@ impl pallet_grouprobot_ads::Config for Test {
 	type NodeDeviationThresholdPct = ConstU32<20>;  // 20% 偏差拒结
 	type AdSlashPercentage = ConstU32<30>;
 	type TreasuryAccount = TreasuryAccountId;
+	type RewardPoolAccount = RewardPoolAccountId;
 	type NodeConsensus = MockNodeConsensus;
 	type Subscription = MockSubscription;
 	type RewardPool = MockRewardPool;
 	type BotRegistry = MockBotRegistry;
+	type PrivateAdRegistrationFee = ConstU128<1_000_000_000_000>; // 1 UNIT per private ad
 }
 
 pub const ADVERTISER: u64 = 1;
@@ -176,6 +186,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 			(ADVERTISER2, 500_000_000_000_000),         // 500 UNIT
 			(COMMUNITY_OWNER, 500_000_000_000_000),     // 500 UNIT
 			(TREASURY, 1_000_000_000_000_000),          // 1000 UNIT
+			(998u64, 1_000_000_000_000_000),             // RewardPool 1000 UNIT
 			(REPORTER, 100_000_000_000_000),            // 100 UNIT
 			(NODE_OPERATOR, 100_000_000_000_000),       // 100 UNIT
 			(TEE_NODE_OPERATOR, 100_000_000_000_000),   // 100 UNIT

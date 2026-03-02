@@ -24,14 +24,30 @@ impl ChainClient {
                     .map_err(|e| BotError::QueryFailed(format!("decode bot: {}", e)))?;
                 debug!(raw = ?decoded, "Bot 原始数据");
 
-                // 从链上 BotInfo 结构体提取字段
-                let is_active = decoded.at("is_active")
-                    .and_then(|v| v.as_bool())
+                // H3 fix: 链上字段是 status: BotStatus 枚举, 不是 is_active: bool
+                let is_active = decoded.at("status")
+                    .map(|v| {
+                        // BotStatus 枚举: Active / Deactivated / Suspended
+                        // subxt 动态查询返回变体名称字符串
+                        use subxt::ext::scale_value::ValueDef;
+                        match &v.value {
+                            ValueDef::Variant(variant) => variant.name == "Active",
+                            _ => v.as_u128().map(|n| n == 0).unwrap_or(false), // fallback: index 0 = Active
+                        }
+                    })
                     .unwrap_or(false);
 
+                // H2 fix: NodeType 是枚举 (StandardNode / TeeNode / TeeNodeV2), 用变体名称匹配
                 let is_tee_node = decoded.at("node_type")
-                    .and_then(|v| v.as_u128())
-                    .map(|nt| nt >= 1) // NodeType: 0=Standard, 1+=TeeNode
+                    .map(|v| {
+                        use subxt::ext::scale_value::ValueDef;
+                        match &v.value {
+                            ValueDef::Variant(variant) => {
+                                variant.name == "TeeNode" || variant.name == "TeeNodeV2"
+                            }
+                            _ => v.as_u128().map(|n| n >= 1).unwrap_or(false), // fallback
+                        }
+                    })
                     .unwrap_or(false);
 
                 let public_key = extract_bytes_32(&decoded, "public_key")
@@ -61,25 +77,62 @@ impl ChainClient {
     }
 
     /// 查询 TEE 节点状态
+    ///
+    /// H1-fix: 优先查询 AttestationsV2 (submit_tee_attestation 写入), 未找到则回退 Attestations
     pub async fn query_tee_status(&self, bot_id_hash: &[u8; 32]) -> BotResult<Option<TeeNodeStatus>> {
-        let query = subxt::dynamic::storage(
-            "GroupRobotRegistry", "Attestations",
+        // 先查 AttestationsV2
+        let query_v2 = subxt::dynamic::storage(
+            "GroupRobotRegistry", "AttestationsV2",
             vec![Value::from_bytes(bot_id_hash)],
         );
-        let result = self.api().storage().at_latest().await
-            .map_err(|e| BotError::QueryFailed(format!("storage access: {}", e)))?
-            .fetch(&query).await
-            .map_err(|e| BotError::QueryFailed(format!("fetch attestation: {}", e)))?;
+        let storage = self.api().storage().at_latest().await
+            .map_err(|e| BotError::QueryFailed(format!("storage access: {}", e)))?;
+
+        let result = storage.fetch(&query_v2).await
+            .map_err(|e| BotError::QueryFailed(format!("fetch attestation v2: {}", e)))?;
+
+        // 未找到 V2 则回退 V1
+        let result = match result {
+            Some(v) => Some(v),
+            None => {
+                let query_v1 = subxt::dynamic::storage(
+                    "GroupRobotRegistry", "Attestations",
+                    vec![Value::from_bytes(bot_id_hash)],
+                );
+                storage.fetch(&query_v1).await
+                    .map_err(|e| BotError::QueryFailed(format!("fetch attestation v1: {}", e)))?
+            }
+        };
 
         match result {
             Some(val) => {
                 let decoded = val.to_value()
                     .map_err(|e| BotError::QueryFailed(format!("decode attestation: {}", e)))?;
                 debug!(raw = ?decoded, "TEE 状态原始数据");
+
+                let expires_at = decoded.at("expires_at")
+                    .and_then(|v| v.as_u128())
+                    .map(|n| n as u64);
+
+                // 获取当前区块号判断是否过期
+                let current_block = self.api().blocks().at_latest().await
+                    .map(|b| b.number() as u64)
+                    .unwrap_or(0);
+
+                let is_expired = expires_at
+                    .map(|exp| current_block > exp)
+                    .unwrap_or(false);
+
+                debug!(
+                    bot = hex::encode(bot_id_hash),
+                    ?expires_at, current_block, is_expired,
+                    "TEE 证明状态"
+                );
+
                 Ok(Some(TeeNodeStatus {
                     is_attested: true,
-                    is_expired: false,
-                    expires_at: None,
+                    is_expired,
+                    expires_at,
                 }))
             }
             None => Ok(None),
@@ -301,15 +354,18 @@ impl ChainClient {
 
         match result {
             Some(val) => {
-                // 使用 SCALE 解码: (nonce: [u8; 32], issued_at: u32)
+                // L2 修复: SCALE 位置提取 — 存储格式 (nonce: [u8; 32], issued_at: u32)
+                // nonce 作为定长 [u8; 32] 在 SCALE 编码中占据前 32 字节
+                // 注意: 若链上存储元组字段重排 (如 issued_at 移到前面), 此处需同步更新
                 let bytes = val.encoded();
-                if bytes.len() >= 32 {
+                // 期望最小长度: 32 (nonce) + 4 (issued_at u32) = 36
+                if bytes.len() >= 36 {
                     let mut nonce = [0u8; 32];
                     nonce.copy_from_slice(&bytes[..32]);
-                    debug!(nonce = %hex::encode(&nonce[..8]), "链上 Nonce 已读取");
+                    debug!(nonce = %hex::encode(&nonce[..8]), raw_len = bytes.len(), "链上 Nonce 已读取");
                     return Ok(Some(nonce));
                 }
-                debug!(len = bytes.len(), "Nonce 原始字节长度不足");
+                warn!(len = bytes.len(), expected = 36, "Nonce SCALE 字节长度异常, 可能存储布局已变更");
                 Ok(None)
             }
             None => Ok(None),
@@ -333,15 +389,28 @@ impl ChainClient {
         hasher.update(&pk_bytes);
         let bot_id_hash: [u8; 32] = hasher.finalize().into();
 
-        // 查询 Attestations 存储
-        let query = subxt::dynamic::storage(
-            "GroupRobotRegistry", "Attestations",
+        // H1-fix: 优先查询 AttestationsV2, 未找到则回退 Attestations
+        let query_v2 = subxt::dynamic::storage(
+            "GroupRobotRegistry", "AttestationsV2",
             vec![Value::from_bytes(bot_id_hash)],
         );
-        let result = self.api().storage().at_latest().await
-            .map_err(|e| BotError::QueryFailed(format!("storage access: {}", e)))?
-            .fetch(&query).await
-            .map_err(|e| BotError::QueryFailed(format!("fetch attestation: {}", e)))?;
+        let storage = self.api().storage().at_latest().await
+            .map_err(|e| BotError::QueryFailed(format!("storage access: {}", e)))?;
+
+        let result = storage.fetch(&query_v2).await
+            .map_err(|e| BotError::QueryFailed(format!("fetch attestation v2: {}", e)))?;
+
+        let result = match result {
+            Some(v) => Some(v),
+            None => {
+                let query_v1 = subxt::dynamic::storage(
+                    "GroupRobotRegistry", "Attestations",
+                    vec![Value::from_bytes(bot_id_hash)],
+                );
+                storage.fetch(&query_v1).await
+                    .map_err(|e| BotError::QueryFailed(format!("fetch attestation v1: {}", e)))?
+            }
+        };
 
         match result {
             Some(val) => {

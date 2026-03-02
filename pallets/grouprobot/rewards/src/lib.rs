@@ -39,7 +39,7 @@ type BalanceOf<T> =
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
-	use frame_support::traits::Currency;
+	use frame_support::traits::{Currency, ExistenceRequirement};
 
 	#[pallet::pallet]
 	pub struct Pallet<T>(_);
@@ -50,6 +50,8 @@ pub mod pallet {
 		type Currency: frame_support::traits::Currency<Self::AccountId>;
 		/// 节点共识查询 (验证 claim 时的 operator 身份)
 		type NodeConsensus: NodeConsensusProvider<Self::AccountId>;
+		/// 奖励池账户 (订阅费节点份额 + 通胀铸币 存放于此, claim 时从此转出)
+		type RewardPoolAccount: Get<Self::AccountId>;
 		/// EraRewards 保留窗口 (仅保留最近 N 个 Era 的奖励记录)
 		#[pallet::constant]
 		type MaxEraHistory: Get<u64>;
@@ -121,8 +123,14 @@ pub mod pallet {
 			let pending = NodePendingRewards::<T>::get(&node_id);
 			ensure!(!pending.is_zero(), Error::<T>::NoPendingRewards);
 
-			// 铸币给操作者
-			let _ = T::Currency::deposit_creating(&who, pending);
+			// C1-fix: 从奖励池转账给操作者 (不再铸币)
+			let reward_pool = T::RewardPoolAccount::get();
+			T::Currency::transfer(
+				&reward_pool,
+				&who,
+				pending,
+				ExistenceRequirement::AllowDeath,
+			)?;
 
 			NodePendingRewards::<T>::remove(&node_id);
 			NodeTotalEarned::<T>::mutate(&node_id, |total| {
@@ -149,6 +157,12 @@ pub mod pallet {
 			node_weights: &[(NodeId, u128)],
 			node_count: u32,
 		) -> BalanceOf<T> {
+			// C1-fix: 铸币通胀部分到奖励池 (订阅费节点份额已由 subscription pallet 转入)
+			if !inflation.is_zero() {
+				let reward_pool = T::RewardPoolAccount::get();
+				let _ = T::Currency::deposit_creating(&reward_pool, inflation);
+			}
+
 			let mut total_weight: u128 = 0;
 			for (_, w) in node_weights.iter() {
 				total_weight = total_weight.saturating_add(*w);

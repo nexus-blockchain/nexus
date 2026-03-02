@@ -1556,8 +1556,9 @@ fn sgx_attestation_works() {
 		// Verify: no dual attestation yet
 		assert!(!GroupRobotRegistry::has_dual_attestation(&bot_hash(1)));
 
-		// Submit SGX attestation (Level 2)
-		let (sgx_quote, _pck) = build_sgx_quote(&mrenclave(1), &pk(1));
+		// M1-fix: request nonce before SGX attestation
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (sgx_quote, _pck) = build_sgx_quote_with_nonce(&mrenclave(1), &pk(1), &nonce);
 		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
 			sgx_quote.try_into().unwrap();
 
@@ -1617,8 +1618,9 @@ fn sgx_attestation_fails_mrenclave_not_approved() {
 			[1u8; 32], None, mrtd(1), None,
 		));
 
-		// MRENCLAVE not approved → MrenclaveNotApproved
-		let (sgx_quote, _pck) = build_sgx_quote(&mrenclave(1), &pk(1));
+		// M1-fix: request nonce so we reach MRENCLAVE check
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (sgx_quote, _pck) = build_sgx_quote_with_nonce(&mrenclave(1), &pk(1), &nonce);
 		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
 			sgx_quote.try_into().unwrap();
 
@@ -1669,7 +1671,9 @@ fn sgx_level3_attestation_works() {
 			[1u8; 32], None, mrtd(1), None,
 		));
 
-		let (sgx_quote, pck_key) = build_sgx_quote(&mrenclave(1), &pk(1));
+		// M1-fix: request nonce before SGX attestation
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (sgx_quote, pck_key) = build_sgx_quote_with_nonce(&mrenclave(1), &pk(1), &nonce);
 
 		// Register PCK key for Level 3
 		let platform_id = [0x02u8; 32];
@@ -2556,5 +2560,218 @@ fn no_heartbeat_no_uptime_record() {
 
 		let history = GroupRobotRegistry::peer_era_uptime(&bot_hash(1), &pk(10));
 		assert_eq!(history.len(), 0);
+	});
+}
+
+// ============================================================================
+// Audit Regression Tests (Phase 4)
+// ============================================================================
+
+/// C1-fix: 公钥轮换必须同时清除 AttestationsV2 记录
+#[test]
+fn c1_key_rotation_clears_attestations_v2() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		// 通过 submit_tee_attestation 写入 AttestationsV2
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_dcap_quote(&mrtd(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+		assert_ok!(GroupRobotRegistry::submit_tee_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			bounded, None, None, None,
+		));
+
+		// 确认 V2 记录存在
+		assert!(AttestationsV2::<Test>::get(bot_hash(1)).is_some());
+		assert!(GroupRobotRegistry::is_tee_node(&bot_hash(1)));
+
+		// 轮换公钥
+		assert_ok!(GroupRobotRegistry::update_public_key(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(2),
+		));
+
+		// C1-fix: AttestationsV2 必须被清除
+		assert!(AttestationsV2::<Test>::get(bot_hash(1)).is_none());
+		assert!(!GroupRobotRegistry::is_tee_node(&bot_hash(1)));
+		let bot = Bots::<Test>::get(bot_hash(1)).unwrap();
+		assert!(matches!(bot.node_type, NodeType::StandardNode));
+	});
+}
+
+/// M5-fix: deregister_peer 必须清理 PeerHeartbeatCount
+#[test]
+fn m5_deregister_peer_clears_heartbeat_count() {
+	new_test_ext().execute_with(|| {
+		// bot_hash(1) => paid tier
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://n1:8443"),
+		));
+
+		// 发送心跳, 累积计数
+		for _ in 0..3 {
+			assert_ok!(GroupRobotRegistry::heartbeat_peer(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10),
+			));
+		}
+		assert_eq!(GroupRobotRegistry::peer_heartbeat_count(&bot_hash(1), &pk(10)), 3);
+
+		// 注销 Peer
+		assert_ok!(GroupRobotRegistry::deregister_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10),
+		));
+
+		// M5-fix: 心跳计数必须被清除
+		assert_eq!(GroupRobotRegistry::peer_heartbeat_count(&bot_hash(1), &pk(10)), 0);
+	});
+}
+
+/// L1-fix: revoke_mrtd 从白名单移除 MRTD
+#[test]
+fn l1_revoke_mrtd_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert!(ApprovedMrtd::<Test>::contains_key(mrtd(1)));
+
+		assert_ok!(GroupRobotRegistry::revoke_mrtd(RuntimeOrigin::root(), mrtd(1)));
+		assert!(!ApprovedMrtd::<Test>::contains_key(mrtd(1)));
+	});
+}
+
+/// L1-fix: revoke_mrtd 不存在时报错
+#[test]
+fn l1_revoke_mrtd_fails_not_found() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotRegistry::revoke_mrtd(RuntimeOrigin::root(), mrtd(99)),
+			Error::<Test>::MrtdNotFound
+		);
+	});
+}
+
+/// L1-fix: revoke_mrenclave 从白名单移除 MRENCLAVE
+#[test]
+fn l1_revoke_mrenclave_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrenclave(RuntimeOrigin::root(), mrenclave(1), 1));
+		assert!(ApprovedMrenclave::<Test>::contains_key(mrenclave(1)));
+
+		assert_ok!(GroupRobotRegistry::revoke_mrenclave(RuntimeOrigin::root(), mrenclave(1)));
+		assert!(!ApprovedMrenclave::<Test>::contains_key(mrenclave(1)));
+	});
+}
+
+/// L1-fix: revoke_mrenclave 不存在时报错
+#[test]
+fn l1_revoke_mrenclave_fails_not_found() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotRegistry::revoke_mrenclave(RuntimeOrigin::root(), mrenclave(99)),
+			Error::<Test>::MrenclaveNotFound
+		);
+	});
+}
+
+/// L2-fix: register_pck_key 拒绝覆盖已注册的 key
+#[test]
+fn l2_register_pck_key_rejects_overwrite() {
+	new_test_ext().execute_with(|| {
+		let platform_id = [0x01u8; 32];
+		let pck1 = [1u8; 64];
+		let pck2 = [2u8; 64];
+
+		assert_ok!(GroupRobotRegistry::register_pck_key(RuntimeOrigin::root(), platform_id, pck1));
+		assert_noop!(
+			GroupRobotRegistry::register_pck_key(RuntimeOrigin::root(), platform_id, pck2),
+			Error::<Test>::PckKeyAlreadyRegistered
+		);
+	});
+}
+
+/// L3-fix: deactivate_bot 清理 BotOperator 和 OperatorBots
+#[test]
+fn l3_deactivate_bot_clears_operator_assignments() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op"), op_contact(b"c"),
+		));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::assign_bot_to_operator(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), Platform::Telegram,
+		));
+
+		// 确认分配存在
+		assert!(BotOperator::<Test>::get(bot_hash(1)).is_some());
+		assert_eq!(OperatorBots::<Test>::get(OWNER, Platform::Telegram).len(), 1);
+		assert_eq!(Operators::<Test>::get(OWNER, Platform::Telegram).unwrap().bot_count, 1);
+
+		// 停用 Bot
+		assert_ok!(GroupRobotRegistry::deactivate_bot(RuntimeOrigin::signed(OWNER), bot_hash(1)));
+
+		// L3-fix: 分配关系必须清除
+		assert!(BotOperator::<Test>::get(bot_hash(1)).is_none());
+		assert_eq!(OperatorBots::<Test>::get(OWNER, Platform::Telegram).len(), 0);
+		assert_eq!(Operators::<Test>::get(OWNER, Platform::Telegram).unwrap().bot_count, 0);
+	});
+}
+
+/// M1-fix: submit_sgx_attestation 无 nonce 时拒绝
+#[test]
+fn m1_sgx_attestation_fails_without_nonce() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::approve_mrenclave(RuntimeOrigin::root(), mrenclave(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::submit_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			[1u8; 32], None, mrtd(1), None,
+		));
+
+		// 不请求 nonce, 直接提交 → NonceMissing
+		let (sgx_quote, _pck) = build_sgx_quote(&mrenclave(1), &pk(1));
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			sgx_quote.try_into().unwrap();
+
+		assert_noop!(
+			GroupRobotRegistry::submit_sgx_attestation(
+				RuntimeOrigin::signed(OWNER), bot_hash(1),
+				bounded, None, None, None,
+			),
+			Error::<Test>::NonceMissing
+		);
+	});
+}
+
+/// M3-fix: report_stale_peer 必须清理 PeerHeartbeatCount
+#[test]
+fn m3_report_stale_peer_clears_heartbeat_count() {
+	new_test_ext().execute_with(|| {
+		// bot_hash(1) => paid tier
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://n1:8443"),
+		));
+
+		// 发送心跳, 累积计数
+		for _ in 0..5 {
+			assert_ok!(GroupRobotRegistry::heartbeat_peer(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10),
+			));
+		}
+		assert_eq!(GroupRobotRegistry::peer_heartbeat_count(&bot_hash(1), &pk(10)), 5);
+
+		// 前进超过心跳超时 (PeerHeartbeatTimeout = 50)
+		System::set_block_number(60);
+
+		// 举报过期 Peer
+		assert_ok!(GroupRobotRegistry::report_stale_peer(
+			RuntimeOrigin::signed(OTHER), bot_hash(1), pk(10),
+		));
+
+		// M3-fix: 心跳计数必须被清除
+		assert_eq!(GroupRobotRegistry::peer_heartbeat_count(&bot_hash(1), &pk(10)), 0);
 	});
 }
