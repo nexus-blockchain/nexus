@@ -52,7 +52,6 @@ impl<AccountId> KycChecker<AccountId> for NullKycChecker {
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
-    use alloc::vec::Vec;
     use frame_support::{
         pallet_prelude::*,
         traits::{Currency, ExistenceRequirement, Get},
@@ -98,18 +97,12 @@ pub mod pallet {
         /// 未开始
         #[default]
         NotStarted,
-        /// 白名单注册中
-        WhitelistOpen,
         /// 发售进行中
         Active,
-        /// 已售罄
-        SoldOut,
         /// 已结束
         Ended,
         /// 已取消
         Cancelled,
-        /// 结算中
-        Settling,
         /// 已完成
         Completed,
     }
@@ -233,8 +226,6 @@ pub mod pallet {
         pub claimed: bool,
         /// 已解锁数量
         pub unlocked_amount: Balance,
-        /// 上次解锁时间
-        pub last_unlock_at: BlockNumber,
         /// 是否已退款（取消发售后）
         pub refunded: bool,
     }
@@ -586,6 +577,8 @@ pub mod pallet {
         StartBlockInPast,
         /// Entity 代币 unreserve 不完整
         IncompleteUnreserve,
+        /// 重复的支付选项（相同 asset_id 已存在）
+        DuplicatePaymentOption,
     }
 
     // ==================== Hooks ====================
@@ -645,7 +638,7 @@ pub mod pallet {
             ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
             ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who || T::EntityProvider::is_entity_admin(entity_id, &who), Error::<T>::Unauthorized);
+            ensure!(owner == who || T::EntityProvider::is_entity_admin(entity_id, &who, pallet_entity_common::AdminPermission::TOKEN_MANAGE), Error::<T>::Unauthorized);
 
             // H1: total_supply > 0
             ensure!(!total_supply.is_zero(), Error::<T>::InvalidTotalSupply);
@@ -744,6 +737,11 @@ pub mod pallet {
 
                 // L2: 写入独立存储
                 RoundPaymentOptions::<T>::try_mutate(round_id, |options| -> DispatchResult {
+                    // M1-R5: 检查重复 asset_id，防止死选项占用槽位
+                    ensure!(
+                        !options.iter().any(|o| o.asset_id == asset_id),
+                        Error::<T>::DuplicatePaymentOption
+                    );
                     options.try_push(option).map_err(|_| Error::<T>::PaymentOptionsFull)?;
                     Ok(())
                 })?;
@@ -973,7 +971,6 @@ pub mod pallet {
                 subscribed_at: now,
                 claimed: false,
                 unlocked_amount: Zero::zero(),
-                last_unlock_at: now,
                 refunded: false,
             };
 
@@ -1034,7 +1031,11 @@ pub mod pallet {
                 // 释放未售 Entity 代币
                 if !round.remaining_amount.is_zero() {
                     let entity_account = T::EntityProvider::entity_account(round.entity_id);
-                    T::TokenProvider::unreserve(round.entity_id, &entity_account, round.remaining_amount);
+                    let deficit = T::TokenProvider::unreserve(round.entity_id, &entity_account, round.remaining_amount);
+                    // M3-deep: 记录 unreserve 不完整
+                    if !deficit.is_zero() {
+                        log::warn!("tokensale end_sale: unreserve deficit {:?} for round {}", deficit, round_id);
+                    }
                     // M1-fix: 清零 remaining_amount（与 do_auto_end_sale 一致）
                     round.remaining_amount = Zero::zero();
                 }
@@ -1081,12 +1082,14 @@ pub mod pallet {
                 // H5: 实际转移 Entity 代币
                 if !initial_unlock.is_zero() {
                     let entity_account = T::EntityProvider::entity_account(round.entity_id);
-                    T::TokenProvider::repatriate_reserved(
+                    let actual = T::TokenProvider::repatriate_reserved(
                         round.entity_id,
                         &entity_account,
                         &who,
                         initial_unlock,
                     )?;
+                    // H1-deep: 验证实际转移量等于请求量，防止幻影代币记账
+                    ensure!(actual == initial_unlock, Error::<T>::IncompleteUnreserve);
                 }
 
                 sub.claimed = true;
@@ -1133,15 +1136,16 @@ pub mod pallet {
 
                 // H5: 实际转移 Entity 代币
                 let entity_account = T::EntityProvider::entity_account(round.entity_id);
-                T::TokenProvider::repatriate_reserved(
+                let actual = T::TokenProvider::repatriate_reserved(
                     round.entity_id,
                     &entity_account,
                     &who,
                     unlockable,
                 )?;
+                // H1-deep: 验证实际转移量等于请求量
+                ensure!(actual == unlockable, Error::<T>::IncompleteUnreserve);
 
                 sub.unlocked_amount = sub.unlocked_amount.saturating_add(unlockable);
-                sub.last_unlock_at = now;
 
                 Self::deposit_event(Event::TokensUnlocked {
                     round_id,
@@ -1172,7 +1176,13 @@ pub mod pallet {
                 // 如果已启动（Active），释放未售 Entity 代币
                 if round.status == RoundStatus::Active && !round.remaining_amount.is_zero() {
                     let entity_account = T::EntityProvider::entity_account(round.entity_id);
-                    T::TokenProvider::unreserve(round.entity_id, &entity_account, round.remaining_amount);
+                    let deficit = T::TokenProvider::unreserve(round.entity_id, &entity_account, round.remaining_amount);
+                    // M3-deep: 记录 unreserve 不完整
+                    if !deficit.is_zero() {
+                        log::warn!("tokensale cancel_sale: unreserve deficit {:?} for round {}", deficit, round_id);
+                    }
+                    // M1-deep: 清零 remaining_amount（与 end_sale/do_auto_end_sale 一致）
+                    round.remaining_amount = Zero::zero();
                 }
 
                 round.status = RoundStatus::Cancelled;
@@ -1268,7 +1278,11 @@ pub mod pallet {
 
                 // 释放未领取的 Entity 代币
                 if !unclaimed_tokens.is_zero() {
-                    T::TokenProvider::unreserve(round.entity_id, &entity_account, unclaimed_tokens);
+                    let deficit = T::TokenProvider::unreserve(round.entity_id, &entity_account, unclaimed_tokens);
+                    // M3-deep: 记录 unreserve 不完整
+                    if !deficit.is_zero() {
+                        log::warn!("tokensale reclaim_unclaimed_tokens: unreserve deficit {:?} for round {}", deficit, round_id);
+                    }
                 }
 
                 // 将未领取的 NEX 转给 Entity
@@ -1315,10 +1329,11 @@ pub mod pallet {
 
                 // 计算 NEX 总募集额（仅原生 NEX）
                 let total_raised = RaisedFunds::<T>::get(round_id, Option::<AssetIdOf<T>>::None);
+                // L3-R5: 提取 entity_account，避免重复查询
+                let entity_account = T::EntityProvider::entity_account(round.entity_id);
 
                 if !total_raised.is_zero() {
                     let pallet_account = Self::pallet_account();
-                    let entity_account = T::EntityProvider::entity_account(round.entity_id);
                     T::Currency::transfer(
                         &pallet_account,
                         &entity_account,
@@ -1331,7 +1346,7 @@ pub mod pallet {
 
                 Self::deposit_event(Event::FundsWithdrawn {
                     round_id,
-                    recipient: T::EntityProvider::entity_account(round.entity_id),
+                    recipient: entity_account,
                     amount: total_raised,
                 });
                 Ok(())
@@ -1390,7 +1405,8 @@ pub mod pallet {
             let price_range: u128 = start_u128.saturating_sub(end_u128);
 
             let price_drop = price_range.saturating_mul(elapsed) / total_duration;
-            let current_price: u128 = start_u128.saturating_sub(price_drop);
+            // M2-deep: 防止 saturating_mul 溢出导致价格低于 end_price
+            let current_price: u128 = start_u128.saturating_sub(price_drop).max(end_u128);
 
             Ok(current_price.saturated_into())
         }
@@ -1496,7 +1512,11 @@ pub mod pallet {
                     // 释放未售 Entity 代币
                     if !round.remaining_amount.is_zero() {
                         let entity_account = T::EntityProvider::entity_account(round.entity_id);
-                        T::TokenProvider::unreserve(round.entity_id, &entity_account, round.remaining_amount);
+                        let deficit = T::TokenProvider::unreserve(round.entity_id, &entity_account, round.remaining_amount);
+                        // M3-deep: 记录 unreserve 不完整
+                        if !deficit.is_zero() {
+                            log::warn!("tokensale do_auto_end_sale: unreserve deficit {:?} for round {}", deficit, round_id);
+                        }
                         // M1-fix: 清零 remaining_amount，防止查询返回过时数据
                         round.remaining_amount = Zero::zero();
                     }

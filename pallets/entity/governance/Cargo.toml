@@ -18,14 +18,12 @@ frame-system = { workspace = true }
 sp-runtime = { workspace = true }
 sp-std = { workspace = true }
 pallet-entity-common = { workspace = true }
-pallet-entity-registry = { workspace = true }
-pallet-entity-token = { workspace = true }
 pallet-entity-commission = { workspace = true }
 
 [dev-dependencies]
-sp-core = { workspace = true }
-sp-io = { workspace = true }
-pallet-balances = { workspace = true }
+sp-core = { workspace = true, default-features = true }
+sp-io = { workspace = true, default-features = true }
+pallet-balances = { workspace = true, default-features = true }
 
 [features]
 default = ["std"]
@@ -37,8 +35,6 @@ std = [
 	"sp-runtime/std",
 	"sp-std/std",
 	"pallet-entity-common/std",
-	"pallet-entity-registry/std",
-	"pallet-entity-token/std",
 	"pallet-entity-commission/std",
 ]
 runtime-benchmarks = [

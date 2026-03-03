@@ -8,8 +8,6 @@
 //! - Era 订阅费结算 (游标分页)
 //! - 实现 SubscriptionProvider + SubscriptionSettler trait
 
-extern crate alloc;
-
 pub use pallet::*;
 
 #[cfg(test)]
@@ -34,7 +32,6 @@ pub struct SubscriptionRecord<T: Config> {
 	pub tier: SubscriptionTier,
 	pub fee_per_era: BalanceOf<T>,
 	pub started_at: BlockNumberFor<T>,
-	pub paid_until_era: u64,
 	pub status: SubscriptionStatus,
 }
 
@@ -171,6 +168,10 @@ pub mod pallet {
 		AdCommitmentUnderdelivered { bot_id_hash: BotIdHash, delivered: u32, committed: u32, consecutive: u8 },
 		/// 广告承诺因连续未达标而降级
 		AdCommitmentDowngraded { bot_id_hash: BotIdHash },
+		/// 已取消的付费订阅记录已清理
+		SubscriptionCleaned { bot_id_hash: BotIdHash },
+		/// 已取消的广告承诺记录已清理
+		AdCommitmentCleaned { bot_id_hash: BotIdHash },
 	}
 
 	// ========================================================================
@@ -213,6 +214,10 @@ pub mod pallet {
 		ZeroDepositAmount,
 		/// 订阅未处于活跃状态 (已取消或已暂停)
 		SubscriptionNotActive,
+		/// 订阅未处于终态 (仅 Cancelled 可清理)
+		SubscriptionNotTerminal,
+		/// 广告承诺未处于终态 (仅 Cancelled 可清理)
+		AdCommitmentNotTerminal,
 	}
 
 	// ========================================================================
@@ -247,14 +252,12 @@ pub mod pallet {
 			SubscriptionEscrow::<T>::insert(&bot_id_hash, deposit);
 
 			let now = frame_system::Pallet::<T>::block_number();
-			let current_era = T::CurrentEraProvider::get();
 			let sub = SubscriptionRecord::<T> {
 				owner: who.clone(),
 				bot_id_hash,
 				tier,
 				fee_per_era: fee,
 				started_at: now,
-				paid_until_era: current_era.saturating_add(1),
 				status: SubscriptionStatus::Active,
 			};
 			Subscriptions::<T>::insert(&bot_id_hash, sub);
@@ -373,6 +376,13 @@ pub mod pallet {
 				);
 				ensure!(sub.tier != new_tier, Error::<T>::SameTier);
 
+				// M1-R4: 升级到更贵层级时验证 escrow 充足性
+				let new_fee = Self::tier_fee(&new_tier);
+				if new_fee > sub.fee_per_era {
+					let escrow = SubscriptionEscrow::<T>::get(&bot_id_hash);
+					ensure!(escrow >= new_fee, Error::<T>::InsufficientDeposit);
+				}
+
 				let old_tier = sub.tier;
 				sub.tier = new_tier;
 				sub.fee_per_era = Self::tier_fee(&new_tier);
@@ -454,6 +464,38 @@ pub mod pallet {
 			Self::deposit_event(Event::AdCommitmentCancelled { bot_id_hash });
 			Ok(())
 		}
+
+		/// M2-R3: 清理已取消的付费订阅记录 (任何人可调用)
+		#[pallet::call_index(6)]
+		#[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+		pub fn cleanup_subscription(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+		) -> DispatchResult {
+			ensure_signed(origin)?;
+			let sub = Subscriptions::<T>::get(&bot_id_hash).ok_or(Error::<T>::SubscriptionNotFound)?;
+			ensure!(sub.status == SubscriptionStatus::Cancelled, Error::<T>::SubscriptionNotTerminal);
+			Subscriptions::<T>::remove(&bot_id_hash);
+			// L2-R4: 防御性清理 escrow 存储残留
+			SubscriptionEscrow::<T>::remove(&bot_id_hash);
+			Self::deposit_event(Event::SubscriptionCleaned { bot_id_hash });
+			Ok(())
+		}
+
+		/// M2-R3: 清理已取消的广告承诺记录 (任何人可调用)
+		#[pallet::call_index(7)]
+		#[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+		pub fn cleanup_ad_commitment(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+		) -> DispatchResult {
+			ensure_signed(origin)?;
+			let record = AdCommitments::<T>::get(&bot_id_hash).ok_or(Error::<T>::AdCommitmentNotFound)?;
+			ensure!(record.status == AdCommitmentStatus::Cancelled, Error::<T>::AdCommitmentNotTerminal);
+			AdCommitments::<T>::remove(&bot_id_hash);
+			Self::deposit_event(Event::AdCommitmentCleaned { bot_id_hash });
+			Ok(())
+		}
 	}
 
 	// ========================================================================
@@ -508,7 +550,7 @@ pub mod pallet {
 			};
 
 			let ad_tier = match AdCommitments::<T>::get(bot_id_hash) {
-				Some(c) if c.status == AdCommitmentStatus::Active => c.effective_tier,
+				Some(c) if matches!(c.status, AdCommitmentStatus::Active | AdCommitmentStatus::Underdelivery) => c.effective_tier,
 				_ => SubscriptionTier::Free,
 			};
 
@@ -526,11 +568,13 @@ pub mod pallet {
 
 		/// Era 订阅费结算 (游标分页)
 		///
-		/// 返回本次结算收取的总收入 (80% 已直接转给 Bot 运营者)
-		pub fn settle_era_subscriptions() -> BalanceOf<T> {
+		/// 返回 (total_income, treasury_share): 本次结算收取的总收入和实际转入国库的金额
+		/// (90% node_share 已直接转给 Bot 运营者, 10% treasury_share 转入国库)
+		pub fn settle_era_subscriptions() -> (BalanceOf<T>, BalanceOf<T>) {
 			let treasury = T::TreasuryAccount::get();
 			let max_settle = T::MaxSubscriptionSettlePerEra::get();
 			let mut subscription_income = BalanceOf::<T>::zero();
+			let mut total_treasury = BalanceOf::<T>::zero();
 			let mut settled = 0u32;
 
 			let iter = match SubscriptionSettleCursor::<T>::get() {
@@ -556,9 +600,7 @@ pub mod pallet {
 				}
 				let escrow = SubscriptionEscrow::<T>::get(&sub.bot_id_hash);
 				if escrow >= sub.fee_per_era {
-					SubscriptionEscrow::<T>::mutate(&sub.bot_id_hash, |e| {
-						*e = e.saturating_sub(sub.fee_per_era);
-					});
+					// M1-R3: 先 unreserve 以允许 transfer, escrow 扣减移至转账成功后
 					T::Currency::unreserve(&sub.owner, sub.fee_per_era);
 
 					// 90/10 拆分 (运营者 90%, 国库 10%)
@@ -567,11 +609,9 @@ pub mod pallet {
 
 					let reward_pool = T::RewardPoolAccount::get();
 
-					// node_share: 直接转给 Bot 运营者 (subscribe 已确保运营者存在)
 					let node_recipient = T::BotRegistry::bot_operator(&sub.bot_id_hash)
 						.unwrap_or_else(|| reward_pool.clone());
 
-					// H3-fix: 检查转账结果, 转账失败则不计入收入
 					let node_ok = T::Currency::transfer(
 						&sub.owner,
 						&node_recipient,
@@ -585,13 +625,29 @@ pub mod pallet {
 						ExistenceRequirement::AllowDeath,
 					).is_ok();
 					if node_ok && treasury_ok {
+						// M1-R3: 全部转账成功后才扣减 escrow
+						SubscriptionEscrow::<T>::mutate(&sub.bot_id_hash, |e| {
+							*e = e.saturating_sub(sub.fee_per_era);
+						});
 						subscription_income = subscription_income.saturating_add(sub.fee_per_era);
-						// H1-fix: 仅在转账成功时发出事件
+						total_treasury = total_treasury.saturating_add(treasury_share);
 						Self::deposit_event(Event::SubscriptionFeeCollected {
 							bot_id_hash: sub.bot_id_hash,
 							amount: sub.fee_per_era,
 						});
 					} else {
+						// M1-R3: 部分失败 — 回收未转出金额, 仅扣减实际转出额
+						let paid = (if node_ok { node_share } else { BalanceOf::<T>::zero() })
+							.saturating_add(if treasury_ok { treasury_share } else { BalanceOf::<T>::zero() });
+						let to_re_reserve = sub.fee_per_era.saturating_sub(paid);
+						if !to_re_reserve.is_zero() {
+							let _ = T::Currency::reserve(&sub.owner, to_re_reserve);
+						}
+						if !paid.is_zero() {
+							SubscriptionEscrow::<T>::mutate(&sub.bot_id_hash, |e| {
+								*e = e.saturating_sub(paid);
+							});
+						}
 						log::warn!(
 							"⚠️ Subscription fee transfer failed for bot {:?}: node_ok={}, treasury_ok={}",
 							sub.bot_id_hash, node_ok, treasury_ok,
@@ -619,7 +675,7 @@ pub mod pallet {
 				SubscriptionSettleCursor::<T>::put(key);
 			}
 
-			subscription_income
+			(subscription_income, total_treasury)
 		}
 
 		/// Era 广告承诺达标检查
@@ -730,10 +786,13 @@ pub mod pallet {
 	// ========================================================================
 
 	impl<T: Config> SubscriptionSettler for Pallet<T> {
-		fn settle_era() -> u128 {
-			let income = Self::settle_era_subscriptions().unique_saturated_into();
+		fn settle_era() -> EraSettlementResult {
+			let (income, treasury) = Self::settle_era_subscriptions();
 			Self::settle_ad_commitments();
-			income
+			EraSettlementResult {
+				total_income: income.unique_saturated_into(),
+				treasury_share: treasury.unique_saturated_into(),
+			}
 		}
 	}
 }

@@ -152,7 +152,7 @@ fn set_team_config(
 fn clear_config(entity_id: u64) -> Result<(), DispatchError>
 ```
 
-`set_team_config` 直接写入存储（无 `validate_config` 校验），调用方需确保参数正确。
+`set_team_config` 执行与 extrinsic 一致的参数校验（TM-M2 审计修复），写入成功后发出 `TeamPerformanceConfigUpdated` 事件。`clear_config` 清除后发出 `TeamPerformanceConfigCleared` 事件。
 
 ## Config
 
@@ -185,6 +185,7 @@ impl pallet_commission_team::Config for Runtime {
 | 事件 | 字段 | 说明 |
 |------|------|------|
 | `TeamPerformanceConfigUpdated` | `entity_id: u64` | 团队业绩配置已创建或更新 |
+| `TeamPerformanceConfigCleared` | `entity_id: u64` | 团队业绩配置已清除（PlanWriter 路径） |
 
 ## Errors
 
@@ -210,7 +211,7 @@ sp-io = { workspace = true, features = ["std"] }
 
 ## 测试覆盖
 
-共 **23 个**单元测试（代码内嵌 `#[cfg(test)] mod tests`）：
+共 **29 个**单元测试（代码内嵌 `#[cfg(test)] mod tests`）：
 
 | 分类 | 数量 | 覆盖内容 |
 |------|------|----------|
@@ -218,12 +219,20 @@ sp-io = { workspace = true, features = ["std"] }
 | Plugin 计算 | 6 | 无配置、模式未启用、单档非叠加、多档叠加、团队人数过滤、remaining 封顶 |
 | 遍历深度 | 1 | max_depth 截断 |
 | PlanWriter | 1 | set_team_config + clear_config |
-| 审计回归 | 6 | H1（PlanWriter 校验）×4、H2（非单调 team_size 匹配）、M1（未激活跳过） |
+| 审计回归 (TM-M1/M2) | 5 | PlanWriter 校验×4、非单调 team_size 匹配 |
+| 深度审计回归 | 5 | H1 循环检测×2、H2 未激活跳过×2、M1 PlanWriter 事件 |
 | 自动生成 | 2 | genesis_config、runtime_integrity |
+| USDT 模式 | 2 | USDT 模式匹配、NEX spent 被忽略 |
 
 ## 已知限制
 
 | 编号 | 级别 | 说明 |
 |------|------|------|
 | L1 | Low | extrinsic 硬编码 Weight，未接入 WeightInfo benchmark 框架 |
-| L2 | Low | PlanWriter `set_team_config` / `clear_config` 不发出事件 |
+
+## 审计历史
+
+| 轮次 | 日期 | 修复 | 测试 |
+|------|------|------|------|
+| Round 1 (TM-M1/M2) | 2026-03 | match_tier 非单调 team_size 修复、PlanWriter 校验 | 24 |
+| 深度审计 | 2026-03 | H1 循环检测、H2 未激活跳过、M1 PlanWriter 事件、L1 Cargo feature | 29 |

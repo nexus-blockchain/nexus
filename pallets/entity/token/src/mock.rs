@@ -110,11 +110,11 @@ impl pallet_assets::Config for Test {
     type BenchmarkHelper = ();
 }
 
-// ==================== Mock ShopProvider ====================
+// ==================== Mock EntityProvider ====================
 
 use pallet_entity_common::{
-    EntityProvider as EntityProviderTrait, ShopProvider as ShopProviderTrait,
-    EntityStatus, ShopType, ShopOperatingStatus, EffectiveShopStatus,
+    EntityProvider as EntityProviderTrait,
+    EntityStatus,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -126,31 +126,6 @@ thread_local! {
     static KYC_LEVELS: RefCell<HashMap<u64, u8>> = RefCell::new(HashMap::new());
     /// (entity_id, account) -> is_member
     static MEMBERS: RefCell<HashMap<(u64, u64), bool>> = RefCell::new(HashMap::new());
-}
-
-pub struct MockShopProvider;
-impl ShopProviderTrait<u64> for MockShopProvider {
-    fn shop_exists(shop_id: u64) -> bool {
-        SHOPS.with(|s| s.borrow().contains_key(&shop_id))
-    }
-    fn is_shop_active(shop_id: u64) -> bool {
-        SHOPS.with(|s| s.borrow().get(&shop_id).map(|(_, a)| *a).unwrap_or(false))
-    }
-    fn shop_owner(shop_id: u64) -> Option<u64> {
-        SHOPS.with(|s| s.borrow().get(&shop_id).map(|(o, _)| *o))
-    }
-    fn shop_entity_id(shop_id: u64) -> Option<u64> {
-        if Self::shop_exists(shop_id) { Some(1) } else { None }
-    }
-    fn shop_account(_shop_id: u64) -> u64 { 999 }
-    fn shop_type(_shop_id: u64) -> Option<ShopType> { Some(ShopType::default()) }
-    fn is_shop_manager(_shop_id: u64, _account: &u64) -> bool { false }
-    fn shop_own_status(_shop_id: u64) -> Option<ShopOperatingStatus> { None }
-    fn effective_status(_shop_id: u64) -> Option<EffectiveShopStatus> { None }
-    fn update_shop_stats(_: u64, _: u128, _: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
-    fn update_shop_rating(_: u64, _: u8) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
-    fn deduct_operating_fund(_: u64, _: u128) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
-    fn operating_balance(_: u64) -> u128 { 0 }
 }
 
 pub struct MockEntityProvider;
@@ -186,8 +161,8 @@ impl pallet_entity_token::KycLevelProvider<u64> for MockKycProvider {
 
 pub struct MockMemberProvider;
 impl pallet_entity_token::EntityMemberProvider<u64> for MockMemberProvider {
-    fn is_member(_entity_id: u64, who: &u64) -> bool {
-        MEMBERS.with(|m| m.borrow().get(&(1, *who)).copied().unwrap_or(false))
+    fn is_member(entity_id: u64, who: &u64) -> bool {
+        MEMBERS.with(|m| m.borrow().get(&(entity_id, *who)).copied().unwrap_or(false))
     }
 }
 
@@ -203,7 +178,6 @@ impl pallet_entity_token::Config for Test {
     type AssetBalance = u128;
     type Assets = Assets;
     type EntityProvider = MockEntityProvider;
-    type ShopProvider = MockShopProvider;
     type ShopTokenOffset = ShopTokenOffset;
     type MaxTokenNameLength = ConstU32<64>;
     type MaxTokenSymbolLength = ConstU32<8>;

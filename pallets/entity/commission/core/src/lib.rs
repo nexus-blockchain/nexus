@@ -624,6 +624,16 @@ pub mod pallet {
             order_id: u64,
             amount: TokenBalanceOf<T>,
         },
+        /// M1 审计修复: Governance 设置 Token 全局最低复购比例
+        GlobalMinTokenRepurchaseRateSet {
+            entity_id: u64,
+            rate: u16,
+        },
+        /// L5 审计修复: Governance 设置 NEX 全局最低复购比例
+        GlobalMinRepurchaseRateSet {
+            entity_id: u64,
+            rate: u16,
+        },
         /// Token 佣金取消
         TokenCommissionCancelled {
             order_id: u64,
@@ -892,9 +902,10 @@ pub mod pallet {
                     .saturating_add(total_to_shopping);
                 let unallocated = UnallocatedPool::<T>::get(entity_id);
                 let required_reserve = remaining_pending.saturating_add(new_shopping_total).saturating_add(unallocated);
+                // M2 审计修复: 使用专用错误码区分"pending 不足"和"Entity 偿付能力不足"
                 ensure!(
                     entity_balance >= split.withdrawal.saturating_add(required_reserve),
-                    Error::<T>::InsufficientCommission
+                    Error::<T>::InsufficientEntityFunds
                 );
 
                 // 从 Entity 账户转账提现部分到用户钱包
@@ -1101,6 +1112,7 @@ pub mod pallet {
             ensure_root(origin)?;
             ensure!(rate <= 10000, Error::<T>::InvalidCommissionRate);
             GlobalMinTokenRepurchaseRate::<T>::insert(entity_id, rate);
+            Self::deposit_event(Event::GlobalMinTokenRepurchaseRateSet { entity_id, rate });
             Ok(())
         }
 
@@ -1194,9 +1206,10 @@ pub mod pallet {
                 let required_reserve = remaining_pending
                     .saturating_add(new_shopping_total)
                     .saturating_add(unallocated);
+                // M2 审计修复: 使用专用错误码区分"pending 不足"和"Entity Token 偿付能力不足"
                 ensure!(
                     entity_token_balance >= split.withdrawal.saturating_add(required_reserve),
-                    Error::<T>::InsufficientTokenCommission
+                    Error::<T>::InsufficientEntityTokenFunds
                 );
 
                 // Token 转账: entity_account → who（提现部分）
@@ -1401,11 +1414,7 @@ pub mod pallet {
             false
         }
 
-        /// 从 shop_id 解析 entity_id
-        #[allow(dead_code)]
-        fn resolve_entity_id(shop_id: u64) -> Result<u64, Error<T>> {
-            T::ShopProvider::shop_entity_id(shop_id).ok_or(Error::<T>::ShopNotFound)
-        }
+        // L1 审计修复: 移除死代码 resolve_entity_id（未被任何代码路径调用）
 
         /// 验证 Entity 所有者权限（直接通过 entity_id）
         fn ensure_entity_owner(entity_id: u64, who: &T::AccountId) -> Result<(), DispatchError> {
@@ -2385,57 +2394,8 @@ pub mod pallet {
             let failed = (refund_groups.len() as u32).saturating_sub(succeeded);
             Self::deposit_event(Event::CommissionCancelled { order_id, refund_succeeded: succeeded, refund_failed: failed });
 
-            // ── 第六步：退还 Token 佣金记录（纯记账，无转账） ──
-            let mut token_cancelled: u32 = 0;
-            OrderTokenCommissionRecords::<T>::mutate(order_id, |records| {
-                for record in records.iter_mut() {
-                    if record.status == CommissionStatus::Pending {
-                        MemberTokenCommissionStats::<T>::mutate(
-                            record.entity_id, &record.beneficiary, |stats| {
-                                stats.pending = stats.pending.saturating_sub(record.amount);
-                                stats.total_earned = stats.total_earned.saturating_sub(record.amount);
-                            }
-                        );
-                        TokenPendingTotal::<T>::mutate(record.entity_id, |total| {
-                            *total = total.saturating_sub(record.amount);
-                        });
-                        record.status = CommissionStatus::Cancelled;
-                        token_cancelled = token_cancelled.saturating_add(1);
-                    }
-                }
-            });
-
-            // ── H2 审计修复：第七步：退还 Token 沉淀池 — 仅在转账成功时扣减池余额 ──
-            let (te_id, ts_id, t_amount) = OrderTokenUnallocated::<T>::get(order_id);
-            if !t_amount.is_zero() {
-                let mut refund_ok = false;
-                let entity_account = T::EntityProvider::entity_account(te_id);
-                if let Some(seller) = T::ShopProvider::shop_owner(ts_id) {
-                    if T::TokenTransferProvider::token_transfer(
-                        te_id, &entity_account, &seller, t_amount,
-                    ).is_ok() {
-                        refund_ok = true;
-                    }
-                }
-                if refund_ok {
-                    UnallocatedTokenPool::<T>::mutate(te_id, |pool| {
-                        *pool = pool.saturating_sub(t_amount);
-                    });
-                    EntityTokenAccountedBalance::<T>::mutate(te_id, |b| {
-                        *b = b.map(|v| v.saturating_sub(t_amount));
-                    });
-                    OrderTokenUnallocated::<T>::remove(order_id);
-                    Self::deposit_event(Event::TokenUnallocatedPoolRefunded {
-                        entity_id: te_id, order_id, amount: t_amount,
-                    });
-                }
-            }
-
-            if token_cancelled > 0 {
-                Self::deposit_event(Event::TokenCommissionCancelled {
-                    order_id, cancelled_count: token_cancelled,
-                });
-            }
+            // M3 审计修复: 复用 do_cancel_token_commission 消除代码重复（原第六、七步）
+            Self::do_cancel_token_commission(order_id)?;
 
             Ok(())
         }
@@ -2533,17 +2493,10 @@ impl<T: pallet::Config> CommissionProvider<T::AccountId, pallet::BalanceOf<T>> f
     }
 
     fn set_commission_modes(entity_id: u64, modes: u16) -> sp_runtime::DispatchResult {
-        let allowed_modes = CommissionModes::DIRECT_REWARD
-            | CommissionModes::MULTI_LEVEL
-            | CommissionModes::TEAM_PERFORMANCE
-            | CommissionModes::LEVEL_DIFF
-            | CommissionModes::FIXED_AMOUNT
-            | CommissionModes::FIRST_ORDER
-            | CommissionModes::REPEAT_PURCHASE
-            | CommissionModes::SINGLE_LINE_UPLINE
-            | CommissionModes::SINGLE_LINE_DOWNLINE
-            | CommissionModes::POOL_REWARD;
-        frame_support::ensure!(modes & !allowed_modes == 0, sp_runtime::DispatchError::Other("InvalidModes"));
+        // M4 审计修复: 使用 CommissionModes::is_valid()（单一事实来源）替代手动构造的掩码，
+        // 与 extrinsic 版本保持一致，防止新增模式位时遗漏更新
+        let modes_flags = CommissionModes(modes);
+        frame_support::ensure!(modes_flags.is_valid(), sp_runtime::DispatchError::Other("InvalidModes"));
 
         // H4 审计修复: 跟踪 POOL_REWARD 开关变化（与 extrinsic 版本一致）
         let old_has_pool = pallet::CommissionConfigs::<T>::get(entity_id)
@@ -2615,6 +2568,8 @@ impl<T: pallet::Config> CommissionProvider<T::AccountId, pallet::BalanceOf<T>> f
     fn set_min_repurchase_rate(entity_id: u64, rate: u16) -> sp_runtime::DispatchResult {
         frame_support::ensure!(rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
         pallet::GlobalMinRepurchaseRate::<T>::insert(entity_id, rate);
+        // L5 审计修复: 发射事件，使 NEX 治理底线变更可审计
+        pallet::Pallet::<T>::deposit_event(pallet::Event::GlobalMinRepurchaseRateSet { entity_id, rate });
         Ok(())
     }
 }

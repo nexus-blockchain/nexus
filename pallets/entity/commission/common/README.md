@@ -172,7 +172,8 @@ pub trait TokenCommissionPlugin<AccountId, TokenBalance> {
 
 | Trait | 实现者 | 方法 |
 |-------|--------|------|
-| `ReferralPlanWriter` | commission-referral | `set_direct_rate`, `set_multi_level`, `set_fixed_amount`, `set_first_order`, `set_repeat_purchase`, `clear_config` |
+| `ReferralPlanWriter` | commission-referral | `set_direct_rate`, `set_fixed_amount`, `set_first_order`, `set_repeat_purchase`, `clear_config` |
+| `MultiLevelPlanWriter` | commission-multi-level | `set_multi_level`, `clear_multi_level_config` |
 | `LevelDiffPlanWriter` | commission-level-diff | `set_level_rates`, `clear_config` |
 | `TeamPlanWriter` | commission-team | `set_team_config` (含 `threshold_mode`), `clear_config` |
 | `PoolRewardPlanWriter` | commission-pool-reward | `set_pool_reward_config`, `clear_config`, `set_token_pool_enabled` |
@@ -203,15 +204,6 @@ pub struct MemberTokenCommissionStatsData<TokenBalance: Default> {
 }
 ```
 
-### TokenCommissionProvider — Token 佣金服务接口
-
-供 Transaction 模块调用 Token 佣金计算：
-
-- `process_token_commission()` / `cancel_token_commission()` / `pending_token_commission()`
-- `token_platform_fee_rate()` — Entity 级 Token 平台费率（bps，0 = 不收费）
-
-空实现：`NullTokenCommissionProvider`
-
 ### 余额读写接口
 
 | Trait | 用途 |
@@ -232,6 +224,7 @@ sp-runtime = { workspace = true }
 
 ## 版本历史
 
+- **v0.4.0**: M1 README PlanWriter 表修正（`set_multi_level` 归属 `MultiLevelPlanWriter`）, L1 移除重复 `TokenCommissionProvider` 章节, L2 Cargo.toml 补充 `runtime-benchmarks`/`try-runtime` feature 传播
 - **v0.3.0**: 移除 `CommissionPlan` 枚举（过度设计，前端改用 `utility.batch` 组合分步 extrinsics）
 - **v0.2.0**: H1 位标志校验 (`ALL_VALID`/`is_valid`), M1 移除死依赖, M2 `WithdrawalTierConfig::is_valid()`, L1 `CommissionOutput` 添加 PartialEq/Eq
 - **v0.1.0**: 初始版本

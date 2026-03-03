@@ -41,7 +41,7 @@ pub mod pallet {
         BoundedVec,
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::EntityProvider;
+    use pallet_entity_common::{AdminPermission, EntityProvider};
     use sp_runtime::traits::{Saturating, Zero};
 
     // ==================== 类型定义 ====================
@@ -148,8 +148,6 @@ pub mod pallet {
         pub level: DisclosureLevel,
         /// 是否启用内幕交易控制
         pub insider_trading_control: bool,
-        /// 披露前黑窗口期（区块数）— 预留，当前仅 blackout_period_after 生效
-        pub blackout_period_before: BlockNumber,
         /// 披露后黑窗口期（区块数）
         pub blackout_period_after: BlockNumber,
         /// 下次必须披露时间
@@ -172,8 +170,6 @@ pub mod pallet {
         pub role: InsiderRole,
         /// 添加时间
         pub added_at: BlockNumber,
-        /// 是否活跃
-        pub active: bool,
     }
 
     // ==================== 公告类型定义 ====================
@@ -494,6 +490,21 @@ pub mod pallet {
         AnnouncementUnpinned {
             entity_id: u64,
         },
+        /// 公告已标记为过期
+        AnnouncementMarkedExpired {
+            announcement_id: u64,
+            entity_id: u64,
+        },
+        /// M1-R3: 披露历史索引已清理
+        DisclosureHistoryCleaned {
+            entity_id: u64,
+            disclosure_id: u64,
+        },
+        /// M1-R3: 公告历史索引已清理
+        AnnouncementHistoryCleaned {
+            entity_id: u64,
+            announcement_id: u64,
+        },
     }
 
     /// 违规类型
@@ -555,6 +566,20 @@ pub mod pallet {
         TitleTooLong,
         /// 过期时间无效（早于当前区块）
         InvalidExpiry,
+        /// ID 溢出（u64::MAX）
+        IdOverflow,
+        /// 更新公告时未提供任何修改项
+        NoUpdateProvided,
+        /// 公告已过期
+        AnnouncementExpired,
+        /// 已存在活跃黑窗口期，不能缩短（请先 end_blackout）
+        BlackoutStillActive,
+        /// 公告尚未过期（无 expires_at 或未到过期时间）
+        AnnouncementNotExpired,
+        /// 披露未处于终态（仅 Withdrawn/Corrected 可清理）
+        DisclosureNotTerminal,
+        /// 公告未处于终态（仅 Withdrawn/Expired 可清理）
+        AnnouncementNotTerminal,
     }
 
     // ==================== Extrinsics ====================
@@ -569,14 +594,16 @@ pub mod pallet {
             entity_id: u64,
             level: DisclosureLevel,
             insider_trading_control: bool,
-            blackout_before: BlockNumberFor<T>,
             blackout_after: BlockNumberFor<T>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证管理员权限
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotAdmin);
+            // H2: 验证实体存在 + 管理员权限
+            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                Error::<T>::NotAdmin
+            );
 
             // H1: 验证 blackout_after 不超过 MaxBlackoutDuration
             let max_blackout = T::MaxBlackoutDuration::get();
@@ -594,7 +621,6 @@ pub mod pallet {
             DisclosureConfigs::<T>::insert(entity_id, DisclosureConfig {
                 level,
                 insider_trading_control,
-                blackout_period_before: blackout_before,
                 blackout_period_after: blackout_after,
                 next_required_disclosure: next_required,
                 last_disclosure: existing_last,
@@ -620,15 +646,22 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证管理员权限
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotAdmin);
+            // H2: 验证实体存在 + 管理员权限
+            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                Error::<T>::NotAdmin
+            );
 
             // H2: 内容 CID 不能为空
             ensure!(!content_cid.is_empty(), Error::<T>::EmptyCid);
 
             let content_bounded: BoundedVec<u8, T::MaxCidLength> = 
                 content_cid.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+            // M3: summary_cid 不能为空字符串
+            if let Some(ref s) = summary_cid {
+                ensure!(!s.is_empty(), Error::<T>::EmptyCid);
+            }
             let summary_bounded = summary_cid
                 .map(|s| s.try_into().map_err(|_| Error::<T>::CidTooLong))
                 .transpose()?;
@@ -652,7 +685,10 @@ pub mod pallet {
 
             // 保存记录
             Disclosures::<T>::insert(disclosure_id, record);
-            NextDisclosureId::<T>::put(disclosure_id.saturating_add(1));
+            // H1: checked_add 防止 ID 溢出
+            NextDisclosureId::<T>::put(
+                disclosure_id.checked_add(1).ok_or(Error::<T>::IdOverflow)?
+            );
 
             // 更新实体披露历史
             EntityDisclosures::<T>::try_mutate(entity_id, |history| -> DispatchResult {
@@ -669,11 +705,12 @@ pub mod pallet {
                     // 如果启用内幕交易控制，开始黑窗口期
                     if config.insider_trading_control && !config.blackout_period_after.is_zero() {
                         let end_block = now.saturating_add(config.blackout_period_after);
-                        BlackoutPeriods::<T>::insert(entity_id, (now, end_block));
+                        // M1-deep: 不缩短已有的黑窗口期
+                        let actual_end = Self::set_or_extend_blackout(entity_id, now, end_block);
                         Self::deposit_event(Event::BlackoutStarted {
                             entity_id,
                             start_block: now,
-                            end_block,
+                            end_block: actual_end,
                         });
                     }
                 }
@@ -700,10 +737,14 @@ pub mod pallet {
             Disclosures::<T>::try_mutate(disclosure_id, |maybe_record| -> DispatchResult {
                 let record = maybe_record.as_mut().ok_or(Error::<T>::DisclosureNotFound)?;
                 
-                // 验证权限
-                let owner = T::EntityProvider::entity_owner(record.entity_id)
+                // H2: 验证权限（管理员或原始披露者）
+                T::EntityProvider::entity_owner(record.entity_id)
                     .ok_or(Error::<T>::EntityNotFound)?;
-                ensure!(owner == who || record.discloser == who, Error::<T>::NotAdmin);
+                ensure!(
+                    T::EntityProvider::is_entity_admin(record.entity_id, &who, AdminPermission::DISCLOSURE_MANAGE)
+                        || record.discloser == who,
+                    Error::<T>::NotAdmin
+                );
                 
                 // 验证状态
                 ensure!(record.status == DisclosureStatus::Published, Error::<T>::InvalidDisclosureStatus);
@@ -735,16 +776,23 @@ pub mod pallet {
             // H2: 只能更正 Published 状态的记录
             ensure!(old_record.status == DisclosureStatus::Published, Error::<T>::InvalidDisclosureStatus);
 
-            // 验证权限
-            let owner = T::EntityProvider::entity_owner(old_record.entity_id)
+            // H2: 验证实体存在 + 管理员权限
+            T::EntityProvider::entity_owner(old_record.entity_id)
                 .ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotAdmin);
+            ensure!(
+                T::EntityProvider::is_entity_admin(old_record.entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                Error::<T>::NotAdmin
+            );
 
             // H2/H3: 内容 CID 不能为空
             ensure!(!content_cid.is_empty(), Error::<T>::EmptyCid);
 
             let content_bounded: BoundedVec<u8, T::MaxCidLength> = 
                 content_cid.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+            // M3: summary_cid 不能为空字符串
+            if let Some(ref s) = summary_cid {
+                ensure!(!s.is_empty(), Error::<T>::EmptyCid);
+            }
             let summary_bounded = summary_cid
                 .map(|s| s.try_into().map_err(|_| Error::<T>::CidTooLong))
                 .transpose()?;
@@ -776,7 +824,10 @@ pub mod pallet {
 
             // 保存新记录
             Disclosures::<T>::insert(new_disclosure_id, new_record);
-            NextDisclosureId::<T>::put(new_disclosure_id.saturating_add(1));
+            // H1: checked_add 防止 ID 溢出
+            NextDisclosureId::<T>::put(
+                new_disclosure_id.checked_add(1).ok_or(Error::<T>::IdOverflow)?
+            );
 
             // 更新历史
             EntityDisclosures::<T>::try_mutate(old_record.entity_id, |history| -> DispatchResult {
@@ -793,11 +844,12 @@ pub mod pallet {
 
                     if config.insider_trading_control && !config.blackout_period_after.is_zero() {
                         let end_block = now.saturating_add(config.blackout_period_after);
-                        BlackoutPeriods::<T>::insert(entity_id, (now, end_block));
+                        // M1-deep: 不缩短已有的黑窗口期
+                        let actual_end = Self::set_or_extend_blackout(entity_id, now, end_block);
                         Self::deposit_event(Event::BlackoutStarted {
                             entity_id,
                             start_block: now,
-                            end_block,
+                            end_block: actual_end,
                         });
                     }
                 }
@@ -822,32 +874,28 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotAdmin);
+            // H2: 验证实体存在 + 管理员权限
+            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                Error::<T>::NotAdmin
+            );
 
             let now = <frame_system::Pallet<T>>::block_number();
 
             Insiders::<T>::try_mutate(entity_id, |insiders| -> DispatchResult {
-                // 检查是否已活跃
+                // M3: 硬删除后不存在非活跃记录，直接检查是否已存在
                 ensure!(
-                    !insiders.iter().any(|i| i.account == account && i.active),
+                    !insiders.iter().any(|i| i.account == account),
                     Error::<T>::InsiderExists
                 );
 
-                // H3: 尝试重新激活已存在的非活跃记录
-                if let Some(existing) = insiders.iter_mut().find(|i| i.account == account && !i.active) {
-                    existing.role = role;
-                    existing.added_at = now;
-                    existing.active = true;
-                } else {
-                    let record = InsiderRecord {
-                        account: account.clone(),
-                        role,
-                        added_at: now,
-                        active: true,
-                    };
-                    insiders.try_push(record).map_err(|_| Error::<T>::InsidersFull)?;
-                }
+                let record = InsiderRecord {
+                    account: account.clone(),
+                    role,
+                    added_at: now,
+                };
+                insiders.try_push(record).map_err(|_| Error::<T>::InsidersFull)?;
                 Ok(())
             })?;
 
@@ -869,13 +917,18 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotAdmin);
+            // H2: 验证实体存在 + 管理员权限
+            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                Error::<T>::NotAdmin
+            );
 
             Insiders::<T>::try_mutate(entity_id, |insiders| -> DispatchResult {
-                let pos = insiders.iter().position(|i| i.account == account && i.active)
+                // M3: 硬删除 — swap_remove 释放 BoundedVec 容量
+                let pos = insiders.iter().position(|i| i.account == account)
                     .ok_or(Error::<T>::InsiderNotFound)?;
-                insiders[pos].active = false;
+                insiders.swap_remove(pos);
                 Ok(())
             })?;
 
@@ -896,8 +949,12 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotAdmin);
+            // H2: 验证实体存在 + 管理员权限
+            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                Error::<T>::NotAdmin
+            );
 
             // M3: 使用 Config 常量替代硬编码
             let max_blackout = T::MaxBlackoutDuration::get();
@@ -905,6 +962,13 @@ pub mod pallet {
 
             let now = <frame_system::Pallet<T>>::block_number();
             let end_block = now.saturating_add(duration);
+
+            // M1-R2: 不允许缩短活跃黑窗口期（防止绕过 auto-blackout 内幕交易控制）
+            if let Some((_existing_start, existing_end)) = BlackoutPeriods::<T>::get(entity_id) {
+                if existing_end > now && end_block < existing_end {
+                    return Err(Error::<T>::BlackoutStillActive.into());
+                }
+            }
 
             BlackoutPeriods::<T>::insert(entity_id, (now, end_block));
 
@@ -925,8 +989,12 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotAdmin);
+            // H2: 验证实体存在 + 管理员权限
+            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                Error::<T>::NotAdmin
+            );
 
             // L1: 检查黑窗口期是否存在
             ensure!(BlackoutPeriods::<T>::contains_key(entity_id), Error::<T>::BlackoutNotFound);
@@ -952,9 +1020,13 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            let owner = T::EntityProvider::entity_owner(entity_id)
+            // H2: 验证实体存在 + 管理员权限
+            T::EntityProvider::entity_owner(entity_id)
                 .ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotAdmin);
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                Error::<T>::NotAdmin
+            );
 
             // 验证标题
             ensure!(!title.is_empty(), Error::<T>::EmptyTitle);
@@ -989,7 +1061,10 @@ pub mod pallet {
             };
 
             Announcements::<T>::insert(announcement_id, record);
-            NextAnnouncementId::<T>::put(announcement_id.saturating_add(1));
+            // H1: checked_add 防止 ID 溢出
+            NextAnnouncementId::<T>::put(
+                announcement_id.checked_add(1).ok_or(Error::<T>::IdOverflow)?
+            );
 
             EntityAnnouncements::<T>::try_mutate(entity_id, |history| -> DispatchResult {
                 history.try_push(announcement_id)
@@ -1019,16 +1094,31 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
+            // M2: 至少需要更新一项
+            ensure!(
+                title.is_some() || content_cid.is_some() || category.is_some() || expires_at.is_some(),
+                Error::<T>::NoUpdateProvided
+            );
+
             Announcements::<T>::try_mutate(announcement_id, |maybe_record| -> DispatchResult {
                 let record = maybe_record.as_mut().ok_or(Error::<T>::AnnouncementNotFound)?;
 
-                let owner = T::EntityProvider::entity_owner(record.entity_id)
+                // H2: 验证实体存在 + 管理员权限
+                T::EntityProvider::entity_owner(record.entity_id)
                     .ok_or(Error::<T>::EntityNotFound)?;
-                ensure!(owner == who, Error::<T>::NotAdmin);
+                ensure!(
+                    T::EntityProvider::is_entity_admin(record.entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                    Error::<T>::NotAdmin
+                );
 
                 ensure!(record.status == AnnouncementStatus::Active, Error::<T>::AnnouncementNotActive);
 
                 let now = <frame_system::Pallet<T>>::block_number();
+
+                // M2-R2: 不允许更新已逾期的公告
+                if let Some(exp) = record.expires_at {
+                    ensure!(now <= exp, Error::<T>::AnnouncementExpired);
+                }
 
                 if let Some(new_title) = title {
                     ensure!(!new_title.is_empty(), Error::<T>::EmptyTitle);
@@ -1072,9 +1162,14 @@ pub mod pallet {
             Announcements::<T>::try_mutate(announcement_id, |maybe_record| -> DispatchResult {
                 let record = maybe_record.as_mut().ok_or(Error::<T>::AnnouncementNotFound)?;
 
-                let owner = T::EntityProvider::entity_owner(record.entity_id)
+                // H2: 验证权限（管理员或原始发布者）
+                T::EntityProvider::entity_owner(record.entity_id)
                     .ok_or(Error::<T>::EntityNotFound)?;
-                ensure!(owner == who || record.publisher == who, Error::<T>::NotAdmin);
+                ensure!(
+                    T::EntityProvider::is_entity_admin(record.entity_id, &who, AdminPermission::DISCLOSURE_MANAGE)
+                        || record.publisher == who,
+                    Error::<T>::NotAdmin
+                );
 
                 ensure!(record.status == AnnouncementStatus::Active, Error::<T>::AnnouncementNotActive);
 
@@ -1109,9 +1204,13 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            let owner = T::EntityProvider::entity_owner(entity_id)
+            // H2: 验证实体存在 + 管理员权限
+            T::EntityProvider::entity_owner(entity_id)
                 .ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotAdmin);
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                Error::<T>::NotAdmin
+            );
 
             match announcement_id {
                 Some(id) => {
@@ -1120,6 +1219,12 @@ pub mod pallet {
                         .ok_or(Error::<T>::AnnouncementNotFound)?;
                     ensure!(record.entity_id == entity_id, Error::<T>::AnnouncementNotFound);
                     ensure!(record.status == AnnouncementStatus::Active, Error::<T>::AnnouncementNotActive);
+
+                    // M1: 检查公告是否已过期
+                    if let Some(exp) = record.expires_at {
+                        let now = <frame_system::Pallet<T>>::block_number();
+                        ensure!(now <= exp, Error::<T>::AnnouncementExpired);
+                    }
 
                     // 取消旧置顶
                     if let Some(old_pinned_id) = PinnedAnnouncement::<T>::get(entity_id) {
@@ -1158,6 +1263,113 @@ pub mod pallet {
 
             Ok(())
         }
+
+        /// 标记已过期公告（任何人可调用）
+        ///
+        /// 将 `expires_at <= now` 且状态为 Active 的公告标记为 `Expired`。
+        /// 如果该公告是置顶公告，自动清除置顶。
+        #[pallet::call_index(12)]
+        #[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+        pub fn expire_announcement(
+            origin: OriginFor<T>,
+            announcement_id: u64,
+        ) -> DispatchResult {
+            ensure_signed(origin)?;
+
+            Announcements::<T>::try_mutate(announcement_id, |maybe_record| -> DispatchResult {
+                let record = maybe_record.as_mut().ok_or(Error::<T>::AnnouncementNotFound)?;
+
+                ensure!(record.status == AnnouncementStatus::Active, Error::<T>::AnnouncementNotActive);
+
+                let now = <frame_system::Pallet<T>>::block_number();
+                let exp = record.expires_at.ok_or(Error::<T>::AnnouncementNotExpired)?;
+                ensure!(now > exp, Error::<T>::AnnouncementNotExpired);
+
+                record.status = AnnouncementStatus::Expired;
+                record.is_pinned = false;
+
+                let entity_id = record.entity_id;
+
+                // 如果是置顶公告，清除置顶
+                if PinnedAnnouncement::<T>::get(entity_id) == Some(announcement_id) {
+                    PinnedAnnouncement::<T>::remove(entity_id);
+                }
+
+                Self::deposit_event(Event::AnnouncementMarkedExpired {
+                    announcement_id,
+                    entity_id,
+                });
+                Ok(())
+            })
+        }
+
+        /// M1-R3: 清理已终结的披露历史索引（任何人可调用）
+        ///
+        /// 从 `EntityDisclosures` 移除 Withdrawn 或 Corrected 状态的披露 ID，
+        /// 释放 BoundedVec 容量供新披露使用。披露记录本身保留供审计。
+        #[pallet::call_index(13)]
+        #[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+        pub fn cleanup_disclosure_history(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            disclosure_id: u64,
+        ) -> DispatchResult {
+            ensure_signed(origin)?;
+
+            let record = Disclosures::<T>::get(disclosure_id)
+                .ok_or(Error::<T>::DisclosureNotFound)?;
+            ensure!(record.entity_id == entity_id, Error::<T>::DisclosureNotFound);
+            ensure!(
+                record.status == DisclosureStatus::Withdrawn || record.status == DisclosureStatus::Corrected,
+                Error::<T>::DisclosureNotTerminal
+            );
+
+            EntityDisclosures::<T>::mutate(entity_id, |history| {
+                if let Some(pos) = history.iter().position(|&id| id == disclosure_id) {
+                    history.swap_remove(pos);
+                }
+            });
+
+            Self::deposit_event(Event::DisclosureHistoryCleaned {
+                entity_id,
+                disclosure_id,
+            });
+            Ok(())
+        }
+
+        /// M1-R3: 清理已终结的公告历史索引（任何人可调用）
+        ///
+        /// 从 `EntityAnnouncements` 移除 Withdrawn 或 Expired 状态的公告 ID，
+        /// 释放 BoundedVec 容量供新公告使用。公告记录本身保留供审计。
+        #[pallet::call_index(14)]
+        #[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+        pub fn cleanup_announcement_history(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            announcement_id: u64,
+        ) -> DispatchResult {
+            ensure_signed(origin)?;
+
+            let record = Announcements::<T>::get(announcement_id)
+                .ok_or(Error::<T>::AnnouncementNotFound)?;
+            ensure!(record.entity_id == entity_id, Error::<T>::AnnouncementNotFound);
+            ensure!(
+                record.status == AnnouncementStatus::Withdrawn || record.status == AnnouncementStatus::Expired,
+                Error::<T>::AnnouncementNotTerminal
+            );
+
+            EntityAnnouncements::<T>::mutate(entity_id, |history| {
+                if let Some(pos) = history.iter().position(|&id| id == announcement_id) {
+                    history.swap_remove(pos);
+                }
+            });
+
+            Self::deposit_event(Event::AnnouncementHistoryCleaned {
+                entity_id,
+                announcement_id,
+            });
+            Ok(())
+        }
     }
 
     // ==================== 辅助函数 ====================
@@ -1174,6 +1386,17 @@ pub mod pallet {
             now.saturating_add(interval)
         }
 
+        /// M1-deep: 设置或延长黑窗口期（不缩短已有的结束时间）
+        ///
+        /// 返回实际写入的 end_block（可能大于传入值）。
+        fn set_or_extend_blackout(entity_id: u64, start: BlockNumberFor<T>, end: BlockNumberFor<T>) -> BlockNumberFor<T> {
+            let final_end = BlackoutPeriods::<T>::get(entity_id)
+                .map(|(_, existing_end)| end.max(existing_end))
+                .unwrap_or(end);
+            BlackoutPeriods::<T>::insert(entity_id, (start, final_end));
+            final_end
+        }
+
         /// 检查是否在黑窗口期内
         pub fn is_in_blackout(entity_id: u64) -> bool {
             if let Some((start, end)) = BlackoutPeriods::<T>::get(entity_id) {
@@ -1186,9 +1409,10 @@ pub mod pallet {
 
         /// 检查账户是否是内幕人员
         pub fn is_insider(entity_id: u64, account: &T::AccountId) -> bool {
+            // M2-deep: remove_insider 已改为 swap_remove，所有条目均为活跃
             Insiders::<T>::get(entity_id)
                 .iter()
-                .any(|i| &i.account == account && i.active)
+                .any(|i| &i.account == account)
         }
 
         /// 检查内幕人员是否可以交易
@@ -1243,8 +1467,25 @@ pub mod pallet {
         }
 
         /// 获取实体的置顶公告 ID
+        ///
+        /// M3-R2: 如果置顶公告已过期或非 Active，返回 None
         pub fn get_pinned_announcement(entity_id: u64) -> Option<u64> {
-            PinnedAnnouncement::<T>::get(entity_id)
+            let id = PinnedAnnouncement::<T>::get(entity_id)?;
+            // 检查公告是否仍然有效
+            if let Some(record) = Announcements::<T>::get(id) {
+                if record.status != AnnouncementStatus::Active {
+                    return None;
+                }
+                if let Some(exp) = record.expires_at {
+                    let now = <frame_system::Pallet<T>>::block_number();
+                    if now > exp {
+                        return None;
+                    }
+                }
+                Some(id)
+            } else {
+                None
+            }
         }
     }
 }

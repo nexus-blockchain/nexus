@@ -1085,17 +1085,16 @@ fn restore_stock_soldout_to_onsale() {
 }
 
 #[test]
-fn delete_product_fails_without_deposit_record() {
+fn h1_delete_product_succeeds_without_deposit_record() {
     new_test_ext().execute_with(|| {
         create_default_product();
         // 手动移除押金记录
         ProductDeposits::<Test>::remove(0);
-        assert_noop!(
-            EntityService::delete_product(RuntimeOrigin::signed(1), 0),
-            Error::<Test>::DepositNotFound
-        );
-        // 商品应仍然存在
-        assert!(Products::<Test>::get(0).is_some());
+        // H1: 押金记录缺失不阻断删除（best-effort, deposit_refunded=0）
+        assert_ok!(EntityService::delete_product(RuntimeOrigin::signed(1), 0));
+        // 商品应已删除
+        assert!(Products::<Test>::get(0).is_none());
+        assert_eq!(ProductStats::<Test>::get().total_products, 0);
     });
 }
 
@@ -1409,5 +1408,111 @@ fn m3_stale_price_returns_min_deposit() {
         set_price_stale(false);
         let restored = EntityService::calculate_product_deposit().unwrap();
         assert_eq!(restored, normal_deposit);
+    });
+}
+
+// ==================== 审计 Round 2 回归测试 ====================
+
+#[test]
+fn h1_delete_product_succeeds_when_pallet_insolvent() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+        // 手动清空 Pallet 账户余额，模拟偿付能力不足
+        let pallet_account: u64 = sp_runtime::traits::AccountIdConversion::<u64>::into_account_truncating(
+            &frame_support::PalletId(*b"et/prod/")
+        );
+        let pallet_balance = Balances::free_balance(pallet_account);
+        if pallet_balance > 0 {
+            let _ = <Balances as frame_support::traits::Currency<u64>>::slash(&pallet_account, pallet_balance);
+        }
+        // H1: Pallet 偿付能力不足不阻断删除
+        assert_ok!(EntityService::delete_product(RuntimeOrigin::signed(1), 0));
+        assert!(Products::<Test>::get(0).is_none());
+        assert_eq!(ProductStats::<Test>::get().total_products, 0);
+    });
+}
+
+#[test]
+fn h2_restore_stock_soldout_inactive_shop_stays_soldout() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        // 创建有限库存商品并上架
+        assert_ok!(EntityService::create_product(
+            RuntimeOrigin::signed(1), 1,
+            b"Qm1".to_vec(), b"Qm2".to_vec(), b"Qm3".to_vec(),
+            100_000_000_000_000u128, 10, ProductCategory::Physical,
+        ));
+        assert_ok!(EntityService::publish_product(RuntimeOrigin::signed(1), 0));
+
+        // 扣减全部库存 → SoldOut
+        assert_ok!(<EntityService as ProductProvider<u64, u128>>::deduct_stock(0, 10));
+        assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::SoldOut);
+
+        // 关闭 Shop
+        set_shop_active(1, false);
+
+        // H2: restore_stock 应增加库存但不恢复 OnSale（Shop 未激活）
+        assert_ok!(<EntityService as ProductProvider<u64, u128>>::restore_stock(0, 5));
+        let product = Products::<Test>::get(0).unwrap();
+        assert_eq!(product.stock, 5);
+        assert_eq!(product.status, ProductStatus::SoldOut); // 仍为 SoldOut
+
+        // 恢复 Shop → 再次 restore_stock，SoldOut + Shop active → OnSale
+        set_shop_active(1, true);
+        assert_ok!(<EntityService as ProductProvider<u64, u128>>::restore_stock(0, 3));
+        let product = Products::<Test>::get(0).unwrap();
+        assert_eq!(product.stock, 8);
+        assert_eq!(product.status, ProductStatus::OnSale); // Shop 激活时恢复 OnSale
+    });
+}
+
+#[test]
+fn m2_create_product_fails_insufficient_balance_with_ed() {
+    new_test_ext().execute_with(|| {
+        // 押金 = 1_000_000_000_000 (1 UNIT), ED = 1
+        // 给 shop 账户恰好 deposit + ED - 1 的余额（不够 KeepAlive）
+        let shop_account: u64 = 1 * 100 + 10; // mock shop_account derivation
+        let deposit = EntityService::calculate_product_deposit().unwrap();
+        let ed = <Balances as frame_support::traits::Currency<u64>>::minimum_balance();
+        // 清空 shop 账户后设置精确余额
+        let current = Balances::free_balance(shop_account);
+        if current > 0 {
+            let _ = <Balances as frame_support::traits::Currency<u64>>::slash(&shop_account, current);
+        }
+        let _ = <Balances as frame_support::traits::Currency<u64>>::deposit_creating(&shop_account, deposit + ed - 1);
+
+        // M2: 应返回 InsufficientShopFund（而非 transfer 内部错误）
+        assert_noop!(
+            EntityService::create_product(
+                RuntimeOrigin::signed(1), 1,
+                b"Qm1".to_vec(), b"Qm2".to_vec(), b"Qm3".to_vec(),
+                100_000_000_000_000u128, 10, ProductCategory::Physical,
+            ),
+            Error::<Test>::InsufficientShopFund
+        );
+    });
+}
+
+#[test]
+fn m3_restore_stock_overflow_rejected() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        // 创建有限库存商品并上架
+        assert_ok!(EntityService::create_product(
+            RuntimeOrigin::signed(1), 1,
+            b"Qm1".to_vec(), b"Qm2".to_vec(), b"Qm3".to_vec(),
+            100_000_000_000_000u128, 10, ProductCategory::Physical,
+        ));
+        assert_ok!(EntityService::publish_product(RuntimeOrigin::signed(1), 0));
+
+        // M3: restore_stock u32::MAX 溢出应报错
+        assert_noop!(
+            <EntityService as ProductProvider<u64, u128>>::restore_stock(0, u32::MAX),
+            Error::<Test>::StockOverflow
+        );
+        // 库存应未变
+        assert_eq!(Products::<Test>::get(0).unwrap().stock, 10);
     });
 }

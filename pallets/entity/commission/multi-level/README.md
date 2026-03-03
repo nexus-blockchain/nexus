@@ -180,14 +180,15 @@ max_total_rate = 1500 (15%)
 
 ---
 
-## 九、测试覆盖（28 个）
+## 九、测试覆盖（31 个）
 
 - **Extrinsic (4):** 设置成功、rate 超限拒绝、非 Root 拒绝
 - **佣金计算 (8):** 基础 3 层、总额截断、激活条件跳过、循环检测、标志未启用、无配置、团队规模、三条件组合
 - **激活条件回归 (3):** USDT vs NEX Balance、USDT 充足通过、单条件不满足
 - **PlanWriter (5):** 创建、rate 校验、层数上限、清除
 - **Round 2 回归 (6):** PlanWriter 事件发出、清除事件、空 levels 拒绝、零 max_total_rate 拒绝（extrinsic + PlanWriter 各一）
-- **自动生成 (2)**
+- **Round 4 回归 (2):** is_activated 跳过停用会员链继续、全部激活不影响
+- **Round 5 回归 (3):** rate=0 占位层跳过推荐人、链短于配置层数提前终止、TokenCommissionPlugin 路径验证
 
 ---
 
@@ -207,6 +208,12 @@ max_total_rate = 1500 (15%)
 | L2-R2 | Low | `max_total_rate = 0` 静默禁用佣金 — 添加 `> 0` 校验 | ✅ |
 | L1-R3 | Low | `check_tier_activation` 仅 `required_spent` 非零时仍调用 `get_member_stats`（多余 DB read）— 改为懒加载 | ✅ |
 | L2-R3 | Low | Extrinsic 文档注释未反映 R2 新增校验（EmptyLevels / max_total_rate > 0）| ✅ |
+| H1-R4 | High | `process_multi_level` 缺 `is_activated` 检查 — 停用会员仍获佣金（与 team H2 同类）| ✅ |
+| M1-R4 | Medium | Cargo.toml 缺 `sp-runtime/runtime-benchmarks` feature 传播 | ✅ |
+| L1-R5 | Low | 死 dev-dependency `pallet-balances` — mock/tests 从未引用 | ✅ |
+| L2-R5 | Low | `rate=0` 占位层代码路径无测试覆盖 | ✅ |
+| L3-R5 | Low | 推荐链短于配置层数（提前 break）无测试覆盖 | ✅ |
+| L4-R5 | Low | `TokenCommissionPlugin` 路径无测试覆盖 | ✅ |
 
 ---
 

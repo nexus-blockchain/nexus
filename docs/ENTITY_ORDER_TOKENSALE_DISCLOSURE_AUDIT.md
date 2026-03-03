@@ -144,3 +144,124 @@ cargo test  -p pallet-entity-service       65 ✅ (shared with governance+review
 - **M [review]**: `ReviewCount` uses `saturating_add` — u64 counter, overflow is theoretical only.
 - **M [governance]**: Many `ProposalType` variants only emit events without on-chain execution — design decision, requires off-chain workers.
 - **L [service]**: `EntityProvider` declared in Config but never directly called — dead dependency, mirrors entity-token L4.
+
+---
+
+# Entity TokenSale Deep Audit Round 4
+
+**Date:** 2026-03-04
+**Scope:** `pallet-entity-tokensale` — deep audit of extrinsics, arithmetic, cross-pallet interactions, storage consistency
+
+## Summary
+
+| Severity | Found | Fixed |
+|----------|-------|-------|
+| High     | 1     | 1     |
+| Medium   | 3     | 3     |
+| Low      | 2     | 1     |
+| **Total**| **6** | **5** |
+
+---
+
+## Fixes
+
+### H1-deep [High] — `claim_tokens` / `unlock_tokens` 忽略 `repatriate_reserved` 返回值
+
+**问题:** `claim_tokens` 和 `unlock_tokens` 调用 `T::TokenProvider::repatriate_reserved` 后仅传播 `Err`（通过 `?`），但丢弃 `Ok(actual)` 返回值。`repatriate_reserved` 返回实际转移量，可能小于请求量（例如跨 pallet reserve 竞争导致 entity_account 的 reserved 不足）。此时 `sub.unlocked_amount` 被记录为请求量而非实际量，产生 **幻影代币记账**——认购者的解锁记录高于实际收到的代币。
+
+**影响:** 后续 `unlock_tokens` 基于膨胀的 `unlocked_amount` 计算剩余可解锁量，可能少发代币或完全跳过解锁。
+
+**修复:** 捕获 `repatriate_reserved` 返回的 `actual` 值，`ensure!(actual == requested, IncompleteUnreserve)`。
+
+**文件:** `pallets/entity/tokensale/src/lib.rs` — `claim_tokens` (line ~1084) + `unlock_tokens` (line ~1138)
+
+---
+
+### M1-deep [Medium] — `cancel_sale` 不清零 `remaining_amount`
+
+**问题:** Round 3 的 M1 修复了 `end_sale` 和 `do_auto_end_sale` 中 unreserve 后 `remaining_amount` 未清零的问题，但 **`cancel_sale` 遗漏了同样的修复**。Active 状态的轮次被取消后，`remaining_amount` 仍保留原始未售数量，链上查询返回过时数据。
+
+**修复:** 在 `cancel_sale` 的 Active 分支 unreserve 后添加 `round.remaining_amount = Zero::zero()`。
+
+**文件:** `pallets/entity/tokensale/src/lib.rs` (line ~1185)
+
+---
+
+### M2-deep [Medium] — `calculate_dutch_price` 溢出可导致价格低于 `end_price`
+
+**问题:** 荷兰拍卖价格计算中 `price_range.saturating_mul(elapsed)` 在极端 price_range 值下溢出 u128，`saturating_mul` 饱和到 `u128::MAX`。随后 `u128::MAX / total_duration` 得到巨大的 `price_drop`，`start_price.saturating_sub(price_drop)` 饱和到 0。最终返回的价格可能远低于 `end_price`，甚至为 0。
+
+**修复:** 在 `saturating_sub` 后添加 `.max(end_u128)` 钳位，确保计算价格不低于终止价格。
+
+**文件:** `pallets/entity/tokensale/src/lib.rs` — `calculate_dutch_price` (line ~1412)
+
+---
+
+### M3-deep [Medium] — 4 处 `unreserve` 返回值被忽略
+
+**问题:** `unreserve` 返回 deficit（未能 unreserve 的金额）。以下 4 处调用丢弃返回值，unreserve 不完整时无任何通知：
+1. `end_sale` — 释放未售代币
+2. `cancel_sale` — 释放未售代币
+3. `do_auto_end_sale` — 自动结束释放未售代币
+4. `reclaim_unclaimed_tokens` — 释放未领取代币
+
+仅 `claim_refund` 正确检查了 deficit。
+
+**修复:** 捕获 deficit，非零时通过 `log::warn!` 记录。添加 `log` 依赖到 Cargo.toml。
+
+**文件:** `pallets/entity/tokensale/src/lib.rs` (4 locations) + `Cargo.toml`
+
+---
+
+### L1-deep [Low] — `Subscription.last_unlock_at` 死字段（记录不修复）
+
+**问题:** `last_unlock_at` 在 `subscribe` 中初始化为 `now`，在 `unlock_tokens` 中更新为当前块号，但 **从未被任何计算逻辑读取**。`calculate_unlockable` 使用 `subscribed_at` 作为锁仓起点，不依赖 `last_unlock_at`。
+
+**原因不修复:** 移除字段需要存储迁移。字段无功能影响，仅占用少量存储。
+
+---
+
+### L2-deep [Low] — Cargo.toml 缺失依赖和 feature flags
+
+**问题:**
+- 缺少 `log` 依赖（M3-deep 所需）
+- `runtime-benchmarks` 缺少 `sp-runtime/runtime-benchmarks`
+- `try-runtime` 缺少 `sp-runtime/try-runtime`
+
+**修复:** 添加 `log = { workspace = true }` 依赖，`log/std` 到 std features，以及缺失的 sp-runtime feature 传播。
+
+**文件:** `pallets/entity/tokensale/Cargo.toml`
+
+---
+
+## Regression Tests (+7 tests, 63 total)
+
+| Test | Validates |
+|------|-----------|
+| `h1_deep_claim_tokens_rejects_partial_repatriation` | claim_tokens 在 reserve 不足时返回 IncompleteUnreserve |
+| `h1_deep_unlock_tokens_rejects_partial_repatriation` | unlock_tokens 在 reserve 不足时返回 IncompleteUnreserve |
+| `h1_deep_claim_and_unlock_full_amount_succeeds` | 正常全额 claim + unlock 带锁仓成功 |
+| `m1_deep_cancel_sale_zeros_remaining_amount` | Active 取消后 remaining_amount 归零 |
+| `m1_deep_cancel_not_started_keeps_remaining` | NotStarted 取消保持原始 remaining_amount |
+| `m2_deep_dutch_price_clamped_to_end_price` | 极端 price_range 下价格 >= end_price |
+| `m2_deep_dutch_price_reaches_end_price_at_end` | 正常递减在结束时刻等于 end_price |
+
+## Files Modified (4 files)
+
+| File | Changes |
+|------|---------|
+| `pallets/entity/tokensale/src/lib.rs` | H1-deep (2), M1-deep, M2-deep, M3-deep (4) |
+| `pallets/entity/tokensale/src/mock.rs` | +set_reserved/get_reserved test helpers |
+| `pallets/entity/tokensale/src/tests.rs` | +7 regression tests |
+| `pallets/entity/tokensale/Cargo.toml` | log dep + L2 feature flags |
+
+## Verification
+
+```
+cargo test  -p pallet-entity-tokensale     63/63 ✅
+cargo check -p nexus-runtime               ✅
+```
+
+## Not Fixed (documented only)
+
+- **L1-deep [tokensale]**: `Subscription.last_unlock_at` dead field — 需存储迁移，无功能影响。

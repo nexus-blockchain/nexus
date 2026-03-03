@@ -46,7 +46,7 @@ pub mod pallet {
     use pallet_entity_common::{PricingProvider, ProductCategory, ProductProvider, ProductStatus, EntityProvider, ShopProvider};
     use pallet_storage_service::{IpfsPinner, SubjectType, PinTier};
     use sp_runtime::{
-        traits::{AccountIdConversion, Zero},
+        traits::{AccountIdConversion, Zero, Saturating},
         SaturatedConversion,
     };
 
@@ -258,6 +258,8 @@ pub mod pallet {
         EmptyCid,
         /// 在售商品不可将库存设为 0（stock=0 仅在创建时表示无限库存）
         CannotClearStockWhileOnSale,
+        /// 库存溢出（restore_stock 超过 u32::MAX）
+        StockOverflow,
     }
 
     // ==================== Extrinsics ====================
@@ -314,7 +316,9 @@ pub mod pallet {
             // 获取店铺派生账户
             let shop_account = T::ShopProvider::shop_account(shop_id);
             let shop_balance = T::Currency::free_balance(&shop_account);
-            ensure!(shop_balance >= deposit, Error::<T>::InsufficientShopFund);
+            // M2: KeepAlive 要求转账后余额 >= ED，预检查须一致
+            let ed = T::Currency::minimum_balance();
+            ensure!(shop_balance >= deposit.saturating_add(ed), Error::<T>::InsufficientShopFund);
 
             // 从店铺派生账户转入 Pallet 账户
             // L2: 使用 KeepAlive 防止 reap 店铺派生账户
@@ -554,17 +558,33 @@ pub mod pallet {
                 Error::<T>::InvalidProductStatus
             );
 
-            // 退还押金到店铺派生账户
-            let deposit_info = ProductDeposits::<T>::take(product_id)
-                .ok_or(Error::<T>::DepositNotFound)?;
-            let pallet_account: T::AccountId = PRODUCT_PALLET_ID.into_account_truncating();
-            T::Currency::transfer(
-                &pallet_account,
-                &deposit_info.source_account,
-                deposit_info.amount,
-                ExistenceRequirement::AllowDeath,
-            )?;
-            let deposit_refunded = deposit_info.amount;
+            // 退还押金到店铺派生账户（best-effort：Pallet 偿付能力不足不阻断删除）
+            let deposit_refunded = if let Some(deposit_info) = ProductDeposits::<T>::take(product_id) {
+                let pallet_account: T::AccountId = PRODUCT_PALLET_ID.into_account_truncating();
+                match T::Currency::transfer(
+                    &pallet_account,
+                    &deposit_info.source_account,
+                    deposit_info.amount,
+                    ExistenceRequirement::AllowDeath,
+                ) {
+                    Ok(_) => deposit_info.amount,
+                    Err(e) => {
+                        log::warn!(
+                            target: "entity-service",
+                            "Failed to refund deposit for product {}: {:?}",
+                            product_id, e
+                        );
+                        Zero::zero()
+                    }
+                }
+            } else {
+                log::warn!(
+                    target: "entity-service",
+                    "No deposit record for product {}, proceeding with deletion",
+                    product_id
+                );
+                Zero::zero()
+            };
 
             // IPFS Unpin: 取消固定商品元数据 CID（best-effort）
             Self::unpin_product_cid(&who, &product.name_cid);
@@ -738,8 +758,11 @@ pub mod pallet {
                 // H1: 包含 OffShelf — 售罄后下架的商品（stock=0, OffShelf）也需恢复库存
                 if product.stock > 0 || product.status == ProductStatus::SoldOut || product.status == ProductStatus::OffShelf {
                     let was_sold_out = product.status == ProductStatus::SoldOut;
-                    product.stock = product.stock.saturating_add(quantity);
-                    if was_sold_out {
+                    // M3: checked_add 防止 u32 溢出静默截断
+                    product.stock = product.stock.checked_add(quantity)
+                        .ok_or(Error::<T>::StockOverflow)?;
+                    // H2: SoldOut→OnSale 仅在 Shop 激活时自动恢复上架
+                    if was_sold_out && T::ShopProvider::is_shop_active(product.shop_id) {
                         product.status = ProductStatus::OnSale;
                         // M4: 恢复库存时增加在售统计
                         ProductStats::<T>::mutate(|stats| {

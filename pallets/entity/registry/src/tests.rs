@@ -1,6 +1,6 @@
 use crate::{mock::*, pallet::*};
 use frame_support::{assert_noop, assert_ok, traits::Currency};
-use pallet_entity_common::{EntityStatus, EntityType, GovernanceMode, EntityProvider};
+use pallet_entity_common::{EntityStatus, EntityType, GovernanceMode, EntityProvider, AdminPermission};
 
 // ==================== Helper ====================
 
@@ -486,9 +486,9 @@ fn ban_entity_from_pending_close() {
 fn add_admin_works() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
-        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB));
+        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB, AdminPermission::ALL));
         let entity = Entities::<Test>::get(id).unwrap();
-        assert!(entity.admins.contains(&BOB));
+        assert!(entity.admins.iter().any(|(a, _)| *a == BOB));
     });
 }
 
@@ -497,7 +497,7 @@ fn add_admin_fails_not_owner() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
         assert_noop!(
-            EntityRegistry::add_admin(RuntimeOrigin::signed(BOB), id, CHARLIE),
+            EntityRegistry::add_admin(RuntimeOrigin::signed(BOB), id, CHARLIE, AdminPermission::ALL),
             Error::<Test>::NotEntityOwner
         );
     });
@@ -507,9 +507,9 @@ fn add_admin_fails_not_owner() {
 fn add_admin_fails_already_exists() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
-        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB));
+        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB, AdminPermission::ALL));
         assert_noop!(
-            EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB),
+            EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB, AdminPermission::ALL),
             Error::<Test>::AdminAlreadyExists
         );
     });
@@ -520,7 +520,7 @@ fn add_admin_fails_owner_as_admin() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
         assert_noop!(
-            EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, ALICE),
+            EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, ALICE, AdminPermission::ALL),
             Error::<Test>::AdminAlreadyExists
         );
     });
@@ -531,11 +531,11 @@ fn add_admin_fails_max_reached() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
         // MaxAdmins = 3
-        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB));
-        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, CHARLIE));
-        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, DAVE));
+        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB, AdminPermission::ALL));
+        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, CHARLIE, AdminPermission::ALL));
+        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, DAVE, AdminPermission::ALL));
         assert_noop!(
-            EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, EVE),
+            EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, EVE, AdminPermission::ALL),
             Error::<Test>::MaxAdminsReached
         );
     });
@@ -547,7 +547,7 @@ fn add_admin_fails_banned_entity() {
         let id = create_default_entity(ALICE);
         assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false));
         assert_noop!(
-            EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB),
+            EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB, AdminPermission::ALL),
             Error::<Test>::InvalidEntityStatus
         );
     });
@@ -559,10 +559,10 @@ fn add_admin_fails_banned_entity() {
 fn remove_admin_works() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
-        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB));
+        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB, AdminPermission::ALL));
         assert_ok!(EntityRegistry::remove_admin(RuntimeOrigin::signed(ALICE), id, BOB));
         let entity = Entities::<Test>::get(id).unwrap();
-        assert!(!entity.admins.contains(&BOB));
+        assert!(!entity.admins.iter().any(|(a, _)| *a == BOB));
     });
 }
 
@@ -592,7 +592,7 @@ fn remove_admin_fails_cannot_remove_owner() {
 fn remove_admin_fails_closed_entity() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
-        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB));
+        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB, AdminPermission::ALL));
         assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
         assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
         assert_noop!(
@@ -622,13 +622,13 @@ fn transfer_ownership_works() {
 fn transfer_ownership_removes_new_owner_from_admins() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
-        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB));
+        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB, AdminPermission::ALL));
         assert_ok!(EntityRegistry::transfer_ownership(
             RuntimeOrigin::signed(ALICE), id, BOB,
         ));
         let entity = Entities::<Test>::get(id).unwrap();
         assert_eq!(entity.owner, BOB);
-        assert!(!entity.admins.contains(&BOB));
+        assert!(!entity.admins.iter().any(|(a, _)| *a == BOB));
     });
 }
 
@@ -853,10 +853,10 @@ fn entity_provider_basic_methods() {
 fn entity_provider_is_entity_admin() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
-        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB));
-        assert!(<EntityRegistry as EntityProvider<u64>>::is_entity_admin(id, &ALICE));
-        assert!(<EntityRegistry as EntityProvider<u64>>::is_entity_admin(id, &BOB));
-        assert!(!<EntityRegistry as EntityProvider<u64>>::is_entity_admin(id, &CHARLIE));
+        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB, AdminPermission::ALL));
+        assert!(<EntityRegistry as EntityProvider<u64>>::is_entity_admin(id, &ALICE, AdminPermission::SHOP_MANAGE));
+        assert!(<EntityRegistry as EntityProvider<u64>>::is_entity_admin(id, &BOB, AdminPermission::SHOP_MANAGE));
+        assert!(!<EntityRegistry as EntityProvider<u64>>::is_entity_admin(id, &CHARLIE, AdminPermission::SHOP_MANAGE));
     });
 }
 
@@ -986,7 +986,7 @@ fn is_admin_helper() {
         let id = create_default_entity(ALICE);
         assert!(EntityRegistry::is_admin(id, &ALICE));
         assert!(!EntityRegistry::is_admin(id, &BOB));
-        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB));
+        assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB, AdminPermission::ALL));
         assert!(EntityRegistry::is_admin(id, &BOB));
     });
 }
@@ -1323,8 +1323,6 @@ fn create_entity_with_referrer_works() {
 
         // Verify referrer stored
         assert_eq!(EntityReferrer::<Test>::get(bob_id), Some(ALICE));
-        // Verify referral count
-        assert_eq!(EntityReferralCount::<Test>::get(ALICE), 1);
     });
 }
 
@@ -1333,7 +1331,6 @@ fn create_entity_without_referrer_works() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
         assert_eq!(EntityReferrer::<Test>::get(id), None);
-        assert_eq!(EntityReferralCount::<Test>::get(ALICE), 0);
     });
 }
 
@@ -1410,7 +1407,6 @@ fn bind_entity_referrer_works() {
             BOB,
         ));
         assert_eq!(EntityReferrer::<Test>::get(alice_id), Some(BOB));
-        assert_eq!(EntityReferralCount::<Test>::get(BOB), 1);
     });
 }
 
@@ -1527,7 +1523,7 @@ fn referral_count_increments_correctly() {
             None,
             Some(ALICE),
         ));
-        assert_eq!(EntityReferralCount::<Test>::get(ALICE), 1);
+        assert_eq!(EntityReferrer::<Test>::get(EntityRegistry::next_entity_id() - 1), Some(ALICE));
 
         // CHARLIE creates entity with ALICE as referrer
         assert_ok!(EntityRegistry::create_entity(
@@ -1537,7 +1533,7 @@ fn referral_count_increments_correctly() {
             None,
             Some(ALICE),
         ));
-        assert_eq!(EntityReferralCount::<Test>::get(ALICE), 2);
+        assert_eq!(EntityReferrer::<Test>::get(EntityRegistry::next_entity_id() - 1), Some(ALICE));
 
         // DAVE creates entity without referrer, then binds ALICE
         let dave_id = create_default_entity(DAVE);
@@ -1546,7 +1542,7 @@ fn referral_count_increments_correctly() {
             dave_id,
             ALICE,
         ));
-        assert_eq!(EntityReferralCount::<Test>::get(ALICE), 3);
+        assert_eq!(EntityReferrer::<Test>::get(dave_id), Some(ALICE));
     });
 }
 
@@ -1797,5 +1793,257 @@ fn m2_set_governance_mode_rejects_closed_entity() {
             <EntityRegistry as EntityProvider<u64>>::set_governance_mode(id, GovernanceMode::FullDAO)
                 .is_err()
         );
+    });
+}
+
+// ==================== Round 6 审计回归测试 ====================
+
+// M1: register_shop 拒绝 Banned/Closed Entity
+#[test]
+fn m1_register_shop_rejects_banned_entity() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false));
+
+        assert_noop!(
+            <EntityRegistry as EntityProvider<u64>>::register_shop(id, 999),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn m1_register_shop_rejects_closed_entity() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
+        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+
+        assert_noop!(
+            <EntityRegistry as EntityProvider<u64>>::register_shop(id, 999),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+// ==================== Round 7 审计回归测试 ====================
+
+// M1: transfer_ownership 拒绝自我转移
+#[test]
+fn m1_transfer_ownership_rejects_self_transfer() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        assert_noop!(
+            EntityRegistry::transfer_ownership(RuntimeOrigin::signed(ALICE), id, ALICE),
+            Error::<Test>::SameOwner
+        );
+        // 确认实体未变
+        let entity = Entities::<Test>::get(id).unwrap();
+        assert_eq!(entity.owner, ALICE);
+    });
+}
+
+// M2: reopen_entity 预检查用户容量
+#[test]
+fn m2_reopen_entity_fails_when_owner_at_capacity() {
+    new_test_ext().execute_with(|| {
+        // ALICE 创建并关闭一个实体
+        let id1 = create_default_entity(ALICE);
+        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id1));
+        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id1));
+        assert_eq!(Entities::<Test>::get(id1).unwrap().status, EntityStatus::Closed);
+
+        // ALICE 创建 3 个新实体（MaxEntitiesPerUser = 3）
+        create_default_entity(ALICE);
+        create_default_entity(ALICE);
+        create_default_entity(ALICE);
+        assert_eq!(UserEntity::<Test>::get(ALICE).len(), 3);
+
+        // 重开旧实体应失败（ALICE 已满）
+        assert_noop!(
+            EntityRegistry::reopen_entity(RuntimeOrigin::signed(ALICE), id1),
+            Error::<Test>::MaxEntitiesReached
+        );
+    });
+}
+
+// M3: deduct_operating_fee 对已暂停实体不发射 EntitySuspendedLowFund
+#[test]
+fn m3_deduct_fee_no_spurious_suspend_event_for_already_suspended() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+
+        // 治理暂停
+        assert_ok!(EntityRegistry::suspend_entity(RuntimeOrigin::root(), id));
+        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Suspended);
+
+        // 清空事件
+        frame_system::Pallet::<Test>::reset_events();
+
+        // 从已暂停的实体扣费（余额仍充足，但实体已暂停）
+        let small_fee = 1_000_000_000_000u128; // 1 token
+        assert_ok!(EntityRegistry::deduct_operating_fee(id, small_fee, FeeType::IpfsPin));
+
+        // 不应有 EntitySuspendedLowFund 事件（实体已经是 Suspended）
+        let events = frame_system::Pallet::<Test>::events();
+        let has_suspend_event = events.iter().any(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::EntityRegistry(crate::Event::EntitySuspendedLowFund { .. })
+            )
+        });
+        assert!(!has_suspend_event, "Should not emit EntitySuspendedLowFund for already-suspended entity");
+    });
+}
+
+// ==================== Round 7 审计回归测试 ====================
+
+// M1: ban_entity confiscation 成功时 EntityBanned.fund_confiscated = true
+#[test]
+fn m1_ban_confiscate_success_reports_true() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        let treasury = EntityRegistry::entity_treasury_account(id);
+        let treasury_balance_before = Balances::free_balance(&treasury);
+        assert!(treasury_balance_before > 0);
+
+        let platform_before = Balances::free_balance(99);
+
+        assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, true));
+
+        // 验证没收成功: 平台账户余额增加
+        let platform_after = Balances::free_balance(99);
+        assert_eq!(platform_after, platform_before + treasury_balance_before);
+
+        // 验证 EntityBanned 事件中 fund_confiscated = true（实际结果）
+        let events = frame_system::Pallet::<Test>::events();
+        let ban_event = events.iter().find(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::EntityRegistry(crate::Event::EntityBanned { .. })
+            )
+        });
+        assert!(ban_event.is_some(), "EntityBanned event should be emitted");
+        if let RuntimeEvent::EntityRegistry(crate::Event::EntityBanned { fund_confiscated, .. }) =
+            &ban_event.unwrap().event
+        {
+            assert!(*fund_confiscated, "fund_confiscated should be true when confiscation succeeds");
+        }
+    });
+}
+
+// ==================== Round 8 审计回归测试 ====================
+
+// L1: deduct_operating_fee 拒绝零费用
+#[test]
+fn l1_deduct_fee_rejects_zero_fee() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        assert_noop!(
+            EntityRegistry::deduct_operating_fee(id, 0, FeeType::IpfsPin),
+            Error::<Test>::ZeroAmount
+        );
+    });
+}
+
+// L2: transfer_ownership 拒绝 PendingClose 实体
+#[test]
+fn l2_transfer_ownership_rejects_pending_close() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
+        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::PendingClose);
+
+        assert_noop!(
+            EntityRegistry::transfer_ownership(RuntimeOrigin::signed(ALICE), id, BOB),
+            Error::<Test>::InvalidEntityStatus
+        );
+        // 确认所有权未变
+        assert_eq!(Entities::<Test>::get(id).unwrap().owner, ALICE);
+    });
+}
+
+// M1: ban_entity 不没收时 EntityBanned.fund_confiscated = false
+#[test]
+fn m1_ban_no_confiscate_reports_false() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+
+        assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false));
+
+        // 验证 EntityBanned 事件中 fund_confiscated = false
+        let events = frame_system::Pallet::<Test>::events();
+        let ban_event = events.iter().find(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::EntityRegistry(crate::Event::EntityBanned { .. })
+            )
+        });
+        assert!(ban_event.is_some());
+        if let RuntimeEvent::EntityRegistry(crate::Event::EntityBanned { fund_confiscated, .. }) =
+            &ban_event.unwrap().event
+        {
+            assert!(!*fund_confiscated, "fund_confiscated should be false when not confiscating");
+        }
+    });
+}
+
+// ==================== Round 8 审计回归测试 ====================
+
+// M1: upgrade_entity_type 仅变更治理模式时不发射 EntityTypeUpgraded 事件
+#[test]
+fn m1_governance_only_change_does_not_emit_type_upgraded() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        // Merchant → Merchant but governance None → FullDAO
+        frame_system::Pallet::<Test>::reset_events();
+
+        assert_ok!(EntityRegistry::upgrade_entity_type(
+            RuntimeOrigin::signed(ALICE), id, EntityType::Merchant, GovernanceMode::FullDAO,
+        ));
+
+        let events = frame_system::Pallet::<Test>::events();
+
+        // 不应有 EntityTypeUpgraded（类型未变）
+        let has_type_event = events.iter().any(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::EntityRegistry(crate::Event::EntityTypeUpgraded { .. })
+            )
+        });
+        assert!(!has_type_event, "Should NOT emit EntityTypeUpgraded when only governance changes");
+
+        // 应有 GovernanceModeChanged
+        let has_gov_event = events.iter().any(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::EntityRegistry(crate::Event::GovernanceModeChanged { .. })
+            )
+        });
+        assert!(has_gov_event, "Should emit GovernanceModeChanged");
+    });
+}
+
+// M1: upgrade_entity_type 类型实际变更时仍发射 EntityTypeUpgraded
+#[test]
+fn m1_type_change_still_emits_type_upgraded() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        frame_system::Pallet::<Test>::reset_events();
+
+        // Merchant → Community (actual type change)
+        assert_ok!(EntityRegistry::upgrade_entity_type(
+            RuntimeOrigin::signed(ALICE), id, EntityType::Community, GovernanceMode::None,
+        ));
+
+        let events = frame_system::Pallet::<Test>::events();
+
+        let has_type_event = events.iter().any(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::EntityRegistry(crate::Event::EntityTypeUpgraded { .. })
+            )
+        });
+        assert!(has_type_event, "Should emit EntityTypeUpgraded when type actually changes");
     });
 }

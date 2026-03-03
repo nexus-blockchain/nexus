@@ -312,3 +312,129 @@ fn shop_operating_status_can_resume() {
 fn null_pricing_provider_returns_one() {
     assert_eq!(NullPricingProvider::get_nex_usdt_price(), 1);
 }
+
+// ============================================================================
+// M1: EffectiveShopStatus::compute — Closing treated consistently
+// ============================================================================
+
+#[test]
+fn m1_compute_entity_suspended_shop_closing_shows_closed() {
+    // Before fix: Closing + Suspended → PausedByEntity (wrong)
+    // After fix:  Closing + Suspended → Closed (terminal state is irreversible)
+    assert_eq!(
+        EffectiveShopStatus::compute(&EntityStatus::Suspended, &ShopOperatingStatus::Closing),
+        EffectiveShopStatus::Closed
+    );
+}
+
+#[test]
+fn m1_compute_entity_pending_close_shop_closing_shows_closed() {
+    assert_eq!(
+        EffectiveShopStatus::compute(&EntityStatus::PendingClose, &ShopOperatingStatus::Closing),
+        EffectiveShopStatus::Closed
+    );
+}
+
+#[test]
+fn m1_compute_entity_pending_shop_closing_shows_closed() {
+    assert_eq!(
+        EffectiveShopStatus::compute(&EntityStatus::Pending, &ShopOperatingStatus::Closing),
+        EffectiveShopStatus::Closed
+    );
+}
+
+// ============================================================================
+// M2: AdminPermission ALL_DEFINED + is_valid
+// ============================================================================
+
+#[test]
+fn m2_admin_permission_all_defined_covers_all_bits() {
+    assert_eq!(AdminPermission::ALL_DEFINED, 0b0011_1111);
+    assert!(AdminPermission::ALL_DEFINED & AdminPermission::SHOP_MANAGE != 0);
+    assert!(AdminPermission::ALL_DEFINED & AdminPermission::MEMBER_MANAGE != 0);
+    assert!(AdminPermission::ALL_DEFINED & AdminPermission::TOKEN_MANAGE != 0);
+    assert!(AdminPermission::ALL_DEFINED & AdminPermission::ADS_MANAGE != 0);
+    assert!(AdminPermission::ALL_DEFINED & AdminPermission::REVIEW_MANAGE != 0);
+    assert!(AdminPermission::ALL_DEFINED & AdminPermission::DISCLOSURE_MANAGE != 0);
+}
+
+#[test]
+fn m2_admin_permission_is_valid_accepts_defined_bits() {
+    assert!(AdminPermission::is_valid(AdminPermission::SHOP_MANAGE));
+    assert!(AdminPermission::is_valid(AdminPermission::ALL_DEFINED));
+    assert!(AdminPermission::is_valid(
+        AdminPermission::SHOP_MANAGE | AdminPermission::MEMBER_MANAGE
+    ));
+}
+
+#[test]
+fn m2_admin_permission_is_valid_rejects_undefined_bits() {
+    assert!(!AdminPermission::is_valid(0b0100_0000)); // bit 6 undefined
+    assert!(!AdminPermission::is_valid(0xFFFF_FFFF)); // ALL includes undefined
+    assert!(!AdminPermission::is_valid(AdminPermission::SHOP_MANAGE | 0x8000_0000));
+}
+
+#[test]
+fn m2_admin_permission_zero_is_valid() {
+    // 0 contains no undefined bits (but is meaningless — registry checks != 0 separately)
+    assert!(AdminPermission::is_valid(0));
+}
+
+// ============================================================================
+// M3: MemberRegistrationPolicy + MemberStatsPolicy is_valid
+// ============================================================================
+
+#[test]
+fn m3_registration_policy_is_valid_accepts_defined() {
+    assert!(MemberRegistrationPolicy(0).is_valid()); // OPEN
+    assert!(MemberRegistrationPolicy(0b0000_0111).is_valid()); // all 3 flags
+    assert!(MemberRegistrationPolicy(MemberRegistrationPolicy::PURCHASE_REQUIRED).is_valid());
+}
+
+#[test]
+fn m3_registration_policy_is_valid_rejects_undefined() {
+    assert!(!MemberRegistrationPolicy(0b0000_1000).is_valid()); // bit 3 undefined
+    assert!(!MemberRegistrationPolicy(0xFF).is_valid());
+}
+
+#[test]
+fn m3_registration_policy_all_valid_matches_defined_bits() {
+    assert_eq!(MemberRegistrationPolicy::ALL_VALID, 0b0000_0111);
+}
+
+#[test]
+fn m3_stats_policy_is_valid_accepts_defined() {
+    assert!(MemberStatsPolicy(0).is_valid()); // default
+    assert!(MemberStatsPolicy(0b0000_0011).is_valid()); // both flags
+    assert!(MemberStatsPolicy(MemberStatsPolicy::INCLUDE_REPURCHASE_DIRECT).is_valid());
+}
+
+#[test]
+fn m3_stats_policy_is_valid_rejects_undefined() {
+    assert!(!MemberStatsPolicy(0b0000_0100).is_valid()); // bit 2 undefined
+    assert!(!MemberStatsPolicy(0xFF).is_valid());
+}
+
+#[test]
+fn m3_stats_policy_all_valid_matches_defined_bits() {
+    assert_eq!(MemberStatsPolicy::ALL_VALID, 0b0000_0011);
+}
+
+// ============================================================================
+// L2: TransferRestrictionMode::try_from_u8
+// ============================================================================
+
+#[test]
+fn l2_try_from_u8_valid_values() {
+    assert_eq!(TransferRestrictionMode::try_from_u8(0), Some(TransferRestrictionMode::None));
+    assert_eq!(TransferRestrictionMode::try_from_u8(1), Some(TransferRestrictionMode::Whitelist));
+    assert_eq!(TransferRestrictionMode::try_from_u8(2), Some(TransferRestrictionMode::Blacklist));
+    assert_eq!(TransferRestrictionMode::try_from_u8(3), Some(TransferRestrictionMode::KycRequired));
+    assert_eq!(TransferRestrictionMode::try_from_u8(4), Some(TransferRestrictionMode::MembersOnly));
+}
+
+#[test]
+fn l2_try_from_u8_invalid_returns_none() {
+    assert_eq!(TransferRestrictionMode::try_from_u8(5), None);
+    assert_eq!(TransferRestrictionMode::try_from_u8(255), None);
+}

@@ -119,10 +119,28 @@ pub mod pallet {
 		/// 单次声誉变更最大绝对值
 		#[pallet::constant]
 		type MaxReputationDelta: Get<u32>;
+		/// M2-R3: 批量提交日志最大条数
+		#[pallet::constant]
+		type MaxBatchSize: Get<u32>;
+		/// M3-R3: 每日区块数 (用于日志保留期计算, 6s/block = 14400)
+		#[pallet::constant]
+		type BlocksPerDay: Get<u32>;
 		/// Bot 注册查询
 		type BotRegistry: BotRegistryProvider<Self::AccountId>;
 		/// 订阅层级查询 (tier gate)
 		type Subscription: SubscriptionProvider;
+	}
+
+	/// L1-R3: Config 参数完整性校验
+	#[pallet::hooks]
+	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+		#[cfg(feature = "std")]
+		fn integrity_test() {
+			assert!(T::MaxLogsPerCommunity::get() > 0, "MaxLogsPerCommunity must be > 0");
+			assert!(T::MaxReputationDelta::get() > 0, "MaxReputationDelta must be > 0");
+			assert!(T::MaxBatchSize::get() > 0, "MaxBatchSize must be > 0");
+			assert!(T::BlocksPerDay::get() > 0, "BlocksPerDay must be > 0");
+		}
 	}
 
 	// ========================================================================
@@ -174,6 +192,11 @@ pub mod pallet {
 		BlockNumberFor<T>,
 		ValueQuery,
 	>;
+
+	/// M4-fix: 每个社区最后提交的日志 sequence (单调递增, None = 无日志)
+	#[pallet::storage]
+	pub type LastSequence<T: Config> =
+		StorageMap<_, Blake2_128Concat, CommunityIdHash, u64>;
 
 	// ========================================================================
 	// Events
@@ -227,6 +250,12 @@ pub mod pallet {
 			community_id_hash: CommunityIdHash,
 			active_members: u32,
 		},
+		/// M2-R2: 过期冷却条目已清理
+		CooldownCleaned {
+			community_id_hash: CommunityIdHash,
+			user_hash: [u8; 32],
+			operator: T::AccountId,
+		},
 	}
 
 	// ========================================================================
@@ -241,8 +270,6 @@ pub mod pallet {
 		SameNodeRequirement,
 		/// 配置版本冲突 (CAS)
 		ConfigVersionConflict,
-		/// 社区配置不存在
-		ConfigNotFound,
 		/// 无日志可清理
 		NoLogsToClear,
 		/// 批量日志为空
@@ -269,6 +296,16 @@ pub mod pallet {
 		BotPublicKeyNotFound,
 		/// P4-fix: 调用者不是该社区绑定 Bot 的 owner
 		NotBotOwner,
+		/// M2-fix: 语言代码无效 (须为 ISO 639-1 ASCII 小写字母)
+		InvalidLanguageCode,
+		/// M4-fix: 日志 sequence 必须严格递增
+		SequenceNotMonotonic,
+		/// M1-R2: Bot 未激活（停用/banned）
+		BotNotActive,
+		/// M2-R2: 冷却条目尚未过期
+		CooldownNotExpired,
+		/// M1-R3: 冷却条目不存在
+		CooldownNotFound,
 	}
 
 	// ========================================================================
@@ -293,11 +330,17 @@ pub mod pallet {
 			signature: [u8; 64],
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
+			// M3-fix: 仅 Bot owner 可提交日志
+			// M1-R2: 同时检查 Bot 是否激活
+			Self::ensure_active_bot_owner(&who, &community_id_hash)?;
 
 			ensure!(
 				T::Subscription::effective_tier(&community_id_hash).is_paid(),
 				Error::<T>::FreeTierNotAllowed
 			);
+
+			// M4-fix: sequence 必须严格递增
+			Self::ensure_sequence_monotonic(&community_id_hash, sequence)?;
 
 			Self::verify_action_log_signature(
 				&community_id_hash,
@@ -327,6 +370,7 @@ pub mod pallet {
 			})?;
 
 			LogCount::<T>::mutate(|c| *c = c.saturating_add(1));
+			LastSequence::<T>::insert(&community_id_hash, sequence);
 
 			Self::deposit_event(Event::ActionLogSubmitted {
 				community_id_hash,
@@ -381,10 +425,18 @@ pub mod pallet {
 			let who = ensure_signed(origin)?;
 			Self::ensure_bot_owner(&who, &community_id_hash)?;
 
+			// M2-fix: language 须为 ASCII 小写字母 (ISO 639-1)
+			ensure!(
+				language[0].is_ascii_lowercase() && language[1].is_ascii_lowercase(),
+				Error::<T>::InvalidLanguageCode
+			);
+
 			let new_version = expected_version.saturating_add(1);
 
-			if let Some(existing) = CommunityConfigs::<T>::get(&community_id_hash) {
-				ensure!(existing.version == expected_version, Error::<T>::ConfigVersionConflict);
+			// M1-fix: 单次读取 CommunityConfigs，缓存 existing 用于版本检查和 active_members
+			let existing = CommunityConfigs::<T>::get(&community_id_hash);
+			if let Some(ref ex) = existing {
+				ensure!(ex.version == expected_version, Error::<T>::ConfigVersionConflict);
 			} else {
 				// 首次创建配置，expected_version 应为 0
 				ensure!(expected_version == 0, Error::<T>::ConfigVersionConflict);
@@ -392,9 +444,7 @@ pub mod pallet {
 
 			let node_req = CommunityNodeRequirement::<T>::get(&community_id_hash);
 			// 保留已有 active_members (由 Bot 单独更新, 不由 config 覆盖)
-			let active_members = CommunityConfigs::<T>::get(&community_id_hash)
-				.map(|c| c.active_members)
-				.unwrap_or(0);
+			let active_members = existing.map(|c| c.active_members).unwrap_or(0);
 
 			let config = CommunityConfig {
 				node_requirement: node_req,
@@ -421,14 +471,21 @@ pub mod pallet {
 		/// 批量提交动作日志
 		///
 		/// P2-fix: 每条日志独立验证 Ed25519 签名。
+		/// H1-fix: weight 按日志数量线性缩放。
 		#[pallet::call_index(3)]
-		#[pallet::weight(Weight::from_parts(80_000_000, 15_000))]
+		#[pallet::weight(Weight::from_parts(
+			30_000_000u64.saturating_add(55_000_000u64.saturating_mul(logs.len() as u64)),
+			5_000u64.saturating_add(500u64.saturating_mul(logs.len() as u64)),
+		))]
 		pub fn batch_submit_logs(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
 			logs: alloc::vec::Vec<(ActionType, [u8; 32], u64, [u8; 32], [u8; 64])>,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
+			// M3-fix: 仅 Bot owner 可提交日志
+			// M1-R2: 同时检查 Bot 是否激活
+			Self::ensure_active_bot_owner(&who, &community_id_hash)?;
 
 			ensure!(
 				T::Subscription::effective_tier(&community_id_hash).is_paid(),
@@ -436,7 +493,17 @@ pub mod pallet {
 			);
 
 			ensure!(!logs.is_empty(), Error::<T>::EmptyBatch);
-			ensure!(logs.len() <= 50, Error::<T>::BatchTooLarge);
+			// M2-R3: 使用可配置的 MaxBatchSize 替代硬编码 50
+			ensure!(logs.len() <= T::MaxBatchSize::get() as usize, Error::<T>::BatchTooLarge);
+
+			// M4-fix: 批量日志内 sequence 须严格递增，且首条须大于链上最后 sequence
+			let mut prev_seq = LastSequence::<T>::get(&community_id_hash);
+			for (_, _, sequence, _, _) in &logs {
+				if let Some(last) = prev_seq {
+					ensure!(*sequence > last, Error::<T>::SequenceNotMonotonic);
+				}
+				prev_seq = Some(*sequence);
+			}
 
 			for (action_type, target_hash, sequence, message_hash, signature) in &logs {
 				Self::verify_action_log_signature(
@@ -452,8 +519,10 @@ pub mod pallet {
 			let now = frame_system::Pallet::<T>::block_number();
 			let count = logs.len() as u32;
 
+			let mut last_seq = 0u64;
 			ActionLogs::<T>::try_mutate(&community_id_hash, |action_logs| -> DispatchResult {
 				for (action_type, target_hash, sequence, message_hash, signature) in logs {
+					last_seq = sequence;
 					let log = ActionLog::<T> {
 						community_id_hash,
 						action_type,
@@ -470,6 +539,7 @@ pub mod pallet {
 			})?;
 
 			LogCount::<T>::mutate(|c| *c = c.saturating_add(count as u64));
+			LastSequence::<T>::insert(&community_id_hash, last_seq);
 
 			Self::deposit_event(Event::BatchLogsSubmitted { community_id_hash, count });
 			Ok(())
@@ -478,6 +548,7 @@ pub mod pallet {
 		/// 奖励声誉
 		///
 		/// P4-fix: 仅该社区绑定的 Bot owner 可操作。
+		/// L1-R2: 委托到 do_modify_reputation 共享 helper。
 		#[pallet::call_index(5)]
 		#[pallet::weight(Weight::from_parts(35_000_000, 6_000))]
 		pub fn award_reputation(
@@ -487,33 +558,13 @@ pub mod pallet {
 			delta: u32,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
-			Self::ensure_bot_owner(&who, &community_id_hash)?;
-			ensure!(delta > 0, Error::<T>::ReputationDeltaZero);
-			ensure!(delta <= T::MaxReputationDelta::get(), Error::<T>::ReputationDeltaTooLarge);
-			Self::check_cooldown(&who, &community_id_hash, &user_hash)?;
-
-			let signed_delta = delta as i64;
-			let new_score = MemberReputation::<T>::mutate(
-				&community_id_hash, &user_hash, |rec| {
-					rec.score = rec.score.saturating_add(signed_delta);
-					rec.awards = rec.awards.saturating_add(1);
-					rec.last_updated = frame_system::Pallet::<T>::block_number();
-					rec.score
-				},
-			);
-
-			GlobalReputation::<T>::mutate(&user_hash, |g| *g = g.saturating_add(signed_delta));
-			Self::set_cooldown(&who, &community_id_hash, &user_hash);
-
-			Self::deposit_event(Event::ReputationAwarded {
-				community_id_hash, user_hash, delta: signed_delta, new_score, operator: who,
-			});
-			Ok(())
+			Self::do_modify_reputation(who, community_id_hash, user_hash, delta, true)
 		}
 
 		/// 扣除声誉
 		///
 		/// P4-fix: 仅该社区绑定的 Bot owner 可操作。
+		/// L1-R2: 委托到 do_modify_reputation 共享 helper。
 		#[pallet::call_index(6)]
 		#[pallet::weight(Weight::from_parts(35_000_000, 6_000))]
 		pub fn deduct_reputation(
@@ -523,28 +574,7 @@ pub mod pallet {
 			delta: u32,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
-			Self::ensure_bot_owner(&who, &community_id_hash)?;
-			ensure!(delta > 0, Error::<T>::ReputationDeltaZero);
-			ensure!(delta <= T::MaxReputationDelta::get(), Error::<T>::ReputationDeltaTooLarge);
-			Self::check_cooldown(&who, &community_id_hash, &user_hash)?;
-
-			let signed_delta = delta as i64;
-			let new_score = MemberReputation::<T>::mutate(
-				&community_id_hash, &user_hash, |rec| {
-					rec.score = rec.score.saturating_sub(signed_delta);
-					rec.deductions = rec.deductions.saturating_add(1);
-					rec.last_updated = frame_system::Pallet::<T>::block_number();
-					rec.score
-				},
-			);
-
-			GlobalReputation::<T>::mutate(&user_hash, |g| *g = g.saturating_sub(signed_delta));
-			Self::set_cooldown(&who, &community_id_hash, &user_hash);
-
-			Self::deposit_event(Event::ReputationDeducted {
-				community_id_hash, user_hash, delta: signed_delta, new_score, operator: who,
-			});
-			Ok(())
+			Self::do_modify_reputation(who, community_id_hash, user_hash, delta, false)
 		}
 
 		/// 重置用户声誉 (管理员)
@@ -558,7 +588,8 @@ pub mod pallet {
 			user_hash: [u8; 32],
 		) -> DispatchResult {
 			let _who = ensure_signed(origin)?;
-			Self::ensure_bot_owner(&_who, &community_id_hash)?;
+			// M1-R2: Bot 必须激活
+			Self::ensure_active_bot_owner(&_who, &community_id_hash)?;
 
 			let old_score = MemberReputation::<T>::get(&community_id_hash, &user_hash).score;
 			MemberReputation::<T>::remove(&community_id_hash, &user_hash);
@@ -581,7 +612,8 @@ pub mod pallet {
 			active_members: u32,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
-			Self::ensure_bot_owner(&who, &community_id_hash)?;
+			// M1-R2: Bot 必须激活
+			Self::ensure_active_bot_owner(&who, &community_id_hash)?;
 
 			CommunityConfigs::<T>::try_mutate(&community_id_hash, |maybe_config| {
 				let config = maybe_config.as_mut().ok_or(Error::<T>::CommunityNotFound)?;
@@ -614,7 +646,8 @@ pub mod pallet {
 			// Tier gate: 强制层级日志保留期下限 (6s/block → 14400 blocks/day)
 			let gate = T::Subscription::effective_feature_gate(&community_id_hash);
 			if gate.log_retention_days > 0 {
-				let min_retention: u32 = (gate.log_retention_days as u32).saturating_mul(14_400);
+				// M3-R3: 使用可配置的 BlocksPerDay 替代硬编码 14_400
+				let min_retention: u32 = (gate.log_retention_days as u32).saturating_mul(T::BlocksPerDay::get());
 				let min_retention_blocks: BlockNumberFor<T> = min_retention.into();
 				ensure!(max_age_blocks >= min_retention_blocks, Error::<T>::RetentionPeriodNotExpired);
 			} else {
@@ -636,6 +669,40 @@ pub mod pallet {
 			LogCount::<T>::mutate(|c| *c = c.saturating_sub(cleared as u64));
 
 			Self::deposit_event(Event::ExpiredLogsCleared { community_id_hash, cleared });
+			Ok(())
+		}
+
+		/// M2-R2: 清理已过期的冷却条目 (释放 storage)
+		///
+		/// 任何人可调用。检查指定 (operator, community, user) 的冷却是否已过期,
+		/// 若已过期则删除该条目。
+		#[pallet::call_index(9)]
+		#[pallet::weight(Weight::from_parts(15_000_000, 4_000))]
+		pub fn cleanup_expired_cooldowns(
+			origin: OriginFor<T>,
+			operator: T::AccountId,
+			community_id_hash: CommunityIdHash,
+			user_hash: [u8; 32],
+		) -> DispatchResult {
+			let _who = ensure_signed(origin)?;
+
+			let last = ReputationCooldowns::<T>::get((&operator, &community_id_hash, &user_hash));
+			// M1-R3: 使用专用错误码替代复用 NoLogsToClear
+			ensure!(last > BlockNumberFor::<T>::default(), Error::<T>::CooldownNotFound);
+
+			let now = frame_system::Pallet::<T>::block_number();
+			ensure!(
+				now.saturating_sub(last) >= T::ReputationCooldown::get(),
+				Error::<T>::CooldownNotExpired
+			);
+
+			ReputationCooldowns::<T>::remove((&operator, &community_id_hash, &user_hash));
+
+			Self::deposit_event(Event::CooldownCleaned {
+				community_id_hash,
+				user_hash,
+				operator,
+			});
 			Ok(())
 		}
 	}
@@ -701,6 +768,64 @@ pub mod pallet {
 			Ok(())
 		}
 
+		/// L1-R2: award/deduct 共享 helper
+		fn do_modify_reputation(
+			who: T::AccountId,
+			community_id_hash: CommunityIdHash,
+			user_hash: [u8; 32],
+			delta: u32,
+			is_award: bool,
+		) -> DispatchResult {
+			// M1-R2: Bot 必须激活
+			Self::ensure_active_bot_owner(&who, &community_id_hash)?;
+			ensure!(delta > 0, Error::<T>::ReputationDeltaZero);
+			ensure!(delta <= T::MaxReputationDelta::get(), Error::<T>::ReputationDeltaTooLarge);
+			Self::check_cooldown(&who, &community_id_hash, &user_hash)?;
+
+			let signed_delta = delta as i64;
+			let new_score = MemberReputation::<T>::mutate(
+				&community_id_hash, &user_hash, |rec| {
+					if is_award {
+						rec.score = rec.score.saturating_add(signed_delta);
+						rec.awards = rec.awards.saturating_add(1);
+					} else {
+						rec.score = rec.score.saturating_sub(signed_delta);
+						rec.deductions = rec.deductions.saturating_add(1);
+					}
+					rec.last_updated = frame_system::Pallet::<T>::block_number();
+					rec.score
+				},
+			);
+
+			if is_award {
+				GlobalReputation::<T>::mutate(&user_hash, |g| *g = g.saturating_add(signed_delta));
+			} else {
+				GlobalReputation::<T>::mutate(&user_hash, |g| *g = g.saturating_sub(signed_delta));
+			}
+			Self::set_cooldown(&who, &community_id_hash, &user_hash);
+
+			if is_award {
+				Self::deposit_event(Event::ReputationAwarded {
+					community_id_hash, user_hash, delta: signed_delta, new_score, operator: who,
+				});
+			} else {
+				Self::deposit_event(Event::ReputationDeducted {
+					community_id_hash, user_hash, delta: signed_delta, new_score, operator: who,
+				});
+			}
+			Ok(())
+		}
+
+		/// M1-R2: ensure_bot_owner + is_bot_active 组合检查
+		fn ensure_active_bot_owner(
+			who: &T::AccountId,
+			community_id_hash: &CommunityIdHash,
+		) -> DispatchResult {
+			Self::ensure_bot_owner(who, community_id_hash)?;
+			ensure!(T::BotRegistry::is_bot_active(community_id_hash), Error::<T>::BotNotActive);
+			Ok(())
+		}
+
 		/// 检查声誉变更冷却
 		fn check_cooldown(
 			operator: &T::AccountId,
@@ -727,29 +852,17 @@ pub mod pallet {
 			let now = frame_system::Pallet::<T>::block_number();
 			ReputationCooldowns::<T>::insert((operator, community_id_hash, user_hash), now);
 		}
-	}
 
-	// ========================================================================
-	// CommunityProvider 实现
-	// ========================================================================
-
-	impl<T: Config> CommunityProvider<T::AccountId> for Pallet<T> {
-		fn get_node_requirement(community_id_hash: &CommunityIdHash) -> NodeRequirement {
-			Self::get_node_requirement(community_id_hash)
-		}
-
-		fn is_community_bound(community_id_hash: &CommunityIdHash) -> bool {
-			Self::is_community_configured(community_id_hash)
+		/// M4-fix: 确保 sequence 严格递增
+		fn ensure_sequence_monotonic(
+			community_id_hash: &CommunityIdHash,
+			sequence: u64,
+		) -> DispatchResult {
+			if let Some(last) = LastSequence::<T>::get(community_id_hash) {
+				ensure!(sequence > last, Error::<T>::SequenceNotMonotonic);
+			}
+			Ok(())
 		}
 	}
 
-	impl<T: Config> ReputationProvider for Pallet<T> {
-		fn get_reputation(community_id_hash: &CommunityIdHash, user_hash: &[u8; 32]) -> i64 {
-			MemberReputation::<T>::get(community_id_hash, user_hash).score
-		}
-
-		fn get_global_reputation(user_hash: &[u8; 32]) -> i64 {
-			GlobalReputation::<T>::get(user_hash)
-		}
-	}
 }

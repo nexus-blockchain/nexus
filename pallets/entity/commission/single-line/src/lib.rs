@@ -28,7 +28,7 @@ pub mod pallet {
     use pallet_commission_common::{
         CommissionModes, CommissionOutput, CommissionType, MemberCommissionStatsData,
     };
-    use sp_runtime::traits::{Saturating, Zero};
+    use sp_runtime::traits::{AtLeast32BitUnsigned, Saturating, Zero};
 
     pub type BalanceOf<T> =
         <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
@@ -180,6 +180,8 @@ pub mod pallet {
         InvalidRate,
         SingleLineFull,
         InvalidLevels,
+        /// base_upline_levels > max_upline_levels 或 base_downline_levels > max_downline_levels
+        BaseLevelsExceedMax,
     }
 
     // ========================================================================
@@ -206,6 +208,8 @@ pub mod pallet {
         ) -> DispatchResult {
             ensure_root(origin)?;
             ensure!(upline_rate <= 1000 && downline_rate <= 1000, Error::<T>::InvalidRate);
+            ensure!(base_upline_levels <= max_upline_levels, Error::<T>::BaseLevelsExceedMax);
+            ensure!(base_downline_levels <= max_downline_levels, Error::<T>::BaseLevelsExceedMax);
 
             SingleLineConfigs::<T>::insert(entity_id, SingleLineConfig {
                 upline_rate,
@@ -295,6 +299,11 @@ pub mod pallet {
                 let index = line.len() as u32;
                 line.try_push(account.clone()).map_err(|_| Error::<T>::SingleLineFull)?;
                 SingleLineIndex::<T>::insert(entity_id, account, index);
+                Self::deposit_event(Event::AddedToSingleLine {
+                    entity_id,
+                    account: account.clone(),
+                    index,
+                });
                 Ok(())
             })
         }
@@ -313,15 +322,19 @@ pub mod pallet {
             }
         }
 
-        pub fn process_upline(
+        /// L5-R3 审计修复: 泛型化，NEX (BalanceOf<T>) 和 Token (TB) 共用同一实现
+        pub fn process_upline<B>(
             entity_id: u64,
             buyer: &T::AccountId,
-            order_amount: BalanceOf<T>,
-            remaining: &mut BalanceOf<T>,
+            order_amount: B,
+            remaining: &mut B,
             config: &SingleLineConfig<BalanceOf<T>>,
             base_up: u8,
-            outputs: &mut Vec<CommissionOutput<T::AccountId, BalanceOf<T>>>,
-        ) {
+            line: &[T::AccountId],
+            outputs: &mut Vec<CommissionOutput<T::AccountId, B>>,
+        ) where
+            B: AtLeast32BitUnsigned + Copy,
+        {
             if config.upline_rate == 0 { return; }
 
             let buyer_index = match SingleLineIndex::<T>::get(entity_id, buyer) {
@@ -330,7 +343,6 @@ pub mod pallet {
             };
             if buyer_index == 0 { return; }
 
-            let line = SingleLines::<T>::get(entity_id);
             let buyer_stats = T::StatsProvider::get_member_stats(entity_id, buyer);
             let extra_levels = Self::calc_extra_levels(config.level_increment_threshold, buyer_stats.total_earned);
             let max_levels = base_up
@@ -345,8 +357,8 @@ pub mod pallet {
 
                 // C2 审计修复: 佣金基于当前订单金额，而非受益人累计收益
                 let commission = order_amount
-                    .saturating_mul(config.upline_rate.into())
-                    / 10000u32.into();
+                    .saturating_mul(B::from(config.upline_rate as u32))
+                    / B::from(10000u32);
                 let actual = commission.min(*remaining);
 
                 if !actual.is_zero() {
@@ -361,15 +373,19 @@ pub mod pallet {
             }
         }
 
-        pub fn process_downline(
+        /// L5-R3 审计修复: 泛型化，NEX (BalanceOf<T>) 和 Token (TB) 共用同一实现
+        pub fn process_downline<B>(
             entity_id: u64,
             buyer: &T::AccountId,
-            order_amount: BalanceOf<T>,
-            remaining: &mut BalanceOf<T>,
+            order_amount: B,
+            remaining: &mut B,
             config: &SingleLineConfig<BalanceOf<T>>,
             base_down: u8,
-            outputs: &mut Vec<CommissionOutput<T::AccountId, BalanceOf<T>>>,
-        ) {
+            line: &[T::AccountId],
+            outputs: &mut Vec<CommissionOutput<T::AccountId, B>>,
+        ) where
+            B: AtLeast32BitUnsigned + Copy,
+        {
             if config.downline_rate == 0 { return; }
 
             let buyer_index = match SingleLineIndex::<T>::get(entity_id, buyer) {
@@ -377,7 +393,6 @@ pub mod pallet {
                 None => return,
             };
 
-            let line = SingleLines::<T>::get(entity_id);
             let line_len = line.len() as u32;
             if buyer_index >= line_len.saturating_sub(1) { return; }
 
@@ -388,14 +403,15 @@ pub mod pallet {
                 .min(config.max_downline_levels) as u32;
 
             for i in 1..=max_levels {
-                let downline_index = (buyer_index + i) as usize;
+                // L1 审计修复: 使用 saturating_add 防止 buyer_index + i 溢出 u32
+                let downline_index = buyer_index.saturating_add(i) as usize;
                 if downline_index >= line.len() { break; }
                 let downline = &line[downline_index];
 
                 // C2 审计修复: 佣金基于当前订单金额，而非受益人累计收益
                 let commission = order_amount
-                    .saturating_mul(config.downline_rate.into())
-                    / 10000u32.into();
+                    .saturating_mul(B::from(config.downline_rate as u32))
+                    / B::from(10000u32);
                 let actual = commission.min(*remaining);
 
                 if !actual.is_zero() {
@@ -413,22 +429,27 @@ pub mod pallet {
 }
 
 // ============================================================================
-// CommissionPlugin implementation
+// L5-R3 审计修复: 统一的返佣计算逻辑（NEX 和 Token 共用）
 // ============================================================================
 
-impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId, pallet::BalanceOf<T>> for pallet::Pallet<T> {
-    fn calculate(
+impl<T: pallet::Config> pallet::Pallet<T> {
+    /// 统一分发逻辑 — NEX `calculate` 和 Token `calculate_token` 均委托此函数。
+    ///
+    /// L5-R3: 消除原先 NEX/Token 两套独立的 process + calculate 实现（~170 行重复），
+    /// 现通过泛型 `B: AtLeast32BitUnsigned` 统一处理所有余额类型。
+    fn do_calculate<B>(
         entity_id: u64,
         buyer: &T::AccountId,
-        order_amount: pallet::BalanceOf<T>,
-        remaining: pallet::BalanceOf<T>,
+        order_amount: B,
+        remaining: B,
         enabled_modes: pallet_commission_common::CommissionModes,
         is_first_order: bool,
-        _buyer_order_count: u32,
-    ) -> (alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, pallet::BalanceOf<T>>>, pallet::BalanceOf<T>) {
+    ) -> (alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, B>>, B)
+    where
+        B: sp_runtime::traits::AtLeast32BitUnsigned + Copy,
+    {
         use pallet_commission_common::CommissionModes;
 
-        // 配置按 entity_id，单链按 entity_id（跨店共享单链）
         let config = match pallet::SingleLineConfigs::<T>::get(entity_id) {
             Some(c) => c,
             None => return (alloc::vec::Vec::new(), remaining),
@@ -444,21 +465,21 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
         let mut remaining = remaining;
         let mut outputs = alloc::vec::Vec::new();
 
-        // M1 性能修复: 预计算等级基础层数，避免 upline+downline 各调用一次
-        let (base_up, base_down) = pallet::Pallet::<T>::effective_base_levels(entity_id, buyer, &config);
+        let (base_up, base_down) = Self::effective_base_levels(entity_id, buyer, &config);
+        let line = pallet::SingleLines::<T>::get(entity_id);
 
         if has_upline {
-            pallet::Pallet::<T>::process_upline(entity_id, buyer, order_amount, &mut remaining, &config, base_up, &mut outputs);
+            Self::process_upline(entity_id, buyer, order_amount, &mut remaining, &config, base_up, &line, &mut outputs);
         }
 
         if has_downline {
-            pallet::Pallet::<T>::process_downline(entity_id, buyer, order_amount, &mut remaining, &config, base_down, &mut outputs);
+            Self::process_downline(entity_id, buyer, order_amount, &mut remaining, &config, base_down, &line, &mut outputs);
         }
 
         // 首次消费加入单链（Entity 级，失败发事件）
         if is_first_order {
-            if pallet::Pallet::<T>::add_to_single_line(entity_id, buyer).is_err() {
-                pallet::Pallet::<T>::deposit_event(pallet::Event::SingleLineJoinFailed {
+            if Self::add_to_single_line(entity_id, buyer).is_err() {
+                Self::deposit_event(pallet::Event::SingleLineJoinFailed {
                     entity_id,
                     account: buyer.clone(),
                 });
@@ -470,113 +491,26 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
 }
 
 // ============================================================================
-// Token 多资产 — TokenCommissionPlugin implementation
+// CommissionPlugin implementation (NEX)
 // ============================================================================
 
-impl<T: pallet::Config> pallet::Pallet<T> {
-    /// Token 版上线收益（泛型，rate-based）
-    ///
-    /// extra_levels 仍基于 NEX 版 StatsProvider（级别扩展取决于 NEX 佣金历史）。
-    fn process_upline_token<TB>(
+impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId, pallet::BalanceOf<T>> for pallet::Pallet<T> {
+    fn calculate(
         entity_id: u64,
         buyer: &T::AccountId,
-        order_amount: TB,
-        remaining: &mut TB,
-        config: &pallet::SingleLineConfig<pallet::BalanceOf<T>>,
-        base_up: u8,
-        outputs: &mut alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>,
-    ) where
-        TB: sp_runtime::traits::AtLeast32BitUnsigned + Copy,
-    {
-        if config.upline_rate == 0 { return; }
-
-        let buyer_index = match pallet::SingleLineIndex::<T>::get(entity_id, buyer) {
-            Some(idx) => idx,
-            None => return,
-        };
-        if buyer_index == 0 { return; }
-
-        let line = pallet::SingleLines::<T>::get(entity_id);
-        let buyer_stats = T::StatsProvider::get_member_stats(entity_id, buyer);
-        let extra_levels = Self::calc_extra_levels(config.level_increment_threshold, buyer_stats.total_earned);
-        let max_levels = base_up
-            .saturating_add(extra_levels)
-            .min(config.max_upline_levels) as u32;
-
-        for i in 1..=max_levels {
-            if buyer_index < i { break; }
-            let upline_index = (buyer_index - i) as usize;
-            if upline_index >= line.len() { break; }
-            let upline = &line[upline_index];
-
-            let commission = order_amount
-                .saturating_mul(TB::from(config.upline_rate as u32))
-                / TB::from(10000u32);
-            let actual = commission.min(*remaining);
-
-            if !actual.is_zero() {
-                *remaining = remaining.saturating_sub(actual);
-                outputs.push(pallet_commission_common::CommissionOutput {
-                    beneficiary: upline.clone(),
-                    amount: actual,
-                    commission_type: pallet_commission_common::CommissionType::SingleLineUpline,
-                    level: i as u8,
-                });
-            }
-        }
-    }
-
-    /// Token 版下线收益（泛型，rate-based）
-    fn process_downline_token<TB>(
-        entity_id: u64,
-        buyer: &T::AccountId,
-        order_amount: TB,
-        remaining: &mut TB,
-        config: &pallet::SingleLineConfig<pallet::BalanceOf<T>>,
-        base_down: u8,
-        outputs: &mut alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>,
-    ) where
-        TB: sp_runtime::traits::AtLeast32BitUnsigned + Copy,
-    {
-        if config.downline_rate == 0 { return; }
-
-        let buyer_index = match pallet::SingleLineIndex::<T>::get(entity_id, buyer) {
-            Some(idx) => idx,
-            None => return,
-        };
-
-        let line = pallet::SingleLines::<T>::get(entity_id);
-        let line_len = line.len() as u32;
-        if buyer_index >= line_len.saturating_sub(1) { return; }
-
-        let buyer_stats = T::StatsProvider::get_member_stats(entity_id, buyer);
-        let extra_levels = Self::calc_extra_levels(config.level_increment_threshold, buyer_stats.total_earned);
-        let max_levels = base_down
-            .saturating_add(extra_levels)
-            .min(config.max_downline_levels) as u32;
-
-        for i in 1..=max_levels {
-            let downline_index = (buyer_index + i) as usize;
-            if downline_index >= line.len() { break; }
-            let downline = &line[downline_index];
-
-            let commission = order_amount
-                .saturating_mul(TB::from(config.downline_rate as u32))
-                / TB::from(10000u32);
-            let actual = commission.min(*remaining);
-
-            if !actual.is_zero() {
-                *remaining = remaining.saturating_sub(actual);
-                outputs.push(pallet_commission_common::CommissionOutput {
-                    beneficiary: downline.clone(),
-                    amount: actual,
-                    commission_type: pallet_commission_common::CommissionType::SingleLineDownline,
-                    level: i as u8,
-                });
-            }
-        }
+        order_amount: pallet::BalanceOf<T>,
+        remaining: pallet::BalanceOf<T>,
+        enabled_modes: pallet_commission_common::CommissionModes,
+        is_first_order: bool,
+        _buyer_order_count: u32,
+    ) -> (alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, pallet::BalanceOf<T>>>, pallet::BalanceOf<T>) {
+        Self::do_calculate(entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order)
     }
 }
+
+// ============================================================================
+// TokenCommissionPlugin implementation (多资产)
+// ============================================================================
 
 impl<T: pallet::Config, TB> pallet_commission_common::TokenCommissionPlugin<T::AccountId, TB>
     for pallet::Pallet<T>
@@ -592,48 +526,6 @@ where
         is_first_order: bool,
         _buyer_order_count: u32,
     ) -> (alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>, TB) {
-        use pallet_commission_common::CommissionModes;
-
-        let config = match pallet::SingleLineConfigs::<T>::get(entity_id) {
-            Some(c) => c,
-            None => return (alloc::vec::Vec::new(), remaining),
-        };
-
-        let has_upline = enabled_modes.contains(CommissionModes::SINGLE_LINE_UPLINE);
-        let has_downline = enabled_modes.contains(CommissionModes::SINGLE_LINE_DOWNLINE);
-
-        if !has_upline && !has_downline {
-            return (alloc::vec::Vec::new(), remaining);
-        }
-
-        let mut remaining = remaining;
-        let mut outputs = alloc::vec::Vec::new();
-
-        // M1 性能修复: 预计算等级基础层数，避免 upline+downline 各调用一次
-        let (base_up, base_down) = pallet::Pallet::<T>::effective_base_levels(entity_id, buyer, &config);
-
-        if has_upline {
-            pallet::Pallet::<T>::process_upline_token::<TB>(
-                entity_id, buyer, order_amount, &mut remaining, &config, base_up, &mut outputs,
-            );
-        }
-
-        if has_downline {
-            pallet::Pallet::<T>::process_downline_token::<TB>(
-                entity_id, buyer, order_amount, &mut remaining, &config, base_down, &mut outputs,
-            );
-        }
-
-        // 首次消费加入单链（与 NEX 版共享，仅触发一次）
-        if is_first_order {
-            if pallet::Pallet::<T>::add_to_single_line(entity_id, buyer).is_err() {
-                pallet::Pallet::<T>::deposit_event(pallet::Event::SingleLineJoinFailed {
-                    entity_id,
-                    account: buyer.clone(),
-                });
-            }
-        }
-
-        (outputs, remaining)
+        Self::do_calculate(entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order)
     }
 }

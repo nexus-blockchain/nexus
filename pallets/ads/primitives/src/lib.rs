@@ -9,8 +9,6 @@
 //! 将广告系统的通用概念 (Campaign 状态、审核状态、偏好) 与领域特定概念
 //! (GroupRobot 的 TEE 节点、Entity 的 Shop) 分离，使核心广告引擎可复用。
 
-extern crate alloc;
-
 use codec::{Decode, Encode, MaxEncodedLen};
 use frame_support::pallet_prelude::*;
 use scale_info::TypeInfo;
@@ -96,7 +94,11 @@ impl Default for AdPreference {
 pub trait DeliveryMethod:
 	Encode + Decode + Clone + MaxEncodedLen + TypeInfo + core::fmt::Debug + PartialEq + Eq
 {
-	/// CPM 定价系数 (基点, 100 = 1.0x)
+	/// CPM 定价系数 (百分比整数, 100 = 1.0x, 200 = 2.0x)
+	///
+	/// 注意: 此处并非金融基点 (1/10000)，而是百分比整数。
+	/// ads-core 计算公式: bid * audience * multiplier / 100_000
+	/// 其中 /1000 为 CPM 标准 (每千人)，/100 为此系数归一化。
 	fn cpm_multiplier_bps(&self) -> u32;
 }
 
@@ -120,6 +122,7 @@ pub trait DeliveryVerifier<AccountId> {
 }
 
 /// DeliveryVerifier 空实现 (直通, 用于测试)
+/// 返回原始 audience_size 不做裁切。
 impl<AccountId> DeliveryVerifier<AccountId> for () {
 	fn verify_and_cap_audience(
 		_: &AccountId,
@@ -165,6 +168,8 @@ pub trait RevenueDistributor<AccountId, Balance> {
 	) -> Result<Balance, sp_runtime::DispatchError>;
 }
 
+/// `()` 空实现: 广告位方份额为零 (全部收入归国库)。
+/// 生产环境必须提供领域适配层实现。
 impl<AccountId, Balance: Default> RevenueDistributor<AccountId, Balance> for () {
 	fn distribute(
 		_: &PlacementId,
@@ -186,8 +191,10 @@ pub trait PlacementStakeProvider<Balance> {
 	fn stake_amount(placement_id: &PlacementId) -> Balance;
 }
 
+/// `()` 空实现: 无质押 → audience_cap = 0 (安全方向: 禁止无质押广告投放)。
+/// 生产环境由适配层根据质押额动态计算 audience_cap。
 impl<Balance: Default> PlacementStakeProvider<Balance> for () {
-	fn audience_cap(_: &PlacementId) -> u32 { u32::MAX }
+	fn audience_cap(_: &PlacementId) -> u32 { 0 }
 	fn stake_amount(_: &PlacementId) -> Balance { Balance::default() }
 }
 
@@ -196,12 +203,12 @@ pub trait AdScheduleProvider {
 	/// 广告位是否启用广告
 	fn is_ads_enabled(placement_id: &PlacementId) -> bool;
 	/// 广告位累计广告收入 (Balance 用 u128 表示)
-	fn community_ad_revenue(placement_id: &PlacementId) -> u128;
+	fn placement_ad_revenue(placement_id: &PlacementId) -> u128;
 }
 
 impl AdScheduleProvider for () {
 	fn is_ads_enabled(_: &PlacementId) -> bool { false }
-	fn community_ad_revenue(_: &PlacementId) -> u128 { 0 }
+	fn placement_ad_revenue(_: &PlacementId) -> u128 { 0 }
 }
 
 /// 广告投放计数查询 (外部 pallet 查询投放达标情况)

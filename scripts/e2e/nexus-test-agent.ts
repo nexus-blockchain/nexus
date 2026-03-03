@@ -55,10 +55,18 @@ import { commissionFlow } from './flows/entity/commission.js';
 import { tokenGovernanceFlow } from './flows/entity/token-governance.js';
 import { kycFlow } from './flows/entity/kyc.js';
 import { tokenSaleFlow } from './flows/entity/token-sale.js';
+import { entityMarketFlow } from './flows/entity/entity-market.js';
+import { entityDisclosureFlow } from './flows/entity/entity-disclosure.js';
+import { nexMarketFlow } from './flows/trading/nex-market.js';
 import { disputeFlow } from './flows/dispute/dispute-resolution.js';
+import { escrowFlow } from './flows/dispute/escrow.js';
 import { botLifecycleFlow } from './flows/grouprobot/bot-lifecycle.js';
 import { nodeConsensusFlow } from './flows/grouprobot/node-consensus.js';
 import { adCampaignFlow } from './flows/grouprobot/ad-campaign.js';
+import { subscriptionFlow } from './flows/grouprobot/subscription.js';
+import { communityFlow } from './flows/grouprobot/community.js';
+import { ceremonyFlow } from './flows/grouprobot/ceremony.js';
+import { rewardsFlow } from './flows/grouprobot/rewards.js';
 import { storageServiceFlow } from './flows/storage/storage-service.js';
 
 /** 全部已注册流程 */
@@ -66,6 +74,7 @@ const FLOW_REGISTRY: Record<string, FlowDef> = {
   T1: makerLifecycleFlow,
   T2: p2pBuyFlow,
   T3: p2pSellFlow,
+  T4: nexMarketFlow,
   E1: entityShopFlow,
   E2: orderLifecycleFlow,
   E3: memberReferralFlow,
@@ -73,19 +82,26 @@ const FLOW_REGISTRY: Record<string, FlowDef> = {
   E5: tokenGovernanceFlow,
   E6: kycFlow,
   E7: tokenSaleFlow,
+  E8: entityMarketFlow,
+  E9: entityDisclosureFlow,
   D1: disputeFlow,
+  D2: escrowFlow,
   G1: botLifecycleFlow,
   G2: nodeConsensusFlow,
   G3: adCampaignFlow,
+  G4: subscriptionFlow,
+  G5: communityFlow,
+  G6: ceremonyFlow,
+  G7: rewardsFlow,
   S1: storageServiceFlow,
 };
 
 /** Flow 分组 */
 const FLOW_GROUPS: Record<string, string[]> = {
-  trading: ['T1', 'T2', 'T3'],
-  entity: ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7'],
-  dispute: ['D1'],
-  grouprobot: ['G1', 'G2', 'G3'],
+  trading: ['T1', 'T2', 'T3', 'T4'],
+  entity: ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7', 'E8', 'E9'],
+  dispute: ['D1', 'D2'],
+  grouprobot: ['G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7'],
   storage: ['S1'],
 };
 
@@ -147,6 +163,36 @@ const COVERAGE_MAP: CoverageMap = {
     'SS-001', 'SS-002', 'SS-003', 'SS-004', 'SS-005', 'SS-006',
     'SS-008', 'SS-010', 'SS-013', 'SS-015', 'SS-016', 'SS-017',
     'SS-018', 'SS-020', 'SS-022',
+  ],
+  'Flow-E8: 实体市场': [
+    'EM-001', 'EM-002', 'EM-003', 'EM-004', 'EM-005', 'EM-006',
+    'EM-007', 'EM-008', 'EM-009', 'EM-010', 'EM-013',
+  ],
+  'Flow-E9: 信息披露': [
+    'DC-001', 'DC-002', 'DC-003', 'DC-005', 'DC-006', 'DC-008',
+    'DC-009', 'DC-011', 'DC-012',
+  ],
+  'Flow-T4: NEX 市场': [
+    'NM-001', 'NM-002', 'NM-003', 'NM-005', 'NM-006', 'NM-007',
+    'NM-008', 'NM-011', 'NM-013', 'NM-014', 'NM-024', 'NM-029',
+  ],
+  'Flow-D2: 托管': [
+    'ES-001', 'ES-002', 'ES-003', 'ES-004', 'ES-005', 'ES-007',
+    'ES-008', 'ES-009', 'ES-010', 'ES-011',
+  ],
+  'Flow-G4: 订阅服务': [
+    'SB-001', 'SB-002', 'SB-003', 'SB-004', 'SB-007', 'SB-008',
+    'SB-009',
+  ],
+  'Flow-G5: 社区管理': [
+    'GC-001', 'GC-006', 'GC-007', 'GC-008', 'GC-010', 'GC-012',
+    'GC-013', 'GC-014', 'GC-016',
+  ],
+  'Flow-G6: 仪式验证': [
+    'CE-001', 'CE-005', 'CE-007', 'CE-008', 'CE-009', 'CE-011',
+  ],
+  'Flow-G7: 奖励分配': [
+    'RW-001', 'RW-002',
   ],
 };
 
@@ -220,7 +266,7 @@ Nexus 全栈测试智能体
 选项:
   --mode <all|cargo|e2e|coverage>  运行模式 (默认: all)
   --group <name> [name...]         按模块群筛选 (entity/commission/trading/dispute/storage/grouprobot)
-  --flow <id> [id...]              指定 E2E 流程 (T1/T2/T3/E1/...)
+  --flow <id> [id...]              指定 E2E 流程 (T1-T4/E1-E9/D1-D2/G1-G7/S1)
   --pallet <name> [name...]        指定 cargo test pallet
   --priority <P0|P1|P2>            按优先级筛选覆盖率报告
   --verbose                        详细输出

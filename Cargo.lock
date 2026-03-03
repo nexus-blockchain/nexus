@@ -6324,8 +6324,6 @@ version = "0.1.0"
 dependencies = [
  "frame-support",
  "frame-system",
- "log",
- "pallet-ads-core",
  "pallet-ads-primitives",
  "pallet-balances",
  "pallet-entity-common",
@@ -6343,13 +6341,11 @@ dependencies = [
  "frame-support",
  "frame-system",
  "log",
- "pallet-ads-core",
  "pallet-ads-primitives",
  "pallet-balances",
  "pallet-grouprobot-primitives",
  "parity-scale-codec",
  "scale-info",
- "sp-core",
  "sp-io",
  "sp-runtime",
 ]
@@ -6580,7 +6576,6 @@ dependencies = [
  "frame-system",
  "pallet-balances",
  "pallet-commission-common",
- "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
  "sp-io",
@@ -6594,7 +6589,6 @@ version = "0.1.0"
 dependencies = [
  "frame-support",
  "frame-system",
- "pallet-balances",
  "pallet-commission-common",
  "parity-scale-codec",
  "scale-info",
@@ -6626,7 +6620,6 @@ dependencies = [
  "frame-system",
  "pallet-balances",
  "pallet-commission-common",
- "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
  "sp-io",
@@ -6784,8 +6777,6 @@ dependencies = [
  "pallet-balances",
  "pallet-entity-commission",
  "pallet-entity-common",
- "pallet-entity-registry",
- "pallet-entity-token",
  "parity-scale-codec",
  "scale-info",
  "sp-core",
@@ -6955,6 +6946,7 @@ version = "0.1.0"
 dependencies = [
  "frame-support",
  "frame-system",
+ "log",
  "pallet-balances",
  "pallet-entity-common",
  "parity-scale-codec",
@@ -7021,32 +7013,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "pallet-grouprobot-ads"
-version = "0.1.0"
-dependencies = [
- "frame-support",
- "frame-system",
- "log",
- "pallet-balances",
- "pallet-grouprobot-primitives",
- "parity-scale-codec",
- "scale-info",
- "sp-core",
- "sp-io",
- "sp-runtime",
-]
-
-[[package]]
 name = "pallet-grouprobot-ceremony"
 version = "0.1.0"
 dependencies = [
  "frame-support",
  "frame-system",
- "log",
  "pallet-grouprobot-primitives",
  "parity-scale-codec",
  "scale-info",
- "sp-core",
  "sp-io",
  "sp-runtime",
 ]
@@ -7057,7 +7031,6 @@ version = "0.1.0"
 dependencies = [
  "frame-support",
  "frame-system",
- "log",
  "pallet-grouprobot-primitives",
  "parity-scale-codec",
  "scale-info",
@@ -7072,12 +7045,10 @@ version = "0.1.0"
 dependencies = [
  "frame-support",
  "frame-system",
- "log",
  "pallet-balances",
  "pallet-grouprobot-primitives",
  "parity-scale-codec",
  "scale-info",
- "sp-core",
  "sp-io",
  "sp-runtime",
 ]
@@ -7121,7 +7092,6 @@ dependencies = [
  "pallet-grouprobot-primitives",
  "parity-scale-codec",
  "scale-info",
- "sp-core",
  "sp-io",
  "sp-runtime",
 ]
@@ -7137,7 +7107,6 @@ dependencies = [
  "pallet-grouprobot-primitives",
  "parity-scale-codec",
  "scale-info",
- "sp-core",
  "sp-io",
  "sp-runtime",
 ]

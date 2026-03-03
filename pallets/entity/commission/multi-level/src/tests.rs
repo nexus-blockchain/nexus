@@ -550,3 +550,188 @@ fn l2_r2_plan_writer_rejects_zero_max_total_rate() {
         ).is_err());
     });
 }
+
+// ============================================================================
+// H1-R4: is_activated — deactivated members skipped
+// ============================================================================
+
+#[test]
+fn h1_r4_deactivated_member_skipped_chain_continues() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        // buyer=50 -> 40 (deactivated) -> 30 -> 20
+        setup_chain(1, 50, &[40, 30, 20]);
+        set_activated(1, 40, false); // 40 is deactivated
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 200, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+
+        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
+            levels: levels.try_into().unwrap(),
+            max_total_rate: 3000,
+        });
+
+        let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
+        let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+            1, &50, 10000, 10000, modes, false, 0,
+        );
+
+        // L1: 40 deactivated → skip, L2: 30 gets 500, L3: 20 gets 200
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].beneficiary, 30);
+        assert_eq!(outputs[0].amount, 500);
+        assert_eq!(outputs[0].level, 2);
+        assert_eq!(outputs[1].beneficiary, 20);
+        assert_eq!(outputs[1].amount, 200);
+        assert_eq!(outputs[1].level, 3);
+        assert_eq!(remaining, 9300);
+    });
+}
+
+#[test]
+fn h1_r4_all_activated_unaffected() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        // buyer=50 -> 40 -> 30 (all activated by default)
+        setup_chain(1, 50, &[40, 30]);
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+
+        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
+            levels: levels.try_into().unwrap(),
+            max_total_rate: 3000,
+        });
+
+        let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
+        let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+            1, &50, 10000, 10000, modes, false, 0,
+        );
+
+        // Both activated → normal distribution
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].beneficiary, 40);
+        assert_eq!(outputs[0].amount, 1000);
+        assert_eq!(outputs[1].beneficiary, 30);
+        assert_eq!(outputs[1].amount, 500);
+        assert_eq!(remaining, 8500);
+    });
+}
+
+// ============================================================================
+// L2-R5: rate=0 placeholder tier
+// ============================================================================
+
+#[test]
+fn l2_r5_rate_zero_placeholder_skips_referrer() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        // buyer=50 -> 40 -> 30 -> 20
+        setup_chain(1, 50, &[40, 30, 20]);
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 0, required_directs: 0, required_team_size: 0, required_spent: 0 },    // L1: placeholder
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },  // L2: 10%
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },   // L3: 5%
+        ];
+
+        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
+            levels: levels.try_into().unwrap(),
+            max_total_rate: 3000,
+        });
+
+        let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
+        let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+            1, &50, 10000, 10000, modes, false, 0,
+        );
+
+        // L1: rate=0 → skip, advance past 40 to 30
+        // L2: 30 gets 1000 at level 2
+        // L3: 20 gets 500 at level 3
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].beneficiary, 30);
+        assert_eq!(outputs[0].amount, 1000);
+        assert_eq!(outputs[0].level, 2);
+        assert_eq!(outputs[1].beneficiary, 20);
+        assert_eq!(outputs[1].amount, 500);
+        assert_eq!(outputs[1].level, 3);
+        assert_eq!(remaining, 8500);
+    });
+}
+
+// ============================================================================
+// L3-R5: chain shorter than configured levels (early break)
+// ============================================================================
+
+#[test]
+fn l3_r5_chain_shorter_than_levels_breaks_early() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        // buyer=50 -> 40 (only 1 referrer, but 3 tiers configured)
+        setup_chain(1, 50, &[40]);
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 200, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+
+        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
+            levels: levels.try_into().unwrap(),
+            max_total_rate: 3000,
+        });
+
+        let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
+        let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+            1, &50, 10000, 10000, modes, false, 0,
+        );
+
+        // Only 40 gets L1, L2/L3 have no referrer → break
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].beneficiary, 40);
+        assert_eq!(outputs[0].amount, 1000);
+        assert_eq!(remaining, 9000);
+    });
+}
+
+// ============================================================================
+// L4-R5: TokenCommissionPlugin path
+// ============================================================================
+
+#[test]
+fn l4_r5_token_commission_plugin_works() {
+    use pallet_commission_common::TokenCommissionPlugin;
+
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_chain(1, 50, &[40, 30]);
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+
+        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
+            levels: levels.try_into().unwrap(),
+            max_total_rate: 3000,
+        });
+
+        let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
+        let (outputs, remaining) = <pallet::Pallet<Test> as TokenCommissionPlugin<u64, Balance>>::calculate_token(
+            1, &50, 10000u128, 10000u128, modes, false, 0,
+        );
+
+        // Token path uses same process_multi_level — results should match NEX path
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].beneficiary, 40);
+        assert_eq!(outputs[0].amount, 1000);
+        assert_eq!(outputs[1].beneficiary, 30);
+        assert_eq!(outputs[1].amount, 500);
+        assert_eq!(remaining, 8500);
+    });
+}

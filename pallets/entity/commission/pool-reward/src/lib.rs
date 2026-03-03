@@ -258,6 +258,8 @@ pub mod pallet {
             account: T::AccountId,
             amount: TokenBalanceOf<T>,
         },
+        /// M3-R5: 沉淀池奖励配置已清除（区别于更新）
+        PoolRewardConfigCleared { entity_id: u64 },
     }
 
     #[pallet::error]
@@ -476,6 +478,9 @@ pub mod pallet {
             entity_id: u64,
         ) -> DispatchResult {
             ensure_root(origin)?;
+
+            // M1-R5: Entity 必须存在且激活（与 claim_pool_reward 一致）
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
 
             let config = PoolRewardConfigs::<T>::get(entity_id)
                 .ok_or(Error::<T>::ConfigNotFound)?;
@@ -703,8 +708,8 @@ impl<T: pallet::Config> pallet_commission_common::PoolRewardPlanWriter for palle
         // H3: clear LastClaimedRound and ClaimRecords for this entity
         let _ = pallet::LastClaimedRound::<T>::clear_prefix(entity_id, u32::MAX, None);
         let _ = pallet::ClaimRecords::<T>::clear_prefix(entity_id, u32::MAX, None);
-        // L1-R3 审计修复: emit 事件
-        Self::deposit_event(pallet::Event::PoolRewardConfigUpdated { entity_id });
+        // M3-R5: 使用专用 Cleared 事件，区别于 Updated
+        Self::deposit_event(pallet::Event::PoolRewardConfigCleared { entity_id });
         Ok(())
     }
 

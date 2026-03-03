@@ -26,3 +26,11 @@ std = [
 	"sp-runtime/std",
 	"pallet-ads-primitives/std",
 ]
+try-runtime = [
+	"frame-support/try-runtime",
+	"sp-runtime/try-runtime",
+]
+runtime-benchmarks = [
+	"frame-support/runtime-benchmarks",
+	"sp-runtime/runtime-benchmarks",
+]

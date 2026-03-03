@@ -53,10 +53,11 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().writes(1))
     }
 
-    /// Storage: EntityProvider (r:1), EntityTokenConfigs (r:1), Assets::mint_into (r:1 w:1)
+    /// Storage: EntityProvider (r:1), EntityTokenConfigs (r:1), Assets::total_issuance (r:1),
+    ///          TotalPendingDividends (r:1), Assets::mint_into (r:1 w:1)
     fn mint_tokens() -> Weight {
         Weight::from_parts(120_000_000, 5_000)
-            .saturating_add(T::DbWeight::get().reads(3))
+            .saturating_add(T::DbWeight::get().reads(4))
             .saturating_add(T::DbWeight::get().writes(1))
     }
 
@@ -76,20 +77,20 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     }
 
     /// Storage: EntityProvider (r:1), EntityTokenConfigs (r:1 w:1),
-    ///          PendingDividends (r:0 w:r) where r = recipients count
+    ///          TotalPendingDividends (r:1 w:1), PendingDividends (r:0 w:r) where r = recipients count
     fn distribute_dividend(r: u32) -> Weight {
         Weight::from_parts(100_000_000, 6_000)
             .saturating_add(Weight::from_parts(5_000_000, 500).saturating_mul(r.into()))
-            .saturating_add(T::DbWeight::get().reads(2))
-            .saturating_add(T::DbWeight::get().writes(1_u64.saturating_add(r.into())))
+            .saturating_add(T::DbWeight::get().reads(3))
+            .saturating_add(T::DbWeight::get().writes(2_u64.saturating_add(r.into())))
     }
 
-    /// Storage: PendingDividends (r:1 w:1), EntityTokenConfigs (r:1),
+    /// Storage: PendingDividends (r:1 w:1), TotalPendingDividends (r:1 w:1),
     ///          ClaimedDividends (r:1 w:1), Assets::mint_into (w:1)
     fn claim_dividend() -> Weight {
         Weight::from_parts(120_000_000, 5_000)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(3))
+            .saturating_add(T::DbWeight::get().reads(4))
+            .saturating_add(T::DbWeight::get().writes(4))
     }
 
     /// Storage: EntityTokenConfigs (r:1), Assets::balance (r:1), LockedTokens (r:1 w:1),
@@ -114,10 +115,11 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().writes(1))
     }
 
-    /// Storage: EntityProvider (r:1), EntityTokenConfigs (r:1 w:1), Assets::total_issuance (r:1)
+    /// Storage: EntityProvider (r:1), EntityTokenConfigs (r:1 w:1),
+    ///          Assets::total_issuance (r:1), TotalPendingDividends (r:1)
     fn set_max_supply() -> Weight {
         Weight::from_parts(80_000_000, 5_000)
-            .saturating_add(T::DbWeight::get().reads(3))
+            .saturating_add(T::DbWeight::get().reads(4))
             .saturating_add(T::DbWeight::get().writes(1))
     }
 

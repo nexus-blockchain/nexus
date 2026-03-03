@@ -80,31 +80,6 @@ pub mod pallet {
         Revoked,
     }
 
-    /// 认证类型（预留，当前未使用）
-    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
-    pub enum VerificationType {
-        /// 邮箱验证
-        Email,
-        /// 手机验证
-        Phone,
-        /// 身份证件
-        IdentityDocument,
-        /// 地址证明
-        AddressProof,
-        /// 资金来源证明
-        SourceOfFunds,
-        /// 企业注册文件
-        BusinessRegistration,
-        /// 受益所有人
-        BeneficialOwner,
-        /// 财务报表
-        FinancialStatements,
-        /// 人脸识别
-        FaceVerification,
-        /// 视频认证
-        VideoVerification,
-    }
-
     /// 拒绝原因
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     pub enum RejectionReason {
@@ -152,12 +127,8 @@ pub mod pallet {
         pub provider_type: ProviderType,
         /// 支持的最高认证级别
         pub max_level: KycLevel,
-        /// 是否活跃
-        pub active: bool,
         /// 已完成的认证数量
         pub verifications_count: u64,
-        /// 押金（可选）
-        pub deposit: u128,
     }
 
     /// 认证提供者类型别名
@@ -373,8 +344,6 @@ pub mod pallet {
         ProviderNotFound,
         /// 提供者已存在
         ProviderAlreadyExists,
-        /// 提供者不活跃
-        ProviderNotActive,
         /// CID 过长
         CidTooLong,
         /// 名称过长
@@ -405,6 +374,10 @@ pub mod pallet {
         EmptyDataCid,
         /// 无效的国家代码（需为 ISO 3166-1 alpha-2 大写字母）
         InvalidCountryCode,
+        /// 不允许自我审批
+        SelfApprovalNotAllowed,
+        /// KYC 尚未过期（expire_kyc 调用时记录仍在有效期内）
+        KycNotExpired,
     }
 
     // ==================== Extrinsics ====================
@@ -489,9 +462,11 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证是活跃提供者
+            // 验证是注册提供者
             let provider = Providers::<T>::get(&who).ok_or(Error::<T>::ProviderNotFound)?;
-            ensure!(provider.active, Error::<T>::ProviderNotActive);
+
+            // M1: 不允许自我审批
+            ensure!(who != account, Error::<T>::SelfApprovalNotAllowed);
 
             // H2: 风险评分必须 0-100
             ensure!(risk_score <= 100, Error::<T>::InvalidRiskScore);
@@ -541,9 +516,8 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证是活跃提供者
+            // 验证是注册提供者
             let provider = Providers::<T>::get(&who).ok_or(Error::<T>::ProviderNotFound)?;
-            ensure!(provider.active, Error::<T>::ProviderNotActive);
 
             let details_bounded = details_cid
                 .map(|cid| {
@@ -573,7 +547,16 @@ pub mod pallet {
                     reason,
                 });
                 Ok(())
-            })
+            })?;
+
+            // M2-R4: 拒绝也是已完成的审核，递增 verifications_count
+            Providers::<T>::mutate(&who, |maybe_provider| {
+                if let Some(p) = maybe_provider {
+                    p.verifications_count = p.verifications_count.saturating_add(1);
+                }
+            });
+
+            Ok(())
         }
 
         /// 撤销 KYC（管理员调用）
@@ -588,9 +571,12 @@ pub mod pallet {
 
             KycRecords::<T>::try_mutate(&account, |maybe_record| -> DispatchResult {
                 let record = maybe_record.as_mut().ok_or(Error::<T>::KycNotFound)?;
-                // H2: 管理员可以撤销 Approved 或 Expired 状态的 KYC
+                // H1-R2: 管理员可以撤销 Pending、Approved 或 Expired 状态的 KYC
+                // Pending: 解决无 provider 可处理的卡死记录
                 ensure!(
-                    record.status == KycStatus::Approved || record.status == KycStatus::Expired,
+                    record.status == KycStatus::Pending
+                        || record.status == KycStatus::Approved
+                        || record.status == KycStatus::Expired,
                     Error::<T>::InvalidKycStatus
                 );
 
@@ -639,9 +625,7 @@ pub mod pallet {
                 name: name_bounded,
                 provider_type,
                 max_level,
-                active: true,
                 verifications_count: 0,
-                deposit: 0,
             };
 
             Providers::<T>::insert(&provider_account, provider);
@@ -726,14 +710,46 @@ pub mod pallet {
                 );
             }
 
+            // M1-R4: 去重，避免重复代码浪费 50 个上限槽位
+            let mut deduped = countries;
+            deduped.sort();
+            deduped.dedup();
+
             let bounded: BoundedVec<[u8; 2], ConstU32<50>> = 
-                countries.try_into().map_err(|_| Error::<T>::TooManyCountries)?;
+                deduped.try_into().map_err(|_| Error::<T>::TooManyCountries)?;
 
             let count = bounded.len() as u32;
             HighRiskCountries::<T>::put(bounded);
 
             Self::deposit_event(Event::HighRiskCountriesUpdated { count });
             Ok(())
+        }
+
+        /// 标记已过期的 KYC 记录（任何人可调用）
+        /// M3-R4: 使 KycStatus::Expired 可达，KycExpired 事件可发射
+        #[pallet::call_index(8)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn expire_kyc(
+            origin: OriginFor<T>,
+            account: T::AccountId,
+        ) -> DispatchResult {
+            ensure_signed(origin)?;
+
+            KycRecords::<T>::try_mutate(&account, |maybe_record| -> DispatchResult {
+                let record = maybe_record.as_mut().ok_or(Error::<T>::KycNotFound)?;
+                ensure!(record.status == KycStatus::Approved, Error::<T>::InvalidKycStatus);
+
+                let expires_at = record.expires_at.ok_or(Error::<T>::InvalidKycStatus)?;
+                let now = <frame_system::Pallet<T>>::block_number();
+                ensure!(now > expires_at, Error::<T>::KycNotExpired);
+
+                record.status = KycStatus::Expired;
+
+                Self::deposit_event(Event::KycExpired {
+                    account: account.clone(),
+                });
+                Ok(())
+            })
         }
     }
 
@@ -806,8 +822,8 @@ pub mod pallet {
                 }
 
                 if let Some(record) = KycRecords::<T>::get(account) {
-                    // 检查状态
-                    if record.status != KycStatus::Approved {
+                    // 检查状态（Expired 仍可享受 grace_period 宽限期）
+                    if record.status != KycStatus::Approved && record.status != KycStatus::Expired {
                         return false;
                     }
                     // 检查级别

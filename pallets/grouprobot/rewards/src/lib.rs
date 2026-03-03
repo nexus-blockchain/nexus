@@ -87,12 +87,14 @@ pub mod pallet {
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
-		RewardsClaimed { node_id: NodeId, amount: BalanceOf<T> },
+		RewardsClaimed { node_id: NodeId, recipient: T::AccountId, amount: BalanceOf<T> },
 		EraCompleted { era: u64, total_distributed: BalanceOf<T> },
 		/// 节点奖励已累加 (ads 或 Era 分配)
 		RewardAccrued { node_id: NodeId, amount: BalanceOf<T> },
 		/// 节点退出时残留奖励已自动领取
 		OrphanRewardsClaimed { node_id: NodeId, operator: T::AccountId, amount: BalanceOf<T> },
+		/// M2-R3: 孤儿奖励领取失败 (奖励池不足, 需 Root rescue)
+		OrphanRewardClaimFailed { node_id: NodeId, amount: BalanceOf<T> },
 	}
 
 	// ========================================================================
@@ -109,6 +111,8 @@ pub mod pallet {
 		NoPendingRewards,
 		/// 奖励池余额不足
 		RewardPoolInsufficient,
+		/// 节点仍活跃, 应使用 claim_rewards
+		NodeStillActive,
 	}
 
 	// ========================================================================
@@ -127,6 +131,23 @@ pub mod pallet {
 			ensure!(operator == who, Error::<T>::NotOperator);
 
 			Self::do_claim_rewards(&node_id, &who)
+		}
+
+		/// M2-R2: Root 救援滞留奖励 (节点已退出, orphan claim 失败后的恢复手段)
+		#[pallet::call_index(1)]
+		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		pub fn rescue_stranded_rewards(
+			origin: OriginFor<T>,
+			node_id: NodeId,
+			recipient: T::AccountId,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			// 仅允许救援已退出节点 (node_operator 返回 None)
+			ensure!(
+				T::NodeConsensus::node_operator(&node_id).is_none(),
+				Error::<T>::NodeStillActive
+			);
+			Self::do_claim_rewards(&node_id, &recipient)
 		}
 	}
 
@@ -154,7 +175,11 @@ pub mod pallet {
 				*total = total.saturating_add(pending);
 			});
 
-			Self::deposit_event(Event::RewardsClaimed { node_id: *node_id, amount: pending });
+			Self::deposit_event(Event::RewardsClaimed {
+				node_id: *node_id,
+				recipient: recipient.clone(),
+				amount: pending,
+			});
 			Ok(())
 		}
 
@@ -187,6 +212,11 @@ pub mod pallet {
 						"Failed to claim orphan rewards for node {:?}, amount: {:?}",
 						node_id, pending
 					);
+					// M2-R3: 链上事件通知, 便于 Root 发现并 rescue
+					Self::deposit_event(Event::OrphanRewardClaimFailed {
+						node_id: *node_id,
+						amount: pending,
+					});
 				}
 			}
 		}
@@ -201,6 +231,12 @@ pub mod pallet {
 			node_weights: &[(NodeId, u128)],
 			node_count: u32,
 		) -> BalanceOf<T> {
+			// M3-R3: 防止同一 era 被重复分配 (重复铸币 + 重复 accrue)
+			if EraRewards::<T>::contains_key(era) {
+				log::warn!("Era {} already distributed, skipping duplicate", era);
+				return BalanceOf::<T>::zero();
+			}
+
 			// C1-fix: 铸币通胀部分到奖励池 (订阅费节点份额已由 subscription pallet 转入)
 			if !inflation.is_zero() {
 				let reward_pool = T::RewardPoolAccount::get();
@@ -224,6 +260,11 @@ pub mod pallet {
 							*pending = pending.saturating_add(reward);
 						});
 						total_distributed = total_distributed.saturating_add(reward);
+						// M1-R2: 逐节点事件, 与 accrue_node_reward (ads 路径) 保持一致
+						Self::deposit_event(Event::RewardAccrued {
+							node_id: *node_id,
+							amount: reward,
+						});
 					}
 				}
 			}

@@ -227,6 +227,8 @@ pub trait Config: frame_system::Config {
         + Debug + AtLeast32BitUnsigned + From<u32> + Into<u128>;
     type TokenPoolBalanceProvider: TokenPoolBalanceProvider<TokenBalanceOf<Self>>;
     type TokenTransferProvider: TokenTransferProvider<Self::AccountId, TokenBalanceOf<Self>>;
+    type ParticipationGuard: ParticipationGuard<Self::AccountId>;
+    type WeightInfo: WeightInfo;
 }
 ```
 
@@ -238,6 +240,7 @@ pub trait Config: frame_system::Config {
 | `CurrentRound` | `StorageMap<u64, RoundInfo>` | 当前轮次快照（entity_id → round） |
 | `LastClaimedRound` | `StorageDoubleMap<u64, AccountId, u64>` | 用户上次领取轮次 ID（防双领） |
 | `ClaimRecords` | `StorageDoubleMap<u64, AccountId, BoundedVec<ClaimRecord>>` | 用户领取历史（滚动窗口） |
+| `LastRoundId` | `StorageMap<u64, u64, ValueQuery>` | 配置变更后保留上一轮次 ID，保持 round_id 单调递增 |
 
 ## Extrinsics
 
@@ -245,7 +248,7 @@ pub trait Config: frame_system::Config {
 |------------|------|------|------|
 | 0 | `set_pool_reward_config` | Root | 设置沉淀池奖励配置（保留现有 `token_pool_enabled`） |
 | 1 | `claim_pool_reward` | Signed（会员） | 领取当前轮次奖励（NEX + Token） |
-| 2 | `force_new_round` | Root | 强制开启新轮次 |
+| 2 | `force_new_round` | Root | 强制开启新轮次（需 Entity 活跃） |
 | 3 | `set_token_pool_enabled` | Root | 启用/禁用 Token 池分配 |
 
 ### set_pool_reward_config 校验规则
@@ -261,14 +264,15 @@ pub trait Config: frame_system::Config {
 ### claim_pool_reward 流程
 
 ```
-1. 资格检查: is_member + is_activated
-2. 配置检查: 用户 custom_level_id 在 level_ratios 中
-3. 轮次检查: 当前轮次有效？过期则自动创建新轮
-4. 防双领: last_claimed_round < current_round_id
-5. 配额检查: claimed_count < member_count
-6. NEX 转账: entity_account → 用户, pool -= reward
-7. Token 转账: best-effort (失败不影响 NEX; 扣池失败则回滚转账)
-8. 记录更新: claimed_count++, 写入 ClaimRecords (滚动窗口)
+1. Entity 检查: is_entity_active
+2. 资格检查: is_member + is_activated + ParticipationGuard::can_participate
+3. 配置检查: 用户 custom_level_id 在 level_ratios 中
+4. 轮次检查: 当前轮次有效？过期则自动创建新轮
+5. 防双领: last_claimed_round < current_round_id
+6. 配额检查: claimed_count < member_count
+7. NEX 转账: entity_account → 用户, pool -= reward
+8. Token 转账: best-effort (失败不影响 NEX; 扣池失败则回滚转账)
+9. 记录更新: claimed_count++, 写入 ClaimRecords (滚动窗口)
 ```
 
 ## 内部方法
@@ -295,7 +299,7 @@ trait PoolRewardPlanWriter {
 ```
 
 - `set_pool_reward_config`: 与 extrinsic 共用 `validate_level_ratios` 校验，保留现有 `token_pool_enabled`
-- `clear_config`: 清除 `PoolRewardConfigs` + `CurrentRound` + `LastClaimedRound` + `ClaimRecords` 全部 4 项存储
+- `clear_config`: 清除 `PoolRewardConfigs` + `CurrentRound` + `LastRoundId` + `LastClaimedRound` + `ClaimRecords` 全部 5 项存储，发出 `PoolRewardConfigCleared` 事件
 
 ## Events
 
@@ -306,6 +310,8 @@ trait PoolRewardPlanWriter {
 | `PoolRewardClaimed` | entity_id, account, amount, token_amount, round_id, level_id | 用户领取奖励 |
 | `TokenPoolEnabledUpdated` | entity_id, enabled | Token 池开关变更 |
 | `RoundForced` | entity_id, round_id | 管理员强制开启新轮次 |
+| `TokenTransferRollbackFailed` | entity_id, account, amount | Token 回滚转账失败（需人工干预） |
+| `PoolRewardConfigCleared` | entity_id | 配置已清除（区别于 Updated） |
 
 ## Errors
 
@@ -325,6 +331,8 @@ trait PoolRewardPlanWriter {
 | `ConfigNotFound` | Entity 未配置沉淀池奖励 |
 | `LevelNotInSnapshot` | 等级未在当前轮次快照中 |
 | `RoundIdOverflow` | round_id 已达 u64::MAX，无法创建新轮次 |
+| `EntityNotActive` | Entity 不存在或未激活 |
+| `ParticipationRequirementNotMet` | 账户未满足 Entity 参与要求（如 KYC） |
 
 ## Token 双池行为细节
 
@@ -360,7 +368,7 @@ pallet-entity-common = { path = "../../common" }
 pallet-commission-common = { path = "../common" }
 ```
 
-## 测试覆盖（52 tests）
+## 测试覆盖（71 tests）
 
 ### 配置测试（7）
 
@@ -584,3 +592,38 @@ pallet-commission-common = { path = "../common" }
 | `m1_r4_weight_values_are_reasonable` | M1-R4 Weight 值非零且在预期范围内 |
 
 **累计测试**: 68 (was 64) ✅ · `cargo check -p nexus-runtime` ✅
+
+### Round 5
+
+**审计日期**: 2026-03-04
+
+#### 修复
+
+| ID | 严重度 | 描述 | 修复 |
+|----|--------|------|------|
+| M1-R5 | Medium | `force_new_round` 不检查 Entity 激活状态，可为 Banned/Closed Entity 创建快照 | 添加 `ensure!(is_entity_active)` 前置检查，与 `claim_pool_reward` 一致 |
+| M3-R5 | Medium | `clear_config` (PlanWriter) 发出 `PoolRewardConfigUpdated` 事件，off-chain indexer 无法区分配置更新与删除 | 新增 `PoolRewardConfigCleared` 事件，`clear_config` 改用专用事件 |
+| L2-R5 | Low | README 缺少 `EntityNotActive`/`ParticipationRequirementNotMet` 错误、`LastRoundId` 存储、`TokenTransferRollbackFailed`/`PoolRewardConfigCleared` 事件、`ParticipationGuard`/`WeightInfo` Config 项 | README 全面同步 |
+
+#### 记录（未修复）
+
+| ID | 严重度 | 描述 |
+|----|--------|------|
+| M2-R5 | Medium | `build_level_snapshots` 双整除截断可避免精度损失（`pool*ratio/10000/count` → `pool*ratio/(10000*count)`）。与 M1-R2 同属设计权衡，尘埃滚入下轮 |
+| L1-R5 | Low | `claim_pool_reward` 历史淘汰 `remove(0)` 为 O(n)，MaxClaimHistory 通常 ≤ 5，可忽略 |
+
+#### 新增事件
+
+| 名称 | 字段 | 说明 |
+|------|------|------|
+| `PoolRewardConfigCleared` | entity_id | 配置已清除（区别于 Updated） |
+
+#### 新增测试 (3)
+
+| 测试名 | 覆盖 |
+|--------|------|
+| `m1_r5_force_new_round_rejects_inactive_entity` | M1-R5 非活跃 Entity 拒绝强制新轮 |
+| `m1_r5_force_new_round_works_when_entity_active` | M1-R5 活跃 Entity 正常工作 |
+| `m3_r5_clear_config_emits_cleared_event` | M3-R5 clear_config 发出 Cleared 事件 |
+
+**累计测试**: 71 (was 68) ✅ · `cargo check -p pallet-commission-pool-reward` ✅

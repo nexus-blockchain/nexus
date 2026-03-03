@@ -3,7 +3,6 @@
 use crate as pallet_entity_tokensale;
 use frame_support::{derive_impl, parameter_types, traits::ConstU32};
 use sp_runtime::BuildStorage;
-use frame_support::traits::Currency;
 use frame_support::sp_runtime::DispatchError;
 
 type Block = frame_system::mocking::MockBlock<Test>;
@@ -58,7 +57,7 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
     }
     fn update_entity_stats(_: u64, _: u128, _: u32) -> Result<(), DispatchError> { Ok(()) }
     fn update_entity_rating(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
-    fn is_entity_admin(entity_id: u64, account: &u64) -> bool {
+    fn is_entity_admin(entity_id: u64, account: &u64, _required_permission: u32) -> bool {
         entity_id == ENTITY_ID && *account == CREATOR
     }
 }
@@ -80,6 +79,12 @@ pub struct MockTokenProvider;
 impl MockTokenProvider {
     pub fn set_balance(entity_id: u64, account: u64, amount: u128) {
         TOKEN_BALANCES.with(|b| b.borrow_mut().insert((entity_id, account), amount));
+    }
+    pub fn set_reserved(entity_id: u64, account: u64, amount: u128) {
+        TOKEN_RESERVED.with(|r| r.borrow_mut().insert((entity_id, account), amount));
+    }
+    pub fn get_reserved(entity_id: u64, account: u64) -> u128 {
+        TOKEN_RESERVED.with(|r| *r.borrow().get(&(entity_id, account)).unwrap_or(&0))
     }
 }
 

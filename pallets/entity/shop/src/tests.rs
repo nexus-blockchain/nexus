@@ -612,7 +612,7 @@ fn m1_enable_points_rejects_empty_name() {
         let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
         assert_noop!(
             Shop::enable_points(RuntimeOrigin::signed(1), 1, empty_name, symbol, 500, 1000, true),
-            Error::<Test>::ShopNameEmpty
+            Error::<Test>::PointsNameEmpty
         );
     });
 }
@@ -892,5 +892,229 @@ fn m4_fund_operating_rejects_zero_amount() {
             Shop::fund_operating(RuntimeOrigin::signed(1), 1, 0),
             Error::<Test>::ZeroFundAmount
         );
+    });
+}
+
+// ============================================================================
+// Audit Round 2: Regression Tests
+// ============================================================================
+
+#[test]
+fn m1_close_shop_clears_shop_entity_index() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        // ShopEntity should exist before close
+        assert_eq!(Shop::shop_entity(1), Some(1));
+
+        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
+
+        // M1: ShopEntity reverse index should be cleaned up after close
+        assert_eq!(Shop::shop_entity(1), None);
+    });
+}
+
+#[test]
+fn m1_force_close_shop_clears_shop_entity_index() {
+    new_test_ext().execute_with(|| {
+        let shop_id = <Shop as ShopProvider<u64>>::create_primary_shop(
+            1, b"Primary Shop".to_vec(), ShopType::OnlineStore,
+        ).unwrap();
+
+        assert_eq!(Shop::shop_entity(shop_id), Some(1));
+
+        // force_close bypasses is_primary check
+        assert_ok!(<Shop as ShopProvider<u64>>::force_close_shop(shop_id));
+
+        // M1: ShopEntity reverse index should be cleaned up
+        assert_eq!(Shop::shop_entity(shop_id), None);
+    });
+}
+
+#[test]
+fn m2_trait_resume_shop_requires_operating_fund() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        // Pause shop
+        assert_ok!(<Shop as ShopProvider<u64>>::pause_shop(1));
+
+        // Drain the shop account balance to below MinOperatingBalance
+        let shop_account = Shop::shop_account_id(1);
+        let balance = Balances::free_balance(shop_account);
+        // Transfer most funds away so balance < MinOperatingBalance (100)
+        let _ = <Balances as frame_support::traits::Currency<u64>>::transfer(
+            &shop_account, &5, balance - 50,
+            frame_support::traits::ExistenceRequirement::AllowDeath,
+        );
+        assert!(Balances::free_balance(shop_account) < 100);
+
+        // M2: trait resume_shop should reject when fund < MinOperatingBalance
+        assert_noop!(
+            <Shop as ShopProvider<u64>>::resume_shop(1),
+            Error::<Test>::InsufficientOperatingFund
+        );
+    });
+}
+
+#[test]
+fn m3_update_points_config_emits_event() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+        assert_ok!(Shop::enable_points(
+            RuntimeOrigin::signed(1), 1, name, symbol, 500, 1000, true,
+        ));
+
+        // Clear events
+        System::reset_events();
+
+        // Update points config
+        assert_ok!(Shop::update_points_config(
+            RuntimeOrigin::signed(1), 1, Some(200), Some(300), None,
+        ));
+
+        // M3: Should have emitted ShopUpdated event
+        let events = System::events();
+        assert!(events.iter().any(|e| {
+            matches!(
+                e.event,
+                RuntimeEvent::Shop(crate::Event::ShopUpdated { shop_id: 1 })
+            )
+        }), "update_points_config should emit ShopUpdated event");
+
+        // Verify config was actually updated
+        let config = Shop::shop_points_config(1).unwrap();
+        assert_eq!(config.reward_rate, 200);
+        assert_eq!(config.exchange_rate, 300);
+    });
+}
+
+#[test]
+fn l2_enable_points_empty_name_returns_points_name_empty() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        let empty_name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::default();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+
+        // L2: Should return PointsNameEmpty, not ShopNameEmpty
+        assert_noop!(
+            Shop::enable_points(RuntimeOrigin::signed(1), 1, empty_name, symbol, 500, 1000, true),
+            Error::<Test>::PointsNameEmpty
+        );
+    });
+}
+
+// ============================================================================
+// Audit Round 3: Regression Tests
+// ============================================================================
+
+#[test]
+fn m1r3_force_close_shop_rejects_double_close() {
+    new_test_ext().execute_with(|| {
+        let shop_id = <Shop as ShopProvider<u64>>::create_primary_shop(
+            1, b"Primary Shop".to_vec(), ShopType::OnlineStore,
+        ).unwrap();
+
+        // First force_close should succeed
+        assert_ok!(<Shop as ShopProvider<u64>>::force_close_shop(shop_id));
+        assert_eq!(Shop::shops(shop_id).unwrap().status, ShopOperatingStatus::Closed);
+
+        // M1-R3: Second force_close should fail (no duplicate ShopClosed event)
+        assert_noop!(
+            <Shop as ShopProvider<u64>>::force_close_shop(shop_id),
+            Error::<Test>::ShopAlreadyClosed
+        );
+    });
+}
+
+#[test]
+fn m2r3_update_shop_stats_works_after_shop_entity_cleared() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        // M2-R3: update_shop_stats reads entity_id from shop struct, not ShopEntity
+        assert_ok!(<Shop as ShopProvider<u64>>::update_shop_stats(1, 5000, 3));
+
+        let shop = Shop::shops(1).unwrap();
+        assert_eq!(shop.total_sales, 5000);
+        assert_eq!(shop.total_orders, 3);
+    });
+}
+
+#[test]
+fn l1r3_update_shop_rejects_all_none() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        // L1-R3: All-None update should be rejected
+        assert_noop!(
+            Shop::update_shop(RuntimeOrigin::signed(1), 1, None, None, None),
+            Error::<Test>::InvalidConfig
+        );
+    });
+}
+
+#[test]
+fn l2r3_update_points_config_rejects_all_none() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+        assert_ok!(Shop::enable_points(
+            RuntimeOrigin::signed(1), 1, name, symbol, 500, 1000, true,
+        ));
+
+        // L2-R3: All-None update should be rejected
+        assert_noop!(
+            Shop::update_points_config(RuntimeOrigin::signed(1), 1, None, None, None),
+            Error::<Test>::InvalidConfig
+        );
+    });
+}
+
+#[test]
+fn h3_deduct_operating_fund_triggers_fund_depleted() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        let shop = Shop::shops(1).unwrap();
+        assert_eq!(shop.status, ShopOperatingStatus::Active);
+
+        // Deduct most of the fund to trigger FundDepleted
+        // MinOperatingBalance = 100, so deducting 950 leaves 50 < 100
+        assert_ok!(<Shop as ShopProvider<u64>>::deduct_operating_fund(1, 950));
+
+        // H3: Shop status should be FundDepleted
+        let shop = Shop::shops(1).unwrap();
+        assert_eq!(shop.status, ShopOperatingStatus::FundDepleted);
     });
 }

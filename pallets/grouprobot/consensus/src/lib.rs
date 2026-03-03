@@ -218,8 +218,6 @@ pub mod pallet {
 		NotExiting,
 		/// Bot 未注册
 		BotNotRegistered,
-		/// 不是 Bot 所有者
-		NotBotOwner,
 		/// Equivocation 已举报
 		EquivocationAlreadyReported,
 		/// 序列已处理
@@ -240,6 +238,10 @@ pub mod pallet {
 		NotBotOperator,
 		/// TEE 奖励参数超出允许范围
 		InvalidTeeRewardParams,
+		/// Equivocation 已被解决 (不可重复 Slash)
+		EquivocationAlreadyResolved,
+		/// Equivocation 尚未解决 (不可清理)
+		EquivocationNotResolved,
 	}
 
 	// ========================================================================
@@ -434,6 +436,8 @@ pub mod pallet {
 			EquivocationRecords::<T>::try_mutate(&node_id, sequence, |maybe_record| -> DispatchResult {
 				// M3-fix: 使用正确的错误码
 				let record = maybe_record.as_mut().ok_or(Error::<T>::EquivocationNotFound)?;
+				// H1-R1: 防止重复 Slash
+				ensure!(!record.resolved, Error::<T>::EquivocationAlreadyResolved);
 				record.resolved = true;
 				Ok(())
 			})?;
@@ -515,6 +519,8 @@ pub mod pallet {
 			let who = ensure_signed(origin)?;
 			let node = Nodes::<T>::get(&node_id).ok_or(Error::<T>::NodeNotFound)?;
 			ensure!(node.operator == who, Error::<T>::NotOperator);
+			// M3-R1: 仅活跃节点可验证 TEE
+			ensure!(node.status == NodeStatus::Active, Error::<T>::NodeNotActive);
 			ensure!(!node.is_tee_node, Error::<T>::AlreadyTeeVerified);
 
 			// 验证 Bot 活跃且属于该操作者
@@ -536,6 +542,24 @@ pub mod pallet {
 			NodeBotBinding::<T>::insert(&node_id, bot_id_hash);
 
 			Self::deposit_event(Event::NodeTeeStatusChanged { node_id, is_tee: true });
+			Ok(())
+		}
+
+		/// 清理已解决的 Equivocation 记录 (任何人可调用)
+		///
+		/// 仅允许清理 `resolved=true` 的记录, 释放链上存储。
+		#[pallet::call_index(13)]
+		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		pub fn cleanup_resolved_equivocation(
+			origin: OriginFor<T>,
+			node_id: NodeId,
+			sequence: u64,
+		) -> DispatchResult {
+			ensure_signed(origin)?;
+			let record = EquivocationRecords::<T>::get(&node_id, sequence)
+				.ok_or(Error::<T>::EquivocationNotFound)?;
+			ensure!(record.resolved, Error::<T>::EquivocationNotResolved);
+			EquivocationRecords::<T>::remove(&node_id, sequence);
 			Ok(())
 		}
 
@@ -614,22 +638,25 @@ pub mod pallet {
 			let active_nodes = ActiveNodeList::<T>::get();
 			let node_count = active_nodes.len() as u32;
 
+			// M5-R1: 订阅结算始终执行, 即使无活跃节点 (费用收取/逾期标记独立于节点)
+			// 1. 委托 subscription pallet 结算订阅费
+			//    90% node_share 已由 subscription pallet 直接转给 Bot 运营者
+			//    10% → Treasury (由 subscription pallet 内部完成)
+			let settlement = T::SubscriptionSettler::settle_era();
+			let subscription_income_u128 = settlement.total_income;
+			let treasury_share_u128 = settlement.treasury_share;
+
 			if node_count == 0 {
+				// M5-R1: 无节点时仍执行 uptime 快照和 era 清理
+				T::PeerUptimeRecorder::record_era_uptime(era);
 				CurrentEra::<T>::put(era.saturating_add(1));
 				EraStartBlock::<T>::put(now);
+				T::RewardDistributor::prune_old_eras(era);
+				Self::deposit_event(Event::EraCompleted { era, total_distributed: BalanceOf::<T>::default() });
 				return;
 			}
 
-			// 1. 委托 subscription pallet 结算订阅费
-			//    80% node_share 已由 subscription pallet 直接转给 Bot 运营者
-			//    10% → Treasury, 10% → Agent (由 subscription pallet 内部完成)
-			let subscription_income_u128 = T::SubscriptionSettler::settle_era();
-			let subscription_income: BalanceOf<T> = subscription_income_u128.unique_saturated_into();
-
-			// 2. 计算份额 (仅用于 EraRewardInfo 记录)
-			let treasury_share = subscription_income * 10u32.into() / 100u32.into();
-
-			// 3. 通胀额度 (由 rewards pallet 在 distribute_and_record 时铸币到 RewardPool)
+			// 2. 通胀额度 (由 rewards pallet 在 distribute_and_record 时铸币到 RewardPool)
 			let inflation = T::InflationPerEra::get();
 
 			// 4. 可分配总额 = 仅通胀 (订阅 node_share 已全部直接分配给运营者, 不参与权重分配)
@@ -662,16 +689,15 @@ pub mod pallet {
 				}
 			}
 
-			// 7. 委托 rewards pallet 分配奖励并记录 Era 信息
+			// 6. 委托 rewards pallet 分配奖励并记录 Era 信息
 			let total_pool_u128: u128 = total_pool.unique_saturated_into();
 			let inflation_u128: u128 = inflation.unique_saturated_into();
-			let treasury_u128: u128 = treasury_share.unique_saturated_into();
 			let total_distributed_u128 = T::RewardDistributor::distribute_and_record(
 				era,
 				total_pool_u128,
 				subscription_income_u128,
 				inflation_u128,
-				treasury_u128,
+				treasury_share_u128,
 				&weights,
 				node_count,
 			);

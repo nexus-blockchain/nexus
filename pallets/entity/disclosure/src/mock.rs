@@ -8,6 +8,8 @@ use frame_support::{
 };
 use pallet_entity_common::{EntityProvider, EntityStatus};
 use sp_runtime::{BuildStorage, DispatchError};
+use std::cell::RefCell;
+use std::collections::BTreeSet;
 
 type Block = frame_system::mocking::MockBlock<Test>;
 
@@ -15,8 +17,17 @@ pub const OWNER: u64 = 1;
 pub const OWNER_2: u64 = 2;
 pub const ALICE: u64 = 10;
 pub const BOB: u64 = 11;
+pub const ADMIN: u64 = 20;
 pub const ENTITY_ID: u64 = 1;
 pub const ENTITY_ID_2: u64 = 2;
+
+thread_local! {
+    static ADMINS: RefCell<BTreeSet<(u64, u64)>> = RefCell::new(BTreeSet::new());
+}
+
+pub fn set_admin(entity_id: u64, account: u64) {
+    ADMINS.with(|a| a.borrow_mut().insert((entity_id, account)));
+}
 
 frame_support::construct_runtime!(
     pub enum Test {
@@ -60,6 +71,13 @@ impl EntityProvider<u64> for MockEntityProvider {
     }
     fn update_entity_stats(_: u64, _: u128, _: u32) -> Result<(), DispatchError> { Ok(()) }
     fn update_entity_rating(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
+    fn is_entity_admin(entity_id: u64, account: &u64, _required_permission: u32) -> bool {
+        // Owner 天然拥有全部权限
+        if Self::entity_owner(entity_id) == Some(*account) {
+            return true;
+        }
+        ADMINS.with(|a| a.borrow().contains(&(entity_id, *account)))
+    }
 }
 
 parameter_types! {

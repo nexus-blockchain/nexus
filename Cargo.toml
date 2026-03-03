@@ -53,7 +53,6 @@ members = [
     "pallets/grouprobot/consensus",
     "pallets/grouprobot/community",
     "pallets/grouprobot/ceremony",
-    "pallets/grouprobot/ads",
     "pallets/grouprobot/subscription",
     "pallets/grouprobot/rewards",
 ]
@@ -112,7 +111,6 @@ pallet-grouprobot-registry = { path = "./pallets/grouprobot/registry", default-f
 pallet-grouprobot-consensus = { path = "./pallets/grouprobot/consensus", default-features = false }
 pallet-grouprobot-community = { path = "./pallets/grouprobot/community", default-features = false }
 pallet-grouprobot-ceremony = { path = "./pallets/grouprobot/ceremony", default-features = false }
-pallet-grouprobot-ads = { path = "./pallets/grouprobot/ads", default-features = false }
 pallet-grouprobot-subscription = { path = "./pallets/grouprobot/subscription", default-features = false }
 pallet-grouprobot-rewards = { path = "./pallets/grouprobot/rewards", default-features = false }
 # Additional dependencies

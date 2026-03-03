@@ -390,6 +390,8 @@ pub mod pallet {
 		MrtdRevoked { mrtd: [u8; 48] },
 		/// L1-fix: MRENCLAVE 已从白名单撤销
 		MrenclaveRevoked { mrenclave: [u8; 32] },
+		/// P6-L1-fix: 用户平台身份绑定被覆盖 (含旧哈希, 审计线索)
+		UserPlatformBindingUpdated { account: T::AccountId, platform: Platform, old_hash: [u8; 32] },
 	}
 
 	// ========================================================================
@@ -783,8 +785,13 @@ pub mod pallet {
 			platform_user_id_hash: [u8; 32],
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
+			let old = UserPlatformBindings::<T>::get(&who, platform);
 			UserPlatformBindings::<T>::insert(&who, platform, platform_user_id_hash);
-			Self::deposit_event(Event::UserPlatformBound { account: who, platform });
+			if let Some(old_hash) = old {
+				Self::deposit_event(Event::UserPlatformBindingUpdated { account: who, platform, old_hash });
+			} else {
+				Self::deposit_event(Event::UserPlatformBound { account: who, platform });
+			}
 			Ok(())
 		}
 

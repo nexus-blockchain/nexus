@@ -105,11 +105,11 @@ pub trait SingleLineStatsProvider<AccountId, Balance> {
 
 ```rust
 pub trait SingleLineMemberLevelProvider<AccountId> {
-    fn effective_level_id(entity_id: u64, account: &AccountId) -> Option<u8>;
+    fn custom_level_id(entity_id: u64, account: &AccountId) -> u8;
 }
 ```
 
-返回买家的有效等级 ID，用于查找 `SingleLineLevelOverrides`。`()` 空实现返回 `None`（不区分等级）。
+返回买家的有效自定义等级 ID（考虑过期回退），用于查找 `SingleLineCustomLevelOverrides`。`()` 空实现返回 `0`（不区分等级）。
 
 ## Storage
 
@@ -118,7 +118,7 @@ pub trait SingleLineMemberLevelProvider<AccountId> {
 | `SingleLineConfigs` | `Map<u64, SingleLineConfig>` | 单线收益配置（entity_id → config） |
 | `SingleLines` | `Map<u64, BoundedVec<AccountId>>` | 消费单链（entity_id → 按序账户列表） |
 | `SingleLineIndex` | `DoubleMap<u64, AccountId, u32>` | 用户在单链中的位置索引 |
-| `SingleLineLevelOverrides` | `DoubleMap<u64, u8, LevelBasedLevels>` | 按等级自定义层数（entity_id, level_id → 层数） |
+| `SingleLineCustomLevelOverrides` | `DoubleMap<u64, u8, LevelBasedLevels>` | 按等级自定义层数（entity_id, level_id → 层数） |
 
 ## Extrinsics
 
@@ -152,7 +152,7 @@ CommissionPlugin::calculate()
 
 - `process_upline_token` / `process_downline_token`
 - `extra_levels` 计算仍基于 NEX `total_earned`（通过 `StatsProvider`），不使用 Token 收益
-- 单链维护（`add_to_single_line`）仅在 NEX 版 `CommissionPlugin::calculate` 中触发
+- 单链维护（`add_to_single_line`）在 NEX 版和 Token 版的 `calculate`/`calculate_token` 中均触发（幂等，不重复加入）
 
 ## Trait 实现
 
@@ -176,6 +176,7 @@ CommissionPlugin::calculate()
 | `InvalidRate` | 收益率超过 1000 基点 |
 | `SingleLineFull` | 消费单链已满 |
 | `InvalidLevels` | upline_levels 和 downline_levels 不能同时为 0 |
+| `BaseLevelsExceedMax` | base_upline_levels > max_upline_levels 或 base_downline_levels > max_downline_levels |
 
 ## 审计记录
 
@@ -183,13 +184,20 @@ CommissionPlugin::calculate()
 |----|------|------|
 | C2 | Critical | `process_upline`/`process_downline` 佣金计算使用 `beneficiary.total_earned * rate`（累计值，无限增长）。修复: 改为 `order_amount * rate / 10000`，添加 `order_amount` 参数 |
 | H4 | High | `calc_extra_levels` 中 `(earned/threshold) as u8` 可溢出。修复: 添加 `.min(255)` |
+| L1-R2 | Low | README trait 签名/存储名与代码不一致。修复: 同步 |
+| L2-R2 | Low | Cargo.toml 缺 `sp-runtime/runtime-benchmarks` 和 `sp-runtime/try-runtime` feature 传播。修复: 已添加 |
+| L3-R2 | Low | `process_downline`/`process_downline_token` 中 `buyer_index + i` 无限溢出检查。修复: 改用 `saturating_add` |
+| M1-R2 | Medium | `AddedToSingleLine` 事件已定义但 `add_to_single_line` 从未发射。修复: 成功加入后发射事件 |
+| M2-R2 | Medium | `set_single_line_config` 不校验 `base_levels <= max_levels`，允许不合逻辑配置。修复: 添加 `BaseLevelsExceedMax` 校验 |
+| M3-R2 | Medium | `SingleLines` 在启用 upline+downline 时被 `process_upline` 和 `process_downline` 各读取一次（需签名变更）。修复: `calculate`/`calculate_token` 预读取一次，传 `&line` 引用给 process 函数（R3 已实现） |
+| M1-R3 | Medium | 同 M3-R2 的实施轮次: NEX + Token 共 4 个 process 函数签名均增加 `line: &[T::AccountId]` 参数，消除冗余存储读取 |
+| L5-R3 | Low | Token 版 `_token` 函数与 NEX 版逻辑大量重复（~170 行）。修复: `process_upline`/`process_downline` 泛型化为 `<B: AtLeast32BitUnsigned + Copy>`，删除 `process_upline_token`/`process_downline_token`；新增 `do_calculate<B>` 统一分发，`calculate`/`calculate_token` 各委托一行 |
 
 ### 记录但未修复
 
 | ID | 级别 | 描述 |
 |----|------|------|
-| M1 | Medium | 3 个 extrinsic 硬编码 Weight，无 WeightInfo trait |
-| L1 | Low | Token 版 `_token` 函数与 NEX 版逻辑大量重复（维护风险） |
+| L4-D | Low | 3 个 extrinsic 硬编码 Weight，无 WeightInfo trait |
 
 ## 依赖
 
@@ -197,4 +205,3 @@ CommissionPlugin::calculate()
 [dependencies]
 pallet-entity-common = { path = "../../common" }
 pallet-commission-common = { path = "../common" }
-```

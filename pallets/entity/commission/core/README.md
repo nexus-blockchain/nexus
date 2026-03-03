@@ -295,7 +295,7 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 | `calc_withdrawal_split` | 计算提现/复购/奖励分配（三层约束模型） |
 | `do_use_shopping_balance` | 使用购物余额纯记账（供 CommissionProvider 调用，不转 NEX） |
 | `do_consume_shopping_balance` | 消费购物余额（扣减记账 + NEX 从 Entity 转入会员钱包，供 ShoppingBalanceProvider 调用） |
-| `resolve_entity_id` | 从 shop_id 解析 entity_id |
+| ~~`resolve_entity_id`~~ | L1 修复: 已移除（死代码，未被任何代码路径调用） |
 | `ensure_entity_owner` | 验证 Entity 所有者权限 |
 
 ## 资金流向
@@ -342,6 +342,8 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 | `TreasuryRefund` | order_id, amount | 国库退款（订单取消） |
 | `CommissionRefundFailed` | entity_id, shop_id, amount | 退款失败（需人工干预） |
 | `WithdrawalCooldownNotMet` | entity_id, account, earliest_block | 提现冻结期未满 |
+| `GlobalMinTokenRepurchaseRateSet` | entity_id, rate | M1 修复: Token Governance 全局最低复购比例变更 |
+| `GlobalMinRepurchaseRateSet` | entity_id, rate | L5 修复: NEX Governance 全局最低复购比例变更 |
 
 ## Errors
 
@@ -352,7 +354,7 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 | `NotShopOwner` | 不是店主 |
 | `NotEntityOwner` | 不是实体所有者 |
 | `CommissionNotConfigured` | 返佣未配置 |
-| `InsufficientCommission` | 返佣余额不足 / 偿付安全检查未通过 |
+| `InsufficientCommission` | 返佣 pending 余额不足（M2 修复: 偿付安全检查已改用 `InsufficientEntityFunds`） |
 | `InvalidCommissionRate` | 无效的返佣率（> 10000） |
 | `RecordsFull` | 订单返佣记录达到 MaxCommissionRecordsPerOrder 上限 |
 | `Overflow` | 数值溢出 |
@@ -370,6 +372,9 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 | `ParticipationRequirementNotMet` | H3: 账户不满足 Entity 参与要求，无法消费购物余额 |
 | `ShoppingBalanceWithdrawalDisabled` | 购物余额仅可用于购物，不可直接提取为 NEX |
 | `CommissionPlanDisabled` | init_commission_plan 已禁用，请使用 utility.batch 组合分步 extrinsics |
+| `InsufficientEntityFunds` | M2 修复: Entity 账户 NEX 偿付能力不足（原复用 InsufficientCommission） |
+| `InsufficientEntityTokenFunds` | M2 修复: Entity 账户 Token 偿付能力不足（原复用 InsufficientTokenCommission） |
+| `InsufficientTokenCommission` | Token 佣金 pending 余额不足（M2 修复: Token 偿付安全检查已改用 `InsufficientEntityTokenFunds`） |
 
 ## Trait 实现
 
@@ -431,10 +436,16 @@ Runtime 通过 `KycParticipationGuard` 桥接 `pallet-entity-kyc::can_participat
 | M2-rep | ~~Removed~~ | `do_consume_shopping_balance` | ~~激活检查已移除（过度设计）~~ KYC 参与权检查已足够 |
 | M3 | Medium | `TieredWithdrawal` 事件 | 新增 `repurchase_target` 字段 |
 | — | — | `use_shopping_balance` extrinsic | 禁用直接提现，购物余额仅可用于购物 |
+| M1-R4 | Medium | `set_global_min_token_repurchase_rate` | 新增 `GlobalMinTokenRepurchaseRateSet` 事件，Governance 比例变更可审计 |
+| M2-R4 | Medium | `withdraw_commission` / `withdraw_token_commission` | 偿付安全检查改用 `InsufficientEntityFunds` / `InsufficientEntityTokenFunds`，与 pending 不足区分 |
+| M3-R4 | Medium | `cancel_commission` | 消除 Token 取消逻辑重复，复用 `do_cancel_token_commission` |
+| M4-R4 | Medium | `CommissionProvider::set_commission_modes` | 使用 `CommissionModes::is_valid()`（单一事实来源）替代手动掩码 |
+| L1-R4 | Low | `resolve_entity_id` | 移除死代码 |
+| L5-R4 | Low | `CommissionProvider::set_min_repurchase_rate` | 新增 `GlobalMinRepurchaseRateSet` 事件 |
 
 ## 测试覆盖
 
-29 个测试（`cargo test -p pallet-commission-core`）：
+102 个测试（`cargo test -p pallet-commission-core`）：
 
 - **set_commission_rate**: works / rejects_invalid / rejects_non_owner
 - **process_commission（平台费分配）**: referrer_gets_half / dual_source / referrer_skipped_no_referrer / referrer_skipped_zero_fee / referrer_capped / referrer_stats
@@ -449,6 +460,7 @@ Runtime 通过 `KycParticipationGuard` 桥接 `pallet-entity-kyc::can_participat
 - **提现模式**: fixed_rate_withdrawal_split_works / governance_floor_enforced_in_full_withdrawal_mode
 - **H3 KYC**: h3_withdraw_blocked_when_target_participation_denied / h3_consume_shopping_balance_blocked_when_participation_denied / h3_self_withdraw_not_checked_by_participation_guard
 - **购物余额**: use_shopping_balance_extrinsic_always_rejected
+- **Round 4 回归**: m1_set_global_min_token_repurchase_rate_emits_event / l5_set_min_repurchase_rate_via_trait_emits_event / m2_withdraw_commission_solvency_uses_entity_funds_error / m2_withdraw_token_commission_solvency_uses_entity_token_funds_error / m3_cancel_commission_still_cancels_token_records / m4_trait_set_commission_modes_uses_is_valid
 
 ## 依赖
 

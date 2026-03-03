@@ -112,10 +112,14 @@ pub mod pallet {
         pub total_orders: u64,
         /// 已完成订单数
         pub completed_orders: u64,
-        /// 总交易额
+        /// 总交易额（NEX）
         pub total_volume: Balance,
-        /// 总平台费收入
+        /// 总平台费收入（NEX）
         pub total_platform_fees: Balance,
+        /// 总 Token 交易额（u128 避免泛型膨胀）
+        pub total_token_volume: u128,
+        /// 总 Token 平台费（u128）
+        pub total_token_platform_fees: u128,
     }
 
     /// 订单附属操作类型（用于失败事件追踪）
@@ -270,6 +274,8 @@ pub mod pallet {
             buyer: T::AccountId,
             seller: T::AccountId,
             amount: BalanceOf<T>,
+            payment_asset: PaymentAsset,
+            token_amount: u128,
         },
         /// 订单已支付
         OrderPaid { order_id: u64, escrow_id: u64 },
@@ -279,13 +285,15 @@ pub mod pallet {
         OrderCompleted {
             order_id: u64,
             seller_received: BalanceOf<T>,
+            token_seller_received: u128,
         },
         /// 订单已取消
-        OrderCancelled { order_id: u64 },
+        OrderCancelled { order_id: u64, amount: BalanceOf<T>, token_amount: u128 },
         /// 订单已退款
         OrderRefunded {
             order_id: u64,
             amount: BalanceOf<T>,
+            token_amount: u128,
         },
         /// 订单进入争议
         OrderDisputed { order_id: u64 },
@@ -417,8 +425,9 @@ pub mod pallet {
             let seller = T::ShopProvider::shop_owner(shop_id).ok_or(Error::<T>::ShopNotFound)?;
             ensure!(seller != buyer, Error::<T>::CannotBuyOwnProduct);
 
-            // 计算金额
-            let total_amount = price.saturating_mul(quantity.into());
+            // H3-fix: 计算金额（checked_mul 防溢出）
+            let total_amount = price.checked_mul(&quantity.into())
+                .ok_or(Error::<T>::Overflow)?;
             
             // 获取 entity_id 用于积分/token 操作
             let entity_id = T::ShopProvider::shop_entity_id(shop_id)
@@ -569,6 +578,8 @@ pub mod pallet {
                 buyer: buyer.clone(),
                 seller: seller.clone(),
                 amount: final_amount,
+                payment_asset: resolved_payment_asset,
+                token_amount: token_payment_amount,
             });
             Self::deposit_event(Event::OrderPaid {
                 order_id,
@@ -630,7 +641,11 @@ pub mod pallet {
                 }
             });
 
-            Self::deposit_event(Event::OrderCancelled { order_id });
+            Self::deposit_event(Event::OrderCancelled {
+                order_id,
+                amount: order.total_amount,
+                token_amount: order.token_payment_amount,
+            });
             Ok(())
         }
 
@@ -779,6 +794,7 @@ pub mod pallet {
             Self::deposit_event(Event::OrderRefunded {
                 order_id,
                 amount: order.total_amount,
+                token_amount: order.token_payment_amount,
             });
             Ok(())
         }
@@ -822,6 +838,8 @@ pub mod pallet {
                 ensure!(order.seller == who, Error::<T>::NotOrderSeller);
                 ensure!(order.product_category == ProductCategory::Service, Error::<T>::NotServiceOrder);
                 ensure!(order.status == OrderStatus::Shipped, Error::<T>::InvalidOrderStatus);
+                // M1-R6-fix: 防止重复调用 complete_service 填充 ExpiryQueue
+                ensure!(order.service_completed_at.is_none(), Error::<T>::InvalidOrderStatus);
 
                 order.service_completed_at = Some(<frame_system::Pallet<T>>::block_number());
                 Ok(())
@@ -861,6 +879,10 @@ pub mod pallet {
         fn do_complete_order(order_id: u64, order: &OrderOf<T>) -> DispatchResult {
             let seller_amount = order.total_amount.saturating_sub(order.platform_fee);
 
+            // L1-R6-fix: 提前解析 entity_id，避免 Token 订单重复读取存储
+            let entity_id = T::ShopProvider::shop_entity_id(order.shop_id)
+                .unwrap_or(order.shop_id);
+
             match order.payment_asset {
                 PaymentAsset::Native => {
                     // NEX 支付：从托管释放资金给卖家
@@ -872,8 +894,6 @@ pub mod pallet {
                 },
                 PaymentAsset::EntityToken => {
                     // Token 支付：计算 Token 平台费并拆分转账
-                    let entity_id = T::ShopProvider::shop_entity_id(order.shop_id)
-                        .unwrap_or(order.shop_id);
                     let token_amount: u128 = order.token_payment_amount;
                     let token_fee_rate = T::TokenCommissionHandler::token_platform_fee_rate(entity_id) as u128;
                     let token_platform_fee = token_amount.saturating_mul(token_fee_rate) / 10000u128;
@@ -910,27 +930,33 @@ pub mod pallet {
                 }
             });
 
-            // 解析 entity_id（供会员/佣金模块使用）
-            let entity_id = T::ShopProvider::shop_entity_id(order.shop_id)
-                .unwrap_or(order.shop_id);
-
             // 自动注册买家为会员 + 更新消费金额（best-effort）
             // auto_register: 首次购买时注册会员（PURCHASE_REQUIRED 策略触发点）
             // update_spent: 更新消费金额 + 激活待激活会员 + 触发等级升级
             if T::MemberHandler::auto_register(entity_id, &order.buyer, None).is_err() {
                 Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::MemberAutoRegister });
             }
-            // NEX → USDT 转换: price 精度 10^6, NEX 精度 10^12
-            // amount_usdt (6 dec) = amount_nex (12 dec) * price (6 dec) / 10^12
-            let amount_nex: u128 = order.total_amount.saturated_into();
-            let nex_price: u128 = T::PricingProvider::get_nex_usdt_price() as u128;
-            let amount_usdt: u64 = amount_nex.saturating_mul(nex_price)
-                .checked_div(1_000_000_000_000u128)
-                .unwrap_or(0) as u64;
+            // H1-R5-fix: Token 订单未花费 NEX，不应将 token 数量当作 NEX 做 USDT 转换
+            let (spent_amount, amount_usdt): (BalanceOf<T>, u64) = match order.payment_asset {
+                PaymentAsset::Native => {
+                    // NEX → USDT 转换: price 精度 10^6, NEX 精度 10^12
+                    // amount_usdt (6 dec) = amount_nex (12 dec) * price (6 dec) / 10^12
+                    let amount_nex: u128 = order.total_amount.saturated_into();
+                    let nex_price: u128 = T::PricingProvider::get_nex_usdt_price() as u128;
+                    let usdt: u64 = amount_nex.saturating_mul(nex_price)
+                        .checked_div(1_000_000_000_000u128)
+                        .unwrap_or(0) as u64;
+                    (order.total_amount, usdt)
+                },
+                PaymentAsset::EntityToken => {
+                    // Token 订单：无 NEX 消费，amount 和 amount_usdt 均为 0
+                    (Zero::zero(), 0u64)
+                },
+            };
             if T::MemberHandler::update_spent(
                 entity_id,
                 &order.buyer,
-                order.total_amount,
+                spent_amount,
                 amount_usdt,
             ).is_err() {
                 Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::MemberUpdate });
@@ -942,20 +968,34 @@ pub mod pallet {
                 entity_id,
                 &order.buyer,
                 order.product_id,
-                order.total_amount,
+                spent_amount,
                 amount_usdt,
             ).is_err() {
                 Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::UpgradeRuleCheck });
             }
 
-            // 更新店铺统计（best-effort，失败发事件）
+            // H2-fix: 更新店铺统计 — Token 订单使用 token_payment_amount，NEX 订单使用 seller_amount
+            let shop_stats_amount: u128 = match order.payment_asset {
+                PaymentAsset::Native => seller_amount.saturated_into(),
+                PaymentAsset::EntityToken => order.token_payment_amount,
+            };
             if T::ShopProvider::update_shop_stats(
                 order.shop_id,
-                seller_amount.saturated_into(),
+                shop_stats_amount,
                 1,
             ).is_err() {
                 Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::ShopStatsUpdate });
             }
+
+            // L1-R5-fix: 预先计算 Token 平台费（避免重复计算 3 次）
+            let token_platform_fee: u128 = match order.payment_asset {
+                PaymentAsset::Native => 0u128,
+                PaymentAsset::EntityToken => {
+                    let ta: u128 = order.token_payment_amount;
+                    let tfr = T::TokenCommissionHandler::token_platform_fee_rate(entity_id) as u128;
+                    ta.saturating_mul(tfr) / 10000u128
+                },
+            };
 
             // 触发佣金计算（best-effort，失败发事件）
             // 根据支付资产类型分支：Native → NEX 佣金，EntityToken → Token 佣金
@@ -973,11 +1013,6 @@ pub mod pallet {
                     }
                 },
                 PaymentAsset::EntityToken => {
-                    // 重新计算 Token 平台费（与上方拆分一致）
-                    let token_amount: u128 = order.token_payment_amount;
-                    let token_fee_rate = T::TokenCommissionHandler::token_platform_fee_rate(entity_id) as u128;
-                    let token_platform_fee = token_amount.saturating_mul(token_fee_rate) / 10000u128;
-
                     if T::TokenCommissionHandler::on_token_order_completed(
                         entity_id,
                         order.shop_id,
@@ -991,24 +1026,42 @@ pub mod pallet {
                 },
             }
 
-            // 发放购物积分奖励（使用已解析的 entity_id）
+            // M3-fix: 发放购物积分奖励 — Token 订单使用 token_payment_amount 转换为 Balance
+            let reward_amount: BalanceOf<T> = match order.payment_asset {
+                PaymentAsset::Native => order.total_amount,
+                PaymentAsset::EntityToken => order.token_payment_amount.saturated_into(),
+            };
             if T::EntityToken::reward_on_purchase(
                 entity_id,
                 &order.buyer,
-                order.total_amount,
+                reward_amount,
             ).is_err() {
                 Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::TokenReward });
             }
 
+            // M2-R5-fix: total_volume 仅追踪 NEX，Token 走 total_token_volume
             OrderStats::<T>::mutate(|stats| {
                 stats.completed_orders = stats.completed_orders.saturating_add(1);
-                stats.total_volume = stats.total_volume.saturating_add(order.total_amount);
-                stats.total_platform_fees = stats.total_platform_fees.saturating_add(order.platform_fee);
+                match order.payment_asset {
+                    PaymentAsset::Native => {
+                        stats.total_volume = stats.total_volume.saturating_add(order.total_amount);
+                        stats.total_platform_fees = stats.total_platform_fees.saturating_add(order.platform_fee);
+                    },
+                    PaymentAsset::EntityToken => {
+                        stats.total_token_volume = stats.total_token_volume.saturating_add(order.token_payment_amount);
+                        stats.total_token_platform_fees = stats.total_token_platform_fees.saturating_add(token_platform_fee);
+                    },
+                }
             });
 
+            let token_seller_received: u128 = match order.payment_asset {
+                PaymentAsset::Native => 0u128,
+                PaymentAsset::EntityToken => order.token_payment_amount.saturating_sub(token_platform_fee),
+            };
             Self::deposit_event(Event::OrderCompleted {
                 order_id,
                 seller_received: seller_amount,
+                token_seller_received,
             });
 
             Ok(())
@@ -1058,10 +1111,13 @@ pub mod pallet {
             }
 
             let mut processed = 0u32;
-            let mut iterated = 0usize; // C1: 实际遍历位置（含跳过和失败的）
+            // H1-fix: 跟踪需要保留在队列中的订单（如服务中未到期）
+            let mut retain_ids: Vec<u64> = Vec::new();
+            let mut iterated = 0usize;
 
             for &order_id in order_ids.iter() {
                 if processed >= max_count {
+                    // 未遍历的全部保留
                     break;
                 }
                 iterated = iterated.saturating_add(1);
@@ -1082,6 +1138,12 @@ pub mod pallet {
                                             ord.status = OrderStatus::Refunded;
                                         }
                                     });
+                                    // M1-R5-fix: 发射退款事件（之前遗漏）
+                                    Self::deposit_event(Event::OrderRefunded {
+                                        order_id,
+                                        amount: order.total_amount,
+                                        token_amount: order.token_payment_amount,
+                                    });
                                     processed = processed.saturating_add(1);
                                 } else {
                                     Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::EscrowRefund });
@@ -1097,6 +1159,12 @@ pub mod pallet {
                                         if let Some(ord) = o {
                                             ord.status = OrderStatus::Refunded;
                                         }
+                                    });
+                                    // M1-R5-fix: 发射退款事件（之前遗漏）
+                                    Self::deposit_event(Event::OrderRefunded {
+                                        order_id,
+                                        amount: order.total_amount,
+                                        token_amount: order.token_payment_amount,
                                     });
                                     processed = processed.saturating_add(1);
                                 } else {
@@ -1127,44 +1195,44 @@ pub mod pallet {
                                             Self::deposit_event(Event::OrderRefunded {
                                                 order_id,
                                                 amount: order.total_amount,
+                                                token_amount: order.token_payment_amount,
                                             });
                                             processed = processed.saturating_add(1);
                                         } else {
                                             Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::EscrowRefund });
                                         }
+                                    } else {
+                                        // H1-fix: 还在服务期限内，保留在队列中等下次检查
+                                        retain_ids.push(order_id);
                                     }
-                                    // else: 还在服务期限内，跳过（等 ServiceConfirmTimeout 到期后处理）
+                                } else {
+                                    // service_started_at 为 None（理论上不应出现），保留队列
+                                    retain_ids.push(order_id);
                                 }
-                                // else: service_started_at 为 None（理论上不应出现），跳过
                             } else if Self::do_complete_order(order_id, &order).is_ok() {
                                 processed = processed.saturating_add(1);
                             } else {
                                 Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::AutoComplete });
                             }
                         }
-                        // 已被手动处理（取消/退款/确认等），跳过
+                        // 已被手动处理（取消/退款/确认等），跳过（从队列移除）
                         _ => {}
                     }
                 }
             }
 
-            // C1: 按实际遍历位置截断，保留未遍历的订单
-            if iterated >= order_ids.len() {
-                // 全部遍历完毕，清空队列
+            // H1-fix: 合并保留的订单 + 未遍历的订单
+            let mut all_remaining = retain_ids;
+            if iterated < order_ids.len() {
+                all_remaining.extend(order_ids.iter().skip(iterated));
+            }
+            if all_remaining.is_empty() {
                 ExpiryQueue::<T>::remove(now);
             } else {
-                // 部分遍历，保留未遍历的条目
-                let remaining: BoundedVec<u64, ConstU32<500>> = order_ids
-                    .into_iter()
-                    .skip(iterated)
-                    .collect::<Vec<_>>()
+                let bounded: BoundedVec<u64, ConstU32<500>> = all_remaining
                     .try_into()
                     .expect("remaining is subset of original bounded vec");
-                if remaining.is_empty() {
-                    ExpiryQueue::<T>::remove(now);
-                } else {
-                    ExpiryQueue::<T>::insert(now, remaining);
-                }
+                ExpiryQueue::<T>::insert(now, bounded);
             }
 
             // 精确报告 weight：读队列 + 每个订单读写 + escrow + commission 操作
@@ -1220,6 +1288,20 @@ pub mod pallet {
                     is_party && status_ok
                 })
                 .unwrap_or(false)
+        }
+
+        fn order_token_amount(order_id: u64) -> Option<u128> {
+            Orders::<T>::get(order_id).map(|o| o.token_payment_amount)
+        }
+
+        fn order_payment_asset(order_id: u64) -> Option<PaymentAsset> {
+            Orders::<T>::get(order_id).map(|o| o.payment_asset)
+        }
+
+        fn order_completed_at(order_id: u64) -> Option<u64> {
+            Orders::<T>::get(order_id)
+                .and_then(|o| o.completed_at)
+                .map(|b| b.try_into().unwrap_or(u64::MAX))
         }
     }
 }

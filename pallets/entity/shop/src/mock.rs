@@ -72,8 +72,8 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
         Ok(())
     }
 
-    fn is_entity_admin(entity_id: u64, account: &u64) -> bool {
-        // Account 10 is admin of Entity 1
+    fn is_entity_admin(entity_id: u64, account: &u64, _required_permission: u32) -> bool {
+        // Account 10 is admin of Entity 1 (full permissions in mock)
         entity_id == 1 && *account == 10
     }
 }

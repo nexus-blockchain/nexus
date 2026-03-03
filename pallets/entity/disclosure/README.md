@@ -91,7 +91,6 @@ Published ──┬── Withdrawn  (撤回)
 pub struct DisclosureConfig<BlockNumber> {
     pub level: DisclosureLevel,              // 当前披露级别
     pub insider_trading_control: bool,       // 是否启用内幕交易控制
-    pub blackout_period_before: BlockNumber, // 披露前黑窗口期长度
     pub blackout_period_after: BlockNumber,  // 披露后黑窗口期长度
     pub next_required_disclosure: BlockNumber, // 下次必须披露的截止区块
     pub last_disclosure: BlockNumber,        // 上次披露区块
@@ -150,7 +149,7 @@ Active ───┬─── Withdrawn  (撤回)
 
 | # | 函数 | 权限 | 说明 |
 |---|------|------|------|
-| 0 | `configure_disclosure(entity_id, level, insider_control, blackout_before, blackout_after)` | Entity Owner | 初始化或更新实体披露配置，自动计算 `next_required_disclosure` |
+| 0 | `configure_disclosure(entity_id, level, insider_control, blackout_after)` | Entity Owner/Admin | 初始化或更新实体披露配置，自动计算 `next_required_disclosure` |
 | 1 | `publish_disclosure(entity_id, type, content_cid, summary_cid?)` | Entity Owner | 发布披露记录；更新配置中的 `last_disclosure` 和 `next_required_disclosure`；若启用内幕控制且 `blackout_after > 0`，自动开启黑窗口期 |
 | 2 | `withdraw_disclosure(disclosure_id)` | Owner 或 Discloser | 撤回已发布的披露（状态 → `Withdrawn`） |
 | 3 | `correct_disclosure(old_id, content_cid, summary_cid?)` | Entity Owner | 创建更正版本（新记录 `previous_id` 指向旧 ID），旧记录状态 → `Corrected` |

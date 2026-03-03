@@ -12,13 +12,16 @@ pub trait WeightInfo {
 pub struct SubstrateWeight<T>(core::marker::PhantomData<T>);
 
 impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
-    /// submit_review: 3 reads (order_buyer, is_order_completed, Reviews)
-    /// + 1 read+write (UserReviews) + 2 writes (Reviews, ReviewCount)
-    /// + conditional 1 read + 1 write (ShopReviewCount, update_shop_rating)
+    /// submit_review:
+    /// reads: order_buyer, is_order_completed, is_order_disputed, order_completed_at,
+    ///        Reviews, order_shop_id, shop_entity_id, EntityReviewDisabled,
+    ///        UserReviews, update_shop_rating, update_entity_rating = ~8 worst-case
+    /// writes: UserReviews, Reviews, ReviewCount, ShopReviewCount,
+    ///         update_shop_rating, update_entity_rating = ~6 worst-case
     fn submit_review() -> Weight {
-        Weight::from_parts(45_000_000, 7_000)
-            .saturating_add(T::DbWeight::get().reads(5))
-            .saturating_add(T::DbWeight::get().writes(5))
+        Weight::from_parts(55_000_000, 8_000)
+            .saturating_add(T::DbWeight::get().reads(8))
+            .saturating_add(T::DbWeight::get().writes(6))
     }
 
     /// set_review_enabled: 3 reads (entity_exists, is_entity_active, is_entity_admin)
@@ -33,7 +36,7 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 /// Unit weight for testing.
 impl WeightInfo for () {
     fn submit_review() -> Weight {
-        Weight::from_parts(45_000_000, 7_000)
+        Weight::from_parts(55_000_000, 8_000)
     }
 
     fn set_review_enabled() -> Weight {

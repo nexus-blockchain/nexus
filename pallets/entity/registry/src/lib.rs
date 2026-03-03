@@ -45,7 +45,7 @@ pub mod pallet {
         BoundedVec, PalletId,
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{EntityStatus, EntityType, GovernanceMode, PricingProvider, EntityProvider, ShopProvider, ShopType};
+    use pallet_entity_common::{EntityStatus, EntityType, GovernanceMode, PricingProvider, EntityProvider, ShopProvider, ShopType, AdminPermission};
     use sp_runtime::{
         traits::{AccountIdConversion, Saturating, Zero},
         SaturatedConversion,
@@ -107,8 +107,8 @@ pub mod pallet {
         // ========== 组织层字段 ==========
         /// 实体类型（默认 Merchant）
         pub entity_type: EntityType,
-        /// 管理员列表（所有者之外的管理员）
-        pub admins: BoundedVec<AccountId, MaxAdmins>,
+        /// 管理员列表（所有者之外的管理员，每个管理员绑定权限位掩码）
+        pub admins: BoundedVec<(AccountId, u32), MaxAdmins>,
         /// 治理模式（默认 None）
         pub governance_mode: GovernanceMode,
         /// 是否已验证（官方认证）
@@ -259,11 +259,6 @@ pub mod pallet {
     #[pallet::getter(fn entity_referrer)]
     pub type EntityReferrer<T: Config> = StorageMap<_, Blake2_128Concat, u64, T::AccountId>;
 
-    /// 账户招商统计 (account → 推荐的 entity 数量)
-    #[pallet::storage]
-    #[pallet::getter(fn entity_referral_count)]
-    pub type EntityReferralCount<T: Config> = StorageMap<_, Blake2_128Concat, T::AccountId, u32, ValueQuery>;
-
     /// Entity 关联的所有 Shop IDs（1:N 多店铺）
     #[pallet::storage]
     #[pallet::getter(fn entity_shop_ids)]
@@ -346,11 +341,19 @@ pub mod pallet {
         AdminAdded {
             entity_id: u64,
             admin: T::AccountId,
+            permissions: u32,
         },
         /// 管理员已移除
         AdminRemoved {
             entity_id: u64,
             admin: T::AccountId,
+        },
+        /// 管理员权限已更新
+        AdminPermissionsUpdated {
+            entity_id: u64,
+            admin: T::AccountId,
+            old_permissions: u32,
+            new_permissions: u32,
         },
         /// 实体类型已升级
         EntityTypeUpgraded {
@@ -394,6 +397,11 @@ pub mod pallet {
         FundRefundFailed {
             entity_id: u64,
             amount: BalanceOf<T>,
+        },
+        /// Shop 已从 Entity 移除
+        ShopRemovedFromEntity {
+            entity_id: u64,
+            shop_id: u64,
         },
     }
 
@@ -455,14 +463,16 @@ pub mod pallet {
         EntityNotActive,
         /// 类型未变化
         SameEntityType,
-        /// 治理模式未变化
-        SameGovernanceMode,
         /// 推荐人已绑定（不可更改）
         ReferrerAlreadyBound,
         /// 无效推荐人（推荐人未拥有 Active Entity）
         InvalidReferrer,
         /// 不能推荐自己
         SelfReferral,
+        /// 不能转移给自己
+        SameOwner,
+        /// 无效权限值（不可为 0）
+        InvalidPermissions,
     }
 
     // ==================== Extrinsics ====================
@@ -584,9 +594,6 @@ pub mod pallet {
             // 记录推荐人（如果有）
             if let Some(ref ref_account) = referrer {
                 EntityReferrer::<T>::insert(entity_id, ref_account);
-                EntityReferralCount::<T>::mutate(ref_account, |count| {
-                    *count = count.saturating_add(1);
-                });
                 Self::deposit_event(Event::EntityReferrerBound {
                     entity_id,
                     referrer: ref_account.clone(),
@@ -800,6 +807,7 @@ pub mod pallet {
             let balance = T::Currency::free_balance(&treasury_account);
 
             // H3 修复: 退还余额给所有者，失败不阻止关闭流程
+            // M2 修复: 退还失败时发射 FundRefundFailed 事件（与 ban_entity 一致）
             let fund_refunded = if !balance.is_zero() {
                 match T::Currency::transfer(
                     &treasury_account,
@@ -808,7 +816,10 @@ pub mod pallet {
                     ExistenceRequirement::AllowDeath,
                 ) {
                     Ok(_) => balance,
-                    Err(_) => Zero::zero(),
+                    Err(_) => {
+                        Self::deposit_event(Event::FundRefundFailed { entity_id, amount: balance });
+                        Zero::zero()
+                    },
                 }
             } else {
                 Zero::zero()
@@ -933,6 +944,8 @@ pub mod pallet {
             let treasury_account = Self::entity_treasury_account(entity_id);
             let balance = T::Currency::free_balance(&treasury_account);
 
+            // M1 审计修复: 跟踪没收是否实际成功，而非仅报告请求意图
+            let mut fund_actually_confiscated = false;
             if !balance.is_zero() {
                 if confiscate_fund {
                     // H1: 没收资金转入平台账户，仅成功时发射事件
@@ -943,6 +956,10 @@ pub mod pallet {
                         ExistenceRequirement::AllowDeath,
                     ).is_ok() {
                         Self::deposit_event(Event::FundConfiscated { entity_id, amount: balance });
+                        fund_actually_confiscated = true;
+                    } else {
+                        // M1 审计修复: 没收失败时发射事件（与 refund 路径一致）
+                        Self::deposit_event(Event::FundRefundFailed { entity_id, amount: balance });
                     }
                 } else {
                     // H2 修复: 退还失败不应阻止封禁（owner 账户可能已被 reaped）
@@ -987,24 +1004,29 @@ pub mod pallet {
                 }
             }
 
+            // M1 审计修复: fund_confiscated 报告实际结果而非请求意图
             Self::deposit_event(Event::EntityBanned {
                 entity_id,
-                fund_confiscated: confiscate_fund,
+                fund_confiscated: fund_actually_confiscated,
             });
             Ok(())
         }
 
         // ==================== Phase 3 新增 Extrinsics ====================
 
-        /// 添加管理员
+        /// 添加管理员（指定权限位掩码）
         #[pallet::call_index(9)]
         #[pallet::weight(Weight::from_parts(60_000_000, 4_000))]
         pub fn add_admin(
             origin: OriginFor<T>,
             entity_id: u64,
             new_admin: T::AccountId,
+            permissions: u32,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+
+            // 权限值不可为 0（无意义）
+            ensure!(permissions != 0, Error::<T>::InvalidPermissions);
             
             Entities::<T>::try_mutate(entity_id, |maybe_entity| -> DispatchResult {
                 let entity = maybe_entity.as_mut().ok_or(Error::<T>::EntityNotFound)?;
@@ -1018,11 +1040,11 @@ pub mod pallet {
                 );
                 
                 // 检查是否已是管理员
-                ensure!(!entity.admins.contains(&new_admin), Error::<T>::AdminAlreadyExists);
+                ensure!(!entity.admins.iter().any(|(a, _)| a == &new_admin), Error::<T>::AdminAlreadyExists);
                 ensure!(new_admin != entity.owner, Error::<T>::AdminAlreadyExists);
                 
                 // 添加管理员
-                entity.admins.try_push(new_admin.clone())
+                entity.admins.try_push((new_admin.clone(), permissions))
                     .map_err(|_| Error::<T>::MaxAdminsReached)?;
                 
                 Ok(())
@@ -1031,6 +1053,7 @@ pub mod pallet {
             Self::deposit_event(Event::AdminAdded {
                 entity_id,
                 admin: new_admin,
+                permissions,
             });
             Ok(())
         }
@@ -1060,7 +1083,7 @@ pub mod pallet {
                 ensure!(admin != entity.owner, Error::<T>::CannotRemoveOwner);
                 
                 // 查找并移除
-                let pos = entity.admins.iter().position(|a| a == &admin)
+                let pos = entity.admins.iter().position(|(a, _)| a == &admin)
                     .ok_or(Error::<T>::AdminNotFound)?;
                 entity.admins.remove(pos);
                 
@@ -1070,6 +1093,44 @@ pub mod pallet {
             Self::deposit_event(Event::AdminRemoved {
                 entity_id,
                 admin,
+            });
+            Ok(())
+        }
+
+        /// 更新管理员权限
+        #[pallet::call_index(17)]
+        #[pallet::weight(Weight::from_parts(60_000_000, 4_000))]
+        pub fn update_admin_permissions(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            admin: T::AccountId,
+            new_permissions: u32,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            ensure!(new_permissions != 0, Error::<T>::InvalidPermissions);
+
+            let old_permissions = Entities::<T>::try_mutate(entity_id, |maybe_entity| -> Result<u32, DispatchError> {
+                let entity = maybe_entity.as_mut().ok_or(Error::<T>::EntityNotFound)?;
+                ensure!(entity.owner == who, Error::<T>::NotEntityOwner);
+                ensure!(
+                    !matches!(entity.status, EntityStatus::Banned | EntityStatus::Closed),
+                    Error::<T>::InvalidEntityStatus
+                );
+
+                let entry = entity.admins.iter_mut()
+                    .find(|(a, _)| a == &admin)
+                    .ok_or(Error::<T>::AdminNotFound)?;
+                let old = entry.1;
+                entry.1 = new_permissions;
+                Ok(old)
+            })?;
+
+            Self::deposit_event(Event::AdminPermissionsUpdated {
+                entity_id,
+                admin,
+                old_permissions,
+                new_permissions,
             });
             Ok(())
         }
@@ -1084,6 +1145,9 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
+            // M1 审计修复: 禁止自我转移（避免无意义存储写入和误导性事件）
+            ensure!(new_owner != who, Error::<T>::SameOwner);
+
             // H2 修复: 先验证新 owner 容量，避免 Entity 变更后 UserEntity 写入失败导致不一致
             let new_owner_entities = UserEntity::<T>::get(&new_owner);
             ensure!(
@@ -1096,9 +1160,10 @@ pub mod pallet {
                 
                 // 只有所有者可以转移所有权
                 ensure!(entity.owner == who, Error::<T>::NotEntityOwner);
-                // H3: 不允许对 Banned/Closed 实体转移所有权
+                // H3+L2: 不允许对 Banned/Closed/PendingClose 实体转移所有权
+                // PendingClose: 转移后 approve_close 退款给新 owner 而非关闭申请人
                 ensure!(
-                    !matches!(entity.status, EntityStatus::Banned | EntityStatus::Closed),
+                    !matches!(entity.status, EntityStatus::Banned | EntityStatus::Closed | EntityStatus::PendingClose),
                     Error::<T>::InvalidEntityStatus
                 );
                 
@@ -1106,7 +1171,7 @@ pub mod pallet {
                 entity.owner = new_owner.clone();
                 
                 // 如果新所有者在管理员列表中，移除
-                if let Some(pos) = entity.admins.iter().position(|a| a == &new_owner) {
+                if let Some(pos) = entity.admins.iter().position(|(a, _)| a == &new_owner) {
                     entity.admins.remove(pos);
                 }
                 
@@ -1179,11 +1244,15 @@ pub mod pallet {
                 Ok((old_t, old_g))
             })?;
 
-            Self::deposit_event(Event::EntityTypeUpgraded {
-                entity_id,
-                old_type,
-                new_type,
-            });
+            // M1 Round 8: 仅在类型实际变更时发射 EntityTypeUpgraded，
+            // 避免仅治理模式变更时产生误导性 "类型升级" 事件
+            if old_type != new_type {
+                Self::deposit_event(Event::EntityTypeUpgraded {
+                    entity_id,
+                    old_type,
+                    new_type,
+                });
+            }
             
             if old_mode != new_governance {
                 Self::deposit_event(Event::GovernanceModeChanged {
@@ -1237,6 +1306,15 @@ pub mod pallet {
             let entity = Entities::<T>::get(entity_id).ok_or(Error::<T>::EntityNotFound)?;
             ensure!(entity.owner == who, Error::<T>::NotEntityOwner);
             ensure!(entity.status == EntityStatus::Closed, Error::<T>::InvalidEntityStatus);
+
+            // M2 审计修复: 预检查用户容量，避免已满时白付 gas
+            let user_entities = UserEntity::<T>::get(&who);
+            if !user_entities.contains(&entity_id) {
+                ensure!(
+                    (user_entities.len() as u32) < T::MaxEntitiesPerUser::get(),
+                    Error::<T>::MaxEntitiesReached
+                );
+            }
 
             // 重新计算并缴纳押金（50 USDT 等值 NEX）
             let initial_fund_amount = Self::calculate_initial_fund()?;
@@ -1303,9 +1381,6 @@ pub mod pallet {
 
             // 写入
             EntityReferrer::<T>::insert(entity_id, &referrer);
-            EntityReferralCount::<T>::mutate(&referrer, |count| {
-                *count = count.saturating_add(1);
-            });
 
             Self::deposit_event(Event::EntityReferrerBound {
                 entity_id,
@@ -1386,6 +1461,9 @@ pub mod pallet {
             fee: BalanceOf<T>,
             fee_type: FeeType,
         ) -> sp_runtime::DispatchResult {
+            // L1: 零费用无意义，拒绝以避免误导性事件
+            ensure!(!fee.is_zero(), Error::<T>::ZeroAmount);
+
             // H4+M4 修复: 检查 Entity 状态，仅 Active/Suspended 允许扣费
             let entity = Entities::<T>::get(entity_id).ok_or(Error::<T>::EntityNotFound)?;
             ensure!(
@@ -1413,21 +1491,26 @@ pub mod pallet {
             // 检查资金健康状态
             if new_balance <= min_balance {
                 // 低于最低余额，暂停实体
+                // M3 修复: 仅在实际发生状态变更（Active → Suspended）时发射事件
+                let mut status_changed = false;
                 Entities::<T>::mutate(entity_id, |s| {
                     if let Some(entity) = s {
                         if entity.status == EntityStatus::Active {
                             entity.status = EntityStatus::Suspended;
+                            status_changed = true;
                             EntityStats::<T>::mutate(|stats| {
                                 stats.active_entities = stats.active_entities.saturating_sub(1);
                             });
                         }
                     }
                 });
-                Self::deposit_event(Event::EntitySuspendedLowFund {
-                    entity_id,
-                    current_balance: new_balance,
-                    minimum_balance: min_balance,
-                });
+                if status_changed {
+                    Self::deposit_event(Event::EntitySuspendedLowFund {
+                        entity_id,
+                        current_balance: new_balance,
+                        minimum_balance: min_balance,
+                    });
+                }
             } else if new_balance <= warning_threshold {
                 // 发出预警
                 Self::deposit_event(Event::FundWarning {
@@ -1471,18 +1554,26 @@ pub mod pallet {
 
         // ==================== Phase 3 新增辅助函数 ====================
 
-        /// 检查是否是管理员（所有者或管理员列表中）
-        pub fn is_admin(entity_id: u64, who: &T::AccountId) -> bool {
+        /// 检查是否拥有指定权限（owner 天然通过，admin 需权限位匹配）
+        pub fn has_permission(entity_id: u64, who: &T::AccountId, required: u32) -> bool {
             Entities::<T>::get(entity_id)
                 .map(|entity| {
-                    entity.owner == *who || entity.admins.contains(who)
+                    if entity.owner == *who {
+                        return true;
+                    }
+                    entity.admins.iter().any(|(a, perm)| a == who && (perm & required) == required)
                 })
                 .unwrap_or(false)
         }
 
-        /// 确保调用者是管理员
-        pub fn ensure_admin(entity_id: u64, who: &T::AccountId) -> DispatchResult {
-            ensure!(Self::is_admin(entity_id, who), Error::<T>::NotAdmin);
+        /// 检查是否是管理员（任意权限，向后兼容）
+        pub fn is_admin(entity_id: u64, who: &T::AccountId) -> bool {
+            Self::has_permission(entity_id, who, 0)
+        }
+
+        /// 确保调用者拥有指定权限
+        pub fn ensure_permission(entity_id: u64, who: &T::AccountId, required: u32) -> DispatchResult {
+            ensure!(Self::has_permission(entity_id, who, required), Error::<T>::NotAdmin);
             Ok(())
         }
 
@@ -1529,8 +1620,8 @@ pub mod pallet {
                 .unwrap_or(false)
         }
 
-        /// 获取管理员列表
-        pub fn get_admins(entity_id: u64) -> Vec<T::AccountId> {
+        /// 获取管理员列表（含权限位掩码）
+        pub fn get_admins(entity_id: u64) -> Vec<(T::AccountId, u32)> {
             Entities::<T>::get(entity_id)
                 .map(|e| e.admins.into_inner())
                 .unwrap_or_default()
@@ -1594,8 +1685,12 @@ pub mod pallet {
         }
 
         fn register_shop(entity_id: u64, shop_id: u64) -> Result<(), sp_runtime::DispatchError> {
-            // 验证 Entity 存在
-            ensure!(Entities::<T>::contains_key(entity_id), Error::<T>::EntityNotFound);
+            // M1: 验证 Entity 存在且状态允许注册 Shop（防御性检查，防止 Banned/Closed Entity 注册新 Shop）
+            let entity = Entities::<T>::get(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(
+                !matches!(entity.status, EntityStatus::Banned | EntityStatus::Closed),
+                Error::<T>::EntityNotActive
+            );
 
             // 添加到 EntityShops 列表
             EntityShops::<T>::try_mutate(entity_id, |shops| -> Result<(), sp_runtime::DispatchError> {
@@ -1637,11 +1732,14 @@ pub mod pallet {
                     }
                 }
             });
+
+            // L3: 与 register_shop 的 ShopAddedToEntity 对称
+            Self::deposit_event(Event::ShopRemovedFromEntity { entity_id, shop_id });
             Ok(())
         }
 
-        fn is_entity_admin(entity_id: u64, account: &T::AccountId) -> bool {
-            Self::is_admin(entity_id, account)
+        fn is_entity_admin(entity_id: u64, account: &T::AccountId, required_permission: u32) -> bool {
+            Self::has_permission(entity_id, account, required_permission)
         }
 
         fn entity_shops(entity_id: u64) -> sp_std::vec::Vec<u64> {

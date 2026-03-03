@@ -448,7 +448,7 @@ fn claim_dividend_works() {
 }
 
 #[test]
-fn claim_dividend_fails_exceeds_max_supply() {
+fn h2r3_distribute_dividend_rejects_exceeding_max_supply() {
     new_test_ext().execute_with(|| {
         setup_token();
         assert_ok!(EntityToken::change_token_type(
@@ -460,11 +460,11 @@ fn claim_dividend_fails_exceeds_max_supply() {
         assert_ok!(EntityToken::configure_dividend(
             RuntimeOrigin::signed(OWNER), SHOP_ID, true, 5,
         ));
-        assert_ok!(EntityToken::distribute_dividend(
-            RuntimeOrigin::signed(OWNER), SHOP_ID, 100, vec![(USER_A, 100)],
-        ));
+        // H2-R3: distribute 时即检查 max_supply，100 > 50 容量 → 拒绝
         assert_noop!(
-            EntityToken::claim_dividend(RuntimeOrigin::signed(USER_A), SHOP_ID),
+            EntityToken::distribute_dividend(
+                RuntimeOrigin::signed(OWNER), SHOP_ID, 100, vec![(USER_A, 100)],
+            ),
             Error::<Test>::ExceedsMaxSupply
         );
     });
@@ -1031,5 +1031,359 @@ fn m4_unlock_tokens_cleans_empty_storage() {
         assert!(locks.is_empty());
         // 验证 LockedTokens 存储项已被完全移除
         assert!(!crate::LockedTokens::<Test>::contains_key(SHOP_ID, &USER_A));
+    });
+}
+
+// ==================== Round 3 回归测试 ====================
+
+#[test]
+fn h1r3_repatriate_reserved_consistent_on_transfer_failure() {
+    use pallet_entity_common::EntityTokenProvider;
+    use frame_support::traits::fungibles::Mutate as FungiblesMutate;
+    new_test_ext().execute_with(|| {
+        setup_token();
+        let asset_id = EntityToken::entity_to_asset_id(SHOP_ID);
+
+        // 铸造 100 给 USER_A
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 100,
+        ));
+        // 虚拟预留 80
+        assert_ok!(
+            <EntityToken as EntityTokenProvider<u64, u128>>::reserve(SHOP_ID, &USER_A, 80)
+        );
+        assert_eq!(EntityToken::reserved_tokens(SHOP_ID, &USER_A), 80);
+
+        // 通过 pallet-assets 直接转出 60，绕过我们的预留检查
+        // USER_A: assets balance = 40, reserved(our pallet) = 80
+        assert_ok!(<Assets as FungiblesMutate<u64>>::transfer(
+            asset_id, &USER_A, &USER_B, 60,
+            frame_support::traits::tokens::Preservation::Preserve,
+        ));
+        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 40);
+
+        // repatriate_reserved 50 → transfer 应失败（USER_A 只有 40）
+        let result = <EntityToken as EntityTokenProvider<u64, u128>>::repatriate_reserved(
+            SHOP_ID, &USER_A, &USER_B, 50,
+        );
+        assert!(result.is_err());
+
+        // H1-R3: ReservedTokens 应保持不变（80），不应被错误扣减
+        assert_eq!(EntityToken::reserved_tokens(SHOP_ID, &USER_A), 80);
+    });
+}
+
+#[test]
+fn h2r3_claim_dividend_succeeds_despite_later_mint() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::change_token_type(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, TokenType::Equity,
+        ));
+        assert_ok!(EntityToken::set_max_supply(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 200,
+        ));
+        assert_ok!(EntityToken::configure_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, true, 5,
+        ));
+        // distribute 50（max_supply=200, current=0, 容量足够）
+        assert_ok!(EntityToken::distribute_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 50, vec![(USER_A, 50)],
+        ));
+        // M1-R6: mint 现在计入 pending，最多铸 150（0+50+150=200）
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_B, 150,
+        ));
+        // H2-R3: claim 应成功（分红在 distribute 时已承诺，不应受后续铸造影响）
+        assert_ok!(EntityToken::claim_dividend(
+            RuntimeOrigin::signed(USER_A), SHOP_ID,
+        ));
+        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 50);
+        assert_eq!(EntityToken::pending_dividends(SHOP_ID, &USER_A), 0);
+    });
+}
+
+#[test]
+fn m1r3_distribute_dividend_rejects_inactive_entity() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::change_token_type(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, TokenType::Equity,
+        ));
+        assert_ok!(EntityToken::configure_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, true, 5,
+        ));
+        // 停用实体
+        deactivate_entity(SHOP_ID);
+        // M1-R3: 被停用的 Entity 不应能分发分红
+        assert_noop!(
+            EntityToken::distribute_dividend(
+                RuntimeOrigin::signed(OWNER), SHOP_ID, 100, vec![(USER_A, 100)],
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn l1r3_transfer_tokens_rejects_inactive_entity() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 1000,
+        ));
+        deactivate_entity(SHOP_ID);
+        // L1-R3: 被停用 Entity 的代币不允许转账
+        assert_noop!(
+            EntityToken::transfer_tokens(
+                RuntimeOrigin::signed(USER_A), SHOP_ID, USER_B, 100,
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn l1r3_lock_tokens_rejects_inactive_entity() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 1000,
+        ));
+        deactivate_entity(SHOP_ID);
+        // L1-R3: 被停用 Entity 的代币不允许新增锁仓
+        assert_noop!(
+            EntityToken::lock_tokens(
+                RuntimeOrigin::signed(USER_A), SHOP_ID, 500, 10,
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn l1r3_unlock_and_claim_still_work_when_inactive() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 1000,
+        ));
+        // 先锁仓 + 分发分红（Entity 活跃时）
+        assert_ok!(EntityToken::lock_tokens(
+            RuntimeOrigin::signed(USER_A), SHOP_ID, 500, 5,
+        ));
+        assert_ok!(EntityToken::change_token_type(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, TokenType::Equity,
+        ));
+        assert_ok!(EntityToken::configure_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, true, 5,
+        ));
+        assert_ok!(EntityToken::distribute_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 100, vec![(USER_A, 100)],
+        ));
+
+        // 停用 Entity
+        deactivate_entity(SHOP_ID);
+        run_to_block(7);
+
+        // unlock 和 claim 应仍可执行（用户取回已有权益）
+        assert_ok!(EntityToken::unlock_tokens(
+            RuntimeOrigin::signed(USER_A), SHOP_ID,
+        ));
+        assert_ok!(EntityToken::claim_dividend(
+            RuntimeOrigin::signed(USER_A), SHOP_ID,
+        ));
+        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 1100); // 1000 + 100 dividend
+    });
+}
+
+#[test]
+fn m1r4_distribute_multiple_times_respects_max_supply_with_pending() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        // 设置 Equity 类型 + 分红 + max_supply
+        assert_ok!(EntityToken::change_token_type(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, TokenType::Equity,
+        ));
+        assert_ok!(EntityToken::set_max_supply(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 200,
+        ));
+        assert_ok!(EntityToken::configure_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, true, 0,
+        ));
+
+        // 第一次分发 150，成功（0 + 0 + 150 <= 200）
+        assert_ok!(EntityToken::distribute_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 150, vec![(USER_A, 150)],
+        ));
+        assert_eq!(EntityToken::total_pending_dividends(SHOP_ID), 150);
+
+        // 第二次分发 60，应拒绝（0 + 150 + 60 > 200）
+        assert_noop!(
+            EntityToken::distribute_dividend(
+                RuntimeOrigin::signed(OWNER), SHOP_ID, 60, vec![(USER_B, 60)],
+            ),
+            Error::<Test>::ExceedsMaxSupply
+        );
+
+        // 第二次分发 50，成功（0 + 150 + 50 <= 200）
+        assert_ok!(EntityToken::distribute_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 50, vec![(USER_B, 50)],
+        ));
+        assert_eq!(EntityToken::total_pending_dividends(SHOP_ID), 200);
+    });
+}
+
+#[test]
+fn m1r4_claim_reduces_total_pending_dividends() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::change_token_type(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, TokenType::Equity,
+        ));
+        assert_ok!(EntityToken::set_max_supply(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 200,
+        ));
+        assert_ok!(EntityToken::configure_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, true, 0,
+        ));
+
+        // 分发 150
+        assert_ok!(EntityToken::distribute_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 150, vec![(USER_A, 100), (USER_B, 50)],
+        ));
+        assert_eq!(EntityToken::total_pending_dividends(SHOP_ID), 150);
+
+        // A 领取 100 → pending 降为 50
+        assert_ok!(EntityToken::claim_dividend(
+            RuntimeOrigin::signed(USER_A), SHOP_ID,
+        ));
+        assert_eq!(EntityToken::total_pending_dividends(SHOP_ID), 50);
+
+        // 此时可再分发 150（supply=100 + pending=50 + 150 = 300? 不对，supply=100, pending=50, max=200）
+        // supply=100 + pending=50 + new=50 = 200 ≤ 200 → OK
+        assert_ok!(EntityToken::distribute_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 50, vec![(USER_A, 50)],
+        ));
+        // supply=100 + pending=100 + new=1 = 201 > 200 → FAIL
+        assert_noop!(
+            EntityToken::distribute_dividend(
+                RuntimeOrigin::signed(OWNER), SHOP_ID, 1, vec![(USER_A, 1)],
+            ),
+            Error::<Test>::ExceedsMaxSupply
+        );
+    });
+}
+
+#[test]
+fn m1r4_set_max_supply_accounts_for_pending_dividends() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::change_token_type(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, TokenType::Equity,
+        ));
+        assert_ok!(EntityToken::configure_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, true, 0,
+        ));
+        // 铸造 100
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 100,
+        ));
+        // 分发 50 分红（pending=50）
+        assert_ok!(EntityToken::distribute_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 50, vec![(USER_A, 50)],
+        ));
+        // 尝试设 max_supply=140: supply(100) + pending(50) = 150 > 140 → 应拒绝
+        assert_noop!(
+            EntityToken::set_max_supply(
+                RuntimeOrigin::signed(OWNER), SHOP_ID, 140,
+            ),
+            Error::<Test>::ExceedsMaxSupply
+        );
+        // 设 max_supply=150: 100 + 50 = 150 ≤ 150 → OK
+        assert_ok!(EntityToken::set_max_supply(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 150,
+        ));
+    });
+}
+
+// ==================== Round 6 回归测试 ====================
+
+#[test]
+fn m1r6_mint_tokens_respects_pending_dividends_in_max_supply() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::change_token_type(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, TokenType::Equity,
+        ));
+        assert_ok!(EntityToken::set_max_supply(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 1000,
+        ));
+        assert_ok!(EntityToken::configure_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, true, 0,
+        ));
+
+        // 分发 800 分红（pending=800）
+        assert_ok!(EntityToken::distribute_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 800,
+            vec![(USER_A, 400), (USER_B, 400)],
+        ));
+        assert_eq!(EntityToken::total_pending_dividends(SHOP_ID), 800);
+
+        // M1-R6: mint 201 应拒绝（supply=0 + pending=800 + 201 = 1001 > 1000）
+        assert_noop!(
+            EntityToken::mint_tokens(
+                RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 201,
+            ),
+            Error::<Test>::ExceedsMaxSupply
+        );
+
+        // mint 200 应成功（0 + 800 + 200 = 1000 ≤ 1000）
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 200,
+        ));
+
+        // 用户 claim 后，supply 上升但 pending 下降，可继续铸造
+        assert_ok!(EntityToken::claim_dividend(
+            RuntimeOrigin::signed(USER_A), SHOP_ID,
+        ));
+        // supply=600(200+400), pending=400, mint 1 → 600+400+1=1001 > 1000 → 拒绝
+        assert_noop!(
+            EntityToken::mint_tokens(
+                RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 1,
+            ),
+            Error::<Test>::ExceedsMaxSupply
+        );
+    });
+}
+
+#[test]
+fn m1r6_reward_on_purchase_skips_when_pending_fills_capacity() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::change_token_type(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, TokenType::Equity,
+        ));
+        assert_ok!(EntityToken::set_max_supply(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 100,
+        ));
+        assert_ok!(EntityToken::configure_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, true, 0,
+        ));
+
+        // 分发 95 分红（pending=95）
+        assert_ok!(EntityToken::distribute_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 95, vec![(USER_A, 95)],
+        ));
+
+        // reward_on_purchase: 5% of 200 = 10, supply=0+pending=95+10=105 > 100 → skip
+        let reward = EntityToken::reward_on_purchase(SHOP_ID, &USER_B, 200);
+        assert_ok!(&reward);
+        assert_eq!(reward.unwrap(), 0);
+
+        // 5% of 80 = 4, 0+95+4=99 ≤ 100 → 应成功
+        let reward = EntityToken::reward_on_purchase(SHOP_ID, &USER_B, 80);
+        assert_ok!(&reward);
+        assert_eq!(reward.unwrap(), 4);
     });
 }

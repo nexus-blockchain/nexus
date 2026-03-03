@@ -237,10 +237,27 @@ pallets/entity/review/
 | Low | L2 | README weight 代码片段与实际代码不一致 | 已修正 |
 | Low | L3 | `ReviewCount` 与 `ShopReviewCount` 存储冗余 | 记录（保留便捷查询） |
 
+## 审计记录 (v0.8.0)
+
+| 级别 | ID | 问题 | 修复 |
+|------|-----|------|------|
+| High | H1 | `submit_review` 不检查订单争议状态 — 争议中的订单可提交评价，争议结果未定时评价可能不公 | 添加 `is_order_disputed` 检查 + `OrderDisputed` 错误 |
+| High | H2 | `set_review_enabled` 无状态变更检测 — 重复设置同一值仍写存储并发射事件，误导前端/索引器 | 添加 `currently_disabled != want_disabled` 守卫，状态不变时跳过写入和事件 |
+| Medium | M1 | `submit_review` 仅更新 Shop 评分，从未调用 `EntityProvider::update_entity_rating` — Entity 级别评分始终为零 | 添加 best-effort `update_entity_rating` 调用（失败仅 log::warn） |
+| Medium | M2 | `ReviewCount` / `ShopReviewCount` 使用 `saturating_add` — u64::MAX 时静默停止计数，计数器永久失准 | `ReviewCount`: `checked_add` + `ReviewCountOverflow`。`ShopReviewCount`: best-effort `checked_add`，溢出仅 log::warn，不阻塞评价 |
+| Medium | M1-R7 | `ShopReviewCount` 溢出通过 `?` 传播错误，整个 extrinsic 回滚 — 与 shop rating best-effort 设计矛盾 | 改为 `mutate` + `checked_add`，溢出仅 log::warn，不阻塞评价 |
+| Low | L1 | `set_review_enabled` 的 `enabled=true` 对已开启实体是 no-op 但仍写存储 | 已由 H2 一并修复 |
+| Low | L2 | 无评价时间窗口 — 订单完成后可无限期评价 | 新增 `ReviewWindowBlocks` Config 常量 + `order_completed_at` OrderProvider 方法 + `ReviewWindowExpired` 错误，7 天窗口 |
+| Low | L1-R7 | `order_shop_id` 被调用两次（entity 检查 + 评分更新）— 冗余跨 pallet 存储读取 | 复用 `shop_id_for_gate` 变量 |
+| Low | L2-R7 | Weight 估算过时 — 注释写 5 reads/5 writes，实际约 8 reads/6 writes | 更新 weight 注释和估算值 |
+
 ## 版本历史
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| v0.8.0 | 2026-03-03 | 再次审计 Round 7：M1-R7(ShopReviewCount best-effort)、L1-R7(去重 order_shop_id)、L2-R7(weight 更新)，54 tests |
+| v0.7.0 | 2026-03-03 | 评价时间窗口：+ReviewWindowBlocks Config、+order_completed_at OrderProvider、+ReviewWindowExpired 错误，+4 测试（52 total） |
+| v0.6.0 | 2026-03-08 | 深度审计 Round 5：H1/H2/M1/M2 共 4 项修复，+6 测试（48 total） |
 | v0.5.0 | 2026-03-02 | Entity 评价开关：+EntityProvider Config、+set_review_enabled extrinsic、+EntityReviewDisabled 存储、+submit_review 门控、+8 测试（41 total） |
 | v0.4.0 | 2026-03-03 | 深度审计 Round 3：H1/H2/L2 共 3 项修复，+4 测试（33 total） |
 | v0.3.0 | 2026-02-26 | 深度审计 Round 2：H1/H2/M1/M2 共 4 项修复，+7 测试（29 total） |

@@ -35,22 +35,12 @@ pnpm-lock.yaml
 .yarn/
 
 # =========================
-# Frontend (Expo/React Native)
+# Frontend (Next.js)
 # =========================
-frontend/.expo/
+frontend/.next/
 frontend/dist/
-frontend/web-build/
+frontend/out/
 frontend/.cache/
-
-# Expo build artifacts
-*.jks
-*.p8
-*.p12
-*.mobileprovision
-*.orig.*
-
-# Metro bundler
-.metro-health-check*
 
 # =========================
 # IDE / Editor
@@ -154,16 +144,15 @@ my-chain-state/
 scripts/test-accounts.json
 scripts/test-accounts.txt
 scripts/node_modules/
+scripts/e2e-reports/
 scripts/*.log
 
 # =========================
-# Frontend (Expo/React Native) - 额外规则
+# Frontend (Next.js) - 额外规则
 # =========================
-frontend/ios/
-frontend/android/
-frontend/.kotlin/
 frontend/*.tsbuildinfo
-frontend/app-example/
+frontend/.eslintcache
+frontend/.vercel
 
 # =========================
 # Telegram (Bot 测试数据)

@@ -3,20 +3,20 @@
 > 实体代币治理模块 — 多模式去中心化决策系统
 
 - **Runtime Pallet Index**: 125
-- **版本**: v0.2.0
+- **版本**: v0.4.0
 
 ## 概述
 
-`pallet-entity-governance` 实现基于实体代币的多模式治理系统。支持 6 种治理模式、42 种提案类型、4 级分层阈值、委员会投票、管理员否决权，以及闪电贷防护快照机制。
+`pallet-entity-governance` 实现基于实体代币的治理系统。支持 2 种治理模式、41 种提案类型、可选管理员否决权，以及首次持有时间校验防护机制。
 
 ### 核心能力
 
-- **6 种治理模式** — None / Advisory / DualTrack / Committee / FullDAO / Tiered
-- **42 种提案类型** — 商品、店铺、代币、财务、返佣、提现、会员等级、治理参数、社区
-- **分层治理阈值** — Operational / Significant / Critical / Constitutional 四级
-- **委员会治理** — 委员会成员管理、最小批准数
-- **管理员否决权** — DualTrack / Advisory 模式下可否决通过的提案
-- **闪电贷防护** — 快照区块 + 首次持有时间校验
+- **2 种治理模式** — None（管理员全权）/ FullDAO（代币投票，可选管理员否决权作为紧急制动）
+- **41 种提案类型** — 商品、店铺、代币、财务、返佣、提现、会员等级、治理参数、社区
+- **管理员否决权** — FullDAO 模式下可启用，作为紧急制动机制
+- **闪电贷防护** — 首次持有时间校验 + 投票权快照
+- **投票代币锁定** — reserve/unreserve + max-lock 引用计数
+- **终态提案清理** — `cleanup_proposal` 释放存储空间
 
 ## 架构
 
@@ -25,8 +25,8 @@
 │                    pallet-entity-governance                        │
 │                       (Runtime Index: 125)                         │
 ├────────────────────────────────────────────────────────────────────┤
-│  提案创建 → 快照锁定 → 代币投票 → 结果判定 → 执行/否决             │
-│  治理配置 → 分层阈值 → 委员会管理                                   │
+│  提案创建 → 代币投票 → 结果判定 → 执行/否决 → 清理                 │
+│  治理配置 → 锁定治理                                                │
 └───────┬──────────┬──────────────┬──────────────┬──────────────────┘
         │          │              │              │
    EntityProvider  ShopProvider   TokenProvider  CommissionProvider
@@ -48,70 +48,52 @@
 
 ## 治理模式
 
-6 种模式定义在 `pallet-entity-common::GovernanceMode`，每个实体可独立配置：
+2 种模式定义在 `pallet-entity-common::GovernanceMode`，每个实体可独立配置：
 
-| 模式 | 说明 | 管理员否决 | 推荐实体类型 |
-|------|------|-----------|-------------|
-| **None** | 无治理，管理员全权控制 | - | Merchant, ServiceProvider |
-| **Advisory** | 咨询式，投票仅作建议，可否决 | 可 | Community |
-| **DualTrack** | 双轨制，代币投票 + 管理员否决权 | 可 | Enterprise, Project |
-| **Committee** | 委员会投票决策 | 否 | Fund |
-| **FullDAO** | 完全 DAO，纯代币投票 | 否 | DAO |
-| **Tiered** | 分层治理，不同级别不同阈值 | 否 | - |
-
-### 分层阈值（ProposalLevel）
-
-Tiered 模式下，不同级别的提案使用不同通过阈值：
-
-| 级别 | 说明 | 默认阈值 |
-|------|------|---------|
-| `Operational` | 日常运营 | 50% |
-| `Significant` | 重要决策 | 60% |
-| `Critical` | 重大变更 | 67% |
-| `Constitutional` | 宪法级 | 75% |
+| 模式 | 说明 | 管理员否决 |
+|------|------|----------|
+| **None** | 无治理，管理员全权控制，禁止创建提案 | - |
+| **FullDAO** | 完全 DAO，所有决策需代币投票，可选管理员否决权（紧急制动） | 可选 |
 
 ## 数据结构
 
 ### GovernanceConfig — 实体治理配置
 
 ```rust
-pub struct GovernanceConfig<AccountId, Balance, BlockNumber, MaxCommitteeSize> {
-    pub mode: GovernanceMode,                              // 治理模式
-    pub voting_period: BlockNumber,                        // 投票期（0 = 使用全局默认）
-    pub execution_delay: BlockNumber,                      // 执行延迟（0 = 使用全局默认）
-    pub operational_threshold: u8,                         // 日常运营阈值（百分比）
-    pub significant_threshold: u8,                         // 重要决策阈值
-    pub critical_threshold: u8,                            // 重大变更阈值
-    pub constitutional_threshold: u8,                      // 宪法级阈值
-    pub quorum_threshold: u8,                              // 法定人数阈值
-    pub proposal_threshold: u16,                           // 提案创建门槛（基点）
-    pub admin_veto_enabled: bool,                          // 管理员否决权
-    pub required_token_type: Option<TokenType>,            // 需要的代币类型
-    pub min_committee_approval: u8,                        // 最小批准数
+pub struct GovernanceConfig<BlockNumber> {
+    pub mode: GovernanceMode,          // 治理模式 (None / FullDAO)
+    pub voting_period: BlockNumber,    // 投票期（0 = 使用全局默认）
+    pub execution_delay: BlockNumber,  // 执行延迟（0 = 使用全局默认）
+    pub quorum_threshold: u8,          // 法定人数阈值 (%)
+    pub pass_threshold: u8,            // 通过阈值 (%)
+    pub proposal_threshold: u16,       // 提案创建门槛（基点）
+    pub admin_veto_enabled: bool,      // 管理员否决权（FullDAO 可选紧急制动）
 }
 ```
-
-> 注：委员会成员独立存储在 `CommitteeMembers` StorageMap 中，不再嵌入 GovernanceConfig。
 
 ### Proposal — 提案
 
 ```rust
 pub struct Proposal<T: Config> {
     pub id: ProposalId,                              // 提案 ID (u64)
-    pub shop_id: u64,                                // 店铺 ID
+    pub entity_id: u64,                              // 实体 ID（1:N 多店铺架构）
     pub proposer: T::AccountId,                      // 提案者
     pub proposal_type: ProposalType<BalanceOf<T>>,   // 提案类型
     pub title: BoundedVec<u8, T::MaxTitleLength>,    // 标题
     pub description_cid: Option<BoundedVec<u8, T::MaxCidLength>>, // 描述 CID
     pub status: ProposalStatus,                      // 状态
     pub created_at: BlockNumberFor<T>,               // 创建时间
-    pub snapshot_block: BlockNumberFor<T>,            // 快照区块（闪电贷防护）
     pub voting_start: BlockNumberFor<T>,             // 投票开始
     pub voting_end: BlockNumberFor<T>,               // 投票结束
     pub execution_time: Option<BlockNumberFor<T>>,   // 执行时间
     pub yes_votes: BalanceOf<T>,                     // 赞成票
     pub no_votes: BalanceOf<T>,                      // 反对票
     pub abstain_votes: BalanceOf<T>,                 // 弃权票
+    // ========== 治理参数快照（防止投票期间参数被篡改）==========
+    pub snapshot_quorum: u8,                         // 快照: 法定人数阈值
+    pub snapshot_pass: u8,                           // 快照: 通过阈值
+    pub snapshot_execution_delay: BlockNumberFor<T>, // 快照: 执行延迟
+    pub snapshot_total_supply: BalanceOf<T>,         // 快照: 代币总供应量
 }
 ```
 
@@ -129,24 +111,22 @@ pub struct VoteRecord<AccountId, Balance, BlockNumber> {
 ### ProposalStatus — 提案状态
 
 ```
-Created → Voting → Passed → Executed
-                 → Failed
-                 → Cancelled (提案者/店主取消, 或被否决)
-         Expired
+Voting → Passed → Executed
+       → Failed
+       → Cancelled (提案者/实体所有者取消, 或被否决)
+       Passed → Expired (执行窗口过期)
 ```
 
 | 状态 | 说明 |
 |------|------|
-| `Created` | 已创建，等待投票 |
-| `Voting` | 投票中 |
+| `Voting` | 投票中（提案创建后的初始状态） |
 | `Passed` | 投票通过，等待执行 |
-| `Failed` | 投票未通过 |
-| `Queued` | 排队等待执行 |
+| `Failed` | 投票未通过（未达法定人数或通过阈值） |
 | `Executed` | 已执行 |
 | `Cancelled` | 已取消 / 被否决 |
-| `Expired` | 已过期 |
+| `Expired` | 执行窗口已过期（Passed 后未及时执行） |
 
-## 提案类型（共 42 种）
+## 提案类型（共 41 种）
 
 ### 商品管理类 (4)
 
@@ -164,8 +144,8 @@ Created → Voting → Passed → Executed
 | `Promotion` | 促销活动 | 事件记录 |
 | `ShopNameChange` | 修改店铺名称 | 链下确认 |
 | `ShopDescriptionChange` | 修改店铺描述 | 链下确认 |
-| `ShopPause` | 暂停店铺营业 | **链上执行** `ShopProvider::pause_shop` |
-| `ShopResume` | 恢复店铺营业 | **链上执行** `ShopProvider::resume_shop` |
+| `ShopPause { shop_id }` | 暂停指定店铺营业 | **链上执行** `ShopProvider::pause_shop` |
+| `ShopResume { shop_id }` | 恢复指定店铺营业 | **链上执行** `ShopProvider::resume_shop` |
 
 ### 代币经济类 (5)
 
@@ -194,7 +174,7 @@ Created → Voting → Passed → Executed
 | `QuorumChange` | 法定人数调整 | **链上执行** 更新 GovernanceConfig |
 | `ProposalThresholdChange` | 提案门槛调整 | **链上执行** 更新 GovernanceConfig |
 
-### 返佣配置类 (9)
+### 返佣配置类 (8)
 
 | 类型 | 说明 | 执行方式 |
 |------|------|---------|
@@ -202,7 +182,6 @@ Created → Voting → Passed → Executed
 | `DirectRewardChange` | 直推奖励费率 | **链上执行** `CommissionProvider` |
 | `MultiLevelChange` | 多级分销配置 | 链下 CID 解析 |
 | `LevelDiffChange` | 等级差价配置（5 级费率） | **链上执行** `CommissionProvider` |
-| `CustomLevelDiffChange` | 自定义等级极差 | 链下 CID 解析 |
 | `FixedAmountChange` | 固定金额配置 | **链上执行** `CommissionProvider` |
 | `FirstOrderChange` | 首单奖励配置 | **链上执行** `CommissionProvider` |
 | `RepeatPurchaseChange` | 复购奖励配置 | **链上执行** `CommissionProvider` |
@@ -241,12 +220,15 @@ Created → Voting → Passed → Executed
 |------|------|-----|------|
 | `NextProposalId` | ValueQuery | - | 下一个提案 ID |
 | `Proposals` | StorageMap | proposal_id | 提案详情 |
-| `ShopProposals` | StorageMap | shop_id | 店铺活跃提案列表 (BoundedVec) |
+| `EntityProposals` | StorageMap | entity_id | 实体活跃提案列表 (BoundedVec) |
 | `VoteRecords` | StorageDoubleMap | (proposal_id, account) | 投票记录 |
-| `FirstHoldTime` | StorageDoubleMap | (shop_id, account) | 用户首次持有代币时间 |
+| `FirstHoldTime` | StorageDoubleMap | (entity_id, account) | 用户首次持有代币时间 |
 | `VotingPowerSnapshot` | StorageDoubleMap | (proposal_id, account) | 投票权快照余额 |
 | `GovernanceConfigs` | StorageMap | entity_id | 实体治理配置 |
-| `CommitteeMembers` | StorageMap | entity_id | 委员会成员列表 (BoundedVec) |
+| `GovernanceLocked` | StorageMap | entity_id | 治理配置是否已锁定 |
+| `VoterTokenLocks` | StorageDoubleMap | (proposal_id, account) | H2: 投票者参与记录（用于批量解锁） |
+| `GovernanceLockCount` | StorageDoubleMap | (entity_id, account) | H2: 活跃投票提案引用计数 |
+| `GovernanceLockAmount` | StorageDoubleMap | (entity_id, account) | H2: 最大锁定代币数 |
 
 ## Extrinsics
 
@@ -266,8 +248,7 @@ fn create_proposal(
 
 - **权限**: 持有店铺代币 >= 总供应量 × `MinProposalThreshold` (默认 1%)
 - **校验**: 店铺存在、治理模式 ≠ None、代币启用、参数有效性、活跃提案数 < MaxActiveProposals
-- **快照**: `snapshot_block` 设为当前区块
-- **H2 参数验证**: 费率/比例类字段 ≤ 10000 (basis points)，百分比 ≤ 100，RevenueShare 之和 ≤ 10000
+- **参数验证**: 费率/比例类字段 ≤ 10000 (basis points)，百分比 ≤ 100，RevenueShare 之和 ≤ 10000
 
 ### call_index(1) — vote
 
@@ -281,8 +262,8 @@ fn vote(
 ) -> DispatchResult
 ```
 
-- **权限**: 持有店铺代币且 `FirstHoldTime <= snapshot_block`
-- **投票权重**: `min(当前余额, 快照余额)`
+- **权限**: 持有店铺代币且 `FirstHoldTime <= 提案创建时间`
+- **投票权重**: `min(当前余额, 快照余额)` × 时间加权
 - **校验**: 代币 TokenType 具有投票权 (`has_voting_power()`)、未重复投票、投票期内
 - **快照**: 首次投票时锁定当前余额到 `VotingPowerSnapshot`
 
@@ -306,8 +287,8 @@ fn vote(
 
 取消提案。
 
-- **权限**: 提案者或店主
-- **限制**: 仅 Created / Voting 状态
+- **权限**: 提案者或实体所有者
+- **限制**: 仅 Voting 状态
 
 ### call_index(5) — configure_governance
 
@@ -319,43 +300,17 @@ fn configure_governance(
     entity_id: u64,
     mode: GovernanceMode,
     voting_period: Option<BlockNumberFor<T>>,
+    execution_delay: Option<BlockNumberFor<T>>,
     quorum_threshold: Option<u8>,
+    pass_threshold: Option<u8>,
     proposal_threshold: Option<u16>,
     admin_veto_enabled: Option<bool>,
 ) -> DispatchResult
 ```
 
 - **权限**: 实体（店铺）所有者
-
-### call_index(6) — set_tiered_thresholds
-
-设置分层治理的四级阈值。
-
-```rust
-fn set_tiered_thresholds(
-    origin: OriginFor<T>,
-    entity_id: u64,
-    operational: u8,
-    significant: u8,
-    critical: u8,
-    constitutional: u8,
-) -> DispatchResult
-```
-
-- **权限**: 实体所有者（通过 EntityProvider 验证）
-
-### call_index(7) — add_committee_member
-
-添加委员会成员。
-
-- **权限**: 实体所有者
-- **限制**: 不能重复、不能超过 MaxCommitteeSize
-
-### call_index(8) — remove_committee_member
-
-移除委员会成员。
-
-- **权限**: 实体所有者
+- **校验**: 投票期 >= MinVotingPeriod，执行延迟 >= MinExecutionDelay，quorum/pass ≤ 100，proposal_threshold ≤ 10000
+- **限制**: 治理未锁定（`GovernanceLocked == false`）
 
 ### call_index(9) — veto_proposal
 
@@ -368,25 +323,43 @@ fn veto_proposal(
 ) -> DispatchResult
 ```
 
-- **权限**: 店铺所有者
-- **限制**: `admin_veto_enabled == true` 且模式为 DualTrack 或 Advisory
+- **权限**: 实体所有者
+- **限制**: `admin_veto_enabled == true`（FullDAO 模式下可选紧急制动）
 - **适用状态**: Voting 或 Passed
+
+### call_index(10) — lock_governance
+
+锁定治理配置（永久不可逆）。
+
+- **权限**: 实体所有者
+- **效果**: 锁定后 Owner 不可再修改治理参数，此操作不可撤销
+- **None 锁定**: 永久冻结治理配置
+- **FullDAO 锁定**: 放弃控制权，仅可通过提案修改治理参数
+
+### call_index(11) — cleanup_proposal
+
+清理终态提案（Executed/Failed/Cancelled/Expired），释放存储空间。
+
+- **权限**: 任何人可调用
+- **限制**: 提案必须处于终态
 
 ## Events
 
 | 事件 | 字段 | 说明 |
 |------|------|------|
-| `ProposalCreated` | proposal_id, shop_id, proposer, title | 提案已创建 |
+| `ProposalCreated` | proposal_id, entity_id, proposer, title | 提案已创建 |
 | `Voted` | proposal_id, voter, vote, weight | 已投票 |
 | `ProposalPassed` | proposal_id | 提案通过 |
 | `ProposalFailed` | proposal_id | 提案未通过 |
 | `ProposalExecuted` | proposal_id | 提案已执行 |
 | `ProposalCancelled` | proposal_id | 提案已取消 |
 | `GovernanceConfigUpdated` | entity_id, mode | 治理配置已更新 |
-| `CommitteeMemberAdded` | entity_id, member | 委员会成员已添加 |
-| `CommitteeMemberRemoved` | entity_id, member | 委员会成员已移除 |
 | `ProposalVetoed` | proposal_id, by | 提案被否决 |
 | `ProposalExecutionNote` | proposal_id, note | 执行备注（链下执行） |
+| `GovernanceConfigLocked` | entity_id | 治理配置已锁定（不可再修改） |
+| `GovernanceSyncFailed` | entity_id, mode | 治理模式同步到 registry 失败 |
+| `ProposalExpired` | proposal_id | 提案执行窗口已过期 |
+| `ProposalCleaned` | proposal_id | 终态提案已被清理（释放存储） |
 
 ## Errors
 
@@ -408,15 +381,17 @@ fn veto_proposal(
 | `CidTooLong` | CID 过长 |
 | `CannotCancel` | 无权取消 |
 | `GovernanceModeNotAllowed` | 治理模式不允许此操作 |
-| `NotAdmin` | 不是管理员 |
-| `NotCommitteeMember` | 不是委员会成员 |
-| `CommitteeMemberExists` | 委员会成员已存在 |
-| `CommitteeMemberNotFound` | 委员会成员不存在 |
-| `CommitteeFull` | 委员会已满 |
-| `ProposalAlreadyVetoed` | 提案已被否决 |
 | `NoVetoRight` | 无否决权 |
 | `TokenTypeNoVotingPower` | 代币类型不具有投票权 |
 | `InvalidParameter` | 参数无效（费率超范围等） |
+| `ProposalTypeNotImplemented` | 提案类型暂未实现链上执行 |
+| `GovernanceConfigIsLocked` | 治理配置已锁定，不可修改 |
+| `GovernanceAlreadyLocked` | 治理配置已经锁定过 |
+| `VotingPeriodTooShort` | 投票期低于最小值 |
+| `ExecutionDelayTooShort` | 执行延迟低于最小值 |
+| `TokenNotEnabledForDAO` | FullDAO 需要先发行代币 |
+| `ProposalIdOverflow` | 提案 ID 溢出 |
+| `ProposalNotTerminal` | 提案未处于终态，不可清理 |
 
 ## Runtime 配置
 
@@ -444,7 +419,10 @@ impl pallet_entity_governance::Config for Runtime {
     type MaxTitleLength = ConstU32<128>;
     type MaxCidLength = ConstU32<64>;
     type MaxActiveProposals = ConstU32<10>;
-    type MaxCommitteeSize = ConstU32<20>;
+    type MinVotingPeriod = GovernanceMinVotingPeriod;
+    type MinExecutionDelay = GovernanceMinExecutionDelay;
+    type TimeWeightFullPeriod = GovernanceTimeWeightFullPeriod;
+    type TimeWeightMaxMultiplier = GovernanceTimeWeightMaxMultiplier;
 }
 ```
 
@@ -459,17 +437,20 @@ impl pallet_entity_governance::Config for Runtime {
 | `MinProposalThreshold` | u16 | 提案创建门槛 (基点) | 100 (1%) |
 | `MaxTitleLength` | u32 | 标题最大长度 | 128 |
 | `MaxCidLength` | u32 | CID 最大长度 | 64 |
-| `MaxActiveProposals` | u32 | 每店铺最大活跃提案数 | 10 |
-| `MaxCommitteeSize` | u32 | 委员会最大成员数 | 20 |
+| `MaxActiveProposals` | u32 | 每实体最大活跃提案数 | 10 |
+| `MinVotingPeriod` | BlockNumber | 最小投票期 | 14400 (~1天) |
+| `MinExecutionDelay` | BlockNumber | 最小执行延迟 | 7200 (~12小时) |
+| `TimeWeightFullPeriod` | BlockNumber | 时间加权满周期 | 604800 (~6周) |
+| `TimeWeightMaxMultiplier` | u32 | 时间加权最大倍率（万分比） | 30000 (3x) |
 
 ## 安全机制
 
 ### 1. 闪电贷防护（快照机制）
 
 ```
-创建提案 → snapshot_block = now
-投票时 → 检查 FirstHoldTime <= snapshot_block
-       → 投票权重 = min(当前余额, 快照余额)
+创建提案 → 记录 created_at
+投票时 → 检查 FirstHoldTime <= created_at
+       → 投票权重 = min(当前余额, 快照余额) × 时间加权
 ```
 
 攻击者无法通过借入代币→投票→归还来操纵投票结果。
@@ -486,62 +467,46 @@ impl pallet_entity_governance::Config for Runtime {
 
 总投票需 >= 10% 总供应量，确保足够参与度。
 
-### 5. 执行延迟
+### 5. 执行延迟与过期窗口
 
-通过后需等待 2 天才能执行，给社区反应时间。DualTrack 模式下管理员可在此窗口内否决。
+通过后需等待执行延迟才能执行，给社区反应时间。FullDAO 模式下管理员可在此窗口内否决（需启用 admin_veto）。执行窗口 = 2 × execution_delay，过期后提案转为 Expired 状态。
 
-### 6. 活跃提案限制
+### 6. 投票代币锁定（H2）
+
+投票时自动 reserve 投票者的原始代币余额，防止投票后转让给其他账户复投。使用 max-lock + 引用计数模式，支持同时投票多个提案而不重复锁定。提案结束时（finalize/cancel/veto）自动 unreserve。
+
+### 7. 时间加权投票
+
+持有代币时间越长，投票权重越大（最高 3x）。通过 `TimeWeightFullPeriod` 和 `TimeWeightMaxMultiplier` 配置。
+
+### 8. 活跃提案限制
 
 每店铺最多 10 个活跃提案，防止 DoS 攻击。
 
-### 7. 治理模式检查
+### 9. 治理模式检查
 
 `GovernanceMode::None` 下禁止创建提案。无配置时向后兼容（允许使用全局默认参数）。
 
-### 8. 提案参数验证
+### 10. 提案参数验证
 
 创建提案时自动校验参数有效性：费率/比例类字段 ≤ 10000 (basis points)，百分比字段 ≤ 100，`RevenueShare` 两项之和 ≤ 10000，`SetUpgradeMode` ≤ 2。
 
 ## 治理流程
 
-### 标准流程（FullDAO / Tiered）
+### FullDAO 标准流程
 
 ```
 代币持有者 create_proposal (持有 >= 1%)
     ↓
-投票期 (7天) — 代币持有者 vote (权重 = 代币余额)
+投票期 (7天) — 代币持有者 vote (权重 = 余额 × 时间加权)
     ↓
 finalize_voting — 法定人数 >= 10% 且 赞成 > 50%
-    ↓
-执行延迟 (2天)
-    ↓
-execute_proposal — 链上自动执行 / 链下事件通知
-```
-
-### DualTrack 流程
-
-```
-代币持有者 create_proposal
-    ↓
-投票期 — 代币投票
     ↓                              ┐
-finalize_voting → Passed           │ 管理员可在任意阶段
-    ↓                              │ 调用 veto_proposal 否决
-执行延迟 (否决窗口)                 ┘
+执行延迟 (2天)                     │ admin_veto_enabled 时
+    ↓                              │ 管理员可否决
+execute_proposal                   ┘
     ↓
-execute_proposal
-```
-
-### Advisory 流程
-
-```
-代币持有者 create_proposal
-    ↓
-投票期 — 代币投票
-    ↓
-finalize_voting → Passed (仅作建议)
-    ↓
-管理员可选择执行或否决
+cleanup_proposal — 释放存储空间
 ```
 
 ## 依赖
@@ -567,20 +532,24 @@ cargo test -p pallet-entity-governance
 
 | 功能 | 说明 |
 |------|------|
-| 时间加权投票 | `calculate_voting_power` 当前直接返回余额，未实现持有时间加权 |
 | 委托投票 | 将投票权委托给他人 |
-| Committee 模式完整实现 | 当前委员会成员管理已完成，投票流程中未区分委员会模式 |
-| Tiered 模式完整实现 | ProposalLevel 已定义，但 finalize_voting 未按级别使用不同阈值 |
 | 链上直接执行扩展 | 部分提案类型仅发出事件，待集成更多 Provider |
-| ~~单元测试~~ | ✅ 已完成 39 个测试 |
+| ~~时间加权投票~~ | ✅ 已实现（max 3x，基于 FirstHoldTime） |
+| ~~投票代币锁定~~ | ✅ 已实现（reserve/unreserve + max-lock 引用计数） |
+| ~~终态提案清理~~ | ✅ 已实现 `cleanup_proposal` |
+| ~~单元测试~~ | ✅ 已完成 90 个测试 |
 
 ## 版本历史
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
 | v0.1.0 | 2026-01-31 | 初始版本：5 个 extrinsics，22 种提案类型 |
-| v0.2.0 | 2026-02-03 | Phase 5 增强：6 种治理模式、分层阈值、委员会管理、管理员否决、快照防护、42 种提案类型 |
-| v0.2.0-audit | 2026-02-09 | 深度审计：C1 移除弃用 RuntimeEvent、H1 治理模式检查、H2 提案参数验证、H3 冗余 remove_from_active、H4 删除死代码 GovernanceTokenProvider、M4 GovernanceConfig 移除 committee 字段、39 个单元测试 |
+| v0.2.0 | 2026-02-03 | Phase 5 增强：治理模式、管理员否决、快照防护、41 种提案类型 |
+| v0.2.0-audit | 2026-02-09 | 审计 R1：C1 RuntimeEvent、H1 治理模式检查、H2 提案参数验证、39 个测试 |
+| v0.2.1-audit | 2026-02-16 | 审计 R2：H1 通过阈值排除弃权、H2-R2 过期优雅转 Expired、H3-R2 VoteRecords 清理、72 个测试 |
+| v0.3.0-audit | 2026-03 | 审计 R3：H2 投票代币锁定、L5 移除死代码 ProposalStatus、84 个测试 |
+| v0.4.0-audit | 2026-03 | 审计 R4：M1 clear_prefix 有界限制、M2 ShopPause/ShopResume 指定 shop_id、M3 移除 snapshot_block 死字段、L1 README 全面同步、L2 cleanup_proposal extrinsic、90 个测试 |
+| v0.5.0-audit | 2026-03 | 审计 R5：M1 修复 lock_governance 误导性文档、L1 模块文档同步 2 种治理模式、L2 README 修正（41 种提案类型/移除幻影 CustomLevelDiffChange/移除不存在的 extrinsic 6-8/补全 configure_governance 签名）、L3 移除 3 个死错误码、L4 移除死代码 ShopProposals 别名、L5 移除死依赖 |
 
 ## 相关模块
 

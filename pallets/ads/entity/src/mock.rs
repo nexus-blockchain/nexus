@@ -106,7 +106,7 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
 	}
 	fn update_entity_stats(_: u64, _: u128, _: u32) -> Result<(), DispatchError> { Ok(()) }
 	fn update_entity_rating(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
-	fn is_entity_admin(entity_id: u64, account: &u64) -> bool {
+	fn is_entity_admin(entity_id: u64, account: &u64, _required_permission: u32) -> bool {
 		entity_id == 1 && *account == BOB
 	}
 }
@@ -174,6 +174,7 @@ impl pallet_ads_entity::Config for Test {
 	type AdPlacementDeposit = ConstU128<100>;        // 100 units
 	type MaxPlacementsPerEntity = ConstU32<10>;
 	type DefaultDailyImpressionCap = ConstU32<1000>;
+	type BlocksPerDay = ConstU32<14400>;
 }
 
 // ============================================================================

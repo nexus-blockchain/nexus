@@ -13,9 +13,7 @@ targets = ["x86_64-unknown-linux-gnu"]
 [dependencies]
 codec = { features = ["derive"], workspace = true }
 scale-info = { features = ["derive"], workspace = true }
-log = { workspace = true }
 pallet-ads-primitives = { path = "../primitives", default-features = false }
-pallet-ads-core = { path = "../core", default-features = false }
 pallet-entity-common = { path = "../../entity/common", default-features = false }
 
 # Substrate
@@ -23,7 +21,6 @@ frame-support = { workspace = true }
 frame-system = { workspace = true }
 sp-runtime = { workspace = true }
 sp-core = { workspace = true }
-sp-io = { workspace = true, default-features = false }
 
 [dev-dependencies]
 sp-io = { workspace = true }
@@ -34,18 +31,16 @@ default = ["std"]
 std = [
 	"codec/std",
 	"scale-info/std",
-	"log/std",
 	"pallet-ads-primitives/std",
-	"pallet-ads-core/std",
 	"pallet-entity-common/std",
 	"frame-support/std",
 	"frame-system/std",
 	"sp-runtime/std",
 	"sp-core/std",
-	"sp-io/std",
 ]
 try-runtime = [
 	"frame-support/try-runtime",
+	"frame-system/try-runtime",
 	"sp-runtime/try-runtime",
 ]
 runtime-benchmarks = [

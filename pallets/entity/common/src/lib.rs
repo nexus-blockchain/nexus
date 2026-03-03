@@ -178,8 +178,8 @@ impl EffectiveShopStatus {
             }
             EntityStatus::Suspended | EntityStatus::PendingClose | EntityStatus::Pending => {
                 // Entity 非 Active → Shop 不可运营
-                // 如果 Shop 自身已 Closed，优先显示 Closed
-                if *shop_status == ShopOperatingStatus::Closed {
+                // 如果 Shop 自身已 Closed 或 Closing，优先显示 Closed（终态不可逆）
+                if matches!(shop_status, ShopOperatingStatus::Closed | ShopOperatingStatus::Closing) {
                     return Self::Closed;
                 }
                 return Self::PausedByEntity;
@@ -301,10 +301,17 @@ impl MemberRegistrationPolicy {
     pub const REFERRAL_REQUIRED: u8 = 0b0000_0010;
     /// 需要 Entity owner 审批（注册后进入 Pending 状态）
     pub const APPROVAL_REQUIRED: u8 = 0b0000_0100;
+    /// 所有已定义标记位的并集
+    pub const ALL_VALID: u8 = Self::PURCHASE_REQUIRED | Self::REFERRAL_REQUIRED | Self::APPROVAL_REQUIRED;
 
     /// 检查是否设置了指定标记
     pub fn contains(&self, flag: u8) -> bool {
         self.0 & flag == flag
+    }
+
+    /// 检查策略值是否仅包含已定义的位
+    pub fn is_valid(&self) -> bool {
+        self.0 & !Self::ALL_VALID == 0
     }
 
     /// 是否为开放注册（无任何限制）
@@ -352,6 +359,13 @@ impl MemberStatsPolicy {
     pub const INCLUDE_REPURCHASE_DIRECT: u8 = 0b0000_0001;
     /// 间接推荐人数包含复购赠与（置位 = indirect_referrals，不置位 = qualified_indirect_referrals）
     pub const INCLUDE_REPURCHASE_INDIRECT: u8 = 0b0000_0010;
+    /// 所有已定义标记位的并集
+    pub const ALL_VALID: u8 = Self::INCLUDE_REPURCHASE_DIRECT | Self::INCLUDE_REPURCHASE_INDIRECT;
+
+    /// 检查策略值是否仅包含已定义的位
+    pub fn is_valid(&self) -> bool {
+        self.0 & !Self::ALL_VALID == 0
+    }
 
     /// 直推人数是否包含复购赠与
     pub fn include_repurchase_direct(&self) -> bool {
@@ -463,7 +477,7 @@ pub enum TransferRestrictionMode {
 }
 
 impl TransferRestrictionMode {
-    /// 从 u8 转换
+    /// 从 u8 转换（未知值回退到 None）
     pub fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::Whitelist,
@@ -471,6 +485,18 @@ impl TransferRestrictionMode {
             3 => Self::KycRequired,
             4 => Self::MembersOnly,
             _ => Self::None,
+        }
+    }
+
+    /// 安全转换（未知值返回 None 而非静默回退）
+    pub fn try_from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::None),
+            1 => Some(Self::Whitelist),
+            2 => Some(Self::Blacklist),
+            3 => Some(Self::KycRequired),
+            4 => Some(Self::MembersOnly),
+            _ => Option::None,
         }
     }
 }
@@ -547,6 +573,44 @@ pub enum OrderStatus {
 }
 
 // ============================================================================
+// Admin 权限位掩码
+// ============================================================================
+
+/// Admin 细粒度权限（位掩码模式）
+///
+/// 每个 admin 绑定一个 `u32` 权限值，通过 `&` 运算检查是否拥有特定权限。
+/// Owner 天然拥有全部权限，不受此掩码限制。
+#[allow(non_snake_case)]
+pub mod AdminPermission {
+    /// Shop 管理（创建/更新/暂停 Shop、产品管理）
+    pub const SHOP_MANAGE: u32     = 0b0000_0001;
+    /// 会员等级管理（等级系统、升级规则、会员审批）
+    pub const MEMBER_MANAGE: u32   = 0b0000_0010;
+    /// Token 发售管理（创建/结束 tokensale）
+    pub const TOKEN_MANAGE: u32    = 0b0000_0100;
+    /// 广告管理（广告位注册/广告活动管理）
+    pub const ADS_MANAGE: u32      = 0b0000_1000;
+    /// 评论管理（开关评论系统）
+    pub const REVIEW_MANAGE: u32   = 0b0001_0000;
+    /// 披露/公告管理（配置披露、发布公告、内幕人员管理）
+    pub const DISCLOSURE_MANAGE: u32 = 0b0010_0000;
+    /// 全部权限
+    pub const ALL: u32             = 0xFFFF_FFFF;
+    /// 所有已定义权限位的并集（用于校验合法性）
+    pub const ALL_DEFINED: u32     = SHOP_MANAGE
+        | MEMBER_MANAGE
+        | TOKEN_MANAGE
+        | ADS_MANAGE
+        | REVIEW_MANAGE
+        | DISCLOSURE_MANAGE;
+
+    /// 检查权限值是否仅包含已定义的位
+    pub fn is_valid(permissions: u32) -> bool {
+        permissions & !ALL_DEFINED == 0
+    }
+}
+
+// ============================================================================
 // 跨模块 Trait 接口
 // ============================================================================
 
@@ -589,9 +653,11 @@ pub trait EntityProvider<AccountId> {
         Ok(())
     }
     
-    /// 检查是否为 Entity 管理员（owner 或 admins 列表中）
-    fn is_entity_admin(entity_id: u64, account: &AccountId) -> bool {
-        let _ = (entity_id, account);
+    /// 检查是否为 Entity 管理员且拥有指定权限
+    ///
+    /// `required_permission` 为 `AdminPermission` 位掩码，owner 天然通过。
+    fn is_entity_admin(entity_id: u64, account: &AccountId, required_permission: u32) -> bool {
+        let _ = (entity_id, account, required_permission);
         false
     }
     
@@ -798,6 +864,24 @@ pub trait OrderProvider<AccountId, Balance> {
     
     /// 检查用户是否可以对该订单发起争议（必须是买家或卖家，且订单状态允许）
     fn can_dispute(order_id: u64, who: &AccountId) -> bool;
+
+    /// 获取订单 Token 支付金额（u128，Token 订单返回实际值，NEX 订单返回 0）
+    fn order_token_amount(order_id: u64) -> Option<u128> {
+        let _ = order_id;
+        None
+    }
+
+    /// 获取订单支付资产类型（Native / EntityToken）
+    fn order_payment_asset(order_id: u64) -> Option<PaymentAsset> {
+        let _ = order_id;
+        None
+    }
+
+    /// 获取订单完成时间（区块号，u64 表示）
+    fn order_completed_at(order_id: u64) -> Option<u64> {
+        let _ = order_id;
+        None
+    }
 }
 
 // ============================================================================
@@ -863,6 +947,8 @@ impl<AccountId, Balance> OrderProvider<AccountId, Balance> for NullOrderProvider
     fn is_order_completed(_order_id: u64) -> bool { false }
     fn is_order_disputed(_order_id: u64) -> bool { false }
     fn can_dispute(_order_id: u64, _who: &AccountId) -> bool { false }
+    fn order_token_amount(_order_id: u64) -> Option<u128> { None }
+    fn order_payment_asset(_order_id: u64) -> Option<PaymentAsset> { None }
 }
 
 // ============================================================================
@@ -1068,7 +1154,7 @@ impl<AccountId, Balance> OrderCommissionHandler<AccountId, Balance> for () {
 // ============================================================================
 
 /// 订单支付资产类型
-#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
 pub enum PaymentAsset {
     /// NEX 原生代币支付
     #[default]
@@ -1107,11 +1193,11 @@ pub trait TokenOrderCommissionHandler<AccountId> {
 }
 
 /// 空 Token 佣金处理（无 Token 佣金系统时使用）
-impl<AccountId> TokenOrderCommissionHandler<AccountId> for () {
+impl<AccountId: Default> TokenOrderCommissionHandler<AccountId> for () {
     fn on_token_order_completed(_: u64, _: u64, _: u64, _: &AccountId, _: u128, _: u128) -> Result<(), DispatchError> { Ok(()) }
     fn on_token_order_cancelled(_: u64) -> Result<(), DispatchError> { Ok(()) }
     fn token_platform_fee_rate(_: u64) -> u16 { 0 }
-    fn entity_account(_: u64) -> AccountId { panic!("no entity_account in null impl") }
+    fn entity_account(_: u64) -> AccountId { AccountId::default() }
 }
 
 // ============================================================================

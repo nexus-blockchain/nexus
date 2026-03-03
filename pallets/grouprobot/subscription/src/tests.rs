@@ -261,9 +261,11 @@ fn settle_era_direct_to_operator() {
 			SubscriptionTier::Basic,
 			50,
 		));
-		let income = Subscription::settle_era_subscriptions();
+		let (income, treasury) = Subscription::settle_era_subscriptions();
 		// BasicFee = 10
 		assert_eq!(income, 10);
+		// treasury_share = 10 - 9 = 1
+		assert_eq!(treasury, 1);
 		assert_eq!(SubscriptionEscrow::<Test>::get(bot_hash(1)), 40);
 
 		// 90/10 拆分: node_share = 10 * 90 / 100 = 9 → OPERATOR
@@ -650,13 +652,14 @@ fn h2_change_tier_rejects_suspended_subscription() {
 }
 
 #[test]
-fn h2_change_tier_allows_past_due() {
+fn h2_change_tier_allows_past_due_downgrade() {
 	new_test_ext().execute_with(|| {
+		// M1-R4: PastDue 仍允许降级 (new_fee <= old_fee 不检查 escrow)
 		assert_ok!(Subscription::subscribe(
 			RuntimeOrigin::signed(OWNER),
 			bot_hash(1),
-			SubscriptionTier::Basic,
-			10,
+			SubscriptionTier::Pro,
+			30,
 		));
 		// Settle to drain escrow, then one more to get PastDue
 		let _ = Subscription::settle_era_subscriptions();
@@ -664,14 +667,14 @@ fn h2_change_tier_allows_past_due() {
 		let sub = Subscriptions::<Test>::get(bot_hash(1)).unwrap();
 		assert_eq!(sub.status, SubscriptionStatus::PastDue);
 
-		// PastDue should still allow tier change
+		// PastDue should still allow downgrade (Basic fee=10 < Pro fee=30)
 		assert_ok!(Subscription::change_tier(
 			RuntimeOrigin::signed(OWNER),
 			bot_hash(1),
-			SubscriptionTier::Pro,
+			SubscriptionTier::Basic,
 		));
 		let sub = Subscriptions::<Test>::get(bot_hash(1)).unwrap();
-		assert_eq!(sub.tier, SubscriptionTier::Pro);
+		assert_eq!(sub.tier, SubscriptionTier::Basic);
 	});
 }
 
@@ -725,7 +728,7 @@ fn h1_settle_income_zero_when_owner_cannot_transfer() {
 		// After unreserve(10), OWNER has ~15 free
 		// node_share = 9, treasury_share = 1, total = 10
 		// Transfer of 9 + 1 = 10 from 15 free should still work
-		let income = Subscription::settle_era_subscriptions();
+		let (income, _treasury) = Subscription::settle_era_subscriptions();
 		assert_eq!(income, 10);
 	});
 }
@@ -778,7 +781,7 @@ fn h1_no_event_on_transfer_failure() {
 		// second transfer of 1 leaves 0 → AllowDeath allows it
 		// So both transfers succeed in this mock. Instead test income is correct:
 		System::reset_events();
-		let income = Subscription::settle_era_subscriptions();
+		let (income, _treasury) = Subscription::settle_era_subscriptions();
 		// If transfers succeed, event should be emitted and income counted
 		assert_eq!(income, 10);
 		let events: Vec<_> = System::events().into_iter()
@@ -868,3 +871,250 @@ fn l1_commit_ads_fails_no_operator() {
 		);
 	});
 }
+
+// ========================================================================
+// 回归测试: H1-R3 — effective_tier 应包含 Underdelivery 状态的广告承诺
+// ========================================================================
+
+#[test]
+fn h1_r3_underdelivery_preserves_effective_tier() {
+	new_test_ext().execute_with(|| {
+		// 创建广告承诺 → Basic
+		assert_ok!(Subscription::commit_ads(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			community_hash(1),
+			5,
+		));
+		// 模拟未达标 → Underdelivery
+		set_delivery_count(&community_hash(1), 2);
+		Subscription::settle_ad_commitments();
+		let record = AdCommitments::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(record.status, AdCommitmentStatus::Underdelivery);
+
+		// H1-R3: Underdelivery 仍应保留有效层级
+		assert_eq!(
+			Subscription::effective_tier(&bot_hash(1)),
+			SubscriptionTier::Basic
+		);
+	});
+}
+
+#[test]
+fn h1_r3_cancelled_commitment_drops_tier() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::commit_ads(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			community_hash(1),
+			5,
+		));
+		assert_ok!(Subscription::cancel_ad_commitment(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+		));
+		// Cancelled 应回到 Free
+		assert_eq!(
+			Subscription::effective_tier(&bot_hash(1)),
+			SubscriptionTier::Free
+		);
+	});
+}
+
+// ========================================================================
+// 回归测试: M2-R3 — cleanup 清理已取消记录
+// ========================================================================
+
+#[test]
+fn m2_r3_cleanup_subscription_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_ok!(Subscription::cancel_subscription(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+		));
+		// 任何人可清理已取消的订阅
+		assert_ok!(Subscription::cleanup_subscription(
+			RuntimeOrigin::signed(OTHER),
+			bot_hash(1),
+		));
+		assert!(Subscriptions::<Test>::get(bot_hash(1)).is_none());
+	});
+}
+
+#[test]
+fn m2_r3_cleanup_subscription_rejects_active() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_noop!(
+			Subscription::cleanup_subscription(
+				RuntimeOrigin::signed(OTHER),
+				bot_hash(1),
+			),
+			Error::<Test>::SubscriptionNotTerminal
+		);
+	});
+}
+
+#[test]
+fn m2_r3_cleanup_ad_commitment_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::commit_ads(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			community_hash(1),
+			5,
+		));
+		assert_ok!(Subscription::cancel_ad_commitment(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+		));
+		assert_ok!(Subscription::cleanup_ad_commitment(
+			RuntimeOrigin::signed(OTHER),
+			bot_hash(1),
+		));
+		assert!(AdCommitments::<Test>::get(bot_hash(1)).is_none());
+	});
+}
+
+#[test]
+fn m2_r3_cleanup_ad_commitment_rejects_active() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::commit_ads(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			community_hash(1),
+			5,
+		));
+		assert_noop!(
+			Subscription::cleanup_ad_commitment(
+				RuntimeOrigin::signed(OTHER),
+				bot_hash(1),
+			),
+			Error::<Test>::AdCommitmentNotTerminal
+		);
+	});
+}
+
+// ========================================================================
+// 回归测试: M1-R4 — change_tier 升级需验证 escrow 充足性
+// ========================================================================
+
+#[test]
+fn m1_r4_change_tier_upgrade_rejects_insufficient_escrow() {
+	new_test_ext().execute_with(|| {
+		// Subscribe Basic (fee=10) with deposit=50, escrow=50
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		// Upgrade to Enterprise (fee=100), escrow=50 < 100 → 应拒绝
+		assert_noop!(
+			Subscription::change_tier(
+				RuntimeOrigin::signed(OWNER),
+				bot_hash(1),
+				SubscriptionTier::Enterprise,
+			),
+			Error::<Test>::InsufficientDeposit
+		);
+		// 层级不变
+		let sub = Subscriptions::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(sub.tier, SubscriptionTier::Basic);
+	});
+}
+
+#[test]
+fn m1_r4_change_tier_upgrade_works_with_sufficient_escrow() {
+	new_test_ext().execute_with(|| {
+		// Subscribe Basic (fee=10) with deposit=100, escrow=100
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			100,
+		));
+		// Upgrade to Enterprise (fee=100), escrow=100 >= 100 → 应成功
+		assert_ok!(Subscription::change_tier(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Enterprise,
+		));
+		let sub = Subscriptions::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(sub.tier, SubscriptionTier::Enterprise);
+		assert_eq!(sub.fee_per_era, 100);
+	});
+}
+
+#[test]
+fn m1_r4_change_tier_downgrade_allows_low_escrow() {
+	new_test_ext().execute_with(|| {
+		// Subscribe Pro (fee=30) with deposit=30
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Pro,
+			30,
+		));
+		// Settle to drain escrow
+		let _ = Subscription::settle_era_subscriptions();
+		assert_eq!(SubscriptionEscrow::<Test>::get(bot_hash(1)), 0);
+		// Second settle → PastDue
+		let _ = Subscription::settle_era_subscriptions();
+		let sub = Subscriptions::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(sub.status, SubscriptionStatus::PastDue);
+
+		// Downgrade to Basic (fee=10 < Pro fee=30), escrow=0
+		// 降级不检查 escrow → 应成功
+		assert_ok!(Subscription::change_tier(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+		));
+		let sub = Subscriptions::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(sub.tier, SubscriptionTier::Basic);
+		assert_eq!(sub.fee_per_era, 10);
+	});
+}
+
+// ========================================================================
+// 回归测试: L2-R4 — cleanup_subscription 防御性清理 escrow 存储
+// ========================================================================
+
+#[test]
+fn l2_r4_cleanup_subscription_removes_escrow_dust() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_ok!(Subscription::cancel_subscription(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+		));
+		// 模拟 escrow 存储残留 (防御性场景)
+		SubscriptionEscrow::<Test>::insert(bot_hash(1), 5u128);
+
+		assert_ok!(Subscription::cleanup_subscription(
+			RuntimeOrigin::signed(OTHER),
+			bot_hash(1),
+		));
+		// 验证 subscription 和 escrow 都已清理
+		assert!(Subscriptions::<Test>::get(bot_hash(1)).is_none());
+		assert_eq!(SubscriptionEscrow::<Test>::get(bot_hash(1)), 0);
+	});
+}
+

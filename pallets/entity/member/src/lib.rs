@@ -32,7 +32,7 @@ pub mod pallet {
         BoundedVec,
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{EntityProvider, ShopProvider, MemberRegistrationPolicy, MemberStatsPolicy};
+    use pallet_entity_common::{EntityProvider, ShopProvider, MemberRegistrationPolicy, MemberStatsPolicy, AdminPermission};
     use sp_runtime::traits::{Saturating, Zero};
 
     /// 货币余额类型别名
@@ -281,6 +281,10 @@ pub mod pallet {
         /// 最大升级历史记录数量
         #[pallet::constant]
         type MaxUpgradeHistory: Get<u32>;
+
+        /// M6 修复: 待审批会员过期区块数（0 = 不过期）
+        #[pallet::constant]
+        type PendingMemberExpiry: Get<BlockNumberFor<Self>>;
     }
 
     #[pallet::pallet]
@@ -398,13 +402,24 @@ pub mod pallet {
         ValueQuery,
     >;
 
-    /// 待审批会员 (entity_id, account) -> referrer
+    /// M5 修复: 会员 USDT 累计消费 (entity_id, account) -> usdt_amount (精度 10^6)
+    /// 独立于 EntityMember.total_spent (NEX Balance)，避免存储迁移
+    #[pallet::storage]
+    pub type MemberSpentUsdt<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat, u64,
+        Blake2_128Concat, T::AccountId,
+        u64,
+        ValueQuery,
+    >;
+
+    /// M6 修复: 待审批会员 (entity_id, account) -> (referrer, applied_at)
     #[pallet::storage]
     pub type PendingMembers<T: Config> = StorageDoubleMap<
         _,
         Blake2_128Concat, u64,
         Blake2_128Concat, T::AccountId,
-        Option<T::AccountId>,
+        (Option<T::AccountId>, BlockNumberFor<T>),
     >;
 
     // ============================================================================
@@ -416,6 +431,7 @@ pub mod pallet {
     pub enum Event<T: Config> {
         /// 会员注册
         MemberRegistered {
+            entity_id: u64,
             shop_id: u64,
             account: T::AccountId,
             referrer: Option<T::AccountId>,
@@ -428,7 +444,7 @@ pub mod pallet {
         },
         /// 自定义等级升级
         CustomLevelUpgraded {
-            shop_id: u64,
+            entity_id: u64,
             account: T::AccountId,
             old_level_id: u8,
             new_level_id: u8,
@@ -495,7 +511,7 @@ pub mod pallet {
         },
         /// 会员等级过期
         MemberLevelExpired {
-            shop_id: u64,
+            entity_id: u64,
             account: T::AccountId,
             expired_level_id: u8,
             new_level_id: u8,
@@ -529,6 +545,36 @@ pub mod pallet {
         },
         /// 会员激活（代注册会员首次消费后激活）
         MemberActivated {
+            entity_id: u64,
+            account: T::AccountId,
+        },
+        /// R6-L1: 自定义等级开关变更
+        UseCustomLevelsUpdated {
+            shop_id: u64,
+            use_custom: bool,
+        },
+        /// R6-L1: 升级模式变更
+        UpgradeModeUpdated {
+            shop_id: u64,
+            upgrade_mode: LevelUpgradeMode,
+        },
+        /// R6-L1: 升级规则系统启用/禁用
+        UpgradeRuleSystemToggled {
+            shop_id: u64,
+            enabled: bool,
+        },
+        /// R6-L1: 冲突策略变更
+        ConflictStrategyUpdated {
+            shop_id: u64,
+            strategy: ConflictStrategy,
+        },
+        /// M6: 待审批会员撤回申请
+        PendingMemberCancelled {
+            entity_id: u64,
+            account: T::AccountId,
+        },
+        /// M6: 待审批会员过期清理
+        PendingMemberExpired {
             entity_id: u64,
             account: T::AccountId,
         },
@@ -610,6 +656,12 @@ pub mod pallet {
         UpgradeRuleSystemAlreadyInitialized,
         /// 等级名称过长（超过 32 字节）
         NameTooLong,
+        /// 规则 ID 溢出
+        RuleIdOverflow,
+        /// M6: 待审批记录已过期
+        PendingMemberAlreadyExpired,
+        /// M6: 不是待审批申请人
+        NotPendingApplicant,
     }
 
     // ============================================================================
@@ -632,11 +684,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证店铺存在且营业中
-            ensure!(T::ShopProvider::shop_exists(shop_id), Error::<T>::ShopNotFound);
-            ensure!(T::ShopProvider::is_shop_active(shop_id), Error::<T>::ShopNotFound);
-
-            let entity_id = T::ShopProvider::shop_entity_id(shop_id)
+            let entity_id = Self::resolve_entity_id(shop_id)
                 .ok_or(Error::<T>::ShopNotFound)?;
 
             // 检查是否已注册（会员统一在 Entity 级别）
@@ -670,7 +718,8 @@ pub mod pallet {
                     Error::<T>::MemberPendingApproval
                 );
 
-                PendingMembers::<T>::insert(entity_id, &who, referrer.clone());
+                let now = <frame_system::Pallet<T>>::block_number();
+                PendingMembers::<T>::insert(entity_id, &who, (referrer.clone(), now));
 
                 Self::deposit_event(Event::MemberPendingApproval {
                     entity_id,
@@ -685,6 +734,7 @@ pub mod pallet {
             Self::do_register_member(entity_id, &who, referrer.clone(), true)?;
 
             Self::deposit_event(Event::MemberRegistered {
+                entity_id,
                 shop_id,
                 account: who,
                 referrer,
@@ -711,7 +761,7 @@ pub mod pallet {
                 .ok_or(Error::<T>::ShopNotFound)?;
 
             // 验证是会员
-            let mut member = Self::get_member_by_shop(shop_id, &who)
+            let member = Self::get_member_by_shop(shop_id, &who)
                 .ok_or(Error::<T>::NotMember)?;
 
             // 验证未绑定推荐人
@@ -731,28 +781,16 @@ pub mod pallet {
             );
 
             // 绑定推荐人
-            member.referrer = Some(referrer.clone());
-            Self::mutate_member_by_shop(shop_id, &who, |maybe_member| {
+            EntityMembers::<T>::mutate(entity_id, &who, |maybe_member| {
                 if let Some(ref mut m) = maybe_member {
-                    m.referrer = member.referrer.clone();
+                    m.referrer = Some(referrer.clone());
                 }
-            })?;
+            });
 
-            // 更新推荐人的直接推荐人数（手动绑定 = qualified）
-            Self::mutate_member_by_shop(shop_id, &referrer, |maybe_member| {
-                if let Some(ref mut m) = maybe_member {
-                    m.direct_referrals = m.direct_referrals.saturating_add(1);
-                    m.qualified_referrals = m.qualified_referrals.saturating_add(1);
-                }
-            })?;
-
-            // 更新推荐索引（entity 级别）
-            DirectReferrals::<T>::try_mutate(entity_id, &referrer, |referrals| {
-                referrals.try_push(who.clone()).map_err(|_| Error::<T>::ReferralsFull)
-            })?;
-
-            // 更新团队人数 + 间接推荐人数（entity 级别，手动绑定 = qualified）
-            Self::update_team_size_by_entity(entity_id, &referrer, true);
+            // R6-M1 审计修复: 复用 mutate_member_referral 统一维护推荐人统计
+            // 确保 DirectReferrals 容量检查在统计写入前执行（fail-fast），
+            // 并与 do_register_member 保持一致的更新顺序
+            Self::mutate_member_referral(entity_id, &referrer, &who, true)?;
 
             Self::deposit_event(Event::ReferrerBound {
                 shop_id,
@@ -956,6 +994,12 @@ pub mod pallet {
                     Error::<T>::InvalidLevelId
                 );
 
+                // H1 审计修复: 检查该等级是否还有会员，防止成员滞留在已删除等级
+                ensure!(
+                    LevelMemberCount::<T>::get(entity_id, level_id) == 0,
+                    Error::<T>::LevelHasMembers
+                );
+
                 system.levels.pop();
 
                 Self::deposit_event(Event::CustomLevelRemoved { shop_id, level_id });
@@ -1003,6 +1047,10 @@ pub mod pallet {
                 LevelMemberCount::<T>::mutate(entity_id, old_level_id, |c| *c = c.saturating_sub(1));
                 LevelMemberCount::<T>::mutate(entity_id, target_level_id, |c| *c = c.saturating_add(1));
 
+                // H13 审计修复: 手动升级为永久等级，清除之前规则升级残留的过期时间
+                // 防止 update_spent P4 逻辑误将手动升级的等级视为已过期并降级
+                MemberLevelExpiry::<T>::remove(entity_id, &member);
+
                 Self::deposit_event(Event::MemberManuallyUpgraded {
                     shop_id,
                     account: member.clone(),
@@ -1031,6 +1079,9 @@ pub mod pallet {
             EntityLevelSystems::<T>::try_mutate(entity_id, |maybe_system| -> DispatchResult {
                 let system = maybe_system.as_mut().ok_or(Error::<T>::LevelSystemNotInitialized)?;
                 system.use_custom = use_custom;
+
+                Self::deposit_event(Event::UseCustomLevelsUpdated { shop_id, use_custom });
+
                 Ok(())
             })
         }
@@ -1053,6 +1104,9 @@ pub mod pallet {
             EntityLevelSystems::<T>::try_mutate(entity_id, |maybe_system| -> DispatchResult {
                 let system = maybe_system.as_mut().ok_or(Error::<T>::LevelSystemNotInitialized)?;
                 system.upgrade_mode = upgrade_mode;
+
+                Self::deposit_event(Event::UpgradeModeUpdated { shop_id, upgrade_mode });
+
                 Ok(())
             })
         }
@@ -1140,7 +1194,9 @@ pub mod pallet {
                 let system = maybe_system.as_mut().ok_or(Error::<T>::UpgradeRuleSystemNotInitialized)?;
 
                 let rule_id = system.next_rule_id;
-                system.next_rule_id = system.next_rule_id.saturating_add(1);
+                // M1 审计修复: checked_add 防止 u32 溢出导致重复 ID
+                system.next_rule_id = system.next_rule_id.checked_add(1)
+                    .ok_or(Error::<T>::RuleIdOverflow)?;
 
                 let rule = UpgradeRule {
                     id: rule_id,
@@ -1256,6 +1312,9 @@ pub mod pallet {
             EntityUpgradeRules::<T>::try_mutate(entity_id, |maybe_system| -> DispatchResult {
                 let system = maybe_system.as_mut().ok_or(Error::<T>::UpgradeRuleSystemNotInitialized)?;
                 system.enabled = enabled;
+
+                Self::deposit_event(Event::UpgradeRuleSystemToggled { shop_id, enabled });
+
                 Ok(())
             })
         }
@@ -1278,6 +1337,9 @@ pub mod pallet {
             EntityUpgradeRules::<T>::try_mutate(entity_id, |maybe_system| -> DispatchResult {
                 let system = maybe_system.as_mut().ok_or(Error::<T>::UpgradeRuleSystemNotInitialized)?;
                 system.conflict_strategy = conflict_strategy;
+
+                Self::deposit_event(Event::ConflictStrategyUpdated { shop_id, strategy: conflict_strategy });
+
                 Ok(())
             })
         }
@@ -1302,7 +1364,7 @@ pub mod pallet {
             // 权限检查：Entity owner 或 admin
             ensure!(
                 T::EntityProvider::entity_owner(entity_id).as_ref() == Some(&who)
-                    || T::EntityProvider::is_entity_admin(entity_id, &who),
+                    || T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::MEMBER_MANAGE),
                 Error::<T>::NotEntityAdmin
             );
 
@@ -1337,13 +1399,23 @@ pub mod pallet {
             // 权限检查
             ensure!(
                 T::EntityProvider::entity_owner(entity_id).as_ref() == Some(&who)
-                    || T::EntityProvider::is_entity_admin(entity_id, &who),
+                    || T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::MEMBER_MANAGE),
                 Error::<T>::NotEntityAdmin
             );
 
             // 取出待审批记录
-            let referrer = PendingMembers::<T>::take(entity_id, &account)
+            let (referrer, applied_at) = PendingMembers::<T>::take(entity_id, &account)
                 .ok_or(Error::<T>::PendingMemberNotFound)?;
+
+            // M6: 检查是否已过期
+            let expiry = T::PendingMemberExpiry::get();
+            if !expiry.is_zero() {
+                let now = <frame_system::Pallet<T>>::block_number();
+                ensure!(
+                    now <= applied_at.saturating_add(expiry),
+                    Error::<T>::PendingMemberAlreadyExpired
+                );
+            }
 
             // 正式注册
             Self::do_register_member(entity_id, &account, referrer, true)?;
@@ -1377,7 +1449,7 @@ pub mod pallet {
             // 权限检查
             ensure!(
                 T::EntityProvider::entity_owner(entity_id).as_ref() == Some(&who)
-                    || T::EntityProvider::is_entity_admin(entity_id, &who),
+                    || T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::MEMBER_MANAGE),
                 Error::<T>::NotEntityAdmin
             );
 
@@ -1392,6 +1464,73 @@ pub mod pallet {
                 entity_id,
                 account,
             });
+
+            Ok(())
+        }
+
+        /// M6: 申请人撤回自己的待审批记录
+        #[pallet::call_index(21)]
+        #[pallet::weight(Weight::from_parts(100_000_000, 6_000))]
+        pub fn cancel_pending_member(
+            origin: OriginFor<T>,
+            shop_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let entity_id = T::ShopProvider::shop_entity_id(shop_id)
+                .ok_or(Error::<T>::ShopNotFound)?;
+
+            ensure!(
+                PendingMembers::<T>::contains_key(entity_id, &who),
+                Error::<T>::PendingMemberNotFound
+            );
+            PendingMembers::<T>::remove(entity_id, &who);
+
+            Self::deposit_event(Event::PendingMemberCancelled {
+                entity_id,
+                account: who,
+            });
+
+            Ok(())
+        }
+
+        /// M6: 清理过期的待审批记录（任人可调用，按 entity 清理）
+        #[pallet::call_index(22)]
+        #[pallet::weight(Weight::from_parts(500_000_000, 20_000))]
+        pub fn cleanup_expired_pending(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            max_clean: u32,
+        ) -> DispatchResult {
+            let _who = ensure_signed(origin)?;
+
+            let expiry = T::PendingMemberExpiry::get();
+            // 如果过期时间为 0，不执行清理（永不过期）
+            if expiry.is_zero() {
+                return Ok(());
+            }
+
+            let now = <frame_system::Pallet<T>>::block_number();
+            let mut cleaned = 0u32;
+            let mut to_remove: alloc::vec::Vec<T::AccountId> = alloc::vec::Vec::new();
+
+            for (account, (_referrer, applied_at)) in PendingMembers::<T>::iter_prefix(entity_id) {
+                if cleaned >= max_clean {
+                    break;
+                }
+                if now > applied_at.saturating_add(expiry) {
+                    to_remove.push(account);
+                    cleaned += 1;
+                }
+            }
+
+            for account in to_remove {
+                PendingMembers::<T>::remove(entity_id, &account);
+                Self::deposit_event(Event::PendingMemberExpired {
+                    entity_id,
+                    account,
+                });
+            }
 
             Ok(())
         }
@@ -1418,7 +1557,7 @@ pub mod pallet {
             // 权限检查：Entity owner 或 admin
             ensure!(
                 T::EntityProvider::entity_owner(entity_id).as_ref() == Some(&who)
-                    || T::EntityProvider::is_entity_admin(entity_id, &who),
+                    || T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::MEMBER_MANAGE),
                 Error::<T>::NotEntityAdmin
             );
 
@@ -1534,6 +1673,9 @@ pub mod pallet {
 
             // 更新团队人数 + 间接推荐人数（entity 级别）
             Self::update_team_size_by_entity(entity_id, ref_account, qualified);
+
+            // M10 修复: 推荐人统计变更后立即检查推荐类升级规则
+            Self::check_referral_upgrade_rules_by_entity(entity_id, ref_account)?;
 
             Ok(())
         }
@@ -1804,6 +1946,77 @@ pub mod pallet {
             Ok(())
         }
 
+        /// M10 修复: 检查推荐类升级规则（在推荐人统计变更后调用）
+        ///
+        /// 仅评估 ReferralCount 和 TeamSize 触发器，避免在注册路径上
+        /// 重复评估订单类触发器（PurchaseProduct, SingleOrder, TotalSpent, OrderCount）。
+        fn check_referral_upgrade_rules_by_entity(
+            entity_id: u64,
+            account: &T::AccountId,
+        ) -> DispatchResult {
+            let system = match EntityUpgradeRules::<T>::get(entity_id) {
+                Some(s) if s.enabled => s,
+                _ => return Ok(()),
+            };
+
+            let member = match EntityMembers::<T>::get(entity_id, account) {
+                Some(m) => m,
+                None => return Ok(()),
+            };
+
+            let mut matched_rules: alloc::vec::Vec<(u32, u8, Option<BlockNumberFor<T>>, u8, bool)> = alloc::vec::Vec::new();
+
+            for rule in system.rules.iter() {
+                if !rule.enabled {
+                    continue;
+                }
+
+                if let Some(max) = rule.max_triggers {
+                    if rule.trigger_count >= max {
+                        continue;
+                    }
+                }
+
+                let matches = match &rule.trigger {
+                    UpgradeTrigger::ReferralCount { count } => {
+                        let policy = EntityMemberStatsPolicy::<T>::get(entity_id);
+                        let referrals = if policy.include_repurchase_direct() {
+                            member.direct_referrals
+                        } else {
+                            member.qualified_referrals
+                        };
+                        referrals >= *count
+                    },
+                    UpgradeTrigger::TeamSize { size } => {
+                        member.team_size >= *size
+                    },
+                    _ => false,
+                };
+
+                if matches {
+                    matched_rules.push((
+                        rule.id,
+                        rule.target_level_id,
+                        rule.duration,
+                        rule.priority,
+                        rule.stackable,
+                    ));
+                }
+            }
+
+            if matched_rules.is_empty() {
+                return Ok(());
+            }
+
+            let selected = Self::resolve_conflict(&matched_rules, &system.conflict_strategy);
+
+            if let Some((rule_id, target_level_id, duration, _, stackable)) = selected {
+                Self::apply_upgrade(entity_id, account, rule_id, target_level_id, duration, stackable)?;
+            }
+
+            Ok(())
+        }
+
         /// 解决规则冲突
         fn resolve_conflict(
             rules: &[(u32, u8, Option<BlockNumberFor<T>>, u8, bool)],
@@ -1897,7 +2110,13 @@ pub mod pallet {
                         upgraded_at: now,
                         expires_at,
                     };
-                    history.try_push(record).ok();
+                    // L2 审计修复: 历史记录满时记录警告，而非静默丢弃
+                    if history.try_push(record).is_err() {
+                        log::warn!(
+                            "MemberUpgradeHistory full for entity={}, rule_id={}, from={} to={}",
+                            entity_id, rule_id, old_level_id, target_level_id,
+                        );
+                    }
                     Ok::<_, Error<T>>(())
                 });
 
@@ -1942,6 +2161,14 @@ pub mod pallet {
             if let Some(expires_at) = MemberLevelExpiry::<T>::get(entity_id, account) {
                 let now = <frame_system::Pallet<T>>::block_number();
                 if now > expires_at {
+                    return Self::calculate_custom_level_by_entity(entity_id, member.total_spent);
+                }
+            }
+
+            // M9 审计修复: 验证 custom_level_id 对应的等级仍然存在
+            // 等级可能被 remove_custom_level 删除，此时回退到基于消费的计算
+            if let Some(system) = EntityLevelSystems::<T>::get(entity_id) {
+                if system.use_custom && (member.custom_level_id as usize) >= system.levels.len() {
                     return Self::calculate_custom_level_by_entity(entity_id, member.total_spent);
                 }
             }
@@ -2092,6 +2319,11 @@ pub mod pallet {
                     level_id as usize == system.levels.len().saturating_sub(1),
                     Error::<T>::InvalidLevelId
                 );
+                // H1 审计修复: 检查该等级是否还有会员
+                ensure!(
+                    LevelMemberCount::<T>::get(entity_id, level_id) == 0,
+                    Error::<T>::LevelHasMembers
+                );
                 system.levels.pop();
                 Ok(())
             })
@@ -2132,8 +2364,15 @@ pub mod pallet {
             entity_id: u64,
             account: &T::AccountId,
             amount: BalanceOf<T>,
-            _amount_usdt: u64,
+            amount_usdt: u64,
         ) -> DispatchResult {
+            // M5 修复: 累加 USDT 消费（独立于 NEX Balance）
+            if amount_usdt > 0 {
+                MemberSpentUsdt::<T>::mutate(entity_id, account, |total| {
+                    *total = total.saturating_add(amount_usdt);
+                });
+            }
+
             EntityMembers::<T>::mutate(entity_id, account, |maybe_member| -> DispatchResult {
                 let member = maybe_member.as_mut().ok_or(Error::<T>::NotMember)?;
 
@@ -2154,7 +2393,7 @@ pub mod pallet {
                             member.custom_level_id = recalculated;
 
                             Self::deposit_event(Event::MemberLevelExpired {
-                                shop_id: 0,
+                                entity_id,
                                 account: account.clone(),
                                 expired_level_id,
                                 new_level_id: recalculated,
@@ -2181,7 +2420,7 @@ pub mod pallet {
                             member.custom_level_id = new_custom_level;
 
                             Self::deposit_event(Event::CustomLevelUpgraded {
-                                shop_id: 0,
+                                entity_id,
                                 account: account.clone(),
                                 old_level_id,
                                 new_level_id: new_custom_level,
@@ -2234,7 +2473,8 @@ pub mod pallet {
             // APPROVAL_REQUIRED: 进入待审批状态（购买触发也需审批）
             if policy.requires_approval() {
                 if !PendingMembers::<T>::contains_key(entity_id, account) {
-                    PendingMembers::<T>::insert(entity_id, account, valid_referrer.clone());
+                    let now = <frame_system::Pallet<T>>::block_number();
+                    PendingMembers::<T>::insert(entity_id, account, (valid_referrer.clone(), now));
 
                     Self::deposit_event(Event::MemberPendingApproval {
                         entity_id,
@@ -2248,6 +2488,7 @@ pub mod pallet {
             Self::do_register_member(entity_id, account, valid_referrer.clone(), true)?;
 
             Self::deposit_event(Event::MemberRegistered {
+                entity_id,
                 shop_id,
                 account: account.clone(),
                 referrer: valid_referrer,
@@ -2255,10 +2496,11 @@ pub mod pallet {
 
             Ok(())
         }
+
         /// 自动注册会员（entity_id 直达版本，供 commission-core 等已持有 entity_id 的模块调用）
         ///
         /// 与 `auto_register` 逻辑一致，但跳过 shop_id → entity_id 解析。
-        /// 事件中 shop_id 字段为 0（无 shop 上下文）。
+        /// 事件中 entity_id 字段为实体 ID。
         ///
         /// `qualified`: 是否为有效直推（购买触发=true，复购赠与=false）
         pub fn auto_register_by_entity(
@@ -2291,7 +2533,8 @@ pub mod pallet {
 
             if policy.requires_approval() {
                 if !PendingMembers::<T>::contains_key(entity_id, account) {
-                    PendingMembers::<T>::insert(entity_id, account, valid_referrer.clone());
+                    let now = <frame_system::Pallet<T>>::block_number();
+                    PendingMembers::<T>::insert(entity_id, account, (valid_referrer.clone(), now));
 
                     Self::deposit_event(Event::MemberPendingApproval {
                         entity_id,
@@ -2305,6 +2548,7 @@ pub mod pallet {
             Self::do_register_member(entity_id, account, valid_referrer.clone(), qualified)?;
 
             Self::deposit_event(Event::MemberRegistered {
+                entity_id,
                 shop_id: 0,
                 account: account.clone(),
                 referrer: valid_referrer,
@@ -2420,7 +2664,8 @@ impl<T: pallet::Config> MemberProvider<T::AccountId, pallet::BalanceOf<T>> for p
                 } else {
                     m.qualified_referrals
                 };
-                let spent_usdt: u128 = sp_runtime::SaturatedConversion::saturated_into(m.total_spent);
+                // M5 修复: 返回独立 USDT 累计消费，而非 NEX Balance 的 saturated_into
+                let spent_usdt: u128 = pallet::MemberSpentUsdt::<T>::get(entity_id, account) as u128;
                 (direct, m.team_size, spent_usdt)
             })
             .unwrap_or((0, 0, 0))

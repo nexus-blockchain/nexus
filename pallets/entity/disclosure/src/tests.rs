@@ -13,14 +13,12 @@ fn configure_disclosure_works() {
             ENTITY_ID,
             DisclosureLevel::Standard,
             true,
-            50u64,
             100u64,
         ));
 
         let config = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
         assert_eq!(config.level, DisclosureLevel::Standard);
         assert!(config.insider_trading_control);
-        assert_eq!(config.blackout_period_before, 50);
         assert_eq!(config.blackout_period_after, 100);
         // next_required = now(1) + StandardInterval(500) = 501
         assert_eq!(config.next_required_disclosure, 501);
@@ -34,7 +32,7 @@ fn configure_disclosure_fails_not_owner() {
         assert_noop!(
             EntityDisclosure::configure_disclosure(
                 RuntimeOrigin::signed(ALICE), ENTITY_ID,
-                DisclosureLevel::Basic, false, 0u64, 0u64,
+                DisclosureLevel::Basic, false, 0u64,
             ),
             Error::<Test>::NotAdmin
         );
@@ -47,7 +45,7 @@ fn configure_disclosure_fails_entity_not_found() {
         assert_noop!(
             EntityDisclosure::configure_disclosure(
                 RuntimeOrigin::signed(OWNER), 999,
-                DisclosureLevel::Basic, false, 0u64, 0u64,
+                DisclosureLevel::Basic, false, 0u64,
             ),
             Error::<Test>::EntityNotFound
         );
@@ -90,7 +88,7 @@ fn publish_disclosure_auto_blackout() {
         // 先配置：启用内幕控制 + blackout_after=50
         assert_ok!(EntityDisclosure::configure_disclosure(
             RuntimeOrigin::signed(OWNER), ENTITY_ID,
-            DisclosureLevel::Standard, true, 0u64, 50u64,
+            DisclosureLevel::Standard, true, 50u64,
         ));
 
         assert_ok!(EntityDisclosure::publish_disclosure(
@@ -112,7 +110,7 @@ fn publish_disclosure_no_blackout_when_disabled() {
         // 配置：不启用内幕控制
         assert_ok!(EntityDisclosure::configure_disclosure(
             RuntimeOrigin::signed(OWNER), ENTITY_ID,
-            DisclosureLevel::Basic, false, 0u64, 50u64,
+            DisclosureLevel::Basic, false, 50u64,
         ));
 
         assert_ok!(EntityDisclosure::publish_disclosure(
@@ -292,9 +290,9 @@ fn add_insider_fails_duplicate() {
 }
 
 #[test]
-fn add_insider_reactivates_removed() {
+fn add_insider_after_remove_works() {
     new_test_ext().execute_with(|| {
-        // H3: 添加后移除再添加，应重用旧记录
+        // M3: 硬删除后重新添加，BoundedVec 长度先减再增
         assert_ok!(EntityDisclosure::add_insider(
             RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Admin,
         ));
@@ -302,16 +300,14 @@ fn add_insider_reactivates_removed() {
             RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE,
         ));
         assert!(!Pallet::<Test>::is_insider(ENTITY_ID, &ALICE));
+        assert_eq!(Insiders::<Test>::get(ENTITY_ID).len(), 0);
 
         // 重新添加（不同角色）
         assert_ok!(EntityDisclosure::add_insider(
             RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Auditor,
         ));
         assert!(Pallet::<Test>::is_insider(ENTITY_ID, &ALICE));
-
-        // BoundedVec 长度不应增加
-        let insiders = Insiders::<Test>::get(ENTITY_ID);
-        assert_eq!(insiders.len(), 1);
+        assert_eq!(Insiders::<Test>::get(ENTITY_ID).len(), 1);
     });
 }
 
@@ -396,7 +392,7 @@ fn can_insider_trade_non_insider_always_true() {
         // 非内幕人员始终可交易（即使在黑窗口期）
         assert_ok!(EntityDisclosure::configure_disclosure(
             RuntimeOrigin::signed(OWNER), ENTITY_ID,
-            DisclosureLevel::Standard, true, 0u64, 100u64,
+            DisclosureLevel::Standard, true, 100u64,
         ));
         assert_ok!(EntityDisclosure::start_blackout(
             RuntimeOrigin::signed(OWNER), ENTITY_ID, 100u64,
@@ -410,7 +406,7 @@ fn can_insider_trade_blocked_during_blackout() {
     new_test_ext().execute_with(|| {
         assert_ok!(EntityDisclosure::configure_disclosure(
             RuntimeOrigin::signed(OWNER), ENTITY_ID,
-            DisclosureLevel::Standard, true, 0u64, 100u64,
+            DisclosureLevel::Standard, true, 100u64,
         ));
         assert_ok!(EntityDisclosure::add_insider(
             RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Admin,
@@ -434,7 +430,7 @@ fn can_insider_trade_allowed_when_control_disabled() {
         // 未启用内幕控制，即使在黑窗口期也可交易
         assert_ok!(EntityDisclosure::configure_disclosure(
             RuntimeOrigin::signed(OWNER), ENTITY_ID,
-            DisclosureLevel::Standard, false, 0u64, 0u64,
+            DisclosureLevel::Standard, false, 0u64,
         ));
         assert_ok!(EntityDisclosure::add_insider(
             RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Admin,
@@ -468,7 +464,7 @@ fn is_disclosure_overdue_works() {
 
         assert_ok!(EntityDisclosure::configure_disclosure(
             RuntimeOrigin::signed(OWNER), ENTITY_ID,
-            DisclosureLevel::Enhanced, false, 0u64, 0u64,
+            DisclosureLevel::Enhanced, false, 0u64,
         ));
         // 刚配置，next_required = 1+100=101
         assert!(!Pallet::<Test>::is_disclosure_overdue(ENTITY_ID));
@@ -494,14 +490,14 @@ fn h1_configure_disclosure_rejects_blackout_exceeds_max() {
         assert_noop!(
             EntityDisclosure::configure_disclosure(
                 RuntimeOrigin::signed(OWNER), ENTITY_ID,
-                DisclosureLevel::Standard, true, 0u64, 201u64,
+                DisclosureLevel::Standard, true, 201u64,
             ),
             Error::<Test>::BlackoutExceedsMax
         );
         // 恰好等于上限应成功
         assert_ok!(EntityDisclosure::configure_disclosure(
             RuntimeOrigin::signed(OWNER), ENTITY_ID,
-            DisclosureLevel::Standard, true, 0u64, 200u64,
+            DisclosureLevel::Standard, true, 200u64,
         ));
     });
 }
@@ -541,7 +537,7 @@ fn h3_correct_disclosure_triggers_blackout() {
         // 配置：启用内幕控制 + blackout_after=50
         assert_ok!(EntityDisclosure::configure_disclosure(
             RuntimeOrigin::signed(OWNER), ENTITY_ID,
-            DisclosureLevel::Standard, true, 0u64, 50u64,
+            DisclosureLevel::Standard, true, 50u64,
         ));
 
         assert_ok!(EntityDisclosure::publish_disclosure(
@@ -570,7 +566,7 @@ fn h5_configure_preserves_last_disclosure() {
         // 首次配置：last_disclosure 应为 0（无历史记录）
         assert_ok!(EntityDisclosure::configure_disclosure(
             RuntimeOrigin::signed(OWNER), ENTITY_ID,
-            DisclosureLevel::Standard, false, 0u64, 0u64,
+            DisclosureLevel::Standard, false, 0u64,
         ));
         let config = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
         assert_eq!(config.last_disclosure, 0);
@@ -587,7 +583,7 @@ fn h5_configure_preserves_last_disclosure() {
         advance_blocks(10);
         assert_ok!(EntityDisclosure::configure_disclosure(
             RuntimeOrigin::signed(OWNER), ENTITY_ID,
-            DisclosureLevel::Enhanced, false, 0u64, 0u64,
+            DisclosureLevel::Enhanced, false, 0u64,
         ));
         let config = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
         assert_eq!(config.last_disclosure, 1); // 保持不变，不被伪造为 now(11)
@@ -641,7 +637,7 @@ fn h5_configure_preserves_violation_count() {
     new_test_ext().execute_with(|| {
         assert_ok!(EntityDisclosure::configure_disclosure(
             RuntimeOrigin::signed(OWNER), ENTITY_ID,
-            DisclosureLevel::Standard, false, 0u64, 0u64,
+            DisclosureLevel::Standard, false, 0u64,
         ));
         // 手动修改 violation_count 模拟累积
         DisclosureConfigs::<Test>::mutate(ENTITY_ID, |c| {
@@ -653,7 +649,7 @@ fn h5_configure_preserves_violation_count() {
         // 重新配置不应清除 violation_count
         assert_ok!(EntityDisclosure::configure_disclosure(
             RuntimeOrigin::signed(OWNER), ENTITY_ID,
-            DisclosureLevel::Enhanced, true, 0u64, 50u64,
+            DisclosureLevel::Enhanced, true, 50u64,
         ));
         let config = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
         assert_eq!(config.violation_count, 3);
@@ -1279,4 +1275,830 @@ fn announcement_category_default() {
 fn announcement_status_default() {
     let status: AnnouncementStatus = Default::default();
     assert_eq!(status, AnnouncementStatus::Active);
+}
+
+// ==================== 审计回归测试 ====================
+
+#[test]
+fn h1_disclosure_id_overflow_rejected() {
+    new_test_ext().execute_with(|| {
+        // 将 NextDisclosureId 设为 u64::MAX
+        NextDisclosureId::<Test>::put(u64::MAX);
+
+        assert_noop!(
+            EntityDisclosure::publish_disclosure(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                DisclosureType::AnnualReport,
+                b"QmContent".to_vec(), None,
+            ),
+            Error::<Test>::IdOverflow
+        );
+    });
+}
+
+#[test]
+fn h1_announcement_id_overflow_rejected() {
+    new_test_ext().execute_with(|| {
+        NextAnnouncementId::<Test>::put(u64::MAX);
+
+        assert_noop!(
+            EntityDisclosure::publish_announcement(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                AnnouncementCategory::General,
+                b"Title".to_vec(), b"QmCid".to_vec(), None,
+            ),
+            Error::<Test>::IdOverflow
+        );
+    });
+}
+
+#[test]
+fn h2_admin_can_publish_disclosure() {
+    new_test_ext().execute_with(|| {
+        // ADMIN 不是 owner，但设为管理员
+        set_admin(ENTITY_ID, ADMIN);
+
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(ADMIN), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmAdminContent".to_vec(), None,
+        ));
+
+        let record = Disclosures::<Test>::get(0).unwrap();
+        assert_eq!(record.discloser, ADMIN);
+    });
+}
+
+#[test]
+fn h2_admin_can_publish_announcement() {
+    new_test_ext().execute_with(|| {
+        set_admin(ENTITY_ID, ADMIN);
+
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(ADMIN), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Admin Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+
+        let record = Announcements::<Test>::get(0).unwrap();
+        assert_eq!(record.publisher, ADMIN);
+    });
+}
+
+#[test]
+fn h2_non_admin_rejected() {
+    new_test_ext().execute_with(|| {
+        // ALICE 既不是 owner 也不是 admin
+        assert_noop!(
+            EntityDisclosure::publish_disclosure(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID,
+                DisclosureType::AnnualReport,
+                b"QmContent".to_vec(), None,
+            ),
+            Error::<Test>::NotAdmin
+        );
+    });
+}
+
+#[test]
+fn m1_pin_announcement_rejects_expired() {
+    new_test_ext().execute_with(|| {
+        // 发布一个即将过期的公告
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::Promotion,
+            b"Expiring".to_vec(), b"QmCid".to_vec(), Some(10u64),
+        ));
+
+        // 过期后尝试置顶
+        advance_blocks(10);
+        assert_noop!(
+            EntityDisclosure::pin_announcement(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, Some(0),
+            ),
+            Error::<Test>::AnnouncementExpired
+        );
+    });
+}
+
+#[test]
+fn m2_update_announcement_rejects_all_none() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+
+        // 所有参数均为 None — 应拒绝
+        assert_noop!(
+            EntityDisclosure::update_announcement(
+                RuntimeOrigin::signed(OWNER), 0,
+                None, None, None, None,
+            ),
+            Error::<Test>::NoUpdateProvided
+        );
+    });
+}
+
+#[test]
+fn m3_publish_disclosure_rejects_empty_summary_cid() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::publish_disclosure(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                DisclosureType::AnnualReport,
+                b"QmContent".to_vec(),
+                Some(vec![]),  // 空 summary_cid
+            ),
+            Error::<Test>::EmptyCid
+        );
+    });
+}
+
+#[test]
+fn m3_correct_disclosure_rejects_empty_summary_cid() {
+    new_test_ext().execute_with(|| {
+        // 先发布一个披露
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmOriginal".to_vec(), None,
+        ));
+
+        // 更正时提供空 summary_cid
+        assert_noop!(
+            EntityDisclosure::correct_disclosure(
+                RuntimeOrigin::signed(OWNER), 0,
+                b"QmCorrected".to_vec(),
+                Some(vec![]),
+            ),
+            Error::<Test>::EmptyCid
+        );
+    });
+}
+
+// ==================== Deep Audit Round 回归测试 ====================
+
+// M1: update_announcement 不允许更新已过期公告
+#[test]
+fn m1_deep_update_announcement_rejects_expired() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::Promotion,
+            b"Sale".to_vec(), b"QmSale".to_vec(), Some(10u64),
+        ));
+
+        // 过期后尝试更新
+        advance_blocks(10);
+        assert_noop!(
+            EntityDisclosure::update_announcement(
+                RuntimeOrigin::signed(OWNER), 0,
+                Some(b"New Title".to_vec()), None, None, None,
+            ),
+            Error::<Test>::AnnouncementExpired
+        );
+    });
+}
+
+// M1: 未过期公告仍可正常更新
+#[test]
+fn m1_deep_update_announcement_works_before_expiry() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::Promotion,
+            b"Sale".to_vec(), b"QmSale".to_vec(), Some(100u64),
+        ));
+
+        // 过期前更新应成功
+        assert_ok!(EntityDisclosure::update_announcement(
+            RuntimeOrigin::signed(OWNER), 0,
+            Some(b"Updated Sale".to_vec()), None, None, None,
+        ));
+        assert_eq!(Announcements::<Test>::get(0).unwrap().title.to_vec(), b"Updated Sale".to_vec());
+    });
+}
+
+// M2: expire_announcement 标记已过期公告
+#[test]
+fn m2_deep_expire_announcement_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::Promotion,
+            b"Promo".to_vec(), b"QmPromo".to_vec(), Some(10u64),
+        ));
+
+        // 过期后调用 expire_announcement
+        advance_blocks(10);
+        assert_ok!(EntityDisclosure::expire_announcement(
+            RuntimeOrigin::signed(ALICE), 0,  // 任何人可调用
+        ));
+
+        let record = Announcements::<Test>::get(0).unwrap();
+        assert_eq!(record.status, AnnouncementStatus::Expired);
+        assert!(!record.is_pinned);
+    });
+}
+
+// M2: expire_announcement 清除置顶
+#[test]
+fn m2_deep_expire_announcement_clears_pin() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::Promotion,
+            b"Pinned Promo".to_vec(), b"QmPin".to_vec(), Some(10u64),
+        ));
+        assert_ok!(EntityDisclosure::pin_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, Some(0),
+        ));
+        assert_eq!(PinnedAnnouncement::<Test>::get(ENTITY_ID), Some(0));
+
+        advance_blocks(10);
+        assert_ok!(EntityDisclosure::expire_announcement(
+            RuntimeOrigin::signed(ALICE), 0,
+        ));
+
+        assert_eq!(PinnedAnnouncement::<Test>::get(ENTITY_ID), None);
+        assert_eq!(Announcements::<Test>::get(0).unwrap().status, AnnouncementStatus::Expired);
+    });
+}
+
+// M2: expire_announcement 拒绝未过期公告
+#[test]
+fn m2_deep_expire_announcement_rejects_not_expired() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), Some(100u64),
+        ));
+
+        // 未过期
+        assert_noop!(
+            EntityDisclosure::expire_announcement(RuntimeOrigin::signed(ALICE), 0),
+            Error::<Test>::AnnouncementNotExpired
+        );
+    });
+}
+
+// M2: expire_announcement 拒绝无过期时间公告
+#[test]
+fn m2_deep_expire_announcement_rejects_no_expiry() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+
+        assert_noop!(
+            EntityDisclosure::expire_announcement(RuntimeOrigin::signed(ALICE), 0),
+            Error::<Test>::AnnouncementNotExpired
+        );
+    });
+}
+
+// M2: expire_announcement 拒绝非 Active 公告
+#[test]
+fn m2_deep_expire_announcement_rejects_non_active() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::Promotion,
+            b"Title".to_vec(), b"QmCid".to_vec(), Some(10u64),
+        ));
+        // 先撤回
+        assert_ok!(EntityDisclosure::withdraw_announcement(RuntimeOrigin::signed(OWNER), 0));
+
+        advance_blocks(10);
+        assert_noop!(
+            EntityDisclosure::expire_announcement(RuntimeOrigin::signed(ALICE), 0),
+            Error::<Test>::AnnouncementNotActive
+        );
+    });
+}
+
+// M3: 硬删除后容量释放 — 移除全部后可重新添加到满
+#[test]
+fn m3_deep_remove_insider_frees_capacity() {
+    new_test_ext().execute_with(|| {
+        // MaxInsiders = 5，先填满
+        for i in 10..15 {
+            assert_ok!(EntityDisclosure::add_insider(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, i, InsiderRole::Advisor,
+            ));
+        }
+        // 已满
+        assert_noop!(
+            EntityDisclosure::add_insider(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, 99, InsiderRole::Advisor,
+            ),
+            Error::<Test>::InsidersFull
+        );
+
+        // 移除全部
+        for i in 10..15 {
+            assert_ok!(EntityDisclosure::remove_insider(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, i,
+            ));
+        }
+        assert_eq!(Insiders::<Test>::get(ENTITY_ID).len(), 0);
+
+        // 重新添加 5 个全新 insider
+        for i in 20..25 {
+            assert_ok!(EntityDisclosure::add_insider(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, i, InsiderRole::Admin,
+            ));
+        }
+        assert_eq!(Insiders::<Test>::get(ENTITY_ID).len(), 5);
+    });
+}
+
+// M3: 硬删除后 is_insider 立即返回 false
+#[test]
+fn m3_deep_remove_insider_immediate_effect() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Admin,
+        ));
+        assert!(Pallet::<Test>::is_insider(ENTITY_ID, &ALICE));
+
+        assert_ok!(EntityDisclosure::remove_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE,
+        ));
+        assert!(!Pallet::<Test>::is_insider(ENTITY_ID, &ALICE));
+
+        // 再次移除应失败
+        assert_noop!(
+            EntityDisclosure::remove_insider(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE,
+            ),
+            Error::<Test>::InsiderNotFound
+        );
+    });
+}
+
+// ==================== Round 2 审计回归测试 ====================
+
+#[test]
+fn m1r2_start_blackout_cannot_shorten_active() {
+    new_test_ext().execute_with(|| {
+        // 先启动一个 150 区块的黑窗口期
+        assert_ok!(EntityDisclosure::start_blackout(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 150u64,
+        ));
+
+        // 尝试用更短的 50 区块覆盖 — 应被拒绝
+        assert_noop!(
+            EntityDisclosure::start_blackout(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, 50u64,
+            ),
+            Error::<Test>::BlackoutStillActive
+        );
+    });
+}
+
+#[test]
+fn m1r2_start_blackout_can_extend_active() {
+    new_test_ext().execute_with(|| {
+        // 先启动 100 区块的黑窗口期
+        assert_ok!(EntityDisclosure::start_blackout(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 100u64,
+        ));
+
+        // 延长到 200 区块 — 应允许
+        assert_ok!(EntityDisclosure::start_blackout(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 200u64,
+        ));
+
+        let (_, end) = BlackoutPeriods::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(end, 1 + 200); // now(1) + 200
+    });
+}
+
+#[test]
+fn m1r2_start_blackout_ok_after_expired() {
+    new_test_ext().execute_with(|| {
+        // 先启动 50 区块的黑窗口期
+        assert_ok!(EntityDisclosure::start_blackout(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 50u64,
+        ));
+
+        // 黑窗口期过期后，可以启动更短的新黑窗口期
+        advance_blocks(60);
+        assert_ok!(EntityDisclosure::start_blackout(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 10u64,
+        ));
+    });
+}
+
+#[test]
+fn m2r2_update_announcement_rejects_expired() {
+    new_test_ext().execute_with(|| {
+        // 发布一个即将过期的公告
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), Some(10u64),
+        ));
+
+        // 过期后尝试更新
+        advance_blocks(10);
+        assert_noop!(
+            EntityDisclosure::update_announcement(
+                RuntimeOrigin::signed(OWNER), 0,
+                Some(b"NewTitle".to_vec()), None, None, None,
+            ),
+            Error::<Test>::AnnouncementExpired
+        );
+    });
+}
+
+#[test]
+fn m3r2_get_pinned_announcement_filters_expired() {
+    new_test_ext().execute_with(|| {
+        // 发布一个有过期时间的公告并置顶
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::Promotion,
+            b"Pinned".to_vec(), b"QmCid".to_vec(), Some(20u64),
+        ));
+        assert_ok!(EntityDisclosure::pin_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, Some(0),
+        ));
+
+        // 过期前 — 应返回 Some
+        assert_eq!(EntityDisclosure::get_pinned_announcement(ENTITY_ID), Some(0));
+
+        // 过期后 — 应返回 None
+        advance_blocks(20);
+        assert_eq!(EntityDisclosure::get_pinned_announcement(ENTITY_ID), None);
+    });
+}
+
+#[test]
+fn m3r2_get_pinned_announcement_filters_withdrawn() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+        assert_ok!(EntityDisclosure::pin_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, Some(0),
+        ));
+
+        // 撤回会清除 PinnedAnnouncement，但即使存储残留也应过滤
+        // 这里先测正常 withdraw 路径：withdraw 已正确清除 PinnedAnnouncement
+        assert_ok!(EntityDisclosure::withdraw_announcement(
+            RuntimeOrigin::signed(OWNER), 0,
+        ));
+        assert_eq!(EntityDisclosure::get_pinned_announcement(ENTITY_ID), None);
+    });
+}
+
+// ==================== Deep Audit 回归测试 ====================
+
+// M1-deep: publish_disclosure 的 auto-blackout 不应缩短已有的更长黑窗口期
+#[test]
+fn m1_deep_auto_blackout_does_not_shorten_existing() {
+    new_test_ext().execute_with(|| {
+        // 配置: insider_trading_control=true, blackout_after=50
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 50u64,
+        ));
+
+        // 手动开始较长的黑窗口期: 200 blocks (结束于 block 201)
+        assert_ok!(EntityDisclosure::start_blackout(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 200u64,
+        ));
+        let (_, manual_end) = BlackoutPeriods::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(manual_end, 201); // block 1 + 200
+
+        // 推进到 block 100，发布披露 → auto-blackout = 50 blocks (结束于 150)
+        advance_blocks(99); // now = 100
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmContent".to_vec(), None,
+        ));
+
+        // M1-deep: 黑窗口期结束时间应保持 201（不被 150 覆盖）
+        let (_, actual_end) = BlackoutPeriods::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(actual_end, manual_end, "auto-blackout should NOT shorten existing longer blackout");
+    });
+}
+
+// M1-deep: correct_disclosure 的 auto-blackout 同样不应缩短
+#[test]
+fn m1_deep_correct_disclosure_blackout_does_not_shorten() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 50u64,
+        ));
+
+        // 发布初始披露
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmOriginal".to_vec(), None,
+        ));
+
+        // 手动开始较长黑窗口期
+        assert_ok!(EntityDisclosure::start_blackout(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 200u64,
+        ));
+        let (_, manual_end) = BlackoutPeriods::<Test>::get(ENTITY_ID).unwrap();
+
+        // 更正披露 → auto-blackout 不应缩短
+        advance_blocks(10);
+        assert_ok!(EntityDisclosure::correct_disclosure(
+            RuntimeOrigin::signed(OWNER), 0,
+            b"QmCorrected".to_vec(), None,
+        ));
+
+        let (_, actual_end) = BlackoutPeriods::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(actual_end, manual_end, "correct_disclosure auto-blackout should NOT shorten existing");
+    });
+}
+
+// M1-deep: 无已有黑窗口时，auto-blackout 正常设置
+#[test]
+fn m1_deep_auto_blackout_sets_when_none_exists() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 50u64,
+        ));
+
+        assert!(BlackoutPeriods::<Test>::get(ENTITY_ID).is_none());
+
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmContent".to_vec(), None,
+        ));
+
+        let (start, end) = BlackoutPeriods::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(start, 1);
+        assert_eq!(end, 51); // block 1 + 50
+    });
+}
+
+// M2-deep: remove_insider 释放槽位后可重新添加到满
+#[test]
+fn m2_deep_remove_insider_frees_slot_for_new_addition() {
+    new_test_ext().execute_with(|| {
+        // MaxInsiders = 5, 先填满
+        for i in 10..15u64 {
+            assert_ok!(EntityDisclosure::add_insider(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, i, InsiderRole::Advisor,
+            ));
+        }
+        assert_eq!(Insiders::<Test>::get(ENTITY_ID).len(), 5);
+
+        // 满了不能添加
+        assert_noop!(
+            EntityDisclosure::add_insider(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, 99, InsiderRole::Advisor,
+            ),
+            Error::<Test>::InsidersFull
+        );
+
+        // 移除一个 → 释放槽位
+        assert_ok!(EntityDisclosure::remove_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 12,
+        ));
+        assert_eq!(Insiders::<Test>::get(ENTITY_ID).len(), 4);
+
+        // 现在可以添加新的
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 99, InsiderRole::Admin,
+        ));
+        assert_eq!(Insiders::<Test>::get(ENTITY_ID).len(), 5);
+        assert!(Pallet::<Test>::is_insider(ENTITY_ID, &99));
+        assert!(!Pallet::<Test>::is_insider(ENTITY_ID, &12));
+    });
+}
+
+// ==================== M1-R3: 历史清理回归测试 ====================
+
+// M1-R3: cleanup_disclosure_history 释放槽位后可发布新披露
+#[test]
+fn m1r3_cleanup_disclosure_history_frees_slot() {
+    new_test_ext().execute_with(|| {
+        // MaxDisclosureHistory = 10，先填满
+        for _ in 0..10 {
+            assert_ok!(EntityDisclosure::publish_disclosure(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                DisclosureType::AnnualReport,
+                b"QmContent".to_vec(), None,
+            ));
+        }
+        // 已满，无法发布新的
+        assert_noop!(
+            EntityDisclosure::publish_disclosure(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                DisclosureType::AnnualReport,
+                b"QmNew".to_vec(), None,
+            ),
+            Error::<Test>::HistoryFull
+        );
+
+        // 撤回第一个披露
+        assert_ok!(EntityDisclosure::withdraw_disclosure(
+            RuntimeOrigin::signed(OWNER), 0,
+        ));
+
+        // 仍然满 — 撤回不释放索引
+        assert_noop!(
+            EntityDisclosure::publish_disclosure(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                DisclosureType::AnnualReport,
+                b"QmNew".to_vec(), None,
+            ),
+            Error::<Test>::HistoryFull
+        );
+
+        // 清理 — 任何人可调用
+        assert_ok!(EntityDisclosure::cleanup_disclosure_history(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 0,
+        ));
+
+        // 现在可以发布新的
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmNew".to_vec(), None,
+        ));
+
+        // 清理后记录本身仍可查询
+        let record = Disclosures::<Test>::get(0).unwrap();
+        assert_eq!(record.status, DisclosureStatus::Withdrawn);
+    });
+}
+
+// M1-R3: cleanup_disclosure_history 拒绝清理 Published 状态
+#[test]
+fn m1r3_cleanup_disclosure_history_rejects_published() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmContent".to_vec(), None,
+        ));
+
+        assert_noop!(
+            EntityDisclosure::cleanup_disclosure_history(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID, 0,
+            ),
+            Error::<Test>::DisclosureNotTerminal
+        );
+    });
+}
+
+// M1-R3: cleanup_disclosure_history 可清理 Corrected 状态
+#[test]
+fn m1r3_cleanup_disclosure_history_accepts_corrected() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmOriginal".to_vec(), None,
+        ));
+        // 更正 → 旧记录变为 Corrected
+        assert_ok!(EntityDisclosure::correct_disclosure(
+            RuntimeOrigin::signed(OWNER), 0,
+            b"QmCorrected".to_vec(), None,
+        ));
+
+        assert_eq!(Disclosures::<Test>::get(0).unwrap().status, DisclosureStatus::Corrected);
+        assert_ok!(EntityDisclosure::cleanup_disclosure_history(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 0,
+        ));
+        // 索引中不再包含 0
+        assert!(!EntityDisclosures::<Test>::get(ENTITY_ID).contains(&0));
+    });
+}
+
+// M1-R3: cleanup_announcement_history 释放槽位后可发布新公告
+#[test]
+fn m1r3_cleanup_announcement_history_frees_slot() {
+    new_test_ext().execute_with(|| {
+        // MaxAnnouncementHistory = 10，先填满
+        for i in 0..10 {
+            assert_ok!(EntityDisclosure::publish_announcement(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                AnnouncementCategory::General,
+                format!("Title {}", i).into_bytes(),
+                b"QmCid".to_vec(), None,
+            ));
+        }
+        // 已满
+        assert_noop!(
+            EntityDisclosure::publish_announcement(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                AnnouncementCategory::General,
+                b"Title New".to_vec(), b"QmCid".to_vec(), None,
+            ),
+            Error::<Test>::AnnouncementHistoryFull
+        );
+
+        // 撤回一个
+        assert_ok!(EntityDisclosure::withdraw_announcement(
+            RuntimeOrigin::signed(OWNER), 0,
+        ));
+
+        // 仍然满
+        assert_noop!(
+            EntityDisclosure::publish_announcement(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                AnnouncementCategory::General,
+                b"Title New".to_vec(), b"QmCid".to_vec(), None,
+            ),
+            Error::<Test>::AnnouncementHistoryFull
+        );
+
+        // 清理撤回的公告
+        assert_ok!(EntityDisclosure::cleanup_announcement_history(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 0,
+        ));
+
+        // 现在可以发布
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title New".to_vec(), b"QmCid".to_vec(), None,
+        ));
+    });
+}
+
+// M1-R3: cleanup_announcement_history 拒绝清理 Active 状态
+#[test]
+fn m1r3_cleanup_announcement_history_rejects_active() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::General,
+            b"Title".to_vec(), b"QmCid".to_vec(), None,
+        ));
+
+        assert_noop!(
+            EntityDisclosure::cleanup_announcement_history(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID, 0,
+            ),
+            Error::<Test>::AnnouncementNotTerminal
+        );
+    });
+}
+
+// M1-R3: cleanup_announcement_history 可清理 Expired 状态
+#[test]
+fn m1r3_cleanup_announcement_history_accepts_expired() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_announcement(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            AnnouncementCategory::Promotion,
+            b"Promo".to_vec(), b"QmCid".to_vec(), Some(10u64),
+        ));
+        advance_blocks(10);
+        assert_ok!(EntityDisclosure::expire_announcement(
+            RuntimeOrigin::signed(ALICE), 0,
+        ));
+
+        assert_eq!(Announcements::<Test>::get(0).unwrap().status, AnnouncementStatus::Expired);
+        assert_ok!(EntityDisclosure::cleanup_announcement_history(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 0,
+        ));
+        assert!(!EntityAnnouncements::<Test>::get(ENTITY_ID).contains(&0));
+    });
+}
+
+// M1-R3: cleanup_disclosure_history 拒绝错误的 entity_id
+#[test]
+fn m1r3_cleanup_disclosure_history_rejects_wrong_entity() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmContent".to_vec(), None,
+        ));
+        assert_ok!(EntityDisclosure::withdraw_disclosure(
+            RuntimeOrigin::signed(OWNER), 0,
+        ));
+
+        // 用错误的 entity_id 清理
+        assert_noop!(
+            EntityDisclosure::cleanup_disclosure_history(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID_2, 0,
+            ),
+            Error::<Test>::DisclosureNotFound
+        );
+    });
 }

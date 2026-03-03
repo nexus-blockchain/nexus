@@ -56,9 +56,7 @@ pub struct KycProvider<AccountId, MaxNameLen> {
     pub name: BoundedVec<u8, MaxNameLen>,
     pub provider_type: ProviderType,    // Internal / ThirdParty / Government / Financial
     pub max_level: KycLevel,            // 支持的最高认证级别
-    pub active: bool,
-    pub verifications_count: u64,       // 已完成认证数
-    pub deposit: u128,
+    pub verifications_count: u64,       // 已完成审核数（含批准和拒绝）
 }
 ```
 
@@ -78,8 +76,6 @@ pub struct EntityKycRequirement {
 
 **KycStatus：** NotSubmitted → Pending → Approved / Rejected / Expired / Revoked
 
-**VerificationType（10 种）：** Email / Phone / IdentityDocument / AddressProof / SourceOfFunds / BusinessRegistration / BeneficialOwner / FinancialStatements / FaceVerification / VideoVerification
-
 **RejectionReason（8 种）：** UnclearDocument / ExpiredDocument / InformationMismatch / SuspiciousActivity / SanctionedEntity / HighRiskCountry / ForgedDocument / Other
 
 ## Runtime 配置
@@ -93,6 +89,7 @@ impl pallet_entity_kyc::Config for Runtime {
     type BasicKycValidity = ...;     // ~1 年（区块数）
     type StandardKycValidity = ...;  // ~6 个月
     type EnhancedKycValidity = ...;  // ~1 年
+    type InstitutionalKycValidity = ...; // ~1 年
     type AdminOrigin = EnsureRoot<AccountId>;
 }
 ```
@@ -108,7 +105,8 @@ impl pallet_entity_kyc::Config for Runtime {
 | 4 | `register_provider(account, name, type, max_level)` | AdminOrigin | 注册认证提供者 |
 | 5 | `remove_provider(account)` | AdminOrigin | 移除认证提供者 |
 | 6 | `set_entity_requirement(entity_id, min_level, mandatory, grace_period, allow_high_risk, max_risk_score)` | AdminOrigin | 设置实体 KYC 要求 |
-| 7 | `update_high_risk_countries(countries)` | AdminOrigin | 更新高风险国家列表（最多 50 个） |
+| 7 | `update_high_risk_countries(countries)` | AdminOrigin | 更新高风险国家列表（最多 50 个，自动去重） |
+| 8 | `expire_kyc(account)` | 任意用户 | 标记已过期的 KYC 记录（需确实已过期） |
 
 ## Storage
 
@@ -143,9 +141,6 @@ impl pallet_entity_kyc::Config for Runtime {
 | `KycAlreadyApproved` | KYC 已通过 |
 | `ProviderNotFound` | 提供者不存在 |
 | `ProviderAlreadyExists` | 提供者已存在 |
-| `NotAProvider` | 不是认证提供者 |
-| `ProviderNotActive` | 提供者不活跃 |
-| `Unauthorized` | 无权限 |
 | `CidTooLong` / `NameTooLong` | 长度超限 |
 | `MaxProvidersReached` | 达到最大提供者数量 |
 | `InvalidKycStatus` / `InvalidKycLevel` | 状态/级别无效 |
@@ -154,6 +149,13 @@ impl pallet_entity_kyc::Config for Runtime {
 | `RiskScoreTooHigh` | 风险评分过高 |
 | `KycExpired` | KYC 已过期 |
 | `ProviderLevelNotSupported` | 提供者不支持此级别 |
+| `TooManyCountries` | 高风险国家列表超出 50 上限 |
+| `InvalidRiskScore` | 风险评分超出 0-100 范围 |
+| `EmptyProviderName` | 提供者名称为空 |
+| `EmptyDataCid` | KYC 数据 CID 为空 |
+| `InvalidCountryCode` | 国家代码格式无效 |
+| `SelfApprovalNotAllowed` | 不允许自我审批 |
+| `KycNotExpired` | KYC 尚未过期（expire_kyc 调用时） |
 
 ## 辅助函数
 
@@ -185,3 +187,5 @@ impl<T: Config> Pallet<T> {
 | 版本 | 日期 | 变更 |
 |------|------|------|
 | v0.1.0 | 2026-02-03 | Phase 7 初始版本 |
+| v0.2.0 | 2026-03 | Round 1-3 审计修复: 空 CID 校验、自我审批阻止、风险评分验证、国家代码格式校验、Expired 状态可撤销 |
+| v0.3.0 | 2026-03 | Round 4 审计: M1(高风险国家去重) M2(拒绝计入审核数) M3(expire_kyc extrinsic) L2(README同步) L3(Cargo features) |

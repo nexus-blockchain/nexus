@@ -29,6 +29,10 @@ pub const ENTITY_1: u64 = 1000;
 thread_local! {
     // OrderProvider mock state: (buyer, shop_id, completed)
     static ORDERS: RefCell<std::collections::HashMap<u64, (u64, u64, bool)>> = RefCell::new(std::collections::HashMap::new());
+    // Disputed orders
+    static DISPUTED_ORDERS: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
+    // Order completed_at block number
+    static ORDER_COMPLETED_AT: RefCell<std::collections::HashMap<u64, u64>> = RefCell::new(std::collections::HashMap::new());
     // ShopProvider mock state: shop_id -> (rating_sum, rating_count)
     static SHOP_RATINGS: RefCell<std::collections::HashMap<u64, (u64, u64)>> = RefCell::new(std::collections::HashMap::new());
     // ShopProvider active state
@@ -39,6 +43,10 @@ thread_local! {
     static ENTITIES: RefCell<std::collections::HashMap<u64, (u64, bool, Vec<u64>)>> = RefCell::new(std::collections::HashMap::new());
     // Shop -> Entity mapping
     static SHOP_ENTITY: RefCell<std::collections::HashMap<u64, u64>> = RefCell::new(std::collections::HashMap::new());
+    // Entity rating tracking: entity_id -> (rating_sum, rating_count)
+    static ENTITY_RATINGS: RefCell<std::collections::HashMap<u64, (u64, u64)>> = RefCell::new(std::collections::HashMap::new());
+    // Whether update_entity_rating should fail
+    static ENTITY_RATING_FAIL: RefCell<bool> = RefCell::new(false);
 }
 
 pub fn add_order(order_id: u64, buyer: u64, shop_id: u64, completed: bool) {
@@ -66,13 +74,33 @@ pub fn set_shop_entity(shop_id: u64, entity_id: u64) {
     SHOP_ENTITY.with(|m| m.borrow_mut().insert(shop_id, entity_id));
 }
 
+pub fn set_order_disputed(order_id: u64) {
+    DISPUTED_ORDERS.with(|d| d.borrow_mut().insert(order_id));
+}
+
+pub fn set_order_completed_at(order_id: u64, block: u64) {
+    ORDER_COMPLETED_AT.with(|m| m.borrow_mut().insert(order_id, block));
+}
+
+pub fn get_entity_rating(entity_id: u64) -> Option<(u64, u64)> {
+    ENTITY_RATINGS.with(|r| r.borrow().get(&entity_id).copied())
+}
+
+pub fn set_entity_rating_fail(fail: bool) {
+    ENTITY_RATING_FAIL.with(|f| *f.borrow_mut() = fail);
+}
+
 pub fn reset_mock_state() {
     ORDERS.with(|o| o.borrow_mut().clear());
+    DISPUTED_ORDERS.with(|d| d.borrow_mut().clear());
     SHOP_RATINGS.with(|r| r.borrow_mut().clear());
     ACTIVE_SHOPS.with(|s| s.borrow_mut().clear());
     SHOP_RATING_FAIL.with(|f| *f.borrow_mut() = false);
     ENTITIES.with(|e| e.borrow_mut().clear());
     SHOP_ENTITY.with(|m| m.borrow_mut().clear());
+    ENTITY_RATINGS.with(|r| r.borrow_mut().clear());
+    ENTITY_RATING_FAIL.with(|f| *f.borrow_mut() = false);
+    ORDER_COMPLETED_AT.with(|m| m.borrow_mut().clear());
 }
 
 // ==================== Mock OrderProvider ====================
@@ -104,12 +132,16 @@ impl OrderProvider<u64, u128> for MockOrderProvider {
         ORDERS.with(|o| o.borrow().get(&order_id).map(|(_, _, c)| *c).unwrap_or(false))
     }
 
-    fn is_order_disputed(_order_id: u64) -> bool {
-        false
+    fn is_order_disputed(order_id: u64) -> bool {
+        DISPUTED_ORDERS.with(|d| d.borrow().contains(&order_id))
     }
 
     fn can_dispute(_order_id: u64, _who: &u64) -> bool {
         false
+    }
+
+    fn order_completed_at(order_id: u64) -> Option<u64> {
+        ORDER_COMPLETED_AT.with(|m| m.borrow().get(&order_id).copied())
     }
 }
 
@@ -250,11 +282,20 @@ impl EntityProvider<u64> for MockEntityProvider {
         Ok(())
     }
 
-    fn update_entity_rating(_entity_id: u64, _rating: u8) -> Result<(), DispatchError> {
+    fn update_entity_rating(entity_id: u64, rating: u8) -> Result<(), DispatchError> {
+        if ENTITY_RATING_FAIL.with(|f| *f.borrow()) {
+            return Err(DispatchError::Other("entity rating update failed"));
+        }
+        ENTITY_RATINGS.with(|r| {
+            let mut map = r.borrow_mut();
+            let entry = map.entry(entity_id).or_insert((0, 0));
+            entry.0 += rating as u64;
+            entry.1 += 1;
+        });
         Ok(())
     }
 
-    fn is_entity_admin(entity_id: u64, account: &u64) -> bool {
+    fn is_entity_admin(entity_id: u64, account: &u64, _required_permission: u32) -> bool {
         ENTITIES.with(|e| {
             e.borrow().get(&entity_id).map(|(owner, _, admins)| {
                 *account == *owner || admins.contains(account)
@@ -263,12 +304,17 @@ impl EntityProvider<u64> for MockEntityProvider {
     }
 }
 
+parameter_types! {
+    pub const ReviewWindowBlocks: u64 = 100800; // ~7 days at 6s blocks
+}
+
 impl pallet_entity_review::Config for Test {
     type EntityProvider = MockEntityProvider;
     type OrderProvider = MockOrderProvider;
     type ShopProvider = MockShopProvider;
     type MaxCidLength = ConstU32<64>;
     type MaxReviewsPerUser = ConstU32<100>;
+    type ReviewWindowBlocks = ReviewWindowBlocks;
     type WeightInfo = ();
 }
 

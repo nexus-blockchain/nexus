@@ -1824,6 +1824,90 @@ fn l1_r4_actual_change_still_invalidates_round() {
     });
 }
 
+// ====================================================================
+// Round 5 审计回归测试
+// ====================================================================
+
+/// M1-R5: force_new_round 拒绝非活跃 Entity
+#[test]
+fn m1_r5_force_new_round_rejects_inactive_entity() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+
+        // Entity 被封禁
+        set_entity_inactive(entity_id);
+
+        assert_noop!(
+            CommissionPoolReward::force_new_round(
+                RuntimeOrigin::root(), entity_id,
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+/// M1-R5: force_new_round 对活跃 Entity 正常工作
+#[test]
+fn m1_r5_force_new_round_works_when_entity_active() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+
+        // Entity 默认活跃
+        assert_ok!(CommissionPoolReward::force_new_round(
+            RuntimeOrigin::root(), entity_id,
+        ));
+        let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
+        assert_eq!(round.round_id, 1);
+    });
+}
+
+/// M3-R5: clear_config 发出 PoolRewardConfigCleared 事件（非 Updated）
+#[test]
+fn m3_r5_clear_config_emits_cleared_event() {
+    new_test_ext().execute_with(|| {
+        use pallet_commission_common::PoolRewardPlanWriter;
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+
+        // Claim to create some state
+        assert_ok!(CommissionPoolReward::claim_pool_reward(
+            RuntimeOrigin::signed(10), entity_id,
+        ));
+
+        System::reset_events();
+        assert_ok!(<pallet::Pallet<Test> as PoolRewardPlanWriter>::clear_config(entity_id));
+
+        let events = System::events();
+        // 应发出 Cleared，不应发出 Updated
+        assert!(
+            events.iter().any(|e| matches!(
+                &e.event,
+                RuntimeEvent::CommissionPoolReward(pallet::Event::PoolRewardConfigCleared { entity_id: 1 })
+            )),
+            "clear_config should emit PoolRewardConfigCleared"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                &e.event,
+                RuntimeEvent::CommissionPoolReward(pallet::Event::PoolRewardConfigUpdated { .. })
+            )),
+            "clear_config should NOT emit PoolRewardConfigUpdated"
+        );
+    });
+}
+
 /// M1-R4: Weight 值合理性检查 — 非零且在预期范围内
 #[test]
 fn m1_r4_weight_values_are_reasonable() {

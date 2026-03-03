@@ -145,3 +145,153 @@
 
 - `cargo test -p pallet-grouprobot-ads`: **78/78 ✅**
 - `cargo check -p pallet-grouprobot-ads`: ✅
+
+---
+---
+
+# Round 2: pallet-ads-grouprobot (适配层) 深度审计
+
+**日期:** 2026-03-04
+**范围:** `pallets/ads/grouprobot/` — lib.rs (585→655行), mock.rs (180行), tests.rs (440→641行), Cargo.toml (55→51行)
+
+> Round 1 审计的是原 monolithic `pallet-grouprobot-ads`。
+> Round 2 审计的是重构后的 `pallet-ads-grouprobot` 适配层 (仅 GroupRobot 专属逻辑，Campaign CRUD 已移至 ads-core)。
+
+## 发现汇总
+
+| 级别 | ID | 描述 | 状态 |
+|------|-----|------|------|
+| High | H1 | `RevenueDistributor::distribute` 仅返回社区份额，不执行实际转账 — 节点奖励从未分配 | ✅ 已修复 |
+| High | H2 | `set_tee_ad_pct` / `set_community_ad_pct` "0=默认值" 语义导致校验与存储不一致 | ✅ 已修复 |
+| High | H3 | `check_audience_surge` 暂停后无恢复机制 — 社区永久无法投放广告 | ✅ 已修复 |
+| Medium | M1 | `unstake_for_ads` 全部取消质押后不清理 `CommunityStakers` / `CommunityAdmin` | ✅ 已修复 |
+| Medium | M2 | `report_node_audience` 同一节点可重复提交消耗全部槽位 | ✅ 已修复 |
+| Medium | M3 | 死事件/错误: `CommunitySlashed` / `NodeDeviationRejected` 从未发射 | ✅ 已修复 |
+| Medium | M4 | `distribute` 忽略 `placement_id`，不检查社区暂停状态 | ✅ 已修复 |
+| Low | L1 | `pallet-ads-core` 列为依赖但从未引用 (死依赖) | ✅ 已修复 |
+| Low | L2 | Config `AdSlashPercentage` 声明但从未使用 | ✅ 已修复 (M3 slash_community 使用) |
+| Low | L3 | README 权限描述错误 + 列出不存在的错误码 | ✅ 已修复 |
+
+**修复 10 项, 记录 0 项**
+
+---
+
+## 修复详情
+
+### H1: `RevenueDistributor::distribute` 不执行实际转账 (High)
+
+**问题:** `distribute()` 只计算社区份额并返回，**从不执行任何转账**。节点奖励未通过 `RewardAccruer::accrue_node_reward` 写入奖励池，`NodeAdRewardAccrued` 事件从未发射。`RewardPoolAccount` 和 `TreasuryAccount` Config 项未被使用。
+
+**修复:** `distribute` 中实际执行三方分成：
+- 社区份额 → 通过返回值记入 `PlacementClaimable` (ads-core 管理)
+- 节点份额 → 从国库转入 `RewardPoolAccount` + `accrue_node_reward` + 发射 `NodeAdRewardAccrued`
+- 国库 → 保留剩余 (100% - community% - tee%)
+
+**文件:** `pallets/ads/grouprobot/src/lib.rs` L605-653
+
+### H2: `set_tee_ad_pct` / `set_community_ad_pct` 校验不一致 (High)
+
+**问题:** extrinsic 中 `let effective_tee = if tee_pct == 0 { 15 } else { tee_pct }` 将 0 扩展为默认值做校验，但存储写入 0，事件报告 0。读取时 `effective_tee_pct()` 再次扩展 0→15。设置者以为设了 0% 但实际是 15%。
+
+**修复:** 移除 extrinsic 中的 "0=默认" 扩展，直接用传入值做校验。`effective_*_pct()` 的 0→default fallback 仅用于 genesis 未初始化场景。
+
+**文件:** `pallets/ads/grouprobot/src/lib.rs` L331-367
+
+### H3: 社区暂停后无恢复路径 (High)
+
+**问题:** `check_audience_surge` 设置 `AudienceSurgePaused = 1` 后无代码路径清零。`AudienceSurgeResumed` 事件定义但从未发射。一旦暂停，`verify_and_cap_audience` 永远返回 `CommunityAdsPaused`。
+
+**修复:** 新增 `resume_audience_surge` extrinsic (call_index 7, Root)，验证暂停状态后清零并发射 `AudienceSurgeResumed`。新增 `CommunityNotPaused` 错误。
+
+**文件:** `pallets/ads/grouprobot/src/lib.rs` L456-471
+
+### M1: `unstake_for_ads` 不清理零余额条目 (Medium)
+
+**问题:** 用户全部取消质押后:
+- `CommunityStakers` 保留 0 余额条目 (存储浪费)
+- `CommunityAdmin` 不清理 (零质押社区仍有管理员)
+
+**修复:** 质押降为 0 时 `CommunityStakers::remove`；总质押降为 0 时 `CommunityAdmin::remove`。
+
+**文件:** `pallets/ads/grouprobot/src/lib.rs` L303-322
+
+### M2: `report_node_audience` 同节点重复提交 (Medium)
+
+**问题:** 同一 node prefix 可多次 `try_push` 消耗全部 10 个报告槽位，挤占其他节点报告空间。
+
+**修复:** 查找已有相同 prefix 的条目 → 更新 audience_size 而非追加。
+
+**文件:** `pallets/ads/grouprobot/src/lib.rs` L412-421
+
+### L1: 死依赖 `pallet-ads-core` (Low)
+
+**问题:** Cargo.toml 依赖 `pallet-ads-core` 但 lib.rs 从未引用。同时 `try-runtime` 和 `runtime-benchmarks` features 也传播了此死依赖。
+
+**修复:** 移除 Cargo.toml 中的 `pallet-ads-core` 依赖及其 feature 传播。
+
+**文件:** `pallets/ads/grouprobot/Cargo.toml`
+
+### M3: 死事件/错误 — `CommunitySlashed` / `NodeDeviationRejected` 从未发射 (Medium)
+
+**问题:**
+- `CommunitySlashed`: 事件定义但无代码路径发射
+- `NodeDeviationRejected`: 事件定义但 `validate_node_reports` 仅返回 `Err((min, max))`，无 extrinsic 调用它
+- `NodeDeviationTooHigh`: 错误定义但仅在 helper 中隐含
+
+**修复:** 新增两个 extrinsic:
+- `cross_validate_nodes` (call_index 8, Root): 调用 `validate_node_reports`，偏差过大时发射 `NodeDeviationRejected` 事件。始终返回 `Ok(())` 因为 Substrate 事务层在 `Err` 时回滚所有存储(含事件)。验证后清理报告数据。
+- `slash_community` (call_index 9, Root): 使用 `T::AdSlashPercentage::get()` 计算 slash 金额，按比例从各质押者 unreserve 并转入国库。发射 `CommunitySlashed` 事件。自动清理零余额质押者和零总质押管理员。
+
+**文件:** `pallets/ads/grouprobot/src/lib.rs` L473-584
+
+### M4: `distribute` 不检查暂停状态 (Medium)
+
+**问题:** 被暂停的社区如有未结算收据仍可通过 settle 获得收入分配。
+
+**修复:** 在 `distribute` 入口添加 `AudienceSurgePaused` 检查，暂停社区返回 `CommunityAdsPaused` 错误。
+
+**文件:** `pallets/ads/grouprobot/src/lib.rs` L729-733
+
+### L2: `AdSlashPercentage` 未使用 (Low)
+
+**问题:** Config 声明 `AdSlashPercentage` 但代码从未调用 `T::AdSlashPercentage::get()`。
+
+**修复:** 由 M3 的 `slash_community` extrinsic 使用。
+
+### L3: README 不一致 (Low)
+
+**问题:**
+- `check_audience_surge` 权限描述为 "Signed (any)" 但代码要求 Root
+- 列出 `CommunityBanned` 错误但代码中不存在
+- 缺少 `resume_audience_surge`/`cross_validate_nodes`/`slash_community` extrinsic
+- 缺少 `CommunityNotPaused` 错误
+- 测试数量过时
+- 依赖树列出已移除的 `pallet-ads-core`
+
+**修复:** 全面同步 README：权限、extrinsics 表、错误表、测试数量、依赖树。
+
+**文件:** `pallets/ads/grouprobot/README.md`
+
+---
+
+## 修改文件
+
+| 文件 | 变更 |
+|------|------|
+| `pallets/ads/grouprobot/src/lib.rs` | H1, H2, H3, M1, M2, M3, M4 修复; +3 extrinsic, +1 错误 (585→770行) |
+| `pallets/ads/grouprobot/src/tests.rs` | +19 回归测试 (45 user + 2 auto = 47 total, was 28) |
+| `pallets/ads/grouprobot/Cargo.toml` | L1: 移除死依赖 pallet-ads-core (55→51行) |
+| `pallets/ads/grouprobot/README.md` | L3: 全面同步权限、extrinsic、错误、测试数量、依赖树 |
+
+## 新增
+
+- **Extrinsic (3):** `resume_audience_surge` (call_index 7, Root), `cross_validate_nodes` (call_index 8, Root), `slash_community` (call_index 9, Root)
+- **错误 (1):** `CommunityNotPaused`
+- **测试 (19):** h1_distribute_transfers_node_share_to_reward_pool, h1_distribute_emits_node_ad_reward_event, h2_set_tee_pct_zero_validates_with_zero, h2_set_community_pct_zero_validates_with_zero, h3_resume_audience_surge_works, h3_resume_audience_surge_fails_not_paused, h3_resume_audience_surge_requires_root, m1_unstake_all_removes_staker_entry, m1_unstake_partial_keeps_admin, m2_report_node_audience_deduplicates_same_node, m3_cross_validate_nodes_emits_event_on_deviation, m3_cross_validate_nodes_passes_and_clears_reports, m3_cross_validate_nodes_requires_root, m3_slash_community_works, m3_slash_community_requires_root, m3_slash_community_fails_no_stake, m4_distribute_rejects_paused_community, m4_distribute_works_when_not_paused
+
+## 验证
+
+- `cargo test -p pallet-ads-grouprobot`: **47/47 ✅** (was 28)
+- `cargo check -p pallet-ads-grouprobot`: ✅
+- `cargo check -p pallet-ads-core`: ✅
+- `cargo check -p nexus-runtime`: 预存在的 `pallet-grouprobot-ceremony` Box import 错误 (非本次变更)

@@ -19,8 +19,6 @@
 //! Entity 使用 `blake2_256(b"entity-ad:" ++ entity_id.to_le_bytes())` 作为 PlacementId。
 //! Shop 级使用 `blake2_256(b"shop-ad:" ++ shop_id.to_le_bytes())` 作为 PlacementId。
 
-extern crate alloc;
-
 pub use pallet::*;
 
 #[cfg(test)]
@@ -137,6 +135,10 @@ pub mod pallet {
 		/// 默认每日展示量上限
 		#[pallet::constant]
 		type DefaultDailyImpressionCap: Get<u32>;
+
+		/// 每日区块数 (用于展示量重置周期, 默认 14400 ≈ 24h @ 6s/block)
+		#[pallet::constant]
+		type BlocksPerDay: Get<u32>;
 	}
 
 	// ========================================================================
@@ -154,7 +156,7 @@ pub mod pallet {
 		_,
 		Blake2_128Concat,
 		u64,  // entity_id
-		BoundedVec<PlacementId, ConstU32<50>>,
+		BoundedVec<PlacementId, T::MaxPlacementsPerEntity>,
 		ValueQuery,
 	>;
 
@@ -269,8 +271,14 @@ pub mod pallet {
 		EntityBanned,
 		/// 每日展示量已达上限
 		DailyImpressionCapReached,
-		/// 保证金不足
-		InsufficientDeposit,
+		/// Entity 已被禁止 (重复禁止)
+		EntityAlreadyBanned,
+		/// Entity 未被禁止 (无需解禁)
+		EntityNotBanned,
+		/// 广告位激活状态未变更
+		PlacementStatusUnchanged,
+		/// 每日展示量上限未变更
+		ImpressionCapUnchanged,
 	}
 
 	// ========================================================================
@@ -294,7 +302,7 @@ pub mod pallet {
 			ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
 			ensure!(
 				T::EntityProvider::entity_owner(entity_id) == Some(who.clone()) ||
-				T::EntityProvider::is_entity_admin(entity_id, &who),
+				T::EntityProvider::is_entity_admin(entity_id, &who, pallet_entity_common::AdminPermission::ADS_MANAGE),
 				Error::<T>::NotEntityAdmin
 			);
 			ensure!(!BannedEntities::<T>::get(entity_id), Error::<T>::EntityBanned);
@@ -330,7 +338,7 @@ pub mod pallet {
 
 			RegisteredPlacements::<T>::insert(&placement_id, info);
 			PlacementDeposits::<T>::insert(&placement_id, deposit);
-			let _ = ids.try_push(placement_id);
+			ids.try_push(placement_id).map_err(|_| Error::<T>::MaxPlacementsReached)?;
 			EntityPlacementIds::<T>::insert(entity_id, ids);
 
 			Self::deposit_event(Event::PlacementRegistered {
@@ -364,7 +372,7 @@ pub mod pallet {
 			);
 			ensure!(
 				T::EntityProvider::entity_owner(entity_id) == Some(who.clone()) ||
-				T::EntityProvider::is_entity_admin(entity_id, &who) ||
+				T::EntityProvider::is_entity_admin(entity_id, &who, pallet_entity_common::AdminPermission::ADS_MANAGE) ||
 				T::ShopProvider::is_shop_manager(shop_id, &who),
 				Error::<T>::NotShopManager
 			);
@@ -399,7 +407,7 @@ pub mod pallet {
 
 			RegisteredPlacements::<T>::insert(&placement_id, info);
 			PlacementDeposits::<T>::insert(&placement_id, deposit);
-			let _ = ids.try_push(placement_id);
+			ids.try_push(placement_id).map_err(|_| Error::<T>::MaxPlacementsReached)?;
 			EntityPlacementIds::<T>::insert(entity_id, ids);
 
 			Self::deposit_event(Event::PlacementRegistered {
@@ -427,7 +435,7 @@ pub mod pallet {
 			// 权限: Entity owner/admin 或注册者
 			ensure!(
 				T::EntityProvider::entity_owner(info.entity_id) == Some(who.clone()) ||
-				T::EntityProvider::is_entity_admin(info.entity_id, &who) ||
+				T::EntityProvider::is_entity_admin(info.entity_id, &who, pallet_entity_common::AdminPermission::ADS_MANAGE) ||
 				info.registered_by == who,
 				Error::<T>::NotEntityAdmin
 			);
@@ -469,10 +477,13 @@ pub mod pallet {
 				let info = maybe_info.as_mut().ok_or(Error::<T>::PlacementNotRegistered)?;
 				ensure!(
 					T::EntityProvider::entity_owner(info.entity_id) == Some(who.clone()) ||
-					T::EntityProvider::is_entity_admin(info.entity_id, &who) ||
+					T::EntityProvider::is_entity_admin(info.entity_id, &who, pallet_entity_common::AdminPermission::ADS_MANAGE) ||
 					info.registered_by == who,
 					Error::<T>::NotEntityAdmin
 				);
+
+				// L3: 状态未变更时跳过，避免冗余事件
+				ensure!(info.active != active, Error::<T>::PlacementStatusUnchanged);
 
 				info.active = active;
 
@@ -498,10 +509,13 @@ pub mod pallet {
 				let info = maybe_info.as_mut().ok_or(Error::<T>::PlacementNotRegistered)?;
 				ensure!(
 					T::EntityProvider::entity_owner(info.entity_id) == Some(who.clone()) ||
-					T::EntityProvider::is_entity_admin(info.entity_id, &who) ||
+					T::EntityProvider::is_entity_admin(info.entity_id, &who, pallet_entity_common::AdminPermission::ADS_MANAGE) ||
 					info.registered_by == who,
 					Error::<T>::NotEntityAdmin
 				);
+
+				// L1-R2: 值未变更时跳过，避免冗余事件
+				ensure!(info.daily_impression_cap != daily_cap, Error::<T>::ImpressionCapUnchanged);
 
 				info.daily_impression_cap = daily_cap;
 
@@ -528,7 +542,10 @@ pub mod pallet {
 				T::EntityProvider::entity_owner(entity_id) == Some(who),
 				Error::<T>::NotEntityAdmin
 			);
-			ensure!(share_bps <= 10_000, Error::<T>::InvalidShareBps);
+			ensure!(
+				share_bps <= 10_000u16.saturating_sub(T::PlatformAdShareBps::get()),
+				Error::<T>::InvalidShareBps
+			);
 
 			EntityAdShareBps::<T>::insert(entity_id, share_bps);
 
@@ -547,6 +564,8 @@ pub mod pallet {
 			entity_id: u64,
 		) -> DispatchResult {
 			ensure_root(origin)?;
+			ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+			ensure!(!BannedEntities::<T>::get(entity_id), Error::<T>::EntityAlreadyBanned);
 			BannedEntities::<T>::insert(entity_id, true);
 			Self::deposit_event(Event::EntityBanned { entity_id });
 			Ok(())
@@ -560,6 +579,8 @@ pub mod pallet {
 			entity_id: u64,
 		) -> DispatchResult {
 			ensure_root(origin)?;
+			ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+			ensure!(BannedEntities::<T>::get(entity_id), Error::<T>::EntityNotBanned);
 			BannedEntities::<T>::remove(entity_id);
 			Self::deposit_event(Event::EntityUnbanned { entity_id });
 			Ok(())
@@ -589,11 +610,11 @@ pub mod pallet {
 			}
 		}
 
-		/// 检查并重置每日展示量计数器 (简化实现: 每 14400 区块 ≈ 24h @ 6s/block)
+		/// 检查并重置每日展示量计数器 (周期由 Config::BlocksPerDay 定义)
 		pub fn check_and_reset_daily(placement_id: &PlacementId) {
 			let now = frame_system::Pallet::<T>::block_number();
 			let last_reset = ImpressionResetBlock::<T>::get(placement_id);
-			let day_blocks: BlockNumberFor<T> = 14_400u32.into();
+			let day_blocks: BlockNumberFor<T> = T::BlocksPerDay::get().into();
 
 			if now.saturating_sub(last_reset) >= day_blocks {
 				DailyImpressions::<T>::insert(placement_id, 0u32);
@@ -631,7 +652,7 @@ pub mod pallet {
 
 			// 3. 调用者权限: Entity owner/admin 或 shop manager
 			let is_authorized = T::EntityProvider::entity_owner(info.entity_id) == Some(who.clone())
-				|| T::EntityProvider::is_entity_admin(info.entity_id, who)
+				|| T::EntityProvider::is_entity_admin(info.entity_id, who, pallet_entity_common::AdminPermission::ADS_MANAGE)
 				|| (info.shop_id > 0 && T::ShopProvider::is_shop_manager(info.shop_id, who));
 			ensure!(is_authorized, Error::<T>::NotEntityAdmin);
 
@@ -696,7 +717,8 @@ pub mod pallet {
 			total_cost: BalanceOf<T>,
 			_advertiser: &T::AccountId,
 		) -> Result<BalanceOf<T>, sp_runtime::DispatchError> {
-			let entity_id = Self::placement_entity_id(placement_id).unwrap_or(0);
+			let entity_id = Self::placement_entity_id(placement_id)
+				.ok_or(Error::<T>::PlacementNotRegistered)?;
 			let entity_share_bps = Self::effective_entity_share_bps(entity_id);
 			let entity_share = Self::bps_of(total_cost, entity_share_bps);
 

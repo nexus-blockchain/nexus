@@ -96,12 +96,9 @@ create_sale_round ──→ [NotStarted] ──┤
 | 状态 | 说明 |
 |------|------|
 | `NotStarted` | 已创建，配置阶段 |
-| `WhitelistOpen` | 白名单注册中（预留） |
 | `Active` | 发售进行中，可认购 |
-| `SoldOut` | 已售罄 |
 | `Ended` | 创建者手动结束 |
 | `Cancelled` | 已取消（认购者可退款） |
-| `Settling` | 结算中（预留） |
 | `Completed` | 已完成 |
 
 ## 数据结构
@@ -450,7 +447,7 @@ cargo test -p pallet-entity-tokensale
 
 **已知设计局限（标记未修）：**
 - L1: `EntityTokenProvider::repatriate_reserved` 返回值语义（实际量 vs 差额）与 Substrate `ReservableCurrency` 惯例不同，跨 pallet 影响范围较广（market 等也使用），暂不修改
-- L2: `RoundStatus` 枚举中 `WhitelistOpen`、`SoldOut`、`Settling` 三个值为预留，从未使用
+- ~~L2: `RoundStatus` 枚举中 `WhitelistOpen`、`SoldOut`、`Settling` 预留变体~~ — Round 5 已移除
 
 ## 许可证
 

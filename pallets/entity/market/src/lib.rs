@@ -1194,6 +1194,9 @@ pub mod pallet {
                 order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled,
                 Error::<T>::OrderClosed
             );
+            // H2 审计修复: 过期订单不可吃单（on_idle 清理可能滞后）
+            let now = <frame_system::Pallet<T>>::block_number();
+            ensure!(now <= order.expires_at, Error::<T>::OrderClosed);
 
             // 不能吃自己的单
             ensure!(order.maker != who, Error::<T>::CannotTakeOwnOrder);
@@ -1655,6 +1658,8 @@ pub mod pallet {
             let total_usdt = token_u128
                 .checked_mul(usdt_price as u128)
                 .ok_or(Error::<T>::ArithmeticOverflow)?;
+            // H1 审计修复: 防止 u128→u64 截断导致保证金不足
+            ensure!(total_usdt <= u64::MAX as u128, Error::<T>::ArithmeticOverflow);
             let maker_deposit = Self::calculate_buyer_deposit(total_usdt as u64);
             if !maker_deposit.is_zero() {
                 T::Currency::reserve(&who, maker_deposit)
@@ -1717,6 +1722,9 @@ pub mod pallet {
                 order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled,
                 Error::<T>::OrderClosed
             );
+            // H2 审计修复: 过期订单不可预锁定
+            let now = <frame_system::Pallet<T>>::block_number();
+            ensure!(now <= order.expires_at, Error::<T>::OrderClosed);
             ensure!(order.maker != who, Error::<T>::CannotTakeOwnOrder);
 
             // 计算成交数量
@@ -1819,6 +1827,9 @@ pub mod pallet {
                 order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled,
                 Error::<T>::OrderClosed
             );
+            // H2 审计修复: 过期订单不可接受
+            let now = <frame_system::Pallet<T>>::block_number();
+            ensure!(now <= order.expires_at, Error::<T>::OrderClosed);
             ensure!(buyer != who, Error::<T>::CannotTakeOwnOrder);
 
             let tron_addr = Self::validate_tron_address(tron_address)?;
@@ -3308,12 +3319,15 @@ pub mod pallet {
                 OrderSide::Sell => EntitySellOrders::<T>::get(entity_id),
                 OrderSide::Buy => EntityBuyOrders::<T>::get(entity_id),
             };
+            // H3 审计修复: 过滤过期订单，防止 on_idle 清理滞后导致过期单参与撮合
+            let now = <frame_system::Pallet<T>>::block_number();
             let mut orders: Vec<TradeOrder<T>> = order_ids
                 .iter()
                 .filter_map(|&id| Orders::<T>::get(id))
                 .filter(|o| {
                     o.channel == PaymentChannel::NEX &&
-                    (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+                    (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled) &&
+                    now <= o.expires_at
                 })
                 .collect();
             match side {
@@ -3754,9 +3768,9 @@ pub mod pallet {
             }
 
             let deviation_bps = if price_u128 > ref_price_u128 {
-                ((price_u128 - ref_price_u128) * 10000 / ref_price_u128) as u16
+                ((price_u128 - ref_price_u128) * 10000 / ref_price_u128).min(u16::MAX as u128) as u16
             } else {
-                ((ref_price_u128 - price_u128) * 10000 / ref_price_u128) as u16
+                ((ref_price_u128 - price_u128) * 10000 / ref_price_u128).min(u16::MAX as u128) as u16
             };
 
             // 检查是否超过最大偏离
@@ -3834,9 +3848,9 @@ pub mod pallet {
             }
 
             let deviation_bps = if price_u128 > twap_u128 {
-                ((price_u128 - twap_u128) * 10000 / twap_u128) as u16
+                ((price_u128 - twap_u128) * 10000 / twap_u128).min(u16::MAX as u128) as u16
             } else {
-                ((twap_u128 - price_u128) * 10000 / twap_u128) as u16
+                ((twap_u128 - price_u128) * 10000 / twap_u128).min(u16::MAX as u128) as u16
             };
 
             // 如果偏离超过熔断阈值，触发熔断
@@ -4007,12 +4021,14 @@ impl<T: Config> Pallet<T> {
 
     /// 计算最优卖价
     fn calculate_best_ask(entity_id: u64) -> Option<BalanceOf<T>> {
+        let now = <frame_system::Pallet<T>>::block_number();
         EntitySellOrders::<T>::get(entity_id)
             .iter()
             .filter_map(|&id| Orders::<T>::get(id))
             .filter(|o| {
                 o.channel == PaymentChannel::NEX &&
-                (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+                (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled) &&
+                now <= o.expires_at
             })
             .map(|o| o.price)
             .min()
@@ -4020,12 +4036,14 @@ impl<T: Config> Pallet<T> {
 
     /// 计算最优买价
     fn calculate_best_bid(entity_id: u64) -> Option<BalanceOf<T>> {
+        let now = <frame_system::Pallet<T>>::block_number();
         EntityBuyOrders::<T>::get(entity_id)
             .iter()
             .filter_map(|&id| Orders::<T>::get(id))
             .filter(|o| {
                 o.channel == PaymentChannel::NEX &&
-                (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+                (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled) &&
+                now <= o.expires_at
             })
             .map(|o| o.price)
             .max()

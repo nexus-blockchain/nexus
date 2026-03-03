@@ -20,11 +20,10 @@ pallet-ads-primitives = { path = "../primitives", default-features = false }
 frame-support = { workspace = true }
 frame-system = { workspace = true }
 sp-runtime = { workspace = true }
-sp-core = { workspace = true }
-sp-io = { workspace = true, default-features = false }
 
 [dev-dependencies]
-sp-io = { workspace = true }
+sp-io = { workspace = true, features = ["std"] }
+sp-core = { workspace = true, features = ["std"] }
 pallet-balances = { workspace = true, features = ["std"] }
 
 [features]
@@ -37,11 +36,10 @@ std = [
 	"frame-support/std",
 	"frame-system/std",
 	"sp-runtime/std",
-	"sp-core/std",
-	"sp-io/std",
 ]
 try-runtime = [
 	"frame-support/try-runtime",
+	"frame-system/try-runtime",
 	"sp-runtime/try-runtime",
 ]
 runtime-benchmarks = [

@@ -252,3 +252,223 @@ fn m1_accrue_node_reward_emits_event() {
 		);
 	});
 }
+
+// ========================================================================
+// Round 2 回归测试
+// ========================================================================
+
+#[test]
+fn m1_r2_distribute_emits_reward_accrued_per_node() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let weights = vec![(node_id(1), 100u128), (node_id(2), 100u128)];
+		Rewards::distribute_and_record_era(0, 1000u128, 800u128, 200u128, 100u128, &weights, 2);
+
+		// 应有 2 个 RewardAccrued 事件 (每节点一个) + 1 个 EraCompleted
+		let events: Vec<_> = System::events().iter().filter_map(|e| {
+			if let RuntimeEvent::Rewards(ref inner) = e.event {
+				Some(inner.clone())
+			} else {
+				None
+			}
+		}).collect();
+
+		// RewardAccrued for node 1
+		assert!(events.contains(&Event::<Test>::RewardAccrued { node_id: node_id(1), amount: 500 }));
+		// RewardAccrued for node 2
+		assert!(events.contains(&Event::<Test>::RewardAccrued { node_id: node_id(2), amount: 500 }));
+		// EraCompleted
+		assert!(events.contains(&Event::<Test>::EraCompleted { era: 0, total_distributed: 1000 }));
+	});
+}
+
+#[test]
+fn m2_r2_rescue_stranded_rewards_works() {
+	new_test_ext().execute_with(|| {
+		// 模拟滞留奖励: 节点 99 不在 MockNodeConsensus (node_operator 返回 None)
+		NodePendingRewards::<Test>::insert(node_id(99), 500u128);
+		let pool_before = Balances::free_balance(REWARD_POOL);
+		let op_before = Balances::free_balance(OPERATOR);
+
+		// Root 救援
+		assert_ok!(Rewards::rescue_stranded_rewards(
+			RuntimeOrigin::root(), node_id(99), OPERATOR
+		));
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(99)), 0);
+		assert_eq!(NodeTotalEarned::<Test>::get(node_id(99)), 500);
+		assert_eq!(Balances::free_balance(REWARD_POOL), pool_before - 500);
+		assert_eq!(Balances::free_balance(OPERATOR), op_before + 500);
+	});
+}
+
+#[test]
+fn m2_r2_rescue_rejects_non_root() {
+	new_test_ext().execute_with(|| {
+		NodePendingRewards::<Test>::insert(node_id(99), 500u128);
+		assert_noop!(
+			Rewards::rescue_stranded_rewards(
+				RuntimeOrigin::signed(OPERATOR), node_id(99), OPERATOR
+			),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+#[test]
+fn m2_r2_rescue_rejects_active_node() {
+	new_test_ext().execute_with(|| {
+		// node_id(1) 仍在 MockNodeConsensus 中 (operator = OPERATOR)
+		NodePendingRewards::<Test>::insert(node_id(1), 500u128);
+		assert_noop!(
+			Rewards::rescue_stranded_rewards(
+				RuntimeOrigin::root(), node_id(1), OPERATOR
+			),
+			Error::<Test>::NodeStillActive
+		);
+	});
+}
+
+#[test]
+fn m2_r2_rescue_rejects_no_pending() {
+	new_test_ext().execute_with(|| {
+		// node_id(99) 已退出, 但无滞留奖励
+		assert_noop!(
+			Rewards::rescue_stranded_rewards(
+				RuntimeOrigin::root(), node_id(99), OPERATOR
+			),
+			Error::<Test>::NoPendingRewards
+		);
+	});
+}
+
+#[test]
+fn distribute_zero_inflation_no_mint() {
+	new_test_ext().execute_with(|| {
+		let pool_before = Balances::free_balance(REWARD_POOL);
+		let weights = vec![(node_id(1), 100u128)];
+		// inflation = 0 → 不铸币
+		Rewards::distribute_and_record_era(0, 500u128, 500u128, 0u128, 50u128, &weights, 1);
+		// RewardPool 不增加 (无铸币)
+		assert_eq!(Balances::free_balance(REWARD_POOL), pool_before);
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 500);
+	});
+}
+
+#[test]
+fn distribute_empty_weights_zero_distributed() {
+	new_test_ext().execute_with(|| {
+		let pool_before = Balances::free_balance(REWARD_POOL);
+		// 空权重列表 → total_weight=0, 不分配
+		let weights: Vec<(NodeId, u128)> = vec![];
+		let distributed = Rewards::distribute_and_record_era(
+			0, 500u128, 400u128, 100u128, 50u128, &weights, 0,
+		);
+		assert_eq!(distributed, 0);
+		// 通胀仍铸币到 pool
+		assert_eq!(Balances::free_balance(REWARD_POOL), pool_before + 100);
+		// Era 记录 total_distributed = 0
+		let info = EraRewards::<Test>::get(0).unwrap();
+		assert_eq!(info.total_distributed, 0);
+		assert_eq!(info.inflation_mint, 100);
+	});
+}
+
+#[test]
+fn accrue_zero_amount_is_noop() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		<Rewards as RewardAccruer>::accrue_node_reward(&node_id(1), 0);
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 0);
+		// 零金额不应发出事件
+		let reward_events: Vec<_> = System::events().into_iter().filter(|e| {
+			matches!(e.event, RuntimeEvent::Rewards(Event::<Test>::RewardAccrued { .. }))
+		}).collect();
+		assert!(reward_events.is_empty());
+	});
+}
+
+// ========================================================================
+// Round 3 回归测试
+// ========================================================================
+
+#[test]
+fn m1_r3_claim_event_includes_recipient() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		NodePendingRewards::<Test>::insert(node_id(1), 500u128);
+		assert_ok!(Rewards::claim_rewards(RuntimeOrigin::signed(OPERATOR), node_id(1)));
+		System::assert_last_event(
+			Event::<Test>::RewardsClaimed {
+				node_id: node_id(1),
+				recipient: OPERATOR,
+				amount: 500,
+			}.into()
+		);
+	});
+}
+
+#[test]
+fn m1_r3_rescue_event_includes_recipient() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		NodePendingRewards::<Test>::insert(node_id(99), 300u128);
+		// Root 救援到 OTHER 账户
+		assert_ok!(Rewards::rescue_stranded_rewards(
+			RuntimeOrigin::root(), node_id(99), OTHER
+		));
+		System::assert_last_event(
+			Event::<Test>::RewardsClaimed {
+				node_id: node_id(99),
+				recipient: OTHER,
+				amount: 300,
+			}.into()
+		);
+	});
+}
+
+#[test]
+fn m2_r3_orphan_claim_failure_emits_event() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let pool_balance = Balances::free_balance(REWARD_POOL);
+		let excessive = pool_balance + 1;
+		NodePendingRewards::<Test>::insert(node_id(1), excessive);
+
+		Rewards::try_claim_orphan_rewards(&node_id(1), &OPERATOR);
+
+		// M2-R3: 应发射 OrphanRewardClaimFailed 事件
+		System::assert_last_event(
+			Event::<Test>::OrphanRewardClaimFailed {
+				node_id: node_id(1),
+				amount: excessive,
+			}.into()
+		);
+		// pending 保持不变
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), excessive);
+	});
+}
+
+#[test]
+fn m3_r3_distribute_era_skips_duplicate() {
+	new_test_ext().execute_with(|| {
+		let weights = vec![(node_id(1), 100u128)];
+		// 第一次分配
+		let d1 = Rewards::distribute_and_record_era(
+			0, 500u128, 400u128, 100u128, 50u128, &weights, 1,
+		);
+		assert_eq!(d1, 500);
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 500);
+
+		let pool_after_first = Balances::free_balance(REWARD_POOL);
+
+		// 第二次分配同一 era → 应被跳过, 不重复铸币/分配
+		let d2 = Rewards::distribute_and_record_era(
+			0, 500u128, 400u128, 100u128, 50u128, &weights, 1,
+		);
+		assert_eq!(d2, 0);
+		// 不应重复铸币
+		assert_eq!(Balances::free_balance(REWARD_POOL), pool_after_first);
+		// 不应重复分配
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 500);
+	});
+}

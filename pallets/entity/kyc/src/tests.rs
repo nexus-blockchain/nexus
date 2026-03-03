@@ -37,7 +37,6 @@ fn register_provider_works() {
         setup_provider();
         let provider = Providers::<Test>::get(PROVIDER).unwrap();
         assert_eq!(provider.max_level, KycLevel::Enhanced);
-        assert!(provider.active);
         assert_eq!(ProviderCount::<Test>::get(), 1);
     });
 }
@@ -298,11 +297,16 @@ fn revoke_kyc_works() {
 }
 
 #[test]
-fn revoke_kyc_fails_not_approved() {
+fn revoke_kyc_fails_on_rejected() {
     new_test_ext().execute_with(|| {
+        setup_provider();
         assert_ok!(EntityKyc::submit_kyc(
-            RuntimeOrigin::signed(USER), KycLevel::Basic, b"data".to_vec(), *b"CN",
+            RuntimeOrigin::signed(USER), KycLevel::Standard, b"data".to_vec(), *b"CN",
         ));
+        assert_ok!(EntityKyc::reject_kyc(
+            RuntimeOrigin::signed(PROVIDER), USER, RejectionReason::Other, None,
+        ));
+        // Rejected 状态不能 revoke
         assert_noop!(
             EntityKyc::revoke_kyc(RuntimeOrigin::root(), USER, RejectionReason::Other),
             Error::<Test>::InvalidKycStatus
@@ -850,16 +854,16 @@ fn h2_revoke_kyc_works_on_expired_record() {
 }
 
 #[test]
-fn h2_revoke_kyc_still_rejects_pending() {
+fn h1_r2_revoke_kyc_accepts_pending() {
     new_test_ext().execute_with(|| {
         assert_ok!(EntityKyc::submit_kyc(
             RuntimeOrigin::signed(USER), KycLevel::Basic, b"data".to_vec(), *b"CN",
         ));
-        // Pending 状态仍然不能撤销
-        assert_noop!(
-            EntityKyc::revoke_kyc(RuntimeOrigin::root(), USER, RejectionReason::Other),
-            Error::<Test>::InvalidKycStatus
-        );
+        // H1-R2: Pending 状态现在可以撤销
+        assert_ok!(EntityKyc::revoke_kyc(
+            RuntimeOrigin::root(), USER, RejectionReason::Other,
+        ));
+        assert_eq!(KycRecords::<Test>::get(USER).unwrap().status, KycStatus::Revoked);
     });
 }
 
@@ -926,5 +930,339 @@ fn m3_institutional_has_own_validity() {
             Pallet::<Test>::get_validity_period(KycLevel::Institutional),
             Pallet::<Test>::get_validity_period(KycLevel::Enhanced),
         );
+    });
+}
+
+// ==================== Deep Audit Round 2 回归测试 ====================
+
+// H1-R2: revoke_kyc 可以撤销 Pending 状态（解决卡死记录）
+#[test]
+fn h1_r2_revoke_kyc_clears_stuck_pending() {
+    new_test_ext().execute_with(|| {
+        // 用户提交 Institutional 级别 KYC
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), KycLevel::Institutional, b"data".to_vec(), *b"CN",
+        ));
+        assert_eq!(KycRecords::<Test>::get(USER).unwrap().status, KycStatus::Pending);
+
+        // 注册一个只支持 Basic 的 provider — 无法处理 Institutional
+        assert_ok!(EntityKyc::register_provider(
+            RuntimeOrigin::root(), PROVIDER,
+            b"Basic Only".to_vec(), ProviderType::Internal, KycLevel::Basic,
+        ));
+        assert_noop!(
+            EntityKyc::approve_kyc(RuntimeOrigin::signed(PROVIDER), USER, 10),
+            Error::<Test>::ProviderLevelNotSupported
+        );
+        assert_noop!(
+            EntityKyc::reject_kyc(RuntimeOrigin::signed(PROVIDER), USER, RejectionReason::Other, None),
+            Error::<Test>::ProviderLevelNotSupported
+        );
+
+        // 用户不能重新提交（被 KycAlreadyPending 阻止）
+        assert_noop!(
+            EntityKyc::submit_kyc(RuntimeOrigin::signed(USER), KycLevel::Basic, b"new".to_vec(), *b"CN"),
+            Error::<Test>::KycAlreadyPending
+        );
+
+        // H1-R2: Admin 可以撤销 Pending 记录
+        assert_ok!(EntityKyc::revoke_kyc(
+            RuntimeOrigin::root(), USER, RejectionReason::Other,
+        ));
+        assert_eq!(KycRecords::<Test>::get(USER).unwrap().status, KycStatus::Revoked);
+
+        // 用户现在可以重新提交
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), KycLevel::Basic, b"retry".to_vec(), *b"CN",
+        ));
+        assert_eq!(KycRecords::<Test>::get(USER).unwrap().status, KycStatus::Pending);
+    });
+}
+
+// H1-R2: revoke_kyc 仍然拒绝 Rejected 和 Revoked 状态
+#[test]
+fn h1_r2_revoke_kyc_still_rejects_rejected_and_revoked() {
+    new_test_ext().execute_with(|| {
+        setup_provider();
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), KycLevel::Standard, b"data".to_vec(), *b"CN",
+        ));
+        assert_ok!(EntityKyc::reject_kyc(
+            RuntimeOrigin::signed(PROVIDER), USER, RejectionReason::Other, None,
+        ));
+
+        // Rejected 状态不能 revoke
+        assert_noop!(
+            EntityKyc::revoke_kyc(RuntimeOrigin::root(), USER, RejectionReason::Other),
+            Error::<Test>::InvalidKycStatus
+        );
+    });
+}
+
+// M1: approve_kyc 拒绝自我审批
+#[test]
+fn m1_r2_approve_kyc_rejects_self_approval() {
+    new_test_ext().execute_with(|| {
+        // Provider 也是用户，提交自己的 KYC
+        assert_ok!(EntityKyc::register_provider(
+            RuntimeOrigin::root(), PROVIDER,
+            b"Self Provider".to_vec(), ProviderType::Internal, KycLevel::Enhanced,
+        ));
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(PROVIDER), KycLevel::Standard, b"data".to_vec(), *b"CN",
+        ));
+
+        // M1: Provider 审批自己应被拒绝
+        assert_noop!(
+            EntityKyc::approve_kyc(RuntimeOrigin::signed(PROVIDER), PROVIDER, 10),
+            Error::<Test>::SelfApprovalNotAllowed
+        );
+    });
+}
+
+// ==================== Deep Audit Round 4 回归测试 ====================
+
+// M1-R4: update_high_risk_countries 自动去重（替代 R2 的拒绝策略）
+#[test]
+fn m1_r4_update_high_risk_countries_deduplicates() {
+    new_test_ext().execute_with(|| {
+        // 含重复项 — 应自动去重而非拒绝
+        assert_ok!(EntityKyc::update_high_risk_countries(
+            RuntimeOrigin::root(), vec![*b"IR", *b"KP", *b"IR"],
+        ));
+        // 去重后只有 2 个
+        assert_eq!(HighRiskCountries::<Test>::get().len(), 2);
+        assert!(HighRiskCountries::<Test>::get().contains(&*b"IR"));
+        assert!(HighRiskCountries::<Test>::get().contains(&*b"KP"));
+
+        // 无重复仍正常工作
+        assert_ok!(EntityKyc::update_high_risk_countries(
+            RuntimeOrigin::root(), vec![*b"IR", *b"KP", *b"SY"],
+        ));
+        assert_eq!(HighRiskCountries::<Test>::get().len(), 3);
+    });
+}
+
+// M1-R4: 大量重复去重后仍能存入（不超上限）
+#[test]
+fn m1_r4_dedup_preserves_capacity() {
+    new_test_ext().execute_with(|| {
+        // 3 个唯一 + 大量重复 = 去重后 3 个，远低于 50 上限
+        let mut countries = vec![*b"IR"; 40];
+        countries.extend_from_slice(&[*b"KP", *b"SY"]);
+        assert_ok!(EntityKyc::update_high_risk_countries(
+            RuntimeOrigin::root(), countries,
+        ));
+        assert_eq!(HighRiskCountries::<Test>::get().len(), 3);
+    });
+}
+
+// M2-R4: reject_kyc 递增 verifications_count
+#[test]
+fn m2_r4_reject_kyc_increments_verifications_count() {
+    new_test_ext().execute_with(|| {
+        setup_provider();
+
+        // 提交 KYC
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), KycLevel::Standard, b"data".to_vec(), *b"CN",
+        ));
+
+        // 拒绝前 count = 0
+        assert_eq!(Providers::<Test>::get(PROVIDER).unwrap().verifications_count, 0);
+
+        // 拒绝
+        assert_ok!(EntityKyc::reject_kyc(
+            RuntimeOrigin::signed(PROVIDER), USER,
+            RejectionReason::UnclearDocument, None,
+        ));
+
+        // M2-R4: 拒绝后 count = 1
+        assert_eq!(Providers::<Test>::get(PROVIDER).unwrap().verifications_count, 1);
+    });
+}
+
+// M2-R4: approve + reject 都递增 verifications_count
+#[test]
+fn m2_r4_approve_and_reject_both_increment_count() {
+    new_test_ext().execute_with(|| {
+        setup_provider();
+        let user2: u64 = 4;
+
+        // 批准 USER
+        submit_and_approve(USER, KycLevel::Standard);
+        assert_eq!(Providers::<Test>::get(PROVIDER).unwrap().verifications_count, 1);
+
+        // 提交 user2 并拒绝
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(user2), KycLevel::Standard, b"data2".to_vec(), *b"US",
+        ));
+        assert_ok!(EntityKyc::reject_kyc(
+            RuntimeOrigin::signed(PROVIDER), user2,
+            RejectionReason::InformationMismatch, None,
+        ));
+
+        // 1 approve + 1 reject = 2
+        assert_eq!(Providers::<Test>::get(PROVIDER).unwrap().verifications_count, 2);
+    });
+}
+
+// M3-R4: expire_kyc 标记已过期的 KYC
+#[test]
+fn m3_r4_expire_kyc_marks_expired_record() {
+    new_test_ext().execute_with(|| {
+        setup_provider();
+        submit_and_approve(USER, KycLevel::Basic);
+
+        let record = KycRecords::<Test>::get(USER).unwrap();
+        assert_eq!(record.status, KycStatus::Approved);
+        let expires_at = record.expires_at.unwrap();
+
+        // 推进到过期后
+        System::set_block_number(expires_at + 1);
+
+        // 任何人可调用 expire_kyc
+        let caller: u64 = 99;
+        assert_ok!(EntityKyc::expire_kyc(
+            RuntimeOrigin::signed(caller), USER,
+        ));
+
+        let record = KycRecords::<Test>::get(USER).unwrap();
+        assert_eq!(record.status, KycStatus::Expired);
+
+        // 验证事件
+        System::assert_has_event(RuntimeEvent::EntityKyc(
+            crate::Event::KycExpired { account: USER }
+        ));
+    });
+}
+
+// M3-R4: expire_kyc 拒绝未过期的记录
+#[test]
+fn m3_r4_expire_kyc_rejects_not_expired() {
+    new_test_ext().execute_with(|| {
+        setup_provider();
+        submit_and_approve(USER, KycLevel::Basic);
+
+        // 在有效期内调用 — 应拒绝
+        assert_noop!(
+            EntityKyc::expire_kyc(RuntimeOrigin::signed(USER), USER),
+            Error::<Test>::KycNotExpired
+        );
+    });
+}
+
+// M3-R4: expire_kyc 拒绝非 Approved 状态
+#[test]
+fn m3_r4_expire_kyc_rejects_non_approved() {
+    new_test_ext().execute_with(|| {
+        // Pending 状态
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), KycLevel::Basic, b"data".to_vec(), *b"CN",
+        ));
+        assert_noop!(
+            EntityKyc::expire_kyc(RuntimeOrigin::signed(USER), USER),
+            Error::<Test>::InvalidKycStatus
+        );
+    });
+}
+
+// M3-R4: expire_kyc 后可以 revoke（H1-R2 Expired 路径现在可达）
+#[test]
+fn m3_r4_expire_then_revoke_works() {
+    new_test_ext().execute_with(|| {
+        setup_provider();
+        submit_and_approve(USER, KycLevel::Basic);
+
+        let expires_at = KycRecords::<Test>::get(USER).unwrap().expires_at.unwrap();
+        System::set_block_number(expires_at + 1);
+
+        // 先 expire
+        assert_ok!(EntityKyc::expire_kyc(RuntimeOrigin::signed(USER), USER));
+        assert_eq!(KycRecords::<Test>::get(USER).unwrap().status, KycStatus::Expired);
+
+        // 然后 admin revoke
+        assert_ok!(EntityKyc::revoke_kyc(
+            RuntimeOrigin::root(), USER, RejectionReason::SuspiciousActivity,
+        ));
+        assert_eq!(KycRecords::<Test>::get(USER).unwrap().status, KycStatus::Revoked);
+    });
+}
+
+// M3-R4: expire_kyc 后可以重新提交
+#[test]
+fn m3_r4_expire_then_resubmit_works() {
+    new_test_ext().execute_with(|| {
+        setup_provider();
+        submit_and_approve(USER, KycLevel::Basic);
+
+        let expires_at = KycRecords::<Test>::get(USER).unwrap().expires_at.unwrap();
+        System::set_block_number(expires_at + 1);
+
+        // Expire
+        assert_ok!(EntityKyc::expire_kyc(RuntimeOrigin::signed(USER), USER));
+
+        // 重新提交 — Expired 状态允许重新提交（与 Rejected/Revoked 一样）
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), KycLevel::Standard, b"new_data".to_vec(), *b"CN",
+        ));
+        assert_eq!(KycRecords::<Test>::get(USER).unwrap().status, KycStatus::Pending);
+    });
+}
+
+// ==================== Deep Audit Round 5 回归测试 ====================
+
+// L4-R5: expire_kyc 不绕过 grace_period — Expired 状态在宽限期内仍可参与实体活动
+#[test]
+fn l4_r5_expire_kyc_does_not_bypass_grace_period() {
+    new_test_ext().execute_with(|| {
+        setup_provider();
+        submit_and_approve(USER, KycLevel::Standard);
+
+        let record = KycRecords::<Test>::get(USER).unwrap();
+        let expires_at = record.expires_at.unwrap();
+
+        // 设置实体要求：mandatory + grace_period = 100 blocks
+        assert_ok!(EntityKyc::set_entity_requirement(
+            RuntimeOrigin::root(), 1,
+            KycLevel::Basic, true, 100, true, 50,
+        ));
+
+        // 推进到刚过期
+        System::set_block_number(expires_at + 1);
+
+        // 在 expire_kyc 之前 — lazy expiry，grace_period 生效
+        assert!(Pallet::<Test>::can_participate_in_entity(&USER, 1));
+
+        // 调用 expire_kyc — 状态变为 Expired
+        assert_ok!(EntityKyc::expire_kyc(RuntimeOrigin::signed(USER), USER));
+        assert_eq!(KycRecords::<Test>::get(USER).unwrap().status, KycStatus::Expired);
+
+        // L4-R5: Expired 状态在宽限期内仍可参与
+        assert!(Pallet::<Test>::can_participate_in_entity(&USER, 1));
+
+        // 推进到宽限期结束后
+        System::set_block_number(expires_at + 101);
+        assert!(!Pallet::<Test>::can_participate_in_entity(&USER, 1));
+    });
+}
+
+// L4-R5: Revoked/Rejected 状态不享受 grace_period（仅 Approved + Expired）
+#[test]
+fn l4_r5_revoked_rejected_still_denied_participation() {
+    new_test_ext().execute_with(|| {
+        setup_provider();
+        submit_and_approve(USER, KycLevel::Standard);
+
+        assert_ok!(EntityKyc::set_entity_requirement(
+            RuntimeOrigin::root(), 1,
+            KycLevel::Basic, true, 100, true, 50,
+        ));
+
+        // Revoke — 不享受 grace_period
+        assert_ok!(EntityKyc::revoke_kyc(
+            RuntimeOrigin::root(), USER, RejectionReason::SuspiciousActivity,
+        ));
+        assert!(!Pallet::<Test>::can_participate_in_entity(&USER, 1));
     });
 }

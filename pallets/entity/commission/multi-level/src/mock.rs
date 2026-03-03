@@ -14,6 +14,7 @@ thread_local! {
     static REFERRERS: RefCell<BTreeMap<(u64, u64), u64>> = RefCell::new(BTreeMap::new());
     static MEMBER_STATS: RefCell<BTreeMap<(u64, u64), (u32, u32, u128)>> = RefCell::new(BTreeMap::new());
     static MEMBER_SPENT_USDT: RefCell<BTreeMap<(u64, u64), u64>> = RefCell::new(BTreeMap::new());
+    static ACTIVATED: RefCell<BTreeMap<(u64, u64), bool>> = RefCell::new(BTreeMap::new());
 }
 
 pub fn set_referrer(entity_id: u64, account: u64, referrer: u64) {
@@ -34,10 +35,17 @@ pub fn set_spent_usdt(entity_id: u64, account: u64, usdt: u64) {
     });
 }
 
+pub fn set_activated(entity_id: u64, account: u64, active: bool) {
+    ACTIVATED.with(|a| {
+        a.borrow_mut().insert((entity_id, account), active);
+    });
+}
+
 pub fn clear_thread_locals() {
     REFERRERS.with(|r| r.borrow_mut().clear());
     MEMBER_STATS.with(|s| s.borrow_mut().clear());
     MEMBER_SPENT_USDT.with(|s| s.borrow_mut().clear());
+    ACTIVATED.with(|a| a.borrow_mut().clear());
 }
 
 /// 设置线性推荐链: buyer -> r1 -> r2 -> r3 -> ...
@@ -78,7 +86,9 @@ impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
         MEMBER_SPENT_USDT.with(|s| s.borrow().get(&(entity_id, *account)).copied().unwrap_or(0))
     }
     fn auto_register_qualified(_: u64, _: &u64, _: Option<u64>, _: bool) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
-    fn is_activated(_: u64, _: &u64) -> bool { true }
+    fn is_activated(entity_id: u64, account: &u64) -> bool {
+        ACTIVATED.with(|a| a.borrow().get(&(entity_id, *account)).copied().unwrap_or(true))
+    }
 }
 
 // ============================================================================

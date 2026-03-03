@@ -1089,6 +1089,7 @@ impl pallet_entity_review::Config for Runtime {
 	type ShopProvider = EntityShop;
 	type MaxCidLength = ConstU32<64>;
 	type MaxReviewsPerUser = ConstU32<500>;
+	type ReviewWindowBlocks = ConstU64<100800>; // 7 days × 24h × 60min × 60s / 6s = 100800 blocks
 	type WeightInfo = pallet_entity_review::weights::SubstrateWeight<Runtime>;
 }
 
@@ -1102,7 +1103,6 @@ impl pallet_entity_token::Config for Runtime {
 	type AssetBalance = Balance;
 	type Assets = Assets;
 	type EntityProvider = EntityRegistry;
-	type ShopProvider = EntityShop;
 	type ShopTokenOffset = ConstU64<1_000_000>;  // 店铺代币 ID 从 1,000,000 开始
 	type MaxTokenNameLength = ConstU32<64>;
 	type MaxTokenSymbolLength = ConstU32<8>;
@@ -1145,10 +1145,17 @@ impl pallet_entity_commission::MemberProvider<AccountId> for MemberProviderBridg
 	}
 
 	fn get_member_stats(entity_id: u64, account: &AccountId) -> (u32, u32, u128) {
+		// H9 审计修复: 尊重 MemberStatsPolicy，与 pallet 内部 MemberProvider 实现一致
+		let policy = pallet_entity_member::EntityMemberStatsPolicy::<Runtime>::get(entity_id);
 		pallet_entity_member::EntityMembers::<Runtime>::get(entity_id, account)
 			.map(|m| {
+				let direct = if policy.include_repurchase_direct() {
+					m.direct_referrals
+				} else {
+					m.qualified_referrals
+				};
 				let spent_usdt: u128 = sp_runtime::SaturatedConversion::saturated_into(m.total_spent);
-				(m.direct_referrals, m.team_size, spent_usdt)
+				(direct, m.team_size, spent_usdt)
 			})
 			.unwrap_or((0, 0, 0))
 	}
@@ -1337,6 +1344,7 @@ impl pallet_entity_member::Config for Runtime {
 	type MaxCustomLevels = ConstU32<10>;
 	type MaxUpgradeRules = ConstU32<50>;
 	type MaxUpgradeHistory = ConstU32<100>;
+	type PendingMemberExpiry = ConstU32<100800>; // 7 days × 24h × 60min × 60s / 6s = 100800 blocks
 }
 
 /// 桥接：EntityReferrerProvider → EntityRegistry::entity_referrer()
@@ -1731,6 +1739,8 @@ impl pallet_grouprobot_community::Config for Runtime {
 	type MaxLogsPerCommunity = ConstU32<10000>;
 	type ReputationCooldown = ConstU32<100>;
 	type MaxReputationDelta = ConstU32<1000>;
+	type MaxBatchSize = ConstU32<50>;
+	type BlocksPerDay = ConstU32<14_400>;
 	type BotRegistry = GrBotRegistryBridge;
 	type Subscription = pallet_grouprobot_subscription::Pallet<Runtime>;
 }
@@ -1741,6 +1751,7 @@ impl pallet_grouprobot_ceremony::Config for Runtime {
 	type MaxCeremonyHistory = ConstU32<10>;
 	type CeremonyValidityBlocks = GrCeremonyValidityBlocks;
 	type CeremonyCheckInterval = GrCeremonyCheckInterval;
+	type MaxProcessPerBlock = ConstU32<50>;
 	type BotRegistry = GrBotRegistryBridge;
 	type Subscription = pallet_grouprobot_subscription::Pallet<Runtime>;
 }
@@ -1816,4 +1827,5 @@ impl pallet_ads_entity::pallet::Config for Runtime {
 	type AdPlacementDeposit = AdsPrivateAdRegistrationFee; // 1 NEX (复用)
 	type MaxPlacementsPerEntity = ConstU32<20>;
 	type DefaultDailyImpressionCap = ConstU32<10_000>;
+	type BlocksPerDay = ConstU32<14_400>;             // 24h @ 6s/block
 }

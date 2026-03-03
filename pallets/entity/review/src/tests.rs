@@ -1,7 +1,6 @@
 use crate::{mock::*, Error, Event, Reviews, ReviewCount, ShopReviewCount, UserReviews, EntityReviewDisabled};
 use frame_support::{assert_noop, assert_ok};
 use frame_system::RawOrigin;
-use sp_runtime::DispatchError;
 
 // ==================== 基础成功路径 ====================
 
@@ -413,7 +412,7 @@ fn submit_review_emits_correct_event_with_shop_id() {
 // ==================== ReviewCount 溢出安全 ====================
 
 #[test]
-fn review_count_saturating_add() {
+fn review_count_checked_add_near_max() {
     new_test_ext().execute_with(|| {
         add_shop(100);
         add_order(1, BUYER, 100, true);
@@ -426,7 +425,7 @@ fn review_count_saturating_add() {
             1, 5, None,
         ));
 
-        // saturating_add 应止于 MAX
+        // checked_add: MAX-1 + 1 = MAX (valid)
         assert_eq!(ReviewCount::<Test>::get(), u64::MAX);
     });
 }
@@ -871,6 +870,397 @@ fn submit_review_entity_enabled_by_default() {
         // 从未调用 set_review_enabled → 默认开启
         assert!(!EntityReviewDisabled::<Test>::contains_key(ENTITY_1));
 
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 5, None,
+        ));
+        assert!(Reviews::<Test>::get(1).is_some());
+    });
+}
+
+// ==================== H1: 争议中订单不可评价 ====================
+
+#[test]
+fn h1_submit_review_rejects_disputed_order() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+        set_order_disputed(1);
+
+        assert_noop!(
+            EntityReview::submit_review(
+                RawOrigin::Signed(BUYER).into(),
+                1, 5, None,
+            ),
+            Error::<Test>::OrderDisputed
+        );
+
+        // 评价不应存储
+        assert!(Reviews::<Test>::get(1).is_none());
+        assert_eq!(ReviewCount::<Test>::get(), 0);
+    });
+}
+
+#[test]
+fn h1_submit_review_works_when_not_disputed() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+        // 不设置 disputed
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 5, None,
+        ));
+        assert!(Reviews::<Test>::get(1).is_some());
+    });
+}
+
+// ==================== H2: set_review_enabled 幂等性 ====================
+
+#[test]
+fn h2_set_review_enabled_no_event_when_already_disabled() {
+    new_test_ext().execute_with(|| {
+        add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
+
+        // 第一次关闭
+        assert_ok!(EntityReview::set_review_enabled(
+            RawOrigin::Signed(ENTITY_OWNER).into(),
+            ENTITY_1,
+            false,
+        ));
+        assert!(EntityReviewDisabled::<Test>::contains_key(ENTITY_1));
+
+        let events_before = System::events().len();
+
+        // 重复关闭 — 不应产生新事件
+        assert_ok!(EntityReview::set_review_enabled(
+            RawOrigin::Signed(ENTITY_OWNER).into(),
+            ENTITY_1,
+            false,
+        ));
+
+        let events_after = System::events().len();
+        assert_eq!(events_before, events_after, "should not emit event when state unchanged");
+    });
+}
+
+#[test]
+fn h2_set_review_enabled_no_event_when_already_enabled() {
+    new_test_ext().execute_with(|| {
+        add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
+
+        // 默认已开启，再次开启不应产生事件
+        assert!(!EntityReviewDisabled::<Test>::contains_key(ENTITY_1));
+
+        let events_before = System::events().len();
+
+        assert_ok!(EntityReview::set_review_enabled(
+            RawOrigin::Signed(ENTITY_OWNER).into(),
+            ENTITY_1,
+            true,
+        ));
+
+        let events_after = System::events().len();
+        assert_eq!(events_before, events_after, "should not emit event when already enabled");
+    });
+}
+
+// ==================== M1: Entity 级别评分更新 ====================
+
+#[test]
+fn m1_entity_rating_updated_on_review() {
+    new_test_ext().execute_with(|| {
+        add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
+        add_shop(100);
+        set_shop_entity(100, ENTITY_1);
+        add_order(1, BUYER, 100, true);
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 4, None,
+        ));
+
+        // 验证 entity rating 被更新
+        let (sum, count) = get_entity_rating(ENTITY_1).unwrap();
+        assert_eq!(sum, 4);
+        assert_eq!(count, 1);
+    });
+}
+
+#[test]
+fn m1_entity_rating_accumulates() {
+    new_test_ext().execute_with(|| {
+        add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
+        add_shop(100);
+        set_shop_entity(100, ENTITY_1);
+        add_order(1, BUYER, 100, true);
+        add_order(2, BUYER2, 100, true);
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 5, None,
+        ));
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER2).into(),
+            2, 3, None,
+        ));
+
+        let (sum, count) = get_entity_rating(ENTITY_1).unwrap();
+        assert_eq!(sum, 8); // 5 + 3
+        assert_eq!(count, 2);
+    });
+}
+
+// ==================== M2: ReviewCount 溢出检测 ====================
+
+#[test]
+fn m2_review_count_overflow_rejected() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+
+        // 预设为 u64::MAX
+        ReviewCount::<Test>::put(u64::MAX);
+
+        assert_noop!(
+            EntityReview::submit_review(
+                RawOrigin::Signed(BUYER).into(),
+                1, 5, None,
+            ),
+            Error::<Test>::ReviewCountOverflow
+        );
+
+        // 评价不应存储（UserReviews 先写入，但 ReviewCount 会回滚整个 extrinsic）
+        assert!(Reviews::<Test>::get(1).is_none());
+    });
+}
+
+// ==================== L2: 评价时间窗口 ====================
+
+#[test]
+fn l2_review_within_window_works() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+        // 订单在 block 10 完成
+        set_order_completed_at(1, 10);
+
+        // 当前 block = 10, window = 100800, 10 - 10 = 0 <= 100800 ✓
+        System::set_block_number(10);
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 5, None,
+        ));
+        assert!(Reviews::<Test>::get(1).is_some());
+    });
+}
+
+#[test]
+fn l2_review_at_window_boundary_works() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+        set_order_completed_at(1, 10);
+
+        // 恰好在窗口边界: 100810 - 10 = 100800 <= 100800 ✓
+        System::set_block_number(100810);
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 5, None,
+        ));
+        assert!(Reviews::<Test>::get(1).is_some());
+    });
+}
+
+#[test]
+fn l2_review_after_window_rejected() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+        set_order_completed_at(1, 10);
+
+        // 超出窗口: 100811 - 10 = 100801 > 100800 ✗
+        System::set_block_number(100811);
+        assert_noop!(
+            EntityReview::submit_review(
+                RawOrigin::Signed(BUYER).into(),
+                1, 5, None,
+            ),
+            Error::<Test>::ReviewWindowExpired
+        );
+        assert!(Reviews::<Test>::get(1).is_none());
+    });
+}
+
+// ==================== Round 6: Regression Tests ====================
+
+#[test]
+fn m1r6_shop_review_count_overflow_does_not_rollback_review() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+
+        // 预设 ShopReviewCount 为 u64::MAX — 下次 checked_add 溢出
+        ShopReviewCount::<Test>::insert(100, u64::MAX);
+
+        // M1-R6: 评价应仍然成功（ShopReviewCount 溢出为 best-effort，不回滚）
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 5, None,
+        ));
+
+        // 评价已存储
+        assert!(Reviews::<Test>::get(1).is_some());
+        assert_eq!(ReviewCount::<Test>::get(), 1);
+
+        // ShopReviewCount 溢出未写入，保持 u64::MAX
+        assert_eq!(ShopReviewCount::<Test>::get(100), u64::MAX);
+    });
+}
+
+#[test]
+fn m2r6_entity_review_disabled_check_uses_single_shop_id() {
+    new_test_ext().execute_with(|| {
+        add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
+        add_shop(100);
+        set_shop_entity(100, ENTITY_1);
+        add_order(1, BUYER, 100, true);
+
+        // 关闭评价
+        assert_ok!(EntityReview::set_review_enabled(
+            RawOrigin::Signed(ENTITY_OWNER).into(),
+            ENTITY_1,
+            false,
+        ));
+
+        // M2-R6: 评价应被拒绝（使用统一的 shop_id 变量进行 entity 检查）
+        assert_noop!(
+            EntityReview::submit_review(
+                RawOrigin::Signed(BUYER).into(),
+                1, 5, None,
+            ),
+            Error::<Test>::ReviewsDisabledForEntity
+        );
+
+        // 重新开启评价后应成功
+        assert_ok!(EntityReview::set_review_enabled(
+            RawOrigin::Signed(ENTITY_OWNER).into(),
+            ENTITY_1,
+            true,
+        ));
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 5, None,
+        ));
+        assert!(Reviews::<Test>::get(1).is_some());
+    });
+}
+
+// ==================== Round 7: Regression Tests ====================
+
+#[test]
+fn m1r7_entity_id_cached_for_rating_update() {
+    new_test_ext().execute_with(|| {
+        add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
+        add_shop(100);
+        set_shop_entity(100, ENTITY_1);
+        add_order(1, BUYER, 100, true);
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 4, None,
+        ));
+
+        // 验证 entity rating 被正确更新（使用缓存的 entity_id）
+        let (sum, count) = get_entity_rating(ENTITY_1).unwrap();
+        assert_eq!(sum, 4);
+        assert_eq!(count, 1);
+
+        // 验证 shop rating 也被正确更新
+        let (shop_sum, shop_count) = get_shop_rating(100).unwrap();
+        assert_eq!(shop_sum, 4);
+        assert_eq!(shop_count, 1);
+    });
+}
+
+#[test]
+fn l2r7_entity_rating_fail_still_stores_review() {
+    new_test_ext().execute_with(|| {
+        add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
+        add_shop(100);
+        set_shop_entity(100, ENTITY_1);
+        add_order(1, BUYER, 100, true);
+        set_entity_rating_fail(true);
+
+        // Entity rating 失败不应回滚评价（best-effort）
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 5, None,
+        ));
+
+        // 评价已存储
+        assert!(Reviews::<Test>::get(1).is_some());
+        assert_eq!(ReviewCount::<Test>::get(), 1);
+        assert_eq!(UserReviews::<Test>::get(BUYER).to_vec(), vec![1]);
+
+        // 店铺评分已更新（shop rating 不受 entity rating 失败影响）
+        let (shop_sum, shop_count) = get_shop_rating(100).unwrap();
+        assert_eq!(shop_sum, 5);
+        assert_eq!(shop_count, 1);
+        assert_eq!(ShopReviewCount::<Test>::get(100), 1);
+
+        // Entity rating 未更新（失败）
+        assert!(get_entity_rating(ENTITY_1).is_none());
+    });
+}
+
+#[test]
+fn l2r7_entity_rating_fail_with_shop_rating_fail_both_best_effort() {
+    new_test_ext().execute_with(|| {
+        add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
+        add_shop(100);
+        set_shop_entity(100, ENTITY_1);
+        add_order(1, BUYER, 100, true);
+        set_shop_rating_fail(true);
+        set_entity_rating_fail(true);
+
+        // 两者都失败，评价仍应存储
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 3, None,
+        ));
+
+        assert!(Reviews::<Test>::get(1).is_some());
+        assert_eq!(ReviewCount::<Test>::get(), 1);
+
+        // 两者都未更新
+        let (shop_sum, shop_count) = get_shop_rating(100).unwrap();
+        assert_eq!(shop_sum, 0);
+        assert_eq!(shop_count, 0);
+        assert_eq!(ShopReviewCount::<Test>::get(100), 0);
+        assert!(get_entity_rating(ENTITY_1).is_none());
+
+        // ShopRatingUpdateFailed 事件
+        System::assert_has_event(
+            Event::ShopRatingUpdateFailed {
+                order_id: 1,
+                shop_id: 100,
+            }
+            .into(),
+        );
+    });
+}
+
+#[test]
+fn l2_review_no_completed_at_allows_review() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+        // 不设置 completed_at — OrderProvider 返回 None，跳过窗口检查
+
+        System::set_block_number(999999);
         assert_ok!(EntityReview::submit_review(
             RawOrigin::Signed(BUYER).into(),
             1, 5, None,

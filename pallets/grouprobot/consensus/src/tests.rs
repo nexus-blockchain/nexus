@@ -595,3 +595,126 @@ fn h8_slash_resets_tee_status() {
 		assert_eq!(node.status, NodeStatus::Suspended);
 	});
 }
+
+// ============================================================================
+// Round 1 regression tests
+// ============================================================================
+
+#[test]
+fn h1r1_slash_rejects_already_resolved() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
+		assert_ok!(GroupRobotConsensus::report_equivocation(
+			RuntimeOrigin::signed(OTHER), node_id(1), 42,
+			[1u8; 32], [1u8; 64], [2u8; 32], [2u8; 64],
+		));
+		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42));
+
+		// Second slash of the same record → must be rejected
+		assert_noop!(
+			GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42),
+			Error::<Test>::EquivocationAlreadyResolved
+		);
+
+		// Stake should only be slashed once (10% of 1000 = 100 → 900 remaining)
+		let node = Nodes::<Test>::get(node_id(1)).unwrap();
+		assert_eq!(node.stake, 900);
+	});
+}
+
+#[test]
+fn m2r1_cleanup_resolved_equivocation_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
+		assert_ok!(GroupRobotConsensus::report_equivocation(
+			RuntimeOrigin::signed(OTHER), node_id(1), 42,
+			[1u8; 32], [1u8; 64], [2u8; 32], [2u8; 64],
+		));
+		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42));
+		assert!(EquivocationRecords::<Test>::contains_key(node_id(1), 42));
+
+		// Anyone can clean up a resolved record
+		assert_ok!(GroupRobotConsensus::cleanup_resolved_equivocation(
+			RuntimeOrigin::signed(OTHER), node_id(1), 42
+		));
+		assert!(!EquivocationRecords::<Test>::contains_key(node_id(1), 42));
+	});
+}
+
+#[test]
+fn m2r1_cleanup_unresolved_equivocation_fails() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
+		assert_ok!(GroupRobotConsensus::report_equivocation(
+			RuntimeOrigin::signed(OTHER), node_id(1), 42,
+			[1u8; 32], [1u8; 64], [2u8; 32], [2u8; 64],
+		));
+
+		// Unresolved record cannot be cleaned up
+		assert_noop!(
+			GroupRobotConsensus::cleanup_resolved_equivocation(
+				RuntimeOrigin::signed(OTHER), node_id(1), 42
+			),
+			Error::<Test>::EquivocationNotResolved
+		);
+	});
+}
+
+#[test]
+fn m3r1_verify_tee_rejects_suspended_node() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
+
+		// Slash to suspend
+		assert_ok!(GroupRobotConsensus::report_equivocation(
+			RuntimeOrigin::signed(OTHER), node_id(1), 42,
+			[1u8; 32], [1u8; 64], [2u8; 32], [2u8; 64],
+		));
+		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42));
+		assert_eq!(Nodes::<Test>::get(node_id(1)).unwrap().status, NodeStatus::Suspended);
+
+		// Suspended node cannot verify TEE
+		assert_noop!(
+			GroupRobotConsensus::verify_node_tee(
+				RuntimeOrigin::signed(OPERATOR), node_id(1), bot_hash(10)
+			),
+			Error::<Test>::NodeNotActive
+		);
+	});
+}
+
+#[test]
+fn m3r1_verify_tee_rejects_exiting_node() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_ok!(GroupRobotConsensus::request_exit(RuntimeOrigin::signed(OPERATOR), node_id(1)));
+		assert_eq!(Nodes::<Test>::get(node_id(1)).unwrap().status, NodeStatus::Exiting);
+
+		// Exiting node cannot verify TEE
+		assert_noop!(
+			GroupRobotConsensus::verify_node_tee(
+				RuntimeOrigin::signed(OPERATOR), node_id(1), bot_hash(10)
+			),
+			Error::<Test>::NodeNotActive
+		);
+	});
+}
+
+#[test]
+fn m5r1_no_nodes_still_settles_and_records_uptime() {
+	new_test_ext().execute_with(|| {
+		// No nodes registered — era end should still settle subscriptions and record uptime
+		set_mock_settle_income(500);
+		clear_distributed_rewards();
+
+		advance_to(52);
+
+		assert!(CurrentEra::<Test>::get() >= 1);
+		// Uptime should still be recorded
+		let uptime_eras = get_recorded_uptime_eras();
+		assert!(!uptime_eras.is_empty(), "Uptime should be recorded even with no nodes");
+		// No rewards distributed (no nodes)
+		let rewards = get_distributed_rewards();
+		assert!(rewards.is_empty());
+	});
+}

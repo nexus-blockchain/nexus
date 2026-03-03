@@ -131,6 +131,7 @@ pub mod pallet {
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
         ReferralConfigUpdated { entity_id: u64 },
+        ReferralConfigCleared { entity_id: u64 },
     }
 
     // ========================================================================
@@ -553,6 +554,7 @@ impl<T: pallet::Config> pallet_commission_common::ReferralPlanWriter<pallet::Bal
             let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
             config.direct_reward.rate = rate;
         });
+        pallet::Pallet::<T>::deposit_event(pallet::Event::ReferralConfigUpdated { entity_id });
         Ok(())
     }
 
@@ -561,6 +563,7 @@ impl<T: pallet::Config> pallet_commission_common::ReferralPlanWriter<pallet::Bal
             let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
             config.fixed_amount = pallet::FixedAmountConfig { amount };
         });
+        pallet::Pallet::<T>::deposit_event(pallet::Event::ReferralConfigUpdated { entity_id });
         Ok(())
     }
 
@@ -571,6 +574,7 @@ impl<T: pallet::Config> pallet_commission_common::ReferralPlanWriter<pallet::Bal
             let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
             config.first_order = pallet::FirstOrderConfig { amount, rate, use_amount };
         });
+        pallet::Pallet::<T>::deposit_event(pallet::Event::ReferralConfigUpdated { entity_id });
         Ok(())
     }
 
@@ -581,11 +585,13 @@ impl<T: pallet::Config> pallet_commission_common::ReferralPlanWriter<pallet::Bal
             let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
             config.repeat_purchase = pallet::RepeatPurchaseConfig { rate, min_orders };
         });
+        pallet::Pallet::<T>::deposit_event(pallet::Event::ReferralConfigUpdated { entity_id });
         Ok(())
     }
 
     fn clear_config(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
         pallet::ReferralConfigs::<T>::remove(entity_id);
+        pallet::Pallet::<T>::deposit_event(pallet::Event::ReferralConfigCleared { entity_id });
         Ok(())
     }
 }

@@ -217,6 +217,43 @@ fn bind_user_platform_works() {
 	});
 }
 
+/// P6-L1-fix: 首次绑定发射 UserPlatformBound 事件
+#[test]
+fn p6_l1_bind_user_platform_emits_bound_event() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::bind_user_platform(
+			RuntimeOrigin::signed(OWNER), Platform::Discord, pk(42),
+		));
+		assert_eq!(UserPlatformBindings::<Test>::get(OWNER, Platform::Discord), Some(pk(42)));
+		System::assert_has_event(RuntimeEvent::GroupRobotRegistry(
+			crate::Event::UserPlatformBound { account: OWNER, platform: Platform::Discord },
+		));
+	});
+}
+
+/// P6-L1-fix: 覆盖绑定发射 UserPlatformBindingUpdated 事件 (含 old_hash)
+#[test]
+fn p6_l1_bind_user_platform_overwrite_emits_updated_event() {
+	new_test_ext().execute_with(|| {
+		// 首次绑定
+		assert_ok!(GroupRobotRegistry::bind_user_platform(
+			RuntimeOrigin::signed(OWNER), Platform::Discord, pk(42),
+		));
+		// 覆盖绑定
+		assert_ok!(GroupRobotRegistry::bind_user_platform(
+			RuntimeOrigin::signed(OWNER), Platform::Discord, pk(99),
+		));
+		assert_eq!(UserPlatformBindings::<Test>::get(OWNER, Platform::Discord), Some(pk(99)));
+		System::assert_has_event(RuntimeEvent::GroupRobotRegistry(
+			crate::Event::UserPlatformBindingUpdated {
+				account: OWNER,
+				platform: Platform::Discord,
+				old_hash: pk(42),
+			},
+		));
+	});
+}
+
 // ============================================================================
 // submit_attestation / refresh_attestation
 // ============================================================================

@@ -1084,3 +1084,143 @@ fn token_price_confidence_levels() {
         assert!(c2 >= c1);
     });
 }
+
+// ==================== Round 3 审计回归测试 ====================
+
+/// C1: deviation_bps u16 截断不应绕过价格保护
+#[test]
+fn c1_extreme_deviation_not_bypassed_by_u16_wrap() {
+    ExtBuilder::build().execute_with(|| {
+        configure_market_enabled(ENTITY_ID);
+
+        // 启用价格保护，设置初始参考价格和较小的 max_deviation
+        assert_ok!(EntityMarket::configure_price_protection(
+            RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
+            true,   // enabled
+            1000,   // max_deviation = 10%
+            500,    // max_slippage
+            5000,   // circuit_breaker_threshold
+            0,      // min_trades_for_twap = 0 → 使用 initial_price
+        ));
+        assert_ok!(EntityMarket::set_initial_price(
+            RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID, 100
+        ));
+
+        // 正常偏离 5% (price=105) → 应通过
+        assert_ok!(EntityMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 100, 105
+        ));
+
+        // 极端偏离 price = 100_000 (99900% 偏离) → 修复前 as u16 会 wrap
+        // 99900 * 10000 / 100 = 9_990_000 bps → 超过 u16::MAX(65535)
+        // 修复前: wrap 到 (9_990_000 % 65536) = 某个小值 → 绕过
+        // 修复后: .min(u16::MAX) = 65535 > 1000 → PriceDeviationTooHigh
+        assert_noop!(
+            EntityMarket::place_sell_order(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID, 100, 100_000
+            ),
+            Error::<Test>::PriceDeviationTooHigh
+        );
+    });
+}
+
+/// H1: place_usdt_buy_order 中 total_usdt u128→u64 截断应被拒绝
+#[test]
+fn h1_usdt_buy_order_rejects_u64_overflow() {
+    ExtBuilder::build().execute_with(|| {
+        configure_market_enabled(ENTITY_ID);
+
+        // token_amount * usdt_price 超过 u64::MAX
+        // u64::MAX = 18_446_744_073_709_551_615
+        // 设置 token_amount = 10^18, usdt_price = 10^6 * 20 = 20_000_000
+        // total = 10^18 * 20_000_000 = 2 * 10^25 > u64::MAX → 应报 ArithmeticOverflow
+        let large_amount: u128 = 1_000_000_000_000_000_000;
+        assert_noop!(
+            EntityMarket::place_usdt_buy_order(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID, large_amount, 20_000_000,
+            ),
+            Error::<Test>::ArithmeticOverflow
+        );
+    });
+}
+
+/// H2: 过期订单不可吃单
+#[test]
+fn h2_take_order_rejects_expired_order() {
+    ExtBuilder::build().execute_with(|| {
+        configure_market_enabled(ENTITY_ID);
+
+        // ALICE 挂卖单: TTL = 1000
+        assert_ok!(EntityMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100
+        ));
+        let order = Orders::<Test>::get(0).unwrap();
+
+        // 推进到过期之后（但 on_idle 未运行，订单仍为 Open）
+        System::set_block_number(order.expires_at + 1);
+
+        // BOB 尝试吃单 → 应失败
+        assert_noop!(
+            EntityMarket::take_order(RuntimeOrigin::signed(BOB), 0, None),
+            Error::<Test>::OrderClosed
+        );
+    });
+}
+
+/// H2: 过期 USDT 卖单不可预锁定
+#[test]
+fn h2_reserve_usdt_sell_rejects_expired_order() {
+    ExtBuilder::build().execute_with(|| {
+        configure_market_enabled(ENTITY_ID);
+        let tron_addr = b"T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb".to_vec();
+
+        assert_ok!(EntityMarket::place_usdt_sell_order(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 1_000_000, tron_addr,
+        ));
+        let order = Orders::<Test>::get(0).unwrap();
+
+        System::set_block_number(order.expires_at + 1);
+
+        assert_noop!(
+            EntityMarket::reserve_usdt_sell_order(RuntimeOrigin::signed(BOB), 0, None),
+            Error::<Test>::OrderClosed
+        );
+    });
+}
+
+/// H3: 过期订单不出现在 best prices 和 market orders
+#[test]
+fn h3_expired_orders_excluded_from_best_prices() {
+    ExtBuilder::build().execute_with(|| {
+        configure_market_enabled(ENTITY_ID);
+
+        // ALICE 挂卖单
+        assert_ok!(EntityMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100
+        ));
+        // BOB 挂买单
+        assert_ok!(EntityMarket::place_buy_order(
+            RuntimeOrigin::signed(BOB), ENTITY_ID, 500, 80
+        ));
+
+        // 验证 best prices 有效
+        let (ask, bid) = EntityMarket::get_best_prices(ENTITY_ID);
+        assert_eq!(ask, Some(100u128));
+        assert_eq!(bid, Some(80u128));
+
+        // 推进到订单过期后（但不运行 on_idle）
+        let order = Orders::<Test>::get(0).unwrap();
+        System::set_block_number(order.expires_at + 1);
+
+        // best prices 应为 None（过期单被过滤）
+        let (ask2, bid2) = EntityMarket::get_best_prices(ENTITY_ID);
+        assert_eq!(ask2, None);
+        assert_eq!(bid2, None);
+
+        // 市价买单应失败（无有效卖单）
+        assert_noop!(
+            EntityMarket::market_buy(RuntimeOrigin::signed(CHARLIE), ENTITY_ID, 100, 200_000),
+            Error::<Test>::NoOrdersAvailable
+        );
+    });
+}

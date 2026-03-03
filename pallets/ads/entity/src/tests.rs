@@ -276,9 +276,9 @@ fn set_impression_cap_works() {
 fn set_entity_ad_share_works() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(AdsEntity::set_entity_ad_share(
-			RuntimeOrigin::signed(ALICE), 1, 9000,
+			RuntimeOrigin::signed(ALICE), 1, 8000,
 		));
-		assert_eq!(pallet::EntityAdShareBps::<Test>::get(1), 9000);
+		assert_eq!(pallet::EntityAdShareBps::<Test>::get(1), 8000);
 	});
 }
 
@@ -529,15 +529,15 @@ fn revenue_distributor_custom_split() {
 		));
 		let pid = entity_placement_id(1);
 
-		// 自定义: entity 拿 9000 基点 = 90%
+		// 自定义: entity 拿 7000 基点 = 70%
 		assert_ok!(AdsEntity::set_entity_ad_share(
-			RuntimeOrigin::signed(ALICE), 1, 9000,
+			RuntimeOrigin::signed(ALICE), 1, 7000,
 		));
 
 		let result = <AdsEntity as pallet_ads_primitives::RevenueDistributor<u64, u128>>::distribute(
 			&pid, 10_000, &99,
 		);
-		assert_eq!(result.unwrap(), 9_000); // 90%
+		assert_eq!(result.unwrap(), 7_000); // 70%
 	});
 }
 
@@ -575,5 +575,234 @@ fn effective_entity_share_defaults() {
 		// 自定义后
 		pallet::EntityAdShareBps::<Test>::insert(1, 9000u16);
 		assert_eq!(AdsEntity::effective_entity_share_bps(1), 9000);
+	});
+}
+
+// ============================================================================
+// Regression: M-ENT2 — set_entity_ad_share capped at 10000 - PlatformAdShareBps
+// ============================================================================
+
+#[test]
+fn m_ent2_set_entity_ad_share_rejects_exceeding_platform_complement() {
+	new_test_ext().execute_with(|| {
+		// PlatformAdShareBps = 2000 (20%), so max entity share = 8000
+		assert_ok!(AdsEntity::set_entity_ad_share(
+			RuntimeOrigin::signed(ALICE), 1, 8000,
+		));
+
+		// 8001 exceeds complement → rejected
+		assert_noop!(
+			AdsEntity::set_entity_ad_share(RuntimeOrigin::signed(ALICE), 1, 8001),
+			Error::<Test>::InvalidShareBps
+		);
+
+		// 10000 (100%) → rejected
+		assert_noop!(
+			AdsEntity::set_entity_ad_share(RuntimeOrigin::signed(ALICE), 1, 10000),
+			Error::<Test>::InvalidShareBps
+		);
+	});
+}
+
+// ============================================================================
+// Regression: M1 — EntityPlacementIds bound matches MaxPlacementsPerEntity
+// ============================================================================
+
+#[test]
+fn m1_entity_placement_ids_respects_config_max() {
+	new_test_ext().execute_with(|| {
+		// MaxPlacementsPerEntity = 10 in mock config
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		let ids = pallet::EntityPlacementIds::<Test>::get(1);
+		assert_eq!(ids.len(), 1);
+
+		// The BoundedVec bound should equal MaxPlacementsPerEntity (10),
+		// not the old hardcoded 50.
+		assert_eq!(
+			<<Test as crate::pallet::Config>::MaxPlacementsPerEntity as frame_support::traits::Get<u32>>::get(),
+			10u32,
+		);
+	});
+}
+
+// ============================================================================
+// Regression: M3 — ban/unban entity existence + idempotency checks
+// ============================================================================
+
+#[test]
+fn m3_ban_entity_rejects_nonexistent() {
+	new_test_ext().execute_with(|| {
+		// entity_id=99 does not exist
+		assert_noop!(
+			AdsEntity::ban_entity(RuntimeOrigin::root(), 99),
+			Error::<Test>::EntityNotFound
+		);
+	});
+}
+
+#[test]
+fn m3_ban_entity_rejects_already_banned() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::ban_entity(RuntimeOrigin::root(), 1));
+		assert_noop!(
+			AdsEntity::ban_entity(RuntimeOrigin::root(), 1),
+			Error::<Test>::EntityAlreadyBanned
+		);
+	});
+}
+
+#[test]
+fn m3_unban_entity_rejects_nonexistent() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			AdsEntity::unban_entity(RuntimeOrigin::root(), 99),
+			Error::<Test>::EntityNotFound
+		);
+	});
+}
+
+#[test]
+fn m3_unban_entity_rejects_not_banned() {
+	new_test_ext().execute_with(|| {
+		// entity 1 is not banned → unban should fail
+		assert_noop!(
+			AdsEntity::unban_entity(RuntimeOrigin::root(), 1),
+			Error::<Test>::EntityNotBanned
+		);
+	});
+}
+
+// ============================================================================
+// Regression: L3 — set_placement_active state-change detection
+// ============================================================================
+
+#[test]
+fn l3_set_placement_active_rejects_unchanged() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		let pid = entity_placement_id(1);
+
+		// Placement starts active=true, setting true again should fail
+		assert_noop!(
+			AdsEntity::set_placement_active(RuntimeOrigin::signed(ALICE), pid, true),
+			Error::<Test>::PlacementStatusUnchanged
+		);
+
+		// Deactivate → succeeds
+		assert_ok!(AdsEntity::set_placement_active(
+			RuntimeOrigin::signed(ALICE), pid, false,
+		));
+
+		// Setting false again should fail
+		assert_noop!(
+			AdsEntity::set_placement_active(RuntimeOrigin::signed(ALICE), pid, false),
+			Error::<Test>::PlacementStatusUnchanged
+		);
+	});
+}
+
+// ============================================================================
+// Regression: M1-R2 — distribute errors on unregistered placement
+// ============================================================================
+
+#[test]
+fn m1r2_distribute_fails_unregistered_placement() {
+	new_test_ext().execute_with(|| {
+		let fake_pid = [0xFFu8; 32];
+		// distribute for an unregistered placement should error, not silently use entity_id=0
+		let result = <AdsEntity as pallet_ads_primitives::RevenueDistributor<u64, u128>>::distribute(
+			&fake_pid, 10_000, &99,
+		);
+		assert_noop!(result, Error::<Test>::PlacementNotRegistered);
+	});
+}
+
+#[test]
+fn m1r2_distribute_works_registered_placement() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		let pid = entity_placement_id(1);
+
+		let result = <AdsEntity as pallet_ads_primitives::RevenueDistributor<u64, u128>>::distribute(
+			&pid, 10_000, &99,
+		);
+		assert_eq!(result.unwrap(), 8_000); // default 80%
+	});
+}
+
+// ============================================================================
+// Regression: L1-R2 — set_impression_cap state-change detection
+// ============================================================================
+
+#[test]
+fn l1r2_set_impression_cap_rejects_unchanged() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		let pid = entity_placement_id(1);
+
+		// Default cap = 1000; setting same value should fail
+		assert_noop!(
+			AdsEntity::set_impression_cap(RuntimeOrigin::signed(ALICE), pid, 1000),
+			Error::<Test>::ImpressionCapUnchanged
+		);
+
+		// Change to 5000 → succeeds
+		assert_ok!(AdsEntity::set_impression_cap(
+			RuntimeOrigin::signed(ALICE), pid, 5000,
+		));
+
+		// Setting 5000 again → fails
+		assert_noop!(
+			AdsEntity::set_impression_cap(RuntimeOrigin::signed(ALICE), pid, 5000),
+			Error::<Test>::ImpressionCapUnchanged
+		);
+	});
+}
+
+// ============================================================================
+// Regression: L2-R2 — daily impression reset after 14400 blocks
+// ============================================================================
+
+#[test]
+fn l2r2_daily_impression_reset_after_14400_blocks() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(
+			RuntimeOrigin::signed(ALICE), 1,
+		));
+		let pid = entity_placement_id(1);
+
+		// Fill to cap (1000)
+		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
+			&ALICE, &pid, 1000,
+		);
+		assert_eq!(result.unwrap(), 1000);
+		assert_eq!(pallet::DailyImpressions::<Test>::get(&pid), 1000);
+
+		// Still at block 1 → cap reached
+		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
+			&ALICE, &pid, 1,
+		);
+		assert_noop!(result, Error::<Test>::DailyImpressionCapReached);
+
+		// Advance to block 14401 (>= 14400 blocks after block 1)
+		System::set_block_number(14401);
+
+		// Now daily counter should reset, new impressions accepted
+		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
+			&ALICE, &pid, 500,
+		);
+		assert_eq!(result.unwrap(), 500);
+		assert_eq!(pallet::DailyImpressions::<Test>::get(&pid), 500);
+
+		// Total impressions accumulated across days
+		assert_eq!(pallet::TotalImpressions::<Test>::get(&pid), 1500);
 	});
 }

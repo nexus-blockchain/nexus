@@ -248,7 +248,7 @@ fn clear_expired_logs_fails_none() {
 }
 
 // ============================================================================
-// Helpers / CommunityProvider
+// Helper Functions
 // ============================================================================
 
 #[test]
@@ -268,17 +268,16 @@ fn helper_get_node_requirement() {
 }
 
 #[test]
-fn community_provider_trait() {
+fn helper_is_community_configured() {
 	new_test_ext().execute_with(|| {
-		use pallet_grouprobot_primitives::CommunityProvider;
-		assert!(!<GroupRobotCommunity as CommunityProvider<u64>>::is_community_bound(&community_hash(1)));
+		assert!(!GroupRobotCommunity::is_community_configured(&community_hash(1)));
 
 		assert_ok!(GroupRobotCommunity::update_community_config(
 			RuntimeOrigin::signed(OWNER),
 			community_hash(1),
 			0, true, 10, 3, WarnAction::Kick, false, false, *b"en",
 		));
-		assert!(<GroupRobotCommunity as CommunityProvider<u64>>::is_community_bound(&community_hash(1)));
+		assert!(GroupRobotCommunity::is_community_configured(&community_hash(1)));
 	});
 }
 
@@ -553,19 +552,17 @@ fn global_reputation_aggregates_communities() {
 }
 
 #[test]
-fn reputation_provider_trait() {
+fn reputation_storage_reads() {
 	new_test_ext().execute_with(|| {
-		use pallet_grouprobot_primitives::ReputationProvider;
-
-		assert_eq!(<GroupRobotCommunity as ReputationProvider>::get_reputation(&community_hash(1), &user_hash(1)), 0);
-		assert_eq!(<GroupRobotCommunity as ReputationProvider>::get_global_reputation(&user_hash(1)), 0);
+		assert_eq!(MemberReputation::<Test>::get(community_hash(1), user_hash(1)).score, 0);
+		assert_eq!(GlobalReputation::<Test>::get(user_hash(1)), 0);
 
 		assert_ok!(GroupRobotCommunity::award_reputation(
 			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 15,
 		));
 
-		assert_eq!(<GroupRobotCommunity as ReputationProvider>::get_reputation(&community_hash(1), &user_hash(1)), 15);
-		assert_eq!(<GroupRobotCommunity as ReputationProvider>::get_global_reputation(&user_hash(1)), 15);
+		assert_eq!(MemberReputation::<Test>::get(community_hash(1), user_hash(1)).score, 15);
+		assert_eq!(GlobalReputation::<Test>::get(user_hash(1)), 15);
 	});
 }
 
@@ -728,15 +725,555 @@ fn h4_submit_action_log_rejects_invalid_signature() {
 #[test]
 fn h5_reputation_rejects_non_bot_owner() {
 	new_test_ext().execute_with(|| {
-		// community_hash(3) has no bot_owner → NotBotOwner
+		// community_hash(4) has no bot_owner → NotBotOwner
 		assert_noop!(
 			GroupRobotCommunity::award_reputation(
 				RuntimeOrigin::signed(OWNER),
-				community_hash(3),
+				community_hash(4),
 				user_hash(1),
 				5,
 			),
 			Error::<Test>::NotBotOwner
+		);
+	});
+}
+
+// ============================================================================
+// M2-fix: InvalidLanguageCode
+// ============================================================================
+
+#[test]
+fn m2_update_config_rejects_invalid_language_uppercase() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotCommunity::update_community_config(
+				RuntimeOrigin::signed(OWNER),
+				community_hash(1),
+				0, true, 10, 3, WarnAction::Kick, false, false, *b"EN",
+			),
+			Error::<Test>::InvalidLanguageCode
+		);
+	});
+}
+
+#[test]
+fn m2_update_config_rejects_invalid_language_non_alpha() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotCommunity::update_community_config(
+				RuntimeOrigin::signed(OWNER),
+				community_hash(1),
+				0, true, 10, 3, WarnAction::Kick, false, false, [0xFF, 0x00],
+			),
+			Error::<Test>::InvalidLanguageCode
+		);
+	});
+}
+
+#[test]
+fn m2_update_config_accepts_valid_language() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCommunity::update_community_config(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1),
+			0, true, 10, 3, WarnAction::Kick, false, false, *b"zh",
+		));
+		let config = CommunityConfigs::<Test>::get(community_hash(1)).unwrap();
+		assert_eq!(config.language, *b"zh");
+	});
+}
+
+// ============================================================================
+// M3-fix: submit_action_log / batch_submit_logs require bot owner
+// ============================================================================
+
+#[test]
+fn m3_submit_action_log_rejects_non_owner() {
+	new_test_ext().execute_with(|| {
+		let sig = test_sign(&community_hash(1), &ActionType::Ban, &[1u8; 32], 1, &[2u8; 32]);
+		assert_noop!(
+			GroupRobotCommunity::submit_action_log(
+				RuntimeOrigin::signed(OTHER),
+				community_hash(1),
+				ActionType::Ban,
+				[1u8; 32], 1, [2u8; 32], sig,
+			),
+			Error::<Test>::NotBotOwner
+		);
+	});
+}
+
+#[test]
+fn m3_batch_submit_logs_rejects_non_owner() {
+	new_test_ext().execute_with(|| {
+		let sig = test_sign(&community_hash(1), &ActionType::Ban, &[1u8; 32], 1, &[2u8; 32]);
+		assert_noop!(
+			GroupRobotCommunity::batch_submit_logs(
+				RuntimeOrigin::signed(OTHER),
+				community_hash(1),
+				vec![(ActionType::Ban, [1u8; 32], 1, [2u8; 32], sig)],
+			),
+			Error::<Test>::NotBotOwner
+		);
+	});
+}
+
+// ============================================================================
+// M4-fix: SequenceNotMonotonic
+// ============================================================================
+
+#[test]
+fn m4_submit_action_log_rejects_duplicate_sequence() {
+	new_test_ext().execute_with(|| {
+		let sig1 = test_sign(&community_hash(1), &ActionType::Ban, &[1u8; 32], 10, &[2u8; 32]);
+		assert_ok!(GroupRobotCommunity::submit_action_log(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1),
+			ActionType::Ban, [1u8; 32], 10, [2u8; 32], sig1,
+		));
+		assert_eq!(LastSequence::<Test>::get(community_hash(1)), Some(10));
+
+		// Same sequence again → SequenceNotMonotonic
+		let sig2 = test_sign(&community_hash(1), &ActionType::Kick, &[3u8; 32], 10, &[4u8; 32]);
+		assert_noop!(
+			GroupRobotCommunity::submit_action_log(
+				RuntimeOrigin::signed(OWNER),
+				community_hash(1),
+				ActionType::Kick, [3u8; 32], 10, [4u8; 32], sig2,
+			),
+			Error::<Test>::SequenceNotMonotonic
+		);
+	});
+}
+
+#[test]
+fn m4_submit_action_log_rejects_lower_sequence() {
+	new_test_ext().execute_with(|| {
+		let sig1 = test_sign(&community_hash(1), &ActionType::Ban, &[1u8; 32], 20, &[2u8; 32]);
+		assert_ok!(GroupRobotCommunity::submit_action_log(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1),
+			ActionType::Ban, [1u8; 32], 20, [2u8; 32], sig1,
+		));
+
+		// Lower sequence → SequenceNotMonotonic
+		let sig2 = test_sign(&community_hash(1), &ActionType::Kick, &[3u8; 32], 5, &[4u8; 32]);
+		assert_noop!(
+			GroupRobotCommunity::submit_action_log(
+				RuntimeOrigin::signed(OWNER),
+				community_hash(1),
+				ActionType::Kick, [3u8; 32], 5, [4u8; 32], sig2,
+			),
+			Error::<Test>::SequenceNotMonotonic
+		);
+	});
+}
+
+#[test]
+fn m4_batch_submit_logs_rejects_non_monotonic_within_batch() {
+	new_test_ext().execute_with(|| {
+		let sig1 = test_sign(&community_hash(1), &ActionType::Ban, &[1u8; 32], 5, &[2u8; 32]);
+		let sig2 = test_sign(&community_hash(1), &ActionType::Kick, &[3u8; 32], 3, &[4u8; 32]);
+		assert_noop!(
+			GroupRobotCommunity::batch_submit_logs(
+				RuntimeOrigin::signed(OWNER),
+				community_hash(1),
+				vec![
+					(ActionType::Ban, [1u8; 32], 5, [2u8; 32], sig1),
+					(ActionType::Kick, [3u8; 32], 3, [4u8; 32], sig2), // 3 < 5
+				],
+			),
+			Error::<Test>::SequenceNotMonotonic
+		);
+	});
+}
+
+#[test]
+fn m4_batch_submit_logs_rejects_stale_first_sequence() {
+	new_test_ext().execute_with(|| {
+		// Submit single log with seq=10
+		let sig0 = test_sign(&community_hash(1), &ActionType::Ban, &[1u8; 32], 10, &[2u8; 32]);
+		assert_ok!(GroupRobotCommunity::submit_action_log(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1),
+			ActionType::Ban, [1u8; 32], 10, [2u8; 32], sig0,
+		));
+
+		// Batch with first seq=5 (< 10) → SequenceNotMonotonic
+		let sig1 = test_sign(&community_hash(1), &ActionType::Kick, &[3u8; 32], 5, &[4u8; 32]);
+		assert_noop!(
+			GroupRobotCommunity::batch_submit_logs(
+				RuntimeOrigin::signed(OWNER),
+				community_hash(1),
+				vec![(ActionType::Kick, [3u8; 32], 5, [4u8; 32], sig1)],
+			),
+			Error::<Test>::SequenceNotMonotonic
+		);
+	});
+}
+
+#[test]
+fn m4_batch_submit_logs_updates_last_sequence() {
+	new_test_ext().execute_with(|| {
+		let sig1 = test_sign(&community_hash(1), &ActionType::Ban, &[1u8; 32], 10, &[2u8; 32]);
+		let sig2 = test_sign(&community_hash(1), &ActionType::Kick, &[3u8; 32], 20, &[4u8; 32]);
+		assert_ok!(GroupRobotCommunity::batch_submit_logs(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1),
+			vec![
+				(ActionType::Ban, [1u8; 32], 10, [2u8; 32], sig1),
+				(ActionType::Kick, [3u8; 32], 20, [4u8; 32], sig2),
+			],
+		));
+		assert_eq!(LastSequence::<Test>::get(community_hash(1)), Some(20));
+	});
+}
+
+// ============================================================================
+// M1-R2: BotNotActive — inactive bot cannot perform operations
+// ============================================================================
+
+#[test]
+fn m1_r2_submit_action_log_rejects_inactive_bot() {
+	new_test_ext().execute_with(|| {
+		// community_hash(3) → owner=OWNER, is_bot_active=false
+		let sig = test_sign(&community_hash(3), &ActionType::Ban, &[1u8; 32], 1, &[2u8; 32]);
+		assert_noop!(
+			GroupRobotCommunity::submit_action_log(
+				RuntimeOrigin::signed(OWNER),
+				community_hash(3),
+				ActionType::Ban, [1u8; 32], 1, [2u8; 32], sig,
+			),
+			Error::<Test>::BotNotActive
+		);
+	});
+}
+
+#[test]
+fn m1_r2_batch_submit_logs_rejects_inactive_bot() {
+	new_test_ext().execute_with(|| {
+		let sig = test_sign(&community_hash(3), &ActionType::Ban, &[1u8; 32], 1, &[2u8; 32]);
+		assert_noop!(
+			GroupRobotCommunity::batch_submit_logs(
+				RuntimeOrigin::signed(OWNER),
+				community_hash(3),
+				vec![(ActionType::Ban, [1u8; 32], 1, [2u8; 32], sig)],
+			),
+			Error::<Test>::BotNotActive
+		);
+	});
+}
+
+#[test]
+fn m1_r2_award_reputation_rejects_inactive_bot() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotCommunity::award_reputation(
+				RuntimeOrigin::signed(OWNER), community_hash(3), user_hash(1), 10,
+			),
+			Error::<Test>::BotNotActive
+		);
+	});
+}
+
+#[test]
+fn m1_r2_deduct_reputation_rejects_inactive_bot() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotCommunity::deduct_reputation(
+				RuntimeOrigin::signed(OWNER), community_hash(3), user_hash(1), 10,
+			),
+			Error::<Test>::BotNotActive
+		);
+	});
+}
+
+#[test]
+fn m1_r2_reset_reputation_rejects_inactive_bot() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotCommunity::reset_reputation(
+				RuntimeOrigin::signed(OWNER), community_hash(3), user_hash(1),
+			),
+			Error::<Test>::BotNotActive
+		);
+	});
+}
+
+#[test]
+fn m1_r2_update_active_members_rejects_inactive_bot() {
+	new_test_ext().execute_with(|| {
+		// Create config for community_hash(3) first — set_node_requirement uses ensure_bot_owner (not active)
+		// But update_community_config also uses ensure_bot_owner (not active), so we can create config
+		assert_ok!(GroupRobotCommunity::update_community_config(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(3), 0, true, 10, 3, WarnAction::Kick, false, false, *b"en",
+		));
+		assert_noop!(
+			GroupRobotCommunity::update_active_members(
+				RuntimeOrigin::signed(OWNER), community_hash(3), 100,
+			),
+			Error::<Test>::BotNotActive
+		);
+	});
+}
+
+#[test]
+fn m1_r2_config_operations_allow_inactive_bot() {
+	new_test_ext().execute_with(|| {
+		// set_node_requirement and update_community_config should work for inactive bots
+		assert_ok!(GroupRobotCommunity::set_node_requirement(
+			RuntimeOrigin::signed(OWNER), community_hash(3), NodeRequirement::Any,
+		));
+		assert_ok!(GroupRobotCommunity::update_community_config(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(3), 0, true, 10, 3, WarnAction::Kick, false, false, *b"en",
+		));
+	});
+}
+
+// ============================================================================
+// M2-R2: cleanup_expired_cooldowns
+// ============================================================================
+
+#[test]
+fn m2_r2_cleanup_expired_cooldowns_works() {
+	new_test_ext().execute_with(|| {
+		// Create a cooldown entry by awarding reputation
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 5,
+		));
+		// Verify cooldown exists
+		assert!(ReputationCooldowns::<Test>::get((&OWNER, &community_hash(1), &user_hash(1))) > 0);
+
+		// Advance past cooldown (5 blocks)
+		System::set_block_number(10);
+
+		// Cleanup should succeed
+		assert_ok!(GroupRobotCommunity::cleanup_expired_cooldowns(
+			RuntimeOrigin::signed(OTHER), // anyone can call
+			OWNER,
+			community_hash(1),
+			user_hash(1),
+		));
+
+		// Cooldown entry should be removed
+		assert_eq!(ReputationCooldowns::<Test>::get((&OWNER, &community_hash(1), &user_hash(1))), 0);
+	});
+}
+
+#[test]
+fn m2_r2_cleanup_cooldowns_rejects_not_expired() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 5,
+		));
+
+		// Still at block 1, cooldown not expired
+		assert_noop!(
+			GroupRobotCommunity::cleanup_expired_cooldowns(
+				RuntimeOrigin::signed(OTHER),
+				OWNER,
+				community_hash(1),
+				user_hash(1),
+			),
+			Error::<Test>::CooldownNotExpired
+		);
+	});
+}
+
+#[test]
+fn m2_r2_cleanup_cooldowns_rejects_nonexistent() {
+	new_test_ext().execute_with(|| {
+		// No cooldown entry exists for this triple
+		// M1-R3: 使用专用 CooldownNotFound 错误码
+		assert_noop!(
+			GroupRobotCommunity::cleanup_expired_cooldowns(
+				RuntimeOrigin::signed(OTHER),
+				OWNER,
+				community_hash(1),
+				user_hash(99),
+			),
+			Error::<Test>::CooldownNotFound
+		);
+	});
+}
+
+#[test]
+fn m2_r2_cleanup_cooldowns_emits_event() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 5,
+		));
+
+		System::set_block_number(10);
+		System::reset_events();
+
+		assert_ok!(GroupRobotCommunity::cleanup_expired_cooldowns(
+			RuntimeOrigin::signed(OTHER),
+			OWNER,
+			community_hash(1),
+			user_hash(1),
+		));
+
+		System::assert_last_event(RuntimeEvent::GroupRobotCommunity(
+			crate::Event::CooldownCleaned {
+				community_id_hash: community_hash(1),
+				user_hash: user_hash(1),
+				operator: OWNER,
+			},
+		));
+	});
+}
+
+// ============================================================================
+// Round 3 regression tests
+// ============================================================================
+
+#[test]
+fn m1_r3_cooldown_not_found_error_is_distinct() {
+	new_test_ext().execute_with(|| {
+		// CooldownNotFound should be returned (not NoLogsToClear)
+		let result = GroupRobotCommunity::cleanup_expired_cooldowns(
+			RuntimeOrigin::signed(OTHER),
+			OWNER,
+			community_hash(1),
+			user_hash(50),
+		);
+		assert_noop!(
+			GroupRobotCommunity::cleanup_expired_cooldowns(
+				RuntimeOrigin::signed(OTHER),
+				OWNER,
+				community_hash(1),
+				user_hash(50),
+			),
+			Error::<Test>::CooldownNotFound
+		);
+		// Verify it's NOT NoLogsToClear
+		assert_ne!(
+			result,
+			Err(Error::<Test>::NoLogsToClear.into()),
+		);
+	});
+}
+
+#[test]
+fn m2_r3_batch_respects_configurable_max_size() {
+	new_test_ext().execute_with(|| {
+		// MaxBatchSize = 50 in mock, create 51 logs
+		let action = ActionType::Kick;
+		let target = [0u8; 32];
+		let msg_hash = [0u8; 32];
+		let logs: Vec<(ActionType, [u8; 32], u64, [u8; 32], [u8; 64])> = (1..=51u64).map(|seq| {
+			let sig = test_sign(&community_hash(1), &action, &target, seq, &msg_hash);
+			(action.clone(), target, seq, msg_hash, sig)
+		}).collect();
+
+		assert_noop!(
+			GroupRobotCommunity::batch_submit_logs(
+				RuntimeOrigin::signed(OWNER),
+				community_hash(1),
+				logs,
+			),
+			Error::<Test>::BatchTooLarge
+		);
+
+		// Exactly MaxBatchSize (50) should still be valid (if space permits in ActionLogs)
+		// But ActionLogs MaxLogsPerCommunity=10, so 50 would hit LogsFull.
+		// Test with 2 logs to confirm non-too-large passes
+		let small_logs: Vec<_> = (1..=2u64).map(|seq| {
+			let sig = test_sign(&community_hash(1), &action, &target, seq, &msg_hash);
+			(action.clone(), target, seq, msg_hash, sig)
+		}).collect();
+		assert_ok!(GroupRobotCommunity::batch_submit_logs(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1),
+			small_logs,
+		));
+	});
+}
+
+#[test]
+fn m3_r3_clear_expired_logs_uses_configurable_blocks_per_day() {
+	new_test_ext().execute_with(|| {
+		// community_hash(1) = Basic tier, log_retention_days=30
+		// BlocksPerDay=14400, so min_retention = 30 * 14400 = 432000
+		let action = ActionType::Kick;
+		let target = [0u8; 32];
+		let msg_hash = [0u8; 32];
+		let sig = test_sign(&community_hash(1), &action, &target, 1, &msg_hash);
+
+		assert_ok!(GroupRobotCommunity::submit_action_log(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1), action, target, 1, msg_hash, sig,
+		));
+
+		// Advance well past retention
+		System::set_block_number(500_000);
+
+		// max_age < min_retention (432000) should fail
+		assert_noop!(
+			GroupRobotCommunity::clear_expired_logs(
+				RuntimeOrigin::signed(OTHER),
+				community_hash(1),
+				431_999u64,
+			),
+			Error::<Test>::RetentionPeriodNotExpired
+		);
+
+		// max_age >= min_retention should succeed
+		assert_ok!(GroupRobotCommunity::clear_expired_logs(
+			RuntimeOrigin::signed(OTHER),
+			community_hash(1),
+			432_000u64,
+		));
+	});
+}
+
+#[test]
+fn l2_r3_enterprise_tier_rejects_log_clearing() {
+	new_test_ext().execute_with(|| {
+		// community_hash(5) = Enterprise tier (log_retention_days=0, permanent)
+		// Enterprise tier should always reject clearing
+		assert_noop!(
+			GroupRobotCommunity::clear_expired_logs(
+				RuntimeOrigin::signed(OTHER),
+				community_hash(5),
+				999_999u64,
+			),
+			Error::<Test>::RetentionPeriodNotExpired
+		);
+	});
+}
+
+#[test]
+fn l2_r3_free_tier_log_clearing_respects_retention() {
+	new_test_ext().execute_with(|| {
+		// community_hash(2) = Free tier, log_retention_days=7
+		// min_retention = 7 * 14400 = 100800
+		// Free tier can't submit logs (FreeTierNotAllowed), but we can test
+		// the retention gate directly by trying to clear with too-small max_age
+		// Even though no logs exist, the retention check comes first for Free tier
+
+		// Free tier, max_age < 100800 should fail with RetentionPeriodNotExpired
+		assert_noop!(
+			GroupRobotCommunity::clear_expired_logs(
+				RuntimeOrigin::signed(OTHER),
+				community_hash(2),
+				100_799u64,
+			),
+			Error::<Test>::RetentionPeriodNotExpired
+		);
+
+		// Free tier, max_age >= 100800 but no logs → NoLogsToClear
+		System::set_block_number(200_000);
+		assert_noop!(
+			GroupRobotCommunity::clear_expired_logs(
+				RuntimeOrigin::signed(OTHER),
+				community_hash(2),
+				100_800u64,
+			),
+			Error::<Test>::NoLogsToClear
 		);
 	});
 }

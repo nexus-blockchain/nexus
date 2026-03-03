@@ -414,7 +414,7 @@ fn configure_governance_fails_invalid_threshold() {
 fn veto_proposal_works() {
     ExtBuilder::build().execute_with(|| {
         use pallet_entity_common::GovernanceMode;
-        // Configure FullDAO with veto enabled
+        // FullDAO + veto enabled（紧急制动模式，设计意图）
         assert_ok!(EntityGovernance::configure_governance(
             RuntimeOrigin::signed(OWNER), 1,
             GovernanceMode::FullDAO, None, None, None, None, None, Some(true),
@@ -809,10 +809,10 @@ fn m5_execute_proposal_fails_expired() {
         // 过期时间 = exec_time + 100 = ~252
         // 推进到超过过期时间
         advance_blocks(200); // block ~302, 远超过期
-        assert_noop!(
-            EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0),
-            Error::<Test>::ExecutionExpired
-        );
+        // H2-R2: 现在优雅转为 Expired 状态（返回 Ok）
+        assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Expired);
     });
 }
 
@@ -1251,5 +1251,649 @@ fn m1_execute_voting_period_change_validates_minimum() {
         // 验证投票期已更新
         let config = GovernanceConfigs::<Test>::get(1).unwrap();
         assert_eq!(config.voting_period, 50);
+    });
+}
+
+// ==================== H1: 弃权票不应稀释通过阈值 ====================
+
+#[test]
+fn h1_abstain_does_not_dilute_pass_threshold() {
+    // 场景: 100 yes, 0 no, 100 abstain — 以前 pass_threshold = 200*50% = 100,
+    // yes(100) > 100 为 false → 失败。修复后 decisive = 100, threshold = 50, yes(100) > 50 → 通过
+    ExtBuilder::build().execute_with(|| {
+        // 设置余额: ALICE=100, BOB=100 (abstain)
+        set_token_balance(SHOP_ID, ALICE, 100_000);
+        set_token_balance(SHOP_ID, BOB, 100_000);
+
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"H1 Test".to_vec(), None,
+        ));
+        // ALICE votes yes
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(ALICE), 0, VoteType::Yes));
+        // BOB votes abstain
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Abstain));
+
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        // 修复后: decisive=100000, threshold=50000, yes(100000) > 50000 → Passed
+        assert_eq!(proposal.status, ProposalStatus::Passed);
+    });
+}
+
+#[test]
+fn h1_abstain_contributes_to_quorum() {
+    // 弃权票仍应计入法定人数
+    ExtBuilder::build().execute_with(|| {
+        // quorum = 10% of 1M = 100_000
+        // 只有 CHARLIE(50_000) 投弃权 — 不足法定人数
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"H1 Quorum".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Abstain));
+
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        // 50_000 < 100_000 quorum → Failed
+        assert_eq!(proposal.status, ProposalStatus::Failed);
+    });
+}
+
+#[test]
+fn h1_no_decisive_votes_all_abstain_fails() {
+    // 全部弃权：decisive_votes=0, pass_threshold=0, yes(0) > 0 为 false → Failed
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"All Abstain".to_vec(), None,
+        ));
+        // BOB + CHARLIE abstain = 200_000 > quorum(100_000)
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Abstain));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Abstain));
+
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        // decisive_votes = 0, yes(0) > 0 = false → Failed
+        assert_eq!(proposal.status, ProposalStatus::Failed);
+    });
+}
+
+// ==================== M1: CommissionModesChange 无效位标志校验 ====================
+
+#[test]
+fn m1_commission_modes_change_rejects_invalid_bits() {
+    ExtBuilder::build().execute_with(|| {
+        // 0b1000_0000_0000 = bit 11, 超出 ALL_VALID 范围
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::CommissionModesChange { modes: 0b1000_0000_0000 },
+                b"Bad modes".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        // 0xFFFF — 高位全设
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::CommissionModesChange { modes: 0xFFFF },
+                b"Bad modes".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+    });
+}
+
+#[test]
+fn m1_commission_modes_change_accepts_valid_bits() {
+    ExtBuilder::build().execute_with(|| {
+        // 0b0000_0000_0001 = DIRECT_REWARD only
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::CommissionModesChange { modes: 0b0000_0000_0001 },
+            b"Valid modes".to_vec(), None,
+        ));
+        // 0b0000_0011_1111_1111 = all valid bits set
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::CommissionModesChange { modes: 0b0000_0011_1111_1111 },
+            b"All modes".to_vec(), None,
+        ));
+        // 0 = NONE
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::CommissionModesChange { modes: 0 },
+            b"No modes".to_vec(), None,
+        ));
+    });
+}
+
+// ==================== M2-R3: ShopPause/ShopResume 指定 shop_id ====================
+
+#[test]
+fn m2_execute_shop_pause_with_valid_shop_id() {
+    // M2-R3: ShopPause 现在指定 shop_id，正确的 shop_id 应成功执行
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::ShopPause { shop_id: SHOP_ID },
+            b"Pause shop".to_vec(), None,
+        ));
+
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes));
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+
+        advance_blocks(51);
+        assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
+    });
+}
+
+#[test]
+fn m2_execute_shop_pause_invalid_shop_id_fails() {
+    // M2-R3: ShopPause 指定不属于 entity 的 shop_id 应失败
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::ShopPause { shop_id: 999 },
+            b"Pause shop".to_vec(), None,
+        ));
+
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes));
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+
+        advance_blocks(51);
+        // shop_id=999 不属于 entity，执行应失败
+        assert_noop!(
+            EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0),
+            Error::<Test>::ShopNotFound
+        );
+    });
+}
+
+// ==================== H2-R2: Expired transition ====================
+
+#[test]
+fn h2_expired_proposal_transitions_to_expired_status() {
+    // H2: 过期的 Passed 提案应优雅转为 Expired 状态（而非永远停在 Passed）
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes));
+
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+
+        // 确认 Passed 状态
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Passed);
+
+        // 推进超过执行窗口 (exec_delay=50, window=50*2=100)
+        advance_blocks(200);
+
+        // 调用 execute_proposal 应成功并将状态转为 Expired
+        assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Expired);
+    });
+}
+
+#[test]
+fn h2_expired_proposal_emits_event() {
+    // H2: Expired 转换应发出 ProposalExpired 事件
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes));
+
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+        advance_blocks(200);
+
+        System::reset_events();
+        assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
+
+        let events = System::events();
+        assert!(
+            events.iter().any(|e| {
+                matches!(
+                    e.event,
+                    RuntimeEvent::EntityGovernance(Event::ProposalExpired { proposal_id: 0 })
+                )
+            }),
+            "ProposalExpired event not found"
+        );
+    });
+}
+
+#[test]
+fn h2_already_expired_proposal_rejects_second_execute() {
+    // H2: 已经转为 Expired 的提案再次调用 execute_proposal 应返回 InvalidProposalStatus
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes));
+
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+        advance_blocks(200);
+
+        // 第一次: 转为 Expired
+        assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
+        // 第二次: Expired != Passed，应失败
+        assert_noop!(
+            EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0),
+            Error::<Test>::InvalidProposalStatus
+        );
+    });
+}
+
+// ==================== H3-R2: VoteRecords cleanup ====================
+
+#[test]
+fn h3_vote_records_cleaned_after_finalize() {
+    // H3: finalize_voting (通过 remove_from_active) 应清理 VoteRecords
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Abstain));
+
+        // 投票后 VoteRecords 应存在
+        assert!(VoteRecords::<Test>::get(0, BOB).is_some());
+        assert!(VoteRecords::<Test>::get(0, CHARLIE).is_some());
+
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+
+        // finalize 后 VoteRecords 应被清理
+        assert!(VoteRecords::<Test>::get(0, BOB).is_none());
+        assert!(VoteRecords::<Test>::get(0, CHARLIE).is_none());
+    });
+}
+
+#[test]
+fn h3_vote_records_cleaned_after_cancel() {
+    // H3: cancel_proposal (通过 remove_from_active) 也应清理 VoteRecords
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::No));
+
+        // 投票后 VoteRecords 应存在
+        assert!(VoteRecords::<Test>::get(0, BOB).is_some());
+
+        // 提案者取消
+        assert_ok!(EntityGovernance::cancel_proposal(RuntimeOrigin::signed(ALICE), 0));
+
+        // 取消后 VoteRecords 应被清理
+        assert!(VoteRecords::<Test>::get(0, BOB).is_none());
+    });
+}
+
+#[test]
+fn h3_vote_records_cleaned_after_veto() {
+    // H3: veto_proposal (通过 remove_from_active) 也应清理 VoteRecords
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        // FullDAO + veto enabled（紧急制动模式，设计意图）
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), 1,
+            GovernanceMode::FullDAO, None, None, None, None, None, Some(true),
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+
+        assert!(VoteRecords::<Test>::get(0, BOB).is_some());
+
+        assert_ok!(EntityGovernance::veto_proposal(RuntimeOrigin::signed(OWNER), 0));
+
+        // veto 后 VoteRecords 应被清理
+        assert!(VoteRecords::<Test>::get(0, BOB).is_none());
+    });
+}
+
+// ==================== H2: Token locking on vote ====================
+
+#[test]
+fn h2_vote_reserves_tokens() {
+    // H2: 投票后投票者的原始代币应被 reserve，防止转让给其他账户复投
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+
+        // 投票前: 无 reserve
+        assert_eq!(get_reserved_balance(SHOP_ID, BOB), 0);
+
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+
+        // 投票后: BOB 的 150_000 代币应被 reserve
+        assert_eq!(get_reserved_balance(SHOP_ID, BOB), 150_000);
+        // VoterTokenLocks 应记录参与
+        assert!(VoterTokenLocks::<Test>::get(0, BOB).is_some());
+        // GovernanceLockCount = 1
+        assert_eq!(GovernanceLockCount::<Test>::get(SHOP_ID, BOB), 1);
+        // GovernanceLockAmount = 150_000
+        assert_eq!(GovernanceLockAmount::<Test>::get(SHOP_ID, BOB), 150_000);
+    });
+}
+
+#[test]
+fn h2_finalize_unreserves_tokens() {
+    // H2: finalize_voting 后投票者的代币应被 unreserve
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::No));
+
+        // 投票后均被 reserve
+        assert_eq!(get_reserved_balance(SHOP_ID, BOB), 150_000);
+        assert_eq!(get_reserved_balance(SHOP_ID, CHARLIE), 50_000);
+
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+
+        // finalize 后: 代币应被 unreserve
+        assert_eq!(get_reserved_balance(SHOP_ID, BOB), 0);
+        assert_eq!(get_reserved_balance(SHOP_ID, CHARLIE), 0);
+        // 存储应被清理
+        assert!(VoterTokenLocks::<Test>::get(0, BOB).is_none());
+        assert_eq!(GovernanceLockCount::<Test>::get(SHOP_ID, BOB), 0);
+        assert_eq!(GovernanceLockAmount::<Test>::get(SHOP_ID, BOB), 0);
+    });
+}
+
+#[test]
+fn h2_multi_proposal_ref_counting() {
+    // H2: 同一用户投票多个提案时使用 max-lock 模式，只在最后一个提案结束时 unreserve
+    ExtBuilder::build().execute_with(|| {
+        // 创建两个提案
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"P1".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_price_change(), b"P2".to_vec(), None,
+        ));
+
+        // BOB 投票 P0
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_eq!(GovernanceLockCount::<Test>::get(SHOP_ID, BOB), 1);
+        assert_eq!(get_reserved_balance(SHOP_ID, BOB), 150_000);
+
+        // BOB 投票 P1 — max-lock 模式不会重复 reserve
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 1, VoteType::No));
+        assert_eq!(GovernanceLockCount::<Test>::get(SHOP_ID, BOB), 2);
+        // reserve 金额不变（max-lock，余额没变）
+        assert_eq!(get_reserved_balance(SHOP_ID, BOB), 150_000);
+
+        // CHARLIE 在两个提案上都投票（投票期结束前）
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 1, VoteType::Yes));
+
+        // 投票期结束
+        advance_blocks(101);
+
+        // 结束 P0
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+
+        // P0 结束后: BOB ref_count=1，代币仍被 reserve
+        assert_eq!(GovernanceLockCount::<Test>::get(SHOP_ID, BOB), 1);
+        assert_eq!(get_reserved_balance(SHOP_ID, BOB), 150_000);
+
+        // 结束 P1
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 1));
+
+        // P1 也结束后: ref_count=0，代币应被 unreserve
+        assert_eq!(GovernanceLockCount::<Test>::get(SHOP_ID, BOB), 0);
+        assert_eq!(get_reserved_balance(SHOP_ID, BOB), 0);
+    });
+}
+
+#[test]
+fn h2_cancel_unreserves_tokens() {
+    // H2: cancel_proposal 也应 unreserve 投票者代币
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_eq!(get_reserved_balance(SHOP_ID, BOB), 150_000);
+
+        // 提案者取消
+        assert_ok!(EntityGovernance::cancel_proposal(RuntimeOrigin::signed(ALICE), 0));
+
+        // 取消后 unreserve
+        assert_eq!(get_reserved_balance(SHOP_ID, BOB), 0);
+        assert_eq!(GovernanceLockCount::<Test>::get(SHOP_ID, BOB), 0);
+    });
+}
+
+// ==================== L5: Dead ProposalStatus removed ====================
+
+#[test]
+fn l5_proposal_status_default_is_voting() {
+    // L5: ProposalStatus::default() 现在应返回 Voting（而非已移除的 Created）
+    assert_eq!(ProposalStatus::default(), ProposalStatus::Voting);
+}
+
+// ==================== L2-R3: cleanup_proposal ====================
+
+#[test]
+fn l2_cleanup_executed_proposal() {
+    // L2-R3: 已执行的提案可被清理，释放存储
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes));
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+        advance_blocks(51);
+        assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
+
+        // 提案仍在存储中
+        assert!(Proposals::<Test>::get(0).is_some());
+
+        // 清理
+        assert_ok!(EntityGovernance::cleanup_proposal(RuntimeOrigin::signed(BOB), 0));
+
+        // 存储已删除
+        assert!(Proposals::<Test>::get(0).is_none());
+    });
+}
+
+#[test]
+fn l2_cleanup_failed_proposal() {
+    // L2-R3: Failed 提案也可清理
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        // 反对票导致 Failed
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::No));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::No));
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Failed);
+
+        assert_ok!(EntityGovernance::cleanup_proposal(RuntimeOrigin::signed(ALICE), 0));
+        assert!(Proposals::<Test>::get(0).is_none());
+    });
+}
+
+#[test]
+fn l2_cleanup_voting_proposal_fails() {
+    // L2-R3: 仍在投票中的提案不可清理
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+
+        assert_noop!(
+            EntityGovernance::cleanup_proposal(RuntimeOrigin::signed(ALICE), 0),
+            Error::<Test>::ProposalNotTerminal
+        );
+    });
+}
+
+#[test]
+fn l2_cleanup_passed_proposal_fails() {
+    // L2-R3: Passed 状态（等待执行）不可清理
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes));
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+
+        assert_noop!(
+            EntityGovernance::cleanup_proposal(RuntimeOrigin::signed(ALICE), 0),
+            Error::<Test>::ProposalNotTerminal
+        );
+    });
+}
+
+#[test]
+fn l2_cleanup_expired_proposal() {
+    // L2-R3: Expired 提案可清理
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes));
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+        advance_blocks(200);
+        assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
+
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Expired);
+
+        assert_ok!(EntityGovernance::cleanup_proposal(RuntimeOrigin::signed(BOB), 0));
+        assert!(Proposals::<Test>::get(0).is_none());
+    });
+}
+
+#[test]
+fn l2_cleanup_emits_event() {
+    // L2-R3: cleanup_proposal 应发出 ProposalCleaned 事件
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        // 取消提案使其进入终态
+        assert_ok!(EntityGovernance::cancel_proposal(RuntimeOrigin::signed(ALICE), 0));
+
+        System::reset_events();
+        assert_ok!(EntityGovernance::cleanup_proposal(RuntimeOrigin::signed(BOB), 0));
+
+        let events = System::events();
+        assert!(
+            events.iter().any(|e| {
+                matches!(
+                    e.event,
+                    RuntimeEvent::EntityGovernance(Event::ProposalCleaned { proposal_id: 0 })
+                )
+            }),
+            "ProposalCleaned event not found"
+        );
+    });
+}
+
+// ==================== Round 5 回归测试 ====================
+
+#[test]
+fn l3_r5_error_no_veto_right_still_works_after_dead_error_removal() {
+    // L3-R5: 移除 ProposalAlreadyVetoed 后，NoVetoRight 仍然正确
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        // 非 entity owner 尝试 veto
+        assert_noop!(
+            EntityGovernance::veto_proposal(RuntimeOrigin::signed(ALICE), 0),
+            Error::<Test>::NoVetoRight
+        );
+    });
+}
+
+#[test]
+fn l3_r5_governance_config_is_locked_still_works() {
+    // L3-R5: 移除 ExecutionExpired 和 FullDAOCannotConfigure 后，
+    // GovernanceConfigIsLocked 仍然正确匹配
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        // 锁定治理
+        assert_ok!(EntityGovernance::lock_governance(RuntimeOrigin::signed(OWNER), 1));
+        // 尝试修改 → GovernanceConfigIsLocked
+        assert_noop!(
+            EntityGovernance::configure_governance(
+                RuntimeOrigin::signed(OWNER), 1, GovernanceMode::FullDAO,
+                None, None, None, None, None, None,
+            ),
+            Error::<Test>::GovernanceConfigIsLocked
+        );
+    });
+}
+
+#[test]
+fn l3_r5_voting_period_too_short_still_works() {
+    // L3-R5: 移除 FullDAOCannotConfigure 后，VotingPeriodTooShort 仍然正确
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        assert_noop!(
+            EntityGovernance::configure_governance(
+                RuntimeOrigin::signed(OWNER), 1, GovernanceMode::FullDAO,
+                Some(1), None, None, None, None, None,  // voting_period=1 < MinVotingPeriod=10
+            ),
+            Error::<Test>::VotingPeriodTooShort
+        );
     });
 }

@@ -144,6 +144,8 @@ use std::collections::HashMap;
 thread_local! {
     static TOKEN_BALANCES: RefCell<HashMap<(u64, u64), u128>> = RefCell::new(HashMap::new());
     static TOKEN_ENABLED: RefCell<HashMap<u64, bool>> = RefCell::new(HashMap::new());
+    // H2: 追踪 reserve/unreserve 调用
+    static RESERVED_BALANCES: RefCell<HashMap<(u64, u64), u128>> = RefCell::new(HashMap::new());
 }
 
 pub fn set_token_balance(shop_id: u64, who: u64, amount: u128) {
@@ -158,6 +160,10 @@ pub fn get_token_balance(shop_id: u64, who: u64) -> u128 {
     TOKEN_BALANCES.with(|b| *b.borrow().get(&(shop_id, who)).unwrap_or(&0))
 }
 
+pub fn get_reserved_balance(entity_id: u64, who: u64) -> u128 {
+    RESERVED_BALANCES.with(|b| *b.borrow().get(&(entity_id, who)).unwrap_or(&0))
+}
+
 pub struct MockTokenProvider;
 impl EntityTokenProvider<u64, u128> for MockTokenProvider {
     fn is_token_enabled(entity_id: u64) -> bool {
@@ -169,8 +175,28 @@ impl EntityTokenProvider<u64, u128> for MockTokenProvider {
     fn reward_on_purchase(_: u64, _: &u64, _: u128) -> Result<u128, DispatchError> { Ok(0) }
     fn redeem_for_discount(_: u64, _: &u64, _: u128) -> Result<u128, DispatchError> { Ok(0) }
     fn transfer(_: u64, _: &u64, _: &u64, _: u128) -> Result<(), DispatchError> { Ok(()) }
-    fn reserve(_: u64, _: &u64, _: u128) -> Result<(), DispatchError> { Ok(()) }
-    fn unreserve(_: u64, _: &u64, _: u128) -> u128 { 0 }
+    fn reserve(entity_id: u64, who: &u64, amount: u128) -> Result<(), DispatchError> {
+        RESERVED_BALANCES.with(|b| {
+            let mut map = b.borrow_mut();
+            let reserved = map.entry((entity_id, *who)).or_insert(0);
+            let balance = get_token_balance(entity_id, *who);
+            let available = balance.saturating_sub(*reserved);
+            if available < amount {
+                return Err(DispatchError::Other("InsufficientBalance"));
+            }
+            *reserved = reserved.saturating_add(amount);
+            Ok(())
+        })
+    }
+    fn unreserve(entity_id: u64, who: &u64, amount: u128) -> u128 {
+        RESERVED_BALANCES.with(|b| {
+            let mut map = b.borrow_mut();
+            let reserved = map.entry((entity_id, *who)).or_insert(0);
+            let actual = amount.min(*reserved);
+            *reserved = reserved.saturating_sub(actual);
+            actual
+        })
+    }
     fn repatriate_reserved(_: u64, _: &u64, _: &u64, _: u128) -> Result<u128, DispatchError> { Ok(0) }
     fn get_token_type(_: u64) -> TokenType { TokenType::Governance }
     fn total_supply(_: u64) -> u128 { TOTAL_SUPPLY }

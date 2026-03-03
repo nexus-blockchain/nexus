@@ -22,6 +22,7 @@ pub use pallet::*;
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
+    use alloc::collections::BTreeSet;
     use alloc::vec::Vec;
     use frame_support::{
         pallet_prelude::*,
@@ -131,6 +132,7 @@ pub mod pallet {
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
         TeamPerformanceConfigUpdated { entity_id: u64 },
+        TeamPerformanceConfigCleared { entity_id: u64 },
     }
 
     #[pallet::error]
@@ -231,16 +233,26 @@ pub mod pallet {
             remaining: &mut BalanceOf<T>,
             config: &TeamPerformanceConfigOf<T>,
             outputs: &mut Vec<CommissionOutput<T::AccountId, BalanceOf<T>>>,
-        ) {
+        ) where T::AccountId: Ord {
             if config.tiers.is_empty() { return; }
 
             let mut current = T::MemberProvider::get_referrer(entity_id, buyer);
             let mut depth: u8 = 0;
+            // H1 审计修复: 循环检测，防止推荐链有环时重复发放佣金
+            let mut visited = BTreeSet::new();
 
             while let Some(ref ancestor) = current {
+                // H1: 检测循环
+                if !visited.insert(ancestor.clone()) { break; }
                 depth += 1;
                 if depth > config.max_depth { break; }
                 if remaining.is_zero() { break; }
+
+                // H2 审计修复: 跳过未激活会员
+                if !T::MemberProvider::is_activated(entity_id, ancestor) {
+                    current = T::MemberProvider::get_referrer(entity_id, ancestor);
+                    continue;
+                }
 
                 // 查询团队统计：(direct_referrals, team_size, total_spent)
                 let (_direct, team_size, nex_spent) =
@@ -343,16 +355,27 @@ impl<T: pallet::Config> pallet::Pallet<T> {
         outputs: &mut alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>,
     ) where
         TB: sp_runtime::traits::AtLeast32BitUnsigned + Copy,
+        T::AccountId: Ord,
     {
         if config.tiers.is_empty() { return; }
 
         let mut current = T::MemberProvider::get_referrer(entity_id, buyer);
         let mut depth: u8 = 0;
+        // H1 审计修复: 循环检测
+        let mut visited = alloc::collections::BTreeSet::new();
 
         while let Some(ref ancestor) = current {
+            // H1: 检测循环
+            if !visited.insert(ancestor.clone()) { break; }
             depth += 1;
             if depth > config.max_depth { break; }
             if remaining.is_zero() { break; }
+
+            // H2 审计修复: 跳过未激活会员
+            if !T::MemberProvider::is_activated(entity_id, ancestor) {
+                current = T::MemberProvider::get_referrer(entity_id, ancestor);
+                continue;
+            }
 
             let (_direct, team_size, nex_spent) =
                 T::MemberProvider::get_member_stats(entity_id, ancestor);
@@ -490,11 +513,15 @@ impl<T: pallet::Config> pallet_commission_common::TeamPlanWriter<pallet::Balance
                 threshold_mode: mode,
             },
         );
+        // M1 审计修复: PlanWriter 路径也发出事件
+        pallet::Pallet::<T>::deposit_event(pallet::Event::TeamPerformanceConfigUpdated { entity_id });
         Ok(())
     }
 
     fn clear_config(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
         pallet::TeamPerformanceConfigs::<T>::remove(entity_id);
+        // M1 审计修复: 配置清除也发出事件
+        pallet::Pallet::<T>::deposit_event(pallet::Event::TeamPerformanceConfigCleared { entity_id });
         Ok(())
     }
 }
@@ -524,6 +551,7 @@ mod tests {
         static REFERRERS: RefCell<BTreeMap<(u64, u64), u64>> = RefCell::new(BTreeMap::new());
         static MEMBER_STATS: RefCell<BTreeMap<(u64, u64), (u32, u32, u128)>> = RefCell::new(BTreeMap::new());
         static MEMBER_SPENT_USDT: RefCell<BTreeMap<(u64, u64), u64>> = RefCell::new(BTreeMap::new());
+        static ACTIVATED: RefCell<BTreeMap<(u64, u64), bool>> = RefCell::new(BTreeMap::new());
     }
 
     pub struct MockMemberProvider;
@@ -548,6 +576,9 @@ mod tests {
         fn custom_level_count(_: u64) -> u8 { 0 }
         fn get_member_spent_usdt(entity_id: u64, account: &u64) -> u64 {
             MEMBER_SPENT_USDT.with(|s| s.borrow().get(&(entity_id, *account)).copied().unwrap_or(0))
+        }
+        fn is_activated(entity_id: u64, account: &u64) -> bool {
+            ACTIVATED.with(|a| a.borrow().get(&(entity_id, *account)).copied().unwrap_or(true))
         }
     }
 
@@ -611,10 +642,17 @@ mod tests {
         });
     }
 
+    fn set_activated(entity_id: u64, account: u64, activated: bool) {
+        ACTIVATED.with(|a| {
+            a.borrow_mut().insert((entity_id, account), activated);
+        });
+    }
+
     fn clear_thread_locals() {
         REFERRERS.with(|r| r.borrow_mut().clear());
         MEMBER_STATS.with(|s| s.borrow_mut().clear());
         MEMBER_SPENT_USDT.with(|s| s.borrow_mut().clear());
+        ACTIVATED.with(|a| a.borrow_mut().clear());
     }
 
     // ====================================================================
@@ -1098,6 +1136,173 @@ mod tests {
             assert!(<pallet::Pallet<Test> as TeamPlanWriter<Balance>>::set_team_config(
                 1, vec![(5000, 0, 200), (1000, 0, 100)], 5, false, 0,
             ).is_err());
+        });
+    }
+
+    // ====================================================================
+    // H1-deep: cycle detection
+    // ====================================================================
+
+    #[test]
+    fn h1_deep_cycle_prevents_duplicate_commission() {
+        new_test_ext().execute_with(|| {
+            clear_thread_locals();
+            // 构造循环推荐链: 50 → 40 → 30 → 40 (cycle)
+            REFERRERS.with(|r| {
+                let mut m = r.borrow_mut();
+                m.insert((1, 50), 40);
+                m.insert((1, 40), 30);
+                m.insert((1, 30), 40); // cycle back to 40
+            });
+            set_stats(1, 40, 5, 20, 10000);
+            set_stats(1, 30, 5, 20, 10000);
+
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 500 },
+            ];
+            assert_ok!(CommissionTeam::set_team_performance_config(
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, true, pallet::SalesThresholdMode::Nex,
+            ));
+
+            use pallet_commission_common::CommissionPlugin;
+            let modes = CommissionModes(CommissionModes::TEAM_PERFORMANCE);
+            let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+                1, &50, 10000, 10000, modes, false, 0,
+            );
+
+            // Without cycle detection: 40 and 30 would alternate, paying each multiple times
+            // With cycle detection: 40 (depth 1) + 30 (depth 2) then cycle detected → break
+            assert_eq!(outputs.len(), 2);
+            assert_eq!(outputs[0].beneficiary, 40);
+            assert_eq!(outputs[1].beneficiary, 30);
+            // 10000 * 500 / 10000 = 500 each
+            assert_eq!(outputs[0].amount, 500);
+            assert_eq!(outputs[1].amount, 500);
+            assert_eq!(remaining, 10000 - 500 - 500);
+        });
+    }
+
+    #[test]
+    fn h1_deep_self_referral_cycle_breaks_immediately() {
+        new_test_ext().execute_with(|| {
+            clear_thread_locals();
+            // 自引用: 50 → 40 → 40 (self-cycle)
+            REFERRERS.with(|r| {
+                let mut m = r.borrow_mut();
+                m.insert((1, 50), 40);
+                m.insert((1, 40), 40); // self-referral
+            });
+            set_stats(1, 40, 5, 20, 10000);
+
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 500 },
+            ];
+            assert_ok!(CommissionTeam::set_team_performance_config(
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, true, pallet::SalesThresholdMode::Nex,
+            ));
+
+            use pallet_commission_common::CommissionPlugin;
+            let modes = CommissionModes(CommissionModes::TEAM_PERFORMANCE);
+            let (outputs, _) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+                1, &50, 10000, 10000, modes, false, 0,
+            );
+
+            // 40 paid once, then self-cycle detected → break
+            assert_eq!(outputs.len(), 1);
+            assert_eq!(outputs[0].beneficiary, 40);
+        });
+    }
+
+    // ====================================================================
+    // H2-deep: deactivated member skipped
+    // ====================================================================
+
+    #[test]
+    fn h2_deep_deactivated_member_skipped() {
+        new_test_ext().execute_with(|| {
+            clear_thread_locals();
+            setup_chain(1); // 50 → 40 → 30 → 20 → 10
+            set_stats(1, 40, 5, 20, 10000); // 达标
+            set_stats(1, 30, 5, 20, 10000); // 达标
+            set_activated(1, 40, false); // 40 被停用
+
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 500 },
+            ];
+            assert_ok!(CommissionTeam::set_team_performance_config(
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false, pallet::SalesThresholdMode::Nex,
+            ));
+
+            use pallet_commission_common::CommissionPlugin;
+            let modes = CommissionModes(CommissionModes::TEAM_PERFORMANCE);
+            let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+                1, &50, 10000, 10000, modes, false, 0,
+            );
+
+            // non-stacking: 40 is deactivated (skipped), 30 is the first qualifying → gets commission
+            assert_eq!(outputs.len(), 1);
+            assert_eq!(outputs[0].beneficiary, 30);
+            assert_eq!(outputs[0].level, 2); // depth 2 (40 consumed depth 1 even though skipped)
+            assert_eq!(outputs[0].amount, 500);
+            assert_eq!(remaining, 9500);
+        });
+    }
+
+    #[test]
+    fn h2_deep_deactivated_stacking_skips_middle() {
+        new_test_ext().execute_with(|| {
+            clear_thread_locals();
+            setup_chain(1); // 50 → 40 → 30 → 20 → 10
+            set_stats(1, 40, 5, 20, 10000);
+            set_stats(1, 30, 5, 50, 50000);
+            set_stats(1, 20, 5, 20, 10000);
+            set_activated(1, 30, false); // 30 被停用
+
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 300 },
+            ];
+            assert_ok!(CommissionTeam::set_team_performance_config(
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, true, pallet::SalesThresholdMode::Nex,
+            ));
+
+            use pallet_commission_common::CommissionPlugin;
+            let modes = CommissionModes(CommissionModes::TEAM_PERFORMANCE);
+            let (outputs, _) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+                1, &50, 10000, 10000, modes, false, 0,
+            );
+
+            // stacking: 40 (depth 1) ok, 30 (depth 2) deactivated skip, 20 (depth 3) ok
+            assert_eq!(outputs.len(), 2);
+            assert_eq!(outputs[0].beneficiary, 40);
+            assert_eq!(outputs[0].level, 1);
+            assert_eq!(outputs[1].beneficiary, 20);
+            assert_eq!(outputs[1].level, 3);
+        });
+    }
+
+    // ====================================================================
+    // M1-deep: PlanWriter emits events
+    // ====================================================================
+
+    #[test]
+    fn m1_deep_plan_writer_emits_events() {
+        new_test_ext().execute_with(|| {
+            use pallet_commission_common::TeamPlanWriter;
+
+            // set_team_config should emit TeamPerformanceConfigUpdated
+            assert_ok!(<pallet::Pallet<Test> as TeamPlanWriter<Balance>>::set_team_config(
+                1, vec![(1000, 5, 200)], 5, false, 0,
+            ));
+            System::assert_has_event(RuntimeEvent::CommissionTeam(
+                pallet::Event::TeamPerformanceConfigUpdated { entity_id: 1 },
+            ));
+
+            // clear_config should emit TeamPerformanceConfigCleared
+            assert_ok!(<pallet::Pallet<Test> as TeamPlanWriter<Balance>>::clear_config(1));
+            System::assert_has_event(RuntimeEvent::CommissionTeam(
+                pallet::Event::TeamPerformanceConfigCleared { entity_id: 1 },
+            ));
+            assert!(pallet::TeamPerformanceConfigs::<Test>::get(1).is_none());
         });
     }
 }

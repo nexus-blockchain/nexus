@@ -80,6 +80,9 @@ pub mod pallet {
 		/// 仪式检查间隔 (区块数)
 		#[pallet::constant]
 		type CeremonyCheckInterval: Get<BlockNumberFor<Self>>;
+		/// L2-R3: 每次 on_initialize 最多处理的仪式数
+		#[pallet::constant]
+		type MaxProcessPerBlock: Get<u32>;
 		/// Bot 注册查询
 		type BotRegistry: BotRegistryProvider<Self::AccountId>;
 		/// 订阅层级查询 (tier gate)
@@ -115,6 +118,20 @@ pub mod pallet {
 	/// 仪式总数
 	#[pallet::storage]
 	pub type CeremonyCount<T: Config> = StorageValue<_, u64, ValueQuery>;
+
+	/// L2-R3: 按 expires_at 排序的过期队列 (expires_at, bot_pk, ceremony_hash)
+	/// record_ceremony 时插入，过期/撤销/替代时移除
+	#[pallet::storage]
+	pub type ExpiryQueue<T: Config> = StorageValue<
+		_,
+		BoundedVec<(BlockNumberFor<T>, [u8; 32], [u8; 32]), ConstU32<1000>>,
+		ValueQuery,
+	>;
+
+	/// L2-R3: AtRisk 检测游标 — 上次处理到的 ActiveCeremony 位置
+	/// 存储 last processed bot_pk，下次从此处继续
+	#[pallet::storage]
+	pub type AtRiskCursor<T: Config> = StorageValue<_, [u8; 32]>;
 
 	// ========================================================================
 	// Events
@@ -153,6 +170,10 @@ pub mod pallet {
 		ForcedReCeremony {
 			ceremony_hash: [u8; 32],
 		},
+		/// M3-R6: 终态仪式已清理
+		CeremonyCleaned {
+			ceremony_hash: [u8; 32],
+		},
 	}
 
 	// ========================================================================
@@ -165,8 +186,6 @@ pub mod pallet {
 		EnclaveNotApproved,
 		/// 仪式不存在
 		CeremonyNotFound,
-		/// 仪式已撤销
-		CeremonyAlreadyRevoked,
 		/// 仪式已存在
 		CeremonyAlreadyExists,
 		/// Shamir 参数无效 (k=0, k>n, n>254)
@@ -179,8 +198,6 @@ pub mod pallet {
 		EmptyParticipants,
 		/// 参与者过多
 		TooManyParticipants,
-		/// 仪式历史已满
-		CeremonyHistoryFull,
 		/// Free 层级不允许使用此功能
 		FreeTierNotAllowed,
 		/// 不是 Bot 所有者
@@ -195,6 +212,16 @@ pub mod pallet {
 		CeremonyNotActive,
 		/// M1-fix: 描述过长 (超过 128 bytes)
 		DescriptionTooLong,
+		/// M2-audit: 参与者 Enclave 列表含重复项
+		DuplicateParticipant,
+		/// M1-R4: ExpiryQueue 已满 (1000 条上限)
+		ExpiryQueueFull,
+		/// M1-R6: Bot 未激活（停用/banned）
+		BotNotActive,
+		/// M2-R6: 参与者数量超过 Shamir n 参数
+		ParticipantCountExceedsN,
+		/// M3-R6: 仪式不是终态（无法清理）
+		CeremonyNotTerminal,
 	}
 
 	// ========================================================================
@@ -212,47 +239,103 @@ pub mod pallet {
 				return Weight::zero();
 			}
 
-			let mut reads: u64 = 0;
+			let max_process = T::MaxProcessPerBlock::get() as usize;
+			let mut reads: u64 = 1; // ExpiryQueue read
 			let mut writes: u64 = 0;
-			let mut expired: alloc::vec::Vec<([u8; 32], [u8; 32])> = alloc::vec::Vec::new();
-			let mut at_risk: alloc::vec::Vec<([u8; 32], u8)> = alloc::vec::Vec::new();
 
-			// CH2-fix: 仅迭代 ActiveCeremony (O(A)) 而非全表 Ceremonies (O(N))
-			for (bot_pk, ceremony_hash) in ActiveCeremony::<T>::iter() {
+			// ── Phase 1: 按 expires_at 排序的优先队列处理过期 ──
+			let mut queue = ExpiryQueue::<T>::get();
+			let mut expired_count: usize = 0;
+
+			// 队列按 expires_at 升序排列，从头部取出已过期的条目
+			while expired_count < max_process {
+				if queue.is_empty() {
+					break;
+				}
+				let (exp_at, _bot_pk, _hash) = &queue[0];
+				if n < *exp_at {
+					break; // 队列有序，后续都未过期
+				}
+				let (_, bot_pk, ceremony_hash) = queue.remove(0);
+
 				reads += 1;
 				if let Some(record) = Ceremonies::<T>::get(&ceremony_hash) {
-					reads += 1;
-					if n >= record.expires_at {
-						expired.push((ceremony_hash, bot_pk));
-					} else {
-						// G5: CeremonyAtRisk 检测 — peer 数量 <= k 时触发风险事件
-						// C1-fix: 使用存储的 bot_id_hash (原 blake2_256 与链下 SHA256 不一致)
-						let peer_count = T::BotRegistry::peer_count(&record.bot_id_hash);
-						reads += 1;
-						if peer_count > 0 && peer_count <= record.k as u32 {
-							at_risk.push((ceremony_hash, record.k));
+					// 仅处理仍然活跃的仪式（可能已被 revoke/supersede）
+					if matches!(record.status, CeremonyStatus::Active) {
+						Ceremonies::<T>::mutate(&ceremony_hash, |maybe_record| {
+							if let Some(r) = maybe_record {
+								r.status = CeremonyStatus::Expired;
+							}
+						});
+						writes += 1;
+
+						// 仅当 ActiveCeremony 仍指向此仪式时才移除
+						if ActiveCeremony::<T>::get(&bot_pk) == Some(ceremony_hash) {
+							ActiveCeremony::<T>::remove(&bot_pk);
+							writes += 1;
 						}
+						reads += 1;
+
+						Self::deposit_event(Event::CeremonyExpired { ceremony_hash });
 					}
 				}
+				expired_count += 1;
 			}
 
-			for (ceremony_hash, bot_pk) in expired {
-				Ceremonies::<T>::mutate(&ceremony_hash, |maybe_record| {
-					if let Some(record) = maybe_record {
-						record.status = CeremonyStatus::Expired;
+			ExpiryQueue::<T>::put(queue);
+			writes += 1;
+
+			// ── Phase 2: 游标分批 AtRisk 检测 ──
+			let remaining_budget = max_process.saturating_sub(expired_count);
+			if remaining_budget > 0 {
+				reads += 1; // AtRiskCursor read
+				let cursor = AtRiskCursor::<T>::get();
+				let mut processed: usize = 0;
+				let mut new_cursor: Option<[u8; 32]> = None;
+
+				// 使用 iter_from 如果有游标，否则从头开始
+				let iter: alloc::boxed::Box<dyn Iterator<Item = ([u8; 32], [u8; 32])>> = match cursor {
+					Some(ref start_key) => {
+						// iter_from 不可用于 StorageMap，使用 iter 并跳过
+						// M1-R5: 使用 < 而非 <=，否则游标位置的仪式会被永久跳过
+						alloc::boxed::Box::new(
+							ActiveCeremony::<T>::iter()
+								.skip_while(move |(k, _)| k < start_key)
+						)
+					},
+					None => alloc::boxed::Box::new(ActiveCeremony::<T>::iter()),
+				};
+
+				for (bot_pk, ceremony_hash) in iter {
+					if processed >= remaining_budget {
+						new_cursor = Some(bot_pk);
+						break;
 					}
-				});
+					reads += 1;
+					if let Some(record) = Ceremonies::<T>::get(&ceremony_hash) {
+						reads += 1;
+						if matches!(record.status, CeremonyStatus::Active) && n < record.expires_at {
+							let peer_count = T::BotRegistry::peer_count(&record.bot_id_hash);
+							reads += 1;
+							if peer_count <= record.k as u32 {
+								Self::deposit_event(Event::CeremonyAtRisk {
+									ceremony_hash,
+									required_k: record.k,
+								});
+							}
+						}
+					}
+					processed += 1;
+					new_cursor = None; // 全部处理完，清除游标
+				}
+
+				// 更新游标
+				if let Some(c) = new_cursor {
+					AtRiskCursor::<T>::put(c);
+				} else {
+					AtRiskCursor::<T>::kill();
+				}
 				writes += 1;
-
-				ActiveCeremony::<T>::remove(&bot_pk);
-				writes += 1;
-
-				Self::deposit_event(Event::CeremonyExpired { ceremony_hash });
-			}
-
-			// G5: 发出 CeremonyAtRisk 事件
-			for (ceremony_hash, required_k) in at_risk {
-				Self::deposit_event(Event::CeremonyAtRisk { ceremony_hash, required_k });
 			}
 
 			Weight::from_parts(
@@ -288,6 +371,9 @@ pub mod pallet {
 				.ok_or(Error::<T>::BotNotFound)?;
 			ensure!(owner == who, Error::<T>::NotBotOwner);
 
+			// M1-R6: 验证 Bot 处于激活状态（停用/banned 的 Bot 不允许发起仪式）
+			ensure!(T::BotRegistry::is_bot_active(&bot_id_hash), Error::<T>::BotNotActive);
+
 			// Tier gate: Free 层级不允许发起 Ceremony
 			ensure!(
 				T::Subscription::effective_tier(&bot_id_hash).is_paid(),
@@ -303,6 +389,22 @@ pub mod pallet {
 			ensure!(!participant_enclaves.is_empty(), Error::<T>::EmptyParticipants);
 			// H1-fix: 参与者数量必须 >= k (否则无法恢复 secret)
 			ensure!(participant_enclaves.len() >= k as usize, Error::<T>::InsufficientParticipants);
+			// M2-R6: 参与者数量不能超过 Shamir n 参数（n 份 share 分配给 n 个参与者）
+			ensure!(participant_enclaves.len() <= n as usize, Error::<T>::ParticipantCountExceedsN);
+
+			// M2-R5: 先检查上限，再做 O(n²) 去重检测，防止无界输入 DoS
+			ensure!(
+				participant_enclaves.len() <= T::MaxParticipants::get() as usize,
+				Error::<T>::TooManyParticipants
+			);
+
+			// M2-audit: 参与者 Enclave 不允许重复（重复会膨胀 participant_count，
+			// 使 Shamir 门限看似满足但实际唯一参与者不足）
+			for i in 0..participant_enclaves.len() {
+				for j in (i + 1)..participant_enclaves.len() {
+					ensure!(participant_enclaves[i] != participant_enclaves[j], Error::<T>::DuplicateParticipant);
+				}
+			}
 
 			// 验证 ceremony enclave 白名单
 			ensure!(
@@ -343,6 +445,8 @@ pub mod pallet {
 						old.status = CeremonyStatus::Superseded { replaced_by: ceremony_hash };
 					}
 				});
+				// L2-R3: 从 ExpiryQueue 中移除被替代的旧仪式
+				Self::remove_from_expiry_queue(&old_hash);
 				Self::deposit_event(Event::CeremonySuperseded {
 					old_hash,
 					new_hash: ceremony_hash,
@@ -355,12 +459,25 @@ pub mod pallet {
 			Ceremonies::<T>::insert(&ceremony_hash, record);
 			ActiveCeremony::<T>::insert(&bot_public_key, ceremony_hash);
 
-			CeremonyHistory::<T>::try_mutate(&bot_public_key, |history| -> DispatchResult {
-				history.try_push(ceremony_hash).map_err(|_| Error::<T>::CeremonyHistoryFull)?;
-				Ok(())
-			})?;
+			// M2-R4: 历史满时移除最旧条目 (FIFO)，避免永久阻塞新仪式
+			CeremonyHistory::<T>::mutate(&bot_public_key, |history| {
+				if history.is_full() {
+					history.remove(0);
+				}
+				// 移除后一定有空间，unwrap 安全
+				let _ = history.try_push(ceremony_hash);
+			});
 
 			CeremonyCount::<T>::mutate(|c| *c = c.saturating_add(1));
+
+			// L2-R3: 插入 ExpiryQueue（按 expires_at 排序）
+			// M1-R4: 队列满时返回错误而非静默丢弃（否则仪式永远不会被自动过期）
+			ExpiryQueue::<T>::try_mutate(|queue| -> DispatchResult {
+				let entry = (expires_at, bot_public_key, ceremony_hash);
+				let pos = queue.iter().position(|(e, _, _)| *e > expires_at).unwrap_or(queue.len());
+				queue.try_insert(pos, entry).map_err(|_| Error::<T>::ExpiryQueueFull)?;
+				Ok(())
+			})?;
 
 			Self::deposit_event(Event::CeremonyRecorded { ceremony_hash, bot_public_key, k, n });
 			Ok(())
@@ -374,26 +491,8 @@ pub mod pallet {
 			ceremony_hash: [u8; 32],
 		) -> DispatchResult {
 			ensure_root(origin)?;
-
-			let record = Ceremonies::<T>::get(&ceremony_hash).ok_or(Error::<T>::CeremonyNotFound)?;
-			ensure!(
-				!matches!(record.status, CeremonyStatus::Revoked { .. }),
-				Error::<T>::CeremonyAlreadyRevoked
-			);
-
-			let now = frame_system::Pallet::<T>::block_number();
-			Ceremonies::<T>::mutate(&ceremony_hash, |maybe_record| {
-				if let Some(r) = maybe_record {
-					let now_u64: u64 = now.unique_saturated_into();
-					r.status = CeremonyStatus::Revoked { revoked_at: now_u64 };
-				}
-			});
-
-			// Clear active ceremony
-			if ActiveCeremony::<T>::get(&record.bot_public_key) == Some(ceremony_hash) {
-				ActiveCeremony::<T>::remove(&record.bot_public_key);
-			}
-
+			// L1-R6: 使用共享 helper
+			Self::do_revoke(&ceremony_hash)?;
 			Self::deposit_event(Event::CeremonyRevoked { ceremony_hash });
 			Ok(())
 		}
@@ -455,27 +554,34 @@ pub mod pallet {
 			ceremony_hash: [u8; 32],
 		) -> DispatchResult {
 			ensure_root(origin)?;
+			// L1-R6: 使用共享 helper
+			Self::do_revoke(&ceremony_hash)?;
+			Self::deposit_event(Event::ForcedReCeremony { ceremony_hash });
+			Ok(())
+		}
+
+		/// M3-R6: 清理终态仪式记录 (任何人可调用)
+		/// 仅清理 Expired / Revoked / Superseded 状态的仪式
+		#[pallet::call_index(5)]
+		#[pallet::weight(Weight::from_parts(30_000_000, 6_000))]
+		pub fn cleanup_ceremony(
+			origin: OriginFor<T>,
+			ceremony_hash: [u8; 32],
+		) -> DispatchResult {
+			ensure_signed(origin)?;
 
 			let record = Ceremonies::<T>::get(&ceremony_hash).ok_or(Error::<T>::CeremonyNotFound)?;
-			// H2-fix: 仅活跃仪式可被强制 re-ceremony
 			ensure!(
-				matches!(record.status, CeremonyStatus::Active),
-				Error::<T>::CeremonyNotActive
+				matches!(
+					record.status,
+					CeremonyStatus::Expired | CeremonyStatus::Revoked { .. } | CeremonyStatus::Superseded { .. }
+				),
+				Error::<T>::CeremonyNotTerminal
 			);
 
-			let now = frame_system::Pallet::<T>::block_number();
-			let now_u64: u64 = now.unique_saturated_into();
-			Ceremonies::<T>::mutate(&ceremony_hash, |maybe_record| {
-				if let Some(r) = maybe_record {
-					r.status = CeremonyStatus::Revoked { revoked_at: now_u64 };
-				}
-			});
+			Ceremonies::<T>::remove(&ceremony_hash);
 
-			if ActiveCeremony::<T>::get(&record.bot_public_key) == Some(ceremony_hash) {
-				ActiveCeremony::<T>::remove(&record.bot_public_key);
-			}
-
-			Self::deposit_event(Event::ForcedReCeremony { ceremony_hash });
+			Self::deposit_event(Event::CeremonyCleaned { ceremony_hash });
 			Ok(())
 		}
 	}
@@ -485,6 +591,37 @@ pub mod pallet {
 	// ========================================================================
 
 	impl<T: Config> Pallet<T> {
+		/// L1-R6: 共享撤销逻辑 — revoke_ceremony 和 force_re_ceremony 的公共实现
+		fn do_revoke(ceremony_hash: &[u8; 32]) -> DispatchResult {
+			let record = Ceremonies::<T>::get(ceremony_hash).ok_or(Error::<T>::CeremonyNotFound)?;
+			ensure!(
+				matches!(record.status, CeremonyStatus::Active),
+				Error::<T>::CeremonyNotActive
+			);
+
+			let now = frame_system::Pallet::<T>::block_number();
+			let now_u64: u64 = now.unique_saturated_into();
+			Ceremonies::<T>::mutate(ceremony_hash, |maybe_record| {
+				if let Some(r) = maybe_record {
+					r.status = CeremonyStatus::Revoked { revoked_at: now_u64 };
+				}
+			});
+
+			if ActiveCeremony::<T>::get(&record.bot_public_key) == Some(*ceremony_hash) {
+				ActiveCeremony::<T>::remove(&record.bot_public_key);
+			}
+
+			Self::remove_from_expiry_queue(ceremony_hash);
+			Ok(())
+		}
+
+		/// L2-R3: 从 ExpiryQueue 中移除指定 ceremony_hash 的条目
+		fn remove_from_expiry_queue(ceremony_hash: &[u8; 32]) {
+			ExpiryQueue::<T>::mutate(|queue| {
+				queue.retain(|(_, _, h)| h != ceremony_hash);
+			});
+		}
+
 		/// 仪式是否活跃
 		pub fn is_ceremony_active(bot_public_key: &[u8; 32]) -> bool {
 			ActiveCeremony::<T>::get(bot_public_key)
@@ -511,24 +648,4 @@ pub mod pallet {
 		}
 	}
 
-	// ========================================================================
-	// CeremonyProvider 实现
-	// ========================================================================
-
-	impl<T: Config> CeremonyProvider for Pallet<T> {
-		fn is_ceremony_active(bot_public_key: &[u8; 32]) -> bool {
-			Self::is_ceremony_active(bot_public_key)
-		}
-		fn ceremony_shamir_params(bot_public_key: &[u8; 32]) -> Option<(u8, u8)> {
-			Self::ceremony_shamir_params(bot_public_key)
-		}
-		fn active_ceremony_hash(bot_public_key: &[u8; 32]) -> Option<[u8; 32]> {
-			Self::get_active_ceremony(bot_public_key)
-		}
-		fn ceremony_participant_count(bot_public_key: &[u8; 32]) -> Option<u8> {
-			ActiveCeremony::<T>::get(bot_public_key)
-				.and_then(|hash| Ceremonies::<T>::get(&hash))
-				.map(|r| r.participant_count)
-		}
-	}
 }

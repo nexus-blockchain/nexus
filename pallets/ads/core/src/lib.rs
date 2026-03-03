@@ -269,6 +269,16 @@ pub mod pallet {
 	pub type PlacementFlagCount<T: Config> =
 		StorageMap<_, Blake2_128Concat, PlacementId, u32, ValueQuery>;
 
+	/// 广告位举报去重 (placement_id, reporter) → bool
+	#[pallet::storage]
+	pub type PlacementFlaggedBy<T: Config> = StorageDoubleMap<
+		_,
+		Blake2_128Concat, PlacementId,
+		Blake2_128Concat, T::AccountId,
+		bool,
+		ValueQuery,
+	>;
+
 	// ========================================================================
 	// Events
 	// ========================================================================
@@ -385,6 +395,10 @@ pub mod pallet {
 			registrar: T::AccountId,
 			count: u32,
 		},
+		/// 广告活动已恢复
+		CampaignResumed { campaign_id: u64 },
+		/// 广告活动已过期 (剩余预算已退还)
+		CampaignMarkedExpired { campaign_id: u64, refunded: BalanceOf<T> },
 	}
 
 	// ========================================================================
@@ -427,7 +441,7 @@ pub mod pallet {
 		NothingToClaim,
 		/// Campaign 已取消/过期
 		CampaignInactive,
-		/// 已审核通过的 Campaign 不可重复审核
+		/// 已拒绝的 Campaign 不可重复审核
 		AlreadyReviewed,
 		/// Campaign 需先通过审核才能投放
 		CampaignNotApproved,
@@ -439,16 +453,22 @@ pub mod pallet {
 		NotPlacementAdmin,
 		/// Campaign 已过期
 		CampaignExpired,
-		/// 结算转账失败
-		SettlementTransferFailed,
 		/// 私有广告注册次数必须 > 0
 		ZeroPrivateAdCount,
 		/// Campaign ID 溢出
 		CampaignIdOverflow,
 		/// 过期时间无效 (必须晚于当前区块)
 		InvalidExpiry,
-		/// 质押不足
-		InsufficientStake,
+		/// 已举报过该广告位
+		AlreadyFlaggedPlacement,
+		/// Campaign 非 Paused 状态
+		CampaignNotPaused,
+		/// 广告主已拉黑该广告位
+		AdvertiserBlacklistedPlacement,
+		/// 广告位已拉黑该广告主
+		PlacementBlacklistedAdvertiser,
+		/// Campaign 尚未过期 (当前区块 <= expires_at)
+		CampaignNotExpired,
 	}
 
 	// ========================================================================
@@ -537,6 +557,10 @@ pub mod pallet {
 					Error::<T>::CampaignInactive
 				);
 
+				// H1: 阻止对已过期 Campaign 追加预算 — 资金无法用于投放
+				let now = frame_system::Pallet::<T>::block_number();
+				ensure!(now <= c.expires_at, Error::<T>::CampaignExpired);
+
 				T::Currency::reserve(&who, amount)?;
 				c.total_budget = c.total_budget.saturating_add(amount);
 				CampaignEscrow::<T>::mutate(campaign_id, |e| *e = e.saturating_add(amount));
@@ -615,8 +639,9 @@ pub mod pallet {
 
 			Campaigns::<T>::try_mutate(campaign_id, |maybe| {
 				let c = maybe.as_mut().ok_or(Error::<T>::CampaignNotFound)?;
+				// H2 审计修复: 允许 governance 重审已通过的 Campaign (原先只允许 Pending/Flagged)
 				ensure!(
-					c.review_status == AdReviewStatus::Pending || c.review_status == AdReviewStatus::Flagged,
+					c.review_status != AdReviewStatus::Rejected,
 					Error::<T>::AlreadyReviewed
 				);
 				c.review_status = if approved {
@@ -659,12 +684,27 @@ pub mod pallet {
 
 			ensure!(!BannedPlacements::<T>::get(&placement_id), Error::<T>::PlacementBanned);
 
+			// M2-R2: 执行双向黑名单检查
+			let advertiser_bl = AdvertiserBlacklist::<T>::get(&campaign.advertiser);
+			ensure!(
+				!advertiser_bl.contains(&placement_id),
+				Error::<T>::AdvertiserBlacklistedPlacement
+			);
+			let placement_bl = PlacementBlacklist::<T>::get(&placement_id);
+			ensure!(
+				!placement_bl.contains(&campaign.advertiser),
+				Error::<T>::PlacementBlacklistedAdvertiser
+			);
+
 			// 委托适配层验证 + 裁切 audience
 			let effective_audience = T::DeliveryVerifier::verify_and_cap_audience(
 				&who,
 				&placement_id,
 				audience_size,
-			).map_err(|_| Error::<T>::DeliveryVerificationFailed)?;
+			).map_err(|e| {
+				log::warn!("[ads-core] delivery verification failed: {:?}", e);
+				Error::<T>::DeliveryVerificationFailed
+			})?;
 
 			ensure!(
 				effective_audience >= T::MinAudienceSize::get(),
@@ -728,6 +768,7 @@ pub mod pallet {
 				if receipt.settled {
 					continue;
 				}
+				// M3: 对无法结算的收据记录警告，避免静默丢弃
 				if let Some(campaign) = Campaigns::<T>::get(receipt.campaign_id) {
 					let cost = Self::compute_cpm_cost(
 						campaign.bid_per_mille,
@@ -742,7 +783,17 @@ pub mod pallet {
 							actual_cost,
 							campaign.advertiser.clone(),
 						));
+					} else {
+						log::warn!(
+							"[ads-core] settle: campaign {} escrow exhausted, receipt skipped",
+							receipt.campaign_id,
+						);
 					}
+				} else {
+					log::warn!(
+						"[ads-core] settle: campaign {} not found, receipt skipped",
+						receipt.campaign_id,
+					);
 				}
 			}
 
@@ -754,18 +805,35 @@ pub mod pallet {
 					continue;
 				}
 
-				// 解锁 advertiser 的 reserve
-				T::Currency::unreserve(advertiser, adjusted_cost);
+				// C1 审计修复: 检查 unreserve 返回值，仅转移实际解锁的金额
+				let deficit = T::Currency::unreserve(advertiser, adjusted_cost);
+				let actually_unreserved = adjusted_cost.saturating_sub(deficit);
+				if actually_unreserved.is_zero() {
+					log::warn!(
+						"[ads-core] settle: campaign {} unreserve returned zero, skipping",
+						campaign_id,
+					);
+					continue;
+				}
 
-				// 全额转入国库
-				T::Currency::transfer(
+				// H1 审计修复: transfer 失败 skip 而非 abort，避免单个 campaign 阻塞整体结算
+				if T::Currency::transfer(
 					advertiser,
 					&treasury,
-					adjusted_cost,
+					actually_unreserved,
 					ExistenceRequirement::AllowDeath,
-				).map_err(|_| Error::<T>::SettlementTransferFailed)?;
+				).is_err() {
+					log::warn!(
+						"[ads-core] settle: campaign {} transfer failed, skipping",
+						campaign_id,
+					);
+					// 重新 reserve 已解锁的金额，避免资金泄露
+					let _ = T::Currency::reserve(advertiser, actually_unreserved);
+					continue;
+				}
+				let adjusted_cost = actually_unreserved;
 
-				// 委托适配层分配收入 (从国库分配给各方)
+				// 委托适配层分配收入 (从国库分配给各方, 使用实际转入金额)
 				let placement_share = T::RevenueDistributor::distribute(
 					&placement_id,
 					adjusted_cost,
@@ -801,7 +869,7 @@ pub mod pallet {
 
 			// 更新收入统计
 			if !total_cost.is_zero() {
-				EraAdRevenue::<T>::mutate(&placement_id, |r| *r = r.saturating_add(total_cost));
+				EraAdRevenue::<T>::insert(&placement_id, total_cost);
 				PlacementTotalRevenue::<T>::mutate(&placement_id, |r| *r = r.saturating_add(total_cost));
 
 				Self::deposit_event(Event::EraAdsSettled {
@@ -826,8 +894,10 @@ pub mod pallet {
 			Campaigns::<T>::try_mutate(campaign_id, |maybe| {
 				let c = maybe.as_mut().ok_or(Error::<T>::CampaignNotFound)?;
 				ensure!(c.status == CampaignStatus::Active, Error::<T>::CampaignNotActive);
+				// H2 审计修复: 仅允许 flag Pending 的 Campaign，
+				// 已 Approved 的 Campaign 不能被单个用户 griefing 停止投放
 				ensure!(
-					c.review_status == AdReviewStatus::Approved || c.review_status == AdReviewStatus::Pending,
+					c.review_status == AdReviewStatus::Pending,
 					Error::<T>::AlreadyReviewed
 				);
 				c.review_status = AdReviewStatus::Flagged;
@@ -1079,6 +1149,13 @@ pub mod pallet {
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 
+			// M1: 同一用户不可重复举报同一广告位
+			ensure!(
+				!PlacementFlaggedBy::<T>::get(&placement_id, &who),
+				Error::<T>::AlreadyFlaggedPlacement
+			);
+
+			PlacementFlaggedBy::<T>::insert(&placement_id, &who, true);
 			let count = PlacementFlagCount::<T>::get(&placement_id).saturating_add(1);
 			PlacementFlagCount::<T>::insert(&placement_id, count);
 
@@ -1117,6 +1194,69 @@ pub mod pallet {
 			}
 
 			let _ = reporter;
+			Ok(())
+		}
+
+		/// M1-R2: 恢复已暂停的广告活动
+		#[pallet::call_index(20)]
+		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		pub fn resume_campaign(
+			origin: OriginFor<T>,
+			campaign_id: u64,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			Campaigns::<T>::try_mutate(campaign_id, |maybe| {
+				let c = maybe.as_mut().ok_or(Error::<T>::CampaignNotFound)?;
+				ensure!(c.advertiser == who, Error::<T>::NotCampaignOwner);
+				ensure!(c.status == CampaignStatus::Paused, Error::<T>::CampaignNotPaused);
+
+				// 阻止恢复已过期的 Campaign
+				let now = frame_system::Pallet::<T>::block_number();
+				ensure!(now <= c.expires_at, Error::<T>::CampaignExpired);
+
+				c.status = CampaignStatus::Active;
+				Ok::<(), DispatchError>(())
+			})?;
+
+			Self::deposit_event(Event::CampaignResumed { campaign_id });
+			Ok(())
+		}
+
+		/// L-CORE4: 标记已过期的广告活动, 退还剩余预算 (任何人可调用)
+		#[pallet::call_index(21)]
+		#[pallet::weight(Weight::from_parts(50_000_000, 6_000))]
+		pub fn expire_campaign(
+			origin: OriginFor<T>,
+			campaign_id: u64,
+		) -> DispatchResult {
+			ensure_signed(origin)?;
+
+			let mut campaign = Campaigns::<T>::get(campaign_id)
+				.ok_or(Error::<T>::CampaignNotFound)?;
+
+			// 仅 Active / Paused / Exhausted 状态可过期
+			ensure!(
+				matches!(campaign.status, CampaignStatus::Active | CampaignStatus::Paused | CampaignStatus::Exhausted),
+				Error::<T>::CampaignInactive
+			);
+
+			// 必须已过期
+			let now = frame_system::Pallet::<T>::block_number();
+			ensure!(now > campaign.expires_at, Error::<T>::CampaignNotExpired);
+
+			// 退还剩余预算
+			let remaining = campaign.total_budget.saturating_sub(campaign.spent);
+			let mut refunded: BalanceOf<T> = Zero::zero();
+			if !remaining.is_zero() {
+				let deficit = T::Currency::unreserve(&campaign.advertiser, remaining);
+				refunded = remaining.saturating_sub(deficit);
+			}
+
+			campaign.status = CampaignStatus::Expired;
+			Campaigns::<T>::insert(campaign_id, campaign);
+
+			Self::deposit_event(Event::CampaignMarkedExpired { campaign_id, refunded });
 			Ok(())
 		}
 
@@ -1184,7 +1324,7 @@ pub mod pallet {
 			PlacementEraDeliveries::<T>::get(placement_id) > 0
 		}
 
-		fn community_ad_revenue(placement_id: &PlacementId) -> u128 {
+		fn placement_ad_revenue(placement_id: &PlacementId) -> u128 {
 			let revenue = PlacementTotalRevenue::<T>::get(placement_id);
 			revenue.try_into().unwrap_or(0u128)
 		}

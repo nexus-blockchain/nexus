@@ -99,6 +99,7 @@ process_level_diff(entity_id, buyer, order_amount, remaining)
 | 事件 | 说明 |
 |------|------|
 | `LevelDiffConfigUpdated` | 等级极差配置更新（extrinsic + trait 路径均触发） |
+| `LevelDiffConfigCleared` | 等级极差配置清除（trait 路径触发） |
 
 ## Errors
 
@@ -125,20 +126,46 @@ process_level_diff(entity_id, buyer, order_amount, remaining)
 | H2 | High | `set_level_diff_config` 允许空 `level_rates` — 写入无意义空配置。修复: 添加 `ensure!(!level_rates.is_empty(), EmptyLevelRates)` |
 | M1 | Medium | `LevelDiffPlanWriter::set_level_rates` trait 路径不发出事件 — governance 修改配置无链上通知。修复: 添加 `deposit_event(LevelDiffConfigUpdated)` |
 
-### 记录但未修复
+### Round 3 已修复
 
 | ID | 级别 | 描述 |
 |----|------|------|
-| H3 | High | `CommissionProvider::set_level_diff_config` trait 方法不传 `max_depth`，用 `level_rates.len() as u8` 作为 depth，与 extrinsic 行为不一致（设计决策：trait 路径 depth 自动推导合理） |
+| H1-R3 | High | `process_level_diff` / `process_level_diff_token` 不检查 `is_activated` — 已停用会员仍获得等级极差佣金（team pallet 已修复，level-diff 遗漏）。修复: 两个函数均添加 `is_activated` 检查，未激活成员跳过但消耗 depth |
+| M1-R3 | Medium | `clear_config` 不发出事件 — 与 team pallet `TeamPerformanceConfigCleared` 不一致。修复: 新增 `LevelDiffConfigCleared` 事件，`clear_config` 中发射 |
+| M2-R3 | Medium | `LevelDiffPlanWriter::set_level_rates` 不检查空 `level_rates` — extrinsic 有 `EmptyLevelRates` 校验但 trait 路径无此检查。修复: 添加 `ensure!(!level_rates.is_empty())` |
+| L1-R3 | Low | Cargo.toml 缺 `sp-runtime/runtime-benchmarks` 和 `sp-runtime/try-runtime` feature 传播。修复: 已添加 |
+
+### Round 4 已修复
+
+| ID | 级别 | 描述 |
+|----|------|------|
+| M1-R4 | Medium | `pallet-entity-common` 死依赖 — Cargo.toml 声明但 lib.rs 从未引用（与 referral L2-R2 同类）。修复: 移除 |
+| M2-R4 | Medium | `TokenCommissionPlugin` / `process_level_diff_token` 零测试覆盖 — 26 个测试全部只测 NEX 版。修复: 新增 4 个 Token 版测试 |
+| L1-R4 | Low | README "记录但未修复" 重复段落 + M4 遗漏。修复: 合并去重 |
+| L2-R4 | Low | pallet 模块内未使用的 `CommissionModes` 导入（编译器警告）。修复: 移除 |
+
+### 记录但未修复（历史）
+
+| ID | 级别 | 描述 |
+|----|------|------|
+| H3 | High | `CommissionProvider::set_level_diff_config` trait 方法不传 `max_depth`，用 `level_rates.len() as u8` 作为 depth（设计决策：trait 路径 depth 自动推导合理） |
 | M2 | Medium | `process_level_diff_token` 与 NEX 版完全重复（~50行维护风险） |
-| M3 | Medium | Extrinsic 权重硬编码 `Weight::from_parts(45_000_000, 4_000)`，无 WeightInfo trait |
+| M3 | Medium | Extrinsic 权重硬编码，无 WeightInfo trait |
 | M4 | Medium | `init_commission_plan` LevelDiff 启用了无用的 `DIRECT_REWARD` 位标志（referral config 已 clear） |
 | L1 | Low | 无等级率单调递增校验（无害但易误配） |
+
+## 版本历史
+
+| 版本 | 变更 |
+|------|------|
+| v0.1.0 | 初始实现 |
+| v0.2.0 | Round 1-2 审计修复 (H1 循环检测, H2 空 rates, M1 事件) |
+| v0.3.0 | Round 3 审计修复 (H1-R3 is_activated, M1-R3 clear 事件, M2-R3 trait 空检查, L1-R3 Cargo features) — 26 tests |
+| v0.4.0 | Round 4 审计修复 (M1-R4 死依赖, M2-R4 Token 测试, L1-R4 README, L2-R4 unused import) — 30 tests |
 
 ## 依赖
 
 ```toml
 [dependencies]
-pallet-entity-common = { path = "../../common" }
 pallet-commission-common = { path = "../common" }
 ```

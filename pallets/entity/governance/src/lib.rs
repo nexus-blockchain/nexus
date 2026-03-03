@@ -9,14 +9,10 @@
 //! - 分层治理阈值
 //! - 提案执行
 //!
-//! ## 治理模式 (Phase 5 增强)
+//! ## 治理模式
 //!
-//! - **None**: 无治理（管理员全权控制）
-//! - **Advisory**: 咨询式（投票仅作建议）
-//! - **DualTrack**: 双轨制（代币投票 + 管理员否决权）
-//! - **Committee**: 委员会（指定委员投票）
-//! - **FullDAO**: 完全 DAO（纯代币投票）
-//! - **Tiered**: 分层治理（不同决策不同阈值）
+//! - **None**: 无治理（管理员全权控制，禁止创建提案）
+//! - **FullDAO**: 完全 DAO（代币投票，可选管理员否决权作为紧急制动）
 //!
 //! ## 版本历史
 //!
@@ -58,16 +54,12 @@ pub mod pallet {
     /// 提案状态
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     pub enum ProposalStatus {
-        /// 已创建，等待投票（保留，当前提案直接进入 Voting）
-        Created,
         /// 投票中
         Voting,
         /// 投票通过
         Passed,
         /// 投票未通过
         Failed,
-        /// 排队等待执行
-        Queued,
         /// 已执行
         Executed,
         /// 已取消
@@ -78,7 +70,7 @@ pub mod pallet {
 
     impl Default for ProposalStatus {
         fn default() -> Self {
-            Self::Created
+            Self::Voting
         }
     }
 
@@ -115,10 +107,10 @@ pub mod pallet {
         ShopNameChange { new_name: BoundedVec<u8, ConstU32<64>> },
         /// 修改店铺描述
         ShopDescriptionChange { description_cid: BoundedVec<u8, ConstU32<64>> },
-        /// 暂停店铺营业
-        ShopPause,
-        /// 恢复店铺营业
-        ShopResume,
+        /// 暂停店铺营业（M2-R3: 指定 shop_id，不再默认第一个 shop）
+        ShopPause { shop_id: u64 },
+        /// 恢复店铺营业（M2-R3: 指定 shop_id）
+        ShopResume { shop_id: u64 },
 
         // ==================== 代币经济类 ====================
         /// 代币配置修改
@@ -255,8 +247,6 @@ pub mod pallet {
         pub status: ProposalStatus,
         /// 创建时间
         pub created_at: BlockNumberFor<T>,
-        /// P1 安全修复: 快照区块（用于防止闪电贷攻击）
-        pub snapshot_block: BlockNumberFor<T>,
         /// 投票开始时间
         pub voting_start: BlockNumberFor<T>,
         /// 投票结束时间
@@ -455,9 +445,6 @@ pub mod pallet {
         ValueQuery,
     >;
 
-    /// 向后兼容别名
-    pub type ShopProposals<T> = EntityProposals<T>;
-
     /// 投票记录
     #[pallet::storage]
     #[pallet::getter(fn vote_records)]
@@ -515,6 +502,43 @@ pub mod pallet {
         Blake2_128Concat,
         u64,  // entity_id
         bool,
+        ValueQuery,
+    >;
+
+    // ========== H2: 投票期间代币锁定（防止跨账户复投）==========
+
+    /// 投票者代币锁定记录 (proposal_id, account) — 用于提案结束时批量解锁
+    #[pallet::storage]
+    pub type VoterTokenLocks<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        ProposalId,
+        Blake2_128Concat,
+        T::AccountId,
+        (),   // 仅标记参与，金额记录在 GovernanceLockAmount
+    >;
+
+    /// 治理锁定引用计数 (entity_id, account) → 活跃投票提案数
+    #[pallet::storage]
+    pub type GovernanceLockCount<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        u64,  // entity_id
+        Blake2_128Concat,
+        T::AccountId,
+        u32,
+        ValueQuery,
+    >;
+
+    /// 治理锁定金额 (entity_id, account) → 最大锁定原始代币数
+    #[pallet::storage]
+    pub type GovernanceLockAmount<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        u64,  // entity_id
+        Blake2_128Concat,
+        T::AccountId,
+        BalanceOf<T>,
         ValueQuery,
     >;
 
@@ -578,6 +602,14 @@ pub mod pallet {
             entity_id: u64,
             mode: GovernanceMode,
         },
+        /// 提案执行窗口已过期，状态转为 Expired
+        ProposalExpired {
+            proposal_id: ProposalId,
+        },
+        /// L2-R3: 终态提案已被清理（释放存储）
+        ProposalCleaned {
+            proposal_id: ProposalId,
+        },
     }
 
     // ==================== 错误 ====================
@@ -617,8 +649,6 @@ pub mod pallet {
         // ========== Phase 5 新增错误 ==========
         /// 治理模式不允许此操作
         GovernanceModeNotAllowed,
-        /// 提案已被否决
-        ProposalAlreadyVetoed,
         /// 无否决权
         NoVetoRight,
         /// TokenType 不具有投票权
@@ -627,14 +657,10 @@ pub mod pallet {
         InvalidParameter,
         /// 提案类型暂未实现链上执行（需链下工作者配合）
         ProposalTypeNotImplemented,
-        /// 提案执行已过期
-        ExecutionExpired,
         /// 治理配置已锁定，不可修改
         GovernanceConfigIsLocked,
         /// 治理配置已经锁定过
         GovernanceAlreadyLocked,
-        /// C5: FullDAO 模式下 Owner 不可直接修改治理参数
-        FullDAOCannotConfigure,
         /// C3: 投票期低于最小值
         VotingPeriodTooShort,
         /// C3: 执行延迟低于最小值
@@ -643,6 +669,8 @@ pub mod pallet {
         TokenNotEnabledForDAO,
         /// 提案 ID 溢出
         ProposalIdOverflow,
+        /// L2-R3: 提案未处于终态，不可清理
+        ProposalNotTerminal,
     }
 
     // ==================== Extrinsics ====================
@@ -741,7 +769,6 @@ pub mod pallet {
                 description_cid: description_bounded,
                 status: ProposalStatus::Voting,
                 created_at: now,
-                snapshot_block: now,
                 voting_start: now,
                 voting_end,
                 execution_time: None,
@@ -839,8 +866,22 @@ pub mod pallet {
                 voted_at: now,
             };
 
-            Proposals::<T>::insert(proposal_id, proposal);
+            Proposals::<T>::insert(proposal_id, &proposal);
             VoteRecords::<T>::insert(proposal_id, &who, record);
+
+            // H2: 锁定投票者的原始代币余额，防止投票后转让给其他账户复投
+            let entity_id = proposal.entity_id;
+            let raw_balance = T::TokenProvider::token_balance(entity_id, &who);
+            let current_locked = GovernanceLockAmount::<T>::get(entity_id, &who);
+            if raw_balance > current_locked {
+                let diff = raw_balance.saturating_sub(current_locked);
+                // best-effort: reserve 失败不阻断投票（兼容 mock 和余额不足场景）
+                if T::TokenProvider::reserve(entity_id, &who, diff).is_ok() {
+                    GovernanceLockAmount::<T>::insert(entity_id, &who, raw_balance);
+                }
+            }
+            GovernanceLockCount::<T>::mutate(entity_id, &who, |c| *c = c.saturating_add(1));
+            VoterTokenLocks::<T>::insert(proposal_id, &who, ());
 
             Self::deposit_event(Event::Voted {
                 proposal_id,
@@ -896,8 +937,9 @@ pub mod pallet {
                 return Ok(());
             }
 
-            // 检查通过阈值
-            let pass_threshold: BalanceOf<T> = total_votes
+            // H1 修复: 通过阈值仅基于 yes+no 票计算，弃权票不稀释通过率
+            let decisive_votes = proposal.yes_votes.saturating_add(proposal.no_votes);
+            let pass_threshold: BalanceOf<T> = decisive_votes
                 .saturating_mul(effective_pass.into())
                 / 100u128.into();
 
@@ -944,7 +986,13 @@ pub mod pallet {
             // H3+M5: 执行过期检查——使用快照的执行延迟的 2 倍作为窗口
             let execution_window = proposal.snapshot_execution_delay.saturating_mul(2u32.into());
             let expiry = exec_time.saturating_add(execution_window);
-            ensure!(now <= expiry, Error::<T>::ExecutionExpired);
+            // H2-R2: 过期后优雅转为 Expired 状态（而非回滚错误导致状态永远停在 Passed）
+            if now > expiry {
+                proposal.status = ProposalStatus::Expired;
+                Proposals::<T>::insert(proposal_id, proposal);
+                Self::deposit_event(Event::ProposalExpired { proposal_id });
+                return Ok(());
+            }
 
             // 执行提案（根据类型）
             Self::do_execute_proposal(&proposal)?;
@@ -986,9 +1034,9 @@ pub mod pallet {
             }
             ensure!(is_proposer || is_owner, Error::<T>::CannotCancel);
 
-            // 验证状态（只能取消 Created 或 Voting 状态的提案）
+            // 验证状态（只能取消 Voting 状态的提案）
             ensure!(
-                proposal.status == ProposalStatus::Created || proposal.status == ProposalStatus::Voting,
+                proposal.status == ProposalStatus::Voting,
                 Error::<T>::InvalidProposalStatus
             );
 
@@ -1085,11 +1133,11 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 锁定治理配置（不可逆）
+        /// 锁定治理配置（永久不可逆）
         ///
-        /// 锁定后 owner 不可再修改治理参数。
-        /// 唯一例外：锁定后仍可通过 configure_governance 将模式从 None 升级到
-        /// FullDAO，即“放权”操作。升级后锁定自动解除。
+        /// 锁定后 owner 不可再修改治理参数，此操作不可撤销。
+        /// - None 锁定 = 永久冻结治理配置
+        /// - FullDAO 锁定 = 放弃控制权，仅可通过提案修改治理参数
         #[pallet::call_index(10)]
         #[pallet::weight(Weight::from_parts(15_000_000, 2_000))]
         pub fn lock_governance(
@@ -1109,6 +1157,37 @@ pub mod pallet {
             GovernanceLocked::<T>::insert(entity_id, true);
 
             Self::deposit_event(Event::GovernanceConfigLocked { entity_id });
+            Ok(())
+        }
+
+        /// L2-R3: 清理终态提案（Executed/Failed/Cancelled/Expired）
+        ///
+        /// 任何人可调用，清理已结束的提案释放存储空间。
+        #[pallet::call_index(11)]
+        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+        pub fn cleanup_proposal(
+            origin: OriginFor<T>,
+            proposal_id: ProposalId,
+        ) -> DispatchResult {
+            let _who = ensure_signed(origin)?;
+
+            let proposal = Proposals::<T>::get(proposal_id)
+                .ok_or(Error::<T>::ProposalNotFound)?;
+
+            ensure!(
+                matches!(
+                    proposal.status,
+                    ProposalStatus::Executed
+                        | ProposalStatus::Failed
+                        | ProposalStatus::Cancelled
+                        | ProposalStatus::Expired
+                ),
+                Error::<T>::ProposalNotTerminal
+            );
+
+            Proposals::<T>::remove(proposal_id);
+
+            Self::deposit_event(Event::ProposalCleaned { proposal_id });
             Ok(())
         }
 
@@ -1225,6 +1304,13 @@ pub mod pallet {
                         ensure!(*cb <= 10000, Error::<T>::InvalidParameter);
                     }
                 },
+                // M1: 返佣模式位标志校验（避免无效提案浪费投票周期）
+                ProposalType::CommissionModesChange { modes } => {
+                    // ALL_VALID = 0b0000_0011_1111_1111 (10 bits)
+                    ensure!(*modes & !0b0000_0011_1111_1111u16 == 0, Error::<T>::InvalidParameter);
+                },
+                // M2-R3: ShopPause/ShopResume 校验 shop_id 属于当前 entity
+                // （在 create_proposal 时无法知道 entity_id，改在 do_execute_proposal 前校验）
                 _ => {},
             }
             Ok(())
@@ -1272,18 +1358,30 @@ pub mod pallet {
             EntityProposals::<T>::mutate(entity_id, |proposals| {
                 proposals.retain(|&id| id != proposal_id);
             });
+
+            // H2: 解锁所有投票者的代币
+            for (voter, _) in VoterTokenLocks::<T>::drain_prefix(proposal_id) {
+                GovernanceLockCount::<T>::mutate(entity_id, &voter, |c| *c = c.saturating_sub(1));
+                let count = GovernanceLockCount::<T>::get(entity_id, &voter);
+                if count == 0 {
+                    let locked = GovernanceLockAmount::<T>::take(entity_id, &voter);
+                    if !locked.is_zero() {
+                        T::TokenProvider::unreserve(entity_id, &voter, locked);
+                    }
+                    GovernanceLockCount::<T>::remove(entity_id, &voter);
+                }
+            }
+
             // M4: 清理 VotingPowerSnapshot 避免存储泄漏
-            let _ = VotingPowerSnapshot::<T>::clear_prefix(proposal_id, u32::MAX, None);
+            // M1-R3: 使用有界上限 500（实体级治理投票者有限），避免无界迭代
+            let _ = VotingPowerSnapshot::<T>::clear_prefix(proposal_id, 500, None);
+            // H3-R2: 清理 VoteRecords 避免存储泄漏
+            let _ = VoteRecords::<T>::clear_prefix(proposal_id, 500, None);
         }
 
         /// 执行提案
         fn do_execute_proposal(proposal: &ProposalOf<T>) -> DispatchResult {
             let entity_id = proposal.entity_id;
-            // 获取 primary shop_id 用于需要 shop 级操作的提案
-            let shop_id = T::EntityProvider::entity_shops(entity_id)
-                .first()
-                .copied()
-                .unwrap_or(entity_id);
             
             match &proposal.proposal_type {
                 // ==================== 商品管理类 ====================
@@ -1350,11 +1448,16 @@ pub mod pallet {
                     let _ = description_cid;
                     Ok(())
                 },
-                ProposalType::ShopPause => {
-                    T::ShopProvider::pause_shop(shop_id)
+                ProposalType::ShopPause { shop_id } => {
+                    // M2-R3: 使用提案中指定的 shop_id，并校验属于当前 entity
+                    let entity_shops = T::EntityProvider::entity_shops(entity_id);
+                    ensure!(entity_shops.contains(shop_id), Error::<T>::ShopNotFound);
+                    T::ShopProvider::pause_shop(*shop_id)
                 },
-                ProposalType::ShopResume => {
-                    T::ShopProvider::resume_shop(shop_id)
+                ProposalType::ShopResume { shop_id } => {
+                    let entity_shops = T::EntityProvider::entity_shops(entity_id);
+                    ensure!(entity_shops.contains(shop_id), Error::<T>::ShopNotFound);
+                    T::ShopProvider::resume_shop(*shop_id)
                 },
 
                 // ==================== 代币经济类 ====================

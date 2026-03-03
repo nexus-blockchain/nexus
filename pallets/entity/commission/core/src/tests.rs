@@ -959,7 +959,7 @@ fn token_withdraw_rejects_when_entity_balance_insufficient() {
         inject_token_pending(ENTITY_ID, REFERRER, 10_000);
         set_token_balance(ENTITY_ID, ea, 5_000); // 不足
 
-        // 新版 withdraw_token_commission 先做偿付能力检查，5000 < 10000 → InsufficientTokenCommission
+        // M2 审计修复: 偿付能力不足使用专用错误码 InsufficientEntityTokenFunds
         assert_noop!(
             CommissionCore::withdraw_token_commission(
                 RuntimeOrigin::signed(REFERRER),
@@ -968,7 +968,7 @@ fn token_withdraw_rejects_when_entity_balance_insufficient() {
                 None,
                 None,
             ),
-            Error::<Test>::InsufficientTokenCommission
+            Error::<Test>::InsufficientEntityTokenFunds
         );
 
         // stats 不应变化（try_mutate 回滚）
@@ -2818,6 +2818,172 @@ fn p3_credit_token_commission_writes_token_last_credited() {
         assert_eq!(
             crate::pallet::MemberLastCredited::<Test>::get(ENTITY_ID, REFERRER),
             0u64
+        );
+    });
+}
+
+// ============================================================================
+// Round 4 审计回归测试
+// ============================================================================
+
+#[test]
+fn m1_set_global_min_token_repurchase_rate_emits_event() {
+    // M1: set_global_min_token_repurchase_rate 应发射 GlobalMinTokenRepurchaseRateSet 事件
+    new_test_ext().execute_with(|| {
+        assert_ok!(CommissionCore::set_global_min_token_repurchase_rate(
+            RuntimeOrigin::root(), ENTITY_ID, 2500,
+        ));
+        System::assert_has_event(RuntimeEvent::CommissionCore(
+            crate::pallet::Event::GlobalMinTokenRepurchaseRateSet {
+                entity_id: ENTITY_ID,
+                rate: 2500,
+            },
+        ));
+    });
+}
+
+#[test]
+fn l5_set_min_repurchase_rate_via_trait_emits_event() {
+    // L5: CommissionProvider::set_min_repurchase_rate 应发射 GlobalMinRepurchaseRateSet 事件
+    use pallet_commission_common::CommissionProvider;
+    new_test_ext().execute_with(|| {
+        assert_ok!(<CommissionCore as CommissionProvider<u64, u128>>::set_min_repurchase_rate(
+            ENTITY_ID, 3000,
+        ));
+        assert_eq!(GlobalMinRepurchaseRate::<Test>::get(ENTITY_ID), 3000);
+        System::assert_has_event(RuntimeEvent::CommissionCore(
+            crate::pallet::Event::GlobalMinRepurchaseRateSet {
+                entity_id: ENTITY_ID,
+                rate: 3000,
+            },
+        ));
+    });
+}
+
+#[test]
+fn m2_withdraw_commission_solvency_uses_entity_funds_error() {
+    // M2: Entity 偿付能力不足应返回 InsufficientEntityFunds（而非 InsufficientCommission）
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        // entity_account 余额极低，不足以覆盖提现 + 剩余承诺
+        fund(ea, 100);
+        // 注入大量 pending 佣金
+        MemberCommissionStats::<Test>::mutate(ENTITY_ID, &REFERRER, |stats| {
+            stats.total_earned = 50_000;
+            stats.pending = 50_000;
+        });
+        ShopPendingTotal::<Test>::insert(ENTITY_ID, 50_000u128);
+
+        CommissionConfigs::<Test>::insert(ENTITY_ID, CoreCommissionConfig {
+            enabled_modes: CommissionModes(CommissionModes::DIRECT_REWARD),
+            max_commission_rate: 10000,
+            enabled: true,
+            withdrawal_cooldown: 0,
+        });
+
+        // pending 足够（50000 >= 1000），但 entity 余额不足
+        assert_noop!(
+            CommissionCore::withdraw_commission(
+                RuntimeOrigin::signed(REFERRER),
+                ENTITY_ID,
+                Some(1_000),
+                None,
+                None,
+            ),
+            Error::<Test>::InsufficientEntityFunds
+        );
+    });
+}
+
+#[test]
+fn m2_withdraw_token_commission_solvency_uses_entity_token_funds_error() {
+    // M2: Token Entity 偿付能力不足应返回 InsufficientEntityTokenFunds
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        // entity_account Token 余额极低
+        set_token_balance(ENTITY_ID, ea, 10);
+        inject_token_pending(ENTITY_ID, REFERRER, 50_000);
+
+        assert_noop!(
+            CommissionCore::withdraw_token_commission(
+                RuntimeOrigin::signed(REFERRER),
+                ENTITY_ID,
+                Some(1_000),
+                None,
+                None,
+            ),
+            Error::<Test>::InsufficientEntityTokenFunds
+        );
+    });
+}
+
+#[test]
+fn m3_cancel_commission_still_cancels_token_records() {
+    // M3: 重构后 cancel_commission 仍能正确取消 Token 记录（通过 do_cancel_token_commission）
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        fund(PLATFORM, 1_000_000);
+        fund(ea, 1);
+        set_entity_referrer(ENTITY_ID, REFERRER);
+        setup_config(10000);
+        set_token_balance(ENTITY_ID, ea, 100_000);
+
+        // 产生 NEX 佣金
+        assert_ok!(CommissionCore::process_commission(
+            ENTITY_ID, SHOP_ID, 8001, &BUYER, 100_000, 100_000, 10_000,
+        ));
+
+        // 注入 Token 佣金记录到同一 order_id
+        inject_token_pending(ENTITY_ID, REFERRER, 5_000);
+        let record = pallet_commission_common::TokenCommissionRecord {
+            entity_id: ENTITY_ID,
+            order_id: 8001,
+            buyer: BUYER,
+            beneficiary: REFERRER,
+            amount: 5_000u128,
+            commission_type: CommissionType::DirectReward,
+            level: 0,
+            status: pallet_commission_common::CommissionStatus::Pending,
+            created_at: 1u64,
+        };
+        OrderTokenCommissionRecords::<Test>::mutate(8001u64, |records| {
+            let _ = records.try_push(record);
+        });
+
+        assert_ok!(CommissionCore::cancel_commission(8001));
+
+        // Token 记录应被取消
+        let token_records = OrderTokenCommissionRecords::<Test>::get(8001u64);
+        assert_eq!(token_records[0].status, pallet_commission_common::CommissionStatus::Cancelled);
+        let token_stats = MemberTokenCommissionStats::<Test>::get(ENTITY_ID, REFERRER);
+        assert_eq!(token_stats.pending, 0);
+
+        // TokenCommissionCancelled 事件应被发射
+        System::assert_has_event(RuntimeEvent::CommissionCore(
+            crate::pallet::Event::TokenCommissionCancelled {
+                order_id: 8001,
+                cancelled_count: 1,
+            },
+        ));
+    });
+}
+
+#[test]
+fn m4_trait_set_commission_modes_uses_is_valid() {
+    // M4: CommissionProvider::set_commission_modes 应拒绝含未知位的模式
+    use pallet_commission_common::CommissionProvider;
+    new_test_ext().execute_with(|| {
+        // 有效模式: DIRECT_REWARD | POOL_REWARD = 0b10_0000_0001 = 513
+        assert_ok!(<CommissionCore as CommissionProvider<u64, u128>>::set_commission_modes(
+            ENTITY_ID, 513,
+        ));
+
+        // 无效模式: 设置一个超出 ALL_VALID 的高位 (bit 11 = 2048)
+        assert_noop!(
+            <CommissionCore as CommissionProvider<u64, u128>>::set_commission_modes(
+                ENTITY_ID, 2048,
+            ),
+            sp_runtime::DispatchError::Other("InvalidModes")
         );
     });
 }

@@ -92,7 +92,7 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
         Ok(())
     }
 
-    fn is_entity_admin(entity_id: u64, account: &u64) -> bool {
+    fn is_entity_admin(entity_id: u64, account: &u64, _required_permission: u32) -> bool {
         entity_id == ENTITY_1 && *account == ADMIN
     }
 }
@@ -178,6 +178,7 @@ impl pallet_entity_member::Config for Test {
     type MaxCustomLevels = ConstU32<10>;
     type MaxUpgradeRules = ConstU32<10>;
     type MaxUpgradeHistory = ConstU32<50>;
+    type PendingMemberExpiry = ConstU64<100>; // 100 blocks for testing
 }
 
 // ============================================================================

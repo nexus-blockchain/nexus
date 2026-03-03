@@ -79,6 +79,11 @@ pub mod pallet {
         #[pallet::constant]
         type MaxReviewsPerUser: Get<u32>;
 
+        /// 评价时间窗口（区块数），订单完成后超过此区块数则不可评价
+        /// 设为 0 表示不限制
+        #[pallet::constant]
+        type ReviewWindowBlocks: Get<u64>;
+
         /// 权重信息
         type WeightInfo: WeightInfo;
     }
@@ -168,6 +173,12 @@ pub mod pallet {
         EntityNotFound,
         /// Entity 未激活
         EntityNotActive,
+        /// 订单处于争议状态
+        OrderDisputed,
+        /// 评价计数溢出
+        ReviewCountOverflow,
+        /// 评价时间窗口已过期
+        ReviewWindowExpired,
     }
 
     // ==================== Extrinsics ====================
@@ -192,14 +203,31 @@ pub mod pallet {
             let buyer = T::OrderProvider::order_buyer(order_id).ok_or(Error::<T>::OrderNotFound)?;
             ensure!(buyer == who, Error::<T>::NotOrderBuyer);
             ensure!(T::OrderProvider::is_order_completed(order_id), Error::<T>::OrderNotCompleted);
+            ensure!(!T::OrderProvider::is_order_disputed(order_id), Error::<T>::OrderDisputed);
             ensure!(!Reviews::<T>::contains_key(order_id), Error::<T>::AlreadyReviewed);
 
-            // 检查 Entity 是否关闭了评价功能
-            let shop_id_for_gate = T::OrderProvider::order_shop_id(order_id);
-            if let Some(sid) = shop_id_for_gate {
-                if let Some(eid) = T::ShopProvider::shop_entity_id(sid) {
-                    ensure!(!EntityReviewDisabled::<T>::contains_key(eid), Error::<T>::ReviewsDisabledForEntity);
+            // 评价时间窗口检查
+            let window = T::ReviewWindowBlocks::get();
+            if window > 0 {
+                if let Some(completed_at) = T::OrderProvider::order_completed_at(order_id) {
+                    let now_u64: u64 = <frame_system::Pallet<T>>::block_number()
+                        .try_into().unwrap_or(u64::MAX);
+                    ensure!(
+                        now_u64.saturating_sub(completed_at) <= window,
+                        Error::<T>::ReviewWindowExpired
+                    );
                 }
+            }
+
+            // M2-R6: 统一获取 shop_id，避免重复调用 order_shop_id
+            let shop_id = T::OrderProvider::order_shop_id(order_id);
+
+            // M1-R7: 统一获取 entity_id，避免重复调用 shop_entity_id
+            let entity_id = shop_id.and_then(|sid| T::ShopProvider::shop_entity_id(sid));
+
+            // 检查 Entity 是否关闭了评价功能
+            if let Some(eid) = entity_id {
+                ensure!(!EntityReviewDisabled::<T>::contains_key(eid), Error::<T>::ReviewsDisabledForEntity);
             }
 
             // 转换 CID
@@ -226,14 +254,26 @@ pub mod pallet {
             })?;
 
             Reviews::<T>::insert(order_id, review);
-            ReviewCount::<T>::mutate(|c| *c = c.saturating_add(1));
+            ReviewCount::<T>::try_mutate(|c| {
+                *c = c.checked_add(1).ok_or(Error::<T>::ReviewCountOverflow)?;
+                Ok::<(), Error<T>>(())
+            })?;
 
-            // H1: 更新店铺评分（best-effort，失败不回滚评价）
-            let shop_id = T::OrderProvider::order_shop_id(order_id);
+            // 更新店铺评分（best-effort，失败不回滚评价）
             if let Some(sid) = shop_id {
                 match T::ShopProvider::update_shop_rating(sid, rating) {
                     Ok(_) => {
-                        ShopReviewCount::<T>::mutate(sid, |c| *c = c.saturating_add(1));
+                        // M1-R7: ShopReviewCount 溢出也 best-effort，不阻塞评价
+                        ShopReviewCount::<T>::mutate(sid, |c| {
+                            if let Some(new_val) = c.checked_add(1) {
+                                *c = new_val;
+                            } else {
+                                log::warn!(
+                                    "ShopReviewCount overflow for shop {}, count stuck at {}",
+                                    sid, *c
+                                );
+                            }
+                        });
                     },
                     Err(e) => {
                         log::warn!(
@@ -245,6 +285,16 @@ pub mod pallet {
                             shop_id: sid,
                         });
                     },
+                }
+
+                // Entity 级别评分更新（best-effort）
+                if let Some(eid) = entity_id {
+                    if let Err(e) = T::EntityProvider::update_entity_rating(eid, rating) {
+                        log::warn!(
+                            "update_entity_rating failed for entity {} order {}: {:?}",
+                            eid, order_id, e
+                        );
+                    }
                 }
             }
 
@@ -270,15 +320,21 @@ pub mod pallet {
 
             ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
             ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
-            ensure!(T::EntityProvider::is_entity_admin(entity_id, &who), Error::<T>::NotEntityAdmin);
+            ensure!(T::EntityProvider::is_entity_admin(entity_id, &who, pallet_entity_common::AdminPermission::REVIEW_MANAGE), Error::<T>::NotEntityAdmin);
 
-            if enabled {
-                EntityReviewDisabled::<T>::remove(entity_id);
-            } else {
-                EntityReviewDisabled::<T>::insert(entity_id, ());
+            let currently_disabled = EntityReviewDisabled::<T>::contains_key(entity_id);
+            let want_disabled = !enabled;
+
+            // H2: 仅在状态实际变更时写入存储和发射事件
+            if currently_disabled != want_disabled {
+                if enabled {
+                    EntityReviewDisabled::<T>::remove(entity_id);
+                } else {
+                    EntityReviewDisabled::<T>::insert(entity_id, ());
+                }
+
+                Self::deposit_event(Event::ReviewConfigUpdated { entity_id, enabled });
             }
-
-            Self::deposit_event(Event::ReviewConfigUpdated { entity_id, enabled });
 
             Ok(())
         }

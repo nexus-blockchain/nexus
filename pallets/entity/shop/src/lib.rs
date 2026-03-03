@@ -343,6 +343,8 @@ pub mod pallet {
         EmptyCid,
         /// 充值金额为零
         ZeroFundAmount,
+        /// 积分名称不能为空
+        PointsNameEmpty,
     }
 
     // ========================================================================
@@ -404,6 +406,12 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             
+            // L1-R3: 至少需要修改一个字段
+            ensure!(
+                name.is_some() || logo_cid.is_some() || description_cid.is_some(),
+                Error::<T>::InvalidConfig
+            );
+
             Shops::<T>::try_mutate(shop_id, |maybe_shop| -> DispatchResult {
                 let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
                 
@@ -651,8 +659,8 @@ pub mod pallet {
             // 检查是否已启用
             ensure!(!ShopPointsConfigs::<T>::contains_key(shop_id), Error::<T>::PointsAlreadyEnabled);
             
-            // M1: 积分名称和符号不能为空
-            ensure!(!name.is_empty(), Error::<T>::ShopNameEmpty);
+            // L2: 积分名称和符号不能为空（使用专用错误码）
+            ensure!(!name.is_empty(), Error::<T>::PointsNameEmpty);
             ensure!(!symbol.is_empty(), Error::<T>::InvalidConfig);
 
             // 验证配置
@@ -700,6 +708,9 @@ pub mod pallet {
                 
                 // M4: 注销 Entity-Shop 关联
                 T::EntityProvider::unregister_shop(shop.entity_id, shop_id)?;
+
+                // M1-fix: 清理 ShopEntity 反向索引
+                ShopEntity::<T>::remove(shop_id);
 
                 // M3: 清理积分数据
                 ShopPointsConfigs::<T>::remove(shop_id);
@@ -763,6 +774,12 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
+            // L2-R3: 至少需要修改一个字段
+            ensure!(
+                reward_rate.is_some() || exchange_rate.is_some() || transferable.is_some(),
+                Error::<T>::InvalidConfig
+            );
+
             let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
             ensure!(Self::can_manage_shop(&shop, &who), Error::<T>::NotAuthorized);
             ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
@@ -782,6 +799,7 @@ pub mod pallet {
                     config.transferable = t;
                 }
 
+                Self::deposit_event(Event::ShopUpdated { shop_id });
                 Ok(())
             })
         }
@@ -901,8 +919,8 @@ pub mod pallet {
                     return true;
                 }
             }
-            // Entity admin 继承 Shop 管理权限
-            if T::EntityProvider::is_entity_admin(shop.entity_id, account) {
+            // Entity admin 继承 Shop 管理权限（需 SHOP_MANAGE 权限）
+            if T::EntityProvider::is_entity_admin(shop.entity_id, account, pallet_entity_common::AdminPermission::SHOP_MANAGE) {
                 return true;
             }
             // Shop manager 有权限
@@ -1001,7 +1019,7 @@ pub mod pallet {
 
             Shops::<T>::insert(shop_id, shop);
             ShopEntity::<T>::insert(shop_id, entity_id);
-            NextShopId::<T>::put(shop_id.saturating_add(1));
+            NextShopId::<T>::put(shop_id + 1);
 
             // 回写 Entity 的 shop_ids（维护双向一致性）
             T::EntityProvider::register_shop(entity_id, shop_id)?;
@@ -1090,15 +1108,14 @@ pub mod pallet {
         }
 
         fn update_shop_stats(shop_id: u64, sales_amount: u128, order_count: u32) -> Result<(), DispatchError> {
-            let entity_id = ShopEntity::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-
-            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> Result<(), DispatchError> {
+            // M2-R3: 从 shop struct 获取 entity_id，避免冗余 ShopEntity 存储读
+            let entity_id = Shops::<T>::try_mutate(shop_id, |maybe_shop| -> Result<u64, DispatchError> {
                 let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
                 shop.total_sales = shop.total_sales.saturating_add(
                     sales_amount.saturated_into()
                 );
                 shop.total_orders = shop.total_orders.saturating_add(order_count);
-                Ok(())
+                Ok(shop.entity_id)
             })?;
 
             // 级联更新 Entity 统计
@@ -1136,13 +1153,14 @@ pub mod pallet {
             let available = balance.saturating_sub(protected);
             ensure!(available >= amount_balance, Error::<T>::InsufficientOperatingFund);
             
-            // 扣减运营资金 → 转给 Entity 账户（非销毁）
+            // H3-fix: 扣减运营资金 → 转给 Entity 账户
+            // 使用 AllowDeath 以允许完全耗尽（KeepAlive 会阻止余额低于 ED，与 FundDepleted 逻辑冲突）
             let entity_account = T::EntityProvider::entity_account(shop.entity_id);
             T::Currency::transfer(
                 &shop_account,
                 &entity_account,
                 amount_balance,
-                ExistenceRequirement::KeepAlive,
+                ExistenceRequirement::AllowDeath,
             )?;
             
             let new_balance = T::Currency::free_balance(&shop_account);
@@ -1207,6 +1225,10 @@ pub mod pallet {
             Shops::<T>::try_mutate(shop_id, |maybe_shop| -> Result<(), DispatchError> {
                 let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
                 ensure!(shop.status.can_resume(), Error::<T>::ShopNotPaused);
+                // M2-fix: trait 版 resume_shop 也检查运营资金（与 extrinsic 一致）
+                let shop_account = Self::shop_account_id(shop_id);
+                let balance = T::Currency::free_balance(&shop_account);
+                ensure!(balance >= T::MinOperatingBalance::get(), Error::<T>::InsufficientOperatingFund);
                 shop.status = ShopOperatingStatus::Active;
                 Self::deposit_event(Event::ShopResumed { shop_id });
                 Ok(())
@@ -1216,10 +1238,15 @@ pub mod pallet {
         fn force_close_shop(shop_id: u64) -> Result<(), DispatchError> {
             Shops::<T>::try_mutate(shop_id, |maybe_shop| -> Result<(), DispatchError> {
                 let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+                // M1-R3: 防止重复关闭发射重复事件
+                ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
                 shop.status = ShopOperatingStatus::Closed;
 
                 // H4: 注销 Entity-Shop 关联（与 close_shop extrinsic 保持一致）
                 let _ = T::EntityProvider::unregister_shop(shop.entity_id, shop_id);
+
+                // M1-fix: 清理 ShopEntity 反向索引
+                ShopEntity::<T>::remove(shop_id);
 
                 // M3: 清理积分数据
                 ShopPointsConfigs::<T>::remove(shop_id);

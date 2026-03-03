@@ -504,3 +504,63 @@ fn plan_writer_clear_config() {
         assert!(pallet::ReferralConfigs::<Test>::get(1).is_none());
     });
 }
+
+// ============================================================================
+// M1 regression: PlanWriter emits events
+// ============================================================================
+
+#[test]
+fn m1_plan_writer_set_direct_rate_emits_event() {
+    new_test_ext().execute_with(|| {
+        System::reset_events();
+        assert_ok!(<pallet::Pallet<Test> as ReferralPlanWriter<Balance>>::set_direct_rate(1, 500));
+        System::assert_last_event(
+            pallet::Event::<Test>::ReferralConfigUpdated { entity_id: 1 }.into(),
+        );
+    });
+}
+
+#[test]
+fn m1_plan_writer_set_fixed_amount_emits_event() {
+    new_test_ext().execute_with(|| {
+        System::reset_events();
+        assert_ok!(<pallet::Pallet<Test> as ReferralPlanWriter<Balance>>::set_fixed_amount(1, 1000));
+        System::assert_last_event(
+            pallet::Event::<Test>::ReferralConfigUpdated { entity_id: 1 }.into(),
+        );
+    });
+}
+
+#[test]
+fn m1_plan_writer_set_first_order_emits_event() {
+    new_test_ext().execute_with(|| {
+        System::reset_events();
+        assert_ok!(<pallet::Pallet<Test> as ReferralPlanWriter<Balance>>::set_first_order(1, 500, 300, true));
+        System::assert_last_event(
+            pallet::Event::<Test>::ReferralConfigUpdated { entity_id: 1 }.into(),
+        );
+    });
+}
+
+#[test]
+fn m1_plan_writer_set_repeat_purchase_emits_event() {
+    new_test_ext().execute_with(|| {
+        System::reset_events();
+        assert_ok!(<pallet::Pallet<Test> as ReferralPlanWriter<Balance>>::set_repeat_purchase(1, 200, 3));
+        System::assert_last_event(
+            pallet::Event::<Test>::ReferralConfigUpdated { entity_id: 1 }.into(),
+        );
+    });
+}
+
+#[test]
+fn m1_plan_writer_clear_config_emits_cleared_event() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(<pallet::Pallet<Test> as ReferralPlanWriter<Balance>>::set_direct_rate(1, 500));
+        System::reset_events();
+        assert_ok!(<pallet::Pallet<Test> as ReferralPlanWriter<Balance>>::clear_config(1));
+        System::assert_last_event(
+            pallet::Event::<Test>::ReferralConfigCleared { entity_id: 1 }.into(),
+        );
+    });
+}

@@ -211,6 +211,12 @@ pub mod pallet {
                 if visited.contains(referrer) { break; }
                 visited.insert(referrer.clone());
 
+                // H1 审计修复: 跳过未激活会员（与 pallet-commission-team H2 一致）
+                if !T::MemberProvider::is_activated(entity_id, referrer) {
+                    current_referrer = T::MemberProvider::get_referrer(entity_id, referrer);
+                    continue;
+                }
+
                 if !Self::check_tier_activation(entity_id, referrer, tier) {
                     current_referrer = T::MemberProvider::get_referrer(entity_id, referrer);
                     continue;

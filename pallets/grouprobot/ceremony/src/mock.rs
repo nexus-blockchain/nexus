@@ -28,27 +28,52 @@ impl SubscriptionProvider for MockSubscription {
 	}
 }
 
+use core::cell::RefCell;
+
+thread_local! {
+	/// 允许测试覆盖 peer_count 返回值 (None = 使用默认逻辑)
+	static MOCK_PEER_COUNT: RefCell<Option<u32>> = RefCell::new(None);
+	/// 允许测试设置 bot_public_key 返回值 (None = 默认返回 None)
+	static MOCK_BOT_PK: RefCell<Option<[u8; 32]>> = RefCell::new(None);
+}
+
+pub fn set_mock_peer_count(count: Option<u32>) {
+	MOCK_PEER_COUNT.with(|c| *c.borrow_mut() = count);
+}
+
+pub fn set_mock_bot_pk(pk: Option<[u8; 32]>) {
+	MOCK_BOT_PK.with(|c| *c.borrow_mut() = pk);
+}
+
 pub struct MockBotRegistry;
 impl BotRegistryProvider<u64> for MockBotRegistry {
-	fn is_bot_active(bot_id_hash: &BotIdHash) -> bool { bot_id_hash[0] == 1 }
+	fn is_bot_active(bot_id_hash: &BotIdHash) -> bool { matches!(bot_id_hash[0], 1 | 3) }
 	fn is_tee_node(_: &BotIdHash) -> bool { false }
 	fn has_dual_attestation(_: &BotIdHash) -> bool { false }
 	fn is_attestation_fresh(_: &BotIdHash) -> bool { false }
 	fn bot_owner(bot_id_hash: &BotIdHash) -> Option<u64> {
 		match bot_id_hash[0] {
 			1 => Some(OWNER),
-			2 => Some(OTHER), // Free tier bot, owned by OTHER
+			2 => Some(OTHER), // inactive + Free tier bot, owned by OTHER
+			3 => Some(OTHER), // active + Free tier bot, owned by OTHER
 			_ => None,
 		}
 	}
-	fn bot_public_key(_: &BotIdHash) -> Option<[u8; 32]> { None }
+	fn bot_public_key(_: &BotIdHash) -> Option<[u8; 32]> {
+		MOCK_BOT_PK.with(|c| *c.borrow())
+	}
 	fn peer_count(bot_id_hash: &BotIdHash) -> u32 {
-		if bot_id_hash[0] == 1 { 3 } else { 0 }
+		MOCK_PEER_COUNT.with(|c| {
+			if let Some(count) = *c.borrow() {
+				return count;
+			}
+			if bot_id_hash[0] == 1 { 3 } else { 0 }
+		})
 	}
 	fn bot_operator(bot_id_hash: &BotIdHash) -> Option<u64> {
 		match bot_id_hash[0] {
 			1 => Some(OWNER),
-			2 => Some(OTHER),
+			2 | 3 => Some(OTHER),
 			_ => None,
 		}
 	}
@@ -57,6 +82,7 @@ impl BotRegistryProvider<u64> for MockBotRegistry {
 parameter_types! {
 	pub const CeremonyValidityBlocks: u64 = 100;
 	pub const CeremonyCheckInterval: u64 = 10;
+	pub const MaxProcessPerBlock: u32 = 20;
 }
 
 impl pallet_grouprobot_ceremony::Config for Test {
@@ -65,6 +91,7 @@ impl pallet_grouprobot_ceremony::Config for Test {
 	type MaxCeremonyHistory = frame_support::traits::ConstU32<10>;
 	type CeremonyValidityBlocks = CeremonyValidityBlocks;
 	type CeremonyCheckInterval = CeremonyCheckInterval;
+	type MaxProcessPerBlock = MaxProcessPerBlock;
 	type BotRegistry = MockBotRegistry;
 	type Subscription = MockSubscription;
 }

@@ -5,8 +5,6 @@
 //! 所有 grouprobot 子 pallet 依赖此 crate。
 //! 无 Storage、无 Extrinsic，纯类型 + Trait 定义。
 
-extern crate alloc;
-
 use codec::{Decode, Encode, MaxEncodedLen};
 use frame_support::pallet_prelude::*;
 use scale_info::TypeInfo;
@@ -14,8 +12,6 @@ use scale_info::TypeInfo;
 // Re-export 通用广告类型 (已迁移到 ads-primitives)
 pub use pallet_ads_primitives::{
 	CampaignStatus, AdReviewStatus, AdPreference, PlacementId,
-	AdScheduleProvider as GenericAdScheduleProvider,
-	AdDeliveryCountProvider as GenericAdDeliveryCountProvider,
 	DeliveryVerifier, PlacementAdminProvider, RevenueDistributor,
 	PlacementStakeProvider, DeliveryMethod,
 };
@@ -490,63 +486,6 @@ impl<AccountId> BotRegistryProvider<AccountId> for () {
 	fn bot_operator(_: &BotIdHash) -> Option<AccountId> { None }
 }
 
-/// 社区管理查询 (consensus 依赖 community)
-pub trait CommunityProvider<AccountId> {
-	fn get_node_requirement(community_id_hash: &CommunityIdHash) -> NodeRequirement;
-	fn is_community_bound(community_id_hash: &CommunityIdHash) -> bool;
-}
-
-/// CommunityProvider 空实现
-impl<AccountId> CommunityProvider<AccountId> for () {
-	fn get_node_requirement(_: &CommunityIdHash) -> NodeRequirement {
-		NodeRequirement::TeeOnly
-	}
-	fn is_community_bound(_: &CommunityIdHash) -> bool { false }
-}
-
-/// 仪式查询 (registry 可选依赖 ceremony)
-pub trait CeremonyProvider {
-	fn is_ceremony_active(bot_public_key: &[u8; 32]) -> bool;
-	fn ceremony_shamir_params(bot_public_key: &[u8; 32]) -> Option<(u8, u8)>;
-	/// 获取活跃仪式哈希
-	fn active_ceremony_hash(bot_public_key: &[u8; 32]) -> Option<[u8; 32]>;
-	/// 获取活跃仪式参与者数量
-	fn ceremony_participant_count(bot_public_key: &[u8; 32]) -> Option<u8>;
-}
-
-impl CeremonyProvider for () {
-	fn is_ceremony_active(_: &[u8; 32]) -> bool { false }
-	fn ceremony_shamir_params(_: &[u8; 32]) -> Option<(u8, u8)> { None }
-	fn active_ceremony_hash(_: &[u8; 32]) -> Option<[u8; 32]> { None }
-	fn ceremony_participant_count(_: &[u8; 32]) -> Option<u8> { None }
-}
-
-/// 声誉查询 (其他 pallet 可查询用户声誉)
-pub trait ReputationProvider {
-	/// 获取用户在社区的本地声誉
-	fn get_reputation(community_id_hash: &CommunityIdHash, user_hash: &[u8; 32]) -> i64;
-	/// 获取用户全局声誉
-	fn get_global_reputation(user_hash: &[u8; 32]) -> i64;
-}
-
-impl ReputationProvider for () {
-	fn get_reputation(_: &CommunityIdHash, _: &[u8; 32]) -> i64 { 0 }
-	fn get_global_reputation(_: &[u8; 32]) -> i64 { 0 }
-}
-
-/// 广告排期查询 (Bot 侧 / 其他 pallet 查询广告投放信息)
-pub trait AdScheduleProvider {
-	/// 社区是否启用广告
-	fn is_ads_enabled(community_id_hash: &CommunityIdHash) -> bool;
-	/// 社区累计广告收入 (Balance 用 u128 表示)
-	fn community_ad_revenue(community_id_hash: &CommunityIdHash) -> u128;
-}
-
-impl AdScheduleProvider for () {
-	fn is_ads_enabled(_: &CommunityIdHash) -> bool { false }
-	fn community_ad_revenue(_: &CommunityIdHash) -> u128 { 0 }
-}
-
 /// 广告投放计数查询 (subscription 依赖 ads)
 pub trait AdDeliveryProvider {
 	/// 查询社区在当前 Era 的广告投放次数
@@ -613,17 +552,29 @@ impl PeerUptimeRecorder for () {
 	fn record_era_uptime(_: u64) {}
 }
 
+/// Era 订阅结算结果
+#[derive(
+	Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, RuntimeDebug, PartialEq, Eq,
+	TypeInfo, MaxEncodedLen, Default,
+)]
+pub struct EraSettlementResult {
+	/// 本次结算收取的总收入
+	pub total_income: u128,
+	/// 实际转入国库的金额
+	pub treasury_share: u128,
+}
+
 /// 订阅结算 trait (consensus on_era_end 调用 subscription pallet)
 pub trait SubscriptionSettler {
-	/// 结算当前 Era 的订阅费, 返回本次收取的总收入 (u128)
+	/// 结算当前 Era 的订阅费, 返回结算结果
 	///
-	/// 80% node_share 已由 subscription pallet 直接转给 Bot 运营者,
-	/// 不再进入 RewardPool 参与权重分配。
-	fn settle_era() -> u128;
+	/// 90% node_share 已由 subscription pallet 直接转给 Bot 运营者,
+	/// 10% treasury_share 已转入国库, 不再进入 RewardPool 参与权重分配。
+	fn settle_era() -> EraSettlementResult;
 }
 
 impl SubscriptionSettler for () {
-	fn settle_era() -> u128 { 0 }
+	fn settle_era() -> EraSettlementResult { EraSettlementResult::default() }
 }
 
 /// H3-fix: 节点退出时领取残留奖励 (consensus finalize_exit 调用 rewards pallet)

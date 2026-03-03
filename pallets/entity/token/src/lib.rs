@@ -49,7 +49,7 @@ pub mod pallet {
         BoundedVec,
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{DividendConfig, EntityProvider, ShopProvider, TokenType, TransferRestrictionMode};
+    use pallet_entity_common::{DividendConfig, EntityProvider, TokenType, TransferRestrictionMode};
     use sp_runtime::traits::{AtLeast32BitUnsigned, Saturating, Zero};
 
     pub use crate::weights::WeightInfo;
@@ -127,9 +127,6 @@ pub mod pallet {
 
         /// 实体查询接口
         type EntityProvider: EntityProvider<Self::AccountId>;
-
-        /// Shop 查询接口（Entity-Shop 分离架构）
-        type ShopProvider: ShopProvider<Self::AccountId>;
 
         /// 店铺代币 ID 偏移量（避免与其他资产冲突）
         #[pallet::constant]
@@ -269,6 +266,18 @@ pub mod pallet {
         u64,
         Blake2_128Concat,
         T::AccountId,
+        T::AssetBalance,
+        ValueQuery,
+    >;
+
+    /// M1-R4: 实体待领取分红总额（已承诺但未铸造）
+    /// distribute_dividend 时递增，claim_dividend 时递减
+    #[pallet::storage]
+    #[pallet::getter(fn total_pending_dividends)]
+    pub type TotalPendingDividends<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // entity_id
         T::AssetBalance,
         ValueQuery,
     >;
@@ -487,6 +496,8 @@ pub mod pallet {
         EmptyName,
         /// 符号为空
         EmptySymbol,
+        /// 代币总数计数溢出
+        TokenCountOverflow,
     }
 
     // ==================== Extrinsics ====================
@@ -572,7 +583,10 @@ pub mod pallet {
             };
             EntityTokenConfigs::<T>::insert(entity_id, config);
             EntityTokenMetadata::<T>::insert(entity_id, (name_bounded, symbol_bounded, decimals));
-            TotalEntityTokens::<T>::mutate(|n| *n = n.saturating_add(1));
+            TotalEntityTokens::<T>::try_mutate(|n| -> Result<(), DispatchError> {
+                *n = n.checked_add(1).ok_or(Error::<T>::TokenCountOverflow)?;
+                Ok(())
+            })?;
 
             Self::deposit_event(Event::EntityTokenCreated {
                 entity_id,
@@ -693,6 +707,8 @@ pub mod pallet {
             let config = EntityTokenConfigs::<T>::get(entity_id).ok_or(Error::<T>::TokenNotEnabled)?;
             ensure!(config.enabled, Error::<T>::TokenNotEnabled);
             ensure!(config.transferable, Error::<T>::TransferNotAllowed);
+            // L1-R3: 被封禁/暂停的 Entity 代币不允许转账
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
 
             // M1: 禁止零数量转账
             ensure!(!amount.is_zero(), Error::<T>::ZeroAmount);
@@ -773,6 +789,8 @@ pub mod pallet {
             // 验证所有者
             let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
             ensure!(owner == who, Error::<T>::NotEntityOwner);
+            // M1-R3: 分发分红创建铸造义务，需 Entity 处于活跃状态
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
 
             // H5: 限制接收人数量
             ensure!(
@@ -806,6 +824,18 @@ pub mod pallet {
             }
             ensure!(sum == total_amount, Error::<T>::DividendAmountMismatch);
 
+            // H2-R3 + M1-R4: 预检查 max_supply 确保分红总额有铸造空间
+            // 必须包含已承诺但未领取的分红（TotalPendingDividends），
+            // 否则多次 distribute 可承诺超过 max_supply 的分红总额。
+            if !config.max_supply.is_zero() {
+                let current_supply = Self::get_total_supply(entity_id);
+                let existing_pending = TotalPendingDividends::<T>::get(entity_id);
+                ensure!(
+                    current_supply.saturating_add(existing_pending).saturating_add(total_amount) <= config.max_supply,
+                    Error::<T>::ExceedsMaxSupply
+                );
+            }
+
             // 分配分红到待领取
             let mut count = 0u32;
             for (holder, amount) in recipients.iter() {
@@ -816,6 +846,11 @@ pub mod pallet {
                     count = count.saturating_add(1);
                 }
             }
+
+            // M1-R4: 递增实体待领取分红总额
+            TotalPendingDividends::<T>::mutate(entity_id, |p| {
+                *p = p.saturating_add(total_amount);
+            });
 
             // 更新上次分红时间和累计金额
             EntityTokenConfigs::<T>::mutate(entity_id, |maybe_config| {
@@ -846,13 +881,18 @@ pub mod pallet {
             let pending = PendingDividends::<T>::get(entity_id, &who);
             ensure!(!pending.is_zero(), Error::<T>::NoDividendToClaim);
 
-            // H3: 检查 max_supply
-            if let Some(config) = EntityTokenConfigs::<T>::get(entity_id) {
-                Self::ensure_within_max_supply(entity_id, &config, pending)?;
-            }
+            // H2-R3: 移除 claim 时的 max_supply 检查。
+            // 分红在 distribute_dividend 时已预检查 max_supply，承诺的分红应始终可领取。
+            // 旧逻辑允许 owner 在 distribute 后操控 max_supply（铸币填满或降低上限），
+            // 导致 PendingDividends 永久无法领取且无清理机制。
 
             // 清空待领取
             PendingDividends::<T>::remove(entity_id, &who);
+
+            // M1-R4: 递减实体待领取分红总额
+            TotalPendingDividends::<T>::mutate(entity_id, |p| {
+                *p = p.saturating_sub(pending);
+            });
 
             // 更新已领取总额
             ClaimedDividends::<T>::mutate(entity_id, &who, |claimed| {
@@ -885,6 +925,8 @@ pub mod pallet {
             // M2: 检查通证是否启用
             let config = EntityTokenConfigs::<T>::get(entity_id).ok_or(Error::<T>::TokenNotEnabled)?;
             ensure!(config.enabled, Error::<T>::TokenNotEnabled);
+            // L1-R3: 被封禁/暂停的 Entity 代币不允许新增锁仓
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             // M3: amount > 0
             ensure!(!amount.is_zero(), Error::<T>::ZeroAmount);
             // M4: duration > 0
@@ -932,11 +974,12 @@ pub mod pallet {
             let now = <frame_system::Pallet<T>>::block_number();
             let mut unlocked_total = T::AssetBalance::zero();
 
-            let has_locks = LockedTokens::<T>::contains_key(entity_id, &who);
-            let entries_len = LockedTokens::<T>::get(entity_id, &who).len();
-            ensure!(has_locks && entries_len > 0, Error::<T>::NoLockedTokens);
+            // L1-R4: 合并为单次 try_mutate，减少 3 次读取到 1 次
+            LockedTokens::<T>::try_mutate_exists(entity_id, &who, |maybe_entries| -> DispatchResult {
+                let entries = maybe_entries.as_mut()
+                    .filter(|e| !e.is_empty())
+                    .ok_or(Error::<T>::NoLockedTokens)?;
 
-            LockedTokens::<T>::mutate(entity_id, &who, |entries| {
                 let mut i = 0;
                 while i < entries.len() {
                     if now >= entries[i].unlock_at {
@@ -946,15 +989,15 @@ pub mod pallet {
                         i += 1;
                     }
                 }
-            });
 
-            ensure!(!unlocked_total.is_zero(), Error::<T>::UnlockTimeNotReached);
+                ensure!(!unlocked_total.is_zero(), Error::<T>::UnlockTimeNotReached);
 
-            // M4: 清理空存储条目
-            let remaining = LockedTokens::<T>::get(entity_id, &who);
-            if remaining.is_empty() {
-                LockedTokens::<T>::remove(entity_id, &who);
-            }
+                // M4: 清理空存储条目
+                if entries.is_empty() {
+                    *maybe_entries = None;
+                }
+                Ok(())
+            })?;
 
             Self::deposit_event(Event::TokensUnlocked {
                 entity_id,
@@ -1019,10 +1062,15 @@ pub mod pallet {
             EntityTokenConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
                 let config = maybe_config.as_mut().ok_or(Error::<T>::TokenNotEnabled)?;
                 
-                // 检查当前供应量是否超过新的最大值
-                let current_supply = Self::get_total_supply(entity_id);
+                // M1-R4: 检查当前供应量 + 已承诺分红是否超过新的最大值
+                // 不能将 max_supply 降低到无法兑现已承诺分红的水平
                 if !max_supply.is_zero() {
-                    ensure!(current_supply <= max_supply, Error::<T>::ExceedsMaxSupply);
+                    let current_supply = Self::get_total_supply(entity_id);
+                    let pending = TotalPendingDividends::<T>::get(entity_id);
+                    ensure!(
+                        current_supply.saturating_add(pending) <= max_supply,
+                        Error::<T>::ExceedsMaxSupply
+                    );
                 }
                 
                 config.max_supply = max_supply;
@@ -1272,6 +1320,7 @@ pub mod pallet {
         }
 
         /// 检查铸造是否在 max_supply 范围内
+        /// M1-R6: 必须包含 TotalPendingDividends，否则 mint 会侵占已承诺分红的容量
         fn ensure_within_max_supply(
             entity_id: u64,
             config: &ShopTokenConfigOf<T>,
@@ -1279,8 +1328,9 @@ pub mod pallet {
         ) -> DispatchResult {
             if !config.max_supply.is_zero() {
                 let current_supply = Self::get_total_supply(entity_id);
+                let pending = TotalPendingDividends::<T>::get(entity_id);
                 ensure!(
-                    current_supply.saturating_add(mint_amount) <= config.max_supply,
+                    current_supply.saturating_add(pending).saturating_add(mint_amount) <= config.max_supply,
                     Error::<T>::ExceedsMaxSupply
                 );
             }
@@ -1329,10 +1379,11 @@ pub mod pallet {
                 return Ok(Zero::zero());
             }
 
-            // H2: 检查 max_supply，超过上限时静默跳过（不报错，避免阻塞订单流程）
+            // H2 + M1-R6: 检查 max_supply（含已承诺分红），超过上限时静默跳过
             if !config.max_supply.is_zero() {
                 let current_supply = Self::get_total_supply(entity_id);
-                if current_supply.saturating_add(reward) > config.max_supply {
+                let pending = TotalPendingDividends::<T>::get(entity_id);
+                if current_supply.saturating_add(pending).saturating_add(reward) > config.max_supply {
                     return Ok(Zero::zero());
                 }
             }
@@ -1521,12 +1572,13 @@ impl<T: Config> EntityTokenProvider<T::AccountId, T::AssetBalance> for Pallet<T>
         if actual.is_zero() {
             return Ok(actual);
         }
-        // 减少 from 的预留
+        // H1-R3: 先执行转账，成功后才扣减预留
+        // 旧代码先扣减 ReservedTokens 再 transfer，如果 transfer 失败且调用方
+        // 不回滚（如 order pallet 的 best-effort 路径），预留记账会不一致。
+        Self::transfer(entity_id, from, to, actual)?;
         pallet::ReservedTokens::<T>::mutate(entity_id, from, |r| {
             *r = r.saturating_sub(actual);
         });
-        // 实际转账
-        Self::transfer(entity_id, from, to, actual)?;
         Ok(actual)
     }
 

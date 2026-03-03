@@ -81,19 +81,25 @@ impl SubscriptionProvider for MockSubscription {
 // Mock SubscriptionSettler
 thread_local! {
 	static SETTLE_INCOME: RefCell<u128> = RefCell::new(0);
+	static SETTLE_TREASURY: RefCell<u128> = RefCell::new(0);
 	static DISTRIBUTED_REWARDS: RefCell<Vec<(NodeId, u128)>> = RefCell::new(Vec::new());
 	static PRUNED_ERA: RefCell<Option<u64>> = RefCell::new(None);
 }
 
 pub struct MockSubscriptionSettler;
 impl SubscriptionSettler for MockSubscriptionSettler {
-	fn settle_era() -> u128 {
-		SETTLE_INCOME.with(|v| *v.borrow())
+	fn settle_era() -> EraSettlementResult {
+		EraSettlementResult {
+			total_income: SETTLE_INCOME.with(|v| *v.borrow()),
+			treasury_share: SETTLE_TREASURY.with(|v| *v.borrow()),
+		}
 	}
 }
 
 pub fn set_mock_settle_income(income: u128) {
 	SETTLE_INCOME.with(|v| *v.borrow_mut() = income);
+	// L4-R2: 模拟 10% 国库分成
+	SETTLE_TREASURY.with(|v| *v.borrow_mut() = income / 10);
 }
 
 // Mock EraRewardDistributor
