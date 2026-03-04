@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { StatusBadge } from "@/components/shared/StatusBadge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FileText, Megaphone, Plus, Pin, AlertTriangle } from "lucide-react";
+import { useTranslations } from "next-intl";
 
 export default function DisclosurePage() {
   const { currentEntityId } = useEntityStore();
@@ -19,8 +20,10 @@ export default function DisclosurePage() {
   const [contentCid, setContentCid] = useState("");
   const [annTitle, setAnnTitle] = useState("");
   const [annCid, setAnnCid] = useState("");
+  const t = useTranslations("disclosure");
+  const tc = useTranslations("common");
 
-  if (!currentEntityId) return <div className="flex h-full items-center justify-center text-muted-foreground">Select an entity first</div>;
+  if (!currentEntityId) return <div className="flex h-full items-center justify-center text-muted-foreground">{tc("selectEntity")}</div>;
 
   return (
     <div className="space-y-6">

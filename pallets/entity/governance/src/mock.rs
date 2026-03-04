@@ -102,7 +102,6 @@ impl EntityProvider<u64> for MockEntityProvider {
         }
     }
     fn update_entity_stats(_: u64, _: u128, _: u32) -> Result<(), DispatchError> { Ok(()) }
-    fn update_entity_rating(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
 }
 
 // ==================== Mock ShopProvider ====================
@@ -200,6 +199,19 @@ impl EntityTokenProvider<u64, u128> for MockTokenProvider {
     fn repatriate_reserved(_: u64, _: &u64, _: &u64, _: u128) -> Result<u128, DispatchError> { Ok(0) }
     fn get_token_type(_: u64) -> TokenType { TokenType::Governance }
     fn total_supply(_: u64) -> u128 { TOTAL_SUPPLY }
+    fn governance_burn(entity_id: u64, amount: u128) -> Result<(), DispatchError> {
+        TOKEN_BALANCES.with(|b| {
+            let mut map = b.borrow_mut();
+            // Burn from entity's "treasury" — use entity_id as account for simplicity
+            let key = (entity_id, entity_id);
+            let balance = map.get(&key).copied().unwrap_or(0);
+            if balance < amount {
+                return Err(DispatchError::Other("InsufficientBalance"));
+            }
+            map.insert(key, balance.saturating_sub(amount));
+            Ok(())
+        })
+    }
 }
 
 // ==================== 常量 ====================
@@ -240,10 +252,12 @@ impl pallet_entity_governance::Config for Test {
     type MaxTitleLength = ConstU32<128>;
     type MaxCidLength = ConstU32<64>;
     type MaxActiveProposals = ConstU32<10>;
+    type MaxDelegatorsPerDelegate = ConstU32<50>;
     type MinVotingPeriod = MinVotingPeriod;
     type MinExecutionDelay = MinExecutionDelay;
     type TimeWeightFullPeriod = TimeWeightFullPeriod;
     type TimeWeightMaxMultiplier = TimeWeightMaxMultiplier;
+    type MultiLevelWriter = ();
 }
 
 // ==================== 构建器 ====================

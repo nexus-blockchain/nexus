@@ -51,7 +51,7 @@ pub trait PricingProvider<Balance> {
 | pallet-storage-service | 运营者保证金 USD 换算 |
 | pallet-entity-registry | 开店初始资金 |
 | pallet-entity-market | 商品押金 |
-| pallet-entity-service | 服务押金 |
+| pallet-entity-product | 服务押金 |
 
 **空实现**：`impl PricingProvider<Balance> for ()` — 返回 `None` / `Ok(())`，用于测试和 Mock。
 

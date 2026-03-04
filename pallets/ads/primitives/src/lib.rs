@@ -36,6 +36,10 @@ pub enum CampaignStatus {
 	Exhausted,
 	Expired,
 	Cancelled,
+	/// 治理暂停 (可恢复)
+	Suspended,
+	/// 审核中 (新建或修改后待审核)
+	UnderReview,
 }
 
 impl Default for CampaignStatus {
@@ -63,44 +67,53 @@ impl Default for AdReviewStatus {
 	}
 }
 
-/// 双向偏好控制 (广告主 ⇄ 广告位)
+/// 广告活动类型
 #[derive(
 	Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, RuntimeDebug, PartialEq, Eq,
 	TypeInfo, MaxEncodedLen,
 )]
-pub enum AdPreference {
-	/// 默认: 允许
-	Allow,
-	/// 拉黑
-	Blocked,
-	/// 指定/白名单 (优先匹配)
-	Preferred,
+pub enum CampaignType {
+	/// CPM — 按展示量计费
+	Cpm,
+	/// CPC — 按点击计费
+	Cpc,
+	/// 固定费用 (包时段/包位)
+	Fixed,
+	/// 私有广告 (仅指定广告位可见)
+	Private,
 }
 
-impl Default for AdPreference {
+impl Default for CampaignType {
 	fn default() -> Self {
-		Self::Allow
+		Self::Cpm
+	}
+}
+
+/// 广告位状态 (由适配层报告)
+#[derive(
+	Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, RuntimeDebug, PartialEq, Eq,
+	TypeInfo, MaxEncodedLen,
+)]
+pub enum PlacementStatus {
+	/// 正常接收广告
+	Active,
+	/// 管理员/Owner 主动暂停
+	Paused,
+	/// 被永久禁止
+	Banned,
+	/// 未注册或不存在
+	Unknown,
+}
+
+impl Default for PlacementStatus {
+	fn default() -> Self {
+		Self::Unknown
 	}
 }
 
 // ============================================================================
 // Trait Interfaces — 适配层需实现
 // ============================================================================
-
-/// 投放方式 trait — 各适配层自定义投放类型
-///
-/// GroupRobot: ScheduledPost / ReplyFooter / WelcomeEmbed
-/// Entity: BannerAd / ProductPlacement / SponsoredListing
-pub trait DeliveryMethod:
-	Encode + Decode + Clone + MaxEncodedLen + TypeInfo + core::fmt::Debug + PartialEq + Eq
-{
-	/// CPM 定价系数 (百分比整数, 100 = 1.0x, 200 = 2.0x)
-	///
-	/// 注意: 此处并非金融基点 (1/10000)，而是百分比整数。
-	/// ads-core 计算公式: bid * audience * multiplier / 100_000
-	/// 其中 /1000 为 CPM 标准 (每千人)，/100 为此系数归一化。
-	fn cpm_multiplier_bps(&self) -> u32;
-}
 
 /// 投放收据验证 — 各适配层实现投放真实性验证
 ///
@@ -112,12 +125,14 @@ pub trait DeliveryVerifier<AccountId> {
 	/// - `who`: 提交者
 	/// - `placement_id`: 广告位
 	/// - `audience_size`: 受众规模
+	/// - `node_id`: 投放节点 ID (GroupRobot: TEE 节点; Entity: None)
 	///
 	/// 返回: 验证通过后的有效受众数 (可能被裁切)
 	fn verify_and_cap_audience(
 		who: &AccountId,
 		placement_id: &PlacementId,
 		audience_size: u32,
+		node_id: Option<[u8; 32]>,
 	) -> Result<u32, sp_runtime::DispatchError>;
 }
 
@@ -128,6 +143,7 @@ impl<AccountId> DeliveryVerifier<AccountId> for () {
 		_: &AccountId,
 		_: &PlacementId,
 		audience_size: u32,
+		_node_id: Option<[u8; 32]>,
 	) -> Result<u32, sp_runtime::DispatchError> {
 		Ok(audience_size)
 	}
@@ -142,11 +158,25 @@ pub trait PlacementAdminProvider<AccountId> {
 	fn placement_admin(placement_id: &PlacementId) -> Option<AccountId>;
 	/// 广告位是否被永久禁止
 	fn is_placement_banned(placement_id: &PlacementId) -> bool;
+	/// 查询广告位当前状态 (Active/Paused/Banned/Unknown)
+	fn placement_status(placement_id: &PlacementId) -> PlacementStatus;
 }
 
 impl<AccountId> PlacementAdminProvider<AccountId> for () {
 	fn placement_admin(_: &PlacementId) -> Option<AccountId> { None }
 	fn is_placement_banned(_: &PlacementId) -> bool { false }
+	fn placement_status(_: &PlacementId) -> PlacementStatus { PlacementStatus::Unknown }
+}
+
+/// 收入分配明细
+#[derive(RuntimeDebug, Clone, PartialEq, Eq)]
+pub struct RevenueBreakdown<Balance> {
+	/// 广告位方可提取份额 (社区/Entity Owner)
+	pub placement_share: Balance,
+	/// 节点份额 (GroupRobot: TEE 节点; Entity: 0)
+	pub node_share: Balance,
+	/// 平台/国库份额
+	pub platform_share: Balance,
 }
 
 /// 结算后的收入分配策略 — 各适配层定义分成比例和分配逻辑
@@ -160,12 +190,12 @@ pub trait RevenueDistributor<AccountId, Balance> {
 	/// - `total_cost`: 本次总费用
 	/// - `advertiser`: 广告主账户
 	///
-	/// 返回: 广告位方可提取的份额
+	/// 返回: 收入分配明细 (RevenueBreakdown)
 	fn distribute(
 		placement_id: &PlacementId,
 		total_cost: Balance,
 		advertiser: &AccountId,
-	) -> Result<Balance, sp_runtime::DispatchError>;
+	) -> Result<RevenueBreakdown<Balance>, sp_runtime::DispatchError>;
 }
 
 /// `()` 空实现: 广告位方份额为零 (全部收入归国库)。
@@ -173,29 +203,15 @@ pub trait RevenueDistributor<AccountId, Balance> {
 impl<AccountId, Balance: Default> RevenueDistributor<AccountId, Balance> for () {
 	fn distribute(
 		_: &PlacementId,
-		_: Balance,
+		total_cost: Balance,
 		_: &AccountId,
-	) -> Result<Balance, sp_runtime::DispatchError> {
-		Ok(Balance::default())
+	) -> Result<RevenueBreakdown<Balance>, sp_runtime::DispatchError> {
+		Ok(RevenueBreakdown {
+			placement_share: Balance::default(),
+			node_share: Balance::default(),
+			platform_share: total_cost,
+		})
 	}
-}
-
-/// 广告位质押管理 — 可选，广告位可通过质押获取受众上限
-///
-/// GroupRobot: 质押 → audience_cap 阶梯函数
-/// Entity: 可能不需要 (网页展示量由流量决定)
-pub trait PlacementStakeProvider<Balance> {
-	/// 查询广告位的受众上限
-	fn audience_cap(placement_id: &PlacementId) -> u32;
-	/// 查询广告位的质押额
-	fn stake_amount(placement_id: &PlacementId) -> Balance;
-}
-
-/// `()` 空实现: 无质押 → audience_cap = 0 (安全方向: 禁止无质押广告投放)。
-/// 生产环境由适配层根据质押额动态计算 audience_cap。
-impl<Balance: Default> PlacementStakeProvider<Balance> for () {
-	fn audience_cap(_: &PlacementId) -> u32 { 0 }
-	fn stake_amount(_: &PlacementId) -> Balance { Balance::default() }
 }
 
 /// 广告排期查询 (其他 pallet 查询广告状态)
@@ -204,11 +220,14 @@ pub trait AdScheduleProvider {
 	fn is_ads_enabled(placement_id: &PlacementId) -> bool;
 	/// 广告位累计广告收入 (Balance 用 u128 表示)
 	fn placement_ad_revenue(placement_id: &PlacementId) -> u128;
+	/// 广告位当前 Era 广告收入 (Balance 用 u128 表示)
+	fn placement_era_revenue(placement_id: &PlacementId) -> u128;
 }
 
 impl AdScheduleProvider for () {
 	fn is_ads_enabled(_: &PlacementId) -> bool { false }
 	fn placement_ad_revenue(_: &PlacementId) -> u128 { 0 }
+	fn placement_era_revenue(_: &PlacementId) -> u128 { 0 }
 }
 
 /// 广告投放计数查询 (外部 pallet 查询投放达标情况)
@@ -222,4 +241,41 @@ pub trait AdDeliveryCountProvider {
 impl AdDeliveryCountProvider for () {
 	fn era_delivery_count(_: &PlacementId) -> u32 { 0 }
 	fn reset_era_deliveries(_: &PlacementId) {}
+}
+
+/// 广告策略查询 — 治理层或适配层提供的广告投放策略参数
+///
+/// 用于限制广告位的投放行为 (每广告位最大活动数、最低预算、审核策略等)。
+pub trait AdPolicyProvider {
+	/// 广告位允许的最大并发活动数 (0 = 无限制)
+	fn max_campaigns_per_placement(placement_id: &PlacementId) -> u32;
+	/// 创建活动的最低预算 (u128, 0 = 无门槛)
+	fn min_campaign_budget(placement_id: &PlacementId) -> u128;
+	/// 新活动是否需要审核
+	fn requires_review(placement_id: &PlacementId) -> bool;
+}
+
+impl AdPolicyProvider for () {
+	fn max_campaigns_per_placement(_: &PlacementId) -> u32 { 0 }
+	fn min_campaign_budget(_: &PlacementId) -> u128 { 0 }
+	fn requires_review(_: &PlacementId) -> bool { false }
+}
+
+/// 广告位配置查询 — 适配层提供的广告位级别参数
+///
+/// GroupRobot: 质押量 → 受众上限映射
+/// Entity: 广告位级别 → 每日展示量上限
+pub trait PlacementConfigProvider {
+	/// 广告位每日展示量上限 (0 = 无限制)
+	fn daily_impression_cap(placement_id: &PlacementId) -> u32;
+	/// 广告位收入分成比例 (基点, 10000 = 100%)
+	fn revenue_share_bps(placement_id: &PlacementId) -> u32;
+	/// 广告位是否支持私有广告
+	fn supports_private_ads(placement_id: &PlacementId) -> bool;
+}
+
+impl PlacementConfigProvider for () {
+	fn daily_impression_cap(_: &PlacementId) -> u32 { 0 }
+	fn revenue_share_bps(_: &PlacementId) -> u32 { 0 }
+	fn supports_private_ads(_: &PlacementId) -> bool { false }
 }

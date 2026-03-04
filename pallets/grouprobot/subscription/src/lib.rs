@@ -141,6 +141,16 @@ pub mod pallet {
 	#[pallet::storage]
 	pub type AdCommitmentSettleCursor<T: Config> = StorageValue<_, BotIdHash>;
 
+	/// 治理可配置的层级功能限制 (覆盖 SubscriptionTier::feature_gate() 硬编码默认值)
+	#[pallet::storage]
+	pub type TierFeatureGateOverrides<T: Config> =
+		StorageMap<_, Blake2_128Concat, SubscriptionTier, TierFeatureGate>;
+
+	/// 治理动态费率覆盖: tier → fee_per_era (None = 使用 Config 常量)
+	#[pallet::storage]
+	pub type TierFeeOverrides<T: Config> =
+		StorageMap<_, Blake2_128Concat, SubscriptionTier, BalanceOf<T>>;
+
 	// ========================================================================
 	// Events
 	// ========================================================================
@@ -172,6 +182,36 @@ pub mod pallet {
 		SubscriptionCleaned { bot_id_hash: BotIdHash },
 		/// 已取消的广告承诺记录已清理
 		AdCommitmentCleaned { bot_id_hash: BotIdHash },
+		/// 治理更新层级功能限制
+		TierFeatureGateUpdated { tier: SubscriptionTier, gate: TierFeatureGate },
+		/// Bot Owner 部分提取 Escrow
+		EscrowWithdrawn { bot_id_hash: BotIdHash, amount: BalanceOf<T>, remaining: BalanceOf<T> },
+		/// 广告承诺已更新 (原子性修改)
+		AdCommitmentUpdated { bot_id_hash: BotIdHash, old_ads: u32, new_ads: u32, old_tier: SubscriptionTier, new_tier: SubscriptionTier },
+		/// Root 强制取消订阅
+		SubscriptionForceCancelled { bot_id_hash: BotIdHash, escrow_slashed: BalanceOf<T> },
+		/// Root 强制暂停订阅
+		SubscriptionForceSuspended { bot_id_hash: BotIdHash },
+		/// Root 强制变更层级
+		TierForceChanged { bot_id_hash: BotIdHash, old_tier: SubscriptionTier, new_tier: SubscriptionTier },
+		/// Root 恢复层级功能限制为默认值
+		TierFeatureGateReset { tier: SubscriptionTier },
+		/// Root 动态调整层级费率
+		TierFeeUpdated { tier: SubscriptionTier, new_fee: BalanceOf<T> },
+		/// Operator 为 Bot 充值 Escrow
+		OperatorDeposited { bot_id_hash: BotIdHash, operator: T::AccountId, amount: BalanceOf<T> },
+		/// Owner 主动暂停订阅
+		SubscriptionPaused { bot_id_hash: BotIdHash },
+		/// Owner 恢复已暂停的订阅
+		SubscriptionResumed { bot_id_hash: BotIdHash },
+		/// 批量清理已取消记录
+		BatchCleaned { subscriptions_cleaned: u32, ad_commitments_cleaned: u32 },
+		/// Root 强制取消广告承诺
+		AdCommitmentForceCancelled { bot_id_hash: BotIdHash },
+		/// Escrow 余额不足 2 Era 费用预警
+		EscrowLow { bot_id_hash: BotIdHash, remaining: BalanceOf<T>, fee_per_era: BalanceOf<T> },
+		/// settle 跳过非活跃 Bot
+		SettleSkippedInactiveBot { bot_id_hash: BotIdHash },
 	}
 
 	// ========================================================================
@@ -218,6 +258,18 @@ pub mod pallet {
 		SubscriptionNotTerminal,
 		/// 广告承诺未处于终态 (仅 Cancelled 可清理)
 		AdCommitmentNotTerminal,
+		/// 提取后 Escrow 不足一个 Era 费用
+		WithdrawWouldUnderfund,
+		/// 订阅未处于暂停状态
+		SubscriptionNotPaused,
+		/// 订阅已处于暂停状态
+		SubscriptionAlreadyPaused,
+		/// 承诺广告数未变更
+		SameCommitment,
+		/// 批量清理列表为空
+		EmptyBatch,
+		/// 不是 Bot Operator
+		NotBotOperator,
 	}
 
 	// ========================================================================
@@ -496,6 +548,347 @@ pub mod pallet {
 			Self::deposit_event(Event::AdCommitmentCleaned { bot_id_hash });
 			Ok(())
 		}
+		/// 治理更新层级功能限制 (root)
+		///
+		/// 覆盖 SubscriptionTier::feature_gate() 硬编码默认值,
+		/// 允许治理调整各层级的 max_rules / log_retention_days /
+		/// forced_ads_per_day / can_disable_ads / tee_access 参数.
+		#[pallet::call_index(8)]
+		#[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+		pub fn update_tier_feature_gate(
+			origin: OriginFor<T>,
+			tier: SubscriptionTier,
+			gate: TierFeatureGate,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			TierFeatureGateOverrides::<T>::insert(&tier, &gate);
+			Self::deposit_event(Event::TierFeatureGateUpdated { tier, gate });
+			Ok(())
+		}
+
+		/// Root 强制取消订阅 (治理应急)
+		///
+		/// Escrow 没收至国库, 订阅状态设为 Cancelled.
+		#[pallet::call_index(9)]
+		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		pub fn force_cancel_subscription(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			let sub = Subscriptions::<T>::get(&bot_id_hash).ok_or(Error::<T>::SubscriptionNotFound)?;
+			ensure!(sub.status != SubscriptionStatus::Cancelled, Error::<T>::SubscriptionAlreadyCancelled);
+
+			// 没收 escrow 至国库
+			let escrow = SubscriptionEscrow::<T>::take(&bot_id_hash);
+			if !escrow.is_zero() {
+				T::Currency::unreserve(&sub.owner, escrow);
+				let treasury = T::TreasuryAccount::get();
+				let _ = T::Currency::transfer(
+					&sub.owner,
+					&treasury,
+					escrow,
+					ExistenceRequirement::AllowDeath,
+				);
+			}
+
+			Subscriptions::<T>::mutate(&bot_id_hash, |maybe| {
+				if let Some(s) = maybe {
+					s.status = SubscriptionStatus::Cancelled;
+				}
+			});
+			Self::deposit_event(Event::SubscriptionForceCancelled { bot_id_hash, escrow_slashed: escrow });
+			Ok(())
+		}
+
+		/// Bot Owner 部分提取 Escrow
+		///
+		/// 提取后 Escrow 余额必须 >= fee_per_era (至少覆盖 1 Era).
+		#[pallet::call_index(10)]
+		#[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
+		pub fn withdraw_escrow(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			amount: BalanceOf<T>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			ensure!(!amount.is_zero(), Error::<T>::ZeroDepositAmount);
+			let sub = Subscriptions::<T>::get(&bot_id_hash).ok_or(Error::<T>::SubscriptionNotFound)?;
+			ensure!(sub.owner == who, Error::<T>::NotBotOwner);
+			ensure!(
+				matches!(sub.status, SubscriptionStatus::Active | SubscriptionStatus::Paused),
+				Error::<T>::SubscriptionNotActive
+			);
+
+			let escrow = SubscriptionEscrow::<T>::get(&bot_id_hash);
+			let remaining = escrow.saturating_sub(amount);
+			ensure!(remaining >= sub.fee_per_era, Error::<T>::WithdrawWouldUnderfund);
+
+			T::Currency::unreserve(&who, amount);
+			SubscriptionEscrow::<T>::insert(&bot_id_hash, remaining);
+			Self::deposit_event(Event::EscrowWithdrawn { bot_id_hash, amount, remaining });
+			Ok(())
+		}
+
+		/// 原子性修改广告承诺 (避免 cancel + commit 的降级窗口)
+		#[pallet::call_index(11)]
+		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		pub fn update_ad_commitment(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			new_committed_ads_per_era: u32,
+			new_community_id_hash: Option<CommunityIdHash>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			AdCommitments::<T>::try_mutate(&bot_id_hash, |maybe| -> DispatchResult {
+				let record = maybe.as_mut().ok_or(Error::<T>::AdCommitmentNotFound)?;
+				ensure!(record.owner == who, Error::<T>::NotBotOwner);
+				ensure!(
+					matches!(record.status, AdCommitmentStatus::Active | AdCommitmentStatus::Underdelivery),
+					Error::<T>::AdCommitmentAlreadyCancelled
+				);
+
+				let new_tier = Self::ads_to_tier(new_committed_ads_per_era);
+				ensure!(new_tier.is_paid(), Error::<T>::CommitmentBelowMinimum);
+				// 至少 ads 数量或社区有变更
+				let community_changed = new_community_id_hash.map_or(false, |c| c != record.community_id_hash);
+				ensure!(
+					record.committed_ads_per_era != new_committed_ads_per_era || community_changed,
+					Error::<T>::SameCommitment
+				);
+
+				let old_ads = record.committed_ads_per_era;
+				let old_tier = record.effective_tier;
+				record.committed_ads_per_era = new_committed_ads_per_era;
+				record.effective_tier = new_tier;
+				if let Some(c) = new_community_id_hash {
+					record.community_id_hash = c;
+				}
+				// 变更后重置未达标计数
+				record.underdelivery_eras = 0;
+				record.status = AdCommitmentStatus::Active;
+
+				Self::deposit_event(Event::AdCommitmentUpdated {
+					bot_id_hash,
+					old_ads,
+					new_ads: new_committed_ads_per_era,
+					old_tier,
+					new_tier,
+				});
+				Ok(())
+			})
+		}
+
+		/// Root 强制暂停订阅 (调查期)
+		#[pallet::call_index(12)]
+		#[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+		pub fn force_suspend_subscription(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			Subscriptions::<T>::try_mutate(&bot_id_hash, |maybe| -> DispatchResult {
+				let sub = maybe.as_mut().ok_or(Error::<T>::SubscriptionNotFound)?;
+				ensure!(sub.status != SubscriptionStatus::Cancelled, Error::<T>::SubscriptionAlreadyCancelled);
+				sub.status = SubscriptionStatus::Suspended;
+				Ok(())
+			})?;
+			Self::deposit_event(Event::SubscriptionForceSuspended { bot_id_hash });
+			Ok(())
+		}
+
+		/// Operator 为 Bot 充值 Escrow (激励对齐: Operator 拿 90% 分成)
+		#[pallet::call_index(13)]
+		#[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
+		pub fn operator_deposit_subscription(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			amount: BalanceOf<T>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			ensure!(!amount.is_zero(), Error::<T>::ZeroDepositAmount);
+			let sub = Subscriptions::<T>::get(&bot_id_hash).ok_or(Error::<T>::SubscriptionNotFound)?;
+			ensure!(sub.status != SubscriptionStatus::Cancelled, Error::<T>::SubscriptionAlreadyCancelled);
+			ensure!(
+				T::BotRegistry::bot_operator(&bot_id_hash) == Some(who.clone()),
+				Error::<T>::NotBotOperator
+			);
+
+			T::Currency::reserve(&who, amount)?;
+			SubscriptionEscrow::<T>::mutate(&bot_id_hash, |escrow| {
+				*escrow = escrow.saturating_add(amount);
+			});
+
+			// 与 deposit_subscription 相同的重新激活逻辑
+			if sub.status == SubscriptionStatus::PastDue || sub.status == SubscriptionStatus::Suspended {
+				let new_escrow = SubscriptionEscrow::<T>::get(&bot_id_hash);
+				if new_escrow >= sub.fee_per_era {
+					Subscriptions::<T>::mutate(&bot_id_hash, |maybe_sub| {
+						if let Some(s) = maybe_sub {
+							s.status = SubscriptionStatus::Active;
+						}
+					});
+				}
+			}
+
+			Self::deposit_event(Event::OperatorDeposited { bot_id_hash, operator: who, amount });
+			Ok(())
+		}
+
+		/// Root 恢复层级功能限制为硬编码默认值
+		#[pallet::call_index(14)]
+		#[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+		pub fn reset_tier_feature_gate(
+			origin: OriginFor<T>,
+			tier: SubscriptionTier,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			TierFeatureGateOverrides::<T>::remove(&tier);
+			Self::deposit_event(Event::TierFeatureGateReset { tier });
+			Ok(())
+		}
+
+		/// Root 强制变更 Bot 订阅层级
+		#[pallet::call_index(15)]
+		#[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
+		pub fn force_change_tier(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			new_tier: SubscriptionTier,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			ensure!(new_tier.is_paid(), Error::<T>::CannotSubscribeFree);
+			Subscriptions::<T>::try_mutate(&bot_id_hash, |maybe| -> DispatchResult {
+				let sub = maybe.as_mut().ok_or(Error::<T>::SubscriptionNotFound)?;
+				ensure!(sub.status != SubscriptionStatus::Cancelled, Error::<T>::SubscriptionAlreadyCancelled);
+				let old_tier = sub.tier;
+				sub.tier = new_tier;
+				sub.fee_per_era = Self::tier_fee(&new_tier);
+				Self::deposit_event(Event::TierForceChanged { bot_id_hash, old_tier, new_tier });
+				Ok(())
+			})
+		}
+
+		/// Bot Owner 主动暂停订阅 (不扣费, 不享受层级权益)
+		#[pallet::call_index(16)]
+		#[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+		pub fn pause_subscription(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			Subscriptions::<T>::try_mutate(&bot_id_hash, |maybe| -> DispatchResult {
+				let sub = maybe.as_mut().ok_or(Error::<T>::SubscriptionNotFound)?;
+				ensure!(sub.owner == who, Error::<T>::NotBotOwner);
+				ensure!(sub.status == SubscriptionStatus::Active, Error::<T>::SubscriptionNotActive);
+				sub.status = SubscriptionStatus::Paused;
+				Ok(())
+			})?;
+			Self::deposit_event(Event::SubscriptionPaused { bot_id_hash });
+			Ok(())
+		}
+
+		/// Bot Owner 恢复已暂停的订阅
+		#[pallet::call_index(17)]
+		#[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+		pub fn resume_subscription(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			Subscriptions::<T>::try_mutate(&bot_id_hash, |maybe| -> DispatchResult {
+				let sub = maybe.as_mut().ok_or(Error::<T>::SubscriptionNotFound)?;
+				ensure!(sub.owner == who, Error::<T>::NotBotOwner);
+				ensure!(sub.status == SubscriptionStatus::Paused, Error::<T>::SubscriptionNotPaused);
+				let escrow = SubscriptionEscrow::<T>::get(&bot_id_hash);
+				if escrow >= sub.fee_per_era {
+					sub.status = SubscriptionStatus::Active;
+				} else {
+					sub.status = SubscriptionStatus::PastDue;
+				}
+				Ok(())
+			})?;
+			Self::deposit_event(Event::SubscriptionResumed { bot_id_hash });
+			Ok(())
+		}
+
+		/// 批量清理已取消的订阅和广告承诺记录
+		#[pallet::call_index(18)]
+		#[pallet::weight(Weight::from_parts(50_000_000, 10_000))]
+		pub fn batch_cleanup(
+			origin: OriginFor<T>,
+			subscription_ids: sp_runtime::BoundedVec<BotIdHash, frame_support::traits::ConstU32<50>>,
+			ad_commitment_ids: sp_runtime::BoundedVec<BotIdHash, frame_support::traits::ConstU32<50>>,
+		) -> DispatchResult {
+			ensure_signed(origin)?;
+			ensure!(
+				!subscription_ids.is_empty() || !ad_commitment_ids.is_empty(),
+				Error::<T>::EmptyBatch
+			);
+
+			let mut subs_cleaned = 0u32;
+			for bot_id_hash in subscription_ids.iter() {
+				if let Some(sub) = Subscriptions::<T>::get(bot_id_hash) {
+					if sub.status == SubscriptionStatus::Cancelled {
+						Subscriptions::<T>::remove(bot_id_hash);
+						SubscriptionEscrow::<T>::remove(bot_id_hash);
+						subs_cleaned += 1;
+					}
+				}
+			}
+
+			let mut ads_cleaned = 0u32;
+			for bot_id_hash in ad_commitment_ids.iter() {
+				if let Some(record) = AdCommitments::<T>::get(bot_id_hash) {
+					if record.status == AdCommitmentStatus::Cancelled {
+						AdCommitments::<T>::remove(bot_id_hash);
+						ads_cleaned += 1;
+					}
+				}
+			}
+
+			Self::deposit_event(Event::BatchCleaned {
+				subscriptions_cleaned: subs_cleaned,
+				ad_commitments_cleaned: ads_cleaned,
+			});
+			Ok(())
+		}
+
+		/// Root 动态调整层级费率
+		///
+		/// 新费率在下一次 Era 结算时生效.
+		/// 已有订阅的 fee_per_era 不自动更新 (需 Owner change_tier 或下次新建时生效).
+		#[pallet::call_index(19)]
+		#[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+		pub fn update_tier_fee(
+			origin: OriginFor<T>,
+			tier: SubscriptionTier,
+			new_fee: BalanceOf<T>,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			ensure!(tier.is_paid(), Error::<T>::CannotSubscribeFree);
+			TierFeeOverrides::<T>::insert(&tier, new_fee);
+			Self::deposit_event(Event::TierFeeUpdated { tier, new_fee });
+			Ok(())
+		}
+
+		/// Root 强制取消广告承诺
+		#[pallet::call_index(20)]
+		#[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+		pub fn force_cancel_ad_commitment(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			AdCommitments::<T>::try_mutate(&bot_id_hash, |maybe| -> DispatchResult {
+				let record = maybe.as_mut().ok_or(Error::<T>::AdCommitmentNotFound)?;
+				ensure!(record.status != AdCommitmentStatus::Cancelled, Error::<T>::AdCommitmentAlreadyCancelled);
+				record.status = AdCommitmentStatus::Cancelled;
+				Ok(())
+			})?;
+			Self::deposit_event(Event::AdCommitmentForceCancelled { bot_id_hash });
+			Ok(())
+		}
 	}
 
 	// ========================================================================
@@ -503,8 +896,11 @@ pub mod pallet {
 	// ========================================================================
 
 	impl<T: Config> Pallet<T> {
-		/// 获取层级费用
+		/// 获取层级费用 (优先使用治理覆盖值, 否则回退 Config 常量)
 		pub fn tier_fee(tier: &SubscriptionTier) -> BalanceOf<T> {
+			if let Some(override_fee) = TierFeeOverrides::<T>::get(tier) {
+				return override_fee;
+			}
 			match tier {
 				SubscriptionTier::Free => BalanceOf::<T>::zero(),
 				SubscriptionTier::Basic => T::BasicFeePerEra::get(),
@@ -540,6 +936,7 @@ pub mod pallet {
 		}
 
 		/// 查询 Bot 的有效层级 (综合付费订阅 + 广告承诺, 取较高者)
+		/// Paused 状态不享受层级权益
 		pub fn effective_tier(bot_id_hash: &BotIdHash) -> SubscriptionTier {
 			let paid_tier = match Subscriptions::<T>::get(bot_id_hash) {
 				Some(sub) => match sub.status {
@@ -561,9 +958,10 @@ pub mod pallet {
 			}
 		}
 
-		/// 查询 Bot 的功能限制
+		/// 查询 Bot 的功能限制 (优先使用治理覆盖值, 否则回退硬编码默认)
 		pub fn effective_feature_gate(bot_id_hash: &BotIdHash) -> TierFeatureGate {
-			Self::effective_tier(bot_id_hash).feature_gate()
+			let tier = Self::effective_tier(bot_id_hash);
+			TierFeatureGateOverrides::<T>::get(&tier).unwrap_or_else(|| tier.feature_gate())
 		}
 
 		/// Era 订阅费结算 (游标分页)
@@ -595,7 +993,12 @@ pub mod pallet {
 				settled += 1;
 				last_key = Some(bot_hash);
 
-				if sub.status == SubscriptionStatus::Cancelled {
+				if sub.status == SubscriptionStatus::Cancelled || sub.status == SubscriptionStatus::Paused {
+					continue;
+				}
+				// Bot 封禁联动: 非活跃 Bot 跳过扣费
+				if !T::BotRegistry::is_bot_active(&sub.bot_id_hash) {
+					Self::deposit_event(Event::SettleSkippedInactiveBot { bot_id_hash: sub.bot_id_hash });
 					continue;
 				}
 				let escrow = SubscriptionEscrow::<T>::get(&sub.bot_id_hash);
@@ -635,6 +1038,16 @@ pub mod pallet {
 							bot_id_hash: sub.bot_id_hash,
 							amount: sub.fee_per_era,
 						});
+						// EscrowLow 预警: 剩余 < 2 Era 费用
+						let remaining = SubscriptionEscrow::<T>::get(&sub.bot_id_hash);
+						let two_eras = sub.fee_per_era.saturating_mul(2u32.into());
+						if remaining < two_eras {
+							Self::deposit_event(Event::EscrowLow {
+								bot_id_hash: sub.bot_id_hash,
+								remaining,
+								fee_per_era: sub.fee_per_era,
+							});
+						}
 					} else {
 						// M1-R3: 部分失败 — 回收未转出金额, 仅扣减实际转出额
 						let paid = (if node_ok { node_share } else { BalanceOf::<T>::zero() })
@@ -779,6 +1192,14 @@ pub mod pallet {
 		fn effective_feature_gate(bot_id_hash: &BotIdHash) -> TierFeatureGate {
 			Pallet::<T>::effective_feature_gate(bot_id_hash)
 		}
+		fn is_subscription_active(bot_id_hash: &BotIdHash) -> bool {
+			Subscriptions::<T>::get(bot_id_hash).map_or(false, |sub| {
+				matches!(sub.status, SubscriptionStatus::Active | SubscriptionStatus::PastDue | SubscriptionStatus::Paused)
+			})
+		}
+		fn subscription_status(bot_id_hash: &BotIdHash) -> Option<SubscriptionStatus> {
+			Subscriptions::<T>::get(bot_id_hash).map(|sub| sub.status)
+		}
 	}
 
 	// ========================================================================
@@ -789,9 +1210,12 @@ pub mod pallet {
 		fn settle_era() -> EraSettlementResult {
 			let (income, treasury) = Self::settle_era_subscriptions();
 			Self::settle_ad_commitments();
+			let income_u128: u128 = income.unique_saturated_into();
+			let treasury_u128: u128 = treasury.unique_saturated_into();
 			EraSettlementResult {
-				total_income: income.unique_saturated_into(),
-				treasury_share: treasury.unique_saturated_into(),
+				total_income: income_u128,
+				node_share: income_u128.saturating_sub(treasury_u128),
+				treasury_share: treasury_u128,
 			}
 		}
 	}

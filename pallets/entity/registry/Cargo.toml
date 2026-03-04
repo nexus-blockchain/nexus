@@ -14,6 +14,7 @@ codec = { features = ["derive"], workspace = true }
 scale-info = { features = ["derive"], workspace = true }
 frame-support = { workspace = true }
 frame-system = { workspace = true }
+sp-api = { workspace = true }
 sp-runtime = { workspace = true }
 sp-std = { workspace = true }
 log = { workspace = true }
@@ -33,6 +34,7 @@ std = [
     "scale-info/std",
     "frame-support/std",
     "frame-system/std",
+    "sp-api/std",
     "sp-runtime/std",
     "sp-std/std",
     "log/std",

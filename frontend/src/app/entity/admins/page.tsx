@@ -11,6 +11,7 @@ import { AddressDisplay } from "@/components/shared/AddressDisplay";
 import { Badge } from "@/components/ui/badge";
 import { PERMISSION_LABELS } from "@/lib/constants";
 import { UserPlus, Trash2, Shield } from "lucide-react";
+import { useTranslations } from "next-intl";
 
 export default function EntityAdminsPage() {
   const { currentEntityId } = useEntityStore();
@@ -18,6 +19,8 @@ export default function EntityAdminsPage() {
   const actions = useEntityActions(currentEntityId || 0);
   const [newAdmin, setNewAdmin] = useState("");
   const [newPerms, setNewPerms] = useState(0);
+  const t = useTranslations("entity.admins");
+  const tc = useTranslations("common");
   const [transferTo, setTransferTo] = useState("");
 
   if (!currentEntityId || isLoading) {

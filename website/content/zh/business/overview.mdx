@@ -1,0 +1,94 @@
+---
+title: "项目概述"
+description: "NEXUS — 面向实体经济的 Layer-1 公链，提供通证化 + 社群营销 + AI 运营三位一体的 Web3 商业基础设施"
+category: "business"
+section: "overview"
+order: 1
+icon: "building"
+tags: ["nexus", "blockchain", "entity", "overview"]
+lastUpdated: "2026-03-04"
+---
+
+## 什么是 NEXUS
+
+**NEXUS** 是一条面向实体经济的 Layer-1 公链，基于 Polkadot SDK (Substrate) 构建，为传统商业实体提供 **实体通证化 · 社群营销引擎 · AI 赋能运营** 三位一体的 Web3 商业基础设施。
+
+任何商业实体 — 商户、企业、品牌、社区、基金 — 都可以在 NEXUS 上完成从注册身份到全链上运营的完整流程。
+
+export const metrics = [
+  { value: "40+", label: "链上模块 (Pallet)" },
+  { value: "5 种", label: "佣金模式" },
+  { value: "6s", label: "出块时间" },
+  { value: "TEE", label: "硬件级安全" },
+];
+
+<MetricCard items={metrics} />
+
+## 核心价值主张
+
+NEXUS 解决传统商业面临的三大核心痛点：
+
+export const compareRows = [
+  { dim: "会员积分", before: "锁在平台，不可转让", after: "通证链上自由交易" },
+  { dim: "佣金结算", before: "黑箱计算，不透明", after: "链上自动分配，可验证" },
+  { dim: "社群运营", before: "依赖人力，成本高", after: "AI Bot 7×24 管理，成本降 80%" },
+  { dim: "融资渠道", before: "门槛高，流动性差", after: "Token Sale 公开融资" },
+  { dim: "消费者权益", before: "无治理权", after: "DAO 提案投票，持币参与" },
+];
+
+<CompareTable before="传统模式" after="NEXUS 方案" rows={compareRows} />
+
+## 三大核心能力
+
+### 实体经济通证化
+
+将传统商业实体从 0 搬上链 — **5 步完成全链上运营**：
+
+1. **注册实体** — 链上永久身份，4 种实体类型
+2. **发行通证** — 7 种代币类型，一键铸造
+3. **开店运营** — Entity-Shop 双层架构，商品上架、订单处理
+4. **开放交易** — 内部市场 NEX ↔ 实体代币，TWAP 价格保护
+5. **启动治理** — 41 种提案类型，时间加权投票
+
+### 社群营销引擎
+
+**5 种佣金模式 × 6 种升级触发 × 溢出安置 = 自驱增长飞轮**
+
+- **推荐链** — 口碑传播、直推分享
+- **级差** — 按等级差额分佣，激励升级
+- **单线** — 上下级直接分佣
+- **多级** — N 层瀑布式分佣 + 激活条件
+- **沉淀池** — 按等级比例瓜分轮次奖池
+
+### AI 赋能企业
+
+- **AI 社群管家** — TEE 硬件保护的 Telegram/Discord Bot，15 种规则链
+- **AI 运营助手** — 智能定价、库存预警、佣金优化、风控检测
+- **AI 决策顾问** — AI 分析 → 生成提案 → DAO 投票 → 链上执行
+
+## 技术底座
+
+| 组件 | 选型 |
+|------|------|
+| 共识 | Substrate L1 (Aura + GRANDPA) |
+| 安全 | TEE (Intel TDX + SGX)，DCAP 链上验证 |
+| 密钥 | Shamir K-of-N 秘密共享，密钥永不暴露 |
+| 存储 | IPFS 去中心化存储 + 链上生命周期管理 |
+| 预言机 | OCW (Off-chain Worker) 内置预言机 |
+| 前端 | Next.js DApp (全功能) + 官网 (多语言) |
+
+<Callout type="tip" title="已通过审计">
+  所有核心 Pallet 已完成多轮代码审计，覆盖 Entity、Trading、GroupRobot、Dispute 等模块，累计修复 50+ 项安全问题。
+</Callout>
+
+## 目标用户
+
+NEXUS 为五种角色提供参与路径：
+
+| 角色 | 行动 | 收益 |
+|------|------|------|
+| **商业实体** | 创建实体 → 发币开店 → 设佣金+治理 | 低成本全链上运营 |
+| **社群领袖** | 建立分销网络 → 部署 AI Bot | 佣金驱动增长 |
+| **AI 节点运营** | 运行 TEE 节点 → AI 赋能社群 | 赚取订阅+通胀奖励 |
+| **做市商** | P2P 做市 → 提供流动性 | 赚取手续费 + 信用积累 |
+| **开发者** | 集成 API → 扩展 Pallet → 部署合约 | 生态建设收益 |

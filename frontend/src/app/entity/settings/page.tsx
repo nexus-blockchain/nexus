@@ -10,6 +10,7 @@ import { TxButton } from "@/components/shared/TxButton";
 import { StatusBadge } from "@/components/shared/StatusBadge";
 import { AddressDisplay } from "@/components/shared/AddressDisplay";
 import { Settings, Save, Upload, ArrowUpRight } from "lucide-react";
+import { useTranslations } from "next-intl";
 
 export default function EntitySettingsPage() {
   const { currentEntityId } = useEntityStore();
@@ -20,6 +21,8 @@ export default function EntitySettingsPage() {
   const [logoCid, setLogoCid] = useState("");
   const [descriptionCid, setDescriptionCid] = useState("");
   const [metadataUri, setMetadataUri] = useState("");
+  const t = useTranslations("entity.settings");
+  const tc = useTranslations("common");
 
   useEffect(() => {
     if (entity) {
@@ -31,7 +34,7 @@ export default function EntitySettingsPage() {
   }, [entity]);
 
   if (!currentEntityId) {
-    return <div className="flex h-full items-center justify-center text-muted-foreground">Select an entity first</div>;
+    return <div className="flex h-full items-center justify-center text-muted-foreground">{tc("selectEntity")}</div>;
   }
 
   if (isLoading) {
@@ -54,14 +57,14 @@ export default function EntitySettingsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold tracking-tight">Entity Settings</h1>
-        <p className="text-muted-foreground">Configure your entity details and metadata</p>
+        <h1 className="text-3xl font-bold tracking-tight">{t("title")}</h1>
+        <p className="text-muted-foreground">{t("subtitle")}</p>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2"><Settings className="h-5 w-5" />Basic Information</CardTitle>
+            <CardTitle className="flex items-center gap-2"><Settings className="h-5 w-5" />{t("basicInfo")}</CardTitle>
             <CardDescription>Core entity details stored on-chain</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -101,25 +104,25 @@ export default function EntitySettingsPage() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium">Name</label>
+              <label className="text-sm font-medium">{t("name")}</label>
               <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Entity name" />
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">Logo CID</label>
+              <label className="text-sm font-medium">{t("logo")}</label>
               <Input value={logoCid} onChange={(e) => setLogoCid(e.target.value)} placeholder="IPFS CID for logo" />
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">Description CID</label>
+              <label className="text-sm font-medium">{t("description")}</label>
               <Input value={descriptionCid} onChange={(e) => setDescriptionCid(e.target.value)} placeholder="IPFS CID for description" />
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">Metadata URI</label>
+              <label className="text-sm font-medium">{t("metadata")}</label>
               <Input value={metadataUri} onChange={(e) => setMetadataUri(e.target.value)} placeholder="https://..." />
             </div>
 
             <div className="flex gap-2 pt-4">
               <TxButton onClick={handleSave} txStatus={actions.txState.status}>
-                <Save className="mr-2 h-4 w-4" />Save Changes
+                <Save className="mr-2 h-4 w-4" />{t("update")}
               </TxButton>
             </div>
 

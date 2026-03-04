@@ -35,7 +35,7 @@ pub mod pallet {
         BoundedVec,
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{EntityProvider, OrderProvider, ShopProvider};
+    use pallet_entity_common::{EntityProvider, OrderProvider, ShopProvider, AdminPermission};
 
     /// 订单评价
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
@@ -88,8 +88,21 @@ pub mod pallet {
         type WeightInfo: WeightInfo;
     }
 
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
+
+    /// M1: Config 参数完整性校验
+    #[pallet::hooks]
+    impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        #[cfg(feature = "std")]
+        fn integrity_test() {
+            assert!(T::MaxCidLength::get() > 0, "MaxCidLength must be > 0");
+            assert!(T::MaxReviewsPerUser::get() > 0, "MaxReviewsPerUser must be > 0");
+        }
+    }
 
     // ==================== 存储项 ====================
 
@@ -143,6 +156,11 @@ pub mod pallet {
             entity_id: u64,
             enabled: bool,
         },
+        /// M4: 评价已被 Root 移除
+        ReviewRemoved {
+            order_id: u64,
+            reviewer: T::AccountId,
+        },
     }
 
     // ==================== 错误 ====================
@@ -179,6 +197,10 @@ pub mod pallet {
         ReviewCountOverflow,
         /// 评价时间窗口已过期
         ReviewWindowExpired,
+        /// 评价不存在（Root 删除时）
+        ReviewNotFound,
+        /// 实体已被全局锁定
+        EntityLocked,
     }
 
     // ==================== Extrinsics ====================
@@ -287,15 +309,7 @@ pub mod pallet {
                     },
                 }
 
-                // Entity 级别评分更新（best-effort）
-                if let Some(eid) = entity_id {
-                    if let Err(e) = T::EntityProvider::update_entity_rating(eid, rating) {
-                        log::warn!(
-                            "update_entity_rating failed for entity {} order {}: {:?}",
-                            eid, order_id, e
-                        );
-                    }
-                }
+                // Note: Entity 级别评分已移至 Shop 层级，此处不再更新 Entity 评分
             }
 
             Self::deposit_event(Event::ReviewSubmitted {
@@ -303,6 +317,40 @@ pub mod pallet {
                 reviewer: who,
                 shop_id,
                 rating,
+            });
+
+            Ok(())
+        }
+
+        /// M4: Root 移除违规评价
+        #[pallet::call_index(2)]
+        #[pallet::weight(T::WeightInfo::remove_review())]
+        pub fn remove_review(
+            origin: OriginFor<T>,
+            order_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            let review = Reviews::<T>::take(order_id)
+                .ok_or(Error::<T>::ReviewNotFound)?;
+
+            // 递减全局计数（best-effort）
+            ReviewCount::<T>::mutate(|c| *c = c.saturating_sub(1));
+
+            // 递减店铺计数（best-effort）
+            let shop_id = T::OrderProvider::order_shop_id(order_id);
+            if let Some(sid) = shop_id {
+                ShopReviewCount::<T>::mutate(sid, |c| *c = c.saturating_sub(1));
+            }
+
+            // 从用户索引中移除
+            UserReviews::<T>::mutate(&review.reviewer, |reviews| {
+                reviews.retain(|&id| id != order_id);
+            });
+
+            Self::deposit_event(Event::ReviewRemoved {
+                order_id,
+                reviewer: review.reviewer,
             });
 
             Ok(())
@@ -320,7 +368,8 @@ pub mod pallet {
 
             ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
             ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
-            ensure!(T::EntityProvider::is_entity_admin(entity_id, &who, pallet_entity_common::AdminPermission::REVIEW_MANAGE), Error::<T>::NotEntityAdmin);
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::REVIEW_MANAGE), Error::<T>::NotEntityAdmin);
 
             let currently_disabled = EntityReviewDisabled::<T>::contains_key(entity_id);
             let want_disabled = !enabled;

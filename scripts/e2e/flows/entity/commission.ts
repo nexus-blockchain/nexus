@@ -70,7 +70,6 @@ async function commissionLifecycle(ctx: FlowContext): Promise<void> {
 
   const initPlanTx = (api.tx as any).commissionCore.initCommissionPlan(
     entityId,
-    0,       // plan: 0=Referral, 1=LevelDiff, 2=SingleLine, 3=Team
   );
   const initResult = await ctx.send(initPlanTx, eve, '初始化佣金方案 (Referral)', 'eve');
   if (initResult.success) {
@@ -83,7 +82,7 @@ async function commissionLifecycle(ctx: FlowContext): Promise<void> {
 
   const setModesTx = (api.tx as any).commissionCore.setCommissionModes(
     entityId,
-    [0],     // modes: [Referral]
+    1,       // modes: u16 bitfield (bit 0 = Referral)
   );
   const modesResult = await ctx.send(setModesTx, eve, '设置返佣模式 (Referral)', 'eve');
   assertTxSuccess(modesResult, '设置返佣模式');
@@ -98,10 +97,11 @@ async function commissionLifecycle(ctx: FlowContext): Promise<void> {
 
   const setWithdrawTx = (api.tx as any).commissionCore.setWithdrawalConfig(
     entityId,
-    0,       // mode: 0=DirectNEX
-    0,       // min_repurchase_rate (0%)
-    0,       // voluntary_repurchase_bonus (0%)
-    nex(1).toString(),  // min_amount: 1 NEX
+    'DirectNex',                                        // mode
+    { minAmount: nex(1).toString(), cooldown: 0 },      // defaultTier
+    [],                                                 // levelOverrides
+    0,                                                  // voluntaryBonusRate
+    true,                                               // enabled
   );
   const withdrawConfigResult = await ctx.send(setWithdrawTx, eve, '设置提现配置', 'eve');
   assertTxSuccess(withdrawConfigResult, '设置提现配置');
@@ -126,15 +126,15 @@ async function commissionLifecycle(ctx: FlowContext): Promise<void> {
 
   // 查找或创建商品
   let productId: number;
-  const nextProductId = await (api.query as any).entityService.nextProductId();
+  const nextProductId = await (api.query as any).entityProduct.nextProductId();
   productId = nextProductId.toNumber();
 
-  const createProductTx = (api.tx as any).entityService.createProduct(
-    shopId, 'Commission Test Product', null, nex(50).toString(), 0, null,
+  const createProductTx = (api.tx as any).entityProduct.createProduct(
+    shopId, 'Commission Test Product', 'img_placeholder', 'detail_placeholder', nex(50).toString(), 100, 'Physical',
   );
   const cpResult = await ctx.send(createProductTx, eve, '创建商品', 'eve');
   if (cpResult.success) {
-    const publishTx = (api.tx as any).entityService.publishProduct(shopId, productId);
+    const publishTx = (api.tx as any).entityProduct.publishProduct(productId);
     await ctx.send(publishTx, eve, '上架商品', 'eve');
   } else {
     productId = productId - 1; // 使用已存在的最新商品
@@ -142,8 +142,8 @@ async function commissionLifecycle(ctx: FlowContext): Promise<void> {
   }
 
   // Charlie 下单
-  const orderTx = (api.tx as any).entityOrder.placeOrder(
-    shopId, productId, 1, bob.address, null, null,
+  const orderTx = (api.tx as any).entityTransaction.placeOrder(
+    productId, 1, null, null, null, null,
   );
   const orderResult = await ctx.send(orderTx, charlie, 'Charlie 下单 (触发佣金)', 'charlie');
   if (orderResult.success) {
@@ -153,15 +153,15 @@ async function commissionLifecycle(ctx: FlowContext): Promise<void> {
 
     // 完成订单流程 (发货→确认) 以释放佣金
     const orderEvent = orderResult.events.find(
-      e => e.section === 'entityOrder' && e.method === 'OrderPlaced',
+      e => e.section === 'entityTransaction' && e.method === 'OrderPlaced',
     );
     const orderId = orderEvent?.data?.orderId ?? orderEvent?.data?.[0];
 
     if (orderId) {
-      const shipTx = (api.tx as any).entityOrder.shipOrder(orderId, null);
+      const shipTx = (api.tx as any).entityTransaction.shipOrder(orderId, 'tracking_placeholder');
       await ctx.send(shipTx, eve, 'Eve 发货', 'eve');
 
-      const confirmTx = (api.tx as any).entityOrder.confirmReceipt(orderId);
+      const confirmTx = (api.tx as any).entityTransaction.confirmReceipt(orderId);
       await ctx.send(confirmTx, charlie, 'Charlie 确认收货', 'charlie');
     }
   } else {
@@ -174,9 +174,9 @@ async function commissionLifecycle(ctx: FlowContext): Promise<void> {
 
   const withdrawTx = (api.tx as any).commissionCore.withdrawCommission(
     entityId,
-    0,      // withdrawal_mode: DirectNEX
-    null,   // amount (全部)
-    null,   // repurchase_target
+    null,   // amount (all)
+    null,   // requestedRepurchaseRate
+    null,   // repurchaseTarget
   );
   const withdrawResult = await ctx.send(withdrawTx, bob, 'Bob 提现佣金', 'bob');
   if (withdrawResult.success) {

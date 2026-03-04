@@ -14,6 +14,10 @@ pub type AccountId = u64;
 thread_local! {
     static REFERRERS: RefCell<BTreeMap<(u64, u64), u64>> = RefCell::new(BTreeMap::new());
     static MEMBER_STATS: RefCell<BTreeMap<(u64, u64), (u32, u32, u128)>> = RefCell::new(BTreeMap::new());
+    static BANNED_MEMBERS: RefCell<std::collections::BTreeSet<(u64, u64)>> = RefCell::new(std::collections::BTreeSet::new());
+    static ENTITY_OWNERS: RefCell<BTreeMap<u64, u64>> = RefCell::new(BTreeMap::new());
+    static ENTITY_ADMINS: RefCell<BTreeMap<(u64, u64), u32>> = RefCell::new(BTreeMap::new());
+    static ENTITY_LOCKED: RefCell<std::collections::BTreeSet<u64>> = RefCell::new(std::collections::BTreeSet::new());
 }
 
 pub fn set_referrer(entity_id: u64, account: u64, referrer: u64) {
@@ -28,9 +32,29 @@ pub fn set_stats(entity_id: u64, account: u64, direct: u32, team_size: u32, tota
     });
 }
 
+pub fn ban_member(entity_id: u64, account: u64) {
+    BANNED_MEMBERS.with(|b| { b.borrow_mut().insert((entity_id, account)); });
+}
+
+pub fn set_entity_owner(entity_id: u64, owner: u64) {
+    ENTITY_OWNERS.with(|e| { e.borrow_mut().insert(entity_id, owner); });
+}
+
+pub fn set_entity_admin(entity_id: u64, admin: u64, permissions: u32) {
+    ENTITY_ADMINS.with(|a| { a.borrow_mut().insert((entity_id, admin), permissions); });
+}
+
+pub fn set_entity_locked(entity_id: u64) {
+    ENTITY_LOCKED.with(|l| { l.borrow_mut().insert(entity_id); });
+}
+
 pub fn clear_thread_locals() {
     REFERRERS.with(|r| r.borrow_mut().clear());
     MEMBER_STATS.with(|s| s.borrow_mut().clear());
+    BANNED_MEMBERS.with(|b| b.borrow_mut().clear());
+    ENTITY_OWNERS.with(|e| e.borrow_mut().clear());
+    ENTITY_ADMINS.with(|a| a.borrow_mut().clear());
+    ENTITY_LOCKED.with(|l| l.borrow_mut().clear());
 }
 
 /// 设置线性推荐链: buyer -> r1 -> r2 -> r3 -> ...
@@ -66,6 +90,38 @@ impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
     fn update_custom_level(_: u64, _: u8, _: Option<&[u8]>, _: Option<u128>, _: Option<u16>, _: Option<u16>) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
     fn remove_custom_level(_: u64, _: u8) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
     fn custom_level_count(_: u64) -> u8 { 0 }
+    fn is_banned(entity_id: u64, account: &u64) -> bool {
+        BANNED_MEMBERS.with(|b| b.borrow().contains(&(entity_id, *account)))
+    }
+}
+
+// ============================================================================
+// MockEntityProvider
+// ============================================================================
+
+pub struct MockEntityProvider;
+
+impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
+    fn entity_exists(entity_id: u64) -> bool {
+        ENTITY_OWNERS.with(|e| e.borrow().contains_key(&entity_id))
+    }
+    fn is_entity_active(_entity_id: u64) -> bool { true }
+    fn entity_status(_entity_id: u64) -> Option<pallet_entity_common::EntityStatus> { None }
+    fn entity_owner(entity_id: u64) -> Option<u64> {
+        ENTITY_OWNERS.with(|e| e.borrow().get(&entity_id).copied())
+    }
+    fn entity_account(_entity_id: u64) -> u64 { 0 }
+    fn update_entity_stats(_: u64, _: u128, _: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+    fn is_entity_admin(entity_id: u64, account: &u64, required_permission: u32) -> bool {
+        ENTITY_ADMINS.with(|a| {
+            a.borrow().get(&(entity_id, *account))
+                .map(|perms| perms & required_permission == required_permission)
+                .unwrap_or(false)
+        })
+    }
+    fn is_entity_locked(entity_id: u64) -> bool {
+        ENTITY_LOCKED.with(|l| l.borrow().contains(&entity_id))
+    }
 }
 
 // ============================================================================
@@ -96,6 +152,7 @@ impl pallet_commission_referral::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type MemberProvider = MockMemberProvider;
+    type EntityProvider = MockEntityProvider;
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

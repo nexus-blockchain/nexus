@@ -56,10 +56,16 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
         if entity_id == ENTITY_ID { ENTITY_ACCOUNT } else { 0 }
     }
     fn update_entity_stats(_: u64, _: u128, _: u32) -> Result<(), DispatchError> { Ok(()) }
-    fn update_entity_rating(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
     fn is_entity_admin(entity_id: u64, account: &u64, _required_permission: u32) -> bool {
         entity_id == ENTITY_ID && *account == CREATOR
     }
+    fn is_entity_locked(entity_id: u64) -> bool {
+        ENTITY_LOCKED.with(|l| l.borrow().contains(&entity_id))
+    }
+}
+
+pub fn set_entity_locked(entity_id: u64) {
+    ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id));
 }
 
 // ==================== Mock TokenProvider ====================
@@ -72,6 +78,7 @@ extern crate alloc;
 thread_local! {
     static TOKEN_BALANCES: RefCell<BTreeMap<(u64, u64), u128>> = RefCell::new(BTreeMap::new());
     static TOKEN_RESERVED: RefCell<BTreeMap<(u64, u64), u128>> = RefCell::new(BTreeMap::new());
+    static ENTITY_LOCKED: RefCell<alloc::collections::BTreeSet<u64>> = RefCell::new(alloc::collections::BTreeSet::new());
 }
 
 pub struct MockTokenProvider;

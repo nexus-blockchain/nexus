@@ -496,7 +496,7 @@ nex_per_order = usdt_amount × 10^12 / seed_price
 | 模块 | 用途 | 接口 |
 |------|------|------|
 | entity-registry | 开店初始资金 | `entity_common::PricingProvider` |
-| entity-service | 服务押金 | `entity_common::PricingProvider` |
+| entity-product | 服务押金 | `entity_common::PricingProvider` |
 | storage-service | 运营者保证金 | `DepositCalculatorImpl` |
 | arbitration | 投诉押金换算 | `trading_common::PricingProvider` |
 

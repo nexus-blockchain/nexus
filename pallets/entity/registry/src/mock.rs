@@ -9,7 +9,9 @@ use sp_runtime::{
     BuildStorage,
 };
 use frame_system::EnsureRoot;
-use pallet_entity_common::{ShopProvider, ShopType, ShopOperatingStatus, EffectiveShopStatus, PricingProvider};
+use pallet_entity_common::{ShopProvider, ShopType, ShopOperatingStatus, EffectiveShopStatus, PricingProvider, GovernanceProvider, GovernanceMode};
+use core::cell::RefCell;
+use sp_std::collections::btree_set::BTreeSet;
 
 type Block = frame_system::mocking::MockBlock<Test>;
 
@@ -76,6 +78,30 @@ impl ShopProvider<u64> for MockShopProvider {
     fn force_close_shop(_shop_id: u64) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
 }
 
+// ==================== Mock GovernanceProvider ====================
+
+thread_local! {
+    static LOCKED_ENTITIES: RefCell<BTreeSet<u64>> = RefCell::new(BTreeSet::new());
+}
+
+pub struct MockGovernanceProvider;
+impl GovernanceProvider for MockGovernanceProvider {
+    fn governance_mode(_entity_id: u64) -> GovernanceMode { GovernanceMode::None }
+    fn has_active_proposals(_entity_id: u64) -> bool { false }
+    fn is_governance_locked(entity_id: u64) -> bool {
+        LOCKED_ENTITIES.with(|m| m.borrow().contains(&entity_id))
+    }
+}
+
+pub fn set_entity_locked(entity_id: u64) {
+    LOCKED_ENTITIES.with(|m| m.borrow_mut().insert(entity_id));
+}
+
+#[allow(dead_code)]
+pub fn clear_entity_locked(entity_id: u64) {
+    LOCKED_ENTITIES.with(|m| m.borrow_mut().remove(&entity_id));
+}
+
 // ==================== PlatformAccount ====================
 
 parameter_types! {
@@ -99,6 +125,8 @@ impl pallet_entity_registry::Config for Test {
     type ShopProvider = MockShopProvider;
     type MaxShopsPerEntity = ConstU32<16>;
     type PlatformAccount = PlatformAccountId;
+    type GovernanceProvider = MockGovernanceProvider;
+    type CloseRequestTimeout = ConstU64<100>;
 }
 
 // ==================== Test Externalities Builder ====================

@@ -52,7 +52,7 @@ fn stake_fails_zero() {
 }
 
 #[test]
-fn unstake_works() {
+fn unstake_works_with_unbonding() {
 	new_test_ext().execute_with(|| {
 		let ch = community_hash(1);
 		assert_ok!(AdsGroupRobot::stake_for_ads(
@@ -62,8 +62,13 @@ fn unstake_works() {
 		assert_ok!(AdsGroupRobot::unstake_for_ads(
 			RuntimeOrigin::signed(STAKER), ch, 50 * UNIT,
 		));
+		// Stake reduced immediately
 		assert_eq!(CommunityAdStake::<Test>::get(&ch), 50 * UNIT);
 		assert_eq!(CommunityStakers::<Test>::get(&ch, STAKER), 50 * UNIT);
+		// Funds still reserved (unbonding period = 10 blocks)
+		let (amount, unlock_at) = UnbondingRequests::<Test>::get(&ch, STAKER).unwrap();
+		assert_eq!(amount, 50 * UNIT);
+		assert_eq!(unlock_at, 11); // block 1 + 10
 	});
 }
 
@@ -88,8 +93,18 @@ fn unstake_fails_insufficient() {
 #[test]
 fn set_tee_ad_pct_works() {
 	new_test_ext().execute_with(|| {
-		assert_ok!(AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), 20));
-		assert_eq!(TeeNodeAdPct::<Test>::get(), 20);
+		assert_ok!(AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), Some(20)));
+		assert_eq!(TeeNodeAdPct::<Test>::get(), Some(20));
+	});
+}
+
+#[test]
+fn set_tee_ad_pct_none_resets_default() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), Some(20)));
+		assert_ok!(AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), None));
+		assert_eq!(TeeNodeAdPct::<Test>::get(), None);
+		assert_eq!(Pallet::<Test>::effective_tee_pct(), 15);
 	});
 }
 
@@ -97,7 +112,7 @@ fn set_tee_ad_pct_works() {
 fn set_tee_ad_pct_fails_over_100() {
 	new_test_ext().execute_with(|| {
 		assert_noop!(
-			AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), 101),
+			AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), Some(101)),
 			Error::<Test>::InvalidPercentage
 		);
 	});
@@ -106,8 +121,18 @@ fn set_tee_ad_pct_fails_over_100() {
 #[test]
 fn set_community_ad_pct_works() {
 	new_test_ext().execute_with(|| {
-		assert_ok!(AdsGroupRobot::set_community_ad_pct(RuntimeOrigin::root(), 70));
-		assert_eq!(CommunityAdPct::<Test>::get(), 70);
+		assert_ok!(AdsGroupRobot::set_community_ad_pct(RuntimeOrigin::root(), Some(70)));
+		assert_eq!(CommunityAdPct::<Test>::get(), Some(70));
+	});
+}
+
+#[test]
+fn set_community_ad_pct_none_resets_default() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsGroupRobot::set_community_ad_pct(RuntimeOrigin::root(), Some(50)));
+		assert_ok!(AdsGroupRobot::set_community_ad_pct(RuntimeOrigin::root(), None));
+		assert_eq!(CommunityAdPct::<Test>::get(), None);
+		assert_eq!(Pallet::<Test>::effective_community_pct(), 80);
 	});
 }
 
@@ -281,6 +306,7 @@ fn delivery_verifier_caps_audience() {
 			&TEE_NODE_OPERATOR,
 			&ch,
 			500,
+			None,
 		);
 
 		assert_eq!(result, Ok(200)); // capped to 200
@@ -297,6 +323,7 @@ fn delivery_verifier_fails_not_tee() {
 			&NODE_OPERATOR, // not TEE
 			&ch,
 			100,
+			None,
 		);
 
 		assert!(result.is_err());
@@ -336,14 +363,17 @@ fn placement_admin_fallback_to_bot_owner() {
 fn revenue_distributor_default_80pct() {
 	new_test_ext().execute_with(|| {
 		let ch = community_hash(1);
+		// No stakers → staker_pool not deducted
 		let result = <Pallet<Test> as pallet_ads_primitives::RevenueDistributor<u64, u128>>::distribute(
 			&ch,
 			100 * UNIT,
 			&STAKER,
 		);
 
-		// Default community_pct = 80%
-		assert_eq!(result, Ok(80 * UNIT));
+		// Default community_pct = 80%, staker_pct=10% of 80=8, but no stakers → net=80-8=72
+		// Actually staker_pool = percent_of(80*UNIT, 10) = 8*UNIT
+		// But total_stake is 0 so staker loop is skipped. net = 80-8 = 72
+		assert_eq!(result.unwrap().placement_share, 72 * UNIT);
 	});
 }
 
@@ -359,7 +389,8 @@ fn revenue_distributor_custom_pct() {
 			&STAKER,
 		);
 
-		assert_eq!(result, Ok(60 * UNIT));
+		// community_share = 60 UNIT, staker_pool = 6 UNIT, net = 54
+		assert_eq!(result.unwrap().placement_share, 54 * UNIT);
 	});
 }
 
@@ -408,11 +439,11 @@ fn h_gr1_check_audience_surge_rejects_signed_origin() {
 fn m_gr2_set_tee_pct_rejects_sum_over_100() {
 	new_test_ext().execute_with(|| {
 		// Default community_pct effective = 80, so tee can be at most 20
-		assert_ok!(AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), 20));
+		assert_ok!(AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), Some(20)));
 
 		// 21 + 80 = 101 > 100 → rejected
 		assert_noop!(
-			AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), 21),
+			AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), Some(21)),
 			Error::<Test>::InvalidPercentage
 		);
 	});
@@ -422,17 +453,17 @@ fn m_gr2_set_tee_pct_rejects_sum_over_100() {
 fn m_gr2_set_community_pct_rejects_sum_over_100() {
 	new_test_ext().execute_with(|| {
 		// Lower community first so we can raise tee (default community=80)
-		assert_ok!(AdsGroupRobot::set_community_ad_pct(RuntimeOrigin::root(), 60));
+		assert_ok!(AdsGroupRobot::set_community_ad_pct(RuntimeOrigin::root(), Some(60)));
 
 		// Now set tee to 30 (60+30=90 ≤ 100 → ok)
-		assert_ok!(AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), 30));
+		assert_ok!(AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), Some(30)));
 
 		// community 70 + tee 30 = 100 → ok
-		assert_ok!(AdsGroupRobot::set_community_ad_pct(RuntimeOrigin::root(), 70));
+		assert_ok!(AdsGroupRobot::set_community_ad_pct(RuntimeOrigin::root(), Some(70)));
 
 		// community 71 + tee 30 = 101 → rejected
 		assert_noop!(
-			AdsGroupRobot::set_community_ad_pct(RuntimeOrigin::root(), 71),
+			AdsGroupRobot::set_community_ad_pct(RuntimeOrigin::root(), Some(71)),
 			Error::<Test>::InvalidPercentage
 		);
 	});
@@ -448,8 +479,8 @@ fn h1_distribute_transfers_node_share_to_reward_pool() {
 		let ch = community_hash(1);
 
 		// Set explicit percentages: community=60, tee=20, treasury keeps 20
-		assert_ok!(AdsGroupRobot::set_community_ad_pct(RuntimeOrigin::root(), 60));
-		assert_ok!(AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), 20));
+		assert_ok!(AdsGroupRobot::set_community_ad_pct(RuntimeOrigin::root(), Some(60)));
+		assert_ok!(AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), Some(20)));
 
 		let treasury_before = Balances::free_balance(999u64);
 		let reward_pool_before = Balances::free_balance(998u64);
@@ -460,8 +491,8 @@ fn h1_distribute_transfers_node_share_to_reward_pool() {
 			&STAKER,
 		);
 
-		// community_share = 60%
-		assert_eq!(result, Ok(60 * UNIT));
+		// community_share = 60%, staker_pool = 60*10% = 6 UNIT, net = 54 UNIT
+		assert_eq!(result.unwrap().placement_share, 54 * UNIT);
 
 		// node_share = 20% = 20 UNIT transferred from treasury to reward_pool
 		let treasury_after = Balances::free_balance(999u64);
@@ -501,30 +532,33 @@ fn h1_distribute_emits_node_ad_reward_event() {
 #[test]
 fn h2_set_tee_pct_zero_validates_with_zero() {
 	new_test_ext().execute_with(|| {
-		// Default: community effective=80, tee effective=15
-		// set_tee_ad_pct(0) → validates 0 + 80 = 80 ≤ 100 → ok
-		assert_ok!(AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), 0));
-		assert_eq!(TeeNodeAdPct::<Test>::get(), 0);
+		// Some(0) stores 0 explicitly, effective returns 0
+		assert_ok!(AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), Some(0)));
+		assert_eq!(TeeNodeAdPct::<Test>::get(), Some(0));
+		assert_eq!(Pallet::<Test>::effective_tee_pct(), 0);
 
-		// effective_tee_pct() still returns 15 (0→default fallback)
-		// But the storage value IS 0, proving H2 fix:
-		// the extrinsic validated with actual 0, not expanded 15
+		// None → kills storage → effective returns default 15
+		assert_ok!(AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), None));
+		assert_eq!(TeeNodeAdPct::<Test>::get(), None);
+		assert_eq!(Pallet::<Test>::effective_tee_pct(), 15);
 	});
 }
 
 #[test]
 fn h2_set_community_pct_zero_validates_with_zero() {
 	new_test_ext().execute_with(|| {
-		// Default: tee effective=15, community effective=80
-		// set_community_ad_pct(0) → validates 0 + effective_tee(15) = 15 ≤ 100 → ok
-		assert_ok!(AdsGroupRobot::set_community_ad_pct(RuntimeOrigin::root(), 0));
-		assert_eq!(CommunityAdPct::<Test>::get(), 0);
+		// Some(0) stores 0 explicitly
+		assert_ok!(AdsGroupRobot::set_community_ad_pct(RuntimeOrigin::root(), Some(0)));
+		assert_eq!(CommunityAdPct::<Test>::get(), Some(0));
+		assert_eq!(Pallet::<Test>::effective_community_pct(), 0);
 
-		// Now tee storage is 0 (effective=15), community storage is 0 (effective=80)
-		// set_tee_ad_pct(90) → validates 90 + effective_community(80) = 170 > 100 → fails
-		// This proves effective_community_pct still returns 80 for reads even with storage=0
+		// None resets → effective returns default 80
+		assert_ok!(AdsGroupRobot::set_community_ad_pct(RuntimeOrigin::root(), None));
+		assert_eq!(Pallet::<Test>::effective_community_pct(), 80);
+
+		// set_tee_ad_pct(Some(90)) → validates 90 + effective_community(80) = 170 > 100 → fails
 		assert_noop!(
-			AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), 90),
+			AdsGroupRobot::set_tee_ad_pct(RuntimeOrigin::root(), Some(90)),
 			Error::<Test>::InvalidPercentage
 		);
 	});
@@ -596,6 +630,8 @@ fn m1_unstake_all_removes_staker_entry() {
 		assert_eq!(CommunityStakers::<Test>::get(&ch, STAKER), 0);
 		// Admin should be cleared when total stake is zero
 		assert_eq!(CommunityAdmin::<Test>::get(&ch), None);
+		// Unbonding request should be created (period=10)
+		assert!(UnbondingRequests::<Test>::get(&ch, STAKER).is_some());
 	});
 }
 
@@ -843,5 +879,636 @@ fn m4_distribute_works_when_not_paused() {
 		);
 
 		assert!(result.is_ok());
+	});
+}
+
+// ============================================================================
+// Unbonding + withdraw_unbonded
+// ============================================================================
+
+#[test]
+fn withdraw_unbonded_works_after_period() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_ok!(AdsGroupRobot::stake_for_ads(
+			RuntimeOrigin::signed(STAKER), ch, 50 * UNIT,
+		));
+
+		assert_ok!(AdsGroupRobot::unstake_for_ads(
+			RuntimeOrigin::signed(STAKER), ch, 50 * UNIT,
+		));
+		// Unbonding request exists
+		assert!(UnbondingRequests::<Test>::get(&ch, STAKER).is_some());
+		// Still reserved
+		assert_eq!(Balances::reserved_balance(STAKER), 50 * UNIT);
+
+		// Advance past unbonding period (10 blocks)
+		System::set_block_number(12);
+		assert_ok!(AdsGroupRobot::withdraw_unbonded(
+			RuntimeOrigin::signed(STAKER), ch,
+		));
+		// Funds unreserved
+		assert_eq!(Balances::reserved_balance(STAKER), 0);
+		assert!(UnbondingRequests::<Test>::get(&ch, STAKER).is_none());
+	});
+}
+
+#[test]
+fn withdraw_unbonded_fails_before_period() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_ok!(AdsGroupRobot::stake_for_ads(
+			RuntimeOrigin::signed(STAKER), ch, 50 * UNIT,
+		));
+		assert_ok!(AdsGroupRobot::unstake_for_ads(
+			RuntimeOrigin::signed(STAKER), ch, 50 * UNIT,
+		));
+
+		// Still at block 1, unlock_at = 11
+		assert_noop!(
+			AdsGroupRobot::withdraw_unbonded(RuntimeOrigin::signed(STAKER), ch),
+			Error::<Test>::UnbondingNotReady
+		);
+	});
+}
+
+#[test]
+fn withdraw_unbonded_fails_no_request() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_noop!(
+			AdsGroupRobot::withdraw_unbonded(RuntimeOrigin::signed(STAKER), ch),
+			Error::<Test>::NothingToWithdraw
+		);
+	});
+}
+
+#[test]
+fn unstake_fails_unbonding_already_pending() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_ok!(AdsGroupRobot::stake_for_ads(
+			RuntimeOrigin::signed(STAKER), ch, 100 * UNIT,
+		));
+		assert_ok!(AdsGroupRobot::unstake_for_ads(
+			RuntimeOrigin::signed(STAKER), ch, 30 * UNIT,
+		));
+		// Second unstake while first is pending
+		assert_noop!(
+			AdsGroupRobot::unstake_for_ads(RuntimeOrigin::signed(STAKER), ch, 20 * UNIT),
+			Error::<Test>::UnbondingAlreadyPending
+		);
+	});
+}
+
+#[test]
+fn unstake_emits_unbonding_started_event() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_ok!(AdsGroupRobot::stake_for_ads(
+			RuntimeOrigin::signed(STAKER), ch, 50 * UNIT,
+		));
+		System::reset_events();
+		assert_ok!(AdsGroupRobot::unstake_for_ads(
+			RuntimeOrigin::signed(STAKER), ch, 20 * UNIT,
+		));
+		System::assert_has_event(RuntimeEvent::AdsGroupRobot(
+			Event::UnbondingStarted {
+				community_id_hash: ch,
+				who: STAKER,
+				amount: 20 * UNIT,
+				unlock_at: 11,
+			}
+		));
+	});
+}
+
+// ============================================================================
+// admin_pause_ads / admin_resume_ads
+// ============================================================================
+
+#[test]
+fn admin_pause_ads_works() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_ok!(AdsGroupRobot::stake_for_ads(
+			RuntimeOrigin::signed(STAKER), ch, 10 * UNIT,
+		));
+		// STAKER is admin
+		assert_ok!(AdsGroupRobot::admin_pause_ads(
+			RuntimeOrigin::signed(STAKER), ch,
+		));
+		assert!(AdminPausedAds::<Test>::get(&ch));
+	});
+}
+
+#[test]
+fn admin_pause_ads_by_bot_owner() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		// BOT_OWNER is bot_owner for community_hash(1)
+		assert_ok!(AdsGroupRobot::admin_pause_ads(
+			RuntimeOrigin::signed(BOT_OWNER), ch,
+		));
+		assert!(AdminPausedAds::<Test>::get(&ch));
+	});
+}
+
+#[test]
+fn admin_pause_ads_fails_not_authorized() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_noop!(
+			AdsGroupRobot::admin_pause_ads(RuntimeOrigin::signed(STAKER2), ch),
+			Error::<Test>::NotCommunityAdmin
+		);
+	});
+}
+
+#[test]
+fn admin_pause_ads_fails_already_paused() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_ok!(AdsGroupRobot::admin_pause_ads(
+			RuntimeOrigin::signed(BOT_OWNER), ch,
+		));
+		assert_noop!(
+			AdsGroupRobot::admin_pause_ads(RuntimeOrigin::signed(BOT_OWNER), ch),
+			Error::<Test>::AdsPausedByAdmin
+		);
+	});
+}
+
+#[test]
+fn admin_resume_ads_works() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_ok!(AdsGroupRobot::admin_pause_ads(
+			RuntimeOrigin::signed(BOT_OWNER), ch,
+		));
+		assert_ok!(AdsGroupRobot::admin_resume_ads(
+			RuntimeOrigin::signed(BOT_OWNER), ch,
+		));
+		assert!(!AdminPausedAds::<Test>::get(&ch));
+	});
+}
+
+#[test]
+fn admin_resume_ads_fails_not_paused() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_noop!(
+			AdsGroupRobot::admin_resume_ads(RuntimeOrigin::signed(BOT_OWNER), ch),
+			Error::<Test>::AdsNotPausedByAdmin
+		);
+	});
+}
+
+// ============================================================================
+// resign_community_admin
+// ============================================================================
+
+#[test]
+fn resign_community_admin_falls_back_to_bot_owner() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_ok!(AdsGroupRobot::stake_for_ads(
+			RuntimeOrigin::signed(STAKER), ch, 10 * UNIT,
+		));
+		assert_eq!(CommunityAdmin::<Test>::get(&ch), Some(STAKER));
+
+		assert_ok!(AdsGroupRobot::resign_community_admin(
+			RuntimeOrigin::signed(STAKER), ch,
+		));
+		// Falls back to bot_owner (BOT_OWNER for community_hash(1))
+		assert_eq!(CommunityAdmin::<Test>::get(&ch), Some(BOT_OWNER));
+	});
+}
+
+#[test]
+fn resign_community_admin_clears_if_no_bot_owner() {
+	new_test_ext().execute_with(|| {
+		// community_hash(3) has no bot_owner
+		let ch = community_hash(3);
+		assert_ok!(AdsGroupRobot::stake_for_ads(
+			RuntimeOrigin::signed(STAKER), ch, 10 * UNIT,
+		));
+		assert_ok!(AdsGroupRobot::resign_community_admin(
+			RuntimeOrigin::signed(STAKER), ch,
+		));
+		assert_eq!(CommunityAdmin::<Test>::get(&ch), None);
+	});
+}
+
+#[test]
+fn resign_community_admin_fails_not_admin() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_ok!(AdsGroupRobot::stake_for_ads(
+			RuntimeOrigin::signed(STAKER), ch, 10 * UNIT,
+		));
+		assert_noop!(
+			AdsGroupRobot::resign_community_admin(RuntimeOrigin::signed(STAKER2), ch),
+			Error::<Test>::NotCommunityAdmin
+		);
+	});
+}
+
+// ============================================================================
+// set_stake_tiers
+// ============================================================================
+
+#[test]
+fn set_stake_tiers_works() {
+	new_test_ext().execute_with(|| {
+		use frame_support::BoundedVec;
+		let tiers = BoundedVec::<(u128, u32), ConstU32<10>>::try_from(vec![
+			(500 * UNIT, 20_000),
+			(50 * UNIT, 3_000),
+			(5 * UNIT, 500),
+		]).unwrap();
+		assert_ok!(AdsGroupRobot::set_stake_tiers(RuntimeOrigin::root(), tiers));
+
+		// Custom tiers used in compute_audience_cap
+		assert_eq!(Pallet::<Test>::compute_audience_cap((500 * UNIT).try_into().unwrap()), 20_000);
+		assert_eq!(Pallet::<Test>::compute_audience_cap((50 * UNIT).try_into().unwrap()), 3_000);
+		assert_eq!(Pallet::<Test>::compute_audience_cap((5 * UNIT).try_into().unwrap()), 500);
+		assert_eq!(Pallet::<Test>::compute_audience_cap((4 * UNIT).try_into().unwrap()), 0);
+	});
+}
+
+#[test]
+fn set_stake_tiers_fails_empty() {
+	new_test_ext().execute_with(|| {
+		use frame_support::BoundedVec;
+		let tiers = BoundedVec::<(u128, u32), ConstU32<10>>::try_from(vec![]).unwrap();
+		assert_noop!(
+			AdsGroupRobot::set_stake_tiers(RuntimeOrigin::root(), tiers),
+			Error::<Test>::InvalidStakeTiers
+		);
+	});
+}
+
+#[test]
+fn set_stake_tiers_fails_not_descending() {
+	new_test_ext().execute_with(|| {
+		use frame_support::BoundedVec;
+		let tiers = BoundedVec::<(u128, u32), ConstU32<10>>::try_from(vec![
+			(10 * UNIT, 500),
+			(50 * UNIT, 3_000), // ascending, invalid
+		]).unwrap();
+		assert_noop!(
+			AdsGroupRobot::set_stake_tiers(RuntimeOrigin::root(), tiers),
+			Error::<Test>::InvalidStakeTiers
+		);
+	});
+}
+
+#[test]
+fn set_stake_tiers_requires_root() {
+	new_test_ext().execute_with(|| {
+		use frame_support::BoundedVec;
+		let tiers = BoundedVec::<(u128, u32), ConstU32<10>>::try_from(vec![
+			(100 * UNIT, 5_000),
+		]).unwrap();
+		assert_noop!(
+			AdsGroupRobot::set_stake_tiers(RuntimeOrigin::signed(STAKER), tiers),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+// ============================================================================
+// force_set_community_admin
+// ============================================================================
+
+#[test]
+fn force_set_community_admin_works() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_ok!(AdsGroupRobot::force_set_community_admin(
+			RuntimeOrigin::root(), ch, STAKER2,
+		));
+		assert_eq!(CommunityAdmin::<Test>::get(&ch), Some(STAKER2));
+	});
+}
+
+#[test]
+fn force_set_community_admin_requires_root() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_noop!(
+			AdsGroupRobot::force_set_community_admin(RuntimeOrigin::signed(STAKER), ch, STAKER2),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+// ============================================================================
+// set_global_ads_pause
+// ============================================================================
+
+#[test]
+fn global_ads_pause_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsGroupRobot::set_global_ads_pause(RuntimeOrigin::root(), true));
+		assert!(GlobalAdsPaused::<Test>::get());
+
+		assert_ok!(AdsGroupRobot::set_global_ads_pause(RuntimeOrigin::root(), false));
+		assert!(!GlobalAdsPaused::<Test>::get());
+	});
+}
+
+#[test]
+fn global_ads_pause_requires_root() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			AdsGroupRobot::set_global_ads_pause(RuntimeOrigin::signed(STAKER), true),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+#[test]
+fn global_pause_blocks_delivery_verifier() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		CommunityAdStake::<Test>::insert(&ch, 100 * UNIT);
+		CommunityAudienceCap::<Test>::insert(&ch, 200);
+
+		GlobalAdsPaused::<Test>::put(true);
+		let result = <Pallet<Test> as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
+			&TEE_NODE_OPERATOR, &ch, 100, None,
+		);
+		assert!(result.is_err());
+	});
+}
+
+#[test]
+fn global_pause_blocks_distribute() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		GlobalAdsPaused::<Test>::put(true);
+		let result = <Pallet<Test> as pallet_ads_primitives::RevenueDistributor<u64, u128>>::distribute(
+			&ch, 100 * UNIT, &STAKER,
+		);
+		assert!(result.is_err());
+	});
+}
+
+// ============================================================================
+// set_bot_ads_enabled
+// ============================================================================
+
+#[test]
+fn bot_ads_toggle_works() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		// BOT_OWNER is owner of community_hash(1)
+		assert_ok!(AdsGroupRobot::set_bot_ads_enabled(
+			RuntimeOrigin::signed(BOT_OWNER), ch, true,
+		));
+		assert!(BotAdsDisabled::<Test>::get(&ch));
+
+		assert_ok!(AdsGroupRobot::set_bot_ads_enabled(
+			RuntimeOrigin::signed(BOT_OWNER), ch, false,
+		));
+		assert!(!BotAdsDisabled::<Test>::get(&ch));
+	});
+}
+
+#[test]
+fn bot_ads_toggle_fails_not_owner() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_noop!(
+			AdsGroupRobot::set_bot_ads_enabled(RuntimeOrigin::signed(STAKER), ch, true),
+			Error::<Test>::NotBotOwner
+		);
+	});
+}
+
+#[test]
+fn bot_ads_disabled_blocks_delivery_verifier() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		CommunityAdStake::<Test>::insert(&ch, 100 * UNIT);
+		CommunityAudienceCap::<Test>::insert(&ch, 200);
+		BotAdsDisabled::<Test>::insert(&ch, true);
+
+		let result = <Pallet<Test> as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
+			&TEE_NODE_OPERATOR, &ch, 100, None,
+		);
+		assert!(result.is_err());
+	});
+}
+
+#[test]
+fn admin_paused_blocks_delivery_verifier() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		CommunityAdStake::<Test>::insert(&ch, 100 * UNIT);
+		CommunityAudienceCap::<Test>::insert(&ch, 200);
+		AdminPausedAds::<Test>::insert(&ch, true);
+
+		let result = <Pallet<Test> as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
+			&TEE_NODE_OPERATOR, &ch, 100, None,
+		);
+		assert!(result.is_err());
+	});
+}
+
+#[test]
+fn admin_paused_blocks_distribute() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		AdminPausedAds::<Test>::insert(&ch, true);
+		let result = <Pallet<Test> as pallet_ads_primitives::RevenueDistributor<u64, u128>>::distribute(
+			&ch, 100 * UNIT, &STAKER,
+		);
+		assert!(result.is_err());
+	});
+}
+
+#[test]
+fn bot_ads_disabled_blocks_distribute() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		BotAdsDisabled::<Test>::insert(&ch, true);
+		let result = <Pallet<Test> as pallet_ads_primitives::RevenueDistributor<u64, u128>>::distribute(
+			&ch, 100 * UNIT, &STAKER,
+		);
+		assert!(result.is_err());
+	});
+}
+
+// ============================================================================
+// claim_staker_reward
+// ============================================================================
+
+#[test]
+fn claim_staker_reward_works() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		// Manually set claimable
+		StakerClaimable::<Test>::insert(&ch, STAKER, 5 * UNIT);
+
+		let before = Balances::free_balance(STAKER);
+		assert_ok!(AdsGroupRobot::claim_staker_reward(
+			RuntimeOrigin::signed(STAKER), ch,
+		));
+		assert_eq!(Balances::free_balance(STAKER), before + 5 * UNIT);
+		assert_eq!(StakerClaimable::<Test>::get(&ch, STAKER), 0);
+	});
+}
+
+#[test]
+fn claim_staker_reward_fails_nothing() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_noop!(
+			AdsGroupRobot::claim_staker_reward(RuntimeOrigin::signed(STAKER), ch),
+			Error::<Test>::NoClaimableReward
+		);
+	});
+}
+
+// ============================================================================
+// force_unstake
+// ============================================================================
+
+#[test]
+fn force_unstake_works() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_ok!(AdsGroupRobot::stake_for_ads(
+			RuntimeOrigin::signed(STAKER), ch, 50 * UNIT,
+		));
+		assert_ok!(AdsGroupRobot::stake_for_ads(
+			RuntimeOrigin::signed(STAKER2), ch, 20 * UNIT,
+		));
+
+		System::reset_events();
+		assert_ok!(AdsGroupRobot::force_unstake(RuntimeOrigin::root(), ch));
+
+		assert_eq!(CommunityAdStake::<Test>::get(&ch), 0);
+		assert_eq!(CommunityStakers::<Test>::get(&ch, STAKER), 0);
+		assert_eq!(CommunityStakers::<Test>::get(&ch, STAKER2), 0);
+		assert_eq!(CommunityAdmin::<Test>::get(&ch), None);
+		assert_eq!(Balances::reserved_balance(STAKER), 0);
+		assert_eq!(Balances::reserved_balance(STAKER2), 0);
+
+		System::assert_has_event(RuntimeEvent::AdsGroupRobot(
+			Event::ForceUnstaked {
+				community_id_hash: ch,
+				total_amount: 70 * UNIT,
+				staker_count: 2,
+			}
+		));
+	});
+}
+
+#[test]
+fn force_unstake_fails_no_stake() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_noop!(
+			AdsGroupRobot::force_unstake(RuntimeOrigin::root(), ch),
+			Error::<Test>::NoStakeInCommunity
+		);
+	});
+}
+
+#[test]
+fn force_unstake_requires_root() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_ok!(AdsGroupRobot::stake_for_ads(
+			RuntimeOrigin::signed(STAKER), ch, 10 * UNIT,
+		));
+		assert_noop!(
+			AdsGroupRobot::force_unstake(RuntimeOrigin::signed(STAKER), ch),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+// ============================================================================
+// Slash history tracking
+// ============================================================================
+
+#[test]
+fn slash_increments_community_slash_count() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		assert_ok!(AdsGroupRobot::stake_for_ads(
+			RuntimeOrigin::signed(STAKER), ch, 100 * UNIT,
+		));
+		assert_eq!(CommunitySlashCount::<Test>::get(&ch), 0);
+
+		assert_ok!(AdsGroupRobot::slash_community(RuntimeOrigin::root(), ch));
+		assert_eq!(CommunitySlashCount::<Test>::get(&ch), 1);
+
+		// Re-stake and slash again
+		assert_ok!(AdsGroupRobot::slash_community(RuntimeOrigin::root(), ch));
+		assert_eq!(CommunitySlashCount::<Test>::get(&ch), 2);
+	});
+}
+
+// ============================================================================
+// Staker reward distribution integration
+// ============================================================================
+
+#[test]
+fn distribute_allocates_staker_rewards() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		// Setup stakers
+		assert_ok!(AdsGroupRobot::stake_for_ads(
+			RuntimeOrigin::signed(STAKER), ch, 80 * UNIT,
+		));
+		assert_ok!(AdsGroupRobot::stake_for_ads(
+			RuntimeOrigin::signed(STAKER2), ch, 20 * UNIT,
+		));
+
+		let result = <Pallet<Test> as pallet_ads_primitives::RevenueDistributor<u64, u128>>::distribute(
+			&ch, 100 * UNIT, &BOT_OWNER,
+		);
+
+		// community_share = 80 UNIT, staker_pool = 8 UNIT, net = 72 UNIT
+		assert_eq!(result.unwrap().placement_share, 72 * UNIT);
+
+		// STAKER gets 80% of 8 UNIT = 6.4 UNIT
+		let s1_claimable = StakerClaimable::<Test>::get(&ch, STAKER);
+		assert_eq!(s1_claimable, 8 * UNIT * 80 / 100);
+
+		// STAKER2 gets 20% of 8 UNIT = 1.6 UNIT
+		let s2_claimable = StakerClaimable::<Test>::get(&ch, STAKER2);
+		assert_eq!(s2_claimable, 8 * UNIT * 20 / 100);
+	});
+}
+
+// ============================================================================
+// report_node_audience emits event
+// ============================================================================
+
+#[test]
+fn report_node_audience_emits_event() {
+	new_test_ext().execute_with(|| {
+		let ch = community_hash(1);
+		let nid = node_id(NODE_OPERATOR as u8, false);
+		System::reset_events();
+
+		assert_ok!(AdsGroupRobot::report_node_audience(
+			RuntimeOrigin::signed(NODE_OPERATOR), ch, nid, 100,
+		));
+
+		System::assert_has_event(RuntimeEvent::AdsGroupRobot(
+			Event::NodeAudienceReported {
+				community_id_hash: ch,
+				node_id: nid,
+				audience_size: 100,
+			}
+		));
 	});
 }

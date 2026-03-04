@@ -15,6 +15,20 @@ pub mod lock;
 pub mod callback;
 pub mod text_utils;
 pub mod ad_footer;
+pub mod approve;
+pub mod automod;
+pub mod captcha;
+pub mod cas;
+pub mod custom_filter;
+pub mod gban;
+pub mod homoglyph;
+pub mod log_channel;
+pub mod mention_flood;
+pub mod new_member_audit;
+pub mod nsfw;
+pub mod profanity;
+pub mod raid;
+pub mod violation_tracker;
 
 use async_trait::async_trait;
 

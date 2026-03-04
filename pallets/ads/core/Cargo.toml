@@ -19,6 +19,7 @@ pallet-ads-primitives = { path = "../primitives", default-features = false }
 # Substrate
 frame-support = { workspace = true }
 frame-system = { workspace = true }
+sp-api = { workspace = true }
 sp-runtime = { workspace = true }
 
 [dev-dependencies]
@@ -35,6 +36,7 @@ std = [
 	"pallet-ads-primitives/std",
 	"frame-support/std",
 	"frame-system/std",
+	"sp-api/std",
 	"sp-runtime/std",
 ]
 try-runtime = [

@@ -47,7 +47,9 @@ pub enum VaultRequest {
 }
 
 /// IPC 响应
-#[derive(Debug, Clone)]
+///
+/// L7 审计修复: 手动实现 Debug, 对 Ok(String) 脱敏防止 Token 泄漏到日志
+#[derive(Clone)]
 pub enum VaultResponse {
     /// 成功: 返回字符串结果
     Ok(String),
@@ -70,6 +72,24 @@ pub enum VaultResponse {
     TokenInjected {
         bot_id_hash: Option<[u8; 32]>,
     },
+}
+
+impl std::fmt::Debug for VaultResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ok(s) => write!(f, "Ok(***{} bytes***)", s.len()),
+            Self::OkHash(h) => write!(f, "OkHash({})", hex::encode(&h[..4])),
+            Self::Error(e) => write!(f, "Error({:?})", e),
+            Self::Pong => write!(f, "Pong"),
+            Self::ShutdownAck => write!(f, "ShutdownAck"),
+            Self::ProvisionSessionCreated { session_id, .. } => {
+                write!(f, "ProvisionSessionCreated({})", hex::encode(session_id))
+            }
+            Self::TokenInjected { bot_id_hash } => {
+                write!(f, "TokenInjected(hash={:?})", bot_id_hash.map(|h| hex::encode(&h[..4])))
+            }
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -354,14 +374,16 @@ pub fn default_socket_path(data_dir: &str) -> String {
 /// 使用 AES-256-GCM 加密 Unix socket 上的所有消息,
 /// 防止同机 root 用户通过 socat 等工具监听 IPC 流量。
 ///
-/// Nonce 策略: 8 字节方向标识 + 4 字节递增计数器
-/// - 发送方向: nonce[0..8] = "CLNT->SV" 或 "SRVR->CL"
-/// - 计数器:   nonce[8..12] = send_counter (小端)
+/// Nonce 策略: 4 字节方向标识 + 8 字节递增计数器
+/// - 发送方向: nonce[0..4] = "C->S" 或 "S->C"
+/// - 计数器:   nonce[4..12] = send_counter (小端, u64)
+///
+/// 使用完整 u64 计数器避免 2^32 后 nonce 复用 (C1 审计修复)
 pub struct IpcCipher {
     cipher: Aes256Gcm,
     /// 方向前缀 (区分 client→server 和 server→client)
-    send_prefix: [u8; 8],
-    recv_prefix: [u8; 8],
+    send_prefix: [u8; 4],
+    recv_prefix: [u8; 4],
     send_counter: AtomicU64,
     recv_counter: AtomicU64,
 }
@@ -371,23 +393,23 @@ pub struct IpcCipher {
 const IPC_NONCE_LEN: usize = 12;
 
 impl IpcCipher {
-    /// 创建服务端加密器 (send=SRVR->CL, recv=CLNT->SV)
+    /// 创建服务端加密器 (send=S->C, recv=C->S)
     pub fn new_server(key: &[u8; 32]) -> Self {
         Self {
             cipher: Aes256Gcm::new(key.into()),
-            send_prefix: *b"SRVR->CL",
-            recv_prefix: *b"CLNT->SV",
+            send_prefix: *b"S->C",
+            recv_prefix: *b"C->S",
             send_counter: AtomicU64::new(0),
             recv_counter: AtomicU64::new(0),
         }
     }
 
-    /// 创建客户端加密器 (send=CLNT->SV, recv=SRVR->CL)
+    /// 创建客户端加密器 (send=C->S, recv=S->C)
     pub fn new_client(key: &[u8; 32]) -> Self {
         Self {
             cipher: Aes256Gcm::new(key.into()),
-            send_prefix: *b"CLNT->SV",
-            recv_prefix: *b"SRVR->CL",
+            send_prefix: *b"C->S",
+            recv_prefix: *b"S->C",
             send_counter: AtomicU64::new(0),
             recv_counter: AtomicU64::new(0),
         }
@@ -396,6 +418,12 @@ impl IpcCipher {
     /// 加密消息 payload
     fn encrypt(&self, plaintext: &[u8]) -> io::Result<Vec<u8>> {
         let counter = self.send_counter.fetch_add(1, Ordering::SeqCst);
+        if counter == u64::MAX {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "IPC nonce counter exhausted, must re-key",
+            ));
+        }
         let nonce_bytes = self.build_nonce(&self.send_prefix, counter);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
@@ -422,17 +450,18 @@ impl IpcCipher {
         let ciphertext = &encrypted[IPC_NONCE_LEN..];
 
         // 验证 nonce 前缀匹配预期方向
-        if nonce_bytes[..8] != self.recv_prefix {
+        if nonce_bytes[..4] != self.recv_prefix {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "IPC nonce direction mismatch",
             ));
         }
 
-        // 验证计数器单调递增 (防重放)
-        let counter = u32::from_le_bytes([
+        // 验证计数器单调递增 (防重放, 使用完整 u64)
+        let counter = u64::from_le_bytes([
+            nonce_bytes[4], nonce_bytes[5], nonce_bytes[6], nonce_bytes[7],
             nonce_bytes[8], nonce_bytes[9], nonce_bytes[10], nonce_bytes[11],
-        ]) as u64;
+        ]);
         let expected = self.recv_counter.fetch_add(1, Ordering::SeqCst);
         if counter != expected {
             return Err(io::Error::new(
@@ -446,10 +475,10 @@ impl IpcCipher {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("IPC decrypt: {}", e)))
     }
 
-    fn build_nonce(&self, prefix: &[u8; 8], counter: u64) -> [u8; 12] {
+    fn build_nonce(&self, prefix: &[u8; 4], counter: u64) -> [u8; 12] {
         let mut nonce = [0u8; 12];
-        nonce[..8].copy_from_slice(prefix);
-        nonce[8..12].copy_from_slice(&(counter as u32).to_le_bytes());
+        nonce[..4].copy_from_slice(prefix);
+        nonce[4..12].copy_from_slice(&counter.to_le_bytes());
         nonce
     }
 }
@@ -509,13 +538,24 @@ pub fn ensure_ipc_key(data_dir: &str) -> io::Result<[u8; 32]> {
     use rand::RngCore;
     rand::rngs::OsRng.fill_bytes(&mut key);
 
-    // 写入文件 (0o600 权限)
+    // 写入文件 (原子设置 0o600 权限, 避免 TOCTOU 竞态) (C2 审计修复)
     std::fs::create_dir_all(data_dir)?;
-    std::fs::write(&path, key)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(&key)?;
+        file.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, key)?;
     }
     Ok(key)
 }

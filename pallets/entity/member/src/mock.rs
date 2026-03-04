@@ -4,6 +4,10 @@ use frame_support::{
     traits::{ConstU32, ConstU64},
 };
 use sp_runtime::BuildStorage;
+use core::cell::RefCell;
+use alloc::collections::BTreeSet;
+
+extern crate alloc;
 
 type Block = frame_system::mocking::MockBlock<Test>;
 
@@ -85,15 +89,11 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
         Ok(())
     }
 
-    fn update_entity_rating(
-        _entity_id: u64,
-        _rating: u8,
-    ) -> Result<(), sp_runtime::DispatchError> {
-        Ok(())
-    }
-
     fn is_entity_admin(entity_id: u64, account: &u64, _required_permission: u32) -> bool {
         entity_id == ENTITY_1 && *account == ADMIN
+    }
+    fn is_entity_locked(entity_id: u64) -> bool {
+        ENTITY_LOCKED.with(|l| l.borrow().contains(&entity_id))
     }
 }
 
@@ -166,6 +166,35 @@ impl pallet_entity_common::ShopProvider<u64> for MockShopProvider {
 }
 
 // ============================================================================
+// Mock KycChecker
+// ============================================================================
+
+thread_local! {
+    static KYC_PASSED: RefCell<BTreeSet<(u64, u64)>> = RefCell::new(BTreeSet::new());
+    static ENTITY_LOCKED: RefCell<BTreeSet<u64>> = RefCell::new(BTreeSet::new());
+}
+
+pub fn set_entity_locked(entity_id: u64) {
+    ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id));
+}
+
+pub fn set_kyc_passed(entity_id: u64, account: u64) {
+    KYC_PASSED.with(|k| k.borrow_mut().insert((entity_id, account)));
+}
+
+pub fn clear_kyc() {
+    KYC_PASSED.with(|k| k.borrow_mut().clear());
+}
+
+pub struct MockKycChecker;
+
+impl crate::KycChecker<u64> for MockKycChecker {
+    fn is_kyc_passed(entity_id: u64, account: &u64) -> bool {
+        KYC_PASSED.with(|k| k.borrow().contains(&(entity_id, *account)))
+    }
+}
+
+// ============================================================================
 // Pallet Config
 // ============================================================================
 
@@ -179,6 +208,7 @@ impl pallet_entity_member::Config for Test {
     type MaxUpgradeRules = ConstU32<10>;
     type MaxUpgradeHistory = ConstU32<50>;
     type PendingMemberExpiry = ConstU64<100>; // 100 blocks for testing
+    type KycChecker = MockKycChecker;
 }
 
 // ============================================================================

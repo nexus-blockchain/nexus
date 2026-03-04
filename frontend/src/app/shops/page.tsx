@@ -8,25 +8,28 @@ import { StatusBadge } from "@/components/shared/StatusBadge";
 import { AddressDisplay } from "@/components/shared/AddressDisplay";
 import { Store, Plus, MapPin, Pause, Play } from "lucide-react";
 import Link from "next/link";
+import { useTranslations } from "next-intl";
 
 export default function ShopListPage() {
   const { currentEntityId } = useEntityStore();
   const { shops, isLoading } = useShops(currentEntityId);
   const shopActions = useShopActions();
+  const t = useTranslations("shops");
+  const tc = useTranslations("common");
 
   if (!currentEntityId) {
-    return <div className="flex h-full items-center justify-center text-muted-foreground">Select an entity first</div>;
+    return <div className="flex h-full items-center justify-center text-muted-foreground">{tc("selectEntity")}</div>;
   }
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Shops</h1>
-          <p className="text-muted-foreground">Manage shops under your entity</p>
+          <h1 className="text-3xl font-bold tracking-tight">{t("title")}</h1>
+          <p className="text-muted-foreground">{t("subtitle")}</p>
         </div>
         <Button asChild>
-          <Link href="/shops/create"><Plus className="mr-2 h-4 w-4" />Create Shop</Link>
+          <Link href="/shops/create"><Plus className="mr-2 h-4 w-4" />{t("createShop")}</Link>
         </Button>
       </div>
 
@@ -36,8 +39,8 @@ export default function ShopListPage() {
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <Store className="h-12 w-12 text-muted-foreground/50" />
-            <p className="mt-4 text-lg font-medium">No Shops Yet</p>
-            <p className="text-sm text-muted-foreground">Create your first shop to get started.</p>
+            <p className="mt-4 text-lg font-medium">{t("noShops")}</p>
+            <p className="text-sm text-muted-foreground">{t("noShopsDesc")}</p>
           </CardContent>
         </Card>
       ) : (
@@ -57,7 +60,7 @@ export default function ShopListPage() {
                 </div>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <MapPin className="h-4 w-4" />
-                  <span>{shop.location ? `${shop.location.lat}, ${shop.location.lng}` : "No location set"}</span>
+                  <span>{shop.location ? `${shop.location.lat}, ${shop.location.lng}` : t("noLocation")}</span>
                 </div>
                 <div className="flex items-center gap-2 text-sm">
                   <span className="text-muted-foreground">Owner:</span>

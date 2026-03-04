@@ -128,7 +128,7 @@ fn compute_entity_active_shop_fund_depleted() {
 fn compute_entity_active_shop_closing() {
     assert_eq!(
         EffectiveShopStatus::compute(&EntityStatus::Active, &ShopOperatingStatus::Closing),
-        EffectiveShopStatus::Closed
+        EffectiveShopStatus::Closing
     );
 }
 
@@ -250,6 +250,7 @@ fn token_type_default_transfer_restriction_returns_enum() {
 // ============================================================================
 
 #[test]
+#[allow(deprecated)]
 fn transfer_restriction_from_u8() {
     assert_eq!(TransferRestrictionMode::from_u8(0), TransferRestrictionMode::None);
     assert_eq!(TransferRestrictionMode::from_u8(1), TransferRestrictionMode::Whitelist);
@@ -318,28 +319,28 @@ fn null_pricing_provider_returns_one() {
 // ============================================================================
 
 #[test]
-fn m1_compute_entity_suspended_shop_closing_shows_closed() {
+fn m1_compute_entity_suspended_shop_closing_shows_closing() {
     // Before fix: Closing + Suspended → PausedByEntity (wrong)
-    // After fix:  Closing + Suspended → Closed (terminal state is irreversible)
+    // After fix:  Closing + Suspended → Closing (closing is irreversible, preserves semantic)
     assert_eq!(
         EffectiveShopStatus::compute(&EntityStatus::Suspended, &ShopOperatingStatus::Closing),
-        EffectiveShopStatus::Closed
+        EffectiveShopStatus::Closing
     );
 }
 
 #[test]
-fn m1_compute_entity_pending_close_shop_closing_shows_closed() {
+fn m1_compute_entity_pending_close_shop_closing_shows_closing() {
     assert_eq!(
         EffectiveShopStatus::compute(&EntityStatus::PendingClose, &ShopOperatingStatus::Closing),
-        EffectiveShopStatus::Closed
+        EffectiveShopStatus::Closing
     );
 }
 
 #[test]
-fn m1_compute_entity_pending_shop_closing_shows_closed() {
+fn m1_compute_entity_pending_shop_closing_shows_closing() {
     assert_eq!(
         EffectiveShopStatus::compute(&EntityStatus::Pending, &ShopOperatingStatus::Closing),
-        EffectiveShopStatus::Closed
+        EffectiveShopStatus::Closing
     );
 }
 
@@ -349,13 +350,18 @@ fn m1_compute_entity_pending_shop_closing_shows_closed() {
 
 #[test]
 fn m2_admin_permission_all_defined_covers_all_bits() {
-    assert_eq!(AdminPermission::ALL_DEFINED, 0b0011_1111);
+    assert_eq!(AdminPermission::ALL_DEFINED, 0b0000_0111_1111_1111);
     assert!(AdminPermission::ALL_DEFINED & AdminPermission::SHOP_MANAGE != 0);
     assert!(AdminPermission::ALL_DEFINED & AdminPermission::MEMBER_MANAGE != 0);
     assert!(AdminPermission::ALL_DEFINED & AdminPermission::TOKEN_MANAGE != 0);
     assert!(AdminPermission::ALL_DEFINED & AdminPermission::ADS_MANAGE != 0);
     assert!(AdminPermission::ALL_DEFINED & AdminPermission::REVIEW_MANAGE != 0);
     assert!(AdminPermission::ALL_DEFINED & AdminPermission::DISCLOSURE_MANAGE != 0);
+    assert!(AdminPermission::ALL_DEFINED & AdminPermission::ENTITY_MANAGE != 0);
+    assert!(AdminPermission::ALL_DEFINED & AdminPermission::KYC_MANAGE != 0);
+    assert!(AdminPermission::ALL_DEFINED & AdminPermission::GOVERNANCE_MANAGE != 0);
+    assert!(AdminPermission::ALL_DEFINED & AdminPermission::ORDER_MANAGE != 0);
+    assert!(AdminPermission::ALL_DEFINED & AdminPermission::COMMISSION_MANAGE != 0);
 }
 
 #[test]
@@ -369,7 +375,7 @@ fn m2_admin_permission_is_valid_accepts_defined_bits() {
 
 #[test]
 fn m2_admin_permission_is_valid_rejects_undefined_bits() {
-    assert!(!AdminPermission::is_valid(0b0100_0000)); // bit 6 undefined
+    assert!(!AdminPermission::is_valid(0b1000_0000_0000)); // bit 11 undefined
     assert!(!AdminPermission::is_valid(0xFFFF_FFFF)); // ALL includes undefined
     assert!(!AdminPermission::is_valid(AdminPermission::SHOP_MANAGE | 0x8000_0000));
 }
@@ -393,13 +399,13 @@ fn m3_registration_policy_is_valid_accepts_defined() {
 
 #[test]
 fn m3_registration_policy_is_valid_rejects_undefined() {
-    assert!(!MemberRegistrationPolicy(0b0000_1000).is_valid()); // bit 3 undefined
+    assert!(!MemberRegistrationPolicy(0b0010_0000).is_valid()); // bit 5 undefined
     assert!(!MemberRegistrationPolicy(0xFF).is_valid());
 }
 
 #[test]
 fn m3_registration_policy_all_valid_matches_defined_bits() {
-    assert_eq!(MemberRegistrationPolicy::ALL_VALID, 0b0000_0111);
+    assert_eq!(MemberRegistrationPolicy::ALL_VALID, 0b0001_1111);
 }
 
 #[test]
@@ -437,4 +443,64 @@ fn l2_try_from_u8_valid_values() {
 fn l2_try_from_u8_invalid_returns_none() {
     assert_eq!(TransferRestrictionMode::try_from_u8(5), None);
     assert_eq!(TransferRestrictionMode::try_from_u8(255), None);
+}
+
+// ============================================================================
+// EntityStatus helper methods
+// ============================================================================
+
+#[test]
+fn entity_status_is_active() {
+    assert!(EntityStatus::Active.is_active());
+    assert!(!EntityStatus::Pending.is_active());
+    assert!(!EntityStatus::Suspended.is_active());
+    assert!(!EntityStatus::Banned.is_active());
+    assert!(!EntityStatus::Closed.is_active());
+    assert!(!EntityStatus::PendingClose.is_active());
+}
+
+#[test]
+fn entity_status_is_terminal() {
+    assert!(EntityStatus::Banned.is_terminal());
+    assert!(EntityStatus::Closed.is_terminal());
+    assert!(!EntityStatus::Active.is_terminal());
+    assert!(!EntityStatus::Pending.is_terminal());
+    assert!(!EntityStatus::Suspended.is_terminal());
+    assert!(!EntityStatus::PendingClose.is_terminal());
+}
+
+#[test]
+fn entity_status_can_operate() {
+    assert!(EntityStatus::Active.can_operate());
+    assert!(!EntityStatus::Pending.can_operate());
+    assert!(!EntityStatus::Banned.can_operate());
+}
+
+#[test]
+fn entity_status_is_pending() {
+    assert!(EntityStatus::Pending.is_pending());
+    assert!(EntityStatus::PendingClose.is_pending());
+    assert!(!EntityStatus::Active.is_pending());
+    assert!(!EntityStatus::Banned.is_pending());
+}
+
+// ============================================================================
+// AdminPermission new bits
+// ============================================================================
+
+#[test]
+fn admin_permission_new_bits_are_valid() {
+    assert!(AdminPermission::is_valid(AdminPermission::GOVERNANCE_MANAGE));
+    assert!(AdminPermission::is_valid(AdminPermission::ORDER_MANAGE));
+    assert!(AdminPermission::is_valid(AdminPermission::COMMISSION_MANAGE));
+    assert!(AdminPermission::is_valid(
+        AdminPermission::GOVERNANCE_MANAGE | AdminPermission::ORDER_MANAGE | AdminPermission::COMMISSION_MANAGE
+    ));
+}
+
+#[test]
+fn admin_permission_new_bits_values() {
+    assert_eq!(AdminPermission::GOVERNANCE_MANAGE, 0b0001_0000_0000);
+    assert_eq!(AdminPermission::ORDER_MANAGE,      0b0010_0000_0000);
+    assert_eq!(AdminPermission::COMMISSION_MANAGE,  0b0100_0000_0000);
 }

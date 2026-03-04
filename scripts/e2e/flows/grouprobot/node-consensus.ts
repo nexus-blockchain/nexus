@@ -48,16 +48,15 @@ async function nodeConsensus(ctx: FlowContext): Promise<void> {
 
   const bobBalBefore = await getFreeBalance(api, bob.address);
 
-  const registerTx = (api.tx as any).grouprobotConsensus.registerNode(
-    '0x' + '01'.repeat(32),    // node_id (32 bytes)
-    'wss://e2e-node.test:9944', // endpoint
-    nex(100).toString(),        // stake amount
+  const registerTx = (api.tx as any).groupRobotConsensus.registerNode(
+    '0x' + '01'.repeat(32),    // nodeId: [u8;32]
+    nex(100).toString(),        // stake: u128
   );
   const regResult = await ctx.send(registerTx, bob, 'Bob 注册节点+质押', 'bob');
   assertTxSuccess(regResult, '注册节点');
 
   const regEvent = regResult.events.find(
-    e => e.section === 'grouprobotConsensus' && e.method === 'NodeRegistered',
+    e => e.section === 'groupRobotConsensus' && e.method === 'NodeRegistered',
   );
   assertTrue(!!regEvent, '应有 NodeRegistered 事件');
   const nodeId = regEvent?.data?.nodeId ?? regEvent?.data?.[0];
@@ -72,8 +71,8 @@ async function nodeConsensus(ctx: FlowContext): Promise<void> {
 
   // ─── Step 2: [错误路径] 质押不足 ──────────────────────────
 
-  const lowStakeTx = (api.tx as any).grouprobotConsensus.registerNode(
-    '0x' + '02'.repeat(32), 'wss://low-stake.test:9944', '1',
+  const lowStakeTx = (api.tx as any).groupRobotConsensus.registerNode(
+    '0x' + '02'.repeat(32), '1',
   );
   const lowStakeResult = await ctx.send(lowStakeTx, dave, '[错误路径] 质押不足', 'dave');
   await ctx.check('质押不足应失败', 'dave', () => {
@@ -83,14 +82,14 @@ async function nodeConsensus(ctx: FlowContext): Promise<void> {
   // ─── Step 3: 验证节点已注册 ───────────────────────────────
 
   await ctx.check('验证节点已注册', 'bob', async () => {
-    const node = await (api.query as any).grouprobotConsensus.nodes(nodeId);
+    const node = await (api.query as any).groupRobotConsensus.nodes(nodeId);
     if (node.isSome) {
       const data = node.unwrap().toHuman();
       console.log(`    节点状态: ${data.status ?? data.state}`);
       console.log(`    质押: ${data.stake ?? data.staked}`);
     } else {
       // 可能用 accountToNode 映射
-      const nodeByAccount = await (api.query as any).grouprobotConsensus.accountToNode(bob.address);
+      const nodeByAccount = await (api.query as any).groupRobotConsensus.accountToNode(bob.address);
       if (nodeByAccount.isSome) {
         console.log(`    Bob 的节点: ${nodeByAccount.unwrap().toHuman()}`);
       }
@@ -102,7 +101,7 @@ async function nodeConsensus(ctx: FlowContext): Promise<void> {
   const botIdHash = '0x' + 'aa'.repeat(32);
   const sequenceNr = 1;
 
-  const markTx = (api.tx as any).grouprobotConsensus.markSequenceProcessed(
+  const markTx = (api.tx as any).groupRobotConsensus.markSequenceProcessed(
     botIdHash,
     sequenceNr,
   );
@@ -111,7 +110,7 @@ async function nodeConsensus(ctx: FlowContext): Promise<void> {
 
   // ─── Step 5: [错误路径] 重复序列 ──────────────────────────
 
-  const dupMarkTx = (api.tx as any).grouprobotConsensus.markSequenceProcessed(
+  const dupMarkTx = (api.tx as any).groupRobotConsensus.markSequenceProcessed(
     botIdHash, sequenceNr,
   );
   const dupResult = await ctx.send(dupMarkTx, bob, '[错误路径] 重复序列', 'bob');
@@ -121,7 +120,7 @@ async function nodeConsensus(ctx: FlowContext): Promise<void> {
 
   // ─── Step 6: [错误路径] Free tier 标记 ────────────────────
   // Dave 没有注册节点且没有付费订阅
-  const freeTierMarkTx = (api.tx as any).grouprobotConsensus.markSequenceProcessed(
+  const freeTierMarkTx = (api.tx as any).groupRobotConsensus.markSequenceProcessed(
     '0x' + 'bb'.repeat(32), 2,
   );
   const freeTierResult = await ctx.send(freeTierMarkTx, dave, '[错误路径] Free tier 标记', 'dave');
@@ -131,7 +130,7 @@ async function nodeConsensus(ctx: FlowContext): Promise<void> {
 
   // ─── Step 7: 验证节点 TEE ────────────────────────────────
 
-  const verifyTeeTx = (api.tx as any).grouprobotConsensus.verifyNodeTee(nodeId);
+  const verifyTeeTx = (api.tx as any).groupRobotConsensus.verifyNodeTee(nodeId, botIdHash);
   const verifyResult = await ctx.send(verifyTeeTx, bob, 'Bob 验证节点 TEE', 'bob');
   if (verifyResult.success) {
     await ctx.check('TEE 验证成功', 'bob', () => {});
@@ -141,7 +140,7 @@ async function nodeConsensus(ctx: FlowContext): Promise<void> {
 
   // ─── Step 8: Alice 设置 TEE 奖励参数 ─────────────────────
 
-  const setParamsTx = (api.tx as any).grouprobotConsensus.setTeeRewardParams(
+  const setParamsTx = (api.tx as any).groupRobotConsensus.setTeeRewardParams(
     15000,   // tee_multiplier: 1.5x
     2000,    // sgx_bonus: +0.2x
   );
@@ -150,15 +149,18 @@ async function nodeConsensus(ctx: FlowContext): Promise<void> {
 
   // ─── Step 9: Charlie 举报 Equivocation ────────────────────
 
-  const reportTx = (api.tx as any).grouprobotConsensus.reportEquivocation(
+  const reportTx = (api.tx as any).groupRobotConsensus.reportEquivocation(
     nodeId,
-    '0x' + '00'.repeat(64),   // proof_hash
-    null,                       // evidence_cid
+    1,                           // sequence
+    '0x' + '00'.repeat(32),     // msgHashA: [u8;32]
+    '0x' + '01'.repeat(64),     // signatureA: [u8;64]
+    '0x' + '02'.repeat(32),     // msgHashB: [u8;32]
+    '0x' + '03'.repeat(64),     // signatureB: [u8;64]
   );
   const reportResult = await ctx.send(reportTx, charlie, 'Charlie 举报 Equivocation', 'charlie');
   if (reportResult.success) {
     await ctx.check('举报事件', 'charlie', () => {
-      assertEventEmitted(reportResult, 'grouprobotConsensus', 'EquivocationReported', '举报事件');
+      assertEventEmitted(reportResult, 'groupRobotConsensus', 'EquivocationReported', '举报事件');
     });
   } else {
     console.log(`    ℹ 举报失败: ${reportResult.error}`);
@@ -166,14 +168,14 @@ async function nodeConsensus(ctx: FlowContext): Promise<void> {
 
   // ─── Step 10: Alice 执行 Slash ────────────────────────────
 
-  const slashTx = (api.tx as any).grouprobotConsensus.slashEquivocation(
+  const slashTx = (api.tx as any).groupRobotConsensus.slashEquivocation(
     nodeId,
-    nex(10).toString(),  // slash_amount
+    1,                   // sequence: u64
   );
   const slashResult = await ctx.sudo(slashTx, '执行 Slash');
   if (slashResult.success) {
     await ctx.check('Slash 事件', 'system', () => {
-      assertEventEmitted(slashResult, 'grouprobotConsensus', 'NodeSlashed', 'Slash 事件');
+      assertEventEmitted(slashResult, 'groupRobotConsensus', 'NodeSlashed', 'Slash 事件');
     });
   } else {
     console.log(`    ℹ Slash 失败: ${slashResult.error}`);
@@ -181,7 +183,7 @@ async function nodeConsensus(ctx: FlowContext): Promise<void> {
 
   // ─── Step 11: Bob 申请退出 ────────────────────────────────
 
-  const exitTx = (api.tx as any).grouprobotConsensus.requestExit(nodeId);
+  const exitTx = (api.tx as any).groupRobotConsensus.requestExit(nodeId);
   const exitResult = await ctx.send(exitTx, bob, 'Bob 申请退出', 'bob');
   assertTxSuccess(exitResult, '申请退出');
 
@@ -193,7 +195,7 @@ async function nodeConsensus(ctx: FlowContext): Promise<void> {
 
   const bobBalBeforeExit = await getFreeBalance(api, bob.address);
 
-  const finalizeTx = (api.tx as any).grouprobotConsensus.finalizeExit(nodeId);
+  const finalizeTx = (api.tx as any).groupRobotConsensus.finalizeExit(nodeId);
   const finalizeResult = await ctx.send(finalizeTx, bob, 'Bob 完成退出', 'bob');
   assertTxSuccess(finalizeResult, '完成退出');
 

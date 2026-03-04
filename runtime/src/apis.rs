@@ -302,6 +302,37 @@ impl_runtime_apis! {
 		}
 	}
 
+	impl pallet_entity_member::runtime_api::MemberTeamApi<Block, AccountId> for Runtime {
+		fn get_member_info(entity_id: u64, account: AccountId) -> Option<pallet_entity_member::runtime_api::MemberDashboardInfo<AccountId>> {
+			pallet_entity_member::Pallet::<Runtime>::get_member_info(entity_id, &account)
+		}
+
+		fn get_referral_team(entity_id: u64, account: AccountId, depth: u32) -> Vec<pallet_entity_member::runtime_api::TeamMemberInfo<AccountId>> {
+			pallet_entity_member::Pallet::<Runtime>::get_referral_team(entity_id, &account, depth)
+		}
+
+		fn get_entity_member_overview(entity_id: u64) -> pallet_entity_member::runtime_api::EntityMemberOverview {
+			pallet_entity_member::Pallet::<Runtime>::get_entity_member_overview(entity_id)
+		}
+
+		fn get_members_paginated(entity_id: u64, page_size: u32, page_index: u32) -> pallet_entity_member::runtime_api::PaginatedMembersResult<AccountId> {
+			pallet_entity_member::Pallet::<Runtime>::get_members_paginated(entity_id, page_size, page_index)
+		}
+	}
+
+	impl pallet_ads_core::runtime_api::AdsDiscoveryApi<Block, AccountId, Balance> for Runtime {
+		fn available_campaigns_for_placement(
+			placement_id: pallet_ads_primitives::PlacementId,
+			max_results: u32,
+		) -> Vec<pallet_ads_core::runtime_api::CampaignSummary<AccountId, Balance>> {
+			pallet_ads_core::Pallet::<Runtime>::available_campaigns_for_placement(&placement_id, max_results)
+		}
+
+		fn campaign_details(campaign_id: u64) -> Option<pallet_ads_core::runtime_api::CampaignDetail<AccountId, Balance>> {
+			pallet_ads_core::Pallet::<Runtime>::campaign_details(campaign_id)
+		}
+	}
+
 	impl pallet_storage_service::runtime_api::StorageServiceApi<Block, AccountId, Balance> for Runtime {
 		fn get_user_funding_account(user: AccountId) -> AccountId {
 			StorageService::derive_user_funding_account(&user)

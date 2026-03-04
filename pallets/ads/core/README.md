@@ -1,6 +1,6 @@
 # pallet-ads-core
 
-> **通用广告引擎 — Campaign CRUD · Escrow 预算托管 · 投放收据 · Era 结算 · 双向偏好 · Slash/惩罚 · 收入提取 · 私域广告**
+> **通用广告引擎 — Campaign CRUD · Escrow 预算托管 · 投放收据 · Era 结算 · 双向偏好 · Slash/惩罚 · 收入提取 · 私域广告 · 治理管控**
 
 ## 概述
 
@@ -39,12 +39,12 @@
 | `text` | `BoundedVec<u8, MaxAdTextLength>` | 广告文本 (≤280 字节) |
 | `url` | `BoundedVec<u8, MaxAdUrlLength>` | 链接 URL (≤256 字节) |
 | `bid_per_mille` | `Balance` | 每千人触达出价 (CPM) |
-| `daily_budget` | `Balance` | 每日预算上限 |
+| `daily_budget` | `Balance` | 每日预算上限 (0 = 不限制) |
 | `total_budget` | `Balance` | 总预算 |
 | `spent` | `Balance` | 已花费 |
 | `delivery_types` | `u8` | 投放类型 bitmask (1~7) |
-| `status` | `CampaignStatus` | 活动状态 |
-| `review_status` | `AdReviewStatus` | 审核状态 |
+| `status` | `CampaignStatus` | 活动状态 (Active/Paused/Exhausted/Expired/Cancelled/Suspended) |
+| `review_status` | `AdReviewStatus` | 审核状态 (Pending/Approved/Rejected/Flagged) |
 | `total_deliveries` | `u64` | 累计投放次数 |
 | `created_at` | `BlockNumber` | 创建区块 |
 | `expires_at` | `BlockNumber` | 过期区块 |
@@ -80,8 +80,10 @@
 | `MaxPlacementWhitelist` | `u32` | 广告位白名单上限 |
 | `MinBidPerMille` | `Balance` | 最低 CPM 出价 |
 | `MinAudienceSize` | `u32` | 接入广告的最低受众人数 |
-| `AdSlashPercentage` | `u32` | Slash 百分比 (e.g. 30 = 30%) |
+| `AdSlashPercentage` | `u32` | Slash 百分比 (e.g. 30 = 30%), ≤100 |
 | `PrivateAdRegistrationFee` | `Balance` | 私有广告注册费用 |
+| `SettlementIncentiveBps` | `u32` | 结算激励 (基点, e.g. 10 = 0.1%), ≤10000 |
+| `MaxCampaignsPerAdvertiser` | `u32` | 每广告主最大 Campaign 数量 |
 
 ### 适配层 Trait
 
@@ -102,11 +104,14 @@
 | `NextCampaignId` | `StorageValue<u64>` | 下一个 Campaign ID |
 | `Campaigns` | `StorageMap<u64, AdCampaign>` | 广告活动 |
 | `CampaignEscrow` | `StorageMap<u64, Balance>` | Campaign 锁定预算 (escrow) |
+| `CampaignsByAdvertiser` | `StorageMap<AccountId, BoundedVec<u64>>` | 广告主→Campaign ID 索引 |
+| `CampaignDailySpent` | `StorageDoubleMap<u64, u32, Balance>` | Campaign 每日已消费 (campaign_id, day_index) |
 | `DeliveryReceipts` | `StorageMap<PlacementId, BoundedVec<DeliveryReceipt>>` | 投放收据 (per placement, 每 Era 结算后清空) |
 | `EraAdRevenue` | `StorageMap<PlacementId, Balance>` | 每 Era 广告位广告收入 |
 | `PlacementTotalRevenue` | `StorageMap<PlacementId, Balance>` | 广告位累计广告总收入 |
 | `PlacementClaimable` | `StorageMap<PlacementId, Balance>` | 广告位待提取收入 (claimable) |
 | `PlacementEraDeliveries` | `StorageMap<PlacementId, u32>` | 广告位本 Era 投放次数 |
+| `PlacementDeliveryTypes` | `StorageMap<PlacementId, u8>` | 广告位接受的投放类型 (0 = 全部接受) |
 | `PrivateAdCount` | `StorageMap<PlacementId, u32>` | 私有广告注册次数 |
 | `AdvertiserBlacklist` | `StorageMap<AccountId, BoundedVec<PlacementId>>` | 广告主拉黑的广告位列表 |
 | `AdvertiserWhitelist` | `StorageMap<AccountId, BoundedVec<PlacementId>>` | 广告主指定 (白名单) 的广告位列表 |
@@ -116,35 +121,68 @@
 | `BannedPlacements` | `StorageMap<PlacementId, bool>` | 被永久禁止的广告位 |
 | `PlacementFlagCount` | `StorageMap<PlacementId, u32>` | 广告位被举报次数 |
 | `PlacementFlaggedBy` | `StorageDoubleMap<PlacementId, AccountId, bool>` | 广告位举报去重 |
+| `CampaignReportCount` | `StorageMap<u64, u32>` | Campaign 被举报次数 |
+| `CampaignReportedBy` | `StorageDoubleMap<u64, AccountId, bool>` | Campaign 举报去重 |
 
 ---
 
 ## Extrinsics
 
+### 广告主操作
+
 | call_index | 函数名 | 权限 | 说明 |
 |------------|--------|------|------|
-| 0 | `create_campaign` | Signed | 创建广告活动, 锁定预算 (reserve) |
+| 0 | `create_campaign` | Signed | 创建广告活动, 锁定预算 (reserve), 维护 CampaignsByAdvertiser 索引 |
 | 1 | `fund_campaign` | Signed (owner) | 追加预算, Exhausted→Active 自动恢复; 阻止对已过期 Campaign 追加 |
 | 2 | `pause_campaign` | Signed (owner) | 暂停广告活动 (Active→Paused) |
 | 3 | `cancel_campaign` | Signed (owner) | 取消广告活动, 退还剩余预算 |
-| 4 | `review_campaign` | Root | 审核广告内容 (approve/reject), 已 Rejected 不可重审 |
-| 5 | `submit_delivery_receipt` | Signed | 提交投放收据, 委托 `DeliveryVerifier` 验证 + 双向黑名单检查 |
-| 6 | `settle_era_ads` | Signed (any) | 结算广告位 Era 收入, 委托 `RevenueDistributor` 分配 |
-| 7 | `flag_campaign` | Signed | 举报广告活动 (仅 Pending 审核状态) |
-| 8 | `claim_ad_revenue` | Signed (admin) | 广告位管理员提取广告收入 |
+| 20 | `resume_campaign` | Signed (owner) | 恢复已暂停的广告活动 (Paused→Active), 阻止恢复已过期 Campaign |
+| 22 | `update_campaign` | Signed (owner) | 更新 Campaign 内容/出价/日预算/投放类型, 重置审核为 Pending |
+| 23 | `extend_campaign_expiry` | Signed (owner) | 延长 Campaign 过期时间 |
+| 31 | `resubmit_campaign` | Signed (owner) | 重新提交被拒绝的 Campaign (修改内容 + 重新 reserve 预算) |
 | 9 | `advertiser_block_placement` | Signed | 广告主拉黑广告位 |
 | 10 | `advertiser_unblock_placement` | Signed | 广告主取消拉黑广告位 |
 | 11 | `advertiser_prefer_placement` | Signed | 广告主指定广告位 (白名单) |
 | 12 | `advertiser_unprefer_placement` | Signed | 广告主取消指定广告位 |
+
+### 广告位管理员操作
+
+| call_index | 函数名 | 权限 | 说明 |
+|------------|--------|------|------|
+| 5 | `submit_delivery_receipt` | Signed | 提交投放收据 (含白名单/投放类型/日预算/双向黑名单检查) |
+| 8 | `claim_ad_revenue` | Signed (admin) | 广告位管理员提取收入 (支持部分提取, amount=0 表示全额) |
 | 13 | `placement_block_advertiser` | Signed (admin) | 广告位拉黑广告主 |
 | 14 | `placement_unblock_advertiser` | Signed (admin) | 广告位取消拉黑广告主 |
 | 15 | `placement_prefer_advertiser` | Signed (admin) | 广告位指定广告主 (白名单) |
 | 16 | `placement_unprefer_advertiser` | Signed (admin) | 广告位取消指定广告主 |
-| 17 | `flag_placement` | Signed (any) | 举报广告位 (同一用户不可重复举报) |
-| 18 | `slash_placement` | Root | Slash 广告位, 连续 3 次→永久禁止 |
 | 19 | `register_private_ad` | Signed (admin) | 私域广告自助登记, 扣除注册费 |
-| 20 | `resume_campaign` | Signed (owner) | 恢复已暂停的广告活动 (Paused→Active), 阻止恢复已过期 Campaign |
-| 21 | `expire_campaign` | Signed (any) | 标记已过期的广告活动, 退还剩余预算 (任何人可调用) |
+| 32 | `set_placement_delivery_types` | Signed (admin) | 设置广告位接受的投放类型 (0 = 全部接受) |
+| 33 | `unregister_private_ad` | Signed (admin) | 私域广告注销 |
+
+### 公共操作
+
+| call_index | 函数名 | 权限 | 说明 |
+|------------|--------|------|------|
+| 6 | `settle_era_ads` | Signed (any) | 结算广告位 Era 收入 (含日预算限制 + 结算激励) |
+| 7 | `flag_campaign` | Signed | 举报广告活动 (仅 Pending 审核状态) |
+| 17 | `flag_placement` | Signed (any) | 举报广告位 (同一用户不可重复举报) |
+| 21 | `expire_campaign` | Signed (any) | 标记已过期的广告活动, 退还剩余预算 |
+| 30 | `report_approved_campaign` | Signed (any) | 举报已审核通过的 Campaign (独立于 flag_campaign) |
+| 34 | `cleanup_campaign` | Signed (any) | 清理已终结 Campaign 的存储 (Cancelled/Expired) |
+
+### 治理 (Root/DAO) 操作
+
+| call_index | 函数名 | 权限 | 说明 |
+|------------|--------|------|------|
+| 4 | `review_campaign` | Root | 审核广告内容 (approve/reject); reject 自动退款; 可重审 Approved Campaign |
+| 18 | `slash_placement` | Root | Slash 广告位 (扣除 PlacementClaimable 的 AdSlashPercentage%), 连续 3 次→永久禁止 |
+| 24 | `force_cancel_campaign` | Root | 强制取消 Campaign, 退还剩余预算 |
+| 25 | `unban_placement` | Root | 解除广告位封禁 (同时重置 SlashCount) |
+| 26 | `reset_slash_count` | Root | 重置广告位 Slash 计数 |
+| 27 | `clear_placement_flags` | Root | 清除广告位举报记录 |
+| 28 | `suspend_campaign` | Root | 暂停 Campaign (Active→Suspended, 阻止投放) |
+| 29 | `unsuspend_campaign` | Root | 解除 Campaign 暂停 (Suspended→Active) |
+| 35 | `force_settle_era_ads` | Root | 强制结算 Era 广告 (无需 settler 签名) |
 
 ---
 
@@ -157,12 +195,29 @@
 | `CampaignPaused` | campaign_id | 暂停 |
 | `CampaignCancelled` | campaign_id, refunded | 取消并退款 |
 | `CampaignReviewed` | campaign_id, approved | 审核完成 |
+| `CampaignUpdated` | campaign_id | Campaign 内容更新 |
+| `CampaignExpiryExtended` | campaign_id, new_expires_at | 过期时间延长 |
+| `CampaignForceCancelled` | campaign_id, refunded | Root 强制取消 |
+| `CampaignSuspended` | campaign_id | Campaign 被治理暂停 |
+| `CampaignUnsuspended` | campaign_id | Campaign 治理暂停解除 |
+| `CampaignReported` | campaign_id, reporter, report_count | 已审核 Campaign 被举报 |
+| `CampaignResubmitted` | campaign_id | 被拒绝的 Campaign 重新提交 |
+| `CampaignCleaned` | campaign_id | 已终结 Campaign 存储已清理 |
 | `DeliveryReceiptSubmitted` | campaign_id, placement_id, audience_size | 投放收据提交 |
 | `EraAdsSettled` | placement_id, total_cost, placement_share | Era 结算完成 |
+| `SettlementIncentivePaid` | settler, amount | 结算激励支付 |
 | `CampaignFlagged` | campaign_id, reporter | 广告被举报 |
 | `AdRevenueClaimed` | placement_id, amount, claimer | 广告收入提取 |
-| `PlacementSlashed` | placement_id, slashed_amount, slash_count | 广告位被 Slash |
+| `PlacementSlashed` | placement_id, slashed_amount, slash_count | 广告位被 Slash (实际扣除金额) |
 | `PlacementBannedFromAds` | placement_id | 广告位被永久禁止 (连续 Slash ≥ 3) |
+| `PlacementUnbanned` | placement_id | 广告位封禁解除 |
+| `PlacementSlashCountReset` | placement_id | Slash 计数重置 |
+| `PlacementFlagsCleared` | placement_id | 举报记录清除 |
+| `PlacementDeliveryTypesSet` | placement_id, delivery_types | 广告位投放类型设置 |
+| `PrivateAdRegistered` | placement_id, registrar, count | 私有广告注册 |
+| `PrivateAdUnregistered` | placement_id, count | 私有广告注销 |
+| `CampaignResumed` | campaign_id | 广告活动恢复 |
+| `CampaignMarkedExpired` | campaign_id, refunded | 广告活动已过期, 剩余预算已退还 |
 | `AdvertiserBlockedPlacement` | advertiser, placement_id | 广告主拉黑广告位 |
 | `AdvertiserUnblockedPlacement` | advertiser, placement_id | 广告主取消拉黑 |
 | `AdvertiserPreferredPlacement` | advertiser, placement_id | 广告主指定广告位 |
@@ -172,9 +227,6 @@
 | `PlacementPreferredAdvertiser` | placement_id, advertiser | 广告位指定广告主 |
 | `PlacementUnpreferredAdvertiser` | placement_id, advertiser | 广告位取消指定 |
 | `PlacementFlagged` | placement_id, reporter, flag_count | 广告位被举报 |
-| `PrivateAdRegistered` | placement_id, registrar, count | 私有广告注册 |
-| `CampaignResumed` | campaign_id | 广告活动恢复 |
-| `CampaignMarkedExpired` | campaign_id, refunded | 广告活动已过期, 剩余预算已退还 |
 
 ---
 
@@ -198,8 +250,8 @@
 | `NotWhitelisted` | 不在白名单中 |
 | `PlacementBanned` | 广告位已被永久禁止 |
 | `NothingToClaim` | 无可提取收入 |
-| `CampaignInactive` | Campaign 已取消/过期 (不可追加预算或取消) |
-| `AlreadyReviewed` | 已 Rejected 的 Campaign 不可重复审核 |
+| `CampaignInactive` | Campaign 已取消/过期 (不可操作) |
+| `AlreadyReviewed` | 已 Rejected 的 Campaign 不可重复审核 (需 resubmit) |
 | `CampaignNotApproved` | Campaign 需先通过审核才能投放 |
 | `AudienceBelowMinimum` | 有效受众低于 MinAudienceSize 门槛 |
 | `DeliveryVerificationFailed` | 投放验证失败 (适配层返回错误) |
@@ -213,6 +265,17 @@
 | `AdvertiserBlacklistedPlacement` | 广告主已拉黑该广告位 (投放被拒) |
 | `PlacementBlacklistedAdvertiser` | 广告位已拉黑该广告主 (投放被拒) |
 | `CampaignNotExpired` | Campaign 尚未过期 (expire 前置检查) |
+| `DailyBudgetExhausted` | 该 Campaign 当日预算已用尽 |
+| `CampaignListFull` | 广告主 Campaign 列表已满 |
+| `PlacementNotBanned` | 广告位未被封禁 (unban 前置检查) |
+| `CampaignNotSuspended` | Campaign 未被暂停 (unsuspend 前置检查) |
+| `NotInAdvertiserWhitelist` | 广告主白名单非空但不含该广告位 |
+| `AlreadyReportedCampaign` | 已举报过该 Campaign |
+| `CampaignNotRejected` | Campaign 未被拒绝 (resubmit 前置检查) |
+| `DeliveryTypeMismatch` | 投放类型与广告位接受类型不匹配 |
+| `CampaignNotTerminated` | Campaign 未终结 (cleanup 前置检查) |
+| `ClaimAmountTooLarge` | 部分提取金额超过可提取余额 |
+| `ExpiryNotExtended` | 新过期时间未超过当前过期时间 |
 
 ---
 
@@ -233,7 +296,8 @@
 
 | 函数 | 说明 |
 |------|------|
-| `compute_cpm_cost(bid_per_mille, audience, multiplier_bps)` | CPM 费用: `bid × audience × multiplier / 100_000` (其中 /1000 为 CPM 标准, /100 为系数归一化) |
+| `compute_cpm_cost(bid_per_mille, audience, multiplier_bps)` | CPM 费用: `bid × audience × multiplier / 100_000` |
+| `block_to_day_index(now, created_at)` | 区块号→天索引 (14400 blocks/day) |
 
 ---
 
@@ -242,15 +306,27 @@
 `settle_era_ads` 的完整流程：
 
 1. 收集广告位所有未结算收据快照
-2. 对每笔收据计算 CPM 费用 (取 escrow 余额与计算值的较小值)
+2. 对每笔收据计算 CPM 费用 (取 escrow 余额、日预算剩余、计算值的最小值)
 3. `unreserve` 广告主的 reserve 资金, 检查返回的 deficit
 4. 全额转入国库 (转账失败则 re-reserve 回退, skip 该收据)
 5. 委托 `RevenueDistributor::distribute()` 从国库分配收入给各方
 6. 记录广告位可提取份额 (`PlacementClaimable`)
-7. 更新 Campaign escrow 和 spent (预算耗尽时自动标记 `Exhausted`)
+7. 更新 Campaign escrow、spent 和 CampaignDailySpent (预算耗尽时自动标记 `Exhausted`)
 8. 清空本 Era 收据并更新收入统计
+9. 向结算调用者支付结算激励 (`SettlementIncentiveBps` 基点)
 
 > 审计改进: 单个 Campaign 转账失败不会阻塞整体结算 (skip + log::warn)。
+
+---
+
+## Hooks
+
+### integrity_test
+
+配置完整性检查 (仅 std 模式):
+- `MaxReceiptsPerPlacement` > 0
+- `AdSlashPercentage` ≤ 100
+- `SettlementIncentiveBps` ≤ 10000
 
 ---
 
@@ -263,6 +339,16 @@ pallet-ads-core (本 crate)
 ├── sp-runtime
 └── log
 ```
+
+## 测试覆盖
+
+93 个单元测试覆盖所有 extrinsics 和新增功能，包括:
+- Campaign 全生命周期 (创建→审核→投放→结算→过期/取消/清理)
+- 日预算限制、结算激励、部分收入提取
+- 双向偏好 (黑名单/白名单) 和投放类型匹配
+- Slash 实际扣款、封禁/解禁
+- 治理操作 (suspend/unsuspend, force_cancel, review re-review)
+- 重新提交被拒绝的 Campaign
 
 ## 许可证
 

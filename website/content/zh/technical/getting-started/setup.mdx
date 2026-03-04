@@ -1,0 +1,110 @@
+---
+title: "环境搭建"
+description: "搭建 NEXUS 区块链开发环境 — Rust、Substrate 依赖、编译与运行"
+category: "technical"
+section: "getting-started"
+order: 1
+icon: "rocket"
+tags: ["setup", "rust", "substrate", "development"]
+lastUpdated: "2026-03-04"
+difficulty: "beginner"
+---
+
+## 前置要求
+
+<Callout type="info" title="系统要求">
+  推荐 Ubuntu 22.04+ 或 macOS 13+，至少 16GB 内存、100GB 磁盘空间。Windows 用户请使用 WSL2。
+</Callout>
+
+## 安装 Rust
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+rustup default stable
+rustup update nightly
+rustup target add wasm32-unknown-unknown --toolchain nightly
+```
+
+验证安装：
+
+```bash
+rustc --version    # 需要 1.75+
+cargo --version
+```
+
+## 安装系统依赖
+
+### Ubuntu / Debian
+
+```bash
+sudo apt update && sudo apt install -y \
+  build-essential git clang curl libssl-dev \
+  protobuf-compiler pkg-config
+```
+
+### macOS
+
+```bash
+brew install openssl protobuf
+```
+
+## 克隆项目
+
+```bash
+git clone https://github.com/aspect-build/nexus.git
+cd nexus
+```
+
+## 编译
+
+```bash
+cargo build --release
+```
+
+<Callout type="warning">
+  首次编译可能需要 20-40 分钟，取决于硬件配置。后续增量编译通常只需数分钟。
+</Callout>
+
+## 运行本地节点
+
+```bash
+./target/release/nexus-node --dev --tmp
+```
+
+成功启动后，你会看到类似如下输出：
+
+```
+2026-03-04 10:00:00 Nexus Node
+2026-03-04 10:00:00 ✌️  version 1.0.0
+2026-03-04 10:00:00 🏷  Node name: dev-node
+2026-03-04 10:00:01 💤 Idle (0 peers), best: #0
+2026-03-04 10:00:06 🙌 Starting consensus session on top of parent 0x1234...
+2026-03-04 10:00:06 ✨ Imported #1 (0xabcd…)
+```
+
+## Docker 方式
+
+```bash
+docker build -t nexus-node .
+docker run --rm -p 9944:9944 -p 9933:9933 nexus-node --dev --tmp
+```
+
+## 连接 Polkadot.js
+
+打开 [Polkadot.js Apps](https://polkadot.js.org/apps/) → 左上角切换到 `ws://127.0.0.1:9944` → 即可查看链状态、发送交易。
+
+## 运行测试
+
+```bash
+# 全部测试
+cargo test --workspace
+
+# 单个 pallet 测试
+cargo test -p pallet-entity-registry
+```
+
+## 下一步
+
+- 了解 [架构概览](/docs/technical/architecture/overview) 理解系统全貌
+- 查看 [Pallet 索引](/docs/technical/architecture/pallet-index) 了解 40+ 模块分布

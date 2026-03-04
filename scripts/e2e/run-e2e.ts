@@ -15,6 +15,7 @@
 import { getApi, disconnectApi } from './core/chain-state.js';
 import { runFlows, FlowDef } from './core/test-runner.js';
 import { getDevAccounts, fundAccounts } from './fixtures/accounts.js';
+import { bootstrapDevChain } from './fixtures/bootstrap.js';
 
 // ── Trading flows ────────────────────────────────────────────
 import { makerLifecycleFlow } from './flows/trading/maker-lifecycle.js';
@@ -188,6 +189,9 @@ async function main() {
   // 确保测试账户有余额
   console.log('💰 检查/补充测试账户余额...');
   await fundAccounts(api, actors, 500_000);
+
+  // 引导链状态 (设置初始价格等)
+  await bootstrapDevChain(api, actors.alice);
 
   // 运行流程
   const { reporter, allPassed } = await runFlows(api, actors, flows);

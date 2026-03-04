@@ -1,6 +1,6 @@
 [package]
 name = "pallet-entity-review"
-version = "0.4.0"
+version = "0.9.0"
 description = "NEXUS Entity 评价管理模块"
 authors = ["NEXUS Team"]
 edition = "2021"

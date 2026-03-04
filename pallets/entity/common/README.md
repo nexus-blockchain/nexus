@@ -152,14 +152,6 @@ pub enum EffectiveShopStatus {
 
 **计算逻辑：** `EffectiveShopStatus::compute(entity_status, shop_status)` — Entity 终态（Banned/Closed）优先；Entity 非 Active 时 Shop Closed/Closing 显示 Closed，其余显示 PausedByEntity。
 
-#### MemberMode — 会员体系模式
-
-```rust
-pub enum MemberMode {
-    Inherit,  // 继承模式（Entity 级别，所有 Shop 共享，默认且唯一）
-}
-```
-
 #### MemberRegistrationPolicy — 会员注册策略（位标记）
 
 ```rust
@@ -188,14 +180,19 @@ pub struct MemberStatsPolicy(pub u8);
 
 ```rust
 pub mod AdminPermission {
-    pub const SHOP_MANAGE: u32       = 0b0000_0001;
-    pub const MEMBER_MANAGE: u32     = 0b0000_0010;
-    pub const TOKEN_MANAGE: u32      = 0b0000_0100;
-    pub const ADS_MANAGE: u32        = 0b0000_1000;
-    pub const REVIEW_MANAGE: u32     = 0b0001_0000;
-    pub const DISCLOSURE_MANAGE: u32 = 0b0010_0000;
-    pub const ALL: u32               = 0xFFFF_FFFF;  // 全部权限（含未来位）
-    pub const ALL_DEFINED: u32       = 0b0011_1111;  // 所有已定义位的并集
+    pub const SHOP_MANAGE: u32         = 0b0000_0001;
+    pub const MEMBER_MANAGE: u32       = 0b0000_0010;
+    pub const TOKEN_MANAGE: u32        = 0b0000_0100;
+    pub const ADS_MANAGE: u32          = 0b0000_1000;
+    pub const REVIEW_MANAGE: u32       = 0b0001_0000;
+    pub const DISCLOSURE_MANAGE: u32   = 0b0010_0000;
+    pub const ENTITY_MANAGE: u32       = 0b0100_0000;
+    pub const KYC_MANAGE: u32          = 0b1000_0000;
+    pub const GOVERNANCE_MANAGE: u32   = 0b0001_0000_0000;
+    pub const ORDER_MANAGE: u32        = 0b0010_0000_0000;
+    pub const COMMISSION_MANAGE: u32   = 0b0100_0000_0000;
+    pub const ALL: u32                 = 0xFFFF_FFFF;  // 全部权限（含未来位）
+    pub const ALL_DEFINED: u32         = 0b0111_1111_1111;  // 所有已定义位的并集
 }
 ```
 
@@ -215,7 +212,7 @@ pub enum PaymentAsset {
 | 类型 | 说明 |
 |------|------|
 | `ProductStatus` | Draft / OnSale / SoldOut / OffShelf |
-| `ProductCategory` | Digital / Physical / Service / Other |
+| `ProductCategory` | Digital / Physical / Service / Subscription / Bundle / Other |
 | `OrderStatus` | Created / Paid / Shipped / Completed / Cancelled / Disputed / Refunded / Expired |
 | `DividendConfig<Balance, BlockNumber>` | 分红配置（启用、周期、累计待分配金额） |
 
@@ -232,8 +229,8 @@ pub trait EntityProvider<AccountId> {
     fn entity_status(entity_id: u64) -> Option<EntityStatus>;
     fn entity_owner(entity_id: u64) -> Option<AccountId>;
     fn entity_account(entity_id: u64) -> AccountId;
+    fn entity_type(entity_id: u64) -> Option<EntityType>;  // v0.7.0 新增
     fn update_entity_stats(entity_id: u64, sales: u128, orders: u32) -> DispatchResult;
-    fn update_entity_rating(entity_id: u64, rating: u8) -> DispatchResult;
     fn register_shop(entity_id: u64, shop_id: u64) -> DispatchResult;
     fn unregister_shop(entity_id: u64, shop_id: u64) -> DispatchResult;
     fn is_entity_admin(entity_id: u64, account: &AccountId, required_permission: u32) -> bool;
@@ -273,7 +270,7 @@ pub trait ShopProvider<AccountId> {
 
 ### ProductProvider — 商品查询接口
 
-由 `pallet-entity-service` 实现，供订单模块调用。
+由 `pallet-entity-product` 实现，供订单模块调用。
 
 ```rust
 pub trait ProductProvider<AccountId, Balance> {
@@ -399,12 +396,52 @@ pub trait ShoppingBalanceProvider<AccountId, Balance> {
 ### OrderMemberHandler — 订单会员处理
 
 ```rust
-pub trait OrderMemberHandler<AccountId, Balance> {
+pub trait OrderMemberHandler<AccountId> {
     fn auto_register(entity_id: u64, account: &AccountId, referrer: Option<AccountId>) -> DispatchResult;
-    fn update_spent(entity_id: u64, account: &AccountId, amount: Balance, amount_usdt: u64) -> DispatchResult;
-    fn check_order_upgrade_rules(entity_id: u64, buyer: &AccountId, product_id: u64, order_amount: Balance, amount_usdt: u64) -> DispatchResult;
+    fn update_spent(entity_id: u64, account: &AccountId, amount_usdt: u64) -> DispatchResult;
+    fn check_order_upgrade_rules(entity_id: u64, buyer: &AccountId, product_id: u64, amount_usdt: u64) -> DispatchResult;
 }
 ```
+
+### MemberProvider — 统一会员服务接口（v0.8.0 新增）
+
+由 `pallet-entity-member` 实现，供返佣、治理、订单等模块统一调用。
+合并了原 `pallet-entity-member::MemberProvider` 和 `pallet-commission-common::MemberProvider` 两个重复定义。
+
+```rust
+pub trait MemberProvider<AccountId> {
+    // === 只读查询（必须实现） ===
+    fn is_member(entity_id: u64, account: &AccountId) -> bool;
+    fn get_referrer(entity_id: u64, account: &AccountId) -> Option<AccountId>;
+    fn custom_level_id(entity_id: u64, account: &AccountId) -> u8;
+    fn get_level_commission_bonus(entity_id: u64, level_id: u8) -> u16;
+    fn uses_custom_levels(entity_id: u64) -> bool;
+    fn get_member_stats(entity_id: u64, account: &AccountId) -> (u32, u32, u128);
+    fn auto_register(entity_id: u64, account: &AccountId, referrer: Option<AccountId>) -> DispatchResult;
+
+    // === 有默认实现的方法 ===
+    fn get_effective_level(..) -> u8;          // 默认 = custom_level_id
+    fn get_level_discount(..) -> u16;          // 默认 0
+    fn member_count(..) -> u32;                // 默认 0
+    fn is_banned(..) -> bool;                  // 默认 false
+    fn last_active_at(..) -> u64;              // 默认 0
+    fn member_level(..) -> Option<MemberLevelInfo>;  // 默认 None
+    fn custom_level_count(..) -> u8;           // 默认 0
+    fn member_count_by_level(..) -> u32;       // 默认 0
+    fn get_member_spent_usdt(..) -> u64;       // 默认 0
+    fn auto_register_qualified(..) -> DispatchResult;  // 默认 Ok
+    fn update_spent(..) -> DispatchResult;     // 默认 Ok
+    fn check_order_upgrade_rules(..) -> DispatchResult;  // 默认 Ok
+    fn set_custom_levels_enabled(..) -> DispatchResult;  // 默认 Ok
+    fn set_upgrade_mode(..) -> DispatchResult; // 默认 Ok
+    fn add_custom_level(..) -> DispatchResult; // 默认 Ok
+    fn update_custom_level(..) -> DispatchResult;  // 默认 Ok
+    fn remove_custom_level(..) -> DispatchResult;  // 默认 Ok
+}
+```
+
+**设计说明：** 只有 7 个方法为必须实现，其余 18 个方法均有合理默认值。
+下游 mock 只需实现所需子集即可编译。`pallet-commission-common` 通过 `pub use` 统一导出此 trait。
 
 ## 测试用空实现
 
@@ -422,6 +459,7 @@ pub trait OrderMemberHandler<AccountId, Balance> {
 | `()` impl for `TokenOrderCommissionHandler` | 空 Token 佣金处理 |
 | `()` impl for `ShoppingBalanceProvider` | 空购物余额 |
 | `()` impl for `OrderMemberHandler` | 空会员处理 |
+| `NullMemberProvider` | 空会员服务提供者 |
 
 所有空实现对查询类方法返回 `false`/`None`/`Default`，对写入类方法返回 `Ok(())`。
 
@@ -436,13 +474,14 @@ pallet-entity-common = { workspace = true }
 use pallet_entity_common::{
     EntityType, GovernanceMode, EntityStatus, TokenType,
     TransferRestrictionMode, ShopType, ShopOperatingStatus,
-    EffectiveShopStatus, MemberMode, MemberRegistrationPolicy,
+    EffectiveShopStatus, MemberRegistrationPolicy,
     MemberStatsPolicy, AdminPermission, PaymentAsset,
     EntityProvider, ShopProvider, ProductProvider,
     OrderProvider, EntityTokenProvider, EntityTokenPriceProvider,
     PricingProvider, CommissionFundGuard, OrderCommissionHandler,
     TokenOrderCommissionHandler, ShoppingBalanceProvider,
-    OrderMemberHandler,
+    OrderMemberHandler, KycProvider, GovernanceProvider,
+    MemberProvider, MemberLevelInfo, NullMemberProvider,
 };
 ```
 
@@ -454,10 +493,10 @@ pallet-entity-common (纯类型 crate)
     ├─► pallet-entity-registry   (EntityProvider 实现)
     ├─► pallet-entity-shop       (ShopProvider 实现)
     ├─► pallet-entity-token      (EntityTokenProvider 实现)
-    ├─► pallet-entity-service    (ProductProvider 实现)
+    ├─► pallet-entity-product    (ProductProvider 实现)
     ├─► pallet-entity-order      (OrderProvider 实现)
-    ├─► pallet-entity-member     (MemberProvider 消费方)
-    ├─► pallet-entity-commission (CommissionFundGuard / OrderCommissionHandler 实现)
+    ├─► pallet-entity-member     (MemberProvider 实现)
+    ├─► pallet-entity-commission (CommissionFundGuard / OrderCommissionHandler 实现, MemberProvider re-export)
     ├─► pallet-entity-governance (消费方)
     ├─► pallet-entity-market     (消费方)
     ├─► pallet-entity-review     (消费方)
@@ -478,3 +517,5 @@ pallet-entity-common (纯类型 crate)
 | v0.6.0 | 2026-03 | 新增 AdminPermission 位掩码、EntityTokenPriceProvider、TokenOrderCommissionHandler、ShoppingBalanceProvider、OrderMemberHandler、MemberStatsPolicy、PaymentAsset |
 | v0.6.1 | 2026-03 | 审计修复: M1(Closing 一致性)、M2(AdminPermission::ALL_DEFINED + is_valid)、M3(Policy is_valid)、L2(try_from_u8)、L3(Cargo 特性传播) |
 | v0.6.2 | 2026-03 | 审计 Round 2: README 同步更新 — GovernanceMode/MemberMode 枚举、EntityProvider/ShopProvider/OrderProvider trait 签名修正 |
+| v0.7.0 | 2026-03 | 用户角色分析重构: 删除 MemberMode 死代码、EntityStatus 辅助方法、EntityProvider::entity_type()、AdminPermission 新增 GOVERNANCE/ORDER/COMMISSION_MANAGE、from_u8 废弃、ProductCategory 新增 Subscription/Bundle、新增 KycProvider/GovernanceProvider trait |
+| v0.8.0 | 2026-03 | MemberProvider trait 统一: 合并 entity-member 和 commission-common 的重复 MemberProvider 定义到 common，新增 MemberLevelInfo 结构体和 NullMemberProvider |

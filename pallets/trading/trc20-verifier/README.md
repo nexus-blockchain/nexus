@@ -10,13 +10,18 @@ TRC20 USDT 链下验证共享库 — 供 OCW 验证 TRON 链上 USDT 转账。
 
 | 能力 | 说明 |
 |------|------|
-| **按 tx_hash 验证** | 查询 TronGrid 单笔交易详情，校验收款地址/合约/确认数/金额 |
 | **按 from/to/amount 搜索** | 查询收款方 TRC20 转入记录，匹配付款方 + USDT 合约，累计多笔金额 |
-| **端点健康评分** | 动态评估 API 端点可用性（成功率 + 响应速度），自动按评分排序 |
-| **并行竞速模式** | 同时请求所有端点，使用最快成功响应（5s 超时） |
-| **串行故障转移** | 按健康评分依次尝试，首个成功即返回（10s 超时） |
+| **分页支持** | 自动翻页（fingerprint），遍历 >50 笔转账（可配置 max_pages） |
+| **按 tx_hash 验证** | 查询 TronGrid 单笔交易详情，校验收款地址/合约/确认数/金额（已废弃，仅向后兼容） |
+| **端点健康评分** | 动态评估 API 端点可用性（成功率 + 响应速度），自动按评分排序 + 优先级加成 |
+| **并行竞速 / 串行故障转移** | 竞速模式使用最快成功响应；串行模式按评分依次尝试 |
+| **API Key 支持** | 每个端点可配置独立 API Key（`TRON-PRO-API-KEY` 头） |
+| **速率限制** | 全局请求间隔保护（默认 200ms），防止 API 限流 |
+| **响应缓存** | URL 级缓存（默认 TTL 30s），减少重复请求 |
 | **多档金额判定** | Exact / Overpaid / Underpaid / SeverelyUnderpaid / Invalid 五级 |
-| **安全校验** | USDT 合约地址验证 + 最小确认数(19) + 防 u64 溢出 |
+| **验证审计日志** | 记录每次验证的参数、结果、时间戳（可配置保留条数） |
+| **可配置参数** | USDT 合约地址、最小确认数、超时、速率限制间隔、缓存 TTL 均可运行时配置 |
+| **TronVerifier trait** | 上层 pallet 可注入 Mock 实现，便于单元测试 |
 
 ### 使用方
 
@@ -31,71 +36,75 @@ TRC20 USDT 链下验证共享库 — 供 OCW 验证 TRON 链上 USDT 转账。
 
 ### verify_trc20_by_transfer（主用 API）
 
-按 `(from, to, amount)` 搜索 TRC20 USDT 转账，**累计同一 from→to 的多笔转账金额**。
+按 `(from, to, amount)` 搜索 TRC20 USDT 转账，**累计同一 from→to 的多笔转账金额**，自动分页。
 
 ```rust
 pub fn verify_trc20_by_transfer(
-    from_address: &[u8],     // 付款方 TRON 地址（Base58，如 "TBuyer..."）
-    to_address: &[u8],       // 收款方 TRON 地址（Base58，如 "TSeller..."）
+    from_address: &[u8],     // 付款方 TRON 地址（Base58）
+    to_address: &[u8],       // 收款方 TRON 地址（Base58）
     expected_amount: u64,    // 预期 USDT 金额（精度 10^6）
-    min_timestamp: u64,      // 最早区块时间戳（毫秒），仅搜索此时间之后
-) -> Result<TransferSearchResult, &'static str>
+    min_timestamp: u64,      // 最早区块时间戳（毫秒）
+) -> Result<TransferSearchResult, VerificationError>
 ```
 
 **查询逻辑**：
 
 ```text
-1. 构建 TronGrid API URL:
-   /v1/accounts/{to}/transactions/trc20
-     ?contract_address=TR7NHq...（USDT 合约）
-     &only_to=true
-     &min_timestamp={min_timestamp}
-     &limit=50
-     &order_by=block_timestamp,desc
-
-2. 发送 HTTP 请求（并行竞速或串行故障转移）
-
-3. 遍历 data 数组中每个转账条目:
-   - 检查 from 地址是否匹配
-   - 检查 token_info.address 是否为 USDT 合约（双重保险）
-   - 提取 value 并累加到 total_matched_amount
-   - 记录最大单笔转账的 tx_hash 和 block_timestamp
-
-4. 返回 TransferSearchResult（含累计金额和匹配状态）
+1. 构建 TronGrid API URL（使用可配置 USDT 合约地址）
+2. 分页循环（最多 max_pages 页，默认 3）:
+   a. 发送 HTTP 请求（速率限制 + 缓存 + 故障转移）
+   b. 解析响应，匹配 from + USDT 合约 + 确认数
+   c. 累加匹配金额，记录每笔明细（MatchedTransfer）
+   d. 若金额已足够(Exact/Overpaid) → 停止翻页
+   e. 提取 fingerprint → 下一页
+3. 写入审计日志
+4. 返回 TransferSearchResult
 ```
 
-### verify_trc20_transaction（按 tx_hash 验证）
+### TronVerifier trait（H4）
 
-通过交易哈希查询单笔交易详情，完整校验链。
+上层 pallet 可通过此 trait 注入 Mock 实现：
 
 ```rust
+pub trait TronVerifier {
+    fn verify_by_transfer(
+        from_address: &[u8], to_address: &[u8],
+        expected_amount: u64, min_timestamp: u64,
+    ) -> Result<TransferSearchResult, VerificationError>;
+}
+
+pub struct DefaultTronVerifier;  // 调用真实 TronGrid API
+```
+
+### verify_trc20_transaction（已废弃）
+
+通过交易哈希查询单笔交易详情。**建议使用 `verify_trc20_by_transfer` 替代。**
+
+```rust
+#[deprecated(note = "Use verify_trc20_by_transfer instead")]
 pub fn verify_trc20_transaction(
-    tx_hash: &[u8],        // TRON 交易哈希（字节数组）
-    expected_to: &[u8],    // 预期收款地址（Base58 字符串字节）
-    expected_amount: u64,  // 预期金额（USDT，精度 10^6）
-) -> Result<TronTxVerification, &'static str>
+    tx_hash: &[u8], expected_to: &[u8], expected_amount: u64,
+) -> Result<TronTxVerification, VerificationError>
 ```
 
-**校验链**：
+---
 
-```text
-1. contractRet == "SUCCESS"       → 否则返回 "Transaction not successful"
-2. 包含 USDT_CONTRACT 地址        → 否则返回 "Not a USDT TRC20 transaction"
-3. confirmations >= 19            → 否则返回 "Insufficient confirmations"
-4. 包含 expected_to 地址          → 否则返回 "Recipient address mismatch"
-5. 提取 amount → 多档金额判定     → 仅 Exact/Overpaid 时 is_valid=true
-```
+## 错误类型
 
-### verify_trc20_transaction_simple
+### VerificationError
 
-简化接口，仅返回 `bool`（`is_valid`）。
+所有公开函数统一使用结构化错误枚举：
 
 ```rust
-pub fn verify_trc20_transaction_simple(
-    tx_hash: &[u8],
-    expected_to: &[u8],
-    expected_amount: u64,
-) -> Result<bool, &'static str>
+pub enum VerificationError {
+    HttpRequestFailed(&'static str),   // HTTP 请求失败
+    InvalidJson,                        // JSON 解析失败
+    InvalidUtf8,                        // UTF-8 解码失败
+    AllEndpointsFailed,                 // 所有端点均失败
+    RateLimited,                        // 速率限制中
+    InvalidEndpointUrl(&'static str),  // 端点 URL 校验失败
+    MaxEndpointsReached,               // 端点数量超限
+}
 ```
 
 ---
@@ -104,32 +113,28 @@ pub fn verify_trc20_transaction_simple(
 
 ### TransferSearchResult
 
-`verify_trc20_by_transfer` 的返回值。
-
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `found` | `bool` | 是否找到匹配的转账 |
-| `actual_amount` | `Option<u64>` | 匹配转账的累计金额（多笔累加） |
+| `actual_amount` | `Option<u64>` | 匹配转账的累计金额 |
 | `tx_hash` | `Option<Vec<u8>>` | 最大单笔转账的交易哈希 |
 | `block_timestamp` | `Option<u64>` | 最大单笔转账的区块时间戳（ms） |
 | `amount_status` | `AmountStatus` | 金额匹配状态 |
 | `error` | `Option<Vec<u8>>` | 错误信息 |
+| `matched_transfers` | `Vec<MatchedTransfer>` | 所有匹配转账明细 |
+| `remaining_amount` | `Option<u64>` | 还需补付金额（仅少付时有值） |
+| `estimated_confirmations` | `Option<u32>` | 估计确认数（基于 block_timestamp） |
+| `truncated` | `bool` | 结果是否被截断（分页未完全遍历） |
 
-### TronTxVerification
+### MatchedTransfer
 
-`verify_trc20_transaction` 的返回值。
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `tx_hash` | `Vec<u8>` | 交易哈希 |
-| `is_valid` | `bool` | 验证是否通过（仅 Exact/Overpaid 为 true） |
-| `from_address` | `Option<Vec<u8>>` | 付款方地址 |
-| `to_address` | `Option<Vec<u8>>` | 收款方地址 |
-| `actual_amount` | `Option<u64>` | 实际转账金额 |
-| `expected_amount` | `Option<u64>` | 预期金额 |
-| `confirmations` | `u32` | 确认数 |
-| `error` | `Option<Vec<u8>>` | 错误信息 |
-| `amount_status` | `AmountStatus` | 金额匹配状态 |
+```rust
+pub struct MatchedTransfer {
+    pub tx_hash: Vec<u8>,
+    pub amount: u64,
+    pub block_timestamp: u64,
+}
+```
 
 ### AmountStatus
 
@@ -144,6 +149,11 @@ pub enum AmountStatus {
     SeverelyUnderpaid { shortage: u64 }, // < 50%
     Invalid,                             // 金额为零或解析失败
 }
+
+impl AmountStatus {
+    pub fn is_acceptable(&self) -> bool;                // Exact | Overpaid
+    pub fn to_verification_result_name(&self) -> &str;  // 与 PaymentVerificationResult 兼容
+}
 ```
 
 | 状态 | 条件 | 上层处理 |
@@ -154,7 +164,50 @@ pub enum AmountStatus {
 | SeverelyUnderpaid | `actual < expected × 0.5` | 按比例释放 + 没收保证金 |
 | Invalid | `actual = 0` 或 `expected = 0` | 不释放 + 没收保证金 |
 
-> 金额阈值计算使用 u128 中间值防止大金额乘法溢出（M2 修复）。`expected=0` 返回 Invalid（L2 修复，与 pallet-trading-common 语义统一）。
+---
+
+## 配置
+
+### VerifierConfig（运行时可配置）
+
+```rust
+pub struct VerifierConfig {
+    pub usdt_contract: Option<String>,       // 覆盖 USDT 合约地址
+    pub min_confirmations: Option<u32>,      // 覆盖最小确认数
+    pub rate_limit_interval_ms: u64,         // 请求间隔（默认 200ms）
+    pub cache_ttl_ms: u64,                   // 响应缓存 TTL（默认 30s）
+    pub max_pages: u32,                      // 分页上限（默认 3）
+    pub audit_log_retention: u32,            // 审计日志保留条数（默认 100）
+}
+```
+
+存储键: `ocw_verifier_config`
+
+### EndpointConfig
+
+```rust
+pub struct EndpointConfig {
+    pub endpoints: Vec<String>,      // 端点 URL 列表
+    pub parallel_mode: bool,         // 是否并行竞速（默认 true）
+    pub updated_at: u64,             // 最后更新时间
+    pub api_keys: Vec<String>,       // 每个端点的 API Key（索引对应）
+    pub timeout_ms: Option<u64>,     // 覆盖串行超时
+    pub timeout_race_ms: Option<u64>,// 覆盖竞速超时
+    pub priority_boosts: Vec<i32>,   // 端点评分加成（索引对应）
+}
+```
+
+存储键: `ocw_custom_endpoints`
+
+### 端点管理函数
+
+| 函数 | 说明 |
+|------|------|
+| `add_endpoint(url)` | 添加端点（HTTPS 校验 + 最大 10 个限制） |
+| `remove_endpoint(url)` | 移除端点 |
+| `get_sorted_endpoints()` | 按健康评分+优先级降序排列 |
+| `reset_endpoint_health(endpoint)` | 重置指定端点健康数据 |
+| `get_all_endpoint_diagnostics()` | 批量获取所有端点诊断信息 |
 
 ---
 
@@ -164,140 +217,85 @@ pub enum AmountStatus {
 
 ```rust
 pub struct EndpointHealth {
-    pub success_count: u32,     // 累计成功次数
-    pub failure_count: u32,     // 累计失败次数
-    pub avg_response_ms: u32,   // 指数移动平均响应时间（衰减因子 90%）
-    pub score: u32,             // 健康评分 (0-100)
-    pub last_updated: u64,      // 最后更新时间戳（ms）
+    pub success_count: u32,
+    pub failure_count: u32,
+    pub avg_response_ms: u32,   // EMA 衰减因子 90%
+    pub score: u32,             // 0-100
+    pub last_updated: u64,
 }
 ```
 
 ### 评分公式
 
 ```text
-score = success_rate_score + speed_score
+score = success_rate_score(0-50) + speed_score(0-50)
+      + priority_boost (EndpointConfig.priority_boosts[i])
 
-success_rate_score (0-50):
-  = success_count / (success_count + failure_count) × 50
-
-speed_score (0-50):
-  avg_response_ms < 1000ms  → 50
-  avg_response_ms > 10000ms → 0
-  其他 → 线性插值: 50 - (avg_ms - 1000) × 50 / 9000
-
-初始评分（无请求记录）: 50
-```
-
-### 响应时间更新（EMA）
-
-```text
-avg_response_ms = old_avg × 0.9 + new_response × 0.1
-```
-
-### 存储
-
-评分数据存储在 offchain local storage（PERSISTENT），键格式 `ocw_endpoint_health::{endpoint_url}`。
-
----
-
-## 请求模式
-
-### 并行竞速模式（默认）
-
-同时向所有端点发送 HTTP GET 请求，使用**第一个成功响应**（HTTP 200 + 非空 body），超时 5s。
-
-```text
-                   ┌─→ api.trongrid.io    ──→ 200 OK (350ms) ✓ 使用此响应
-Parallel Race ─────┼─→ api.tronstack.io   ──→ 超时
-                   └─→ apilist.tronscan... ──→ 200 OK (800ms)
-```
-
-- 成功端点记录 `record_success(response_ms)`
-- 失败/超时端点记录 `record_failure()`
-
-### 串行故障转移模式
-
-按健康评分**降序**依次尝试，首个成功即返回，超时 10s。
-
-```text
-Sequential: trongrid(score=95) → 失败 → tronstack(score=70) → 200 OK ✓
-```
-
-### 切换模式
-
-```rust
-let mut config = get_endpoint_config();
-config.parallel_mode = false;  // 关闭并行，启用串行
-save_endpoint_config(&config);
+success_rate = success / (success + failure) × 50
+speed: <1000ms→50, >10000ms→0, 线性插值
+初始: 50
 ```
 
 ---
 
-## 端点管理
+## 速率限制 & 缓存
 
-### EndpointConfig
+### 速率限制
+
+全局请求间隔保护，防止 TronGrid 429 限流：
+
+- 默认间隔: 200ms（通过 `VerifierConfig.rate_limit_interval_ms` 配置）
+- 存储键: `ocw_last_request_ts`
+- 间隔内请求返回 `VerificationError::RateLimited`
+
+### 响应缓存
+
+URL 级响应缓存，减少重复请求：
+
+- 默认 TTL: 30s（通过 `VerifierConfig.cache_ttl_ms` 配置）
+- 存储键: `ocw_cache::{url_hash}`
+- `fetch_url_with_fallback` 自动检查缓存
+
+---
+
+## 审计日志
+
+每次 `verify_trc20_by_transfer` 调用自动记录：
 
 ```rust
-pub struct EndpointConfig {
-    pub endpoints: Vec<String>,  // 端点 URL 列表
-    pub parallel_mode: bool,     // 是否并行竞速（默认 true）
-    pub updated_at: u64,         // 最后更新时间
+pub struct AuditLogEntry {
+    pub timestamp: u64,
+    pub action: Vec<u8>,
+    pub from_address: Vec<u8>,
+    pub to_address: Vec<u8>,
+    pub expected_amount: u64,
+    pub actual_amount: u64,
+    pub result_ok: bool,
+    pub error_msg: Vec<u8>,
 }
 ```
 
-存储在 offchain local storage，键 `ocw_custom_endpoints`。
-
-### 默认端点
-
-| 端点 | 说明 |
-|------|------|
-| `https://api.trongrid.io` | TronGrid 官方（主端点，用于 URL 构建模板） |
-| `https://api.tronstack.io` | TronStack 第三方 |
-| `https://apilist.tronscanapi.com` | TronScan |
-
-### 管理函数
-
 | 函数 | 说明 |
 |------|------|
-| `get_endpoint_config()` | 获取当前端点配置（无配置时返回默认值） |
-| `save_endpoint_config(config)` | 保存端点配置 |
-| `add_endpoint(url)` | 添加自定义端点（去重） |
-| `remove_endpoint(url)` | 移除端点 |
-| `get_sorted_endpoints()` | 获取按健康评分降序排列的端点列表 |
-| `get_endpoint_health(endpoint)` | 获取指定端点的健康状态 |
+| `get_audit_logs()` | 获取所有审计日志 |
+| `write_audit_log(entry)` | 写入日志（自动截断至 `audit_log_retention`） |
 
 ---
 
 ## JSON 解析
 
-本库使用轻量级字符串匹配解析 TronGrid JSON 响应（`no_std` 兼容，无需 serde/json crate）。
+使用 `lite-json` 结构化解析（`no_std` 兼容），替代旧版字符串匹配。
 
 ### 解析工具函数
 
 | 函数 | 说明 |
 |------|------|
-| `extract_json_string_value(json, key)` | 提取字符串字段（支持 `"key":"value"` 和 `"key": "value"`） |
-| `extract_json_number(json, key)` | 提取数字字段（支持数字和引号包裹的数字） |
-| `extract_amount(response)` | 提取 `"amount"` 字段 |
-| `extract_confirmations(response)` | 提取 `"confirmations"` 字段 |
-| `find_matching_brace(s, pos)` | 找到匹配的 `}` 括号（支持一层嵌套，防下溢） |
-
-### 转账列表解析逻辑
-
-`parse_trc20_transfer_list` 解析 TronGrid `/v1/accounts/{addr}/transactions/trc20` 响应：
-
-```text
-1. 检查 "success":true
-2. 定位 "data":[ 数组
-3. 遍历每个 {} 条目（find_matching_brace 支持嵌套 token_info）:
-   a. 匹配 "from":"expected_from"
-   b. 匹配 USDT_CONTRACT 地址
-   c. 提取 "value" 并累加到 total_matched_amount
-   d. 跟踪最大单笔的 tx_hash / block_timestamp
-4. 计算 calculate_amount_status(expected, total)
-```
-
-> **安全说明**：字符串包含匹配在 OCW 安全边界内可接受，但需限制可信端点以防恶意 API 注入匹配字符串。
+| `json_find_str(value, key)` | 递归查找字符串字段 |
+| `json_find_u64(value, key)` | 递归查找数字字段（支持字符串数字） |
+| `json_has_str_value(value, target)` | 检查是否包含完整字符串值（非子串） |
+| `json_obj_get(obj, key)` | 对象级字段查找 |
+| `json_obj_get_str(obj, key)` | 对象级字符串字段 |
+| `json_obj_get_u64(obj, key)` | 对象级数字字段 |
 
 ---
 
@@ -305,9 +303,9 @@ pub struct EndpointConfig {
 
 | 函数 | 签名 | 说明 |
 |------|------|------|
-| `bytes_to_hex(bytes)` | `&[u8] → String` | 字节数组转十六进制字符串 |
-| `hex_to_bytes(hex)` | `&str → Result<Vec<u8>, &str>` | 十六进制字符串转字节数组 |
-| `calculate_amount_status(expected, actual)` | `(u64, u64) → AmountStatus` | 五级金额匹配判定（公开 API） |
+| `bytes_to_hex` | `&[u8] → String` | 字节转十六进制 |
+| `hex_to_bytes` | `&str → Result<Vec<u8>>` | 十六进制转字节（自动去 0x 前缀） |
+| `calculate_amount_status` | `(u64, u64) → AmountStatus` | 五级金额判定 |
 
 ---
 
@@ -315,14 +313,13 @@ pub struct EndpointConfig {
 
 | 常量 | 值 | 说明 |
 |------|------|------|
-| `USDT_CONTRACT` | `TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t` | USDT TRC20 合约地址（主网） |
-| `TRONGRID_MAINNET` | `https://api.trongrid.io` | 主端点（URL 构建模板） |
-| `HTTP_TIMEOUT_MS` | 10,000 | 串行模式单请求超时（ms） |
-| `HTTP_TIMEOUT_RACE_MS` | 5,000 | 并行竞速模式超时（ms） |
-| `MIN_CONFIRMATIONS` | 19 | 最小确认数（防链重组） |
-| `HEALTH_DECAY_FACTOR` | 90 | 响应时间 EMA 衰减因子（90% 旧 + 10% 新） |
-| `ENDPOINT_HEALTH_PREFIX` | `ocw_endpoint_health::` | 端点健康数据存储键前缀 |
-| `CUSTOM_ENDPOINTS_KEY` | `ocw_custom_endpoints` | 端点配置存储键 |
+| `USDT_CONTRACT` | `TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t` | USDT TRC20 合约地址（默认，可通过 VerifierConfig 覆盖） |
+| `TRONGRID_MAINNET` | `https://api.trongrid.io` | 主端点 URL 模板 |
+| `HTTP_TIMEOUT_MS` | 10,000 | 串行模式超时（可通过 EndpointConfig 覆盖） |
+| `HTTP_TIMEOUT_RACE_MS` | 5,000 | 竞速模式超时（可通过 EndpointConfig 覆盖） |
+| `MIN_CONFIRMATIONS` | 19 | 最小确认数（可通过 VerifierConfig 覆盖） |
+| `MAX_ENDPOINTS` | 10 | 最大端点数量 |
+| `HEALTH_DECAY_FACTOR` | 90 | EMA 衰减因子 |
 
 ---
 
@@ -332,21 +329,22 @@ pub struct EndpointConfig {
 
 | 防护 | 说明 |
 |------|------|
-| **合约地址校验** | 每次验证均检查 USDT 合约地址 `TR7NHq...`，防止其他 TRC20 代币冒充（M6 修复） |
-| **最小确认数** | 要求 ≥ 19 confirmations，防止 TRON 链重组导致回滚（L1 修复） |
-| **Base58 地址匹配** | `expected_to` 直接按 UTF-8 字符串匹配，避免 hex 编码导致永不匹配（H1 修复） |
-| **u128 中间计算** | 金额阈值计算使用 u128 防止 `expected × 1005` 溢出 u64（M2 修复） |
-| **expected=0 处理** | `calculate_amount_status(0, any)` 返回 Invalid，与 pallet-trading-common 语义一致（L2 修复） |
-| **括号匹配防下溢** | `find_matching_brace` 使用 `checked_sub` 防止恶意响应导致 depth 下溢（L3 修复） |
-| **双重合约过滤** | 转账搜索：URL 参数 `contract_address` + 响应体内 `token_info.address` 双重校验 |
+| **合约地址校验** | lite-json 精确字符串匹配（非子串），防其他 TRC20 冒充 |
+| **最小确认数** | 默认 ≥ 19，防 TRON 链重组回滚 |
+| **Base58 地址匹配** | 直接 UTF-8 字符串匹配，避免 hex 编码永不匹配 |
+| **u128 中间计算** | 金额阈值防 u64 溢出，极端值 `.min(u64::MAX)` 防截断回绕 |
+| **expected=0 → Invalid** | 与 pallet-trading-common 语义一致 |
+| **双重合约过滤** | URL 参数 + 响应体内 token_info.address 双重校验 |
 
 ### 端点安全
 
 | 防护 | 说明 |
 |------|------|
-| **主网限定** | 所有默认端点为 TRON 主网，代码注释标注禁止使用测试网 |
-| **故障隔离** | 请求失败不影响其他端点，评分自动降级 |
-| **评分衰减** | 新请求结果仅占 10% 权重（EMA），防止单次异常翻转评分 |
+| **HTTPS 强制** | `add_endpoint` 拒绝非 HTTPS URL |
+| **URL 校验** | 长度 10-256，无空白字符 |
+| **最大端点数** | 限制 10 个，防存储膨胀 |
+| **故障隔离** | 单端点失败不影响其他端点 |
+| **速率限制** | 全局请求间隔防 API 限流 |
 
 ---
 
@@ -356,34 +354,17 @@ pub struct EndpointConfig {
 cargo test -p pallet-trading-trc20-verifier
 ```
 
-覆盖范围（27 个测试）：
+覆盖范围（45 个测试）：
 
-**基础工具**
-- `bytes_to_hex` / `hex_to_bytes` 正确性和边界
+**基础工具** — `bytes_to_hex`, `hex_to_bytes`（含 0x 前缀），边界值
 
-**端点健康**
-- 评分公式（默认/高成功率/慢响应）
+**端点健康** — 评分公式（默认/高成功率/慢响应）
 
-**JSON 解析**
-- `extract_amount` 多格式
-- `extract_json_string_value` 有/无空格格式
-- `extract_json_number` 数字和字符串数字格式
-- `find_matching_brace` 嵌套和异常
+**JSON 解析 (lite-json)** — `json_find_str`, `json_has_str_value` 精确匹配, `extract_amount`, `extract_json_string_value`, `extract_json_number`, `find_matching_brace`
 
-**转账搜索**
-- 精确匹配 / 多付 / 少付 / 严重少付
-- from 地址不匹配 → 不找到
-- 空 data 数组
-- API 返回 failure
-- 多笔转账累加（5M + 6M = 11M）
-- 非 USDT 合约忽略
+**转账搜索** — 精确匹配 / 多付 / 少付 / 严重少付 / from 不匹配 / 空数组 / API failure / 多笔累加 / 非 USDT 合约忽略 / JSON 字符串中的 `{}` 特殊字符
 
-**审计回归**
-- H1: Base58 地址直接匹配（非 hex 编码）
-- H1: 地址不匹配 / 确认数不足 / 非 USDT 合约 / 交易失败
-- M2: 大金额（10^16 USDT）不溢出
-- L1: `best_tx_hash` 跟踪最大单笔（非前序总和）
-- L2: `expected=0` 返回 Invalid
+**审计回归** — H1 Base58 匹配, H6 发送方校验, H7 expected=0, H8 端点校验, C1 精确字段匹配, C2 字段名提取, M2 大金额不溢出, M5 lite-json 替代, M8 极端值防回绕, L1 最大单笔跟踪, L2 expected=0, L6 0x 前缀
 
 ---
 
@@ -391,12 +372,13 @@ cargo test -p pallet-trading-trc20-verifier
 
 | crate | 用途 |
 |-------|------|
-| `codec` (SCALE) | 端点健康/配置序列化 |
-| `sp-runtime` | OCW HTTP 客户端（`offchain::http`） |
-| `sp-core` | offchain `StorageKind` |
+| `codec` (SCALE) | 端点健康/配置/审计日志序列化 |
+| `sp-runtime` | OCW HTTP 客户端 |
+| `sp-core` | offchain StorageKind |
 | `sp-io` | 时间戳 / 本地存储读写 |
 | `sp-std` | `no_std` 兼容 |
-| `log` | OCW 日志输出 |
+| `log` | OCW 日志 |
+| `lite-json` | `no_std` JSON 结构化解析 |
 
 ---
 
@@ -404,7 +386,8 @@ cargo test -p pallet-trading-trc20-verifier
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
-| v0.2.0 | 2026-02-23 | 新增 `verify_trc20_by_transfer`（按 from/to 搜索 + 累加）、`TransferSearchResult`、`parse_trc20_transfer_list`、JSON 解析工具函数 |
+| v0.3.0 | 2026-03-04 | **重大增强**: VerificationError 枚举统一错误处理, VerifierConfig 运行时配置(合约/确认数/速率/缓存/分页/审计), EndpointConfig 增强(API Key/超时/优先级), TronVerifier trait 抽象, 分页支持(fingerprint), 速率限制+响应缓存, 审计日志, TransferSearchResult 增强(matched_transfers/remaining_amount/estimated_confirmations/truncated), AmountStatus.is_acceptable()+to_verification_result_name(), 端点健康重置+批量诊断, lite-json 结构化解析, 端点最大数量限制(10), 废弃 verify_trc20_transaction |
+| v0.2.0 | 2026-02-23 | 新增 `verify_trc20_by_transfer`、`TransferSearchResult`、`parse_trc20_transfer_list`、JSON 工具函数 |
 | v0.1.0 | 2026-02-08 | 从 `pallet-trading-swap/src/ocw.rs` 提取为独立共享库 |
 
 ---

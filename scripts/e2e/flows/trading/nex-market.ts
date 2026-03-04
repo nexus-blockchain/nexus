@@ -50,9 +50,10 @@ async function nexMarket(ctx: FlowContext): Promise<void> {
   // ─── Step 1: Alice 配置价格保护 ────────────────────────────
 
   const configProtTx = (api.tx as any).nexMarket.configurePriceProtection(
-    500,     // max_slippage: 5%
-    5000,    // circuit_breaker_threshold: 50%
-    5,       // min_trades_for_twap
+    true,    // enabled
+    500,     // maxPriceDeviation: 5%
+    5000,    // circuitBreakerThreshold: 50%
+    5,       // minTradesForTwap
   );
   const configProtResult = await ctx.sudo(configProtTx, '配置价格保护');
   assertTxSuccess(configProtResult, '配置价格保护');
@@ -126,11 +127,14 @@ async function nexMarket(ctx: FlowContext): Promise<void> {
     );
     const usdtTxId = usdtTxEvent?.data?.transactionId ?? usdtTxEvent?.data?.[0];
 
-    if (usdtTxId !== undefined) {
-      const confirmTx = (api.tx as any).nexMarket.confirmPayment(
-        usdtTxId,
-        '0x' + 'ab'.repeat(32),   // tx_hash (模拟)
-      );
+    // confirmPayment takes only tradeId
+    const tradeEvent = reserveResult.events.find(
+      e => e.section === 'nexMarket' && e.method === 'TradeCreated',
+    );
+    const tradeId = tradeEvent?.data?.tradeId ?? tradeEvent?.data?.[0] ?? usdtTxId;
+
+    if (tradeId !== undefined) {
+      const confirmTx = (api.tx as any).nexMarket.confirmPayment(tradeId);
       const confirmResult = await ctx.send(confirmTx, charlie, 'Charlie 确认付款', 'charlie');
       if (confirmResult.success) {
         await ctx.check('付款已确认', 'charlie', () => {
@@ -210,8 +214,8 @@ async function nexMarket(ctx: FlowContext): Promise<void> {
   // ─── Step 11: Alice 注入种子流动性 ─────────────────────────
 
   const seedTx = (api.tx as any).nexMarket.seedLiquidity(
-    100_000_000,        // usdt_amount: 100 USDT
-    500,                // premium_bps: 5% 溢价
+    5,                  // orderCount
+    null,               // usdtOverride: None (use default)
   );
   const seedResult = await ctx.sudo(seedTx, '注入种子流动性');
   if (seedResult.success) {

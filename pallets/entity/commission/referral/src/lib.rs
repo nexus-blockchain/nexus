@@ -26,6 +26,7 @@ pub mod pallet {
     use pallet_commission_common::{
         CommissionOutput, CommissionType, MemberProvider,
     };
+    use pallet_entity_common::{EntityProvider, AdminPermission};
     use sp_runtime::traits::{Saturating, Zero};
 
     pub type BalanceOf<T> =
@@ -105,9 +106,14 @@ pub mod pallet {
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
         type Currency: Currency<Self::AccountId>;
         type MemberProvider: MemberProvider<Self::AccountId>;
+        /// 实体查询接口（权限校验、Owner/Admin 判断）
+        type EntityProvider: EntityProvider<Self::AccountId>;
     }
 
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     // ========================================================================
@@ -141,6 +147,14 @@ pub mod pallet {
     #[pallet::error]
     pub enum Error<T> {
         InvalidRate,
+        /// 实体不存在
+        EntityNotFound,
+        /// 非实体所有者或无 COMMISSION_MANAGE 权限
+        NotEntityOwnerOrAdmin,
+        /// 配置不存在（清除时）
+        ConfigNotFound,
+        /// 实体已被全局锁定，所有配置操作不可用
+        EntityLocked,
     }
 
     // ========================================================================
@@ -149,10 +163,119 @@ pub mod pallet {
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        /// 设置直推奖励配置
+        /// 设置直推奖励配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
         #[pallet::call_index(0)]
         #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_direct_reward_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            rate: u16,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(rate <= 10000, Error::<T>::InvalidRate);
+
+            ReferralConfigs::<T>::mutate(entity_id, |maybe| {
+                let config = maybe.get_or_insert_with(ReferralConfig::default);
+                config.direct_reward.rate = rate;
+            });
+
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
+            Ok(())
+        }
+
+        /// 设置固定金额配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
+        #[pallet::call_index(2)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn set_fixed_amount_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            amount: BalanceOf<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+
+            ReferralConfigs::<T>::mutate(entity_id, |maybe| {
+                let config = maybe.get_or_insert_with(ReferralConfig::default);
+                config.fixed_amount = FixedAmountConfig { amount };
+            });
+
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
+            Ok(())
+        }
+
+        /// 设置首单奖励配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
+        #[pallet::call_index(3)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn set_first_order_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            amount: BalanceOf<T>,
+            rate: u16,
+            use_amount: bool,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(rate <= 10000, Error::<T>::InvalidRate);
+
+            ReferralConfigs::<T>::mutate(entity_id, |maybe| {
+                let config = maybe.get_or_insert_with(ReferralConfig::default);
+                config.first_order = FirstOrderConfig { amount, rate, use_amount };
+            });
+
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
+            Ok(())
+        }
+
+        /// 设置复购奖励配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
+        #[pallet::call_index(4)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn set_repeat_purchase_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            rate: u16,
+            min_orders: u32,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(rate <= 10000, Error::<T>::InvalidRate);
+
+            ReferralConfigs::<T>::mutate(entity_id, |maybe| {
+                let config = maybe.get_or_insert_with(ReferralConfig::default);
+                config.repeat_purchase = RepeatPurchaseConfig { rate, min_orders };
+            });
+
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
+            Ok(())
+        }
+
+        /// 清除推荐链返佣配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
+        #[pallet::call_index(5)]
+        #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
+        pub fn clear_referral_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(ReferralConfigs::<T>::contains_key(entity_id), Error::<T>::ConfigNotFound);
+
+            ReferralConfigs::<T>::remove(entity_id);
+            Self::deposit_event(Event::ReferralConfigCleared { entity_id });
+            Ok(())
+        }
+
+        // ===== Root force_* 紧急覆写 extrinsics =====
+
+        /// [Root] 强制设置直推奖励配置
+        #[pallet::call_index(6)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn force_set_direct_reward_config(
             origin: OriginFor<T>,
             entity_id: u64,
             rate: u16,
@@ -169,10 +292,10 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 设置固定金额配置
-        #[pallet::call_index(2)]
+        /// [Root] 强制设置固定金额配置
+        #[pallet::call_index(7)]
         #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
-        pub fn set_fixed_amount_config(
+        pub fn force_set_fixed_amount_config(
             origin: OriginFor<T>,
             entity_id: u64,
             amount: BalanceOf<T>,
@@ -188,10 +311,10 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 设置首单奖励配置
-        #[pallet::call_index(3)]
+        /// [Root] 强制设置首单奖励配置
+        #[pallet::call_index(8)]
         #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
-        pub fn set_first_order_config(
+        pub fn force_set_first_order_config(
             origin: OriginFor<T>,
             entity_id: u64,
             amount: BalanceOf<T>,
@@ -199,7 +322,6 @@ pub mod pallet {
             use_amount: bool,
         ) -> DispatchResult {
             ensure_root(origin)?;
-            // H1 审计修复: rate 用于比例模式计算，必须 <= 10000 基点
             ensure!(rate <= 10000, Error::<T>::InvalidRate);
 
             ReferralConfigs::<T>::mutate(entity_id, |maybe| {
@@ -211,17 +333,16 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 设置复购奖励配置
-        #[pallet::call_index(4)]
+        /// [Root] 强制设置复购奖励配置
+        #[pallet::call_index(9)]
         #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
-        pub fn set_repeat_purchase_config(
+        pub fn force_set_repeat_purchase_config(
             origin: OriginFor<T>,
             entity_id: u64,
             rate: u16,
             min_orders: u32,
         ) -> DispatchResult {
             ensure_root(origin)?;
-            // H2 审计修复: rate 必须 <= 10000 基点
             ensure!(rate <= 10000, Error::<T>::InvalidRate);
 
             ReferralConfigs::<T>::mutate(entity_id, |maybe| {
@@ -232,6 +353,22 @@ pub mod pallet {
             Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
             Ok(())
         }
+
+        /// [Root] 强制清除推荐链返佣配置
+        #[pallet::call_index(10)]
+        #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
+        pub fn force_clear_referral_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            // X2: 仅配置存在时才 remove + emit，防止幻影事件
+            if ReferralConfigs::<T>::contains_key(entity_id) {
+                ReferralConfigs::<T>::remove(entity_id);
+                Self::deposit_event(Event::ReferralConfigCleared { entity_id });
+            }
+            Ok(())
+        }
     }
 
     // ========================================================================
@@ -239,6 +376,20 @@ pub mod pallet {
     // ========================================================================
 
     impl<T: Config> Pallet<T> {
+        /// 验证 Entity Owner 或 Admin(COMMISSION_MANAGE) 权限
+        fn ensure_owner_or_admin(entity_id: u64, who: &T::AccountId) -> DispatchResult {
+            let owner = T::EntityProvider::entity_owner(entity_id)
+                .ok_or(Error::<T>::EntityNotFound)?;
+            if *who == owner {
+                return Ok(());
+            }
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, who, AdminPermission::COMMISSION_MANAGE),
+                Error::<T>::NotEntityOwnerOrAdmin
+            );
+            Ok(())
+        }
+
         pub fn process_direct_reward(
             entity_id: u64,
             buyer: &T::AccountId,
@@ -249,6 +400,8 @@ pub mod pallet {
         ) {
             if config.rate == 0 { return; }
             if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
+                // X1: 跳过被封禁的推荐人
+                if T::MemberProvider::is_banned(entity_id, &referrer) { return; }
                 let commission = order_amount.saturating_mul(config.rate.into()) / 10000u32.into();
                 let actual = commission.min(*remaining);
                 if !actual.is_zero() {
@@ -272,6 +425,8 @@ pub mod pallet {
         ) {
             if config.amount.is_zero() { return; }
             if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
+                // X1: 跳过被封禁的推荐人
+                if T::MemberProvider::is_banned(entity_id, &referrer) { return; }
                 let actual = config.amount.min(*remaining);
                 if !actual.is_zero() {
                     *remaining = remaining.saturating_sub(actual);
@@ -297,6 +452,8 @@ pub mod pallet {
             if config.use_amount && config.amount.is_zero() { return; }
             if !config.use_amount && config.rate == 0 { return; }
             if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
+                // X1: 跳过被封禁的推荐人
+                if T::MemberProvider::is_banned(entity_id, &referrer) { return; }
                 let commission = if config.use_amount {
                     config.amount
                 } else {
@@ -326,6 +483,8 @@ pub mod pallet {
         ) {
             if config.rate == 0 || buyer_order_count < config.min_orders { return; }
             if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
+                // X1: 跳过被封禁的推荐人
+                if T::MemberProvider::is_banned(entity_id, &referrer) { return; }
                 let commission = order_amount.saturating_mul(config.rate.into()) / 10000u32.into();
                 let actual = commission.min(*remaining);
                 if !actual.is_zero() {
@@ -417,6 +576,8 @@ impl<T: pallet::Config> pallet::Pallet<T> {
     {
         if rate == 0 { return; }
         if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
+            // X1: 跳过被封禁的推荐人
+            if T::MemberProvider::is_banned(entity_id, &referrer) { return; }
             let commission = order_amount.saturating_mul(TB::from(rate as u32)) / TB::from(10000u32);
             let actual = commission.min(*remaining);
             if !actual.is_zero() {
@@ -444,6 +605,8 @@ impl<T: pallet::Config> pallet::Pallet<T> {
         // Token: 仅支持 rate 模式，use_amount=true（固定金额）跳过
         if config.use_amount || config.rate == 0 { return; }
         if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
+            // X1: 跳过被封禁的推荐人
+            if T::MemberProvider::is_banned(entity_id, &referrer) { return; }
             let commission = order_amount.saturating_mul(TB::from(config.rate as u32)) / TB::from(10000u32);
             let actual = commission.min(*remaining);
             if !actual.is_zero() {
@@ -471,6 +634,8 @@ impl<T: pallet::Config> pallet::Pallet<T> {
     {
         if config.rate == 0 || buyer_order_count < config.min_orders { return; }
         if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
+            // X1: 跳过被封禁的推荐人
+            if T::MemberProvider::is_banned(entity_id, &referrer) { return; }
             let commission = order_amount.saturating_mul(TB::from(config.rate as u32)) / TB::from(10000u32);
             let actual = commission.min(*remaining);
             if !actual.is_zero() {
@@ -590,8 +755,11 @@ impl<T: pallet::Config> pallet_commission_common::ReferralPlanWriter<pallet::Bal
     }
 
     fn clear_config(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
-        pallet::ReferralConfigs::<T>::remove(entity_id);
-        pallet::Pallet::<T>::deposit_event(pallet::Event::ReferralConfigCleared { entity_id });
+        // X2: 仅配置存在时才 remove + emit，防止幻影事件误导 indexer
+        if pallet::ReferralConfigs::<T>::contains_key(entity_id) {
+            pallet::ReferralConfigs::<T>::remove(entity_id);
+            pallet::Pallet::<T>::deposit_event(pallet::Event::ReferralConfigCleared { entity_id });
+        }
         Ok(())
     }
 }

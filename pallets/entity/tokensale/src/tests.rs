@@ -1432,3 +1432,681 @@ fn m2_deep_dutch_price_reaches_end_price_at_end() {
         assert_eq!(price, 1000u128);
     });
 }
+
+// ==================== P0: force_cancel_sale ====================
+
+#[test]
+fn p0_force_cancel_sale_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+
+        assert_ok!(EntityTokenSale::force_cancel_sale(RuntimeOrigin::root(), round_id));
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.status, RoundStatus::Cancelled);
+        assert_eq!(round.remaining_amount, 0u128);
+        assert!(round.cancelled_at.is_some());
+        assert!(ActiveRounds::<Test>::get().is_empty());
+    });
+}
+
+#[test]
+fn p0_force_cancel_sale_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_noop!(
+            EntityTokenSale::force_cancel_sale(RuntimeOrigin::signed(CREATOR), round_id),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn p0_force_cancel_sale_rejects_ended() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        frame_system::Pallet::<Test>::set_block_number(101);
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        assert_noop!(
+            EntityTokenSale::force_cancel_sale(RuntimeOrigin::root(), round_id),
+            Error::<Test>::InvalidRoundStatus
+        );
+    });
+}
+
+#[test]
+fn p0_force_cancel_not_started_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_round();
+        assert_ok!(EntityTokenSale::force_cancel_sale(RuntimeOrigin::root(), round_id));
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.status, RoundStatus::Cancelled);
+    });
+}
+
+// ==================== P0: force_end_sale ====================
+
+#[test]
+fn p0_force_end_sale_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 200u128, None));
+
+        // Root 可在任意时间强制结束（无需等 end_block）
+        assert_ok!(EntityTokenSale::force_end_sale(RuntimeOrigin::root(), round_id));
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.status, RoundStatus::Ended);
+        assert_eq!(round.sold_amount, 200u128);
+        assert_eq!(round.remaining_amount, 0u128);
+        assert!(ActiveRounds::<Test>::get().is_empty());
+    });
+}
+
+#[test]
+fn p0_force_end_sale_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_noop!(
+            EntityTokenSale::force_end_sale(RuntimeOrigin::signed(CREATOR), round_id),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn p0_force_end_sale_rejects_not_active() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_round(); // NotStarted
+        assert_noop!(
+            EntityTokenSale::force_end_sale(RuntimeOrigin::root(), round_id),
+            Error::<Test>::InvalidRoundStatus
+        );
+    });
+}
+
+// ==================== P1: force_refund ====================
+
+#[test]
+fn p1_force_refund_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        let buyer_before = Balances::free_balance(BUYER);
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+
+        // force_cancel + force_refund
+        assert_ok!(EntityTokenSale::force_cancel_sale(RuntimeOrigin::root(), round_id));
+        assert_ok!(EntityTokenSale::force_refund(RuntimeOrigin::root(), round_id, BUYER));
+
+        let buyer_after = Balances::free_balance(BUYER);
+        assert_eq!(buyer_after, buyer_before);
+
+        let sub = Subscriptions::<Test>::get(round_id, BUYER).unwrap();
+        assert!(sub.refunded);
+
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.total_refunded_nex, 10_000u128);
+    });
+}
+
+#[test]
+fn p1_force_refund_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+        assert_ok!(EntityTokenSale::force_cancel_sale(RuntimeOrigin::root(), round_id));
+
+        assert_noop!(
+            EntityTokenSale::force_refund(RuntimeOrigin::signed(CREATOR), round_id, BUYER),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn p1_force_refund_rejects_not_cancelled() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+
+        assert_noop!(
+            EntityTokenSale::force_refund(RuntimeOrigin::root(), round_id, BUYER),
+            Error::<Test>::SaleNotCancelled
+        );
+    });
+}
+
+#[test]
+fn p1_force_refund_rejects_already_refunded() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+        assert_ok!(EntityTokenSale::force_cancel_sale(RuntimeOrigin::root(), round_id));
+        assert_ok!(EntityTokenSale::force_refund(RuntimeOrigin::root(), round_id, BUYER));
+
+        assert_noop!(
+            EntityTokenSale::force_refund(RuntimeOrigin::root(), round_id, BUYER),
+            Error::<Test>::AlreadyRefunded
+        );
+    });
+}
+
+// ==================== P1: force_withdraw_funds ====================
+
+#[test]
+fn p1_force_withdraw_funds_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+        frame_system::Pallet::<Test>::set_block_number(101);
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        let entity_before = Balances::free_balance(ENTITY_ACCOUNT);
+        assert_ok!(EntityTokenSale::force_withdraw_funds(RuntimeOrigin::root(), round_id));
+        let entity_after = Balances::free_balance(ENTITY_ACCOUNT);
+        assert_eq!(entity_after - entity_before, 10_000u128);
+
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert!(round.funds_withdrawn);
+    });
+}
+
+#[test]
+fn p1_force_withdraw_funds_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+        frame_system::Pallet::<Test>::set_block_number(101);
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        assert_noop!(
+            EntityTokenSale::force_withdraw_funds(RuntimeOrigin::signed(BUYER), round_id),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn p1_force_withdraw_funds_rejects_active() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_noop!(
+            EntityTokenSale::force_withdraw_funds(RuntimeOrigin::root(), round_id),
+            Error::<Test>::InvalidRoundStatus
+        );
+    });
+}
+
+// ==================== P1: update_sale_round ====================
+
+#[test]
+fn p1_update_sale_round_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_round();
+        assert_ok!(EntityTokenSale::update_sale_round(
+            RuntimeOrigin::signed(CREATOR), round_id,
+            Some(2_000_000u128), Some(20u64.into()), Some(200u64.into()),
+            Some(true), Some(3),
+        ));
+
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.total_supply, 2_000_000u128);
+        assert_eq!(round.remaining_amount, 2_000_000u128);
+        assert_eq!(round.start_block, 20u64);
+        assert_eq!(round.end_block, 200u64);
+        assert!(round.kyc_required);
+        assert_eq!(round.min_kyc_level, 3);
+    });
+}
+
+#[test]
+fn p1_update_sale_round_rejects_non_creator() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_round();
+        assert_noop!(
+            EntityTokenSale::update_sale_round(
+                RuntimeOrigin::signed(BUYER), round_id,
+                Some(2_000_000u128), None, None, None, None,
+            ),
+            Error::<Test>::Unauthorized
+        );
+    });
+}
+
+#[test]
+fn p1_update_sale_round_rejects_active() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_noop!(
+            EntityTokenSale::update_sale_round(
+                RuntimeOrigin::signed(CREATOR), round_id,
+                Some(2_000_000u128), None, None, None, None,
+            ),
+            Error::<Test>::InvalidRoundStatus
+        );
+    });
+}
+
+#[test]
+fn p1_update_sale_round_rejects_no_update() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_round();
+        assert_noop!(
+            EntityTokenSale::update_sale_round(
+                RuntimeOrigin::signed(CREATOR), round_id,
+                None, None, None, None, None,
+            ),
+            Error::<Test>::NoUpdateProvided
+        );
+    });
+}
+
+#[test]
+fn p1_update_sale_round_validates_time_window() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_round();
+        // end_block < start_block after update
+        assert_noop!(
+            EntityTokenSale::update_sale_round(
+                RuntimeOrigin::signed(CREATOR), round_id,
+                None, Some(200u64.into()), Some(50u64.into()), None, None,
+            ),
+            Error::<Test>::InvalidTimeWindow
+        );
+    });
+}
+
+#[test]
+fn p1_update_sale_round_rejects_zero_supply() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_round();
+        assert_noop!(
+            EntityTokenSale::update_sale_round(
+                RuntimeOrigin::signed(CREATOR), round_id,
+                Some(0u128), None, None, None, None,
+            ),
+            Error::<Test>::InvalidTotalSupply
+        );
+    });
+}
+
+// ==================== P1: increase_subscription ====================
+
+#[test]
+fn p1_increase_subscription_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        // 初次认购 100
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+
+        let buyer_mid = Balances::free_balance(BUYER);
+
+        // 追加 200
+        assert_ok!(EntityTokenSale::increase_subscription(
+            RuntimeOrigin::signed(BUYER), round_id, 200u128, None,
+        ));
+
+        let sub = Subscriptions::<Test>::get(round_id, BUYER).unwrap();
+        assert_eq!(sub.amount, 300u128); // 100 + 200
+        assert_eq!(sub.payment_amount, 30_000u128); // 300 * 100
+
+        let buyer_after = Balances::free_balance(BUYER);
+        assert_eq!(buyer_mid - buyer_after, 20_000u128); // additional: 200 * 100
+
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.sold_amount, 300u128);
+    });
+}
+
+#[test]
+fn p1_increase_subscription_rejects_not_subscribed() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_noop!(
+            EntityTokenSale::increase_subscription(
+                RuntimeOrigin::signed(BUYER), round_id, 100u128, None,
+            ),
+            Error::<Test>::NotSubscribed
+        );
+    });
+}
+
+#[test]
+fn p1_increase_subscription_rejects_exceeds_limit() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        // max_purchase_per_account = 100_000
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 50_000u128, None));
+
+        // 追加超过限额
+        assert_noop!(
+            EntityTokenSale::increase_subscription(
+                RuntimeOrigin::signed(BUYER), round_id, 60_000u128, None,
+            ),
+            Error::<Test>::ExceedsPurchaseLimit
+        );
+    });
+}
+
+#[test]
+fn p1_increase_subscription_rejects_sold_out() {
+    new_test_ext().execute_with(|| {
+        // 创建供应量只有 200 的轮次
+        assert_ok!(EntityTokenSale::create_sale_round(
+            RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+            SaleMode::FixedPrice, 200u128, 10u64.into(), 100u64.into(), false, 0,
+        ));
+        assert_ok!(EntityTokenSale::add_payment_option(
+            RuntimeOrigin::signed(CREATOR), 0, None, 100u128, 10u128, 200u128,
+        ));
+        assert_ok!(EntityTokenSale::start_sale(RuntimeOrigin::signed(CREATOR), 0));
+        frame_system::Pallet::<Test>::set_block_number(10);
+
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), 0, 150u128, None));
+
+        // 追加超过剩余
+        assert_noop!(
+            EntityTokenSale::increase_subscription(RuntimeOrigin::signed(BUYER), 0, 100u128, None),
+            Error::<Test>::SoldOut
+        );
+    });
+}
+
+// ==================== P1: remove_from_whitelist ====================
+
+#[test]
+fn p1_remove_from_whitelist_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_round();
+        // 先添加白名单
+        assert_ok!(EntityTokenSale::add_to_whitelist(
+            RuntimeOrigin::signed(CREATOR), round_id,
+            BoundedVec::try_from(vec![BUYER, BUYER2]).unwrap(),
+        ));
+        assert_eq!(WhitelistCount::<Test>::get(round_id), 2);
+
+        // 移除 BUYER
+        assert_ok!(EntityTokenSale::remove_from_whitelist(
+            RuntimeOrigin::signed(CREATOR), round_id,
+            BoundedVec::try_from(vec![BUYER]).unwrap(),
+        ));
+        assert!(!RoundWhitelist::<Test>::get(round_id, BUYER));
+        assert!(RoundWhitelist::<Test>::get(round_id, BUYER2));
+        assert_eq!(WhitelistCount::<Test>::get(round_id), 1);
+    });
+}
+
+#[test]
+fn p1_remove_from_whitelist_ignores_nonexistent() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_round();
+        assert_ok!(EntityTokenSale::add_to_whitelist(
+            RuntimeOrigin::signed(CREATOR), round_id,
+            BoundedVec::try_from(vec![BUYER]).unwrap(),
+        ));
+        // 移除不在白名单中的地址 — 不报错，removed_count=0
+        assert_ok!(EntityTokenSale::remove_from_whitelist(
+            RuntimeOrigin::signed(CREATOR), round_id,
+            BoundedVec::try_from(vec![BUYER2]).unwrap(),
+        ));
+        assert_eq!(WhitelistCount::<Test>::get(round_id), 1);
+    });
+}
+
+#[test]
+fn p1_remove_from_whitelist_rejects_active() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_noop!(
+            EntityTokenSale::remove_from_whitelist(
+                RuntimeOrigin::signed(CREATOR), round_id,
+                BoundedVec::try_from(vec![BUYER]).unwrap(),
+            ),
+            Error::<Test>::InvalidRoundStatus
+        );
+    });
+}
+
+// ==================== P2: remove_payment_option ====================
+
+#[test]
+fn p2_remove_payment_option_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_round();
+        assert_ok!(EntityTokenSale::add_payment_option(
+            RuntimeOrigin::signed(CREATOR), round_id, None, 100u128, 10u128, 10_000u128,
+        ));
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.payment_options_count, 1);
+
+        assert_ok!(EntityTokenSale::remove_payment_option(
+            RuntimeOrigin::signed(CREATOR), round_id, 0,
+        ));
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.payment_options_count, 0);
+        assert!(RoundPaymentOptions::<Test>::get(round_id).is_empty());
+    });
+}
+
+#[test]
+fn p2_remove_payment_option_rejects_invalid_index() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_round();
+        assert_noop!(
+            EntityTokenSale::remove_payment_option(
+                RuntimeOrigin::signed(CREATOR), round_id, 0,
+            ),
+            Error::<Test>::PaymentOptionNotFound
+        );
+    });
+}
+
+#[test]
+fn p2_remove_payment_option_rejects_active() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_noop!(
+            EntityTokenSale::remove_payment_option(
+                RuntimeOrigin::signed(CREATOR), round_id, 0,
+            ),
+            Error::<Test>::InvalidRoundStatus
+        );
+    });
+}
+
+// ==================== P2: extend_sale ====================
+
+#[test]
+fn p2_extend_sale_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::extend_sale(
+            RuntimeOrigin::signed(CREATOR), round_id, 200u64.into(),
+        ));
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.end_block, 200u64);
+    });
+}
+
+#[test]
+fn p2_extend_sale_rejects_shorter() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round(); // end_block = 100
+        assert_noop!(
+            EntityTokenSale::extend_sale(
+                RuntimeOrigin::signed(CREATOR), round_id, 50u64.into(),
+            ),
+            Error::<Test>::InvalidExtension
+        );
+    });
+}
+
+#[test]
+fn p2_extend_sale_rejects_not_active() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_round(); // NotStarted
+        assert_noop!(
+            EntityTokenSale::extend_sale(
+                RuntimeOrigin::signed(CREATOR), round_id, 200u64.into(),
+            ),
+            Error::<Test>::InvalidRoundStatus
+        );
+    });
+}
+
+// ==================== P3: pause_sale / resume_sale ====================
+
+#[test]
+fn p3_pause_sale_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::pause_sale(RuntimeOrigin::signed(CREATOR), round_id));
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.status, RoundStatus::Paused);
+    });
+}
+
+#[test]
+fn p3_pause_sale_rejects_not_active() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_round(); // NotStarted
+        assert_noop!(
+            EntityTokenSale::pause_sale(RuntimeOrigin::signed(CREATOR), round_id),
+            Error::<Test>::InvalidRoundStatus
+        );
+    });
+}
+
+#[test]
+fn p3_resume_sale_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::pause_sale(RuntimeOrigin::signed(CREATOR), round_id));
+        assert_ok!(EntityTokenSale::resume_sale(RuntimeOrigin::signed(CREATOR), round_id));
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.status, RoundStatus::Active);
+    });
+}
+
+#[test]
+fn p3_resume_sale_rejects_not_paused() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_noop!(
+            EntityTokenSale::resume_sale(RuntimeOrigin::signed(CREATOR), round_id),
+            Error::<Test>::SaleNotPaused
+        );
+    });
+}
+
+#[test]
+fn p3_subscribe_rejects_paused() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::pause_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        assert_noop!(
+            EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None),
+            Error::<Test>::InvalidRoundStatus
+        );
+    });
+}
+
+#[test]
+fn p3_cancel_paused_sale_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+        assert_ok!(EntityTokenSale::pause_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        assert_ok!(EntityTokenSale::cancel_sale(RuntimeOrigin::signed(CREATOR), round_id));
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.status, RoundStatus::Cancelled);
+        assert_eq!(round.remaining_amount, 0u128);
+    });
+}
+
+#[test]
+fn p3_end_paused_sale_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::pause_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // Paused 状态也可在 end_block 后结束
+        frame_system::Pallet::<Test>::set_block_number(101);
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.status, RoundStatus::Ended);
+    });
+}
+
+#[test]
+fn p3_force_end_paused_sale_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::pause_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        assert_ok!(EntityTokenSale::force_end_sale(RuntimeOrigin::root(), round_id));
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.status, RoundStatus::Ended);
+    });
+}
+
+#[test]
+fn p3_force_cancel_paused_sale_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::pause_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        assert_ok!(EntityTokenSale::force_cancel_sale(RuntimeOrigin::root(), round_id));
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.status, RoundStatus::Cancelled);
+    });
+}
+
+#[test]
+fn p3_on_initialize_skips_paused_round() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::pause_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // 推进到 end_block 之后
+        frame_system::Pallet::<Test>::set_block_number(101);
+        EntityTokenSale::on_initialize(101);
+
+        // Paused 轮次不应被自动结束
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.status, RoundStatus::Paused);
+    });
+}
+
+#[test]
+fn p2_extend_paused_sale_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::pause_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // Paused 状态也可延长
+        assert_ok!(EntityTokenSale::extend_sale(
+            RuntimeOrigin::signed(CREATOR), round_id, 500u64.into(),
+        ));
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.end_block, 500u64);
+    });
+}
+
+// ==================== EntityLocked 回归测试 ====================
+
+#[test]
+fn entity_locked_rejects_create_sale_round() {
+    new_test_ext().execute_with(|| {
+        set_entity_locked(ENTITY_ID);
+        assert_noop!(
+            EntityTokenSale::create_sale_round(
+                RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+                SaleMode::FixedPrice, 1_000u128, 10u64.into(), 100u64.into(), false, 0,
+            ),
+            Error::<Test>::EntityLocked
+        );
+    });
+}

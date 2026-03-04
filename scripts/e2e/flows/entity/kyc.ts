@@ -47,7 +47,8 @@ async function kycLifecycle(ctx: FlowContext): Promise<void> {
   const registerProviderTx = (api.tx as any).entityKyc.registerProvider(
     dave.address,
     'E2E KYC Provider',  // name
-    3,                    // max_level: Enhanced (可批准 Basic/Standard/Enhanced)
+    'Standard',           // providerType
+    'Enhanced',           // maxLevel
   );
   const regResult = await ctx.sudo(registerProviderTx, '注册 KYC Provider (Dave)');
   if (regResult.success) {
@@ -78,8 +79,8 @@ async function kycLifecycle(ctx: FlowContext): Promise<void> {
   // ─── Step 3: Dave 批准 KYC ────────────────────────────────
 
   const approveTx = (api.tx as any).entityKyc.approveKyc(
-    kycId,
-    10,    // risk_score (0-100)
+    bob.address,
+    10,    // riskScore (0-100)
   );
   const approveResult = await ctx.send(approveTx, dave, 'Dave 批准 KYC', 'dave');
   assertTxSuccess(approveResult, '批准 KYC');
@@ -122,14 +123,17 @@ async function kycLifecycle(ctx: FlowContext): Promise<void> {
 
     const setReqTx = (api.tx as any).entityKyc.setEntityRequirement(
       entityId,
-      1,     // min_level: Basic
-      50,    // max_risk_score
+      'Basic',   // minLevel
+      true,      // mandatory
+      0,         // gracePeriod
+      false,     // allowHighRiskCountries
+      50,        // maxRiskScore
     );
     const setReqResult = await ctx.send(setReqTx, eve, 'Eve 设置实体 KYC 要求', 'eve');
     assertTxSuccess(setReqResult, '设置 KYC 要求');
 
     // ─── Step 8: [错误路径] max_risk_score > 100 ────────────
-    const badScoreTx = (api.tx as any).entityKyc.setEntityRequirement(entityId, 1, 150);
+    const badScoreTx = (api.tx as any).entityKyc.setEntityRequirement(entityId, 'Basic', true, 0, false, 150);
     const badScoreResult = await ctx.send(badScoreTx, eve, '[错误路径] risk_score > 100', 'eve');
     await ctx.check('超过100的 risk_score 应失败', 'eve', () => {
       assertTxFailed(badScoreResult, undefined, 'risk_score > 100');
@@ -138,7 +142,7 @@ async function kycLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 9: Alice 撤销 KYC ───────────────────────────────
 
-  const revokeTx = (api.tx as any).entityKyc.revokeKyc(kycId);
+  const revokeTx = (api.tx as any).entityKyc.revokeKyc(bob.address, 'Administrative');
   const revokeResult = await ctx.sudo(revokeTx, '撤销 Bob 的 KYC');
   assertTxSuccess(revokeResult, '撤销 KYC');
 
@@ -149,8 +153,7 @@ async function kycLifecycle(ctx: FlowContext): Promise<void> {
   // ─── Step 10: 更新高风险国家列表 ──────────────────────────
 
   const updateCountriesTx = (api.tx as any).entityKyc.updateHighRiskCountries(
-    ['KP', 'IR', 'SY'],  // add
-    [],                    // remove
+    ['0x4b50', '0x4952', '0x5359'],  // KP, IR, SY as [u8;2]
   );
   const updateResult = await ctx.sudo(updateCountriesTx, '更新高风险国家');
   assertTxSuccess(updateResult, '更新高风险国家');

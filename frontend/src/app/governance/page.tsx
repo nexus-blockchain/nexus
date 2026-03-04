@@ -9,16 +9,19 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/shared/StatusBadge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Vote, Plus, CheckCircle, XCircle, Clock } from "lucide-react";
+import { Vote, Plus, CheckCircle, XCircle, Clock, Gavel } from "lucide-react";
+import { useTranslations } from "next-intl";
 
 export default function GovernancePage() {
   const { currentEntityId } = useEntityStore();
   const { proposals, isLoading } = useProposals(currentEntityId);
   const actions = useGovernanceActions();
+  const t = useTranslations("governance");
+  const tc = useTranslations("common");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
 
-  if (!currentEntityId) return <div className="flex h-full items-center justify-center text-muted-foreground">Select an entity first</div>;
+  if (!currentEntityId) return <div className="flex h-full items-center justify-center text-muted-foreground">{tc("selectEntity")}</div>;
 
   const handleCreate = () => {
     if (title && description) {

@@ -381,6 +381,46 @@ pub mod pallet {
     #[pallet::pallet]
     pub struct Pallet<T>(_);
 
+    // ==================== Genesis ====================
+
+    #[pallet::genesis_config]
+    #[derive(frame_support::DefaultNoBound)]
+    pub struct GenesisConfig<T: Config> {
+        /// 初始 NEX/USDT 价格（精度 10^6，例 1 = 0.000001 USDT/NEX）
+        /// None = 不预设价格（需链上调用 set_initial_price）
+        pub initial_price: Option<u64>,
+        #[serde(skip)]
+        pub _phantom: core::marker::PhantomData<T>,
+    }
+
+    #[pallet::genesis_build]
+    impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
+        fn build(&self) {
+            if let Some(price) = self.initial_price {
+                if price > 0 {
+                    PriceProtectionStore::<T>::mutate(|maybe| {
+                        let config = maybe.get_or_insert_with(Default::default);
+                        config.initial_price = Some(price);
+                    });
+
+                    TwapAccumulatorStore::<T>::put(TwapAccumulator {
+                        last_price: price,
+                        current_block: 0,
+                        hour_snapshot: PriceSnapshot { cumulative_price: 0, block_number: 0 },
+                        day_snapshot: PriceSnapshot { cumulative_price: 0, block_number: 0 },
+                        week_snapshot: PriceSnapshot { cumulative_price: 0, block_number: 0 },
+                        last_hour_update: 0,
+                        last_day_update: 0,
+                        last_week_update: 0,
+                        ..Default::default()
+                    });
+
+                    LastTradePrice::<T>::put(price);
+                }
+            }
+        }
+    }
+
     // ==================== Hooks ====================
 
     #[pallet::hooks]

@@ -1,8 +1,6 @@
 //! # Commission Level-Diff Plugin (pallet-commission-level-diff)
 //!
-//! 等级极差返佣插件，支持：
-//! - 全局等级体系（Normal/Silver/Gold/Platinum/Diamond）
-//! - 自定义等级体系（shop 自定义等级 + 返佣率）
+//! 等级极差返佣插件，支持自定义等级体系（Entity 自定义等级 + 返佣率）
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -25,6 +23,7 @@ pub mod pallet {
     use pallet_commission_common::{
         CommissionOutput, CommissionType, MemberProvider,
     };
+    use pallet_entity_common::EntityProvider;
     use sp_runtime::traits::{Saturating, Zero};
 
     pub type BalanceOf<T> =
@@ -63,11 +62,17 @@ pub mod pallet {
         type Currency: Currency<Self::AccountId>;
         type MemberProvider: MemberProvider<Self::AccountId>;
 
+        /// 实体查询接口（权限校验、Owner/Admin 判断）
+        type EntityProvider: EntityProvider<Self::AccountId>;
+
         #[pallet::constant]
         type MaxCustomLevels: Get<u32>;
     }
 
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     // ========================================================================
@@ -99,6 +104,10 @@ pub mod pallet {
         InvalidRate,
         InvalidMaxDepth,
         EmptyLevelRates,
+        EntityNotFound,
+        NotEntityOwnerOrAdmin,
+        EntityLocked,
+        ConfigNotFound,
     }
 
     // ========================================================================
@@ -107,7 +116,7 @@ pub mod pallet {
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        /// 设置等级极差配置
+        /// 设置等级极差配置（Entity Owner / Admin(COMMISSION_MANAGE)）
         ///
         /// level_rates: 每个自定义等级对应的极差比例（bps），索引 = custom_level_id
         #[pallet::call_index(1)]
@@ -118,8 +127,84 @@ pub mod pallet {
             level_rates: BoundedVec<u16, T::MaxCustomLevels>,
             max_depth: u8,
         ) -> DispatchResult {
-            ensure_root(origin)?;
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
+            Self::do_set_config(entity_id, level_rates, max_depth)
+        }
+
+        /// 清除等级极差配置（Entity Owner / Admin(COMMISSION_MANAGE)）
+        #[pallet::call_index(2)]
+        #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
+        pub fn clear_level_diff_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(CustomLevelDiffConfigs::<T>::contains_key(entity_id), Error::<T>::ConfigNotFound);
+
+            CustomLevelDiffConfigs::<T>::remove(entity_id);
+            Self::deposit_event(Event::LevelDiffConfigCleared { entity_id });
+            Ok(())
+        }
+
+        /// [Root] 强制设置等级极差配置
+        #[pallet::call_index(3)]
+        #[pallet::weight(Weight::from_parts(45_000_000, 4_000))]
+        pub fn force_set_level_diff_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            level_rates: BoundedVec<u16, T::MaxCustomLevels>,
+            max_depth: u8,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            Self::do_set_config(entity_id, level_rates, max_depth)
+        }
+
+        /// [Root] 强制清除等级极差配置
+        #[pallet::call_index(4)]
+        #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
+        pub fn force_clear_level_diff_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(CustomLevelDiffConfigs::<T>::contains_key(entity_id), Error::<T>::ConfigNotFound);
+
+            CustomLevelDiffConfigs::<T>::remove(entity_id);
+            Self::deposit_event(Event::LevelDiffConfigCleared { entity_id });
+            Ok(())
+        }
+    }
+
+    // ========================================================================
+    // Internal helpers
+    // ========================================================================
+
+    impl<T: Config> Pallet<T> {
+        /// 验证 Entity Owner 或 Admin(COMMISSION_MANAGE) 权限
+        fn ensure_owner_or_admin(entity_id: u64, who: &T::AccountId) -> DispatchResult {
+            let owner = T::EntityProvider::entity_owner(entity_id)
+                .ok_or(Error::<T>::EntityNotFound)?;
+            if *who == owner {
+                return Ok(());
+            }
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, who, pallet_entity_common::AdminPermission::COMMISSION_MANAGE),
+                Error::<T>::NotEntityOwnerOrAdmin
+            );
+            Ok(())
+        }
+
+        /// 共享的配置写入逻辑（extrinsic + force 共用）
+        fn do_set_config(
+            entity_id: u64,
+            level_rates: BoundedVec<u16, T::MaxCustomLevels>,
+            max_depth: u8,
+        ) -> DispatchResult {
             ensure!(!level_rates.is_empty(), Error::<T>::EmptyLevelRates);
             for rate in level_rates.iter() {
                 ensure!(*rate <= 10000, Error::<T>::InvalidRate);
@@ -165,8 +250,8 @@ pub mod pallet {
                 // M2 审计修复: 额度耗尽后提前退出，避免无意义的 storage read
                 if remaining.is_zero() { break; }
 
-                // H1-R3 审计修复: 跳过未激活会员（与 team pallet H2 修复一致）
-                if !T::MemberProvider::is_activated(entity_id, referrer) {
+                // X8: 跳过被封禁推荐人（与 team pallet 一致）
+                if T::MemberProvider::is_banned(entity_id, referrer) {
                     current_referrer = T::MemberProvider::get_referrer(entity_id, referrer);
                     continue;
                 }
@@ -267,8 +352,8 @@ impl<T: pallet::Config> pallet::Pallet<T> {
             if level > max_depth { break; }
             if remaining.is_zero() { break; }
 
-            // H1-R3 审计修复: 跳过未激活会员（与 team pallet H2 修复一致）
-            if !T::MemberProvider::is_activated(entity_id, referrer) {
+            // X8: 跳过被封禁推荐人（与 team pallet 一致）
+            if T::MemberProvider::is_banned(entity_id, referrer) {
                 current_referrer = T::MemberProvider::get_referrer(entity_id, referrer);
                 continue;
             }
@@ -358,9 +443,11 @@ impl<T: pallet::Config> pallet_commission_common::LevelDiffPlanWriter for pallet
     }
 
     fn clear_config(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
-        pallet::CustomLevelDiffConfigs::<T>::remove(entity_id);
-        // M1-R3 审计修复: 配置清除也发出事件（与 team pallet 一致）
-        pallet::Pallet::<T>::deposit_event(pallet::Event::LevelDiffConfigCleared { entity_id });
+        // X10: 幻影事件守卫 — 配置不存在时不 remove + 不 emit（与 team/referral 一致）
+        if pallet::CustomLevelDiffConfigs::<T>::contains_key(entity_id) {
+            pallet::CustomLevelDiffConfigs::<T>::remove(entity_id);
+            pallet::Pallet::<T>::deposit_event(pallet::Event::LevelDiffConfigCleared { entity_id });
+        }
         Ok(())
     }
 }
@@ -372,27 +459,52 @@ impl<T: pallet::Config> pallet_commission_common::LevelDiffPlanWriter for pallet
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frame_support::{derive_impl, parameter_types, assert_ok};
+    use frame_support::{derive_impl, parameter_types, assert_ok, assert_noop};
     use sp_runtime::BuildStorage;
     use std::cell::RefCell;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use pallet_commission_common::CommissionModes;
 
     type Balance = u128;
+    const OWNER: u64 = 100;
+    const ADMIN: u64 = 101;
+    const NON_OWNER: u64 = 999;
 
     // ---- Thread-local mock state ----
     thread_local! {
         static REFERRERS: RefCell<BTreeMap<(u64, u64), u64>> = RefCell::new(BTreeMap::new());
         static CUSTOM_LEVEL_IDS: RefCell<BTreeMap<(u64, u64), u8>> = RefCell::new(BTreeMap::new());
         static LEVEL_BONUSES: RefCell<BTreeMap<(u64, u8), u16>> = RefCell::new(BTreeMap::new());
-        static ACTIVATED: RefCell<BTreeMap<(u64, u64), bool>> = RefCell::new(BTreeMap::new());
+        static BANNED_MEMBERS: RefCell<BTreeSet<(u64, u64)>> = RefCell::new(BTreeSet::new());
+        static ENTITY_OWNERS: RefCell<BTreeMap<u64, u64>> = RefCell::new(BTreeMap::new());
+        static ENTITY_ADMINS: RefCell<BTreeSet<(u64, u64)>> = RefCell::new(BTreeSet::new());
+        static ENTITY_LOCKED: RefCell<BTreeSet<u64>> = RefCell::new(BTreeSet::new());
     }
 
     fn clear_mocks() {
         REFERRERS.with(|r| r.borrow_mut().clear());
         CUSTOM_LEVEL_IDS.with(|c| c.borrow_mut().clear());
         LEVEL_BONUSES.with(|l| l.borrow_mut().clear());
-        ACTIVATED.with(|a| a.borrow_mut().clear());
+        BANNED_MEMBERS.with(|b| b.borrow_mut().clear());
+        ENTITY_OWNERS.with(|o| o.borrow_mut().clear());
+        ENTITY_ADMINS.with(|a| a.borrow_mut().clear());
+        ENTITY_LOCKED.with(|l| l.borrow_mut().clear());
+    }
+
+    fn set_entity_owner(entity_id: u64, owner: u64) {
+        ENTITY_OWNERS.with(|o| o.borrow_mut().insert(entity_id, owner));
+    }
+
+    fn set_entity_admin(entity_id: u64, admin: u64) {
+        ENTITY_ADMINS.with(|a| a.borrow_mut().insert((entity_id, admin)));
+    }
+
+    fn lock_entity(entity_id: u64) {
+        ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id));
+    }
+
+    fn ban_member(entity_id: u64, account: u64) {
+        BANNED_MEMBERS.with(|b| b.borrow_mut().insert((entity_id, account)));
     }
 
     pub struct MockMemberProvider;
@@ -410,6 +522,9 @@ mod tests {
         fn get_level_commission_bonus(entity_id: u64, level_id: u8) -> u16 {
             LEVEL_BONUSES.with(|l| l.borrow().get(&(entity_id, level_id)).copied().unwrap_or(0))
         }
+        fn is_banned(entity_id: u64, account: &u64) -> bool {
+            BANNED_MEMBERS.with(|b| b.borrow().contains(&(entity_id, *account)))
+        }
         fn auto_register(_: u64, _: &u64, _: Option<u64>) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
         fn set_custom_levels_enabled(_: u64, _: bool) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
         fn set_upgrade_mode(_: u64, _: u8) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
@@ -417,8 +532,29 @@ mod tests {
         fn update_custom_level(_: u64, _: u8, _: Option<&[u8]>, _: Option<u128>, _: Option<u16>, _: Option<u16>) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
         fn remove_custom_level(_: u64, _: u8) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
         fn custom_level_count(_: u64) -> u8 { 0 }
-        fn is_activated(entity_id: u64, account: &u64) -> bool {
-            ACTIVATED.with(|a| a.borrow().get(&(entity_id, *account)).copied().unwrap_or(true))
+    }
+
+    // -- Mock EntityProvider --
+    pub struct MockEntityProvider;
+
+    impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
+        fn entity_exists(entity_id: u64) -> bool {
+            ENTITY_OWNERS.with(|o| o.borrow().contains_key(&entity_id))
+        }
+        fn is_entity_active(_entity_id: u64) -> bool { true }
+        fn entity_status(_entity_id: u64) -> Option<pallet_entity_common::EntityStatus> {
+            Some(pallet_entity_common::EntityStatus::Active)
+        }
+        fn entity_owner(entity_id: u64) -> Option<u64> {
+            ENTITY_OWNERS.with(|o| o.borrow().get(&entity_id).copied())
+        }
+        fn entity_account(_entity_id: u64) -> u64 { 0 }
+        fn update_entity_stats(_: u64, _: u128, _: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+        fn is_entity_admin(entity_id: u64, who: &u64, _perm: u32) -> bool {
+            ENTITY_ADMINS.with(|a| a.borrow().contains(&(entity_id, *who)))
+        }
+        fn is_entity_locked(entity_id: u64) -> bool {
+            ENTITY_LOCKED.with(|l| l.borrow().contains(&entity_id))
         }
     }
 
@@ -451,6 +587,7 @@ mod tests {
         type RuntimeEvent = RuntimeEvent;
         type Currency = Balances;
         type MemberProvider = MockMemberProvider;
+        type EntityProvider = MockEntityProvider;
         type MaxCustomLevels = MaxCustomLevels;
     }
 
@@ -458,7 +595,10 @@ mod tests {
         clear_mocks();
         let t = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
         let mut ext = sp_io::TestExternalities::new(t);
-        ext.execute_with(|| System::set_block_number(1));
+        ext.execute_with(|| {
+            System::set_block_number(1);
+            set_entity_owner(1, OWNER);
+        });
         ext
     }
 
@@ -540,8 +680,8 @@ mod tests {
 
             // CustomLevelDiffConfig 配置 = 500, 800 → 应优先使用
             let level_rates = frame_support::BoundedVec::try_from(vec![500u16, 800]).unwrap();
-            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
-                frame_system::RawOrigin::Root.into(),
+            assert_ok!(pallet::Pallet::<Test>::force_set_level_diff_config(
+                RuntimeOrigin::root(),
                 entity_id,
                 level_rates,
                 10,
@@ -589,8 +729,8 @@ mod tests {
 
             // level_rates 只有 2 个元素: [300, 600]
             let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600]).unwrap();
-            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
-                frame_system::RawOrigin::Root.into(),
+            assert_ok!(pallet::Pallet::<Test>::force_set_level_diff_config(
+                RuntimeOrigin::root(),
                 entity_id,
                 level_rates,
                 10,
@@ -629,8 +769,8 @@ mod tests {
             // 不设置 commission_bonus → 回退为 0
 
             let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600]).unwrap();
-            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
-                frame_system::RawOrigin::Root.into(),
+            assert_ok!(pallet::Pallet::<Test>::force_set_level_diff_config(
+                RuntimeOrigin::root(),
                 entity_id,
                 level_rates,
                 10,
@@ -693,8 +833,8 @@ mod tests {
     fn set_config_validates_rates() {
         new_test_ext().execute_with(|| {
             let rates = frame_support::BoundedVec::try_from(vec![10001u16]).unwrap();
-            assert!(pallet::Pallet::<Test>::set_level_diff_config(
-                frame_system::RawOrigin::Root.into(), 1, rates, 10,
+            assert!(pallet::Pallet::<Test>::force_set_level_diff_config(
+                RuntimeOrigin::root(), 1, rates, 10,
             ).is_err());
         });
     }
@@ -704,12 +844,12 @@ mod tests {
         new_test_ext().execute_with(|| {
             let rates = frame_support::BoundedVec::try_from(vec![100u16]).unwrap();
             // depth=0 invalid
-            assert!(pallet::Pallet::<Test>::set_level_diff_config(
-                frame_system::RawOrigin::Root.into(), 1, rates.clone(), 0,
+            assert!(pallet::Pallet::<Test>::force_set_level_diff_config(
+                RuntimeOrigin::root(), 1, rates.clone(), 0,
             ).is_err());
             // depth=21 invalid
-            assert!(pallet::Pallet::<Test>::set_level_diff_config(
-                frame_system::RawOrigin::Root.into(), 1, rates, 21,
+            assert!(pallet::Pallet::<Test>::force_set_level_diff_config(
+                RuntimeOrigin::root(), 1, rates, 21,
             ).is_err());
         });
     }
@@ -755,8 +895,8 @@ mod tests {
             });
 
             let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600, 900]).unwrap();
-            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
-                frame_system::RawOrigin::Root.into(),
+            assert_ok!(pallet::Pallet::<Test>::force_set_level_diff_config(
+                RuntimeOrigin::root(),
                 entity_id, level_rates, 10,
             ));
 
@@ -840,8 +980,8 @@ mod tests {
             });
 
             let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600, 900]).unwrap();
-            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
-                frame_system::RawOrigin::Root.into(),
+            assert_ok!(pallet::Pallet::<Test>::force_set_level_diff_config(
+                RuntimeOrigin::root(),
                 entity_id, level_rates, 10,
             ));
 
@@ -890,8 +1030,8 @@ mod tests {
 
             // max_depth=2 → 只遍历前 2 层
             let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600, 900, 1200]).unwrap();
-            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
-                frame_system::RawOrigin::Root.into(),
+            assert_ok!(pallet::Pallet::<Test>::force_set_level_diff_config(
+                RuntimeOrigin::root(),
                 entity_id, level_rates, 2,
             ));
 
@@ -920,8 +1060,8 @@ mod tests {
 
             // 设置配置
             let level_rates = frame_support::BoundedVec::try_from(vec![300u16]).unwrap();
-            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
-                frame_system::RawOrigin::Root.into(), entity_id, level_rates, 5,
+            assert_ok!(pallet::Pallet::<Test>::force_set_level_diff_config(
+                RuntimeOrigin::root(), entity_id, level_rates, 5,
             ));
             assert!(pallet::CustomLevelDiffConfigs::<Test>::get(entity_id).is_some());
 
@@ -942,8 +1082,8 @@ mod tests {
 
             // 不设置推荐链 → buyer 无推荐人
             let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600, 900]).unwrap();
-            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
-                frame_system::RawOrigin::Root.into(),
+            assert_ok!(pallet::Pallet::<Test>::force_set_level_diff_config(
+                RuntimeOrigin::root(),
                 entity_id, level_rates, 10,
             ));
 
@@ -1041,8 +1181,8 @@ mod tests {
     fn h2_set_config_rejects_empty_level_rates() {
         new_test_ext().execute_with(|| {
             let empty_rates = frame_support::BoundedVec::try_from(vec![]).unwrap();
-            assert!(pallet::Pallet::<Test>::set_level_diff_config(
-                frame_system::RawOrigin::Root.into(), 1, empty_rates, 10,
+            assert!(pallet::Pallet::<Test>::force_set_level_diff_config(
+                RuntimeOrigin::root(), 1, empty_rates, 10,
             ).is_err());
 
             // 确认存储未被写入
@@ -1077,131 +1217,6 @@ mod tests {
     }
 
     // ========================================================================
-    // H1-R3: 未激活会员跳过测试
-    // ========================================================================
-
-    #[test]
-    fn h1r3_deactivated_member_skipped_no_commission() {
-        new_test_ext().execute_with(|| {
-            let entity_id = 1u64;
-
-            // 推荐链: 50 → 40(level0) → 30(level1,停用) → 20(level2)
-            setup_chain(entity_id);
-            CUSTOM_LEVEL_IDS.with(|c| {
-                let mut m = c.borrow_mut();
-                m.insert((entity_id, 40), 0);
-                m.insert((entity_id, 30), 1);
-                m.insert((entity_id, 20), 2);
-            });
-
-            let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600, 900]).unwrap();
-            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
-                frame_system::RawOrigin::Root.into(),
-                entity_id, level_rates, 10,
-            ));
-
-            // 停用 30
-            ACTIVATED.with(|a| a.borrow_mut().insert((entity_id, 30), false));
-
-            let mut remaining: Balance = 10000;
-            let mut outputs = alloc::vec::Vec::new();
-            pallet::Pallet::<Test>::process_level_diff(
-                entity_id, &50, 10000, &mut remaining, &mut outputs,
-            );
-
-            // 40: rate=300, prev=0, diff=300 → 300
-            // 30: 停用 → 跳过，prev 不变
-            // 20: rate=900, prev=300, diff=600 → 600
-            assert_eq!(outputs.len(), 2);
-            assert_eq!(outputs[0].beneficiary, 40);
-            assert_eq!(outputs[0].amount, 300);
-            assert_eq!(outputs[1].beneficiary, 20);
-            assert_eq!(outputs[1].amount, 600);
-            assert_eq!(remaining, 10000 - 900);
-        });
-    }
-
-    #[test]
-    fn h1r3_deactivated_member_consumes_depth() {
-        new_test_ext().execute_with(|| {
-            let entity_id = 1u64;
-
-            // 推荐链: 50 → 40(停用) → 30(level1)
-            // max_depth=1 → 40 消耗 depth=1（停用但仍计深度），30 depth=2 超出
-            REFERRERS.with(|r| {
-                let mut m = r.borrow_mut();
-                m.insert((entity_id, 50), 40);
-                m.insert((entity_id, 40), 30);
-            });
-            CUSTOM_LEVEL_IDS.with(|c| {
-                let mut m = c.borrow_mut();
-                m.insert((entity_id, 40), 0);
-                m.insert((entity_id, 30), 1);
-            });
-            LEVEL_BONUSES.with(|l| {
-                let mut m = l.borrow_mut();
-                m.insert((entity_id, 0), 300);
-                m.insert((entity_id, 1), 600);
-            });
-
-            // 停用 40
-            ACTIVATED.with(|a| a.borrow_mut().insert((entity_id, 40), false));
-
-            let mut remaining: Balance = 10000;
-            let mut outputs = alloc::vec::Vec::new();
-            pallet::Pallet::<Test>::process_level_diff(
-                entity_id, &50, 10000, &mut remaining, &mut outputs,
-            );
-
-            // max_depth 默认 10（无配置），所以 30(depth=2) 在范围内
-            // 40(depth=1): 停用跳过
-            // 30(depth=2): rate=600, prev=0, diff=600 → 600
-            assert_eq!(outputs.len(), 1);
-            assert_eq!(outputs[0].beneficiary, 30);
-            assert_eq!(outputs[0].amount, 600);
-        });
-    }
-
-    #[test]
-    fn h1r3_all_deactivated_no_commission() {
-        new_test_ext().execute_with(|| {
-            let entity_id = 1u64;
-
-            // 推荐链: 50 → 40 → 30，两者都停用
-            REFERRERS.with(|r| {
-                let mut m = r.borrow_mut();
-                m.insert((entity_id, 50), 40);
-                m.insert((entity_id, 40), 30);
-            });
-            CUSTOM_LEVEL_IDS.with(|c| {
-                let mut m = c.borrow_mut();
-                m.insert((entity_id, 40), 0);
-                m.insert((entity_id, 30), 1);
-            });
-            LEVEL_BONUSES.with(|l| {
-                let mut m = l.borrow_mut();
-                m.insert((entity_id, 0), 300);
-                m.insert((entity_id, 1), 600);
-            });
-
-            ACTIVATED.with(|a| {
-                let mut m = a.borrow_mut();
-                m.insert((entity_id, 40), false);
-                m.insert((entity_id, 30), false);
-            });
-
-            let mut remaining: Balance = 10000;
-            let mut outputs = alloc::vec::Vec::new();
-            pallet::Pallet::<Test>::process_level_diff(
-                entity_id, &50, 10000, &mut remaining, &mut outputs,
-            );
-
-            assert!(outputs.is_empty());
-            assert_eq!(remaining, 10000);
-        });
-    }
-
-    // ========================================================================
     // M1-R3: clear_config 发出事件
     // ========================================================================
 
@@ -1213,8 +1228,8 @@ mod tests {
 
             // 先设置配置
             let level_rates = frame_support::BoundedVec::try_from(vec![300u16]).unwrap();
-            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
-                frame_system::RawOrigin::Root.into(), entity_id, level_rates, 5,
+            assert_ok!(pallet::Pallet::<Test>::force_set_level_diff_config(
+                RuntimeOrigin::root(), entity_id, level_rates, 5,
             ));
             assert!(pallet::CustomLevelDiffConfigs::<Test>::get(entity_id).is_some());
 
@@ -1252,8 +1267,8 @@ mod tests {
             });
 
             let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600]).unwrap();
-            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
-                frame_system::RawOrigin::Root.into(),
+            assert_ok!(pallet::Pallet::<Test>::force_set_level_diff_config(
+                RuntimeOrigin::root(),
                 entity_id, level_rates, 10,
             ));
 
@@ -1286,46 +1301,6 @@ mod tests {
     }
 
     #[test]
-    fn m2r4_token_plugin_deactivated_member_skipped() {
-        new_test_ext().execute_with(|| {
-            let entity_id = 1u64;
-
-            // 推荐链: 50 → 40(level0) → 30(level1,停用) → 20(level2)
-            setup_chain(entity_id);
-            CUSTOM_LEVEL_IDS.with(|c| {
-                let mut m = c.borrow_mut();
-                m.insert((entity_id, 40), 0);
-                m.insert((entity_id, 30), 1);
-                m.insert((entity_id, 20), 2);
-            });
-
-            let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600, 900]).unwrap();
-            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
-                frame_system::RawOrigin::Root.into(),
-                entity_id, level_rates, 10,
-            ));
-
-            // 停用 30
-            ACTIVATED.with(|a| a.borrow_mut().insert((entity_id, 30), false));
-
-            let modes = CommissionModes(CommissionModes::LEVEL_DIFF);
-            let (outputs, remaining) = <pallet::Pallet<Test> as pallet_commission_common::TokenCommissionPlugin<u64, u128>>::calculate_token(
-                entity_id, &50, 10000u128, 10000u128, modes, false, 1,
-            );
-
-            // 40: rate=300, prev=0, diff=300 → 300
-            // 30: 停用 → 跳过
-            // 20: rate=900, prev=300, diff=600 → 600
-            assert_eq!(outputs.len(), 2);
-            assert_eq!(outputs[0].beneficiary, 40);
-            assert_eq!(outputs[0].amount, 300u128);
-            assert_eq!(outputs[1].beneficiary, 20);
-            assert_eq!(outputs[1].amount, 600u128);
-            assert_eq!(remaining, 10000u128 - 900);
-        });
-    }
-
-    #[test]
     fn m2r4_token_plugin_cycle_detection() {
         new_test_ext().execute_with(|| {
             let entity_id = 1u64;
@@ -1344,8 +1319,8 @@ mod tests {
             });
 
             let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600]).unwrap();
-            assert_ok!(pallet::Pallet::<Test>::set_level_diff_config(
-                frame_system::RawOrigin::Root.into(),
+            assert_ok!(pallet::Pallet::<Test>::force_set_level_diff_config(
+                RuntimeOrigin::root(),
                 entity_id, level_rates, 10,
             ));
 
@@ -1376,6 +1351,371 @@ mod tests {
 
             // 确认存储未被写入
             assert!(pallet::CustomLevelDiffConfigs::<Test>::get(1).is_none());
+        });
+    }
+
+    // ========================================================================
+    // X1: Owner/Admin 权限模型
+    // ========================================================================
+
+    #[test]
+    fn x1_owner_can_set_config() {
+        new_test_ext().execute_with(|| {
+            let rates = frame_support::BoundedVec::try_from(vec![300u16, 600]).unwrap();
+            assert_ok!(CommissionLevelDiff::set_level_diff_config(
+                RuntimeOrigin::signed(OWNER), 1, rates, 10,
+            ));
+            assert!(pallet::CustomLevelDiffConfigs::<Test>::get(1).is_some());
+        });
+    }
+
+    #[test]
+    fn x1_admin_can_set_config() {
+        new_test_ext().execute_with(|| {
+            set_entity_admin(1, ADMIN);
+            let rates = frame_support::BoundedVec::try_from(vec![300u16]).unwrap();
+            assert_ok!(CommissionLevelDiff::set_level_diff_config(
+                RuntimeOrigin::signed(ADMIN), 1, rates, 5,
+            ));
+            assert!(pallet::CustomLevelDiffConfigs::<Test>::get(1).is_some());
+        });
+    }
+
+    #[test]
+    fn x1_non_owner_rejected() {
+        new_test_ext().execute_with(|| {
+            let rates = frame_support::BoundedVec::try_from(vec![300u16]).unwrap();
+            assert_noop!(
+                CommissionLevelDiff::set_level_diff_config(
+                    RuntimeOrigin::signed(NON_OWNER), 1, rates, 5,
+                ),
+                Error::<Test>::NotEntityOwnerOrAdmin
+            );
+        });
+    }
+
+    #[test]
+    fn x1_entity_not_found_rejected() {
+        new_test_ext().execute_with(|| {
+            let rates = frame_support::BoundedVec::try_from(vec![300u16]).unwrap();
+            assert_noop!(
+                CommissionLevelDiff::set_level_diff_config(
+                    RuntimeOrigin::signed(OWNER), 999, rates, 5,
+                ),
+                Error::<Test>::EntityNotFound
+            );
+        });
+    }
+
+    // ========================================================================
+    // X2: force_set (Root-only)
+    // ========================================================================
+
+    #[test]
+    fn x2_force_set_works_for_root() {
+        new_test_ext().execute_with(|| {
+            let rates = frame_support::BoundedVec::try_from(vec![500u16]).unwrap();
+            assert_ok!(CommissionLevelDiff::force_set_level_diff_config(
+                RuntimeOrigin::root(), 1, rates, 10,
+            ));
+            let config = pallet::CustomLevelDiffConfigs::<Test>::get(1).unwrap();
+            assert_eq!(config.level_rates[0], 500);
+        });
+    }
+
+    #[test]
+    fn x2_force_set_rejects_non_root() {
+        new_test_ext().execute_with(|| {
+            let rates = frame_support::BoundedVec::try_from(vec![500u16]).unwrap();
+            assert_noop!(
+                CommissionLevelDiff::force_set_level_diff_config(
+                    RuntimeOrigin::signed(OWNER), 1, rates, 10,
+                ),
+                sp_runtime::DispatchError::BadOrigin
+            );
+        });
+    }
+
+    // ========================================================================
+    // X3: clear_level_diff_config (signed, Owner/Admin)
+    // ========================================================================
+
+    #[test]
+    fn x3_owner_can_clear_config() {
+        new_test_ext().execute_with(|| {
+            let rates = frame_support::BoundedVec::try_from(vec![300u16]).unwrap();
+            assert_ok!(CommissionLevelDiff::force_set_level_diff_config(
+                RuntimeOrigin::root(), 1, rates, 5,
+            ));
+            assert!(pallet::CustomLevelDiffConfigs::<Test>::get(1).is_some());
+
+            assert_ok!(CommissionLevelDiff::clear_level_diff_config(
+                RuntimeOrigin::signed(OWNER), 1,
+            ));
+            assert!(pallet::CustomLevelDiffConfigs::<Test>::get(1).is_none());
+        });
+    }
+
+    #[test]
+    fn x3_clear_rejects_non_owner() {
+        new_test_ext().execute_with(|| {
+            let rates = frame_support::BoundedVec::try_from(vec![300u16]).unwrap();
+            assert_ok!(CommissionLevelDiff::force_set_level_diff_config(
+                RuntimeOrigin::root(), 1, rates, 5,
+            ));
+
+            assert_noop!(
+                CommissionLevelDiff::clear_level_diff_config(
+                    RuntimeOrigin::signed(NON_OWNER), 1,
+                ),
+                Error::<Test>::NotEntityOwnerOrAdmin
+            );
+        });
+    }
+
+    #[test]
+    fn x3_clear_rejects_absent_config() {
+        new_test_ext().execute_with(|| {
+            assert_noop!(
+                CommissionLevelDiff::clear_level_diff_config(
+                    RuntimeOrigin::signed(OWNER), 1,
+                ),
+                Error::<Test>::ConfigNotFound
+            );
+        });
+    }
+
+    // ========================================================================
+    // X4: force_clear (Root-only)
+    // ========================================================================
+
+    #[test]
+    fn x4_force_clear_works() {
+        new_test_ext().execute_with(|| {
+            let rates = frame_support::BoundedVec::try_from(vec![300u16]).unwrap();
+            assert_ok!(CommissionLevelDiff::force_set_level_diff_config(
+                RuntimeOrigin::root(), 1, rates, 5,
+            ));
+            assert_ok!(CommissionLevelDiff::force_clear_level_diff_config(
+                RuntimeOrigin::root(), 1,
+            ));
+            assert!(pallet::CustomLevelDiffConfigs::<Test>::get(1).is_none());
+        });
+    }
+
+    #[test]
+    fn x4_force_clear_rejects_non_root() {
+        new_test_ext().execute_with(|| {
+            let rates = frame_support::BoundedVec::try_from(vec![300u16]).unwrap();
+            assert_ok!(CommissionLevelDiff::force_set_level_diff_config(
+                RuntimeOrigin::root(), 1, rates, 5,
+            ));
+            assert_noop!(
+                CommissionLevelDiff::force_clear_level_diff_config(
+                    RuntimeOrigin::signed(OWNER), 1,
+                ),
+                sp_runtime::DispatchError::BadOrigin
+            );
+        });
+    }
+
+    #[test]
+    fn x4_force_clear_rejects_absent() {
+        new_test_ext().execute_with(|| {
+            assert_noop!(
+                CommissionLevelDiff::force_clear_level_diff_config(
+                    RuntimeOrigin::root(), 1,
+                ),
+                Error::<Test>::ConfigNotFound
+            );
+        });
+    }
+
+    // ========================================================================
+    // X6: 治理锁检查
+    // ========================================================================
+
+    #[test]
+    fn x6_locked_entity_rejects_set() {
+        new_test_ext().execute_with(|| {
+            lock_entity(1);
+            let rates = frame_support::BoundedVec::try_from(vec![300u16]).unwrap();
+            assert_noop!(
+                CommissionLevelDiff::set_level_diff_config(
+                    RuntimeOrigin::signed(OWNER), 1, rates, 5,
+                ),
+                Error::<Test>::EntityLocked
+            );
+        });
+    }
+
+    #[test]
+    fn x6_locked_entity_rejects_clear() {
+        new_test_ext().execute_with(|| {
+            let rates = frame_support::BoundedVec::try_from(vec![300u16]).unwrap();
+            assert_ok!(CommissionLevelDiff::force_set_level_diff_config(
+                RuntimeOrigin::root(), 1, rates, 5,
+            ));
+            lock_entity(1);
+            assert_noop!(
+                CommissionLevelDiff::clear_level_diff_config(
+                    RuntimeOrigin::signed(OWNER), 1,
+                ),
+                Error::<Test>::EntityLocked
+            );
+        });
+    }
+
+    #[test]
+    fn x6_force_set_bypasses_lock() {
+        new_test_ext().execute_with(|| {
+            lock_entity(1);
+            let rates = frame_support::BoundedVec::try_from(vec![300u16]).unwrap();
+            assert_ok!(CommissionLevelDiff::force_set_level_diff_config(
+                RuntimeOrigin::root(), 1, rates, 5,
+            ));
+            assert!(pallet::CustomLevelDiffConfigs::<Test>::get(1).is_some());
+        });
+    }
+
+    // ========================================================================
+    // X8: is_banned 守卫
+    // ========================================================================
+
+    #[test]
+    fn x8_banned_referrer_skipped_in_nex() {
+        new_test_ext().execute_with(|| {
+            let entity_id = 1u64;
+
+            // 推荐链: 50 → 40 → 30 → 20
+            setup_chain(entity_id);
+            CUSTOM_LEVEL_IDS.with(|c| {
+                let mut m = c.borrow_mut();
+                m.insert((entity_id, 40), 0);
+                m.insert((entity_id, 30), 1);
+                m.insert((entity_id, 20), 2);
+            });
+
+            let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600, 900]).unwrap();
+            assert_ok!(CommissionLevelDiff::force_set_level_diff_config(
+                RuntimeOrigin::root(), entity_id, level_rates, 10,
+            ));
+
+            // 封禁 30 → 应跳过
+            ban_member(entity_id, 30);
+
+            let mut remaining: Balance = 10000;
+            let mut outputs = alloc::vec::Vec::new();
+            pallet::Pallet::<Test>::process_level_diff(
+                entity_id, &50, 10000, &mut remaining, &mut outputs,
+            );
+
+            // 40: rate=300, diff=300 → 300
+            // 30: banned → skipped
+            // 20: rate=900, prev=300, diff=600 → 600
+            assert_eq!(outputs.len(), 2);
+            assert_eq!(outputs[0].beneficiary, 40);
+            assert_eq!(outputs[0].amount, 300);
+            assert_eq!(outputs[1].beneficiary, 20);
+            assert_eq!(outputs[1].amount, 600);
+        });
+    }
+
+    #[test]
+    fn x8_banned_referrer_skipped_in_token() {
+        new_test_ext().execute_with(|| {
+            let entity_id = 1u64;
+
+            setup_chain(entity_id);
+            CUSTOM_LEVEL_IDS.with(|c| {
+                let mut m = c.borrow_mut();
+                m.insert((entity_id, 40), 0);
+                m.insert((entity_id, 30), 1);
+                m.insert((entity_id, 20), 2);
+            });
+
+            let level_rates = frame_support::BoundedVec::try_from(vec![300u16, 600, 900]).unwrap();
+            assert_ok!(CommissionLevelDiff::force_set_level_diff_config(
+                RuntimeOrigin::root(), entity_id, level_rates, 10,
+            ));
+
+            ban_member(entity_id, 30);
+
+            let modes = CommissionModes(CommissionModes::LEVEL_DIFF);
+            let (outputs, remaining) = <pallet::Pallet<Test> as pallet_commission_common::TokenCommissionPlugin<u64, u128>>::calculate_token(
+                entity_id, &50, 10000u128, 10000u128, modes, false, 1,
+            );
+
+            // 40: rate=300 → 300, 30: banned, 20: rate=900, diff=600 → 600
+            assert_eq!(outputs.len(), 2);
+            assert_eq!(outputs[0].beneficiary, 40);
+            assert_eq!(outputs[0].amount, 300u128);
+            assert_eq!(outputs[1].beneficiary, 20);
+            assert_eq!(outputs[1].amount, 600u128);
+            assert_eq!(remaining, 10000u128 - 900);
+        });
+    }
+
+    #[test]
+    fn x8_non_banned_still_receives() {
+        new_test_ext().execute_with(|| {
+            let entity_id = 1u64;
+
+            REFERRERS.with(|r| r.borrow_mut().insert((entity_id, 50), 40));
+            CUSTOM_LEVEL_IDS.with(|c| c.borrow_mut().insert((entity_id, 40), 0));
+            LEVEL_BONUSES.with(|l| l.borrow_mut().insert((entity_id, 0), 500));
+
+            // 不封禁 → 正常获得佣金
+            let mut remaining: Balance = 10000;
+            let mut outputs = alloc::vec::Vec::new();
+            pallet::Pallet::<Test>::process_level_diff(
+                entity_id, &50, 10000, &mut remaining, &mut outputs,
+            );
+
+            assert_eq!(outputs.len(), 1);
+            assert_eq!(outputs[0].amount, 500);
+        });
+    }
+
+    // ========================================================================
+    // X10: 幻影事件守卫
+    // ========================================================================
+
+    #[test]
+    fn x10_trait_clear_no_phantom_event_when_absent() {
+        new_test_ext().execute_with(|| {
+            use pallet_commission_common::LevelDiffPlanWriter;
+
+            // 配置不存在时 clear 不应发射事件
+            assert_ok!(<pallet::Pallet<Test> as LevelDiffPlanWriter>::clear_config(1));
+
+            let events = frame_system::Pallet::<Test>::events();
+            let found = events.iter().any(|e| {
+                matches!(
+                    e.event,
+                    RuntimeEvent::CommissionLevelDiff(pallet::Event::LevelDiffConfigCleared { .. })
+                )
+            });
+            assert!(!found, "No LevelDiffConfigCleared event should be emitted when config absent");
+        });
+    }
+
+    #[test]
+    fn x10_trait_clear_emits_event_when_present() {
+        new_test_ext().execute_with(|| {
+            use pallet_commission_common::LevelDiffPlanWriter;
+
+            assert_ok!(<pallet::Pallet<Test> as LevelDiffPlanWriter>::set_level_rates(1, vec![100], 5));
+            assert_ok!(<pallet::Pallet<Test> as LevelDiffPlanWriter>::clear_config(1));
+
+            let events = frame_system::Pallet::<Test>::events();
+            let found = events.iter().any(|e| {
+                matches!(
+                    e.event,
+                    RuntimeEvent::CommissionLevelDiff(pallet::Event::LevelDiffConfigCleared { entity_id: 1 })
+                )
+            });
+            assert!(found, "LevelDiffConfigCleared should be emitted when config exists");
         });
     }
 }

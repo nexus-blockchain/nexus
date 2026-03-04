@@ -30,6 +30,20 @@ impl pallet_balances::Config for Test {
 }
 
 // Mock EntityProvider
+
+use core::cell::RefCell;
+use alloc::collections::BTreeSet;
+extern crate alloc;
+
+thread_local! {
+    static ENTITY_LOCKED: RefCell<BTreeSet<u64>> = RefCell::new(BTreeSet::new());
+    static ENTITY_SHOPS: RefCell<alloc::collections::BTreeMap<u64, alloc::vec::Vec<u64>>> = RefCell::new(alloc::collections::BTreeMap::new());
+}
+
+pub fn set_entity_locked(entity_id: u64) {
+    ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id));
+}
+
 pub struct MockEntityProvider;
 
 impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
@@ -68,13 +82,32 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
         Ok(())
     }
 
-    fn update_entity_rating(_entity_id: u64, _rating: u8) -> Result<(), sp_runtime::DispatchError> {
-        Ok(())
-    }
-
     fn is_entity_admin(entity_id: u64, account: &u64, _required_permission: u32) -> bool {
         // Account 10 is admin of Entity 1 (full permissions in mock)
         entity_id == 1 && *account == 10
+    }
+    fn is_entity_locked(entity_id: u64) -> bool {
+        ENTITY_LOCKED.with(|l| l.borrow().contains(&entity_id))
+    }
+
+    fn entity_shops(entity_id: u64) -> sp_std::vec::Vec<u64> {
+        ENTITY_SHOPS.with(|s| s.borrow().get(&entity_id).cloned().unwrap_or_default())
+    }
+
+    fn register_shop(entity_id: u64, shop_id: u64) -> Result<(), sp_runtime::DispatchError> {
+        ENTITY_SHOPS.with(|s| {
+            s.borrow_mut().entry(entity_id).or_default().push(shop_id);
+        });
+        Ok(())
+    }
+
+    fn unregister_shop(entity_id: u64, shop_id: u64) -> Result<(), sp_runtime::DispatchError> {
+        ENTITY_SHOPS.with(|s| {
+            if let Some(shops) = s.borrow_mut().get_mut(&entity_id) {
+                shops.retain(|&id| id != shop_id);
+            }
+        });
+        Ok(())
     }
 }
 
@@ -86,6 +119,8 @@ parameter_types! {
     pub const MaxPointsSymbolLength: u32 = 8;
     pub const MinOperatingBalance: u64 = 100;
     pub const WarningThreshold: u64 = 200;
+    pub const ShopClosingGracePeriod: u64 = 10;
+    pub const MaxShopsPerEntity: u32 = 5;
 }
 
 impl pallet_entity_shop::Config for Test {
@@ -100,6 +135,8 @@ impl pallet_entity_shop::Config for Test {
     type MinOperatingBalance = MinOperatingBalance;
     type WarningThreshold = WarningThreshold;
     type CommissionFundGuard = ();
+    type ShopClosingGracePeriod = ShopClosingGracePeriod;
+    type MaxShopsPerEntity = MaxShopsPerEntity;
 }
 
 // Build genesis storage according to the mock runtime.

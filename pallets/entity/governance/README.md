@@ -3,17 +3,18 @@
 > 实体代币治理模块 — 多模式去中心化决策系统
 
 - **Runtime Pallet Index**: 125
-- **版本**: v0.4.0
+- **版本**: v0.6.0
 
 ## 概述
 
-`pallet-entity-governance` 实现基于实体代币的治理系统。支持 2 种治理模式、41 种提案类型、可选管理员否决权，以及首次持有时间校验防护机制。
+`pallet-entity-governance` 实现基于实体代币的治理系统。支持 2 种治理模式、44 种提案类型、可选管理员否决权、委托投票，以及首次持有时间校验防护机制。
 
 ### 核心能力
 
 - **2 种治理模式** — None（管理员全权）/ FullDAO（代币投票，可选管理员否决权作为紧急制动）
-- **41 种提案类型** — 商品、店铺、代币、财务、返佣、提现、会员等级、治理参数、社区
+- **44 种提案类型** — 商品、店铺、代币、财务、返佣、提现、会员等级、治理参数、社区
 - **管理员否决权** — FullDAO 模式下可启用，作为紧急制动机制
+- **委托投票** — Compound 模型，委托后不可直投，代理人拥有委托者投票权重
 - **闪电贷防护** — 首次持有时间校验 + 投票权快照
 - **投票代币锁定** — reserve/unreserve + max-lock 引用计数
 - **终态提案清理** — `cleanup_proposal` 释放存储空间
@@ -126,7 +127,7 @@ Voting → Passed → Executed
 | `Cancelled` | 已取消 / 被否决 |
 | `Expired` | 执行窗口已过期（Passed 后未及时执行） |
 
-## 提案类型（共 41 种）
+## 提案类型（共 44 种）
 
 ### 商品管理类 (4)
 
@@ -166,13 +167,16 @@ Voting → Passed → Executed
 | `RevenueShare` | 收益分配比例 | 事件记录 |
 | `RefundPolicy` | 退款政策调整 | 事件记录 |
 
-### 治理参数类 (3)
+### 治理参数类 (6)
 
 | 类型 | 说明 | 执行方式 |
-|------|------|---------|
+|------|------|--------|
 | `VotingPeriodChange` | 投票期调整 | **链上执行** 更新 GovernanceConfig |
 | `QuorumChange` | 法定人数调整 | **链上执行** 更新 GovernanceConfig |
 | `ProposalThresholdChange` | 提案门槛调整 | **链上执行** 更新 GovernanceConfig |
+| `ExecutionDelayChange` | 执行延迟调整（lock 后仍可通过提案修改） | **链上执行** 更新 GovernanceConfig |
+| `PassThresholdChange` | 通过阈值调整（lock 后仍可通过提案修改） | **链上执行** 更新 GovernanceConfig |
+| `AdminVetoToggle` | 管理员否决权开关（lock 后仍可通过提案修改） | **链上执行** 更新 GovernanceConfig |
 
 ### 返佣配置类 (8)
 
@@ -180,12 +184,12 @@ Voting → Passed → Executed
 |------|------|---------|
 | `CommissionModesChange` | 启用/禁用返佣模式 | **链上执行** `CommissionProvider` |
 | `DirectRewardChange` | 直推奖励费率 | **链上执行** `CommissionProvider` |
-| `MultiLevelChange` | 多级分销配置 | 链下 CID 解析 |
+| `MultiLevelChange` | 多级分销配置 | ⛔ 创建时拒绝（链上执行未实现） |
 | `LevelDiffChange` | 等级差价配置（5 级费率） | **链上执行** `CommissionProvider` |
 | `FixedAmountChange` | 固定金额配置 | **链上执行** `CommissionProvider` |
 | `FirstOrderChange` | 首单奖励配置 | **链上执行** `CommissionProvider` |
 | `RepeatPurchaseChange` | 复购奖励配置 | **链上执行** `CommissionProvider` |
-| `SingleLineChange` | 单线收益配置 | 待扩展 CommissionProvider |
+| `SingleLineChange` | 单线收益配置 | ⛔ 创建时拒绝（链上执行未实现） |
 
 ### 提现配置类 (2)
 
@@ -203,8 +207,8 @@ Voting → Passed → Executed
 | `RemoveCustomLevel` | 删除自定义等级 | **链上执行** `MemberProvider` |
 | `SetUpgradeMode` | 设置升级模式 (Auto/Manual/PeriodReset) | **链上执行** `MemberProvider` |
 | `EnableCustomLevels` | 启用/禁用自定义等级 | **链上执行** `MemberProvider` |
-| `AddUpgradeRule` | 添加升级规则 | 链下 CID 解析 |
-| `RemoveUpgradeRule` | 删除升级规则 | 待扩展 MemberProvider |
+| `AddUpgradeRule` | 添加升级规则 | ⛔ 创建时拒绝（链上执行未实现） |
+| `RemoveUpgradeRule` | 删除升级规则 | ⛔ 创建时拒绝（链上执行未实现） |
 
 ### 社区类 (3)
 
@@ -229,6 +233,8 @@ Voting → Passed → Executed
 | `VoterTokenLocks` | StorageDoubleMap | (proposal_id, account) | H2: 投票者参与记录（用于批量解锁） |
 | `GovernanceLockCount` | StorageDoubleMap | (entity_id, account) | H2: 活跃投票提案引用计数 |
 | `GovernanceLockAmount` | StorageDoubleMap | (entity_id, account) | H2: 最大锁定代币数 |
+| `VoteDelegation` | StorageDoubleMap | (entity_id, delegator) | F5: 投票委托映射 (delegator → delegate) |
+| `DelegatedVoters` | StorageDoubleMap | (entity_id, delegate) | F5: 委托者列表 (BoundedVec) |
 
 ## Extrinsics
 
@@ -263,8 +269,8 @@ fn vote(
 ```
 
 - **权限**: 持有店铺代币且 `FirstHoldTime <= 提案创建时间`
-- **投票权重**: `min(当前余额, 快照余额)` × 时间加权
-- **校验**: 代币 TokenType 具有投票权 (`has_voting_power()`)、未重复投票、投票期内
+- **投票权重**: `min(当前余额 + 委托权重, 快照余额)` × 时间加权
+- **校验**: 代币 TokenType 具有投票权 (`has_voting_power()`)、未重复投票、投票期内、未委托投票权
 - **快照**: 首次投票时锁定当前余额到 `VotingPowerSnapshot`
 
 ### call_index(2) — finalize_voting
@@ -333,7 +339,7 @@ fn veto_proposal(
 
 - **权限**: 实体所有者
 - **效果**: 锁定后 Owner 不可再修改治理参数，此操作不可撤销
-- **None 锁定**: 永久冻结治理配置
+- **None 锁定**: 永久冻结治理配置，明确"永不启用 DAO"（适用于未发代币实体）
 - **FullDAO 锁定**: 放弃控制权，仅可通过提案修改治理参数
 
 ### call_index(11) — cleanup_proposal
@@ -342,6 +348,35 @@ fn veto_proposal(
 
 - **权限**: 任何人可调用
 - **限制**: 提案必须处于终态
+
+### call_index(12) — delegate_vote
+
+委托投票权。将自己在某实体的投票权委托给另一个账户。委托后不可直接投票（Compound 模型）。
+
+```rust
+fn delegate_vote(
+    origin: OriginFor<T>,
+    entity_id: u64,
+    delegate: T::AccountId,
+) -> DispatchResult
+```
+
+- **权限**: 代币持有者
+- **校验**: 实体存在且活跃、代币已启用、不可自我委托、未已有委托关系、委托接收者未达上限
+
+### call_index(13) — undelegate_vote
+
+取消投票委托，恢复直接投票能力。
+
+```rust
+fn undelegate_vote(
+    origin: OriginFor<T>,
+    entity_id: u64,
+) -> DispatchResult
+```
+
+- **权限**: 已委托的用户
+- **限制**: 必须有现有委托关系
 
 ## Events
 
@@ -360,6 +395,8 @@ fn veto_proposal(
 | `GovernanceSyncFailed` | entity_id, mode | 治理模式同步到 registry 失败 |
 | `ProposalExpired` | proposal_id | 提案执行窗口已过期 |
 | `ProposalCleaned` | proposal_id | 终态提案已被清理（释放存储） |
+| `VoteDelegated` | entity_id, delegator, delegate | F5: 投票权已委托 |
+| `VoteUndelegated` | entity_id, delegator | F5: 投票委托已撤销 |
 
 ## Errors
 
@@ -392,6 +429,12 @@ fn veto_proposal(
 | `TokenNotEnabledForDAO` | FullDAO 需要先发行代币 |
 | `ProposalIdOverflow` | 提案 ID 溢出 |
 | `ProposalNotTerminal` | 提案未处于终态，不可清理 |
+| `VotePowerDelegated` | F5: 已委托投票权，不可直接投票（需先取消委托） |
+| `AlreadyDelegated` | F5: 已有委托关系 |
+| `NotDelegated` | F5: 无委托关系 |
+| `SelfDelegation` | F5: 不可自我委托 |
+| `TooManyDelegators` | F5: 委托接收者已达上限 |
+| `ProposalTypeNotSupported` | R3: 提案类型暂不支持创建（链上执行未实现） |
 
 ## Runtime 配置
 
@@ -419,6 +462,7 @@ impl pallet_entity_governance::Config for Runtime {
     type MaxTitleLength = ConstU32<128>;
     type MaxCidLength = ConstU32<64>;
     type MaxActiveProposals = ConstU32<10>;
+    type MaxDelegatorsPerDelegate = ConstU32<50>;
     type MinVotingPeriod = GovernanceMinVotingPeriod;
     type MinExecutionDelay = GovernanceMinExecutionDelay;
     type TimeWeightFullPeriod = GovernanceTimeWeightFullPeriod;
@@ -438,6 +482,7 @@ impl pallet_entity_governance::Config for Runtime {
 | `MaxTitleLength` | u32 | 标题最大长度 | 128 |
 | `MaxCidLength` | u32 | CID 最大长度 | 64 |
 | `MaxActiveProposals` | u32 | 每实体最大活跃提案数 | 10 |
+| `MaxDelegatorsPerDelegate` | u32 | 每个委托接收者最大委托人数 | 50 |
 | `MinVotingPeriod` | BlockNumber | 最小投票期 | 14400 (~1天) |
 | `MinExecutionDelay` | BlockNumber | 最小执行延迟 | 7200 (~12小时) |
 | `TimeWeightFullPeriod` | BlockNumber | 时间加权满周期 | 604800 (~6周) |
@@ -514,8 +559,6 @@ cleanup_proposal — 释放存储空间
 ```toml
 [dependencies]
 pallet-entity-common = { workspace = true }
-pallet-entity-registry = { workspace = true }
-pallet-entity-token = { workspace = true }
 pallet-entity-commission = { workspace = true }
 
 [dev-dependencies]
@@ -532,12 +575,12 @@ cargo test -p pallet-entity-governance
 
 | 功能 | 说明 |
 |------|------|
-| 委托投票 | 将投票权委托给他人 |
 | 链上直接执行扩展 | 部分提案类型仅发出事件，待集成更多 Provider |
+| ~~委托投票~~ | ✅ 已实现（Compound 模型，委托后不可直投） |
 | ~~时间加权投票~~ | ✅ 已实现（max 3x，基于 FirstHoldTime） |
 | ~~投票代币锁定~~ | ✅ 已实现（reserve/unreserve + max-lock 引用计数） |
 | ~~终态提案清理~~ | ✅ 已实现 `cleanup_proposal` |
-| ~~单元测试~~ | ✅ 已完成 90 个测试 |
+| ~~单元测试~~ | ✅ 已完成 115 个测试 |
 
 ## 版本历史
 
@@ -549,7 +592,8 @@ cargo test -p pallet-entity-governance
 | v0.2.1-audit | 2026-02-16 | 审计 R2：H1 通过阈值排除弃权、H2-R2 过期优雅转 Expired、H3-R2 VoteRecords 清理、72 个测试 |
 | v0.3.0-audit | 2026-03 | 审计 R3：H2 投票代币锁定、L5 移除死代码 ProposalStatus、84 个测试 |
 | v0.4.0-audit | 2026-03 | 审计 R4：M1 clear_prefix 有界限制、M2 ShopPause/ShopResume 指定 shop_id、M3 移除 snapshot_block 死字段、L1 README 全面同步、L2 cleanup_proposal extrinsic、90 个测试 |
-| v0.5.0-audit | 2026-03 | 审计 R5：M1 修复 lock_governance 误导性文档、L1 模块文档同步 2 种治理模式、L2 README 修正（41 种提案类型/移除幻影 CustomLevelDiffChange/移除不存在的 extrinsic 6-8/补全 configure_governance 签名）、L3 移除 3 个死错误码、L4 移除死代码 ShopProposals 别名、L5 移除死依赖 |
+| v0.5.0-audit | 2026-03 | 审计 R5：M1 修复 lock_governance 误导性文档、L1 模块文档同步 2 种治理模式、L2 README 修正、L3 移除 3 个死错误码、L4 移除死代码、L5 移除死依赖 |
+| v0.6.0 | 2026-03 | F1: 新增 3 种治理参数提案类型 (ExecutionDelayChange/PassThresholdChange/AdminVetoToggle)、R3: 创建阶段拒绝 4 种未实现提案类型、F5: 委托投票 (Compound 模型)、44 种提案类型、115 个测试 |
 
 ## 相关模块
 

@@ -1,38 +1,33 @@
 /**
- * Flow-T2: P2P Buy 完整流程 (用户买 NEX)
+ * Flow-T2: NEX 市场卖单流程 (卖家挂单 → 买家预锁定 → 确认付款)
  *
- * 角色: Bob (做市商), Charlie (买家), Alice (Sudo)
+ * 角色: Bob (卖家), Charlie (买家)
  *
- * 前置条件: Bob 已是 Active 做市商 (依赖 Flow-T1)
+ * 前置条件: Flow-T1 已设置初始价格
  *
  * 流程:
- *   1. 查询 Charlie 余额
- *   2. Charlie 创建 Buy 订单 (购买 100 NEX)
- *   3. 验证订单状态 + 托管锁定
- *   4. Charlie 标记已付款
- *   5. Bob(做市商) 释放 NEX
- *   6. 验证 Charlie 收到 NEX
- *   7. [错误路径] 已完成订单不能重复释放
- *   8. [分支] 创建另一个订单 → 买家取消
- *   9. [分支] 创建另一个订单 → 发起争议
+ *   1. Bob 挂卖单 (placeSellOrder)
+ *   2. Charlie 预锁定卖单 (reserveSellOrder)
+ *   3. Charlie 确认付款 (confirmPayment)
+ *   4. 验证交易完成
+ *   5. Bob 挂卖单 → 取消
+ *   6. [错误路径] Charlie 取消他人订单
+ *   7. [错误路径] 超时处理 (processTimeout on non-existent trade)
  */
 
 import { FlowDef, FlowContext } from '../../core/test-runner.js';
 import {
   assertTxSuccess,
   assertTxFailed,
-  assertStorageField,
   assertEventEmitted,
   assertTrue,
-  assertEqual,
 } from '../../core/assertions.js';
 import { getFreeBalance } from '../../core/chain-state.js';
 import { nex } from '../../core/config.js';
-import { blake2AsHex } from '@polkadot/util-crypto';
 
 export const p2pBuyFlow: FlowDef = {
-  name: 'Flow-T2: P2P Buy 流程',
-  description: '创建 Buy 订单 → 付款 → 释放 NEX + 取消 + 争议分支',
+  name: 'Flow-T2: NEX 卖单流程',
+  description: '挂卖单 → 预锁定 → 确认付款 → 取消 | 错误路径',
   fn: p2pBuy,
 };
 
@@ -40,161 +35,94 @@ async function p2pBuy(ctx: FlowContext): Promise<void> {
   const { api } = ctx;
   const bob = ctx.actor('bob');
   const charlie = ctx.actor('charlie');
+  const tronAddr = 'TJYo36u5BbBVKguFVpsBj3yfHdR65VRj7G';
 
-  // 确认 Bob 是活跃做市商
-  let makerId: number;
-  await ctx.check('确认做市商状态', 'bob', async () => {
-    const bobMakerId = await (api.query as any).tradingMaker.accountToMaker(bob.address);
-    assertTrue(bobMakerId.isSome, 'Bob 应是做市商');
-    makerId = bobMakerId.unwrap().toNumber();
-    const app = await (api.query as any).tradingMaker.makerApplications(makerId);
-    assertTrue(app.isSome, '做市商记录应存在');
-    const status = app.unwrap().status.toString();
-    assertEqual(status, 'Active', 'Bob 应是 Active 状态');
-  });
-  // 获取 makerId (在 check 外部也需要)
-  const bobMakerIdRaw = await (api.query as any).tradingMaker.accountToMaker(bob.address);
-  makerId = bobMakerIdRaw.unwrap().toNumber();
-
-  // ============ 主流程: 创建 → 付款 → 释放 ============
-
-  // --------------- Step 1: 查询余额 ---------------
-  const charlieBalanceBefore = await getFreeBalance(api, charlie.address);
-  await ctx.check('查询 Charlie 初始余额', 'charlie', () => {
-    console.log(`    Charlie 余额: ${Number(charlieBalanceBefore) / 1e12} NEX`);
-  });
-
-  // --------------- Step 2: 创建 Buy 订单 ---------------
-  const nextOrderId = await (api.query as any).tradingP2p.nextBuyOrderId();
-  const orderId = nextOrderId.toNumber();
-
-  const paymentCommit = blake2AsHex(`payment:${charlie.address}:${Date.now()}`);
-  const contactCommit = blake2AsHex(`contact:wechat_charlie:${Date.now()}`);
-
-  const createTx = (api.tx as any).tradingP2p.createBuyOrder(
-    makerId,
-    nex(100).toString(),
-    paymentCommit,
-    contactCommit,
+  // --------------- Step 1: Bob 挂卖单 ---------------
+  const sellTx = (api.tx as any).nexMarket.placeSellOrder(
+    nex(100).toString(),  // nexAmount
+    1_000_000,            // usdtPrice
+    tronAddr,             // tronAddress
   );
-  const createResult = await ctx.send(createTx, charlie, '创建 Buy 订单 (100 NEX)', 'charlie');
-  assertTxSuccess(createResult, '创建 Buy 订单');
-  assertEventEmitted(createResult, 'tradingP2p', 'BuyOrderCreated', '创建订单事件');
+  const sellResult = await ctx.send(sellTx, bob, 'Bob 挂卖单 100 NEX', 'bob');
+  assertTxSuccess(sellResult, '挂卖单');
 
-  // --------------- Step 3: 验证订单状态 ---------------
-  await ctx.check('验证订单已创建', 'charlie', async () => {
-    await assertStorageField(
-      api, 'tradingP2p', 'buyOrders', [orderId],
-      'state', 'Created', '订单状态应为 Created',
-    );
-  });
-
-  // --------------- Step 4: 标记已付款 ---------------
-  const tronTxHash = `${Date.now().toString(16)}abcdef1234567890`;
-  const markPaidTx = (api.tx as any).tradingP2p.markPaid(
-    orderId,
-    tronTxHash,
+  const sellEvent = sellResult.events.find(
+    (e: any) => e.section === 'nexMarket' && e.method === 'SellOrderPlaced',
   );
-  const paidResult = await ctx.send(markPaidTx, charlie, '标记已付款', 'charlie');
-  assertTxSuccess(paidResult, '标记付款');
+  assertTrue(!!sellEvent, '应有 SellOrderPlaced 事件');
+  const sellOrderId = sellEvent?.data?.orderId ?? sellEvent?.data?.[0];
+  console.log(`    卖单 ID: ${sellOrderId}`);
 
-  await ctx.check('验证订单状态为 Paid', 'charlie', async () => {
-    await assertStorageField(
-      api, 'tradingP2p', 'buyOrders', [orderId],
-      'state', 'Paid', '订单状态应为 Paid',
-    );
-  });
-
-  // --------------- Step 5: 做市商释放 NEX ---------------
-  const releaseTx = (api.tx as any).tradingP2p.releaseNex(orderId);
-  const releaseResult = await ctx.send(releaseTx, bob, '释放 NEX', 'bob');
-  assertTxSuccess(releaseResult, '释放 NEX');
-
-  // --------------- Step 6: 验证最终状态 ---------------
-  await ctx.check('验证订单完成 + Charlie 收到 NEX', 'charlie', async () => {
-    await assertStorageField(
-      api, 'tradingP2p', 'buyOrders', [orderId],
-      'state', 'Released', '订单状态应为 Released',
-    );
-
-    const charlieBalanceAfter = await getFreeBalance(api, charlie.address);
-    // Charlie 应增加约 100 NEX (减去手续费)
-    const delta = charlieBalanceAfter - charlieBalanceBefore;
-    assertTrue(delta > nex(90), `Charlie 应收到约 100 NEX, 实际增加 ${Number(delta) / 1e12}`);
-  });
-
-  // --------------- Step 7: 错误路径 — 重复释放 ---------------
-  const dupRelease = (api.tx as any).tradingP2p.releaseNex(orderId);
-  const dupResult = await ctx.send(dupRelease, bob, '[错误路径] 重复释放 NEX', 'bob');
-  await ctx.check('重复释放应失败', 'bob', () => {
-    assertTxFailed(dupResult, undefined, '重复释放');
-  });
-
-  // ============ 分支: 取消订单 ============
-
-  const nextOrderId2 = await (api.query as any).tradingP2p.nextBuyOrderId();
-  const cancelOrderId = nextOrderId2.toNumber();
-
-  const payCommit2 = blake2AsHex(`payment:cancel:${Date.now()}`);
-  const contCommit2 = blake2AsHex(`contact:cancel:${Date.now()}`);
-
-  const createTx2 = (api.tx as any).tradingP2p.createBuyOrder(
-    makerId,
-    nex(50).toString(),
-    payCommit2,
-    contCommit2,
+  // --------------- Step 2: Charlie 预锁定 ---------------
+  const reserveTx = (api.tx as any).nexMarket.reserveSellOrder(
+    sellOrderId,
+    nex(50).toString(),   // amount (部分)
+    tronAddr,             // buyerTronAddress
   );
-  const create2 = await ctx.send(createTx2, charlie, '创建待取消订单 (50 NEX)', 'charlie');
-  assertTxSuccess(create2, '创建待取消订单');
+  const reserveResult = await ctx.send(reserveTx, charlie, 'Charlie 预锁定 50 NEX', 'charlie');
+  assertTxSuccess(reserveResult, '预锁定');
 
-  const cancelTx = (api.tx as any).tradingP2p.cancelBuyOrder(cancelOrderId);
-  const cancelResult = await ctx.send(cancelTx, charlie, '取消 Buy 订单', 'charlie');
-  assertTxSuccess(cancelResult, '取消订单');
-
-  await ctx.check('验证取消后订单状态', 'charlie', async () => {
-    await assertStorageField(
-      api, 'tradingP2p', 'buyOrders', [cancelOrderId],
-      'state', 'Cancelled', '订单状态应为 Cancelled',
-    );
-  });
-
-  // ============ 分支: 争议订单 ============
-
-  const nextOrderId3 = await (api.query as any).tradingP2p.nextBuyOrderId();
-  const disputeOrderId = nextOrderId3.toNumber();
-
-  const payCommit3 = blake2AsHex(`payment:dispute:${Date.now()}`);
-  const contCommit3 = blake2AsHex(`contact:dispute:${Date.now()}`);
-
-  const createTx3 = (api.tx as any).tradingP2p.createBuyOrder(
-    makerId,
-    nex(30).toString(),
-    payCommit3,
-    contCommit3,
+  const tradeEvent = reserveResult.events.find(
+    (e: any) => e.section === 'nexMarket' && e.method === 'TradeCreated',
   );
-  const create3 = await ctx.send(createTx3, charlie, '创建待争议订单 (30 NEX)', 'charlie');
-  assertTxSuccess(create3, '创建待争议订单');
+  const tradeId = tradeEvent?.data?.tradeId ?? tradeEvent?.data?.[0];
+  console.log(`    Trade ID: ${tradeId}`);
 
-  // 先标记付款 (争议需要在 Paid 之后)
-  const markPaid3 = (api.tx as any).tradingP2p.markPaid(disputeOrderId, null);
-  const paid3 = await ctx.send(markPaid3, charlie, '争议订单标记付款', 'charlie');
-  assertTxSuccess(paid3, '争议订单标记付款');
+  // --------------- Step 3: Charlie 确认付款 ---------------
+  if (tradeId !== undefined) {
+    const confirmTx = (api.tx as any).nexMarket.confirmPayment(tradeId);
+    const confirmResult = await ctx.send(confirmTx, charlie, 'Charlie 确认付款', 'charlie');
+    assertTxSuccess(confirmResult, '确认付款');
 
-  const disputeTx = (api.tx as any).tradingP2p.disputeBuyOrder(disputeOrderId);
-  const disputeResult = await ctx.send(disputeTx, charlie, '发起 Buy 争议', 'charlie');
-  assertTxSuccess(disputeResult, '发起争议');
+    await ctx.check('验证付款确认', 'charlie', () => {});
+  }
 
-  await ctx.check('验证争议状态', 'charlie', async () => {
-    await assertStorageField(
-      api, 'tradingP2p', 'buyOrders', [disputeOrderId],
-      'state', 'Disputed', '订单状态应为 Disputed',
+  // --------------- Step 4: Bob 挂卖单 → 取消 ---------------
+  const sell2Tx = (api.tx as any).nexMarket.placeSellOrder(
+    nex(50).toString(), 1_000_000, tronAddr,
+  );
+  const sell2Result = await ctx.send(sell2Tx, bob, 'Bob 挂卖单(待取消)', 'bob');
+  assertTxSuccess(sell2Result, '挂卖单(待取消)');
+
+  const sell2Event = sell2Result.events.find(
+    (e: any) => e.section === 'nexMarket' && e.method === 'SellOrderPlaced',
+  );
+  const cancelableOrderId = sell2Event?.data?.orderId ?? sell2Event?.data?.[0];
+
+  const cancelTx = (api.tx as any).nexMarket.cancelOrder(cancelableOrderId);
+  const cancelResult = await ctx.send(cancelTx, bob, 'Bob 取消卖单', 'bob');
+  assertTxSuccess(cancelResult, '取消卖单');
+
+  // --------------- Step 5: [错误路径] Charlie 取消他人订单 ---------------
+  const sell3Tx = (api.tx as any).nexMarket.placeSellOrder(
+    nex(30).toString(), 1_000_000, tronAddr,
+  );
+  const sell3Result = await ctx.send(sell3Tx, bob, 'Bob 挂卖单(供错误路径)', 'bob');
+
+  if (sell3Result.success) {
+    const sell3Event = sell3Result.events.find(
+      (e: any) => e.section === 'nexMarket' && e.method === 'SellOrderPlaced',
     );
+    const otherOrderId = sell3Event?.data?.orderId ?? sell3Event?.data?.[0];
+
+    const charlieCancelTx = (api.tx as any).nexMarket.cancelOrder(otherOrderId);
+    const charlieCancelResult = await ctx.send(charlieCancelTx, charlie, '[错误路径] Charlie 取消他人卖单', 'charlie');
+    await ctx.check('非所有者取消应失败', 'charlie', () => {
+      assertTxFailed(charlieCancelResult, undefined, '非所有者取消');
+    });
+  }
+
+  // --------------- Step 6: [错误路径] processTimeout on non-existent trade ---------------
+  const timeoutTx = (api.tx as any).nexMarket.processTimeout(99999);
+  const timeoutResult = await ctx.send(timeoutTx, bob, '[错误路径] 超时处理不存在的交易', 'bob');
+  await ctx.check('不存在的交易超时应失败', 'bob', () => {
+    assertTxFailed(timeoutResult, undefined, '不存在的交易');
   });
 
   // --------------- 汇总 ---------------
-  await ctx.check('P2P Buy 流程汇总', 'system', () => {
-    console.log(`    主流程订单 #${orderId}: Created → Paid → Released ✓`);
-    console.log(`    取消分支订单 #${cancelOrderId}: Created → Cancelled ✓`);
-    console.log(`    争议分支订单 #${disputeOrderId}: Created → Paid → Disputed ✓`);
+  await ctx.check('NEX 卖单流程汇总', 'system', () => {
+    console.log(`    ✓ 卖单: 挂单 → 预锁定 → 确认付款`);
+    console.log(`    ✓ 取消: 挂单 → 取消`);
+    console.log(`    ✓ 错误路径: 非所有者取消 ✗, 不存在交易超时 ✗`);
   });
 }

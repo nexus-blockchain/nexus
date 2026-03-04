@@ -58,25 +58,40 @@ impl TelegramExecutor {
     /// - 不在日志中输出 api_url
     /// - 生产环境建议使用 Telegram Bot API 本地服务器 (无需远程传输 token)
     async fn call_api(&self, method: &str, params: serde_json::Value) -> BotResult<serde_json::Value> {
-        let api_url = self.vault.build_tg_api_url(method).await?;
-        let resp = self.http.post(api_url.as_str())
-            .json(&params)
-            .send().await
-            .map_err(|e| BotError::PlatformApi { platform: "telegram".into(), message: format!("{}", e) })?;
+        // M1 修复: 429 限流自动重试 (最多 1 次)
+        let mut retries = 0u8;
+        loop {
+            let api_url = self.vault.build_tg_api_url(method).await?;
+            let resp = self.http.post(api_url.as_str())
+                .json(&params)
+                .send().await
+                .map_err(|e| BotError::PlatformApi { platform: "telegram".into(), message: format!("{}", e) })?;
 
-        let body: serde_json::Value = resp.json().await
-            .map_err(|e| BotError::PlatformApi { platform: "telegram".into(), message: format!("{}", e) })?;
+            let status = resp.status();
+            let body: serde_json::Value = resp.json().await
+                .map_err(|e| BotError::PlatformApi { platform: "telegram".into(), message: format!("{}", e) })?;
 
-        if body["ok"].as_bool() != Some(true) {
-            let desc = body["description"].as_str().unwrap_or("unknown error");
-            warn!(method = method, error = desc, "Telegram API 调用失败");
-            return Err(BotError::PlatformApi {
-                platform: "telegram".into(),
-                message: format!("{}: {}", method, desc),
-            });
+            // 429 Too Many Requests: 解析 retry_after 并等待后重试
+            if status.as_u16() == 429 && retries < 1 {
+                let retry_after = body["parameters"]["retry_after"].as_u64().unwrap_or(1);
+                let wait = retry_after.min(30); // 上限 30 秒, 防止恶意 retry_after
+                warn!(method = method, retry_after = wait, "Telegram API 429 限流, 等待后重试");
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                retries += 1;
+                continue;
+            }
+
+            if body["ok"].as_bool() != Some(true) {
+                let desc = body["description"].as_str().unwrap_or("unknown error");
+                warn!(method = method, error = desc, "Telegram API 调用失败");
+                return Err(BotError::PlatformApi {
+                    platform: "telegram".into(),
+                    message: format!("{}: {}", method, desc),
+                });
+            }
+
+            return Ok(body);
         }
-
-        Ok(body)
     }
 
     /// 查询用户是否为群管理员或创建者
@@ -359,7 +374,14 @@ impl PlatformExecutor for TelegramExecutor {
                     Ok(())
                 }
             }
-            _ => Ok(()),
+            other => {
+                // H1 修复: 未实现的动作显式返回错误, 而非静默成功
+                warn!(action = ?other, "Telegram 不支持此动作类型");
+                Err(BotError::PlatformApi {
+                    platform: "telegram".into(),
+                    message: format!("unsupported action type: {:?}", other),
+                })
+            }
         };
 
         let success = result.is_ok();

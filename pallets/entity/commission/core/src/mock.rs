@@ -16,6 +16,7 @@ pub const TREASURY: u64 = 98;
 pub const ENTITY_ID: u64 = 1;
 pub const SHOP_ID: u64 = 100;
 pub const GIFT_TARGET: u64 = 77;
+pub const ADMIN: u64 = 55;
 
 // ============================================================================
 // Thread-local mock state
@@ -32,6 +33,9 @@ thread_local! {
     static TOKEN_BALANCES: RefCell<BTreeMap<(u64, u64), u128>> = RefCell::new(BTreeMap::new());
     /// Mock 非会员集合: (entity_id, account) → 如果存在则 is_member 返回 false
     static NON_MEMBERS: RefCell<std::collections::BTreeSet<(u64, u64)>> = RefCell::new(std::collections::BTreeSet::new());
+    /// F1: Mock Admin 权限: (entity_id, account) → permission bitmask
+    static ENTITY_ADMINS: RefCell<BTreeMap<(u64, u64), u32>> = RefCell::new(BTreeMap::new());
+    static ENTITY_LOCKED: RefCell<std::collections::BTreeSet<u64>> = RefCell::new(std::collections::BTreeSet::new());
 }
 
 pub fn setup_default() {
@@ -48,6 +52,10 @@ pub fn set_referrer(entity_id: u64, account: u64, referrer: u64) {
     REFERRERS.with(|m| m.borrow_mut().insert((entity_id, account), referrer));
 }
 
+pub fn set_entity_locked(entity_id: u64) {
+    ENTITY_LOCKED.with(|m| m.borrow_mut().insert(entity_id));
+}
+
 pub fn clear_thread_locals() {
     SHOP_ENTITY.with(|m| m.borrow_mut().clear());
     ENTITY_OWNERS.with(|m| m.borrow_mut().clear());
@@ -57,6 +65,8 @@ pub fn clear_thread_locals() {
     KYC_BLOCKED.with(|m| m.borrow_mut().clear());
     TOKEN_BALANCES.with(|m| m.borrow_mut().clear());
     NON_MEMBERS.with(|m| m.borrow_mut().clear());
+    ENTITY_ADMINS.with(|m| m.borrow_mut().clear());
+    ENTITY_LOCKED.with(|m| m.borrow_mut().clear());
 }
 
 /// 设置 Mock Token 余额
@@ -110,7 +120,16 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
         entity_id + 9000
     }
     fn update_entity_stats(_: u64, _: u128, _: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
-    fn update_entity_rating(_: u64, _: u8) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+    fn is_entity_admin(entity_id: u64, account: &u64, required_permission: u32) -> bool {
+        ENTITY_ADMINS.with(|m| {
+            m.borrow().get(&(entity_id, *account))
+                .map(|perms| perms & required_permission == required_permission)
+                .unwrap_or(false)
+        })
+    }
+    fn is_entity_locked(entity_id: u64) -> bool {
+        ENTITY_LOCKED.with(|m| m.borrow().contains(&entity_id))
+    }
 }
 
 pub struct MockMemberProvider;
@@ -217,7 +236,6 @@ parameter_types! {
     pub const PlatformAccount: u64 = PLATFORM;
     pub const TreasuryAccount: u64 = TREASURY;
     pub const ReferrerShareBps: u16 = 5000; // 50% of platform fee
-    pub const TokenPlatformFeeRate: u16 = 100; // 1% Token 平台费
     pub const PoolRewardWithdrawCooldown: u64 = 100; // 100 blocks cooldown
 }
 
@@ -241,7 +259,6 @@ impl pallet_commission_core::Config for Test {
     type PlatformAccount = PlatformAccount;
     type TreasuryAccount = TreasuryAccount;
     type ReferrerShareBps = ReferrerShareBps;
-    type TokenPlatformFeeRate = TokenPlatformFeeRate;
     type MaxCommissionRecordsPerOrder = ConstU32<20>;
     type MaxCustomLevels = ConstU32<10>;
     type ParticipationGuard = MockParticipationGuard;
@@ -275,6 +292,11 @@ pub fn block_participation(entity_id: u64, account: u64) {
 /// 解除参与限制
 pub fn unblock_participation(entity_id: u64, account: u64) {
     KYC_BLOCKED.with(|s| s.borrow_mut().remove(&(entity_id, account)));
+}
+
+/// F1: 设置 Mock Admin 权限
+pub fn set_entity_admin(entity_id: u64, account: u64, permissions: u32) {
+    ENTITY_ADMINS.with(|m| m.borrow_mut().insert((entity_id, account), permissions));
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

@@ -42,20 +42,21 @@ async function communityLifecycle(ctx: FlowContext): Promise<void> {
   const dave = ctx.actor('dave');
 
   const communityIdHash = '0x' + 'c1'.repeat(32);
-  const botPublicKey = '0x' + '01'.repeat(32);
-  const userHash = '0x' + 'u1'.repeat(16) + '00'.repeat(16);
+  const botIdHash = '0x' + '01'.repeat(32);
+  const botPublicKey = '0x' + '11'.repeat(32);
+  const userHash = '0x' + 'a1'.repeat(16) + '00'.repeat(16);
 
   // 先注册 Bot 并绑定社区 (前置依赖)
-  const registerTx = (api.tx as any).grouprobotRegistry.registerBot(
-    botPublicKey, 'G5 Community Bot', null,
+  const registerTx = (api.tx as any).groupRobotRegistry.registerBot(
+    botIdHash, botPublicKey,
   );
   const regResult = await ctx.send(registerTx, bob, '注册 Bot (前置)', 'bob');
   if (!regResult.success) {
     console.log(`    ℹ Bot 注册失败 (可能已存在): ${regResult.error}`);
   }
 
-  const bindTx = (api.tx as any).grouprobotRegistry.bindCommunity(
-    botPublicKey, communityIdHash, 0,
+  const bindTx = (api.tx as any).groupRobotRegistry.bindCommunity(
+    botIdHash, communityIdHash, 'Telegram',
   );
   const bindResult = await ctx.send(bindTx, bob, '绑定社区 (前置)', 'bob');
   if (!bindResult.success) {
@@ -66,7 +67,7 @@ async function communityLifecycle(ctx: FlowContext): Promise<void> {
 
   const mockSignature = '0x' + '00'.repeat(64);
 
-  const logTx = (api.tx as any).grouprobotCommunity.submitActionLog(
+  const logTx = (api.tx as any).groupRobotCommunity.submitActionLog(
     communityIdHash,
     0,               // action_type: Kick=0
     userHash,        // target_user_hash
@@ -77,7 +78,7 @@ async function communityLifecycle(ctx: FlowContext): Promise<void> {
   const logResult = await ctx.send(logTx, bob, 'Bob 提交行为日志', 'bob');
   if (logResult.success) {
     await ctx.check('行为日志事件', 'bob', () => {
-      assertEventEmitted(logResult, 'grouprobotCommunity', 'ActionLogSubmitted', '日志事件');
+      assertEventEmitted(logResult, 'groupRobotCommunity', 'ActionLogSubmitted', '日志事件');
     });
   } else {
     console.log(`    ℹ 提交日志失败 (可能签名不匹配): ${logResult.error}`);
@@ -85,26 +86,13 @@ async function communityLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 2: Bob 批量提交行为日志 ──────────────────────────
 
+  // logs is Vec<(ActionType, [u8;32], u64, [u8;32], [u8;64])>
   const logs = [
-    {
-      community_id_hash: communityIdHash,
-      action_type: 1,   // Ban
-      target_user_hash: userHash,
-      sequence: 2,
-      message_hash: '0x' + 'cd'.repeat(32),
-      signature: mockSignature,
-    },
-    {
-      community_id_hash: communityIdHash,
-      action_type: 2,   // Mute
-      target_user_hash: userHash,
-      sequence: 3,
-      message_hash: '0x' + 'ef'.repeat(32),
-      signature: mockSignature,
-    },
+    ['Ban', userHash, 2, '0x' + 'cd'.repeat(32), mockSignature],
+    ['Mute', userHash, 3, '0x' + 'ef'.repeat(32), mockSignature],
   ];
 
-  const batchLogTx = (api.tx as any).grouprobotCommunity.batchSubmitLogs(logs);
+  const batchLogTx = (api.tx as any).groupRobotCommunity.batchSubmitLogs(communityIdHash, logs);
   const batchLogResult = await ctx.send(batchLogTx, bob, 'Bob 批量提交日志', 'bob');
   if (batchLogResult.success) {
     await ctx.check('批量日志成功', 'bob', () => {});
@@ -114,10 +102,9 @@ async function communityLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 3: 设置节点准入策略 ──────────────────────────────
 
-  const setReqTx = (api.tx as any).grouprobotCommunity.setNodeRequirement(
+  const setReqTx = (api.tx as any).groupRobotCommunity.setNodeRequirement(
     communityIdHash,
-    1,      // min_nodes
-    true,   // require_tee
+    { MinNodes: 1 },   // requirement: enum
   );
   const setReqResult = await ctx.send(setReqTx, bob, 'Bob 设置节点准入策略', 'bob');
   if (setReqResult.success) {
@@ -128,17 +115,21 @@ async function communityLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 4: 更新社区配置 (CAS 乐观锁) ────────────────────
 
-  const configTx = (api.tx as any).grouprobotCommunity.updateCommunityConfig(
+  const configTx = (api.tx as any).groupRobotCommunity.updateCommunityConfig(
     communityIdHash,
-    0,              // expected_version (CAS)
-    'QmConfigCid',  // config_cid
-    null,           // max_members
-    null,           // cooldown_blocks
+    0,              // expectedVersion (CAS)
+    true,           // antiFloodEnabled
+    100,            // floodLimit: u16
+    3,              // warnLimit: u8
+    'Mute',         // warnAction: enum
+    true,           // welcomeEnabled
+    false,          // adsEnabled
+    '0x656e',       // language: [u8;2] = 'en'
   );
   const configResult = await ctx.send(configTx, bob, 'Bob 更新社区配置', 'bob');
   if (configResult.success) {
     await ctx.check('社区配置已更新', 'bob', () => {
-      assertEventEmitted(configResult, 'grouprobotCommunity', 'CommunityConfigUpdated', '配置事件');
+      assertEventEmitted(configResult, 'groupRobotCommunity', 'CommunityConfigUpdated', '配置事件');
     });
   } else {
     console.log(`    ℹ 更新配置失败: ${configResult.error}`);
@@ -146,15 +137,15 @@ async function communityLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 5: 奖励声誉 ─────────────────────────────────────
 
-  const awardTx = (api.tx as any).grouprobotCommunity.awardReputation(
+  const awardTx = (api.tx as any).groupRobotCommunity.awardReputation(
     communityIdHash,
-    charlie.address,
-    100,   // amount
+    userHash,       // userHash: [u8;32]
+    100,            // delta
   );
   const awardResult = await ctx.send(awardTx, bob, 'Bob 奖励 Charlie 声誉', 'bob');
   if (awardResult.success) {
     await ctx.check('声誉奖励事件', 'bob', () => {
-      assertEventEmitted(awardResult, 'grouprobotCommunity', 'ReputationAwarded', '奖励事件');
+      assertEventEmitted(awardResult, 'groupRobotCommunity', 'ReputationAwarded', '奖励事件');
     });
   } else {
     console.log(`    ℹ 声誉奖励失败: ${awardResult.error}`);
@@ -162,15 +153,15 @@ async function communityLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 6: 扣减声誉 ─────────────────────────────────────
 
-  const deductTx = (api.tx as any).grouprobotCommunity.deductReputation(
+  const deductTx = (api.tx as any).groupRobotCommunity.deductReputation(
     communityIdHash,
-    charlie.address,
-    50,    // amount
+    userHash,       // userHash: [u8;32]
+    50,             // delta
   );
   const deductResult = await ctx.send(deductTx, bob, 'Bob 扣减 Charlie 声誉', 'bob');
   if (deductResult.success) {
     await ctx.check('声誉扣减事件', 'bob', () => {
-      assertEventEmitted(deductResult, 'grouprobotCommunity', 'ReputationDeducted', '扣减事件');
+      assertEventEmitted(deductResult, 'groupRobotCommunity', 'ReputationDeducted', '扣减事件');
     });
   } else {
     console.log(`    ℹ 声誉扣减失败: ${deductResult.error}`);
@@ -178,9 +169,9 @@ async function communityLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 7: 重置声誉 ─────────────────────────────────────
 
-  const resetTx = (api.tx as any).grouprobotCommunity.resetReputation(
+  const resetTx = (api.tx as any).groupRobotCommunity.resetReputation(
     communityIdHash,
-    charlie.address,
+    userHash,       // userHash: [u8;32]
   );
   const resetResult = await ctx.send(resetTx, bob, 'Bob 重置 Charlie 声誉', 'bob');
   if (resetResult.success) {
@@ -191,7 +182,7 @@ async function communityLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 8: 更新活跃成员数 ────────────────────────────────
 
-  const updateMembersTx = (api.tx as any).grouprobotCommunity.updateActiveMembers(
+  const updateMembersTx = (api.tx as any).groupRobotCommunity.updateActiveMembers(
     communityIdHash,
     42,    // active_members
   );
@@ -204,10 +195,9 @@ async function communityLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 9: 清理过期日志 ─────────────────────────────────
 
-  const clearLogsTx = (api.tx as any).grouprobotCommunity.clearExpiredLogs(
+  const clearLogsTx = (api.tx as any).groupRobotCommunity.clearExpiredLogs(
     communityIdHash,
-    100,     // max_age_blocks
-    10,      // limit
+    100,     // maxAgeBlocks
   );
   const clearLogsResult = await ctx.send(clearLogsTx, bob, 'Bob 清理过期日志', 'bob');
   if (clearLogsResult.success) {
@@ -218,10 +208,10 @@ async function communityLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 10: 清理过期冷却 ────────────────────────────────
 
-  const cleanupCooldownTx = (api.tx as any).grouprobotCommunity.cleanupExpiredCooldowns(
+  const cleanupCooldownTx = (api.tx as any).groupRobotCommunity.cleanupExpiredCooldowns(
     bob.address,        // operator
     communityIdHash,
-    charlie.address,    // user
+    userHash,           // userHash: [u8;32]
   );
   const cleanupResult = await ctx.send(cleanupCooldownTx, bob, '清理过期冷却', 'bob');
   if (cleanupResult.success) {
@@ -232,7 +222,7 @@ async function communityLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 11: [错误路径] Dave 提交行为日志 ─────────────────
 
-  const daveLogTx = (api.tx as any).grouprobotCommunity.submitActionLog(
+  const daveLogTx = (api.tx as any).groupRobotCommunity.submitActionLog(
     communityIdHash, 0, userHash, 99, '0x' + '00'.repeat(32), mockSignature,
   );
   const daveLogResult = await ctx.send(daveLogTx, dave, '[错误路径] Dave 提交日志', 'dave');
@@ -242,8 +232,8 @@ async function communityLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 12: [错误路径] Dave 奖励声誉 ─────────────────────
 
-  const daveAwardTx = (api.tx as any).grouprobotCommunity.awardReputation(
-    communityIdHash, charlie.address, 100,
+  const daveAwardTx = (api.tx as any).groupRobotCommunity.awardReputation(
+    communityIdHash, userHash, 100,
   );
   const daveAwardResult = await ctx.send(daveAwardTx, dave, '[错误路径] Dave 奖励声誉', 'dave');
   await ctx.check('非管理者奖励应失败', 'dave', () => {

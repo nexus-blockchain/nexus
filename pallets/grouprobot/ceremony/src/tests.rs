@@ -635,7 +635,9 @@ fn m1_audit_peer_count_zero_triggers_at_risk() {
 		System::assert_has_event(RuntimeEvent::GroupRobotCeremony(
 			crate::pallet::Event::CeremonyAtRisk {
 				ceremony_hash: ceremony_hash(1),
+				bot_public_key: bot_pk(1),
 				required_k: 2,
+				current_peer_count: 0,
 			},
 		));
 
@@ -665,7 +667,9 @@ fn m1_audit_peer_count_equal_k_triggers_at_risk() {
 		System::assert_has_event(RuntimeEvent::GroupRobotCeremony(
 			crate::pallet::Event::CeremonyAtRisk {
 				ceremony_hash: ceremony_hash(1),
+				bot_public_key: bot_pk(1),
 				required_k: 3,
+				current_peer_count: 3,
 			},
 		));
 
@@ -1126,7 +1130,9 @@ fn m1_r5_at_risk_cursor_does_not_skip_boundary_ceremony() {
 		System::assert_has_event(RuntimeEvent::GroupRobotCeremony(
 			crate::pallet::Event::CeremonyAtRisk {
 				ceremony_hash: ceremony_hash(1),
+				bot_public_key: bot_pk(1),
 				required_k: 2,
+				current_peer_count: 1,
 			},
 		));
 
@@ -1418,5 +1424,570 @@ fn l1_r5_ceremony_history_fifo_works_without_history_full_error() {
 		oldest[0] = 2;
 		oldest[1] = 0xA5;
 		assert_eq!(history[0], oldest);
+	});
+}
+
+// ============================================================================
+// F1: owner_revoke_ceremony
+// ============================================================================
+
+#[test]
+fn f1_owner_revoke_ceremony_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+
+		assert_ok!(GroupRobotCeremony::owner_revoke_ceremony(
+			RuntimeOrigin::signed(OWNER), ceremony_hash(1)
+		));
+
+		let record = Ceremonies::<Test>::get(ceremony_hash(1)).unwrap();
+		assert!(matches!(record.status, CeremonyStatus::Revoked { .. }));
+		assert_eq!(ActiveCeremony::<Test>::get(bot_pk(1)), None);
+
+		System::assert_has_event(RuntimeEvent::GroupRobotCeremony(
+			crate::pallet::Event::OwnerCeremonyRevoked {
+				ceremony_hash: ceremony_hash(1),
+				bot_public_key: bot_pk(1),
+			},
+		));
+	});
+}
+
+#[test]
+fn f1_owner_revoke_rejects_non_owner() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+
+		assert_noop!(
+			GroupRobotCeremony::owner_revoke_ceremony(
+				RuntimeOrigin::signed(OTHER), ceremony_hash(1)
+			),
+			Error::<Test>::NotBotOwner
+		);
+	});
+}
+
+#[test]
+fn f1_owner_revoke_rejects_not_found() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotCeremony::owner_revoke_ceremony(
+				RuntimeOrigin::signed(OWNER), ceremony_hash(99)
+			),
+			Error::<Test>::CeremonyNotFound
+		);
+	});
+}
+
+#[test]
+fn f1_owner_revoke_rejects_not_active() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+		// Revoke first
+		assert_ok!(GroupRobotCeremony::owner_revoke_ceremony(
+			RuntimeOrigin::signed(OWNER), ceremony_hash(1)
+		));
+		// Second revoke should fail
+		assert_noop!(
+			GroupRobotCeremony::owner_revoke_ceremony(
+				RuntimeOrigin::signed(OWNER), ceremony_hash(1)
+			),
+			Error::<Test>::CeremonyNotActive
+		);
+	});
+}
+
+// ============================================================================
+// F7: revoke_by_mrenclave
+// ============================================================================
+
+#[test]
+fn f7_revoke_by_mrenclave_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		// 创建两个使用同一 mrenclave 的仪式（不同 bot）
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+		// bot_id(3) → owner=OTHER, active=true, tier=Free → 但我们需要 paid tier
+		// 使用不同的 ceremony_hash 但同一 bot_pk 会 supersede
+		// 改用同一 bot 的新仪式不行，直接手动插入第二个
+		// 实际上只测试一个仪式被撤销即可
+		assert!(GroupRobotCeremony::is_ceremony_active(&bot_pk(1)));
+
+		assert_ok!(GroupRobotCeremony::revoke_by_mrenclave(
+			RuntimeOrigin::root(), mrenclave(1)
+		));
+
+		assert!(!GroupRobotCeremony::is_ceremony_active(&bot_pk(1)));
+		let record = Ceremonies::<Test>::get(ceremony_hash(1)).unwrap();
+		assert!(matches!(record.status, CeremonyStatus::Revoked { .. }));
+
+		System::assert_has_event(RuntimeEvent::GroupRobotCeremony(
+			crate::pallet::Event::CeremoniesRevokedByMrenclave {
+				mrenclave: mrenclave(1),
+				count: 1,
+			},
+		));
+	});
+}
+
+#[test]
+fn f7_revoke_by_mrenclave_no_match() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+
+		// 使用不匹配的 mrenclave
+		assert_ok!(GroupRobotCeremony::revoke_by_mrenclave(
+			RuntimeOrigin::root(), mrenclave(99)
+		));
+
+		// 仪式不受影响
+		assert!(GroupRobotCeremony::is_ceremony_active(&bot_pk(1)));
+
+		System::assert_has_event(RuntimeEvent::GroupRobotCeremony(
+			crate::pallet::Event::CeremoniesRevokedByMrenclave {
+				mrenclave: mrenclave(99),
+				count: 0,
+			},
+		));
+	});
+}
+
+#[test]
+fn f7_revoke_by_mrenclave_rejects_non_root() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotCeremony::revoke_by_mrenclave(
+				RuntimeOrigin::signed(OWNER), mrenclave(1)
+			),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+// ============================================================================
+// F12: trigger_expiry
+// ============================================================================
+
+#[test]
+fn f12_trigger_expiry_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+		// expires_at = 1 + 100 = 101
+		// Set block to 102 (past expiry) but don't trigger on_initialize
+		System::set_block_number(102);
+
+		assert_ok!(GroupRobotCeremony::trigger_expiry(
+			RuntimeOrigin::signed(OTHER), ceremony_hash(1)
+		));
+
+		let record = Ceremonies::<Test>::get(ceremony_hash(1)).unwrap();
+		assert!(matches!(record.status, CeremonyStatus::Expired));
+		assert_eq!(ActiveCeremony::<Test>::get(bot_pk(1)), None);
+		assert_eq!(ExpiryQueue::<Test>::get().len(), 0);
+
+		System::assert_has_event(RuntimeEvent::GroupRobotCeremony(
+			crate::pallet::Event::CeremonyManuallyExpired {
+				ceremony_hash: ceremony_hash(1),
+			},
+		));
+	});
+}
+
+#[test]
+fn f12_trigger_expiry_rejects_not_expired() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+		// 还未过期 (current block=1, expires_at=101)
+		assert_noop!(
+			GroupRobotCeremony::trigger_expiry(
+				RuntimeOrigin::signed(OTHER), ceremony_hash(1)
+			),
+			Error::<Test>::CeremonyNotExpired
+		);
+	});
+}
+
+#[test]
+fn f12_trigger_expiry_rejects_not_active() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+		assert_ok!(GroupRobotCeremony::revoke_ceremony(RuntimeOrigin::root(), ceremony_hash(1)));
+
+		System::set_block_number(200);
+		assert_noop!(
+			GroupRobotCeremony::trigger_expiry(
+				RuntimeOrigin::signed(OTHER), ceremony_hash(1)
+			),
+			Error::<Test>::CeremonyNotActive
+		);
+	});
+}
+
+#[test]
+fn f12_trigger_expiry_rejects_not_found() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotCeremony::trigger_expiry(
+				RuntimeOrigin::signed(OTHER), ceremony_hash(99)
+			),
+			Error::<Test>::CeremonyNotFound
+		);
+	});
+}
+
+// ============================================================================
+// F11: batch_cleanup_ceremonies
+// ============================================================================
+
+#[test]
+fn f11_batch_cleanup_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		// 创建 3 个仪式 (第 1 个会被替代两次)
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(2), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+		// ceremony_hash(1) is now Superseded
+		// Revoke ceremony_hash(2)
+		assert_ok!(GroupRobotCeremony::revoke_ceremony(RuntimeOrigin::root(), ceremony_hash(2)));
+
+		// 批量清理
+		assert_ok!(GroupRobotCeremony::batch_cleanup_ceremonies(
+			RuntimeOrigin::signed(OTHER),
+			vec![ceremony_hash(1), ceremony_hash(2)],
+		));
+
+		assert!(Ceremonies::<Test>::get(ceremony_hash(1)).is_none());
+		assert!(Ceremonies::<Test>::get(ceremony_hash(2)).is_none());
+	});
+}
+
+#[test]
+fn f11_batch_cleanup_rejects_empty() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotCeremony::batch_cleanup_ceremonies(
+				RuntimeOrigin::signed(OTHER), vec![],
+			),
+			Error::<Test>::NoCeremoniesToCleanup
+		);
+	});
+}
+
+#[test]
+fn f11_batch_cleanup_rejects_too_many() {
+	new_test_ext().execute_with(|| {
+		// MaxProcessPerBlock = 20 in mock
+		let hashes: alloc::vec::Vec<[u8; 32]> = (0..21u8).map(|i| {
+			let mut h = [0u8; 32];
+			h[0] = i;
+			h[31] = 0xFA;
+			h
+		}).collect();
+		assert_noop!(
+			GroupRobotCeremony::batch_cleanup_ceremonies(
+				RuntimeOrigin::signed(OTHER), hashes,
+			),
+			Error::<Test>::TooManyCeremonies
+		);
+	});
+}
+
+#[test]
+fn f11_batch_cleanup_rejects_active() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+
+		assert_noop!(
+			GroupRobotCeremony::batch_cleanup_ceremonies(
+				RuntimeOrigin::signed(OTHER), vec![ceremony_hash(1)],
+			),
+			Error::<Test>::CeremonyNotTerminal
+		);
+	});
+}
+
+// ============================================================================
+// F2: renew_ceremony
+// ============================================================================
+
+#[test]
+fn f2_renew_ceremony_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+		// 原 expires_at = 1 + 100 = 101
+
+		// 在 block 50 续期
+		System::set_block_number(50);
+		assert_ok!(GroupRobotCeremony::renew_ceremony(
+			RuntimeOrigin::signed(OWNER), ceremony_hash(1)
+		));
+
+		// 新 expires_at = 50 + 100 = 150
+		let record = Ceremonies::<Test>::get(ceremony_hash(1)).unwrap();
+		assert_eq!(record.expires_at, 150);
+
+		// ExpiryQueue 更新
+		let queue = ExpiryQueue::<Test>::get();
+		assert_eq!(queue.len(), 1);
+		assert_eq!(queue[0].0, 150);
+
+		System::assert_has_event(RuntimeEvent::GroupRobotCeremony(
+			crate::pallet::Event::CeremonyRenewed {
+				ceremony_hash: ceremony_hash(1),
+				new_expires_at: 150,
+			},
+		));
+	});
+}
+
+#[test]
+fn f2_renew_rejects_non_owner() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+		assert_noop!(
+			GroupRobotCeremony::renew_ceremony(
+				RuntimeOrigin::signed(OTHER), ceremony_hash(1)
+			),
+			Error::<Test>::NotBotOwner
+		);
+	});
+}
+
+#[test]
+fn f2_renew_rejects_not_active() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+		assert_ok!(GroupRobotCeremony::revoke_ceremony(RuntimeOrigin::root(), ceremony_hash(1)));
+
+		assert_noop!(
+			GroupRobotCeremony::renew_ceremony(
+				RuntimeOrigin::signed(OWNER), ceremony_hash(1)
+			),
+			Error::<Test>::CeremonyNotActive
+		);
+	});
+}
+
+#[test]
+fn f2_renew_rejects_inactive_bot() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+		// 手动将仪式的 bot_id_hash 改为 inactive bot
+		Ceremonies::<Test>::mutate(ceremony_hash(1), |maybe| {
+			if let Some(r) = maybe {
+				r.bot_id_hash = bot_id(2); // bot_id(2) → active=false
+			}
+		});
+		assert_noop!(
+			GroupRobotCeremony::renew_ceremony(
+				RuntimeOrigin::signed(OTHER), ceremony_hash(1)
+			),
+			Error::<Test>::BotNotActive
+		);
+	});
+}
+
+#[test]
+fn f2_renew_prevents_expiry() {
+	// 续期后仪式不会在原过期时间到期
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+		// 原 expires_at = 101
+
+		// 在 block 90 续期 → new expires_at = 190
+		System::set_block_number(90);
+		assert_ok!(GroupRobotCeremony::renew_ceremony(
+			RuntimeOrigin::signed(OWNER), ceremony_hash(1)
+		));
+
+		// 推进到 block 110 (原过期时间后)
+		advance_to(110);
+		// 仪式应仍然活跃
+		assert!(GroupRobotCeremony::is_ceremony_active(&bot_pk(1)));
+
+		// 推进到 block 200 (新过期时间后)
+		advance_to(200);
+		// 现在应过期
+		assert!(!GroupRobotCeremony::is_ceremony_active(&bot_pk(1)));
+	});
+}
+
+// ============================================================================
+// F3: ceremony_health
+// ============================================================================
+
+#[test]
+fn f3_ceremony_health_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+
+		// MockBotRegistry: bot_id(1) → peer_count=3
+		let health = GroupRobotCeremony::ceremony_health(&bot_pk(1));
+		assert!(health.is_some());
+		let (expires_at, peer_count, k) = health.unwrap();
+		assert_eq!(expires_at, 101);
+		assert_eq!(peer_count, 3);
+		assert_eq!(k, 2);
+	});
+}
+
+#[test]
+fn f3_ceremony_health_none_when_no_ceremony() {
+	new_test_ext().execute_with(|| {
+		assert_eq!(GroupRobotCeremony::ceremony_health(&bot_pk(1)), None);
+	});
+}
+
+// ============================================================================
+// F13: ceremony_expires_at / ceremony_participant_enclaves
+// ============================================================================
+
+#[test]
+fn f13_ceremony_expires_at_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			vec![[10u8; 32], [11u8; 32]], bot_id(1),
+		));
+		assert_eq!(GroupRobotCeremony::ceremony_expires_at(&bot_pk(1)), Some(101));
+		assert_eq!(GroupRobotCeremony::ceremony_expires_at(&bot_pk(99)), None);
+	});
+}
+
+#[test]
+fn f13_ceremony_participant_enclaves_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCeremony::approve_ceremony_enclave(
+			RuntimeOrigin::root(), mrenclave(1), 1, vec![]
+		));
+		let participants = vec![[10u8; 32], [11u8; 32], [12u8; 32]];
+		assert_ok!(GroupRobotCeremony::record_ceremony(
+			RuntimeOrigin::signed(OWNER),
+			ceremony_hash(1), mrenclave(1), 2, 3, bot_pk(1),
+			participants.clone(), bot_id(1),
+		));
+		assert_eq!(
+			GroupRobotCeremony::ceremony_participant_enclaves(&bot_pk(1)),
+			Some(participants)
+		);
+		assert_eq!(GroupRobotCeremony::ceremony_participant_enclaves(&bot_pk(99)), None);
 	});
 }

@@ -246,7 +246,7 @@ fn ensure_shop_owner_rejects_non_owner() {
                 false,
                 LevelUpgradeMode::AutoUpgrade,
             ),
-            Error::<Test>::NotShopOwner
+            Error::<Test>::NotEntityAdmin
         );
     });
 }
@@ -353,9 +353,9 @@ fn add_custom_level_works() {
             RuntimeOrigin::signed(OWNER),
             SHOP_1,
             name,
-            1000u128, // threshold
-            500,      // discount_rate (5%)
-            300,      // commission_bonus (3%)
+            1000u64, // threshold
+            500,     // discount_rate (5%)
+            300,     // commission_bonus (3%)
         ));
 
         let system = EntityLevelSystems::<Test>::get(ENTITY_1).unwrap();
@@ -384,7 +384,7 @@ fn add_custom_level_invalid_basis_points_fails() {
                 RuntimeOrigin::signed(OWNER),
                 SHOP_1,
                 name.clone(),
-                1000u128,
+                1000u64,
                 10001,
                 300,
             ),
@@ -397,7 +397,7 @@ fn add_custom_level_invalid_basis_points_fails() {
                 RuntimeOrigin::signed(OWNER),
                 SHOP_1,
                 name,
-                1000u128,
+                1000u64,
                 500,
                 10001,
             ),
@@ -422,13 +422,13 @@ fn add_custom_level_threshold_ordering() {
             b"VIP2".to_vec().try_into().unwrap();
 
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 1000u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 1000u64, 0, 0,
         ));
 
         // Threshold must be > previous
         assert_noop!(
             MemberPallet::add_custom_level(
-                RuntimeOrigin::signed(OWNER), SHOP_1, name2.clone(), 500u128, 0, 0,
+                RuntimeOrigin::signed(OWNER), SHOP_1, name2.clone(), 500u64, 0, 0,
             ),
             Error::<Test>::InvalidThreshold
         );
@@ -436,7 +436,7 @@ fn add_custom_level_threshold_ordering() {
         // Same threshold also fails
         assert_noop!(
             MemberPallet::add_custom_level(
-                RuntimeOrigin::signed(OWNER), SHOP_1, name2, 1000u128, 0, 0,
+                RuntimeOrigin::signed(OWNER), SHOP_1, name2, 1000u64, 0, 0,
             ),
             Error::<Test>::InvalidThreshold
         );
@@ -456,10 +456,10 @@ fn remove_custom_level_only_last() {
             b"VIP2".to_vec().try_into().unwrap();
 
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 1000u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 1000u64, 0, 0,
         ));
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 2000u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 2000u64, 0, 0,
         ));
 
         // Can't remove first level
@@ -476,7 +476,7 @@ fn remove_custom_level_only_last() {
 }
 
 #[test]
-fn manual_upgrade_member_works() {
+fn manual_set_member_level_works() {
     new_test_ext().execute_with(|| {
         assert_ok!(MemberPallet::init_level_system(
             RuntimeOrigin::signed(OWNER), SHOP_1, true, LevelUpgradeMode::ManualUpgrade,
@@ -486,12 +486,12 @@ fn manual_upgrade_member_works() {
             b"VIP1".to_vec().try_into().unwrap();
 
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name, 0u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name, 0u64, 0, 0,
         ));
 
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
 
-        assert_ok!(MemberPallet::manual_upgrade_member(
+        assert_ok!(MemberPallet::manual_set_member_level(
             RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 0,
         ));
     });
@@ -506,7 +506,7 @@ fn manual_upgrade_rejects_auto_mode() {
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
 
         assert_noop!(
-            MemberPallet::manual_upgrade_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 0),
+            MemberPallet::manual_set_member_level(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 0),
             Error::<Test>::ManualUpgradeNotSupported
         );
     });
@@ -526,7 +526,7 @@ fn upgrade_rule_system_lifecycle() {
         let level_name: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP1".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, level_name, 1000u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, level_name, 1000u64, 0, 0,
         ));
 
         // Init
@@ -544,7 +544,7 @@ fn upgrade_rule_system_lifecycle() {
             RuntimeOrigin::signed(OWNER),
             SHOP_1,
             name,
-            UpgradeTrigger::TotalSpent { threshold: 1000u128 },
+            UpgradeTrigger::TotalSpent { threshold: 1000u64 },
             0,
             None,
             1,
@@ -586,11 +586,11 @@ fn update_spent_auto_upgrades_custom_level() {
         let name: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP1".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name, 500u128, 100, 50,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name, 500u64, 100, 50,
         ));
 
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 600u128, 0));
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 600u64));
 
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
         assert_eq!(member.custom_level_id, 0); // VIP1 = level_id 0
@@ -601,7 +601,7 @@ fn update_spent_auto_upgrades_custom_level() {
 fn update_spent_invalid_shop_fails() {
     new_test_ext().execute_with(|| {
         assert_noop!(
-            MemberPallet::update_spent(INVALID_SHOP, &ALICE, 100u128, 0),
+            MemberPallet::update_spent(INVALID_SHOP, &ALICE, 100u64),
             Error::<Test>::ShopNotFound
         );
     });
@@ -707,7 +707,7 @@ fn empty_level_name_fails() {
 
         assert_noop!(
             MemberPallet::add_custom_level(
-                RuntimeOrigin::signed(OWNER), SHOP_1, name, 1000u128, 0, 0,
+                RuntimeOrigin::signed(OWNER), SHOP_1, name, 1000u64, 0, 0,
             ),
             Error::<Test>::EmptyLevelName
         );
@@ -722,7 +722,7 @@ fn level_system_not_initialized_fails() {
 
         assert_noop!(
             MemberPallet::add_custom_level(
-                RuntimeOrigin::signed(OWNER), SHOP_1, name, 1000u128, 0, 0,
+                RuntimeOrigin::signed(OWNER), SHOP_1, name, 1000u64, 0, 0,
             ),
             Error::<Test>::LevelSystemNotInitialized
         );
@@ -734,12 +734,12 @@ fn member_provider_trait_works() {
     new_test_ext().execute_with(|| {
         use crate::MemberProvider;
 
-        assert!(!<MemberPallet as MemberProvider<u64, u128>>::is_member(ENTITY_1, &ALICE));
+        assert!(!<MemberPallet as MemberProvider<u64>>::is_member(ENTITY_1, &ALICE));
 
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
-        assert!(<MemberPallet as MemberProvider<u64, u128>>::is_member(ENTITY_1, &ALICE));
+        assert!(<MemberPallet as MemberProvider<u64>>::is_member(ENTITY_1, &ALICE));
 
-        let level_id = <MemberPallet as MemberProvider<u64, u128>>::custom_level_id(ENTITY_1, &ALICE);
+        let level_id = <MemberPallet as MemberProvider<u64>>::custom_level_id(ENTITY_1, &ALICE);
         assert_eq!(level_id, 0);
     });
 }
@@ -751,9 +751,9 @@ fn member_provider_trait_works() {
 #[test]
 fn h2_set_member_policy_rejects_invalid_bits() {
     new_test_ext().execute_with(|| {
-        // 高位垃圾值 (8 = 0b1000) 应被拒绝
+        // 高位垃圾值 (32 = 0b100000) 应被拒绝
         assert_noop!(
-            MemberPallet::set_member_policy(RuntimeOrigin::signed(OWNER), SHOP_1, 8),
+            MemberPallet::set_member_policy(RuntimeOrigin::signed(OWNER), SHOP_1, 32),
             Error::<Test>::InvalidPolicyBits
         );
         // 255 也应被拒绝
@@ -761,9 +761,9 @@ fn h2_set_member_policy_rejects_invalid_bits() {
             MemberPallet::set_member_policy(RuntimeOrigin::signed(OWNER), SHOP_1, 255),
             Error::<Test>::InvalidPolicyBits
         );
-        // 7 = 0b111 (全部3个标志) 应该成功
+        // 31 = 0b11111 (全部5个标志) 应该成功
         assert_ok!(MemberPallet::set_member_policy(
-            RuntimeOrigin::signed(OWNER), SHOP_1, 7,
+            RuntimeOrigin::signed(OWNER), SHOP_1, 31,
         ));
     });
 }
@@ -798,7 +798,7 @@ fn h4_add_upgrade_rule_rejects_invalid_target_level() {
         let name: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP1".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name, 1000u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name, 1000u64, 0, 0,
         ));
         assert_ok!(MemberPallet::init_upgrade_rule_system(
             RuntimeOrigin::signed(OWNER), SHOP_1, ConflictStrategy::HighestLevel,
@@ -897,15 +897,15 @@ fn h6_custom_level_id_respects_expiry() {
         let name2: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP2".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u64, 0, 0,
         ));
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u64, 0, 0,
         ));
 
         // Register member and manually upgrade to VIP2 (level_id=1)
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
-        assert_ok!(MemberPallet::manual_upgrade_member(
+        assert_ok!(MemberPallet::manual_set_member_level(
             RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1,
         ));
 
@@ -921,7 +921,7 @@ fn h6_custom_level_id_respects_expiry() {
 
         // custom_level_id via MemberProvider trait should respect expiry
         // With 0 spending, calculated level falls back to 0
-        let level = <MemberPallet as MemberProvider<u64, u128>>::custom_level_id(SHOP_1, &ALICE);
+        let level = <MemberPallet as MemberProvider<u64>>::custom_level_id(SHOP_1, &ALICE);
         assert_eq!(level, 0); // expired → calculated from spending (0)
     });
 }
@@ -938,10 +938,10 @@ fn h7_apply_upgrade_skips_deleted_level() {
         let name2: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP2".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u64, 0, 0,
         ));
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 200u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 200u64, 0, 0,
         ));
 
         // Create rule targeting VIP2 (level_id=1)
@@ -964,10 +964,10 @@ fn h7_apply_upgrade_skips_deleted_level() {
         assert_ok!(MemberPallet::remove_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, 1));
 
         // Spend enough to trigger rule
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 150u128, 150));
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 150u64));
 
         // check_order_upgrade_rules should handle deleted level gracefully
-        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 150u128));
+        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 150u64));
 
         // Member should NOT have been upgraded to deleted level
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
@@ -988,10 +988,10 @@ fn h10_stackable_rule_cannot_downgrade() {
         let name2: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP2".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u64, 0, 0,
         ));
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u64, 0, 0,
         ));
 
         // Create stackable rule targeting VIP1 (level_id=0)
@@ -1009,14 +1009,14 @@ fn h10_stackable_rule_cannot_downgrade() {
 
         // Register member and manually upgrade to VIP2 (level_id=1)
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
-        assert_ok!(MemberPallet::manual_upgrade_member(
+        assert_ok!(MemberPallet::manual_set_member_level(
             RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1,
         ));
         assert_eq!(MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap().custom_level_id, 1);
 
         // Spend enough to trigger the stackable rule targeting VIP1
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 200u128, 200));
-        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 200u128));
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 200u64));
+        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 200u64));
 
         // H10: Member should NOT be downgraded from VIP2 to VIP1
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
@@ -1036,10 +1036,10 @@ fn h12_auto_upgrade_preserves_active_rule_upgrade() {
         let name2: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP2".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 500u128, 100, 50,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 500u64, 100, 50,
         ));
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 2000u128, 200, 100,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 2000u64, 200, 100,
         ));
 
         // Setup: rule system with a rule that upgrades to VIP2 with 100-block duration
@@ -1058,22 +1058,22 @@ fn h12_auto_upgrade_preserves_active_rule_upgrade() {
 
         // Register and spend enough for VIP1 only (>500, <2000)
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 600u128, 0));
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 600u64));
         assert_eq!(MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap().custom_level_id, 0); // VIP1
 
         // Trigger rule: upgrade to VIP2 with expiry at block 101
-        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 42, 600u128));
+        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 42, 600u64));
         assert_eq!(MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap().custom_level_id, 1); // VIP2
         assert_eq!(MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE), Some(101));
 
         // H12: Another order/update_spent should NOT overwrite VIP2 back to VIP1
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u128, 0));
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u64));
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
         assert_eq!(member.custom_level_id, 1, "auto-upgrade must not overwrite active rule upgrade");
 
         // After expiry, auto-upgrade should recalculate
         System::set_block_number(102);
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 10u128, 0));
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 10u64));
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
         assert_eq!(member.custom_level_id, 0, "after expiry, auto-upgrade should recalculate to VIP1");
     });
@@ -1089,7 +1089,7 @@ fn m14_stackable_preserves_permanent_upgrade() {
         let name1: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP1".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u64, 0, 0,
         ));
 
         // Create stackable rule targeting VIP1 with 50-block duration
@@ -1108,15 +1108,15 @@ fn m14_stackable_preserves_permanent_upgrade() {
 
         // Register member and manually upgrade to VIP1 (permanent, no expiry)
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
-        assert_ok!(MemberPallet::manual_upgrade_member(
+        assert_ok!(MemberPallet::manual_set_member_level(
             RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 0,
         ));
         // Verify no expiry
         assert!(MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE).is_none());
 
         // Trigger stackable rule
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u128, 100));
-        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u128));
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u64));
+        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u64));
 
         // M14: Since member had no expiry (permanent), stacking with duration
         // should start from now (block 1) + 50 = 51, NOT convert permanent to limited
@@ -1133,9 +1133,9 @@ fn m18_order_count_tracked_when_rule_system_disabled() {
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
 
         // No rule system initialized — check_order_upgrade_rules should still track orders
-        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u128));
-        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 200u128));
-        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 300u128));
+        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u64));
+        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 200u64));
+        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 300u64));
 
         // M18: Order count should be 3 even without rule system
         assert_eq!(MemberPallet::member_order_count(ENTITY_1, ALICE), 3);
@@ -1147,7 +1147,7 @@ fn m18_order_count_tracked_when_rule_system_disabled() {
         let name: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP1".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name, 100u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name, 100u64, 0, 0,
         ));
         assert_ok!(MemberPallet::init_upgrade_rule_system(
             RuntimeOrigin::signed(OWNER), SHOP_1, ConflictStrategy::HighestLevel,
@@ -1161,7 +1161,7 @@ fn m18_order_count_tracked_when_rule_system_disabled() {
         ));
 
         // 4th order should trigger the rule (3 previous + 1 new)
-        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u128));
+        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u64));
         assert_eq!(MemberPallet::member_order_count(ENTITY_1, ALICE), 4);
     });
 }
@@ -1237,12 +1237,12 @@ fn p4_update_spent_corrects_expired_level() {
         let name: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP1".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name.clone(), 500u128, 100, 50,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name.clone(), 500u64, 100, 50,
         ));
         let name2: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP2".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 2000u128, 200, 100,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 2000u64, 200, 100,
         ));
 
         // 注册会员
@@ -1264,18 +1264,16 @@ fn p4_update_spent_corrects_expired_level() {
         // 推进到 block 11（过期后）
         System::set_block_number(11);
 
-        // get_effective_level 返回基于消费的等级（VIP1=0），但存储未变
+        // S1 修复: get_effective_level 现在是写穿模式 — 检测到过期时立即修正存储
         assert_eq!(MemberPallet::get_effective_level(SHOP_1, &ALICE), 0);
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
-        assert_eq!(member.custom_level_id, 1); // 存储仍为旧值！
+        assert_eq!(member.custom_level_id, 0); // S1: 存储已被写穿修正
+        assert!(crate::MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE).is_none());
 
-        // P4 修复: update_spent 应修正过期的存储
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 10u128, 0));
-
-        // 修正后: custom_level_id 应为 0 (VIP1)，MemberLevelExpiry 已清除
+        // update_spent 不再需要额外修正（已由 get_effective_level 完成）
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 10u64));
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
         assert_eq!(member.custom_level_id, 0);
-        assert!(crate::MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE).is_none());
     });
 }
 
@@ -1288,12 +1286,11 @@ fn p4_update_spent_emits_expired_event() {
         let name: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP1".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name, 500u128, 100, 50,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name, 500u64, 100, 50,
         ));
 
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
 
-        // 手动设置 VIP1(level_id=0)，消费=0（不够 VIP1），过期在 block 5
         crate::EntityMembers::<Test>::mutate(ENTITY_1, ALICE, |m| {
             if let Some(ref mut member) = m {
                 member.custom_level_id = 0; // VIP1
@@ -1306,7 +1303,7 @@ fn p4_update_spent_emits_expired_event() {
         // 清除之前的事件
         System::reset_events();
 
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 10u128, 0));
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 10u64));
 
         // 过期后 recalculated=0 (消费 110 < 500 → 无等级即 0)
         // 但 member.custom_level_id 已是 0，所以不会 emit MemberLevelExpired
@@ -1327,7 +1324,7 @@ fn p4_non_expired_level_not_touched() {
         let name: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP1".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name, 500u128, 100, 50,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name, 500u64, 100, 50,
         ));
 
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
@@ -1342,7 +1339,7 @@ fn p4_non_expired_level_not_touched() {
         crate::MemberLevelExpiry::<Test>::insert(ENTITY_1, ALICE, 100u64);
 
         // block=1，未过期
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 10u128, 0));
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 10u64));
 
         // 等级和过期记录都不应改变
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
@@ -1420,7 +1417,7 @@ fn get_member_stats_default_returns_qualified() {
 
         // 默认策略（0）：get_member_stats 返回 qualified_referrals
         let (direct, _team, _spent) =
-            <MemberPallet as MemberProvider<u64, u128>>::get_member_stats(ENTITY_1, &ALICE);
+            <MemberPallet as MemberProvider<u64>>::get_member_stats(ENTITY_1, &ALICE);
         assert_eq!(direct, 1, "默认策略下 get_member_stats 应返回 qualified_referrals=1");
     });
 }
@@ -1448,7 +1445,7 @@ fn get_member_stats_include_repurchase_direct() {
 
         // get_member_stats 现在返回 direct_referrals（含复购）
         let (direct, _team, _spent) =
-            <MemberPallet as MemberProvider<u64, u128>>::get_member_stats(ENTITY_1, &ALICE);
+            <MemberPallet as MemberProvider<u64>>::get_member_stats(ENTITY_1, &ALICE);
         assert_eq!(direct, 2, "含复购策略下 get_member_stats 应返回 direct_referrals=2");
     });
 }
@@ -1482,7 +1479,7 @@ fn qualified_referrals_not_incremented_for_repurchase() {
 }
 
 // ============================================================================
-// H13: manual_upgrade_member 应清除 MemberLevelExpiry
+// H13: manual_set_member_level 应清除 MemberLevelExpiry
 // ============================================================================
 
 #[test]
@@ -1499,13 +1496,13 @@ fn h13_manual_upgrade_clears_stale_expiry() {
         let name3: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP3".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u64, 0, 0,
         ));
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u64, 0, 0,
         ));
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name3, 2000u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name3, 2000u64, 0, 0,
         ));
 
         // Register member
@@ -1524,7 +1521,7 @@ fn h13_manual_upgrade_clears_stale_expiry() {
 
         // At block 50, owner manually upgrades to VIP3 (level_id=2) — permanent
         System::set_block_number(50);
-        assert_ok!(MemberPallet::manual_upgrade_member(
+        assert_ok!(MemberPallet::manual_set_member_level(
             RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 2,
         ));
 
@@ -1536,7 +1533,7 @@ fn h13_manual_upgrade_clears_stale_expiry() {
 
         // At block 101 (past the old expiry), update_spent should NOT downgrade
         System::set_block_number(101);
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 10u128, 0));
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 10u64));
 
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
         assert_eq!(member.custom_level_id, 2, "VIP3 must persist after old expiry passes");
@@ -1555,17 +1552,17 @@ fn h13_manual_upgrade_without_prior_expiry_works() {
         let name2: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP2".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u64, 0, 0,
         ));
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u64, 0, 0,
         ));
 
         // Register and manually upgrade (no prior expiry)
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
         assert!(crate::MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE).is_none());
 
-        assert_ok!(MemberPallet::manual_upgrade_member(
+        assert_ok!(MemberPallet::manual_set_member_level(
             RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1,
         ));
 
@@ -1593,7 +1590,7 @@ fn h9_get_member_stats_respects_policy_default() {
 
         // Default policy (0): should return qualified_referrals = 1
         let (direct, _team, _spent) =
-            <MemberPallet as MemberProvider<u64, u128>>::get_member_stats(ENTITY_1, &ALICE);
+            <MemberPallet as MemberProvider<u64>>::get_member_stats(ENTITY_1, &ALICE);
         assert_eq!(direct, 1, "default policy: get_member_stats should return qualified_referrals");
     });
 }
@@ -1617,7 +1614,7 @@ fn h9_get_member_stats_respects_policy_include_repurchase() {
 
         // Should return direct_referrals = 2 (including repurchase)
         let (direct, _team, _spent) =
-            <MemberPallet as MemberProvider<u64, u128>>::get_member_stats(ENTITY_1, &ALICE);
+            <MemberPallet as MemberProvider<u64>>::get_member_stats(ENTITY_1, &ALICE);
         assert_eq!(direct, 2, "include-repurchase policy: should return direct_referrals");
     });
 }
@@ -1638,10 +1635,10 @@ fn m9_effective_level_falls_back_when_level_deleted() {
         let name2: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP2".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u64, 0, 0,
         ));
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u64, 0, 0,
         ));
 
         // Register member, manually set to VIP2 (level_id=1)
@@ -1676,7 +1673,7 @@ fn m9_effective_level_valid_level_unchanged() {
         let name1: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP1".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u64, 0, 0,
         ));
 
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
@@ -1707,10 +1704,10 @@ fn m10_referral_count_trigger_fires_on_registration() {
         let name2: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP2".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 500u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 500u64, 0, 0,
         ));
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 1000u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 1000u64, 0, 0,
         ));
         assert_ok!(MemberPallet::init_upgrade_rule_system(
             RuntimeOrigin::signed(OWNER), SHOP_1, ConflictStrategy::HighestLevel,
@@ -1764,10 +1761,10 @@ fn m10_referral_trigger_does_not_fire_below_threshold() {
         let name2: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP2".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 500u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 500u64, 0, 0,
         ));
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 1000u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 1000u64, 0, 0,
         ));
         assert_ok!(MemberPallet::init_upgrade_rule_system(
             RuntimeOrigin::signed(OWNER), SHOP_1, ConflictStrategy::HighestLevel,
@@ -1809,10 +1806,10 @@ fn m10_bind_referrer_triggers_referral_upgrade() {
         let name2: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP2".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 500u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 500u64, 0, 0,
         ));
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 1000u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 1000u64, 0, 0,
         ));
         assert_ok!(MemberPallet::init_upgrade_rule_system(
             RuntimeOrigin::signed(OWNER), SHOP_1, ConflictStrategy::HighestLevel,
@@ -1872,15 +1869,15 @@ fn h1_remove_custom_level_rejects_when_level_has_members() {
         let name2: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP2".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 500u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 500u64, 0, 0,
         ));
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 1000u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 1000u64, 0, 0,
         ));
 
         // Register ALICE and manually upgrade to VIP2 (level_id=1)
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
-        assert_ok!(MemberPallet::manual_upgrade_member(
+        assert_ok!(MemberPallet::manual_set_member_level(
             RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1,
         ));
 
@@ -1891,7 +1888,7 @@ fn h1_remove_custom_level_rejects_when_level_has_members() {
         );
 
         // Downgrade ALICE back to level 0
-        assert_ok!(MemberPallet::manual_upgrade_member(
+        assert_ok!(MemberPallet::manual_set_member_level(
             RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 0,
         ));
 
@@ -1909,7 +1906,7 @@ fn h1_remove_empty_level_succeeds() {
         let name: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP1".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name, 500u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name, 500u64, 0, 0,
         ));
 
         // No members at level 0 (custom) — removal succeeds
@@ -1930,7 +1927,7 @@ fn m1_add_upgrade_rule_overflow_rejected() {
         let name: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
             b"VIP1".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, name, 500u128, 0, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, name, 500u64, 0, 0,
         ));
         assert_ok!(MemberPallet::init_upgrade_rule_system(
             RuntimeOrigin::signed(OWNER), SHOP_1, ConflictStrategy::HighestLevel,
@@ -2131,9 +2128,9 @@ fn r6_l3_conflict_strategy_highest_priority() {
         let name1: BoundedVec<u8, frame_support::traits::ConstU32<32>> = b"VIP1".to_vec().try_into().unwrap();
         let name2: BoundedVec<u8, frame_support::traits::ConstU32<32>> = b"VIP2".to_vec().try_into().unwrap();
         let name3: BoundedVec<u8, frame_support::traits::ConstU32<32>> = b"VIP3".to_vec().try_into().unwrap();
-        assert_ok!(MemberPallet::add_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u128, 0, 0));
-        assert_ok!(MemberPallet::add_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u128, 0, 0));
-        assert_ok!(MemberPallet::add_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, name3, 1000u128, 0, 0));
+        assert_ok!(MemberPallet::add_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u64, 0, 0));
+        assert_ok!(MemberPallet::add_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u64, 0, 0));
+        assert_ok!(MemberPallet::add_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, name3, 1000u64, 0, 0));
 
         // Init rule system with HighestPriority strategy
         assert_ok!(MemberPallet::init_upgrade_rule_system(
@@ -2155,8 +2152,8 @@ fn r6_l3_conflict_strategy_highest_priority() {
 
         // Register and spend
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u128, 0));
-        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u128));
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u64));
+        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u64));
 
         // HighestPriority: rule with priority=10 wins → VIP1 (level 0)
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
@@ -2173,8 +2170,8 @@ fn r6_l3_conflict_strategy_longest_duration() {
         ));
         let name1: BoundedVec<u8, frame_support::traits::ConstU32<32>> = b"VIP1".to_vec().try_into().unwrap();
         let name2: BoundedVec<u8, frame_support::traits::ConstU32<32>> = b"VIP2".to_vec().try_into().unwrap();
-        assert_ok!(MemberPallet::add_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u128, 0, 0));
-        assert_ok!(MemberPallet::add_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u128, 0, 0));
+        assert_ok!(MemberPallet::add_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u64, 0, 0));
+        assert_ok!(MemberPallet::add_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u64, 0, 0));
 
         // Init with LongestDuration strategy
         assert_ok!(MemberPallet::init_upgrade_rule_system(
@@ -2195,8 +2192,8 @@ fn r6_l3_conflict_strategy_longest_duration() {
         ));
 
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u128, 0));
-        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u128));
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u64));
+        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u64));
 
         // LongestDuration: None (permanent) > Some(10) → VIP2 (level 1)
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
@@ -2214,8 +2211,8 @@ fn r6_l3_conflict_strategy_first_match() {
         ));
         let name1: BoundedVec<u8, frame_support::traits::ConstU32<32>> = b"VIP1".to_vec().try_into().unwrap();
         let name2: BoundedVec<u8, frame_support::traits::ConstU32<32>> = b"VIP2".to_vec().try_into().unwrap();
-        assert_ok!(MemberPallet::add_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u128, 0, 0));
-        assert_ok!(MemberPallet::add_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u128, 0, 0));
+        assert_ok!(MemberPallet::add_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u64, 0, 0));
+        assert_ok!(MemberPallet::add_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u64, 0, 0));
 
         // Init with FirstMatch strategy
         assert_ok!(MemberPallet::init_upgrade_rule_system(
@@ -2236,8 +2233,8 @@ fn r6_l3_conflict_strategy_first_match() {
         ));
 
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u128, 0));
-        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u128));
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u64));
+        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u64));
 
         // FirstMatch: first rule wins → VIP1 (level 0)
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
@@ -2246,7 +2243,7 @@ fn r6_l3_conflict_strategy_first_match() {
 }
 
 // ============================================================================
-// M5: MemberSpentUsdt 独立 USDT 累计消费
+// M5: USDT 累计消费（total_spent 直接存储 USDT）
 // ============================================================================
 
 #[test]
@@ -2254,42 +2251,40 @@ fn m5_update_spent_accumulates_usdt() {
     new_test_ext().execute_with(|| {
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
 
-        // 第一笔: 100 NEX, 50 USDT
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u128, 50u64));
-        assert_eq!(MemberSpentUsdt::<Test>::get(ENTITY_1, &ALICE), 50);
-
-        // 第二笔: 200 NEX, 30 USDT — 累加
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 200u128, 30u64));
-        assert_eq!(MemberSpentUsdt::<Test>::get(ENTITY_1, &ALICE), 80);
-
-        // NEX 累计应为 300
+        // 第一笔: 50 USDT
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 50u64));
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
-        assert_eq!(member.total_spent, 300u128);
+        assert_eq!(member.total_spent, 50u64);
+
+        // 第二笔: 30 USDT — 累加
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 30u64));
+        let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
+        assert_eq!(member.total_spent, 80u64);
     });
 }
 
 #[test]
-fn m5_zero_usdt_does_not_write() {
+fn m5_zero_usdt_no_change() {
     new_test_ext().execute_with(|| {
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
 
-        // amount_usdt = 0 不应写入
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u128, 0u64));
-        assert_eq!(MemberSpentUsdt::<Test>::get(ENTITY_1, &ALICE), 0);
+        // amount_usdt = 0 → total_spent 不变
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 0u64));
+        let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
+        assert_eq!(member.total_spent, 0u64);
     });
 }
 
 #[test]
-fn m5_get_member_stats_returns_usdt_not_nex() {
+fn m5_get_member_stats_returns_usdt() {
     new_test_ext().execute_with(|| {
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
 
-        // 消费 1_000_000_000_000 NEX (10^12), 1_000_000 USDT (10^6)
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 1_000_000_000_000u128, 1_000_000u64));
+        // 消费 1_000_000 USDT (精度 10^6)
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 1_000_000u64));
 
-        let (_, _, spent_usdt) = <MemberPallet as crate::MemberProvider<u64, u128>>::get_member_stats(ENTITY_1, &ALICE);
-        // 应返回 USDT 值 (10^6)，不是 NEX 值 (10^12)
-        assert_eq!(spent_usdt, 1_000_000u128, "get_member_stats should return USDT amount, not NEX");
+        let (_, _, spent_usdt) = <MemberPallet as crate::MemberProvider<u64>>::get_member_stats(ENTITY_1, &ALICE);
+        assert_eq!(spent_usdt, 1_000_000u128, "get_member_stats should return USDT amount");
     });
 }
 
@@ -2299,11 +2294,16 @@ fn m5_usdt_saturating_add_no_overflow() {
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
 
         // 预设一个接近 u64::MAX 的值
-        MemberSpentUsdt::<Test>::insert(ENTITY_1, &ALICE, u64::MAX - 10);
+        EntityMembers::<Test>::mutate(ENTITY_1, &ALICE, |maybe| {
+            if let Some(ref mut m) = maybe {
+                m.total_spent = u64::MAX - 10;
+            }
+        });
 
         // 再加 20 应 saturating 到 u64::MAX
-        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u128, 20u64));
-        assert_eq!(MemberSpentUsdt::<Test>::get(ENTITY_1, &ALICE), u64::MAX);
+        assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 20u64));
+        let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
+        assert_eq!(member.total_spent, u64::MAX);
     });
 }
 
@@ -2497,5 +2497,772 @@ fn m6_auto_register_stores_applied_at() {
         let (referrer, applied_at) = PendingMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
         assert_eq!(referrer, None);
         assert_eq!(applied_at, 77);
+    });
+}
+
+// ============================================================================
+// P1-1: 批量审批/拒绝
+// ============================================================================
+
+#[test]
+fn batch_approve_members_works() {
+    new_test_ext().execute_with(|| {
+        // 设置为 APPROVAL_REQUIRED
+        assert_ok!(MemberPallet::set_member_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1, 0b0000_0100,
+        ));
+
+        // 提交 3 个待审批
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(BOB), SHOP_1, None));
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(CHARLIE), SHOP_1, None));
+
+        assert!(PendingMembers::<Test>::contains_key(ENTITY_1, &ALICE));
+        assert!(PendingMembers::<Test>::contains_key(ENTITY_1, &BOB));
+        assert!(PendingMembers::<Test>::contains_key(ENTITY_1, &CHARLIE));
+
+        // 批量审批
+        assert_ok!(MemberPallet::batch_approve_members(
+            RuntimeOrigin::signed(OWNER), SHOP_1,
+            vec![ALICE, BOB, CHARLIE],
+        ));
+
+        // 验证全部注册成功
+        assert!(EntityMembers::<Test>::contains_key(ENTITY_1, &ALICE));
+        assert!(EntityMembers::<Test>::contains_key(ENTITY_1, &BOB));
+        assert!(EntityMembers::<Test>::contains_key(ENTITY_1, &CHARLIE));
+        assert_eq!(MemberPallet::member_count(ENTITY_1), 3);
+
+        // 验证事件
+        System::assert_has_event(RuntimeEvent::MemberPallet(
+            crate::Event::BatchMembersApproved { entity_id: ENTITY_1, count: 3 },
+        ));
+    });
+}
+
+#[test]
+fn batch_approve_skips_expired() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::set_member_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1, 0b0000_0100,
+        ));
+
+        System::set_block_number(1);
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        System::set_block_number(150);
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(BOB), SHOP_1, None));
+
+        // 超过 ALICE 的过期时间 (applied_at=1 + expiry=100 < 200), BOB 未过期 (applied_at=150 + 100 > 200)
+        System::set_block_number(200);
+
+        assert_ok!(MemberPallet::batch_approve_members(
+            RuntimeOrigin::signed(OWNER), SHOP_1,
+            vec![ALICE, BOB],
+        ));
+
+        // ALICE 过期被跳过, BOB 未过期应注册成功
+        assert!(!EntityMembers::<Test>::contains_key(ENTITY_1, &ALICE));
+        assert!(EntityMembers::<Test>::contains_key(ENTITY_1, &BOB));
+
+        System::assert_has_event(RuntimeEvent::MemberPallet(
+            crate::Event::BatchMembersApproved { entity_id: ENTITY_1, count: 1 },
+        ));
+    });
+}
+
+#[test]
+fn batch_approve_skips_nonexistent() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::set_member_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1, 0b0000_0100,
+        ));
+
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        // BOB 没有申请, 应被跳过
+        assert_ok!(MemberPallet::batch_approve_members(
+            RuntimeOrigin::signed(OWNER), SHOP_1,
+            vec![ALICE, BOB],
+        ));
+
+        assert!(EntityMembers::<Test>::contains_key(ENTITY_1, &ALICE));
+        assert!(!EntityMembers::<Test>::contains_key(ENTITY_1, &BOB));
+
+        System::assert_has_event(RuntimeEvent::MemberPallet(
+            crate::Event::BatchMembersApproved { entity_id: ENTITY_1, count: 1 },
+        ));
+    });
+}
+
+#[test]
+fn batch_approve_rejects_over_limit() {
+    new_test_ext().execute_with(|| {
+        let accounts: Vec<u64> = (100..152).collect(); // 52 accounts
+        assert_noop!(
+            MemberPallet::batch_approve_members(
+                RuntimeOrigin::signed(OWNER), SHOP_1, accounts,
+            ),
+            crate::Error::<Test>::BatchLimitExceeded
+        );
+    });
+}
+
+#[test]
+fn batch_approve_admin_can_call() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::set_member_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1, 0b0000_0100,
+        ));
+
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        // ADMIN (account 2) should have MEMBER_MANAGE permission
+        assert_ok!(MemberPallet::batch_approve_members(
+            RuntimeOrigin::signed(ADMIN), SHOP_1,
+            vec![ALICE],
+        ));
+
+        assert!(EntityMembers::<Test>::contains_key(ENTITY_1, &ALICE));
+    });
+}
+
+#[test]
+fn batch_reject_members_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::set_member_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1, 0b0000_0100,
+        ));
+
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(BOB), SHOP_1, None));
+
+        assert_ok!(MemberPallet::batch_reject_members(
+            RuntimeOrigin::signed(OWNER), SHOP_1,
+            vec![ALICE, BOB],
+        ));
+
+        assert!(!PendingMembers::<Test>::contains_key(ENTITY_1, &ALICE));
+        assert!(!PendingMembers::<Test>::contains_key(ENTITY_1, &BOB));
+
+        System::assert_has_event(RuntimeEvent::MemberPallet(
+            crate::Event::BatchMembersRejected { entity_id: ENTITY_1, count: 2 },
+        ));
+    });
+}
+
+#[test]
+fn batch_reject_skips_nonexistent() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::set_member_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1, 0b0000_0100,
+        ));
+
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        // BOB not pending — should be silently skipped
+        assert_ok!(MemberPallet::batch_reject_members(
+            RuntimeOrigin::signed(OWNER), SHOP_1,
+            vec![ALICE, BOB],
+        ));
+
+        System::assert_has_event(RuntimeEvent::MemberPallet(
+            crate::Event::BatchMembersRejected { entity_id: ENTITY_1, count: 1 },
+        ));
+    });
+}
+
+#[test]
+fn batch_reject_rejects_over_limit() {
+    new_test_ext().execute_with(|| {
+        let accounts: Vec<u64> = (100..152).collect();
+        assert_noop!(
+            MemberPallet::batch_reject_members(
+                RuntimeOrigin::signed(OWNER), SHOP_1, accounts,
+            ),
+            crate::Error::<Test>::BatchLimitExceeded
+        );
+    });
+}
+
+// ============================================================================
+// P1-2: 封禁/解封会员
+// ============================================================================
+
+#[test]
+fn ban_member_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        assert_ok!(MemberPallet::ban_member(
+            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, None,
+        ));
+
+        let m = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
+        assert!(m.banned_at.is_some());
+
+        System::assert_has_event(RuntimeEvent::MemberPallet(
+            crate::Event::MemberBanned { entity_id: ENTITY_1, account: ALICE, reason: None },
+        ));
+    });
+}
+
+#[test]
+fn ban_member_not_member_fails() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            MemberPallet::ban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, None),
+            crate::Error::<Test>::NotMember
+        );
+    });
+}
+
+#[test]
+fn ban_member_already_banned_fails() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+        assert_ok!(MemberPallet::ban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, None));
+
+        assert_noop!(
+            MemberPallet::ban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, None),
+            crate::Error::<Test>::MemberAlreadyBanned
+        );
+    });
+}
+
+#[test]
+fn ban_member_admin_can_call() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        assert_ok!(MemberPallet::ban_member(
+            RuntimeOrigin::signed(ADMIN), SHOP_1, ALICE, None,
+        ));
+
+        let m = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
+        assert!(m.banned_at.is_some());
+    });
+}
+
+#[test]
+fn ban_member_non_admin_fails() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        assert_noop!(
+            MemberPallet::ban_member(RuntimeOrigin::signed(BOB), SHOP_1, ALICE, None),
+            crate::Error::<Test>::NotEntityAdmin
+        );
+    });
+}
+
+#[test]
+fn unban_member_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+        assert_ok!(MemberPallet::ban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, None));
+
+        assert_ok!(MemberPallet::unban_member(
+            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE,
+        ));
+
+        let m = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
+        assert!(m.banned_at.is_none());
+
+        System::assert_has_event(RuntimeEvent::MemberPallet(
+            crate::Event::MemberUnbanned { entity_id: ENTITY_1, account: ALICE },
+        ));
+    });
+}
+
+#[test]
+fn unban_member_not_banned_fails() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        assert_noop!(
+            MemberPallet::unban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE),
+            crate::Error::<Test>::MemberNotBanned
+        );
+    });
+}
+
+#[test]
+fn unban_member_admin_can_call() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+        assert_ok!(MemberPallet::ban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, None));
+
+        assert_ok!(MemberPallet::unban_member(
+            RuntimeOrigin::signed(ADMIN), SHOP_1, ALICE,
+        ));
+
+        let m = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
+        assert!(m.banned_at.is_none());
+    });
+}
+
+// ============================================================================
+// P0-2: MemberProvider trait — member_count / is_banned
+// ============================================================================
+
+#[test]
+fn member_provider_member_count_works() {
+    new_test_ext().execute_with(|| {
+        assert_eq!(MemberPallet::member_count(ENTITY_1), 0);
+
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+        assert_eq!(MemberPallet::member_count(ENTITY_1), 1);
+
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(BOB), SHOP_1, None));
+        assert_eq!(MemberPallet::member_count(ENTITY_1), 2);
+    });
+}
+
+#[test]
+fn member_provider_is_banned_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        // 未封禁
+        let m = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
+        assert!(m.banned_at.is_none());
+
+        // 封禁后
+        assert_ok!(MemberPallet::ban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, None));
+        let m = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
+        assert!(m.banned_at.is_some());
+
+        // 解封后
+        assert_ok!(MemberPallet::unban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE));
+        let m = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
+        assert!(m.banned_at.is_none());
+    });
+}
+
+#[test]
+fn ban_member_stores_block_number() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        System::set_block_number(42);
+        assert_ok!(MemberPallet::ban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, None));
+
+        let m = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
+        assert_eq!(m.banned_at, Some(42));
+    });
+}
+
+// ============================================================================
+// last_active_at 可读可写
+// ============================================================================
+
+#[test]
+fn last_active_at_set_on_register() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(10);
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        // 注册时 last_active_at = joined_at = 当前区块
+        let member = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
+        assert_eq!(member.last_active_at, 10);
+
+        // 通过 trait 方法读取
+        assert_eq!(
+            <MemberPallet as crate::MemberProvider<u64>>::last_active_at(ENTITY_1, &ALICE),
+            10
+        );
+    });
+}
+
+#[test]
+fn last_active_at_updated_on_spend() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(5);
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+        assert_eq!(
+            <MemberPallet as crate::MemberProvider<u64>>::last_active_at(ENTITY_1, &ALICE),
+            5
+        );
+
+        // 消费后 last_active_at 更新
+        System::set_block_number(100);
+        assert_ok!(MemberPallet::update_spent_by_entity(ENTITY_1, &ALICE, 1000u64));
+        assert_eq!(
+            <MemberPallet as crate::MemberProvider<u64>>::last_active_at(ENTITY_1, &ALICE),
+            100
+        );
+
+        // 再次消费
+        System::set_block_number(200);
+        assert_ok!(MemberPallet::update_spent_by_entity(ENTITY_1, &ALICE, 500u64));
+        assert_eq!(
+            <MemberPallet as crate::MemberProvider<u64>>::last_active_at(ENTITY_1, &ALICE),
+            200
+        );
+    });
+}
+
+#[test]
+fn last_active_at_returns_zero_for_non_member() {
+    new_test_ext().execute_with(|| {
+        assert_eq!(
+            <MemberPallet as crate::MemberProvider<u64>>::last_active_at(ENTITY_1, &ALICE),
+            0
+        );
+    });
+}
+
+// ============================================================================
+// KYC 阻断测试
+// ============================================================================
+
+#[test]
+fn kyc_required_blocks_register_member() {
+    new_test_ext().execute_with(|| {
+        // 设置 KYC_REQUIRED (bit 3 = 0b0000_1000 = 8)
+        assert_ok!(MemberPallet::set_member_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1, 0b0000_1000,
+        ));
+
+        // 未通过 KYC → 注册失败
+        assert_noop!(
+            MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None),
+            Error::<Test>::KycNotPassed
+        );
+
+        // 通过 KYC 后 → 注册成功
+        set_kyc_passed(ENTITY_1, ALICE);
+        assert_ok!(MemberPallet::register_member(
+            RuntimeOrigin::signed(ALICE), SHOP_1, None,
+        ));
+        assert!(MemberPallet::is_member_of_shop(SHOP_1, &ALICE));
+    });
+}
+
+#[test]
+fn kyc_required_blocks_auto_register() {
+    new_test_ext().execute_with(|| {
+        // 设置 KYC_REQUIRED
+        assert_ok!(MemberPallet::set_member_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1, 0b0000_1000,
+        ));
+
+        // 未通过 KYC → auto_register 失败
+        assert_noop!(
+            MemberPallet::auto_register(SHOP_1, &ALICE, None),
+            Error::<Test>::KycNotPassed
+        );
+
+        // 通过 KYC 后 → 成功
+        set_kyc_passed(ENTITY_1, ALICE);
+        assert_ok!(MemberPallet::auto_register(SHOP_1, &ALICE, None));
+        assert!(MemberPallet::is_member_of_shop(SHOP_1, &ALICE));
+    });
+}
+
+#[test]
+fn kyc_required_blocks_auto_register_by_entity() {
+    new_test_ext().execute_with(|| {
+        // 设置 KYC_REQUIRED
+        assert_ok!(MemberPallet::set_member_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1, 0b0000_1000,
+        ));
+
+        // 未通过 KYC → auto_register_by_entity 失败
+        assert_noop!(
+            MemberPallet::auto_register_by_entity(ENTITY_1, &ALICE, None, true),
+            Error::<Test>::KycNotPassed
+        );
+
+        // 通过 KYC 后 → 成功
+        set_kyc_passed(ENTITY_1, ALICE);
+        assert_ok!(MemberPallet::auto_register_by_entity(ENTITY_1, &ALICE, None, true));
+        assert!(EntityMembers::<Test>::contains_key(ENTITY_1, ALICE));
+    });
+}
+
+#[test]
+fn kyc_not_required_allows_register_without_kyc() {
+    new_test_ext().execute_with(|| {
+        // 默认策略（OPEN，无 KYC 要求）→ 直接注册成功
+        assert_ok!(MemberPallet::register_member(
+            RuntimeOrigin::signed(ALICE), SHOP_1, None,
+        ));
+        assert!(MemberPallet::is_member_of_shop(SHOP_1, &ALICE));
+    });
+}
+
+#[test]
+fn kyc_upgrade_required_blocks_auto_upgrade() {
+    new_test_ext().execute_with(|| {
+        // 初始化等级系统
+        assert_ok!(MemberPallet::init_level_system(
+            RuntimeOrigin::signed(OWNER), SHOP_1, true, LevelUpgradeMode::AutoUpgrade,
+        ));
+        assert_ok!(MemberPallet::add_custom_level(
+            RuntimeOrigin::signed(OWNER), SHOP_1,
+            BoundedVec::try_from(b"Base".to_vec()).unwrap(), 0, 0, 0,
+        ));
+        assert_ok!(MemberPallet::add_custom_level(
+            RuntimeOrigin::signed(OWNER), SHOP_1,
+            BoundedVec::try_from(b"VIP1".to_vec()).unwrap(), 100, 500, 0,
+        ));
+
+        // 注册会员
+        assert_ok!(MemberPallet::register_member(
+            RuntimeOrigin::signed(ALICE), SHOP_1, None,
+        ));
+
+        // 设置 KYC_UPGRADE_REQUIRED (bit 4 = 0b0001_0000 = 16)
+        assert_ok!(MemberPallet::set_member_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1, 0b0001_0000,
+        ));
+
+        // 未通过 KYC → apply_upgrade 静默跳过（不升级）
+        assert_ok!(MemberPallet::apply_upgrade_for_test(ENTITY_1, &ALICE, 0, 1, None, false));
+        let member = EntityMembers::<Test>::get(ENTITY_1, ALICE).unwrap();
+        assert_eq!(member.custom_level_id, 0); // 未升级
+
+        // 通过 KYC 后 → 升级成功
+        set_kyc_passed(ENTITY_1, ALICE);
+        assert_ok!(MemberPallet::apply_upgrade_for_test(ENTITY_1, &ALICE, 0, 1, None, false));
+        let member = EntityMembers::<Test>::get(ENTITY_1, ALICE).unwrap();
+        assert_eq!(member.custom_level_id, 1); // 已升级
+    });
+}
+
+#[test]
+fn kyc_upgrade_required_blocks_manual_upgrade() {
+    new_test_ext().execute_with(|| {
+        // 初始化等级系统（手动升级模式）
+        assert_ok!(MemberPallet::init_level_system(
+            RuntimeOrigin::signed(OWNER), SHOP_1, true, LevelUpgradeMode::ManualUpgrade,
+        ));
+        assert_ok!(MemberPallet::add_custom_level(
+            RuntimeOrigin::signed(OWNER), SHOP_1,
+            BoundedVec::try_from(b"Base".to_vec()).unwrap(), 0, 0, 0,
+        ));
+        assert_ok!(MemberPallet::add_custom_level(
+            RuntimeOrigin::signed(OWNER), SHOP_1,
+            BoundedVec::try_from(b"VIP1".to_vec()).unwrap(), 100, 500, 0,
+        ));
+
+        // 注册会员
+        assert_ok!(MemberPallet::register_member(
+            RuntimeOrigin::signed(ALICE), SHOP_1, None,
+        ));
+
+        // 设置 KYC_UPGRADE_REQUIRED
+        assert_ok!(MemberPallet::set_member_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1, 0b0001_0000,
+        ));
+
+        // 未通过 KYC → 手动升级失败
+        assert_noop!(
+            MemberPallet::manual_set_member_level(
+                RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1,
+            ),
+            Error::<Test>::KycRequiredForUpgrade
+        );
+
+        // 通过 KYC 后 → 手动升级成功
+        set_kyc_passed(ENTITY_1, ALICE);
+        assert_ok!(MemberPallet::manual_set_member_level(
+            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1,
+        ));
+        let member = EntityMembers::<Test>::get(ENTITY_1, ALICE).unwrap();
+        assert_eq!(member.custom_level_id, 1);
+    });
+}
+
+#[test]
+fn kyc_combined_with_other_policies() {
+    new_test_ext().execute_with(|| {
+        // KYC_REQUIRED + REFERRAL_REQUIRED = 0b1000 | 0b0010 = 10
+        assert_ok!(MemberPallet::set_member_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1, 0b0000_1010,
+        ));
+
+        // 注册 BOB 作为推荐人（先关闭 KYC 策略）
+        assert_ok!(MemberPallet::set_member_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1, 0,
+        ));
+        assert_ok!(MemberPallet::register_member(
+            RuntimeOrigin::signed(BOB), SHOP_1, None,
+        ));
+        // 恢复策略
+        assert_ok!(MemberPallet::set_member_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1, 0b0000_1010,
+        ));
+
+        // 有推荐人但无 KYC → 失败
+        assert_noop!(
+            MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, Some(BOB)),
+            Error::<Test>::KycNotPassed
+        );
+
+        // 有 KYC 但无推荐人 → 失败
+        set_kyc_passed(ENTITY_1, ALICE);
+        assert_noop!(
+            MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None),
+            Error::<Test>::ReferralRequiredForRegistration
+        );
+
+        // 有 KYC + 有推荐人 → 成功
+        assert_ok!(MemberPallet::register_member(
+            RuntimeOrigin::signed(ALICE), SHOP_1, Some(BOB),
+        ));
+        assert!(MemberPallet::is_member_of_shop(SHOP_1, &ALICE));
+    });
+}
+
+// ============================================================================
+// 封禁执行力测试
+// ============================================================================
+
+#[test]
+fn banned_member_update_spent_silently_skipped() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+        // 先消费一次
+        assert_ok!(MemberPallet::update_spent_by_entity(ENTITY_1, &ALICE, 100u64));
+        let m = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
+        assert_eq!(m.total_spent, 100u64);
+
+        // 封禁后消费被跳过
+        assert_ok!(MemberPallet::ban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, None));
+        assert_ok!(MemberPallet::update_spent_by_entity(ENTITY_1, &ALICE, 200u64));
+        let m = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
+        assert_eq!(m.total_spent, 100u64); // 未增加
+
+        // 解封后消费恢复
+        assert_ok!(MemberPallet::unban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE));
+        assert_ok!(MemberPallet::update_spent_by_entity(ENTITY_1, &ALICE, 300u64));
+        let m = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
+        assert_eq!(m.total_spent, 400u64); // 100 + 300
+    });
+}
+
+#[test]
+fn banned_member_auto_upgrade_silently_skipped() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+        // 初始化等级系统 + 添加两个等级
+        assert_ok!(MemberPallet::init_level_system(
+            RuntimeOrigin::signed(OWNER), SHOP_1, true, LevelUpgradeMode::AutoUpgrade,
+        ));
+        let name0: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
+            b"Base".to_vec().try_into().unwrap();
+        let name1: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
+            b"VIP1".to_vec().try_into().unwrap();
+        assert_ok!(MemberPallet::add_custom_level(
+            RuntimeOrigin::signed(OWNER), SHOP_1, name0, 0u64, 0, 0,
+        ));
+        assert_ok!(MemberPallet::add_custom_level(
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u64, 0, 0,
+        ));
+
+        // 封禁
+        assert_ok!(MemberPallet::ban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, None));
+
+        // 尝试 apply_upgrade → 静默跳过
+        assert_ok!(MemberPallet::apply_upgrade_for_test(ENTITY_1, &ALICE, 1, 1, None, false));
+        let m = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
+        assert_eq!(m.custom_level_id, 0); // 未升级
+    });
+}
+
+#[test]
+fn banned_member_manual_upgrade_fails() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+        // 初始化等级系统（ManualUpgrade 模式）
+        assert_ok!(MemberPallet::init_level_system(
+            RuntimeOrigin::signed(OWNER), SHOP_1, true, LevelUpgradeMode::ManualUpgrade,
+        ));
+        let name0: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
+            b"Base".to_vec().try_into().unwrap();
+        let name1: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
+            b"VIP1".to_vec().try_into().unwrap();
+        assert_ok!(MemberPallet::add_custom_level(
+            RuntimeOrigin::signed(OWNER), SHOP_1, name0, 0u64, 0, 0,
+        ));
+        assert_ok!(MemberPallet::add_custom_level(
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u64, 0, 0,
+        ));
+
+        // 封禁
+        assert_ok!(MemberPallet::ban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, None));
+
+        // 手动升级 → 显式错误
+        assert_noop!(
+            MemberPallet::manual_set_member_level(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1),
+            Error::<Test>::MemberIsBanned
+        );
+
+        // 解封后可以升级
+        assert_ok!(MemberPallet::unban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE));
+        assert_ok!(MemberPallet::manual_set_member_level(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1));
+        let m = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
+        assert_eq!(m.custom_level_id, 1);
+    });
+}
+
+// ==================== EntityLocked 回归测试 ====================
+
+#[test]
+fn entity_locked_rejects_init_level_system() {
+    new_test_ext().execute_with(|| {
+        set_entity_locked(ENTITY_1);
+        assert_noop!(
+            MemberPallet::init_level_system(
+                RuntimeOrigin::signed(OWNER), SHOP_1, true, LevelUpgradeMode::AutoUpgrade,
+            ),
+            Error::<Test>::EntityLocked
+        );
+    });
+}
+
+#[test]
+fn entity_locked_rejects_approve_member() {
+    new_test_ext().execute_with(|| {
+        // 设置需审核的会员政策 (APPROVAL_REQUIRED = 0b0000_0100)
+        assert_ok!(MemberPallet::set_member_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1, 0b0000_0100,
+        ));
+        // 注册会员（进入待审核状态）
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+        // 锁定后无法审核
+        set_entity_locked(ENTITY_1);
+        assert_noop!(
+            MemberPallet::approve_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE),
+            Error::<Test>::EntityLocked
+        );
+    });
+}
+
+#[test]
+fn entity_locked_rejects_ban_member() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+        set_entity_locked(ENTITY_1);
+        assert_noop!(
+            MemberPallet::ban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, None),
+            Error::<Test>::EntityLocked
+        );
+    });
+}
+
+#[test]
+fn entity_locked_rejects_set_member_policy() {
+    new_test_ext().execute_with(|| {
+        set_entity_locked(ENTITY_1);
+        assert_noop!(
+            MemberPallet::set_member_policy(
+                RuntimeOrigin::signed(OWNER), SHOP_1, 0b0000_0100,
+            ),
+            Error::<Test>::EntityLocked
+        );
     });
 }

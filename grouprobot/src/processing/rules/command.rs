@@ -146,6 +146,7 @@ impl Rule for CommandRule {
                 reason: Some(format!("Unmuted by {}", ctx.sender_name)),
                 message: None,
                 duration_secs: None,
+                inline_keyboard: None,
             }),
             "unban" => Some(ActionDecision::unban(target, &format!("Unbanned by {}", ctx.sender_name))),
             "warn" => {
@@ -179,6 +180,9 @@ mod tests {
             command: Some(cmd.into()),
             command_args: args.into_iter().map(|s| s.to_string()).collect(),
             is_join_request: false,
+            is_new_member: false,
+            is_left_member: false,
+            service_message_id: None,
             is_admin: true,
             message_type: None,
             callback_query_id: None,

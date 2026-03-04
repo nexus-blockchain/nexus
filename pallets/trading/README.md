@@ -53,7 +53,7 @@ pallet-trading-common（被外部模块使用）
   ├── pallet-storage-service  → PricingProvider + DepositCalculator (保证金)
   ├── pallet-entity-registry  → PricingProvider (开店初始资金)
   ├── pallet-entity-market    → PricingProvider (商品押金)
-  └── pallet-entity-service   → PricingProvider (服务押金)
+  └── pallet-entity-product   → PricingProvider (服务押金)
 
 Runtime 适配器（mod.rs 中实现）:
   TradingPricingProvider   → 优先 1h TWAP → LastTradePrice → initial_price

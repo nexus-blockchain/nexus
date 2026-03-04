@@ -51,8 +51,9 @@ async function entityDisclosure(ctx: FlowContext): Promise<void> {
 
   const createEntityTx = (api.tx as any).entityRegistry.createEntity(
     'E9 Disclosure Test Entity',
-    'QmE9DisclosureDesc',
-    null,
+    null,                  // logoCid
+    'QmE9DisclosureDesc', // descriptionCid
+    null,                  // referrer
   );
   const entityResult = await ctx.send(createEntityTx, bob, '创建实体', 'bob');
   assertTxSuccess(entityResult, '创建实体');
@@ -67,9 +68,9 @@ async function entityDisclosure(ctx: FlowContext): Promise<void> {
 
   const configTx = (api.tx as any).entityDisclosure.configureDisclosure(
     entityId,
-    true,     // require_approval
-    7200,     // blackout_duration (blocks)
-    null,     // max_disclosures
+    'Full',    // level
+    true,      // insiderTradingControl
+    7200,      // blackoutAfter
   );
   const configResult = await ctx.send(configTx, bob, '配置披露设置', 'bob');
   assertTxSuccess(configResult, '配置披露');
@@ -78,11 +79,9 @@ async function entityDisclosure(ctx: FlowContext): Promise<void> {
 
   const publishTx = (api.tx as any).entityDisclosure.publishDisclosure(
     entityId,
-    0,                        // disclosure_type: Financial=0
-    'QmDisclosureTitleCid',   // title_cid
-    'QmDisclosureContentCid', // content_cid
-    null,                     // attachments
-    null,                     // effective_at
+    'Financial',              // disclosureType
+    'QmDisclosureContentCid', // contentCid
+    'QmDisclosureSummary',    // summaryCid
   );
   const publishResult = await ctx.send(publishTx, bob, 'Bob 发布披露', 'bob');
   assertTxSuccess(publishResult, '发布披露');
@@ -97,12 +96,9 @@ async function entityDisclosure(ctx: FlowContext): Promise<void> {
   // ─── Step 4: 更正披露 ─────────────────────────────────────
 
   const correctTx = (api.tx as any).entityDisclosure.correctDisclosure(
-    entityId,
     disclosureId,
-    'QmCorrectedTitleCid',
-    'QmCorrectedContentCid',
-    null,
-    'QmCorrectionReasonCid',  // reason_cid
+    'QmCorrectedContentCid',   // contentCid
+    'QmCorrectedSummary',      // summaryCid
   );
   const correctResult = await ctx.send(correctTx, bob, 'Bob 更正披露', 'bob');
   assertTxSuccess(correctResult, '更正披露');
@@ -120,7 +116,6 @@ async function entityDisclosure(ctx: FlowContext): Promise<void> {
   // ─── Step 5: 撤回披露 ─────────────────────────────────────
 
   const withdrawTx = (api.tx as any).entityDisclosure.withdrawDisclosure(
-    entityId,
     correctedDisclosureId,
   );
   const withdrawResult = await ctx.send(withdrawTx, bob, 'Bob 撤回披露', 'bob');
@@ -132,7 +127,7 @@ async function entityDisclosure(ctx: FlowContext): Promise<void> {
 
   // ─── Step 6: 清理披露历史 ─────────────────────────────────
 
-  const cleanupDiscTx = (api.tx as any).entityDisclosure.cleanupDisclosureHistory(entityId);
+  const cleanupDiscTx = (api.tx as any).entityDisclosure.cleanupDisclosureHistory(entityId, correctedDisclosureId);
   const cleanupDiscResult = await ctx.send(cleanupDiscTx, bob, 'Bob 清理披露历史', 'bob');
   if (cleanupDiscResult.success) {
     await ctx.check('披露历史已清理', 'bob', () => {});
@@ -145,7 +140,7 @@ async function entityDisclosure(ctx: FlowContext): Promise<void> {
   const addInsiderTx = (api.tx as any).entityDisclosure.addInsider(
     entityId,
     charlie.address,
-    'CFO',           // role
+    'Executive',     // role (InsiderRole enum)
   );
   const addInsiderResult = await ctx.send(addInsiderTx, bob, 'Bob 添加 Charlie 为内幕人员', 'bob');
   assertTxSuccess(addInsiderResult, '添加内幕人员');
@@ -156,7 +151,7 @@ async function entityDisclosure(ctx: FlowContext): Promise<void> {
 
   // ─── Step 8: 开始黑窗口期 ─────────────────────────────────
 
-  const startBlackoutTx = (api.tx as any).entityDisclosure.startBlackout(entityId);
+  const startBlackoutTx = (api.tx as any).entityDisclosure.startBlackout(entityId, 100);
   const startBlackoutResult = await ctx.send(startBlackoutTx, bob, 'Bob 开始黑窗口期', 'bob');
   assertTxSuccess(startBlackoutResult, '开始黑窗口期');
 
@@ -183,11 +178,10 @@ async function entityDisclosure(ctx: FlowContext): Promise<void> {
 
   const publishAnnTx = (api.tx as any).entityDisclosure.publishAnnouncement(
     entityId,
-    'QmAnnouncementTitleCid',
-    'QmAnnouncementContentCid',
-    0,      // category: General=0
-    null,   // expires_at
-    null,   // attachments
+    'General',                   // category
+    'QmAnnouncementTitleCid',    // title
+    'QmAnnouncementContentCid',  // contentCid
+    null,                        // expiresAt
   );
   const publishAnnResult = await ctx.send(publishAnnTx, bob, 'Bob 发布公告', 'bob');
   assertTxSuccess(publishAnnResult, '发布公告');
@@ -202,12 +196,11 @@ async function entityDisclosure(ctx: FlowContext): Promise<void> {
   // ─── Step 12: 更新公告 ────────────────────────────────────
 
   const updateAnnTx = (api.tx as any).entityDisclosure.updateAnnouncement(
-    entityId,
     announcementId,
-    'QmUpdatedAnnTitle',
-    'QmUpdatedAnnContent',
-    null,   // category
-    null,   // expires_at
+    'QmUpdatedAnnTitle',    // title
+    'QmUpdatedAnnContent',  // contentCid
+    null,                   // category
+    null,                   // expiresAt
   );
   const updateAnnResult = await ctx.send(updateAnnTx, bob, 'Bob 更新公告', 'bob');
   assertTxSuccess(updateAnnResult, '更新公告');
@@ -226,7 +219,6 @@ async function entityDisclosure(ctx: FlowContext): Promise<void> {
   // ─── Step 14: 撤回公告 ────────────────────────────────────
 
   const withdrawAnnTx = (api.tx as any).entityDisclosure.withdrawAnnouncement(
-    entityId,
     announcementId,
   );
   const withdrawAnnResult = await ctx.send(withdrawAnnTx, bob, 'Bob 撤回公告', 'bob');
@@ -234,7 +226,7 @@ async function entityDisclosure(ctx: FlowContext): Promise<void> {
 
   // ─── Step 15: 清理公告历史 ────────────────────────────────
 
-  const cleanupAnnTx = (api.tx as any).entityDisclosure.cleanupAnnouncementHistory(entityId);
+  const cleanupAnnTx = (api.tx as any).entityDisclosure.cleanupAnnouncementHistory(entityId, announcementId);
   const cleanupAnnResult = await ctx.send(cleanupAnnTx, bob, 'Bob 清理公告历史', 'bob');
   if (cleanupAnnResult.success) {
     await ctx.check('公告历史已清理', 'bob', () => {});
@@ -245,7 +237,7 @@ async function entityDisclosure(ctx: FlowContext): Promise<void> {
   // ─── Step 16: [错误路径] Dave 发布披露 ─────────────────────
 
   const davePublishTx = (api.tx as any).entityDisclosure.publishDisclosure(
-    entityId, 0, 'QmFakeTitle', 'QmFakeContent', null, null,
+    entityId, 'Financial', 'QmFakeContent', null,
   );
   const davePublishResult = await ctx.send(davePublishTx, dave, '[错误路径] Dave 发布披露', 'dave');
   await ctx.check('非所有者发布应失败', 'dave', () => {
@@ -256,7 +248,7 @@ async function entityDisclosure(ctx: FlowContext): Promise<void> {
 
   // 先让 Bob 发布一个新的披露
   const newDiscTx = (api.tx as any).entityDisclosure.publishDisclosure(
-    entityId, 0, 'QmNewTitle', 'QmNewContent', null, null,
+    entityId, 'Financial', 'QmNewContent', null,
   );
   const newDiscResult = await ctx.send(newDiscTx, bob, 'Bob 发布新披露(供错误路径)', 'bob');
   if (newDiscResult.success) {
@@ -265,7 +257,7 @@ async function entityDisclosure(ctx: FlowContext): Promise<void> {
     );
     const newDiscId = newDiscEvent?.data?.disclosureId ?? newDiscEvent?.data?.[0];
 
-    const daveWithdrawTx = (api.tx as any).entityDisclosure.withdrawDisclosure(entityId, newDiscId);
+    const daveWithdrawTx = (api.tx as any).entityDisclosure.withdrawDisclosure(newDiscId);
     const daveWithdrawResult = await ctx.send(daveWithdrawTx, dave, '[错误路径] Dave 撤回他人披露', 'dave');
     await ctx.check('非所有者撤回应失败', 'dave', () => {
       assertTxFailed(daveWithdrawResult, undefined, '非所有者撤回');

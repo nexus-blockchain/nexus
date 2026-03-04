@@ -50,7 +50,7 @@ impl Rule for BlacklistRule {
     fn name(&self) -> &'static str { "blacklist" }
 
     async fn evaluate(&self, ctx: &MessageContext, _store: &LocalStore) -> Option<ActionDecision> {
-        if ctx.is_command || ctx.message_text.is_empty() {
+        if ctx.is_command || ctx.is_admin || ctx.message_text.is_empty() {
             return None;
         }
 
@@ -83,6 +83,9 @@ mod tests {
             command: None,
             command_args: vec![],
             is_join_request: false,
+            is_new_member: false,
+            is_left_member: false,
+            service_message_id: None,
             is_admin: false,
             message_type: None,
             callback_query_id: None,

@@ -113,10 +113,7 @@ impl Rule for CaptchaRule {
 
         let mut decision = ActionDecision::send_message(&ctx.group_id, &text);
         decision.duration_secs = Some(self.timeout_secs); // 供外部定时器参考
-        // 将 keyboard 附加到 ExecuteAction (通过 action.rs 的 inline_keyboard 字段传递)
-        // 我们在这里用一种约定: 将 keyboard JSON 编码到 reason 字段, router 转换时提取
-        // 更好的方式: 直接在 ActionDecision 中增加 inline_keyboard 字段
-        decision.reason = Some(serde_json::to_string(&keyboard).unwrap_or_default());
+        decision.inline_keyboard = Some(serde_json::to_string(&keyboard).unwrap_or_default());
 
         Some(decision)
     }

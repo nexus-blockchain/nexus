@@ -246,10 +246,17 @@ pub trait Config: frame_system::Config {
 
 | call_index | 方法 | 权限 | 说明 |
 |------------|------|------|------|
-| 0 | `set_pool_reward_config` | Root | 设置沉淀池奖励配置（保留现有 `token_pool_enabled`） |
+| 0 | `set_pool_reward_config` | Entity Owner / Admin(COMMISSION_MANAGE) | 设置沉淀池奖励配置（保留现有 `token_pool_enabled`） |
 | 1 | `claim_pool_reward` | Signed（会员） | 领取当前轮次奖励（NEX + Token） |
-| 2 | `force_new_round` | Root | 强制开启新轮次（需 Entity 活跃） |
-| 3 | `set_token_pool_enabled` | Root | 启用/禁用 Token 池分配 |
+| 2 | `force_new_round` | Entity Owner / Admin(COMMISSION_MANAGE) | 开启新轮次（需 Entity 活跃） |
+| 3 | `set_token_pool_enabled` | Entity Owner / Admin(COMMISSION_MANAGE) | 启用/禁用 Token 池分配 |
+| 4 | `force_set_pool_reward_config` | Root | [Root] 强制设置配置（绕过权限和 EntityLocked） |
+| 5 | `force_set_token_pool_enabled` | Root | [Root] 强制启用/禁用 Token 池（绕过权限和 EntityLocked） |
+| 6 | `force_start_new_round` | Root | [Root] 强制开启新轮次（绕过权限和 EntityLocked） |
+| 7 | `clear_pool_reward_config` | Entity Owner / Admin(COMMISSION_MANAGE) | 清除配置（不清理历史记录） |
+| 8 | `force_clear_pool_reward_config` | Root | [Root] 强制清除配置（绕过权限和 EntityLocked，X2 防幻影事件） |
+
+> **权限模型说明：** 日常配置操作由 Entity Owner 或拥有 `COMMISSION_MANAGE` 权限的 Admin 执行，受 EntityLocked 保护。Root 可通过 `force_*` extrinsics 或 `PoolRewardPlanWriter` trait 绕过锁定和权限检查。
 
 ### set_pool_reward_config 校验规则
 
@@ -265,7 +272,7 @@ pub trait Config: frame_system::Config {
 
 ```
 1. Entity 检查: is_entity_active
-2. 资格检查: is_member + is_activated + ParticipationGuard::can_participate
+2. 资格检查: is_member + ParticipationGuard::can_participate
 3. 配置检查: 用户 custom_level_id 在 level_ratios 中
 4. 轮次检查: 当前轮次有效？过期则自动创建新轮
 5. 防双领: last_claimed_round < current_round_id
@@ -283,6 +290,7 @@ pub trait Config: frame_system::Config {
 | `build_level_snapshots<B>(pool_balance, &[(u8, u16, u32)])` | 泛型快照构建，NEX/Token 通用，避免重复代码 |
 | `ensure_current_round(entity_id, config, now)` | 若当前轮次有效则返回，否则调用 `create_new_round` |
 | `create_new_round(entity_id, config, now)` | 缓存等级会员数 → 构建 NEX/Token 快照 → 写入存储 |
+| `ensure_owner_or_admin(who, entity_id)` | 检查 Entity 活跃 + 调用者是 Owner 或 Admin(COMMISSION_MANAGE) |
 
 ## Trait 实现
 
@@ -322,7 +330,8 @@ trait PoolRewardPlanWriter {
 | `DuplicateLevelId` | 配置中存在重复的 level_id |
 | `InvalidRoundDuration` | round_duration 为 0 |
 | `NotMember` | 调用者不是该 Entity 的会员 |
-| `MemberNotActivated` | 会员未激活 |
+| `NotAuthorized` | 调用者不是 Entity Owner 或授权管理员 |
+| `EntityLocked` | 实体已被全局锁定，所有配置操作不可用 |
 | `LevelNotConfigured` | 用户等级未在配置中 |
 | `AlreadyClaimed` | 本轮已领取过 |
 | `LevelQuotaExhausted` | 该等级本轮领取名额已满 |
@@ -333,6 +342,8 @@ trait PoolRewardPlanWriter {
 | `RoundIdOverflow` | round_id 已达 u64::MAX，无法创建新轮次 |
 | `EntityNotActive` | Entity 不存在或未激活 |
 | `ParticipationRequirementNotMet` | 账户未满足 Entity 参与要求（如 KYC） |
+
+> **注意：** `is_activated` 不在 `MemberProvider` trait 中，会员激活状态由 `is_member` 隐含覆盖。
 
 ## Token 双池行为细节
 
@@ -368,7 +379,7 @@ pallet-entity-common = { path = "../../common" }
 pallet-commission-common = { path = "../common" }
 ```
 
-## 测试覆盖（71 tests）
+## 测试覆盖（94 tests）
 
 ### 配置测试（7）
 
@@ -379,7 +390,7 @@ pallet-commission-common = { path = "../common" }
 | `set_config_rejects_zero_ratio` | 单个比率为 0 |
 | `set_config_rejects_duplicate_level` | 重复 level_id |
 | `set_config_rejects_zero_duration` | round_duration = 0 |
-| `set_config_requires_root` | 非 Root 调用被拒 |
+| `set_config_rejects_unauthorized` | 非 Owner/Admin 调用被拒 |
 | `set_config_rejects_ratio_over_10000` | ratio > 10000 拒绝 |
 
 ### 轮次测试（4）
@@ -389,7 +400,7 @@ pallet-commission-common = { path = "../common" }
 | `first_claim_creates_round` | 首次 claim 触发轮次创建 |
 | `round_persists_within_duration` | 轮次窗口内复用同一轮 |
 | `round_rolls_over_after_expiry` | 过期后自动创建新轮 |
-| `force_new_round_works` | Root 强制新轮 |
+| `force_new_round_works` | Owner 强制新轮 |
 
 ### 领取测试（9）
 
@@ -455,14 +466,13 @@ pallet-commission-common = { path = "../common" }
 | `m2_claim_rejects_entity_not_active` | Banned/Closed Entity 的会员不能领取 |
 | `m2_claim_works_when_entity_active` | 正常 Entity 领取不受影响 |
 
-### 边界与集成测试（12）
+### 边界与集成测试（10）
 
 | 测试 | 覆盖场景 |
 |------|----------|
-| `claim_rejects_inactive_member` | 未激活会员拒绝领取 |
-| `force_new_round_requires_root` | 非 Root 拒绝强制新轮 |
+| `force_new_round_rejects_unauthorized` | 非 Owner/Admin 拒绝强制新轮 |
 | `force_new_round_rejects_no_config` | 无配置时拒绝强制新轮 |
-| `set_token_pool_enabled_requires_root` | 非 Root 拒绝设置 Token 开关 |
+| `set_token_pool_enabled_rejects_unauthorized` | 非 Owner/Admin 拒绝设置 Token 开关 |
 | `claim_zero_pool_balance_nothing_to_claim` | 零池余额返回 NothingToClaim |
 | `claim_insufficient_pool_after_snapshot` | 快照后池被消耗返回 InsufficientPool |
 | `multi_entity_isolation` | 多实体互不影响 |
@@ -627,3 +637,113 @@ pallet-commission-common = { path = "../common" }
 | `m3_r5_clear_config_emits_cleared_event` | M3-R5 clear_config 发出 Cleared 事件 |
 
 **累计测试**: 71 (was 68) ✅ · `cargo check -p pallet-commission-pool-reward` ✅
+
+### P0 权限下放
+
+**日期**: 2026-03
+
+#### 修改
+
+| ID | 类型 | 描述 | 修复 |
+|----|------|------|------|
+| P0-1 | Feature | `set_pool_reward_config` / `force_new_round` / `set_token_pool_enabled` 从 Root-only 改为 Entity Owner + Admin(COMMISSION_MANAGE) | `ensure_root` → `ensure_signed` + `ensure_owner_or_admin` helper |
+| P0-2 | Feature | 新增 `NotAuthorized` 错误 | 权限检查失败时返回 |
+| P0-3 | Doc | README `is_activated` 检查不存在于 `MemberProvider` trait | 修正文档，移除虚假流程步骤 |
+| P0-4 | Weight | `weights.rs` 3 个 extrinsic +2 reads (entity_active + entity_owner) | 更新 DB 计数和 ref_time |
+
+#### 新增内部方法
+
+| 方法 | 说明 |
+|------|------|
+| `ensure_owner_or_admin(who, entity_id)` | 检查 Entity 活跃 + 调用者是 Owner 或 Admin(COMMISSION_MANAGE) |
+
+#### 新增测试 (7)
+
+| 测试名 | 覆盖 |
+|--------|------|
+| `p0_admin_can_set_pool_reward_config` | Admin(COMMISSION_MANAGE) 可配置 |
+| `p0_admin_without_commission_manage_rejected` | 无权限 Admin 被拒 |
+| `p0_admin_can_force_new_round` | Admin 可强制新轮 |
+| `p0_admin_can_set_token_pool_enabled` | Admin 可设 Token 开关 |
+| `p0_root_origin_rejected` | Root origin 被 ensure_signed 拒绝 |
+| `p0_owner_rejected_for_inactive_entity` | 非活跃 Entity 的 Owner 被拒 |
+| + 2 existing tests renamed | `requires_root` → `rejects_unauthorized` |
+
+#### Mock 变更
+
+- 新增 `ENTITY_ADMINS` thread_local + `set_entity_admin` helper
+- `MockEntityProvider` 新增 `is_entity_admin` impl
+- 新增 `OWNER = 999` 常量，所有 extrinsic 测试改用 `RuntimeOrigin::signed(OWNER)`
+
+**累计测试**: 76 (was 71) ✅ · `cargo check -p pallet-commission-pool-reward` ✅
+
+### P1 EntityLocked + Root force_*
+
+**日期**: 2026-03
+
+#### 修改
+
+| ID | 类型 | 描述 | 修复 |
+|----|------|------|------|
+| P1-1 | Feature | 3 个 Owner/Admin extrinsic 缺少 `is_entity_locked` 保护，锁定 Entity 仍可配置 | 添加 `ensure!(!is_entity_locked)` guard |
+| P1-2 | Feature | Root 缺少紧急覆写路径（其他插件均有 force_* 变体） | 新增 3 个 `force_*` extrinsics (call_index 4/5/6) |
+| P1-3 | Error | 新增 `EntityLocked` 错误类型 | 配置操作在锁定时返回 |
+
+#### 新增 Extrinsics
+
+| call_index | 方法 | 权限 | 说明 |
+|------------|------|------|------|
+| 4 | `force_set_pool_reward_config` | Root | 绕过 Owner/Admin + EntityLocked，共用校验逻辑 |
+| 5 | `force_set_token_pool_enabled` | Root | 绕过 Owner/Admin + EntityLocked，幂等保护 |
+| 6 | `force_start_new_round` | Root | 绕过 Owner/Admin + EntityLocked，仍检查 entity_active |
+
+#### 新增测试 (10)
+
+| 测试名 | 覆盖 |
+|--------|------|
+| `p1_locked_entity_rejects_set_config` | Owner 在锁定 Entity 上被拒 |
+| `p1_locked_entity_rejects_force_new_round` | Owner 在锁定 Entity 上被拒 |
+| `p1_locked_entity_rejects_set_token_pool_enabled` | Owner 在锁定 Entity 上被拒 |
+| `p1_root_force_set_config_bypasses_lock` | Root force 绕过锁定 |
+| `p1_root_force_set_token_pool_enabled_bypasses_lock` | Root force 绕过锁定 |
+| `p1_root_force_start_new_round_bypasses_lock` | Root force 绕过锁定 |
+| `p1_force_set_config_rejects_non_root` | 非 Root 调用 force 被拒 |
+| `p1_force_set_token_pool_enabled_rejects_non_root` | 非 Root 调用 force 被拒 |
+| `p1_force_start_new_round_rejects_non_root` | 非 Root 调用 force 被拒 |
+| `p1_admin_rejected_on_locked_entity` | Admin 在锁定 Entity 上也被拒 |
+
+**累计测试**: 86 (was 76) ✅ · `cargo check -p pallet-commission-pool-reward` ✅
+
+### P2 clear_pool_reward_config + force_clear
+
+**日期**: 2026-03
+
+#### 修改
+
+| ID | 类型 | 描述 | 修复 |
+|----|------|------|------|
+| P2-1 | Feature | 缺少 Owner/Admin 清除配置 extrinsic（其他插件均有 clear_*） | 新增 `clear_pool_reward_config` (call_index 7) |
+| P2-2 | Feature | 缺少 Root 紧急清除路径 | 新增 `force_clear_pool_reward_config` (call_index 8，X2 防幻影事件) |
+| P2-3 | Weight | 新增 `clear_pool_reward_config` 权重函数 | 4R/3W, 40M ref_time |
+
+#### 新增 Extrinsics
+
+| call_index | 方法 | 权限 | 说明 |
+|------------|------|------|------|
+| 7 | `clear_pool_reward_config` | Owner/Admin + EntityLocked | 移除配置 + 失效轮次，不清理历史记录 |
+| 8 | `force_clear_pool_reward_config` | Root | 绕过权限+锁定，无配置时静默成功 |
+
+#### 新增测试 (8)
+
+| 测试名 | 覆盖 |
+|--------|------|
+| `p2_clear_pool_reward_config_works` | Owner 清除配置成功 |
+| `p2_clear_config_rejects_no_config` | 无配置时 ConfigNotFound |
+| `p2_clear_config_rejects_unauthorized` | 非授权用户被拒 |
+| `p2_clear_config_rejects_locked_entity` | 锁定 Entity 被拒 |
+| `p2_admin_can_clear_config` | Admin 可清除配置 |
+| `p2_root_force_clear_bypasses_lock` | Root force 绕过锁定 |
+| `p2_root_force_clear_no_config_silent` | 无配置时静默成功 |
+| `p2_force_clear_rejects_non_root` | 非 Root 被拒 |
+
+**累计测试**: 94 (was 86) ✅ · `cargo check -p pallet-commission-pool-reward` ✅

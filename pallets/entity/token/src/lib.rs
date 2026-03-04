@@ -49,7 +49,7 @@ pub mod pallet {
         BoundedVec,
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{DividendConfig, EntityProvider, TokenType, TransferRestrictionMode};
+    use pallet_entity_common::{AdminPermission, DividendConfig, DisclosureProvider, EntityProvider, TokenType, TransferRestrictionMode};
     use sp_runtime::traits::{AtLeast32BitUnsigned, Saturating, Zero};
 
     pub use crate::weights::WeightInfo;
@@ -154,6 +154,9 @@ pub mod pallet {
         /// 成员查询接口（可选）
         type MemberProvider: EntityMemberProvider<Self::AccountId>;
 
+        /// 披露查询接口（黑窗口期内幕人员交易限制）
+        type DisclosureProvider: DisclosureProvider<Self::AccountId>;
+
         /// Weight information for extrinsics in this pallet.
         type WeightInfo: WeightInfo;
     }
@@ -185,7 +188,10 @@ pub mod pallet {
         fn is_member(_entity_id: u64, _account: &AccountId) -> bool { true }
     }
 
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     // ==================== 存储项 ====================
@@ -319,6 +325,26 @@ pub mod pallet {
         ValueQuery,
     >;
 
+    // ========== P1/P3 紧急管控存储项 ==========
+
+    /// P1: 实体转账冻结标记 (entity_id) -> ()
+    /// 存在即表示该实体的代币转账已被冻结，分红领取不受影响
+    #[pallet::storage]
+    #[pallet::getter(fn transfers_frozen)]
+    pub type TransfersFrozen<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // entity_id
+        (),
+        OptionQuery,
+    >;
+
+    /// P3: 全平台代币紧急暂停开关
+    /// true = 所有涉及 pallet-assets 的操作被暂停
+    #[pallet::storage]
+    #[pallet::getter(fn global_token_paused)]
+    pub type GlobalTokenPaused<T: Config> = StorageValue<_, bool, ValueQuery>;
+
     // ==================== 事件 ====================
 
     #[pallet::event]
@@ -416,6 +442,27 @@ pub mod pallet {
             added: u32,
             removed: u32,
         },
+        // ========== P1/P2/P3 紧急管控事件 ==========
+        /// P1: 代币已被平台强制禁用
+        TokenForceDisabled { entity_id: u64 },
+        /// P1: 代币转账已被冻结（分红领取不受影响）
+        TransfersFrozenEvent { entity_id: u64 },
+        /// P1: 代币转账冻结已解除
+        TransfersUnfrozen { entity_id: u64 },
+        /// P2: 代币已被平台强制销毁
+        TokensForceBurned {
+            entity_id: u64,
+            from: T::AccountId,
+            amount: T::AssetBalance,
+        },
+        /// P3: 全平台代币暂停状态变更
+        GlobalTokenPauseSet { paused: bool },
+        /// H4: 治理提案销毁代币
+        TokensGovernanceBurned {
+            entity_id: u64,
+            from: T::AccountId,
+            amount: T::AssetBalance,
+        },
     }
 
     // ==================== 错误 ====================
@@ -498,6 +545,23 @@ pub mod pallet {
         EmptySymbol,
         /// 代币总数计数溢出
         TokenCountOverflow,
+        /// 内幕人员黑窗口期内禁止交易
+        InsiderTradingRestricted,
+        /// 实体已被全局锁定，所有配置操作不可用
+        EntityLocked,
+        /// 调用者既非实体所有者，也非拥有 TOKEN_MANAGE 权限的管理员
+        NotAuthorized,
+        // ========== P1/P2/P3 紧急管控错误 ==========
+        /// P1: 该实体的代币转账已被冻结
+        TokenTransfersFrozen,
+        /// P3: 全平台代币操作已暂停
+        GlobalPaused,
+        /// P1: 代币已处于禁用状态
+        TokenAlreadyDisabled,
+        /// P1: 转账未被冻结，无需解冻
+        TransfersNotFrozen,
+        /// P1: 转账已被冻结，无需重复冻结
+        TransfersAlreadyFrozen,
     }
 
     // ==================== Extrinsics ====================
@@ -526,11 +590,13 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证实体存在且调用者是所有者
-            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+            // P3: 全平台暂停检查
+            ensure!(!GlobalTokenPaused::<T>::get(), Error::<T>::GlobalPaused);
+
+            // P0: 验证实体存在且调用者是所有者或 TOKEN_MANAGE 管理员
             ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotEntityOwner);
+            Self::ensure_owner_or_admin(&who, entity_id)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             // 检查代币是否已存在
             ensure!(!EntityTokenConfigs::<T>::contains_key(entity_id), Error::<T>::TokenAlreadyExists);
@@ -613,9 +679,9 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证实体所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotEntityOwner);
+            // P0: 验证调用者是所有者或 TOKEN_MANAGE 管理员
+            Self::ensure_owner_or_admin(&who, entity_id)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             EntityTokenConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
                 let config = maybe_config.as_mut().ok_or(Error::<T>::TokenNotEnabled)?;
@@ -664,9 +730,12 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证实体所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotEntityOwner);
+            // P3: 全平台暂停检查
+            ensure!(!GlobalTokenPaused::<T>::get(), Error::<T>::GlobalPaused);
+
+            // P0: 验证调用者是所有者或 TOKEN_MANAGE 管理员
+            Self::ensure_owner_or_admin(&who, entity_id)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             // 检查代币是否启用
             let config = EntityTokenConfigs::<T>::get(entity_id).ok_or(Error::<T>::TokenNotEnabled)?;
@@ -703,6 +772,11 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
+            // P3: 全平台暂停检查
+            ensure!(!GlobalTokenPaused::<T>::get(), Error::<T>::GlobalPaused);
+            // P1: 实体转账冻结检查
+            ensure!(!TransfersFrozen::<T>::contains_key(entity_id), Error::<T>::TokenTransfersFrozen);
+
             // 检查代币配置
             let config = EntityTokenConfigs::<T>::get(entity_id).ok_or(Error::<T>::TokenNotEnabled)?;
             ensure!(config.enabled, Error::<T>::TokenNotEnabled);
@@ -715,6 +789,12 @@ pub mod pallet {
 
             // Phase 8: 检查转账限制
             Self::check_transfer_restriction(entity_id, &config, &to)?;
+
+            // P0-a6: 内幕人员黑窗口期限制
+            ensure!(
+                T::DisclosureProvider::can_insider_trade(entity_id, &who),
+                Error::<T>::InsiderTradingRestricted
+            );
 
             // H4: 检查可用余额（扣除锁仓和预留）
             let asset_id = Self::entity_to_asset_id(entity_id);
@@ -750,9 +830,9 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotEntityOwner);
+            // P0: 验证调用者是所有者或 TOKEN_MANAGE 管理员
+            Self::ensure_owner_or_admin(&who, entity_id)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             // 检查代币是否存在
             EntityTokenConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
@@ -786,9 +866,9 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotEntityOwner);
+            // P0: 验证调用者是所有者或 TOKEN_MANAGE 管理员
+            Self::ensure_owner_or_admin(&who, entity_id)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             // M1-R3: 分发分红创建铸造义务，需 Entity 处于活跃状态
             ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
 
@@ -877,6 +957,9 @@ pub mod pallet {
             entity_id: u64,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+
+            // P3: 全平台暂停检查（claim 会铸造代币，需要 pallet-assets）
+            ensure!(!GlobalTokenPaused::<T>::get(), Error::<T>::GlobalPaused);
 
             let pending = PendingDividends::<T>::get(entity_id, &who);
             ensure!(!pending.is_zero(), Error::<T>::NoDividendToClaim);
@@ -1017,9 +1100,9 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotEntityOwner);
+            // P0: 验证调用者是所有者或 TOKEN_MANAGE 管理员
+            Self::ensure_owner_or_admin(&who, entity_id)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             let old_type = EntityTokenConfigs::<T>::try_mutate(entity_id, |maybe_config| -> Result<TokenType, DispatchError> {
                 let config = maybe_config.as_mut().ok_or(Error::<T>::TokenNotEnabled)?;
@@ -1055,9 +1138,9 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotEntityOwner);
+            // P0: 验证调用者是所有者或 TOKEN_MANAGE 管理员
+            Self::ensure_owner_or_admin(&who, entity_id)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             EntityTokenConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
                 let config = maybe_config.as_mut().ok_or(Error::<T>::TokenNotEnabled)?;
@@ -1094,9 +1177,9 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotEntityOwner);
+            // P0: 验证调用者是所有者或 TOKEN_MANAGE 管理员
+            Self::ensure_owner_or_admin(&who, entity_id)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             let clamped_kyc = min_receiver_kyc.min(4);
             EntityTokenConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
@@ -1128,9 +1211,9 @@ pub mod pallet {
             // M7: 限制输入列表长度
             ensure!(accounts.len() <= T::MaxTransferListSize::get() as usize, Error::<T>::TransferListFull);
 
-            // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotEntityOwner);
+            // P0: 验证调用者是所有者或 TOKEN_MANAGE 管理员
+            Self::ensure_owner_or_admin(&who, entity_id)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             let mut added = 0u32;
             TransferWhitelist::<T>::try_mutate(entity_id, |list| -> DispatchResult {
@@ -1164,9 +1247,9 @@ pub mod pallet {
             // M7: 限制输入列表长度
             ensure!(accounts.len() <= T::MaxTransferListSize::get() as usize, Error::<T>::TransferListFull);
 
-            // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotEntityOwner);
+            // P0: 验证调用者是所有者或 TOKEN_MANAGE 管理员
+            Self::ensure_owner_or_admin(&who, entity_id)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             let mut removed = 0u32;
             TransferWhitelist::<T>::mutate(entity_id, |list| {
@@ -1199,9 +1282,9 @@ pub mod pallet {
             // M7: 限制输入列表长度
             ensure!(accounts.len() <= T::MaxTransferListSize::get() as usize, Error::<T>::TransferListFull);
 
-            // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotEntityOwner);
+            // P0: 验证调用者是所有者或 TOKEN_MANAGE 管理员
+            Self::ensure_owner_or_admin(&who, entity_id)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             let mut added = 0u32;
             TransferBlacklist::<T>::try_mutate(entity_id, |list| -> DispatchResult {
@@ -1235,9 +1318,9 @@ pub mod pallet {
             // M7: 限制输入列表长度
             ensure!(accounts.len() <= T::MaxTransferListSize::get() as usize, Error::<T>::TransferListFull);
 
-            // 验证所有者
-            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(owner == who, Error::<T>::NotEntityOwner);
+            // P0: 验证调用者是所有者或 TOKEN_MANAGE 管理员
+            Self::ensure_owner_or_admin(&who, entity_id)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             let mut removed = 0u32;
             TransferBlacklist::<T>::mutate(entity_id, |list| {
@@ -1256,11 +1339,134 @@ pub mod pallet {
             });
             Ok(())
         }
+
+        // ==================== P1/P2/P3 紧急管控 Extrinsics ====================
+
+        /// P1: 平台强制禁用某实体的代币（Root-only）
+        /// 紧急情况下（如代币被用于欺诈）强制设置 enabled=false
+        #[pallet::call_index(16)]
+        #[pallet::weight(T::WeightInfo::force_disable_token())]
+        pub fn force_disable_token(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            EntityTokenConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
+                let config = maybe_config.as_mut().ok_or(Error::<T>::TokenNotEnabled)?;
+                ensure!(config.enabled, Error::<T>::TokenAlreadyDisabled);
+                config.enabled = false;
+                Ok(())
+            })?;
+
+            Self::deposit_event(Event::TokenForceDisabled { entity_id });
+            Ok(())
+        }
+
+        /// P1: 合规冻结 — 暂停某实体代币的所有转账，但不影响分红领取（Root-only）
+        #[pallet::call_index(17)]
+        #[pallet::weight(T::WeightInfo::force_freeze_transfers())]
+        pub fn force_freeze_transfers(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            // 代币必须存在
+            ensure!(EntityTokenConfigs::<T>::contains_key(entity_id), Error::<T>::TokenNotEnabled);
+            // 幂等性检查
+            ensure!(!TransfersFrozen::<T>::contains_key(entity_id), Error::<T>::TransfersAlreadyFrozen);
+
+            TransfersFrozen::<T>::insert(entity_id, ());
+
+            Self::deposit_event(Event::TransfersFrozenEvent { entity_id });
+            Ok(())
+        }
+
+        /// P1: 解除转账冻结（Root-only）
+        #[pallet::call_index(18)]
+        #[pallet::weight(T::WeightInfo::force_unfreeze_transfers())]
+        pub fn force_unfreeze_transfers(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            ensure!(TransfersFrozen::<T>::contains_key(entity_id), Error::<T>::TransfersNotFrozen);
+
+            TransfersFrozen::<T>::remove(entity_id);
+
+            Self::deposit_event(Event::TransfersUnfrozen { entity_id });
+            Ok(())
+        }
+
+        /// P2: 法律合规强制销毁代币（Root-only）
+        /// 如法院命令冻结并销毁涉案资产
+        #[pallet::call_index(19)]
+        #[pallet::weight(T::WeightInfo::force_burn())]
+        pub fn force_burn(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            from: T::AccountId,
+            amount: T::AssetBalance,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            ensure!(!amount.is_zero(), Error::<T>::ZeroAmount);
+            // 代币必须存在
+            ensure!(EntityTokenConfigs::<T>::contains_key(entity_id), Error::<T>::TokenNotEnabled);
+
+            let asset_id = Self::entity_to_asset_id(entity_id);
+            T::Assets::burn_from(
+                asset_id,
+                &from,
+                amount,
+                frame_support::traits::tokens::Preservation::Expendable,
+                frame_support::traits::tokens::Precision::Exact,
+                frame_support::traits::tokens::Fortitude::Force,
+            )?;
+
+            Self::deposit_event(Event::TokensForceBurned {
+                entity_id,
+                from,
+                amount,
+            });
+            Ok(())
+        }
+
+        /// P3: 全平台代币紧急暂停开关（Root-only）
+        /// 发现底层 pallet-assets 漏洞时立即暂停所有代币操作
+        #[pallet::call_index(20)]
+        #[pallet::weight(T::WeightInfo::set_global_token_pause())]
+        pub fn set_global_token_pause(
+            origin: OriginFor<T>,
+            paused: bool,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            GlobalTokenPaused::<T>::put(paused);
+
+            Self::deposit_event(Event::GlobalTokenPauseSet { paused });
+            Ok(())
+        }
     }
 
     // ==================== 内部函数 ====================
 
     impl<T: Config> Pallet<T> {
+        /// P0: 确保调用者是 Entity Owner 或拥有 TOKEN_MANAGE 权限的管理员
+        fn ensure_owner_or_admin(who: &T::AccountId, entity_id: u64) -> DispatchResult {
+            let owner = T::EntityProvider::entity_owner(entity_id)
+                .ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(
+                *who == owner || T::EntityProvider::is_entity_admin(
+                    entity_id, who, AdminPermission::TOKEN_MANAGE
+                ),
+                Error::<T>::NotAuthorized
+            );
+            Ok(())
+        }
+
         /// Entity ID 转资产 ID
         pub fn entity_to_asset_id(entity_id: u64) -> T::AssetId {
             (T::ShopTokenOffset::get() + entity_id).into()
@@ -1365,6 +1571,11 @@ pub mod pallet {
             buyer: &T::AccountId,
             purchase_amount: T::AssetBalance,
         ) -> Result<T::AssetBalance, DispatchError> {
+            // P3: 全平台暂停时静默跳过奖励
+            if GlobalTokenPaused::<T>::get() {
+                return Ok(Zero::zero());
+            }
+
             let config = match EntityTokenConfigs::<T>::get(entity_id) {
                 Some(c) if c.enabled && c.reward_rate > 0 => c,
                 _ => return Ok(Zero::zero()),
@@ -1407,6 +1618,9 @@ pub mod pallet {
             buyer: &T::AccountId,
             tokens_to_use: T::AssetBalance,
         ) -> Result<T::AssetBalance, DispatchError> {
+            // P3: 全平台暂停时拒绝兑换
+            ensure!(!GlobalTokenPaused::<T>::get(), Error::<T>::GlobalPaused);
+
             let config = EntityTokenConfigs::<T>::get(entity_id)
                 .ok_or(Error::<T>::TokenNotEnabled)?;
 
@@ -1477,7 +1691,7 @@ impl<T: Config> Pallet<T> {
 
 // ==================== EntityTokenProvider 实现 ====================
 
-use pallet_entity_common::{EntityTokenProvider, TokenType};
+use pallet_entity_common::{EntityProvider, EntityTokenProvider, TokenType};
 use sp_runtime::traits::{Zero as _Zero, Saturating as _Saturating};
 
 impl<T: Config> EntityTokenProvider<T::AccountId, T::AssetBalance> for Pallet<T> {
@@ -1590,5 +1804,31 @@ impl<T: Config> EntityTokenProvider<T::AccountId, T::AssetBalance> for Pallet<T>
 
     fn total_supply(entity_id: u64) -> T::AssetBalance {
         Pallet::<T>::get_total_supply(entity_id)
+    }
+
+    fn governance_burn(entity_id: u64, amount: T::AssetBalance) -> Result<(), sp_runtime::DispatchError> {
+        use frame_support::traits::fungibles::Mutate;
+        if amount.is_zero() {
+            return Err(sp_runtime::DispatchError::Other("ZeroAmount"));
+        }
+        let config = pallet::EntityTokenConfigs::<T>::get(entity_id)
+            .ok_or(sp_runtime::DispatchError::Other("TokenNotEnabled"))?;
+        let _ = config;
+        let entity_account = T::EntityProvider::entity_account(entity_id);
+        let asset_id = Pallet::<T>::entity_to_asset_id(entity_id);
+        T::Assets::burn_from(
+            asset_id,
+            &entity_account,
+            amount,
+            frame_support::traits::tokens::Preservation::Preserve,
+            frame_support::traits::tokens::Precision::Exact,
+            frame_support::traits::tokens::Fortitude::Polite,
+        )?;
+        Pallet::<T>::deposit_event(pallet::Event::TokensGovernanceBurned {
+            entity_id,
+            from: entity_account,
+            amount,
+        });
+        Ok(())
     }
 }

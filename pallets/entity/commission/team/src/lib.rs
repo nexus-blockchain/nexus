@@ -32,6 +32,7 @@ pub mod pallet {
     use pallet_commission_common::{
         CommissionOutput, CommissionType, MemberProvider,
     };
+    use pallet_entity_common::{EntityProvider, AdminPermission};
     use sp_runtime::traits::{Saturating, Zero};
 
     pub type BalanceOf<T> =
@@ -55,7 +56,7 @@ pub mod pallet {
     /// 团队业绩门槛数据源模式
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     pub enum SalesThresholdMode {
-        /// 使用 get_member_stats 返回的 total_spent（NEX Balance 转 u128）
+        /// 使用 get_member_stats 返回的 total_spent（u128，来自 MemberProvider）
         Nex = 0,
         /// 使用 get_member_spent_usdt 返回的 USDT 累计（精度 10^6）
         Usdt = 1,
@@ -75,7 +76,7 @@ pub mod pallet {
         pub max_depth: u8,
         /// 是否允许多层叠加（false = 仅最近一个达标上级获得奖金）
         pub allow_stacking: bool,
-        /// 门槛数据源模式（Nex=使用 NEX 累计, Usdt=使用 MemberSpentUsdt）
+        /// 门槛数据源模式（Nex=使用 NEX 累计, Usdt=使用 USDT 累计消费）
         pub threshold_mode: SalesThresholdMode,
     }
 
@@ -103,12 +104,18 @@ pub mod pallet {
         type Currency: Currency<Self::AccountId>;
         type MemberProvider: MemberProvider<Self::AccountId>;
 
+        /// 实体查询接口（权限校验、Owner/Admin 判断）
+        type EntityProvider: EntityProvider<Self::AccountId>;
+
         /// 最大阶梯档位数
         #[pallet::constant]
         type MaxTeamTiers: Get<u32>;
     }
 
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     // ========================================================================
@@ -145,6 +152,16 @@ pub mod pallet {
         InvalidMaxDepth,
         /// 阶梯门槛未严格递增
         TiersNotAscending,
+        /// 实体不存在
+        EntityNotFound,
+        /// 非实体所有者或无 COMMISSION_MANAGE 权限
+        NotEntityOwnerOrAdmin,
+        /// 配置不存在（清除/更新时）
+        ConfigNotFound,
+        /// 更新参数全部为 None（无操作）
+        NothingToUpdate,
+        /// 实体已被全局锁定，所有配置操作不可用
+        EntityLocked,
     }
 
     // ========================================================================
@@ -153,7 +170,7 @@ pub mod pallet {
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        /// 设置团队业绩返佣配置
+        /// 设置团队业绩返佣配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
         #[pallet::call_index(0)]
         #[pallet::weight(Weight::from_parts(45_000_000, 4_000))]
         pub fn set_team_performance_config(
@@ -164,22 +181,10 @@ pub mod pallet {
             allow_stacking: bool,
             threshold_mode: SalesThresholdMode,
         ) -> DispatchResult {
-            ensure_root(origin)?;
-            ensure!(!tiers.is_empty(), Error::<T>::EmptyTiers);
-            ensure!(max_depth > 0 && max_depth <= 30, Error::<T>::InvalidMaxDepth);
-
-            // 校验每个档位
-            for tier in tiers.iter() {
-                ensure!(tier.rate <= 10000, Error::<T>::InvalidRate);
-            }
-
-            // 校验阶梯门槛严格递增
-            for window in tiers.windows(2) {
-                ensure!(
-                    window[1].sales_threshold > window[0].sales_threshold,
-                    Error::<T>::TiersNotAscending
-                );
-            }
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            Self::validate_tiers(&tiers, max_depth)?;
 
             TeamPerformanceConfigs::<T>::insert(entity_id, TeamPerformanceConfig {
                 tiers,
@@ -191,6 +196,100 @@ pub mod pallet {
             Self::deposit_event(Event::TeamPerformanceConfigUpdated { entity_id });
             Ok(())
         }
+
+        /// 清除团队业绩返佣配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
+        #[pallet::call_index(1)]
+        #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
+        pub fn clear_team_performance_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(TeamPerformanceConfigs::<T>::contains_key(entity_id), Error::<T>::ConfigNotFound);
+
+            TeamPerformanceConfigs::<T>::remove(entity_id);
+            Self::deposit_event(Event::TeamPerformanceConfigCleared { entity_id });
+            Ok(())
+        }
+
+        /// 部分更新团队业绩参数（不重提 tiers）
+        #[pallet::call_index(2)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn update_team_performance_params(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            max_depth: Option<u8>,
+            allow_stacking: Option<bool>,
+            threshold_mode: Option<SalesThresholdMode>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(
+                max_depth.is_some() || allow_stacking.is_some() || threshold_mode.is_some(),
+                Error::<T>::NothingToUpdate
+            );
+
+            TeamPerformanceConfigs::<T>::try_mutate(entity_id, |maybe| -> DispatchResult {
+                let config = maybe.as_mut().ok_or(Error::<T>::ConfigNotFound)?;
+                if let Some(d) = max_depth {
+                    ensure!(d > 0 && d <= 30, Error::<T>::InvalidMaxDepth);
+                    config.max_depth = d;
+                }
+                if let Some(s) = allow_stacking {
+                    config.allow_stacking = s;
+                }
+                if let Some(m) = threshold_mode {
+                    config.threshold_mode = m;
+                }
+                Ok(())
+            })?;
+
+            Self::deposit_event(Event::TeamPerformanceConfigUpdated { entity_id });
+            Ok(())
+        }
+
+        /// [Root] 强制设置团队业绩返佣配置
+        #[pallet::call_index(3)]
+        #[pallet::weight(Weight::from_parts(45_000_000, 4_000))]
+        pub fn force_set_team_performance_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            tiers: BoundedVec<TeamPerformanceTier<BalanceOf<T>>, T::MaxTeamTiers>,
+            max_depth: u8,
+            allow_stacking: bool,
+            threshold_mode: SalesThresholdMode,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            Self::validate_tiers(&tiers, max_depth)?;
+
+            TeamPerformanceConfigs::<T>::insert(entity_id, TeamPerformanceConfig {
+                tiers,
+                max_depth,
+                allow_stacking,
+                threshold_mode,
+            });
+
+            Self::deposit_event(Event::TeamPerformanceConfigUpdated { entity_id });
+            Ok(())
+        }
+
+        /// [Root] 强制清除团队业绩返佣配置
+        #[pallet::call_index(4)]
+        #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
+        pub fn force_clear_team_performance_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            if TeamPerformanceConfigs::<T>::contains_key(entity_id) {
+                TeamPerformanceConfigs::<T>::remove(entity_id);
+                Self::deposit_event(Event::TeamPerformanceConfigCleared { entity_id });
+            }
+            Ok(())
+        }
     }
 
     // ========================================================================
@@ -198,6 +297,39 @@ pub mod pallet {
     // ========================================================================
 
     impl<T: Config> Pallet<T> {
+        /// 验证 Entity Owner 或 Admin(COMMISSION_MANAGE) 权限
+        fn ensure_owner_or_admin(entity_id: u64, who: &T::AccountId) -> DispatchResult {
+            let owner = T::EntityProvider::entity_owner(entity_id)
+                .ok_or(Error::<T>::EntityNotFound)?;
+            if *who == owner {
+                return Ok(());
+            }
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, who, AdminPermission::COMMISSION_MANAGE),
+                Error::<T>::NotEntityOwnerOrAdmin
+            );
+            Ok(())
+        }
+
+        /// 校验 tiers 参数合法性
+        fn validate_tiers(
+            tiers: &BoundedVec<TeamPerformanceTier<BalanceOf<T>>, T::MaxTeamTiers>,
+            max_depth: u8,
+        ) -> DispatchResult {
+            ensure!(!tiers.is_empty(), Error::<T>::EmptyTiers);
+            ensure!(max_depth > 0 && max_depth <= 30, Error::<T>::InvalidMaxDepth);
+            for tier in tiers.iter() {
+                ensure!(tier.rate <= 10000, Error::<T>::InvalidRate);
+            }
+            for window in tiers.windows(2) {
+                ensure!(
+                    window[1].sales_threshold > window[0].sales_threshold,
+                    Error::<T>::TiersNotAscending
+                );
+            }
+            Ok(())
+        }
+
         /// 匹配最高达标的阶梯档位
         ///
         /// tiers 按 sales_threshold 升序排列，返回最后一个满足条件的档位 rate
@@ -248,13 +380,13 @@ pub mod pallet {
                 if depth > config.max_depth { break; }
                 if remaining.is_zero() { break; }
 
-                // H2 审计修复: 跳过未激活会员
-                if !T::MemberProvider::is_activated(entity_id, ancestor) {
+                // 查询团队统计：(direct_referrals, team_size, total_spent)
+                // P1: 跳过被封禁会员
+                if T::MemberProvider::is_banned(entity_id, ancestor) {
                     current = T::MemberProvider::get_referrer(entity_id, ancestor);
                     continue;
                 }
 
-                // 查询团队统计：(direct_referrals, team_size, total_spent)
                 let (_direct, team_size, nex_spent) =
                     T::MemberProvider::get_member_stats(entity_id, ancestor);
                 let total_spent = match config.threshold_mode {
@@ -339,7 +471,7 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
 // Token 多资产 — TokenCommissionPlugin implementation
 // ============================================================================
 
-use pallet_commission_common::MemberProvider as _MemberProviderToken;
+use pallet_commission_common::MemberProvider as _;
 
 impl<T: pallet::Config> pallet::Pallet<T> {
     /// Token 版团队业绩计算（泛型，rate-based）
@@ -371,8 +503,8 @@ impl<T: pallet::Config> pallet::Pallet<T> {
             if depth > config.max_depth { break; }
             if remaining.is_zero() { break; }
 
-            // H2 审计修复: 跳过未激活会员
-            if !T::MemberProvider::is_activated(entity_id, ancestor) {
+            // P1: 跳过被封禁会员
+            if T::MemberProvider::is_banned(entity_id, ancestor) {
                 current = T::MemberProvider::get_referrer(entity_id, ancestor);
                 continue;
             }
@@ -498,10 +630,10 @@ impl<T: pallet::Config> pallet_commission_common::TeamPlanWriter<pallet::Balance
             .try_into()
             .map_err(|_| sp_runtime::DispatchError::Other("TooManyTiers"))?;
 
-        let mode = if threshold_mode == 1 {
-            pallet::SalesThresholdMode::Usdt
-        } else {
-            pallet::SalesThresholdMode::Nex
+        let mode = match threshold_mode {
+            0 => pallet::SalesThresholdMode::Nex,
+            1 => pallet::SalesThresholdMode::Usdt,
+            _ => return Err(sp_runtime::DispatchError::Other("InvalidThresholdMode")),
         };
 
         pallet::TeamPerformanceConfigs::<T>::insert(
@@ -519,9 +651,10 @@ impl<T: pallet::Config> pallet_commission_common::TeamPlanWriter<pallet::Balance
     }
 
     fn clear_config(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
-        pallet::TeamPerformanceConfigs::<T>::remove(entity_id);
-        // M1 审计修复: 配置清除也发出事件
-        pallet::Pallet::<T>::deposit_event(pallet::Event::TeamPerformanceConfigCleared { entity_id });
+        if pallet::TeamPerformanceConfigs::<T>::contains_key(entity_id) {
+            pallet::TeamPerformanceConfigs::<T>::remove(entity_id);
+            pallet::Pallet::<T>::deposit_event(pallet::Event::TeamPerformanceConfigCleared { entity_id });
+        }
         Ok(())
     }
 }
@@ -545,13 +678,16 @@ mod tests {
 
     // -- Mock MemberProvider --
     use core::cell::RefCell;
-    use alloc::collections::BTreeMap;
+    use alloc::collections::{BTreeMap, BTreeSet};
 
     thread_local! {
         static REFERRERS: RefCell<BTreeMap<(u64, u64), u64>> = RefCell::new(BTreeMap::new());
         static MEMBER_STATS: RefCell<BTreeMap<(u64, u64), (u32, u32, u128)>> = RefCell::new(BTreeMap::new());
         static MEMBER_SPENT_USDT: RefCell<BTreeMap<(u64, u64), u64>> = RefCell::new(BTreeMap::new());
-        static ACTIVATED: RefCell<BTreeMap<(u64, u64), bool>> = RefCell::new(BTreeMap::new());
+        static ENTITY_OWNERS: RefCell<BTreeMap<u64, u64>> = RefCell::new(BTreeMap::new());
+        static ENTITY_ADMINS: RefCell<BTreeMap<(u64, u64), u32>> = RefCell::new(BTreeMap::new());
+        static BANNED_MEMBERS: RefCell<BTreeSet<(u64, u64)>> = RefCell::new(BTreeSet::new());
+        static ENTITY_LOCKED: RefCell<BTreeSet<u64>> = RefCell::new(BTreeSet::new());
     }
 
     pub struct MockMemberProvider;
@@ -577,8 +713,38 @@ mod tests {
         fn get_member_spent_usdt(entity_id: u64, account: &u64) -> u64 {
             MEMBER_SPENT_USDT.with(|s| s.borrow().get(&(entity_id, *account)).copied().unwrap_or(0))
         }
-        fn is_activated(entity_id: u64, account: &u64) -> bool {
-            ACTIVATED.with(|a| a.borrow().get(&(entity_id, *account)).copied().unwrap_or(true))
+        fn is_banned(entity_id: u64, account: &u64) -> bool {
+            BANNED_MEMBERS.with(|b| b.borrow().contains(&(entity_id, *account)))
+        }
+        fn get_effective_level(_: u64, _: &u64) -> u8 { 0 }
+        fn get_level_discount(_: u64, _: u8) -> u16 { 0 }
+        fn update_spent(_: u64, _: &u64, _: u64) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+        fn check_order_upgrade_rules(_: u64, _: &u64, _: u64, _: u64) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+    }
+
+    // -- Mock EntityProvider --
+    pub struct MockEntityProvider;
+
+    impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
+        fn entity_exists(entity_id: u64) -> bool {
+            ENTITY_OWNERS.with(|o| o.borrow().contains_key(&entity_id))
+        }
+        fn is_entity_active(_entity_id: u64) -> bool { true }
+        fn entity_status(_entity_id: u64) -> Option<pallet_entity_common::EntityStatus> { None }
+        fn entity_owner(entity_id: u64) -> Option<u64> {
+            ENTITY_OWNERS.with(|o| o.borrow().get(&entity_id).copied())
+        }
+        fn entity_account(_entity_id: u64) -> u64 { 0 }
+        fn update_entity_stats(_: u64, _: u128, _: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+        fn is_entity_admin(entity_id: u64, account: &u64, required_permission: u32) -> bool {
+            ENTITY_ADMINS.with(|a| {
+                a.borrow().get(&(entity_id, *account))
+                    .map(|perms| perms & required_permission == required_permission)
+                    .unwrap_or(false)
+            })
+        }
+        fn is_entity_locked(entity_id: u64) -> bool {
+            ENTITY_LOCKED.with(|l| l.borrow().contains(&entity_id))
         }
     }
 
@@ -607,6 +773,7 @@ mod tests {
         type RuntimeEvent = RuntimeEvent;
         type Currency = Balances;
         type MemberProvider = MockMemberProvider;
+        type EntityProvider = MockEntityProvider;
         type MaxTeamTiers = ConstU32<10>;
     }
 
@@ -642,17 +809,30 @@ mod tests {
         });
     }
 
-    fn set_activated(entity_id: u64, account: u64, activated: bool) {
-        ACTIVATED.with(|a| {
-            a.borrow_mut().insert((entity_id, account), activated);
-        });
-    }
-
     fn clear_thread_locals() {
         REFERRERS.with(|r| r.borrow_mut().clear());
         MEMBER_STATS.with(|s| s.borrow_mut().clear());
         MEMBER_SPENT_USDT.with(|s| s.borrow_mut().clear());
-        ACTIVATED.with(|a| a.borrow_mut().clear());
+        ENTITY_OWNERS.with(|o| o.borrow_mut().clear());
+        ENTITY_ADMINS.with(|a| a.borrow_mut().clear());
+        BANNED_MEMBERS.with(|b| b.borrow_mut().clear());
+        ENTITY_LOCKED.with(|l| l.borrow_mut().clear());
+    }
+
+    fn set_entity_owner(entity_id: u64, owner: u64) {
+        ENTITY_OWNERS.with(|o| o.borrow_mut().insert(entity_id, owner));
+    }
+
+    fn set_entity_admin(entity_id: u64, admin: u64, permissions: u32) {
+        ENTITY_ADMINS.with(|a| a.borrow_mut().insert((entity_id, admin), permissions));
+    }
+
+    fn set_banned(entity_id: u64, account: u64) {
+        BANNED_MEMBERS.with(|b| b.borrow_mut().insert((entity_id, account)));
+    }
+
+    fn set_entity_locked(entity_id: u64) {
+        ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id));
     }
 
     // ====================================================================
@@ -660,14 +840,15 @@ mod tests {
     // ====================================================================
 
     #[test]
-    fn set_config_works() {
+    fn set_config_works_by_owner() {
         new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
             let tiers = vec![
                 pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 5, rate: 100 },
                 pallet::TeamPerformanceTier { sales_threshold: 5000, min_team_size: 20, rate: 300 },
             ];
             assert_ok!(CommissionTeam::set_team_performance_config(
-                RuntimeOrigin::root(),
+                RuntimeOrigin::signed(100),
                 1,
                 tiers.try_into().unwrap(),
                 10,
@@ -685,10 +866,11 @@ mod tests {
     #[test]
     fn set_config_rejects_empty_tiers() {
         new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
             let tiers: Vec<pallet::TeamPerformanceTier<Balance>> = vec![];
             assert_noop!(
                 CommissionTeam::set_team_performance_config(
-                    RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+                    RuntimeOrigin::signed(100), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
                 ),
                 Error::<Test>::EmptyTiers
             );
@@ -698,12 +880,13 @@ mod tests {
     #[test]
     fn set_config_rejects_invalid_rate() {
         new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
             let tiers = vec![
                 pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 10001 },
             ];
             assert_noop!(
                 CommissionTeam::set_team_performance_config(
-                    RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+                    RuntimeOrigin::signed(100), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
                 ),
                 Error::<Test>::InvalidRate
             );
@@ -713,12 +896,13 @@ mod tests {
     #[test]
     fn set_config_rejects_invalid_depth_zero() {
         new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
             let tiers = vec![
                 pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
             ];
             assert_noop!(
                 CommissionTeam::set_team_performance_config(
-                    RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 0, false, pallet::SalesThresholdMode::Nex,
+                    RuntimeOrigin::signed(100), 1, tiers.try_into().unwrap(), 0, false, pallet::SalesThresholdMode::Nex,
                 ),
                 Error::<Test>::InvalidMaxDepth
             );
@@ -728,12 +912,13 @@ mod tests {
     #[test]
     fn set_config_rejects_invalid_depth_over_30() {
         new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
             let tiers = vec![
                 pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
             ];
             assert_noop!(
                 CommissionTeam::set_team_performance_config(
-                    RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 31, false, pallet::SalesThresholdMode::Nex,
+                    RuntimeOrigin::signed(100), 1, tiers.try_into().unwrap(), 31, false, pallet::SalesThresholdMode::Nex,
                 ),
                 Error::<Test>::InvalidMaxDepth
             );
@@ -743,13 +928,14 @@ mod tests {
     #[test]
     fn set_config_rejects_non_ascending_thresholds() {
         new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
             let tiers = vec![
                 pallet::TeamPerformanceTier { sales_threshold: 5000, min_team_size: 0, rate: 300 },
                 pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
             ];
             assert_noop!(
                 CommissionTeam::set_team_performance_config(
-                    RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+                    RuntimeOrigin::signed(100), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
                 ),
                 Error::<Test>::TiersNotAscending
             );
@@ -757,16 +943,34 @@ mod tests {
     }
 
     #[test]
-    fn set_config_requires_root() {
+    fn set_config_rejects_non_owner() {
         new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+            ];
+            // account 999 is not owner nor admin
+            assert_noop!(
+                CommissionTeam::set_team_performance_config(
+                    RuntimeOrigin::signed(999), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+                ),
+                Error::<Test>::NotEntityOwnerOrAdmin
+            );
+        });
+    }
+
+    #[test]
+    fn set_config_rejects_entity_not_found() {
+        new_test_ext().execute_with(|| {
+            // entity 99 does not exist
             let tiers = vec![
                 pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
             ];
             assert_noop!(
                 CommissionTeam::set_team_performance_config(
-                    RuntimeOrigin::signed(1), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+                    RuntimeOrigin::signed(1), 99, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
                 ),
-                sp_runtime::DispatchError::BadOrigin
+                Error::<Test>::EntityNotFound
             );
         });
     }
@@ -797,7 +1001,7 @@ mod tests {
             let tiers = vec![
                 pallet::TeamPerformanceTier { sales_threshold: 100, min_team_size: 0, rate: 500 },
             ];
-            assert_ok!(CommissionTeam::set_team_performance_config(
+            assert_ok!(CommissionTeam::force_set_team_performance_config(
                 RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
             ));
 
@@ -825,7 +1029,7 @@ mod tests {
                 pallet::TeamPerformanceTier { sales_threshold: 3000, min_team_size: 5, rate: 200 },
                 pallet::TeamPerformanceTier { sales_threshold: 10000, min_team_size: 20, rate: 500 },
             ];
-            assert_ok!(CommissionTeam::set_team_performance_config(
+            assert_ok!(CommissionTeam::force_set_team_performance_config(
                 RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false, pallet::SalesThresholdMode::Nex,
             ));
 
@@ -858,7 +1062,7 @@ mod tests {
                 pallet::TeamPerformanceTier { sales_threshold: 3000, min_team_size: 5, rate: 200 },
                 pallet::TeamPerformanceTier { sales_threshold: 10000, min_team_size: 20, rate: 500 },
             ];
-            assert_ok!(CommissionTeam::set_team_performance_config(
+            assert_ok!(CommissionTeam::force_set_team_performance_config(
                 RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, true, pallet::SalesThresholdMode::Nex, // allow_stacking
             ));
 
@@ -889,7 +1093,7 @@ mod tests {
             let tiers = vec![
                 pallet::TeamPerformanceTier { sales_threshold: 3000, min_team_size: 5, rate: 200 },
             ];
-            assert_ok!(CommissionTeam::set_team_performance_config(
+            assert_ok!(CommissionTeam::force_set_team_performance_config(
                 RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false, pallet::SalesThresholdMode::Nex,
             ));
 
@@ -915,7 +1119,7 @@ mod tests {
             let tiers = vec![
                 pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 5000 }, // 50%
             ];
-            assert_ok!(CommissionTeam::set_team_performance_config(
+            assert_ok!(CommissionTeam::force_set_team_performance_config(
                 RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false, pallet::SalesThresholdMode::Nex,
             ));
 
@@ -944,7 +1148,7 @@ mod tests {
             let tiers = vec![
                 pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 300 },
             ];
-            assert_ok!(CommissionTeam::set_team_performance_config(
+            assert_ok!(CommissionTeam::force_set_team_performance_config(
                 RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 2, false, pallet::SalesThresholdMode::Nex, // max_depth=2
             ));
 
@@ -1008,7 +1212,7 @@ mod tests {
             let tiers = vec![
                 pallet::TeamPerformanceTier { sales_threshold: 3_000_000, min_team_size: 5, rate: 200 },
             ];
-            assert_ok!(CommissionTeam::set_team_performance_config(
+            assert_ok!(CommissionTeam::force_set_team_performance_config(
                 RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false, pallet::SalesThresholdMode::Usdt,
             ));
 
@@ -1039,7 +1243,7 @@ mod tests {
             let tiers = vec![
                 pallet::TeamPerformanceTier { sales_threshold: 2_000_000, min_team_size: 0, rate: 500 },
             ];
-            assert_ok!(CommissionTeam::set_team_performance_config(
+            assert_ok!(CommissionTeam::force_set_team_performance_config(
                 RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false, pallet::SalesThresholdMode::Usdt,
             ));
 
@@ -1071,7 +1275,7 @@ mod tests {
                 pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 50, rate: 100 },
                 pallet::TeamPerformanceTier { sales_threshold: 5000, min_team_size: 5, rate: 300 },
             ];
-            assert_ok!(CommissionTeam::set_team_performance_config(
+            assert_ok!(CommissionTeam::force_set_team_performance_config(
                 RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false, pallet::SalesThresholdMode::Nex,
             ));
 
@@ -1160,7 +1364,7 @@ mod tests {
             let tiers = vec![
                 pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 500 },
             ];
-            assert_ok!(CommissionTeam::set_team_performance_config(
+            assert_ok!(CommissionTeam::force_set_team_performance_config(
                 RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, true, pallet::SalesThresholdMode::Nex,
             ));
 
@@ -1197,7 +1401,7 @@ mod tests {
             let tiers = vec![
                 pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 500 },
             ];
-            assert_ok!(CommissionTeam::set_team_performance_config(
+            assert_ok!(CommissionTeam::force_set_team_performance_config(
                 RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, true, pallet::SalesThresholdMode::Nex,
             ));
 
@@ -1210,73 +1414,6 @@ mod tests {
             // 40 paid once, then self-cycle detected → break
             assert_eq!(outputs.len(), 1);
             assert_eq!(outputs[0].beneficiary, 40);
-        });
-    }
-
-    // ====================================================================
-    // H2-deep: deactivated member skipped
-    // ====================================================================
-
-    #[test]
-    fn h2_deep_deactivated_member_skipped() {
-        new_test_ext().execute_with(|| {
-            clear_thread_locals();
-            setup_chain(1); // 50 → 40 → 30 → 20 → 10
-            set_stats(1, 40, 5, 20, 10000); // 达标
-            set_stats(1, 30, 5, 20, 10000); // 达标
-            set_activated(1, 40, false); // 40 被停用
-
-            let tiers = vec![
-                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 500 },
-            ];
-            assert_ok!(CommissionTeam::set_team_performance_config(
-                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false, pallet::SalesThresholdMode::Nex,
-            ));
-
-            use pallet_commission_common::CommissionPlugin;
-            let modes = CommissionModes(CommissionModes::TEAM_PERFORMANCE);
-            let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-                1, &50, 10000, 10000, modes, false, 0,
-            );
-
-            // non-stacking: 40 is deactivated (skipped), 30 is the first qualifying → gets commission
-            assert_eq!(outputs.len(), 1);
-            assert_eq!(outputs[0].beneficiary, 30);
-            assert_eq!(outputs[0].level, 2); // depth 2 (40 consumed depth 1 even though skipped)
-            assert_eq!(outputs[0].amount, 500);
-            assert_eq!(remaining, 9500);
-        });
-    }
-
-    #[test]
-    fn h2_deep_deactivated_stacking_skips_middle() {
-        new_test_ext().execute_with(|| {
-            clear_thread_locals();
-            setup_chain(1); // 50 → 40 → 30 → 20 → 10
-            set_stats(1, 40, 5, 20, 10000);
-            set_stats(1, 30, 5, 50, 50000);
-            set_stats(1, 20, 5, 20, 10000);
-            set_activated(1, 30, false); // 30 被停用
-
-            let tiers = vec![
-                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 300 },
-            ];
-            assert_ok!(CommissionTeam::set_team_performance_config(
-                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, true, pallet::SalesThresholdMode::Nex,
-            ));
-
-            use pallet_commission_common::CommissionPlugin;
-            let modes = CommissionModes(CommissionModes::TEAM_PERFORMANCE);
-            let (outputs, _) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-                1, &50, 10000, 10000, modes, false, 0,
-            );
-
-            // stacking: 40 (depth 1) ok, 30 (depth 2) deactivated skip, 20 (depth 3) ok
-            assert_eq!(outputs.len(), 2);
-            assert_eq!(outputs[0].beneficiary, 40);
-            assert_eq!(outputs[0].level, 1);
-            assert_eq!(outputs[1].beneficiary, 20);
-            assert_eq!(outputs[1].level, 3);
         });
     }
 
@@ -1303,6 +1440,522 @@ mod tests {
                 pallet::Event::TeamPerformanceConfigCleared { entity_id: 1 },
             ));
             assert!(pallet::TeamPerformanceConfigs::<Test>::get(1).is_none());
+        });
+    }
+
+    // ====================================================================
+    // P0: Admin with COMMISSION_MANAGE permission
+    // ====================================================================
+
+    #[test]
+    fn set_config_works_by_admin_with_commission_manage() {
+        new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
+            set_entity_admin(1, 200, pallet_entity_common::AdminPermission::COMMISSION_MANAGE);
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+            ];
+            assert_ok!(CommissionTeam::set_team_performance_config(
+                RuntimeOrigin::signed(200), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+            ));
+            assert!(pallet::TeamPerformanceConfigs::<Test>::get(1).is_some());
+        });
+    }
+
+    #[test]
+    fn set_config_rejects_admin_without_commission_manage() {
+        new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
+            // Admin has SHOP_MANAGE only, not COMMISSION_MANAGE
+            set_entity_admin(1, 200, pallet_entity_common::AdminPermission::SHOP_MANAGE);
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+            ];
+            assert_noop!(
+                CommissionTeam::set_team_performance_config(
+                    RuntimeOrigin::signed(200), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+                ),
+                Error::<Test>::NotEntityOwnerOrAdmin
+            );
+        });
+    }
+
+    // ====================================================================
+    // P1: clear_team_performance_config
+    // ====================================================================
+
+    #[test]
+    fn clear_config_works_by_owner() {
+        new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+            ];
+            assert_ok!(CommissionTeam::set_team_performance_config(
+                RuntimeOrigin::signed(100), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+            ));
+            assert_ok!(CommissionTeam::clear_team_performance_config(
+                RuntimeOrigin::signed(100), 1,
+            ));
+            assert!(pallet::TeamPerformanceConfigs::<Test>::get(1).is_none());
+        });
+    }
+
+    #[test]
+    fn clear_config_rejects_when_not_found() {
+        new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
+            assert_noop!(
+                CommissionTeam::clear_team_performance_config(RuntimeOrigin::signed(100), 1),
+                Error::<Test>::ConfigNotFound
+            );
+        });
+    }
+
+    // ====================================================================
+    // P1: force_set / force_clear (Root)
+    // ====================================================================
+
+    #[test]
+    fn force_set_config_works() {
+        new_test_ext().execute_with(|| {
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+            ];
+            assert_ok!(CommissionTeam::force_set_team_performance_config(
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+            ));
+            assert!(pallet::TeamPerformanceConfigs::<Test>::get(1).is_some());
+        });
+    }
+
+    #[test]
+    fn force_set_config_rejects_non_root() {
+        new_test_ext().execute_with(|| {
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+            ];
+            assert_noop!(
+                CommissionTeam::force_set_team_performance_config(
+                    RuntimeOrigin::signed(1), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+                ),
+                sp_runtime::DispatchError::BadOrigin
+            );
+        });
+    }
+
+    #[test]
+    fn force_clear_config_works() {
+        new_test_ext().execute_with(|| {
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+            ];
+            assert_ok!(CommissionTeam::force_set_team_performance_config(
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+            ));
+            // force_clear even without checking existence
+            assert_ok!(CommissionTeam::force_clear_team_performance_config(RuntimeOrigin::root(), 1));
+            assert!(pallet::TeamPerformanceConfigs::<Test>::get(1).is_none());
+        });
+    }
+
+    #[test]
+    fn force_clear_config_rejects_non_root() {
+        new_test_ext().execute_with(|| {
+            assert_noop!(
+                CommissionTeam::force_clear_team_performance_config(RuntimeOrigin::signed(1), 1),
+                sp_runtime::DispatchError::BadOrigin
+            );
+        });
+    }
+
+    // ====================================================================
+    // P2: update_team_performance_params
+    // ====================================================================
+
+    #[test]
+    fn update_params_works() {
+        new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+            ];
+            assert_ok!(CommissionTeam::set_team_performance_config(
+                RuntimeOrigin::signed(100), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+            ));
+
+            // Update max_depth only
+            assert_ok!(CommissionTeam::update_team_performance_params(
+                RuntimeOrigin::signed(100), 1, Some(15), None, None,
+            ));
+            let config = pallet::TeamPerformanceConfigs::<Test>::get(1).unwrap();
+            assert_eq!(config.max_depth, 15);
+            assert!(!config.allow_stacking);
+            assert_eq!(config.threshold_mode, pallet::SalesThresholdMode::Nex);
+
+            // Update allow_stacking and threshold_mode
+            assert_ok!(CommissionTeam::update_team_performance_params(
+                RuntimeOrigin::signed(100), 1, None, Some(true), Some(pallet::SalesThresholdMode::Usdt),
+            ));
+            let config = pallet::TeamPerformanceConfigs::<Test>::get(1).unwrap();
+            assert_eq!(config.max_depth, 15);
+            assert!(config.allow_stacking);
+            assert_eq!(config.threshold_mode, pallet::SalesThresholdMode::Usdt);
+        });
+    }
+
+    #[test]
+    fn update_params_rejects_all_none() {
+        new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
+            assert_noop!(
+                CommissionTeam::update_team_performance_params(
+                    RuntimeOrigin::signed(100), 1, None, None, None,
+                ),
+                Error::<Test>::NothingToUpdate
+            );
+        });
+    }
+
+    #[test]
+    fn update_params_rejects_config_not_found() {
+        new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
+            assert_noop!(
+                CommissionTeam::update_team_performance_params(
+                    RuntimeOrigin::signed(100), 1, Some(10), None, None,
+                ),
+                Error::<Test>::ConfigNotFound
+            );
+        });
+    }
+
+    #[test]
+    fn update_params_rejects_invalid_depth() {
+        new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+            ];
+            assert_ok!(CommissionTeam::set_team_performance_config(
+                RuntimeOrigin::signed(100), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+            ));
+            assert_noop!(
+                CommissionTeam::update_team_performance_params(
+                    RuntimeOrigin::signed(100), 1, Some(0), None, None,
+                ),
+                Error::<Test>::InvalidMaxDepth
+            );
+            assert_noop!(
+                CommissionTeam::update_team_performance_params(
+                    RuntimeOrigin::signed(100), 1, Some(31), None, None,
+                ),
+                Error::<Test>::InvalidMaxDepth
+            );
+        });
+    }
+
+    // ====================================================================
+    // P1: banned member skipped in commission calculation
+    // ====================================================================
+
+    #[test]
+    fn banned_ancestor_skipped_in_non_stacking() {
+        new_test_ext().execute_with(|| {
+            clear_thread_locals();
+            setup_chain(1);
+            // account 40 is banned, account 30 is eligible
+            set_stats(1, 40, 5, 20, 10000);
+            set_stats(1, 30, 8, 50, 20000);
+            set_banned(1, 40);
+
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 500 },
+            ];
+            assert_ok!(CommissionTeam::force_set_team_performance_config(
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, false, pallet::SalesThresholdMode::Nex,
+            ));
+
+            use pallet_commission_common::CommissionPlugin;
+            let modes = CommissionModes(CommissionModes::TEAM_PERFORMANCE);
+            let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+                1, &50, 10000, 10000, modes, false, 0,
+            );
+
+            // non-stacking: account 40 banned → skipped, account 30 is first eligible → paid
+            assert_eq!(outputs.len(), 1);
+            assert_eq!(outputs[0].beneficiary, 30);
+            assert_eq!(outputs[0].amount, 500); // 10000 * 500 / 10000
+            assert_eq!(remaining, 9500);
+        });
+    }
+
+    #[test]
+    fn banned_ancestor_skipped_in_stacking() {
+        new_test_ext().execute_with(|| {
+            clear_thread_locals();
+            setup_chain(1);
+            set_stats(1, 40, 5, 20, 10000);
+            set_stats(1, 30, 8, 50, 20000);
+            set_stats(1, 20, 3, 10, 5000);
+            set_banned(1, 30); // ban account 30
+
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 500 },
+            ];
+            assert_ok!(CommissionTeam::force_set_team_performance_config(
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10, true, pallet::SalesThresholdMode::Nex,
+            ));
+
+            use pallet_commission_common::CommissionPlugin;
+            let modes = CommissionModes(CommissionModes::TEAM_PERFORMANCE);
+            let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+                1, &50, 10000, 10000, modes, false, 0,
+            );
+
+            // stacking: 40 paid, 30 banned→skipped, 20 paid
+            assert_eq!(outputs.len(), 2);
+            assert_eq!(outputs[0].beneficiary, 40);
+            assert_eq!(outputs[1].beneficiary, 20);
+            assert_eq!(outputs[0].amount, 500);
+            assert_eq!(outputs[1].amount, 500);
+            assert_eq!(remaining, 10000 - 500 - 500);
+        });
+    }
+
+    // ====================================================================
+    // 审计 Round 2: M1 — force_clear 无幻影事件
+    // ====================================================================
+
+    #[test]
+    fn m1_force_clear_no_phantom_event_when_config_absent() {
+        new_test_ext().execute_with(|| {
+            // entity 99 has no config
+            assert_ok!(CommissionTeam::force_clear_team_performance_config(RuntimeOrigin::root(), 99));
+            // Should NOT emit TeamPerformanceConfigCleared since nothing was cleared
+            assert_eq!(
+                System::events()
+                    .iter()
+                    .filter(|e| matches!(
+                        e.event,
+                        RuntimeEvent::CommissionTeam(pallet::Event::TeamPerformanceConfigCleared { .. })
+                    ))
+                    .count(),
+                0
+            );
+        });
+    }
+
+    #[test]
+    fn m1_force_clear_emits_event_when_config_exists() {
+        new_test_ext().execute_with(|| {
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+            ];
+            assert_ok!(CommissionTeam::force_set_team_performance_config(
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+            ));
+            assert_ok!(CommissionTeam::force_clear_team_performance_config(RuntimeOrigin::root(), 1));
+            System::assert_has_event(RuntimeEvent::CommissionTeam(
+                pallet::Event::TeamPerformanceConfigCleared { entity_id: 1 },
+            ));
+        });
+    }
+
+    #[test]
+    fn m1_plan_writer_clear_no_phantom_event() {
+        new_test_ext().execute_with(|| {
+            use pallet_commission_common::TeamPlanWriter;
+            // Clear non-existent config via PlanWriter
+            assert_ok!(<pallet::Pallet<Test> as TeamPlanWriter<Balance>>::clear_config(999));
+            assert_eq!(
+                System::events()
+                    .iter()
+                    .filter(|e| matches!(
+                        e.event,
+                        RuntimeEvent::CommissionTeam(pallet::Event::TeamPerformanceConfigCleared { .. })
+                    ))
+                    .count(),
+                0
+            );
+        });
+    }
+
+    // ====================================================================
+    // 审计 Round 2: L2 — PlanWriter rejects invalid threshold_mode
+    // ====================================================================
+
+    #[test]
+    fn l2_plan_writer_rejects_invalid_threshold_mode() {
+        new_test_ext().execute_with(|| {
+            use pallet_commission_common::TeamPlanWriter;
+            // threshold_mode = 2 should be rejected
+            assert!(<pallet::Pallet<Test> as TeamPlanWriter<Balance>>::set_team_config(
+                1, vec![(1000, 5, 200)], 5, false, 2,
+            ).is_err());
+            // threshold_mode = 255 should be rejected
+            assert!(<pallet::Pallet<Test> as TeamPlanWriter<Balance>>::set_team_config(
+                1, vec![(1000, 5, 200)], 5, false, 255,
+            ).is_err());
+        });
+    }
+
+    // ====================================================================
+    // 审计 Round 2: L4 — Extrinsic event emission verification
+    // ====================================================================
+
+    #[test]
+    fn set_config_emits_updated_event() {
+        new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+            ];
+            assert_ok!(CommissionTeam::set_team_performance_config(
+                RuntimeOrigin::signed(100), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+            ));
+            System::assert_has_event(RuntimeEvent::CommissionTeam(
+                pallet::Event::TeamPerformanceConfigUpdated { entity_id: 1 },
+            ));
+        });
+    }
+
+    #[test]
+    fn clear_config_emits_cleared_event() {
+        new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+            ];
+            assert_ok!(CommissionTeam::set_team_performance_config(
+                RuntimeOrigin::signed(100), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+            ));
+            assert_ok!(CommissionTeam::clear_team_performance_config(RuntimeOrigin::signed(100), 1));
+            System::assert_has_event(RuntimeEvent::CommissionTeam(
+                pallet::Event::TeamPerformanceConfigCleared { entity_id: 1 },
+            ));
+        });
+    }
+
+    #[test]
+    fn update_params_emits_updated_event() {
+        new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+            ];
+            assert_ok!(CommissionTeam::set_team_performance_config(
+                RuntimeOrigin::signed(100), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+            ));
+            assert_ok!(CommissionTeam::update_team_performance_params(
+                RuntimeOrigin::signed(100), 1, Some(20), None, None,
+            ));
+            // Should have TWO Updated events (set + update)
+            assert_eq!(
+                System::events()
+                    .iter()
+                    .filter(|e| matches!(
+                        e.event,
+                        RuntimeEvent::CommissionTeam(pallet::Event::TeamPerformanceConfigUpdated { entity_id: 1 })
+                    ))
+                    .count(),
+                2
+            );
+        });
+    }
+
+    #[test]
+    fn force_set_emits_updated_event() {
+        new_test_ext().execute_with(|| {
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+            ];
+            assert_ok!(CommissionTeam::force_set_team_performance_config(
+                RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+            ));
+            System::assert_has_event(RuntimeEvent::CommissionTeam(
+                pallet::Event::TeamPerformanceConfigUpdated { entity_id: 1 },
+            ));
+        });
+    }
+
+    // ====================================================================
+    // 审计 Round 2: duplicate threshold values
+    // ====================================================================
+
+    #[test]
+    fn set_config_rejects_equal_thresholds() {
+        new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 5, rate: 200 },
+            ];
+            assert_noop!(
+                CommissionTeam::set_team_performance_config(
+                    RuntimeOrigin::signed(100), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+                ),
+                Error::<Test>::TiersNotAscending
+            );
+        });
+    }
+
+    // ====================================================================
+    // EntityLocked 回归测试
+    // ====================================================================
+
+    #[test]
+    fn entity_locked_rejects_set_config() {
+        new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
+            set_entity_locked(1);
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+            ];
+            assert_noop!(
+                CommissionTeam::set_team_performance_config(
+                    RuntimeOrigin::signed(100), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+                ),
+                Error::<Test>::EntityLocked
+            );
+        });
+    }
+
+    #[test]
+    fn entity_locked_rejects_clear_config() {
+        new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+            ];
+            assert_ok!(CommissionTeam::set_team_performance_config(
+                RuntimeOrigin::signed(100), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+            ));
+            set_entity_locked(1);
+            assert_noop!(
+                CommissionTeam::clear_team_performance_config(RuntimeOrigin::signed(100), 1),
+                Error::<Test>::EntityLocked
+            );
+        });
+    }
+
+    #[test]
+    fn entity_locked_rejects_update_params() {
+        new_test_ext().execute_with(|| {
+            set_entity_owner(1, 100);
+            let tiers = vec![
+                pallet::TeamPerformanceTier { sales_threshold: 1000, min_team_size: 0, rate: 100 },
+            ];
+            assert_ok!(CommissionTeam::set_team_performance_config(
+                RuntimeOrigin::signed(100), 1, tiers.try_into().unwrap(), 5, false, pallet::SalesThresholdMode::Nex,
+            ));
+            set_entity_locked(1);
+            assert_noop!(
+                CommissionTeam::update_team_performance_params(
+                    RuntimeOrigin::signed(100), 1, Some(15), None, None,
+                ),
+                Error::<Test>::EntityLocked
+            );
         });
     }
 }

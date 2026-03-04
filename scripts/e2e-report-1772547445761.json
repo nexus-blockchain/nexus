@@ -1,0 +1,141 @@
+{
+  "timestamp": "2026-03-03T14:17:25.764Z",
+  "summary": {
+    "total": 1,
+    "passed": 0,
+    "failed": 1
+  },
+  "flows": [
+    {
+      "flowName": "Flow-E1: 实体→店铺创建",
+      "description": "创建实体 → 自动 Primary Shop → 更新 → 暂停/恢复 → 关闭",
+      "steps": [
+        {
+          "name": "创建实体 (Merchant)",
+          "actor": "eve",
+          "passed": true,
+          "duration": 17372
+        },
+        {
+          "name": "验证实体已创建",
+          "actor": "eve",
+          "passed": true,
+          "duration": 13
+        },
+        {
+          "name": "验证 Eve 的 UserEntity 记录",
+          "actor": "eve",
+          "passed": true,
+          "duration": 4
+        },
+        {
+          "name": "验证初始资金已扣除",
+          "actor": "eve",
+          "passed": true,
+          "duration": 6
+        },
+        {
+          "name": "查询实体详细信息",
+          "actor": "eve",
+          "passed": true,
+          "duration": 5
+        },
+        {
+          "name": "更新实体信息",
+          "actor": "eve",
+          "passed": true,
+          "duration": 18681
+        },
+        {
+          "name": "验证更新后的名称",
+          "actor": "eve",
+          "passed": true,
+          "duration": 8
+        },
+        {
+          "name": "暂停实体",
+          "actor": "sudo(alice)",
+          "passed": true,
+          "duration": 17371
+        },
+        {
+          "name": "验证实体已暂停",
+          "actor": "eve",
+          "passed": true,
+          "duration": 5
+        },
+        {
+          "name": "恢复实体",
+          "actor": "sudo(alice)",
+          "passed": true,
+          "duration": 18715
+        },
+        {
+          "name": "验证实体已恢复",
+          "actor": "eve",
+          "passed": true,
+          "duration": 7
+        },
+        {
+          "name": "[错误路径] 非所有者更新",
+          "actor": "charlie",
+          "passed": false,
+          "duration": 17371,
+          "error": "entityRegistry.NotEntityOwner: 不是实体所有者"
+        },
+        {
+          "name": "非所有者更新应失败",
+          "actor": "charlie",
+          "passed": true,
+          "duration": 1
+        },
+        {
+          "name": "[错误路径] 空名称创建实体",
+          "actor": "eve",
+          "passed": false,
+          "duration": 18720,
+          "error": "entityRegistry.NameEmpty: 名称为空"
+        },
+        {
+          "name": "空名称创建应失败",
+          "actor": "eve",
+          "passed": true,
+          "duration": 0
+        },
+        {
+          "name": "申请关闭实体",
+          "actor": "eve",
+          "passed": true,
+          "duration": 17381
+        },
+        {
+          "name": "验证状态为 PendingClose",
+          "actor": "eve",
+          "passed": true,
+          "duration": 6
+        },
+        {
+          "name": "审批关闭实体",
+          "actor": "sudo(alice)",
+          "passed": true,
+          "duration": 18712
+        },
+        {
+          "name": "验证实体已关闭",
+          "actor": "eve",
+          "passed": true,
+          "duration": 5
+        },
+        {
+          "name": "Entity→Shop 流程汇总",
+          "actor": "system",
+          "passed": true,
+          "duration": 1
+        }
+      ],
+      "startTime": 1772547301355,
+      "endTime": 1772547445759,
+      "passed": false
+    }
+  ]
+}

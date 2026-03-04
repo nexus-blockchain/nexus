@@ -9,20 +9,23 @@ import { Input } from "@/components/ui/input";
 import { StatusBadge } from "@/components/shared/StatusBadge";
 import { Progress } from "@/components/ui/progress";
 import { Rocket, Clock, DollarSign, Users } from "lucide-react";
+import { useTranslations } from "next-intl";
 
 export default function TokensalePage() {
   const { currentEntityId } = useEntityStore();
   const { rounds, isLoading } = useSaleRounds(currentEntityId);
   const actions = useTokensaleActions();
   const [subscribeAmount, setSubscribeAmount] = useState("");
+  const t = useTranslations("tokensale");
+  const tc = useTranslations("common");
 
-  if (!currentEntityId) return <div className="flex h-full items-center justify-center text-muted-foreground">Select an entity first</div>;
+  if (!currentEntityId) return <div className="flex h-full items-center justify-center text-muted-foreground">{tc("selectEntity")}</div>;
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold tracking-tight">Token Sale</h1>
-        <p className="text-muted-foreground">Manage sale rounds, subscriptions, and vesting</p>
+        <h1 className="text-3xl font-bold tracking-tight">{t("title")}</h1>
+        <p className="text-muted-foreground">{t("subtitle")}</p>
       </div>
 
       {isLoading ? (

@@ -4,7 +4,7 @@ use crate as pallet_entity_disclosure;
 use frame_support::{
     derive_impl,
     parameter_types,
-    traits::{ConstU16, ConstU32},
+    traits::ConstU32,
 };
 use pallet_entity_common::{EntityProvider, EntityStatus};
 use sp_runtime::{BuildStorage, DispatchError};
@@ -23,10 +23,20 @@ pub const ENTITY_ID_2: u64 = 2;
 
 thread_local! {
     static ADMINS: RefCell<BTreeSet<(u64, u64)>> = RefCell::new(BTreeSet::new());
+    static ENTITY_STATUSES: RefCell<std::collections::BTreeMap<u64, EntityStatus>> = RefCell::new(std::collections::BTreeMap::new());
+    static ENTITY_LOCKED: RefCell<BTreeSet<u64>> = RefCell::new(BTreeSet::new());
 }
 
 pub fn set_admin(entity_id: u64, account: u64) {
     ADMINS.with(|a| a.borrow_mut().insert((entity_id, account)));
+}
+
+pub fn set_entity_status(entity_id: u64, status: EntityStatus) {
+    ENTITY_STATUSES.with(|s| s.borrow_mut().insert(entity_id, status));
+}
+
+pub fn set_entity_locked(entity_id: u64) {
+    ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id));
 }
 
 frame_support::construct_runtime!(
@@ -57,6 +67,11 @@ impl EntityProvider<u64> for MockEntityProvider {
         entity_id == ENTITY_ID || entity_id == ENTITY_ID_2
     }
     fn entity_status(entity_id: u64) -> Option<EntityStatus> {
+        // 优先使用覆盖状态
+        let override_status = ENTITY_STATUSES.with(|s| s.borrow().get(&entity_id).cloned());
+        if let Some(status) = override_status {
+            return Some(status);
+        }
         if entity_id <= 2 { Some(EntityStatus::Active) } else { None }
     }
     fn entity_owner(entity_id: u64) -> Option<u64> {
@@ -70,13 +85,15 @@ impl EntityProvider<u64> for MockEntityProvider {
         100 + entity_id
     }
     fn update_entity_stats(_: u64, _: u128, _: u32) -> Result<(), DispatchError> { Ok(()) }
-    fn update_entity_rating(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
     fn is_entity_admin(entity_id: u64, account: &u64, _required_permission: u32) -> bool {
         // Owner 天然拥有全部权限
         if Self::entity_owner(entity_id) == Some(*account) {
             return true;
         }
         ADMINS.with(|a| a.borrow().contains(&(entity_id, *account)))
+    }
+    fn is_entity_locked(entity_id: u64) -> bool {
+        ENTITY_LOCKED.with(|l| l.borrow().contains(&entity_id))
     }
 }
 
@@ -92,10 +109,11 @@ impl pallet_entity_disclosure::Config for Test {
     type BasicDisclosureInterval = BasicDisclosureInterval;
     type StandardDisclosureInterval = StandardDisclosureInterval;
     type EnhancedDisclosureInterval = EnhancedDisclosureInterval;
-    type MajorHolderThreshold = ConstU16<500>;
     type MaxBlackoutDuration = MaxBlackoutDuration;
     type MaxAnnouncementHistory = ConstU32<10>;
     type MaxTitleLength = ConstU32<128>;
+    type MaxPinnedAnnouncements = ConstU32<3>;
+    type MaxInsiderRoleHistory = ConstU32<10>;
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

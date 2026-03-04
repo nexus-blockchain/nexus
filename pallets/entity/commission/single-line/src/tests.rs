@@ -3,8 +3,13 @@ use crate::pallet;
 use frame_support::{assert_noop, assert_ok};
 use frame_system::RawOrigin;
 use pallet_commission_common::{CommissionModes, CommissionPlugin, CommissionType, TokenCommissionPlugin};
+use pallet_entity_common::AdminPermission;
 
 type SingleLine = pallet::Pallet<Test>;
+
+const OWNER: u64 = 100;
+const ADMIN: u64 = 101;
+const NOBODY: u64 = 999;
 
 // ============================================================================
 // Helper: 构建单链 [1, 2, 3, 4, 5]
@@ -16,9 +21,15 @@ fn setup_single_line(entity_id: u64, accounts: &[u64]) {
     }
 }
 
+fn setup_entity(entity_id: u64) {
+    set_entity_owner(entity_id, OWNER);
+    set_entity_admin(entity_id, ADMIN, AdminPermission::COMMISSION_MANAGE);
+}
+
 fn setup_config(entity_id: u64) {
+    setup_entity(entity_id);
     assert_ok!(SingleLine::set_single_line_config(
-        RawOrigin::Root.into(),
+        RuntimeOrigin::signed(OWNER),
         entity_id,
         100,  // upline_rate = 1%
         100,  // downline_rate = 1%
@@ -50,14 +61,41 @@ fn set_config_works() {
 }
 
 #[test]
-fn set_config_requires_root() {
+fn set_config_by_admin_works() {
     new_test_ext().execute_with(|| {
+        setup_entity(1);
+        assert_ok!(SingleLine::set_single_line_config(
+            RuntimeOrigin::signed(ADMIN),
+            1, 100, 100, 10, 15, 1000, 150, 200,
+        ));
+        assert!(pallet::SingleLineConfigs::<Test>::get(1).is_some());
+    });
+}
+
+#[test]
+fn set_config_rejects_no_entity() {
+    new_test_ext().execute_with(|| {
+        // entity not registered
         assert_noop!(
             SingleLine::set_single_line_config(
-                RawOrigin::Signed(1).into(),
+                RuntimeOrigin::signed(NOBODY),
                 1, 100, 100, 10, 15, 1000, 150, 200,
             ),
-            frame_support::error::BadOrigin,
+            pallet::Error::<Test>::EntityNotFound,
+        );
+    });
+}
+
+#[test]
+fn set_config_rejects_non_owner_non_admin() {
+    new_test_ext().execute_with(|| {
+        setup_entity(1);
+        assert_noop!(
+            SingleLine::set_single_line_config(
+                RuntimeOrigin::signed(NOBODY),
+                1, 100, 100, 10, 15, 1000, 150, 200,
+            ),
+            pallet::Error::<Test>::NotEntityOwnerOrAdmin,
         );
     });
 }
@@ -65,9 +103,10 @@ fn set_config_requires_root() {
 #[test]
 fn set_config_rejects_invalid_upline_rate() {
     new_test_ext().execute_with(|| {
+        setup_entity(1);
         assert_noop!(
             SingleLine::set_single_line_config(
-                RawOrigin::Root.into(),
+                RuntimeOrigin::signed(OWNER),
                 1, 1001, 100, 10, 15, 1000, 150, 200,
             ),
             pallet::Error::<Test>::InvalidRate,
@@ -78,9 +117,10 @@ fn set_config_rejects_invalid_upline_rate() {
 #[test]
 fn set_config_rejects_invalid_downline_rate() {
     new_test_ext().execute_with(|| {
+        setup_entity(1);
         assert_noop!(
             SingleLine::set_single_line_config(
-                RawOrigin::Root.into(),
+                RuntimeOrigin::signed(OWNER),
                 1, 100, 1001, 10, 15, 1000, 150, 200,
             ),
             pallet::Error::<Test>::InvalidRate,
@@ -91,8 +131,9 @@ fn set_config_rejects_invalid_downline_rate() {
 #[test]
 fn set_config_boundary_rate_1000_ok() {
     new_test_ext().execute_with(|| {
+        setup_entity(1);
         assert_ok!(SingleLine::set_single_line_config(
-            RawOrigin::Root.into(),
+            RuntimeOrigin::signed(OWNER),
             1, 1000, 1000, 10, 15, 1000, 150, 200,
         ));
     });
@@ -292,8 +333,9 @@ fn process_upline_dynamic_levels_with_extra() {
     new_test_ext().execute_with(|| {
         let entity_id = 1u64;
         // base_upline_levels=2, max=150, threshold=1000
+        setup_entity(entity_id);
         assert_ok!(SingleLine::set_single_line_config(
-            RawOrigin::Root.into(), entity_id, 100, 100, 2, 2, 1000, 150, 200,
+            RuntimeOrigin::signed(OWNER), entity_id, 100, 100, 2, 2, 1000, 150, 200,
         ));
         // 单链: [1, 2, 3, 4, 5, 6]
         setup_single_line(entity_id, &[1, 2, 3, 4, 5, 6]);
@@ -351,8 +393,9 @@ fn process_downline_basic() {
 fn process_downline_zero_rate_no_output() {
     new_test_ext().execute_with(|| {
         let entity_id = 1u64;
+        setup_entity(entity_id);
         assert_ok!(SingleLine::set_single_line_config(
-            RawOrigin::Root.into(), entity_id, 100, 0, 10, 15, 1000, 150, 200,
+            RuntimeOrigin::signed(OWNER), entity_id, 100, 0, 10, 15, 1000, 150, 200,
         ));
         setup_single_line(entity_id, &[10, 20, 30]);
 
@@ -418,8 +461,9 @@ fn process_downline_dynamic_levels_with_extra() {
     new_test_ext().execute_with(|| {
         let entity_id = 1u64;
         // base_downline_levels=1, threshold=500
+        setup_entity(entity_id);
         assert_ok!(SingleLine::set_single_line_config(
-            RawOrigin::Root.into(), entity_id, 100, 100, 2, 1, 500, 150, 200,
+            RuntimeOrigin::signed(OWNER), entity_id, 100, 100, 2, 1, 500, 150, 200,
         ));
         setup_single_line(entity_id, &[1, 2, 3, 4, 5]);
 
@@ -758,8 +802,9 @@ fn default_config_values() {
 #[test]
 fn set_level_based_levels_works() {
     new_test_ext().execute_with(|| {
+        setup_entity(1);
         assert_ok!(SingleLine::set_level_based_levels(
-            RawOrigin::Root.into(), 1, 2, 10, 12,
+            RuntimeOrigin::signed(OWNER), 1, 2, 10, 12,
         ));
         let overrides = pallet::SingleLineCustomLevelOverrides::<Test>::get(1, 2).unwrap();
         assert_eq!(overrides.upline_levels, 10);
@@ -771,11 +816,12 @@ fn set_level_based_levels_works() {
 }
 
 #[test]
-fn set_level_based_levels_requires_root() {
+fn set_level_based_levels_rejects_non_owner() {
     new_test_ext().execute_with(|| {
+        setup_entity(1);
         assert_noop!(
-            SingleLine::set_level_based_levels(RawOrigin::Signed(1).into(), 1, 0, 20, 25),
-            frame_support::error::BadOrigin,
+            SingleLine::set_level_based_levels(RuntimeOrigin::signed(NOBODY), 1, 0, 20, 25),
+            pallet::Error::<Test>::NotEntityOwnerOrAdmin,
         );
     });
 }
@@ -783,8 +829,9 @@ fn set_level_based_levels_requires_root() {
 #[test]
 fn set_level_based_levels_rejects_both_zero() {
     new_test_ext().execute_with(|| {
+        setup_entity(1);
         assert_noop!(
-            SingleLine::set_level_based_levels(RawOrigin::Root.into(), 1, 0, 0, 0),
+            SingleLine::set_level_based_levels(RuntimeOrigin::signed(OWNER), 1, 0, 0, 0),
             pallet::Error::<Test>::InvalidLevels,
         );
     });
@@ -793,11 +840,12 @@ fn set_level_based_levels_rejects_both_zero() {
 #[test]
 fn remove_level_based_levels_works() {
     new_test_ext().execute_with(|| {
+        setup_entity(1);
         assert_ok!(SingleLine::set_level_based_levels(
-            RawOrigin::Root.into(), 1, 3, 8, 10,
+            RuntimeOrigin::signed(OWNER), 1, 3, 8, 10,
         ));
         assert_ok!(SingleLine::remove_level_based_levels(
-            RawOrigin::Root.into(), 1, 3,
+            RuntimeOrigin::signed(OWNER), 1, 3,
         ));
         assert_eq!(pallet::SingleLineCustomLevelOverrides::<Test>::get(1, 3), None);
         frame_system::Pallet::<Test>::assert_has_event(
@@ -809,11 +857,16 @@ fn remove_level_based_levels_works() {
 #[test]
 fn remove_nonexistent_level_no_event() {
     new_test_ext().execute_with(|| {
+        setup_entity(1);
         // M3 修复: 不存在的覆盖不应发出事件
         assert_ok!(SingleLine::remove_level_based_levels(
-            RawOrigin::Root.into(), 1, 99,
+            RuntimeOrigin::signed(OWNER), 1, 99,
         ));
-        assert_eq!(frame_system::Pallet::<Test>::events().len(), 0);
+        // 只有 setup_entity 不产生 pallet 事件
+        let pallet_events: alloc::vec::Vec<_> = System::events().into_iter()
+            .filter(|e| matches!(e.event, RuntimeEvent::CommissionSingleLine(_)))
+            .collect();
+        assert_eq!(pallet_events.len(), 0);
     });
 }
 
@@ -822,12 +875,13 @@ fn level_override_affects_upline_levels() {
     new_test_ext().execute_with(|| {
         let entity_id = 1u64;
         // base_upline_levels=2, max=150
+        setup_entity(entity_id);
         assert_ok!(SingleLine::set_single_line_config(
-            RawOrigin::Root.into(), entity_id, 100, 100, 2, 2, 1000, 150, 200,
+            RuntimeOrigin::signed(OWNER), entity_id, 100, 100, 2, 2, 1000, 150, 200,
         ));
         // 自定义等级 1 上线层数=5
         assert_ok!(SingleLine::set_level_based_levels(
-            RawOrigin::Root.into(), entity_id, 1, 5, 2,
+            RuntimeOrigin::signed(OWNER), entity_id, 1, 5, 2,
         ));
         setup_single_line(entity_id, &[1, 2, 3, 4, 5, 6, 7]);
 
@@ -857,12 +911,13 @@ fn level_override_affects_downline_levels() {
     new_test_ext().execute_with(|| {
         let entity_id = 1u64;
         // base_downline_levels=1, max=200
+        setup_entity(entity_id);
         assert_ok!(SingleLine::set_single_line_config(
-            RawOrigin::Root.into(), entity_id, 100, 100, 2, 1, 1000, 150, 200,
+            RuntimeOrigin::signed(OWNER), entity_id, 100, 100, 2, 1, 1000, 150, 200,
         ));
         // 自定义等级 2 下线层数=4
         assert_ok!(SingleLine::set_level_based_levels(
-            RawOrigin::Root.into(), entity_id, 2, 2, 4,
+            RuntimeOrigin::signed(OWNER), entity_id, 2, 2, 4,
         ));
         setup_single_line(entity_id, &[1, 2, 3, 4, 5, 6]);
 
@@ -892,12 +947,13 @@ fn level_override_fallback_when_no_override_for_level() {
     new_test_ext().execute_with(|| {
         let entity_id = 1u64;
         // base=2(config), threshold=1000, max=150
+        setup_entity(entity_id);
         assert_ok!(SingleLine::set_single_line_config(
-            RawOrigin::Root.into(), entity_id, 100, 100, 2, 2, 1000, 150, 200,
+            RuntimeOrigin::signed(OWNER), entity_id, 100, 100, 2, 2, 1000, 150, 200,
         ));
         // 自定义等级 1 override upline=3
         assert_ok!(SingleLine::set_level_based_levels(
-            RawOrigin::Root.into(), entity_id, 1, 3, 2,
+            RuntimeOrigin::signed(OWNER), entity_id, 1, 3, 2,
         ));
         setup_single_line(entity_id, &[1, 2, 3, 4, 5, 6, 7]);
 
@@ -918,12 +974,13 @@ fn level_override_still_capped_by_max() {
     new_test_ext().execute_with(|| {
         let entity_id = 1u64;
         // max_upline_levels=3
+        setup_entity(entity_id);
         assert_ok!(SingleLine::set_single_line_config(
-            RawOrigin::Root.into(), entity_id, 100, 100, 2, 2, 1000, 3, 200,
+            RuntimeOrigin::signed(OWNER), entity_id, 100, 100, 2, 2, 1000, 3, 200,
         ));
         // 自定义等级 0 override upline=10（超过 max=3）
         assert_ok!(SingleLine::set_level_based_levels(
-            RawOrigin::Root.into(), entity_id, 0, 10, 2,
+            RuntimeOrigin::signed(OWNER), entity_id, 0, 10, 2,
         ));
         setup_single_line(entity_id, &[1, 2, 3, 4, 5, 6, 7]);
 
@@ -944,12 +1001,13 @@ fn level_override_combined_with_extra_levels() {
     new_test_ext().execute_with(|| {
         let entity_id = 1u64;
         // base=2(config), threshold=1000, max=150
+        setup_entity(entity_id);
         assert_ok!(SingleLine::set_single_line_config(
-            RawOrigin::Root.into(), entity_id, 100, 100, 2, 2, 1000, 150, 200,
+            RuntimeOrigin::signed(OWNER), entity_id, 100, 100, 2, 2, 1000, 150, 200,
         ));
         // 自定义等级 1 override upline=3
         assert_ok!(SingleLine::set_level_based_levels(
-            RawOrigin::Root.into(), entity_id, 1, 3, 2,
+            RuntimeOrigin::signed(OWNER), entity_id, 1, 3, 2,
         ));
         setup_single_line(entity_id, &[1, 2, 3, 4, 5, 6, 7, 8]);
 
@@ -975,12 +1033,13 @@ fn plugin_with_level_override_integration() {
     new_test_ext().execute_with(|| {
         let entity_id = 1u64;
         // base=1, max=150/200
+        setup_entity(entity_id);
         assert_ok!(SingleLine::set_single_line_config(
-            RawOrigin::Root.into(), entity_id, 100, 100, 1, 1, 1000, 150, 200,
+            RuntimeOrigin::signed(OWNER), entity_id, 100, 100, 1, 1, 1000, 150, 200,
         ));
         // 自定义等级 2 → upline=3, downline=4
         assert_ok!(SingleLine::set_level_based_levels(
-            RawOrigin::Root.into(), entity_id, 2, 3, 4,
+            RuntimeOrigin::signed(OWNER), entity_id, 2, 3, 4,
         ));
         setup_single_line(entity_id, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
@@ -1008,16 +1067,17 @@ fn plugin_with_level_override_integration() {
 fn different_custom_level_overrides_are_isolated() {
     new_test_ext().execute_with(|| {
         let entity_id = 1u64;
+        setup_entity(entity_id);
         assert_ok!(SingleLine::set_single_line_config(
-            RawOrigin::Root.into(), entity_id, 100, 100, 1, 1, 1000, 150, 200,
+            RuntimeOrigin::signed(OWNER), entity_id, 100, 100, 1, 1, 1000, 150, 200,
         ));
         // 自定义等级 1 → upline=6
         assert_ok!(SingleLine::set_level_based_levels(
-            RawOrigin::Root.into(), entity_id, 1, 6, 1,
+            RuntimeOrigin::signed(OWNER), entity_id, 1, 6, 1,
         ));
         // 自定义等级 2 → upline=3
         assert_ok!(SingleLine::set_level_based_levels(
-            RawOrigin::Root.into(), entity_id, 2, 3, 1,
+            RuntimeOrigin::signed(OWNER), entity_id, 2, 3, 1,
         ));
         setup_single_line(entity_id, &[1, 2, 3, 4, 5, 6, 7, 8]);
 
@@ -1076,9 +1136,10 @@ fn m1_deep_add_to_single_line_emits_event() {
 fn m2_deep_set_config_rejects_base_upline_exceeds_max() {
     new_test_ext().execute_with(|| {
         // base_upline_levels=20 > max_upline_levels=10 → 应拒绝
+        setup_entity(1);
         assert_noop!(
             SingleLine::set_single_line_config(
-                RawOrigin::Root.into(), 1, 100, 100, 20, 5, 1000, 10, 200,
+                RuntimeOrigin::signed(OWNER), 1, 100, 100, 20, 5, 1000, 10, 200,
             ),
             pallet::Error::<Test>::BaseLevelsExceedMax
         );
@@ -1089,9 +1150,10 @@ fn m2_deep_set_config_rejects_base_upline_exceeds_max() {
 fn m2_deep_set_config_rejects_base_downline_exceeds_max() {
     new_test_ext().execute_with(|| {
         // base_downline_levels=30 > max_downline_levels=5 → 应拒绝
+        setup_entity(1);
         assert_noop!(
             SingleLine::set_single_line_config(
-                RawOrigin::Root.into(), 1, 100, 100, 5, 30, 1000, 150, 5,
+                RuntimeOrigin::signed(OWNER), 1, 100, 100, 5, 30, 1000, 150, 5,
             ),
             pallet::Error::<Test>::BaseLevelsExceedMax
         );
@@ -1144,13 +1206,477 @@ fn m1_r3_shared_line_upline_downline_consistent() {
 fn m2_deep_set_config_base_equals_max_ok() {
     new_test_ext().execute_with(|| {
         // base == max 应该成功
+        setup_entity(1);
         assert_ok!(SingleLine::set_single_line_config(
-            RawOrigin::Root.into(), 1, 100, 100, 10, 15, 1000, 10, 15,
+            RuntimeOrigin::signed(OWNER), 1, 100, 100, 10, 15, 1000, 10, 15,
         ));
         let config = pallet::SingleLineConfigs::<Test>::get(1u64).unwrap();
         assert_eq!(config.base_upline_levels, 10);
         assert_eq!(config.max_upline_levels, 10);
         assert_eq!(config.base_downline_levels, 15);
         assert_eq!(config.max_downline_levels, 15);
+    });
+}
+
+// ============================================================================
+// force_set_single_line_config 测试
+// ============================================================================
+
+#[test]
+fn force_set_config_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(SingleLine::force_set_single_line_config(
+            RuntimeOrigin::root(), 1, 200, 300, 5, 10, 500, 50, 100,
+        ));
+        let config = pallet::SingleLineConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.upline_rate, 200);
+        assert_eq!(config.downline_rate, 300);
+        frame_system::Pallet::<Test>::assert_has_event(
+            pallet::Event::<Test>::SingleLineConfigUpdated { entity_id: 1 }.into(),
+        );
+    });
+}
+
+#[test]
+fn force_set_config_rejects_signed() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            SingleLine::force_set_single_line_config(
+                RuntimeOrigin::signed(OWNER), 1, 100, 100, 10, 15, 1000, 150, 200,
+            ),
+            frame_support::error::BadOrigin,
+        );
+    });
+}
+
+#[test]
+fn force_set_config_rejects_invalid_rate() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            SingleLine::force_set_single_line_config(
+                RuntimeOrigin::root(), 1, 1001, 100, 10, 15, 1000, 150, 200,
+            ),
+            pallet::Error::<Test>::InvalidRate,
+        );
+    });
+}
+
+// ============================================================================
+// force_clear_single_line_config 测试
+// ============================================================================
+
+#[test]
+fn force_clear_config_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(SingleLine::force_set_single_line_config(
+            RuntimeOrigin::root(), 1, 100, 100, 10, 15, 1000, 150, 200,
+        ));
+        assert!(pallet::SingleLineConfigs::<Test>::get(1).is_some());
+
+        assert_ok!(SingleLine::force_clear_single_line_config(
+            RuntimeOrigin::root(), 1,
+        ));
+        assert!(pallet::SingleLineConfigs::<Test>::get(1).is_none());
+        frame_system::Pallet::<Test>::assert_has_event(
+            pallet::Event::<Test>::SingleLineConfigCleared { entity_id: 1 }.into(),
+        );
+    });
+}
+
+#[test]
+fn force_clear_nonexistent_is_noop() {
+    new_test_ext().execute_with(|| {
+        // 不存在配置时 force_clear 不报错也不发事件
+        assert_ok!(SingleLine::force_clear_single_line_config(
+            RuntimeOrigin::root(), 99,
+        ));
+        let pallet_events: alloc::vec::Vec<_> = System::events().into_iter()
+            .filter(|e| matches!(e.event, RuntimeEvent::CommissionSingleLine(_)))
+            .collect();
+        assert_eq!(pallet_events.len(), 0);
+    });
+}
+
+#[test]
+fn force_clear_rejects_signed() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            SingleLine::force_clear_single_line_config(
+                RuntimeOrigin::signed(OWNER), 1,
+            ),
+            frame_support::error::BadOrigin,
+        );
+    });
+}
+
+// ============================================================================
+// clear_single_line_config 测试（Owner/Admin）
+// ============================================================================
+
+#[test]
+fn clear_config_by_owner_works() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert!(pallet::SingleLineConfigs::<Test>::get(1).is_some());
+
+        assert_ok!(SingleLine::clear_single_line_config(
+            RuntimeOrigin::signed(OWNER), 1,
+        ));
+        assert!(pallet::SingleLineConfigs::<Test>::get(1).is_none());
+        frame_system::Pallet::<Test>::assert_has_event(
+            pallet::Event::<Test>::SingleLineConfigCleared { entity_id: 1 }.into(),
+        );
+    });
+}
+
+#[test]
+fn clear_config_by_admin_works() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_ok!(SingleLine::clear_single_line_config(
+            RuntimeOrigin::signed(ADMIN), 1,
+        ));
+        assert!(pallet::SingleLineConfigs::<Test>::get(1).is_none());
+    });
+}
+
+#[test]
+fn clear_config_rejects_non_owner() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_noop!(
+            SingleLine::clear_single_line_config(RuntimeOrigin::signed(NOBODY), 1),
+            pallet::Error::<Test>::NotEntityOwnerOrAdmin,
+        );
+    });
+}
+
+#[test]
+fn clear_config_rejects_not_found() {
+    new_test_ext().execute_with(|| {
+        setup_entity(1);
+        // 未设置配置
+        assert_noop!(
+            SingleLine::clear_single_line_config(RuntimeOrigin::signed(OWNER), 1),
+            pallet::Error::<Test>::ConfigNotFound,
+        );
+    });
+}
+
+// ============================================================================
+// update_single_line_params 测试
+// ============================================================================
+
+#[test]
+fn update_params_upline_rate_only() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_ok!(SingleLine::update_single_line_params(
+            RuntimeOrigin::signed(OWNER), 1, Some(500), None, None,
+        ));
+        let config = pallet::SingleLineConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.upline_rate, 500);
+        assert_eq!(config.downline_rate, 100); // unchanged
+    });
+}
+
+#[test]
+fn update_params_downline_rate_only() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_ok!(SingleLine::update_single_line_params(
+            RuntimeOrigin::signed(OWNER), 1, None, Some(800), None,
+        ));
+        let config = pallet::SingleLineConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.upline_rate, 100); // unchanged
+        assert_eq!(config.downline_rate, 800);
+    });
+}
+
+#[test]
+fn update_params_threshold_only() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_ok!(SingleLine::update_single_line_params(
+            RuntimeOrigin::signed(OWNER), 1, None, None, Some(9999),
+        ));
+        let config = pallet::SingleLineConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.level_increment_threshold, 9999);
+        assert_eq!(config.upline_rate, 100); // unchanged
+    });
+}
+
+#[test]
+fn update_params_multiple() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_ok!(SingleLine::update_single_line_params(
+            RuntimeOrigin::signed(OWNER), 1, Some(200), Some(300), Some(5000),
+        ));
+        let config = pallet::SingleLineConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.upline_rate, 200);
+        assert_eq!(config.downline_rate, 300);
+        assert_eq!(config.level_increment_threshold, 5000);
+    });
+}
+
+#[test]
+fn update_params_rejects_nothing_to_update() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_noop!(
+            SingleLine::update_single_line_params(
+                RuntimeOrigin::signed(OWNER), 1, None, None, None,
+            ),
+            pallet::Error::<Test>::NothingToUpdate,
+        );
+    });
+}
+
+#[test]
+fn update_params_rejects_config_not_found() {
+    new_test_ext().execute_with(|| {
+        setup_entity(1);
+        assert_noop!(
+            SingleLine::update_single_line_params(
+                RuntimeOrigin::signed(OWNER), 1, Some(100), None, None,
+            ),
+            pallet::Error::<Test>::ConfigNotFound,
+        );
+    });
+}
+
+#[test]
+fn update_params_rejects_invalid_rate() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_noop!(
+            SingleLine::update_single_line_params(
+                RuntimeOrigin::signed(OWNER), 1, Some(1001), None, None,
+            ),
+            pallet::Error::<Test>::InvalidRate,
+        );
+        assert_noop!(
+            SingleLine::update_single_line_params(
+                RuntimeOrigin::signed(OWNER), 1, None, Some(1001), None,
+            ),
+            pallet::Error::<Test>::InvalidRate,
+        );
+    });
+}
+
+#[test]
+fn update_params_rejects_non_owner() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_noop!(
+            SingleLine::update_single_line_params(
+                RuntimeOrigin::signed(NOBODY), 1, Some(100), None, None,
+            ),
+            pallet::Error::<Test>::NotEntityOwnerOrAdmin,
+        );
+    });
+}
+
+#[test]
+fn update_params_emits_event() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        System::reset_events();
+        assert_ok!(SingleLine::update_single_line_params(
+            RuntimeOrigin::signed(OWNER), 1, Some(200), None, None,
+        ));
+        frame_system::Pallet::<Test>::assert_has_event(
+            pallet::Event::<Test>::SingleLineConfigUpdated { entity_id: 1 }.into(),
+        );
+    });
+}
+
+// ============================================================================
+// is_banned 受益人检查测试
+// ============================================================================
+
+#[test]
+fn banned_upline_skipped() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        // 单链: [10, 20, 30, 40, 50]
+        setup_single_line(entity_id, &[10, 20, 30, 40, 50]);
+
+        // ban 40 (index=3)
+        set_banned(entity_id, 40);
+
+        let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
+        let mut remaining: u128 = 100_000;
+        let mut outputs = alloc::vec::Vec::new();
+        let line = pallet::SingleLines::<Test>::get(entity_id);
+        let (base_up, _) = SingleLine::effective_base_levels(entity_id, &50, &config);
+        SingleLine::process_upline(entity_id, &50, 100_000, &mut remaining, &config, base_up, &line, &mut outputs);
+
+        // 上线: 40(banned→skip), 30, 20, 10 → 3 outputs
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[0].beneficiary, 30); // 40 was skipped
+        assert_eq!(outputs[1].beneficiary, 20);
+        assert_eq!(outputs[2].beneficiary, 10);
+    });
+}
+
+#[test]
+fn banned_downline_skipped() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        setup_single_line(entity_id, &[10, 20, 30, 40, 50]);
+
+        // ban 30 (index=2)
+        set_banned(entity_id, 30);
+
+        let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
+        let mut remaining: u128 = 100_000;
+        let mut outputs = alloc::vec::Vec::new();
+        let line = pallet::SingleLines::<Test>::get(entity_id);
+        let (_, base_down) = SingleLine::effective_base_levels(entity_id, &10, &config);
+        SingleLine::process_downline(entity_id, &10, 100_000, &mut remaining, &config, base_down, &line, &mut outputs);
+
+        // 下线: 20, 30(banned→skip), 40, 50 → 3 outputs
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[0].beneficiary, 20);
+        assert_eq!(outputs[1].beneficiary, 40); // 30 was skipped
+        assert_eq!(outputs[2].beneficiary, 50);
+    });
+}
+
+#[test]
+fn banned_via_plugin_integration() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        setup_single_line(entity_id, &[10, 20, 30]);
+
+        set_banned(entity_id, 20);
+
+        let modes = CommissionModes(CommissionModes::SINGLE_LINE_UPLINE);
+        let (outputs, _remaining) = <SingleLine as CommissionPlugin<u64, u128>>::calculate(
+            entity_id, &30, 100_000, 100_000, modes, false, 1,
+        );
+
+        // 上线: 20(banned), 10 → only 10
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].beneficiary, 10);
+    });
+}
+
+// ============================================================================
+// SingleLinePlanWriter 测试
+// ============================================================================
+
+#[test]
+fn plan_writer_set_config_works() {
+    new_test_ext().execute_with(|| {
+        use pallet_commission_common::SingleLinePlanWriter;
+
+        assert_ok!(<SingleLine as SingleLinePlanWriter>::set_single_line_config(
+            1, 200, 300, 5, 10, 2000, 50, 100,
+        ));
+        let config = pallet::SingleLineConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.upline_rate, 200);
+        assert_eq!(config.downline_rate, 300);
+        assert_eq!(config.base_upline_levels, 5);
+        assert_eq!(config.base_downline_levels, 10);
+        assert_eq!(config.level_increment_threshold, 2000);
+        assert_eq!(config.max_upline_levels, 50);
+        assert_eq!(config.max_downline_levels, 100);
+        frame_system::Pallet::<Test>::assert_has_event(
+            pallet::Event::<Test>::SingleLineConfigUpdated { entity_id: 1 }.into(),
+        );
+    });
+}
+
+#[test]
+fn plan_writer_set_config_rejects_invalid_rate() {
+    new_test_ext().execute_with(|| {
+        use pallet_commission_common::SingleLinePlanWriter;
+
+        assert!(<SingleLine as SingleLinePlanWriter>::set_single_line_config(
+            1, 1001, 100, 5, 10, 2000, 50, 100,
+        ).is_err());
+    });
+}
+
+#[test]
+fn plan_writer_set_config_rejects_base_exceeds_max() {
+    new_test_ext().execute_with(|| {
+        use pallet_commission_common::SingleLinePlanWriter;
+
+        assert!(<SingleLine as SingleLinePlanWriter>::set_single_line_config(
+            1, 100, 100, 20, 10, 2000, 10, 100,
+        ).is_err());
+    });
+}
+
+#[test]
+fn plan_writer_clear_config_works() {
+    new_test_ext().execute_with(|| {
+        use pallet_commission_common::SingleLinePlanWriter;
+
+        assert_ok!(<SingleLine as SingleLinePlanWriter>::set_single_line_config(
+            1, 100, 100, 5, 10, 2000, 50, 100,
+        ));
+        assert!(pallet::SingleLineConfigs::<Test>::get(1).is_some());
+
+        assert_ok!(<SingleLine as SingleLinePlanWriter>::clear_config(1));
+        assert!(pallet::SingleLineConfigs::<Test>::get(1).is_none());
+        frame_system::Pallet::<Test>::assert_has_event(
+            pallet::Event::<Test>::SingleLineConfigCleared { entity_id: 1 }.into(),
+        );
+    });
+}
+
+#[test]
+fn plan_writer_clear_nonexistent_is_noop() {
+    new_test_ext().execute_with(|| {
+        use pallet_commission_common::SingleLinePlanWriter;
+
+        assert_ok!(<SingleLine as SingleLinePlanWriter>::clear_config(99));
+        let pallet_events: alloc::vec::Vec<_> = System::events().into_iter()
+            .filter(|e| matches!(e.event, RuntimeEvent::CommissionSingleLine(_)))
+            .collect();
+        assert_eq!(pallet_events.len(), 0);
+    });
+}
+
+// ==================== EntityLocked 回归测试 ====================
+
+#[test]
+fn entity_locked_rejects_set_single_line_config() {
+    new_test_ext().execute_with(|| {
+        setup_entity(1);
+        set_entity_locked(1);
+        assert_noop!(
+            CommissionSingleLine::set_single_line_config(
+                RuntimeOrigin::signed(OWNER), 1,
+                100, 100, 10, 15, 1000, 150, 200,
+            ),
+            pallet::Error::<Test>::EntityLocked
+        );
+    });
+}
+
+#[test]
+fn entity_locked_rejects_clear_single_line_config() {
+    new_test_ext().execute_with(|| {
+        setup_entity(1);
+        // 先设置配置
+        assert_ok!(CommissionSingleLine::set_single_line_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            100, 100, 10, 15, 1000, 150, 200,
+        ));
+        // 锁定后无法清除
+        set_entity_locked(1);
+        assert_noop!(
+            CommissionSingleLine::clear_single_line_config(RuntimeOrigin::signed(OWNER), 1),
+            pallet::Error::<Test>::EntityLocked
+        );
     });
 }

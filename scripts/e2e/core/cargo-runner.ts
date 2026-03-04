@@ -21,7 +21,7 @@ export const ALL_PALLETS = [
   // Entity 模块群
   'pallet-entity-registry',
   'pallet-entity-shop',
-  'pallet-entity-service',
+  'pallet-entity-product',
   'pallet-entity-order',
   'pallet-entity-review',
   'pallet-entity-token',

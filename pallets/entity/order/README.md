@@ -47,7 +47,7 @@ impl pallet_entity_order::Config for Runtime {
     type Currency = Balances;
     type Escrow = EscrowPallet;
     type ShopProvider = EntityShop;
-    type ProductProvider = EntityService;
+    type ProductProvider = EntityProduct;
     type EntityToken = EntityTokenPallet;
     type CommissionHandler = CommissionCore;
     type PlatformAccount = PlatformAccountId;

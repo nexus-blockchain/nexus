@@ -155,6 +155,17 @@ impl ConfigManager {
                     forced_ads_per_day: 2,
                     can_disable_ads: false,
                     community_id_hash: String::new(),
+                    cas_enabled: false,
+                    raid_enabled: false,
+                    raid_window_secs: 60,
+                    raid_join_threshold: 10,
+                    max_mentions: 0,
+                    new_member_audit_count: 0,
+                    nsfw_mode: 0,
+                    profanity_words: String::new(),
+                    profanity_action: 0,
+                    homoglyph_keywords: String::new(),
+                    automod_rules_json: String::new(),
                 }, 0) // last_sync = 0 → needs_sync 立即返回 true
             });
             debug!(community = hex::encode(community_id_hash), "新群组已注册, 等待同步");
@@ -210,6 +221,17 @@ mod tests {
             forced_ads_per_day: 0,
             can_disable_ads: true,
             community_id_hash: String::new(),
+            cas_enabled: false,
+            raid_enabled: false,
+            raid_window_secs: 60,
+            raid_join_threshold: 10,
+            max_mentions: 0,
+            new_member_audit_count: 0,
+            nsfw_mode: 0,
+            profanity_words: String::new(),
+            profanity_action: 0,
+            homoglyph_keywords: String::new(),
+            automod_rules_json: String::new(),
         });
 
         let config = mgr.get_config(&hash).unwrap();
@@ -254,6 +276,17 @@ mod tests {
             forced_ads_per_day: 0,
             can_disable_ads: true,
             community_id_hash: String::new(),
+            cas_enabled: false,
+            raid_enabled: false,
+            raid_window_secs: 60,
+            raid_join_threshold: 10,
+            max_mentions: 0,
+            new_member_audit_count: 0,
+            nsfw_mode: 0,
+            profanity_words: String::new(),
+            profanity_action: 0,
+            homoglyph_keywords: String::new(),
+            automod_rules_json: String::new(),
         });
         assert!(!mgr.needs_sync(&hash));
     }

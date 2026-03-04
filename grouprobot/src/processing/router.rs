@@ -85,7 +85,7 @@ impl MessageRouter {
             let execute_action = action_decision.to_execute_action(&ctx.group_id, ctx.channel_id.as_deref());
             let receipt = executor.execute(&execute_action).await?;
 
-            // 3. 签名 + 入队链上日志 (免注册模式跳过)
+            // 3. 签名 + 入队链上日志 + 序列号去重 (免注册模式跳过)
             if self.chain_enabled {
                 let sequence = self.sequence.next()
                     .map_err(|e| BotError::Internal(e.into()))?;
@@ -109,6 +109,29 @@ impl MessageRouter {
 
                 if let Err(e) = self.log_sender.send(log).await {
                     warn!(error = %e, "动作日志入队失败");
+                }
+
+                // P1-fix: 先在本地 pending set 中原子性占位,防止并发实例重复提交
+                if self.pending_sequences.insert(sequence) {
+                    let chain_opt = self.chain.read().await.clone();
+                    if let Some(chain) = chain_opt {
+                        let bot_hash = self.key_manager.bot_id_hash();
+                        let pending_ref = self.pending_sequences.clone();
+                        let seq = sequence;
+                        tokio::spawn(async move {
+                            match chain.mark_sequence_processed(bot_hash, seq).await {
+                                Ok(_) => { /* 成功: pending 条目保留,防止重入 */ }
+                                Err(e) => {
+                                    warn!(error = %e, seq = seq, "序列号去重标记失败");
+                                    pending_ref.remove(&seq);
+                                }
+                            }
+                        });
+                    } else {
+                        self.pending_sequences.remove(&sequence);
+                    }
+                } else {
+                    debug!(seq = sequence, "序列号已在本地 pending 中, 跳过重复提交");
                 }
             }
 
@@ -148,31 +171,6 @@ impl MessageRouter {
                 success = receipt.success,
                 "动作执行完成"
             );
-        }
-
-        // P1-fix: 先在本地 pending set 中原子性占位,防止并发实例重复提交
-        if self.chain_enabled {
-            let seq = self.sequence.current();
-            if self.pending_sequences.insert(seq) {
-                let chain_opt = self.chain.read().await.clone();
-                if let Some(chain) = chain_opt {
-                    let bot_hash = self.key_manager.bot_id_hash();
-                    let pending_ref = self.pending_sequences.clone();
-                    tokio::spawn(async move {
-                        match chain.mark_sequence_processed(bot_hash, seq).await {
-                            Ok(_) => { /* 成功: pending 条目保留,防止重入 */ }
-                            Err(e) => {
-                                warn!(error = %e, seq = seq, "序列号去重标记失败");
-                                pending_ref.remove(&seq);
-                            }
-                        }
-                    });
-                } else {
-                    self.pending_sequences.remove(&seq);
-                }
-            } else {
-                debug!(seq = seq, "序列号已在本地 pending 中, 跳过重复提交");
-            }
         }
 
         Ok(())

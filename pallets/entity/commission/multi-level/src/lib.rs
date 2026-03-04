@@ -20,6 +20,8 @@ pub mod weights;
 pub use pallet::*;
 pub use weights::WeightInfo;
 
+use pallet_entity_common::EntityProvider as _;
+
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
@@ -33,6 +35,7 @@ pub mod pallet {
     use pallet_commission_common::{
         CommissionOutput, CommissionType, MemberProvider,
     };
+    use pallet_entity_common::{AdminPermission, EntityProvider};
 
     // ========================================================================
     // 数据结构
@@ -80,8 +83,13 @@ pub mod pallet {
 
     #[pallet::config]
     pub trait Config: frame_system::Config {
+        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+
         /// 推荐链 + 统计 + USDT 消费数据
         type MemberProvider: MemberProvider<Self::AccountId>;
+
+        /// 实体查询接口（权限校验、Owner/Admin 判断）
+        type EntityProvider: EntityProvider<Self::AccountId>;
 
         /// 最大层级数（默认 15）
         #[pallet::constant]
@@ -91,7 +99,10 @@ pub mod pallet {
         type WeightInfo: WeightInfo;
     }
 
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     // ========================================================================
@@ -116,6 +127,14 @@ pub mod pallet {
     pub enum Event<T: Config> {
         MultiLevelConfigUpdated { entity_id: u64 },
         MultiLevelConfigCleared { entity_id: u64 },
+        /// 单层配置已更新
+        TierUpdated { entity_id: u64, tier_index: u32 },
+        /// max_total_rate 已更新
+        MaxTotalRateUpdated { entity_id: u64, new_rate: u16 },
+        /// 层级已插入
+        TierInserted { entity_id: u64, tier_index: u32 },
+        /// 层级已移除
+        TierRemoved { entity_id: u64, tier_index: u32 },
     }
 
     // ========================================================================
@@ -128,6 +147,20 @@ pub mod pallet {
         InvalidRate,
         /// levels 为空
         EmptyLevels,
+        /// 实体不存在
+        EntityNotFound,
+        /// 非实体所有者或无 COMMISSION_MANAGE 权限
+        NotEntityOwnerOrAdmin,
+        /// 配置不存在（清除时）
+        ConfigNotFound,
+        /// 实体已被全局锁定，所有配置操作不可用
+        EntityLocked,
+        /// 部分更新时所有字段均为 None
+        NothingToUpdate,
+        /// tier_index 超出 levels 范围
+        TierIndexOutOfBounds,
+        /// 层级数已达 MaxMultiLevels 上限
+        TierLimitExceeded,
     }
 
     // ========================================================================
@@ -136,7 +169,7 @@ pub mod pallet {
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        /// 设置 Entity 多级分销配置
+        /// 设置 Entity 多级分销配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
         ///
         /// 校验：levels 非空，每层 `rate ≤ 10000`，`0 < max_total_rate ≤ 10000`。
         #[pallet::call_index(0)]
@@ -147,17 +180,168 @@ pub mod pallet {
             levels: BoundedVec<MultiLevelTier, T::MaxMultiLevels>,
             max_total_rate: u16,
         ) -> DispatchResult {
-            ensure_root(origin)?;
-            ensure!(!levels.is_empty(), Error::<T>::EmptyLevels);
-            for tier in levels.iter() {
-                ensure!(tier.rate <= 10000, Error::<T>::InvalidRate);
-            }
-            ensure!(max_total_rate > 0 && max_total_rate <= 10000, Error::<T>::InvalidRate);
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            Self::validate_config(&levels, max_total_rate)?;
 
             MultiLevelConfigs::<T>::insert(entity_id, MultiLevelConfig { levels, max_total_rate });
 
             Self::deposit_event(Event::MultiLevelConfigUpdated { entity_id });
             Ok(())
+        }
+
+        /// 清除 Entity 多级分销配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
+        #[pallet::call_index(1)]
+        #[pallet::weight(T::WeightInfo::clear_multi_level_config())]
+        pub fn clear_multi_level_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(MultiLevelConfigs::<T>::contains_key(entity_id), Error::<T>::ConfigNotFound);
+
+            MultiLevelConfigs::<T>::remove(entity_id);
+            Self::deposit_event(Event::MultiLevelConfigCleared { entity_id });
+            Ok(())
+        }
+
+        /// [Root] 强制设置 Entity 多级分销配置
+        #[pallet::call_index(2)]
+        #[pallet::weight(T::WeightInfo::set_multi_level_config(levels.len() as u32))]
+        pub fn force_set_multi_level_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            levels: BoundedVec<MultiLevelTier, T::MaxMultiLevels>,
+            max_total_rate: u16,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            Self::validate_config(&levels, max_total_rate)?;
+
+            MultiLevelConfigs::<T>::insert(entity_id, MultiLevelConfig { levels, max_total_rate });
+
+            Self::deposit_event(Event::MultiLevelConfigUpdated { entity_id });
+            Ok(())
+        }
+
+        /// [Root] 强制清除 Entity 多级分销配置（幂等，配置不存在时静默成功）
+        #[pallet::call_index(3)]
+        #[pallet::weight(T::WeightInfo::clear_multi_level_config())]
+        pub fn force_clear_multi_level_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            if MultiLevelConfigs::<T>::contains_key(entity_id) {
+                MultiLevelConfigs::<T>::remove(entity_id);
+                Self::deposit_event(Event::MultiLevelConfigCleared { entity_id });
+            }
+            Ok(())
+        }
+
+        /// F3: 部分更新多级分销参数（Owner/Admin）
+        ///
+        /// 支持单独更新 `max_total_rate` 和/或指定层的配置，无需重提整个 levels 数组。
+        /// 全部 None 返回 `NothingToUpdate`。
+        #[pallet::call_index(4)]
+        #[pallet::weight(T::WeightInfo::update_multi_level_params())]
+        pub fn update_multi_level_params(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            max_total_rate: Option<u16>,
+            tier_index: Option<u32>,
+            tier_update: Option<MultiLevelTier>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(
+                max_total_rate.is_some() || (tier_index.is_some() && tier_update.is_some()),
+                Error::<T>::NothingToUpdate
+            );
+
+            MultiLevelConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
+                let config = maybe_config.as_mut().ok_or(Error::<T>::ConfigNotFound)?;
+
+                if let Some(new_rate) = max_total_rate {
+                    ensure!(new_rate > 0 && new_rate <= 10000, Error::<T>::InvalidRate);
+                    config.max_total_rate = new_rate;
+                    Self::deposit_event(Event::MaxTotalRateUpdated { entity_id, new_rate });
+                }
+
+                if let (Some(idx), Some(tier)) = (tier_index, tier_update) {
+                    let idx = idx as usize;
+                    ensure!(idx < config.levels.len(), Error::<T>::TierIndexOutOfBounds);
+                    ensure!(tier.rate <= 10000, Error::<T>::InvalidRate);
+                    config.levels[idx] = tier;
+                    Self::deposit_event(Event::TierUpdated { entity_id, tier_index: idx as u32 });
+                }
+
+                Ok(())
+            })
+        }
+
+        /// F4: 在指定位置插入新层级（Owner/Admin）
+        ///
+        /// `index` 为插入位置（0-indexed），现有层级从 index 开始后移。
+        /// index = levels.len() 表示追加到末尾。
+        #[pallet::call_index(5)]
+        #[pallet::weight(T::WeightInfo::add_tier())]
+        pub fn add_tier(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            index: u32,
+            tier: MultiLevelTier,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(tier.rate <= 10000, Error::<T>::InvalidRate);
+
+            MultiLevelConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
+                let config = maybe_config.as_mut().ok_or(Error::<T>::ConfigNotFound)?;
+                let idx = index as usize;
+                ensure!(idx <= config.levels.len(), Error::<T>::TierIndexOutOfBounds);
+
+                // 构建新 Vec 并插入
+                let mut v = config.levels.to_vec();
+                v.insert(idx, tier);
+                config.levels = v.try_into().map_err(|_| Error::<T>::TierLimitExceeded)?;
+
+                Self::deposit_event(Event::TierInserted { entity_id, tier_index: index });
+                Ok(())
+            })
+        }
+
+        /// F4: 移除指定位置的层级（Owner/Admin）
+        ///
+        /// 移除后 levels 不可为空（至少保留 1 层，否则应使用 clear）。
+        #[pallet::call_index(6)]
+        #[pallet::weight(T::WeightInfo::remove_tier())]
+        pub fn remove_tier(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            index: u32,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+
+            MultiLevelConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
+                let config = maybe_config.as_mut().ok_or(Error::<T>::ConfigNotFound)?;
+                let idx = index as usize;
+                ensure!(idx < config.levels.len(), Error::<T>::TierIndexOutOfBounds);
+                ensure!(config.levels.len() > 1, Error::<T>::EmptyLevels);
+
+                let mut v = config.levels.to_vec();
+                v.remove(idx);
+                config.levels = v.try_into().map_err(|_| Error::<T>::TierLimitExceeded)?;
+
+                Self::deposit_event(Event::TierRemoved { entity_id, tier_index: index });
+                Ok(())
+            })
         }
     }
 
@@ -166,6 +350,33 @@ pub mod pallet {
     // ========================================================================
 
     impl<T: Config> Pallet<T> {
+        /// 验证 Entity Owner 或 Admin(COMMISSION_MANAGE) 权限
+        fn ensure_owner_or_admin(entity_id: u64, who: &T::AccountId) -> DispatchResult {
+            let owner = T::EntityProvider::entity_owner(entity_id)
+                .ok_or(Error::<T>::EntityNotFound)?;
+            if *who == owner {
+                return Ok(());
+            }
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, who, AdminPermission::COMMISSION_MANAGE),
+                Error::<T>::NotEntityOwnerOrAdmin
+            );
+            Ok(())
+        }
+
+        /// 校验 levels + max_total_rate 参数合法性
+        fn validate_config(
+            levels: &BoundedVec<MultiLevelTier, T::MaxMultiLevels>,
+            max_total_rate: u16,
+        ) -> DispatchResult {
+            ensure!(!levels.is_empty(), Error::<T>::EmptyLevels);
+            for tier in levels.iter() {
+                ensure!(tier.rate <= 10000, Error::<T>::InvalidRate);
+            }
+            ensure!(max_total_rate > 0 && max_total_rate <= 10000, Error::<T>::InvalidRate);
+            Ok(())
+        }
+
         /// 多级分销佣金计算
         ///
         /// 逐层遍历推荐链，每层执行：
@@ -211,8 +422,15 @@ pub mod pallet {
                 if visited.contains(referrer) { break; }
                 visited.insert(referrer.clone());
 
-                // H1 审计修复: 跳过未激活会员（与 pallet-commission-team H2 一致）
-                if !T::MemberProvider::is_activated(entity_id, referrer) {
+                // F10: 跳过非会员（已退出/未注册的推荐人不应获得佣金）
+                // M1-R4: is_member/is_banned 廉价检查提前，避免 check_tier_activation 的多余 DB read
+                if !T::MemberProvider::is_member(entity_id, referrer) {
+                    current_referrer = T::MemberProvider::get_referrer(entity_id, referrer);
+                    continue;
+                }
+
+                // F9: 跳过被封禁的推荐人（与 referral X1 修复一致）
+                if T::MemberProvider::is_banned(entity_id, referrer) {
                     current_referrer = T::MemberProvider::get_referrer(entity_id, referrer);
                     continue;
                 }
@@ -283,6 +501,18 @@ pub mod pallet {
             }
             true
         }
+
+        /// F11: 查询指定账户在各层级的激活状态
+        ///
+        /// 返回 `Vec<bool>`，长度 = levels.len()，true = 该层已激活。
+        /// 配置不存在时返回空 Vec。
+        pub fn get_activation_status(entity_id: u64, account: &T::AccountId) -> alloc::vec::Vec<bool> {
+            let config = match MultiLevelConfigs::<T>::get(entity_id) {
+                Some(c) => c,
+                None => return alloc::vec::Vec::new(),
+            };
+            config.levels.iter().map(|tier| Self::check_tier_activation(entity_id, account, tier)).collect()
+        }
     }
 }
 
@@ -307,6 +537,11 @@ where
         use pallet_commission_common::CommissionModes;
 
         if !enabled_modes.contains(CommissionModes::MULTI_LEVEL) {
+            return (alloc::vec::Vec::new(), remaining);
+        }
+
+        // F12: Entity 未激活时跳过佣金计算
+        if !T::EntityProvider::is_entity_active(entity_id) {
             return (alloc::vec::Vec::new(), remaining);
         }
 
@@ -351,6 +586,11 @@ where
             return (alloc::vec::Vec::new(), remaining);
         }
 
+        // F12: Entity 未激活时跳过佣金计算
+        if !T::EntityProvider::is_entity_active(entity_id) {
+            return (alloc::vec::Vec::new(), remaining);
+        }
+
         let config = match pallet::MultiLevelConfigs::<T>::get(entity_id) {
             Some(c) => c,
             None => return (alloc::vec::Vec::new(), remaining),
@@ -389,6 +629,29 @@ impl<T: pallet::Config> pallet_commission_common::MultiLevelPlanWriter for palle
             .map_err(|_| sp_runtime::DispatchError::Other("TooManyLevels"))?;
         pallet::MultiLevelConfigs::<T>::insert(entity_id, pallet::MultiLevelConfig { levels: bounded, max_total_rate });
         // M1-R2 审计修复: PlanWriter 路径也需 emit 事件，供 off-chain indexer 感知
+        Self::deposit_event(pallet::Event::MultiLevelConfigUpdated { entity_id });
+        Ok(())
+    }
+
+    fn set_multi_level_full(
+        entity_id: u64,
+        tiers: alloc::vec::Vec<(u16, u32, u32, u128)>,
+        max_total_rate: u16,
+    ) -> Result<(), sp_runtime::DispatchError> {
+        frame_support::ensure!(!tiers.is_empty(), sp_runtime::DispatchError::Other("EmptyLevels"));
+        frame_support::ensure!(max_total_rate > 0 && max_total_rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
+        for &(rate, _, _, _) in tiers.iter() {
+            frame_support::ensure!(rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
+        }
+        let bounded: frame_support::BoundedVec<pallet::MultiLevelTier, T::MaxMultiLevels> = tiers
+            .into_iter()
+            .map(|(rate, required_directs, required_team_size, required_spent)| {
+                pallet::MultiLevelTier { rate, required_directs, required_team_size, required_spent }
+            })
+            .collect::<alloc::vec::Vec<_>>()
+            .try_into()
+            .map_err(|_| sp_runtime::DispatchError::Other("TooManyLevels"))?;
+        pallet::MultiLevelConfigs::<T>::insert(entity_id, pallet::MultiLevelConfig { levels: bounded, max_total_rate });
         Self::deposit_event(pallet::Event::MultiLevelConfigUpdated { entity_id });
         Ok(())
     }

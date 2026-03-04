@@ -34,7 +34,7 @@ Bot 注册中心 + TEE 节点管理 + 平台身份绑定 + 多级 DCAP 证明系
 ### TEE 证明提交
 | call_index | 方法 | Origin | 说明 |
 |:---:|------|:---:|------|
-| 6 | `submit_attestation` | Signed | 软件模式提交（Level 0，⚠️ 无签名验证） |
+| 6 | `submit_attestation` | Signed | ⚠️ **已弃用** 软件模式提交（Level 0，无签名验证，请用 `submit_tee_attestation`） |
 | 7 | `refresh_attestation` | Signed | 刷新证明（24h 周期，V1/V2 分别刷新） |
 | 10 | `submit_verified_attestation` | Signed | 结构验证（Level 1，解析 Quote + Nonce 绑定） |
 | 11 | `request_attestation_nonce` | Signed | 请求 Nonce（防重放，嵌入 report_data[32..64]） |
@@ -53,6 +53,8 @@ Bot 注册中心 + TEE 节点管理 + 平台身份绑定 + 多级 DCAP 证明系
 | 13 | `register_pck_key` | Root | 注册 PCK 公钥（Level 3 需要，防重复注册） |
 | 29 | `revoke_mrtd` | Root | 撤销 MRTD 白名单（固件漏洞响应） |
 | 30 | `revoke_mrenclave` | Root | 撤销 MRENCLAVE 白名单（enclave 漏洞响应） |
+| 35 | `revoke_api_server_mrtd` | Root | 撤销 API Server MRTD 白名单 |
+| 36 | `revoke_pck_key` | Root | 撤销 PCK 公钥（密钥泄露紧急响应） |
 
 ### Peer 网络
 | call_index | 方法 | Origin | 说明 |
@@ -61,6 +63,7 @@ Bot 注册中心 + TEE 节点管理 + 平台身份绑定 + 多级 DCAP 证明系
 | 18 | `deregister_peer` | Signed | 注销 Peer 端点（清理心跳计数） |
 | 19 | `heartbeat_peer` | Signed | Peer 心跳保活（更新 last_seen + 累加心跳计数） |
 | 22 | `report_stale_peer` | Signed | 举报过期 Peer（任何人可调用，被动清理替代全表扫描） |
+| 40 | `update_peer_endpoint` | Signed | 原子更新 Peer 端点 URL（无需先注销再注册） |
 
 ### 运营商管理
 | call_index | 方法 | Origin | 说明 |
@@ -71,6 +74,29 @@ Bot 注册中心 + TEE 节点管理 + 平台身份绑定 + 多级 DCAP 证明系
 | 26 | `set_operator_sla` | Root | 设置运营商 SLA 等级（0-3） |
 | 27 | `assign_bot_to_operator` | Signed | 将 Bot 分配给运营商（需同时为 Bot 所有者和运营商） |
 | 28 | `unassign_bot_from_operator` | Signed | 取消 Bot 与运营商的关联 |
+| 42 | `operator_unassign_bot` | Signed | 运营商主动解除与 Bot 的关联（运营商发现违规时使用） |
+
+### Bot 生命周期管理
+| call_index | 方法 | Origin | 说明 |
+|:---:|------|:---:|------|
+| 31 | `suspend_bot` | Root | 暂停 Bot（Active → Suspended，治理违规响应） |
+| 32 | `reactivate_bot` | Root | 恢复暂停的 Bot（Suspended → Active） |
+| 34 | `transfer_bot_ownership` | Signed | 转移 Bot 所有权（调用者须为当前所有者） |
+| 37 | `force_deactivate_bot` | Root | 强制停用 Bot（Active/Suspended 均可，含完整清理） |
+| 41 | `cleanup_deactivated_bot` | Signed | 清理已停用 Bot 的存储（任何人可调用，释放 OwnerBots 配额） |
+| 43 | `force_expire_attestation` | Root | 强制过期证明（移除 V1+V2，降级为 StandardNode） |
+| 44 | `force_transfer_bot_ownership` | Root | 强制转移 Bot 所有权（应对失联 Owner） |
+
+### 用户平台管理
+| call_index | 方法 | Origin | 说明 |
+|:---:|------|:---:|------|
+| 33 | `unbind_user_platform` | Signed | 解绑用户平台身份 |
+
+### 运营商治理（Root）
+| call_index | 方法 | Origin | 说明 |
+|:---:|------|:---:|------|
+| 38 | `suspend_operator` | Root | 暂停运营商（不接受新 Bot 分配） |
+| 39 | `unsuspend_operator` | Root | 恢复暂停的运营商 |
 
 ## DCAP 验证级别
 
@@ -237,8 +263,8 @@ pub struct CommunityBinding<T: Config> {
 | `NonceIssued` | 证明 Nonce 已签发 |
 | `MrtdApproved` / `MrtdRevoked` | MRTD 白名单审批/撤销 |
 | `MrenclaveApproved` / `MrenclaveRevoked` | MRENCLAVE 白名单审批/撤销 |
-| `ApiServerMrtdApproved` | API Server MRTD 已审批 |
-| `PckKeyRegistered` | PCK 公钥已注册 |
+| `ApiServerMrtdApproved` / `ApiServerMrtdRevoked` | API Server MRTD 审批/撤销 |
+| `PckKeyRegistered` / `PckKeyRevoked` | PCK 公钥注册/撤销 |
 | `DcapAttestationSubmitted` | DCAP 证明已提交（含 dcap_level + has_api_server） |
 | `SgxAttestationSubmitted` | SGX 补充证明已提交 |
 | `TeeAttestationSubmitted` | 统一入口 TEE 证明已提交（含 tee_type + dcap_level） |
@@ -248,6 +274,12 @@ pub struct CommunityBinding<T: Config> {
 | `OperatorRegistered` / `OperatorUpdated` / `OperatorDeregistered` | 运营商生命周期 |
 | `OperatorSlaUpdated` | 运营商 SLA 等级已更新 |
 | `BotAssignedToOperator` / `BotUnassignedFromOperator` | Bot 运营商分配/取消 |
+| `UserPlatformUnbound` | 用户平台身份已解绑 |
+| `BotOwnershipTransferred` | Bot 所有权已转移（含 old_owner / new_owner） |
+| `BotSuspended` / `BotReactivated` | Bot 暂停/恢复 |
+| `OperatorSuspended` / `OperatorUnsuspended` | 运营商暂停/恢复 |
+| `PeerEndpointUpdated` | Peer 端点 URL 已更新 |
+| `BotCleaned` | 已停用 Bot 存储已清理 |
 
 ## 错误
 
@@ -304,6 +336,13 @@ pub struct CommunityBinding<T: Config> {
 | `ExpiryQueueFull` | 证明过期队列已满（1000 上限） |
 | `MrtdNotFound` | MRTD 不在白名单中（撤销时） |
 | `MrenclaveNotFound` | MRENCLAVE 不在白名单中（撤销时） |
+| `BotNotSuspended` | Bot 不处于暂停状态（恢复时） |
+| `SameOwner` | 新所有者与当前所有者相同 |
+| `PlatformBindingNotFound` | 平台绑定不存在（解绑时） |
+| `ApiServerMrtdNotFound` | API Server MRTD 不在白名单中（撤销时） |
+| `BotNotDeactivated` | Bot 不处于停用状态（清理时） |
+| `NotOperator` | 不是 Bot 当前关联的运营商 |
+| `OperatorNotSuspended` | 运营商不处于暂停状态（恢复时） |
 
 ## 配置参数
 
@@ -336,6 +375,9 @@ pub struct CommunityBinding<T: Config> {
 
 - `is_bot_active` / `is_tee_node` / `has_dual_attestation` / `is_attestation_fresh`
 - `bot_owner` / `bot_public_key` / `peer_count` / `bot_operator`
+- `attestation_level` — 返回 V2 优先的 DCAP 等级（0-4），无证明返回 0
+- `tee_type` — 返回 `Option<TeeType>`（V2 直接读取，V1 TeeNode → Tdx）
+- `bot_status` — 返回 `Option<BotStatus>`（含 Suspended 状态）
 
 ### PeerUptimeRecorder
 
@@ -349,6 +391,9 @@ pub struct CommunityBinding<T: Config> {
 - `bot_owner` / `bot_public_key` / `peer_count` / `get_peers`
 - `bot_operator_account` / `bot_operator_full` / `operator_info` / `operator_bots`
 - `peer_heartbeat_count` / `peer_era_uptime`
+- `attestation_level` — DCAP 等级查询（V2 优先，V1 回退，无证明返回 0）
+- `get_tee_type` — TEE 类型查询（V2 直接读取，V1 TeeNode → Tdx）
+- `attestation_info` — 综合查询返回 `Option<(dcap_level, quote_verified, expires_at, Option<TeeType>)>`
 
 ## 子模块
 
@@ -361,3 +406,25 @@ pub struct CommunityBinding<T: Config> {
 - [consensus/](../consensus/) — 节点共识（依赖 BotRegistryProvider + PeerUptimeRecorder）
 - [subscription/](../subscription/) — 订阅管理（依赖 BotRegistryProvider）
 - [community/](../community/) — 社区管理（依赖 BotRegistryProvider）
+
+## 版本历史
+
+### v2 — 新增治理与运营管理 extrinsics
+
+**新增 14 个 extrinsics** (call_index 31-44):
+- Bot 生命周期: `suspend_bot`, `reactivate_bot`, `transfer_bot_ownership`, `force_deactivate_bot`, `cleanup_deactivated_bot`, `force_expire_attestation`, `force_transfer_bot_ownership`
+- 用户平台: `unbind_user_platform`
+- 白名单撤销: `revoke_api_server_mrtd`, `revoke_pck_key`
+- 运营商治理: `suspend_operator`, `unsuspend_operator`
+- Peer 管理: `update_peer_endpoint`
+- 运营商自助: `operator_unassign_bot`
+
+**弃用**: `submit_attestation` (call_index 6) — 请用 `submit_tee_attestation`
+
+**修复**: `refresh_attestation` 保留 `dcap_level` / `quote_verified` / `tee_type`（之前刷新会重置为 0/false）
+
+**BotRegistryProvider 扩展**: 新增 `attestation_level`, `tee_type`, `bot_status` 方法
+
+**新查询方法**: `attestation_level`, `get_tee_type`, `attestation_info`
+
+**测试**: 225 tests ✅

@@ -23,7 +23,8 @@ pub async fn handle_webhook(
             .get("x-telegram-bot-api-secret-token")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        if secret != state.config.webhook_secret {
+        // L3 修复: 常量时间比较, 防止计时攻击
+        if !constant_time_eq(secret.as_bytes(), state.config.webhook_secret.as_bytes()) {
             warn!("Webhook secret 验证失败");
             return StatusCode::UNAUTHORIZED;
         }
@@ -124,4 +125,21 @@ pub async fn handle_status(
         "local_store_counters": state.local_store.counter_count(),
         "local_store_fingerprints": state.local_store.fingerprint_count(),
     }))
+}
+
+/// L3 修复: 常量时间字节比较 (防止计时侧信道攻击)
+/// 长度不同时仍遍历以消耗恒定时间, 但结果必定为 false
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        let mut _acc = 0u8;
+        for &byte in a.iter().chain(b.iter()) {
+            _acc |= byte;
+        }
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }

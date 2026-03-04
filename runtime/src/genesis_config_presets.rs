@@ -19,6 +19,7 @@ use crate::{
 	AccountId, BalancesConfig, RuntimeGenesisConfig, SudoConfig, UNIT,
 	TechnicalCommitteeConfig, ArbitrationCommitteeConfig, TreasuryCouncilConfig, ContentCommitteeConfig,
 	TechnicalMembershipConfig, ArbitrationMembershipConfig, TreasuryMembershipConfig, ContentMembershipConfig,
+	NexMarketConfig,
 };
 use alloc::{vec, vec::Vec};
 use frame_support::build_struct_json_patch;
@@ -110,6 +111,12 @@ fn testnet_genesis(
 		content_membership: ContentMembershipConfig {
 			members: content_members.try_into().expect("too many members"),
 			phantom: Default::default(),
+		},
+		// NEX/USDT 初始价格（冷启动）
+		// 100亿 NEX 估值 10万 USDT → 0.000001 USDT/NEX → 精度 10^6 = 1
+		nex_market: NexMarketConfig {
+			initial_price: Some(1),
+			..Default::default()
 		},
 	})
 }

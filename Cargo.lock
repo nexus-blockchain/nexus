@@ -5955,6 +5955,7 @@ dependencies = [
  "pallet-ads-entity",
  "pallet-ads-grouprobot",
  "pallet-ads-primitives",
+ "pallet-ads-router",
  "pallet-arbitration",
  "pallet-assets",
  "pallet-aura",
@@ -5977,9 +5978,9 @@ dependencies = [
  "pallet-entity-market",
  "pallet-entity-member",
  "pallet-entity-order",
+ "pallet-entity-product",
  "pallet-entity-registry",
  "pallet-entity-review",
- "pallet-entity-service",
  "pallet-entity-shop",
  "pallet-entity-token",
  "pallet-entity-tokensale",
@@ -6313,6 +6314,7 @@ dependencies = [
  "pallet-balances",
  "parity-scale-codec",
  "scale-info",
+ "sp-api",
  "sp-core",
  "sp-io",
  "sp-runtime",
@@ -6357,6 +6359,18 @@ dependencies = [
  "frame-support",
  "parity-scale-codec",
  "scale-info",
+ "sp-runtime",
+]
+
+[[package]]
+name = "pallet-ads-router"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "pallet-ads-entity",
+ "pallet-ads-grouprobot",
+ "pallet-ads-primitives",
  "sp-runtime",
 ]
 
@@ -6545,6 +6559,7 @@ name = "pallet-commission-common"
 version = "0.1.0"
 dependencies = [
  "frame-support",
+ "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
  "sp-runtime",
@@ -6576,6 +6591,7 @@ dependencies = [
  "frame-system",
  "pallet-balances",
  "pallet-commission-common",
+ "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
  "sp-io",
@@ -6590,6 +6606,7 @@ dependencies = [
  "frame-support",
  "frame-system",
  "pallet-commission-common",
+ "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
  "sp-io",
@@ -6620,6 +6637,7 @@ dependencies = [
  "frame-system",
  "pallet-balances",
  "pallet-commission-common",
+ "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
  "sp-io",
@@ -6638,6 +6656,7 @@ dependencies = [
  "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
+ "sp-core",
  "sp-io",
  "sp-runtime",
  "sp-std",
@@ -6791,6 +6810,7 @@ version = "0.1.0"
 dependencies = [
  "frame-support",
  "frame-system",
+ "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
  "sp-core",
@@ -6804,14 +6824,8 @@ version = "0.1.0"
 dependencies = [
  "frame-support",
  "frame-system",
- "log",
- "pallet-assets",
  "pallet-balances",
  "pallet-entity-common",
- "pallet-entity-registry",
- "pallet-entity-token",
- "pallet-trading-common",
- "pallet-trading-trc20-verifier",
  "parity-scale-codec",
  "scale-info",
  "sp-core",
@@ -6831,6 +6845,7 @@ dependencies = [
  "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
+ "sp-api",
  "sp-core",
  "sp-io",
  "sp-runtime",
@@ -6856,40 +6871,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pallet-entity-registry"
-version = "0.1.0"
-dependencies = [
- "frame-support",
- "frame-system",
- "log",
- "pallet-balances",
- "pallet-entity-common",
- "parity-scale-codec",
- "scale-info",
- "sp-core",
- "sp-io",
- "sp-runtime",
- "sp-std",
-]
-
-[[package]]
-name = "pallet-entity-review"
-version = "0.4.0"
-dependencies = [
- "frame-support",
- "frame-system",
- "log",
- "pallet-balances",
- "pallet-entity-common",
- "parity-scale-codec",
- "scale-info",
- "sp-core",
- "sp-io",
- "sp-runtime",
-]
-
-[[package]]
-name = "pallet-entity-service"
+name = "pallet-entity-product"
 version = "0.1.0"
 dependencies = [
  "frame-support",
@@ -6904,6 +6886,40 @@ dependencies = [
  "sp-io",
  "sp-runtime",
  "sp-std",
+]
+
+[[package]]
+name = "pallet-entity-registry"
+version = "0.1.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "log",
+ "pallet-balances",
+ "pallet-entity-common",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-api",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+ "sp-std",
+]
+
+[[package]]
+name = "pallet-entity-review"
+version = "0.9.0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "log",
+ "pallet-balances",
+ "pallet-entity-common",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
 ]
 
 [[package]]
@@ -7049,6 +7065,7 @@ dependencies = [
  "pallet-grouprobot-primitives",
  "parity-scale-codec",
  "scale-info",
+ "sp-core",
  "sp-io",
  "sp-runtime",
 ]
@@ -7173,6 +7190,7 @@ dependencies = [
  "pallet-trading-trc20-verifier",
  "parity-scale-codec",
  "scale-info",
+ "serde",
  "sp-core",
  "sp-io",
  "sp-runtime",
@@ -7311,7 +7329,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-trading-trc20-verifier"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "lite-json",
  "log",
@@ -7319,7 +7337,6 @@ dependencies = [
  "sp-core",
  "sp-io",
  "sp-runtime",
- "sp-std",
 ]
 
 [[package]]

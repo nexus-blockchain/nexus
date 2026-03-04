@@ -7,7 +7,7 @@
 `pallet-entity-review` 是 Entity 商城系统的评价管理模块，负责订单完成后的评分提交和店铺评分更新。
 
 - **Runtime pallet_index:** 123
-- **版本:** 0.5.0
+- **版本:** 0.9.0
 
 ### 核心功能
 
@@ -71,6 +71,32 @@ impl pallet_entity_review::Config for Runtime {
 | `WeightInfo` | `WeightInfo` | 权重信息（benchmark 集成） |
 
 ## Extrinsics
+
+### remove_review (call_index 2)
+
+Root 移除违规评价。
+
+```rust
+#[pallet::call_index(2)]
+#[pallet::weight(T::WeightInfo::remove_review())]
+pub fn remove_review(
+    origin: OriginFor<T>,
+    order_id: u64,
+) -> DispatchResult
+```
+
+**权限：** Root only
+
+**验证流程：**
+1. 评价存在 → `ReviewNotFound`
+
+**执行逻辑：**
+1. `Reviews::take` 删除评价记录
+2. `ReviewCount` 递减（saturating_sub，best-effort）
+3. `ShopReviewCount` 递减（best-effort）
+4. `UserReviews` 中移除该 order_id
+5. 发出 `ReviewRemoved` 事件
+6. 删除后买家可重新提交评价
 
 ### set_review_enabled (call_index 1)
 
@@ -148,6 +174,7 @@ pub fn submit_review(
 | `ReviewSubmitted` | `order_id: u64`, `reviewer: AccountId`, `shop_id: Option<u64>`, `rating: u8` | 评价已提交 |
 | `ShopRatingUpdateFailed` | `order_id: u64`, `shop_id: u64` | 店铺评分更新失败（评价仍已记录） |
 | `ReviewConfigUpdated` | `entity_id: u64`, `enabled: bool` | Entity 评价配置已更新 |
+| `ReviewRemoved` | `order_id: u64`, `reviewer: AccountId` | 评价已被 Root 移除 |
 
 ## Errors
 
@@ -165,6 +192,10 @@ pub fn submit_review(
 | `NotEntityAdmin` | 调用者不是 Entity owner/admin |
 | `EntityNotFound` | Entity 不存在 |
 | `EntityNotActive` | Entity 未激活 |
+| `OrderDisputed` | 订单处于争议状态 |
+| `ReviewCountOverflow` | 评价计数溢出（u64::MAX） |
+| `ReviewWindowExpired` | 评价时间窗口已过期 |
+| `ReviewNotFound` | 评价不存在（Root 删除时） |
 
 ## 依赖接口
 
@@ -195,7 +226,7 @@ pallets/entity/review/
     ├── lib.rs      # 主模块（Config、Storage、Extrinsics、Events、Errors）
     ├── weights.rs  # 权重定义（WeightInfo trait + SubstrateWeight）
     ├── mock.rs     # 测试 mock runtime
-    └── tests.rs    # 单元测试（41 tests）
+    └── tests.rs    # 单元测试（62 tests）
 ```
 
 ## 审计记录 (v0.2.0)
@@ -243,7 +274,7 @@ pallets/entity/review/
 |------|-----|------|------|
 | High | H1 | `submit_review` 不检查订单争议状态 — 争议中的订单可提交评价，争议结果未定时评价可能不公 | 添加 `is_order_disputed` 检查 + `OrderDisputed` 错误 |
 | High | H2 | `set_review_enabled` 无状态变更检测 — 重复设置同一值仍写存储并发射事件，误导前端/索引器 | 添加 `currently_disabled != want_disabled` 守卫，状态不变时跳过写入和事件 |
-| Medium | M1 | `submit_review` 仅更新 Shop 评分，从未调用 `EntityProvider::update_entity_rating` — Entity 级别评分始终为零 | 添加 best-effort `update_entity_rating` 调用（失败仅 log::warn） |
+| Medium | M1 | `submit_review` 仅更新 Shop 评分，Entity 级别评分独立于 Shop 评分 | 记录：Entity 评分已移至 Shop 层级管理，无需在 review 模块中重复更新 |
 | Medium | M2 | `ReviewCount` / `ShopReviewCount` 使用 `saturating_add` — u64::MAX 时静默停止计数，计数器永久失准 | `ReviewCount`: `checked_add` + `ReviewCountOverflow`。`ShopReviewCount`: best-effort `checked_add`，溢出仅 log::warn，不阻塞评价 |
 | Medium | M1-R7 | `ShopReviewCount` 溢出通过 `?` 传播错误，整个 extrinsic 回滚 — 与 shop rating best-effort 设计矛盾 | 改为 `mutate` + `checked_add`，溢出仅 log::warn，不阻塞评价 |
 | Low | L1 | `set_review_enabled` 的 `enabled=true` 对已开启实体是 no-op 但仍写存储 | 已由 H2 一并修复 |
@@ -251,10 +282,23 @@ pallets/entity/review/
 | Low | L1-R7 | `order_shop_id` 被调用两次（entity 检查 + 评分更新）— 冗余跨 pallet 存储读取 | 复用 `shop_id_for_gate` 变量 |
 | Low | L2-R7 | Weight 估算过时 — 注释写 5 reads/5 writes，实际约 8 reads/6 writes | 更新 weight 注释和估算值 |
 
+## 审计记录 (v0.9.0)
+
+| 级别 | ID | 问题 | 修复 |
+|------|-----|------|------|
+| Medium | M1 | 无 `integrity_test` — `MaxCidLength=0` / `MaxReviewsPerUser=0` 无校验 | 新增 `#[pallet::hooks]` + `integrity_test` 校验 MaxCidLength, MaxReviewsPerUser > 0 |
+| Medium | M2 | `set_review_enabled` weight 漏算 1 read (`EntityReviewDisabled::contains_key`) | 3→4 reads |
+| Medium | M3 | Cargo.toml `version = "0.4.0"` 与 README v0.8.0 不同步 | 更新为 0.9.0 |
+| Medium | M4 | 无 `remove_review` Root extrinsic — 治理无法处理违规评价 | 新增 `remove_review` (call_index 2)，Root 可删除评价并清理所有关联存储 |
+| Medium | M5 | Mock `is_entity_admin` 忽略 `required_permission` 参数 — 测试未验证权限粒度 | Mock 改用 `ENTITY_ADMINS` 权限位图，检查 `perms & required_permission == required_permission` |
+| Low | L1 | README v0.8.0 M1 称已添加 `update_entity_rating`，但该方法不存在于 `EntityProvider` trait | 修正为"Entity 评分已移至 Shop 层级管理" |
+| Low | L2 | `submit_review` weight 注释与实际读写数不匹配（8→10 reads） | 更新 weight 注释和 DB read/write 计数 |
+
 ## 版本历史
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| v0.9.0 | 2026-03-04 | 深度审计 Round 9：M1(integrity_test)、M2(weight 修正)、M3(Cargo.toml 版本同步)、M4(remove_review Root extrinsic)、M5(mock admin 权限粒度)、L1(README M1-v0.8.0 修正)、L2(weight 注释更新)，+8 测试（62 total） |
 | v0.8.0 | 2026-03-03 | 再次审计 Round 7：M1-R7(ShopReviewCount best-effort)、L1-R7(去重 order_shop_id)、L2-R7(weight 更新)，54 tests |
 | v0.7.0 | 2026-03-03 | 评价时间窗口：+ReviewWindowBlocks Config、+order_completed_at OrderProvider、+ReviewWindowExpired 错误，+4 测试（52 total） |
 | v0.6.0 | 2026-03-08 | 深度审计 Round 5：H1/H2/M1/M2 共 4 项修复，+6 测试（48 total） |

@@ -161,7 +161,7 @@ impl PeerClient {
             .map_err(|e| BotError::EnclaveError(format!("peer response parse: {}", e)))?;
 
         // 解码 base64 share data (ECDH 加密格式: [32 ephemeral_pk][EncryptedShare])
-        let share_bytes = base64_decode(&share_resp.share_data)
+        let share_bytes = base64_decode_pub(&share_resp.share_data)
             .map_err(|e| BotError::EnclaveError(format!("share base64 decode: {}", e)))?;
 
         let ecdh_share = crate::tee::shamir::ecdh_share_from_bytes(&share_bytes)
@@ -212,7 +212,7 @@ impl PeerClient {
 
         while let Some(join_result) = futures.next().await {
             match join_result {
-                Ok((idx, Ok(share))) => {
+                Ok((_idx, Ok(share))) => {
                     collected.push(share);
                     if collected.len() >= needed {
                         info!(collected = collected.len(), "已收集足够 shares");
@@ -236,93 +236,20 @@ impl PeerClient {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Base64 帮助函数 (避免添加额外依赖)
+// Base64 帮助函数 (M5 审计修复: 使用 base64 crate 替代自定义实现)
 // ═══════════════════════════════════════════════════════════════
 
-const BASE64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 
 /// Base64 编码
 pub fn base64_encode(data: &[u8]) -> String {
-    let mut result = String::new();
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-
-        result.push(BASE64_CHARS[((triple >> 18) & 0x3F) as usize] as char);
-        result.push(BASE64_CHARS[((triple >> 12) & 0x3F) as usize] as char);
-
-        if chunk.len() > 1 {
-            result.push(BASE64_CHARS[((triple >> 6) & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-
-        if chunk.len() > 2 {
-            result.push(BASE64_CHARS[(triple & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-    }
-    result
+    BASE64_STANDARD.encode(data)
 }
 
 /// Base64 解码 (公开接口, 供 ceremony.rs 等模块复用)
 pub fn base64_decode_pub(input: &str) -> Result<Vec<u8>, String> {
-    base64_decode(input)
-}
-
-/// Base64 解码 (内部使用)
-fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    let input = input.trim_end_matches('=');
-    let mut result = Vec::new();
-
-    let decode_char = |c: u8| -> Result<u32, String> {
-        match c {
-            b'A'..=b'Z' => Ok((c - b'A') as u32),
-            b'a'..=b'z' => Ok((c - b'a' + 26) as u32),
-            b'0'..=b'9' => Ok((c - b'0' + 52) as u32),
-            b'+' => Ok(62),
-            b'/' => Ok(63),
-            _ => Err(format!("invalid base64 char: {}", c as char)),
-        }
-    };
-
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let remaining = bytes.len() - i;
-        if remaining >= 4 {
-            let a = decode_char(bytes[i])?;
-            let b = decode_char(bytes[i + 1])?;
-            let c = decode_char(bytes[i + 2])?;
-            let d = decode_char(bytes[i + 3])?;
-            let triple = (a << 18) | (b << 12) | (c << 6) | d;
-            result.push(((triple >> 16) & 0xFF) as u8);
-            result.push(((triple >> 8) & 0xFF) as u8);
-            result.push((triple & 0xFF) as u8);
-            i += 4;
-        } else if remaining == 3 {
-            let a = decode_char(bytes[i])?;
-            let b = decode_char(bytes[i + 1])?;
-            let c = decode_char(bytes[i + 2])?;
-            let triple = (a << 18) | (b << 12) | (c << 6);
-            result.push(((triple >> 16) & 0xFF) as u8);
-            result.push(((triple >> 8) & 0xFF) as u8);
-            i += 3;
-        } else if remaining == 2 {
-            let a = decode_char(bytes[i])?;
-            let b = decode_char(bytes[i + 1])?;
-            let triple = (a << 18) | (b << 12);
-            result.push(((triple >> 16) & 0xFF) as u8);
-            i += 2;
-        } else {
-            break;
-        }
-    }
-
-    Ok(result)
+    BASE64_STANDARD.decode(input).map_err(|e| format!("base64 decode: {}", e))
 }
 
 #[cfg(test)]
@@ -333,14 +260,14 @@ mod tests {
     fn base64_roundtrip() {
         let data = b"hello world, this is a test of base64!";
         let encoded = base64_encode(data);
-        let decoded = base64_decode(&encoded).unwrap();
+        let decoded = base64_decode_pub(&encoded).unwrap();
         assert_eq!(decoded, data);
     }
 
     #[test]
     fn base64_empty() {
         assert_eq!(base64_encode(b""), "");
-        assert_eq!(base64_decode("").unwrap(), Vec::<u8>::new());
+        assert_eq!(base64_decode_pub("").unwrap(), Vec::<u8>::new());
     }
 
     #[test]
@@ -348,16 +275,16 @@ mod tests {
         assert_eq!(base64_encode(b"a"), "YQ==");
         assert_eq!(base64_encode(b"ab"), "YWI=");
         assert_eq!(base64_encode(b"abc"), "YWJj");
-        assert_eq!(base64_decode("YQ==").unwrap(), b"a");
-        assert_eq!(base64_decode("YWI=").unwrap(), b"ab");
-        assert_eq!(base64_decode("YWJj").unwrap(), b"abc");
+        assert_eq!(base64_decode_pub("YQ==").unwrap(), b"a");
+        assert_eq!(base64_decode_pub("YWI=").unwrap(), b"ab");
+        assert_eq!(base64_decode_pub("YWJj").unwrap(), b"abc");
     }
 
     #[test]
     fn base64_binary_data() {
         let data: Vec<u8> = (0..=255).collect();
         let encoded = base64_encode(&data);
-        let decoded = base64_decode(&encoded).unwrap();
+        let decoded = base64_decode_pub(&encoded).unwrap();
         assert_eq!(decoded, data);
     }
 

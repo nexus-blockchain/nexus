@@ -10,6 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { AddressDisplay } from "@/components/shared/AddressDisplay";
 import { TrendingUp, TrendingDown, ArrowUpDown } from "lucide-react";
+import { useTranslations } from "next-intl";
 
 export default function MarketPage() {
   const { currentEntityId } = useEntityStore();
@@ -18,15 +19,17 @@ export default function MarketPage() {
   const [buyPrice, setBuyPrice] = useState("");
   const [buyAmount, setBuyAmount] = useState("");
   const [sellPrice, setSellPrice] = useState("");
+  const t = useTranslations("market");
+  const tc = useTranslations("common");
   const [sellAmount, setSellAmount] = useState("");
 
-  if (!currentEntityId) return <div className="flex h-full items-center justify-center text-muted-foreground">Select an entity first</div>;
+  if (!currentEntityId) return <div className="flex h-full items-center justify-center text-muted-foreground">{tc("selectEntity")}</div>;
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold tracking-tight">Token Market</h1>
-        <p className="text-muted-foreground">NEX orderbook and USDT OTC trading</p>
+        <h1 className="text-3xl font-bold tracking-tight">{t("title")}</h1>
+        <p className="text-muted-foreground">{t("subtitle")}</p>
       </div>
 
       <Tabs defaultValue="nex">

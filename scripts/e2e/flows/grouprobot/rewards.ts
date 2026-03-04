@@ -41,7 +41,7 @@ async function rewardsLifecycle(ctx: FlowContext): Promise<void> {
 
   const bobBalBefore = await getFreeBalance(api, bob.address);
 
-  const claimTx = (api.tx as any).grouprobotRewards.claimRewards(nodeId);
+  const claimTx = (api.tx as any).groupRobotRewards.claimRewards(nodeId);
   const claimResult = await ctx.send(claimTx, bob, 'Bob 领取节点奖励', 'bob');
 
   if (claimResult.success) {
@@ -49,7 +49,7 @@ async function rewardsLifecycle(ctx: FlowContext): Promise<void> {
       const bobBalAfter = await getFreeBalance(api, bob.address);
       const delta = bobBalAfter - bobBalBefore;
       console.log(`    奖励金额: ${Number(delta) / 1e12} NEX`);
-      assertEventEmitted(claimResult, 'grouprobotRewards', 'RewardsClaimed', '领取事件');
+      assertEventEmitted(claimResult, 'groupRobotRewards', 'RewardsClaimed', '领取事件');
     });
   } else {
     console.log(`    ℹ 领取奖励失败 (可能无待领取奖励): ${claimResult.error}`);
@@ -57,7 +57,7 @@ async function rewardsLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 2: Alice 救援滞留奖励 ───────────────────────────
 
-  const rescueTx = (api.tx as any).grouprobotRewards.rescueStrandedRewards(
+  const rescueTx = (api.tx as any).groupRobotRewards.rescueStrandedRewards(
     nodeId,
     bob.address,   // beneficiary
   );
@@ -65,7 +65,7 @@ async function rewardsLifecycle(ctx: FlowContext): Promise<void> {
 
   if (rescueResult.success) {
     await ctx.check('滞留奖励已救援', 'system', () => {
-      assertEventEmitted(rescueResult, 'grouprobotRewards', 'StrandedRewardsRescued', '救援事件');
+      assertEventEmitted(rescueResult, 'groupRobotRewards', 'StrandedRewardsRescued', '救援事件');
     });
   } else {
     console.log(`    ℹ 救援失败 (可能无滞留奖励): ${rescueResult.error}`);
@@ -73,7 +73,7 @@ async function rewardsLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 3: [错误路径] Dave 领取他人节点奖励 ──────────────
 
-  const daveClaimTx = (api.tx as any).grouprobotRewards.claimRewards(nodeId);
+  const daveClaimTx = (api.tx as any).groupRobotRewards.claimRewards(nodeId);
   const daveClaimResult = await ctx.send(daveClaimTx, dave, '[错误路径] Dave 领取他人奖励', 'dave');
   await ctx.check('非节点 Owner 领取应失败', 'dave', () => {
     assertTxFailed(daveClaimResult, undefined, '非 Owner 领取');
@@ -81,7 +81,7 @@ async function rewardsLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 4: [错误路径] 领取不存在节点的奖励 ──────────────
 
-  const fakeClaimTx = (api.tx as any).grouprobotRewards.claimRewards(fakeNodeId);
+  const fakeClaimTx = (api.tx as any).groupRobotRewards.claimRewards(fakeNodeId);
   const fakeClaimResult = await ctx.send(fakeClaimTx, bob, '[错误路径] 不存在节点', 'bob');
   await ctx.check('不存在节点领取应失败', 'bob', () => {
     assertTxFailed(fakeClaimResult, undefined, '不存在节点');

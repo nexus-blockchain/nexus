@@ -1,6 +1,6 @@
 [package]
 name = "pallet-trading-trc20-verifier"
-version = "0.1.0"
+version = "0.3.0"
 description = "TRC20 交易验证共享库 - OCW HTTP 客户端、端点健康评分、TronGrid API 解析"
 authors = ["Nexus Team"]
 edition = "2021"
@@ -16,12 +16,10 @@ codec = { features = ["derive"], workspace = true }
 sp-runtime = { workspace = true }
 sp-core = { workspace = true }
 sp-io = { workspace = true }
-sp-std = { workspace = true }
 log = { workspace = true }
 lite-json = { workspace = true }
 
 [dev-dependencies]
-sp-io = { workspace = true }
 
 [features]
 default = ["std"]
@@ -30,7 +28,6 @@ std = [
     "sp-runtime/std",
     "sp-core/std",
     "sp-io/std",
-    "sp-std/std",
     "log/std",
     "lite-json/std",
 ]

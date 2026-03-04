@@ -1,7 +1,7 @@
 [package]
 name = "pallet-entity-market"
 version = "0.1.0"
-description = "店铺代币 P2P 交易市场模块"
+description = "实体代币 P2P 交易市场模块"
 authors = ["Nexus Team"]
 edition = "2021"
 license = "MIT"
@@ -16,18 +16,12 @@ sp-runtime = { workspace = true }
 sp-std = { workspace = true }
 sp-io = { workspace = true }
 sp-core = { workspace = true }
-log = { workspace = true }
 pallet-entity-common = { workspace = true }
-pallet-entity-registry = { workspace = true }
-pallet-entity-token = { workspace = true }
-pallet-trading-trc20-verifier = { workspace = true }
-pallet-trading-common = { workspace = true }
 
 [dev-dependencies]
 sp-core = { workspace = true }
 sp-io = { workspace = true }
 pallet-balances = { workspace = true }
-pallet-assets = { workspace = true }
 
 [features]
 default = ["std"]
@@ -40,14 +34,8 @@ std = [
 	"sp-std/std",
 	"sp-io/std",
 	"sp-core/std",
-	"log/std",
 	"pallet-entity-common/std",
-	"pallet-entity-registry/std",
-	"pallet-entity-token/std",
-	"pallet-trading-trc20-verifier/std",
-	"pallet-trading-common/std",
 	"pallet-balances/std",
-	"pallet-assets/std",
 ]
 runtime-benchmarks = [
 	"frame-support/runtime-benchmarks",

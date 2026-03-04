@@ -1,5 +1,14 @@
 use crate::platform::{PlatformAdapter, PlatformEvent, MessageContext};
 
+/// L1 修复: 解析 Discord ISO 8601 时间戳为 Unix 秒
+fn parse_discord_timestamp(d: &serde_json::Value) -> u64 {
+    d.get("timestamp")
+        .and_then(|t| t.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.timestamp() as u64)
+        .unwrap_or(0)
+}
+
 /// Discord Gateway 事件适配器
 pub struct DiscordAdapter;
 
@@ -69,7 +78,7 @@ impl PlatformAdapter for DiscordAdapter {
                     message_id: d.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()),
                     content: Some(content.to_string()),
                     raw_event: raw.clone(),
-                    timestamp: 0,
+                    timestamp: parse_discord_timestamp(d),
                     channel_id: d.get("channel_id").and_then(|c| c.as_str()).map(|s| s.to_string()),
                 })
             }
@@ -84,7 +93,11 @@ impl PlatformAdapter for DiscordAdapter {
                     message_id: None,
                     content: None,
                     raw_event: raw.clone(),
-                    timestamp: 0,
+                    timestamp: d.get("joined_at")
+                        .and_then(|t| t.as_str())
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.timestamp() as u64)
+                        .unwrap_or(0),
                     channel_id: None,
                 })
             }
@@ -119,6 +132,9 @@ impl PlatformAdapter for DiscordAdapter {
             command,
             command_args: args,
             is_join_request: event.event_type == "member_join",
+            is_new_member: event.event_type == "member_join",
+            is_left_member: event.event_type == "member_leave",
+            service_message_id: None,
             is_admin: false,
             message_type: Self::detect_message_type(&event.raw_event),
             callback_query_id: None,

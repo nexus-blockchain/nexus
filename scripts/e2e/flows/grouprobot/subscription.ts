@@ -48,16 +48,16 @@ async function subscriptionLifecycle(ctx: FlowContext): Promise<void> {
 
   const bobBalBefore = await getFreeBalance(api, bob.address);
 
-  const subscribeTx = (api.tx as any).grouprobotSubscription.subscribe(
+  const subscribeTx = (api.tx as any).groupRobotSubscription.subscribe(
     botIdHash,
-    1,                       // tier: Basic=1
+    'Basic',                 // tier: enum
     nex(10).toString(),      // deposit
   );
   const subResult = await ctx.send(subscribeTx, bob, 'Bob 订阅 Bot 服务', 'bob');
   assertTxSuccess(subResult, '订阅');
 
   const subEvent = subResult.events.find(
-    e => e.section === 'grouprobotSubscription' && e.method === 'Subscribed',
+    e => e.section === 'groupRobotSubscription' && e.method === 'Subscribed',
   );
   assertTrue(!!subEvent, '应有 Subscribed 事件');
   console.log(`    订阅事件: ${JSON.stringify(subEvent?.data).slice(0, 100)}`);
@@ -72,7 +72,7 @@ async function subscriptionLifecycle(ctx: FlowContext): Promise<void> {
   // ─── Step 2: 验证订阅状态 ─────────────────────────────────
 
   await ctx.check('验证订阅已创建', 'bob', async () => {
-    const sub = await (api.query as any).grouprobotSubscription.subscriptions(botIdHash, bob.address);
+    const sub = await (api.query as any).groupRobotSubscription.subscriptions(botIdHash, bob.address);
     if (sub && !sub.isNone) {
       const data = sub.unwrap ? sub.unwrap().toHuman() : sub.toHuman();
       console.log(`    订阅状态: ${JSON.stringify(data).slice(0, 150)}`);
@@ -81,7 +81,7 @@ async function subscriptionLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 3: Bob 充值订阅 ─────────────────────────────────
 
-  const depositTx = (api.tx as any).grouprobotSubscription.depositSubscription(
+  const depositTx = (api.tx as any).groupRobotSubscription.depositSubscription(
     botIdHash,
     nex(5).toString(),   // additional deposit
   );
@@ -90,14 +90,14 @@ async function subscriptionLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 4: Bob 变更订阅层级 ─────────────────────────────
 
-  const changeTierTx = (api.tx as any).grouprobotSubscription.changeTier(
+  const changeTierTx = (api.tx as any).groupRobotSubscription.changeTier(
     botIdHash,
-    2,    // tier: Pro=2
+    'Pro',    // tier: enum
   );
   const changeTierResult = await ctx.send(changeTierTx, bob, 'Bob 升级到 Pro', 'bob');
   if (changeTierResult.success) {
     await ctx.check('层级变更成功', 'bob', () => {
-      assertEventEmitted(changeTierResult, 'grouprobotSubscription', 'TierChanged', '层级变更事件');
+      assertEventEmitted(changeTierResult, 'groupRobotSubscription', 'TierChanged', '层级变更事件');
     });
   } else {
     console.log(`    ℹ 层级变更失败: ${changeTierResult.error}`);
@@ -105,14 +105,15 @@ async function subscriptionLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 5: Charlie 通过广告承诺订阅 ─────────────────────
 
-  const commitAdsTx = (api.tx as any).grouprobotSubscription.commitAds(
+  const commitAdsTx = (api.tx as any).groupRobotSubscription.commitAds(
     botIdHash,
-    '0x' + 'ee'.repeat(32),   // community_id_hash
+    '0x' + 'ee'.repeat(32),   // communityIdHash
+    10,                         // committedAdsPerEra
   );
   const commitResult = await ctx.send(commitAdsTx, charlie, 'Charlie 广告承诺订阅', 'charlie');
   if (commitResult.success) {
     await ctx.check('广告承诺事件', 'charlie', () => {
-      assertEventEmitted(commitResult, 'grouprobotSubscription', 'AdCommitted', '广告承诺事件');
+      assertEventEmitted(commitResult, 'groupRobotSubscription', 'AdCommitted', '广告承诺事件');
     });
   } else {
     console.log(`    ℹ 广告承诺失败: ${commitResult.error}`);
@@ -120,7 +121,7 @@ async function subscriptionLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 6: Charlie 取消广告承诺 ─────────────────────────
 
-  const cancelAdTx = (api.tx as any).grouprobotSubscription.cancelAdCommitment(botIdHash);
+  const cancelAdTx = (api.tx as any).groupRobotSubscription.cancelAdCommitment(botIdHash);
   const cancelAdResult = await ctx.send(cancelAdTx, charlie, 'Charlie 取消广告承诺', 'charlie');
   if (cancelAdResult.success) {
     await ctx.check('广告承诺已取消', 'charlie', () => {});
@@ -130,19 +131,18 @@ async function subscriptionLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 7: Bob 取消付费订阅 ─────────────────────────────
 
-  const cancelSubTx = (api.tx as any).grouprobotSubscription.cancelSubscription(botIdHash);
+  const cancelSubTx = (api.tx as any).groupRobotSubscription.cancelSubscription(botIdHash);
   const cancelSubResult = await ctx.send(cancelSubTx, bob, 'Bob 取消订阅', 'bob');
   assertTxSuccess(cancelSubResult, '取消订阅');
 
   await ctx.check('验证取消事件', 'bob', () => {
-    assertEventEmitted(cancelSubResult, 'grouprobotSubscription', 'SubscriptionCancelled', '取消事件');
+    assertEventEmitted(cancelSubResult, 'groupRobotSubscription', 'SubscriptionCancelled', '取消事件');
   });
 
   // ─── Step 8: 清理已取消的订阅记录 ─────────────────────────
 
-  const cleanupSubTx = (api.tx as any).grouprobotSubscription.cleanupSubscription(
+  const cleanupSubTx = (api.tx as any).groupRobotSubscription.cleanupSubscription(
     botIdHash,
-    bob.address,
   );
   const cleanupSubResult = await ctx.send(cleanupSubTx, bob, '清理订阅记录', 'bob');
   if (cleanupSubResult.success) {
@@ -153,9 +153,8 @@ async function subscriptionLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 9: 清理广告承诺记录 ─────────────────────────────
 
-  const cleanupAdTx = (api.tx as any).grouprobotSubscription.cleanupAdCommitment(
+  const cleanupAdTx = (api.tx as any).groupRobotSubscription.cleanupAdCommitment(
     botIdHash,
-    charlie.address,
   );
   const cleanupAdResult = await ctx.send(cleanupAdTx, charlie, '清理广告承诺记录', 'charlie');
   if (cleanupAdResult.success) {
@@ -166,7 +165,7 @@ async function subscriptionLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── Step 10: [错误路径] Dave 充值不存在的订阅 ─────────────
 
-  const daveDepositTx = (api.tx as any).grouprobotSubscription.depositSubscription(
+  const daveDepositTx = (api.tx as any).groupRobotSubscription.depositSubscription(
     '0x' + 'ff'.repeat(32),   // 不存在的 bot
     nex(5).toString(),
   );
@@ -178,15 +177,15 @@ async function subscriptionLifecycle(ctx: FlowContext): Promise<void> {
   // ─── Step 11: [错误路径] 重复订阅 ─────────────────────────
 
   // Bob 重新订阅
-  const resubTx = (api.tx as any).grouprobotSubscription.subscribe(
-    botIdHash, 1, nex(10).toString(),
+  const resubTx = (api.tx as any).groupRobotSubscription.subscribe(
+    botIdHash, 'Basic', nex(10).toString(),
   );
   const resubResult = await ctx.send(resubTx, bob, 'Bob 重新订阅', 'bob');
 
   if (resubResult.success) {
     // 尝试重复订阅
-    const dupSubTx = (api.tx as any).grouprobotSubscription.subscribe(
-      botIdHash, 1, nex(10).toString(),
+    const dupSubTx = (api.tx as any).groupRobotSubscription.subscribe(
+      botIdHash, 'Basic', nex(10).toString(),
     );
     const dupSubResult = await ctx.send(dupSubTx, bob, '[错误路径] Bob 重复订阅', 'bob');
     await ctx.check('重复订阅应失败', 'bob', () => {

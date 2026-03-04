@@ -21,7 +21,7 @@
 Entity (组织层)                    Shop (业务层)
 ───────────────────                ───────────────────
 • 所有权 / 治理                    • 日常运营
-• 代币发行 / 分红                  • 商品管理 (entity-service)
+• 代币发行 / 分红                  • 商品管理 (entity-product)
 • KYC / 合规                       • 订单处理 (entity-order)
 • 组织金库                         • 运营资金 (shop_account)
 • 管理员权限                       • 门店管理员
@@ -291,5 +291,5 @@ impl<T: Config> Pallet<T> {
 
 - [pallet-entity-common](../common/) — 共享类型 + Trait（EntityProvider, ShopProvider）
 - [pallet-entity-registry](../registry/) — 实体管理（EntityProvider 实现方）
-- [pallet-entity-service](../service/) — 商品管理（通过 ShopProvider 查询）
+- [pallet-entity-product](../product/) — 商品管理（通过 ShopProvider 查询）
 - [pallet-commission-core](../commission/core/) — 佣金管理（CommissionFundGuard 实现方）

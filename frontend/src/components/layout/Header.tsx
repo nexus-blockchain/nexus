@@ -7,8 +7,11 @@ import { useEntityStore } from "@/stores/entity";
 import { useUserEntities } from "@/hooks/useEntity";
 import { shortenAddress, formatBalance } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Wallet, Bell, ChevronDown, Loader2, Wifi, WifiOff } from "lucide-react";
+import { Wallet, ChevronDown, Loader2, Wifi, WifiOff } from "lucide-react";
 import { useState } from "react";
+import { useTranslations } from "next-intl";
+import { LanguageSwitcher } from "@/components/shared/LanguageSwitcher";
+import { NotificationCenter } from "@/components/shared/NotificationCenter";
 
 export function Header() {
   const { connect, disconnect, accounts, isConnecting } = useWallet();
@@ -17,6 +20,7 @@ export function Header() {
   const { currentEntityId, setCurrentEntityId, userEntities } = useEntityStore();
   const [showEntityDropdown, setShowEntityDropdown] = useState(false);
   const [showAccountDropdown, setShowAccountDropdown] = useState(false);
+  const t = useTranslations("header");
 
   useUserEntities(address);
 
@@ -31,14 +35,14 @@ export function Header() {
             className="flex items-center gap-2 rounded-lg border px-3 py-1.5 text-sm hover:bg-accent"
           >
             <span className="font-medium">
-              {currentEntity ? currentEntity.name : "Select Entity"}
+              {currentEntity ? currentEntity.name : t("selectEntity")}
             </span>
             <ChevronDown className="h-4 w-4 text-muted-foreground" />
           </button>
           {showEntityDropdown && (
             <div className="absolute left-0 top-full z-50 mt-1 w-56 rounded-md border bg-popover p-1 shadow-md">
               {userEntities.length === 0 ? (
-                <div className="px-3 py-2 text-sm text-muted-foreground">No entities found</div>
+                <div className="px-3 py-2 text-sm text-muted-foreground">{t("noEntities")}</div>
               ) : (
                 userEntities.map((e) => (
                   <button
@@ -74,9 +78,9 @@ export function Header() {
           {apiConnected && <span className="font-mono">#{chainInfo.bestBlock.toLocaleString()}</span>}
         </div>
 
-        <Button variant="ghost" size="icon" className="relative">
-          <Bell className="h-4 w-4" />
-        </Button>
+        <LanguageSwitcher />
+
+        <NotificationCenter />
 
         {isConnected && address ? (
           <div className="relative">
@@ -107,7 +111,7 @@ export function Header() {
                   }}
                   className="flex w-full items-center gap-2 rounded-sm px-3 py-2 text-sm text-destructive hover:bg-accent"
                 >
-                  Disconnect
+                  {t("disconnect")}
                 </button>
               </div>
             )}
@@ -115,7 +119,7 @@ export function Header() {
         ) : (
           <Button onClick={connect} disabled={isConnecting} size="sm">
             {isConnecting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wallet className="mr-2 h-4 w-4" />}
-            Connect Wallet
+            {t("connectWallet")}
           </Button>
         )}
       </div>

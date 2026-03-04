@@ -25,6 +25,11 @@ RA-TLS 仪式审计系统，管理 Shamir 密钥分割仪式的链上记录、En
 | 3 | `remove_ceremony_enclave` | Root | 移除 Ceremony Enclave |
 | 4 | `force_re_ceremony` | Root | 强制 re-ceremony（安全事件响应） |
 | 5 | `cleanup_ceremony` | Signed | M3-R6: 清理终态仪式记录（Expired/Revoked/Superseded） |
+| 6 | `owner_revoke_ceremony` | Signed | F1: Bot Owner 主动撤销自己 Bot 的活跃仪式 |
+| 7 | `revoke_by_mrenclave` | Root | F7: 按 mrenclave 批量撤销所有活跃仪式（漏洞响应，受 MaxProcessPerBlock 限制） |
+| 8 | `trigger_expiry` | Signed | F12: 手动触发已过期仪式的状态标记（任何人可调用） |
+| 9 | `batch_cleanup_ceremonies` | Signed | F11: 批量清理终态仪式（上限 MaxProcessPerBlock 条，原子性） |
+| 10 | `renew_ceremony` | Signed | F2: 轻量仪式续期（仅延长 expires_at，Bot Owner + Tier gate） |
 
 ## 存储
 
@@ -46,11 +51,15 @@ RA-TLS 仪式审计系统，管理 Shamir 密钥分割仪式的链上记录、En
 | `CeremonyRevoked` | 仪式已被治理撤销 |
 | `CeremonySuperseded` | 旧仪式被新仪式替代（含 old_hash, new_hash） |
 | `CeremonyExpired` | 仪式已过期（on_initialize 自动触发） |
-| `CeremonyAtRisk` | 仪式存在风险（peer 数量 ≤ k，含 required_k） |
+| `CeremonyAtRisk` | F14: 仪式存在风险（peer 数量 ≤ k，含 bot_public_key, required_k, current_peer_count） |
 | `EnclaveApproved` | Ceremony Enclave 已审批（含 mrenclave, version） |
 | `EnclaveRemoved` | Ceremony Enclave 已从白名单移除 |
 | `ForcedReCeremony` | 仪式已被强制 re-ceremony |
 | `CeremonyCleaned` | M3-R6: 终态仪式已清理 |
+| `OwnerCeremonyRevoked` | F1: Bot Owner 主动撤销仪式（含 ceremony_hash, bot_public_key） |
+| `CeremoniesRevokedByMrenclave` | F7: 按 mrenclave 批量撤销（含 mrenclave, count） |
+| `CeremonyManuallyExpired` | F12: 仪式被手动触发过期（含 ceremony_hash） |
+| `CeremonyRenewed` | F2: 仪式续期（含 ceremony_hash, new_expires_at） |
 
 ## 主要类型
 
@@ -106,6 +115,9 @@ pub struct CeremonyEnclaveInfo {
 | `BotNotActive` | M1-R6: Bot 未激活（停用/banned） |
 | `ParticipantCountExceedsN` | M2-R6: 参与者数量超过 Shamir n 参数 |
 | `CeremonyNotTerminal` | M3-R6: 仪式不是终态（无法清理） |
+| `CeremonyNotExpired` | F12: 仪式尚未过期（无法手动触发） |
+| `NoCeremoniesToCleanup` | F11: 批量清理列表为空 |
+| `TooManyCeremonies` | F11: 批量清理数量超出 MaxProcessPerBlock 上限 |
 
 ## 配置参数
 
@@ -133,6 +145,9 @@ pub struct CeremonyEnclaveInfo {
 - `ceremony_shamir_params(bot_public_key)` — 获取 (k, n) 参数
 - `get_active_ceremony(bot_public_key)` — 获取活跃仪式哈希
 - `is_enclave_approved(mrenclave)` — Enclave 是否已审批
+- `ceremony_health(bot_public_key)` — F3: 仪式健康状态 (expires_at, peer_count, k)
+- `ceremony_expires_at(bot_public_key)` — F13: 活跃仪式过期区块
+- `ceremony_participant_enclaves(bot_public_key)` — F13: 活跃仪式参与者 Enclave 列表
 
 ## 仪式状态机
 
@@ -183,7 +198,7 @@ Active → Expired                     (on_initialize 自动过期)
 
 ## 测试覆盖
 
-64 个测试（`cargo test -p pallet-grouprobot-ceremony`）：
+88 个测试（`cargo test -p pallet-grouprobot-ceremony`）：
 
 - **Enclave 白名单**: approve_works / fails_duplicate / fails_not_root / remove_works / remove_fails_not_found
 - **record_ceremony**: works / fails_invalid_shamir / fails_enclave_not_approved / fails_duplicate / supersedes_old / fails_empty_participants / fails_not_bot_owner / fails_bot_not_found / first_is_not_re_ceremony / second_is_re_ceremony / fails_free_tier
@@ -206,3 +221,10 @@ Active → Expired                     (on_initialize 自动过期)
 - **Round 6 回归 (M1)**: m1_r6_record_ceremony_rejects_inactive_bot / m1_r6_record_ceremony_allows_active_bot
 - **Round 6 回归 (M2)**: m2_r6_participants_exceeding_n_rejected / m2_r6_participants_equal_n_accepted / m2_r6_participants_between_k_and_n_accepted
 - **Round 6 回归 (M3)**: m3_r6_cleanup_expired_ceremony / m3_r6_cleanup_revoked_ceremony / m3_r6_cleanup_superseded_ceremony / m3_r6_cleanup_active_ceremony_rejected / m3_r6_cleanup_nonexistent_ceremony_rejected
+- **F1 (owner_revoke_ceremony)**: f1_owner_revoke_ceremony_works / f1_owner_revoke_rejects_non_owner / f1_owner_revoke_rejects_not_found / f1_owner_revoke_rejects_not_active
+- **F7 (revoke_by_mrenclave)**: f7_revoke_by_mrenclave_works / f7_revoke_by_mrenclave_no_match / f7_revoke_by_mrenclave_rejects_non_root
+- **F12 (trigger_expiry)**: f12_trigger_expiry_works / f12_trigger_expiry_rejects_not_expired / f12_trigger_expiry_rejects_not_active / f12_trigger_expiry_rejects_not_found
+- **F11 (batch_cleanup)**: f11_batch_cleanup_works / f11_batch_cleanup_rejects_empty / f11_batch_cleanup_rejects_too_many / f11_batch_cleanup_rejects_active
+- **F2 (renew_ceremony)**: f2_renew_ceremony_works / f2_renew_rejects_non_owner / f2_renew_rejects_not_active / f2_renew_rejects_inactive_bot / f2_renew_prevents_expiry
+- **F3 (ceremony_health)**: f3_ceremony_health_works / f3_ceremony_health_none_when_no_ceremony
+- **F13 (查询方法)**: f13_ceremony_expires_at_works / f13_ceremony_participant_enclaves_works

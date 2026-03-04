@@ -140,6 +140,18 @@ export function useEntityActions(entityId: number) {
   };
 }
 
+export function useRegisterEntity() {
+  const { submit, state, reset } = useTx();
+
+  const registerEntity = useCallback(
+    (name: string, entityType: string, referrer: string | null) =>
+      submit("entityRegistry", "registerEntity", [name, entityType, referrer]),
+    [submit]
+  );
+
+  return { registerEntity, txState: state, resetTx: reset };
+}
+
 export function useUserEntities(address: string | null) {
   const [entities, setEntities] = useState<Array<{ id: number; name: string; status: string; entityType: string }>>([]);
   const [isLoading, setIsLoading] = useState(false);

@@ -54,7 +54,7 @@ impl std::fmt::Display for PeerHealthStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Healthy { peer_count, threshold } => {
-                write!(f, "HEALTHY: {}/{} peers (K={})", peer_count, peer_count, threshold)
+                write!(f, "HEALTHY: {} peers (K={})", peer_count, threshold)
             }
             Self::Warning { peer_count, threshold } => {
                 write!(f, "WARNING: only {} peers remaining (K={}), 1 more loss = critical", peer_count, threshold)
@@ -145,7 +145,13 @@ pub fn evaluate_trigger(
 }
 
 /// 判断本节点是否为 Leader (公钥字典序最小)
+///
+/// 前置条件: 本节点必须在 peers 列表中, 否则返回 false (M1 审计修复)
 pub fn is_leader(my_pk: &[u8; 32], peers: &[PeerInfo]) -> bool {
+    let self_registered = peers.iter().any(|p| p.public_key == *my_pk);
+    if !self_registered {
+        return false;
+    }
     for peer in peers {
         if peer.public_key < *my_pk {
             return false;

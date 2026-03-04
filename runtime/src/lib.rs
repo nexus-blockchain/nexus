@@ -305,7 +305,7 @@ mod runtime {
 	pub type EntityShop = pallet_entity_shop;
 
 	#[runtime::pallet_index(121)]
-	pub type EntityService = pallet_entity_service;
+	pub type EntityProduct = pallet_entity_product;
 
 	#[runtime::pallet_index(122)]
 	pub type EntityTransaction = pallet_entity_order;

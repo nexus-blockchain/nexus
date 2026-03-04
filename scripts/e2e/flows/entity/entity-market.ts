@@ -50,8 +50,9 @@ async function entityMarket(ctx: FlowContext): Promise<void> {
 
   const createEntityTx = (api.tx as any).entityRegistry.createEntity(
     'E8 Market Test Entity',
-    'QmE8MarketDesc',
-    null,
+    null,                // logoCid
+    'QmE8MarketDesc',   // descriptionCid
+    null,                // referrer
   );
   const entityResult = await ctx.send(createEntityTx, bob, '创建实体', 'bob');
   assertTxSuccess(entityResult, '创建实体');
@@ -64,33 +65,36 @@ async function entityMarket(ctx: FlowContext): Promise<void> {
   console.log(`    实体 ID: ${entityId}`);
 
   // 创建代币
-  const createTokenTx = (api.tx as any).entityToken.createToken(
+  const createTokenTx = (api.tx as any).entityToken.createShopToken(
     entityId,
-    'E8MKT',             // symbol
     'E8 Market Token',   // name
-    1_000_000,           // max_supply
-    0,                   // token_type: Governance=0
+    'E8MKT',             // symbol
+    12,                  // decimals
+    0,                   // rewardRate
+    100,                 // exchangeRate
   );
   const tokenResult = await ctx.send(createTokenTx, bob, '创建代币', 'bob');
   assertTxSuccess(tokenResult, '创建代币');
 
   // 铸造给 Bob
-  const mintTx = (api.tx as any).entityToken.mint(entityId, bob.address, 500_000);
+  const mintTx = (api.tx as any).entityToken.mintTokens(entityId, bob.address, 500_000);
   const mintResult = await ctx.send(mintTx, bob, '铸造代币给 Bob', 'bob');
   assertTxSuccess(mintResult, '铸造');
 
   // 铸造给 Charlie (用于卖出测试)
-  const mintCharlieTx = (api.tx as any).entityToken.mint(entityId, charlie.address, 100_000);
+  const mintCharlieTx = (api.tx as any).entityToken.mintTokens(entityId, charlie.address, 100_000);
   await ctx.send(mintCharlieTx, bob, '铸造代币给 Charlie', 'bob');
 
   // ─── Step 2: Bob 配置市场 ──────────────────────────────────
 
   const configMarketTx = (api.tx as any).entityMarket.configureMarket(
     entityId,
-    true,    // enabled
-    100,     // min_order_size
-    null,    // fee_bps
-    null,    // maker_fee_bps
+    true,    // cosEnabled
+    true,    // usdtEnabled
+    100,     // feeRate
+    100,     // minOrderAmount
+    1000,    // orderTtl
+    600,     // usdtTimeout
   );
   const configResult = await ctx.send(configMarketTx, bob, '配置市场', 'bob');
   assertTxSuccess(configResult, '配置市场');
@@ -108,9 +112,11 @@ async function entityMarket(ctx: FlowContext): Promise<void> {
 
   const configProtTx = (api.tx as any).entityMarket.configurePriceProtection(
     entityId,
-    500,     // max_slippage: 5%
-    5000,    // circuit_breaker_threshold: 50%
-    5,       // min_trades_for_twap
+    true,    // enabled
+    500,     // maxPriceDeviation: 5%
+    500,     // maxSlippage: 5%
+    5000,    // circuitBreakerThreshold: 50%
+    5,       // minTradesForTwap
   );
   const protResult = await ctx.send(configProtTx, bob, '配置价格保护', 'bob');
   assertTxSuccess(protResult, '配置价格保护');

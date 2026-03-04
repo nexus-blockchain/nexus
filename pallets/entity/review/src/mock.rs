@@ -39,14 +39,14 @@ thread_local! {
     static ACTIVE_SHOPS: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
     // Whether update_shop_rating should fail
     static SHOP_RATING_FAIL: RefCell<bool> = RefCell::new(false);
-    // EntityProvider mock state: entity_id -> (owner, active, admins)
-    static ENTITIES: RefCell<std::collections::HashMap<u64, (u64, bool, Vec<u64>)>> = RefCell::new(std::collections::HashMap::new());
+    // EntityProvider mock state: entity_id -> (owner, active)
+    static ENTITIES: RefCell<std::collections::HashMap<u64, (u64, bool)>> = RefCell::new(std::collections::HashMap::new());
+    // M5: Admin permission map: (entity_id, account) -> permission bitmask
+    static ENTITY_ADMINS: RefCell<std::collections::HashMap<(u64, u64), u32>> = RefCell::new(std::collections::HashMap::new());
     // Shop -> Entity mapping
     static SHOP_ENTITY: RefCell<std::collections::HashMap<u64, u64>> = RefCell::new(std::collections::HashMap::new());
-    // Entity rating tracking: entity_id -> (rating_sum, rating_count)
-    static ENTITY_RATINGS: RefCell<std::collections::HashMap<u64, (u64, u64)>> = RefCell::new(std::collections::HashMap::new());
-    // Whether update_entity_rating should fail
-    static ENTITY_RATING_FAIL: RefCell<bool> = RefCell::new(false);
+    // Entity locked state
+    static ENTITY_LOCKED: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
 }
 
 pub fn add_order(order_id: u64, buyer: u64, shop_id: u64, completed: bool) {
@@ -67,7 +67,16 @@ pub fn get_shop_rating(shop_id: u64) -> Option<(u64, u64)> {
 }
 
 pub fn add_entity(entity_id: u64, owner: u64, active: bool, admins: Vec<u64>) {
-    ENTITIES.with(|e| e.borrow_mut().insert(entity_id, (owner, active, admins)));
+    ENTITIES.with(|e| e.borrow_mut().insert(entity_id, (owner, active)));
+    // 默认给 admins 全权限（兼容旧测试）
+    for admin in admins {
+        set_entity_admin(entity_id, admin, u32::MAX);
+    }
+}
+
+/// M5: 设置 Admin 权限位
+pub fn set_entity_admin(entity_id: u64, account: u64, permissions: u32) {
+    ENTITY_ADMINS.with(|m| m.borrow_mut().insert((entity_id, account), permissions));
 }
 
 pub fn set_shop_entity(shop_id: u64, entity_id: u64) {
@@ -82,12 +91,8 @@ pub fn set_order_completed_at(order_id: u64, block: u64) {
     ORDER_COMPLETED_AT.with(|m| m.borrow_mut().insert(order_id, block));
 }
 
-pub fn get_entity_rating(entity_id: u64) -> Option<(u64, u64)> {
-    ENTITY_RATINGS.with(|r| r.borrow().get(&entity_id).copied())
-}
-
-pub fn set_entity_rating_fail(fail: bool) {
-    ENTITY_RATING_FAIL.with(|f| *f.borrow_mut() = fail);
+pub fn set_entity_locked(entity_id: u64) {
+    ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id));
 }
 
 pub fn reset_mock_state() {
@@ -97,10 +102,10 @@ pub fn reset_mock_state() {
     ACTIVE_SHOPS.with(|s| s.borrow_mut().clear());
     SHOP_RATING_FAIL.with(|f| *f.borrow_mut() = false);
     ENTITIES.with(|e| e.borrow_mut().clear());
+    ENTITY_ADMINS.with(|m| m.borrow_mut().clear());
     SHOP_ENTITY.with(|m| m.borrow_mut().clear());
-    ENTITY_RATINGS.with(|r| r.borrow_mut().clear());
-    ENTITY_RATING_FAIL.with(|f| *f.borrow_mut() = false);
     ORDER_COMPLETED_AT.with(|m| m.borrow_mut().clear());
+    ENTITY_LOCKED.with(|l| l.borrow_mut().clear());
 }
 
 // ==================== Mock OrderProvider ====================
@@ -263,17 +268,17 @@ impl EntityProvider<u64> for MockEntityProvider {
     }
 
     fn is_entity_active(entity_id: u64) -> bool {
-        ENTITIES.with(|e| e.borrow().get(&entity_id).map(|(_, active, _)| *active).unwrap_or(false))
+        ENTITIES.with(|e| e.borrow().get(&entity_id).map(|(_, active)| *active).unwrap_or(false))
     }
 
     fn entity_status(entity_id: u64) -> Option<EntityStatus> {
-        ENTITIES.with(|e| e.borrow().get(&entity_id).map(|(_, active, _)| {
+        ENTITIES.with(|e| e.borrow().get(&entity_id).map(|(_, active)| {
             if *active { EntityStatus::Active } else { EntityStatus::Suspended }
         }))
     }
 
     fn entity_owner(entity_id: u64) -> Option<u64> {
-        ENTITIES.with(|e| e.borrow().get(&entity_id).map(|(owner, _, _)| *owner))
+        ENTITIES.with(|e| e.borrow().get(&entity_id).map(|(owner, _)| *owner))
     }
 
     fn entity_account(_entity_id: u64) -> u64 { 0 }
@@ -282,25 +287,25 @@ impl EntityProvider<u64> for MockEntityProvider {
         Ok(())
     }
 
-    fn update_entity_rating(entity_id: u64, rating: u8) -> Result<(), DispatchError> {
-        if ENTITY_RATING_FAIL.with(|f| *f.borrow()) {
-            return Err(DispatchError::Other("entity rating update failed"));
-        }
-        ENTITY_RATINGS.with(|r| {
-            let mut map = r.borrow_mut();
-            let entry = map.entry(entity_id).or_insert((0, 0));
-            entry.0 += rating as u64;
-            entry.1 += 1;
+    /// M5: 检查 owner 或 admin（需持有 required_permission 位）
+    fn is_entity_admin(entity_id: u64, account: &u64, required_permission: u32) -> bool {
+        // Owner 始终通过
+        let is_owner = ENTITIES.with(|e| {
+            e.borrow().get(&entity_id).map(|(owner, _)| *account == *owner).unwrap_or(false)
         });
-        Ok(())
+        if is_owner {
+            return true;
+        }
+        // Admin 需持有 required_permission 位
+        ENTITY_ADMINS.with(|m| {
+            m.borrow().get(&(entity_id, *account))
+                .map(|perms| perms & required_permission == required_permission)
+                .unwrap_or(false)
+        })
     }
 
-    fn is_entity_admin(entity_id: u64, account: &u64, _required_permission: u32) -> bool {
-        ENTITIES.with(|e| {
-            e.borrow().get(&entity_id).map(|(owner, _, admins)| {
-                *account == *owner || admins.contains(account)
-            }).unwrap_or(false)
-        })
+    fn is_entity_locked(entity_id: u64) -> bool {
+        ENTITY_LOCKED.with(|l| l.borrow().contains(&entity_id))
     }
 }
 

@@ -33,7 +33,7 @@ members = [
     "pallets/entity/commission/team",
     "pallets/entity/commission/pool-reward",
     "pallets/entity/commission",
-    "pallets/entity/service",
+    "pallets/entity/product",
     "pallets/entity/order",
     "pallets/entity/market",
     "pallets/entity/review",
@@ -47,6 +47,7 @@ members = [
     "pallets/ads/core",
     "pallets/ads/grouprobot",
     "pallets/ads/entity",
+    "pallets/ads/router",
 # GroupRobot pallets
     "pallets/grouprobot/primitives",
     "pallets/grouprobot/registry",
@@ -93,7 +94,7 @@ pallet-commission-single-line = { path = "./pallets/entity/commission/single-lin
 pallet-commission-team = { path = "./pallets/entity/commission/team", default-features = false }
 pallet-commission-pool-reward = { path = "./pallets/entity/commission/pool-reward", default-features = false }
 pallet-entity-commission = { path = "./pallets/entity/commission", default-features = false }
-pallet-entity-service = { path = "./pallets/entity/service", default-features = false }
+pallet-entity-product = { path = "./pallets/entity/product", default-features = false }
 pallet-entity-order = { path = "./pallets/entity/order", default-features = false }
 pallet-entity-market = { path = "./pallets/entity/market", default-features = false }
 pallet-entity-review = { path = "./pallets/entity/review", default-features = false }
@@ -105,6 +106,7 @@ pallet-ads-primitives = { path = "./pallets/ads/primitives", default-features = 
 pallet-ads-core = { path = "./pallets/ads/core", default-features = false }
 pallet-ads-grouprobot = { path = "./pallets/ads/grouprobot", default-features = false }
 pallet-ads-entity = { path = "./pallets/ads/entity", default-features = false }
+pallet-ads-router = { path = "./pallets/ads/router", default-features = false }
 # GroupRobot pallets
 pallet-grouprobot-primitives = { path = "./pallets/grouprobot/primitives", default-features = false }
 pallet-grouprobot-registry = { path = "./pallets/grouprobot/registry", default-features = false }

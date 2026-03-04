@@ -455,6 +455,12 @@ pub struct MockTokenCommissionHandler;
 thread_local! {
     static TOKEN_CANCELLED_ORDERS: RefCell<Vec<u64>> = RefCell::new(Vec::new());
     static TOKEN_COMPLETED_ORDERS: RefCell<Vec<(u64, u64, u64, u64, u128, u128)>> = RefCell::new(Vec::new());
+    static TOKEN_FEE_RATES: RefCell<HashMap<u64, u16>> = RefCell::new(HashMap::new());
+}
+
+#[allow(dead_code)]
+pub fn set_token_fee_rate(entity_id: u64, rate: u16) {
+    TOKEN_FEE_RATES.with(|r| r.borrow_mut().insert(entity_id, rate));
 }
 
 #[allow(dead_code)]
@@ -478,7 +484,9 @@ impl pallet_entity_common::TokenOrderCommissionHandler<u64> for MockTokenCommiss
         Ok(())
     }
 
-    fn token_platform_fee_rate(_entity_id: u64) -> u16 { 0 }
+    fn token_platform_fee_rate(entity_id: u64) -> u16 {
+        TOKEN_FEE_RATES.with(|r| *r.borrow().get(&entity_id).unwrap_or(&0))
+    }
 
     fn entity_account(entity_id: u64) -> u64 { entity_id + 9000 }
 }
@@ -500,7 +508,7 @@ pub struct MockMemberHandler;
 
 thread_local! {
     static MEMBER_REGISTERED: RefCell<Vec<(u64, u64)>> = RefCell::new(Vec::new());
-    static MEMBER_SPENT: RefCell<Vec<(u64, u64, u64, u64)>> = RefCell::new(Vec::new());
+    static MEMBER_SPENT: RefCell<Vec<(u64, u64, u64)>> = RefCell::new(Vec::new());
 }
 
 #[allow(dead_code)]
@@ -509,22 +517,22 @@ pub fn get_member_registered() -> Vec<(u64, u64)> {
 }
 
 #[allow(dead_code)]
-pub fn get_member_spent() -> Vec<(u64, u64, u64, u64)> {
+pub fn get_member_spent() -> Vec<(u64, u64, u64)> {
     MEMBER_SPENT.with(|s| s.borrow().clone())
 }
 
-impl pallet_entity_common::OrderMemberHandler<u64, u64> for MockMemberHandler {
+impl pallet_entity_common::OrderMemberHandler<u64> for MockMemberHandler {
     fn auto_register(entity_id: u64, account: &u64, _referrer: Option<u64>) -> Result<(), sp_runtime::DispatchError> {
         MEMBER_REGISTERED.with(|r| r.borrow_mut().push((entity_id, *account)));
         Ok(())
     }
 
-    fn update_spent(entity_id: u64, account: &u64, amount: u64, amount_usdt: u64) -> Result<(), sp_runtime::DispatchError> {
-        MEMBER_SPENT.with(|s| s.borrow_mut().push((entity_id, *account, amount, amount_usdt)));
+    fn update_spent(entity_id: u64, account: &u64, amount_usdt: u64) -> Result<(), sp_runtime::DispatchError> {
+        MEMBER_SPENT.with(|s| s.borrow_mut().push((entity_id, *account, amount_usdt)));
         Ok(())
     }
 
-    fn check_order_upgrade_rules(_entity_id: u64, _buyer: &u64, _product_id: u64, _order_amount: u64, _amount_usdt: u64) -> Result<(), sp_runtime::DispatchError> {
+    fn check_order_upgrade_rules(_entity_id: u64, _buyer: &u64, _product_id: u64, _amount_usdt: u64) -> Result<(), sp_runtime::DispatchError> {
         Ok(())
     }
 }
@@ -552,10 +560,12 @@ impl pallet_entity_order::Config for Test {
     type ProductProvider = MockProductProvider;
     type EntityToken = MockEntityToken;
     type PlatformAccount = PlatformAccount;
-    type PlatformFeeRate = ConstU16<200>; // 2%
+
     type ShipTimeout = ConstU64<100>;
     type ConfirmTimeout = ConstU64<200>;
     type ServiceConfirmTimeout = ConstU64<150>;
+    type DisputeTimeout = ConstU64<300>;
+    type ConfirmExtension = ConstU64<100>;
     type CommissionHandler = MockCommissionHandler;
     type TokenCommissionHandler = MockTokenCommissionHandler;
     type ShoppingBalance = MockShoppingBalanceProvider;

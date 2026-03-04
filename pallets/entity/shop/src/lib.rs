@@ -73,8 +73,6 @@ pub mod pallet {
         pub exchange_rate: u16,
         /// 积分是否可转让
         pub transferable: bool,
-        /// 是否启用
-        pub enabled: bool,
     }
 
     /// 积分配置类型别名
@@ -115,6 +113,8 @@ pub mod pallet {
         pub address_cid: Option<BoundedVec<u8, MaxCidLen>>,
         /// 营业时间 CID
         pub business_hours_cid: Option<BoundedVec<u8, MaxCidLen>>,
+        /// 店铺政策 CID（退换货/运费/服务条款）
+        pub policies_cid: Option<BoundedVec<u8, MaxCidLen>>,
         /// 创建时间
         pub created_at: BlockNumber,
         /// 商品/服务数量
@@ -182,10 +182,48 @@ pub mod pallet {
 
         /// 佣金资金保护（查询已承诺的 pending + shopping 总额）
         type CommissionFundGuard: pallet_entity_common::CommissionFundGuard;
+
+        /// Shop 关闭宽限期（区块数）
+        #[pallet::constant]
+        type ShopClosingGracePeriod: Get<BlockNumberFor<Self>>;
+
+        /// 每个 Entity 最大 Shop 数量
+        #[pallet::constant]
+        type MaxShopsPerEntity: Get<u32>;
     }
 
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
+
+    #[pallet::hooks]
+    impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        #[cfg(feature = "std")]
+        fn integrity_test() {
+            assert!(
+                T::MaxManagers::get() >= 1,
+                "MaxManagers must be >= 1"
+            );
+            assert!(
+                T::MaxShopNameLength::get() >= 1,
+                "MaxShopNameLength must be >= 1"
+            );
+            assert!(
+                T::MaxCidLength::get() >= 1,
+                "MaxCidLength must be >= 1"
+            );
+            assert!(
+                T::MaxShopsPerEntity::get() >= 1,
+                "MaxShopsPerEntity must be >= 1"
+            );
+            assert!(
+                T::WarningThreshold::get() >= T::MinOperatingBalance::get(),
+                "WarningThreshold must be >= MinOperatingBalance"
+            );
+        }
+    }
 
     // ========================================================================
     // Storage
@@ -210,6 +248,11 @@ pub mod pallet {
     #[pallet::getter(fn next_shop_id)]
     pub type NextShopId<T: Config> = StorageValue<_, u64, ValueQuery, DefaultNextShopId>;
 
+    /// Shop 关闭倒计时 shop_id -> closing_initiated_at_block
+    #[pallet::storage]
+    #[pallet::getter(fn shop_closing_at)]
+    pub type ShopClosingAt<T: Config> = StorageMap<_, Blake2_128Concat, u64, BlockNumberFor<T>>;
+
     /// Shop 积分配置 shop_id -> PointsConfig
     #[pallet::storage]
     #[pallet::getter(fn shop_points_config)]
@@ -230,6 +273,35 @@ pub mod pallet {
     #[pallet::storage]
     #[pallet::getter(fn shop_points_total_supply)]
     pub type ShopPointsTotalSupply<T: Config> = StorageMap<_, Blake2_128Concat, u64, BalanceOf<T>, ValueQuery>;
+
+    /// Shop 积分有效期（区块数，0=永不过期）shop_id -> ttl_blocks
+    #[pallet::storage]
+    #[pallet::getter(fn shop_points_ttl)]
+    pub type ShopPointsTtl<T: Config> = StorageMap<_, Blake2_128Concat, u64, BlockNumberFor<T>, ValueQuery>;
+
+    /// 用户积分到期时间 (shop_id, account) -> expires_at_block
+    #[pallet::storage]
+    #[pallet::getter(fn shop_points_expires_at)]
+    pub type ShopPointsExpiresAt<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat, u64,
+        Blake2_128Concat, T::AccountId,
+        BlockNumberFor<T>,
+    >;
+
+    /// Shop 积分总量上限 shop_id -> max_supply（0=无上限）
+    #[pallet::storage]
+    #[pallet::getter(fn shop_points_max_supply)]
+    pub type ShopPointsMaxSupply<T: Config> = StorageMap<_, Blake2_128Concat, u64, BalanceOf<T>, ValueQuery>;
+
+    /// Entity 主 Shop 索引 entity_id -> primary_shop_id
+    #[pallet::storage]
+    #[pallet::getter(fn entity_primary_shop)]
+    pub type EntityPrimaryShop<T: Config> = StorageMap<_, Blake2_128Concat, u64, u64>;
+
+    /// 封禁前的 Shop 状态（用于解封时恢复）shop_id -> ShopOperatingStatus
+    #[pallet::storage]
+    pub type ShopStatusBeforeBan<T: Config> = StorageMap<_, Blake2_128Concat, u64, ShopOperatingStatus>;
 
     // ========================================================================
     // Events
@@ -281,6 +353,42 @@ pub mod pallet {
         OperatingFundWithdrawn { shop_id: u64, to: T::AccountId, amount: BalanceOf<T>, new_balance: BalanceOf<T> },
         /// Shop 关闭时资金退还
         ShopClosedFundRefunded { shop_id: u64, to: T::AccountId, amount: BalanceOf<T> },
+        /// Shop 客服账户更新
+        CustomerServiceUpdated { shop_id: u64, customer_service: Option<T::AccountId> },
+        /// Shop 进入关闭宽限期
+        ShopClosing { shop_id: u64, grace_until: BlockNumberFor<T> },
+        /// Shop 关闭完成（宽限期满）
+        ShopCloseFinalized { shop_id: u64 },
+        /// 积分兑换
+        PointsRedeemed { shop_id: u64, who: T::AccountId, points_burned: BalanceOf<T>, payout: BalanceOf<T> },
+        /// Shop 转让
+        ShopTransferred { shop_id: u64, from_entity_id: u64, to_entity_id: u64 },
+        /// 主 Shop 变更
+        PrimaryShopChanged { entity_id: u64, old_shop_id: u64, new_shop_id: u64 },
+        /// Shop 被强制暂停（Root）
+        ShopForcePaused { shop_id: u64 },
+        /// 积分有效期设置
+        PointsTtlSet { shop_id: u64, ttl_blocks: BlockNumberFor<T> },
+        /// 积分过期清除
+        PointsExpired { shop_id: u64, account: T::AccountId, amount: BalanceOf<T> },
+        /// Shop 被 Root 强制关闭
+        ShopForceClosedByRoot { shop_id: u64 },
+        /// Shop 营业时间更新
+        ShopBusinessHoursUpdated { shop_id: u64 },
+        /// Shop 政策更新
+        ShopPoliciesUpdated { shop_id: u64 },
+        /// Shop 类型变更
+        ShopTypeChanged { shop_id: u64, old_type: ShopType, new_type: ShopType },
+        /// Shop 关闭撤回
+        ShopClosingCancelled { shop_id: u64 },
+        /// 积分总量上限设置
+        PointsMaxSupplySet { shop_id: u64, max_supply: BalanceOf<T> },
+        /// Manager 自我辞职
+        ManagerResigned { shop_id: u64, manager: T::AccountId },
+        /// Shop 被封禁（Root）
+        ShopBannedByRoot { shop_id: u64 },
+        /// Shop 被解封（Root）
+        ShopUnbannedByRoot { shop_id: u64, restored_status: ShopOperatingStatus },
     }
 
     // ========================================================================
@@ -295,7 +403,7 @@ pub mod pallet {
         EntityNotActive,
         /// Shop 不存在
         ShopNotFound,
-        /// Shop 未激活
+        /// Shop 未处于 Active 状态（无法执行此操作）
         ShopNotActive,
         /// 无权限操作
         NotAuthorized,
@@ -309,8 +417,6 @@ pub mod pallet {
         ManagerNotFound,
         /// 管理员数量已满
         TooManyManagers,
-        /// 余额不足
-        InsufficientBalance,
         /// 运营资金不足
         InsufficientOperatingFund,
         /// Shop 已暂停
@@ -345,6 +451,34 @@ pub mod pallet {
         ZeroFundAmount,
         /// 积分名称不能为空
         PointsNameEmpty,
+        /// Shop 已在关闭中（宽限期内）
+        ShopAlreadyClosing,
+        /// 关闭宽限期未满
+        ClosingGracePeriodNotElapsed,
+        /// Shop 不在关闭宽限期中
+        ShopNotClosing,
+        /// 不可转让主 Shop
+        CannotTransferPrimaryShop,
+        /// 不能转让给同一 Entity
+        SameEntity,
+        /// 积分未过期（无法清除）
+        PointsNotExpired,
+        /// 兑换金额为零（积分数量太小）
+        RedeemPayoutZero,
+        /// Shop 类型未变更
+        ShopTypeSame,
+        /// 积分总量超过上限
+        PointsMaxSupplyExceeded,
+        /// 实体已被全局锁定，所有配置操作不可用
+        EntityLocked,
+        /// Entity 的 Shop 数量已达上限
+        ShopLimitReached,
+        /// Shop 已被封禁
+        ShopBanned,
+        /// Shop 未被封禁
+        ShopNotBanned,
+        /// 调用者不是该 Shop 的管理员
+        NotManager,
     }
 
     // ========================================================================
@@ -381,6 +515,14 @@ pub mod pallet {
             // 检查权限（仅 Entity owner）
             let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
             ensure!(who == owner, Error::<T>::NotAuthorized);
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+
+            // Shop 数量预检
+            let current_shops = T::EntityProvider::entity_shops(entity_id);
+            ensure!(
+                (current_shops.len() as u32) < T::MaxShopsPerEntity::get(),
+                Error::<T>::ShopLimitReached
+            );
             
             // 先创建 Shop（获取分配的 shop_id）
             let shop_id = Self::do_create_shop(entity_id, name, shop_type, initial_fund)?;
@@ -401,8 +543,8 @@ pub mod pallet {
             origin: OriginFor<T>,
             shop_id: u64,
             name: Option<BoundedVec<u8, T::MaxShopNameLength>>,
-            logo_cid: Option<BoundedVec<u8, T::MaxCidLength>>,
-            description_cid: Option<BoundedVec<u8, T::MaxCidLength>>,
+            logo_cid: Option<Option<BoundedVec<u8, T::MaxCidLength>>>,
+            description_cid: Option<Option<BoundedVec<u8, T::MaxCidLength>>>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             
@@ -417,22 +559,33 @@ pub mod pallet {
                 
                 // 检查权限
                 ensure!(Self::can_manage_shop(shop, &who), Error::<T>::NotAuthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
+                ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
                 
-                // H3: 已关闭的 Shop 不可修改
-                ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
+                // H3: 已关闭/关闭中/封禁的 Shop 不可修改
+                ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
 
                 if let Some(n) = name {
                     // H2: 名称不能为空
                     ensure!(!n.is_empty(), Error::<T>::ShopNameEmpty);
                     shop.name = n;
                 }
-                if let Some(cid) = logo_cid {
-                    ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
-                    shop.logo_cid = Some(cid);
+                // Option<Option<CID>>: None=不修改, Some(None)=清除, Some(Some(cid))=设新值
+                match logo_cid {
+                    Some(Some(cid)) => {
+                        ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
+                        shop.logo_cid = Some(cid);
+                    }
+                    Some(None) => { shop.logo_cid = None; }
+                    None => {}
                 }
-                if let Some(cid) = description_cid {
-                    ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
-                    shop.description_cid = Some(cid);
+                match description_cid {
+                    Some(Some(cid)) => {
+                        ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
+                        shop.description_cid = Some(cid);
+                    }
+                    Some(None) => { shop.description_cid = None; }
+                    None => {}
                 }
                 
                 Self::deposit_event(Event::ShopUpdated { shop_id });
@@ -457,9 +610,10 @@ pub mod pallet {
                 let owner = T::EntityProvider::entity_owner(shop.entity_id)
                     .ok_or(Error::<T>::EntityNotFound)?;
                 ensure!(who == owner, Error::<T>::NotAuthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
 
-                // H3: 已关闭的 Shop 不可操作管理员
-                ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
+                // H3: 已关闭/关闭中的 Shop 不可操作管理员
+                ensure!(!shop.status.is_closed_or_closing(), Error::<T>::ShopAlreadyClosed);
                 
                 // 检查是否已存在
                 ensure!(!shop.managers.contains(&manager), Error::<T>::ManagerAlreadyExists);
@@ -490,9 +644,10 @@ pub mod pallet {
                 let owner = T::EntityProvider::entity_owner(shop.entity_id)
                     .ok_or(Error::<T>::EntityNotFound)?;
                 ensure!(who == owner, Error::<T>::NotAuthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
 
-                // H3: 已关闭的 Shop 不可操作管理员
-                ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
+                // H3: 已关闭/关闭中的 Shop 不可操作管理员
+                ensure!(!shop.status.is_closed_or_closing(), Error::<T>::ShopAlreadyClosed);
                 
                 // 查找并移除
                 let pos = shop.managers.iter().position(|m| m == &manager)
@@ -521,8 +676,11 @@ pub mod pallet {
                 
                 // 检查权限
                 ensure!(Self::can_manage_shop(shop, &who), Error::<T>::NotAuthorized);
-                // H2: 关闭的店铺不允许充值
+                ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
+                ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
+                // H2: 已关闭/封禁的店铺不允许充值（Closing 允许，以覆盖宽限期内义务）
                 ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
+                ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
                 
                 // 转移资金
                 let shop_account = Self::shop_account_id(shop_id);
@@ -555,9 +713,10 @@ pub mod pallet {
                 
                 // 检查权限
                 ensure!(Self::can_manage_shop(shop, &who), Error::<T>::NotAuthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
                 
-                // 检查状态
-                ensure!(shop.status == ShopOperatingStatus::Active, Error::<T>::ShopAlreadyPaused);
+                // 检查状态（仅 Active 可暂停；FundDepleted/Closing/Closed 等不可暂停）
+                ensure!(shop.status == ShopOperatingStatus::Active, Error::<T>::ShopNotActive);
                 
                 shop.status = ShopOperatingStatus::Paused;
                 
@@ -580,7 +739,10 @@ pub mod pallet {
                 
                 // 检查权限
                 ensure!(Self::can_manage_shop(shop, &who), Error::<T>::NotAuthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
                 
+                // 封禁状态仅 Root 可解封，owner/manager 不可恢复
+                ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
                 // 检查状态
                 ensure!(shop.status.can_resume(), Error::<T>::ShopNotPaused);
                 
@@ -603,8 +765,8 @@ pub mod pallet {
             origin: OriginFor<T>,
             shop_id: u64,
             location: Option<(i64, i64)>,
-            address_cid: Option<BoundedVec<u8, T::MaxCidLength>>,
-            business_hours_cid: Option<BoundedVec<u8, T::MaxCidLength>>,
+            address_cid: Option<Option<BoundedVec<u8, T::MaxCidLength>>>,
+            business_hours_cid: Option<Option<BoundedVec<u8, T::MaxCidLength>>>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             
@@ -613,7 +775,9 @@ pub mod pallet {
                 
                 // 检查权限
                 ensure!(Self::can_manage_shop(shop, &who), Error::<T>::NotAuthorized);
-                ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
+                ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
+                ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
+                ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
                 
                 // 验证位置（经度 -180~180，纬度 -90~90，精度 10^6）
                 if let Some((lng, lat)) = location {
@@ -622,13 +786,22 @@ pub mod pallet {
                 }
                 
                 shop.location = location;
-                if let Some(cid) = address_cid {
-                    ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
-                    shop.address_cid = Some(cid);
+                // Option<Option<CID>>: None=不修改, Some(None)=清除, Some(Some(cid))=设新值
+                match address_cid {
+                    Some(Some(cid)) => {
+                        ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
+                        shop.address_cid = Some(cid);
+                    }
+                    Some(None) => { shop.address_cid = None; }
+                    None => {}
                 }
-                if let Some(cid) = business_hours_cid {
-                    ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
-                    shop.business_hours_cid = Some(cid);
+                match business_hours_cid {
+                    Some(Some(cid)) => {
+                        ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
+                        shop.business_hours_cid = Some(cid);
+                    }
+                    Some(None) => { shop.business_hours_cid = None; }
+                    None => {}
                 }
                 
                 Self::deposit_event(Event::ShopLocationUpdated { shop_id, location });
@@ -654,7 +827,9 @@ pub mod pallet {
             
             // 检查权限
             ensure!(Self::can_manage_shop(&shop, &who), Error::<T>::NotAuthorized);
-            ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
+            ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
+            ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
             
             // 检查是否已启用
             ensure!(!ShopPointsConfigs::<T>::contains_key(shop_id), Error::<T>::PointsAlreadyEnabled);
@@ -672,7 +847,6 @@ pub mod pallet {
                 reward_rate,
                 exchange_rate,
                 transferable,
-                enabled: true,
             };
             
             ShopPointsConfigs::<T>::insert(shop_id, config);
@@ -681,7 +855,11 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 关闭 Shop
+        /// 关闭 Shop（进入宽限期）
+        ///
+        /// 将 Shop 状态设为 Closing，开始宽限期倒计时。
+        /// 宽限期内：不可接新单/上新品，已有订单可完成，积分可转移。
+        /// 宽限期满后调用 `finalize_close_shop` 完成清理。
         #[pallet::call_index(9)]
         #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
         pub fn close_shop(
@@ -697,44 +875,91 @@ pub mod pallet {
                 let owner = T::EntityProvider::entity_owner(shop.entity_id)
                     .ok_or(Error::<T>::EntityNotFound)?;
                 ensure!(who == owner, Error::<T>::NotAuthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
                 
                 // 主 Shop 不可关闭
                 ensure!(!shop.is_primary, Error::<T>::CannotClosePrimaryShop);
                 
                 // 检查状态
                 ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
+                ensure!(shop.status != ShopOperatingStatus::Closing, Error::<T>::ShopAlreadyClosing);
                 
+                shop.status = ShopOperatingStatus::Closing;
+                
+                let now = <frame_system::Pallet<T>>::block_number();
+                let grace = T::ShopClosingGracePeriod::get();
+                let grace_until = now.saturating_add(grace);
+                ShopClosingAt::<T>::insert(shop_id, now);
+                
+                Self::deposit_event(Event::ShopClosing { shop_id, grace_until });
+                Ok(())
+            })
+        }
+
+        /// 完成 Shop 关闭（宽限期满后调用）
+        ///
+        /// 任何人可调用。检查宽限期已过，然后执行清理：
+        /// 注销 Entity 关联、清积分数据、退还剩余资金。
+        #[pallet::call_index(15)]
+        #[pallet::weight(Weight::from_parts(200_000_000, 12_000))]
+        pub fn finalize_close_shop(
+            origin: OriginFor<T>,
+            shop_id: u64,
+        ) -> DispatchResult {
+            ensure_signed(origin)?;
+
+            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> DispatchResult {
+                let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+
+                ensure!(shop.status == ShopOperatingStatus::Closing, Error::<T>::ShopNotClosing);
+
+                // 检查宽限期
+                let closing_at = ShopClosingAt::<T>::get(shop_id)
+                    .ok_or(Error::<T>::ShopNotFound)?;
+                let now = <frame_system::Pallet<T>>::block_number();
+                let grace = T::ShopClosingGracePeriod::get();
+                ensure!(now >= closing_at.saturating_add(grace), Error::<T>::ClosingGracePeriodNotElapsed);
+
                 shop.status = ShopOperatingStatus::Closed;
-                
-                // M4: 注销 Entity-Shop 关联
+
+                // 清理 closing 计时器
+                ShopClosingAt::<T>::remove(shop_id);
+
+                // 注销 Entity-Shop 关联
                 T::EntityProvider::unregister_shop(shop.entity_id, shop_id)?;
 
-                // M1-fix: 清理 ShopEntity 反向索引
+                // 清理 ShopEntity 反向索引
                 ShopEntity::<T>::remove(shop_id);
 
-                // M3: 清理积分数据
+                // 清理积分数据
                 ShopPointsConfigs::<T>::remove(shop_id);
                 let _ = ShopPointsBalances::<T>::clear_prefix(shop_id, u32::MAX, None);
                 ShopPointsTotalSupply::<T>::remove(shop_id);
+                ShopPointsTtl::<T>::remove(shop_id);
+                let _ = ShopPointsExpiresAt::<T>::clear_prefix(shop_id, u32::MAX, None);
+                ShopPointsMaxSupply::<T>::remove(shop_id);
 
                 // 退还 shop_account 余额给 entity_owner
                 let shop_account = Self::shop_account_id(shop_id);
                 let remaining = T::Currency::free_balance(&shop_account);
                 if !remaining.is_zero() {
-                    if T::Currency::transfer(
-                        &shop_account,
-                        &who,
-                        remaining,
-                        ExistenceRequirement::AllowDeath,
-                    ).is_ok() {
-                        Self::deposit_event(Event::ShopClosedFundRefunded {
-                            shop_id,
-                            to: who,
-                            amount: remaining,
-                        });
+                    if let Some(owner) = T::EntityProvider::entity_owner(shop.entity_id) {
+                        if T::Currency::transfer(
+                            &shop_account,
+                            &owner,
+                            remaining,
+                            ExistenceRequirement::AllowDeath,
+                        ).is_ok() {
+                            Self::deposit_event(Event::ShopClosedFundRefunded {
+                                shop_id,
+                                to: owner,
+                                amount: remaining,
+                            });
+                        }
                     }
                 }
-                
+
+                Self::deposit_event(Event::ShopCloseFinalized { shop_id });
                 Self::deposit_event(Event::ShopClosed { shop_id });
                 Ok(())
             })
@@ -751,12 +976,21 @@ pub mod pallet {
 
             let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
             ensure!(Self::can_manage_shop(&shop, &who), Error::<T>::NotAuthorized);
+            ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
+            // M3: 关闭中/封禁的 Shop 不可禁用积分
+            ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
             ensure!(ShopPointsConfigs::<T>::contains_key(shop_id), Error::<T>::PointsNotEnabled);
 
             ShopPointsConfigs::<T>::remove(shop_id);
             // H2: 清理积分余额和总供应量，避免残留数据
             let _ = ShopPointsBalances::<T>::clear_prefix(shop_id, u32::MAX, None);
             ShopPointsTotalSupply::<T>::remove(shop_id);
+            // M1: 清理 TTL 相关存储
+            ShopPointsTtl::<T>::remove(shop_id);
+            let _ = ShopPointsExpiresAt::<T>::clear_prefix(shop_id, u32::MAX, None);
+            // 清理积分总量上限
+            ShopPointsMaxSupply::<T>::remove(shop_id);
 
             Self::deposit_event(Event::ShopPointsDisabled { shop_id });
             Ok(())
@@ -782,7 +1016,9 @@ pub mod pallet {
 
             let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
             ensure!(Self::can_manage_shop(&shop, &who), Error::<T>::NotAuthorized);
-            ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
+            ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
+            ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
 
             ShopPointsConfigs::<T>::try_mutate(shop_id, |maybe_config| -> DispatchResult {
                 let config = maybe_config.as_mut().ok_or(Error::<T>::PointsNotEnabled)?;
@@ -825,6 +1061,9 @@ pub mod pallet {
                 .ok_or(Error::<T>::PointsNotEnabled)?;
             ensure!(config.transferable, Error::<T>::PointsNotTransferable);
 
+            // 懒过期检查
+            Self::check_points_expiry(shop_id, &who);
+
             let from_balance = ShopPointsBalances::<T>::get(shop_id, &who);
             ensure!(from_balance >= amount, Error::<T>::InsufficientPointsBalance);
 
@@ -863,6 +1102,7 @@ pub mod pallet {
             let owner = T::EntityProvider::entity_owner(shop.entity_id)
                 .ok_or(Error::<T>::EntityNotFound)?;
             ensure!(who == owner, Error::<T>::NotAuthorized);
+            ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
 
             let shop_account = Self::shop_account_id(shop_id);
             let balance = T::Currency::free_balance(&shop_account);
@@ -899,6 +1139,581 @@ pub mod pallet {
             });
             Ok(())
         }
+
+        /// 设置/清除 Shop 客服账户
+        #[pallet::call_index(14)]
+        #[pallet::weight(Weight::from_parts(100_000_000, 6_000))]
+        pub fn set_customer_service(
+            origin: OriginFor<T>,
+            shop_id: u64,
+            customer_service: Option<T::AccountId>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> DispatchResult {
+                let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+
+                ensure!(Self::can_manage_shop(shop, &who), Error::<T>::NotAuthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
+                ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
+                ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
+
+                shop.customer_service = customer_service.clone();
+
+                Self::deposit_event(Event::CustomerServiceUpdated { shop_id, customer_service });
+                Ok(())
+            })
+        }
+
+        /// Manager 直接发放积分
+        #[pallet::call_index(16)]
+        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        pub fn manager_issue_points(
+            origin: OriginFor<T>,
+            shop_id: u64,
+            to: T::AccountId,
+            amount: BalanceOf<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(!amount.is_zero(), Error::<T>::InsufficientPointsBalance);
+
+            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
+            ensure!(Self::can_manage_shop(&shop, &who), Error::<T>::NotAuthorized);
+            ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
+            ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
+            ensure!(ShopPointsConfigs::<T>::contains_key(shop_id), Error::<T>::PointsNotEnabled);
+
+            // 积分总量上限检查
+            Self::check_points_max_supply(shop_id, amount)?;
+
+            ShopPointsBalances::<T>::mutate(shop_id, &to, |b| *b = b.saturating_add(amount));
+            ShopPointsTotalSupply::<T>::mutate(shop_id, |s| *s = s.saturating_add(amount));
+
+            Self::maybe_extend_points_expiry(shop_id, &to);
+
+            Self::deposit_event(Event::PointsIssued { shop_id, to, amount });
+            Ok(())
+        }
+
+        /// Manager 直接销毁积分
+        #[pallet::call_index(17)]
+        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        pub fn manager_burn_points(
+            origin: OriginFor<T>,
+            shop_id: u64,
+            from: T::AccountId,
+            amount: BalanceOf<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(!amount.is_zero(), Error::<T>::InsufficientPointsBalance);
+
+            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
+            ensure!(Self::can_manage_shop(&shop, &who), Error::<T>::NotAuthorized);
+            ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
+            ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
+            ensure!(ShopPointsConfigs::<T>::contains_key(shop_id), Error::<T>::PointsNotEnabled);
+
+            // 懒过期检查
+            Self::check_points_expiry(shop_id, &from);
+
+            let balance = ShopPointsBalances::<T>::get(shop_id, &from);
+            ensure!(balance >= amount, Error::<T>::InsufficientPointsBalance);
+
+            ShopPointsBalances::<T>::mutate(shop_id, &from, |b| *b = b.saturating_sub(amount));
+            ShopPointsTotalSupply::<T>::mutate(shop_id, |s| *s = s.saturating_sub(amount));
+
+            Self::deposit_event(Event::PointsBurned { shop_id, from, amount });
+            Ok(())
+        }
+
+        /// 用户兑换积分为货币
+        ///
+        /// 按 exchange_rate（基点）计算：payout = amount * exchange_rate / 10000
+        /// 货币从 Shop 运营资金账户支出。
+        #[pallet::call_index(18)]
+        #[pallet::weight(Weight::from_parts(200_000_000, 12_000))]
+        pub fn redeem_points(
+            origin: OriginFor<T>,
+            shop_id: u64,
+            amount: BalanceOf<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(!amount.is_zero(), Error::<T>::InsufficientPointsBalance);
+
+            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
+            ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
+
+            let config = ShopPointsConfigs::<T>::get(shop_id)
+                .ok_or(Error::<T>::PointsNotEnabled)?;
+            ensure!(config.exchange_rate > 0, Error::<T>::InvalidConfig);
+
+            // 懒过期检查
+            Self::check_points_expiry(shop_id, &who);
+
+            let balance = ShopPointsBalances::<T>::get(shop_id, &who);
+            ensure!(balance >= amount, Error::<T>::InsufficientPointsBalance);
+
+            // 计算兑换金额
+            let rate: BalanceOf<T> = (config.exchange_rate as u128).saturated_into();
+            let divisor: BalanceOf<T> = 10000u128.saturated_into();
+            let payout = amount.saturating_mul(rate) / divisor;
+            ensure!(!payout.is_zero(), Error::<T>::RedeemPayoutZero);
+
+            // 从 Shop 运营账户转给用户
+            let shop_account = Self::shop_account_id(shop_id);
+            T::Currency::transfer(&shop_account, &who, payout, ExistenceRequirement::AllowDeath)?;
+
+            // 销毁积分
+            ShopPointsBalances::<T>::mutate(shop_id, &who, |b| *b = b.saturating_sub(amount));
+            ShopPointsTotalSupply::<T>::mutate(shop_id, |s| *s = s.saturating_sub(amount));
+
+            Self::deposit_event(Event::PointsRedeemed { shop_id, who, points_burned: amount, payout });
+            Ok(())
+        }
+
+        /// 转让 Shop 到另一个 Entity
+        ///
+        /// 仅 Entity owner 可调用。主 Shop 不可转让。
+        /// Shop 运营资金随 Shop 账户自动转移。
+        #[pallet::call_index(19)]
+        #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
+        pub fn transfer_shop(
+            origin: OriginFor<T>,
+            shop_id: u64,
+            to_entity_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> DispatchResult {
+                let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+                let from_entity_id = shop.entity_id;
+
+                // 仅 Entity owner 可转让
+                let owner = T::EntityProvider::entity_owner(from_entity_id)
+                    .ok_or(Error::<T>::EntityNotFound)?;
+                ensure!(who == owner, Error::<T>::NotAuthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(from_entity_id), Error::<T>::EntityLocked);
+
+                ensure!(!shop.is_primary, Error::<T>::CannotTransferPrimaryShop);
+                ensure!(from_entity_id != to_entity_id, Error::<T>::SameEntity);
+                ensure!(!shop.status.is_closed_or_closing(), Error::<T>::ShopAlreadyClosed);
+
+                // 目标 Entity 必须存在且激活
+                ensure!(T::EntityProvider::entity_exists(to_entity_id), Error::<T>::EntityNotFound);
+                ensure!(T::EntityProvider::is_entity_active(to_entity_id), Error::<T>::EntityNotActive);
+
+                // 注销原 Entity 关联，注册到新 Entity
+                T::EntityProvider::unregister_shop(from_entity_id, shop_id)?;
+                T::EntityProvider::register_shop(to_entity_id, shop_id)?;
+
+                shop.entity_id = to_entity_id;
+                ShopEntity::<T>::insert(shop_id, to_entity_id);
+
+                Self::deposit_event(Event::ShopTransferred { shop_id, from_entity_id, to_entity_id });
+                Ok(())
+            })
+        }
+
+        /// 更换 Entity 的主 Shop
+        ///
+        /// 仅 Entity owner 可调用。新主 Shop 必须属于同一 Entity 且处于活跃状态。
+        #[pallet::call_index(20)]
+        #[pallet::weight(Weight::from_parts(200_000_000, 12_000))]
+        pub fn set_primary_shop(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            new_primary_shop_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let owner = T::EntityProvider::entity_owner(entity_id)
+                .ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(who == owner, Error::<T>::NotAuthorized);
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+
+            let new_shop = Shops::<T>::get(new_primary_shop_id).ok_or(Error::<T>::ShopNotFound)?;
+            ensure!(new_shop.entity_id == entity_id, Error::<T>::NotAuthorized);
+            ensure!(!new_shop.status.is_closed_or_closing(), Error::<T>::ShopAlreadyClosed);
+            ensure!(!new_shop.is_primary, Error::<T>::InvalidConfig);
+
+            // 通过 EntityPrimaryShop 索引 O(1) 查找当前主 Shop
+            let old_primary_id = EntityPrimaryShop::<T>::get(entity_id).unwrap_or(0);
+
+            if old_primary_id > 0 {
+                Shops::<T>::mutate(old_primary_id, |maybe| {
+                    if let Some(s) = maybe.as_mut() {
+                        s.is_primary = false;
+                    }
+                });
+            }
+
+            // 设置新主 Shop
+            Shops::<T>::mutate(new_primary_shop_id, |maybe| {
+                if let Some(s) = maybe.as_mut() {
+                    s.is_primary = true;
+                }
+            });
+            EntityPrimaryShop::<T>::insert(entity_id, new_primary_shop_id);
+
+            Self::deposit_event(Event::PrimaryShopChanged {
+                entity_id,
+                old_shop_id: old_primary_id,
+                new_shop_id: new_primary_shop_id,
+            });
+            Ok(())
+        }
+
+        /// 强制暂停 Shop（Root/治理层调用）
+        ///
+        /// 可被 owner/manager 通过 resume_shop 恢复。
+        #[pallet::call_index(21)]
+        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        pub fn force_pause_shop(
+            origin: OriginFor<T>,
+            shop_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> DispatchResult {
+                let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+                ensure!(!shop.status.is_closed_or_closing(), Error::<T>::ShopAlreadyClosed);
+                ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
+                ensure!(shop.status != ShopOperatingStatus::Paused, Error::<T>::ShopAlreadyPaused);
+
+                shop.status = ShopOperatingStatus::Paused;
+
+                Self::deposit_event(Event::ShopForcePaused { shop_id });
+                Ok(())
+            })
+        }
+
+        /// 设置 Shop 积分有效期（TTL）
+        ///
+        /// ttl_blocks = 0 表示永不过期（移除 TTL 限制）。
+        /// 新 TTL 仅影响后续发放的积分。
+        #[pallet::call_index(22)]
+        #[pallet::weight(Weight::from_parts(100_000_000, 6_000))]
+        pub fn set_points_ttl(
+            origin: OriginFor<T>,
+            shop_id: u64,
+            ttl_blocks: BlockNumberFor<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
+            ensure!(Self::can_manage_shop(&shop, &who), Error::<T>::NotAuthorized);
+            ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
+            ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
+            ensure!(ShopPointsConfigs::<T>::contains_key(shop_id), Error::<T>::PointsNotEnabled);
+
+            if ttl_blocks.is_zero() {
+                ShopPointsTtl::<T>::remove(shop_id);
+            } else {
+                ShopPointsTtl::<T>::insert(shop_id, ttl_blocks);
+            }
+
+            Self::deposit_event(Event::PointsTtlSet { shop_id, ttl_blocks });
+            Ok(())
+        }
+
+        /// 清除过期积分
+        ///
+        /// 任何人可调用。仅当积分确实已过期时才执行清除。
+        #[pallet::call_index(23)]
+        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        pub fn expire_points(
+            origin: OriginFor<T>,
+            shop_id: u64,
+            account: T::AccountId,
+        ) -> DispatchResult {
+            ensure_signed(origin)?;
+
+            ensure!(Shops::<T>::contains_key(shop_id), Error::<T>::ShopNotFound);
+
+            let expiry = ShopPointsExpiresAt::<T>::get(shop_id, &account)
+                .ok_or(Error::<T>::PointsNotExpired)?;
+
+            let now = <frame_system::Pallet<T>>::block_number();
+            ensure!(now > expiry, Error::<T>::PointsNotExpired);
+
+            let expired_amount = ShopPointsBalances::<T>::take(shop_id, &account);
+            if !expired_amount.is_zero() {
+                ShopPointsTotalSupply::<T>::mutate(shop_id, |s| *s = s.saturating_sub(expired_amount));
+                Self::deposit_event(Event::PointsExpired {
+                    shop_id,
+                    account: account.clone(),
+                    amount: expired_amount,
+                });
+            }
+            ShopPointsExpiresAt::<T>::remove(shop_id, &account);
+
+            Ok(())
+        }
+
+        /// Root 强制关闭 Shop
+        ///
+        /// 跳过宽限期，立即关闭并清理。委托给 ShopProvider::force_close_shop。
+        #[pallet::call_index(24)]
+        #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
+        pub fn force_close_shop(
+            origin: OriginFor<T>,
+            shop_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            // 委托给 trait 实现（已包含完整清理逻辑）
+            <Self as ShopProvider<T::AccountId>>::force_close_shop(shop_id)?;
+
+            Self::deposit_event(Event::ShopForceClosedByRoot { shop_id });
+            Ok(())
+        }
+
+        /// 设置 Shop 营业时间（独立于位置信息）
+        #[pallet::call_index(25)]
+        #[pallet::weight(Weight::from_parts(100_000_000, 6_000))]
+        pub fn set_business_hours(
+            origin: OriginFor<T>,
+            shop_id: u64,
+            business_hours_cid: Option<BoundedVec<u8, T::MaxCidLength>>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> DispatchResult {
+                let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+
+                ensure!(Self::can_manage_shop(shop, &who), Error::<T>::NotAuthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
+                ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
+                ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
+
+                match business_hours_cid {
+                    Some(cid) => {
+                        ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
+                        shop.business_hours_cid = Some(cid);
+                    }
+                    None => { shop.business_hours_cid = None; }
+                }
+
+                Self::deposit_event(Event::ShopBusinessHoursUpdated { shop_id });
+                Ok(())
+            })
+        }
+
+        /// 设置/清除 Shop 政策（退换货/运费/服务条款）
+        #[pallet::call_index(26)]
+        #[pallet::weight(Weight::from_parts(100_000_000, 6_000))]
+        pub fn set_shop_policies(
+            origin: OriginFor<T>,
+            shop_id: u64,
+            policies_cid: Option<BoundedVec<u8, T::MaxCidLength>>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> DispatchResult {
+                let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+
+                ensure!(Self::can_manage_shop(shop, &who), Error::<T>::NotAuthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
+                ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
+                ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
+
+                match policies_cid {
+                    Some(cid) => {
+                        ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
+                        shop.policies_cid = Some(cid);
+                    }
+                    None => { shop.policies_cid = None; }
+                }
+
+                Self::deposit_event(Event::ShopPoliciesUpdated { shop_id });
+                Ok(())
+            })
+        }
+
+        /// 变更 Shop 类型
+        ///
+        /// 仅 Entity owner 可调用。已关闭/关闭中的 Shop 不可变更。
+        #[pallet::call_index(27)]
+        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        pub fn set_shop_type(
+            origin: OriginFor<T>,
+            shop_id: u64,
+            new_shop_type: ShopType,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> DispatchResult {
+                let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+
+                // 仅 Entity owner 可变更类型
+                let owner = T::EntityProvider::entity_owner(shop.entity_id)
+                    .ok_or(Error::<T>::EntityNotFound)?;
+                ensure!(who == owner, Error::<T>::NotAuthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
+                ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
+                ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
+                ensure!(shop.shop_type != new_shop_type, Error::<T>::ShopTypeSame);
+
+                let old_type = shop.shop_type;
+                shop.shop_type = new_shop_type;
+
+                Self::deposit_event(Event::ShopTypeChanged { shop_id, old_type, new_type: new_shop_type });
+                Ok(())
+            })
+        }
+
+        /// 撤回 Shop 关闭（取消宽限期）
+        ///
+        /// 仅 Entity owner 可调用。Shop 必须处于 Closing 状态。
+        /// 撤回后恢复为 Active（如果运营资金充足）或 FundDepleted。
+        #[pallet::call_index(28)]
+        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        pub fn cancel_close_shop(
+            origin: OriginFor<T>,
+            shop_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> DispatchResult {
+                let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+
+                // 仅 Entity owner 可撤回
+                let owner = T::EntityProvider::entity_owner(shop.entity_id)
+                    .ok_or(Error::<T>::EntityNotFound)?;
+                ensure!(who == owner, Error::<T>::NotAuthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
+                ensure!(shop.status == ShopOperatingStatus::Closing, Error::<T>::ShopNotClosing);
+
+                // 清理关闭计时器
+                ShopClosingAt::<T>::remove(shop_id);
+
+                // 恢复状态：检查运营资金决定恢复为 Active 还是 FundDepleted
+                let shop_account = Self::shop_account_id(shop_id);
+                let balance = T::Currency::free_balance(&shop_account);
+                if balance >= T::MinOperatingBalance::get() {
+                    shop.status = ShopOperatingStatus::Active;
+                } else {
+                    shop.status = ShopOperatingStatus::FundDepleted;
+                }
+
+                Self::deposit_event(Event::ShopClosingCancelled { shop_id });
+                Ok(())
+            })
+        }
+
+        /// 设置积分总量上限
+        ///
+        /// max_supply = 0 表示无上限。已有供应量超过新上限时拒绝。
+        #[pallet::call_index(29)]
+        #[pallet::weight(Weight::from_parts(100_000_000, 6_000))]
+        pub fn set_points_max_supply(
+            origin: OriginFor<T>,
+            shop_id: u64,
+            max_supply: BalanceOf<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
+            ensure!(Self::can_manage_shop(&shop, &who), Error::<T>::NotAuthorized);
+            ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
+            ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
+            ensure!(ShopPointsConfigs::<T>::contains_key(shop_id), Error::<T>::PointsNotEnabled);
+
+            // 如果设置上限，当前供应量不得超过
+            if !max_supply.is_zero() {
+                let current_supply = ShopPointsTotalSupply::<T>::get(shop_id);
+                ensure!(current_supply <= max_supply, Error::<T>::PointsMaxSupplyExceeded);
+            }
+
+            if max_supply.is_zero() {
+                ShopPointsMaxSupply::<T>::remove(shop_id);
+            } else {
+                ShopPointsMaxSupply::<T>::insert(shop_id, max_supply);
+            }
+
+            Self::deposit_event(Event::PointsMaxSupplySet { shop_id, max_supply });
+            Ok(())
+        }
+
+        /// Manager 自我辞职
+        ///
+        /// 允许 Shop Manager 主动从管理员列表中移除自己。
+        /// Entity Owner 和 Entity Admin 不受此影响（他们的权限来自 Entity 层）。
+        #[pallet::call_index(30)]
+        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        pub fn resign_manager(
+            origin: OriginFor<T>,
+            shop_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> DispatchResult {
+                let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+
+                // 查找调用者在 managers 列表中的位置
+                let pos = shop.managers.iter().position(|m| m == &who)
+                    .ok_or(Error::<T>::NotManager)?;
+                shop.managers.remove(pos);
+
+                Self::deposit_event(Event::ManagerResigned { shop_id, manager: who });
+                Ok(())
+            })
+        }
+
+        /// 封禁 Shop（Root/治理层调用）
+        ///
+        /// 将 Shop 设为 Banned 状态，owner/manager 无法 resume。
+        /// 仅 Root 可通过 unban_shop 解封。
+        #[pallet::call_index(31)]
+        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        pub fn ban_shop(
+            origin: OriginFor<T>,
+            shop_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> DispatchResult {
+                let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+                ensure!(!shop.status.is_closed_or_closing(), Error::<T>::ShopAlreadyClosed);
+                ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
+
+                // 记录封禁前状态，解封时恢复
+                ShopStatusBeforeBan::<T>::insert(shop_id, shop.status);
+                shop.status = ShopOperatingStatus::Banned;
+
+                Self::deposit_event(Event::ShopBannedByRoot { shop_id });
+                Ok(())
+            })
+        }
+
+        /// 解封 Shop（Root/治理层调用）
+        ///
+        /// 恢复为封禁前的状态（Active/Paused/FundDepleted）。
+        #[pallet::call_index(32)]
+        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        pub fn unban_shop(
+            origin: OriginFor<T>,
+            shop_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> DispatchResult {
+                let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+                ensure!(shop.status.is_banned(), Error::<T>::ShopNotBanned);
+
+                // 恢复封禁前状态，默认 Paused（安全）
+                let restored = ShopStatusBeforeBan::<T>::take(shop_id)
+                    .unwrap_or(ShopOperatingStatus::Paused);
+                shop.status = restored;
+
+                Self::deposit_event(Event::ShopUnbannedByRoot { shop_id, restored_status: restored });
+                Ok(())
+            })
+        }
     }
 
     // ========================================================================
@@ -927,6 +1742,50 @@ pub mod pallet {
             shop.managers.contains(account)
         }
 
+        /// 检查并清除过期积分（懒过期）
+        fn check_points_expiry(shop_id: u64, account: &T::AccountId) {
+            if let Some(expiry) = ShopPointsExpiresAt::<T>::get(shop_id, account) {
+                let now = <frame_system::Pallet<T>>::block_number();
+                if now > expiry {
+                    let expired = ShopPointsBalances::<T>::take(shop_id, account);
+                    if !expired.is_zero() {
+                        ShopPointsTotalSupply::<T>::mutate(shop_id, |s| *s = s.saturating_sub(expired));
+                        Self::deposit_event(Event::PointsExpired {
+                            shop_id,
+                            account: account.clone(),
+                            amount: expired,
+                        });
+                    }
+                    ShopPointsExpiresAt::<T>::remove(shop_id, account);
+                }
+            }
+        }
+
+        /// 检查积分发行是否超过总量上限
+        fn check_points_max_supply(shop_id: u64, amount: BalanceOf<T>) -> DispatchResult {
+            let max_supply = ShopPointsMaxSupply::<T>::get(shop_id);
+            if !max_supply.is_zero() {
+                let current = ShopPointsTotalSupply::<T>::get(shop_id);
+                ensure!(current.saturating_add(amount) <= max_supply, Error::<T>::PointsMaxSupplyExceeded);
+            }
+            Ok(())
+        }
+
+        /// 延长积分有效期（发放积分时调用）
+        fn maybe_extend_points_expiry(shop_id: u64, account: &T::AccountId) {
+            let ttl = ShopPointsTtl::<T>::get(shop_id);
+            if !ttl.is_zero() {
+                let now = <frame_system::Pallet<T>>::block_number();
+                let new_expiry = now.saturating_add(ttl);
+                // 取当前到期时间和新到期时间的较大值（滑动窗口延长）
+                let final_expiry = match ShopPointsExpiresAt::<T>::get(shop_id, account) {
+                    Some(current) if current > new_expiry => current,
+                    _ => new_expiry,
+                };
+                ShopPointsExpiresAt::<T>::insert(shop_id, account, final_expiry);
+            }
+        }
+
         /// 发放积分（供外部模块调用，如订单完成后返积分）
         pub fn issue_points(
             shop_id: u64,
@@ -934,15 +1793,21 @@ pub mod pallet {
             amount: BalanceOf<T>,
         ) -> DispatchResult {
             ensure!(!amount.is_zero(), Error::<T>::InsufficientPointsBalance);
-            // M5: 已关闭的 Shop 不可发放积分
+            // M5: 已关闭/关闭中的 Shop 不可发放积分
             let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
-            let config = ShopPointsConfigs::<T>::get(shop_id)
-                .ok_or(Error::<T>::PointsNotEnabled)?;
-            ensure!(config.enabled, Error::<T>::PointsNotEnabled);
+            ensure!(!shop.status.is_closed_or_closing(), Error::<T>::ShopAlreadyClosed);
+            ensure!(
+                ShopPointsConfigs::<T>::contains_key(shop_id),
+                Error::<T>::PointsNotEnabled
+            );
+
+            // 积分总量上限检查
+            Self::check_points_max_supply(shop_id, amount)?;
 
             ShopPointsBalances::<T>::mutate(shop_id, to, |b| *b = b.saturating_add(amount));
             ShopPointsTotalSupply::<T>::mutate(shop_id, |s| *s = s.saturating_add(amount));
+
+            Self::maybe_extend_points_expiry(shop_id, to);
 
             Self::deposit_event(Event::PointsIssued {
                 shop_id,
@@ -966,6 +1831,9 @@ pub mod pallet {
                 ShopPointsConfigs::<T>::contains_key(shop_id),
                 Error::<T>::PointsNotEnabled
             );
+
+            // 懒过期检查
+            Self::check_points_expiry(shop_id, from);
 
             let balance = ShopPointsBalances::<T>::get(shop_id, from);
             ensure!(balance >= amount, Error::<T>::InsufficientPointsBalance);
@@ -1008,6 +1876,7 @@ pub mod pallet {
                 location: None,
                 address_cid: None,
                 business_hours_cid: None,
+                policies_cid: None,
                 created_at: now,
                 product_count: 0,
                 total_sales: Zero::zero(),
@@ -1019,6 +1888,9 @@ pub mod pallet {
 
             Shops::<T>::insert(shop_id, shop);
             ShopEntity::<T>::insert(shop_id, entity_id);
+            if is_primary {
+                EntityPrimaryShop::<T>::insert(entity_id, shop_id);
+            }
             NextShopId::<T>::put(shop_id + 1);
 
             // 回写 Entity 的 shop_ids（维护双向一致性）
@@ -1048,6 +1920,35 @@ pub mod pallet {
         pub fn get_operating_balance(shop_id: u64) -> BalanceOf<T> {
             let shop_account = Self::shop_account_id(shop_id);
             T::Currency::free_balance(&shop_account)
+        }
+
+        // ================================================================
+        // 积分查询 Runtime API 辅助方法
+        // ================================================================
+
+        /// 查询用户在指定 Shop 的积分余额
+        pub fn get_points_balance(shop_id: u64, account: &T::AccountId) -> BalanceOf<T> {
+            ShopPointsBalances::<T>::get(shop_id, account)
+        }
+
+        /// 查询 Shop 积分总供应量
+        pub fn get_points_total_supply(shop_id: u64) -> BalanceOf<T> {
+            ShopPointsTotalSupply::<T>::get(shop_id)
+        }
+
+        /// 查询 Shop 积分配置
+        pub fn get_points_config(shop_id: u64) -> Option<PointsConfigOf<T>> {
+            ShopPointsConfigs::<T>::get(shop_id)
+        }
+
+        /// 查询用户积分到期区块
+        pub fn get_points_expiry(shop_id: u64, account: &T::AccountId) -> Option<BlockNumberFor<T>> {
+            ShopPointsExpiresAt::<T>::get(shop_id, account)
+        }
+
+        /// 查询 Shop 积分总量上限
+        pub fn get_points_max_supply(shop_id: u64) -> BalanceOf<T> {
+            ShopPointsMaxSupply::<T>::get(shop_id)
         }
     }
 
@@ -1105,6 +2006,22 @@ pub mod pallet {
             let entity_status = T::EntityProvider::entity_status(entity_id)
                 .unwrap_or(EntityStatus::Pending);
             Some(EffectiveShopStatus::compute(&entity_status, &shop.status))
+        }
+
+        fn increment_product_count(shop_id: u64) -> Result<(), DispatchError> {
+            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> Result<(), DispatchError> {
+                let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+                shop.product_count = shop.product_count.saturating_add(1);
+                Ok(())
+            })
+        }
+
+        fn decrement_product_count(shop_id: u64) -> Result<(), DispatchError> {
+            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> Result<(), DispatchError> {
+                let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+                shop.product_count = shop.product_count.saturating_sub(1);
+                Ok(())
+            })
         }
 
         fn update_shop_stats(shop_id: u64, sales_amount: u128, order_count: u32) -> Result<(), DispatchError> {
@@ -1214,7 +2131,7 @@ pub mod pallet {
         fn pause_shop(shop_id: u64) -> Result<(), DispatchError> {
             Shops::<T>::try_mutate(shop_id, |maybe_shop| -> Result<(), DispatchError> {
                 let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
-                ensure!(shop.status == ShopOperatingStatus::Active, Error::<T>::ShopAlreadyPaused);
+                ensure!(shop.status == ShopOperatingStatus::Active, Error::<T>::ShopNotActive);
                 shop.status = ShopOperatingStatus::Paused;
                 Self::deposit_event(Event::ShopPaused { shop_id });
                 Ok(())
@@ -1235,12 +2152,27 @@ pub mod pallet {
             })
         }
 
+        fn force_pause_shop(shop_id: u64) -> Result<(), DispatchError> {
+            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> Result<(), DispatchError> {
+                let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+                ensure!(!shop.status.is_closed_or_closing(), Error::<T>::ShopAlreadyClosed);
+                ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
+                ensure!(shop.status != ShopOperatingStatus::Paused, Error::<T>::ShopAlreadyPaused);
+                shop.status = ShopOperatingStatus::Paused;
+                Self::deposit_event(Event::ShopForcePaused { shop_id });
+                Ok(())
+            })
+        }
+
         fn force_close_shop(shop_id: u64) -> Result<(), DispatchError> {
             Shops::<T>::try_mutate(shop_id, |maybe_shop| -> Result<(), DispatchError> {
                 let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
                 // M1-R3: 防止重复关闭发射重复事件
                 ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
                 shop.status = ShopOperatingStatus::Closed;
+
+                // 清理 Closing 计时器（如果正在 Closing）
+                ShopClosingAt::<T>::remove(shop_id);
 
                 // H4: 注销 Entity-Shop 关联（与 close_shop extrinsic 保持一致）
                 let _ = T::EntityProvider::unregister_shop(shop.entity_id, shop_id);
@@ -1252,6 +2184,14 @@ pub mod pallet {
                 ShopPointsConfigs::<T>::remove(shop_id);
                 let _ = ShopPointsBalances::<T>::clear_prefix(shop_id, u32::MAX, None);
                 ShopPointsTotalSupply::<T>::remove(shop_id);
+                ShopPointsTtl::<T>::remove(shop_id);
+                let _ = ShopPointsExpiresAt::<T>::clear_prefix(shop_id, u32::MAX, None);
+                ShopPointsMaxSupply::<T>::remove(shop_id);
+
+                // M4: 清理 EntityPrimaryShop 索引（主 Shop 被强制关闭时）
+                if shop.is_primary {
+                    EntityPrimaryShop::<T>::remove(shop.entity_id);
+                }
 
                 // 退还 shop_account 余额给 entity_owner（best-effort）
                 let shop_account = Self::shop_account_id(shop_id);

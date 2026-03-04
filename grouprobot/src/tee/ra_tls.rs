@@ -169,17 +169,17 @@ impl ProvisionState {
         }
     }
 
-    /// C1 修复: 验证 Bearer Token
+    /// C1 修复: 验证 Bearer Token (H3 审计修复: 常量时间比较)
     fn check_auth(&self, headers: &HeaderMap) -> bool {
+        use subtle::ConstantTimeEq;
         let auth = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         let expected = format!("Bearer {}", self.provision_secret);
-        // 使用 SHA256 比较防止时序攻击
         let expected_hash = Sha256::digest(expected.as_bytes());
         let actual_hash = Sha256::digest(auth.as_bytes());
-        expected_hash == actual_hash
+        expected_hash.ct_eq(&actual_hash).into()
     }
 
     /// 创建新会话
@@ -531,9 +531,9 @@ impl ProvisionState {
             info!("Token 已 auto-seal 为 Shamir share (后续启动从 share 恢复)");
         }
 
-        // 清除环境变量中可能存在的旧 Token
-        std::env::remove_var("BOT_TOKEN");
-        std::env::remove_var("DISCORD_BOT_TOKEN");
+        // L8 审计修复: 移除 std::env::remove_var 调用
+        // remove_var 在多线程环境中是 UB (Rust 1.66+ deprecated, edition 2024 禁止)
+        // Token 已安全存储在 TokenVault 中, 环境变量清理应在启动初期单线程阶段完成
 
         Ok(bot_id_hash)
     }
@@ -645,11 +645,11 @@ async fn handle_inject_token(
         );
     }
     // 验证平台
-    if req.platform != "telegram" && req.platform != "discord" {
+    if req.platform != "telegram" && req.platform != "discord" && req.platform != "telegram_api" {
         return (
             axum::http::StatusCode::BAD_REQUEST,
             Json(serde_json::json!(ErrorResponse {
-                error: "platform must be 'telegram' or 'discord'".into()
+                error: "platform must be 'telegram', 'discord', or 'telegram_api'".into()
             })),
         );
     }

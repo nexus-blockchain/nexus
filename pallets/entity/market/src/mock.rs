@@ -104,8 +104,8 @@ impl EntityProvider<u64> for MockEntityProvider {
     fn update_entity_stats(_: u64, _: u128, _: u32) -> Result<(), DispatchError> {
         Ok(())
     }
-    fn update_entity_rating(_: u64, _: u8) -> Result<(), DispatchError> {
-        Ok(())
+    fn is_entity_locked(entity_id: u64) -> bool {
+        ENTITY_LOCKED.with(|l| l.borrow().contains(&entity_id))
     }
 }
 
@@ -119,10 +119,15 @@ thread_local! {
     static TOKEN_RESERVED: RefCell<HashMap<(u64, u64), u128>> = RefCell::new(HashMap::new());
     static TOKEN_ENABLED: RefCell<HashMap<u64, bool>> = RefCell::new(HashMap::new());
     static ENTITY_ACTIVE: RefCell<HashMap<u64, bool>> = RefCell::new(HashMap::new());
+    static ENTITY_LOCKED: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
 }
 
 pub fn set_entity_active(entity_id: u64, active: bool) {
     ENTITY_ACTIVE.with(|e| e.borrow_mut().insert(entity_id, active));
+}
+
+pub fn set_entity_locked(entity_id: u64) {
+    ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id));
 }
 
 pub fn set_token_balance(entity_id: u64, who: u64, amount: u128) {
@@ -202,6 +207,9 @@ impl EntityTokenProvider<u64, u128> for MockTokenProvider {
     fn total_supply(_: u64) -> u128 {
         1_000_000_000
     }
+    fn governance_burn(_entity_id: u64, _amount: u128) -> Result<(), DispatchError> {
+        Ok(())
+    }
 }
 
 // ==================== 测试常量 ====================
@@ -220,18 +228,10 @@ parameter_types! {
     pub const DefaultOrderTTL: u32 = 1000;
     pub const MaxActiveOrdersPerUser: u32 = 50;
     pub const DefaultFeeRate: u16 = 100; // 1%
-    pub const DefaultUsdtTimeout: u32 = 300;
     pub const BlocksPerHour: u32 = 600;
     pub const BlocksPerDay: u32 = 14400;
     pub const BlocksPerWeek: u32 = 100800;
     pub const CircuitBreakerDuration: u32 = 600;
-    pub const VerificationReward: u128 = 100_000; // 0.1 NEX
-    pub const RewardSourceAccount: u64 = REWARD_SOURCE;
-    pub const BuyerDepositRate: u16 = 1000; // 10%
-    pub const MinBuyerDeposit: u128 = 10_000; // 0.01 NEX
-    pub const DepositForfeitRate: u16 = 10000; // 100%
-    pub const UsdtToNexRate: u64 = 1_000_000; // 1 USDT = 1 NEX
-    pub const TreasuryAccountId: u64 = TREASURY;
 }
 
 impl pallet_entity_market::Config for Test {
@@ -244,27 +244,11 @@ impl pallet_entity_market::Config for Test {
     type DefaultOrderTTL = DefaultOrderTTL;
     type MaxActiveOrdersPerUser = MaxActiveOrdersPerUser;
     type DefaultFeeRate = DefaultFeeRate;
-    type DefaultUsdtTimeout = DefaultUsdtTimeout;
     type BlocksPerHour = BlocksPerHour;
     type BlocksPerDay = BlocksPerDay;
     type BlocksPerWeek = BlocksPerWeek;
     type CircuitBreakerDuration = CircuitBreakerDuration;
-    type VerificationReward = VerificationReward;
-    type RewardSource = RewardSourceAccount;
-    type BuyerDepositRate = BuyerDepositRate;
-    type MinBuyerDeposit = MinBuyerDeposit;
-    type DepositForfeitRate = DepositForfeitRate;
-    type UsdtToNexRate = UsdtToNexRate;
-    type TreasuryAccount = TreasuryAccountId;
-    type VerificationGracePeriod = ConstU32<600>;  // 1h 宽限期
-    type UnderpaidGracePeriod = ConstU32<1200>;    // 2h 补付窗口
-    type NexUsdtPrice = MockNexUsdtPrice;
-}
-
-/// Mock NEX/USDT 价格: 0.5 USDT/NEX (500_000, 精度 10^6)
-pub struct MockNexUsdtPrice;
-impl pallet_entity_common::PricingProvider for MockNexUsdtPrice {
-    fn get_nex_usdt_price() -> u64 { 500_000 }
+    type DisclosureProvider = pallet_entity_common::NullDisclosureProvider;
 }
 
 // ==================== 测试构建器 ====================
@@ -308,16 +292,14 @@ impl ExtBuilder {
     }
 }
 
-/// 配置市场（启用 NEX + USDT）
+/// 配置市场（启用 NEX）
 pub fn configure_market_enabled(entity_id: u64) {
     assert!(EntityMarket::configure_market(
         RuntimeOrigin::signed(if entity_id == ENTITY_ID { ENTITY_OWNER } else { ENTITY_OWNER_2 }),
         entity_id,
-        true,  // cos_enabled
-        true,  // usdt_enabled
+        true,  // nex_enabled
         100,   // fee_rate = 1%
         1,     // min_order_amount
         1000,  // order_ttl
-        300,   // usdt_timeout
     ).is_ok());
 }

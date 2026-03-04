@@ -123,7 +123,7 @@
 
 ## 3. Entity Service — 商品/服务管理
 
-> Pallet: `pallet-entity-service` | Extrinsics: 5 (call_index 0-4)
+> Pallet: `pallet-entity-product` | Extrinsics: 5 (call_index 0-4)
 > 审计修复: H1(OffShelf 库存恢复), H2(SoldCountUpdated 事件), M1(零库存防护), M2(CID 非空), M3(stale price)
 
 | # | 测试用例 | 角色 | 类型 | 优先级 |
@@ -157,7 +157,7 @@
 | OD-007 | cancel_order(1)：买家取消订单→退款（数字商品不可取消） | R5 | 正向+负向 | P0 |
 | OD-008 | request_refund(4)→approve_refund(5)：申请退款→卖家同意→退款 | R5→R6 | 流程 | P1 |
 | OD-009 | start_service(6)→complete_service(7)→confirm_service(8)：服务类订单流程 | R6→R5 | 流程 | P1 |
-| OD-010 | 订单完成触发 update_spent（等级升级 + USDT 独立追踪 MemberSpentUsdt，审计 P3/P4） | 集成 | 流程 | P0 |
+| OD-010 | 订单完成触发 update_spent（等级升级 + USDT 消费累计，审计 P4） | 集成 | 流程 | P0 |
 | OD-011 | 订单完成触发 NEX + Token 双路佣金分配（process_commission + process_token_commission） | 集成 | 流程 | P0 |
 | OD-012 | 下单时自动注册会员（MemberProvider::ensure_member） | 系统 | 流程 | P0 |
 | OD-013 | 订单取消触发 cancel_commission + do_cancel_token_commission | 系统 | 流程 | P0 |

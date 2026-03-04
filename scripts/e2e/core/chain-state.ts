@@ -40,61 +40,106 @@ export async function disconnectApi(): Promise<void> {
   }
 }
 
-/** 签名并发送交易，等待 finalized */
+/** 签名并发送交易，等待 finalized，从区块手动拉取事件 */
 export async function signAndSend(
   api: ApiPromise,
   tx: SubmittableExtrinsic<'promise'>,
   signer: KeyringPair,
   description?: string,
 ): Promise<TxResult> {
-  return new Promise((resolve) => {
+  const txHash = tx.hash.toHex();
+
+  // Phase 1: synchronous callback — only captures blockHash + txIndex
+  const inclusion = await new Promise<{ blockHash: string; txIndex?: number } | { error: string }>((resolve) => {
     const timeout = setTimeout(() => {
-      resolve({ success: false, events: [], error: `Timeout: ${description}` });
+      resolve({ error: `Timeout: ${description}` });
     }, defaultConfig.txTimeout);
 
-    tx.signAndSend(signer, ({ status, events, dispatchError }) => {
+    tx.signAndSend(signer, ({ status, txIndex }) => {
       if (!status.isFinalized) return;
       clearTimeout(timeout);
-
-      const blockHash = status.asFinalized.toHex();
-
-      if (dispatchError) {
-        let errorMessage = 'Unknown error';
-        if (dispatchError.isModule) {
-          const decoded = api.registry.findMetaError(dispatchError.asModule);
-          errorMessage = `${decoded.section}.${decoded.name}: ${decoded.docs.join(' ')}`;
-        } else {
-          errorMessage = dispatchError.toString();
-        }
-        resolve({ success: false, blockHash, events: [], error: errorMessage });
-        return;
-      }
-
-      const txEvents: TxEvent[] = events
-        .filter(({ event }) =>
-          !event.section.includes('system') &&
-          !event.section.includes('transactionPayment')
-        )
-        .map(({ event }) => ({
-          section: event.section,
-          method: event.method,
-          data: event.data.toHuman(),
-        }));
-
-      resolve({
-        success: true,
-        blockHash,
-        txHash: tx.hash.toHex(),
-        events: txEvents,
-      });
+      resolve({ blockHash: status.asFinalized.toHex(), txIndex });
     }).catch((error: Error) => {
       clearTimeout(timeout);
-      resolve({ success: false, events: [], error: error.message });
+      resolve({ error: error.message });
     });
   });
+
+  if ('error' in inclusion) {
+    return { success: false, events: [], error: inclusion.error };
+  }
+
+  const { blockHash, txIndex } = inclusion;
+
+  // Phase 2: async event fetching from the finalized block
+  // (Polkadot.js v12 callback returns empty events for extrinsic v5 runtimes)
+  try {
+    const apiAt = await api.at(blockHash);
+    const allEvents: any = await apiAt.query.system.events();
+
+    // Determine our extrinsic index
+    let extIdx: number | undefined = txIndex;
+    if (extIdx === undefined || extIdx === null) {
+      // Heuristic: highest extrinsic index = our user tx (inherents have lower indices)
+      let maxIdx = -1;
+      for (const record of allEvents) {
+        if (record.phase.isApplyExtrinsic) {
+          const idx = record.phase.asApplyExtrinsic.toNumber();
+          if (idx > maxIdx) maxIdx = idx;
+        }
+      }
+      extIdx = maxIdx >= 0 ? maxIdx : undefined;
+    }
+
+    // Collect events for our extrinsic
+    const ourRecords = extIdx !== undefined
+      ? allEvents.filter((r: any) =>
+          r.phase.isApplyExtrinsic && r.phase.asApplyExtrinsic.eq(extIdx))
+      : [];
+
+    // Check for ExtrinsicFailed
+    const failedRecord = ourRecords.find(
+      (r: any) => r.event.section === 'system' && r.event.method === 'ExtrinsicFailed',
+    );
+
+    if (failedRecord) {
+      const errData = failedRecord.event.data[0];
+      let errorMessage = 'Unknown dispatch error';
+      try {
+        if (errData.isModule) {
+          const decoded = api.registry.findMetaError(errData.asModule);
+          errorMessage = `${decoded.section}.${decoded.name}: ${decoded.docs.join(' ')}`;
+        } else {
+          errorMessage = errData.toHuman ? JSON.stringify(errData.toHuman()) : errData.toString();
+        }
+      } catch { /* keep fallback message */ }
+      return { success: false, blockHash, txHash, events: [], error: errorMessage };
+    }
+
+    // Extract non-system events
+    const txEvents: TxEvent[] = ourRecords
+      .filter((r: any) =>
+        r.event.section !== 'system' && r.event.section !== 'transactionPayment',
+      )
+      .map((r: any) => ({
+        section: r.event.section as string,
+        method: r.event.method as string,
+        data: r.event.data.toHuman(),
+      }));
+
+    return { success: true, blockHash, txHash, events: txEvents };
+  } catch (fetchErr: any) {
+    return {
+      success: true,
+      blockHash,
+      txHash,
+      events: [],
+      error: `[warn] cannot fetch block events: ${fetchErr.message}`,
+    };
+  }
 }
 
-/** 通过 Sudo 发送交易 */
+/** 通过 Sudo 发送交易，检查 Sudid 事件确认内部调用结果 */
 export async function sudoSend(
   api: ApiPromise,
   tx: SubmittableExtrinsic<'promise'>,
@@ -102,7 +147,27 @@ export async function sudoSend(
   description?: string,
 ): Promise<TxResult> {
   const sudoTx = api.tx.sudo.sudo(tx);
-  return signAndSend(api, sudoTx, sudoAccount, `sudo: ${description}`);
+  const result = await signAndSend(api, sudoTx, sudoAccount, `sudo: ${description}`);
+
+  // Even if the outer extrinsic succeeded, the inner call may have failed.
+  // Check the sudo.Sudid event for the inner dispatch result.
+  if (result.success) {
+    const sudidEvent = result.events.find(
+      (e) => e.section === 'sudo' && e.method === 'Sudid',
+    );
+    if (sudidEvent) {
+      const sudoResult = sudidEvent.data?.sudoResult ?? sudidEvent.data?.[0];
+      if (sudoResult && typeof sudoResult === 'object' && 'Err' in sudoResult) {
+        return {
+          ...result,
+          success: false,
+          error: `sudo inner call failed: ${JSON.stringify(sudoResult.Err)}`,
+        };
+      }
+    }
+  }
+
+  return result;
 }
 
 /** 查询 storage 值 */

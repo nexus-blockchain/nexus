@@ -145,6 +145,7 @@ pub trait Config: frame_system::Config {
 | `TokenWithdrawalConfigs` | `Map<u64, EntityWithdrawalConfig>` | Token 提现配置（OptionQuery） |
 | `GlobalMinTokenRepurchaseRate` | `Map<u64, u16>` | Token Governance 全局最低复购比例（ValueQuery） |
 | `EntityTokenAccountedBalance` | `Map<u64, TokenBalance>` | Entity Token 已知渠道余额（用于 sweep 检测外部转入） |
+| `GlobalMaxCommissionRate` | `Map<u64, u16>` | F15: 全局佣金率上限（ValueQuery，0=无限制） |
 
 ## 核心结构体
 
@@ -155,11 +156,14 @@ pub struct CoreCommissionConfig {
     pub enabled_modes: CommissionModes,  // 启用的返佣模式位标志
     pub max_commission_rate: u16,        // 会员返佣上限（基点，从卖家货款扣除）
     pub enabled: bool,                   // 是否全局启用
-    pub withdrawal_cooldown: u32,        // 提现冻结期（区块数，0 = 无冻结）
+    pub withdrawal_cooldown: u32,        // NEX 提现冻结期（区块数，0 = 无冻结）
+    pub creator_reward_rate: u16,        // 创建人收益比例（基点，0 = 不启用，上限 5000）
+    pub token_withdrawal_cooldown: u32,  // F3: Token 提现冻结期（0 = 使用 withdrawal_cooldown）
 }
 ```
 
 > **注意**：`referrer_share` 字段已移除，招商人分佣比例由全局常量 `ReferrerShareBps` 控制。
+> **F3**: Token 提现冻结期独立于 NEX，`token_withdrawal_cooldown=0` 时回退到 `withdrawal_cooldown`。
 
 ### EntityWithdrawalConfig
 
@@ -179,18 +183,29 @@ pub struct EntityWithdrawalConfig<MaxLevels: Get<u32>> {
 
 | call_index | 方法 | 权限 | 说明 |
 |------------|------|------|------|
-| 0 | `set_commission_modes` | Entity Owner | 设置启用的返佣模式位标志 |
-| 1 | `set_commission_rate` | Entity Owner | 设置会员返佣上限（≤10000 基点，从卖家货款扣除） |
-| 2 | `enable_commission` | Entity Owner | 启用/禁用返佣 |
+| 0 | `set_commission_modes` | Owner/Admin | 设置启用的返佣模式位标志 |
+| 1 | `set_commission_rate` | Owner/Admin | 设置会员返佣上限（≤10000 基点，受 F15 全局上限约束） |
+| 2 | `enable_commission` | Owner/Admin | 启用/禁用返佣 |
 | 3 | `withdraw_commission` | 会员 | 提取返佣（支持四种提现模式 + 指定复购目标） |
-| 4 | `set_withdrawal_config` | Entity Owner | 设置提现配置（含 level_id 唯一性校验） |
+| 4 | `set_withdrawal_config` | Owner/Admin | 设置提现配置（含 level_id 唯一性校验） |
 | 5 | `use_shopping_balance` | ~~会员~~ **已禁用** | 购物余额仅可用于购物（下单抵扣），不可直接提取为 NEX → `ShoppingBalanceWithdrawalDisabled` |
 | 6 | `init_commission_plan` | ~~Entity Owner~~ **已禁用** | 过度设计，前端改用 `utility.batch` 组合分步 extrinsics → `CommissionPlanDisabled` |
-| 8 | `withdraw_token_commission` | 会员 | 提取 Token 佣金（与 NEX 提现对称，含复购目标） |
-| 10 | `set_token_withdrawal_config` | Entity Owner | 设置 Token 提现配置（与 NEX 对称，独立存储） |
+| 8 | `withdraw_token_commission` | 会员 | 提取 Token 佣金（F3: 使用独立 token_withdrawal_cooldown） |
+| 10 | `set_token_withdrawal_config` | Owner/Admin | 设置 Token 提现配置（与 NEX 对称，独立存储） |
 | 11 | `set_global_min_token_repurchase_rate` | Root | 设置 Token Governance 全局最低复购比例 |
 | 12 | `withdraw_entity_funds` | Entity Owner | 提取 Entity NEX 自由余额（需保留 PendingTotal + ShoppingTotal + UnallocatedPool） |
 | 13 | `withdraw_entity_token_funds` | Entity Owner | 提取 Entity Token 自由余额（需保留 TokenPendingTotal + TokenShoppingTotal + UnallocatedTokenPool） |
+| 14 | `set_creator_reward_rate` | Owner/Admin | 设置创建人收益比例（基点，上限 5000） |
+| 15 | `set_token_platform_fee_rate` | Root | 设置 Token 平台费率（基点，上限 1000 = 10%） |
+| 16 | `set_global_min_repurchase_rate` | Root | F13: 设置 NEX 全局最低复购比例 |
+| 17 | `set_withdrawal_cooldown` | Owner/Admin | F2: 设置 NEX/Token 独立提现冻结期 |
+| 18 | `force_disable_entity_commission` | Root | F14: 紧急禁用 Entity 佣金（不可逆） |
+| 19 | `set_global_max_commission_rate` | Root | F15: 设置全局佣金率上限（0=无限制） |
+| 20 | `clear_commission_config` | Owner/Admin | F4: 清除佣金配置 |
+| 21 | `clear_withdrawal_config` | Owner/Admin | F4: 清除 NEX 提现配置 |
+| 22 | `clear_token_withdrawal_config` | Owner/Admin | F4: 清除 Token 提现配置 |
+
+> **F1 权限模型**: call_index 0,1,2,4,10,14,17,20,21,22 支持 Owner 或 Admin（需 `COMMISSION_MANAGE` 权限位）。call_index 12,13（资金提取）仅限 Owner。
 
 ### set_withdrawal_config 校验规则
 
@@ -296,7 +311,8 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 | `do_use_shopping_balance` | 使用购物余额纯记账（供 CommissionProvider 调用，不转 NEX） |
 | `do_consume_shopping_balance` | 消费购物余额（扣减记账 + NEX 从 Entity 转入会员钱包，供 ShoppingBalanceProvider 调用） |
 | ~~`resolve_entity_id`~~ | L1 修复: 已移除（死代码，未被任何代码路径调用） |
-| `ensure_entity_owner` | 验证 Entity 所有者权限 |
+| `ensure_owner_or_admin` | F1: 验证 Entity Owner 或 Admin(COMMISSION_MANAGE) 权限 |
+| `ensure_entity_owner` | 验证 Entity Owner（仅 Owner，用于资金提取等敏感操作） |
 
 ## 资金流向
 
@@ -344,6 +360,13 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 | `WithdrawalCooldownNotMet` | entity_id, account, earliest_block | 提现冻结期未满 |
 | `GlobalMinTokenRepurchaseRateSet` | entity_id, rate | M1 修复: Token Governance 全局最低复购比例变更 |
 | `GlobalMinRepurchaseRateSet` | entity_id, rate | L5 修复: NEX Governance 全局最低复购比例变更 |
+| `TokenPlatformFeeRateUpdated` | old_rate, new_rate | Token 平台费率变更 |
+| `CommissionForceDisabled` | entity_id | F14: Root 紧急禁用 Entity 佣金 |
+| `GlobalMaxCommissionRateSet` | entity_id, rate | F15: 全局佣金率上限变更 |
+| `WithdrawalCooldownUpdated` | entity_id, nex_cooldown, token_cooldown | F2: 提现冻结期变更 |
+| `CommissionConfigCleared` | entity_id | F4: 佣金配置已清除 |
+| `WithdrawalConfigCleared` | entity_id | F4: NEX 提现配置已清除 |
+| `TokenWithdrawalConfigCleared` | entity_id | F4: Token 提现配置已清除 |
 
 ## Errors
 
@@ -375,6 +398,12 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 | `InsufficientEntityFunds` | M2 修复: Entity 账户 NEX 偿付能力不足（原复用 InsufficientCommission） |
 | `InsufficientEntityTokenFunds` | M2 修复: Entity 账户 Token 偿付能力不足（原复用 InsufficientTokenCommission） |
 | `InsufficientTokenCommission` | Token 佣金 pending 余额不足（M2 修复: Token 偿付安全检查已改用 `InsufficientEntityTokenFunds`） |
+| `TokenPlatformFeeRateTooHigh` | Token 平台费率超过上限（最大 1000 bps = 10%） |
+| `EntityLocked` | 实体已被全局锁定，所有配置操作不可用 |
+| `PoolRewardCooldownActive` | POOL_REWARD 关闭后冷却期未满 |
+| `NotEntityOwnerOrAdmin` | F1: 调用者既不是 Owner 也不是拥有 COMMISSION_MANAGE 的 Admin |
+| `CommissionRateExceedsGlobalMax` | F15: max_commission_rate 超过全局上限 |
+| `ConfigNotFound` | F4: 配置不存在，无法清除 |
 
 ## Trait 实现
 
@@ -443,9 +472,21 @@ Runtime 通过 `KycParticipationGuard` 桥接 `pallet-entity-kyc::can_participat
 | L1-R4 | Low | `resolve_entity_id` | 移除死代码 |
 | L5-R4 | Low | `CommissionProvider::set_min_repurchase_rate` | 新增 `GlobalMinRepurchaseRateSet` 事件 |
 
+### 功能扩展记录
+
+| 编号 | 说明 |
+|------|------|
+| F1 | Admin 权限支持 — `ensure_owner_or_admin` + `COMMISSION_MANAGE` 权限位，配置 extrinsics 支持 Owner/Admin，资金提取仅 Owner |
+| F2 | `set_withdrawal_cooldown` 独立 extrinsic (call_index 17) — NEX/Token 冻结期独立配置 |
+| F3 | Token 独立冻结期 — `token_withdrawal_cooldown` 字段，0 = 回退到 `withdrawal_cooldown` |
+| F4 | `clear_commission_config` / `clear_withdrawal_config` / `clear_token_withdrawal_config` (call_index 20-22) |
+| F13 | NEX 全局最低复购比例 `set_global_min_repurchase_rate` (call_index 16) — 与 Token 版对称 |
+| F14 | `force_disable_entity_commission` (call_index 18) — Root 紧急禁用 Entity 佣金 |
+| F15 | `GlobalMaxCommissionRate` storage + `set_global_max_commission_rate` (call_index 19) — 治理佣金率上限 |
+
 ## 测试覆盖
 
-102 个测试（`cargo test -p pallet-commission-core`）：
+144 个测试（`cargo test -p pallet-commission-core`）：
 
 - **set_commission_rate**: works / rejects_invalid / rejects_non_owner
 - **process_commission（平台费分配）**: referrer_gets_half / dual_source / referrer_skipped_no_referrer / referrer_skipped_zero_fee / referrer_capped / referrer_stats
@@ -461,6 +502,13 @@ Runtime 通过 `KycParticipationGuard` 桥接 `pallet-entity-kyc::can_participat
 - **H3 KYC**: h3_withdraw_blocked_when_target_participation_denied / h3_consume_shopping_balance_blocked_when_participation_denied / h3_self_withdraw_not_checked_by_participation_guard
 - **购物余额**: use_shopping_balance_extrinsic_always_rejected
 - **Round 4 回归**: m1_set_global_min_token_repurchase_rate_emits_event / l5_set_min_repurchase_rate_via_trait_emits_event / m2_withdraw_commission_solvency_uses_entity_funds_error / m2_withdraw_token_commission_solvency_uses_entity_token_funds_error / m3_cancel_commission_still_cancels_token_records / m4_trait_set_commission_modes_uses_is_valid
+- **F1 Admin 权限**: f1_admin_can_set_commission_modes / f1_admin_can_set_commission_rate / f1_admin_can_enable_commission / f1_admin_without_permission_rejected / f1_non_owner_non_admin_rejected / f1_owner_still_works / f1_admin_cannot_withdraw_entity_funds
+- **F13 NEX 全局最低复购**: f13_set_global_min_repurchase_rate_works / f13_rejects_non_root / f13_rejects_over_10000
+- **F2 提现冻结期**: f2_set_withdrawal_cooldown_works / f2_set_withdrawal_cooldown_admin_works
+- **F3 Token 独立冻结期**: f3_token_uses_independent_cooldown / f3_token_fallback_to_nex_cooldown_when_zero
+- **F14 Root 紧急暂停**: f14_force_disable_works / f14_force_disable_rejects_non_root / f14_force_disable_creates_config_if_absent
+- **F15 全局佣金率上限**: f15_set_global_max_commission_rate_works / f15_set_commission_rate_blocked_by_global_max / f15_zero_global_max_means_no_limit / f15_rejects_non_root
+- **F4 清除配置**: f4_clear_commission_config_works / f4_clear_commission_config_rejects_absent / f4_clear_withdrawal_config_works / f4_clear_token_withdrawal_config_works / f4_clear_config_admin_works
 
 ## 依赖
 

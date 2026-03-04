@@ -33,16 +33,8 @@ impl ChainClient {
         bundle: &AttestationBundle,
     ) -> BotResult<()> {
         // C2 fix: 链上期望 Option<[u8; 32]>, 需用 unnamed_variant 包装
-        let sgx_quote_hash_val = if bundle.sgx_quote_hash == [0u8; 32] {
-            Value::unnamed_variant("None", vec![])
-        } else {
-            Value::unnamed_variant("Some", vec![Value::from_bytes(bundle.sgx_quote_hash)])
-        };
-        let mrenclave_val = if bundle.mrenclave == [0u8; 32] {
-            Value::unnamed_variant("None", vec![])
-        } else {
-            Value::unnamed_variant("Some", vec![Value::from_bytes(bundle.mrenclave)])
-        };
+        let sgx_quote_hash_val = option_bytes_32(bundle.sgx_quote_hash);
+        let mrenclave_val = option_bytes_32(bundle.mrenclave);
 
         let tx = subxt::dynamic::tx(
             "GroupRobotRegistry", "submit_attestation",
@@ -71,17 +63,8 @@ impl ChainClient {
             BotError::AttestationFailed("tdx_quote_raw is required for verified attestation".into())
         })?;
 
-        let sgx_quote_hash_val = if bundle.sgx_quote_hash == [0u8; 32] {
-            Value::unnamed_variant("None", vec![])
-        } else {
-            Value::unnamed_variant("Some", vec![Value::from_bytes(bundle.sgx_quote_hash)])
-        };
-
-        let mrenclave_val = if bundle.mrenclave == [0u8; 32] {
-            Value::unnamed_variant("None", vec![])
-        } else {
-            Value::unnamed_variant("Some", vec![Value::from_bytes(bundle.mrenclave)])
-        };
+        let sgx_quote_hash_val = option_bytes_32(bundle.sgx_quote_hash);
+        let mrenclave_val = option_bytes_32(bundle.mrenclave);
 
         let tx = subxt::dynamic::tx(
             "GroupRobotRegistry", "submit_verified_attestation",
@@ -115,11 +98,7 @@ impl ChainClient {
             BotError::AttestationFailed("intermediate_cert_der required for Level 4".into())
         })?;
 
-        let mrenclave_val = if bundle.mrenclave == [0u8; 32] {
-            Value::unnamed_variant("None", vec![])
-        } else {
-            Value::unnamed_variant("Some", vec![Value::from_bytes(bundle.mrenclave)])
-        };
+        let mrenclave_val = option_bytes_32(bundle.mrenclave);
 
         let tx = subxt::dynamic::tx(
             "GroupRobotRegistry", "submit_dcap_full_attestation",
@@ -199,16 +178,8 @@ impl ChainClient {
         bundle: &AttestationBundle,
     ) -> BotResult<()> {
         // C2 fix: 链上期望 Option<[u8; 32]>, 需用 unnamed_variant 包装
-        let sgx_quote_hash_val = if bundle.sgx_quote_hash == [0u8; 32] {
-            Value::unnamed_variant("None", vec![])
-        } else {
-            Value::unnamed_variant("Some", vec![Value::from_bytes(bundle.sgx_quote_hash)])
-        };
-        let mrenclave_val = if bundle.mrenclave == [0u8; 32] {
-            Value::unnamed_variant("None", vec![])
-        } else {
-            Value::unnamed_variant("Some", vec![Value::from_bytes(bundle.mrenclave)])
-        };
+        let sgx_quote_hash_val = option_bytes_32(bundle.sgx_quote_hash);
+        let mrenclave_val = option_bytes_32(bundle.mrenclave);
 
         let tx = subxt::dynamic::tx(
             "GroupRobotRegistry", "refresh_attestation",
@@ -301,12 +272,6 @@ impl ChainClient {
         bot_id_hash: [u8; 32],
         sequence: u64,
     ) -> BotResult<bool> {
-        // 先查链上是否已处理
-        if self.is_sequence_processed(&bot_id_hash, sequence).await? {
-            debug!(sequence, "序列号已被其他实例处理，跳过");
-            return Ok(false);
-        }
-
         let tx = subxt::dynamic::tx(
             "GroupRobotConsensus", "mark_sequence_processed",
             vec![
@@ -320,9 +285,13 @@ impl ChainClient {
                 info!(sequence, "序列号已标记处理");
                 Ok(true)
             }
-            Err(_) => {
-                warn!(sequence, "序列号标记失败（可能已被处理）");
+            Err(BotError::TransactionFailed(ref msg)) if msg.contains("dispatch") => {
+                debug!(sequence, "序列号已被其他实例处理，跳过");
                 Ok(false)
+            }
+            Err(e) => {
+                warn!(sequence, error = %e, "序列号标记失败");
+                Err(e)
             }
         }
     }
@@ -489,11 +458,10 @@ impl ChainClient {
                             return Ok(());
                         }
                         Err(e) => {
-                            let err_str = e.to_string();
                             // Dispatch 错误不可重试 (如 BotNotFound, NotBotOwner 等)
-                            if err_str.contains("Module") || err_str.contains("dispatch") {
+                            if matches!(e, subxt::Error::Runtime(_)) {
                                 warn!(call = label, error = %e, "交易 dispatch 错误 (不可重试)");
-                                return Err(BotError::TransactionFailed(format!("{}: {}", label, e)));
+                                return Err(BotError::TransactionFailed(format!("dispatch: {}: {}", label, e)));
                             }
                             warn!(call = label, error = %e, attempt, "交易上链等待失败");
                             last_err = format!("{}: {}", label, e);
@@ -508,6 +476,15 @@ impl ChainClient {
         }
 
         Err(BotError::TransactionFailed(format!("{} ({}次重试后)", last_err, MAX_RETRIES)))
+    }
+}
+
+/// 将 [u8; 32] 编码为链上 Option<[u8; 32]>: 全零 → None, 否则 → Some(bytes)
+fn option_bytes_32(val: [u8; 32]) -> Value {
+    if val == [0u8; 32] {
+        Value::unnamed_variant("None", vec![])
+    } else {
+        Value::unnamed_variant("Some", vec![Value::from_bytes(val)])
     }
 }
 
@@ -527,8 +504,8 @@ fn encode_action_type(action_type: u8) -> Value {
         8 => Value::unnamed_variant("Welcome", vec![]),
         // ConfigUpdate(ConfigUpdateAction) 需要内嵌子枚举, 链下暂不支持
         _ => {
-            tracing::warn!(action_type, "未知 ActionType, 回退为 Kick");
-            Value::unnamed_variant("Kick", vec![])
+            tracing::warn!(action_type, "未知 ActionType, 回退为 Welcome (无害)");
+            Value::unnamed_variant("Welcome", vec![])
         }
     }
 }
@@ -597,8 +574,15 @@ impl ActionLogBatcher {
                     Ok(()) => info!(count = logs.len(), "批量日志提交成功"),
                     Err(e) => {
                         warn!(error = %e, count = logs.len(), "批量日志提交失败，尝试逐条");
+                        let mut failed = 0u32;
                         for log in &logs {
-                            let _ = self.chain.submit_action_log(log).await;
+                            if let Err(e) = self.chain.submit_action_log(log).await {
+                                failed += 1;
+                                debug!(error = %e, "逐条日志提交失败");
+                            }
+                        }
+                        if failed > 0 {
+                            warn!(failed, total = logs.len(), "逐条回退: 部分日志提交失败");
                         }
                     }
                 }

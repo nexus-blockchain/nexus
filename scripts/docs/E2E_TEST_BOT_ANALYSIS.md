@@ -181,7 +181,7 @@ interface E2EConfig {
 
 | 模块群 | Pallet 数 | Pallet 列表 |
 |--------|:---------:|-------------|
-| **Entity** | 12 | entity-registry, entity-shop, entity-service, entity-order, entity-review, entity-token, entity-governance, entity-member, entity-market, entity-disclosure, entity-kyc, entity-tokensale |
+| **Entity** | 12 | entity-registry, entity-shop, entity-product, entity-order, entity-review, entity-token, entity-governance, entity-member, entity-market, entity-disclosure, entity-kyc, entity-tokensale |
 | **Commission** | 5 | commission-common, commission-core, commission-referral, commission-level-diff, commission-single-line |
 | **Trading** | 1 | nex-market |
 | **Dispute** | 3 | escrow, evidence, arbitration |
@@ -324,8 +324,8 @@ interface E2EConfig {
 | Step | 操作 | 断言 |
 |:----:|------|------|
 | 1 | 确保实体+店铺已就绪 | Storage 查询 |
-| 2 | Eve 创建商品 (`entityService.createProduct`) | `assertTxSuccess` |
-| 3 | Eve 上架商品 (`entityService.publishProduct`) | `assertTxSuccess` |
+| 2 | Eve 创建商品 (`entityProduct.createProduct`) | `assertTxSuccess` |
+| 3 | Eve 上架商品 (`entityProduct.publishProduct`) | `assertTxSuccess` |
 | 4 | Bob 下单 (`entityTransaction.placeOrder`) | `assertTxSuccess` + `assertEventEmitted(OrderPlaced)` |
 | 5 | 验证资金锁定 | 余额变化 |
 | 6 | Eve 发货 (`entityTransaction.shipOrder`) | `assertTxSuccess` |
@@ -335,7 +335,7 @@ interface E2EConfig {
 | 10 | **[错误]** 购买未上架商品 | `assertTxFailed` |
 | 11 | 订单取消+退款流程 | `assertTxSuccess` |
 
-**涉及 Pallet**: EntityRegistry, EntityShop, EntityService, EntityTransaction, Balances
+**涉及 Pallet**: EntityRegistry, EntityShop, EntityProduct, EntityTransaction, Balances
 
 ---
 
@@ -667,7 +667,7 @@ nexus-test-agent 中注册的所有流程及其分组:
 | TradingP2p | T2, T3 | createBuyOrder, createSellOrder, markPaid, releaseNex, cancelBuyOrder, disputeBuyOrder, markSellComplete, confirmSellVerification, reportSell |
 | EntityRegistry | E1-E7 | createEntity, updateEntity, suspendEntity, resumeEntity, requestCloseEntity, approveCloseEntity |
 | EntityShop | E1, E2, E5, E7 | (自动创建 + 查询) |
-| EntityService | E2 | createProduct, publishProduct |
+| EntityProduct | E2 | createProduct, publishProduct |
 | EntityTransaction | E2, E4 | placeOrder, shipOrder, confirmReceipt, cancelOrder |
 | EntityToken | E5, E7 | createShopToken, mintTokens, transferTokens, setTransferRestriction, addToWhitelist, lockTokens, unlockTokens |
 | EntityGovernance | E5 | configureGovernance, createProposal, vote, finalizeVoting, executeProposal |

@@ -8,6 +8,7 @@ pub struct ActionDecision {
     pub reason: Option<String>,
     pub message: Option<String>,
     pub duration_secs: Option<u64>,
+    pub inline_keyboard: Option<String>,
 }
 
 impl ActionDecision {
@@ -18,6 +19,7 @@ impl ActionDecision {
             reason: Some(reason.to_string()),
             message: None,
             duration_secs: None,
+            inline_keyboard: None,
         }
     }
 
@@ -28,6 +30,7 @@ impl ActionDecision {
             reason: Some(reason.to_string()),
             message: None,
             duration_secs: None,
+            inline_keyboard: None,
         }
     }
 
@@ -38,6 +41,7 @@ impl ActionDecision {
             reason: Some(reason.to_string()),
             message: None,
             duration_secs: Some(duration_secs),
+            inline_keyboard: None,
         }
     }
 
@@ -48,6 +52,7 @@ impl ActionDecision {
             reason: None,
             message: Some(message.to_string()),
             duration_secs: None,
+            inline_keyboard: None,
         }
     }
 
@@ -58,6 +63,7 @@ impl ActionDecision {
             reason: None,
             message: None,
             duration_secs: None,
+            inline_keyboard: None,
         }
     }
 
@@ -68,6 +74,7 @@ impl ActionDecision {
             reason: None,
             message: Some(text.to_string()),
             duration_secs: None,
+            inline_keyboard: None,
         }
     }
 
@@ -78,6 +85,7 @@ impl ActionDecision {
             reason: None,
             message: None,
             duration_secs: None,
+            inline_keyboard: None,
         }
     }
 
@@ -88,6 +96,7 @@ impl ActionDecision {
             reason: Some(reason.to_string()),
             message: None,
             duration_secs: None,
+            inline_keyboard: None,
         }
     }
 
@@ -98,6 +107,7 @@ impl ActionDecision {
             reason: Some(reason.to_string()),
             message: None,
             duration_secs: None,
+            inline_keyboard: None,
         }
     }
 
@@ -108,6 +118,7 @@ impl ActionDecision {
             reason: Some(reason.to_string()),
             message: None,
             duration_secs: None,
+            inline_keyboard: None,
         }
     }
 
@@ -118,6 +129,7 @@ impl ActionDecision {
             reason: None,
             message: Some(text.to_string()),
             duration_secs: None,
+            inline_keyboard: None,
         }
     }
 
@@ -130,7 +142,8 @@ impl ActionDecision {
             reason: self.reason.clone(),
             message: self.message.clone(),
             duration_secs: self.duration_secs,
-            inline_keyboard: None,
+            inline_keyboard: self.inline_keyboard.as_ref()
+                .and_then(|s| serde_json::from_str(s).ok()),
             callback_query_id: None,
             channel_id: channel_id.map(|s| s.to_string()),
         }

@@ -66,15 +66,19 @@ pub struct MultiLevelConfig<MaxLevels: Get<u32>> {
 1. **rate = 0** → 跳过（占位层），向上移动 referrer
 2. **无推荐人** → 终止
 3. **循环检测**（`BTreeSet<AccountId>`）→ 命中则终止
-4. **激活条件不满足** → 跳过该层，继续下一层
-5. **计算佣金** `commission = order_amount × rate / 10000`，取 `min(commission, remaining)`
-6. **总额上限检查** — 累计超过 `max_total_rate` 时截断最后一笔并终止
+4. **非会员** (`is_member` = false) → 跳过该层，继续下一层
+5. **推荐人被封禁** (`is_banned`) → 跳过该层，继续下一层
+6. **激活条件不满足** → 跳过该层，继续下一层
+7. **计算佣金** `commission = order_amount × rate / 10000`，取 `min(commission, remaining)`
+8. **总额上限检查** — 累计超过 `max_total_rate` 时截断最后一笔并终止
+
+> **M1-R6 优化**: is_member/is_banned（廉价 bool）在 check_tier_activation（可能 2 次 DB read）之前执行，避免对非会员/被封禁用户的多余读取。
 
 ### 终止条件汇总
 
 | 情况 | 行为 |
 |------|------|
-| `rate == 0` / 激活条件不满足 | 跳过，继续 |
+| `rate == 0` / 非会员 / 推荐人被封禁 / 激活条件不满足 | 跳过，继续 |
 | 无推荐人 / 循环检测 / remaining = 0 / 超总额上限 | 终止 |
 
 ---
@@ -123,7 +127,9 @@ max_total_rate = 1500 (15%)
 
 | 关联类型 | 说明 |
 |----------|------|
+| `RuntimeEvent` | 事件类型 |
 | `MemberProvider` | 推荐链 + 统计 + USDT 消费数据 |
+| `EntityProvider` | 实体查询接口（Owner/Admin 权限校验） |
 | `MaxMultiLevels` | 最大层级数（`Get<u32>`，默认 15） |
 | `WeightInfo` | 权重（`weights.rs`） |
 
@@ -137,7 +143,15 @@ max_total_rate = 1500 (15%)
 
 | idx | 名称 | Origin | 说明 |
 |-----|------|--------|------|
-| 0 | `set_multi_level_config` | Root | 设置 Entity 多级分销配置 |
+| 0 | `set_multi_level_config` | Signed (Owner/Admin) | 设置 Entity 多级分销配置 |
+| 1 | `clear_multi_level_config` | Signed (Owner/Admin) | 清除 Entity 多级分销配置 |
+| 2 | `force_set_multi_level_config` | Root | [紧急] 强制设置配置 |
+| 3 | `force_clear_multi_level_config` | Root | [紧急] 强制清除配置（幂等） |
+| 4 | `update_multi_level_params` | Signed (Owner/Admin) | 部分更新 max_total_rate 和/或指定层配置 |
+| 5 | `add_tier` | Signed (Owner/Admin) | 在指定位置插入新层级 |
+| 6 | `remove_tier` | Signed (Owner/Admin) | 移除指定位置的层级（至少保留 1 层） |
+
+**权限模型：** Entity Owner 或持有 `COMMISSION_MANAGE` 权限的 Admin 可操作 `set`/`clear`/`update`/`add`/`remove`；Root 可通过 `force_*` 无视权限覆写。所有 Owner/Admin extrinsic 受 `EntityLocked` 守卫保护。
 
 校验：levels 非空，每层 `rate ≤ 10000`，`0 < max_total_rate ≤ 10000`。
 
@@ -147,21 +161,34 @@ max_total_rate = 1500 (15%)
 |------|------|
 | `MultiLevelConfigUpdated { entity_id }` | 配置已更新（extrinsic + PlanWriter 均发出） |
 | `MultiLevelConfigCleared { entity_id }` | 配置已清除（PlanWriter 路径） |
+| `TierUpdated { entity_id, tier_index }` | 单层配置已更新（F3 部分更新） |
+| `MaxTotalRateUpdated { entity_id, new_rate }` | max_total_rate 已更新（F3 部分更新） |
+| `TierInserted { entity_id, tier_index }` | 层级已插入（F4 add_tier） |
+| `TierRemoved { entity_id, tier_index }` | 层级已移除（F4 remove_tier） |
 
 | 错误 | 说明 |
 |------|------|
 | `InvalidRate` | rate 超过 10000 或 max_total_rate 为 0 |
 | `EmptyLevels` | levels 为空 |
+| `EntityNotFound` | 实体不存在 |
+| `NotEntityOwnerOrAdmin` | 非实体所有者或无 COMMISSION_MANAGE 权限 |
+| `ConfigNotFound` | 配置不存在（清除/更新/增删层时） |
+| `EntityLocked` | 实体已被全局锁定，所有配置操作不可用 |
+| `NothingToUpdate` | 部分更新时所有字段均为 None |
+| `TierIndexOutOfBounds` | tier_index 超出 levels 范围 |
+| `TierLimitExceeded` | 层级数已达 MaxMultiLevels 上限 |
 
 ---
 
 ## 七、Trait 实现
 
-- **CommissionPlugin / TokenCommissionPlugin** — 供 core 调用，共用 `process_multi_level` 泛型逻辑（仅 Balance 类型不同）
-- **MultiLevelPlanWriter** — 治理路径，支持 `set_multi_level` / `clear_multi_level_config`
-  - PlanWriter 校验 rate / max_total_rate / 层数上限 / 非空
-  - 两个方法均 emit 事件（R2 审计修复）
-  - **限制：** PlanWriter 创建的 tiers 激活条件全为 0，需通过 Root extrinsic 配置完整条件
+- **CommissionPlugin / TokenCommissionPlugin** — 供 core 调用，共用 `process_multi_level` 泛型逻辑（仅 Balance 类型不同）。F12: Entity 未激活时跳过佣金计算。
+- **MultiLevelPlanWriter** — 治理路径，支持三个方法：
+  - `set_multi_level` — 设置仅含 rate 的配置（激活条件全为 0）
+  - `set_multi_level_full` (F7) — 设置含完整激活条件 (rate, required_directs, required_team_size, required_spent) 的配置
+  - `clear_multi_level_config` — 清除配置
+  - 所有方法均 emit 事件、校验 rate / max_total_rate / 层数上限 / 非空
+- **Helper** — `get_activation_status(entity_id, account)` (F11): 返回各层级激活状态 `Vec<bool>`
 
 ---
 
@@ -180,15 +207,27 @@ max_total_rate = 1500 (15%)
 
 ---
 
-## 九、测试覆盖（31 个）
+## 九、测试覆盖（76 个）
 
-- **Extrinsic (4):** 设置成功、rate 超限拒绝、非 Root 拒绝
+- **Extrinsic — set (7):** Owner 设置成功、Admin(COMMISSION_MANAGE) 设置成功、无权限 Admin 拒绝、rate 超限拒绝、tier rate 超限拒绝、Entity 不存在拒绝、非 Owner 拒绝
+- **Extrinsic — clear (3):** Owner 清除成功、配置不存在拒绝、非 Owner 拒绝
+- **Extrinsic — force_set (2):** Root 设置成功、非 Root 拒绝
+- **Extrinsic — force_clear (3):** Root 清除成功、幂等（无配置静默成功无事件）、非 Root 拒绝
+- **Extrinsic — update_multi_level_params F3 (7):** 仅更新 rate、仅更新 tier、同时更新、NothingToUpdate、ConfigNotFound、TierIndexOutOfBounds、InvalidRate
+- **Extrinsic — add_tier F4 (4):** 末尾追加、开头插入、超限拒绝、索引越界
+- **Extrinsic — remove_tier F4 (3):** 移除中间层、最后一层拒绝、索引越界
 - **佣金计算 (8):** 基础 3 层、总额截断、激活条件跳过、循环检测、标志未启用、无配置、团队规模、三条件组合
 - **激活条件回归 (3):** USDT vs NEX Balance、USDT 充足通过、单条件不满足
+- **is_banned F9 (3):** 被封禁推荐人跳过、非封禁正常获佣、全部封禁返空
+- **is_member F10 (2):** 非会员推荐人跳过、全部非会员返空
+- **get_activation_status F11 (3):** 无配置返空、全部通过、部分通过
+- **Entity 激活 F12 (2):** 未激活 Entity 跳过佣金、激活 Entity 正常计算
 - **PlanWriter (5):** 创建、rate 校验、层数上限、清除
+- **PlanWriter set_multi_level_full F7 (3):** 正常创建含激活条件、空 tiers 拒绝、无效 rate 拒绝
 - **Round 2 回归 (6):** PlanWriter 事件发出、清除事件、空 levels 拒绝、零 max_total_rate 拒绝（extrinsic + PlanWriter 各一）
-- **Round 4 回归 (2):** is_activated 跳过停用会员链继续、全部激活不影响
 - **Round 5 回归 (3):** rate=0 占位层跳过推荐人、链短于配置层数提前终止、TokenCommissionPlugin 路径验证
+- **EntityLocked 回归 (5):** set_multi_level_config、clear_multi_level_config、add_tier、remove_tier、update_multi_level_params
+- **ConfigNotFound 回归 R4 (2):** add_tier 无配置、remove_tier 无配置
 
 ---
 
@@ -214,6 +253,21 @@ max_total_rate = 1500 (15%)
 | L2-R5 | Low | `rate=0` 占位层代码路径无测试覆盖 | ✅ |
 | L3-R5 | Low | 推荐链短于配置层数（提前 break）无测试覆盖 | ✅ |
 | L4-R5 | Low | `TokenCommissionPlugin` 路径无测试覆盖 | ✅ |
+| M1-R6 | Medium | `process_multi_level` 先调 `check_tier_activation`（2 DB read）再检 `is_member`/`is_banned`（廉价 bool）— 重排顺序避免浪费 | ✅ |
+| L1-R6 | Low | 死错误码 `EntityNotActive` — 已移除 | ✅ |
+| L2-R6 | Low | `weights.rs` 缺 `update_multi_level_params`/`add_tier`/`remove_tier` 专用权重 — 已新增 | ✅ |
+| L3-R6 | Low | README 严重过时（缺 3 extrinsic、4 event、4 error、新功能、测试计数）— 已全面同步 | ✅ |
+| L4-R6 | Low | 缺 `entity_locked_rejects_remove_tier` 和 `entity_locked_rejects_update_multi_level_params` 回归测试 | ✅ |
+| L5-R6 | Low | 缺 `add_tier`/`remove_tier` 对无配置 entity 的 `ConfigNotFound` 测试 | ✅ |
+| F1-P0 | Feature | `set_multi_level_config` 改为 Owner/Admin(COMMISSION_MANAGE) 权限 | ✅ |
+| F2-P0 | Feature | 新增 `clear_multi_level_config` extrinsic (Owner/Admin) | ✅ |
+| F5-P0 | Feature | 新增 `force_set_multi_level_config` (Root) | ✅ |
+| F6-P0 | Feature | 新增 `force_clear_multi_level_config` (Root, 幂等) | ✅ |
+| F9-P0 | Feature | `process_multi_level` 添加 `is_banned` 检查，跳过被封禁推荐人 | ✅ |
+| I1-P0 | Infra | Config trait 新增 `RuntimeEvent` | ✅ |
+| I2-P0 | Infra | Config trait 新增 `EntityProvider` | ✅ |
+| I4-P0 | Infra | 新增 `EntityNotFound` / `NotEntityOwnerOrAdmin` / `ConfigNotFound` 错误 | ✅ |
+| I6-P0 | Infra | 新增 `ensure_owner_or_admin` + `validate_config` 内部帮助函数 | ✅ |
 
 ---
 
@@ -222,6 +276,7 @@ max_total_rate = 1500 (15%)
 ```
 pallet-commission-multi-level
 ├── pallet-commission-common  (CommissionPlugin, MemberProvider, MultiLevelPlanWriter)
+├── pallet-entity-common      (EntityProvider, AdminPermission)
 ├── frame-support / frame-system / sp-runtime / sp-std
 ```
 

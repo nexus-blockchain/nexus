@@ -8,6 +8,11 @@ use sp_runtime::{
 	traits::{BlakeTwo256, IdentityLookup},
 	BuildStorage, DispatchError,
 };
+use std::cell::RefCell;
+
+thread_local! {
+	static ENTITY_LOCKED: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
+}
 
 type Block = frame_system::mocking::MockBlock<Test>;
 
@@ -105,9 +110,12 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
 		1000 + entity_id
 	}
 	fn update_entity_stats(_: u64, _: u128, _: u32) -> Result<(), DispatchError> { Ok(()) }
-	fn update_entity_rating(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
 	fn is_entity_admin(entity_id: u64, account: &u64, _required_permission: u32) -> bool {
 		entity_id == 1 && *account == BOB
+	}
+
+	fn is_entity_locked(entity_id: u64) -> bool {
+		ENTITY_LOCKED.with(|l| l.borrow().contains(&entity_id))
 	}
 }
 
@@ -180,6 +188,10 @@ impl pallet_ads_entity::Config for Test {
 // ============================================================================
 // Test Helpers
 // ============================================================================
+
+pub fn set_entity_locked(entity_id: u64) {
+	ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id));
+}
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
 	let mut t = frame_system::GenesisConfig::<Test>::default()

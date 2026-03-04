@@ -47,6 +47,7 @@ pub trait Config: frame_system::Config {
     type RuntimeEvent: From<Event<Self>> + IsType<...>;
     type Currency: Currency<Self::AccountId>;
     type MemberProvider: MemberProvider<Self::AccountId>;
+    type EntityProvider: EntityProvider<Self::AccountId>;  // 实体权限查询
     #[pallet::constant]
     type MaxCustomLevels: Get<u32>;
 }
@@ -62,9 +63,13 @@ pub trait Config: frame_system::Config {
 
 | call_index | 方法 | 权限 | 说明 |
 |------------|------|------|------|
-| 1 | `set_level_diff_config` | Root | 设置等级极差配置（自定义等级体系） |
+| 1 | `set_level_diff_config` | Owner/Admin(COMMISSION_MANAGE) | 设置等级极差配置 |
+| 2 | `clear_level_diff_config` | Owner/Admin(COMMISSION_MANAGE) | 清除等级极差配置 |
+| 3 | `force_set_level_diff_config` | Root | 强制设置等级极差配置 |
+| 4 | `force_clear_level_diff_config` | Root | 强制清除等级极差配置 |
 
 > `level_rates` 不可为空，每个 rate `<= 10000` 基点。`max_depth` 范围 `1-20`。
+> Owner/Admin 日常 extrinsic 受 `is_entity_locked` 治理锁保护；Root force 版本不受此限制。
 
 ## 计算逻辑
 
@@ -108,6 +113,10 @@ process_level_diff(entity_id, buyer, order_amount, remaining)
 | `InvalidRate` | 返佣率超过 10000 基点 |
 | `InvalidMaxDepth` | max_depth 不在 1-20 范围内 |
 | `EmptyLevelRates` | level_rates 为空 |
+| `EntityNotFound` | entity_id 对应的实体不存在 |
+| `NotEntityOwnerOrAdmin` | 调用者非 Entity Owner 且非 Admin(COMMISSION_MANAGE) |
+| `EntityLocked` | 实体已被治理锁定，不允许 Owner/Admin 修改 |
+| `ConfigNotFound` | 清除配置时配置不存在 |
 
 ## 审计记录
 
@@ -130,7 +139,7 @@ process_level_diff(entity_id, buyer, order_amount, remaining)
 
 | ID | 级别 | 描述 |
 |----|------|------|
-| H1-R3 | High | `process_level_diff` / `process_level_diff_token` 不检查 `is_activated` — 已停用会员仍获得等级极差佣金（team pallet 已修复，level-diff 遗漏）。修复: 两个函数均添加 `is_activated` 检查，未激活成员跳过但消耗 depth |
+| H1-R3 | High | `process_level_diff` / `process_level_diff_token` 不检查 `is_activated` — 已停用会员仍获得等级极差佣金。*注: Round 5 移除此修复，`MemberProvider` trait 无 `is_activated` 方法，与其他插件一致* |
 | M1-R3 | Medium | `clear_config` 不发出事件 — 与 team pallet `TeamPerformanceConfigCleared` 不一致。修复: 新增 `LevelDiffConfigCleared` 事件，`clear_config` 中发射 |
 | M2-R3 | Medium | `LevelDiffPlanWriter::set_level_rates` 不检查空 `level_rates` — extrinsic 有 `EmptyLevelRates` 校验但 trait 路径无此检查。修复: 添加 `ensure!(!level_rates.is_empty())` |
 | L1-R3 | Low | Cargo.toml 缺 `sp-runtime/runtime-benchmarks` 和 `sp-runtime/try-runtime` feature 传播。修复: 已添加 |
@@ -143,6 +152,20 @@ process_level_diff(entity_id, buyer, order_amount, remaining)
 | M2-R4 | Medium | `TokenCommissionPlugin` / `process_level_diff_token` 零测试覆盖 — 26 个测试全部只测 NEX 版。修复: 新增 4 个 Token 版测试 |
 | L1-R4 | Low | README "记录但未修复" 重复段落 + M4 遗漏。修复: 合并去重 |
 | L2-R4 | Low | pallet 模块内未使用的 `CommissionModes` 导入（编译器警告）。修复: 移除 |
+
+### Round 5 功能增强
+
+| ID | 级别 | 描述 |
+|----|------|------|
+| X1 | High | `set_level_diff_config` 从 Root-only 改为 signed + Owner/Admin(COMMISSION_MANAGE) 权限检查 |
+| X2 | High | 新增 `force_set_level_diff_config` (Root-only) 紧急覆写 |
+| X3 | High | 新增 `clear_level_diff_config` extrinsic (signed, Owner/Admin) |
+| X4 | High | 新增 `force_clear_level_diff_config` (Root-only) |
+| X5 | High | Config 新增 `EntityProvider`，Cargo.toml 新增 `pallet-entity-common` 依赖 |
+| X6 | Medium | 日常 extrinsic 添加 `is_entity_locked` 治理锁检查 |
+| X8 | High | `process_level_diff` / `process_level_diff_token` 添加 `is_banned` 检查，封禁会员跳过不获佣金 |
+| X9 | — | `is_activated` 检查不适用（`MemberProvider` trait 无此方法，与 referral/team 一致） |
+| X10 | Low | `LevelDiffPlanWriter::clear_config` 添加 `contains_key` 守卫，配置不存在时不发射幻影事件 |
 
 ### 记录但未修复（历史）
 
@@ -162,10 +185,12 @@ process_level_diff(entity_id, buyer, order_amount, remaining)
 | v0.2.0 | Round 1-2 审计修复 (H1 循环检测, H2 空 rates, M1 事件) |
 | v0.3.0 | Round 3 审计修复 (H1-R3 is_activated, M1-R3 clear 事件, M2-R3 trait 空检查, L1-R3 Cargo features) — 26 tests |
 | v0.4.0 | Round 4 审计修复 (M1-R4 死依赖, M2-R4 Token 测试, L1-R4 README, L2-R4 unused import) — 30 tests |
+| v0.5.0 | Round 5 功能增强 (X1-X6 权限模型重构, X8 is_banned, X10 幻影事件守卫) — 46 tests |
 
 ## 依赖
 
 ```toml
 [dependencies]
 pallet-commission-common = { path = "../common" }
+pallet-entity-common = { path = "../../common" }
 ```

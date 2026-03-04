@@ -5,18 +5,18 @@ use crate::processing::action::ActionDecision;
 /// 警告升级动作
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WarnAction {
-    Kick = 0,
-    Ban = 1,
-    Mute = 2,
+    Mute = 0,
+    Kick = 1,
+    Ban = 2,
 }
 
 impl WarnAction {
     pub fn from_u8(v: u8) -> Self {
         match v {
-            0 => Self::Kick,
-            1 => Self::Ban,
-            2 => Self::Mute,
-            _ => Self::Kick,
+            0 => Self::Mute,
+            1 => Self::Kick,
+            2 => Self::Ban,
+            _ => Self::Mute,
         }
     }
 }
@@ -236,9 +236,9 @@ mod tests {
 
     #[test]
     fn warn_action_from_u8() {
-        assert_eq!(WarnAction::from_u8(0), WarnAction::Kick);
-        assert_eq!(WarnAction::from_u8(1), WarnAction::Ban);
-        assert_eq!(WarnAction::from_u8(2), WarnAction::Mute);
-        assert_eq!(WarnAction::from_u8(99), WarnAction::Kick);
+        assert_eq!(WarnAction::from_u8(0), WarnAction::Mute);
+        assert_eq!(WarnAction::from_u8(1), WarnAction::Kick);
+        assert_eq!(WarnAction::from_u8(2), WarnAction::Ban);
+        assert_eq!(WarnAction::from_u8(99), WarnAction::Mute);
     }
 }

@@ -5,19 +5,29 @@ use pallet_commission_common::{
     CommissionModes, CommissionPlugin, MultiLevelPlanWriter,
 };
 
+const OWNER: u64 = 100;
+const ADMIN: u64 = 200;
+const NOBODY: u64 = 999;
+
+fn setup_entity(entity_id: u64) {
+    set_entity_owner(entity_id, OWNER);
+    set_entity_admin(entity_id, ADMIN, pallet_entity_common::AdminPermission::COMMISSION_MANAGE);
+}
+
 // ============================================================================
-// Extrinsic tests — set_multi_level_config
+// Extrinsic tests — set_multi_level_config (Owner/Admin)
 // ============================================================================
 
 #[test]
-fn set_multi_level_config_works() {
+fn set_multi_level_config_works_by_owner() {
     new_test_ext().execute_with(|| {
+        setup_entity(1);
         let tiers = vec![
             pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
             pallet::MultiLevelTier { rate: 500, required_directs: 3, required_team_size: 0, required_spent: 0 },
         ];
         assert_ok!(CommissionMultiLevel::set_multi_level_config(
-            RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 2000,
+            RuntimeOrigin::signed(OWNER), 1, tiers.try_into().unwrap(), 2000,
         ));
         let config = pallet::MultiLevelConfigs::<Test>::get(1).unwrap();
         assert_eq!(config.levels.len(), 2);
@@ -26,13 +36,46 @@ fn set_multi_level_config_works() {
 }
 
 #[test]
+fn set_multi_level_config_works_by_admin_with_commission_manage() {
+    new_test_ext().execute_with(|| {
+        setup_entity(1);
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(ADMIN), 1, tiers.try_into().unwrap(), 2000,
+        ));
+        assert!(pallet::MultiLevelConfigs::<Test>::get(1).is_some());
+    });
+}
+
+#[test]
+fn set_multi_level_config_rejects_admin_without_commission_manage() {
+    new_test_ext().execute_with(|| {
+        set_entity_owner(1, OWNER);
+        // Admin has SHOP_MANAGE only, not COMMISSION_MANAGE
+        set_entity_admin(1, ADMIN, pallet_entity_common::AdminPermission::SHOP_MANAGE);
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_noop!(
+            CommissionMultiLevel::set_multi_level_config(
+                RuntimeOrigin::signed(ADMIN), 1, tiers.try_into().unwrap(), 2000,
+            ),
+            pallet::Error::<Test>::NotEntityOwnerOrAdmin
+        );
+    });
+}
+
+#[test]
 fn set_multi_level_config_rejects_invalid_rate() {
     new_test_ext().execute_with(|| {
+        setup_entity(1);
         let tiers = vec![
             pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
         ];
         assert_noop!(
-            CommissionMultiLevel::set_multi_level_config(RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 10001),
+            CommissionMultiLevel::set_multi_level_config(RuntimeOrigin::signed(OWNER), 1, tiers.try_into().unwrap(), 10001),
             pallet::Error::<Test>::InvalidRate
         );
     });
@@ -41,24 +84,160 @@ fn set_multi_level_config_rejects_invalid_rate() {
 #[test]
 fn set_multi_level_config_rejects_invalid_tier_rate() {
     new_test_ext().execute_with(|| {
+        setup_entity(1);
         let tiers = vec![
             pallet::MultiLevelTier { rate: 10001, required_directs: 0, required_team_size: 0, required_spent: 0 },
         ];
         assert_noop!(
-            CommissionMultiLevel::set_multi_level_config(RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 5000),
+            CommissionMultiLevel::set_multi_level_config(RuntimeOrigin::signed(OWNER), 1, tiers.try_into().unwrap(), 5000),
             pallet::Error::<Test>::InvalidRate
         );
     });
 }
 
 #[test]
-fn set_multi_level_config_requires_root() {
+fn set_multi_level_config_rejects_entity_not_found() {
+    new_test_ext().execute_with(|| {
+        // Entity 999 does not exist
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_noop!(
+            CommissionMultiLevel::set_multi_level_config(RuntimeOrigin::signed(NOBODY), 999, tiers.try_into().unwrap(), 2000),
+            pallet::Error::<Test>::EntityNotFound
+        );
+    });
+}
+
+#[test]
+fn set_multi_level_config_rejects_non_owner() {
+    new_test_ext().execute_with(|| {
+        setup_entity(1);
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_noop!(
+            CommissionMultiLevel::set_multi_level_config(RuntimeOrigin::signed(NOBODY), 1, tiers.try_into().unwrap(), 2000),
+            pallet::Error::<Test>::NotEntityOwnerOrAdmin
+        );
+    });
+}
+
+// ============================================================================
+// Extrinsic tests — clear_multi_level_config (Owner/Admin)
+// ============================================================================
+
+#[test]
+fn clear_multi_level_config_works_by_owner() {
+    new_test_ext().execute_with(|| {
+        setup_entity(1);
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1, tiers.try_into().unwrap(), 2000,
+        ));
+        assert!(pallet::MultiLevelConfigs::<Test>::get(1).is_some());
+
+        assert_ok!(CommissionMultiLevel::clear_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+        ));
+        assert!(pallet::MultiLevelConfigs::<Test>::get(1).is_none());
+    });
+}
+
+#[test]
+fn clear_multi_level_config_rejects_absent() {
+    new_test_ext().execute_with(|| {
+        setup_entity(1);
+        assert_noop!(
+            CommissionMultiLevel::clear_multi_level_config(RuntimeOrigin::signed(OWNER), 1),
+            pallet::Error::<Test>::ConfigNotFound
+        );
+    });
+}
+
+#[test]
+fn clear_multi_level_config_rejects_non_owner() {
+    new_test_ext().execute_with(|| {
+        setup_entity(1);
+        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
+            levels: vec![
+                pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            ].try_into().unwrap(),
+            max_total_rate: 2000,
+        });
+        assert_noop!(
+            CommissionMultiLevel::clear_multi_level_config(RuntimeOrigin::signed(NOBODY), 1),
+            pallet::Error::<Test>::NotEntityOwnerOrAdmin
+        );
+    });
+}
+
+// ============================================================================
+// Extrinsic tests — force_set / force_clear (Root)
+// ============================================================================
+
+#[test]
+fn force_set_multi_level_config_works_for_root() {
+    new_test_ext().execute_with(|| {
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::force_set_multi_level_config(
+            RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 2000,
+        ));
+        assert!(pallet::MultiLevelConfigs::<Test>::get(1).is_some());
+    });
+}
+
+#[test]
+fn force_set_multi_level_config_rejects_non_root() {
     new_test_ext().execute_with(|| {
         let tiers = vec![
             pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
         ];
         assert_noop!(
-            CommissionMultiLevel::set_multi_level_config(RuntimeOrigin::signed(1), 1, tiers.try_into().unwrap(), 2000),
+            CommissionMultiLevel::force_set_multi_level_config(
+                RuntimeOrigin::signed(1), 1, tiers.try_into().unwrap(), 2000,
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn force_clear_multi_level_config_works() {
+    new_test_ext().execute_with(|| {
+        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
+            levels: vec![
+                pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            ].try_into().unwrap(),
+            max_total_rate: 2000,
+        });
+        assert_ok!(CommissionMultiLevel::force_clear_multi_level_config(RuntimeOrigin::root(), 1));
+        assert!(pallet::MultiLevelConfigs::<Test>::get(1).is_none());
+    });
+}
+
+#[test]
+fn force_clear_multi_level_config_idempotent() {
+    new_test_ext().execute_with(|| {
+        // No config exists — should succeed silently without event
+        assert_ok!(CommissionMultiLevel::force_clear_multi_level_config(RuntimeOrigin::root(), 1));
+        let events = System::events();
+        assert!(!events.iter().any(|e| matches!(
+            e.event,
+            RuntimeEvent::CommissionMultiLevel(pallet::Event::MultiLevelConfigCleared { .. })
+        )));
+    });
+}
+
+#[test]
+fn force_clear_multi_level_config_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            CommissionMultiLevel::force_clear_multi_level_config(RuntimeOrigin::signed(1), 1),
             sp_runtime::DispatchError::BadOrigin
         );
     });
@@ -512,9 +691,10 @@ fn m2_r2_plan_writer_clear_emits_cleared_event() {
 #[test]
 fn l1_r2_set_config_rejects_empty_levels() {
     new_test_ext().execute_with(|| {
+        setup_entity(1);
         let empty: Vec<pallet::MultiLevelTier> = vec![];
         assert_noop!(
-            CommissionMultiLevel::set_multi_level_config(RuntimeOrigin::root(), 1, empty.try_into().unwrap(), 1000),
+            CommissionMultiLevel::set_multi_level_config(RuntimeOrigin::signed(OWNER), 1, empty.try_into().unwrap(), 1000),
             pallet::Error::<Test>::EmptyLevels
         );
     });
@@ -532,11 +712,12 @@ fn l1_r2_plan_writer_rejects_empty_levels() {
 #[test]
 fn l2_r2_set_config_rejects_zero_max_total_rate() {
     new_test_ext().execute_with(|| {
+        setup_entity(1);
         let tiers = vec![
             pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
         ];
         assert_noop!(
-            CommissionMultiLevel::set_multi_level_config(RuntimeOrigin::root(), 1, tiers.try_into().unwrap(), 0),
+            CommissionMultiLevel::set_multi_level_config(RuntimeOrigin::signed(OWNER), 1, tiers.try_into().unwrap(), 0),
             pallet::Error::<Test>::InvalidRate
         );
     });
@@ -548,78 +729,6 @@ fn l2_r2_plan_writer_rejects_zero_max_total_rate() {
         assert!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level(
             1, vec![500], 0,
         ).is_err());
-    });
-}
-
-// ============================================================================
-// H1-R4: is_activated — deactivated members skipped
-// ============================================================================
-
-#[test]
-fn h1_r4_deactivated_member_skipped_chain_continues() {
-    new_test_ext().execute_with(|| {
-        clear_thread_locals();
-        // buyer=50 -> 40 (deactivated) -> 30 -> 20
-        setup_chain(1, 50, &[40, 30, 20]);
-        set_activated(1, 40, false); // 40 is deactivated
-
-        let levels = vec![
-            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
-            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
-            pallet::MultiLevelTier { rate: 200, required_directs: 0, required_team_size: 0, required_spent: 0 },
-        ];
-
-        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
-            levels: levels.try_into().unwrap(),
-            max_total_rate: 3000,
-        });
-
-        let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
-        let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, &50, 10000, 10000, modes, false, 0,
-        );
-
-        // L1: 40 deactivated → skip, L2: 30 gets 500, L3: 20 gets 200
-        assert_eq!(outputs.len(), 2);
-        assert_eq!(outputs[0].beneficiary, 30);
-        assert_eq!(outputs[0].amount, 500);
-        assert_eq!(outputs[0].level, 2);
-        assert_eq!(outputs[1].beneficiary, 20);
-        assert_eq!(outputs[1].amount, 200);
-        assert_eq!(outputs[1].level, 3);
-        assert_eq!(remaining, 9300);
-    });
-}
-
-#[test]
-fn h1_r4_all_activated_unaffected() {
-    new_test_ext().execute_with(|| {
-        clear_thread_locals();
-        // buyer=50 -> 40 -> 30 (all activated by default)
-        setup_chain(1, 50, &[40, 30]);
-
-        let levels = vec![
-            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
-            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
-        ];
-
-        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
-            levels: levels.try_into().unwrap(),
-            max_total_rate: 3000,
-        });
-
-        let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
-        let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
-            1, &50, 10000, 10000, modes, false, 0,
-        );
-
-        // Both activated → normal distribution
-        assert_eq!(outputs.len(), 2);
-        assert_eq!(outputs[0].beneficiary, 40);
-        assert_eq!(outputs[0].amount, 1000);
-        assert_eq!(outputs[1].beneficiary, 30);
-        assert_eq!(outputs[1].amount, 500);
-        assert_eq!(remaining, 8500);
     });
 }
 
@@ -733,5 +842,793 @@ fn l4_r5_token_commission_plugin_works() {
         assert_eq!(outputs[1].beneficiary, 30);
         assert_eq!(outputs[1].amount, 500);
         assert_eq!(remaining, 8500);
+    });
+}
+
+// ============================================================================
+// F9: is_banned check in process_multi_level
+// ============================================================================
+
+#[test]
+fn f9_banned_referrer_skipped_in_multi_level() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        // buyer=50 -> 40 -> 30 -> 20
+        setup_chain(1, 50, &[40, 30, 20]);
+
+        // Ban account 40 (L1 referrer)
+        ban_member(1, 40);
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 200, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+
+        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
+            levels: levels.try_into().unwrap(),
+            max_total_rate: 3000,
+        });
+
+        let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
+        let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+            1, &50, 10000, 10000, modes, false, 0,
+        );
+
+        // L1: 40 is banned → skipped, L2: 30 gets 500, L3: 20 gets 200
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].beneficiary, 30);
+        assert_eq!(outputs[0].amount, 500);
+        assert_eq!(outputs[0].level, 2);
+        assert_eq!(outputs[1].beneficiary, 20);
+        assert_eq!(outputs[1].amount, 200);
+        assert_eq!(outputs[1].level, 3);
+        assert_eq!(remaining, 9300);
+    });
+}
+
+#[test]
+fn f9_non_banned_referrer_still_receives_commission() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_chain(1, 50, &[40, 30]);
+
+        // No one is banned — normal flow
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+
+        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
+            levels: levels.try_into().unwrap(),
+            max_total_rate: 3000,
+        });
+
+        let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
+        let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+            1, &50, 10000, 10000, modes, false, 0,
+        );
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].beneficiary, 40);
+        assert_eq!(outputs[0].amount, 1000);
+        assert_eq!(outputs[1].beneficiary, 30);
+        assert_eq!(outputs[1].amount, 500);
+        assert_eq!(remaining, 8500);
+    });
+}
+
+#[test]
+fn f9_all_referrers_banned_returns_empty() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_chain(1, 50, &[40, 30]);
+
+        ban_member(1, 40);
+        ban_member(1, 30);
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+
+        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
+            levels: levels.try_into().unwrap(),
+            max_total_rate: 3000,
+        });
+
+        let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
+        let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+            1, &50, 10000, 10000, modes, false, 0,
+        );
+
+        // Both referrers banned → no commission
+        assert!(outputs.is_empty());
+        assert_eq!(remaining, 10000);
+    });
+}
+
+// ============================================================================
+// F3: update_multi_level_params — 部分更新
+// ============================================================================
+
+#[test]
+fn f3_update_max_total_rate_only() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            vec![pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 }].try_into().unwrap(),
+            5000,
+        ));
+
+        // Update only max_total_rate
+        assert_ok!(CommissionMultiLevel::update_multi_level_params(
+            RuntimeOrigin::signed(OWNER), 1, Some(8000), None, None,
+        ));
+        let config = pallet::MultiLevelConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.max_total_rate, 8000);
+        assert_eq!(config.levels[0].rate, 1000); // unchanged
+    });
+}
+
+#[test]
+fn f3_update_tier_only() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            vec![
+                pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+                pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            ].try_into().unwrap(),
+            5000,
+        ));
+
+        // Update tier at index 1
+        assert_ok!(CommissionMultiLevel::update_multi_level_params(
+            RuntimeOrigin::signed(ADMIN), 1, None, Some(1),
+            Some(pallet::MultiLevelTier { rate: 800, required_directs: 5, required_team_size: 10, required_spent: 100 }),
+        ));
+        let config = pallet::MultiLevelConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.max_total_rate, 5000); // unchanged
+        assert_eq!(config.levels[0].rate, 1000); // unchanged
+        assert_eq!(config.levels[1].rate, 800);
+        assert_eq!(config.levels[1].required_directs, 5);
+        assert_eq!(config.levels[1].required_team_size, 10);
+        assert_eq!(config.levels[1].required_spent, 100);
+    });
+}
+
+#[test]
+fn f3_update_both_rate_and_tier() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            vec![pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 }].try_into().unwrap(),
+            5000,
+        ));
+
+        assert_ok!(CommissionMultiLevel::update_multi_level_params(
+            RuntimeOrigin::signed(OWNER), 1, Some(9000), Some(0),
+            Some(pallet::MultiLevelTier { rate: 2000, required_directs: 0, required_team_size: 0, required_spent: 0 }),
+        ));
+        let config = pallet::MultiLevelConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.max_total_rate, 9000);
+        assert_eq!(config.levels[0].rate, 2000);
+    });
+}
+
+#[test]
+fn f3_nothing_to_update() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            vec![pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 }].try_into().unwrap(),
+            5000,
+        ));
+
+        assert_noop!(
+            CommissionMultiLevel::update_multi_level_params(
+                RuntimeOrigin::signed(OWNER), 1, None, None, None,
+            ),
+            pallet::Error::<Test>::NothingToUpdate
+        );
+    });
+}
+
+#[test]
+fn f3_config_not_found() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+
+        assert_noop!(
+            CommissionMultiLevel::update_multi_level_params(
+                RuntimeOrigin::signed(OWNER), 1, Some(5000), None, None,
+            ),
+            pallet::Error::<Test>::ConfigNotFound
+        );
+    });
+}
+
+#[test]
+fn f3_tier_index_out_of_bounds() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            vec![pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 }].try_into().unwrap(),
+            5000,
+        ));
+
+        assert_noop!(
+            CommissionMultiLevel::update_multi_level_params(
+                RuntimeOrigin::signed(OWNER), 1, None, Some(5),
+                Some(pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 }),
+            ),
+            pallet::Error::<Test>::TierIndexOutOfBounds
+        );
+    });
+}
+
+#[test]
+fn f3_invalid_rate() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            vec![pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 }].try_into().unwrap(),
+            5000,
+        ));
+
+        // Invalid max_total_rate
+        assert_noop!(
+            CommissionMultiLevel::update_multi_level_params(
+                RuntimeOrigin::signed(OWNER), 1, Some(0), None, None,
+            ),
+            pallet::Error::<Test>::InvalidRate
+        );
+
+        // Invalid tier rate
+        assert_noop!(
+            CommissionMultiLevel::update_multi_level_params(
+                RuntimeOrigin::signed(OWNER), 1, None, Some(0),
+                Some(pallet::MultiLevelTier { rate: 10001, required_directs: 0, required_team_size: 0, required_spent: 0 }),
+            ),
+            pallet::Error::<Test>::InvalidRate
+        );
+    });
+}
+
+// ============================================================================
+// F4: add_tier / remove_tier
+// ============================================================================
+
+#[test]
+fn f4_add_tier_appends() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            vec![pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 }].try_into().unwrap(),
+            5000,
+        ));
+
+        // Append at end (index = 1 = len)
+        assert_ok!(CommissionMultiLevel::add_tier(
+            RuntimeOrigin::signed(OWNER), 1, 1,
+            pallet::MultiLevelTier { rate: 500, required_directs: 3, required_team_size: 0, required_spent: 0 },
+        ));
+        let config = pallet::MultiLevelConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.levels.len(), 2);
+        assert_eq!(config.levels[1].rate, 500);
+        assert_eq!(config.levels[1].required_directs, 3);
+    });
+}
+
+#[test]
+fn f4_add_tier_inserts_at_beginning() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            vec![pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 }].try_into().unwrap(),
+            5000,
+        ));
+
+        // Insert at beginning
+        assert_ok!(CommissionMultiLevel::add_tier(
+            RuntimeOrigin::signed(ADMIN), 1, 0,
+            pallet::MultiLevelTier { rate: 200, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ));
+        let config = pallet::MultiLevelConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.levels.len(), 2);
+        assert_eq!(config.levels[0].rate, 200);
+        assert_eq!(config.levels[1].rate, 1000); // shifted
+    });
+}
+
+#[test]
+fn f4_add_tier_rejects_over_limit() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        // Fill up to MaxMultiLevels (15)
+        let levels: Vec<_> = (0..15).map(|_| pallet::MultiLevelTier { rate: 100, required_directs: 0, required_team_size: 0, required_spent: 0 }).collect();
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            levels.try_into().unwrap(),
+            5000,
+        ));
+
+        assert_noop!(
+            CommissionMultiLevel::add_tier(
+                RuntimeOrigin::signed(OWNER), 1, 15,
+                pallet::MultiLevelTier { rate: 100, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            ),
+            pallet::Error::<Test>::TierLimitExceeded
+        );
+    });
+}
+
+#[test]
+fn f4_add_tier_index_out_of_bounds() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            vec![pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 }].try_into().unwrap(),
+            5000,
+        ));
+
+        // index = 2 > len = 1
+        assert_noop!(
+            CommissionMultiLevel::add_tier(
+                RuntimeOrigin::signed(OWNER), 1, 2,
+                pallet::MultiLevelTier { rate: 100, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            ),
+            pallet::Error::<Test>::TierIndexOutOfBounds
+        );
+    });
+}
+
+#[test]
+fn f4_remove_tier_works() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            vec![
+                pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+                pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+                pallet::MultiLevelTier { rate: 200, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            ].try_into().unwrap(),
+            5000,
+        ));
+
+        // Remove middle tier (index 1)
+        assert_ok!(CommissionMultiLevel::remove_tier(
+            RuntimeOrigin::signed(OWNER), 1, 1,
+        ));
+        let config = pallet::MultiLevelConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.levels.len(), 2);
+        assert_eq!(config.levels[0].rate, 1000);
+        assert_eq!(config.levels[1].rate, 200); // was at index 2, now 1
+    });
+}
+
+#[test]
+fn f4_remove_last_tier_rejected() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            vec![pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 }].try_into().unwrap(),
+            5000,
+        ));
+
+        // Cannot remove last tier
+        assert_noop!(
+            CommissionMultiLevel::remove_tier(RuntimeOrigin::signed(OWNER), 1, 0),
+            pallet::Error::<Test>::EmptyLevels
+        );
+    });
+}
+
+#[test]
+fn f4_remove_tier_index_out_of_bounds() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            vec![
+                pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+                pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            ].try_into().unwrap(),
+            5000,
+        ));
+
+        assert_noop!(
+            CommissionMultiLevel::remove_tier(RuntimeOrigin::signed(OWNER), 1, 5),
+            pallet::Error::<Test>::TierIndexOutOfBounds
+        );
+    });
+}
+
+// ============================================================================
+// F7: PlanWriter set_multi_level_full
+// ============================================================================
+
+#[test]
+fn f7_plan_writer_set_multi_level_full_works() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        let tiers = vec![
+            (1000u16, 5u32, 10u32, 500u128),
+            (500, 3, 0, 0),
+        ];
+        assert_ok!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level_full(1, tiers, 3000));
+
+        let config = pallet::MultiLevelConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.levels.len(), 2);
+        assert_eq!(config.levels[0].rate, 1000);
+        assert_eq!(config.levels[0].required_directs, 5);
+        assert_eq!(config.levels[0].required_team_size, 10);
+        assert_eq!(config.levels[0].required_spent, 500);
+        assert_eq!(config.levels[1].rate, 500);
+        assert_eq!(config.levels[1].required_directs, 3);
+        assert_eq!(config.max_total_rate, 3000);
+    });
+}
+
+#[test]
+fn f7_plan_writer_set_multi_level_full_rejects_empty() {
+    new_test_ext().execute_with(|| {
+        assert!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level_full(1, vec![], 3000).is_err());
+    });
+}
+
+#[test]
+fn f7_plan_writer_set_multi_level_full_rejects_invalid_rate() {
+    new_test_ext().execute_with(|| {
+        assert!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level_full(1, vec![(10001, 0, 0, 0)], 3000).is_err());
+        assert!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level_full(1, vec![(100, 0, 0, 0)], 0).is_err());
+    });
+}
+
+// ============================================================================
+// F10: is_member check in process_multi_level
+// ============================================================================
+
+#[test]
+fn f10_non_member_referrer_skipped() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_chain(1, 50, &[40, 30, 20]);
+
+        // Mark referrer 40 as non-member
+        set_non_member(1, 40);
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 200, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+
+        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
+            levels: levels.try_into().unwrap(),
+            max_total_rate: 3000,
+        });
+
+        let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
+        let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+            1, &50, 10000, 10000, modes, false, 0,
+        );
+
+        // L1: 40 is non-member → skipped, L2: 30 gets 500, L3: 20 gets 200
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].beneficiary, 30);
+        assert_eq!(outputs[0].amount, 500);
+        assert_eq!(outputs[1].beneficiary, 20);
+        assert_eq!(outputs[1].amount, 200);
+        assert_eq!(remaining, 9300);
+    });
+}
+
+#[test]
+fn f10_all_referrers_non_member_returns_empty() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_chain(1, 50, &[40, 30]);
+
+        set_non_member(1, 40);
+        set_non_member(1, 30);
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+
+        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
+            levels: levels.try_into().unwrap(),
+            max_total_rate: 3000,
+        });
+
+        let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
+        let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+            1, &50, 10000, 10000, modes, false, 0,
+        );
+
+        assert!(outputs.is_empty());
+        assert_eq!(remaining, 10000);
+    });
+}
+
+// ============================================================================
+// F11: check_activation_status helper
+// ============================================================================
+
+#[test]
+fn f11_get_activation_status_no_config() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        let status = pallet::Pallet::<Test>::get_activation_status(1, &50);
+        assert!(status.is_empty());
+    });
+}
+
+#[test]
+fn f11_get_activation_status_all_pass() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        // No activation conditions → all pass
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
+            levels: levels.try_into().unwrap(),
+            max_total_rate: 3000,
+        });
+
+        let status = pallet::Pallet::<Test>::get_activation_status(1, &50);
+        assert_eq!(status, vec![true, true]);
+    });
+}
+
+#[test]
+fn f11_get_activation_status_partial() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        // Set stats: 50 has 3 direct referrals, team 5
+        set_stats(1, 50, 3, 5, 0);
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 2, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 500, required_directs: 5, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 200, required_directs: 0, required_team_size: 10, required_spent: 0 },
+        ];
+        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
+            levels: levels.try_into().unwrap(),
+            max_total_rate: 3000,
+        });
+
+        let status = pallet::Pallet::<Test>::get_activation_status(1, &50);
+        // L1: 3 >= 2 → true, L2: 3 < 5 → false, L3: 5 < 10 → false
+        assert_eq!(status, vec![true, false, false]);
+    });
+}
+
+// ============================================================================
+// F12: Entity activation check in calculate
+// ============================================================================
+
+#[test]
+fn f12_inactive_entity_skips_commission() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_chain(1, 50, &[40, 30]);
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
+            levels: levels.try_into().unwrap(),
+            max_total_rate: 3000,
+        });
+
+        // Mark entity 1 as inactive
+        set_entity_inactive(1);
+
+        let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
+        let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+            1, &50, 10000, 10000, modes, false, 0,
+        );
+
+        // Entity inactive → no commission
+        assert!(outputs.is_empty());
+        assert_eq!(remaining, 10000);
+    });
+}
+
+#[test]
+fn f12_active_entity_calculates_normally() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_chain(1, 50, &[40, 30]);
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
+            levels: levels.try_into().unwrap(),
+            max_total_rate: 3000,
+        });
+
+        // Entity 1 is active by default (not in INACTIVE_ENTITIES)
+        let modes = CommissionModes(CommissionModes::MULTI_LEVEL);
+        let (outputs, remaining) = <pallet::Pallet<Test> as CommissionPlugin<u64, Balance>>::calculate(
+            1, &50, 10000, 10000, modes, false, 0,
+        );
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].beneficiary, 40);
+        assert_eq!(outputs[0].amount, 1000);
+        assert_eq!(outputs[1].beneficiary, 30);
+        assert_eq!(outputs[1].amount, 500);
+        assert_eq!(remaining, 8500);
+    });
+}
+
+// ==================== EntityLocked 回归测试 ====================
+
+#[test]
+fn entity_locked_rejects_set_multi_level_config() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        set_entity_locked(1);
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_noop!(
+            CommissionMultiLevel::set_multi_level_config(
+                RuntimeOrigin::signed(OWNER), 1,
+                tiers.try_into().unwrap(), 5000,
+            ),
+            pallet::Error::<Test>::EntityLocked
+        );
+    });
+}
+
+#[test]
+fn entity_locked_rejects_clear_multi_level_config() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            tiers.try_into().unwrap(), 5000,
+        ));
+        set_entity_locked(1);
+        assert_noop!(
+            CommissionMultiLevel::clear_multi_level_config(RuntimeOrigin::signed(OWNER), 1),
+            pallet::Error::<Test>::EntityLocked
+        );
+    });
+}
+
+#[test]
+fn entity_locked_rejects_add_tier() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            tiers.try_into().unwrap(), 5000,
+        ));
+        set_entity_locked(1);
+        let new_tier = pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 };
+        assert_noop!(
+            CommissionMultiLevel::add_tier(RuntimeOrigin::signed(OWNER), 1, 1, new_tier),
+            pallet::Error::<Test>::EntityLocked
+        );
+    });
+}
+
+#[test]
+fn entity_locked_rejects_remove_tier() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            tiers.try_into().unwrap(), 5000,
+        ));
+        set_entity_locked(1);
+        assert_noop!(
+            CommissionMultiLevel::remove_tier(RuntimeOrigin::signed(OWNER), 1, 0),
+            pallet::Error::<Test>::EntityLocked
+        );
+    });
+}
+
+#[test]
+fn entity_locked_rejects_update_multi_level_params() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            tiers.try_into().unwrap(), 5000,
+        ));
+        set_entity_locked(1);
+        assert_noop!(
+            CommissionMultiLevel::update_multi_level_params(
+                RuntimeOrigin::signed(OWNER), 1, Some(8000), None, None,
+            ),
+            pallet::Error::<Test>::EntityLocked
+        );
+    });
+}
+
+// ==================== ConfigNotFound 回归测试 (L5-R4) ====================
+
+#[test]
+fn add_tier_rejects_no_config() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        // No config set for entity 1
+        assert_noop!(
+            CommissionMultiLevel::add_tier(
+                RuntimeOrigin::signed(OWNER), 1, 0,
+                pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            ),
+            pallet::Error::<Test>::ConfigNotFound
+        );
+    });
+}
+
+#[test]
+fn remove_tier_rejects_no_config() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        // No config set for entity 1
+        assert_noop!(
+            CommissionMultiLevel::remove_tier(RuntimeOrigin::signed(OWNER), 1, 0),
+            pallet::Error::<Test>::ConfigNotFound
+        );
     });
 }

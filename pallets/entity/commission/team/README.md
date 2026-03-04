@@ -52,13 +52,17 @@ pub enum SalesThresholdMode {
 
 | call_index | 名称 | 权限 | 说明 |
 |------------|------|------|------|
-| 0 | `set_team_performance_config` | Root | 设置团队业绩返佣配置 |
+| 0 | `set_team_performance_config` | Owner/Admin(COMMISSION_MANAGE) | 设置团队业绩返佣配置 |
+| 1 | `clear_team_performance_config` | Owner/Admin(COMMISSION_MANAGE) | 清除团队业绩返佣配置 |
+| 2 | `update_team_performance_params` | Owner/Admin(COMMISSION_MANAGE) | 部分更新参数（不重提 tiers） |
+| 3 | `force_set_team_performance_config` | Root | 强制设置团队业绩返佣配置 |
+| 4 | `force_clear_team_performance_config` | Root | 强制清除团队业绩返佣配置 |
 
 ### set_team_performance_config (call_index 0)
 
 ```rust
 fn set_team_performance_config(
-    origin: OriginFor<T>,          // Root only
+    origin: OriginFor<T>,          // Entity Owner 或 Admin(COMMISSION_MANAGE)
     entity_id: u64,
     tiers: BoundedVec<TeamPerformanceTier<BalanceOf<T>>, T::MaxTeamTiers>,
     max_depth: u8,
@@ -67,7 +71,19 @@ fn set_team_performance_config(
 ) -> DispatchResult
 ```
 
-**校验（`validate_config` 共享方法，extrinsic 和 PlanWriter 统一调用）：**
+### clear_team_performance_config (call_index 1)
+
+清除指定 entity 的团队业绩配置。需要配置存在（`ConfigNotFound` 守卫）。
+
+### update_team_performance_params (call_index 2)
+
+部分更新 `max_depth`、`allow_stacking`、`threshold_mode`，不需重提 tiers。至少一个参数非 None（`NothingToUpdate` 守卫），且配置必须存在（`ConfigNotFound`）。
+
+### force_set/force_clear (call_index 3/4)
+
+Root 专用，跳过 Owner/Admin 权限检查。`force_clear` 不检查配置是否存在。
+
+**校验（`validate_tiers` 共享方法，extrinsic 和 PlanWriter 统一调用）：**
 
 | 规则 | 条件 | 错误 |
 |------|------|------|
@@ -84,8 +100,8 @@ fn set_team_performance_config(
 buyer 下单
   → 读取 entity_id 的 TeamPerformanceConfig
   → 沿推荐链向上遍历（最多 max_depth 层）
-    → 跳过未激活会员（is_activated 检查）
-    → 对每个激活上级查询 (team_size, total_spent)
+    → 跳过被封禁会员（is_banned 检查）
+    → 对每个非封禁上级查询 (team_size, total_spent)
     → total_spent 来源由 threshold_mode 决定（Nex=NEX 累计, Usdt=USDT 累计）
     → match_tier: 匹配最高达标阶梯档位
     → commission = order_amount × rate / 10000
@@ -127,7 +143,7 @@ allow_stacking = true  → 所有达标上级均可获奖（叠加发放）
 | **依据** | 个人会员等级 | 团队累计销售额 + 团队人数 |
 | **计算** | 上下级费率差额 | 固定阶梯比例 × 订单金额 |
 | **数据来源** | `member_level()` / `custom_level_id()` | `get_member_stats()` |
-| **未激活处理** | 跳过继续遍历 | 跳过继续遍历 |
+| **封禁处理** | 跳过继续遍历 | 跳过继续遍历（is_banned） |
 | **典型场景** | 代理商等级体系 | 团队销售目标达标奖金 |
 
 ## Trait 实现
@@ -163,6 +179,9 @@ pub trait Config: frame_system::Config {
     type Currency: Currency<Self::AccountId>;
     type MemberProvider: MemberProvider<Self::AccountId>;
 
+    /// 实体查询接口（权限校验、Owner/Admin 判断）
+    type EntityProvider: EntityProvider<Self::AccountId>;
+
     /// 最大阶梯档位数
     #[pallet::constant]
     type MaxTeamTiers: Get<u32>;
@@ -176,6 +195,7 @@ impl pallet_commission_team::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type MemberProvider = EntityMemberProvider;
+    type EntityProvider = EntityRegistry;
     type MaxTeamTiers = ConstU32<10>;
 }
 ```
@@ -184,8 +204,8 @@ impl pallet_commission_team::Config for Runtime {
 
 | 事件 | 字段 | 说明 |
 |------|------|------|
-| `TeamPerformanceConfigUpdated` | `entity_id: u64` | 团队业绩配置已创建或更新 |
-| `TeamPerformanceConfigCleared` | `entity_id: u64` | 团队业绩配置已清除（PlanWriter 路径） |
+| `TeamPerformanceConfigUpdated` | `entity_id: u64` | 团队业绩配置已创建或更新（extrinsic/PlanWriter） |
+| `TeamPerformanceConfigCleared` | `entity_id: u64` | 团队业绩配置已清除（extrinsic/PlanWriter） |
 
 ## Errors
 
@@ -195,6 +215,10 @@ impl pallet_commission_team::Config for Runtime {
 | `EmptyTiers` | 档位列表为空 |
 | `InvalidMaxDepth` | `max_depth` 为 0 或超过 30 |
 | `TiersNotAscending` | `sales_threshold` 未严格递增 |
+| `EntityNotFound` | entity_id 对应的实体不存在 |
+| `NotEntityOwnerOrAdmin` | 调用者非 Owner 且无 COMMISSION_MANAGE 权限 |
+| `ConfigNotFound` | 清除/更新时配置不存在 |
+| `NothingToUpdate` | `update_team_performance_params` 所有参数为 None |
 
 ## 依赖
 
@@ -211,17 +235,24 @@ sp-io = { workspace = true, features = ["std"] }
 
 ## 测试覆盖
 
-共 **29 个**单元测试（代码内嵌 `#[cfg(test)] mod tests`）：
+共 **51 个**单元测试（代码内嵌 `#[cfg(test)] mod tests`）：
 
 | 分类 | 数量 | 覆盖内容 |
 |------|------|----------|
-| Extrinsic 校验 | 7 | 正常写入、空档位、非法费率、深度 0/31、门槛未递增、非 Root 权限 |
+| Extrinsic 校验（Owner/Admin） | 10 | Owner 设置、Admin(COMMISSION_MANAGE) 设置、非 Owner 拒绝、无权限 Admin 拒绝、Entity 不存在、空档位、非法费率、深度 0/31、门槛未递增、相等门槛拒绝 |
+| clear_config | 2 | Owner 清除、配置不存在拒绝 |
+| force_set/force_clear | 4 | Root 设置/清除、非 Root 拒绝 |
+| update_params | 4 | 部分更新、全 None 拒绝、配置不存在、非法深度 |
 | Plugin 计算 | 6 | 无配置、模式未启用、单档非叠加、多档叠加、团队人数过滤、remaining 封顶 |
 | 遍历深度 | 1 | max_depth 截断 |
 | PlanWriter | 1 | set_team_config + clear_config |
 | 审计回归 (TM-M1/M2) | 5 | PlanWriter 校验×4、非单调 team_size 匹配 |
-| 深度审计回归 | 5 | H1 循环检测×2、H2 未激活跳过×2、M1 PlanWriter 事件 |
-| 自动生成 | 2 | genesis_config、runtime_integrity |
+| 深度审计回归 | 3 | H1 循环检测×2、M1 PlanWriter 事件 |
+| is_banned | 2 | 非叠加模式跳过封禁会员、叠加模式跳过封禁会员 |
+| 审计 R2: M1 幻影事件 | 3 | force_clear 无配置不发事件、有配置发事件、PlanWriter clear 无配置不发事件 |
+| 审计 R2: L2 threshold_mode | 1 | PlanWriter 拒绝无效 threshold_mode (2/255) |
+| 审计 R2: L4 事件验证 | 4 | set_config/clear_config/update_params/force_set 事件发射 |
+| 自动生成 | 3 | genesis_config、runtime_integrity 等 |
 | USDT 模式 | 2 | USDT 模式匹配、NEX spent 被忽略 |
 
 ## 已知限制
@@ -229,6 +260,7 @@ sp-io = { workspace = true, features = ["std"] }
 | 编号 | 级别 | 说明 |
 |------|------|------|
 | L1 | Low | extrinsic 硬编码 Weight，未接入 WeightInfo benchmark 框架 |
+| I1 | Info | 被封禁会员在遍历中仍消耗 depth 槽位（与 multi-level 设计一致，防止深度滥用） |
 
 ## 审计历史
 
@@ -236,3 +268,5 @@ sp-io = { workspace = true, features = ["std"] }
 |------|------|------|------|
 | Round 1 (TM-M1/M2) | 2026-03 | match_tier 非单调 team_size 修复、PlanWriter 校验 | 24 |
 | 深度审计 | 2026-03 | H1 循环检测、H2 未激活跳过、M1 PlanWriter 事件、L1 Cargo feature | 29 |
+| v0.2.0 功能增强 | 2026-03 | P0 权限下放(Owner/Admin)、P1 clear/force/banned、P2 partial update | 42 |
+| 深度审计 Round 2 | 2026-03 | M1 幻影事件修复、L1 Cargo features、L2 PlanWriter threshold_mode 校验、L3 doc comment、L5 死 import 清理 | 51 |

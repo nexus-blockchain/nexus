@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui";
+import { useTranslations } from "next-intl";
 import {
   LayoutDashboard,
   Building2,
@@ -18,97 +19,120 @@ import {
   Rocket,
   ChevronLeft,
   ChevronRight,
+  type LucideIcon,
 } from "lucide-react";
 
-const navItems = [
-  { href: "/", label: "Dashboard", icon: LayoutDashboard },
+interface NavChild { href: string; labelKey: string }
+interface NavEntry { href?: string; labelKey: string; icon: LucideIcon; children?: NavChild[] }
+
+const navItems: NavEntry[] = [
+  { href: "/", labelKey: "dashboard", icon: LayoutDashboard },
   {
-    label: "Entity",
+    labelKey: "entity",
     icon: Building2,
     children: [
-      { href: "/entity/settings", label: "Settings" },
-      { href: "/entity/admins", label: "Admins" },
-      { href: "/entity/fund", label: "Fund" },
+      { href: "/entity/create", labelKey: "createEntity" },
+      { href: "/entity/settings", labelKey: "settings" },
+      { href: "/entity/admins", labelKey: "admins" },
+      { href: "/entity/fund", labelKey: "fund" },
     ],
   },
   {
-    label: "Shops",
+    labelKey: "shops",
     icon: Store,
     children: [
-      { href: "/shops", label: "Shop List" },
-      { href: "/shops/products", label: "Products" },
-      { href: "/shops/orders", label: "Orders" },
-      { href: "/shops/reviews", label: "Reviews" },
+      { href: "/shops", labelKey: "shops" },
+      { href: "/shops/create", labelKey: "createShop" },
     ],
   },
   {
-    label: "Token",
+    labelKey: "token",
     icon: Coins,
     children: [
-      { href: "/token/config", label: "Config" },
-      { href: "/token/holders", label: "Holders" },
-      { href: "/token/dividend", label: "Dividend" },
-      { href: "/token/lock", label: "Lock" },
+      { href: "/token/config", labelKey: "tokenConfig" },
+      { href: "/token/holders", labelKey: "holders" },
+      { href: "/token/dividend", labelKey: "dividend" },
+      { href: "/token/lock", labelKey: "lock" },
+      { href: "/token/transfer", labelKey: "transfer" },
     ],
   },
-  { href: "/market", label: "Market", icon: TrendingUp },
   {
-    label: "Members",
+    labelKey: "market",
+    icon: TrendingUp,
+    children: [
+      { href: "/market", labelKey: "market" },
+      { href: "/market/usdt", labelKey: "usdtOtc" },
+      { href: "/market/orders", labelKey: "myOrders" },
+      { href: "/market/settings", labelKey: "settings" },
+    ],
+  },
+  {
+    labelKey: "members",
     icon: Users,
     children: [
-      { href: "/members/list", label: "Member List" },
-      { href: "/members/levels", label: "Levels" },
-      { href: "/members/rules", label: "Upgrade Rules" },
-      { href: "/members/pending", label: "Pending" },
+      { href: "/members", labelKey: "members" },
+      { href: "/members/levels", labelKey: "levels" },
+      { href: "/members/rules", labelKey: "rules" },
+      { href: "/members/pending", labelKey: "pending" },
+      { href: "/members/policy", labelKey: "policy" },
     ],
   },
-  { href: "/commission", label: "Commission", icon: Wallet },
   {
-    label: "Governance",
+    labelKey: "commission",
+    icon: Wallet,
+    children: [
+      { href: "/commission", labelKey: "commission" },
+      { href: "/commission/config", labelKey: "config" },
+      { href: "/commission/withdraw", labelKey: "withdraw" },
+      { href: "/commission/pool", labelKey: "pool" },
+    ],
+  },
+  {
+    labelKey: "governance",
     icon: Vote,
     children: [
-      { href: "/governance/proposals", label: "Proposals" },
-      { href: "/governance/config", label: "Config" },
+      { href: "/governance", labelKey: "governance" },
+      { href: "/governance/config", labelKey: "config" },
     ],
   },
   {
-    label: "Disclosure",
+    labelKey: "disclosure",
     icon: FileText,
     children: [
-      { href: "/disclosure/reports", label: "Reports" },
-      { href: "/disclosure/announcements", label: "Announcements" },
-      { href: "/disclosure/insiders", label: "Insiders" },
+      { href: "/disclosure", labelKey: "disclosure" },
+      { href: "/disclosure/insiders", labelKey: "insiders" },
     ],
   },
   {
-    label: "KYC",
+    labelKey: "kyc",
     icon: ShieldCheck,
     children: [
-      { href: "/kyc/records", label: "Records" },
-      { href: "/kyc/providers", label: "Providers" },
-      { href: "/kyc/settings", label: "Settings" },
+      { href: "/kyc", labelKey: "kyc" },
+      { href: "/kyc/settings", labelKey: "settings" },
+      { href: "/kyc/providers", labelKey: "providers" },
     ],
   },
   {
-    label: "Tokensale",
+    labelKey: "tokensale",
     icon: Rocket,
     children: [
-      { href: "/tokensale/rounds", label: "Rounds" },
-      { href: "/tokensale/create", label: "Create" },
+      { href: "/tokensale", labelKey: "tokensale" },
+      { href: "/tokensale/create", labelKey: "createRound" },
     ],
   },
 ];
 
 interface NavItemProps {
-  item: (typeof navItems)[number];
+  item: NavEntry;
   collapsed: boolean;
   pathname: string;
+  t: (key: string) => string;
 }
 
-function NavItem({ item, collapsed, pathname }: NavItemProps) {
+function NavItem({ item, collapsed, pathname, t }: NavItemProps) {
   const Icon = item.icon;
 
-  if ("href" in item && item.href) {
+  if (item.href) {
     const isActive = pathname === item.href;
     return (
       <Link
@@ -121,13 +145,13 @@ function NavItem({ item, collapsed, pathname }: NavItemProps) {
         )}
       >
         <Icon className="h-4 w-4 shrink-0" />
-        {!collapsed && <span>{item.label}</span>}
+        {!collapsed && <span>{t(item.labelKey)}</span>}
       </Link>
     );
   }
 
-  const children = "children" in item ? item.children : [];
-  const isGroupActive = children?.some((c) => pathname.startsWith(c.href));
+  const children = item.children || [];
+  const isGroupActive = children.some((c) => pathname === c.href || pathname.startsWith(c.href + "/"));
 
   return (
     <div className="space-y-1">
@@ -138,10 +162,10 @@ function NavItem({ item, collapsed, pathname }: NavItemProps) {
         )}
       >
         <Icon className="h-4 w-4 shrink-0" />
-        {!collapsed && <span>{item.label}</span>}
+        {!collapsed && <span>{t(item.labelKey)}</span>}
       </div>
       {!collapsed &&
-        children?.map((child) => {
+        children.map((child) => {
           const isActive = pathname === child.href || pathname.startsWith(child.href + "/");
           return (
             <Link
@@ -154,7 +178,7 @@ function NavItem({ item, collapsed, pathname }: NavItemProps) {
                   : "text-sidebar-foreground/60 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground"
               )}
             >
-              {child.label}
+              {t(child.labelKey)}
             </Link>
           );
         })}
@@ -165,6 +189,7 @@ function NavItem({ item, collapsed, pathname }: NavItemProps) {
 export function Sidebar() {
   const pathname = usePathname();
   const { sidebarCollapsed, toggleSidebar } = useUiStore();
+  const t = useTranslations("nav");
 
   return (
     <aside
@@ -187,7 +212,7 @@ export function Sidebar() {
 
       <nav className="flex-1 space-y-1 overflow-y-auto p-3">
         {navItems.map((item, i) => (
-          <NavItem key={i} item={item} collapsed={sidebarCollapsed} pathname={pathname} />
+          <NavItem key={i} item={item} collapsed={sidebarCollapsed} pathname={pathname} t={t} />
         ))}
       </nav>
     </aside>

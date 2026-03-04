@@ -1,8 +1,9 @@
 use crate as pallet_ads_core;
 use frame_support::{
+	assert_ok,
 	derive_impl,
 	parameter_types,
-	traits::ConstU32,
+	traits::{ConstU32, ConstU64},
 };
 use pallet_ads_primitives::*;
 use sp_runtime::BuildStorage;
@@ -47,6 +48,7 @@ impl DeliveryVerifier<u64> for MockDeliveryVerifier {
 		_who: &u64,
 		_placement_id: &PlacementId,
 		audience_size: u32,
+		_node_id: Option<[u8; 32]>,
 	) -> Result<u32, sp_runtime::DispatchError> {
 		// 简单裁切到 500
 		Ok(core::cmp::min(audience_size, 500))
@@ -72,6 +74,15 @@ impl PlacementAdminProvider<u64> for MockPlacementAdmin {
 	fn is_placement_banned(placement_id: &PlacementId) -> bool {
 		placement_id[0] == 255
 	}
+	fn placement_status(placement_id: &PlacementId) -> PlacementStatus {
+		if placement_id[0] == 255 {
+			PlacementStatus::Banned
+		} else if placement_id[0] == 1 || placement_id[0] == 2 {
+			PlacementStatus::Active
+		} else {
+			PlacementStatus::Unknown
+		}
+	}
 }
 
 // ============================================================================
@@ -85,9 +96,14 @@ impl RevenueDistributor<u64, u128> for MockRevenueDistributor {
 		_placement_id: &PlacementId,
 		total_cost: u128,
 		_advertiser: &u64,
-	) -> Result<u128, sp_runtime::DispatchError> {
-		// 80% 给广告位
-		Ok(total_cost * 80 / 100)
+	) -> Result<RevenueBreakdown<u128>, sp_runtime::DispatchError> {
+		// 80% 给广告位, 20% 平台
+		let placement_share = total_cost * 80 / 100;
+		Ok(RevenueBreakdown {
+			placement_share,
+			node_share: 0,
+			platform_share: total_cost - placement_share,
+		})
 	}
 }
 
@@ -109,6 +125,12 @@ impl pallet_ads_core::Config for Test {
 	type PlacementAdmin = MockPlacementAdmin;
 	type RevenueDistributor = MockRevenueDistributor;
 	type PrivateAdRegistrationFee = ConstU128<1_000_000_000_000>; // 1 UNIT
+	type SettlementIncentiveBps = ConstU32<10>; // 0.1%
+	type MaxCampaignsPerAdvertiser = ConstU32<100>;
+	type MaxTargetsPerCampaign = ConstU32<20>;
+	type ReceiptConfirmationWindow = ConstU64<100>;
+	type AdvertiserReferralRate = ConstU32<500>; // 5% of platform share
+	type MaxReferredAdvertisers = ConstU32<100>;
 }
 
 pub const ADVERTISER: u64 = 1;
@@ -144,6 +166,9 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 	let mut ext = sp_io::TestExternalities::new(t);
 	ext.execute_with(|| {
 		System::set_block_number(1);
+		// Phase 6: 预注册种子广告主, 使现有测试不受影响
+		assert_ok!(AdsCore::force_register_advertiser(RuntimeOrigin::root(), ADVERTISER));
+		assert_ok!(AdsCore::force_register_advertiser(RuntimeOrigin::root(), ADVERTISER2));
 	});
 	ext
 }

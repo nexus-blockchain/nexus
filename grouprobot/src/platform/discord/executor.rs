@@ -26,33 +26,67 @@ impl DiscordExecutor {
     }
 
     async fn call_api(&self, method: reqwest::Method, path: &str, body: Option<serde_json::Value>) -> BotResult<serde_json::Value> {
-        let url = self.api_url(path);
-        let auth = self.vault.build_dc_auth_header().await?;
-        let mut req = self.http.request(method, &url)
-            .header("Authorization", auth.as_str());
+        self.call_api_with_headers(method, path, body, None).await
+    }
 
-        if let Some(b) = body {
-            req = req.json(&b);
+    /// M1+M2 修复: 支持自定义 headers + 429 限流自动重试
+    async fn call_api_with_headers(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        extra_headers: Option<Vec<(&str, &str)>>,
+    ) -> BotResult<serde_json::Value> {
+        let mut retries = 0u8;
+        loop {
+            let url = self.api_url(path);
+            let auth = self.vault.build_dc_auth_header().await?;
+            let mut req = self.http.request(method.clone(), &url)
+                .header("Authorization", auth.as_str());
+
+            if let Some(ref headers) = extra_headers {
+                for (k, v) in headers {
+                    req = req.header(*k, *v);
+                }
+            }
+
+            if let Some(ref b) = body {
+                req = req.json(b);
+            }
+
+            let resp = req.send().await
+                .map_err(|e| BotError::PlatformApi { platform: "discord".into(), message: format!("{}", e) })?;
+
+            let status = resp.status();
+            if status.as_u16() == 204 {
+                return Ok(serde_json::json!({"ok": true}));
+            }
+
+            let resp_body: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
+
+            // M1 修复: 429 Too Many Requests — 解析 retry_after 并等待后重试
+            if status.as_u16() == 429 && retries < 1 {
+                // Discord retry_after 是浮点秒数
+                let retry_after = resp_body.get("retry_after")
+                    .and_then(|r| r.as_f64())
+                    .unwrap_or(1.0);
+                let wait_ms = (retry_after * 1000.0).min(30_000.0) as u64;
+                warn!(path = path, retry_after_ms = wait_ms, "Discord API 429 限流, 等待后重试");
+                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                retries += 1;
+                continue;
+            }
+
+            if !status.is_success() {
+                let msg = resp_body.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
+                warn!(path = path, status = %status, error = msg, "Discord API 失败");
+                return Err(BotError::PlatformApi {
+                    platform: "discord".into(),
+                    message: format!("{}: {} {}", path, status, msg),
+                });
+            }
+            return Ok(resp_body);
         }
-
-        let resp = req.send().await
-            .map_err(|e| BotError::PlatformApi { platform: "discord".into(), message: format!("{}", e) })?;
-
-        let status = resp.status();
-        if status.as_u16() == 204 {
-            return Ok(serde_json::json!({"ok": true}));
-        }
-
-        let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
-        if !status.is_success() {
-            let msg = body.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
-            warn!(path = path, status = %status, error = msg, "Discord API 失败");
-            return Err(BotError::PlatformApi {
-                platform: "discord".into(),
-                message: format!("{}: {} {}", path, status, msg),
-            });
-        }
-        Ok(body)
     }
 
     pub async fn send_message(&self, channel_id: &str, content: &str) -> BotResult<()> {
@@ -65,31 +99,14 @@ impl DiscordExecutor {
     }
 
     pub async fn ban_member(&self, guild_id: &str, user_id: &str, reason: Option<&str>) -> BotResult<()> {
-        let url = self.api_url(&format!("/guilds/{}/bans/{}", guild_id, user_id));
-        let auth = self.vault.build_dc_auth_header().await?;
-        let body = serde_json::json!({"delete_message_seconds": 0});
-
-        let mut req = self.http.request(reqwest::Method::PUT, &url)
-            .header("Authorization", auth.as_str())
-            .json(&body);
-
-        if let Some(r) = reason {
-            // Discord 支持通过 X-Audit-Log-Reason 记录 ban 原因到审计日志
-            req = req.header("X-Audit-Log-Reason", r);
-        }
-
-        let resp = req.send().await
-            .map_err(|e| BotError::PlatformApi { platform: "discord".into(), message: format!("{}", e) })?;
-
-        let status = resp.status();
-        if status.as_u16() != 204 && !status.is_success() {
-            let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
-            let msg = body.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
-            return Err(BotError::PlatformApi {
-                platform: "discord".into(),
-                message: format!("ban: {} {}", status, msg),
-            });
-        }
+        // M2 修复: 使用 call_api_with_headers 统一错误处理 + 429 重试
+        let headers = reason.map(|r| vec![("X-Audit-Log-Reason", r)]);
+        self.call_api_with_headers(
+            reqwest::Method::PUT,
+            &format!("/guilds/{}/bans/{}", guild_id, user_id),
+            Some(serde_json::json!({"delete_message_seconds": 0})),
+            headers,
+        ).await?;
         Ok(())
     }
 
@@ -103,7 +120,10 @@ impl DiscordExecutor {
     }
 
     pub async fn timeout_member(&self, guild_id: &str, user_id: &str, duration_secs: u64) -> BotResult<()> {
-        let until = chrono::Utc::now() + chrono::Duration::seconds(duration_secs as i64);
+        // M3 修复: Discord timeout 上限 28 天 (2,419,200 秒) + 安全 i64 转换
+        const MAX_TIMEOUT_SECS: u64 = 28 * 24 * 3600;
+        let capped = duration_secs.min(MAX_TIMEOUT_SECS);
+        let until = chrono::Utc::now() + chrono::Duration::seconds(capped as i64);
         self.call_api(
             reqwest::Method::PATCH,
             &format!("/guilds/{}/members/{}", guild_id, user_id),
@@ -256,11 +276,7 @@ impl PlatformExecutor for DiscordExecutor {
         };
 
         let success = result.is_ok();
-        if !success {
-            if let Err(ref e) = result {
-                warn!(action = ?action.action_type, error = %e, "Discord 动作执行失败");
-            }
-        }
+        // L2 修复: 移除双重日志 — call_api 内部已记录失败详情
 
         let mut hasher = Sha256::new();
         hasher.update(action.group_id.as_bytes());

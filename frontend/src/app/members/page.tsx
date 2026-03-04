@@ -7,35 +7,38 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { AddressDisplay } from "@/components/shared/AddressDisplay";
 import { Users, UserCheck, Crown, Star } from "lucide-react";
+import { useTranslations } from "next-intl";
 
 export default function MembersPage() {
   const { currentEntityId } = useEntityStore();
   const { members, isLoading } = useMembers(currentEntityId);
   const { levels } = useLevels(currentEntityId);
   const actions = useMemberActions();
+  const t = useTranslations("members");
+  const tc = useTranslations("common");
 
-  if (!currentEntityId) return <div className="flex h-full items-center justify-center text-muted-foreground">Select an entity first</div>;
+  if (!currentEntityId) return <div className="flex h-full items-center justify-center text-muted-foreground">{tc("selectEntity")}</div>;
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Members</h1>
-          <p className="text-muted-foreground">Manage entity members and level system</p>
+          <h1 className="text-3xl font-bold tracking-tight">{t("title")}</h1>
+          <p className="text-muted-foreground">{t("subtitle")}</p>
         </div>
       </div>
 
       <div className="grid gap-4 md:grid-cols-3">
         <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Total Members</CardTitle></CardHeader>
+          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">{t("totalMembers")}</CardTitle></CardHeader>
           <CardContent><p className="text-2xl font-bold">{members.length}</p></CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Levels Configured</CardTitle></CardHeader>
+          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">{t("levelsConfigured")}</CardTitle></CardHeader>
           <CardContent><p className="text-2xl font-bold">{levels.length}</p></CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Pending Approval</CardTitle></CardHeader>
+          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">{t("pendingApproval")}</CardTitle></CardHeader>
           <CardContent><p className="text-2xl font-bold">{members.filter((m: any) => m.status === "Pending").length}</p></CardContent>
         </Card>
       </div>
@@ -43,7 +46,7 @@ export default function MembersPage() {
       {levels.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2"><Crown className="h-5 w-5" />Level System</CardTitle>
+            <CardTitle className="flex items-center gap-2"><Crown className="h-5 w-5" />{t("levelSystem")}</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="flex flex-wrap gap-3">
@@ -63,13 +66,13 @@ export default function MembersPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2"><Users className="h-5 w-5" />Member List</CardTitle>
+          <CardTitle className="flex items-center gap-2"><Users className="h-5 w-5" />{t("memberList")}</CardTitle>
         </CardHeader>
         <CardContent>
           {isLoading ? (
             <div className="flex justify-center py-8"><div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" /></div>
           ) : members.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No members registered yet.</p>
+            <p className="text-sm text-muted-foreground">{t("noMembers")}</p>
           ) : (
             <div className="space-y-3">
               {members.map((member: any) => (

@@ -279,6 +279,8 @@ pub mod pallet {
 		PlacementStatusUnchanged,
 		/// 每日展示量上限未变更
 		ImpressionCapUnchanged,
+		/// 实体已被全局锁定
+		EntityLocked,
 	}
 
 	// ========================================================================
@@ -300,6 +302,7 @@ pub mod pallet {
 			// 验证 Entity 状态
 			ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
 			ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+			ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 			ensure!(
 				T::EntityProvider::entity_owner(entity_id) == Some(who.clone()) ||
 				T::EntityProvider::is_entity_admin(entity_id, &who, pallet_entity_common::AdminPermission::ADS_MANAGE),
@@ -364,6 +367,7 @@ pub mod pallet {
 			// 验证 Entity + Shop 状态
 			ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
 			ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+			ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 			ensure!(T::ShopProvider::shop_exists(shop_id), Error::<T>::ShopNotFound);
 			ensure!(T::ShopProvider::is_shop_active(shop_id), Error::<T>::ShopNotActive);
 			ensure!(
@@ -433,6 +437,7 @@ pub mod pallet {
 				.ok_or(Error::<T>::PlacementNotRegistered)?;
 
 			// 权限: Entity owner/admin 或注册者
+			ensure!(!T::EntityProvider::is_entity_locked(info.entity_id), Error::<T>::EntityLocked);
 			ensure!(
 				T::EntityProvider::entity_owner(info.entity_id) == Some(who.clone()) ||
 				T::EntityProvider::is_entity_admin(info.entity_id, &who, pallet_entity_common::AdminPermission::ADS_MANAGE) ||
@@ -475,6 +480,7 @@ pub mod pallet {
 
 			RegisteredPlacements::<T>::try_mutate(&placement_id, |maybe_info| {
 				let info = maybe_info.as_mut().ok_or(Error::<T>::PlacementNotRegistered)?;
+				ensure!(!T::EntityProvider::is_entity_locked(info.entity_id), Error::<T>::EntityLocked);
 				ensure!(
 					T::EntityProvider::entity_owner(info.entity_id) == Some(who.clone()) ||
 					T::EntityProvider::is_entity_admin(info.entity_id, &who, pallet_entity_common::AdminPermission::ADS_MANAGE) ||
@@ -507,6 +513,7 @@ pub mod pallet {
 
 			RegisteredPlacements::<T>::try_mutate(&placement_id, |maybe_info| {
 				let info = maybe_info.as_mut().ok_or(Error::<T>::PlacementNotRegistered)?;
+				ensure!(!T::EntityProvider::is_entity_locked(info.entity_id), Error::<T>::EntityLocked);
 				ensure!(
 					T::EntityProvider::entity_owner(info.entity_id) == Some(who.clone()) ||
 					T::EntityProvider::is_entity_admin(info.entity_id, &who, pallet_entity_common::AdminPermission::ADS_MANAGE) ||
@@ -538,6 +545,7 @@ pub mod pallet {
 			let who = ensure_signed(origin)?;
 
 			ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+			ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 			ensure!(
 				T::EntityProvider::entity_owner(entity_id) == Some(who),
 				Error::<T>::NotEntityAdmin
@@ -637,6 +645,7 @@ pub mod pallet {
 			who: &T::AccountId,
 			placement_id: &PlacementId,
 			audience_size: u32,
+			_node_id: Option<[u8; 32]>,
 		) -> Result<u32, sp_runtime::DispatchError> {
 			// 1. 广告位必须已注册且激活
 			let info = RegisteredPlacements::<T>::get(placement_id)
@@ -705,6 +714,21 @@ pub mod pallet {
 				.map(|info| BannedEntities::<T>::get(info.entity_id))
 				.unwrap_or(false)
 		}
+
+		fn placement_status(placement_id: &PlacementId) -> PlacementStatus {
+			match RegisteredPlacements::<T>::get(placement_id) {
+				None => PlacementStatus::Unknown,
+				Some(info) => {
+					if BannedEntities::<T>::get(info.entity_id) {
+						PlacementStatus::Banned
+					} else if !info.active {
+						PlacementStatus::Paused
+					} else {
+						PlacementStatus::Active
+					}
+				}
+			}
+		}
 	}
 
 	// ========================================================================
@@ -716,7 +740,7 @@ pub mod pallet {
 			placement_id: &PlacementId,
 			total_cost: BalanceOf<T>,
 			_advertiser: &T::AccountId,
-		) -> Result<BalanceOf<T>, sp_runtime::DispatchError> {
+		) -> Result<RevenueBreakdown<BalanceOf<T>>, sp_runtime::DispatchError> {
 			let entity_id = Self::placement_entity_id(placement_id)
 				.ok_or(Error::<T>::PlacementNotRegistered)?;
 			let entity_share_bps = Self::effective_entity_share_bps(entity_id);
@@ -724,8 +748,13 @@ pub mod pallet {
 
 			// 平台份额 = total_cost - entity_share (自动包含余数)
 			// 转入国库由 ads-core 的 settle_era_ads 处理
+			let platform_share = total_cost.saturating_sub(entity_share);
 
-			Ok(entity_share)
+			Ok(RevenueBreakdown {
+				placement_share: entity_share,
+				node_share: Zero::zero(),
+				platform_share,
+			})
 		}
 	}
 }

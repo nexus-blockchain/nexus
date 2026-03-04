@@ -1,9 +1,6 @@
 # Entity 模块 (pallet-entity)
 
-> 🏪 NEXUS 实体管理系统 — 支持多类型实体、Entity-Shop 双层架构、通证发行、DAO 治理、多模式返佣、KYC 合规与代币发售
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Substrate](https://img.shields.io/badge/Substrate-polkadot--sdk-blue)](https://github.com/paritytech/polkadot-sdk)
+> NEXUS 实体管理系统 — 支持多类型实体、Entity-Shop 双层架构、通证发行、DAO 治理、多模式返佣、KYC 合规与代币发售
 
 ## 概述
 
@@ -21,7 +18,7 @@ pallets/entity/
 │
 │  ┌─ 业务层 ─────────────────────────────────────────────┐
 ├── shop/                # Shop 管理、运营资金、双层状态
-├── service/             # 商品/服务 CRUD、库存管理
+├── product/             # 商品/服务 CRUD、库存管理
 ├── order/               # 订单全流程（下单→发货→收货→退款）
 ├── review/              # 评价系统（订单完成后评价）
 │  └──────────────────────────────────────────────────────┘
@@ -34,11 +31,11 @@ pallets/entity/
 │
 │  ┌─ 会员与佣金层 ───────────────────────────────────────┐
 ├── member/              # 会员注册、等级系统、升级规则引擎
-├── commission/          # 多模式返佣（7 个子模块：直推/多级/级差/排线/团队/奖池/核心）
+├── commission/          # 多模式返佣（8 个子模块：core + common + 6 佣金插件）
 │  └──────────────────────────────────────────────────────┘
 │
 │  ┌─ 治理与合规层 ───────────────────────────────────────┐
-├── governance/          # DAO 治理（提案、投票、执行）
+├── governance/          # DAO 治理（提案、投票、委托、执行）
 ├── disclosure/          # 财务披露、公告管理、内幕交易控制
 └── kyc/                 # KYC/AML 四级认证（None/Basic/Standard/Enhanced）
    └──────────────────────────────────────────────────────┘
@@ -46,22 +43,22 @@ pallets/entity/
 
 ## 子模块概览
 
-| 模块 | Crate | 说明 | 代码行数 |
-|------|-------|------|----------|
-| [common](./common/README.md) | `pallet-entity-common` | 公共类型、Trait 接口、空实现 | ~1,286 |
-| [registry](./registry/README.md) | `pallet-entity-registry` | 实体注册、状态管理、多管理员权限位掩码 | ~1,812 |
-| [shop](./shop/README.md) | `pallet-entity-shop` | Shop 管理、运营资金、积分系统 | ~1,282 |
-| [token](./token/README.md) | `pallet-entity-token` | 通证创建/铸造/分红/锁仓/转账限制 | ~1,595 |
-| [governance](./governance/README.md) | `pallet-entity-governance` | 多模式治理、提案、代币加权投票 | ~1,679 |
-| [member](./member/README.md) | `pallet-entity-member` | 会员注册策略、自定义等级、升级规则引擎 | ~2,715 |
-| [commission](./commission/README.md) | `pallet-entity-commission-*` | 7 子模块返佣体系（core + 6 佣金模式） | ~8,615 |
-| [market](./market/README.md) | `pallet-entity-market` | NEX/USDT 双市场、限价/市价单、TWAP | ~4,284 |
-| [service](./service/README.md) | `pallet-entity-service` | 商品 CRUD、库存管理、NEX/USDT 定价 | ~795 |
-| [order](./order/README.md) | `pallet-entity-order` | 订单全流程、NEX/Token 双支付、佣金触发 | ~1,307 |
-| [review](./review/README.md) | `pallet-entity-review` | 评价提交、评分聚合、开关控制 | ~342 |
-| [disclosure](./disclosure/README.md) | `pallet-entity-disclosure` | 财务披露、公告管理、Blackout 窗口 | ~1,491 |
-| [kyc](./kyc/README.md) | `pallet-entity-kyc` | KYC/AML 四级认证、Provider 管理 | ~868 |
-| [tokensale](./tokensale/README.md) | `pallet-entity-tokensale` | 代币发售轮次、多资产支付、Vesting 解锁 | ~1,573 |
+| 模块 | Crate | 说明 | 代码行数 | 测试数 |
+|------|-------|------|----------|--------|
+| [common](./common/README.md) | `pallet-entity-common` | 公共类型、Trait 接口、空实现 | ~1,686 | — |
+| [registry](./registry/README.md) | `pallet-entity-registry` | 实体注册、状态管理、多管理员权限位掩码 | ~2,311 | 168 |
+| [shop](./shop/README.md) | `pallet-entity-shop` | Shop 管理、运营资金、积分系统 | ~2,039 | 143 |
+| [token](./token/README.md) | `pallet-entity-token` | 通证创建/铸造/分红/锁仓/转账限制 | ~1,799 | 102 |
+| [governance](./governance/README.md) | `pallet-entity-governance` | 多模式治理、提案、委托投票、代币锁定 | ~1,901 | 115 |
+| [member](./member/README.md) | `pallet-entity-member` | 会员注册策略、自定义等级、升级规则引擎 | ~3,282 | 131 |
+| [commission](./commission/README.md) | `pallet-entity-commission-*` | 8 子模块返佣体系（core + common + 6 插件） | ~9,313 | 450 |
+| [market](./market/README.md) | `pallet-entity-market` | NEX/USDT 双市场、限价/市价单、TWAP | ~4,897 | 82 |
+| [product](./product/README.md) | `pallet-entity-product` | 商品 CRUD、库存管理、NEX/USDT 定价 | ~1,113 | 96 |
+| [order](./order/README.md) | `pallet-entity-order` | 订单全流程、NEX/Token 双支付、佣金触发 | ~1,699 | 118 |
+| [review](./review/README.md) | `pallet-entity-review` | 评价提交、评分聚合、Root 删除 | ~388 | 61 |
+| [disclosure](./disclosure/README.md) | `pallet-entity-disclosure` | 财务披露、公告管理、Blackout 窗口 | ~2,080 | 155 |
+| [kyc](./kyc/README.md) | `pallet-entity-kyc` | KYC/AML 四级认证、Provider 管理 | ~1,183 | 106 |
+| [tokensale](./tokensale/README.md) | `pallet-entity-tokensale` | 代币发售轮次、多资产支付、Vesting 解锁 | ~2,094 | 107 |
 
 ## 核心类型
 
@@ -97,8 +94,6 @@ pallets/entity/
 | `None` | 无治理（管理员全权控制，默认） |
 | `FullDAO` | 完全 DAO（所有决策需代币投票） |
 
-> **注**：Governance pallet 内部支持更丰富的提案类型和投票逻辑，GovernanceMode 仅控制 Entity 级别的治理开关。
-
 ### TransferRestrictionMode — 转账限制
 
 | 模式 | 说明 |
@@ -115,15 +110,19 @@ Entity 子模块通过 `pallet-entity-common` 定义的 Trait 接口实现松耦
 
 | Trait | 实现方 | 消费方 | 说明 |
 |-------|--------|--------|------|
-| `EntityProvider` | registry | shop, token, governance, member, commission, market, service, order, disclosure, kyc, tokensale | 实体查询、状态、管理员权限 |
-| `ShopProvider` | shop | service, order, review, commission | Shop 查询、运营资金、统计更新 |
-| `ProductProvider` | service | order | 商品查询、库存管理 |
+| `EntityProvider` | registry | shop, token, governance, member, commission, market, product, order, disclosure, kyc, tokensale | 实体查询、状态、管理员权限 |
+| `ShopProvider` | shop | product, order, review, commission | Shop 查询、运营资金、统计更新 |
+| `ProductProvider` | product | order | 商品查询、库存管理 |
 | `OrderProvider` | order | review, commission | 订单查询、状态检查 |
 | `EntityTokenProvider` | token | order, market | 代币余额、奖励、锁定/解锁 |
 | `EntityTokenPriceProvider` | market | commission, tokensale | Token 价格查询（TWAP） |
-| `PricingProvider` | trading/pricing | registry, service | NEX/USDT 定价 |
+| `PricingProvider` | trading/pricing | registry, product | NEX/USDT 定价 |
+| `MemberProvider` | member | commission, governance, order | 会员查询、等级、推荐链 |
+| `KycProvider` | kyc | token, member, tokensale | KYC 级别查询 |
+| `GovernanceProvider` | governance | registry | 治理状态查询 |
+| `DisclosureProvider` | disclosure | token, market | 黑窗口期、内幕人员检查 |
 | `CommissionFundGuard` | commission | shop | 佣金资金保护 |
-| `OrderCommissionHandler` | commission | order | 订单佣金触发 |
+| `OrderCommissionHandler` | commission | order | NEX 订单佣金触发 |
 | `TokenOrderCommissionHandler` | commission | order | Token 订单佣金触发 |
 | `ShoppingBalanceProvider` | commission | order | 购物余额抵扣 |
 | `OrderMemberHandler` | member | order | 自动注册、消费更新 |
@@ -161,7 +160,7 @@ pallet-entity-governance = { workspace = true }
 pallet-entity-member = { workspace = true }
 pallet-entity-commission = { workspace = true }
 pallet-entity-market = { workspace = true }
-pallet-entity-service = { workspace = true }
+pallet-entity-product = { workspace = true }
 pallet-entity-order = { workspace = true }
 pallet-entity-review = { workspace = true }
 pallet-entity-disclosure = { workspace = true }
@@ -179,28 +178,19 @@ cargo test -p pallet-entity-shop
 cargo test -p pallet-entity-token
 cargo test -p pallet-entity-governance
 cargo test -p pallet-entity-member
-cargo test -p pallet-entity-commission
+cargo test -p pallet-entity-commission-core
+cargo test -p pallet-entity-commission-referral
+cargo test -p pallet-entity-commission-multi-level
+cargo test -p pallet-entity-commission-single-line
+cargo test -p pallet-entity-commission-pool-reward
 cargo test -p pallet-entity-market
-cargo test -p pallet-entity-service
+cargo test -p pallet-entity-product
 cargo test -p pallet-entity-order
 cargo test -p pallet-entity-review
 cargo test -p pallet-entity-disclosure
 cargo test -p pallet-entity-kyc
 cargo test -p pallet-entity-tokensale
 ```
-
-## 版本历史
-
-| 版本 | 日期 | 变更 |
-|------|------|------|
-| v0.1.0 | 2026-01-31 | 初始版本：从 pallet-mall 拆分 |
-| v0.2.0 | 2026-02-01 | Phase 1-4: EntityType/TokenType 扩展、运营资金机制 |
-| v0.3.0 | 2026-02-02 | Phase 5: 治理模式增强 |
-| v0.4.0 | 2026-02-03 | Phase 6-8: 披露/KYC/代币发售 |
-| v0.5.0 | 2026-02-05 | Entity-Shop 分离架构、双层状态模型 |
-| v0.6.0 | 2026-02-08 | 转账限制、AdminPermission 位掩码、MemberRegistrationPolicy |
-| v0.7.0 | 2026-02-23 | 全面安全审计: commission 授权修复、治理时间加权投票、tokensale 深度修复 |
-| v0.8.0 | 2026-03 | 审计 Round 2-3: common 类型修复、service 库存/事件修复、member USDT 统计+过期清理、disclosure/kyc/review 增强 |
 
 ## 许可证
 

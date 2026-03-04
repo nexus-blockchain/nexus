@@ -16,6 +16,7 @@ frame-support = { workspace = true }
 frame-system = { workspace = true }
 sp-runtime = { workspace = true }
 sp-std = { workspace = true }
+sp-api = { workspace = true }
 log = { workspace = true }
 
 # 内部依赖
@@ -35,6 +36,7 @@ std = [
     "frame-system/std",
     "sp-runtime/std",
     "sp-std/std",
+    "sp-api/std",
     "log/std",
     "pallet-entity-common/std",
 ]

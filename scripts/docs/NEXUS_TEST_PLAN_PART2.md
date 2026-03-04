@@ -8,7 +8,7 @@
 ## 8. Entity Member — 会员管理
 
 > Pallet: `pallet-entity-member` | Extrinsics: 22 (call_index 0-1, 4-22; 2-3 reserved)
-> 审计修复: P3(MemberSpentUsdt USDT 独立追踪), P4(update_spent 过期等级自动修正+MemberLevelExpired 事件)
+> 审计修复: P4(update_spent 过期等级自动修正+MemberLevelExpired 事件)
 
 | # | 测试用例 | 角色 | 类型 | 优先级 |
 |---|---------|------|------|--------|
@@ -41,9 +41,9 @@
 | MB-027 | 升级后级联检查推荐人 ReferralLevelCount 规则 | 系统 | 流程 | P1 |
 | MB-028 | 等级过期 → get_effective_level 返回回退等级 | 系统 | 功能 | P1 |
 | MB-029 | update_spent 检测过期等级并修正+发出 MemberLevelExpired 事件（审计 P4 回归） | 系统 | 功能 | P0 |
-| MB-030 | USDT 消费独立追踪 MemberSpentUsdt，calculate_level 使用 USDT 值（审计 P3 回归） | 系统 | 功能 | P0 |
-| MB-031 | zero_usdt 金额不改变全局等级（审计 P3 回归） | 系统 | 负向 | P1 |
-| MB-032 | USDT 跨订单累计正确性（审计 P3 回归） | 系统 | 功能 | P1 |
+| MB-030 | USDT 消费累加到 total_spent，自定义等级阈值基于 USDT 精度 | 系统 | 功能 | P0 |
+| MB-031 | zero_usdt 金额不改变自定义等级 | 系统 | 负向 | P1 |
+| MB-032 | USDT 跨订单累计正确性 | 系统 | 功能 | P1 |
 
 ## 9. Commission 模块群 — 返佣系统
 

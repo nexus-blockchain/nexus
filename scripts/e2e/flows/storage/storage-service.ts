@@ -49,10 +49,12 @@ async function storageService(ctx: FlowContext): Promise<void> {
   // ─── Step 1: 设置计费参数 ────────────────────────────────
 
   const setBillingTx = (api.tx as any).storageService.setBillingParams(
-    nex(1).toString(),    // base_fee_per_gb_per_era
-    null,                  // grace_period_eras
-    null,                  // max_unpaid_eras
-    null,                  // min_balance
+    nex(1).toString(),    // pricePerGibWeek
+    null,                  // periodBlocks
+    null,                  // graceBlocks
+    null,                  // maxChargePerBlock
+    null,                  // subjectMinReserve
+    null,                  // paused
   );
   const billingResult = await ctx.sudo(setBillingTx, '设置计费参数');
   assertTxSuccess(billingResult, '设置计费参数');
@@ -61,11 +63,15 @@ async function storageService(ctx: FlowContext): Promise<void> {
 
   const charlieBalBefore = await getFreeBalance(api, charlie.address);
 
+  const peerId = '0x' + '01'.repeat(32);  // peerId: [u8;32]
+  const endpointHash = '0x' + 'e0'.repeat(32);  // endpointHash: H256
+  const certFingerprint = '0x' + 'cf'.repeat(32);  // certFingerprint: H256
   const joinTx = (api.tx as any).storageService.joinOperator(
-    100,                   // capacity_gib
-    nex(50).toString(),    // bond (保证金)
-    'wss://storage-e2e.test:9944',  // endpoint
-    null,                  // metadata
+    peerId,                // peerId: [u8;32]
+    100,                   // capacityGib: u32
+    endpointHash,          // endpointHash: H256
+    certFingerprint,       // certFingerprint: H256
+    nex(50).toString(),    // bond: u128
   );
   const joinResult = await ctx.send(joinTx, charlie, 'Charlie 加入运营者', 'charlie');
   assertTxSuccess(joinResult, '加入运营者');
@@ -79,9 +85,10 @@ async function storageService(ctx: FlowContext): Promise<void> {
   // ─── Step 3: Charlie 更新运营者信息 ──────────────────────
 
   const updateOpTx = (api.tx as any).storageService.updateOperator(
-    200,                                    // new capacity
-    'wss://storage-e2e-v2.test:9944',       // new endpoint
-    null,                                    // metadata
+    null,                                    // peerId: Option
+    200,                                     // capacityGib: Option<u32>
+    null,                                    // endpointHash: Option<H256>
+    null,                                    // certFingerprint: Option<H256>
   );
   const updateOpResult = await ctx.send(updateOpTx, charlie, 'Charlie 更新运营者', 'charlie');
   assertTxSuccess(updateOpResult, '更新运营者');
@@ -102,11 +109,9 @@ async function storageService(ctx: FlowContext): Promise<void> {
   // ─── Step 5: Bob 请求 Pin 文件 ───────────────────────────
 
   const pinTx = (api.tx as any).storageService.requestPinForSubject(
-    'QmTestFileCid001',         // cid
-    1024 * 1024,                // size_bytes: 1 MB
-    0,                          // subject_id
-    null,                       // tier
-    null,                       // replicas
+    0,                          // subjectId: u64
+    'QmTestFileCid001',         // cid: Bytes
+    0,                          // tier: u8
   );
   const pinResult = await ctx.send(pinTx, bob, 'Bob 请求 Pin', 'bob');
   assertTxSuccess(pinResult, '请求 Pin');
@@ -118,10 +123,9 @@ async function storageService(ctx: FlowContext): Promise<void> {
   // ─── Step 6: [错误路径] 余额不足 Pin ─────────────────────
 
   const bigPinTx = (api.tx as any).storageService.requestPinForSubject(
-    'QmHugeFileCid001',
-    1024 * 1024 * 1024 * 100,  // 100 GB
-    0,
-    null, null,
+    0,                          // subjectId
+    'QmHugeFileCid001',         // cid
+    0,                          // tier
   );
   const bigPinResult = await ctx.send(bigPinTx, dave, '[错误路径] 余额不足 Pin', 'dave');
   await ctx.check('余额不足 Pin 应失败', 'dave', () => {
@@ -130,9 +134,10 @@ async function storageService(ctx: FlowContext): Promise<void> {
 
   // ─── Step 7: 标记 Pin 成功 ───────────────────────────────
 
+  const cidHash = '0x' + 'ab'.repeat(32);  // cidHash: H256
   const markPinnedTx = (api.tx as any).storageService.markPinned(
-    'QmTestFileCid001',
-    charlie.address,    // operator
+    cidHash,            // cidHash: H256
+    1,                  // replicas: u32
   );
   // mark_pinned 通常由 OCW 调用, 这里尝试 sudo
   const markResult = await ctx.sudo(markPinnedTx, '标记 Pin 成功');
@@ -191,7 +196,6 @@ async function storageService(ctx: FlowContext): Promise<void> {
   const slashOpTx = (api.tx as any).storageService.slashOperator(
     charlie.address,
     nex(5).toString(),   // amount
-    'E2E slash test',    // reason
   );
   const slashResult = await ctx.sudo(slashOpTx, 'Slash 运营者');
   if (slashResult.success) {
@@ -218,7 +222,7 @@ async function storageService(ctx: FlowContext): Promise<void> {
 
   // ─── Step 14: [错误路径] Dave 非运营者操作 ────────────────
 
-  const daveUpdateTx = (api.tx as any).storageService.updateOperator(50, null, null);
+  const daveUpdateTx = (api.tx as any).storageService.updateOperator(null, 50, null, null);
   const daveUpdateResult = await ctx.send(daveUpdateTx, dave, '[错误路径] Dave 更新运营者', 'dave');
   await ctx.check('非运营者更新应失败', 'dave', () => {
     assertTxFailed(daveUpdateResult, undefined, '非运营者');

@@ -98,15 +98,22 @@ impl pallet_entity_kyc::Config for Runtime {
 
 | Index | 函数 | 权限 | 说明 |
 |-------|------|------|------|
-| 0 | `submit_kyc(level, data_cid, country_code)` | 任意用户 | 提交 KYC 申请（已有 Pending 时拒绝） |
+| 0 | `submit_kyc(level, data_cid, country_code)` | 任意用户 | 提交 KYC 申请（已有 Pending 时拒绝，已批准未过期时仅允许升级） |
 | 1 | `approve_kyc(account, risk_score)` | 认证提供者 | 批准 KYC，设置有效期和风险评分 |
 | 2 | `reject_kyc(account, reason, details_cid)` | 认证提供者 | 拒绝 KYC，记录原因 |
-| 3 | `revoke_kyc(account, reason)` | AdminOrigin | 撤销已通过的 KYC |
+| 3 | `revoke_kyc(account, reason)` | AdminOrigin | 撤销 Pending/Approved/Expired 的 KYC |
 | 4 | `register_provider(account, name, type, max_level)` | AdminOrigin | 注册认证提供者 |
 | 5 | `remove_provider(account)` | AdminOrigin | 移除认证提供者 |
-| 6 | `set_entity_requirement(entity_id, min_level, mandatory, grace_period, allow_high_risk, max_risk_score)` | AdminOrigin | 设置实体 KYC 要求 |
+| 6 | `set_entity_requirement(entity_id, ...)` | Entity Owner / KYC_MANAGE Admin | 设置实体 KYC 要求 |
 | 7 | `update_high_risk_countries(countries)` | AdminOrigin | 更新高风险国家列表（最多 50 个，自动去重） |
 | 8 | `expire_kyc(account)` | 任意用户 | 标记已过期的 KYC 记录（需确实已过期） |
+| 9 | `cancel_kyc()` | 申请人 | 取消自己的 Pending KYC 申请 |
+| 10 | `force_set_entity_requirement(entity_id, ...)` | AdminOrigin | 强制设置实体 KYC 要求（不检查 Entity 存在） |
+| 11 | `update_risk_score(account, new_score)` | 认证提供者 | 更新已批准用户的风险评分 |
+| 12 | `update_provider(provider, name?, max_level?)` | AdminOrigin | 更新提供者信息（至少提供一个字段） |
+| 13 | `suspend_provider(provider)` | AdminOrigin | 暂停认证提供者 |
+| 14 | `resume_provider(provider)` | AdminOrigin | 恢复认证提供者 |
+| 15 | `force_approve_kyc(account, level, risk_score, country_code)` | AdminOrigin | 强制批准 KYC（数据迁移/特殊豁免） |
 
 ## Storage
 
@@ -127,8 +134,14 @@ impl pallet_entity_kyc::Config for Runtime {
 | `KycRejected` | KYC 已拒绝（含 reason） |
 | `KycExpired` | KYC 已过期 |
 | `KycRevoked` | KYC 已撤销 |
+| `KycCancelled` | KYC 申请已取消 |
+| `KycForceApproved` | KYC 已强制批准 |
 | `ProviderRegistered` | 提供者已注册 |
 | `ProviderRemoved` | 提供者已移除 |
+| `ProviderUpdated` | 提供者已更新 |
+| `ProviderSuspended` | 提供者已暂停 |
+| `ProviderResumed` | 提供者已恢复 |
+| `RiskScoreUpdated` | 风险评分已更新 |
 | `EntityRequirementSet` | 实体 KYC 要求已设置 |
 | `HighRiskCountriesUpdated` | 高风险国家已更新 |
 
@@ -156,6 +169,11 @@ impl pallet_entity_kyc::Config for Runtime {
 | `InvalidCountryCode` | 国家代码格式无效 |
 | `SelfApprovalNotAllowed` | 不允许自我审批 |
 | `KycNotExpired` | KYC 尚未过期（expire_kyc 调用时） |
+| `NotEntityOwnerOrAdmin` | 非 Entity Owner 或授权管理员 |
+| `EntityNotFound` | Entity 不存在 |
+| `ProviderIsSuspended` | 提供者已被暂停 |
+| `ProviderNotSuspended` | 提供者未被暂停 |
+| `NothingToUpdate` | 未提供任何更新字段 |
 
 ## 辅助函数
 
@@ -189,3 +207,5 @@ impl<T: Config> Pallet<T> {
 | v0.1.0 | 2026-02-03 | Phase 7 初始版本 |
 | v0.2.0 | 2026-03 | Round 1-3 审计修复: 空 CID 校验、自我审批阻止、风险评分验证、国家代码格式校验、Expired 状态可撤销 |
 | v0.3.0 | 2026-03 | Round 4 审计: M1(高风险国家去重) M2(拒绝计入审核数) M3(expire_kyc extrinsic) L2(README同步) L3(Cargo features) |
+| v0.4.0 | 2026-03 | P0-P2 功能: Entity Owner 设置 KYC 要求、cancel_kyc、upgrade KYC、force_approve、provider 管理(suspend/resume/update)、update_risk_score、KycLevel as_u8/try_from_u8 |
+| v0.5.0 | 2026-03 | Round 6 审计: M1(get_risk_score 状态+过期检查) L1(update_provider 拒绝 no-op) L2-L5(补充测试覆盖) L6(README 同步) |

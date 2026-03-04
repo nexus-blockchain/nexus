@@ -8,13 +8,16 @@ import { StatusBadge } from "@/components/shared/StatusBadge";
 import { AddressDisplay } from "@/components/shared/AddressDisplay";
 import { Badge } from "@/components/ui/badge";
 import { ShieldCheck, Clock, CheckCircle, XCircle } from "lucide-react";
+import { useTranslations } from "next-intl";
 
 export default function KycPage() {
   const { currentEntityId } = useEntityStore();
   const { records, isLoading } = useKycRecords(currentEntityId);
   const actions = useKycActions();
+  const t = useTranslations("kyc");
+  const tc = useTranslations("common");
 
-  if (!currentEntityId) return <div className="flex h-full items-center justify-center text-muted-foreground">Select an entity first</div>;
+  if (!currentEntityId) return <div className="flex h-full items-center justify-center text-muted-foreground">{tc("selectEntity")}</div>;
 
   return (
     <div className="space-y-6">

@@ -140,6 +140,8 @@ impl pallet_entity_token::Config for Runtime {
 | `TransferWhitelist` | `StorageMap<u64, BoundedVec<AccountId>>` | 转账白名单 |
 | `TransferBlacklist` | `StorageMap<u64, BoundedVec<AccountId>>` | 转账黑名单 |
 | `ReservedTokens` | `StorageDoubleMap<u64, AccountId, Balance>` | 预留代币（reserve/unreserve） |
+| `TransfersFrozen` | `StorageMap<u64, ()>` | P1: 实体转账冻结标记（存在即冻结） |
+| `GlobalTokenPaused` | `StorageValue<bool>` | P3: 全平台代币紧急暂停开关 |
 
 ## Extrinsics
 
@@ -161,6 +163,11 @@ impl pallet_entity_token::Config for Runtime {
 | 13 | `remove_from_whitelist(entity_id, accounts)` | Owner | 批量移除白名单 |
 | 14 | `add_to_blacklist(entity_id, accounts)` | Owner | 批量添加黑名单 |
 | 15 | `remove_from_blacklist(entity_id, accounts)` | Owner | 批量移除黑名单 |
+| 16 | `force_disable_token(entity_id)` | **Root** | P1: 强制禁用代币（enabled→false） |
+| 17 | `force_freeze_transfers(entity_id)` | **Root** | P1: 冻结转账（分红领取不受影响） |
+| 18 | `force_unfreeze_transfers(entity_id)` | **Root** | P1: 解除转账冻结 |
+| 19 | `force_burn(entity_id, from, amount)` | **Root** | P2: 强制销毁代币（法律合规） |
+| 20 | `set_global_token_pause(paused)` | **Root** | P3: 全平台代币紧急暂停/恢复 |
 
 ## 购物奖励 / 积分兑换
 
@@ -246,6 +253,11 @@ asset_id = ShopTokenOffset + shop_id
 | `TransferRestrictionSet` | entity_id, mode, min_receiver_kyc | set_transfer_restriction |
 | `WhitelistUpdated` | entity_id, added, removed | add/remove_from_whitelist |
 | `BlacklistUpdated` | entity_id, added, removed | add/remove_from_blacklist |
+| `TokenForceDisabled` | entity_id | force_disable_token |
+| `TransfersFrozenEvent` | entity_id | force_freeze_transfers |
+| `TransfersUnfrozen` | entity_id | force_unfreeze_transfers |
+| `TokensForceBurned` | entity_id, from, amount | force_burn |
+| `GlobalTokenPauseSet` | paused | set_global_token_pause |
 
 ## Errors
 
@@ -285,6 +297,11 @@ asset_id = ShopTokenOffset + shop_id
 | `InvalidRedeemLimits` | min_redeem > max_redeem_per_order |
 | `EmptyName` | 名称为空 |
 | `EmptySymbol` | 符号为空 |
+| `TokenTransfersFrozen` | P1: 该实体的代币转账已被冻结 |
+| `GlobalPaused` | P3: 全平台代币操作已暂停 |
+| `TokenAlreadyDisabled` | P1: 代币已处于禁用状态 |
+| `TransfersNotFrozen` | P1: 转账未被冻结，无需解冻 |
+| `TransfersAlreadyFrozen` | P1: 转账已被冻结，无需重复冻结 |
 
 ## 权限模型
 
@@ -299,10 +316,19 @@ asset_id = ShopTokenOffset + shop_id
 | `claim_dividend` | 持有者 | PendingDividends > 0 |
 | `lock_tokens` | 持有者 | 通证 enabled + amount>0 + duration>0 + 可用余额（扣除预留） |
 | `unlock_tokens` | 持有者 | now >= unlock_at |
-| `change_token_type` | Owner | 通证已创建 |
-| `set_max_supply` | Owner | max_supply >= current_supply |
-| `set_transfer_restriction` | Owner | 通证已创建 |
-| `add/remove_*_list` | Owner | — |
+| `change_token_type` | Owner/Admin | 通证已创建 |
+| `set_max_supply` | Owner/Admin | max_supply >= current_supply |
+| `set_transfer_restriction` | Owner/Admin | 通证已创建 |
+| `add/remove_*_list` | Owner/Admin | — |
+| `force_disable_token` | **Root** | 代币已创建 + 当前 enabled=true |
+| `force_freeze_transfers` | **Root** | 代币已创建 + 未冻结 |
+| `force_unfreeze_transfers` | **Root** | 已冻结 |
+| `force_burn` | **Root** | 代币已创建 + amount>0 + 目标余额充足 |
+| `set_global_token_pause` | **Root** | — |
+
+> **Admin 权限**: 拥有 `TOKEN_MANAGE` (`0b0000_0100`) 权限的实体管理员可执行所有标记为 Owner/Admin 的操作。
+>
+> **紧急管控**: `force_*` 和 `set_global_token_pause` 仅限 Root（治理/Sudo）调用，用于欺诈响应、法律合规、底层漏洞应急。
 
 ## 与其他模块的集成
 
@@ -332,10 +358,12 @@ cargo test -p pallet-entity-token
 | v0.2.0 | 2026-02-03 | Phase 2：7 种通证类型、分红配置/分发/领取、锁仓/解锁、最大供应量 |
 | v0.3.0 | 2026-02-04 | Phase 8：转账限制（5 种模式）、白名单/黑名单、KYC/成员查询集成 |
 | v0.4.0 | 2026-02-09 | 深度审计修复：DecodeWithMemTracking、Weight proof_size、max_supply 全链路校验、锁仓+预留余额拦截、ReservedTokens 真实实现、分红安全加固、mock+tests 41 用例 |
+| v0.5.0 | 2026-03 | P0 Admin 权限下放：12 个 owner-only extrinsic 支持 TOKEN_MANAGE 管理员操作，新增 ensure_owner_or_admin helper + NotAuthorized 错误，15 个管理员权限测试（75 用例） |
+| v0.6.0 | 2026-03 | P1/P2/P3 紧急管控：force_disable_token、force_freeze/unfreeze_transfers、force_burn、set_global_token_pause 5 个 Root-only extrinsic，TransfersFrozen + GlobalTokenPaused 存储项，6 条 guard 检查（create/mint/transfer/claim/reward/redeem），29 个测试（104 用例） |
 
 ## 测试覆盖
 
-41 个单元测试覆盖：
+104 个单元测试覆盖：
 
 - **创建**: 正常创建、Shop 不存在、Shop 未激活、非店主、重复创建、空名称/符号、无效比率
 - **配置**: 更新成功、min>max 拒绝
@@ -347,6 +375,11 @@ cargo test -p pallet-entity-token
 - **供应**: 设置 max_supply、低于当前拒绝
 - **限制**: KYC clamped 事件、白/黑名单增删、输入长度限制
 - **Trait**: reserve/unreserve/repatriate 完整流程、reward 超供应量跳过
+- **P0 Admin**: admin 创建/更新/铸造/分红/类型/供应/限制/白黑名单、非管理员拒绝、错误权限拒绝、owner 无 admin 标记仍可操作、不存在 entity 拒绝
+- **P1 force_disable_token**: 正常禁用、非 Root 拒绝、无代币拒绝、已禁用拒绝
+- **P1 force_freeze/unfreeze**: 冻结转账、冻结后 claim 不受影响、已冻结重复拒绝、未冻结解冻拒绝、解冻恢复转账
+- **P2 force_burn**: 正常销毁、全额销毁、非 Root 拒绝、零额拒绝、余额不足拒绝
+- **P3 global_pause**: 暂停/恢复、非 Root 拒绝、阻止 create/mint/transfer/claim、reward 静默返回 0、redeem 拒绝、恢复后操作正常
 
 ## 许可证
 

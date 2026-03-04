@@ -9,12 +9,15 @@ import { TxButton } from "@/components/shared/TxButton";
 import { Progress } from "@/components/ui/progress";
 import { formatBalance } from "@/lib/utils";
 import { Wallet, ArrowUpFromLine, AlertTriangle, CheckCircle } from "lucide-react";
+import { useTranslations } from "next-intl";
 
 export default function EntityFundPage() {
   const { currentEntityId } = useEntityStore();
   const { data: entity, isLoading } = useEntity(currentEntityId);
   const actions = useEntityActions(currentEntityId || 0);
   const [topUpAmount, setTopUpAmount] = useState("");
+  const t = useTranslations("entity.fund");
+  const tc = useTranslations("common");
 
   if (!currentEntityId || isLoading || !entity) {
     return <div className="flex h-full items-center justify-center"><div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" /></div>;

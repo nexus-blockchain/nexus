@@ -148,6 +148,17 @@ scripts/e2e-reports/
 scripts/*.log
 
 # =========================
+# Website (Next.js)
+# =========================
+website/.next/
+website/dist/
+website/out/
+website/.cache/
+website/*.tsbuildinfo
+website/.eslintcache
+website/.vercel
+
+# =========================
 # Frontend (Next.js) - 额外规则
 # =========================
 frontend/*.tsbuildinfo

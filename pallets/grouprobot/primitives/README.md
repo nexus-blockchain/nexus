@@ -73,19 +73,13 @@ pub enum OperatorStatus {
 ### NodeStatus（节点状态）
 ```rust
 pub enum NodeStatus {
-    Active, Probation, Suspended, Exiting,
-}
-```
-
-### SuspendReason（暂停原因）
-```rust
-pub enum SuspendReason {
-    LowReputation, Equivocation, Offline, Manual,
+    Active, Suspended, Exiting,
 }
 ```
 
 ### SubscriptionTier（订阅层级）
 ```rust
+#[derive(PartialOrd, Ord, ...)]
 pub enum SubscriptionTier {
     Free,        // 免费 (默认, 无链上记录)
     Basic,       // 基础版
@@ -94,7 +88,7 @@ pub enum SubscriptionTier {
 }
 ```
 
-附带 `is_paid()` 和 `feature_gate()` 方法。
+附带 `is_paid()` 和 `feature_gate()` 方法。派生 `PartialOrd`/`Ord` 支持层级比较。
 
 ### TierFeatureGate（层级功能限制）
 ```rust
@@ -149,25 +143,6 @@ pub enum NodeRequirement {
 pub enum WarnAction { Kick, Ban, Mute }
 ```
 
-### AdDeliveryType（广告投放类型）
-```rust
-pub enum AdDeliveryType {
-    ScheduledPost,   // CPM 1.0x
-    ReplyFooter,     // CPM 0.5x
-    WelcomeEmbed,    // CPM 0.3x
-}
-```
-
-### AdTargetTag（广告目标标签）
-```rust
-pub enum AdTargetTag {
-    TargetPlatform(Platform),
-    MinMembers(u32),
-    Language([u8; 2]),
-    All,
-}
-```
-
 ### CeremonyStatus（仪式状态）
 ```rust
 pub enum CeremonyStatus {
@@ -196,6 +171,9 @@ pub trait BotRegistryProvider<AccountId> {
     fn bot_public_key(bot_id_hash: &BotIdHash) -> Option<[u8; 32]>;
     fn peer_count(bot_id_hash: &BotIdHash) -> u32;
     fn bot_operator(bot_id_hash: &BotIdHash) -> Option<AccountId>;
+    fn bot_status(bot_id_hash: &BotIdHash) -> Option<BotStatus>;       // NEW
+    fn attestation_level(bot_id_hash: &BotIdHash) -> u8;               // NEW
+    fn tee_type(bot_id_hash: &BotIdHash) -> Option<TeeType>;           // NEW
 }
 ```
 
@@ -253,11 +231,26 @@ pub trait PeerUptimeRecorder {
 }
 ```
 
+### CommunityProvider（社区查询）
+
+> 实现: community pallet | 消费: ads-grouprobot (可选)
+
+```rust
+pub trait CommunityProvider {
+    fn is_community_configured(community_id_hash: &CommunityIdHash) -> bool;
+    fn is_community_banned(community_id_hash: &CommunityIdHash) -> bool;
+    fn is_ads_enabled(community_id_hash: &CommunityIdHash) -> bool;
+    fn active_members(community_id_hash: &CommunityIdHash) -> u32;
+    fn language(community_id_hash: &CommunityIdHash) -> Option<[u8; 2]>;
+}
+```
+
 ### EraSettlementResult（结算结果）
 
 ```rust
 pub struct EraSettlementResult {
     pub total_income: u128,
+    pub node_share: u128,       // NEW: 运营者分成 (通常 90%)
     pub treasury_share: u128,
 }
 ```
@@ -332,6 +325,7 @@ pub trait EraRewardDistributor {
 |------|------|------|------|
 | R1 | 2026-03-03 | L1, L2, L3 | 移除死 `extern crate alloc`; Cargo.toml 补充 try-runtime/runtime-benchmarks features; README 全面同步 |
 | R1.1 | 2026-03-03 | L4, L5/M1 | 移除死别名 GenericAdScheduleProvider/GenericAdDeliveryCountProvider; 移除死 AdScheduleProvider trait (grouprobot 版, 零消费者), 消除与 ads-primitives 同名冲突 |
+| R2 | 2026-03-04 | 多项 | 删除死类型 SuspendReason/AdDeliveryType/AdTargetTag; BotRegistryProvider +bot_status/attestation_level/tee_type; SubscriptionTier +PartialOrd/Ord; EraSettlementResult +node_share; TierFeatureGate 可配置化 (subscription pallet TierFeatureGateOverrides 存储) |
 
 **记录但未修复:**
 - M2: 5 个 ads-primitives 重导出 (CampaignStatus, AdReviewStatus, AdPreference, PlacementId, DeliveryMethod) 无下游消费者通过 grouprobot-primitives 路径引用 (保留向后兼容)

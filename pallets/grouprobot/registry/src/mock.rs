@@ -32,6 +32,12 @@ impl SubscriptionProvider for MockSubscription {
 	fn effective_feature_gate(bot_id_hash: &BotIdHash) -> TierFeatureGate {
 		MockSubscription::effective_tier(bot_id_hash).feature_gate()
 	}
+	fn is_subscription_active(bot_id_hash: &BotIdHash) -> bool {
+		MockSubscription::effective_tier(bot_id_hash).is_paid()
+	}
+	fn subscription_status(bot_id_hash: &BotIdHash) -> Option<SubscriptionStatus> {
+		if MockSubscription::effective_tier(bot_id_hash).is_paid() { Some(SubscriptionStatus::Active) } else { None }
+	}
 }
 
 impl pallet_grouprobot_registry::Config for Test {

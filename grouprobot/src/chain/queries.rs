@@ -53,11 +53,8 @@ impl ChainClient {
                 let public_key = extract_bytes_32(&decoded, "public_key")
                     .unwrap_or([0u8; 32]);
 
-                let owner = decoded.at("owner")
-                    .and_then(|v| {
-                        // AccountId32 存储为 Composite 或 bytes
-                        v.as_str().map(|s| s.to_string())
-                    })
+                let owner = extract_bytes_32(&decoded, "owner")
+                    .map(|b| hex::encode(b))
                     .unwrap_or_default();
 
                 if !is_active {
@@ -116,8 +113,8 @@ impl ChainClient {
 
                 // 获取当前区块号判断是否过期
                 let current_block = self.api().blocks().at_latest().await
-                    .map(|b| b.number() as u64)
-                    .unwrap_or(0);
+                    .map_err(|e| BotError::QueryFailed(format!("fetch current block: {}", e)))?
+                    .number() as u64;
 
                 let is_expired = expires_at
                     .map(|exp| current_block > exp)
@@ -311,6 +308,44 @@ impl ChainClient {
                     .unwrap_or("")
                     .to_string();
 
+                // Phase 5 新增字段
+                let cas_enabled = decoded.at("cas_enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let raid_enabled = decoded.at("raid_enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let raid_window_secs = decoded.at("raid_window_secs")
+                    .and_then(|v| v.as_u128())
+                    .unwrap_or(60) as u64;
+                let raid_join_threshold = decoded.at("raid_join_threshold")
+                    .and_then(|v| v.as_u128())
+                    .unwrap_or(10) as u16;
+                let max_mentions = decoded.at("max_mentions")
+                    .and_then(|v| v.as_u128())
+                    .unwrap_or(0) as u16;
+                let new_member_audit_count = decoded.at("new_member_audit_count")
+                    .and_then(|v| v.as_u128())
+                    .unwrap_or(0) as u16;
+                let nsfw_mode = decoded.at("nsfw_mode")
+                    .and_then(|v| v.as_u128())
+                    .unwrap_or(0) as u8;
+                let profanity_words = decoded.at("profanity_words")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let profanity_action = decoded.at("profanity_action")
+                    .and_then(|v| v.as_u128())
+                    .unwrap_or(0) as u8;
+                let homoglyph_keywords = decoded.at("homoglyph_keywords")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let automod_rules_json = decoded.at("automod_rules_json")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
                 Ok(Some(ChainCommunityConfig {
                     node_requirement,
                     anti_flood_enabled,
@@ -342,6 +377,17 @@ impl ChainClient {
                     forced_ads_per_day,
                     can_disable_ads,
                     community_id_hash: community_id_hash_str,
+                    cas_enabled,
+                    raid_enabled,
+                    raid_window_secs,
+                    raid_join_threshold,
+                    max_mentions,
+                    new_member_audit_count,
+                    nsfw_mode,
+                    profanity_words,
+                    profanity_action,
+                    homoglyph_keywords,
+                    automod_rules_json,
                 }))
             }
             None => Ok(None),
@@ -516,20 +562,6 @@ impl ChainClient {
             }
             None => Ok(Vec::new()),
         }
-    }
-
-    /// 查询活跃仪式
-    #[allow(dead_code)]
-    pub async fn is_ceremony_active(&self, bot_public_key: &[u8; 32]) -> BotResult<bool> {
-        let query = subxt::dynamic::storage(
-            "GroupRobotCeremony", "ActiveCeremony",
-            vec![Value::from_bytes(bot_public_key)],
-        );
-        let result = self.api().storage().at_latest().await
-            .map_err(|e| BotError::QueryFailed(format!("storage access: {}", e)))?
-            .fetch(&query).await
-            .map_err(|e| BotError::QueryFailed(format!("fetch ceremony: {}", e)))?;
-        Ok(result.is_some())
     }
 
     // ========================================================================

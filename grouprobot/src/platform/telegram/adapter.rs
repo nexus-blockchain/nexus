@@ -135,6 +135,23 @@ impl PlatformAdapter for TelegramAdapter {
         // 检测消息类型
         let message_type = Self::detect_message_type(&event.raw_event);
 
+        // 检测新成员入群/离群
+        let msg_obj = event.raw_event.get("message");
+        let is_new_member = msg_obj
+            .and_then(|m| m.get("new_chat_members"))
+            .and_then(|a| a.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false)
+            || event.event_type == "join_request";
+        let is_left_member = msg_obj
+            .and_then(|m| m.get("left_chat_member"))
+            .is_some();
+        let service_message_id = if is_new_member || is_left_member {
+            event.message_id.clone()
+        } else {
+            None
+        };
+
         // CallbackQuery
         let (callback_query_id, callback_data) = if is_callback {
             let cb = event.raw_event.get("callback_query");
@@ -156,6 +173,9 @@ impl PlatformAdapter for TelegramAdapter {
             command,
             command_args: args,
             is_join_request: event.event_type == "join_request",
+            is_new_member,
+            is_left_member,
+            service_message_id,
             is_admin: false, // 需要通过 API 查询
             message_type,
             callback_query_id,

@@ -6,10 +6,11 @@
 //
 // | Extrinsic             | DB Reads | DB Writes | ref_time   | proof_size |
 // |-----------------------|----------|-----------|------------|------------|
-// | set_pool_reward_config| 2 R      | 3 W       | 45M        | 5K         |
-// | claim_pool_reward     | 10 R     | 7 W       | 150M       | 15K        |
-// | force_new_round       | 5+N R   | 1 W        | 100M       | 10K        |
-// | set_token_pool_enabled| 2 R      | 3 W       | 40M        | 4K         |
+// | set_pool_reward_config  | 4 R      | 3 W       | 50M        | 6K         |
+// | claim_pool_reward       | 10 R     | 7 W       | 150M       | 15K        |
+// | force_new_round         | 7+N R   | 1 W        | 110M       | 11K        |
+// | set_token_pool_enabled  | 4 R      | 3 W       | 45M        | 5K         |
+// | clear_pool_reward_config| 4 R      | 3 W       | 40M        | 5K         |
 
 use frame_support::weights::Weight;
 
@@ -18,6 +19,7 @@ pub trait WeightInfo {
     fn claim_pool_reward() -> Weight;
     fn force_new_round() -> Weight;
     fn set_token_pool_enabled() -> Weight;
+    fn clear_pool_reward_config() -> Weight;
 }
 
 /// 基于 DB 读写分析的估算权重
@@ -25,18 +27,18 @@ pub struct SubstrateWeight;
 
 impl WeightInfo for SubstrateWeight {
     /// set_pool_reward_config:
-    ///   reads: existing_config(1) + CurrentRound in invalidate(1) = 2
+    ///   reads: entity_active(1) + entity_owner(1) + existing_config(1) + CurrentRound in invalidate(1) = 4
     ///   writes: config_insert(1) + LastRoundId(1) + CurrentRound::remove(1) = 3
     fn set_pool_reward_config() -> Weight {
-        Weight::from_parts(45_000_000, 5_000)
-            .saturating_add(frame_support::weights::constants::RocksDbWeight::get().reads(2))
+        Weight::from_parts(50_000_000, 6_000)
+            .saturating_add(frame_support::weights::constants::RocksDbWeight::get().reads(4))
             .saturating_add(frame_support::weights::constants::RocksDbWeight::get().writes(3))
     }
 
     /// claim_pool_reward:
-    ///   reads: entity_active(1) + is_member(1) + is_activated(1) + participation(1) +
+    ///   reads: entity_active(1) + is_member(1) + participation(1) +
     ///          config(1) + current_round(1) + pool_balance(1) + last_claimed(1) +
-    ///          Currency::from_bal(1) + Currency::to_bal(1) = 10
+    ///          Currency::from_bal(1) + Currency::to_bal(1) = 9
     ///   writes: deduct_pool(1) + Currency::from_bal(1) + Currency::to_bal(1) +
     ///           current_round(1) + last_claimed(1) + claim_records(1) + token(0-1) = 7
     fn claim_pool_reward() -> Weight {
@@ -46,21 +48,30 @@ impl WeightInfo for SubstrateWeight {
     }
 
     /// force_new_round:
-    ///   reads: config(1) + CurrentRound(1) + pool_balance(1) + member_count_by_level(N, up to 10)
-    ///          + token_pool_balance(0-1) ≈ 5 base + N
+    ///   reads: entity_active(1) + entity_owner(1) + config(1) + CurrentRound(1) + pool_balance(1)
+    ///          + member_count_by_level(N, up to 10) + token_pool_balance(0-1) ≈ 7 base + N
     ///   writes: CurrentRound(1)
     fn force_new_round() -> Weight {
-        Weight::from_parts(100_000_000, 10_000)
-            .saturating_add(frame_support::weights::constants::RocksDbWeight::get().reads(5))
+        Weight::from_parts(110_000_000, 11_000)
+            .saturating_add(frame_support::weights::constants::RocksDbWeight::get().reads(7))
             .saturating_add(frame_support::weights::constants::RocksDbWeight::get().writes(1))
     }
 
     /// set_token_pool_enabled:
-    ///   reads: config_mutate(1) + CurrentRound in invalidate(1) = 2
+    ///   reads: entity_active(1) + entity_owner(1) + config_mutate(1) + CurrentRound in invalidate(1) = 4
     ///   writes: config(1) + LastRoundId(1) + CurrentRound::remove(1) = 3
     fn set_token_pool_enabled() -> Weight {
-        Weight::from_parts(40_000_000, 4_000)
-            .saturating_add(frame_support::weights::constants::RocksDbWeight::get().reads(2))
+        Weight::from_parts(45_000_000, 5_000)
+            .saturating_add(frame_support::weights::constants::RocksDbWeight::get().reads(4))
+            .saturating_add(frame_support::weights::constants::RocksDbWeight::get().writes(3))
+    }
+
+    /// clear_pool_reward_config:
+    ///   reads: entity_active(1) + entity_owner(1) + config_exists(1) + CurrentRound in invalidate(1) = 4
+    ///   writes: config_remove(1) + LastRoundId(1) + CurrentRound::remove(1) = 3
+    fn clear_pool_reward_config() -> Weight {
+        Weight::from_parts(40_000_000, 5_000)
+            .saturating_add(frame_support::weights::constants::RocksDbWeight::get().reads(4))
             .saturating_add(frame_support::weights::constants::RocksDbWeight::get().writes(3))
     }
 }
@@ -71,4 +82,5 @@ impl WeightInfo for () {
     fn claim_pool_reward() -> Weight { Weight::zero() }
     fn force_new_round() -> Weight { Weight::zero() }
     fn set_token_pool_enabled() -> Weight { Weight::zero() }
+    fn clear_pool_reward_config() -> Weight { Weight::zero() }
 }

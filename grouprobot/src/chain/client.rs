@@ -2,6 +2,7 @@ use subxt::{OnlineClient, SubstrateConfig};
 use subxt_signer::sr25519::Keypair;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
+use zeroize::Zeroize;
 
 use crate::chain::types::PendingActionLog;
 use crate::error::{BotError, BotResult};
@@ -67,14 +68,26 @@ impl ChainClient {
 pub fn load_or_generate_signer(data_dir: &str, seed: Option<&str>) -> Keypair {
     // 如果提供了种子
     if let Some(seed_hex) = seed {
-        if let Ok(bytes) = hex::decode(seed_hex.strip_prefix("0x").unwrap_or(seed_hex)) {
-            if bytes.len() == 32 {
-                let mut s = [0u8; 32];
-                s.copy_from_slice(&bytes);
-                if let Ok(kp) = Keypair::from_secret_key(s) {
-                    info!("链上签名密钥从种子加载");
-                    return kp;
+        match hex::decode(seed_hex.strip_prefix("0x").unwrap_or(seed_hex)) {
+            Ok(mut bytes) => {
+                if bytes.len() == 32 {
+                    let mut s = [0u8; 32];
+                    s.copy_from_slice(&bytes);
+                    bytes.zeroize();
+                    let result = Keypair::from_secret_key(s);
+                    s.zeroize();
+                    if let Ok(kp) = result {
+                        info!("链上签名密钥从种子加载");
+                        return kp;
+                    }
+                    warn!("提供的 CHAIN_SIGNER_SEED 无法生成密钥对，回退到文件/生成");
+                } else {
+                    warn!(len = bytes.len(), "提供的 CHAIN_SIGNER_SEED 长度不是 32 字节，回退到文件/生成");
+                    bytes.zeroize();
                 }
+            }
+            Err(e) => {
+                warn!(error = %e, "提供的 CHAIN_SIGNER_SEED 不是有效 hex，回退到文件/生成");
             }
         }
     }
@@ -82,14 +95,19 @@ pub fn load_or_generate_signer(data_dir: &str, seed: Option<&str>) -> Keypair {
     // 尝试从文件加载
     let key_path = std::path::Path::new(data_dir).join("chain_signer.key");
     if key_path.exists() {
-        if let Ok(seed_bytes) = std::fs::read(&key_path) {
+        if let Ok(mut seed_bytes) = std::fs::read(&key_path) {
             if seed_bytes.len() == 32 {
                 let mut seed = [0u8; 32];
                 seed.copy_from_slice(&seed_bytes);
-                if let Ok(kp) = Keypair::from_secret_key(seed) {
+                seed_bytes.zeroize();
+                let result = Keypair::from_secret_key(seed);
+                seed.zeroize();
+                if let Ok(kp) = result {
                     info!("链上签名密钥已从文件加载");
                     return kp;
                 }
+            } else {
+                seed_bytes.zeroize();
             }
         }
     }
@@ -101,7 +119,7 @@ pub fn load_or_generate_signer(data_dir: &str, seed: Option<&str>) -> Keypair {
     let kp = Keypair::from_secret_key(seed).expect("有效的随机种子");
 
     std::fs::create_dir_all(data_dir).ok();
-    if let Err(e) = std::fs::write(&key_path, seed) {
+    if let Err(e) = std::fs::write(&key_path, &seed) {
         warn!(error = %e, "链上签名密钥持久化失败");
     } else {
         // 限制密钥文件权限为 0o600 (仅 owner 可读写)
@@ -112,5 +130,6 @@ pub fn load_or_generate_signer(data_dir: &str, seed: Option<&str>) -> Keypair {
         }
         info!("已生成并保存新的链上签名密钥");
     }
+    seed.zeroize();
     kp
 }

@@ -913,6 +913,12 @@ pub fn handle_migration_export(
     let local_share = shamir::decrypt_share(&encrypted_share, &seal_key)
         .map_err(|e| BotError::EnclaveError(format!("decrypt local share for migration: {}", e)))?;
 
+    // M4 审计修复: 此处用单个 share 做 K=1 恢复
+    // 仅当原始 Shamir split 使用 K=1 时结果才正确
+    // K>1 场景下, 单 share 恢复会产生错误 secret (静默错误, 非 panic)
+    // TODO: 持久化 ceremony K 值到 EnclaveBridge, 在此处校验
+    warn!("Migration export: recovering secret with K=1 from single share. \
+           This is only correct if the original ceremony used threshold=1.");
     let secrets = shamir::recover(&[local_share], 1)
         .map_err(|e| BotError::EnclaveError(format!("recover secret for migration: {}", e)))?;
 

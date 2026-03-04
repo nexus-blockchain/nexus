@@ -34,7 +34,7 @@ pub mod pallet {
         TokenTransferProvider as TokenTransferProviderT,
         ParticipationGuard,
     };
-    use pallet_entity_common::EntityProvider;
+    use pallet_entity_common::{EntityProvider, AdminPermission};
     use sp_runtime::traits::{Saturating, Zero};
 
     pub type BalanceOf<T> =
@@ -171,7 +171,10 @@ pub mod pallet {
         type WeightInfo: WeightInfo;
     }
 
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     // ========================================================================
@@ -274,8 +277,6 @@ pub mod pallet {
         InvalidRoundDuration,
         /// 调用者不是该 Entity 的会员
         NotMember,
-        /// 会员未激活
-        MemberNotActivated,
         /// 用户等级未在配置中或比率为 0
         LevelNotConfigured,
         /// 本轮已领取过
@@ -296,6 +297,10 @@ pub mod pallet {
         RoundIdOverflow,
         /// 账户未满足 Entity 参与要求（如 KYC）
         ParticipationRequirementNotMet,
+        /// 调用者不是 Entity Owner 或授权管理员
+        NotAuthorized,
+        /// 实体已被全局锁定，所有配置操作不可用
+        EntityLocked,
     }
 
     // ========================================================================
@@ -304,7 +309,7 @@ pub mod pallet {
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        /// 设置沉淀池奖励配置（Root / Governance）
+        /// 设置沉淀池奖励配置（Entity Owner / Admin(COMMISSION_MANAGE)）
         #[pallet::call_index(0)]
         #[pallet::weight(T::WeightInfo::set_pool_reward_config())]
         pub fn set_pool_reward_config(
@@ -313,7 +318,9 @@ pub mod pallet {
             level_ratios: BoundedVec<(u8, u16), T::MaxPoolRewardLevels>,
             round_duration: BlockNumberFor<T>,
         ) -> DispatchResult {
-            ensure_root(origin)?;
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(&who, entity_id)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             ensure!(round_duration > BlockNumberFor::<T>::zero(), Error::<T>::InvalidRoundDuration);
             Self::validate_level_ratios(&level_ratios)?;
@@ -352,7 +359,6 @@ pub mod pallet {
 
             // 1. 资格检查
             ensure!(T::MemberProvider::is_member(entity_id, &who), Error::<T>::NotMember);
-            ensure!(T::MemberProvider::is_activated(entity_id, &who), Error::<T>::MemberNotActivated);
 
             // PR-H1 审计修复: 池奖励领取需检查参与权（与 withdraw_commission 一致）
             ensure!(
@@ -470,17 +476,16 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 强制开启新轮次（Root）
+        /// 开启新轮次（Entity Owner / Admin(COMMISSION_MANAGE)）
         #[pallet::call_index(2)]
         #[pallet::weight(T::WeightInfo::force_new_round())]
         pub fn force_new_round(
             origin: OriginFor<T>,
             entity_id: u64,
         ) -> DispatchResult {
-            ensure_root(origin)?;
-
-            // M1-R5: Entity 必须存在且激活（与 claim_pool_reward 一致）
-            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(&who, entity_id)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             let config = PoolRewardConfigs::<T>::get(entity_id)
                 .ok_or(Error::<T>::ConfigNotFound)?;
@@ -496,7 +501,7 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 启用/禁用 Entity Token 池分配（Root）
+        /// 启用/禁用 Entity Token 池分配（Entity Owner / Admin(COMMISSION_MANAGE)）
         #[pallet::call_index(3)]
         #[pallet::weight(T::WeightInfo::set_token_pool_enabled())]
         pub fn set_token_pool_enabled(
@@ -504,7 +509,9 @@ pub mod pallet {
             entity_id: u64,
             enabled: bool,
         ) -> DispatchResult {
-            ensure_root(origin)?;
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(&who, entity_id)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             let mut changed = false;
             PoolRewardConfigs::<T>::try_mutate(entity_id, |maybe| -> DispatchResult {
                 let config = maybe.as_mut().ok_or(Error::<T>::ConfigNotFound)?;
@@ -522,6 +529,125 @@ pub mod pallet {
             Self::deposit_event(Event::TokenPoolEnabledUpdated { entity_id, enabled });
             Ok(())
         }
+
+        // ===== Root force_* 紧急覆写 extrinsics =====
+
+        /// [Root] 强制设置沉淀池奖励配置（绕过 Owner/Admin 权限和 EntityLocked 检查）
+        #[pallet::call_index(4)]
+        #[pallet::weight(T::WeightInfo::set_pool_reward_config())]
+        pub fn force_set_pool_reward_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            level_ratios: BoundedVec<(u8, u16), T::MaxPoolRewardLevels>,
+            round_duration: BlockNumberFor<T>,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            ensure!(round_duration > BlockNumberFor::<T>::zero(), Error::<T>::InvalidRoundDuration);
+            Self::validate_level_ratios(&level_ratios)?;
+
+            let token_pool_enabled = PoolRewardConfigs::<T>::get(entity_id)
+                .map(|c| c.token_pool_enabled)
+                .unwrap_or(false);
+
+            PoolRewardConfigs::<T>::insert(entity_id, PoolRewardConfig {
+                level_ratios,
+                round_duration,
+                token_pool_enabled,
+            });
+
+            Self::invalidate_current_round(entity_id);
+            Self::deposit_event(Event::PoolRewardConfigUpdated { entity_id });
+            Ok(())
+        }
+
+        /// [Root] 强制启用/禁用 Token 池分配（绕过 Owner/Admin 权限和 EntityLocked 检查）
+        #[pallet::call_index(5)]
+        #[pallet::weight(T::WeightInfo::set_token_pool_enabled())]
+        pub fn force_set_token_pool_enabled(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            enabled: bool,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            let mut changed = false;
+            PoolRewardConfigs::<T>::try_mutate(entity_id, |maybe| -> DispatchResult {
+                let config = maybe.as_mut().ok_or(Error::<T>::ConfigNotFound)?;
+                if config.token_pool_enabled != enabled {
+                    config.token_pool_enabled = enabled;
+                    changed = true;
+                }
+                Ok(())
+            })?;
+            if changed {
+                Self::invalidate_current_round(entity_id);
+            }
+            Self::deposit_event(Event::TokenPoolEnabledUpdated { entity_id, enabled });
+            Ok(())
+        }
+
+        /// 清除沉淀池奖励配置（Entity Owner / Admin(COMMISSION_MANAGE)）
+        ///
+        /// 仅移除配置并使当前轮次失效，不清理历史领取记录。
+        /// 完整清理（含 LastClaimedRound / ClaimRecords）请使用 PoolRewardPlanWriter::clear_config。
+        #[pallet::call_index(7)]
+        #[pallet::weight(T::WeightInfo::clear_pool_reward_config())]
+        pub fn clear_pool_reward_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(&who, entity_id)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(PoolRewardConfigs::<T>::contains_key(entity_id), Error::<T>::ConfigNotFound);
+
+            PoolRewardConfigs::<T>::remove(entity_id);
+            Self::invalidate_current_round(entity_id);
+            Self::deposit_event(Event::PoolRewardConfigCleared { entity_id });
+            Ok(())
+        }
+
+        /// [Root] 强制清除沉淀池奖励配置（绕过 Owner/Admin 权限和 EntityLocked 检查）
+        #[pallet::call_index(8)]
+        #[pallet::weight(T::WeightInfo::clear_pool_reward_config())]
+        pub fn force_clear_pool_reward_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            // X2: 仅配置存在时才 remove + emit，防止幻影事件
+            if PoolRewardConfigs::<T>::contains_key(entity_id) {
+                PoolRewardConfigs::<T>::remove(entity_id);
+                Self::invalidate_current_round(entity_id);
+                Self::deposit_event(Event::PoolRewardConfigCleared { entity_id });
+            }
+            Ok(())
+        }
+
+        /// [Root] 强制开启新轮次（绕过 Owner/Admin 权限和 EntityLocked 检查）
+        #[pallet::call_index(6)]
+        #[pallet::weight(T::WeightInfo::force_new_round())]
+        pub fn force_start_new_round(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+
+            let config = PoolRewardConfigs::<T>::get(entity_id)
+                .ok_or(Error::<T>::ConfigNotFound)?;
+
+            let now = <frame_system::Pallet<T>>::block_number();
+            let round = Self::create_new_round(entity_id, &config, now)?;
+
+            Self::deposit_event(Event::RoundForced {
+                entity_id,
+                round_id: round.round_id,
+            });
+
+            Ok(())
+        }
     }
 
     // ========================================================================
@@ -529,6 +655,20 @@ pub mod pallet {
     // ========================================================================
 
     impl<T: Config> Pallet<T> {
+        /// 确保调用者是 Entity Owner 或拥有 COMMISSION_MANAGE 权限的管理员
+        fn ensure_owner_or_admin(who: &T::AccountId, entity_id: u64) -> DispatchResult {
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+            let owner = T::EntityProvider::entity_owner(entity_id)
+                .ok_or(Error::<T>::EntityNotActive)?;
+            ensure!(
+                *who == owner || T::EntityProvider::is_entity_admin(
+                    entity_id, who, AdminPermission::COMMISSION_MANAGE
+                ),
+                Error::<T>::NotAuthorized
+            );
+            Ok(())
+        }
+
         /// M2-R3 审计修复: 使当前轮次失效，保留 round_id 到 LastRoundId 保持单调递增
         pub(crate) fn invalidate_current_round(entity_id: u64) {
             if let Some(round) = CurrentRound::<T>::get(entity_id) {

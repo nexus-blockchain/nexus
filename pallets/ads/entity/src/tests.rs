@@ -341,7 +341,7 @@ fn delivery_verifier_works() {
 
 		// ALICE (entity owner) 提交展示量
 		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
-			&ALICE, &pid, 500,
+			&ALICE, &pid, 500, None,
 		);
 		assert_ok!(&result);
 		assert_eq!(result.unwrap(), 500);
@@ -362,13 +362,13 @@ fn delivery_verifier_caps_audience() {
 
 		// 默认 cap = 1000, 提交 1500 → 只算 1000
 		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
-			&ALICE, &pid, 1500,
+			&ALICE, &pid, 1500, None,
 		);
 		assert_eq!(result.unwrap(), 1000);
 
 		// 再提交 500 → 剩余 0, 应该失败
 		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
-			&ALICE, &pid, 500,
+			&ALICE, &pid, 500, None,
 		);
 		assert_noop!(result, Error::<Test>::DailyImpressionCapReached);
 	});
@@ -379,7 +379,7 @@ fn delivery_verifier_fails_not_registered() {
 	new_test_ext().execute_with(|| {
 		let pid = entity_placement_id(1);
 		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
-			&ALICE, &pid, 100,
+			&ALICE, &pid, 100, None,
 		);
 		assert_noop!(result, Error::<Test>::PlacementNotRegistered);
 	});
@@ -399,7 +399,7 @@ fn delivery_verifier_fails_not_active() {
 		));
 
 		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
-			&ALICE, &pid, 100,
+			&ALICE, &pid, 100, None,
 		);
 		assert_noop!(result, Error::<Test>::PlacementNotActive);
 	});
@@ -416,7 +416,7 @@ fn delivery_verifier_fails_banned() {
 		assert_ok!(AdsEntity::ban_entity(RuntimeOrigin::root(), 1));
 
 		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
-			&ALICE, &pid, 100,
+			&ALICE, &pid, 100, None,
 		);
 		assert_noop!(result, Error::<Test>::EntityBanned);
 	});
@@ -432,7 +432,7 @@ fn delivery_verifier_fails_not_authorized() {
 
 		// 用户 4 既不是 owner 也不是 admin
 		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
-			&4u64, &pid, 100,
+			&4u64, &pid, 100, None,
 		);
 		assert_noop!(result, Error::<Test>::NotEntityAdmin);
 	});
@@ -448,7 +448,7 @@ fn delivery_verifier_shop_manager_authorized() {
 
 		// CHARLIE 是 shop manager, 可以提交展示量
 		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
-			&CHARLIE, &pid, 200,
+			&CHARLIE, &pid, 200, None,
 		);
 		assert_ok!(&result);
 		assert_eq!(result.unwrap(), 200);
@@ -517,7 +517,7 @@ fn revenue_distributor_default_split() {
 		let result = <AdsEntity as pallet_ads_primitives::RevenueDistributor<u64, u128>>::distribute(
 			&pid, 10_000, &99,
 		);
-		assert_eq!(result.unwrap(), 8_000); // 80%
+		assert_eq!(result.unwrap().placement_share, 8_000); // 80%
 	});
 }
 
@@ -537,7 +537,7 @@ fn revenue_distributor_custom_split() {
 		let result = <AdsEntity as pallet_ads_primitives::RevenueDistributor<u64, u128>>::distribute(
 			&pid, 10_000, &99,
 		);
-		assert_eq!(result.unwrap(), 7_000); // 70%
+		assert_eq!(result.unwrap().placement_share, 7_000); // 70%
 	});
 }
 
@@ -732,7 +732,7 @@ fn m1r2_distribute_works_registered_placement() {
 		let result = <AdsEntity as pallet_ads_primitives::RevenueDistributor<u64, u128>>::distribute(
 			&pid, 10_000, &99,
 		);
-		assert_eq!(result.unwrap(), 8_000); // default 80%
+		assert_eq!(result.unwrap().placement_share, 8_000); // default 80%
 	});
 }
 
@@ -781,14 +781,14 @@ fn l2r2_daily_impression_reset_after_14400_blocks() {
 
 		// Fill to cap (1000)
 		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
-			&ALICE, &pid, 1000,
+			&ALICE, &pid, 1000, None,
 		);
 		assert_eq!(result.unwrap(), 1000);
 		assert_eq!(pallet::DailyImpressions::<Test>::get(&pid), 1000);
 
 		// Still at block 1 → cap reached
 		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
-			&ALICE, &pid, 1,
+			&ALICE, &pid, 1, None,
 		);
 		assert_noop!(result, Error::<Test>::DailyImpressionCapReached);
 
@@ -797,12 +797,88 @@ fn l2r2_daily_impression_reset_after_14400_blocks() {
 
 		// Now daily counter should reset, new impressions accepted
 		let result = <AdsEntity as pallet_ads_primitives::DeliveryVerifier<u64>>::verify_and_cap_audience(
-			&ALICE, &pid, 500,
+			&ALICE, &pid, 500, None,
 		);
 		assert_eq!(result.unwrap(), 500);
 		assert_eq!(pallet::DailyImpressions::<Test>::get(&pid), 500);
 
 		// Total impressions accumulated across days
 		assert_eq!(pallet::TotalImpressions::<Test>::get(&pid), 1500);
+	});
+}
+
+// ============================================================================
+// EntityLocked 回归测试
+// ============================================================================
+
+#[test]
+fn entity_locked_rejects_register_entity_placement() {
+	new_test_ext().execute_with(|| {
+		set_entity_locked(1);
+		assert_noop!(
+			AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 1),
+			Error::<Test>::EntityLocked
+		);
+	});
+}
+
+#[test]
+fn entity_locked_rejects_register_shop_placement() {
+	new_test_ext().execute_with(|| {
+		set_entity_locked(1);
+		assert_noop!(
+			AdsEntity::register_shop_placement(RuntimeOrigin::signed(ALICE), 1, 10),
+			Error::<Test>::EntityLocked
+		);
+	});
+}
+
+#[test]
+fn entity_locked_rejects_deregister_placement() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 1));
+		let pid = crate::entity_placement_id(1);
+		set_entity_locked(1);
+		assert_noop!(
+			AdsEntity::deregister_placement(RuntimeOrigin::signed(ALICE), pid),
+			Error::<Test>::EntityLocked
+		);
+	});
+}
+
+#[test]
+fn entity_locked_rejects_set_placement_active() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 1));
+		let pid = crate::entity_placement_id(1);
+		set_entity_locked(1);
+		assert_noop!(
+			AdsEntity::set_placement_active(RuntimeOrigin::signed(ALICE), pid, false),
+			Error::<Test>::EntityLocked
+		);
+	});
+}
+
+#[test]
+fn entity_locked_rejects_set_impression_cap() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 1));
+		let pid = crate::entity_placement_id(1);
+		set_entity_locked(1);
+		assert_noop!(
+			AdsEntity::set_impression_cap(RuntimeOrigin::signed(ALICE), pid, 500),
+			Error::<Test>::EntityLocked
+		);
+	});
+}
+
+#[test]
+fn entity_locked_rejects_set_entity_ad_share() {
+	new_test_ext().execute_with(|| {
+		set_entity_locked(1);
+		assert_noop!(
+			AdsEntity::set_entity_ad_share(RuntimeOrigin::signed(ALICE), 1, 5000),
+			Error::<Test>::EntityLocked
+		);
 	});
 }

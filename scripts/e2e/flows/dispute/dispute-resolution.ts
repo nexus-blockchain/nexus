@@ -47,10 +47,12 @@ async function disputeResolution(ctx: FlowContext): Promise<void> {
   const docCids = ['QmTestEvidenceDoc001'];
 
   const commitTx = (api.tx as any).evidence.commit(
+    0,          // domain
+    0,          // targetId
     imgCids,    // images
     vidCids,    // videos
     docCids,    // documents
-    null,       // description_cid
+    null,       // memo
   );
   const commitResult = await ctx.send(commitTx, bob, 'Bob 提交证据', 'bob');
   assertTxSuccess(commitResult, '提交证据');
@@ -65,7 +67,7 @@ async function disputeResolution(ctx: FlowContext): Promise<void> {
   // ─── Step 2: Eve 提交反驳证据 ─────────────────────────────
 
   const eveCommitTx = (api.tx as any).evidence.commit(
-    ['QmSellerRebuttalImg001'], [], ['QmSellerRebuttalDoc001'], null,
+    0, 0, ['QmSellerRebuttalImg001'], [], ['QmSellerRebuttalDoc001'], null,
   );
   const eveCommitResult = await ctx.send(eveCommitTx, eve, 'Eve 提交反驳证据', 'eve');
   assertTxSuccess(eveCommitResult, 'Eve 提交证据');
@@ -79,12 +81,13 @@ async function disputeResolution(ctx: FlowContext): Promise<void> {
 
   const bobBalBefore = await getFreeBalance(api, bob.address);
 
+  const domain = '0x' + '00'.repeat(8);  // 8-byte domain identifier
   const complaintTx = (api.tx as any).arbitration.fileComplaint(
-    eve.address,               // respondent
-    'QmComplaintDescCid001',   // description_cid
-    evidenceId,                // evidence_id (optional)
-    null,                      // order_id (optional)
-    null,                      // escrow_id (optional)
+    domain,                    // domain: [u8;8]
+    0,                         // objectId: u64
+    'General',                 // complaintType: enum
+    'QmComplaintDescCid001',   // detailsCid
+    null,                      // amount: Option<u128>
   );
   const complaintResult = await ctx.send(complaintTx, bob, 'Bob 发起投诉', 'bob');
   assertTxSuccess(complaintResult, '发起投诉');
@@ -107,22 +110,21 @@ async function disputeResolution(ctx: FlowContext): Promise<void> {
 
   const respondTx = (api.tx as any).arbitration.respondToComplaint(
     complaintId,
-    'QmResponseDescCid001',    // response_cid
-    eveEvidenceId,             // evidence_id (optional)
+    'QmResponseDescCid001',    // responseCid
   );
   const respondResult = await ctx.send(respondTx, eve, 'Eve 响应投诉', 'eve');
   assertTxSuccess(respondResult, '响应投诉');
 
   // ─── Step 5: 达成和解 ─────────────────────────────────────
 
-  const settleTx = (api.tx as any).arbitration.settleComplaint(complaintId);
+  const settleTx = (api.tx as any).arbitration.settleComplaint(complaintId, 'QmSettlementCid001');
   const settleResult = await ctx.send(settleTx, bob, 'Bob 提议和解', 'bob');
   // 和解需要双方同意，先由一方提议
   if (settleResult.success) {
     await ctx.check('和解提议已提交', 'bob', () => {});
 
     // Eve 同意和解
-    const eveSettleTx = (api.tx as any).arbitration.settleComplaint(complaintId);
+    const eveSettleTx = (api.tx as any).arbitration.settleComplaint(complaintId, 'QmSettlementCid002');
     const eveSettleResult = await ctx.send(eveSettleTx, eve, 'Eve 同意和解', 'eve');
     if (eveSettleResult.success) {
       await ctx.check('投诉已和解', 'system', () => {
@@ -136,7 +138,7 @@ async function disputeResolution(ctx: FlowContext): Promise<void> {
   // ─── Step 6: 新投诉 → 升级到仲裁 ─────────────────────────
 
   const complaint2Tx = (api.tx as any).arbitration.fileComplaint(
-    eve.address, 'QmComplaint2Desc', null, null, null,
+    domain, 0, 'General', 'QmComplaint2Desc', null,
   );
   const complaint2Result = await ctx.send(complaint2Tx, bob, 'Bob 发起新投诉(升级)', 'bob');
   assertTxSuccess(complaint2Result, '发起新投诉');
@@ -147,7 +149,7 @@ async function disputeResolution(ctx: FlowContext): Promise<void> {
   const complaint2Id = complaint2Event?.data?.complaintId ?? complaint2Event?.data?.[0];
 
   // Eve 响应
-  const respond2Tx = (api.tx as any).arbitration.respondToComplaint(complaint2Id, 'QmResponse2', null);
+  const respond2Tx = (api.tx as any).arbitration.respondToComplaint(complaint2Id, 'QmResponse2');
   await ctx.send(respond2Tx, eve, 'Eve 响应新投诉', 'eve');
 
   // 升级到仲裁
@@ -163,8 +165,9 @@ async function disputeResolution(ctx: FlowContext): Promise<void> {
 
   const resolveTx = (api.tx as any).arbitration.resolveComplaint(
     complaint2Id,
-    0,    // decision: 0=FavorComplainant, 1=FavorRespondent, 2=Split
-    null, // bps (用于 Split)
+    0,                       // decision: 0=FavorComplainant
+    'QmReasonCid001',        // reasonCid
+    null,                    // partialBps (用于 Split)
   );
   const resolveResult = await ctx.sudo(resolveTx, '仲裁裁决');
   assertTxSuccess(resolveResult, '仲裁裁决');
@@ -177,7 +180,7 @@ async function disputeResolution(ctx: FlowContext): Promise<void> {
 
   // 先再创建一个投诉用于错误路径
   const complaint3Tx = (api.tx as any).arbitration.fileComplaint(
-    eve.address, 'QmComplaint3', null, null, null,
+    domain, 0, 'General', 'QmComplaint3', null,
   );
   const complaint3Result = await ctx.send(complaint3Tx, bob, 'Bob 发起投诉(错误路径)', 'bob');
 
@@ -189,7 +192,7 @@ async function disputeResolution(ctx: FlowContext): Promise<void> {
 
     // Eve 响应
     await ctx.send(
-      (api.tx as any).arbitration.respondToComplaint(complaint3Id, 'QmResp3', null),
+      (api.tx as any).arbitration.respondToComplaint(complaint3Id, 'QmResp3'),
       eve, 'Eve 响应', 'eve',
     );
 
@@ -200,7 +203,7 @@ async function disputeResolution(ctx: FlowContext): Promise<void> {
     );
 
     // Charlie 尝试裁决
-    const fakeResolveTx = (api.tx as any).arbitration.resolveComplaint(complaint3Id, 0, null);
+    const fakeResolveTx = (api.tx as any).arbitration.resolveComplaint(complaint3Id, 0, 'QmFakeReason', null);
     const fakeResolveResult = await ctx.send(fakeResolveTx, charlie, '[错误路径] Charlie 裁决', 'charlie');
     await ctx.check('非仲裁者裁决应失败', 'charlie', () => {
       assertTxFailed(fakeResolveResult, undefined, '非仲裁者裁决');
@@ -210,7 +213,7 @@ async function disputeResolution(ctx: FlowContext): Promise<void> {
   // ─── Step 9: 撤销投诉 → 退还押金 ─────────────────────────
 
   const complaint4Tx = (api.tx as any).arbitration.fileComplaint(
-    eve.address, 'QmComplaint4', null, null, null,
+    domain, 0, 'General', 'QmComplaint4', null,
   );
   const complaint4Result = await ctx.send(complaint4Tx, bob, 'Bob 发起投诉(撤销)', 'bob');
 

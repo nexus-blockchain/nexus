@@ -45,6 +45,10 @@ impl TokenVault {
     ///
     /// 接受 String 或 Zeroizing<String>, 内部统一以 Zeroizing 保护
     pub fn set_telegram_token(&mut self, token: impl Into<Zeroizing<String>>) {
+        // M6 审计修复: munlock 旧 token 防止 mlock 页面泄漏
+        if let Some(ref old) = self.tg_token {
+            mem_security::munlock_bytes(old.as_bytes());
+        }
         let z: Zeroizing<String> = token.into();
         // mlock: 锁定 Token 内存页, 防止被 swap 到磁盘
         if mem_security::mlock_bytes(z.as_bytes()) {
@@ -57,6 +61,10 @@ impl TokenVault {
     ///
     /// 接受 String 或 Zeroizing<String>, 内部统一以 Zeroizing 保护
     pub fn set_discord_token(&mut self, token: impl Into<Zeroizing<String>>) {
+        // M6 审计修复: munlock 旧 token 防止 mlock 页面泄漏
+        if let Some(ref old) = self.dc_token {
+            mem_security::munlock_bytes(old.as_bytes());
+        }
         let z: Zeroizing<String> = token.into();
         if mem_security::mlock_bytes(z.as_bytes()) {
             debug!("Discord token memory locked (mlock)");
@@ -72,6 +80,13 @@ impl TokenVault {
         api_id: impl Into<Zeroizing<String>>,
         api_hash: impl Into<Zeroizing<String>>,
     ) {
+        // M6 审计修复: munlock 旧 credentials 防止 mlock 页面泄漏
+        if let Some(ref old) = self.tg_api_id {
+            mem_security::munlock_bytes(old.as_bytes());
+        }
+        if let Some(ref old) = self.tg_api_hash {
+            mem_security::munlock_bytes(old.as_bytes());
+        }
         let id: Zeroizing<String> = api_id.into();
         let hash: Zeroizing<String> = api_hash.into();
         if mem_security::mlock_bytes(id.as_bytes()) {

@@ -9,6 +9,7 @@ import { StatusBadge } from "@/components/shared/StatusBadge";
 import { Badge } from "@/components/ui/badge";
 import { Coins, Settings, Lock, Unlock } from "lucide-react";
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 
 export default function TokenConfigPage() {
   const { currentEntityId } = useEntityStore();
@@ -16,23 +17,25 @@ export default function TokenConfigPage() {
   const actions = useTokenActions();
   const [mintAmount, setMintAmount] = useState("");
   const [mintTo, setMintTo] = useState("");
+  const t = useTranslations("token");
+  const tc = useTranslations("common");
 
-  if (!currentEntityId) return <div className="flex h-full items-center justify-center text-muted-foreground">Select an entity first</div>;
+  if (!currentEntityId) return <div className="flex h-full items-center justify-center text-muted-foreground">{tc("selectEntity")}</div>;
   if (isLoading) return <div className="flex h-full items-center justify-center"><div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" /></div>;
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold tracking-tight">Token Configuration</h1>
-        <p className="text-muted-foreground">Manage your entity token settings</p>
+        <h1 className="text-3xl font-bold tracking-tight">{t("title")}</h1>
+        <p className="text-muted-foreground">{t("subtitle")}</p>
       </div>
 
       {!config ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <Coins className="h-12 w-12 text-muted-foreground/50" />
-            <p className="mt-4 text-lg font-medium">No Token Configured</p>
-            <p className="text-sm text-muted-foreground">Token will be created with your entity&apos;s primary shop.</p>
+            <p className="mt-4 text-lg font-medium">{t("noToken")}</p>
+            <p className="text-sm text-muted-foreground">{t("noTokenDesc")}</p>
           </CardContent>
         </Card>
       ) : (

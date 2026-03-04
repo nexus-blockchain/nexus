@@ -64,7 +64,7 @@ pallet-commission-single-line = { workspace = true }
 pallet-commission-team = { workspace = true }
 pallet-commission-pool-reward = { workspace = true }
 pallet-entity-commission = { workspace = true }
-pallet-entity-service = { workspace = true }
+pallet-entity-product = { workspace = true }
 pallet-entity-order = { workspace = true }
 pallet-entity-market = { workspace = true }
 pallet-entity-review = { workspace = true }
@@ -84,6 +84,7 @@ pallet-ads-primitives = { workspace = true }
 pallet-ads-core = { workspace = true }
 pallet-ads-grouprobot = { workspace = true }
 pallet-ads-entity = { workspace = true }
+pallet-ads-router = { workspace = true }
 scale-info = { features = ["derive", "serde"], workspace = true }
 serde_json = { workspace = true, default-features = false, features = ["alloc"] }
 sp-api = { version = "40.0.0", workspace = true }
@@ -158,7 +159,7 @@ std = [
 	"pallet-commission-team/std",
 	"pallet-commission-pool-reward/std",
 	"pallet-entity-commission/std",
-	"pallet-entity-service/std",
+	"pallet-entity-product/std",
 	"pallet-entity-order/std",
 	"pallet-entity-market/std",
 	"pallet-entity-review/std",
@@ -178,6 +179,7 @@ std = [
 	"pallet-ads-core/std",
 	"pallet-ads-grouprobot/std",
 	"pallet-ads-entity/std",
+	"pallet-ads-router/std",
 	"scale-info/std",
 	"serde_json/std",
 	"sp-api/std",

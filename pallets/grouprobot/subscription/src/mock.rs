@@ -68,6 +68,11 @@ impl BotRegistryProvider<u64> for MockBotRegistry {
 			_ => None,
 		}
 	}
+	fn bot_status(bot_id_hash: &BotIdHash) -> Option<BotStatus> {
+		if matches!(bot_id_hash[0], 1 | 2) { Some(BotStatus::Active) } else { None }
+	}
+	fn attestation_level(_: &BotIdHash) -> u8 { 0 }
+	fn tee_type(_: &BotIdHash) -> Option<TeeType> { None }
 }
 
 parameter_types! {

@@ -8,6 +8,8 @@ pub struct LocalStore {
     fingerprints: DashMap<String, (u64, u64)>,
     /// L1 修复: 双桶滑动窗口计数器: key → (prev_count, curr_count, curr_window_start, window_secs)
     sliding_counters: DashMap<String, (u64, u64, u64, u64)>,
+    /// 通用字符串 KV 存储 (规则模块用于状态管理)
+    strings: DashMap<String, String>,
 }
 
 impl Default for LocalStore {
@@ -22,6 +24,7 @@ impl LocalStore {
             counters: DashMap::new(),
             fingerprints: DashMap::new(),
             sliding_counters: DashMap::new(),
+            strings: DashMap::new(),
         }
     }
 
@@ -149,6 +152,36 @@ impl LocalStore {
     pub fn record_message_hash(&self, group_id: &str, sender_id: &str, text_hash: u64, window_secs: u64) -> u64 {
         let key = format!("msghash:{}:{}:{}", group_id, sender_id, text_hash);
         self.increment_counter(&key, window_secs)
+    }
+
+    /// 读取字符串值
+    pub fn get_string(&self, key: &str) -> Option<String> {
+        self.strings.get(key).map(|v| v.value().clone())
+    }
+
+    /// 设置字符串值
+    pub fn set_string(&self, key: &str, value: &str) {
+        self.strings.insert(key.to_string(), value.to_string());
+    }
+
+    /// 删除字符串值
+    pub fn remove_string(&self, key: &str) {
+        self.strings.remove(key);
+    }
+
+    /// 移除并返回所有以指定前缀开头的字符串条目
+    pub fn drain_strings_with_prefix(&self, prefix: &str) -> Vec<(String, String)> {
+        let keys: Vec<String> = self.strings.iter()
+            .filter(|entry| entry.key().starts_with(prefix))
+            .map(|entry| entry.key().clone())
+            .collect();
+        let mut result = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Some((k, v)) = self.strings.remove(&key) {
+                result.push((k, v));
+            }
+        }
+        result
     }
 }
 

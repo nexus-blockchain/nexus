@@ -17,12 +17,13 @@ impl frame_system::Config for Test {
 	type Block = Block;
 }
 
-// Mock SubscriptionProvider: community_hash(1) => Basic, community_hash(5) => Enterprise, others => Free
+// Mock SubscriptionProvider: community_hash(1) => Basic, community_hash(2) => Pro, community_hash(5) => Enterprise, others => Free
 pub struct MockSubscription;
 impl SubscriptionProvider for MockSubscription {
 	fn effective_tier(bot_id_hash: &BotIdHash) -> SubscriptionTier {
 		match bot_id_hash[0] {
 			1 => SubscriptionTier::Basic,
+			2 => SubscriptionTier::Pro,
 			5 => SubscriptionTier::Enterprise,
 			_ => SubscriptionTier::Free,
 		}
@@ -30,25 +31,36 @@ impl SubscriptionProvider for MockSubscription {
 	fn effective_feature_gate(bot_id_hash: &BotIdHash) -> TierFeatureGate {
 		MockSubscription::effective_tier(bot_id_hash).feature_gate()
 	}
+	fn is_subscription_active(bot_id_hash: &BotIdHash) -> bool {
+		MockSubscription::effective_tier(bot_id_hash).is_paid()
+	}
+	fn subscription_status(bot_id_hash: &BotIdHash) -> Option<SubscriptionStatus> {
+		if MockSubscription::effective_tier(bot_id_hash).is_paid() { Some(SubscriptionStatus::Active) } else { None }
+	}
 }
 
 pub struct MockBotRegistry;
 impl BotRegistryProvider<u64> for MockBotRegistry {
-	fn is_bot_active(bot_id_hash: &BotIdHash) -> bool { bot_id_hash[0] <= 2 }
+	fn is_bot_active(bot_id_hash: &BotIdHash) -> bool { bot_id_hash[0] <= 2 || bot_id_hash[0] == 4 }
 	fn is_tee_node(_: &BotIdHash) -> bool { false }
 	fn has_dual_attestation(_: &BotIdHash) -> bool { false }
 	fn is_attestation_fresh(_: &BotIdHash) -> bool { false }
 	fn bot_owner(bot_id_hash: &BotIdHash) -> Option<u64> {
-		// community_hash(1,2) = active, community_hash(3) = inactive, all owned by OWNER
-		if bot_id_hash[0] <= 3 { Some(OWNER) } else { None }
+		// community_hash(1,2) = active, community_hash(3) = inactive, community_hash(4) = active+Free
+		if bot_id_hash[0] <= 4 { Some(OWNER) } else { None }
 	}
 	fn bot_public_key(bot_id_hash: &BotIdHash) -> Option<[u8; 32]> {
-		if bot_id_hash[0] <= 3 { Some(test_public_key()) } else { None }
+		if bot_id_hash[0] <= 4 { Some(test_public_key()) } else { None }
 	}
 	fn peer_count(_: &BotIdHash) -> u32 { 0 }
 	fn bot_operator(bot_id_hash: &BotIdHash) -> Option<u64> {
-		if bot_id_hash[0] <= 3 { Some(OWNER) } else { None }
+		if bot_id_hash[0] <= 4 { Some(OWNER) } else { None }
 	}
+	fn bot_status(bot_id_hash: &BotIdHash) -> Option<BotStatus> {
+		if bot_id_hash[0] <= 2 || bot_id_hash[0] == 4 { Some(BotStatus::Active) } else { None }
+	}
+	fn attestation_level(_: &BotIdHash) -> u8 { 0 }
+	fn tee_type(_: &BotIdHash) -> Option<TeeType> { None }
 }
 
 impl pallet_grouprobot_community::Config for Test {

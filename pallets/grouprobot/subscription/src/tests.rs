@@ -1118,3 +1118,915 @@ fn l2_r4_cleanup_subscription_removes_escrow_dust() {
 	});
 }
 
+// ========================================================================
+// force_cancel_subscription 测试
+// ========================================================================
+
+#[test]
+fn force_cancel_subscription_works() {
+	new_test_ext().execute_with(|| {
+		let treasury_before = Balances::free_balance(TREASURY);
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_ok!(Subscription::force_cancel_subscription(
+			RuntimeOrigin::root(),
+			bot_hash(1),
+		));
+		let sub = Subscriptions::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(sub.status, SubscriptionStatus::Cancelled);
+		assert_eq!(SubscriptionEscrow::<Test>::get(bot_hash(1)), 0);
+		// escrow 没收至国库
+		assert_eq!(Balances::free_balance(TREASURY), treasury_before + 50);
+	});
+}
+
+#[test]
+fn force_cancel_subscription_fails_not_root() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_noop!(
+			Subscription::force_cancel_subscription(
+				RuntimeOrigin::signed(OWNER),
+				bot_hash(1),
+			),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+#[test]
+fn force_cancel_subscription_fails_already_cancelled() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_ok!(Subscription::cancel_subscription(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+		));
+		assert_noop!(
+			Subscription::force_cancel_subscription(
+				RuntimeOrigin::root(),
+				bot_hash(1),
+			),
+			Error::<Test>::SubscriptionAlreadyCancelled
+		);
+	});
+}
+
+// ========================================================================
+// withdraw_escrow 测试
+// ========================================================================
+
+#[test]
+fn withdraw_escrow_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		// 提取 30, 剩余 20 >= fee=10 → 成功
+		assert_ok!(Subscription::withdraw_escrow(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			30,
+		));
+		assert_eq!(SubscriptionEscrow::<Test>::get(bot_hash(1)), 20);
+	});
+}
+
+#[test]
+fn withdraw_escrow_fails_would_underfund() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		// 提取 45, 剩余 5 < fee=10 → 拒绝
+		assert_noop!(
+			Subscription::withdraw_escrow(
+				RuntimeOrigin::signed(OWNER),
+				bot_hash(1),
+				45,
+			),
+			Error::<Test>::WithdrawWouldUnderfund
+		);
+	});
+}
+
+#[test]
+fn withdraw_escrow_fails_not_owner() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_noop!(
+			Subscription::withdraw_escrow(
+				RuntimeOrigin::signed(OTHER),
+				bot_hash(1),
+				10,
+			),
+			Error::<Test>::NotBotOwner
+		);
+	});
+}
+
+#[test]
+fn withdraw_escrow_fails_zero_amount() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_noop!(
+			Subscription::withdraw_escrow(
+				RuntimeOrigin::signed(OWNER),
+				bot_hash(1),
+				0,
+			),
+			Error::<Test>::ZeroDepositAmount
+		);
+	});
+}
+
+// ========================================================================
+// update_ad_commitment 测试
+// ========================================================================
+
+#[test]
+fn update_ad_commitment_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::commit_ads(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			community_hash(1),
+			5,
+		));
+		// 从 5 改为 8 (Basic→Pro)
+		assert_ok!(Subscription::update_ad_commitment(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			8,
+			None,
+		));
+		let record = AdCommitments::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(record.committed_ads_per_era, 8);
+		assert_eq!(record.effective_tier, SubscriptionTier::Pro);
+		assert_eq!(record.underdelivery_eras, 0);
+		assert_eq!(record.status, AdCommitmentStatus::Active);
+	});
+}
+
+#[test]
+fn update_ad_commitment_changes_community() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::commit_ads(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			community_hash(1),
+			5,
+		));
+		assert_ok!(Subscription::update_ad_commitment(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			5, // 数量不变
+			Some(community_hash(2)), // 社区变更
+		));
+		let record = AdCommitments::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(record.community_id_hash, community_hash(2));
+	});
+}
+
+#[test]
+fn update_ad_commitment_fails_same() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::commit_ads(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			community_hash(1),
+			5,
+		));
+		assert_noop!(
+			Subscription::update_ad_commitment(
+				RuntimeOrigin::signed(OWNER),
+				bot_hash(1),
+				5,
+				None,
+			),
+			Error::<Test>::SameCommitment
+		);
+	});
+}
+
+#[test]
+fn update_ad_commitment_fails_below_minimum() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::commit_ads(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			community_hash(1),
+			5,
+		));
+		assert_noop!(
+			Subscription::update_ad_commitment(
+				RuntimeOrigin::signed(OWNER),
+				bot_hash(1),
+				1, // 低于 Basic 阈值
+				None,
+			),
+			Error::<Test>::CommitmentBelowMinimum
+		);
+	});
+}
+
+// ========================================================================
+// force_suspend_subscription 测试
+// ========================================================================
+
+#[test]
+fn force_suspend_subscription_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_ok!(Subscription::force_suspend_subscription(
+			RuntimeOrigin::root(),
+			bot_hash(1),
+		));
+		let sub = Subscriptions::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(sub.status, SubscriptionStatus::Suspended);
+	});
+}
+
+#[test]
+fn force_suspend_fails_not_root() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_noop!(
+			Subscription::force_suspend_subscription(
+				RuntimeOrigin::signed(OWNER),
+				bot_hash(1),
+			),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+#[test]
+fn force_suspend_fails_already_cancelled() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_ok!(Subscription::cancel_subscription(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+		));
+		assert_noop!(
+			Subscription::force_suspend_subscription(
+				RuntimeOrigin::root(),
+				bot_hash(1),
+			),
+			Error::<Test>::SubscriptionAlreadyCancelled
+		);
+	});
+}
+
+// ========================================================================
+// operator_deposit_subscription 测试
+// ========================================================================
+
+#[test]
+fn operator_deposit_subscription_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_ok!(Subscription::operator_deposit_subscription(
+			RuntimeOrigin::signed(OPERATOR),
+			bot_hash(1),
+			20,
+		));
+		assert_eq!(SubscriptionEscrow::<Test>::get(bot_hash(1)), 70);
+	});
+}
+
+#[test]
+fn operator_deposit_fails_not_operator() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_noop!(
+			Subscription::operator_deposit_subscription(
+				RuntimeOrigin::signed(OTHER),
+				bot_hash(1),
+				20,
+			),
+			Error::<Test>::NotBotOperator
+		);
+	});
+}
+
+#[test]
+fn operator_deposit_reactivates_suspended() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			10,
+		));
+		// 设为 Suspended, escrow=0
+		Subscriptions::<Test>::mutate(bot_hash(1), |maybe| {
+			if let Some(s) = maybe { s.status = SubscriptionStatus::Suspended; }
+		});
+		SubscriptionEscrow::<Test>::insert(bot_hash(1), 0u128);
+
+		assert_ok!(Subscription::operator_deposit_subscription(
+			RuntimeOrigin::signed(OPERATOR),
+			bot_hash(1),
+			10, // = fee → 重新激活
+		));
+		let sub = Subscriptions::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(sub.status, SubscriptionStatus::Active);
+	});
+}
+
+// ========================================================================
+// reset_tier_feature_gate 测试
+// ========================================================================
+
+#[test]
+fn reset_tier_feature_gate_works() {
+	new_test_ext().execute_with(|| {
+		let gate = TierFeatureGate {
+			max_rules: 99,
+			log_retention_days: 99,
+			forced_ads_per_day: 99,
+			can_disable_ads: true,
+			tee_access: true,
+		};
+		assert_ok!(Subscription::update_tier_feature_gate(
+			RuntimeOrigin::root(),
+			SubscriptionTier::Basic,
+			gate,
+		));
+		assert!(TierFeatureGateOverrides::<Test>::get(SubscriptionTier::Basic).is_some());
+
+		assert_ok!(Subscription::reset_tier_feature_gate(
+			RuntimeOrigin::root(),
+			SubscriptionTier::Basic,
+		));
+		assert!(TierFeatureGateOverrides::<Test>::get(SubscriptionTier::Basic).is_none());
+	});
+}
+
+// ========================================================================
+// force_change_tier 测试
+// ========================================================================
+
+#[test]
+fn force_change_tier_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_ok!(Subscription::force_change_tier(
+			RuntimeOrigin::root(),
+			bot_hash(1),
+			SubscriptionTier::Enterprise,
+		));
+		let sub = Subscriptions::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(sub.tier, SubscriptionTier::Enterprise);
+		assert_eq!(sub.fee_per_era, 100);
+	});
+}
+
+#[test]
+fn force_change_tier_fails_free() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_noop!(
+			Subscription::force_change_tier(
+				RuntimeOrigin::root(),
+				bot_hash(1),
+				SubscriptionTier::Free,
+			),
+			Error::<Test>::CannotSubscribeFree
+		);
+	});
+}
+
+// ========================================================================
+// pause_subscription / resume_subscription 测试
+// ========================================================================
+
+#[test]
+fn pause_subscription_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_ok!(Subscription::pause_subscription(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+		));
+		let sub = Subscriptions::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(sub.status, SubscriptionStatus::Paused);
+	});
+}
+
+#[test]
+fn pause_subscription_fails_not_active() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			10,
+		));
+		// Settle 两次 → PastDue
+		let _ = Subscription::settle_era_subscriptions();
+		let _ = Subscription::settle_era_subscriptions();
+		let sub = Subscriptions::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(sub.status, SubscriptionStatus::PastDue);
+
+		assert_noop!(
+			Subscription::pause_subscription(
+				RuntimeOrigin::signed(OWNER),
+				bot_hash(1),
+			),
+			Error::<Test>::SubscriptionNotActive
+		);
+	});
+}
+
+#[test]
+fn resume_subscription_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_ok!(Subscription::pause_subscription(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+		));
+		assert_ok!(Subscription::resume_subscription(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+		));
+		let sub = Subscriptions::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(sub.status, SubscriptionStatus::Active);
+	});
+}
+
+#[test]
+fn resume_subscription_past_due_when_low_escrow() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_ok!(Subscription::pause_subscription(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+		));
+		// 手动清空 escrow
+		SubscriptionEscrow::<Test>::insert(bot_hash(1), 5u128);
+
+		assert_ok!(Subscription::resume_subscription(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+		));
+		let sub = Subscriptions::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(sub.status, SubscriptionStatus::PastDue);
+	});
+}
+
+#[test]
+fn resume_fails_not_paused() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_noop!(
+			Subscription::resume_subscription(
+				RuntimeOrigin::signed(OWNER),
+				bot_hash(1),
+			),
+			Error::<Test>::SubscriptionNotPaused
+		);
+	});
+}
+
+#[test]
+fn paused_subscription_not_charged_during_settle() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_ok!(Subscription::pause_subscription(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+		));
+		let _ = Subscription::settle_era_subscriptions();
+		// 暂停状态不扣费
+		assert_eq!(SubscriptionEscrow::<Test>::get(bot_hash(1)), 50);
+	});
+}
+
+#[test]
+fn paused_subscription_effective_tier_is_free() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Pro,
+			50,
+		));
+		assert_ok!(Subscription::pause_subscription(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+		));
+		assert_eq!(
+			Subscription::effective_tier(&bot_hash(1)),
+			SubscriptionTier::Free
+		);
+	});
+}
+
+// ========================================================================
+// batch_cleanup 测试
+// ========================================================================
+
+#[test]
+fn batch_cleanup_works() {
+	new_test_ext().execute_with(|| {
+		// 创建并取消 2 个订阅
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_ok!(Subscription::cancel_subscription(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+		));
+		// 创建并取消广告承诺
+		// 需要先订阅 bot_hash(1) 才能 commit_ads... 重新用新 bot
+		// 使用 bot_hash(1) 已经 cancelled, 直接插入测试数据
+		let mut cancelled_ad = AdCommitmentRecord::<Test> {
+			owner: OWNER,
+			bot_id_hash: bot_hash(1),
+			community_id_hash: community_hash(1),
+			committed_ads_per_era: 5,
+			effective_tier: SubscriptionTier::Basic,
+			underdelivery_eras: 0,
+			status: AdCommitmentStatus::Cancelled,
+			started_at: 1,
+		};
+		AdCommitments::<Test>::insert(bot_hash(1), cancelled_ad.clone());
+
+		let sub_ids: sp_runtime::BoundedVec<_, frame_support::traits::ConstU32<50>> =
+			vec![bot_hash(1)].try_into().unwrap();
+		let ad_ids: sp_runtime::BoundedVec<_, frame_support::traits::ConstU32<50>> =
+			vec![bot_hash(1)].try_into().unwrap();
+
+		assert_ok!(Subscription::batch_cleanup(
+			RuntimeOrigin::signed(OTHER),
+			sub_ids,
+			ad_ids,
+		));
+		assert!(Subscriptions::<Test>::get(bot_hash(1)).is_none());
+		assert!(AdCommitments::<Test>::get(bot_hash(1)).is_none());
+	});
+}
+
+#[test]
+fn batch_cleanup_skips_active() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		let sub_ids: sp_runtime::BoundedVec<_, frame_support::traits::ConstU32<50>> =
+			vec![bot_hash(1)].try_into().unwrap();
+		let ad_ids: sp_runtime::BoundedVec<_, frame_support::traits::ConstU32<50>> =
+			vec![].try_into().unwrap();
+
+		assert_ok!(Subscription::batch_cleanup(
+			RuntimeOrigin::signed(OTHER),
+			sub_ids,
+			ad_ids,
+		));
+		// Active 不被清理
+		assert!(Subscriptions::<Test>::get(bot_hash(1)).is_some());
+	});
+}
+
+#[test]
+fn batch_cleanup_fails_empty() {
+	new_test_ext().execute_with(|| {
+		let empty_sub: sp_runtime::BoundedVec<_, frame_support::traits::ConstU32<50>> =
+			vec![].try_into().unwrap();
+		let empty_ad: sp_runtime::BoundedVec<_, frame_support::traits::ConstU32<50>> =
+			vec![].try_into().unwrap();
+		assert_noop!(
+			Subscription::batch_cleanup(
+				RuntimeOrigin::signed(OTHER),
+				empty_sub,
+				empty_ad,
+			),
+			Error::<Test>::EmptyBatch
+		);
+	});
+}
+
+// ========================================================================
+// update_tier_fee (动态费率) 测试
+// ========================================================================
+
+#[test]
+fn update_tier_fee_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::update_tier_fee(
+			RuntimeOrigin::root(),
+			SubscriptionTier::Basic,
+			20, // 从默认 10 → 20
+		));
+		assert_eq!(Subscription::tier_fee(&SubscriptionTier::Basic), 20);
+	});
+}
+
+#[test]
+fn update_tier_fee_fails_free() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			Subscription::update_tier_fee(
+				RuntimeOrigin::root(),
+				SubscriptionTier::Free,
+				5,
+			),
+			Error::<Test>::CannotSubscribeFree
+		);
+	});
+}
+
+#[test]
+fn dynamic_fee_affects_new_subscriptions() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::update_tier_fee(
+			RuntimeOrigin::root(),
+			SubscriptionTier::Basic,
+			20,
+		));
+		// 新订阅使用动态费率
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		let sub = Subscriptions::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(sub.fee_per_era, 20);
+	});
+}
+
+// ========================================================================
+// force_cancel_ad_commitment 测试
+// ========================================================================
+
+#[test]
+fn force_cancel_ad_commitment_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::commit_ads(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			community_hash(1),
+			5,
+		));
+		assert_ok!(Subscription::force_cancel_ad_commitment(
+			RuntimeOrigin::root(),
+			bot_hash(1),
+		));
+		let record = AdCommitments::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(record.status, AdCommitmentStatus::Cancelled);
+	});
+}
+
+#[test]
+fn force_cancel_ad_commitment_fails_not_root() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(Subscription::commit_ads(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			community_hash(1),
+			5,
+		));
+		assert_noop!(
+			Subscription::force_cancel_ad_commitment(
+				RuntimeOrigin::signed(OWNER),
+				bot_hash(1),
+			),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+// ========================================================================
+// EscrowLow 预警事件测试
+// ========================================================================
+
+#[test]
+fn escrow_low_event_emitted_during_settle() {
+	new_test_ext().execute_with(|| {
+		// BasicFee=10, deposit=15 → 结算后 remaining=5 < 2*10=20 → 触发 EscrowLow
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			15,
+		));
+		System::reset_events();
+		let _ = Subscription::settle_era_subscriptions();
+
+		let low_events: Vec<_> = System::events().into_iter()
+			.filter(|e| matches!(e.event, RuntimeEvent::Subscription(Event::EscrowLow { .. })))
+			.collect();
+		assert_eq!(low_events.len(), 1);
+	});
+}
+
+#[test]
+fn escrow_low_not_emitted_when_sufficient() {
+	new_test_ext().execute_with(|| {
+		// BasicFee=10, deposit=50 → 结算后 remaining=40 >= 2*10=20 → 不触发
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		System::reset_events();
+		let _ = Subscription::settle_era_subscriptions();
+
+		let low_events: Vec<_> = System::events().into_iter()
+			.filter(|e| matches!(e.event, RuntimeEvent::Subscription(Event::EscrowLow { .. })))
+			.collect();
+		assert_eq!(low_events.len(), 0);
+	});
+}
+
+// ========================================================================
+// Bot 封禁联动测试
+// ========================================================================
+
+#[test]
+fn settle_skips_inactive_bot() {
+	new_test_ext().execute_with(|| {
+		// bot_hash(1) is active in mock. 手动创建一个 inactive bot 的订阅
+		// bot_hash(99) 在 MockBotRegistry 中 is_bot_active=false
+		// 直接插入一个订阅记录
+		let sub = SubscriptionRecord::<Test> {
+			owner: OWNER,
+			bot_id_hash: bot_hash(99),
+			tier: SubscriptionTier::Basic,
+			fee_per_era: 10,
+			started_at: 1,
+			status: SubscriptionStatus::Active,
+		};
+		Subscriptions::<Test>::insert(bot_hash(99), sub);
+		SubscriptionEscrow::<Test>::insert(bot_hash(99), 50u128);
+
+		System::reset_events();
+		let (income, _) = Subscription::settle_era_subscriptions();
+
+		// 不扣费
+		assert_eq!(SubscriptionEscrow::<Test>::get(bot_hash(99)), 50);
+		// 发射 SettleSkippedInactiveBot 事件
+		let skip_events: Vec<_> = System::events().into_iter()
+			.filter(|e| matches!(e.event, RuntimeEvent::Subscription(Event::SettleSkippedInactiveBot { .. })))
+			.collect();
+		assert_eq!(skip_events.len(), 1);
+	});
+}
+
+// ========================================================================
+// SubscriptionProvider trait 新方法测试
+// ========================================================================
+
+#[test]
+fn is_subscription_active_works() {
+	new_test_ext().execute_with(|| {
+		// 无订阅 → false
+		assert!(!<Subscription as SubscriptionProvider>::is_subscription_active(&bot_hash(99)));
+
+		// Active → true
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert!(<Subscription as SubscriptionProvider>::is_subscription_active(&bot_hash(1)));
+
+		// Paused → true
+		assert_ok!(Subscription::pause_subscription(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+		));
+		assert!(<Subscription as SubscriptionProvider>::is_subscription_active(&bot_hash(1)));
+
+		// Cancelled → false
+		assert_ok!(Subscription::cancel_subscription(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+		));
+		assert!(!<Subscription as SubscriptionProvider>::is_subscription_active(&bot_hash(1)));
+	});
+}
+
+#[test]
+fn subscription_status_works() {
+	new_test_ext().execute_with(|| {
+		assert_eq!(
+			<Subscription as SubscriptionProvider>::subscription_status(&bot_hash(99)),
+			None
+		);
+		assert_ok!(Subscription::subscribe(
+			RuntimeOrigin::signed(OWNER),
+			bot_hash(1),
+			SubscriptionTier::Basic,
+			50,
+		));
+		assert_eq!(
+			<Subscription as SubscriptionProvider>::subscription_status(&bot_hash(1)),
+			Some(SubscriptionStatus::Active)
+		);
+	});
+}
+

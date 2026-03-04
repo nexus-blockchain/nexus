@@ -105,6 +105,8 @@ pub mod pallet {
         Cancelled,
         /// 已完成
         Completed,
+        /// 已暂停（可恢复）
+        Paused,
     }
 
     /// 锁仓类型
@@ -291,7 +293,10 @@ pub mod pallet {
         type RefundGracePeriod: Get<BlockNumberFor<Self>>;
     }
 
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     // ==================== 存储项 ====================
@@ -481,6 +486,54 @@ pub mod pallet {
             tokens_reclaimed: BalanceOf<T>,
             nex_reclaimed: BalanceOf<T>,
         },
+        /// 发售轮次被治理强制取消
+        SaleRoundForceCancelled { round_id: u64 },
+        /// 发售轮次被治理强制结束
+        SaleRoundForceEnded {
+            round_id: u64,
+            sold_amount: BalanceOf<T>,
+            participants_count: u32,
+        },
+        /// 治理强制退款
+        ForceRefundIssued {
+            round_id: u64,
+            subscriber: T::AccountId,
+            amount: BalanceOf<T>,
+        },
+        /// 治理强制提取资金
+        ForceFundsWithdrawn {
+            round_id: u64,
+            recipient: T::AccountId,
+            amount: BalanceOf<T>,
+        },
+        /// 轮次参数已更新（NotStarted 阶段）
+        SaleRoundUpdated { round_id: u64 },
+        /// 认购量已追加
+        SubscriptionIncreased {
+            round_id: u64,
+            subscriber: T::AccountId,
+            additional_amount: BalanceOf<T>,
+            additional_payment: BalanceOf<T>,
+        },
+        /// 白名单地址已移除
+        WhitelistRemoved {
+            round_id: u64,
+            removed_count: u32,
+        },
+        /// 支付选项已移除
+        PaymentOptionRemoved {
+            round_id: u64,
+            index: u32,
+        },
+        /// 发售时间已延长
+        SaleExtended {
+            round_id: u64,
+            new_end_block: BlockNumberFor<T>,
+        },
+        /// 发售已暂停
+        SaleRoundPaused { round_id: u64 },
+        /// 发售已恢复
+        SaleRoundResumed { round_id: u64 },
     }
 
     // ==================== 错误 ====================
@@ -579,6 +632,16 @@ pub mod pallet {
         IncompleteUnreserve,
         /// 重复的支付选项（相同 asset_id 已存在）
         DuplicatePaymentOption,
+        /// 实体已被全局锁定，所有配置操作不可用
+        EntityLocked,
+        /// 无更新内容（所有参数均为 None）
+        NoUpdateProvided,
+        /// 支付选项索引不存在
+        PaymentOptionNotFound,
+        /// 新结束时间必须大于当前结束时间
+        InvalidExtension,
+        /// 发售未处于暂停状态
+        SaleNotPaused,
     }
 
     // ==================== Hooks ====================
@@ -639,6 +702,7 @@ pub mod pallet {
             ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
             ensure!(owner == who || T::EntityProvider::is_entity_admin(entity_id, &who, pallet_entity_common::AdminPermission::TOKEN_MANAGE), Error::<T>::Unauthorized);
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             // H1: total_supply > 0
             ensure!(!total_supply.is_zero(), Error::<T>::InvalidTotalSupply);
@@ -720,6 +784,7 @@ pub mod pallet {
             SaleRounds::<T>::try_mutate(round_id, |maybe_round| -> DispatchResult {
                 let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
                 ensure!(round.creator == who, Error::<T>::Unauthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(round.entity_id), Error::<T>::EntityLocked);
                 ensure!(round.status == RoundStatus::NotStarted, Error::<T>::InvalidRoundStatus);
 
                 // L4: DutchAuction 模式下 price 由荷兰公式决定，允许为 0
@@ -770,6 +835,7 @@ pub mod pallet {
             SaleRounds::<T>::try_mutate(round_id, |maybe_round| -> DispatchResult {
                 let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
                 ensure!(round.creator == who, Error::<T>::Unauthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(round.entity_id), Error::<T>::EntityLocked);
                 ensure!(round.status == RoundStatus::NotStarted, Error::<T>::InvalidRoundStatus);
 
                 ensure!(initial_unlock_bps <= 10000, Error::<T>::InvalidVestingConfig);
@@ -804,6 +870,7 @@ pub mod pallet {
             SaleRounds::<T>::try_mutate(round_id, |maybe_round| -> DispatchResult {
                 let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
                 ensure!(round.creator == who, Error::<T>::Unauthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(round.entity_id), Error::<T>::EntityLocked);
                 ensure!(round.mode == SaleMode::DutchAuction, Error::<T>::InvalidRoundStatus);
                 // M3: 必须在 NotStarted 状态
                 ensure!(round.status == RoundStatus::NotStarted, Error::<T>::InvalidRoundStatus);
@@ -832,6 +899,7 @@ pub mod pallet {
 
             let round = SaleRounds::<T>::get(round_id).ok_or(Error::<T>::RoundNotFound)?;
             ensure!(round.creator == who, Error::<T>::Unauthorized);
+            ensure!(!T::EntityProvider::is_entity_locked(round.entity_id), Error::<T>::EntityLocked);
             // M5: 只能在 NotStarted 状态添加白名单
             ensure!(round.status == RoundStatus::NotStarted, Error::<T>::InvalidRoundStatus);
 
@@ -865,6 +933,7 @@ pub mod pallet {
             SaleRounds::<T>::try_mutate(round_id, |maybe_round| -> DispatchResult {
                 let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
                 ensure!(round.creator == who, Error::<T>::Unauthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(round.entity_id), Error::<T>::EntityLocked);
                 ensure!(round.status == RoundStatus::NotStarted, Error::<T>::InvalidRoundStatus);
                 // L2: 检查独立存储中的支付选项数
                 ensure!(round.payment_options_count > 0, Error::<T>::NoPaymentOptions);
@@ -1019,7 +1088,11 @@ pub mod pallet {
             SaleRounds::<T>::try_mutate(round_id, |maybe_round| -> DispatchResult {
                 let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
                 ensure!(round.creator == who, Error::<T>::Unauthorized);
-                ensure!(round.status == RoundStatus::Active, Error::<T>::InvalidRoundStatus);
+                ensure!(!T::EntityProvider::is_entity_locked(round.entity_id), Error::<T>::EntityLocked);
+                ensure!(
+                    round.status == RoundStatus::Active || round.status == RoundStatus::Paused,
+                    Error::<T>::InvalidRoundStatus
+                );
 
                 // H2-audit: 必须超过结束时间 或 已售罄，才能结束
                 let now = <frame_system::Pallet<T>>::block_number();
@@ -1168,13 +1241,14 @@ pub mod pallet {
             SaleRounds::<T>::try_mutate(round_id, |maybe_round| -> DispatchResult {
                 let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
                 ensure!(round.creator == who, Error::<T>::Unauthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(round.entity_id), Error::<T>::EntityLocked);
                 ensure!(
-                    round.status == RoundStatus::NotStarted || round.status == RoundStatus::Active,
+                    matches!(round.status, RoundStatus::NotStarted | RoundStatus::Active | RoundStatus::Paused),
                     Error::<T>::InvalidRoundStatus
                 );
 
-                // 如果已启动（Active），释放未售 Entity 代币
-                if round.status == RoundStatus::Active && !round.remaining_amount.is_zero() {
+                // 如果已启动（Active/Paused），释放未售 Entity 代币
+                if matches!(round.status, RoundStatus::Active | RoundStatus::Paused) && !round.remaining_amount.is_zero() {
                     let entity_account = T::EntityProvider::entity_account(round.entity_id);
                     let deficit = T::TokenProvider::unreserve(round.entity_id, &entity_account, round.remaining_amount);
                     // M3-deep: 记录 unreserve 不完整
@@ -1261,6 +1335,7 @@ pub mod pallet {
             SaleRounds::<T>::try_mutate(round_id, |maybe_round| -> DispatchResult {
                 let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
                 ensure!(round.creator == who, Error::<T>::Unauthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(round.entity_id), Error::<T>::EntityLocked);
                 ensure!(round.status == RoundStatus::Cancelled, Error::<T>::SaleNotCancelled);
 
                 // 检查宽限期是否已过
@@ -1321,6 +1396,7 @@ pub mod pallet {
             SaleRounds::<T>::try_mutate(round_id, |maybe_round| -> DispatchResult {
                 let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
                 ensure!(round.creator == who, Error::<T>::Unauthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(round.entity_id), Error::<T>::EntityLocked);
                 ensure!(
                     round.status == RoundStatus::Ended || round.status == RoundStatus::Completed,
                     Error::<T>::InvalidRoundStatus
@@ -1349,6 +1425,454 @@ pub mod pallet {
                     recipient: entity_account,
                     amount: total_raised,
                 });
+                Ok(())
+            })
+        }
+
+        // ==================== P0: Root 强制操作 ====================
+
+        /// Root 强制取消发售（治理干预违规/欺诈发售）
+        #[pallet::call_index(14)]
+        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        pub fn force_cancel_sale(
+            origin: OriginFor<T>,
+            round_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            SaleRounds::<T>::try_mutate(round_id, |maybe_round| -> DispatchResult {
+                let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
+                ensure!(
+                    matches!(round.status, RoundStatus::NotStarted | RoundStatus::Active | RoundStatus::Paused),
+                    Error::<T>::InvalidRoundStatus
+                );
+
+                if matches!(round.status, RoundStatus::Active | RoundStatus::Paused) && !round.remaining_amount.is_zero() {
+                    let entity_account = T::EntityProvider::entity_account(round.entity_id);
+                    let deficit = T::TokenProvider::unreserve(round.entity_id, &entity_account, round.remaining_amount);
+                    if !deficit.is_zero() {
+                        log::warn!("tokensale force_cancel_sale: unreserve deficit {:?} for round {}", deficit, round_id);
+                    }
+                    round.remaining_amount = Zero::zero();
+                }
+
+                round.status = RoundStatus::Cancelled;
+                round.cancelled_at = Some(<frame_system::Pallet<T>>::block_number());
+
+                ActiveRounds::<T>::mutate(|active| {
+                    active.retain(|&id| id != round_id);
+                });
+
+                Self::deposit_event(Event::SaleRoundForceCancelled { round_id });
+                Ok(())
+            })
+        }
+
+        /// Root 强制结束发售（紧急停止认购）
+        #[pallet::call_index(15)]
+        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        pub fn force_end_sale(
+            origin: OriginFor<T>,
+            round_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            SaleRounds::<T>::try_mutate(round_id, |maybe_round| -> DispatchResult {
+                let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
+                ensure!(
+                    matches!(round.status, RoundStatus::Active | RoundStatus::Paused),
+                    Error::<T>::InvalidRoundStatus
+                );
+
+                if !round.remaining_amount.is_zero() {
+                    let entity_account = T::EntityProvider::entity_account(round.entity_id);
+                    let deficit = T::TokenProvider::unreserve(round.entity_id, &entity_account, round.remaining_amount);
+                    if !deficit.is_zero() {
+                        log::warn!("tokensale force_end_sale: unreserve deficit {:?} for round {}", deficit, round_id);
+                    }
+                    round.remaining_amount = Zero::zero();
+                }
+
+                let sold = round.sold_amount;
+                let count = round.participants_count;
+                round.status = RoundStatus::Ended;
+
+                ActiveRounds::<T>::mutate(|active| {
+                    active.retain(|&id| id != round_id);
+                });
+
+                Self::deposit_event(Event::SaleRoundForceEnded {
+                    round_id,
+                    sold_amount: sold,
+                    participants_count: count,
+                });
+                Ok(())
+            })
+        }
+
+        /// Root 强制为特定认购者退款（争议仲裁后）
+        #[pallet::call_index(16)]
+        #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
+        pub fn force_refund(
+            origin: OriginFor<T>,
+            round_id: u64,
+            subscriber: T::AccountId,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            let round = SaleRounds::<T>::get(round_id).ok_or(Error::<T>::RoundNotFound)?;
+            ensure!(round.status == RoundStatus::Cancelled, Error::<T>::SaleNotCancelled);
+
+            Subscriptions::<T>::try_mutate(round_id, &subscriber, |maybe_sub| -> DispatchResult {
+                let sub = maybe_sub.as_mut().ok_or(Error::<T>::NotSubscribed)?;
+                ensure!(!sub.refunded, Error::<T>::AlreadyRefunded);
+
+                let entity_account = T::EntityProvider::entity_account(round.entity_id);
+                let remaining = T::TokenProvider::unreserve(round.entity_id, &entity_account, sub.amount);
+                ensure!(remaining.is_zero(), Error::<T>::IncompleteUnreserve);
+
+                let pallet_account = Self::pallet_account();
+                T::Currency::transfer(
+                    &pallet_account,
+                    &subscriber,
+                    sub.payment_amount,
+                    ExistenceRequirement::AllowDeath,
+                )?;
+
+                sub.refunded = true;
+
+                SaleRounds::<T>::mutate(round_id, |maybe_round| {
+                    if let Some(r) = maybe_round {
+                        r.total_refunded_tokens = r.total_refunded_tokens.saturating_add(sub.amount);
+                        r.total_refunded_nex = r.total_refunded_nex.saturating_add(sub.payment_amount);
+                    }
+                });
+
+                Self::deposit_event(Event::ForceRefundIssued {
+                    round_id,
+                    subscriber: subscriber.clone(),
+                    amount: sub.payment_amount,
+                });
+                Ok(())
+            })
+        }
+
+        /// Root 强制提取募集资金到 Entity 账户（创建者失联时）
+        #[pallet::call_index(17)]
+        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        pub fn force_withdraw_funds(
+            origin: OriginFor<T>,
+            round_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            SaleRounds::<T>::try_mutate(round_id, |maybe_round| -> DispatchResult {
+                let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
+                ensure!(
+                    round.status == RoundStatus::Ended || round.status == RoundStatus::Completed,
+                    Error::<T>::InvalidRoundStatus
+                );
+                ensure!(!round.funds_withdrawn, Error::<T>::FundsAlreadyWithdrawn);
+
+                let total_raised = RaisedFunds::<T>::get(round_id, Option::<AssetIdOf<T>>::None);
+                let entity_account = T::EntityProvider::entity_account(round.entity_id);
+
+                if !total_raised.is_zero() {
+                    let pallet_account = Self::pallet_account();
+                    T::Currency::transfer(
+                        &pallet_account,
+                        &entity_account,
+                        total_raised,
+                        ExistenceRequirement::AllowDeath,
+                    )?;
+                }
+
+                round.funds_withdrawn = true;
+
+                Self::deposit_event(Event::ForceFundsWithdrawn {
+                    round_id,
+                    recipient: entity_account,
+                    amount: total_raised,
+                });
+                Ok(())
+            })
+        }
+
+        // ==================== P1: Owner/Subscriber 功能增强 ====================
+
+        /// 更新轮次参数（仅 NotStarted 状态，可选更新各字段）
+        #[pallet::call_index(18)]
+        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        pub fn update_sale_round(
+            origin: OriginFor<T>,
+            round_id: u64,
+            total_supply: Option<BalanceOf<T>>,
+            start_block: Option<BlockNumberFor<T>>,
+            end_block: Option<BlockNumberFor<T>>,
+            kyc_required: Option<bool>,
+            min_kyc_level: Option<u8>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            ensure!(
+                total_supply.is_some() || start_block.is_some() || end_block.is_some()
+                    || kyc_required.is_some() || min_kyc_level.is_some(),
+                Error::<T>::NoUpdateProvided
+            );
+
+            SaleRounds::<T>::try_mutate(round_id, |maybe_round| -> DispatchResult {
+                let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
+                ensure!(round.creator == who, Error::<T>::Unauthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(round.entity_id), Error::<T>::EntityLocked);
+                ensure!(round.status == RoundStatus::NotStarted, Error::<T>::InvalidRoundStatus);
+
+                if let Some(supply) = total_supply {
+                    ensure!(!supply.is_zero(), Error::<T>::InvalidTotalSupply);
+                    round.total_supply = supply;
+                    round.remaining_amount = supply;
+                }
+
+                if let Some(start) = start_block {
+                    let now = <frame_system::Pallet<T>>::block_number();
+                    ensure!(start >= now, Error::<T>::StartBlockInPast);
+                    round.start_block = start;
+                }
+
+                if let Some(end) = end_block {
+                    round.end_block = end;
+                }
+
+                // 更新后校验时间窗口一致性
+                ensure!(round.end_block > round.start_block, Error::<T>::InvalidTimeWindow);
+
+                if let Some(kyc) = kyc_required {
+                    round.kyc_required = kyc;
+                }
+
+                if let Some(level) = min_kyc_level {
+                    ensure!(level <= 4, Error::<T>::InvalidKycLevel);
+                    round.min_kyc_level = level;
+                }
+
+                Self::deposit_event(Event::SaleRoundUpdated { round_id });
+                Ok(())
+            })
+        }
+
+        /// 追加认购量（已认购用户在 Active 状态下增加购买量）
+        #[pallet::call_index(19)]
+        #[pallet::weight(Weight::from_parts(300_000_000, 14_000))]
+        pub fn increase_subscription(
+            origin: OriginFor<T>,
+            round_id: u64,
+            additional_amount: BalanceOf<T>,
+            payment_asset: Option<AssetIdOf<T>>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let round = SaleRounds::<T>::get(round_id).ok_or(Error::<T>::RoundNotFound)?;
+            ensure!(round.status == RoundStatus::Active, Error::<T>::InvalidRoundStatus);
+            ensure!(round.remaining_amount >= additional_amount, Error::<T>::SoldOut);
+            ensure!(!additional_amount.is_zero(), Error::<T>::InvalidTotalSupply);
+
+            let now = <frame_system::Pallet<T>>::block_number();
+            ensure!(now >= round.start_block && now <= round.end_block, Error::<T>::SaleNotInTimeWindow);
+
+            // 必须已认购
+            let sub = Subscriptions::<T>::get(round_id, &who).ok_or(Error::<T>::NotSubscribed)?;
+
+            // KYC 校验
+            if round.kyc_required {
+                let level = T::KycChecker::kyc_level(&who);
+                ensure!(level >= round.min_kyc_level, Error::<T>::InsufficientKycLevel);
+            }
+
+            // 查找支付选项
+            let payment_options = RoundPaymentOptions::<T>::get(round_id);
+            let payment_option = payment_options.iter()
+                .find(|o| o.asset_id == payment_asset && o.enabled)
+                .ok_or(Error::<T>::InvalidPaymentAsset)?;
+
+            // 验证追加后总量在限额内
+            let new_total = sub.amount.saturating_add(additional_amount);
+            ensure!(new_total <= payment_option.max_purchase_per_account, Error::<T>::ExceedsPurchaseLimit);
+
+            // 计算追加支付金额
+            let additional_payment = Self::calculate_payment_amount(&round, additional_amount, payment_option)?;
+
+            // NEX 转账到托管
+            let pallet_account = Self::pallet_account();
+            T::Currency::transfer(
+                &who,
+                &pallet_account,
+                additional_payment,
+                ExistenceRequirement::KeepAlive,
+            )?;
+
+            // 更新认购记录
+            Subscriptions::<T>::mutate(round_id, &who, |maybe_sub| {
+                if let Some(s) = maybe_sub {
+                    s.amount = s.amount.saturating_add(additional_amount);
+                    s.payment_amount = s.payment_amount.saturating_add(additional_payment);
+                }
+            });
+
+            // 更新轮次数据
+            SaleRounds::<T>::mutate(round_id, |maybe_round| {
+                if let Some(r) = maybe_round {
+                    r.sold_amount = r.sold_amount.saturating_add(additional_amount);
+                    r.remaining_amount = r.remaining_amount.saturating_sub(additional_amount);
+                }
+            });
+
+            // 更新募集统计
+            RaisedFunds::<T>::mutate(round_id, payment_asset, |funds| {
+                *funds = funds.saturating_add(additional_payment);
+            });
+
+            Self::deposit_event(Event::SubscriptionIncreased {
+                round_id,
+                subscriber: who,
+                additional_amount,
+                additional_payment,
+            });
+            Ok(())
+        }
+
+        /// 从白名单移除地址（仅 NotStarted 状态）
+        #[pallet::call_index(20)]
+        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        pub fn remove_from_whitelist(
+            origin: OriginFor<T>,
+            round_id: u64,
+            accounts: BoundedVec<T::AccountId, T::MaxWhitelistSize>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let round = SaleRounds::<T>::get(round_id).ok_or(Error::<T>::RoundNotFound)?;
+            ensure!(round.creator == who, Error::<T>::Unauthorized);
+            ensure!(!T::EntityProvider::is_entity_locked(round.entity_id), Error::<T>::EntityLocked);
+            ensure!(round.status == RoundStatus::NotStarted, Error::<T>::InvalidRoundStatus);
+
+            let mut removed_count: u32 = 0;
+            for account in &accounts {
+                if RoundWhitelist::<T>::contains_key(round_id, account) {
+                    RoundWhitelist::<T>::remove(round_id, account);
+                    removed_count = removed_count.saturating_add(1);
+                }
+            }
+
+            if removed_count > 0 {
+                WhitelistCount::<T>::mutate(round_id, |count| {
+                    *count = count.saturating_sub(removed_count);
+                });
+            }
+
+            Self::deposit_event(Event::WhitelistRemoved { round_id, removed_count });
+            Ok(())
+        }
+
+        // ==================== P2: 补充管理功能 ====================
+
+        /// 移除支付选项（仅 NotStarted 状态，按索引移除）
+        #[pallet::call_index(21)]
+        #[pallet::weight(Weight::from_parts(120_000_000, 6_000))]
+        pub fn remove_payment_option(
+            origin: OriginFor<T>,
+            round_id: u64,
+            index: u32,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            SaleRounds::<T>::try_mutate(round_id, |maybe_round| -> DispatchResult {
+                let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
+                ensure!(round.creator == who, Error::<T>::Unauthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(round.entity_id), Error::<T>::EntityLocked);
+                ensure!(round.status == RoundStatus::NotStarted, Error::<T>::InvalidRoundStatus);
+
+                RoundPaymentOptions::<T>::try_mutate(round_id, |options| -> DispatchResult {
+                    ensure!((index as usize) < options.len(), Error::<T>::PaymentOptionNotFound);
+                    options.remove(index as usize);
+                    Ok(())
+                })?;
+
+                round.payment_options_count = round.payment_options_count.saturating_sub(1);
+                Ok(())
+            })?;
+
+            Self::deposit_event(Event::PaymentOptionRemoved { round_id, index });
+            Ok(())
+        }
+
+        /// 延长发售时间（Active 状态，仅可延长不可缩短）
+        #[pallet::call_index(22)]
+        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        pub fn extend_sale(
+            origin: OriginFor<T>,
+            round_id: u64,
+            new_end_block: BlockNumberFor<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            SaleRounds::<T>::try_mutate(round_id, |maybe_round| -> DispatchResult {
+                let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
+                ensure!(round.creator == who, Error::<T>::Unauthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(round.entity_id), Error::<T>::EntityLocked);
+                ensure!(
+                    round.status == RoundStatus::Active || round.status == RoundStatus::Paused,
+                    Error::<T>::InvalidRoundStatus
+                );
+                ensure!(new_end_block > round.end_block, Error::<T>::InvalidExtension);
+
+                round.end_block = new_end_block;
+
+                Self::deposit_event(Event::SaleExtended { round_id, new_end_block });
+                Ok(())
+            })
+        }
+
+        // ==================== P3: 暂停/恢复 ====================
+
+        /// 暂停发售（Active → Paused，暂停认购但不取消）
+        #[pallet::call_index(23)]
+        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        pub fn pause_sale(
+            origin: OriginFor<T>,
+            round_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            SaleRounds::<T>::try_mutate(round_id, |maybe_round| -> DispatchResult {
+                let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
+                ensure!(round.creator == who, Error::<T>::Unauthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(round.entity_id), Error::<T>::EntityLocked);
+                ensure!(round.status == RoundStatus::Active, Error::<T>::InvalidRoundStatus);
+
+                round.status = RoundStatus::Paused;
+
+                Self::deposit_event(Event::SaleRoundPaused { round_id });
+                Ok(())
+            })
+        }
+
+        /// 恢复发售（Paused → Active）
+        #[pallet::call_index(24)]
+        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        pub fn resume_sale(
+            origin: OriginFor<T>,
+            round_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            SaleRounds::<T>::try_mutate(round_id, |maybe_round| -> DispatchResult {
+                let round = maybe_round.as_mut().ok_or(Error::<T>::RoundNotFound)?;
+                ensure!(round.creator == who, Error::<T>::Unauthorized);
+                ensure!(!T::EntityProvider::is_entity_locked(round.entity_id), Error::<T>::EntityLocked);
+                ensure!(round.status == RoundStatus::Paused, Error::<T>::SaleNotPaused);
+
+                round.status = RoundStatus::Active;
+
+                Self::deposit_event(Event::SaleRoundResumed { round_id });
                 Ok(())
             })
         }

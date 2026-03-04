@@ -30,6 +30,21 @@ use sp_runtime::traits::Saturating;
 use sp_core::ed25519;
 use sp_io::crypto::ed25519_verify;
 
+/// 社区状态
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, RuntimeDebug, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
+pub enum CommunityStatus {
+	/// 正常运行
+	Active,
+	/// 被封禁 (Root 操作)
+	Banned,
+}
+
+impl Default for CommunityStatus {
+	fn default() -> Self {
+		Self::Active
+	}
+}
+
 /// 群规则配置 (链上精简版)
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, RuntimeDebug, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
 pub struct CommunityConfig {
@@ -47,6 +62,8 @@ pub struct CommunityConfig {
 	pub language: [u8; 2],
 	/// 配置版本 (CAS 乐观锁)
 	pub version: u32,
+	/// 社区状态 (Active / Banned)
+	pub status: CommunityStatus,
 }
 
 impl Default for CommunityConfig {
@@ -62,6 +79,7 @@ impl Default for CommunityConfig {
 			active_members: 0,
 			language: *b"en",
 			version: 0,
+			status: CommunityStatus::Active,
 		}
 	}
 }
@@ -152,11 +170,6 @@ pub mod pallet {
 	pub type CommunityConfigs<T: Config> =
 		StorageMap<_, Blake2_128Concat, CommunityIdHash, CommunityConfig>;
 
-	/// 节点准入策略 (快速查询): community_id_hash → NodeRequirement
-	#[pallet::storage]
-	pub type CommunityNodeRequirement<T: Config> =
-		StorageMap<_, Blake2_128Concat, CommunityIdHash, NodeRequirement, ValueQuery>;
-
 	/// 动作日志: community_id_hash → BoundedVec<ActionLog>
 	#[pallet::storage]
 	pub type ActionLogs<T: Config> = StorageMap<
@@ -164,21 +177,12 @@ pub mod pallet {
 		BoundedVec<ActionLog<T>, T::MaxLogsPerCommunity>, ValueQuery,
 	>;
 
-	/// 日志总数
-	#[pallet::storage]
-	pub type LogCount<T: Config> = StorageValue<_, u64, ValueQuery>;
-
 	/// 社区内用户声誉: (community_id_hash, user_hash) → ReputationRecord
 	#[pallet::storage]
 	pub type MemberReputation<T: Config> = StorageDoubleMap<
 		_, Blake2_128Concat, CommunityIdHash, Blake2_128Concat, [u8; 32],
 		ReputationRecord<T>, ValueQuery,
 	>;
-
-	/// 全局用户声誉: user_hash → score (所有社区声誉之和)
-	#[pallet::storage]
-	pub type GlobalReputation<T: Config> =
-		StorageMap<_, Blake2_128Concat, [u8; 32], i64, ValueQuery>;
 
 	/// 声誉变更冷却: (operator, community_id_hash, user_hash) → last_block
 	#[pallet::storage]
@@ -256,6 +260,31 @@ pub mod pallet {
 			user_hash: [u8; 32],
 			operator: T::AccountId,
 		},
+		/// Bot Owner 删除社区配置
+		CommunityConfigDeleted {
+			community_id_hash: CommunityIdHash,
+		},
+		/// Root 强制删除社区
+		CommunityForceRemoved {
+			community_id_hash: CommunityIdHash,
+		},
+		/// Root 封禁社区
+		CommunityBanned {
+			community_id_hash: CommunityIdHash,
+		},
+		/// Root 解封社区
+		CommunityUnbanned {
+			community_id_hash: CommunityIdHash,
+		},
+		/// Root 强制更新社区配置
+		CommunityConfigForceUpdated {
+			community_id_hash: CommunityIdHash,
+			version: u32,
+		},
+		/// Root 强制重置社区全部声誉
+		CommunityReputationForceReset {
+			community_id_hash: CommunityIdHash,
+		},
 	}
 
 	// ========================================================================
@@ -306,6 +335,12 @@ pub mod pallet {
 		CooldownNotExpired,
 		/// M1-R3: 冷却条目不存在
 		CooldownNotFound,
+		/// 社区已被封禁
+		CommunityBanned,
+		/// 社区未被封禁 (解封时)
+		CommunityNotBanned,
+		/// 社区已处于该状态
+		CommunityAlreadyInStatus,
 	}
 
 	// ========================================================================
@@ -330,16 +365,14 @@ pub mod pallet {
 			signature: [u8; 64],
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
-			// M3-fix: 仅 Bot owner 可提交日志
-			// M1-R2: 同时检查 Bot 是否激活
 			Self::ensure_active_bot_owner(&who, &community_id_hash)?;
+			Self::ensure_not_banned(&community_id_hash)?;
 
 			ensure!(
 				T::Subscription::effective_tier(&community_id_hash).is_paid(),
 				Error::<T>::FreeTierNotAllowed
 			);
 
-			// M4-fix: sequence 必须严格递增
 			Self::ensure_sequence_monotonic(&community_id_hash, sequence)?;
 
 			Self::verify_action_log_signature(
@@ -369,7 +402,6 @@ pub mod pallet {
 				Ok(())
 			})?;
 
-			LogCount::<T>::mutate(|c| *c = c.saturating_add(1));
 			LastSequence::<T>::insert(&community_id_hash, sequence);
 
 			Self::deposit_event(Event::ActionLogSubmitted {
@@ -391,17 +423,14 @@ pub mod pallet {
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 			Self::ensure_bot_owner(&who, &community_id_hash)?;
-			let current = CommunityNodeRequirement::<T>::get(&community_id_hash);
-			ensure!(current != requirement, Error::<T>::SameNodeRequirement);
+			Self::ensure_not_banned(&community_id_hash)?;
 
-			CommunityNodeRequirement::<T>::insert(&community_id_hash, requirement.clone());
-
-			// 同步到 CommunityConfig
-			CommunityConfigs::<T>::mutate(&community_id_hash, |maybe_config| {
-				if let Some(config) = maybe_config {
-					config.node_requirement = requirement.clone();
-				}
-			});
+			CommunityConfigs::<T>::try_mutate(&community_id_hash, |maybe_config| {
+				let config = maybe_config.as_mut().ok_or(Error::<T>::CommunityNotFound)?;
+				ensure!(config.node_requirement != requirement, Error::<T>::SameNodeRequirement);
+				config.node_requirement = requirement.clone();
+				Ok::<(), DispatchError>(())
+			})?;
 
 			Self::deposit_event(Event::NodeRequirementUpdated { community_id_hash, requirement });
 			Ok(())
@@ -433,17 +462,15 @@ pub mod pallet {
 
 			let new_version = expected_version.saturating_add(1);
 
-			// M1-fix: 单次读取 CommunityConfigs，缓存 existing 用于版本检查和 active_members
 			let existing = CommunityConfigs::<T>::get(&community_id_hash);
 			if let Some(ref ex) = existing {
 				ensure!(ex.version == expected_version, Error::<T>::ConfigVersionConflict);
+				ensure!(ex.status != CommunityStatus::Banned, Error::<T>::CommunityBanned);
 			} else {
-				// 首次创建配置，expected_version 应为 0
 				ensure!(expected_version == 0, Error::<T>::ConfigVersionConflict);
 			}
 
-			let node_req = CommunityNodeRequirement::<T>::get(&community_id_hash);
-			// 保留已有 active_members (由 Bot 单独更新, 不由 config 覆盖)
+			let node_req = existing.as_ref().map(|c| c.node_requirement.clone()).unwrap_or_default();
 			let active_members = existing.map(|c| c.active_members).unwrap_or(0);
 
 			let config = CommunityConfig {
@@ -457,6 +484,7 @@ pub mod pallet {
 				active_members,
 				language,
 				version: new_version,
+				status: CommunityStatus::Active,
 			};
 
 			CommunityConfigs::<T>::insert(&community_id_hash, config);
@@ -483,9 +511,8 @@ pub mod pallet {
 			logs: alloc::vec::Vec<(ActionType, [u8; 32], u64, [u8; 32], [u8; 64])>,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
-			// M3-fix: 仅 Bot owner 可提交日志
-			// M1-R2: 同时检查 Bot 是否激活
 			Self::ensure_active_bot_owner(&who, &community_id_hash)?;
+			Self::ensure_not_banned(&community_id_hash)?;
 
 			ensure!(
 				T::Subscription::effective_tier(&community_id_hash).is_paid(),
@@ -538,7 +565,6 @@ pub mod pallet {
 				Ok(())
 			})?;
 
-			LogCount::<T>::mutate(|c| *c = c.saturating_add(count as u64));
 			LastSequence::<T>::insert(&community_id_hash, last_seq);
 
 			Self::deposit_event(Event::BatchLogsSubmitted { community_id_hash, count });
@@ -587,13 +613,11 @@ pub mod pallet {
 			community_id_hash: CommunityIdHash,
 			user_hash: [u8; 32],
 		) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
-			// M1-R2: Bot 必须激活
-			Self::ensure_active_bot_owner(&_who, &community_id_hash)?;
+			let who = ensure_signed(origin)?;
+			Self::ensure_active_bot_owner(&who, &community_id_hash)?;
 
 			let old_score = MemberReputation::<T>::get(&community_id_hash, &user_hash).score;
 			MemberReputation::<T>::remove(&community_id_hash, &user_hash);
-			GlobalReputation::<T>::mutate(&user_hash, |g| *g = g.saturating_sub(old_score));
 
 			Self::deposit_event(Event::ReputationReset {
 				community_id_hash, user_hash, old_score,
@@ -666,8 +690,6 @@ pub mod pallet {
 
 			ensure!(cleared > 0, Error::<T>::NoLogsToClear);
 
-			LogCount::<T>::mutate(|c| *c = c.saturating_sub(cleared as u64));
-
 			Self::deposit_event(Event::ExpiredLogsCleared { community_id_hash, cleared });
 			Ok(())
 		}
@@ -705,6 +727,155 @@ pub mod pallet {
 			});
 			Ok(())
 		}
+
+		/// Bot Owner 删除社区配置 (清理孤儿数据)
+		#[pallet::call_index(10)]
+		#[pallet::weight(Weight::from_parts(40_000_000, 8_000))]
+		pub fn delete_community_config(
+			origin: OriginFor<T>,
+			community_id_hash: CommunityIdHash,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			Self::ensure_bot_owner(&who, &community_id_hash)?;
+			ensure!(
+				CommunityConfigs::<T>::contains_key(&community_id_hash),
+				Error::<T>::CommunityNotFound
+			);
+
+			CommunityConfigs::<T>::remove(&community_id_hash);
+			ActionLogs::<T>::remove(&community_id_hash);
+			LastSequence::<T>::remove(&community_id_hash);
+
+			Self::deposit_event(Event::CommunityConfigDeleted { community_id_hash });
+			Ok(())
+		}
+
+		/// Root 强制删除社区 (清除全部数据)
+		#[pallet::call_index(11)]
+		#[pallet::weight(Weight::from_parts(80_000_000, 15_000))]
+		pub fn force_remove_community(
+			origin: OriginFor<T>,
+			community_id_hash: CommunityIdHash,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+
+			CommunityConfigs::<T>::remove(&community_id_hash);
+			ActionLogs::<T>::remove(&community_id_hash);
+			LastSequence::<T>::remove(&community_id_hash);
+			let _ = MemberReputation::<T>::clear_prefix(&community_id_hash, u32::MAX, None);
+
+			Self::deposit_event(Event::CommunityForceRemoved { community_id_hash });
+			Ok(())
+		}
+
+		/// Root 封禁社区
+		#[pallet::call_index(12)]
+		#[pallet::weight(Weight::from_parts(25_000_000, 5_000))]
+		pub fn ban_community(
+			origin: OriginFor<T>,
+			community_id_hash: CommunityIdHash,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+
+			CommunityConfigs::<T>::try_mutate(&community_id_hash, |maybe_config| {
+				let config = maybe_config.as_mut().ok_or(Error::<T>::CommunityNotFound)?;
+				ensure!(config.status != CommunityStatus::Banned, Error::<T>::CommunityAlreadyInStatus);
+				config.status = CommunityStatus::Banned;
+				Ok::<(), DispatchError>(())
+			})?;
+
+			Self::deposit_event(Event::CommunityBanned { community_id_hash });
+			Ok(())
+		}
+
+		/// Root 解封社区
+		#[pallet::call_index(13)]
+		#[pallet::weight(Weight::from_parts(25_000_000, 5_000))]
+		pub fn unban_community(
+			origin: OriginFor<T>,
+			community_id_hash: CommunityIdHash,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+
+			CommunityConfigs::<T>::try_mutate(&community_id_hash, |maybe_config| {
+				let config = maybe_config.as_mut().ok_or(Error::<T>::CommunityNotFound)?;
+				ensure!(config.status == CommunityStatus::Banned, Error::<T>::CommunityNotBanned);
+				config.status = CommunityStatus::Active;
+				Ok::<(), DispatchError>(())
+			})?;
+
+			Self::deposit_event(Event::CommunityUnbanned { community_id_hash });
+			Ok(())
+		}
+
+		/// Root 强制更新社区配置 (绕过 Bot Owner 检查)
+		#[pallet::call_index(14)]
+		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		pub fn force_update_community_config(
+			origin: OriginFor<T>,
+			community_id_hash: CommunityIdHash,
+			anti_flood_enabled: bool,
+			flood_limit: u16,
+			warn_limit: u8,
+			warn_action: WarnAction,
+			welcome_enabled: bool,
+			ads_enabled: bool,
+			language: [u8; 2],
+		) -> DispatchResult {
+			ensure_root(origin)?;
+
+			ensure!(
+				language[0].is_ascii_lowercase() && language[1].is_ascii_lowercase(),
+				Error::<T>::InvalidLanguageCode
+			);
+
+			let existing = CommunityConfigs::<T>::get(&community_id_hash);
+			let node_req = existing.as_ref().map(|c| c.node_requirement.clone()).unwrap_or_default();
+			let active_members = existing.as_ref().map(|c| c.active_members).unwrap_or(0);
+			let status = existing.as_ref().map(|c| c.status).unwrap_or_default();
+			let new_version = existing.as_ref().map(|c| c.version.saturating_add(1)).unwrap_or(1);
+
+			let config = CommunityConfig {
+				node_requirement: node_req,
+				anti_flood_enabled,
+				flood_limit,
+				warn_limit,
+				warn_action,
+				welcome_enabled,
+				ads_enabled,
+				active_members,
+				language,
+				version: new_version,
+				status,
+			};
+
+			CommunityConfigs::<T>::insert(&community_id_hash, config);
+
+			Self::deposit_event(Event::CommunityConfigForceUpdated {
+				community_id_hash,
+				version: new_version,
+			});
+			Ok(())
+		}
+
+		/// Root 强制重置社区全部声誉
+		#[pallet::call_index(15)]
+		#[pallet::weight(Weight::from_parts(100_000_000, 20_000))]
+		pub fn force_reset_community_reputation(
+			origin: OriginFor<T>,
+			community_id_hash: CommunityIdHash,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			ensure!(
+				CommunityConfigs::<T>::contains_key(&community_id_hash),
+				Error::<T>::CommunityNotFound
+			);
+
+			let _ = MemberReputation::<T>::clear_prefix(&community_id_hash, u32::MAX, None);
+
+			Self::deposit_event(Event::CommunityReputationForceReset { community_id_hash });
+			Ok(())
+		}
 	}
 
 	// ========================================================================
@@ -714,7 +885,9 @@ pub mod pallet {
 	impl<T: Config> Pallet<T> {
 		/// 获取社区节点准入策略
 		pub fn get_node_requirement(community_id_hash: &CommunityIdHash) -> NodeRequirement {
-			CommunityNodeRequirement::<T>::get(community_id_hash)
+			CommunityConfigs::<T>::get(community_id_hash)
+				.map(|c| c.node_requirement)
+				.unwrap_or_default()
 		}
 
 		/// 社区是否已绑定 (有配置)
@@ -722,9 +895,24 @@ pub mod pallet {
 			CommunityConfigs::<T>::contains_key(community_id_hash)
 		}
 
+		/// 社区是否被封禁
+		pub fn is_community_banned(community_id_hash: &CommunityIdHash) -> bool {
+			CommunityConfigs::<T>::get(community_id_hash)
+				.map(|c| c.status == CommunityStatus::Banned)
+				.unwrap_or(false)
+		}
+
 		/// 获取社区日志数
 		pub fn log_count_for(community_id_hash: &CommunityIdHash) -> u32 {
 			ActionLogs::<T>::get(community_id_hash).len() as u32
+		}
+
+		/// 确保社区未被封禁
+		fn ensure_not_banned(community_id_hash: &CommunityIdHash) -> DispatchResult {
+			if let Some(config) = CommunityConfigs::<T>::get(community_id_hash) {
+				ensure!(config.status != CommunityStatus::Banned, Error::<T>::CommunityBanned);
+			}
+			Ok(())
 		}
 
 		/// P2-fix: 验证动作日志的 Ed25519 签名
@@ -768,7 +956,7 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// L1-R2: award/deduct 共享 helper
+		/// L1-R2: award/deduct 共享 helper (含 tier gate)
 		fn do_modify_reputation(
 			who: T::AccountId,
 			community_id_hash: CommunityIdHash,
@@ -776,8 +964,12 @@ pub mod pallet {
 			delta: u32,
 			is_award: bool,
 		) -> DispatchResult {
-			// M1-R2: Bot 必须激活
 			Self::ensure_active_bot_owner(&who, &community_id_hash)?;
+			Self::ensure_not_banned(&community_id_hash)?;
+			ensure!(
+				T::Subscription::effective_tier(&community_id_hash).is_paid(),
+				Error::<T>::FreeTierNotAllowed
+			);
 			ensure!(delta > 0, Error::<T>::ReputationDeltaZero);
 			ensure!(delta <= T::MaxReputationDelta::get(), Error::<T>::ReputationDeltaTooLarge);
 			Self::check_cooldown(&who, &community_id_hash, &user_hash)?;
@@ -797,11 +989,6 @@ pub mod pallet {
 				},
 			);
 
-			if is_award {
-				GlobalReputation::<T>::mutate(&user_hash, |g| *g = g.saturating_add(signed_delta));
-			} else {
-				GlobalReputation::<T>::mutate(&user_hash, |g| *g = g.saturating_sub(signed_delta));
-			}
 			Self::set_cooldown(&who, &community_id_hash, &user_hash);
 
 			if is_award {
@@ -862,6 +1049,40 @@ pub mod pallet {
 				ensure!(sequence > last, Error::<T>::SequenceNotMonotonic);
 			}
 			Ok(())
+		}
+	}
+
+	// ========================================================================
+	// CommunityProvider 实现
+	// ========================================================================
+
+	impl<T: Config> CommunityProvider for Pallet<T> {
+		fn is_community_configured(community_id_hash: &CommunityIdHash) -> bool {
+			CommunityConfigs::<T>::contains_key(community_id_hash)
+		}
+
+		fn is_community_banned(community_id_hash: &CommunityIdHash) -> bool {
+			CommunityConfigs::<T>::get(community_id_hash)
+				.map(|c| c.status == CommunityStatus::Banned)
+				.unwrap_or(false)
+		}
+
+		fn is_ads_enabled(community_id_hash: &CommunityIdHash) -> bool {
+			CommunityConfigs::<T>::get(community_id_hash)
+				.map(|c| c.ads_enabled && c.status == CommunityStatus::Active)
+				.unwrap_or(false)
+		}
+
+		fn active_members(community_id_hash: &CommunityIdHash) -> u32 {
+			CommunityConfigs::<T>::get(community_id_hash)
+				.map(|c| c.active_members)
+				.unwrap_or(0)
+		}
+
+		fn language(community_id_hash: &CommunityIdHash) -> [u8; 2] {
+			CommunityConfigs::<T>::get(community_id_hash)
+				.map(|c| c.language)
+				.unwrap_or(*b"en")
 		}
 	}
 

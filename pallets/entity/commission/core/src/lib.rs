@@ -37,7 +37,7 @@ pub mod pallet {
         traits::{Currency, ExistenceRequirement, Get},
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{EntityProvider, ShopProvider};
+    use pallet_entity_common::{AdminPermission, EntityProvider, ShopProvider};
     use pallet_commission_common::{ReferralPlanWriter, LevelDiffPlanWriter, TeamPlanWriter, MultiLevelPlanWriter};
     use sp_runtime::traits::{Saturating, Zero};
 
@@ -77,6 +77,12 @@ pub mod pallet {
         pub enabled: bool,
         /// 提现冻结期（区块数，0 = 无冻结）
         pub withdrawal_cooldown: u32,
+        /// 创建人收益比例（基点，从 Pool B 佣金预算中优先扣除）
+        /// 0 = 不启用，5000 = 佣金预算的 50%
+        pub creator_reward_rate: u16,
+        /// Token 提现冻结期（区块数，0 = 使用 withdrawal_cooldown）
+        /// F3: Token/NEX 独立冻结期，与 P3 审计修复（独立时间追踪）配套
+        pub token_withdrawal_cooldown: u32,
     }
 
     impl Default for CoreCommissionConfig {
@@ -86,6 +92,8 @@ pub mod pallet {
                 max_commission_rate: 10000,
                 enabled: false,
                 withdrawal_cooldown: 0,
+                creator_reward_rate: 0,
+                token_withdrawal_cooldown: 0,
             }
         }
     }
@@ -197,10 +205,6 @@ pub mod pallet {
         #[pallet::constant]
         type ReferrerShareBps: Get<u16>;
 
-        /// Token 订单平台费率（基点，全局固定，100 = 1%）
-        /// 与 NEX PlatformFeeRate 对称，不可 per-entity 配置
-        #[pallet::constant]
-        type TokenPlatformFeeRate: Get<u16>;
 
         /// 最大返佣记录数（每订单）
         #[pallet::constant]
@@ -253,7 +257,10 @@ pub mod pallet {
         type TokenTransferProvider: TokenTransferProviderT<Self::AccountId, TokenBalanceOf<Self>>;
     }
 
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     // ========================================================================
@@ -440,7 +447,14 @@ pub mod pallet {
         ValueQuery,
     >;
 
-    // Token 平台费率已改为 Config 全局常量 TokenPlatformFeeRate（不再 per-entity 存储）
+    /// Token 订单平台费率（基点，100 = 1%）
+    /// 可通过 set_token_platform_fee_rate 治理调整，0 = 关闭 Token 平台费
+    #[pallet::storage]
+    pub type TokenPlatformFeeRate<T> = StorageValue<_, u16, ValueQuery, DefaultTokenPlatformFeeRate>;
+
+    /// Token 平台费率默认值（100 bps = 1%）
+    #[pallet::type_value]
+    pub fn DefaultTokenPlatformFeeRate() -> u16 { 100 }
 
     /// Token 购物余额 (entity_id, account) → TokenBalance
     #[pallet::storage]
@@ -510,6 +524,17 @@ pub mod pallet {
         _,
         Blake2_128Concat, u64,
         BlockNumberFor<T>,
+    >;
+
+    /// F15: 全局佣金率上限 entity_id → u16（万分比，由 Root 设定）
+    /// Entity Owner 的 max_commission_rate 不得超过此值。0 = 无限制（默认）
+    #[pallet::storage]
+    #[pallet::getter(fn global_max_commission_rate)]
+    pub type GlobalMaxCommissionRate<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat, u64,
+        u16,
+        ValueQuery,
     >;
 
     // ========================================================================
@@ -668,6 +693,20 @@ pub mod pallet {
             to: T::AccountId,
             amount: TokenBalanceOf<T>,
         },
+        /// Token 平台费率已更新
+        TokenPlatformFeeRateUpdated { old_rate: u16, new_rate: u16 },
+        /// F14: Root 紧急禁用 Entity 佣金
+        CommissionForceDisabled { entity_id: u64 },
+        /// F15: 全局佣金率上限已更新
+        GlobalMaxCommissionRateSet { entity_id: u64, rate: u16 },
+        /// F2: 提现冻结期已更新
+        WithdrawalCooldownUpdated { entity_id: u64, nex_cooldown: u32, token_cooldown: u32 },
+        /// F4: 佣金配置已清除
+        CommissionConfigCleared { entity_id: u64 },
+        /// F4: 提现配置已清除
+        WithdrawalConfigCleared { entity_id: u64 },
+        /// F4: Token 提现配置已清除
+        TokenWithdrawalConfigCleared { entity_id: u64 },
     }
 
     // ========================================================================
@@ -722,6 +761,16 @@ pub mod pallet {
         PoolRewardCooldownActive,
         /// init_commission_plan 已禁用，请使用 utility.batch 组合分步 extrinsics
         CommissionPlanDisabled,
+        /// Token 平台费率超过上限（最大 1000 bps = 10%）
+        TokenPlatformFeeRateTooHigh,
+        /// 实体已被全局锁定，所有配置操作不可用
+        EntityLocked,
+        /// F1: 调用者既不是 Entity Owner 也不是拥有 COMMISSION_MANAGE 权限的 Admin
+        NotEntityOwnerOrAdmin,
+        /// F15: Entity Owner 设置的 max_commission_rate 超过全局上限
+        CommissionRateExceedsGlobalMax,
+        /// F4: 佣金配置不存在，无法清除
+        ConfigNotFound,
     }
 
     // ========================================================================
@@ -739,7 +788,8 @@ pub mod pallet {
             modes: CommissionModes,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            Self::ensure_entity_owner(entity_id, &who)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             ensure!(modes.is_valid(), Error::<T>::InvalidCommissionRate);
 
             let old_has_pool = CommissionConfigs::<T>::get(entity_id)
@@ -777,8 +827,15 @@ pub mod pallet {
             max_rate: u16,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            Self::ensure_entity_owner(entity_id, &who)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             ensure!(max_rate <= 10000, Error::<T>::InvalidCommissionRate);
+
+            // F15: 全局佣金率上限校验
+            let global_max = GlobalMaxCommissionRate::<T>::get(entity_id);
+            if global_max > 0 {
+                ensure!(max_rate <= global_max, Error::<T>::CommissionRateExceedsGlobalMax);
+            }
 
             CommissionConfigs::<T>::mutate(entity_id, |maybe| {
                 let config = maybe.get_or_insert_with(CoreCommissionConfig::default);
@@ -798,7 +855,8 @@ pub mod pallet {
             enabled: bool,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            Self::ensure_entity_owner(entity_id, &who)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             CommissionConfigs::<T>::mutate(entity_id, |maybe| {
                 let config = maybe.get_or_insert_with(CoreCommissionConfig::default);
@@ -966,7 +1024,8 @@ pub mod pallet {
             enabled: bool,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            Self::ensure_entity_owner(entity_id, &who)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             // 校验模式参数
             match &mode {
@@ -1053,7 +1112,8 @@ pub mod pallet {
             enabled: bool,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            Self::ensure_entity_owner(entity_id, &who)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             // 校验模式参数
             match &mode {
@@ -1176,12 +1236,17 @@ pub mod pallet {
                 }
 
                 // P3 审计修复: Token 冻结期使用独立的 MemberTokenLastCredited
-                // 不再共用 NEX 的 MemberLastCredited，实现完全解耦
+                // F3: 使用独立的 token_withdrawal_cooldown（0 = 回退到 withdrawal_cooldown）
                 if let Some(config) = CommissionConfigs::<T>::get(entity_id) {
-                    if config.withdrawal_cooldown > 0 {
+                    let effective_cooldown = if config.token_withdrawal_cooldown > 0 {
+                        config.token_withdrawal_cooldown
+                    } else {
+                        config.withdrawal_cooldown
+                    };
+                    if effective_cooldown > 0 {
                         let now = <frame_system::Pallet<T>>::block_number();
                         let last = MemberTokenLastCredited::<T>::get(entity_id, &who);
-                        let cooldown: BlockNumberFor<T> = config.withdrawal_cooldown.into();
+                        let cooldown: BlockNumberFor<T> = effective_cooldown.into();
                         ensure!(now >= last.saturating_add(cooldown),
                             Error::<T>::WithdrawalCooldownNotMet);
                     }
@@ -1269,6 +1334,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::ensure_entity_owner(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             ensure!(!amount.is_zero(), Error::<T>::ZeroWithdrawalAmount);
 
             let entity_account = T::EntityProvider::entity_account(entity_id);
@@ -1330,6 +1396,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::ensure_entity_owner(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             ensure!(!amount.is_zero(), Error::<T>::ZeroWithdrawalAmount);
 
             // 检测外部直接转入的 Token 并归入沉淀池（incoming=0，无已知入账）
@@ -1379,6 +1446,178 @@ pub mod pallet {
             Ok(())
         }
 
+        /// 设置创建人收益比例（Entity 级，从 Pool B 佣金预算中优先扣除）
+        ///
+        /// 仅 Entity Owner 可调用。rate 为基点，0 = 不启用，上限 5000（50%）
+        /// 需同时启用 CREATOR_REWARD 模式位才会实际生效
+        #[pallet::call_index(14)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn set_creator_reward_rate(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            rate: u16,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(rate <= 5000, Error::<T>::InvalidCommissionRate);
+
+            CommissionConfigs::<T>::mutate(entity_id, |maybe| {
+                let config = maybe.get_or_insert_with(CoreCommissionConfig::default);
+                config.creator_reward_rate = rate;
+            });
+
+            Self::deposit_event(Event::CommissionConfigUpdated { entity_id });
+            Ok(())
+        }
+
+        /// 设置 Token 平台费率（Root / 治理）
+        ///
+        /// rate 为基点，0 = 关闭 Token 平台费，上限 1000 bps（10%）
+        #[pallet::call_index(15)]
+        #[pallet::weight(Weight::from_parts(20_000_000, 2_000))]
+        pub fn set_token_platform_fee_rate(
+            origin: OriginFor<T>,
+            new_rate: u16,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(new_rate <= 1000, Error::<T>::TokenPlatformFeeRateTooHigh);
+            let old_rate = TokenPlatformFeeRate::<T>::get();
+            TokenPlatformFeeRate::<T>::put(new_rate);
+            Self::deposit_event(Event::TokenPlatformFeeRateUpdated { old_rate, new_rate });
+            Ok(())
+        }
+
+        /// F13: 设置 NEX 全局最低复购比例（Root，Governance 底线）
+        ///
+        /// 与 Token 版 set_global_min_token_repurchase_rate (call_index 11) 对称
+        #[pallet::call_index(16)]
+        #[pallet::weight(Weight::from_parts(30_000_000, 3_000))]
+        pub fn set_global_min_repurchase_rate(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            rate: u16,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(rate <= 10000, Error::<T>::InvalidCommissionRate);
+            GlobalMinRepurchaseRate::<T>::insert(entity_id, rate);
+            Self::deposit_event(Event::GlobalMinRepurchaseRateSet { entity_id, rate });
+            Ok(())
+        }
+
+        /// F2: 设置提现冻结期（Entity 级，NEX 和 Token 独立配置）
+        #[pallet::call_index(17)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn set_withdrawal_cooldown(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            nex_cooldown: u32,
+            token_cooldown: u32,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+
+            CommissionConfigs::<T>::mutate(entity_id, |maybe| {
+                let config = maybe.get_or_insert_with(CoreCommissionConfig::default);
+                config.withdrawal_cooldown = nex_cooldown;
+                config.token_withdrawal_cooldown = token_cooldown;
+            });
+
+            Self::deposit_event(Event::WithdrawalCooldownUpdated {
+                entity_id,
+                nex_cooldown,
+                token_cooldown,
+            });
+            Ok(())
+        }
+
+        /// F14: Root 紧急禁用 Entity 佣金（不可逆，需 Root 重新启用）
+        #[pallet::call_index(18)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn force_disable_entity_commission(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            CommissionConfigs::<T>::mutate(entity_id, |maybe| {
+                let config = maybe.get_or_insert_with(CoreCommissionConfig::default);
+                config.enabled = false;
+            });
+
+            Self::deposit_event(Event::CommissionForceDisabled { entity_id });
+            Ok(())
+        }
+
+        /// F15: 设置全局佣金率上限（Root）
+        ///
+        /// Entity Owner 的 max_commission_rate 不得超过此值。0 = 无限制。
+        #[pallet::call_index(19)]
+        #[pallet::weight(Weight::from_parts(30_000_000, 3_000))]
+        pub fn set_global_max_commission_rate(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            rate: u16,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(rate <= 10000, Error::<T>::InvalidCommissionRate);
+            GlobalMaxCommissionRate::<T>::insert(entity_id, rate);
+            Self::deposit_event(Event::GlobalMaxCommissionRateSet { entity_id, rate });
+            Ok(())
+        }
+
+        /// F4: 清除佣金配置（恢复默认值）
+        #[pallet::call_index(20)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn clear_commission_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(CommissionConfigs::<T>::contains_key(entity_id), Error::<T>::ConfigNotFound);
+
+            CommissionConfigs::<T>::remove(entity_id);
+            Self::deposit_event(Event::CommissionConfigCleared { entity_id });
+            Ok(())
+        }
+
+        /// F4: 清除 NEX 提现配置
+        #[pallet::call_index(21)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn clear_withdrawal_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(WithdrawalConfigs::<T>::contains_key(entity_id), Error::<T>::ConfigNotFound);
+
+            WithdrawalConfigs::<T>::remove(entity_id);
+            Self::deposit_event(Event::WithdrawalConfigCleared { entity_id });
+            Ok(())
+        }
+
+        /// F4: 清除 Token 提现配置
+        #[pallet::call_index(22)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn clear_token_withdrawal_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(TokenWithdrawalConfigs::<T>::contains_key(entity_id), Error::<T>::ConfigNotFound);
+
+            TokenWithdrawalConfigs::<T>::remove(entity_id);
+            Self::deposit_event(Event::TokenWithdrawalConfigCleared { entity_id });
+            Ok(())
+        }
+
     }
 
     // ========================================================================
@@ -1416,7 +1655,21 @@ pub mod pallet {
 
         // L1 审计修复: 移除死代码 resolve_entity_id（未被任何代码路径调用）
 
-        /// 验证 Entity 所有者权限（直接通过 entity_id）
+        /// F1: 验证 Entity Owner 或 Admin(COMMISSION_MANAGE) 权限
+        fn ensure_owner_or_admin(entity_id: u64, who: &T::AccountId) -> DispatchResult {
+            let owner = T::EntityProvider::entity_owner(entity_id)
+                .ok_or(Error::<T>::EntityNotFound)?;
+            if *who == owner {
+                return Ok(());
+            }
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, who, AdminPermission::COMMISSION_MANAGE),
+                Error::<T>::NotEntityOwnerOrAdmin
+            );
+            Ok(())
+        }
+
+        /// 验证 Entity Owner（仅 Owner，不含 Admin — 用于资金提取等敏感操作）
         fn ensure_entity_owner(entity_id: u64, who: &T::AccountId) -> Result<(), DispatchError> {
             let owner = T::EntityProvider::entity_owner(entity_id)
                 .ok_or(Error::<T>::EntityNotFound)?;
@@ -1822,6 +2075,23 @@ pub mod pallet {
             if !remaining.is_zero() {
                 let initial_remaining = remaining;
 
+                // ── 创建人收益（从 Pool B 预算中优先扣除，在所有插件之前） ──
+                if enabled_modes.contains(CommissionModes::CREATOR_REWARD) && config.creator_reward_rate > 0 {
+                    if let Some(creator) = T::EntityProvider::entity_owner(entity_id) {
+                        let creator_amount = remaining
+                            .saturating_mul(config.creator_reward_rate.into())
+                            / 10000u32.into();
+                        let creator_amount = creator_amount.min(remaining);
+                        if !creator_amount.is_zero() {
+                            Self::credit_commission(
+                                entity_id, shop_id, order_id, buyer, &creator,
+                                creator_amount, CommissionType::CreatorReward, 0, now,
+                            )?;
+                            remaining = remaining.saturating_sub(creator_amount);
+                        }
+                    }
+                }
+
                 // 1. Referral Plugin
                 let (outputs, new_remaining) = T::ReferralPlugin::calculate(
                     entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
@@ -2026,6 +2296,7 @@ pub mod pallet {
             order_id: u64,
             buyer: &T::AccountId,
             token_order_amount: TokenBalanceOf<T>,
+            token_available_pool: TokenBalanceOf<T>,
             token_platform_fee: TokenBalanceOf<T>,
         ) -> DispatchResult {
             let config = CommissionConfigs::<T>::get(entity_id)
@@ -2070,7 +2341,7 @@ pub mod pallet {
             }
 
             // ── 池 B：会员 Token 返佣（从 entity_account Token 余额中分配） ──
-            let max_commission = token_order_amount
+            let max_commission = token_available_pool
                 .saturating_mul(config.max_commission_rate.into())
                 / 10000u32.into();
 
@@ -2088,6 +2359,23 @@ pub mod pallet {
             let mut remaining = max_commission.min(available_token);
 
             if !remaining.is_zero() {
+                // ── 创建人收益（从 Token Pool B 预算中优先扣除） ──
+                if enabled_modes.contains(CommissionModes::CREATOR_REWARD) && config.creator_reward_rate > 0 {
+                    if let Some(creator) = T::EntityProvider::entity_owner(entity_id) {
+                        let creator_amount = remaining
+                            .saturating_mul(config.creator_reward_rate.into())
+                            / 10000u32.into();
+                        let creator_amount = creator_amount.min(remaining);
+                        if !creator_amount.is_zero() {
+                            Self::credit_token_commission(
+                                entity_id, order_id, buyer, &creator,
+                                creator_amount, CommissionType::CreatorReward, 0, now,
+                            )?;
+                            remaining = remaining.saturating_sub(creator_amount);
+                        }
+                    }
+                }
+
                 // 1. Token Referral Plugin
                 let (outputs, new_remaining) = T::TokenReferralPlugin::calculate_token(
                     entity_id, buyer, token_order_amount, remaining,
@@ -2572,6 +2860,15 @@ impl<T: pallet::Config> CommissionProvider<T::AccountId, pallet::BalanceOf<T>> f
         pallet::Pallet::<T>::deposit_event(pallet::Event::GlobalMinRepurchaseRateSet { entity_id, rate });
         Ok(())
     }
+
+    fn set_creator_reward_rate(entity_id: u64, rate: u16) -> sp_runtime::DispatchResult {
+        frame_support::ensure!(rate <= 5000, sp_runtime::DispatchError::Other("InvalidRate"));
+        pallet::CommissionConfigs::<T>::mutate(entity_id, |maybe| {
+            let config = maybe.get_or_insert_with(pallet::CoreCommissionConfig::default);
+            config.creator_reward_rate = rate;
+        });
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -2618,8 +2915,6 @@ impl<T: pallet::Config> pallet_commission_common::TokenPoolBalanceProvider<palle
 // TokenCommissionProvider 实现（供 transaction 模块调用 Token 佣金管线）
 // ============================================================================
 
-use frame_support::traits::Get as GetTrait;
-
 impl<T: pallet::Config> pallet_commission_common::TokenCommissionProvider<T::AccountId, pallet::TokenBalanceOf<T>>
     for pallet::Pallet<T>
 {
@@ -2629,9 +2924,10 @@ impl<T: pallet::Config> pallet_commission_common::TokenCommissionProvider<T::Acc
         order_id: u64,
         buyer: &T::AccountId,
         token_order_amount: pallet::TokenBalanceOf<T>,
+        token_available_pool: pallet::TokenBalanceOf<T>,
         token_platform_fee: pallet::TokenBalanceOf<T>,
     ) -> Result<(), sp_runtime::DispatchError> {
-        pallet::Pallet::<T>::process_token_commission(entity_id, shop_id, order_id, buyer, token_order_amount, token_platform_fee)
+        pallet::Pallet::<T>::process_token_commission(entity_id, shop_id, order_id, buyer, token_order_amount, token_available_pool, token_platform_fee)
     }
 
     fn cancel_token_commission(order_id: u64) -> Result<(), sp_runtime::DispatchError> {
@@ -2643,6 +2939,6 @@ impl<T: pallet::Config> pallet_commission_common::TokenCommissionProvider<T::Acc
     }
 
     fn token_platform_fee_rate(_entity_id: u64) -> u16 {
-        T::TokenPlatformFeeRate::get()
+        pallet::TokenPlatformFeeRate::<T>::get()
     }
 }

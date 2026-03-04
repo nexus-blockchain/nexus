@@ -25,7 +25,7 @@
 
 // Substrate and Polkadot dependencies
 use sp_runtime::{traits::AccountIdConversion, generic};
-use crate::{UncheckedExtrinsic, EntityMember};
+use crate::{UncheckedExtrinsic, EntityMember, EntityGovernance};
 use frame_support::{
 	derive_impl, parameter_types,
 	traits::{ConstBool, ConstU128, ConstU16, ConstU32, ConstU64, ConstU8, VariantCountOf},
@@ -47,7 +47,7 @@ use super::{
 	System, Timestamp, EXISTENTIAL_DEPOSIT, SLOT_DURATION, VERSION, UNIT, MINUTES, HOURS, DAYS,
 	TechnicalCommittee, ArbitrationCommittee, TreasuryCouncil, ContentCommittee,
 	// Entity types (原 ShareMall)
-	Assets, Escrow, EntityRegistry, EntityShop, EntityService, EntityTransaction, EntityToken, EntityKyc,
+	Assets, Escrow, EntityRegistry, EntityShop, EntityProduct, EntityTransaction, EntityToken, EntityKyc, EntityDisclosure,
 };
 
 const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
@@ -984,8 +984,6 @@ impl pallet_assets::Config for Runtime {
 parameter_types! {
 	/// 最低实体保证金: 100 COS
 	pub const EntityMinDeposit: Balance = 100 * UNIT;
-	/// 平台费率: 2% (200 基点)
-	pub const EntityPlatformFeeRate: u16 = 200;
 	/// 发货超时: 约 3 天 (假设 6 秒一个块)
 	pub const EntityShipTimeout: BlockNumber = 43200;
 	/// 确认收货超时: 约 7 天
@@ -1033,6 +1031,8 @@ impl pallet_entity_registry::Config for Runtime {
 	type ShopProvider = EntityShop;
 	type MaxShopsPerEntity = ConstU32<16>;
 	type PlatformAccount = EntityPlatformAccount;
+	type GovernanceProvider = EntityGovernance;
+	type CloseRequestTimeout = ConstU32<{ 7 * DAYS }>;  // 7 天
 }
 
 impl pallet_entity_shop::Config for Runtime {
@@ -1047,9 +1047,11 @@ impl pallet_entity_shop::Config for Runtime {
 	type MinOperatingBalance = ConstU128<{ UNIT / 10 }>;
 	type WarningThreshold = ConstU128<{ UNIT }>;
 	type CommissionFundGuard = crate::CommissionCore;
+	type ShopClosingGracePeriod = ConstU32<100800>; // 7 days @ 6s/block
+	type MaxShopsPerEntity = ConstU32<16>;
 }
 
-impl pallet_entity_service::Config for Runtime {
+impl pallet_entity_product::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type EntityProvider = EntityRegistry;
@@ -1061,6 +1063,8 @@ impl pallet_entity_service::Config for Runtime {
 	type MinProductDepositCos = ConstU128<{ UNIT / 100 }>;
 	type MaxProductDepositCos = ConstU128<{ 10 * UNIT }>;
 	type IpfsPinner = pallet_storage_service::Pallet<Runtime>;
+	type MaxBatchSize = ConstU32<50>;
+	type MaxReasonLength = ConstU32<256>;
 }
 
 impl pallet_entity_order::Config for Runtime {
@@ -1068,13 +1072,14 @@ impl pallet_entity_order::Config for Runtime {
 	type Currency = Balances;
 	type Escrow = Escrow;
 	type ShopProvider = EntityShop;
-	type ProductProvider = EntityService;
+	type ProductProvider = EntityProduct;
 	type EntityToken = EntityToken;
 	type PlatformAccount = EntityPlatformAccount;
-	type PlatformFeeRate = EntityPlatformFeeRate;
 	type ShipTimeout = EntityShipTimeout;
 	type ConfirmTimeout = EntityConfirmTimeout;
 	type ServiceConfirmTimeout = ConstU32<{ 7 * 24 * 600 }>;  // 7 天
+	type DisputeTimeout = ConstU32<{ 14 * 24 * 600 }>;  // 14 天
+	type ConfirmExtension = ConstU32<{ 7 * 24 * 600 }>;  // 7 天
 	type CommissionHandler = OrderCommissionBridge;
 	type TokenCommissionHandler = TokenOrderCommissionBridge;
 	type ShoppingBalance = ShoppingBalanceBridge;
@@ -1093,8 +1098,16 @@ impl pallet_entity_review::Config for Runtime {
 	type WeightInfo = pallet_entity_review::weights::SubstrateWeight<Runtime>;
 }
 
-// 使用 pallet-entity-token 内置的 Null 实现
-pub type TokenKycProvider = pallet_entity_token::pallet::NullKycProvider;
+/// Token KYC 适配器（桥接 pallet-entity-kyc → KycLevelProvider trait）
+pub struct TokenKycBridge;
+impl pallet_entity_token::pallet::KycLevelProvider<AccountId> for TokenKycBridge {
+	fn get_kyc_level(account: &AccountId) -> u8 {
+		EntityKyc::get_kyc_level(account).as_u8()
+	}
+	fn meets_kyc_requirement(account: &AccountId, min_level: u8) -> bool {
+		EntityKyc::get_kyc_level(account).as_u8() >= min_level
+	}
+}
 pub type TokenMemberProvider = pallet_entity_token::pallet::NullMemberProvider;
 
 impl pallet_entity_token::Config for Runtime {
@@ -1108,8 +1121,9 @@ impl pallet_entity_token::Config for Runtime {
 	type MaxTokenSymbolLength = ConstU32<8>;
 	type MaxTransferListSize = ConstU32<1000>;
 	type MaxDividendRecipients = ConstU32<500>;
-	type KycProvider = TokenKycProvider;
+	type KycProvider = TokenKycBridge;
 	type MemberProvider = TokenMemberProvider;
+	type DisclosureProvider = EntityDisclosure;
 	type WeightInfo = pallet_entity_token::weights::SubstrateWeight<Runtime>;
 }
 
@@ -1154,8 +1168,7 @@ impl pallet_entity_commission::MemberProvider<AccountId> for MemberProviderBridg
 				} else {
 					m.qualified_referrals
 				};
-				let spent_usdt: u128 = sp_runtime::SaturatedConversion::saturated_into(m.total_spent);
-				(direct, m.team_size, spent_usdt)
+				(direct, m.team_size, m.total_spent as u128)
 			})
 			.unwrap_or((0, 0, 0))
 	}
@@ -1179,10 +1192,6 @@ impl pallet_entity_commission::MemberProvider<AccountId> for MemberProviderBridg
 
 	fn auto_register_qualified(entity_id: u64, account: &AccountId, referrer: Option<AccountId>, qualified: bool) -> sp_runtime::DispatchResult {
 		pallet_entity_member::Pallet::<Runtime>::auto_register_by_entity(entity_id, account, referrer, qualified)
-	}
-
-	fn is_activated(_entity_id: u64, _account: &AccountId) -> bool {
-		true // 激活机制已移除，所有注册会员均视为已激活
 	}
 
 	fn set_custom_levels_enabled(entity_id: u64, enabled: bool) -> sp_runtime::DispatchResult {
@@ -1231,6 +1240,28 @@ impl pallet_entity_commission::MemberProvider<AccountId> for MemberProviderBridg
 	fn member_count_by_level(entity_id: u64, level_id: u8) -> u32 {
 		pallet_entity_member::LevelMemberCount::<Runtime>::get(entity_id, level_id)
 	}
+
+	fn get_member_spent_usdt(entity_id: u64, account: &AccountId) -> u64 {
+		pallet_entity_member::EntityMembers::<Runtime>::get(entity_id, account)
+			.map(|m| m.total_spent)
+			.unwrap_or(0)
+	}
+
+	fn get_effective_level(entity_id: u64, account: &AccountId) -> u8 {
+		pallet_entity_member::Pallet::<Runtime>::get_effective_level_by_entity(entity_id, account)
+	}
+
+	fn get_level_discount(entity_id: u64, level_id: u8) -> u16 {
+		pallet_entity_member::Pallet::<Runtime>::get_level_discount_by_entity(entity_id, level_id)
+	}
+
+	fn update_spent(entity_id: u64, account: &AccountId, amount_usdt: u64) -> sp_runtime::DispatchResult {
+		pallet_entity_member::Pallet::<Runtime>::update_spent_by_entity(entity_id, account, amount_usdt)
+	}
+
+	fn check_order_upgrade_rules(entity_id: u64, buyer: &AccountId, product_id: u64, amount_usdt: u64) -> sp_runtime::DispatchResult {
+		pallet_entity_member::Pallet::<Runtime>::check_order_upgrade_rules_by_entity(entity_id, buyer, product_id, amount_usdt)
+	}
 }
 
 /// 桥接：OrderCommissionHandler → CommissionProvider（供 Transaction 模块调用）
@@ -1244,9 +1275,10 @@ impl pallet_entity_common::OrderCommissionHandler<AccountId, Balance> for OrderC
 		order_amount: Balance,
 		platform_fee: Balance,
 	) -> Result<(), sp_runtime::DispatchError> {
-		// available_pool = order_amount，commission 内部会按 max_commission_rate、source 和账户余额封顶
+		// available_pool = order_amount - platform_fee（卖家实际所得），commission 内部会按 max_commission_rate、source 和账户余额封顶
+		let available_pool = order_amount.saturating_sub(platform_fee);
 		<pallet_commission_core::Pallet<Runtime> as pallet_commission_common::CommissionProvider<AccountId, Balance>>::process_commission(
-			entity_id, shop_id, order_id, buyer, order_amount, order_amount, platform_fee,
+			entity_id, shop_id, order_id, buyer, order_amount, available_pool, platform_fee,
 		)
 	}
 	fn on_order_cancelled(order_id: u64) -> Result<(), sp_runtime::DispatchError> {
@@ -1268,8 +1300,9 @@ impl pallet_entity_common::TokenOrderCommissionHandler<AccountId> for TokenOrder
 		use sp_runtime::SaturatedConversion;
 		let token_balance: <Runtime as pallet_commission_core::Config>::TokenBalance = token_amount.saturated_into();
 		let fee_balance: <Runtime as pallet_commission_core::Config>::TokenBalance = token_platform_fee.saturated_into();
+		let available_pool = token_balance.saturating_sub(fee_balance);
 		<pallet_commission_core::Pallet<Runtime> as pallet_commission_common::TokenCommissionProvider<AccountId, <Runtime as pallet_commission_core::Config>::TokenBalance>>::process_token_commission(
-			entity_id, shop_id, order_id, buyer, token_balance, fee_balance,
+			entity_id, shop_id, order_id, buyer, token_balance, available_pool, fee_balance,
 		)
 	}
 	fn on_token_order_cancelled(order_id: u64) -> Result<(), sp_runtime::DispatchError> {
@@ -1333,6 +1366,17 @@ impl pallet_entity_governance::Config for Runtime {
 	type MinExecutionDelay = GovernanceMinExecutionDelay;
 	type TimeWeightFullPeriod = ConstU32<{ 30 * DAYS }>;  // 30 天达到最大乘数
 	type TimeWeightMaxMultiplier = ConstU32<30000>;        // 最大 3x 投票权
+	type MaxDelegatorsPerDelegate = ConstU32<100>;
+	type MultiLevelWriter = pallet_commission_multi_level::Pallet<Runtime>;
+}
+
+/// 桥接：KycChecker → pallet-entity-kyc::can_participate_in_entity
+/// Entity 未配置 EntityRequirements 或 mandatory=false 时返回 true
+pub struct MemberKycBridge;
+impl pallet_entity_member::KycChecker<AccountId> for MemberKycBridge {
+	fn is_kyc_passed(entity_id: u64, account: &AccountId) -> bool {
+		pallet_entity_kyc::Pallet::<Runtime>::can_participate_in_entity(account, entity_id)
+	}
 }
 
 impl pallet_entity_member::Config for Runtime {
@@ -1345,6 +1389,7 @@ impl pallet_entity_member::Config for Runtime {
 	type MaxUpgradeRules = ConstU32<50>;
 	type MaxUpgradeHistory = ConstU32<100>;
 	type PendingMemberExpiry = ConstU32<100800>; // 7 days × 24h × 60min × 60s / 6s = 100800 blocks
+	type KycChecker = MemberKycBridge;
 }
 
 /// 桥接：EntityReferrerProvider → EntityRegistry::entity_referrer()
@@ -1386,7 +1431,7 @@ impl pallet_commission_core::Config for Runtime {
 	type PlatformAccount = EntityPlatformAccount;
 	type TreasuryAccount = TreasuryAccountId;
 	type ReferrerShareBps = ConstU16<5000>; // 50% of platform fee → referrer
-	type TokenPlatformFeeRate = ConstU16<100>; // 1% Token 订单平台费（全局固定）
+
 	type MaxCommissionRecordsPerOrder = ConstU32<20>;
 	type MaxCustomLevels = ConstU32<10>;
 	type ParticipationGuard = KycParticipationGuard;
@@ -1405,10 +1450,13 @@ impl pallet_commission_referral::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type MemberProvider = EntityMemberProvider;
+	type EntityProvider = EntityRegistry;
 }
 
 impl pallet_commission_multi_level::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
 	type MemberProvider = EntityMemberProvider;
+	type EntityProvider = EntityRegistry;
 	type MaxMultiLevels = ConstU32<15>;
 	type WeightInfo = pallet_commission_multi_level::weights::SubstrateWeight<Runtime>;
 }
@@ -1433,6 +1481,7 @@ impl pallet_commission_level_diff::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type MemberProvider = EntityMemberProvider;
+	type EntityProvider = EntityRegistry;
 	type MaxCustomLevels = ConstU32<10>;
 }
 
@@ -1458,6 +1507,7 @@ impl pallet_commission_team::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type MemberProvider = EntityMemberProvider;
+	type EntityProvider = EntityRegistry;
 	type MaxTeamTiers = ConstU32<10>;
 }
 
@@ -1466,11 +1516,9 @@ impl pallet_commission_single_line::Config for Runtime {
 	type Currency = Balances;
 	type StatsProvider = SingleLineStatsFromCore;
 	type MemberLevelProvider = SingleLineLevelFromMember;
+	type EntityProvider = EntityRegistry;
+	type MemberProvider = EntityMemberProvider;
 	type MaxSingleLineLength = ConstU32<50>;
-}
-
-parameter_types! {
-	pub MarketTreasuryAccount: AccountId = AccountId::from([0u8; 32]);
 }
 
 impl pallet_entity_market::Config for Runtime {
@@ -1483,21 +1531,11 @@ impl pallet_entity_market::Config for Runtime {
 	type DefaultOrderTTL = ConstU32<{ 7 * 24 * 600 }>;  // 7 天
 	type MaxActiveOrdersPerUser = ConstU32<100>;
 	type DefaultFeeRate = ConstU16<30>;  // 0.3%
-	type DefaultUsdtTimeout = ConstU32<{ 2 * 600 }>;  // 2 小时
 	type BlocksPerHour = ConstU32<600>;
 	type BlocksPerDay = ConstU32<{ 24 * 600 }>;
 	type BlocksPerWeek = ConstU32<{ 7 * 24 * 600 }>;
 	type CircuitBreakerDuration = ConstU32<600>;  // 1 小时
-	type VerificationReward = ConstU128<{ UNIT / 10 }>;  // 0.1 NEX
-	type RewardSource = MarketTreasuryAccount;
-	type BuyerDepositRate = ConstU16<1000>;  // 10%
-	type MinBuyerDeposit = ConstU128<{ UNIT }>;  // 1 COS
-	type DepositForfeitRate = ConstU16<5000>;  // 50%
-	type UsdtToNexRate = ConstU64<100_000>;  // 1 USDT = 0.1 NEX
-	type TreasuryAccount = MarketTreasuryAccount;
-	type VerificationGracePeriod = ConstU32<600>;  // 1 小时
-	type UnderpaidGracePeriod = ConstU32<{ 2 * 600 }>;  // 2 小时
-	type NexUsdtPrice = EntityPricingProvider;
+	type DisclosureProvider = EntityDisclosure;
 }
 
 // ============================================================================
@@ -1525,10 +1563,11 @@ impl pallet_entity_disclosure::Config for Runtime {
 	type BasicDisclosureInterval = BasicDisclosureInterval;
 	type StandardDisclosureInterval = StandardDisclosureInterval;
 	type EnhancedDisclosureInterval = EnhancedDisclosureInterval;
-	type MajorHolderThreshold = ConstU16<500>; // 5%
 	type MaxBlackoutDuration = MaxBlackoutDuration;
 	type MaxAnnouncementHistory = ConstU32<200>;
 	type MaxTitleLength = ConstU32<128>;
+	type MaxPinnedAnnouncements = ConstU32<5>;
+	type MaxInsiderRoleHistory = ConstU32<20>;
 }
 
 impl pallet_entity_kyc::Config for Runtime {
@@ -1541,20 +1580,14 @@ impl pallet_entity_kyc::Config for Runtime {
 	type EnhancedKycValidity = EnhancedKycValidity;
 	type InstitutionalKycValidity = InstitutionalKycValidity;
 	type AdminOrigin = EnsureRoot<AccountId>;
+	type EntityProvider = EntityRegistry;
 }
 
 /// TokenSale KYC 适配器（桥接 pallet-entity-kyc → KycChecker trait）
 pub struct TokenSaleKycBridge;
 impl pallet_entity_tokensale::KycChecker<AccountId> for TokenSaleKycBridge {
 	fn kyc_level(account: &AccountId) -> u8 {
-		use pallet_entity_kyc::pallet::KycLevel;
-		match EntityKyc::get_kyc_level(account) {
-			KycLevel::None => 0,
-			KycLevel::Basic => 1,
-			KycLevel::Standard => 2,
-			KycLevel::Enhanced => 3,
-			KycLevel::Institutional => 4,
-		}
+		EntityKyc::get_kyc_level(account).as_u8()
 	}
 }
 
@@ -1650,6 +1683,15 @@ impl pallet_grouprobot_primitives::BotRegistryProvider<AccountId> for GrBotRegis
 	fn bot_operator(bot_id_hash: &[u8; 32]) -> Option<AccountId> {
 		pallet_grouprobot_registry::Pallet::<Runtime>::bot_operator_account(bot_id_hash)
 	}
+	fn bot_status(bot_id_hash: &[u8; 32]) -> Option<pallet_grouprobot_primitives::BotStatus> {
+		pallet_grouprobot_registry::Bots::<Runtime>::get(bot_id_hash).map(|b| b.status)
+	}
+	fn attestation_level(bot_id_hash: &[u8; 32]) -> u8 {
+		pallet_grouprobot_registry::Pallet::<Runtime>::attestation_level(bot_id_hash)
+	}
+	fn tee_type(bot_id_hash: &[u8; 32]) -> Option<pallet_grouprobot_primitives::TeeType> {
+		pallet_grouprobot_registry::Pallet::<Runtime>::get_tee_type(bot_id_hash)
+	}
 }
 
 parameter_types! {
@@ -1730,8 +1772,10 @@ impl pallet_grouprobot_rewards::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type NodeConsensus = GrNodeConsensusBridge;
+	type BotRegistry = GrBotRegistryBridge;
 	type RewardPoolAccount = RewardPoolAccountId;
 	type MaxEraHistory = GrMaxEraHistory;
+	type MaxBatchClaim = ConstU32<20>;
 }
 
 impl pallet_grouprobot_community::Config for Runtime {
@@ -1796,11 +1840,17 @@ impl pallet_ads_core::pallet::Config for Runtime {
 	type MinAudienceSize = ConstU32<10>;
 	type AdSlashPercentage = ConstU32<30>;
 	type TreasuryAccount = TreasuryAccountId;
-	// 适配层: 由 pallet-ads-grouprobot 提供实现
-	type DeliveryVerifier = pallet_ads_grouprobot::Pallet<Runtime>;
-	type PlacementAdmin = pallet_ads_grouprobot::Pallet<Runtime>;
-	type RevenueDistributor = pallet_ads_grouprobot::Pallet<Runtime>;
+	// 适配层: 路由分发到 Entity 或 GroupRobot
+	type DeliveryVerifier = pallet_ads_router::AdsRouter<Runtime>;
+	type PlacementAdmin = pallet_ads_router::AdsRouter<Runtime>;
+	type RevenueDistributor = pallet_ads_router::AdsRouter<Runtime>;
 	type PrivateAdRegistrationFee = AdsPrivateAdRegistrationFee;
+	type SettlementIncentiveBps = ConstU32<10>; // 0.1%
+	type MaxCampaignsPerAdvertiser = ConstU32<100>;
+	type MaxTargetsPerCampaign = ConstU32<20>;
+	type ReceiptConfirmationWindow = ConstU32<7200>; // ≈ 12h @ 6s/block
+	type AdvertiserReferralRate = ConstU32<500>; // 5% of platform share
+	type MaxReferredAdvertisers = ConstU32<100>;
 }
 
 impl pallet_ads_grouprobot::pallet::Config for Runtime {
@@ -1815,6 +1865,8 @@ impl pallet_ads_grouprobot::pallet::Config for Runtime {
 	type AudienceSurgeThresholdPct = ConstU32<100>;   // 允许 100% audience 增长
 	type NodeDeviationThresholdPct = ConstU32<20>;     // 20% 多节点偏差
 	type AdSlashPercentage = ConstU32<30>;             // 30% slash
+	type UnbondingPeriod = ConstU32<14_400>;           // ~24h @ 6s/block
+	type StakerRewardPct = ConstU32<10>;               // 质押者分成 10%
 }
 
 impl pallet_ads_entity::pallet::Config for Runtime {

@@ -61,6 +61,7 @@ pub trait Config: frame_system::Config {
     type RuntimeEvent: From<Event<Self>> + IsType<...>;
     type Currency: Currency<Self::AccountId>;
     type MemberProvider: MemberProvider<Self::AccountId>;
+    type EntityProvider: EntityProvider<Self::AccountId>;
 }
 ```
 
@@ -72,15 +73,28 @@ pub trait Config: frame_system::Config {
 
 ## Extrinsics
 
+### Owner/Admin 操作（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
+
 | call_index | 方法 | 权限 | 说明 |
 |------------|------|------|------|
-| 0 | `set_direct_reward_config` | Root | 设置直推奖励率（rate ≤ 10000 bps） |
-| 2 | `set_fixed_amount_config` | Root | 设置固定金额 |
-| 3 | `set_first_order_config` | Root | 设置首单奖励（rate ≤ 10000 bps） |
-| 4 | `set_repeat_purchase_config` | Root | 设置复购奖励（rate ≤ 10000 bps） |
+| 0 | `set_direct_reward_config` | Owner/Admin | 设置直推奖励率（rate ≤ 10000 bps） |
+| 2 | `set_fixed_amount_config` | Owner/Admin | 设置固定金额 |
+| 3 | `set_first_order_config` | Owner/Admin | 设置首单奖励（rate ≤ 10000 bps） |
+| 4 | `set_repeat_purchase_config` | Owner/Admin | 设置复购奖励（rate ≤ 10000 bps） |
+| 5 | `clear_referral_config` | Owner/Admin | 清除推荐链配置（配置必须存在） |
+
+### Root 紧急覆写
+
+| call_index | 方法 | 权限 | 说明 |
+|------------|------|------|------|
+| 6 | `force_set_direct_reward_config` | Root | 强制设置直推奖励率 |
+| 7 | `force_set_fixed_amount_config` | Root | 强制设置固定金额 |
+| 8 | `force_set_first_order_config` | Root | 强制设置首单奖励 |
+| 9 | `force_set_repeat_purchase_config` | Root | 强制设置复购奖励 |
+| 10 | `force_clear_referral_config` | Root | 强制清除推荐链配置（幻影事件守卫） |
 
 > call_index 1 已移除（原为 MultiLevel，现分离为 `pallet-commission-multi-level`）。
-> Extrinsics 使用 `ensure_root` 权限。正常使用通过 core pallet 的 `init_commission_plan` / `ReferralPlanWriter` trait 进行配置。
+> 配置也可通过 `ReferralPlanWriter` trait 进行设置（治理/core pallet 路径）。
 
 ## 计算逻辑
 
@@ -97,6 +111,7 @@ CommissionPlugin::calculate()
 - 每种模式从 `remaining` 额度中扣除，避免超发
 - 所有模式仅查找买家的直接推荐人（单层）
 - 无推荐人时跳过，不产生输出
+- **推荐人被封禁时跳过** — `is_banned` 检查，与 team/level-diff 插件一致 (X1)
 
 ## Token 多资产支持
 
@@ -123,6 +138,9 @@ CommissionPlugin::calculate()
 | 错误 | 说明 |
 |------|------|
 | `InvalidRate` | 返佣率超过 10000 基点 |
+| `EntityNotFound` | 实体不存在 |
+| `NotEntityOwnerOrAdmin` | 非实体所有者或无 COMMISSION_MANAGE 权限 |
+| `ConfigNotFound` | 配置不存在（清除时） |
 
 ## 审计记录
 
@@ -143,6 +161,9 @@ CommissionPlugin::calculate()
 |----|------|------|
 | L-weight | Low | 4 个 extrinsic 硬编码 Weight，无 WeightInfo trait（需完整 benchmark 框架） |
 | L-dup | Low | Token 版 `_token` 函数与 NEX 版逻辑大量重复（维护风险） |
+| X1 | High | 推荐人无 `is_banned` 检查 — 被封禁会员仍获返佣。修复: 7 个 process 函数添加 `is_banned` 守卫 |
+| X2 | Medium | `clear_config` / `force_clear` 幻影事件 — 配置不存在时仍发射 `ReferralConfigCleared`。修复: 添加 `contains_key` 前置检查 |
+| X3 | Medium | 所有 extrinsic 为 Root-only — Entity Owner 无法自主管理。修复: 日常操作改为 Owner/Admin (COMMISSION_MANAGE)，新增 `force_*` Root 后备 |
 
 ## 版本历史
 
@@ -151,10 +172,12 @@ CommissionPlugin::calculate()
 | v0.1.0 | 初始版本（含 MultiLevel） |
 | v0.2.0 | MultiLevel 分离为 `pallet-commission-multi-level` |
 | v0.3.0 | 深度审计 Round 2: M1(事件发射) + M2(README) + L1(Cargo) + L2(死依赖) |
+| v0.4.0 | Phase 1 功能增强: X1(is_banned守卫) + X2(幻影事件守卫) + X3(Owner/Admin权限+force_*) — 55 tests |
 
 ## 依赖
 
 ```toml
 [dependencies]
 pallet-commission-common = { path = "../common" }
+pallet-entity-common = { path = "../../common" }
 ```

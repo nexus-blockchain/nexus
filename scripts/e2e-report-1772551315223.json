@@ -1,0 +1,127 @@
+{
+  "timestamp": "2026-03-03T15:21:55.225Z",
+  "summary": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0
+  },
+  "flows": [
+    {
+      "flowName": "Flow-E1: 实体→店铺创建",
+      "description": "创建实体 → 自动 Primary Shop → 更新 → 暂停/恢复 → 关闭",
+      "steps": [
+        {
+          "name": "创建实体 (Merchant)",
+          "actor": "eve",
+          "passed": true,
+          "duration": 18710
+        },
+        {
+          "name": "验证实体已创建",
+          "actor": "eve",
+          "passed": true,
+          "duration": 12
+        },
+        {
+          "name": "验证 Eve 的 UserEntity 记录",
+          "actor": "eve",
+          "passed": true,
+          "duration": 5
+        },
+        {
+          "name": "验证初始资金已扣除",
+          "actor": "eve",
+          "passed": true,
+          "duration": 3
+        },
+        {
+          "name": "查询实体详细信息",
+          "actor": "eve",
+          "passed": true,
+          "duration": 6
+        },
+        {
+          "name": "更新实体信息",
+          "actor": "eve",
+          "passed": true,
+          "duration": 17349
+        },
+        {
+          "name": "验证更新后的名称",
+          "actor": "eve",
+          "passed": true,
+          "duration": 5
+        },
+        {
+          "name": "暂停实体",
+          "actor": "sudo(alice)",
+          "passed": true,
+          "duration": 18714
+        },
+        {
+          "name": "验证实体已暂停",
+          "actor": "eve",
+          "passed": true,
+          "duration": 7
+        },
+        {
+          "name": "恢复实体",
+          "actor": "sudo(alice)",
+          "passed": true,
+          "duration": 17372
+        },
+        {
+          "name": "验证实体已恢复",
+          "actor": "eve",
+          "passed": true,
+          "duration": 5
+        },
+        {
+          "name": "非所有者更新应失败",
+          "actor": "charlie",
+          "passed": true,
+          "duration": 0
+        },
+        {
+          "name": "空名称创建应失败",
+          "actor": "eve",
+          "passed": true,
+          "duration": 0
+        },
+        {
+          "name": "申请关闭实体",
+          "actor": "eve",
+          "passed": true,
+          "duration": 18719
+        },
+        {
+          "name": "验证状态为 PendingClose",
+          "actor": "eve",
+          "passed": true,
+          "duration": 6
+        },
+        {
+          "name": "审批关闭实体",
+          "actor": "sudo(alice)",
+          "passed": true,
+          "duration": 17380
+        },
+        {
+          "name": "验证实体已关闭",
+          "actor": "eve",
+          "passed": true,
+          "duration": 5
+        },
+        {
+          "name": "Entity→Shop 流程汇总",
+          "actor": "system",
+          "passed": true,
+          "duration": 0
+        }
+      ],
+      "startTime": 1772551170814,
+      "endTime": 1772551315221,
+      "passed": true
+    }
+  ]
+}

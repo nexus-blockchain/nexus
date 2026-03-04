@@ -135,6 +135,28 @@ pub enum EntityStatus {
     PendingClose,
 }
 
+impl EntityStatus {
+    /// 是否正常运营
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Active)
+    }
+
+    /// 是否为终态（不可恢复）
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Banned | Self::Closed)
+    }
+
+    /// 是否可正常运营（仅 Active）
+    pub fn can_operate(&self) -> bool {
+        matches!(self, Self::Active)
+    }
+
+    /// 是否处于待定状态
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending | Self::PendingClose)
+    }
+}
+
 // ============================================================================
 // Shop 有效状态（实时计算，不存储）
 // ============================================================================
@@ -154,8 +176,10 @@ pub enum EffectiveShopStatus {
     Closed,
     /// Entity 已关闭/封禁，Shop 强制关闭
     ClosedByEntity,
-    /// 待激活
-    Pending,
+    /// Shop 关闭中（宽限期）
+    Closing,
+    /// Shop 被治理层封禁
+    Banned,
 }
 
 impl EffectiveShopStatus {
@@ -178,9 +202,12 @@ impl EffectiveShopStatus {
             }
             EntityStatus::Suspended | EntityStatus::PendingClose | EntityStatus::Pending => {
                 // Entity 非 Active → Shop 不可运营
-                // 如果 Shop 自身已 Closed 或 Closing，优先显示 Closed（终态不可逆）
-                if matches!(shop_status, ShopOperatingStatus::Closed | ShopOperatingStatus::Closing) {
+                // 如果 Shop 自身已 Closed/Closing，优先显示对应状态（终态不可逆）
+                if matches!(shop_status, ShopOperatingStatus::Closed) {
                     return Self::Closed;
+                }
+                if matches!(shop_status, ShopOperatingStatus::Closing) {
+                    return Self::Closing;
                 }
                 return Self::PausedByEntity;
             }
@@ -193,8 +220,8 @@ impl EffectiveShopStatus {
             ShopOperatingStatus::Paused => Self::PausedBySelf,
             ShopOperatingStatus::FundDepleted => Self::FundDepleted,
             ShopOperatingStatus::Closed => Self::Closed,
-            ShopOperatingStatus::Closing => Self::Closed,
-            ShopOperatingStatus::Pending => Self::Pending,
+            ShopOperatingStatus::Closing => Self::Closing,
+            ShopOperatingStatus::Banned => Self::Banned,
         }
     }
 }
@@ -243,19 +270,19 @@ impl ShopType {
 /// Shop 状态（业务层状态）
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
 pub enum ShopOperatingStatus {
-    /// 待激活
-    #[default]
-    Pending,
     /// 营业中
+    #[default]
     Active,
     /// 暂停营业
     Paused,
     /// 资金耗尽（自动暂停）
     FundDepleted,
-    /// 关闭中
-    Closing,
     /// 已关闭
     Closed,
+    /// 关闭中（宽限期内）
+    Closing,
+    /// 被治理层封禁（仅 Root 可解封）
+    Banned,
 }
 
 impl ShopOperatingStatus {
@@ -268,13 +295,21 @@ impl ShopOperatingStatus {
     pub fn can_resume(&self) -> bool {
         matches!(self, Self::Paused | Self::FundDepleted)
     }
-}
 
-/// 会员体系模式（统一继承模式：会员数据存储在 Entity 级别，所有 Shop 共享）
-#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
-pub enum MemberMode {
-    #[default]
-    Inherit,
+    /// 是否处于关闭/关闭中状态（终态或准终态）
+    pub fn is_closed_or_closing(&self) -> bool {
+        matches!(self, Self::Closed | Self::Closing)
+    }
+
+    /// 是否被封禁
+    pub fn is_banned(&self) -> bool {
+        matches!(self, Self::Banned)
+    }
+
+    /// 是否处于不可管理状态（关闭/关闭中/封禁）
+    pub fn is_terminal_or_banned(&self) -> bool {
+        matches!(self, Self::Closed | Self::Closing | Self::Banned)
+    }
 }
 
 // ============================================================================
@@ -301,8 +336,12 @@ impl MemberRegistrationPolicy {
     pub const REFERRAL_REQUIRED: u8 = 0b0000_0010;
     /// 需要 Entity owner 审批（注册后进入 Pending 状态）
     pub const APPROVAL_REQUIRED: u8 = 0b0000_0100;
+    /// 注册时需要通过 KYC 认证
+    pub const KYC_REQUIRED: u8 = 0b0000_1000;
+    /// 等级升级时需要通过 KYC 认证
+    pub const KYC_UPGRADE_REQUIRED: u8 = 0b0001_0000;
     /// 所有已定义标记位的并集
-    pub const ALL_VALID: u8 = Self::PURCHASE_REQUIRED | Self::REFERRAL_REQUIRED | Self::APPROVAL_REQUIRED;
+    pub const ALL_VALID: u8 = Self::PURCHASE_REQUIRED | Self::REFERRAL_REQUIRED | Self::APPROVAL_REQUIRED | Self::KYC_REQUIRED | Self::KYC_UPGRADE_REQUIRED;
 
     /// 检查是否设置了指定标记
     pub fn contains(&self, flag: u8) -> bool {
@@ -332,6 +371,16 @@ impl MemberRegistrationPolicy {
     /// 是否要求审批
     pub fn requires_approval(&self) -> bool {
         self.contains(Self::APPROVAL_REQUIRED)
+    }
+
+    /// 注册时是否要求 KYC
+    pub fn requires_kyc(&self) -> bool {
+        self.contains(Self::KYC_REQUIRED)
+    }
+
+    /// 升级时是否要求 KYC
+    pub fn requires_kyc_for_upgrade(&self) -> bool {
+        self.contains(Self::KYC_UPGRADE_REQUIRED)
     }
 }
 
@@ -478,6 +527,7 @@ pub enum TransferRestrictionMode {
 
 impl TransferRestrictionMode {
     /// 从 u8 转换（未知值回退到 None）
+    #[deprecated(note = "使用 try_from_u8 代替，from_u8 会将未知值静默回退到最宽松模式")]
     pub fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::Whitelist,
@@ -502,6 +552,10 @@ impl TransferRestrictionMode {
 }
 
 /// 分红配置
+///
+/// **设计说明：** `last_distribution` 和 `accumulated` 为运行时状态字段，
+/// 理想情况下应作为独立存储项放在 `pallet-entity-token` 中。
+/// 因当前已嵌入 `EntityTokenConfig` 存储结构，修改需存储迁移，暂保留。
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
 pub struct DividendConfig<Balance, BlockNumber> {
     /// 是否启用分红
@@ -532,6 +586,18 @@ pub enum ProductStatus {
     OffShelf,
 }
 
+/// 商品可见性
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+pub enum ProductVisibility {
+    /// 公开（所有人可见）
+    #[default]
+    Public,
+    /// 仅会员可见/可购买
+    MembersOnly,
+    /// 等级门槛（达到指定等级才能购买）
+    LevelGated(u8),
+}
+
 /// 商品类别
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
 pub enum ProductCategory {
@@ -542,6 +608,10 @@ pub enum ProductCategory {
     Physical,
     /// 服务类
     Service,
+    /// 订阅制商品（周期性付费）
+    Subscription,
+    /// 组合包（多个商品打包）
+    Bundle,
     /// 其他
     Other,
 }
@@ -594,6 +664,16 @@ pub mod AdminPermission {
     pub const REVIEW_MANAGE: u32   = 0b0001_0000;
     /// 披露/公告管理（配置披露、发布公告、内幕人员管理）
     pub const DISCLOSURE_MANAGE: u32 = 0b0010_0000;
+    /// 实体管理（更新实体信息、充值资金）
+    pub const ENTITY_MANAGE: u32   = 0b0100_0000;
+    /// KYC 要求管理（设置实体 KYC 要求配置）
+    pub const KYC_MANAGE: u32      = 0b1000_0000;
+    /// 治理提案管理（创建/投票/执行提案）
+    pub const GOVERNANCE_MANAGE: u32 = 0b0001_0000_0000;
+    /// 订单管理（退款审批、争议处理）
+    pub const ORDER_MANAGE: u32      = 0b0010_0000_0000;
+    /// 佣金配置管理（返佣模式、费率设置）
+    pub const COMMISSION_MANAGE: u32 = 0b0100_0000_0000;
     /// 全部权限
     pub const ALL: u32             = 0xFFFF_FFFF;
     /// 所有已定义权限位的并集（用于校验合法性）
@@ -602,7 +682,12 @@ pub mod AdminPermission {
         | TOKEN_MANAGE
         | ADS_MANAGE
         | REVIEW_MANAGE
-        | DISCLOSURE_MANAGE;
+        | DISCLOSURE_MANAGE
+        | ENTITY_MANAGE
+        | KYC_MANAGE
+        | GOVERNANCE_MANAGE
+        | ORDER_MANAGE
+        | COMMISSION_MANAGE;
 
     /// 检查权限值是否仅包含已定义的位
     pub fn is_valid(permissions: u32) -> bool {
@@ -632,12 +717,15 @@ pub trait EntityProvider<AccountId> {
     
     /// 获取实体派生账户
     fn entity_account(entity_id: u64) -> AccountId;
+
+    /// 获取实体类型
+    fn entity_type(entity_id: u64) -> Option<EntityType> {
+        let _ = entity_id;
+        None
+    }
     
     /// 更新实体统计（销售额、订单数）
     fn update_entity_stats(entity_id: u64, sales_amount: u128, order_count: u32) -> Result<(), DispatchError>;
-    
-    /// 更新实体评分
-    fn update_entity_rating(entity_id: u64, rating: u8) -> Result<(), DispatchError>;
     
     // ==================== Entity-Shop 关联接口 ====================
     
@@ -686,6 +774,14 @@ pub trait EntityProvider<AccountId> {
         let _ = (entity_id, mode);
         Ok(())
     }
+
+    /// 实体是否被全局锁定（governance lock 生效时返回 true）
+    ///
+    /// 锁定后所有 Owner/Admin 配置操作被拒绝，不可逆。
+    fn is_entity_locked(entity_id: u64) -> bool {
+        let _ = entity_id;
+        false
+    }
 }
 
 
@@ -725,6 +821,20 @@ pub trait ShopProvider<AccountId> {
     
     /// 更新 Shop 评分
     fn update_shop_rating(shop_id: u64, rating: u8) -> Result<(), DispatchError>;
+    
+    // ==================== 商品统计 ====================
+    
+    /// 增加 Shop 商品计数（创建商品时调用）
+    fn increment_product_count(shop_id: u64) -> Result<(), DispatchError> {
+        let _ = shop_id;
+        Ok(())
+    }
+    
+    /// 减少 Shop 商品计数（删除商品时调用）
+    fn decrement_product_count(shop_id: u64) -> Result<(), DispatchError> {
+        let _ = shop_id;
+        Ok(())
+    }
     
     // ==================== 运营资金 ====================
     
@@ -783,6 +893,12 @@ pub trait ShopProvider<AccountId> {
         let _ = shop_id;
         Ok(())
     }
+
+    /// 强制暂停 Shop（治理层调用，可被 owner 恢复）
+    fn force_pause_shop(shop_id: u64) -> Result<(), DispatchError> {
+        let _ = shop_id;
+        Ok(())
+    }
 }
 
 /// 商品查询接口
@@ -815,7 +931,51 @@ pub trait ProductProvider<AccountId, Balance> {
     
     /// 增加销量
     fn add_sold_count(product_id: u64, quantity: u32) -> Result<(), DispatchError>;
-    
+
+    // ==================== 扩展查询接口 ====================
+
+    /// 获取商品状态
+    fn product_status(product_id: u64) -> Option<ProductStatus> {
+        let _ = product_id;
+        None
+    }
+
+    /// 获取商品 USDT 价格（精度 10^6）
+    fn product_usdt_price(product_id: u64) -> Option<u64> {
+        let _ = product_id;
+        None
+    }
+
+    /// 获取商品所有者（通过 Shop → Owner）
+    fn product_owner(product_id: u64) -> Option<AccountId> {
+        let _ = product_id;
+        None
+    }
+
+    /// 获取店铺下所有商品 ID
+    fn shop_product_ids(shop_id: u64) -> sp_std::vec::Vec<u64> {
+        let _ = shop_id;
+        sp_std::vec::Vec::new()
+    }
+
+    /// 获取商品可见性
+    fn product_visibility(product_id: u64) -> Option<ProductVisibility> {
+        let _ = product_id;
+        None
+    }
+
+    /// 获取商品最小购买数量（0 表示不限，默认 1）
+    fn product_min_order_quantity(product_id: u64) -> Option<u32> {
+        let _ = product_id;
+        None
+    }
+
+    /// 获取商品最大购买数量（0 表示不限）
+    fn product_max_order_quantity(product_id: u64) -> Option<u32> {
+        let _ = product_id;
+        None
+    }
+
     // ==================== 治理调用接口 ====================
     
     /// 更新商品价格（治理调用）
@@ -898,7 +1058,6 @@ impl<AccountId: Default> EntityProvider<AccountId> for NullEntityProvider {
     fn entity_owner(_entity_id: u64) -> Option<AccountId> { None }
     fn entity_account(_entity_id: u64) -> AccountId { AccountId::default() }
     fn update_entity_stats(_entity_id: u64, _sales_amount: u128, _order_count: u32) -> Result<(), DispatchError> { Ok(()) }
-    fn update_entity_rating(_entity_id: u64, _rating: u8) -> Result<(), DispatchError> { Ok(()) }
 }
 
 /// 空 Shop 提供者（测试用）
@@ -1014,6 +1173,9 @@ pub trait EntityTokenProvider<AccountId, Balance> {
     
     /// Phase 8: 获取代币总供应量
     fn total_supply(entity_id: u64) -> Balance;
+
+    /// H4: 治理提案销毁代币（从 entity 派生账户销毁）
+    fn governance_burn(entity_id: u64, amount: Balance) -> Result<(), DispatchError>;
 }
 
 /// 空实体代币提供者（测试用或未启用代币时）
@@ -1104,6 +1266,116 @@ impl EntityTokenPriceProvider for () {
     fn get_token_price_usdt(_entity_id: u64) -> Option<u64> { None }
     fn token_price_confidence(_entity_id: u64) -> u8 { 0 }
     fn is_token_price_stale(_entity_id: u64, _max_age_blocks: u32) -> bool { true }
+}
+
+// ============================================================================
+// 披露接口
+// ============================================================================
+
+/// 披露级别（跨模块共享）
+///
+/// 由 pallet-entity-disclosure 设置，供 token/market 等模块查询
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default, PartialOrd, Ord)]
+pub enum DisclosureLevel {
+    /// 基础披露（年度简报）
+    #[default]
+    Basic,
+    /// 标准披露（季度报告）
+    Standard,
+    /// 增强披露（月度报告 + 重大事件）
+    Enhanced,
+    /// 完全披露（实时 + 详细财务）
+    Full,
+}
+
+/// 披露查询接口
+///
+/// 供 token/market 等模块在交易前检查黑窗口期和内幕人员限制，
+/// 无需直接依赖 pallet-entity-disclosure。
+pub trait DisclosureProvider<AccountId> {
+    /// 检查实体是否处于黑窗口期
+    fn is_in_blackout(entity_id: u64) -> bool;
+
+    /// 检查账户是否是内幕人员
+    fn is_insider(entity_id: u64, account: &AccountId) -> bool;
+
+    /// 检查内幕人员是否可以交易
+    ///
+    /// 非内幕人员始终返回 true；内幕人员在黑窗口期内且启用控制时返回 false
+    fn can_insider_trade(entity_id: u64, account: &AccountId) -> bool;
+
+    /// 获取实体的披露级别
+    fn get_disclosure_level(entity_id: u64) -> DisclosureLevel;
+
+    /// 检查披露是否逾期
+    fn is_disclosure_overdue(entity_id: u64) -> bool;
+}
+
+/// 空披露提供者（测试用或未启用披露时）
+pub struct NullDisclosureProvider;
+
+impl<AccountId> DisclosureProvider<AccountId> for NullDisclosureProvider {
+    fn is_in_blackout(_entity_id: u64) -> bool { false }
+    fn is_insider(_entity_id: u64, _account: &AccountId) -> bool { false }
+    fn can_insider_trade(_entity_id: u64, _account: &AccountId) -> bool { true }
+    fn get_disclosure_level(_entity_id: u64) -> DisclosureLevel { DisclosureLevel::Basic }
+    fn is_disclosure_overdue(_entity_id: u64) -> bool { false }
+}
+
+// ============================================================================
+// KYC 查询接口
+// ============================================================================
+
+/// KYC 查询接口
+///
+/// 供其他模块查询用户 KYC 状态，无需直接依赖 pallet-entity-kyc。
+pub trait KycProvider<AccountId> {
+    /// 获取用户在指定实体下的 KYC 级别（0 = 未认证）
+    fn kyc_level(entity_id: u64, account: &AccountId) -> u8;
+
+    /// 用户是否已通过 KYC 认证（level >= 1）
+    fn is_kyc_approved(entity_id: u64, account: &AccountId) -> bool {
+        Self::kyc_level(entity_id, account) >= 1
+    }
+
+    /// 用户是否满足指定 KYC 级别要求
+    fn meets_kyc_requirement(entity_id: u64, account: &AccountId, required_level: u8) -> bool {
+        Self::kyc_level(entity_id, account) >= required_level
+    }
+}
+
+/// 空 KYC 提供者（测试用或未启用 KYC 时）
+pub struct NullKycProvider;
+
+impl<AccountId> KycProvider<AccountId> for NullKycProvider {
+    fn kyc_level(_entity_id: u64, _account: &AccountId) -> u8 { 0 }
+}
+
+// ============================================================================
+// 治理查询接口
+// ============================================================================
+
+/// 治理查询接口
+///
+/// 供其他模块查询实体治理状态，无需直接依赖 pallet-entity-governance。
+pub trait GovernanceProvider {
+    /// 获取实体治理模式
+    fn governance_mode(entity_id: u64) -> GovernanceMode;
+
+    /// 实体是否有活跃提案
+    fn has_active_proposals(entity_id: u64) -> bool;
+
+    /// 实体治理是否被锁定（例如重大变更期间）
+    fn is_governance_locked(entity_id: u64) -> bool;
+}
+
+/// 空治理提供者（测试用或未启用治理时）
+pub struct NullGovernanceProvider;
+
+impl GovernanceProvider for NullGovernanceProvider {
+    fn governance_mode(_entity_id: u64) -> GovernanceMode { GovernanceMode::None }
+    fn has_active_proposals(_entity_id: u64) -> bool { false }
+    fn is_governance_locked(_entity_id: u64) -> bool { false }
 }
 
 // ============================================================================
@@ -1227,20 +1499,210 @@ impl<AccountId, Balance: Default> ShoppingBalanceProvider<AccountId, Balance> fo
 /// 供 Transaction 模块在订单完成时：
 /// 1. 自动注册买家为会员（如果尚未注册）
 /// 2. 更新消费金额（触发等级升级）
-pub trait OrderMemberHandler<AccountId, Balance> {
+pub trait OrderMemberHandler<AccountId> {
     /// 自动注册会员（首次下单时，推荐人可选）
     fn auto_register(entity_id: u64, account: &AccountId, referrer: Option<AccountId>) -> Result<(), DispatchError>;
-    /// 更新消费金额（订单完成时，amount=NEX, amount_usdt=USDT 精度值）
-    fn update_spent(entity_id: u64, account: &AccountId, amount: Balance, amount_usdt: u64) -> Result<(), DispatchError>;
-    /// 检查订单完成时的升级规则（触发规则引擎评估）
-    fn check_order_upgrade_rules(entity_id: u64, buyer: &AccountId, product_id: u64, order_amount: Balance, amount_usdt: u64) -> Result<(), DispatchError>;
+    /// 更新消费金额（USDT 精度 10^6）
+    fn update_spent(entity_id: u64, account: &AccountId, amount_usdt: u64) -> Result<(), DispatchError>;
+    /// 检查订单完成时的升级规则（amount_usdt: USDT 精度 10^6）
+    fn check_order_upgrade_rules(entity_id: u64, buyer: &AccountId, product_id: u64, amount_usdt: u64) -> Result<(), DispatchError>;
 }
 
 /// 空会员处理（无会员系统时使用）
-impl<AccountId, Balance> OrderMemberHandler<AccountId, Balance> for () {
+impl<AccountId> OrderMemberHandler<AccountId> for () {
     fn auto_register(_: u64, _: &AccountId, _: Option<AccountId>) -> Result<(), DispatchError> { Ok(()) }
-    fn update_spent(_: u64, _: &AccountId, _: Balance, _: u64) -> Result<(), DispatchError> { Ok(()) }
-    fn check_order_upgrade_rules(_: u64, _: &AccountId, _: u64, _: Balance, _: u64) -> Result<(), DispatchError> { Ok(()) }
+    fn update_spent(_: u64, _: &AccountId, _: u64) -> Result<(), DispatchError> { Ok(()) }
+    fn check_order_upgrade_rules(_: u64, _: &AccountId, _: u64, _: u64) -> Result<(), DispatchError> { Ok(()) }
+}
+
+// ============================================================================
+// 会员服务接口（统一定义）
+// ============================================================================
+
+/// 会员等级信息（无泛型，适合跨模块 trait 返回）
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, RuntimeDebug, TypeInfo)]
+pub struct MemberLevelInfo {
+    /// 等级 ID
+    pub level_id: u8,
+    /// 等级名称（UTF-8 字节）
+    pub name: sp_std::vec::Vec<u8>,
+    /// 升级阈值（USDT 累计消费，精度 10^6）
+    pub threshold: u64,
+    /// 折扣率（基点）
+    pub discount_rate: u16,
+    /// 返佣加成（基点）
+    pub commission_bonus: u16,
+}
+
+/// 会员服务接口（供返佣、治理、订单等模块统一调用）
+///
+/// 由 `pallet-entity-member` 实现，通过 runtime 桥接到各消费方。
+/// 合并了原 `pallet-entity-member::MemberProvider` 和 `pallet-commission-common::MemberProvider`
+/// 两个重复定义，消除运行时手动桥接的冗余。
+pub trait MemberProvider<AccountId> {
+    // ==================== 只读查询 ====================
+
+    /// 检查是否为实体会员
+    fn is_member(entity_id: u64, account: &AccountId) -> bool;
+
+    /// 获取推荐人
+    fn get_referrer(entity_id: u64, account: &AccountId) -> Option<AccountId>;
+
+    /// 获取自定义等级 ID
+    fn custom_level_id(entity_id: u64, account: &AccountId) -> u8;
+
+    /// 获取有效等级（考虑过期）
+    fn get_effective_level(entity_id: u64, account: &AccountId) -> u8 {
+        Self::custom_level_id(entity_id, account)
+    }
+
+    /// 获取等级折扣率
+    fn get_level_discount(entity_id: u64, level_id: u8) -> u16 {
+        let _ = (entity_id, level_id);
+        0
+    }
+
+    /// 获取等级返佣加成
+    fn get_level_commission_bonus(entity_id: u64, level_id: u8) -> u16;
+
+    /// 检查实体是否使用自定义等级
+    fn uses_custom_levels(entity_id: u64) -> bool;
+
+    /// 获取会员统计信息 (直推人数, 团队人数, 累计消费USDT)
+    fn get_member_stats(entity_id: u64, account: &AccountId) -> (u32, u32, u128);
+
+    /// 查询 Entity 的会员总数
+    fn member_count(entity_id: u64) -> u32 {
+        let _ = entity_id;
+        0
+    }
+
+    /// 查询会员是否被封禁
+    fn is_banned(entity_id: u64, account: &AccountId) -> bool {
+        let _ = (entity_id, account);
+        false
+    }
+
+    /// 查询会员最后活跃时间（区块号，0 = 未知/非会员）
+    fn last_active_at(entity_id: u64, account: &AccountId) -> u64 {
+        let _ = (entity_id, account);
+        0
+    }
+
+    /// 获取会员当前有效等级的完整信息
+    fn member_level(entity_id: u64, account: &AccountId) -> Option<MemberLevelInfo> {
+        let _ = (entity_id, account);
+        None
+    }
+
+    /// 查询自定义等级数量
+    fn custom_level_count(entity_id: u64) -> u8 {
+        let _ = entity_id;
+        0
+    }
+
+    /// 查询指定等级的会员数量
+    fn member_count_by_level(entity_id: u64, level_id: u8) -> u32 {
+        let _ = (entity_id, level_id);
+        0
+    }
+
+    /// 查询会员 USDT 累计消费（精度 10^6）
+    fn get_member_spent_usdt(entity_id: u64, account: &AccountId) -> u64 {
+        let _ = (entity_id, account);
+        0
+    }
+
+    // ==================== 会员注册/更新 ====================
+
+    /// 自动注册会员（首次下单时）
+    fn auto_register(entity_id: u64, account: &AccountId, referrer: Option<AccountId>) -> Result<(), DispatchError>;
+
+    /// 自动注册会员（qualified 控制是否为有效直推）
+    fn auto_register_qualified(entity_id: u64, account: &AccountId, referrer: Option<AccountId>, qualified: bool) -> Result<(), DispatchError> {
+        let _ = (entity_id, account, referrer, qualified);
+        Ok(())
+    }
+
+    /// 更新消费金额（USDT 精度 10^6）
+    fn update_spent(entity_id: u64, account: &AccountId, amount_usdt: u64) -> Result<(), DispatchError> {
+        let _ = (entity_id, account, amount_usdt);
+        Ok(())
+    }
+
+    /// 检查订单完成时的升级规则
+    fn check_order_upgrade_rules(entity_id: u64, buyer: &AccountId, product_id: u64, amount_usdt: u64) -> Result<(), DispatchError> {
+        let _ = (entity_id, buyer, product_id, amount_usdt);
+        Ok(())
+    }
+
+    // ==================== 治理写入 ====================
+
+    /// 启用/禁用自定义等级系统
+    fn set_custom_levels_enabled(entity_id: u64, enabled: bool) -> Result<(), DispatchError> {
+        let _ = (entity_id, enabled);
+        Ok(())
+    }
+
+    /// 设置升级模式
+    fn set_upgrade_mode(entity_id: u64, mode: u8) -> Result<(), DispatchError> {
+        let _ = (entity_id, mode);
+        Ok(())
+    }
+
+    /// 添加自定义等级
+    fn add_custom_level(entity_id: u64, level_id: u8, name: &[u8], threshold: u128, discount_rate: u16, commission_bonus: u16) -> Result<(), DispatchError> {
+        let _ = (entity_id, level_id, name, threshold, discount_rate, commission_bonus);
+        Ok(())
+    }
+
+    /// 更新自定义等级
+    fn update_custom_level(entity_id: u64, level_id: u8, name: Option<&[u8]>, threshold: Option<u128>, discount_rate: Option<u16>, commission_bonus: Option<u16>) -> Result<(), DispatchError> {
+        let _ = (entity_id, level_id, name, threshold, discount_rate, commission_bonus);
+        Ok(())
+    }
+
+    /// 删除自定义等级
+    fn remove_custom_level(entity_id: u64, level_id: u8) -> Result<(), DispatchError> {
+        let _ = (entity_id, level_id);
+        Ok(())
+    }
+
+    /// G1: 设置注册策略（治理调用）
+    fn set_registration_policy(entity_id: u64, policy_bits: u8) -> Result<(), DispatchError> {
+        let _ = (entity_id, policy_bits);
+        Ok(())
+    }
+
+    /// G1: 设置统计策略（治理调用）
+    fn set_stats_policy(entity_id: u64, policy_bits: u8) -> Result<(), DispatchError> {
+        let _ = (entity_id, policy_bits);
+        Ok(())
+    }
+}
+
+/// 空会员服务提供者（测试用或未启用会员系统时）
+pub struct NullMemberProvider;
+
+impl<AccountId> MemberProvider<AccountId> for NullMemberProvider {
+    fn is_member(_: u64, _: &AccountId) -> bool { false }
+    fn get_referrer(_: u64, _: &AccountId) -> Option<AccountId> { None }
+    fn custom_level_id(_: u64, _: &AccountId) -> u8 { 0 }
+    fn get_effective_level(_: u64, _: &AccountId) -> u8 { 0 }
+    fn get_level_discount(_: u64, _: u8) -> u16 { 0 }
+    fn get_level_commission_bonus(_: u64, _: u8) -> u16 { 0 }
+    fn uses_custom_levels(_: u64) -> bool { false }
+    fn get_member_stats(_: u64, _: &AccountId) -> (u32, u32, u128) { (0, 0, 0) }
+    fn auto_register(_: u64, _: &AccountId, _: Option<AccountId>) -> Result<(), DispatchError> { Ok(()) }
+    fn update_spent(_: u64, _: &AccountId, _: u64) -> Result<(), DispatchError> { Ok(()) }
+    fn check_order_upgrade_rules(_: u64, _: &AccountId, _: u64, _: u64) -> Result<(), DispatchError> { Ok(()) }
+    fn set_custom_levels_enabled(_: u64, _: bool) -> Result<(), DispatchError> { Ok(()) }
+    fn set_upgrade_mode(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
+    fn add_custom_level(_: u64, _: u8, _: &[u8], _: u128, _: u16, _: u16) -> Result<(), DispatchError> { Ok(()) }
+    fn update_custom_level(_: u64, _: u8, _: Option<&[u8]>, _: Option<u128>, _: Option<u16>, _: Option<u16>) -> Result<(), DispatchError> { Ok(()) }
+    fn remove_custom_level(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
+    fn set_registration_policy(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
+    fn set_stats_policy(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
 }
 
 /// 空定价提供者（测试用）
@@ -1280,6 +1742,9 @@ impl<AccountId, Balance: Default> EntityTokenProvider<AccountId, Balance> for Nu
     }
     fn total_supply(_entity_id: u64) -> Balance {
         Default::default()
+    }
+    fn governance_burn(_: u64, _: Balance) -> Result<(), DispatchError> {
+        Ok(())
     }
 }
 

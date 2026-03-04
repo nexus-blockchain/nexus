@@ -392,6 +392,20 @@ pub mod pallet {
 		MrenclaveRevoked { mrenclave: [u8; 32] },
 		/// P6-L1-fix: 用户平台身份绑定被覆盖 (含旧哈希, 审计线索)
 		UserPlatformBindingUpdated { account: T::AccountId, platform: Platform, old_hash: [u8; 32] },
+		/// Bot 所有权已转移
+		BotOwnershipTransferred { bot_id_hash: BotIdHash, old_owner: T::AccountId, new_owner: T::AccountId },
+		/// API Server MRTD 已从白名单撤销
+		ApiServerMrtdRevoked { mrtd: [u8; 48] },
+		/// PCK 公钥已撤销
+		PckKeyRevoked { platform_id: [u8; 32] },
+		/// 运营商已暂停
+		OperatorSuspended { operator: T::AccountId, platform: Platform },
+		/// 运营商已恢复
+		OperatorUnsuspended { operator: T::AccountId, platform: Platform },
+		/// Peer 端点已更新
+		PeerEndpointUpdated { bot_id_hash: BotIdHash, public_key: [u8; 32] },
+		/// 已停用 Bot 存储已清理
+		BotCleaned { bot_id_hash: BotIdHash },
 	}
 
 	// ========================================================================
@@ -507,6 +521,18 @@ pub mod pallet {
 		MrenclaveNotFound,
 		/// L2-fix: PCK 公钥已注册
 		PckKeyAlreadyRegistered,
+		/// Bot 未处于暂停状态
+		BotNotSuspended,
+		/// 新所有者不能与当前所有者相同
+		SameOwner,
+		/// 用户平台绑定不存在
+		PlatformBindingNotFound,
+		/// API Server MRTD 不在白名单中 (撤销时)
+		ApiServerMrtdNotFound,
+		/// 运营商未处于暂停状态
+		OperatorNotSuspended,
+		/// Bot 未处于停用状态 (清理时)
+		BotNotDeactivated,
 	}
 
 	// ========================================================================
@@ -795,10 +821,11 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// 提交 TEE 双证明 (TDX+SGX Quote)
+		/// ⚠️ **已弃用 (Deprecated)**: Level 0 软件模式, 无任何签名验证。
+		/// 生产环境应使用 `submit_tee_attestation` (call_index 21) 统一入口。
+		/// 此 extrinsic 仅保留用于测试网兼容性。
 		#[pallet::call_index(6)]
 		#[pallet::weight(Weight::from_parts(60_000_000, 12_000))]
-		/// ⚠️ 仅用于软件模式 (is_simulated=true)。硬件节点应使用 submit_verified_attestation。
 		pub fn submit_attestation(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -890,6 +917,7 @@ pub mod pallet {
 			let is_dual = sgx_quote_hash.is_some() && mrenclave.is_some();
 
 			// P6-H1 fix: V2 证明刷新到 V2, V1 刷新到 V1
+			// R1-fix: 刷新时维持原有 dcap_level 和 quote_verified, 避免安全级别倒退
 			if has_v2 {
 				let old_v2 = AttestationsV2::<T>::get(&bot_id_hash).expect("checked above");
 				let record = AttestationRecordV2::<T> {
@@ -903,14 +931,15 @@ pub mod pallet {
 					attested_at: now,
 					expires_at,
 					is_dual_attestation: is_dual,
-					quote_verified: false,
-					dcap_level: 0,
-					api_server_mrtd: None,
-					api_server_quote_hash: None,
+					quote_verified: old_v2.quote_verified,
+					dcap_level: old_v2.dcap_level,
+					api_server_mrtd: old_v2.api_server_mrtd,
+					api_server_quote_hash: old_v2.api_server_quote_hash,
 				};
 				AttestationsV2::<T>::insert(&bot_id_hash, record);
 				Self::enqueue_attestation_expiry(expires_at, bot_id_hash, true)?;
 			} else {
+				let old_v1 = Attestations::<T>::get(&bot_id_hash).expect("checked above");
 				let record = AttestationRecord::<T> {
 					bot_id_hash,
 					tdx_quote_hash,
@@ -921,10 +950,10 @@ pub mod pallet {
 					attested_at: now,
 					expires_at,
 					is_dual_attestation: is_dual,
-					quote_verified: false,
-					dcap_level: 0,
-					api_server_mrtd: None,
-					api_server_quote_hash: None,
+					quote_verified: old_v1.quote_verified,
+					dcap_level: old_v1.dcap_level,
+					api_server_mrtd: old_v1.api_server_mrtd,
+					api_server_quote_hash: old_v1.api_server_quote_hash,
 				};
 				Attestations::<T>::insert(&bot_id_hash, record);
 				Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false)?;
@@ -2034,6 +2063,328 @@ pub mod pallet {
 			Self::deposit_event(Event::BotUnassignedFromOperator { bot_id_hash, operator, platform });
 			Ok(())
 		}
+
+		/// 暂停 Bot (仅 Root, 用于治理响应违规行为)
+		///
+		/// Active → Suspended。暂停期间 Bot 不接受心跳、证明提交等操作。
+		/// 可通过 `reactivate_bot` 恢复。
+		#[pallet::call_index(31)]
+		#[pallet::weight(Weight::from_parts(25_000_000, 5_000))]
+		pub fn suspend_bot(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			Bots::<T>::try_mutate(&bot_id_hash, |maybe_bot| -> DispatchResult {
+				let bot = maybe_bot.as_mut().ok_or(Error::<T>::BotNotFound)?;
+				ensure!(bot.status == BotStatus::Active, Error::<T>::BotNotActive);
+				bot.status = BotStatus::Suspended;
+				Ok(())
+			})?;
+			Self::deposit_event(Event::BotSuspended { bot_id_hash });
+			Ok(())
+		}
+
+		/// 恢复暂停的 Bot (仅 Root)
+		///
+		/// Suspended → Active。仅对 Suspended 状态的 Bot 有效。
+		#[pallet::call_index(32)]
+		#[pallet::weight(Weight::from_parts(25_000_000, 5_000))]
+		pub fn reactivate_bot(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			Bots::<T>::try_mutate(&bot_id_hash, |maybe_bot| -> DispatchResult {
+				let bot = maybe_bot.as_mut().ok_or(Error::<T>::BotNotFound)?;
+				ensure!(bot.status == BotStatus::Suspended, Error::<T>::BotNotSuspended);
+				bot.status = BotStatus::Active;
+				Ok(())
+			})?;
+			Self::deposit_event(Event::BotReactivated { bot_id_hash });
+			Ok(())
+		}
+
+		/// 解绑用户平台身份
+		#[pallet::call_index(33)]
+		#[pallet::weight(Weight::from_parts(25_000_000, 5_000))]
+		pub fn unbind_user_platform(
+			origin: OriginFor<T>,
+			platform: Platform,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			ensure!(
+				UserPlatformBindings::<T>::contains_key(&who, platform),
+				Error::<T>::PlatformBindingNotFound
+			);
+			UserPlatformBindings::<T>::remove(&who, platform);
+			Self::deposit_event(Event::UserPlatformUnbound { account: who, platform });
+			Ok(())
+		}
+
+		/// 转移 Bot 所有权
+		///
+		/// 调用者必须是当前 Bot 所有者。新所有者的 Bot 列表不能已满。
+		/// 转移后运营商关联保持不变 (由新所有者自行决定是否解除)。
+		#[pallet::call_index(34)]
+		#[pallet::weight(Weight::from_parts(50_000_000, 10_000))]
+		pub fn transfer_bot_ownership(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			new_owner: T::AccountId,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let old_owner = Bots::<T>::try_mutate(&bot_id_hash, |maybe_bot| -> Result<T::AccountId, DispatchError> {
+				let bot = maybe_bot.as_mut().ok_or(Error::<T>::BotNotFound)?;
+				ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+				ensure!(new_owner != who, Error::<T>::SameOwner);
+				let old = bot.owner.clone();
+				bot.owner = new_owner.clone();
+				Ok(old)
+			})?;
+			OwnerBots::<T>::mutate(&old_owner, |bots| {
+				bots.retain(|b| b != &bot_id_hash);
+			});
+			OwnerBots::<T>::try_mutate(&new_owner, |bots| -> DispatchResult {
+				bots.try_push(bot_id_hash).map_err(|_| Error::<T>::MaxBotsReached)?;
+				Ok(())
+			})?;
+			Self::deposit_event(Event::BotOwnershipTransferred { bot_id_hash, old_owner, new_owner });
+			Ok(())
+		}
+
+		/// 撤销 API Server MRTD 白名单 (仅 Root, 发现 API Server 代码漏洞时使用)
+		#[pallet::call_index(35)]
+		#[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+		pub fn revoke_api_server_mrtd(
+			origin: OriginFor<T>,
+			mrtd: [u8; 48],
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			ensure!(ApprovedApiServerMrtd::<T>::contains_key(&mrtd), Error::<T>::ApiServerMrtdNotFound);
+			ApprovedApiServerMrtd::<T>::remove(&mrtd);
+			Self::deposit_event(Event::ApiServerMrtdRevoked { mrtd });
+			Ok(())
+		}
+
+		/// 撤销 PCK 公钥 (仅 Root, PCK 密钥泄露时紧急使用)
+		#[pallet::call_index(36)]
+		#[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+		pub fn revoke_pck_key(
+			origin: OriginFor<T>,
+			platform_id: [u8; 32],
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			ensure!(RegisteredPckKeys::<T>::contains_key(&platform_id), Error::<T>::PckKeyNotRegistered);
+			RegisteredPckKeys::<T>::remove(&platform_id);
+			Self::deposit_event(Event::PckKeyRevoked { platform_id });
+			Ok(())
+		}
+
+		/// 强制停用 Bot (仅 Root, 治理最后手段)
+		///
+		/// 与 `deactivate_bot` 相同的清理逻辑, 但不需要 Bot Owner 权限。
+		/// Active 或 Suspended 状态的 Bot 均可强制停用。
+		#[pallet::call_index(37)]
+		#[pallet::weight(Weight::from_parts(60_000_000, 15_000))]
+		pub fn force_deactivate_bot(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			Bots::<T>::try_mutate(&bot_id_hash, |maybe_bot| -> DispatchResult {
+				let bot = maybe_bot.as_mut().ok_or(Error::<T>::BotNotFound)?;
+				ensure!(bot.status != BotStatus::Deactivated, Error::<T>::BotAlreadyDeactivated);
+				bot.status = BotStatus::Deactivated;
+				Ok(())
+			})?;
+			// 清理证明
+			Attestations::<T>::remove(&bot_id_hash);
+			AttestationsV2::<T>::remove(&bot_id_hash);
+			AttestationNonces::<T>::remove(&bot_id_hash);
+			// 清理 Peer
+			let peers = PeerRegistry::<T>::take(&bot_id_hash);
+			for peer in peers.iter() {
+				PeerHeartbeatCount::<T>::remove(&bot_id_hash, &peer.public_key);
+			}
+			// 清理运营商关联
+			if let Some((operator, platform)) = BotOperator::<T>::take(&bot_id_hash) {
+				OperatorBots::<T>::mutate(&operator, platform, |bots| {
+					bots.retain(|b| b != &bot_id_hash);
+				});
+				Operators::<T>::mutate(&operator, platform, |maybe_op| {
+					if let Some(op) = maybe_op {
+						op.bot_count = op.bot_count.saturating_sub(1);
+					}
+				});
+			}
+			Self::deposit_event(Event::BotDeactivated { bot_id_hash });
+			Ok(())
+		}
+
+		/// 暂停运营商 (仅 Root)
+		///
+		/// 暂停后运营商不接受新 Bot 分配。已分配的 Bot 不受影响。
+		#[pallet::call_index(38)]
+		#[pallet::weight(Weight::from_parts(25_000_000, 5_000))]
+		pub fn suspend_operator(
+			origin: OriginFor<T>,
+			operator: T::AccountId,
+			platform: Platform,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			Operators::<T>::try_mutate(&operator, platform, |maybe_op| -> DispatchResult {
+				let op = maybe_op.as_mut().ok_or(Error::<T>::OperatorNotFound)?;
+				ensure!(op.status == OperatorStatus::Active, Error::<T>::OperatorNotActive);
+				op.status = OperatorStatus::Suspended;
+				Ok(())
+			})?;
+			Self::deposit_event(Event::OperatorSuspended { operator, platform });
+			Ok(())
+		}
+
+		/// 恢复暂停的运营商 (仅 Root)
+		#[pallet::call_index(39)]
+		#[pallet::weight(Weight::from_parts(25_000_000, 5_000))]
+		pub fn unsuspend_operator(
+			origin: OriginFor<T>,
+			operator: T::AccountId,
+			platform: Platform,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			Operators::<T>::try_mutate(&operator, platform, |maybe_op| -> DispatchResult {
+				let op = maybe_op.as_mut().ok_or(Error::<T>::OperatorNotFound)?;
+				ensure!(op.status == OperatorStatus::Suspended, Error::<T>::OperatorNotSuspended);
+				op.status = OperatorStatus::Active;
+				Ok(())
+			})?;
+			Self::deposit_event(Event::OperatorUnsuspended { operator, platform });
+			Ok(())
+		}
+
+		/// 更新 Peer 端点 URL (原子操作, 无需先注销再注册)
+		#[pallet::call_index(40)]
+		#[pallet::weight(Weight::from_parts(35_000_000, 6_000))]
+		pub fn update_peer_endpoint(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			peer_public_key: [u8; 32],
+			new_endpoint: BoundedVec<u8, T::MaxEndpointLen>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
+			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
+			ensure!(!new_endpoint.is_empty(), Error::<T>::EndpointEmpty);
+
+			PeerRegistry::<T>::try_mutate(&bot_id_hash, |peers| -> DispatchResult {
+				let peer = peers.iter_mut().find(|p| p.public_key == peer_public_key)
+					.ok_or(Error::<T>::PeerNotFound)?;
+				peer.endpoint = new_endpoint;
+				Ok(())
+			})?;
+			Self::deposit_event(Event::PeerEndpointUpdated { bot_id_hash, public_key: peer_public_key });
+			Ok(())
+		}
+
+		/// 清理已停用 Bot 的存储 (任何人可调用)
+		///
+		/// 仅对 Deactivated 状态的 Bot 有效。释放 OwnerBots 配额。
+		#[pallet::call_index(41)]
+		#[pallet::weight(Weight::from_parts(35_000_000, 8_000))]
+		pub fn cleanup_deactivated_bot(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+		) -> DispatchResult {
+			ensure_signed(origin)?;
+			let bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
+			ensure!(bot.status == BotStatus::Deactivated, Error::<T>::BotNotDeactivated);
+			OwnerBots::<T>::mutate(&bot.owner, |bots| {
+				bots.retain(|b| b != &bot_id_hash);
+			});
+			Bots::<T>::remove(&bot_id_hash);
+			BotCount::<T>::mutate(|c| *c = c.saturating_sub(1));
+			Self::deposit_event(Event::BotCleaned { bot_id_hash });
+			Ok(())
+		}
+
+		/// 运营商主动解除与 Bot 的关联 (运营商发现 Bot 违规时使用)
+		///
+		/// 调用者必须是该 Bot 当前关联的运营商。
+		#[pallet::call_index(42)]
+		#[pallet::weight(Weight::from_parts(40_000_000, 8_000))]
+		pub fn operator_unassign_bot(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			let (operator, platform) = BotOperator::<T>::get(&bot_id_hash)
+				.ok_or(Error::<T>::BotNotAssigned)?;
+			ensure!(operator == who, Error::<T>::NotOperator);
+
+			OperatorBots::<T>::mutate(&operator, platform, |bots| {
+				bots.retain(|b| b != &bot_id_hash);
+			});
+			BotOperator::<T>::remove(&bot_id_hash);
+			Operators::<T>::mutate(&operator, platform, |maybe_op| {
+				if let Some(op) = maybe_op {
+					op.bot_count = op.bot_count.saturating_sub(1);
+				}
+			});
+			Self::deposit_event(Event::BotUnassignedFromOperator { bot_id_hash, operator, platform });
+			Ok(())
+		}
+
+		/// 强制过期 Bot 证明 (仅 Root, 紧急安全响应)
+		///
+		/// 立即移除 V1 + V2 证明, Bot 降级为 StandardNode。
+		#[pallet::call_index(43)]
+		#[pallet::weight(Weight::from_parts(40_000_000, 8_000))]
+		pub fn force_expire_attestation(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			ensure!(Bots::<T>::contains_key(&bot_id_hash), Error::<T>::BotNotFound);
+			let has_v1 = Attestations::<T>::contains_key(&bot_id_hash);
+			let has_v2 = AttestationsV2::<T>::contains_key(&bot_id_hash);
+			ensure!(has_v1 || has_v2, Error::<T>::AttestationNotFound);
+			Attestations::<T>::remove(&bot_id_hash);
+			AttestationsV2::<T>::remove(&bot_id_hash);
+			AttestationNonces::<T>::remove(&bot_id_hash);
+			Bots::<T>::mutate(&bot_id_hash, |maybe_bot| {
+				if let Some(bot) = maybe_bot {
+					bot.node_type = NodeType::StandardNode;
+				}
+			});
+			Self::deposit_event(Event::AttestationExpired { bot_id_hash });
+			Ok(())
+		}
+
+		/// 强制转移 Bot 所有权 (仅 Root, 应对失联 Owner 或安全事件)
+		#[pallet::call_index(44)]
+		#[pallet::weight(Weight::from_parts(50_000_000, 10_000))]
+		pub fn force_transfer_bot_ownership(
+			origin: OriginFor<T>,
+			bot_id_hash: BotIdHash,
+			new_owner: T::AccountId,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			let old_owner = Bots::<T>::try_mutate(&bot_id_hash, |maybe_bot| -> Result<T::AccountId, DispatchError> {
+				let bot = maybe_bot.as_mut().ok_or(Error::<T>::BotNotFound)?;
+				let old = bot.owner.clone();
+				bot.owner = new_owner.clone();
+				Ok(old)
+			})?;
+			OwnerBots::<T>::mutate(&old_owner, |bots| {
+				bots.retain(|b| b != &bot_id_hash);
+			});
+			OwnerBots::<T>::try_mutate(&new_owner, |bots| -> DispatchResult {
+				bots.try_push(bot_id_hash).map_err(|_| Error::<T>::MaxBotsReached)?;
+				Ok(())
+			})?;
+			Self::deposit_event(Event::BotOwnershipTransferred { bot_id_hash, old_owner, new_owner });
+			Ok(())
+		}
 	}
 
 	// ========================================================================
@@ -2250,6 +2601,34 @@ pub mod pallet {
 		pub fn peer_era_uptime(bot_id_hash: &BotIdHash, peer_pk: &[u8; 32]) -> BoundedVec<(u64, u32), T::MaxUptimeEraHistory> {
 			PeerEraUptime::<T>::get(bot_id_hash, peer_pk)
 		}
+
+		/// 获取 Bot 的 DCAP 证明级别 (0=无证明, 1-4=DCAP Level)
+		pub fn attestation_level(bot_id_hash: &BotIdHash) -> u8 {
+			if let Some(v2) = AttestationsV2::<T>::get(bot_id_hash) {
+				return v2.dcap_level;
+			}
+			Attestations::<T>::get(bot_id_hash)
+				.map(|a| a.dcap_level)
+				.unwrap_or(0)
+		}
+
+		/// 获取 Bot 的 TEE 类型 (None=StandardNode)
+		pub fn get_tee_type(bot_id_hash: &BotIdHash) -> Option<TeeType> {
+			let bot = Bots::<T>::get(bot_id_hash)?;
+			match bot.node_type {
+				NodeType::StandardNode => None,
+				NodeType::TeeNode { .. } => Some(TeeType::Tdx),
+				NodeType::TeeNodeV2 { tee_type, .. } => Some(tee_type),
+			}
+		}
+
+		/// 获取 Bot 的证明信息摘要 (dcap_level, quote_verified, expires_at, tee_type)
+		pub fn attestation_info(bot_id_hash: &BotIdHash) -> Option<(u8, bool, BlockNumberFor<T>, Option<TeeType>)> {
+			if let Some(v2) = AttestationsV2::<T>::get(bot_id_hash) {
+				return Some((v2.dcap_level, v2.quote_verified, v2.expires_at, Some(v2.tee_type)));
+			}
+			Attestations::<T>::get(bot_id_hash).map(|a| (a.dcap_level, a.quote_verified, a.expires_at, None))
+		}
 	}
 
 	// ========================================================================
@@ -2280,6 +2659,15 @@ pub mod pallet {
 		}
 		fn bot_operator(bot_id_hash: &BotIdHash) -> Option<T::AccountId> {
 			Self::bot_operator_account(bot_id_hash)
+		}
+		fn bot_status(bot_id_hash: &BotIdHash) -> Option<BotStatus> {
+			Bots::<T>::get(bot_id_hash).map(|b| b.status)
+		}
+		fn attestation_level(bot_id_hash: &BotIdHash) -> u8 {
+			Self::attestation_level(bot_id_hash)
+		}
+		fn tee_type(bot_id_hash: &BotIdHash) -> Option<TeeType> {
+			Self::get_tee_type(bot_id_hash)
 		}
 	}
 

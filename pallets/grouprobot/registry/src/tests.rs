@@ -3042,3 +3042,966 @@ fn p6_m1_bind_community_rejects_active_bot_rebind() {
 		);
 	});
 }
+
+// ============================================================================
+// New Extrinsics: suspend_bot / reactivate_bot (call_index 31-32)
+// ============================================================================
+
+#[test]
+fn suspend_bot_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::suspend_bot(RuntimeOrigin::root(), bot_hash(1)));
+		assert_eq!(Bots::<Test>::get(bot_hash(1)).unwrap().status, BotStatus::Suspended);
+		System::assert_has_event(RuntimeEvent::GroupRobotRegistry(
+			crate::Event::BotSuspended { bot_id_hash: bot_hash(1) },
+		));
+	});
+}
+
+#[test]
+fn suspend_bot_fails_not_root() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::suspend_bot(RuntimeOrigin::signed(OWNER), bot_hash(1)),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+#[test]
+fn suspend_bot_fails_not_active() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::deactivate_bot(RuntimeOrigin::signed(OWNER), bot_hash(1)));
+		assert_noop!(
+			GroupRobotRegistry::suspend_bot(RuntimeOrigin::root(), bot_hash(1)),
+			Error::<Test>::BotNotActive
+		);
+	});
+}
+
+#[test]
+fn suspend_bot_fails_not_found() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotRegistry::suspend_bot(RuntimeOrigin::root(), bot_hash(99)),
+			Error::<Test>::BotNotFound
+		);
+	});
+}
+
+#[test]
+fn reactivate_bot_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::suspend_bot(RuntimeOrigin::root(), bot_hash(1)));
+		assert_ok!(GroupRobotRegistry::reactivate_bot(RuntimeOrigin::root(), bot_hash(1)));
+		assert_eq!(Bots::<Test>::get(bot_hash(1)).unwrap().status, BotStatus::Active);
+		System::assert_has_event(RuntimeEvent::GroupRobotRegistry(
+			crate::Event::BotReactivated { bot_id_hash: bot_hash(1) },
+		));
+	});
+}
+
+#[test]
+fn reactivate_bot_fails_not_suspended() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::reactivate_bot(RuntimeOrigin::root(), bot_hash(1)),
+			Error::<Test>::BotNotSuspended
+		);
+	});
+}
+
+#[test]
+fn reactivate_bot_fails_not_root() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::suspend_bot(RuntimeOrigin::root(), bot_hash(1)));
+		assert_noop!(
+			GroupRobotRegistry::reactivate_bot(RuntimeOrigin::signed(OWNER), bot_hash(1)),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+// ============================================================================
+// New Extrinsic: unbind_user_platform (call_index 33)
+// ============================================================================
+
+#[test]
+fn unbind_user_platform_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::bind_user_platform(
+			RuntimeOrigin::signed(OWNER), Platform::Discord, pk(42),
+		));
+		assert!(UserPlatformBindings::<Test>::contains_key(OWNER, Platform::Discord));
+
+		assert_ok!(GroupRobotRegistry::unbind_user_platform(
+			RuntimeOrigin::signed(OWNER), Platform::Discord,
+		));
+		assert!(!UserPlatformBindings::<Test>::contains_key(OWNER, Platform::Discord));
+		System::assert_has_event(RuntimeEvent::GroupRobotRegistry(
+			crate::Event::UserPlatformUnbound { account: OWNER, platform: Platform::Discord },
+		));
+	});
+}
+
+#[test]
+fn unbind_user_platform_fails_not_found() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotRegistry::unbind_user_platform(RuntimeOrigin::signed(OWNER), Platform::Discord),
+			Error::<Test>::PlatformBindingNotFound
+		);
+	});
+}
+
+// ============================================================================
+// New Extrinsic: transfer_bot_ownership (call_index 34)
+// ============================================================================
+
+#[test]
+fn transfer_bot_ownership_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::transfer_bot_ownership(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), OWNER2,
+		));
+		assert_eq!(Bots::<Test>::get(bot_hash(1)).unwrap().owner, OWNER2);
+		assert_eq!(OwnerBots::<Test>::get(OWNER).len(), 0);
+		assert_eq!(OwnerBots::<Test>::get(OWNER2).len(), 1);
+		System::assert_has_event(RuntimeEvent::GroupRobotRegistry(
+			crate::Event::BotOwnershipTransferred {
+				bot_id_hash: bot_hash(1),
+				old_owner: OWNER,
+				new_owner: OWNER2,
+			},
+		));
+	});
+}
+
+#[test]
+fn transfer_bot_ownership_fails_not_owner() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::transfer_bot_ownership(RuntimeOrigin::signed(OTHER), bot_hash(1), OWNER2),
+			Error::<Test>::NotBotOwner
+		);
+	});
+}
+
+#[test]
+fn transfer_bot_ownership_fails_same_owner() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::transfer_bot_ownership(RuntimeOrigin::signed(OWNER), bot_hash(1), OWNER),
+			Error::<Test>::SameOwner
+		);
+	});
+}
+
+#[test]
+fn transfer_bot_ownership_fails_new_owner_max_bots() {
+	new_test_ext().execute_with(|| {
+		// OWNER2 fills up their bot slots (MaxBotsPerOwner = 5)
+		for i in 0..5u8 {
+			assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER2), bot_hash(10 + i), pk(10 + i)));
+		}
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::transfer_bot_ownership(RuntimeOrigin::signed(OWNER), bot_hash(1), OWNER2),
+			Error::<Test>::MaxBotsReached
+		);
+	});
+}
+
+// ============================================================================
+// New Extrinsic: revoke_api_server_mrtd (call_index 35)
+// ============================================================================
+
+#[test]
+fn revoke_api_server_mrtd_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_api_server_mrtd(RuntimeOrigin::root(), mrtd(10), 1));
+		assert!(ApprovedApiServerMrtd::<Test>::contains_key(mrtd(10)));
+
+		assert_ok!(GroupRobotRegistry::revoke_api_server_mrtd(RuntimeOrigin::root(), mrtd(10)));
+		assert!(!ApprovedApiServerMrtd::<Test>::contains_key(mrtd(10)));
+		System::assert_has_event(RuntimeEvent::GroupRobotRegistry(
+			crate::Event::ApiServerMrtdRevoked { mrtd: mrtd(10) },
+		));
+	});
+}
+
+#[test]
+fn revoke_api_server_mrtd_fails_not_found() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotRegistry::revoke_api_server_mrtd(RuntimeOrigin::root(), mrtd(99)),
+			Error::<Test>::ApiServerMrtdNotFound
+		);
+	});
+}
+
+#[test]
+fn revoke_api_server_mrtd_fails_not_root() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_api_server_mrtd(RuntimeOrigin::root(), mrtd(10), 1));
+		assert_noop!(
+			GroupRobotRegistry::revoke_api_server_mrtd(RuntimeOrigin::signed(OWNER), mrtd(10)),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+// ============================================================================
+// New Extrinsic: revoke_pck_key (call_index 36)
+// ============================================================================
+
+#[test]
+fn revoke_pck_key_works() {
+	new_test_ext().execute_with(|| {
+		let pid = [0x01u8; 32];
+		let pck = [0xAAu8; 64];
+		assert_ok!(GroupRobotRegistry::register_pck_key(RuntimeOrigin::root(), pid, pck));
+		assert!(RegisteredPckKeys::<Test>::contains_key(pid));
+
+		assert_ok!(GroupRobotRegistry::revoke_pck_key(RuntimeOrigin::root(), pid));
+		assert!(!RegisteredPckKeys::<Test>::contains_key(pid));
+		System::assert_has_event(RuntimeEvent::GroupRobotRegistry(
+			crate::Event::PckKeyRevoked { platform_id: pid },
+		));
+	});
+}
+
+#[test]
+fn revoke_pck_key_fails_not_registered() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotRegistry::revoke_pck_key(RuntimeOrigin::root(), [0x99u8; 32]),
+			Error::<Test>::PckKeyNotRegistered
+		);
+	});
+}
+
+// ============================================================================
+// New Extrinsic: force_deactivate_bot (call_index 37)
+// ============================================================================
+
+#[test]
+fn force_deactivate_bot_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::force_deactivate_bot(RuntimeOrigin::root(), bot_hash(1)));
+		assert_eq!(Bots::<Test>::get(bot_hash(1)).unwrap().status, BotStatus::Deactivated);
+	});
+}
+
+#[test]
+fn force_deactivate_bot_works_from_suspended() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::suspend_bot(RuntimeOrigin::root(), bot_hash(1)));
+		assert_ok!(GroupRobotRegistry::force_deactivate_bot(RuntimeOrigin::root(), bot_hash(1)));
+		assert_eq!(Bots::<Test>::get(bot_hash(1)).unwrap().status, BotStatus::Deactivated);
+	});
+}
+
+#[test]
+fn force_deactivate_bot_clears_all_state() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		// Setup attestation + peer + operator
+		assert_ok!(GroupRobotRegistry::submit_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			[1u8; 32], None, mrtd(1), None,
+		));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://n1:8443"),
+		));
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op"), op_contact(b"c"),
+		));
+		assert_ok!(GroupRobotRegistry::assign_bot_to_operator(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), Platform::Telegram,
+		));
+
+		assert_ok!(GroupRobotRegistry::force_deactivate_bot(RuntimeOrigin::root(), bot_hash(1)));
+
+		// All cleaned
+		assert!(Attestations::<Test>::get(bot_hash(1)).is_none());
+		assert_eq!(PeerRegistry::<Test>::get(bot_hash(1)).len(), 0);
+		assert!(BotOperator::<Test>::get(bot_hash(1)).is_none());
+		assert_eq!(Operators::<Test>::get(OWNER, Platform::Telegram).unwrap().bot_count, 0);
+	});
+}
+
+#[test]
+fn force_deactivate_bot_fails_already_deactivated() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::deactivate_bot(RuntimeOrigin::signed(OWNER), bot_hash(1)));
+		assert_noop!(
+			GroupRobotRegistry::force_deactivate_bot(RuntimeOrigin::root(), bot_hash(1)),
+			Error::<Test>::BotAlreadyDeactivated
+		);
+	});
+}
+
+#[test]
+fn force_deactivate_bot_fails_not_root() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::force_deactivate_bot(RuntimeOrigin::signed(OWNER), bot_hash(1)),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+// ============================================================================
+// New Extrinsics: suspend_operator / unsuspend_operator (call_index 38-39)
+// ============================================================================
+
+#[test]
+fn suspend_operator_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op"), op_contact(b"c"),
+		));
+		assert_ok!(GroupRobotRegistry::suspend_operator(RuntimeOrigin::root(), OWNER, Platform::Telegram));
+		assert_eq!(
+			Operators::<Test>::get(OWNER, Platform::Telegram).unwrap().status,
+			OperatorStatus::Suspended
+		);
+		System::assert_has_event(RuntimeEvent::GroupRobotRegistry(
+			crate::Event::OperatorSuspended { operator: OWNER, platform: Platform::Telegram },
+		));
+	});
+}
+
+#[test]
+fn suspend_operator_fails_not_active() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op"), op_contact(b"c"),
+		));
+		assert_ok!(GroupRobotRegistry::suspend_operator(RuntimeOrigin::root(), OWNER, Platform::Telegram));
+		assert_noop!(
+			GroupRobotRegistry::suspend_operator(RuntimeOrigin::root(), OWNER, Platform::Telegram),
+			Error::<Test>::OperatorNotActive
+		);
+	});
+}
+
+#[test]
+fn suspend_operator_fails_not_root() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op"), op_contact(b"c"),
+		));
+		assert_noop!(
+			GroupRobotRegistry::suspend_operator(RuntimeOrigin::signed(OWNER), OWNER, Platform::Telegram),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+#[test]
+fn unsuspend_operator_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op"), op_contact(b"c"),
+		));
+		assert_ok!(GroupRobotRegistry::suspend_operator(RuntimeOrigin::root(), OWNER, Platform::Telegram));
+		assert_ok!(GroupRobotRegistry::unsuspend_operator(RuntimeOrigin::root(), OWNER, Platform::Telegram));
+		assert_eq!(
+			Operators::<Test>::get(OWNER, Platform::Telegram).unwrap().status,
+			OperatorStatus::Active
+		);
+		System::assert_has_event(RuntimeEvent::GroupRobotRegistry(
+			crate::Event::OperatorUnsuspended { operator: OWNER, platform: Platform::Telegram },
+		));
+	});
+}
+
+#[test]
+fn unsuspend_operator_fails_not_suspended() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op"), op_contact(b"c"),
+		));
+		assert_noop!(
+			GroupRobotRegistry::unsuspend_operator(RuntimeOrigin::root(), OWNER, Platform::Telegram),
+			Error::<Test>::OperatorNotSuspended
+		);
+	});
+}
+
+// ============================================================================
+// New Extrinsic: update_peer_endpoint (call_index 40)
+// ============================================================================
+
+#[test]
+fn update_peer_endpoint_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://old:8443"),
+		));
+
+		assert_ok!(GroupRobotRegistry::update_peer_endpoint(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://new:9443"),
+		));
+		let peers = PeerRegistry::<Test>::get(bot_hash(1));
+		assert_eq!(peers[0].endpoint.as_slice(), b"https://new:9443");
+		System::assert_has_event(RuntimeEvent::GroupRobotRegistry(
+			crate::Event::PeerEndpointUpdated { bot_id_hash: bot_hash(1), public_key: pk(10) },
+		));
+	});
+}
+
+#[test]
+fn update_peer_endpoint_fails_not_owner() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://old:8443"),
+		));
+		assert_noop!(
+			GroupRobotRegistry::update_peer_endpoint(
+				RuntimeOrigin::signed(OTHER), bot_hash(1), pk(10), endpoint("https://new:9443"),
+			),
+			Error::<Test>::NotBotOwner
+		);
+	});
+}
+
+#[test]
+fn update_peer_endpoint_fails_peer_not_found() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::update_peer_endpoint(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), pk(99), endpoint("https://new:9443"),
+			),
+			Error::<Test>::PeerNotFound
+		);
+	});
+}
+
+#[test]
+fn update_peer_endpoint_fails_empty() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::register_peer(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://old:8443"),
+		));
+		assert_noop!(
+			GroupRobotRegistry::update_peer_endpoint(
+				RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint(""),
+			),
+			Error::<Test>::EndpointEmpty
+		);
+	});
+}
+
+// ============================================================================
+// New Extrinsic: cleanup_deactivated_bot (call_index 41)
+// ============================================================================
+
+#[test]
+fn cleanup_deactivated_bot_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_eq!(BotCount::<Test>::get(), 1);
+		assert_eq!(OwnerBots::<Test>::get(OWNER).len(), 1);
+
+		assert_ok!(GroupRobotRegistry::deactivate_bot(RuntimeOrigin::signed(OWNER), bot_hash(1)));
+		// Bot still exists in storage
+		assert!(Bots::<Test>::contains_key(bot_hash(1)));
+
+		// Anyone can clean up
+		assert_ok!(GroupRobotRegistry::cleanup_deactivated_bot(RuntimeOrigin::signed(OTHER), bot_hash(1)));
+		assert!(!Bots::<Test>::contains_key(bot_hash(1)));
+		assert_eq!(BotCount::<Test>::get(), 0);
+		assert_eq!(OwnerBots::<Test>::get(OWNER).len(), 0);
+		System::assert_has_event(RuntimeEvent::GroupRobotRegistry(
+			crate::Event::BotCleaned { bot_id_hash: bot_hash(1) },
+		));
+	});
+}
+
+#[test]
+fn cleanup_deactivated_bot_fails_not_deactivated() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::cleanup_deactivated_bot(RuntimeOrigin::signed(OTHER), bot_hash(1)),
+			Error::<Test>::BotNotDeactivated
+		);
+	});
+}
+
+#[test]
+fn cleanup_deactivated_bot_fails_not_found() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotRegistry::cleanup_deactivated_bot(RuntimeOrigin::signed(OTHER), bot_hash(99)),
+			Error::<Test>::BotNotFound
+		);
+	});
+}
+
+#[test]
+fn cleanup_frees_owner_bot_slot() {
+	new_test_ext().execute_with(|| {
+		// Fill all 5 slots
+		for i in 0..5u8 {
+			assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(i), pk(i)));
+		}
+		assert_noop!(
+			GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(10), pk(10)),
+			Error::<Test>::MaxBotsReached
+		);
+
+		// Deactivate + cleanup one
+		assert_ok!(GroupRobotRegistry::deactivate_bot(RuntimeOrigin::signed(OWNER), bot_hash(0)));
+		assert_ok!(GroupRobotRegistry::cleanup_deactivated_bot(RuntimeOrigin::signed(OTHER), bot_hash(0)));
+
+		// Now can register a new one
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(10), pk(10)));
+	});
+}
+
+// ============================================================================
+// New Extrinsic: operator_unassign_bot (call_index 42)
+// ============================================================================
+
+#[test]
+fn operator_unassign_bot_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op"), op_contact(b"c"),
+		));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::assign_bot_to_operator(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), Platform::Telegram,
+		));
+
+		// Operator unassigns
+		assert_ok!(GroupRobotRegistry::operator_unassign_bot(RuntimeOrigin::signed(OWNER), bot_hash(1)));
+		assert!(BotOperator::<Test>::get(bot_hash(1)).is_none());
+		assert_eq!(OperatorBots::<Test>::get(OWNER, Platform::Telegram).len(), 0);
+		assert_eq!(Operators::<Test>::get(OWNER, Platform::Telegram).unwrap().bot_count, 0);
+	});
+}
+
+#[test]
+fn operator_unassign_bot_fails_not_operator() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_operator(
+			RuntimeOrigin::signed(OWNER), Platform::Telegram, app_hash(1), op_name(b"Op"), op_contact(b"c"),
+		));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::assign_bot_to_operator(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), Platform::Telegram,
+		));
+
+		// OTHER is not the operator
+		assert_noop!(
+			GroupRobotRegistry::operator_unassign_bot(RuntimeOrigin::signed(OTHER), bot_hash(1)),
+			Error::<Test>::NotOperator
+		);
+	});
+}
+
+#[test]
+fn operator_unassign_bot_fails_not_assigned() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::operator_unassign_bot(RuntimeOrigin::signed(OWNER), bot_hash(1)),
+			Error::<Test>::BotNotAssigned
+		);
+	});
+}
+
+// ============================================================================
+// New Extrinsic: force_expire_attestation (call_index 43)
+// ============================================================================
+
+#[test]
+fn force_expire_attestation_v1_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::submit_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			[1u8; 32], None, mrtd(1), None,
+		));
+		assert!(GroupRobotRegistry::is_tee_node(&bot_hash(1)));
+
+		assert_ok!(GroupRobotRegistry::force_expire_attestation(RuntimeOrigin::root(), bot_hash(1)));
+		assert!(!GroupRobotRegistry::is_tee_node(&bot_hash(1)));
+		assert!(Attestations::<Test>::get(bot_hash(1)).is_none());
+		let bot = Bots::<Test>::get(bot_hash(1)).unwrap();
+		assert!(matches!(bot.node_type, NodeType::StandardNode));
+		System::assert_has_event(RuntimeEvent::GroupRobotRegistry(
+			crate::Event::AttestationExpired { bot_id_hash: bot_hash(1) },
+		));
+	});
+}
+
+#[test]
+fn force_expire_attestation_v2_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_dcap_quote(&mrtd(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+		assert_ok!(GroupRobotRegistry::submit_tee_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			bounded, None, None, None,
+		));
+		assert!(AttestationsV2::<Test>::get(bot_hash(1)).is_some());
+
+		assert_ok!(GroupRobotRegistry::force_expire_attestation(RuntimeOrigin::root(), bot_hash(1)));
+		assert!(AttestationsV2::<Test>::get(bot_hash(1)).is_none());
+		assert!(!GroupRobotRegistry::is_tee_node(&bot_hash(1)));
+	});
+}
+
+#[test]
+fn force_expire_attestation_fails_no_attestation() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::force_expire_attestation(RuntimeOrigin::root(), bot_hash(1)),
+			Error::<Test>::AttestationNotFound
+		);
+	});
+}
+
+#[test]
+fn force_expire_attestation_fails_not_root() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::submit_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			[1u8; 32], None, mrtd(1), None,
+		));
+		assert_noop!(
+			GroupRobotRegistry::force_expire_attestation(RuntimeOrigin::signed(OWNER), bot_hash(1)),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+// ============================================================================
+// New Extrinsic: force_transfer_bot_ownership (call_index 44)
+// ============================================================================
+
+#[test]
+fn force_transfer_bot_ownership_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::force_transfer_bot_ownership(
+			RuntimeOrigin::root(), bot_hash(1), OWNER2,
+		));
+		assert_eq!(Bots::<Test>::get(bot_hash(1)).unwrap().owner, OWNER2);
+		assert_eq!(OwnerBots::<Test>::get(OWNER).len(), 0);
+		assert_eq!(OwnerBots::<Test>::get(OWNER2).len(), 1);
+	});
+}
+
+#[test]
+fn force_transfer_bot_ownership_fails_not_root() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::force_transfer_bot_ownership(RuntimeOrigin::signed(OWNER), bot_hash(1), OWNER2),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+#[test]
+fn force_transfer_allows_same_owner() {
+	new_test_ext().execute_with(|| {
+		// force_transfer does NOT check SameOwner (unlike user transfer)
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::force_transfer_bot_ownership(
+			RuntimeOrigin::root(), bot_hash(1), OWNER,
+		));
+		assert_eq!(Bots::<Test>::get(bot_hash(1)).unwrap().owner, OWNER);
+	});
+}
+
+// ============================================================================
+// R1-fix: refresh_attestation 维持 dcap_level/quote_verified
+// ============================================================================
+
+#[test]
+fn r1_refresh_preserves_dcap_level_v1() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		// DCAP Level 2 attestation
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_dcap_quote(&mrtd(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+		assert_ok!(GroupRobotRegistry::submit_dcap_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), bounded, None, None,
+		));
+		let record = Attestations::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(record.dcap_level, 2);
+
+		// Refresh - should preserve dcap_level=2
+		assert_ok!(GroupRobotRegistry::refresh_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			[0xBB; 32], None, mrtd(1), None,
+		));
+		let refreshed = Attestations::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(refreshed.dcap_level, 2, "R1-fix: dcap_level must be preserved");
+		assert_eq!(refreshed.quote_verified, record.quote_verified, "R1-fix: quote_verified must be preserved");
+	});
+}
+
+#[test]
+fn r1_refresh_preserves_dcap_level_v2() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		// V2 attestation via submit_tee_attestation
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_dcap_quote(&mrtd(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+		assert_ok!(GroupRobotRegistry::submit_tee_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), bounded, None, None, None,
+		));
+		let v2 = AttestationsV2::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(v2.dcap_level, 2);
+
+		// Refresh V2 - should preserve dcap_level
+		assert_ok!(GroupRobotRegistry::refresh_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			[0xCC; 32], None, mrtd(1), None,
+		));
+		let refreshed = AttestationsV2::<Test>::get(bot_hash(1)).unwrap();
+		assert_eq!(refreshed.dcap_level, 2, "R1-fix: V2 dcap_level must be preserved");
+		assert_eq!(refreshed.tee_type, v2.tee_type, "R1-fix: V2 tee_type must be preserved");
+	});
+}
+
+// ============================================================================
+// New Query Helpers: attestation_level, get_tee_type, attestation_info
+// ============================================================================
+
+#[test]
+fn query_attestation_level_default_zero() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_eq!(GroupRobotRegistry::attestation_level(&bot_hash(1)), 0);
+	});
+}
+
+#[test]
+fn query_attestation_level_v1() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_dcap_quote(&mrtd(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+		assert_ok!(GroupRobotRegistry::submit_dcap_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), bounded, None, None,
+		));
+		assert_eq!(GroupRobotRegistry::attestation_level(&bot_hash(1)), 2);
+	});
+}
+
+#[test]
+fn query_attestation_level_v2() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_dcap_quote(&mrtd(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+		assert_ok!(GroupRobotRegistry::submit_tee_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), bounded, None, None, None,
+		));
+		assert_eq!(GroupRobotRegistry::attestation_level(&bot_hash(1)), 2);
+	});
+}
+
+#[test]
+fn query_tee_type_standard_node() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_eq!(GroupRobotRegistry::get_tee_type(&bot_hash(1)), None);
+	});
+}
+
+#[test]
+fn query_tee_type_v1_tee_node() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_ok!(GroupRobotRegistry::submit_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1),
+			[1u8; 32], None, mrtd(1), None,
+		));
+		// V1 TeeNode maps to TeeType::Tdx
+		assert_eq!(GroupRobotRegistry::get_tee_type(&bot_hash(1)), Some(TeeType::Tdx));
+	});
+}
+
+#[test]
+fn query_tee_type_v2_sgx() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrenclave(RuntimeOrigin::root(), mrenclave(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_sgx_quote_with_nonce(&mrenclave(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+		assert_ok!(GroupRobotRegistry::submit_tee_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), bounded, None, None, None,
+		));
+		assert_eq!(GroupRobotRegistry::get_tee_type(&bot_hash(1)), Some(TeeType::Sgx));
+	});
+}
+
+#[test]
+fn query_attestation_info_returns_full_tuple() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_dcap_quote(&mrtd(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+		assert_ok!(GroupRobotRegistry::submit_tee_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), bounded, None, None, None,
+		));
+
+		let info = GroupRobotRegistry::attestation_info(&bot_hash(1));
+		assert!(info.is_some());
+		let (level, _verified, expires, tee) = info.unwrap();
+		assert_eq!(level, 2);
+		assert!(expires > 1);
+		assert_eq!(tee, Some(TeeType::Tdx));
+	});
+}
+
+#[test]
+fn query_attestation_info_none_without_attestation() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert!(GroupRobotRegistry::attestation_info(&bot_hash(1)).is_none());
+	});
+}
+
+// ============================================================================
+// BotRegistryProvider: new trait methods (attestation_level, tee_type)
+// ============================================================================
+
+#[test]
+fn bot_registry_provider_attestation_level() {
+	new_test_ext().execute_with(|| {
+		use pallet_grouprobot_primitives::BotRegistryProvider;
+
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_eq!(
+			<GroupRobotRegistry as BotRegistryProvider<u64>>::attestation_level(&bot_hash(1)),
+			0
+		);
+
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_dcap_quote(&mrtd(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+		assert_ok!(GroupRobotRegistry::submit_tee_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), bounded, None, None, None,
+		));
+
+		assert_eq!(
+			<GroupRobotRegistry as BotRegistryProvider<u64>>::attestation_level(&bot_hash(1)),
+			2
+		);
+	});
+}
+
+#[test]
+fn bot_registry_provider_tee_type() {
+	new_test_ext().execute_with(|| {
+		use pallet_grouprobot_primitives::BotRegistryProvider;
+
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_eq!(
+			<GroupRobotRegistry as BotRegistryProvider<u64>>::tee_type(&bot_hash(1)),
+			None
+		);
+
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		let nonce = request_nonce(OWNER, bot_hash(1));
+		let (quote, _pck) = build_dcap_quote(&mrtd(1), &pk(1), &nonce);
+		let bounded: frame_support::BoundedVec<u8, frame_support::traits::ConstU32<8192>> =
+			quote.try_into().unwrap();
+		assert_ok!(GroupRobotRegistry::submit_tee_attestation(
+			RuntimeOrigin::signed(OWNER), bot_hash(1), bounded, None, None, None,
+		));
+
+		assert_eq!(
+			<GroupRobotRegistry as BotRegistryProvider<u64>>::tee_type(&bot_hash(1)),
+			Some(TeeType::Tdx)
+		);
+	});
+}
+
+#[test]
+fn bot_registry_provider_bot_status() {
+	new_test_ext().execute_with(|| {
+		use pallet_grouprobot_primitives::BotRegistryProvider;
+
+		assert_eq!(
+			<GroupRobotRegistry as BotRegistryProvider<u64>>::bot_status(&bot_hash(1)),
+			None
+		);
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_eq!(
+			<GroupRobotRegistry as BotRegistryProvider<u64>>::bot_status(&bot_hash(1)),
+			Some(BotStatus::Active)
+		);
+		assert_ok!(GroupRobotRegistry::suspend_bot(RuntimeOrigin::root(), bot_hash(1)));
+		assert_eq!(
+			<GroupRobotRegistry as BotRegistryProvider<u64>>::bot_status(&bot_hash(1)),
+			Some(BotStatus::Suspended)
+		);
+	});
+}

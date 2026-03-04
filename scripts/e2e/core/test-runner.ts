@@ -80,13 +80,17 @@ async function runSingleFlow(
       const start = Date.now();
       const result = await signAndSend(api, tx, signer, stepName);
       const duration = Date.now() - start;
-      reporter.recordStep(
-        stepName,
-        actorName ?? 'unknown',
-        result.success,
-        duration,
-        result.error,
-      );
+      // 错误路径 (expected-fail) steps: don't record here — let ctx.check verify
+      const isErrorPath = stepName.includes('[错误路径]') || stepName.includes('[error-path]');
+      if (!isErrorPath) {
+        reporter.recordStep(
+          stepName,
+          actorName ?? 'unknown',
+          result.success,
+          duration,
+          result.error,
+        );
+      }
       return result;
     },
 

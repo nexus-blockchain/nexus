@@ -966,52 +966,6 @@ fn h2_set_review_enabled_no_event_when_already_enabled() {
     });
 }
 
-// ==================== M1: Entity 级别评分更新 ====================
-
-#[test]
-fn m1_entity_rating_updated_on_review() {
-    new_test_ext().execute_with(|| {
-        add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
-        add_shop(100);
-        set_shop_entity(100, ENTITY_1);
-        add_order(1, BUYER, 100, true);
-
-        assert_ok!(EntityReview::submit_review(
-            RawOrigin::Signed(BUYER).into(),
-            1, 4, None,
-        ));
-
-        // 验证 entity rating 被更新
-        let (sum, count) = get_entity_rating(ENTITY_1).unwrap();
-        assert_eq!(sum, 4);
-        assert_eq!(count, 1);
-    });
-}
-
-#[test]
-fn m1_entity_rating_accumulates() {
-    new_test_ext().execute_with(|| {
-        add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
-        add_shop(100);
-        set_shop_entity(100, ENTITY_1);
-        add_order(1, BUYER, 100, true);
-        add_order(2, BUYER2, 100, true);
-
-        assert_ok!(EntityReview::submit_review(
-            RawOrigin::Signed(BUYER).into(),
-            1, 5, None,
-        ));
-        assert_ok!(EntityReview::submit_review(
-            RawOrigin::Signed(BUYER2).into(),
-            2, 3, None,
-        ));
-
-        let (sum, count) = get_entity_rating(ENTITY_1).unwrap();
-        assert_eq!(sum, 8); // 5 + 3
-        assert_eq!(count, 2);
-    });
-}
-
 // ==================== M2: ReviewCount 溢出检测 ====================
 
 #[test]
@@ -1161,7 +1115,7 @@ fn m2r6_entity_review_disabled_check_uses_single_shop_id() {
 // ==================== Round 7: Regression Tests ====================
 
 #[test]
-fn m1r7_entity_id_cached_for_rating_update() {
+fn m1r7_shop_rating_updated_on_review() {
     new_test_ext().execute_with(|| {
         add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
         add_shop(100);
@@ -1173,12 +1127,7 @@ fn m1r7_entity_id_cached_for_rating_update() {
             1, 4, None,
         ));
 
-        // 验证 entity rating 被正确更新（使用缓存的 entity_id）
-        let (sum, count) = get_entity_rating(ENTITY_1).unwrap();
-        assert_eq!(sum, 4);
-        assert_eq!(count, 1);
-
-        // 验证 shop rating 也被正确更新
+        // 验证 shop rating 被正确更新
         let (shop_sum, shop_count) = get_shop_rating(100).unwrap();
         assert_eq!(shop_sum, 4);
         assert_eq!(shop_count, 1);
@@ -1186,47 +1135,15 @@ fn m1r7_entity_id_cached_for_rating_update() {
 }
 
 #[test]
-fn l2r7_entity_rating_fail_still_stores_review() {
-    new_test_ext().execute_with(|| {
-        add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
-        add_shop(100);
-        set_shop_entity(100, ENTITY_1);
-        add_order(1, BUYER, 100, true);
-        set_entity_rating_fail(true);
-
-        // Entity rating 失败不应回滚评价（best-effort）
-        assert_ok!(EntityReview::submit_review(
-            RawOrigin::Signed(BUYER).into(),
-            1, 5, None,
-        ));
-
-        // 评价已存储
-        assert!(Reviews::<Test>::get(1).is_some());
-        assert_eq!(ReviewCount::<Test>::get(), 1);
-        assert_eq!(UserReviews::<Test>::get(BUYER).to_vec(), vec![1]);
-
-        // 店铺评分已更新（shop rating 不受 entity rating 失败影响）
-        let (shop_sum, shop_count) = get_shop_rating(100).unwrap();
-        assert_eq!(shop_sum, 5);
-        assert_eq!(shop_count, 1);
-        assert_eq!(ShopReviewCount::<Test>::get(100), 1);
-
-        // Entity rating 未更新（失败）
-        assert!(get_entity_rating(ENTITY_1).is_none());
-    });
-}
-
-#[test]
-fn l2r7_entity_rating_fail_with_shop_rating_fail_both_best_effort() {
+fn l2r7_shop_rating_fail_still_stores_review() {
     new_test_ext().execute_with(|| {
         add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
         add_shop(100);
         set_shop_entity(100, ENTITY_1);
         add_order(1, BUYER, 100, true);
         set_shop_rating_fail(true);
-        set_entity_rating_fail(true);
 
-        // 两者都失败，评价仍应存储
+        // Shop rating 失败不应回滚评价（best-effort）
         assert_ok!(EntityReview::submit_review(
             RawOrigin::Signed(BUYER).into(),
             1, 3, None,
@@ -1235,12 +1152,11 @@ fn l2r7_entity_rating_fail_with_shop_rating_fail_both_best_effort() {
         assert!(Reviews::<Test>::get(1).is_some());
         assert_eq!(ReviewCount::<Test>::get(), 1);
 
-        // 两者都未更新
+        // Shop rating 未更新（失败）
         let (shop_sum, shop_count) = get_shop_rating(100).unwrap();
         assert_eq!(shop_sum, 0);
         assert_eq!(shop_count, 0);
         assert_eq!(ShopReviewCount::<Test>::get(100), 0);
-        assert!(get_entity_rating(ENTITY_1).is_none());
 
         // ShopRatingUpdateFailed 事件
         System::assert_has_event(
@@ -1266,5 +1182,192 @@ fn l2_review_no_completed_at_allows_review() {
             1, 5, None,
         ));
         assert!(Reviews::<Test>::get(1).is_some());
+    });
+}
+
+// ==================== Round 9: M4 — remove_review Root extrinsic ====================
+
+#[test]
+fn m4_remove_review_works() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 5, None,
+        ));
+        assert_eq!(ReviewCount::<Test>::get(), 1);
+        assert_eq!(ShopReviewCount::<Test>::get(100), 1);
+        assert_eq!(UserReviews::<Test>::get(BUYER).len(), 1);
+
+        // Root 移除评价
+        assert_ok!(EntityReview::remove_review(RawOrigin::Root.into(), 1));
+
+        // 评价已删除
+        assert!(Reviews::<Test>::get(1).is_none());
+        assert_eq!(ReviewCount::<Test>::get(), 0);
+        assert_eq!(ShopReviewCount::<Test>::get(100), 0);
+        assert_eq!(UserReviews::<Test>::get(BUYER).len(), 0);
+
+        // 事件
+        System::assert_last_event(
+            Event::ReviewRemoved {
+                order_id: 1,
+                reviewer: BUYER,
+            }
+            .into(),
+        );
+    });
+}
+
+#[test]
+fn m4_remove_review_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 5, None,
+        ));
+
+        assert_noop!(
+            EntityReview::remove_review(RawOrigin::Signed(BUYER).into(), 1),
+            frame_support::error::BadOrigin
+        );
+
+        // 评价仍存在
+        assert!(Reviews::<Test>::get(1).is_some());
+    });
+}
+
+#[test]
+fn m4_remove_review_rejects_not_found() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityReview::remove_review(RawOrigin::Root.into(), 999),
+            Error::<Test>::ReviewNotFound
+        );
+    });
+}
+
+#[test]
+fn m4_remove_review_allows_resubmit() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 5, None,
+        ));
+
+        // Root 移除
+        assert_ok!(EntityReview::remove_review(RawOrigin::Root.into(), 1));
+
+        // 买家可以重新提交
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 3, None,
+        ));
+
+        let review = Reviews::<Test>::get(1).unwrap();
+        assert_eq!(review.rating, 3);
+        assert_eq!(ReviewCount::<Test>::get(), 1);
+    });
+}
+
+#[test]
+fn m4_remove_review_user_index_cleanup() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+        add_order(2, BUYER, 100, true);
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            1, 5, None,
+        ));
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(),
+            2, 4, None,
+        ));
+        assert_eq!(UserReviews::<Test>::get(BUYER).to_vec(), vec![1, 2]);
+
+        // 移除第一条
+        assert_ok!(EntityReview::remove_review(RawOrigin::Root.into(), 1));
+
+        // 用户索引仅保留第二条
+        assert_eq!(UserReviews::<Test>::get(BUYER).to_vec(), vec![2]);
+        assert_eq!(ReviewCount::<Test>::get(), 1);
+    });
+}
+
+// ==================== Round 9: M5 — Admin permission granularity ====================
+
+#[test]
+fn m5_admin_without_review_manage_rejected() {
+    new_test_ext().execute_with(|| {
+        add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
+        // 给 ENTITY_ADMIN 一个不包含 REVIEW_MANAGE 的权限
+        set_entity_admin(ENTITY_1, ENTITY_ADMIN, pallet_entity_common::AdminPermission::MEMBER_MANAGE);
+
+        assert_noop!(
+            EntityReview::set_review_enabled(
+                RawOrigin::Signed(ENTITY_ADMIN).into(),
+                ENTITY_1,
+                false,
+            ),
+            Error::<Test>::NotEntityAdmin
+        );
+    });
+}
+
+#[test]
+fn m5_admin_with_review_manage_works() {
+    new_test_ext().execute_with(|| {
+        add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
+        set_entity_admin(ENTITY_1, ENTITY_ADMIN, pallet_entity_common::AdminPermission::REVIEW_MANAGE);
+
+        assert_ok!(EntityReview::set_review_enabled(
+            RawOrigin::Signed(ENTITY_ADMIN).into(),
+            ENTITY_1,
+            false,
+        ));
+        assert!(EntityReviewDisabled::<Test>::contains_key(ENTITY_1));
+    });
+}
+
+#[test]
+fn m5_owner_always_passes_admin_check() {
+    new_test_ext().execute_with(|| {
+        // Owner 不需要任何 admin 权限位
+        add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
+
+        assert_ok!(EntityReview::set_review_enabled(
+            RawOrigin::Signed(ENTITY_OWNER).into(),
+            ENTITY_1,
+            false,
+        ));
+        assert!(EntityReviewDisabled::<Test>::contains_key(ENTITY_1));
+    });
+}
+
+// ==================== EntityLocked 回归测试 ====================
+
+#[test]
+fn entity_locked_rejects_set_review_enabled() {
+    new_test_ext().execute_with(|| {
+        add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
+        set_entity_locked(ENTITY_1);
+        assert_noop!(
+            EntityReview::set_review_enabled(
+                RawOrigin::Signed(ENTITY_OWNER).into(),
+                ENTITY_1,
+                false,
+            ),
+            Error::<Test>::EntityLocked
+        );
     });
 }

@@ -7,8 +7,8 @@ use crate::error::BotResult;
 
 /// 标准化平台事件
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PlatformEvent {
+    #[allow(dead_code)]
     pub platform: String,
     pub event_type: String,
     pub group_id: String,
@@ -35,6 +35,12 @@ pub struct MessageContext {
     pub command: Option<String>,
     pub command_args: Vec<String>,
     pub is_join_request: bool,
+    /// 新成员入群事件
+    pub is_new_member: bool,
+    /// 成员离群事件
+    pub is_left_member: bool,
+    /// 服务消息 ID (入群/离群等系统消息)
+    pub service_message_id: Option<String>,
     pub is_admin: bool,
     /// 消息类型标记 (photo, video, audio, document, sticker, animation, voice, forward, contact, location, poll)
     pub message_type: Option<String>,
@@ -102,8 +108,8 @@ pub struct ExecutionReceipt {
 
 /// 平台适配器 — 统一不同平台的事件解析
 #[async_trait]
-#[allow(dead_code)]
 pub trait PlatformAdapter: Send + Sync {
+    #[allow(dead_code)]
     fn platform_name(&self) -> &'static str;
     fn parse_event(&self, raw: &serde_json::Value) -> Option<PlatformEvent>;
     fn extract_context(&self, event: &PlatformEvent) -> MessageContext;

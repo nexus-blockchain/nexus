@@ -11,9 +11,8 @@ use scale_info::TypeInfo;
 
 // Re-export 通用广告类型 (已迁移到 ads-primitives)
 pub use pallet_ads_primitives::{
-	CampaignStatus, AdReviewStatus, AdPreference, PlacementId,
+	CampaignStatus, AdReviewStatus, PlacementId,
 	DeliveryVerifier, PlacementAdminProvider, RevenueDistributor,
-	PlacementStakeProvider, DeliveryMethod,
 };
 
 // ============================================================================
@@ -157,7 +156,6 @@ impl Default for OperatorStatus {
 )]
 pub enum NodeStatus {
 	Active,
-	Probation,
 	Suspended,
 	Exiting,
 }
@@ -168,22 +166,10 @@ impl Default for NodeStatus {
 	}
 }
 
-/// 暂停原因
-#[derive(
-	Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, RuntimeDebug, PartialEq, Eq,
-	TypeInfo, MaxEncodedLen,
-)]
-pub enum SuspendReason {
-	LowReputation,
-	Equivocation,
-	Offline,
-	Manual,
-}
-
 /// 订阅层级
 #[derive(
 	Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, RuntimeDebug, PartialEq, Eq,
-	TypeInfo, MaxEncodedLen,
+	PartialOrd, Ord, TypeInfo, MaxEncodedLen,
 )]
 pub enum SubscriptionTier {
 	/// 免费层级 (默认, 无链上订阅记录)
@@ -268,6 +254,8 @@ pub enum SubscriptionStatus {
 	PastDue,
 	Suspended,
 	Cancelled,
+	/// Owner 主动暂停 (不扣费, 不享受层级)
+	Paused,
 }
 
 impl Default for SubscriptionStatus {
@@ -369,69 +357,7 @@ impl Default for WarnAction {
 	}
 }
 
-// ============================================================================
-// Ad System Types (群组广告)
-// ============================================================================
-
-/// 广告投放类型
-#[derive(
-	Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, RuntimeDebug, PartialEq, Eq,
-	TypeInfo, MaxEncodedLen,
-)]
-pub enum AdDeliveryType {
-	/// 定时推送到群组
-	ScheduledPost,
-	/// Bot 回复底部附带广告
-	ReplyFooter,
-	/// 嵌入欢迎消息
-	WelcomeEmbed,
-}
-
-impl AdDeliveryType {
-	/// CPM 定价系数 (基点, 100 = 1.0x)
-	///
-	/// 按投放侵入性差异化定价:
-	/// - ScheduledPost: 100 (1.0x) — 独立消息推送, 最具侵入性
-	/// - ReplyFooter:    50 (0.5x) — 回复底部附带, 低侵入性
-	/// - WelcomeEmbed:   30 (0.3x) — 仅新成员可见, 最低侵入性
-	pub fn cpm_multiplier_bps(&self) -> u32 {
-		match self {
-			Self::ScheduledPost => 100,
-			Self::ReplyFooter => 50,
-			Self::WelcomeEmbed => 30,
-		}
-	}
-}
-
-impl Default for AdDeliveryType {
-	fn default() -> Self {
-		Self::ScheduledPost
-	}
-}
-
-/// 广告目标标签 (用于匹配社区)
-#[derive(
-	Encode, Decode, codec::DecodeWithMemTracking, Clone, RuntimeDebug, PartialEq, Eq, TypeInfo,
-	MaxEncodedLen,
-)]
-pub enum AdTargetTag {
-	/// 按平台
-	TargetPlatform(Platform),
-	/// 按社区最低活跃成员数
-	MinMembers(u32),
-	/// 按语言/地区 (ISO 639-1)
-	Language([u8; 2]),
-	/// 全部社区
-	All,
-}
-
-impl Default for AdTargetTag {
-	fn default() -> Self {
-		Self::All
-	}
-}
-
-// NOTE: AdPreference, CampaignStatus, AdReviewStatus 已迁移至 pallet-ads-primitives
+// NOTE: CampaignStatus, AdReviewStatus 已迁移至 pallet-ads-primitives
 // 通过顶部 `pub use pallet_ads_primitives::{...}` 重导出, 保持向后兼容
 
 // ============================================================================
@@ -460,6 +386,28 @@ impl Default for CeremonyStatus {
 // Trait Interfaces
 // ============================================================================
 
+/// 社区查询 (ads 等模块依赖 community)
+pub trait CommunityProvider {
+	/// 社区是否已配置
+	fn is_community_configured(community_id_hash: &CommunityIdHash) -> bool;
+	/// 社区是否被封禁
+	fn is_community_banned(community_id_hash: &CommunityIdHash) -> bool;
+	/// 社区是否接受广告投放
+	fn is_ads_enabled(community_id_hash: &CommunityIdHash) -> bool;
+	/// 社区活跃成员数
+	fn active_members(community_id_hash: &CommunityIdHash) -> u32;
+	/// 社区语言 (ISO 639-1)
+	fn language(community_id_hash: &CommunityIdHash) -> [u8; 2];
+}
+
+impl CommunityProvider for () {
+	fn is_community_configured(_: &CommunityIdHash) -> bool { false }
+	fn is_community_banned(_: &CommunityIdHash) -> bool { false }
+	fn is_ads_enabled(_: &CommunityIdHash) -> bool { false }
+	fn active_members(_: &CommunityIdHash) -> u32 { 0 }
+	fn language(_: &CommunityIdHash) -> [u8; 2] { *b"en" }
+}
+
 /// Bot 注册查询 (consensus/ceremony 依赖 registry)
 pub trait BotRegistryProvider<AccountId> {
 	fn is_bot_active(bot_id_hash: &BotIdHash) -> bool;
@@ -472,6 +420,12 @@ pub trait BotRegistryProvider<AccountId> {
 	fn peer_count(bot_id_hash: &BotIdHash) -> u32;
 	/// 获取 Bot 所属运营商
 	fn bot_operator(bot_id_hash: &BotIdHash) -> Option<AccountId>;
+	/// 获取 Bot 的精确状态 (Active/Suspended/Deactivated)
+	fn bot_status(bot_id_hash: &BotIdHash) -> Option<BotStatus>;
+	/// 获取 Bot 的 DCAP 证明级别 (0=无证明, 1-4=DCAP Level)
+	fn attestation_level(bot_id_hash: &BotIdHash) -> u8;
+	/// 获取 Bot 的 TEE 类型 (None=StandardNode)
+	fn tee_type(bot_id_hash: &BotIdHash) -> Option<TeeType>;
 }
 
 /// BotRegistryProvider 空实现 (用于不依赖 registry 的测试)
@@ -484,6 +438,9 @@ impl<AccountId> BotRegistryProvider<AccountId> for () {
 	fn bot_public_key(_: &BotIdHash) -> Option<[u8; 32]> { None }
 	fn peer_count(_: &BotIdHash) -> u32 { 0 }
 	fn bot_operator(_: &BotIdHash) -> Option<AccountId> { None }
+	fn bot_status(_: &BotIdHash) -> Option<BotStatus> { None }
+	fn attestation_level(_: &BotIdHash) -> u8 { 0 }
+	fn tee_type(_: &BotIdHash) -> Option<TeeType> { None }
 }
 
 /// 广告投放计数查询 (subscription 依赖 ads)
@@ -520,11 +477,17 @@ pub trait SubscriptionProvider {
 	fn effective_tier(bot_id_hash: &BotIdHash) -> SubscriptionTier;
 	/// 查询 Bot 的功能限制
 	fn effective_feature_gate(bot_id_hash: &BotIdHash) -> TierFeatureGate;
+	/// 查询 Bot 是否有活跃的付费订阅 (Active/PastDue/Paused 均算)
+	fn is_subscription_active(bot_id_hash: &BotIdHash) -> bool;
+	/// 查询 Bot 的订阅状态
+	fn subscription_status(bot_id_hash: &BotIdHash) -> Option<SubscriptionStatus>;
 }
 
 impl SubscriptionProvider for () {
 	fn effective_tier(_: &BotIdHash) -> SubscriptionTier { SubscriptionTier::Free }
 	fn effective_feature_gate(_: &BotIdHash) -> TierFeatureGate { SubscriptionTier::Free.feature_gate() }
+	fn is_subscription_active(_: &BotIdHash) -> bool { false }
+	fn subscription_status(_: &BotIdHash) -> Option<SubscriptionStatus> { None }
 }
 
 /// 🆕 10.4: 统一奖励写入 trait (为未来 rewards pallet 拆分准备)
@@ -560,6 +523,8 @@ impl PeerUptimeRecorder for () {
 pub struct EraSettlementResult {
 	/// 本次结算收取的总收入
 	pub total_income: u128,
+	/// 运营者分成 (通常 90%)
+	pub node_share: u128,
 	/// 实际转入国库的金额
 	pub treasury_share: u128,
 }
@@ -594,6 +559,7 @@ pub trait EraRewardDistributor {
 	/// - `era`: 当前 Era 编号
 	/// - `total_pool`: 可分配总额 (subscription node_share + inflation)
 	/// - `subscription_income`: 本期订阅收入
+	/// - `ads_income`: 本期广告收入
 	/// - `inflation`: 本期通胀铸币
 	/// - `treasury_share`: 国库分成
 	/// - `node_weights`: 各节点权重 (node_id, weight)
@@ -604,6 +570,7 @@ pub trait EraRewardDistributor {
 		era: u64,
 		total_pool: u128,
 		subscription_income: u128,
+		ads_income: u128,
 		inflation: u128,
 		treasury_share: u128,
 		node_weights: &[(NodeId, u128)],
@@ -616,7 +583,7 @@ pub trait EraRewardDistributor {
 
 impl EraRewardDistributor for () {
 	fn distribute_and_record(
-		_: u64, _: u128, _: u128, _: u128, _: u128, _: &[(NodeId, u128)], _: u32,
+		_: u64, _: u128, _: u128, _: u128, _: u128, _: u128, _: &[(NodeId, u128)], _: u32,
 	) -> u128 { 0 }
 	fn prune_old_eras(_: u64) {}
 }

@@ -126,7 +126,7 @@ async function memberReferral(ctx: FlowContext): Promise<void> {
 
   await ctx.check('验证 Charlie 的推荐人是 Bob', 'system', async () => {
     // 查询 Charlie 的 member 记录
-    const member = await (api.query as any).entityMember.members(shopId, charlie.address);
+    const member = await (api.query as any).entityMember.entityMembers(shopId, charlie.address);
     if (member.isSome) {
       const data = member.unwrap().toHuman();
       const referrer = data.referrer ?? data.referrer_account;
@@ -158,7 +158,7 @@ async function memberReferral(ctx: FlowContext): Promise<void> {
   // ─── Step 9: Eve 手动升级 Bob ────────────────────────────
 
   // 获取等级 ID (第一个自定义等级)
-  const levelConfig = await (api.query as any).entityMember.shopLevelConfig(shopId);
+  const levelConfig = await (api.query as any).entityMember.entityLevelSystems(shopId);
   let targetLevelId = 1; // 默认
   if (levelConfig.isSome) {
     const data = levelConfig.unwrap().toHuman();

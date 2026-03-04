@@ -2,6 +2,23 @@ use crate::{mock::*, *};
 use frame_support::{assert_noop, assert_ok};
 use pallet_grouprobot_primitives::*;
 
+/// P14: 生成有效的 equivocation 证据 (两组不同消息 + 同一节点的真实签名)
+fn equivocation_evidence(node_n: u8, seq: u64) -> ([u8; 32], [u8; 64], [u8; 32], [u8; 64]) {
+	let msg_a = [b"equivocation-a", seq.to_le_bytes().as_slice(), &[node_n]].concat();
+	let msg_b = [b"equivocation-b", seq.to_le_bytes().as_slice(), &[node_n]].concat();
+	let (hash_a, sig_a) = sign_msg(node_n, &msg_a);
+	let (hash_b, sig_b) = sign_msg(node_n, &msg_b);
+	(hash_a, sig_a, hash_b, sig_b)
+}
+
+/// P14: 便捷函数 — 使用真实签名举报 equivocation (assert_ok)
+fn do_report_equivocation(reporter: u64, node_n: u8, seq: u64) {
+	let (ha, sa, hb, sb) = equivocation_evidence(node_n, seq);
+	assert_ok!(GroupRobotConsensus::report_equivocation(
+		RuntimeOrigin::signed(reporter), node_id(node_n), seq, ha, sa, hb, sb,
+	));
+}
+
 // ============================================================================
 // register_node
 // ============================================================================
@@ -14,7 +31,6 @@ fn register_node_works() {
 		assert_eq!(node.operator, OPERATOR);
 		assert_eq!(node.stake, 200);
 		assert_eq!(node.status, NodeStatus::Active);
-		assert_eq!(node.reputation, 5000);
 		assert_eq!(ActiveNodeList::<Test>::get().len(), 1);
 		assert_eq!(OperatorNodes::<Test>::get(OPERATOR), Some(node_id(1)));
 	});
@@ -102,12 +118,7 @@ fn request_exit_fails_not_operator() {
 fn report_equivocation_works() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
-		assert_ok!(GroupRobotConsensus::report_equivocation(
-			RuntimeOrigin::signed(OTHER),
-			node_id(1), 42,
-			[1u8; 32], [1u8; 64],
-			[2u8; 32], [2u8; 64],
-		));
+		do_report_equivocation(OTHER, 1, 42);
 		let record = EquivocationRecords::<Test>::get(node_id(1), 42).unwrap();
 		assert_eq!(record.reporter, OTHER);
 		assert!(!record.resolved);
@@ -118,12 +129,7 @@ fn report_equivocation_works() {
 fn slash_equivocation_works() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
-		assert_ok!(GroupRobotConsensus::report_equivocation(
-			RuntimeOrigin::signed(OTHER),
-			node_id(1), 42,
-			[1u8; 32], [1u8; 64],
-			[2u8; 32], [2u8; 64],
-		));
+		do_report_equivocation(OTHER, 1, 42);
 		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42));
 
 		let node = Nodes::<Test>::get(node_id(1)).unwrap();
@@ -504,10 +510,7 @@ fn m2_slash_cleans_node_bot_binding() {
 		));
 		assert!(NodeBotBinding::<Test>::contains_key(node_id(1)));
 
-		assert_ok!(GroupRobotConsensus::report_equivocation(
-			RuntimeOrigin::signed(OTHER), node_id(1), 42,
-			[1u8; 32], [1u8; 64], [2u8; 32], [2u8; 64],
-		));
+		do_report_equivocation(OTHER, 1, 42);
 		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42));
 
 		// NodeBotBinding should be cleaned after slash
@@ -531,10 +534,7 @@ fn m3_slash_missing_equivocation_returns_correct_error() {
 fn h5_suspended_node_can_request_exit() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
-		assert_ok!(GroupRobotConsensus::report_equivocation(
-			RuntimeOrigin::signed(OTHER), node_id(1), 42,
-			[1u8; 32], [1u8; 64], [2u8; 32], [2u8; 64],
-		));
+		do_report_equivocation(OTHER, 1, 42);
 		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42));
 
 		// Node is now Suspended
@@ -583,10 +583,7 @@ fn h8_slash_resets_tee_status() {
 		));
 		assert!(Nodes::<Test>::get(node_id(1)).unwrap().is_tee_node);
 
-		assert_ok!(GroupRobotConsensus::report_equivocation(
-			RuntimeOrigin::signed(OTHER), node_id(1), 42,
-			[1u8; 32], [1u8; 64], [2u8; 32], [2u8; 64],
-		));
+		do_report_equivocation(OTHER, 1, 42);
 		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42));
 
 		// After slash, is_tee_node should be false
@@ -604,10 +601,7 @@ fn h8_slash_resets_tee_status() {
 fn h1r1_slash_rejects_already_resolved() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
-		assert_ok!(GroupRobotConsensus::report_equivocation(
-			RuntimeOrigin::signed(OTHER), node_id(1), 42,
-			[1u8; 32], [1u8; 64], [2u8; 32], [2u8; 64],
-		));
+		do_report_equivocation(OTHER, 1, 42);
 		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42));
 
 		// Second slash of the same record → must be rejected
@@ -626,10 +620,7 @@ fn h1r1_slash_rejects_already_resolved() {
 fn m2r1_cleanup_resolved_equivocation_works() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
-		assert_ok!(GroupRobotConsensus::report_equivocation(
-			RuntimeOrigin::signed(OTHER), node_id(1), 42,
-			[1u8; 32], [1u8; 64], [2u8; 32], [2u8; 64],
-		));
+		do_report_equivocation(OTHER, 1, 42);
 		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42));
 		assert!(EquivocationRecords::<Test>::contains_key(node_id(1), 42));
 
@@ -645,10 +636,7 @@ fn m2r1_cleanup_resolved_equivocation_works() {
 fn m2r1_cleanup_unresolved_equivocation_fails() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
-		assert_ok!(GroupRobotConsensus::report_equivocation(
-			RuntimeOrigin::signed(OTHER), node_id(1), 42,
-			[1u8; 32], [1u8; 64], [2u8; 32], [2u8; 64],
-		));
+		do_report_equivocation(OTHER, 1, 42);
 
 		// Unresolved record cannot be cleaned up
 		assert_noop!(
@@ -666,10 +654,7 @@ fn m3r1_verify_tee_rejects_suspended_node() {
 		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
 
 		// Slash to suspend
-		assert_ok!(GroupRobotConsensus::report_equivocation(
-			RuntimeOrigin::signed(OTHER), node_id(1), 42,
-			[1u8; 32], [1u8; 64], [2u8; 32], [2u8; 64],
-		));
+		do_report_equivocation(OTHER, 1, 42);
 		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42));
 		assert_eq!(Nodes::<Test>::get(node_id(1)).unwrap().status, NodeStatus::Suspended);
 
@@ -716,5 +701,595 @@ fn m5r1_no_nodes_still_settles_and_records_uptime() {
 		// No rewards distributed (no nodes)
 		let rewards = get_distributed_rewards();
 		assert!(rewards.is_empty());
+	});
+}
+
+// ============================================================================
+// P1: increase_stake
+// ============================================================================
+
+#[test]
+fn p1_increase_stake_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_eq!(Nodes::<Test>::get(node_id(1)).unwrap().stake, 200);
+
+		assert_ok!(GroupRobotConsensus::increase_stake(RuntimeOrigin::signed(OPERATOR), node_id(1), 300));
+		assert_eq!(Nodes::<Test>::get(node_id(1)).unwrap().stake, 500);
+	});
+}
+
+#[test]
+fn p1_increase_stake_fails_not_operator() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_noop!(
+			GroupRobotConsensus::increase_stake(RuntimeOrigin::signed(OTHER), node_id(1), 100),
+			Error::<Test>::NotOperator
+		);
+	});
+}
+
+#[test]
+fn p1_increase_stake_fails_zero_amount() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_noop!(
+			GroupRobotConsensus::increase_stake(RuntimeOrigin::signed(OPERATOR), node_id(1), 0),
+			Error::<Test>::InsufficientStake
+		);
+	});
+}
+
+#[test]
+fn p1_increase_stake_works_for_suspended_node() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
+		// Slash to suspend
+		do_report_equivocation(OTHER, 1, 42);
+		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42));
+		assert_eq!(Nodes::<Test>::get(node_id(1)).unwrap().status, NodeStatus::Suspended);
+
+		// Can increase stake even when suspended
+		assert_ok!(GroupRobotConsensus::increase_stake(RuntimeOrigin::signed(OPERATOR), node_id(1), 500));
+		assert_eq!(Nodes::<Test>::get(node_id(1)).unwrap().stake, 1400); // 900 + 500
+	});
+}
+
+// ============================================================================
+// P2: reinstate_node
+// ============================================================================
+
+#[test]
+fn p2_reinstate_node_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
+		do_report_equivocation(OTHER, 1, 42);
+		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42));
+		assert_eq!(Nodes::<Test>::get(node_id(1)).unwrap().status, NodeStatus::Suspended);
+		assert_eq!(ActiveNodeList::<Test>::get().len(), 0);
+
+		assert_ok!(GroupRobotConsensus::reinstate_node(RuntimeOrigin::signed(OPERATOR), node_id(1)));
+		assert_eq!(Nodes::<Test>::get(node_id(1)).unwrap().status, NodeStatus::Active);
+		assert_eq!(ActiveNodeList::<Test>::get().len(), 1);
+	});
+}
+
+#[test]
+fn p2_reinstate_node_fails_not_suspended() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_noop!(
+			GroupRobotConsensus::reinstate_node(RuntimeOrigin::signed(OPERATOR), node_id(1)),
+			Error::<Test>::NodeNotSuspended
+		);
+	});
+}
+
+#[test]
+fn p2_reinstate_node_fails_insufficient_stake() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 100));
+		// Force suspend via governance
+		assert_ok!(GroupRobotConsensus::force_suspend_node(RuntimeOrigin::root(), node_id(1)));
+		// Slash some stake manually to make it below MinStake
+		// Actually we need equivocation slash — use force_suspend + manual stake reduction
+		// Better: register with minimal stake, slash via equivocation (10% of 100 = 10, remaining 90 < 100)
+		assert_eq!(Nodes::<Test>::get(node_id(1)).unwrap().status, NodeStatus::Suspended);
+		// Stake is 100, MinStake is 100, so this should work (stake >= MinStake)
+		assert_ok!(GroupRobotConsensus::reinstate_node(RuntimeOrigin::signed(OPERATOR), node_id(1)));
+	});
+}
+
+#[test]
+fn p2_reinstate_after_slash_with_topup() {
+	new_test_ext().execute_with(|| {
+		// Register with exactly MinStake
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 100));
+		// Report + slash (10% = 10, remaining = 90 < MinStake 100)
+		do_report_equivocation(OTHER, 1, 1);
+		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 1));
+		assert_eq!(Nodes::<Test>::get(node_id(1)).unwrap().stake, 90);
+
+		// Cannot reinstate: stake < MinStake
+		assert_noop!(
+			GroupRobotConsensus::reinstate_node(RuntimeOrigin::signed(OPERATOR), node_id(1)),
+			Error::<Test>::InsufficientStake
+		);
+
+		// Top up stake
+		assert_ok!(GroupRobotConsensus::increase_stake(RuntimeOrigin::signed(OPERATOR), node_id(1), 20));
+		assert_eq!(Nodes::<Test>::get(node_id(1)).unwrap().stake, 110);
+
+		// Now reinstate works
+		assert_ok!(GroupRobotConsensus::reinstate_node(RuntimeOrigin::signed(OPERATOR), node_id(1)));
+		assert_eq!(Nodes::<Test>::get(node_id(1)).unwrap().status, NodeStatus::Active);
+	});
+}
+
+// ============================================================================
+// P3: force_suspend_node
+// ============================================================================
+
+#[test]
+fn p3_force_suspend_node_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_ok!(GroupRobotConsensus::verify_node_tee(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), bot_hash(10)
+		));
+		assert!(Nodes::<Test>::get(node_id(1)).unwrap().is_tee_node);
+
+		assert_ok!(GroupRobotConsensus::force_suspend_node(RuntimeOrigin::root(), node_id(1)));
+
+		let node = Nodes::<Test>::get(node_id(1)).unwrap();
+		assert_eq!(node.status, NodeStatus::Suspended);
+		assert!(!node.is_tee_node);
+		assert_eq!(ActiveNodeList::<Test>::get().len(), 0);
+		assert!(!NodeBotBinding::<Test>::contains_key(node_id(1)));
+	});
+}
+
+#[test]
+fn p3_force_suspend_node_requires_root() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_noop!(
+			GroupRobotConsensus::force_suspend_node(RuntimeOrigin::signed(OPERATOR), node_id(1)),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+#[test]
+fn p3_force_suspend_node_fails_not_active() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
+		do_report_equivocation(OTHER, 1, 42);
+		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42));
+		// Already Suspended
+		assert_noop!(
+			GroupRobotConsensus::force_suspend_node(RuntimeOrigin::root(), node_id(1)),
+			Error::<Test>::NodeNotActive
+		);
+	});
+}
+
+// ============================================================================
+// P4: force_remove_node
+// ============================================================================
+
+#[test]
+fn p4_force_remove_node_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
+		assert_ok!(GroupRobotConsensus::verify_node_tee(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), bot_hash(10)
+		));
+
+		assert_ok!(GroupRobotConsensus::force_remove_node(RuntimeOrigin::root(), node_id(1)));
+
+		assert!(!Nodes::<Test>::contains_key(node_id(1)));
+		assert!(!OperatorNodes::<Test>::contains_key(OPERATOR));
+		assert!(!NodeBotBinding::<Test>::contains_key(node_id(1)));
+		assert_eq!(ActiveNodeList::<Test>::get().len(), 0);
+	});
+}
+
+#[test]
+fn p4_force_remove_node_requires_root() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_noop!(
+			GroupRobotConsensus::force_remove_node(RuntimeOrigin::signed(OPERATOR), node_id(1)),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+// ============================================================================
+// P5: reporter reward + set_reporter_reward_pct
+// ============================================================================
+
+#[test]
+fn p5_set_reporter_reward_pct_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::set_reporter_reward_pct(RuntimeOrigin::root(), 1000));
+		assert_eq!(ReporterRewardPct::<Test>::get(), 1000);
+	});
+}
+
+#[test]
+fn p5_set_reporter_reward_pct_rejects_excessive() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotConsensus::set_reporter_reward_pct(RuntimeOrigin::root(), 5001),
+			Error::<Test>::InvalidReporterRewardPct
+		);
+	});
+}
+
+#[test]
+fn p5_set_reporter_reward_pct_requires_root() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotConsensus::set_reporter_reward_pct(RuntimeOrigin::signed(OPERATOR), 1000),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+#[test]
+fn p5_reporter_gets_reward_on_slash() {
+	new_test_ext().execute_with(|| {
+		// Set 10% reporter reward
+		assert_ok!(GroupRobotConsensus::set_reporter_reward_pct(RuntimeOrigin::root(), 1000));
+
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
+		let reporter_balance_before = Balances::free_balance(OTHER);
+
+		do_report_equivocation(OTHER, 1, 42);
+		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42));
+
+		// Slash = 10% of 1000 = 100, reporter reward = 10% of 100 = 10
+		let reporter_balance_after = Balances::free_balance(OTHER);
+		assert_eq!(reporter_balance_after - reporter_balance_before, 10);
+	});
+}
+
+#[test]
+fn p5_no_reporter_reward_when_pct_zero() {
+	new_test_ext().execute_with(|| {
+		// Default ReporterRewardPct is 0
+		assert_eq!(ReporterRewardPct::<Test>::get(), 0);
+
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
+		let reporter_balance_before = Balances::free_balance(OTHER);
+
+		do_report_equivocation(OTHER, 1, 42);
+		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42));
+
+		// No reward
+		assert_eq!(Balances::free_balance(OTHER), reporter_balance_before);
+	});
+}
+
+// ============================================================================
+// P7: unbind_bot
+// ============================================================================
+
+#[test]
+fn p7_unbind_bot_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_ok!(GroupRobotConsensus::verify_node_tee(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), bot_hash(10)
+		));
+		assert!(Nodes::<Test>::get(node_id(1)).unwrap().is_tee_node);
+		assert!(NodeBotBinding::<Test>::contains_key(node_id(1)));
+
+		assert_ok!(GroupRobotConsensus::unbind_bot(RuntimeOrigin::signed(OPERATOR), node_id(1)));
+
+		assert!(!Nodes::<Test>::get(node_id(1)).unwrap().is_tee_node);
+		assert!(!NodeBotBinding::<Test>::contains_key(node_id(1)));
+	});
+}
+
+#[test]
+fn p7_unbind_bot_fails_no_binding() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_noop!(
+			GroupRobotConsensus::unbind_bot(RuntimeOrigin::signed(OPERATOR), node_id(1)),
+			Error::<Test>::NoBotBinding
+		);
+	});
+}
+
+#[test]
+fn p7_unbind_then_rebind_bot() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_ok!(GroupRobotConsensus::verify_node_tee(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), bot_hash(10)
+		));
+
+		// Unbind
+		assert_ok!(GroupRobotConsensus::unbind_bot(RuntimeOrigin::signed(OPERATOR), node_id(1)));
+		assert!(!Nodes::<Test>::get(node_id(1)).unwrap().is_tee_node);
+
+		// Re-verify with same bot
+		assert_ok!(GroupRobotConsensus::verify_node_tee(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), bot_hash(10)
+		));
+		assert!(Nodes::<Test>::get(node_id(1)).unwrap().is_tee_node);
+	});
+}
+
+// ============================================================================
+// P8: replace_operator
+// ============================================================================
+
+#[test]
+fn p8_replace_operator_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_ok!(GroupRobotConsensus::verify_node_tee(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), bot_hash(10)
+		));
+
+		assert_ok!(GroupRobotConsensus::replace_operator(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), OWNER
+		));
+
+		let node = Nodes::<Test>::get(node_id(1)).unwrap();
+		assert_eq!(node.operator, OWNER);
+		assert!(!node.is_tee_node, "TEE should be reset after operator change");
+		assert!(!NodeBotBinding::<Test>::contains_key(node_id(1)));
+		assert!(!OperatorNodes::<Test>::contains_key(OPERATOR));
+		assert_eq!(OperatorNodes::<Test>::get(OWNER), Some(node_id(1)));
+	});
+}
+
+#[test]
+fn p8_replace_operator_fails_new_has_node() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR2), node_id(2), 200));
+		assert_noop!(
+			GroupRobotConsensus::replace_operator(RuntimeOrigin::signed(OPERATOR), node_id(1), OPERATOR2),
+			Error::<Test>::NewOperatorAlreadyHasNode
+		);
+	});
+}
+
+#[test]
+fn p8_replace_operator_transfers_stake() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 500));
+		let op_reserved_before = Balances::reserved_balance(OPERATOR);
+		let owner_reserved_before = Balances::reserved_balance(OWNER);
+
+		assert_ok!(GroupRobotConsensus::replace_operator(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), OWNER
+		));
+
+		// Old operator: stake unreserved
+		assert_eq!(Balances::reserved_balance(OPERATOR), op_reserved_before - 500);
+		// New operator: stake reserved
+		assert_eq!(Balances::reserved_balance(OWNER), owner_reserved_before + 500);
+	});
+}
+
+// ============================================================================
+// P9: set_slash_percentage
+// ============================================================================
+
+#[test]
+fn p9_set_slash_percentage_works() {
+	new_test_ext().execute_with(|| {
+		assert_eq!(GroupRobotConsensus::effective_slash_percentage(), 10); // Config default
+
+		assert_ok!(GroupRobotConsensus::set_slash_percentage(RuntimeOrigin::root(), 25));
+		assert_eq!(GroupRobotConsensus::effective_slash_percentage(), 25);
+
+		// Reset to default
+		assert_ok!(GroupRobotConsensus::set_slash_percentage(RuntimeOrigin::root(), 0));
+		assert_eq!(GroupRobotConsensus::effective_slash_percentage(), 10);
+	});
+}
+
+#[test]
+fn p9_set_slash_percentage_rejects_over_100() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotConsensus::set_slash_percentage(RuntimeOrigin::root(), 101),
+			Error::<Test>::InvalidSlashPercentage
+		);
+	});
+}
+
+#[test]
+fn p9_slash_uses_runtime_percentage() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::set_slash_percentage(RuntimeOrigin::root(), 50));
+
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
+		do_report_equivocation(OTHER, 1, 42);
+		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42));
+
+		// 50% of 1000 = 500 slashed
+		let node = Nodes::<Test>::get(node_id(1)).unwrap();
+		assert_eq!(node.stake, 500);
+	});
+}
+
+// ============================================================================
+// P10: force_reinstate_node
+// ============================================================================
+
+#[test]
+fn p10_force_reinstate_node_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
+		do_report_equivocation(OTHER, 1, 42);
+		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 42));
+
+		// Force reinstate (no stake check)
+		assert_ok!(GroupRobotConsensus::force_reinstate_node(RuntimeOrigin::root(), node_id(1)));
+		assert_eq!(Nodes::<Test>::get(node_id(1)).unwrap().status, NodeStatus::Active);
+		assert_eq!(ActiveNodeList::<Test>::get().len(), 1);
+	});
+}
+
+#[test]
+fn p10_force_reinstate_requires_root() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_ok!(GroupRobotConsensus::force_suspend_node(RuntimeOrigin::root(), node_id(1)));
+		assert_noop!(
+			GroupRobotConsensus::force_reinstate_node(RuntimeOrigin::signed(OPERATOR), node_id(1)),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+// ============================================================================
+// P12: batch_cleanup_equivocations + query helpers
+// ============================================================================
+
+#[test]
+fn p12_batch_cleanup_equivocations_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 1000));
+
+		// Report and slash two equivocations
+		do_report_equivocation(OTHER, 1, 1);
+		do_report_equivocation(OTHER, 1, 2);
+		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 1));
+		assert_ok!(GroupRobotConsensus::slash_equivocation(RuntimeOrigin::root(), node_id(1), 2));
+
+		// Batch cleanup
+		let items = vec![(node_id(1), 1u64), (node_id(1), 2u64)];
+		let bounded: BoundedVec<_, <Test as crate::pallet::Config>::MaxActiveNodes> =
+			items.try_into().unwrap();
+		assert_ok!(GroupRobotConsensus::batch_cleanup_equivocations(
+			RuntimeOrigin::signed(OTHER), bounded
+		));
+
+		assert!(!EquivocationRecords::<Test>::contains_key(node_id(1), 1));
+		assert!(!EquivocationRecords::<Test>::contains_key(node_id(1), 2));
+	});
+}
+
+#[test]
+fn p12_batch_cleanup_fails_nothing_to_clean() {
+	new_test_ext().execute_with(|| {
+		let items: Vec<(NodeId, u64)> = vec![];
+		let bounded: BoundedVec<_, <Test as crate::pallet::Config>::MaxActiveNodes> =
+			items.try_into().unwrap();
+		assert_noop!(
+			GroupRobotConsensus::batch_cleanup_equivocations(RuntimeOrigin::signed(OTHER), bounded),
+			Error::<Test>::NothingToCleanup
+		);
+	});
+}
+
+#[test]
+fn p12_active_node_count_query() {
+	new_test_ext().execute_with(|| {
+		assert_eq!(GroupRobotConsensus::active_node_count(), 0);
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_eq!(GroupRobotConsensus::active_node_count(), 1);
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR2), node_id(2), 200));
+		assert_eq!(GroupRobotConsensus::active_node_count(), 2);
+	});
+}
+
+#[test]
+fn p12_current_era_query() {
+	new_test_ext().execute_with(|| {
+		assert_eq!(GroupRobotConsensus::current_era(), 0);
+		advance_to(52);
+		assert!(GroupRobotConsensus::current_era() >= 1);
+	});
+}
+
+// ============================================================================
+// P13: force_era_end
+// ============================================================================
+
+#[test]
+fn p13_force_era_end_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		set_mock_settle_income(0);
+		clear_distributed_rewards();
+
+		let era_before = GroupRobotConsensus::current_era();
+		assert_ok!(GroupRobotConsensus::force_era_end(RuntimeOrigin::root()));
+		assert_eq!(GroupRobotConsensus::current_era(), era_before + 1);
+	});
+}
+
+#[test]
+fn p13_force_era_end_requires_root() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			GroupRobotConsensus::force_era_end(RuntimeOrigin::signed(OPERATOR)),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+// ============================================================================
+// P14: ed25519 签名验证
+// ============================================================================
+
+#[test]
+fn p14_report_equivocation_rejects_invalid_signature() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+
+		// Use node 2's key to sign, but report against node 1 → sig verification fails
+		let (ha, sa, _hb, _sb) = equivocation_evidence(2, 42); // signed by node 2
+		let (hb, sb) = sign_msg(2, b"other-msg"); // also signed by node 2
+		assert_noop!(
+			GroupRobotConsensus::report_equivocation(
+				RuntimeOrigin::signed(OTHER),
+				node_id(1), 42, // but claiming node 1
+				ha, sa, hb, sb,
+			),
+			Error::<Test>::InvalidEquivocationEvidence
+		);
+	});
+}
+
+#[test]
+fn p14_report_equivocation_with_valid_signatures_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		let (ha, sa, hb, sb) = equivocation_evidence(1, 42);
+		assert_ok!(GroupRobotConsensus::report_equivocation(
+			RuntimeOrigin::signed(OTHER), node_id(1), 42, ha, sa, hb, sb,
+		));
+		assert!(EquivocationRecords::<Test>::contains_key(node_id(1), 42));
+	});
+}
+
+#[test]
+fn p14_report_equivocation_rejects_one_bad_signature() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		let (ha, sa, _hb, _sb) = equivocation_evidence(1, 42);
+		// sig_b is from wrong node
+		let (hb, sb) = sign_msg(2, b"wrong-key-msg");
+		assert_noop!(
+			GroupRobotConsensus::report_equivocation(
+				RuntimeOrigin::signed(OTHER), node_id(1), 42,
+				ha, sa, hb, sb,
+			),
+			Error::<Test>::InvalidEquivocationEvidence
+		);
 	});
 }

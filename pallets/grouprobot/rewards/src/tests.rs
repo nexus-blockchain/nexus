@@ -71,7 +71,7 @@ fn distribute_and_record_era_works() {
 
 		let weights = vec![(node_id(1), 100u128), (node_id(2), 100u128)];
 		let distributed = Rewards::distribute_and_record_era(
-			0, 1000u128, 800u128, 200u128, 100u128, &weights, 2,
+			0, 1000u128, 800u128, 0u128, 200u128, 100u128, &weights, 2,
 		);
 		// Equal weights → 500 each
 		assert_eq!(distributed, 1000);
@@ -84,6 +84,7 @@ fn distribute_and_record_era_works() {
 		// Era info recorded
 		let info = EraRewards::<Test>::get(0).unwrap();
 		assert_eq!(info.subscription_income, 800);
+		assert_eq!(info.ads_income, 0);
 		assert_eq!(info.inflation_mint, 200);
 		assert_eq!(info.total_distributed, 1000);
 		assert_eq!(info.node_count, 2);
@@ -95,7 +96,7 @@ fn distribute_with_unequal_weights() {
 	new_test_ext().execute_with(|| {
 		let weights = vec![(node_id(1), 300u128), (node_id(2), 100u128)];
 		let distributed = Rewards::distribute_and_record_era(
-			1, 400u128, 300u128, 100u128, 50u128, &weights, 2,
+			1, 400u128, 300u128, 0u128, 100u128, 50u128, &weights, 2,
 		);
 		// 300/400 * 400 = 300, 100/400 * 400 = 100
 		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 300);
@@ -109,7 +110,7 @@ fn era_reward_distributor_trait_works() {
 	new_test_ext().execute_with(|| {
 		let weights = vec![(node_id(1), 50u128), (node_id(2), 50u128)];
 		let distributed = <Rewards as EraRewardDistributor>::distribute_and_record(
-			5, 200, 150, 50, 20, &weights, 2,
+			5, 200, 150, 0, 50, 20, &weights, 2,
 		);
 		assert_eq!(distributed, 200);
 		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 100);
@@ -124,6 +125,7 @@ fn prune_old_era_rewards_works() {
 		for era in 0..5u64 {
 			let info = EraRewardInfo {
 				subscription_income: 100u128,
+				ads_income: 0u128,
 				inflation_mint: 50u128,
 				total_distributed: 150u128,
 				treasury_share: 10u128,
@@ -150,6 +152,7 @@ fn h1_prune_batch_bounded_at_10() {
 		for era in 0..20u64 {
 			let info = EraRewardInfo {
 				subscription_income: 100u128,
+				ads_income: 0u128,
 				inflation_mint: 50u128,
 				total_distributed: 150u128,
 				treasury_share: 10u128,
@@ -262,7 +265,7 @@ fn m1_r2_distribute_emits_reward_accrued_per_node() {
 	new_test_ext().execute_with(|| {
 		System::set_block_number(1);
 		let weights = vec![(node_id(1), 100u128), (node_id(2), 100u128)];
-		Rewards::distribute_and_record_era(0, 1000u128, 800u128, 200u128, 100u128, &weights, 2);
+		Rewards::distribute_and_record_era(0, 1000u128, 800u128, 0u128, 200u128, 100u128, &weights, 2);
 
 		// 应有 2 个 RewardAccrued 事件 (每节点一个) + 1 个 EraCompleted
 		let events: Vec<_> = System::events().iter().filter_map(|e| {
@@ -277,8 +280,8 @@ fn m1_r2_distribute_emits_reward_accrued_per_node() {
 		assert!(events.contains(&Event::<Test>::RewardAccrued { node_id: node_id(1), amount: 500 }));
 		// RewardAccrued for node 2
 		assert!(events.contains(&Event::<Test>::RewardAccrued { node_id: node_id(2), amount: 500 }));
-		// EraCompleted
-		assert!(events.contains(&Event::<Test>::EraCompleted { era: 0, total_distributed: 1000 }));
+		// EraCompleted (check era and total_distributed via pattern match)
+		assert!(events.iter().any(|e| matches!(e, Event::<Test>::EraCompleted { era: 0, total_distributed: 1000, .. })));
 	});
 }
 
@@ -347,7 +350,7 @@ fn distribute_zero_inflation_no_mint() {
 		let pool_before = Balances::free_balance(REWARD_POOL);
 		let weights = vec![(node_id(1), 100u128)];
 		// inflation = 0 → 不铸币
-		Rewards::distribute_and_record_era(0, 500u128, 500u128, 0u128, 50u128, &weights, 1);
+		Rewards::distribute_and_record_era(0, 500u128, 500u128, 0u128, 0u128, 50u128, &weights, 1);
 		// RewardPool 不增加 (无铸币)
 		assert_eq!(Balances::free_balance(REWARD_POOL), pool_before);
 		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 500);
@@ -361,7 +364,7 @@ fn distribute_empty_weights_zero_distributed() {
 		// 空权重列表 → total_weight=0, 不分配
 		let weights: Vec<(NodeId, u128)> = vec![];
 		let distributed = Rewards::distribute_and_record_era(
-			0, 500u128, 400u128, 100u128, 50u128, &weights, 0,
+			0, 500u128, 400u128, 0u128, 100u128, 50u128, &weights, 0,
 		);
 		assert_eq!(distributed, 0);
 		// 通胀仍铸币到 pool
@@ -402,6 +405,7 @@ fn m1_r3_claim_event_includes_recipient() {
 				node_id: node_id(1),
 				recipient: OPERATOR,
 				amount: 500,
+				total_earned_after: 500,
 			}.into()
 		);
 	});
@@ -421,6 +425,7 @@ fn m1_r3_rescue_event_includes_recipient() {
 				node_id: node_id(99),
 				recipient: OTHER,
 				amount: 300,
+				total_earned_after: 300,
 			}.into()
 		);
 	});
@@ -454,7 +459,7 @@ fn m3_r3_distribute_era_skips_duplicate() {
 		let weights = vec![(node_id(1), 100u128)];
 		// 第一次分配
 		let d1 = Rewards::distribute_and_record_era(
-			0, 500u128, 400u128, 100u128, 50u128, &weights, 1,
+			0, 500u128, 400u128, 0u128, 100u128, 50u128, &weights, 1,
 		);
 		assert_eq!(d1, 500);
 		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 500);
@@ -463,12 +468,516 @@ fn m3_r3_distribute_era_skips_duplicate() {
 
 		// 第二次分配同一 era → 应被跳过, 不重复铸币/分配
 		let d2 = Rewards::distribute_and_record_era(
-			0, 500u128, 400u128, 100u128, 50u128, &weights, 1,
+			0, 500u128, 400u128, 0u128, 100u128, 50u128, &weights, 1,
 		);
 		assert_eq!(d2, 0);
 		// 不应重复铸币
 		assert_eq!(Balances::free_balance(REWARD_POOL), pool_after_first);
 		// 不应重复分配
 		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 500);
+	});
+}
+
+// ========================================================================
+// P0: batch_claim_rewards
+// ========================================================================
+
+#[test]
+fn batch_claim_rewards_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		NodePendingRewards::<Test>::insert(node_id(1), 300u128);
+		NodePendingRewards::<Test>::insert(node_id(2), 200u128);
+
+		let op1_before = Balances::free_balance(OPERATOR);
+		let op2_before = Balances::free_balance(OPERATOR2);
+
+		// OPERATOR owns node_id(1), OPERATOR2 owns node_id(2)
+		// batch with mixed ownership: only node_id(1) should be claimed
+		assert_ok!(Rewards::batch_claim_rewards(
+			RuntimeOrigin::signed(OPERATOR),
+			vec![node_id(1), node_id(2)]
+		));
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 0);
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(2)), 200); // not claimed
+		assert_eq!(Balances::free_balance(OPERATOR), op1_before + 300);
+		assert_eq!(Balances::free_balance(OPERATOR2), op2_before); // unchanged
+
+		System::assert_last_event(
+			Event::<Test>::BatchRewardsClaimed {
+				operator: OPERATOR,
+				total_amount: 300,
+				node_count: 1,
+			}.into()
+		);
+	});
+}
+
+#[test]
+fn batch_claim_empty_list_fails() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			Rewards::batch_claim_rewards(RuntimeOrigin::signed(OPERATOR), vec![]),
+			Error::<Test>::EmptyBatchList
+		);
+	});
+}
+
+#[test]
+fn batch_claim_too_many_nodes_fails() {
+	new_test_ext().execute_with(|| {
+		// MaxBatchClaim = 10
+		let ids: Vec<NodeId> = (0..11u8).map(|i| node_id(i)).collect();
+		assert_noop!(
+			Rewards::batch_claim_rewards(RuntimeOrigin::signed(OPERATOR), ids),
+			Error::<Test>::TooManyNodes
+		);
+	});
+}
+
+#[test]
+fn batch_claim_no_pending_fails() {
+	new_test_ext().execute_with(|| {
+		// node_id(1) has no pending rewards
+		assert_noop!(
+			Rewards::batch_claim_rewards(RuntimeOrigin::signed(OPERATOR), vec![node_id(1)]),
+			Error::<Test>::NoPendingRewards
+		);
+	});
+}
+
+// ========================================================================
+// P0: set_reward_recipient
+// ========================================================================
+
+#[test]
+fn set_reward_recipient_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		NodePendingRewards::<Test>::insert(node_id(1), 500u128);
+
+		// Set recipient to OTHER
+		assert_ok!(Rewards::set_reward_recipient(
+			RuntimeOrigin::signed(OPERATOR),
+			node_id(1),
+			Some(OTHER)
+		));
+		System::assert_last_event(
+			Event::<Test>::RewardRecipientSet { node_id: node_id(1), recipient: OTHER }.into()
+		);
+
+		// claim_rewards should transfer to OTHER, not OPERATOR
+		let other_before = Balances::free_balance(OTHER);
+		assert_ok!(Rewards::claim_rewards(RuntimeOrigin::signed(OPERATOR), node_id(1)));
+		assert_eq!(Balances::free_balance(OTHER), other_before + 500);
+	});
+}
+
+#[test]
+fn clear_reward_recipient_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		RewardRecipient::<Test>::insert(node_id(1), OTHER);
+
+		// Clear recipient
+		assert_ok!(Rewards::set_reward_recipient(
+			RuntimeOrigin::signed(OPERATOR),
+			node_id(1),
+			None
+		));
+		System::assert_last_event(
+			Event::<Test>::RewardRecipientCleared { node_id: node_id(1) }.into()
+		);
+		assert!(RewardRecipient::<Test>::get(node_id(1)).is_none());
+	});
+}
+
+#[test]
+fn set_reward_recipient_not_operator_fails() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			Rewards::set_reward_recipient(
+				RuntimeOrigin::signed(OTHER),
+				node_id(1),
+				Some(OTHER)
+			),
+			Error::<Test>::NotOperator
+		);
+	});
+}
+
+// ========================================================================
+// P0: force_slash_pending_rewards
+// ========================================================================
+
+#[test]
+fn force_slash_pending_rewards_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		NodePendingRewards::<Test>::insert(node_id(1), 500u128);
+
+		assert_ok!(Rewards::force_slash_pending_rewards(
+			RuntimeOrigin::root(), node_id(1), 200
+		));
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 300);
+		System::assert_last_event(
+			Event::<Test>::PendingRewardsSlashed { node_id: node_id(1), amount: 200 }.into()
+		);
+	});
+}
+
+#[test]
+fn force_slash_exceeds_pending_fails() {
+	new_test_ext().execute_with(|| {
+		NodePendingRewards::<Test>::insert(node_id(1), 100u128);
+		assert_noop!(
+			Rewards::force_slash_pending_rewards(RuntimeOrigin::root(), node_id(1), 200),
+			Error::<Test>::SlashExceedsPending
+		);
+	});
+}
+
+#[test]
+fn force_slash_rejects_non_root() {
+	new_test_ext().execute_with(|| {
+		NodePendingRewards::<Test>::insert(node_id(1), 500u128);
+		assert_noop!(
+			Rewards::force_slash_pending_rewards(RuntimeOrigin::signed(OPERATOR), node_id(1), 200),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+// ========================================================================
+// P1: set_reward_split + claim_owner_rewards
+// ========================================================================
+
+#[test]
+fn set_reward_split_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		// bot_hash(10) → BOT_OWNER
+		assert_ok!(Rewards::set_reward_split(
+			RuntimeOrigin::signed(BOT_OWNER),
+			bot_hash(10),
+			2000  // 20%
+		));
+		assert_eq!(RewardSplitBps::<Test>::get(bot_hash(10)), 2000);
+		System::assert_last_event(
+			Event::<Test>::RewardSplitSet { bot_id_hash: bot_hash(10), owner_bps: 2000 }.into()
+		);
+	});
+}
+
+#[test]
+fn set_reward_split_invalid_bps_fails() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			Rewards::set_reward_split(RuntimeOrigin::signed(BOT_OWNER), bot_hash(10), 5001),
+			Error::<Test>::InvalidSplitBps
+		);
+	});
+}
+
+#[test]
+fn set_reward_split_not_owner_fails() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			Rewards::set_reward_split(RuntimeOrigin::signed(OPERATOR), bot_hash(10), 1000),
+			Error::<Test>::NotBotOwner
+		);
+	});
+}
+
+#[test]
+fn owner_split_accrues_correctly() {
+	new_test_ext().execute_with(|| {
+		// Setup split: bot_hash(10) with 20% owner split
+		RewardSplitBps::<Test>::insert(bot_hash(10), 2000);
+		// Bind node_id(1) to bot_hash(10)
+		NodeBotSplitBinding::<Test>::insert(node_id(1), bot_hash(10));
+
+		// Accrue 1000 to node_id(1) → 200 to owner, 800 to operator
+		<Rewards as RewardAccruer>::accrue_node_reward(&node_id(1), 1000);
+
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 800);
+		assert_eq!(OwnerPendingRewards::<Test>::get(bot_hash(10)), 200);
+	});
+}
+
+#[test]
+fn owner_split_zero_bps_no_split() {
+	new_test_ext().execute_with(|| {
+		// Bind but no split set (default 0)
+		NodeBotSplitBinding::<Test>::insert(node_id(1), bot_hash(10));
+
+		<Rewards as RewardAccruer>::accrue_node_reward(&node_id(1), 1000);
+
+		// All goes to operator
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 1000);
+		assert_eq!(OwnerPendingRewards::<Test>::get(bot_hash(10)), 0);
+	});
+}
+
+#[test]
+fn claim_owner_rewards_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		OwnerPendingRewards::<Test>::insert(bot_hash(10), 500u128);
+
+		let owner_before = Balances::free_balance(BOT_OWNER);
+		assert_ok!(Rewards::claim_owner_rewards(
+			RuntimeOrigin::signed(BOT_OWNER),
+			bot_hash(10)
+		));
+		assert_eq!(OwnerPendingRewards::<Test>::get(bot_hash(10)), 0);
+		assert_eq!(OwnerTotalEarned::<Test>::get(bot_hash(10)), 500);
+		assert_eq!(Balances::free_balance(BOT_OWNER), owner_before + 500);
+
+		System::assert_last_event(
+			Event::<Test>::OwnerRewardsClaimed {
+				bot_id_hash: bot_hash(10),
+				owner: BOT_OWNER,
+				amount: 500,
+			}.into()
+		);
+	});
+}
+
+#[test]
+fn claim_owner_rewards_no_pending_fails() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			Rewards::claim_owner_rewards(RuntimeOrigin::signed(BOT_OWNER), bot_hash(10)),
+			Error::<Test>::NoOwnerPendingRewards
+		);
+	});
+}
+
+#[test]
+fn claim_owner_rewards_not_owner_fails() {
+	new_test_ext().execute_with(|| {
+		OwnerPendingRewards::<Test>::insert(bot_hash(10), 500u128);
+		assert_noop!(
+			Rewards::claim_owner_rewards(RuntimeOrigin::signed(OPERATOR), bot_hash(10)),
+			Error::<Test>::NotBotOwner
+		);
+	});
+}
+
+// ========================================================================
+// P1: pause / resume distribution
+// ========================================================================
+
+#[test]
+fn pause_distribution_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		assert_ok!(Rewards::pause_distribution(RuntimeOrigin::root()));
+		assert!(DistributionPaused::<Test>::get());
+		System::assert_last_event(Event::<Test>::DistributionPausedEvent.into());
+	});
+}
+
+#[test]
+fn pause_already_paused_fails() {
+	new_test_ext().execute_with(|| {
+		DistributionPaused::<Test>::put(true);
+		assert_noop!(
+			Rewards::pause_distribution(RuntimeOrigin::root()),
+			Error::<Test>::DistributionIsPaused
+		);
+	});
+}
+
+#[test]
+fn resume_distribution_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		DistributionPaused::<Test>::put(true);
+		assert_ok!(Rewards::resume_distribution(RuntimeOrigin::root()));
+		assert!(!DistributionPaused::<Test>::get());
+		System::assert_last_event(Event::<Test>::DistributionResumedEvent.into());
+	});
+}
+
+#[test]
+fn resume_not_paused_fails() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			Rewards::resume_distribution(RuntimeOrigin::root()),
+			Error::<Test>::DistributionNotPaused
+		);
+	});
+}
+
+#[test]
+fn distribution_skipped_when_paused() {
+	new_test_ext().execute_with(|| {
+		DistributionPaused::<Test>::put(true);
+		let weights = vec![(node_id(1), 100u128)];
+		let d = Rewards::distribute_and_record_era(
+			0, 500u128, 400u128, 0u128, 100u128, 50u128, &weights, 1,
+		);
+		assert_eq!(d, 0);
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 0);
+		assert!(EraRewards::<Test>::get(0).is_none());
+	});
+}
+
+// ========================================================================
+// P1: force_set_pending_rewards
+// ========================================================================
+
+#[test]
+fn force_set_pending_rewards_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		NodePendingRewards::<Test>::insert(node_id(1), 300u128);
+
+		assert_ok!(Rewards::force_set_pending_rewards(
+			RuntimeOrigin::root(), node_id(1), 1000
+		));
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 1000);
+		System::assert_last_event(
+			Event::<Test>::PendingRewardsForceSet {
+				node_id: node_id(1),
+				old_amount: 300,
+				new_amount: 1000,
+			}.into()
+		);
+	});
+}
+
+#[test]
+fn force_set_pending_rejects_non_root() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			Rewards::force_set_pending_rewards(RuntimeOrigin::signed(OPERATOR), node_id(1), 100),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+// ========================================================================
+// P2: force_prune_era_rewards
+// ========================================================================
+
+#[test]
+fn force_prune_era_rewards_works() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		for era in 0..5u64 {
+			let info = EraRewardInfo {
+				subscription_income: 100u128,
+				ads_income: 0u128,
+				inflation_mint: 50u128,
+				total_distributed: 150u128,
+				treasury_share: 10u128,
+				node_count: 1,
+			};
+			EraRewards::<Test>::insert(era, info);
+		}
+		assert_ok!(Rewards::force_prune_era_rewards(RuntimeOrigin::root(), 3));
+		assert!(EraRewards::<Test>::get(0).is_none());
+		assert!(EraRewards::<Test>::get(1).is_none());
+		assert!(EraRewards::<Test>::get(2).is_none());
+		assert!(EraRewards::<Test>::get(3).is_some());
+		assert_eq!(EraCleanupCursor::<Test>::get(), 3);
+
+		System::assert_last_event(
+			Event::<Test>::EraRewardsForcePruned { from_era: 0, to_era: 3 }.into()
+		);
+	});
+}
+
+#[test]
+fn force_prune_nothing_fails() {
+	new_test_ext().execute_with(|| {
+		EraCleanupCursor::<Test>::put(5);
+		assert_noop!(
+			Rewards::force_prune_era_rewards(RuntimeOrigin::root(), 3),
+			Error::<Test>::NothingToPrune
+		);
+	});
+}
+
+// ========================================================================
+// P1: query helpers
+// ========================================================================
+
+#[test]
+fn query_helpers_work() {
+	new_test_ext().execute_with(|| {
+		NodePendingRewards::<Test>::insert(node_id(1), 300u128);
+		NodeTotalEarned::<Test>::insert(node_id(1), 700u128);
+
+		assert_eq!(Rewards::pending_rewards(&node_id(1)), 300);
+
+		let summary = Rewards::node_reward_summary(&node_id(1));
+		assert_eq!(summary.pending, 300);
+		assert_eq!(summary.total_earned, 700);
+
+		let pool_bal = Rewards::reward_pool_balance();
+		assert_eq!(pool_bal, 1_000_000);
+
+		OwnerPendingRewards::<Test>::insert(bot_hash(10), 150u128);
+		assert_eq!(Rewards::owner_pending(&bot_hash(10)), 150);
+	});
+}
+
+// ========================================================================
+// P2: batch_claim with custom recipient
+// ========================================================================
+
+#[test]
+fn batch_claim_respects_custom_recipient() {
+	new_test_ext().execute_with(|| {
+		NodePendingRewards::<Test>::insert(node_id(1), 500u128);
+		RewardRecipient::<Test>::insert(node_id(1), OTHER);
+
+		let other_before = Balances::free_balance(OTHER);
+		assert_ok!(Rewards::batch_claim_rewards(
+			RuntimeOrigin::signed(OPERATOR),
+			vec![node_id(1)]
+		));
+		assert_eq!(Balances::free_balance(OTHER), other_before + 500);
+	});
+}
+
+// ========================================================================
+// P2: Owner split during Era distribution
+// ========================================================================
+
+#[test]
+fn era_distribution_with_owner_split() {
+	new_test_ext().execute_with(|| {
+		// Setup: 20% owner split for bot_hash(10), bound to node_id(1)
+		RewardSplitBps::<Test>::insert(bot_hash(10), 2000);
+		NodeBotSplitBinding::<Test>::insert(node_id(1), bot_hash(10));
+
+		let weights = vec![(node_id(1), 100u128)];
+		let distributed = Rewards::distribute_and_record_era(
+			0, 1000u128, 800u128, 0u128, 200u128, 100u128, &weights, 1,
+		);
+		assert_eq!(distributed, 1000);
+		// 1000 * 20% = 200 to owner, 800 to operator
+		assert_eq!(NodePendingRewards::<Test>::get(node_id(1)), 800);
+		assert_eq!(OwnerPendingRewards::<Test>::get(bot_hash(10)), 200);
+	});
+}
+
+// ========================================================================
+// bind/unbind node bot split
+// ========================================================================
+
+#[test]
+fn bind_unbind_node_bot_split_works() {
+	new_test_ext().execute_with(|| {
+		Rewards::bind_node_bot_split(&node_id(1), &bot_hash(10));
+		assert_eq!(NodeBotSplitBinding::<Test>::get(node_id(1)), Some(bot_hash(10)));
+
+		Rewards::unbind_node_bot_split(&node_id(1));
+		assert!(NodeBotSplitBinding::<Test>::get(node_id(1)).is_none());
 	});
 }

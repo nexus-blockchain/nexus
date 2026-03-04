@@ -33,6 +33,11 @@ pub trait WeightInfo {
     fn remove_from_whitelist(n: u32) -> Weight;
     fn add_to_blacklist(n: u32) -> Weight;
     fn remove_from_blacklist(n: u32) -> Weight;
+    fn force_disable_token() -> Weight;
+    fn force_freeze_transfers() -> Weight;
+    fn force_unfreeze_transfers() -> Weight;
+    fn force_burn() -> Weight;
+    fn set_global_token_pause() -> Weight;
 }
 
 /// Weights for `pallet_entity_token` using the Substrate node and recommended hardware.
@@ -161,6 +166,40 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(2))
             .saturating_add(T::DbWeight::get().writes(1))
     }
+
+    /// Storage: EntityTokenConfigs (r:1 w:1)
+    fn force_disable_token() -> Weight {
+        Weight::from_parts(50_000_000, 4_000)
+            .saturating_add(T::DbWeight::get().reads(1))
+            .saturating_add(T::DbWeight::get().writes(1))
+    }
+
+    /// Storage: EntityTokenConfigs (r:1), TransfersFrozen (r:1 w:1)
+    fn force_freeze_transfers() -> Weight {
+        Weight::from_parts(50_000_000, 4_000)
+            .saturating_add(T::DbWeight::get().reads(2))
+            .saturating_add(T::DbWeight::get().writes(1))
+    }
+
+    /// Storage: TransfersFrozen (r:1 w:1)
+    fn force_unfreeze_transfers() -> Weight {
+        Weight::from_parts(50_000_000, 4_000)
+            .saturating_add(T::DbWeight::get().reads(1))
+            .saturating_add(T::DbWeight::get().writes(1))
+    }
+
+    /// Storage: EntityTokenConfigs (r:1), Assets::burn_from (r:1 w:1)
+    fn force_burn() -> Weight {
+        Weight::from_parts(100_000_000, 5_000)
+            .saturating_add(T::DbWeight::get().reads(2))
+            .saturating_add(T::DbWeight::get().writes(1))
+    }
+
+    /// Storage: GlobalTokenPaused (w:1)
+    fn set_global_token_pause() -> Weight {
+        Weight::from_parts(30_000_000, 3_000)
+            .saturating_add(T::DbWeight::get().writes(1))
+    }
 }
 
 impl WeightInfo for () {
@@ -180,4 +219,9 @@ impl WeightInfo for () {
     fn remove_from_whitelist(_n: u32) -> Weight { Weight::from_parts(150_000_000, 5_000) }
     fn add_to_blacklist(_n: u32) -> Weight { Weight::from_parts(150_000_000, 5_000) }
     fn remove_from_blacklist(_n: u32) -> Weight { Weight::from_parts(150_000_000, 5_000) }
+    fn force_disable_token() -> Weight { Weight::from_parts(50_000_000, 4_000) }
+    fn force_freeze_transfers() -> Weight { Weight::from_parts(50_000_000, 4_000) }
+    fn force_unfreeze_transfers() -> Weight { Weight::from_parts(50_000_000, 4_000) }
+    fn force_burn() -> Weight { Weight::from_parts(100_000_000, 5_000) }
+    fn set_global_token_pause() -> Weight { Weight::from_parts(30_000_000, 3_000) }
 }

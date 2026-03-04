@@ -19,9 +19,10 @@ pallet-grouprobot-primitives = { path = "../primitives", default-features = fals
 frame-support = { workspace = true }
 frame-system = { workspace = true }
 sp-runtime = { workspace = true }
+sp-io = { workspace = true }
+sp-core = { workspace = true }
 
 [dev-dependencies]
-sp-io = { workspace = true }
 pallet-balances = { workspace = true, features = ["std"] }
 
 [features]
@@ -33,6 +34,8 @@ std = [
 	"frame-support/std",
 	"frame-system/std",
 	"sp-runtime/std",
+	"sp-io/std",
+	"sp-core/std",
 ]
 try-runtime = [
 	"frame-support/try-runtime",

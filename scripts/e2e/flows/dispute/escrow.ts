@@ -53,6 +53,7 @@ async function escrowLifecycle(ctx: FlowContext): Promise<void> {
 
   const lockTx = (api.tx as any).escrow.lock(
     escrowId,
+    bob.address,          // payer
     nex(50).toString(),   // amount
   );
   const lockResult = await ctx.send(lockTx, bob, 'Bob 锁定 50 NEX', 'bob');
@@ -84,6 +85,7 @@ async function escrowLifecycle(ctx: FlowContext): Promise<void> {
   const escrowId2 = 2;
   const lockNonceTx = (api.tx as any).escrow.lockWithNonce(
     escrowId2,
+    bob.address,          // payer
     nex(30).toString(),
     1,   // nonce
   );
@@ -91,7 +93,7 @@ async function escrowLifecycle(ctx: FlowContext): Promise<void> {
   assertTxSuccess(lockNonceResult, 'nonce 锁定');
 
   // 重复 nonce 应被忽略
-  const dupNonceTx = (api.tx as any).escrow.lockWithNonce(escrowId2, nex(30).toString(), 1);
+  const dupNonceTx = (api.tx as any).escrow.lockWithNonce(escrowId2, bob.address, nex(30).toString(), 1);
   const dupNonceResult = await ctx.send(dupNonceTx, bob, 'Bob 重复 nonce 锁定', 'bob');
   // 重复 nonce 可能成功(忽略)或失败，取决于实现
   console.log(`    重复 nonce 结果: ${dupNonceResult.success ? '忽略(成功)' : dupNonceResult.error}`);
@@ -113,7 +115,7 @@ async function escrowLifecycle(ctx: FlowContext): Promise<void> {
   // ─── Step 5: 锁定 → 退款 ─────────────────────────────────
 
   const escrowId3 = 3;
-  const lockRefundTx = (api.tx as any).escrow.lock(escrowId3, nex(20).toString());
+  const lockRefundTx = (api.tx as any).escrow.lock(escrowId3, bob.address, nex(20).toString());
   await ctx.send(lockRefundTx, bob, 'Bob 锁定 20 NEX (退款)', 'bob');
 
   const bobBalBeforeRefund = await getFreeBalance(api, bob.address);
@@ -131,7 +133,7 @@ async function escrowLifecycle(ctx: FlowContext): Promise<void> {
   // ─── Step 6: 分账释放 ─────────────────────────────────────
 
   const escrowId4 = 4;
-  const lockSplitTx = (api.tx as any).escrow.lock(escrowId4, nex(100).toString());
+  const lockSplitTx = (api.tx as any).escrow.lock(escrowId4, bob.address, nex(100).toString());
   await ctx.send(lockSplitTx, bob, 'Bob 锁定 100 NEX (分账)', 'bob');
 
   const splitTx = (api.tx as any).escrow.releaseSplit(
@@ -153,7 +155,7 @@ async function escrowLifecycle(ctx: FlowContext): Promise<void> {
   // ─── Step 7: 争议 → 仲裁全额释放 ─────────────────────────
 
   const escrowId5 = 5;
-  const lockDispTx = (api.tx as any).escrow.lock(escrowId5, nex(50).toString());
+  const lockDispTx = (api.tx as any).escrow.lock(escrowId5, bob.address, nex(50).toString());
   await ctx.send(lockDispTx, bob, 'Bob 锁定 50 NEX (争议)', 'bob');
 
   // 进入争议
@@ -176,7 +178,7 @@ async function escrowLifecycle(ctx: FlowContext): Promise<void> {
   // ─── Step 8: 争议 → 仲裁全额退款 ─────────────────────────
 
   const escrowId6 = 6;
-  const lockDisp2Tx = (api.tx as any).escrow.lock(escrowId6, nex(50).toString());
+  const lockDisp2Tx = (api.tx as any).escrow.lock(escrowId6, bob.address, nex(50).toString());
   await ctx.send(lockDisp2Tx, bob, 'Bob 锁定 50 NEX (争议退款)', 'bob');
 
   const dispute2Tx = (api.tx as any).escrow.dispute(escrowId6, 2);
@@ -192,7 +194,7 @@ async function escrowLifecycle(ctx: FlowContext): Promise<void> {
   // ─── Step 9: 争议 → 仲裁部分释放 ─────────────────────────
 
   const escrowId7 = 7;
-  const lockDisp3Tx = (api.tx as any).escrow.lock(escrowId7, nex(100).toString());
+  const lockDisp3Tx = (api.tx as any).escrow.lock(escrowId7, bob.address, nex(100).toString());
   await ctx.send(lockDisp3Tx, bob, 'Bob 锁定 100 NEX (部分仲裁)', 'bob');
 
   const dispute3Tx = (api.tx as any).escrow.dispute(escrowId7, 3);
@@ -233,7 +235,7 @@ async function escrowLifecycle(ctx: FlowContext): Promise<void> {
   // ─── Step 11: 安排到期 → 取消到期 ─────────────────────────
 
   const escrowId9 = 9;
-  const lockExpiryTx = (api.tx as any).escrow.lock(escrowId9, nex(20).toString());
+  const lockExpiryTx = (api.tx as any).escrow.lock(escrowId9, bob.address, nex(20).toString());
   await ctx.send(lockExpiryTx, bob, 'Bob 锁定 (到期测试)', 'bob');
 
   const header = await api.rpc.chain.getHeader();
@@ -241,9 +243,7 @@ async function escrowLifecycle(ctx: FlowContext): Promise<void> {
 
   const scheduleExpiryTx = (api.tx as any).escrow.scheduleExpiry(
     escrowId9,
-    currentBlock + 100,   // expire_at
-    0,                     // action: 0=Refund
-    bob.address,           // beneficiary
+    currentBlock + 100,   // at
   );
   const scheduleResult = await ctx.sudo(scheduleExpiryTx, '安排到期');
   if (scheduleResult.success) {
@@ -260,7 +260,7 @@ async function escrowLifecycle(ctx: FlowContext): Promise<void> {
   // ─── Step 12: [错误路径] Dave 释放他人托管 ─────────────────
 
   const escrowId10 = 10;
-  const lockDaveTx = (api.tx as any).escrow.lock(escrowId10, nex(10).toString());
+  const lockDaveTx = (api.tx as any).escrow.lock(escrowId10, bob.address, nex(10).toString());
   await ctx.send(lockDaveTx, bob, 'Bob 锁定 (供错误路径)', 'bob');
 
   const daveReleaseTx = (api.tx as any).escrow.release(escrowId10, dave.address);
@@ -272,7 +272,7 @@ async function escrowLifecycle(ctx: FlowContext): Promise<void> {
   // ─── Step 13: [错误路径] 争议状态下释放被拒绝 ──────────────
 
   const escrowId11 = 11;
-  const lockDisp4Tx = (api.tx as any).escrow.lock(escrowId11, nex(10).toString());
+  const lockDisp4Tx = (api.tx as any).escrow.lock(escrowId11, bob.address, nex(10).toString());
   await ctx.send(lockDisp4Tx, bob, 'Bob 锁定 (争议错误路径)', 'bob');
 
   const dispute4Tx = (api.tx as any).escrow.dispute(escrowId11, 1);

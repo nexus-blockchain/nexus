@@ -49,7 +49,7 @@ async function adCampaign(ctx: FlowContext): Promise<void> {
 
   // ─── Step 1: 设置社区管理员 ───────────────────────────────
 
-  const setAdminTx = (api.tx as any).grouprobotAds.setCommunityAdmin(
+  const setAdminTx = (api.tx as any).adsGroupRobot.setCommunityAdmin(
     communityIdHash,
     charlie.address,
   );
@@ -58,7 +58,7 @@ async function adCampaign(ctx: FlowContext): Promise<void> {
 
   // ─── Step 2: Charlie 质押获取 audience_cap ────────────────
 
-  const stakeTx = (api.tx as any).grouprobotAds.stakeForAds(
+  const stakeTx = (api.tx as any).adsGroupRobot.stakeForAds(
     communityIdHash,
     nex(50).toString(),   // stake amount
   );
@@ -66,26 +66,28 @@ async function adCampaign(ctx: FlowContext): Promise<void> {
   assertTxSuccess(stakeResult, '质押');
 
   await ctx.check('验证质押事件', 'charlie', () => {
-    assertEventEmitted(stakeResult, 'grouprobotAds', 'StakedForAds', '质押事件');
+    assertEventEmitted(stakeResult, 'adsGroupRobot', 'StakedForAds', '质押事件');
   });
 
   // ─── Step 3: Bob 创建广告活动 ─────────────────────────────
 
   const bobBalBefore = await getFreeBalance(api, bob.address);
 
-  const createCampaignTx = (api.tx as any).grouprobotAds.createCampaign(
-    'E2E Test Ad Campaign',         // title
-    'QmAdContentCid001',            // content_cid
-    nex(100).toString(),            // budget
-    1000,                            // cpm_rate (10 NEX per 1000 impressions)
-    null,                            // max_daily_spend
-    null,                            // target_communities
+  const currentBlock = (await api.rpc.chain.getHeader()).number.toNumber();
+  const createCampaignTx = (api.tx as any).adsCore.createCampaign(
+    'E2E Test Ad Campaign',          // text
+    'https://e2e-test.example.com',  // url
+    nex(10).toString(),              // bidPerMille
+    nex(50).toString(),              // dailyBudget
+    nex(100).toString(),             // totalBudget
+    1,                                // deliveryTypes: u8 bitfield
+    currentBlock + 1000,              // expiresAt
   );
   const campaignResult = await ctx.send(createCampaignTx, bob, 'Bob 创建广告活动', 'bob');
   assertTxSuccess(campaignResult, '创建广告');
 
   const campaignEvent = campaignResult.events.find(
-    e => e.section === 'grouprobotAds' && e.method === 'CampaignCreated',
+    e => e.section === 'adsCore' && e.method === 'CampaignCreated',
   );
   assertTrue(!!campaignEvent, '应有 CampaignCreated 事件');
   const campaignId = campaignEvent?.data?.campaignId ?? campaignEvent?.data?.[0];
@@ -100,17 +102,16 @@ async function adCampaign(ctx: FlowContext): Promise<void> {
 
   // ─── Step 4: Alice 审核广告 ───────────────────────────────
 
-  const reviewTx = (api.tx as any).grouprobotAds.reviewCampaign(
+  const reviewTx = (api.tx as any).adsCore.reviewCampaign(
     campaignId,
     true,    // approved
-    null,    // reason
   );
   const reviewResult = await ctx.sudo(reviewTx, '审核广告 (approve)');
   assertTxSuccess(reviewResult, '审核广告');
 
   // ─── Step 5: Bob 追加预算 ────────────────────────────────
 
-  const fundTx = (api.tx as any).grouprobotAds.fundCampaign(
+  const fundTx = (api.tx as any).adsCore.fundCampaign(
     campaignId,
     nex(50).toString(),
   );
@@ -119,26 +120,28 @@ async function adCampaign(ctx: FlowContext): Promise<void> {
 
   // ─── Step 6: 提交投放收据 ────────────────────────────────
 
-  const receiptTx = (api.tx as any).grouprobotAds.submitDeliveryReceipt(
+  // placementId is derived from community registration; use communityIdHash as placeholder
+  const placementId = communityIdHash;
+  const receiptTx = (api.tx as any).adsCore.submitDeliveryReceipt(
     campaignId,
-    communityIdHash,
-    500,              // audience_size (会被 cap 裁切)
-    '0x' + '00'.repeat(64),  // proof_hash
+    placementId,      // placementId: [u8;32]
+    500,              // audienceSize
+    10000,            // cpmMultiplierBps: 100%
   );
   const receiptResult = await ctx.send(receiptTx, charlie, '提交投放收据', 'charlie');
   assertTxSuccess(receiptResult, '投放收据');
 
   await ctx.check('验证投放收据事件', 'charlie', () => {
-    assertEventEmitted(receiptResult, 'grouprobotAds', 'DeliveryReceiptSubmitted', '收据事件');
+    assertEventEmitted(receiptResult, 'adsCore', 'DeliveryReceiptSubmitted', '收据事件');
   });
 
   // ─── Step 7: Era 结算 ────────────────────────────────────
 
-  const settleTx = (api.tx as any).grouprobotAds.settleEraAds(communityIdHash);
+  const settleTx = (api.tx as any).adsCore.settleEraAds(placementId);
   const settleResult = await ctx.send(settleTx, charlie, 'Era 结算', 'charlie');
   if (settleResult.success) {
     await ctx.check('Era 结算事件', 'system', () => {
-      assertEventEmitted(settleResult, 'grouprobotAds', 'EraSettled', '结算事件');
+      assertEventEmitted(settleResult, 'adsCore', 'EraSettled', '结算事件');
     });
   } else {
     console.log(`    ℹ 结算失败 (可能尚未到 Era 边界): ${settleResult.error}`);
@@ -148,7 +151,7 @@ async function adCampaign(ctx: FlowContext): Promise<void> {
 
   const charlieBalBefore = await getFreeBalance(api, charlie.address);
 
-  const claimRevTx = (api.tx as any).grouprobotAds.claimAdRevenue(communityIdHash);
+  const claimRevTx = (api.tx as any).adsCore.claimAdRevenue(placementId);
   const claimRevResult = await ctx.send(claimRevTx, charlie, 'Charlie 提取广告收入', 'charlie');
   if (claimRevResult.success) {
     await ctx.check('验证收入到账', 'charlie', async () => {
@@ -162,7 +165,7 @@ async function adCampaign(ctx: FlowContext): Promise<void> {
 
   // ─── Step 9: Bob 暂停广告 ────────────────────────────────
 
-  const pauseTx = (api.tx as any).grouprobotAds.pauseCampaign(campaignId);
+  const pauseTx = (api.tx as any).adsCore.pauseCampaign(campaignId);
   const pauseResult = await ctx.send(pauseTx, bob, 'Bob 暂停广告', 'bob');
   assertTxSuccess(pauseResult, '暂停广告');
 
@@ -170,7 +173,7 @@ async function adCampaign(ctx: FlowContext): Promise<void> {
 
   const bobBalBeforeCancel = await getFreeBalance(api, bob.address);
 
-  const cancelTx = (api.tx as any).grouprobotAds.cancelCampaign(campaignId);
+  const cancelTx = (api.tx as any).adsCore.cancelCampaign(campaignId);
   const cancelResult = await ctx.send(cancelTx, bob, 'Bob 取消广告', 'bob');
   assertTxSuccess(cancelResult, '取消广告');
 
@@ -182,40 +185,39 @@ async function adCampaign(ctx: FlowContext): Promise<void> {
 
   // ─── Step 11: 双向偏好 ───────────────────────────────────
 
-  // Bob 拉黑社区
-  const blockCommTx = (api.tx as any).grouprobotAds.advertiserBlockCommunity(communityIdHash);
-  const blockResult = await ctx.send(blockCommTx, bob, 'Bob 拉黑社区', 'bob');
-  assertTxSuccess(blockResult, '拉黑社区');
+  // Bob 拉黑广告位
+  const blockCommTx = (api.tx as any).adsCore.advertiserBlockPlacement(placementId);
+  const blockResult = await ctx.send(blockCommTx, bob, 'Bob 拉黑广告位', 'bob');
+  assertTxSuccess(blockResult, '拉黑广告位');
 
   // Bob 取消拉黑
-  const unblockTx = (api.tx as any).grouprobotAds.advertiserUnblockCommunity(communityIdHash);
+  const unblockTx = (api.tx as any).adsCore.advertiserUnblockPlacement(placementId);
   const unblockResult = await ctx.send(unblockTx, bob, 'Bob 取消拉黑', 'bob');
   assertTxSuccess(unblockResult, '取消拉黑');
 
   // Charlie (管理员) 拉黑广告主
-  // 需要新广告以获取广告主 ID
-  const commBlockTx = (api.tx as any).grouprobotAds.communityBlockAdvertiser(
-    communityIdHash, bob.address,
+  const commBlockTx = (api.tx as any).adsCore.placementBlockAdvertiser(
+    placementId, bob.address,
   );
   const commBlockResult = await ctx.send(commBlockTx, charlie, 'Charlie 拉黑广告主', 'charlie');
-  assertTxSuccess(commBlockResult, '社区拉黑广告主');
+  assertTxSuccess(commBlockResult, '广告位拉黑广告主');
 
   // 取消拉黑
-  const commUnblockTx = (api.tx as any).grouprobotAds.communityUnblockAdvertiser(
-    communityIdHash, bob.address,
+  const commUnblockTx = (api.tx as any).adsCore.placementUnblockAdvertiser(
+    placementId, bob.address,
   );
   await ctx.send(commUnblockTx, charlie, 'Charlie 取消拉黑', 'charlie');
 
   // ─── Step 12: [错误路径] Dave 非管理员操作 ────────────────
 
-  const daveClaimTx = (api.tx as any).grouprobotAds.claimAdRevenue(communityIdHash);
+  const daveClaimTx = (api.tx as any).adsCore.claimAdRevenue(placementId);
   const daveResult = await ctx.send(daveClaimTx, dave, '[错误路径] Dave 提取收入', 'dave');
   await ctx.check('非管理员提取应失败', 'dave', () => {
     assertTxFailed(daveResult, undefined, '非管理员');
   });
 
-  const daveBlockTx = (api.tx as any).grouprobotAds.communityBlockAdvertiser(
-    communityIdHash, bob.address,
+  const daveBlockTx = (api.tx as any).adsCore.placementBlockAdvertiser(
+    placementId, bob.address,
   );
   const daveBlockResult = await ctx.send(daveBlockTx, dave, '[错误路径] Dave 拉黑', 'dave');
   await ctx.check('非管理员拉黑应失败', 'dave', () => {
@@ -224,21 +226,19 @@ async function adCampaign(ctx: FlowContext): Promise<void> {
 
   // ─── Step 13: Alice Slash 社区 ────────────────────────────
 
-  const slashTx = (api.tx as any).grouprobotAds.slashCommunity(
+  const slashTx = (api.tx as any).adsGroupRobot.slashCommunity(
     communityIdHash,
-    nex(10).toString(),    // slash_amount
-    'E2E Slash test',      // reason
   );
   const slashResult = await ctx.sudo(slashTx, 'Slash 社区');
   assertTxSuccess(slashResult, 'Slash 社区');
 
   await ctx.check('Slash 事件', 'system', () => {
-    assertEventEmitted(slashResult, 'grouprobotAds', 'CommunitySlashed', 'Slash 事件');
+    assertEventEmitted(slashResult, 'adsGroupRobot', 'CommunitySlashed', 'Slash 事件');
   });
 
   // ─── Charlie 取消质押 ────────────────────────────────────
 
-  const unstakeTx = (api.tx as any).grouprobotAds.unstakeFromAds(communityIdHash);
+  const unstakeTx = (api.tx as any).adsGroupRobot.unstakeForAds(communityIdHash, nex(50).toString());
   const unstakeResult = await ctx.send(unstakeTx, charlie, 'Charlie 取消质押', 'charlie');
   if (unstakeResult.success) {
     await ctx.check('取消质押事件', 'charlie', () => {});

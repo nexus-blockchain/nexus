@@ -20,6 +20,19 @@ use crate::processing::rules::lock::LockRule;
 use crate::processing::rules::callback::CallbackRule;
 use crate::processing::rules::warn_tracker::WarnTracker;
 use crate::processing::rules::ad_footer::AdFooterRule;
+use crate::processing::rules::approve::ApproveRule;
+use crate::processing::rules::automod::AutoModRule;
+use crate::processing::rules::captcha::CaptchaRule;
+use crate::processing::rules::cas::CasRule;
+use crate::processing::rules::custom_filter::CustomFilterRule;
+use crate::processing::rules::gban::GbanRule;
+use crate::processing::rules::homoglyph::HomoglyphRule;
+use crate::processing::rules::log_channel::LogChannelRule;
+use crate::processing::rules::mention_flood::MentionFloodRule;
+use crate::processing::rules::new_member_audit::NewMemberAuditRule;
+use crate::processing::rules::nsfw::NsfwRule;
+use crate::processing::rules::profanity::{ProfanityRule, ProfanityAction};
+use crate::processing::rules::raid::RaidRule;
 
 /// 可插拔规则引擎
 pub struct RuleEngine {
@@ -83,18 +96,36 @@ impl RuleEngine {
         Self { rules, store, warn_tracker: None }
     }
 
-    /// 从链上群配置构建完整规则链 (Phase 1)
+    /// 从链上群配置构建完整规则链
     ///
     /// 规则执行顺序:
-    /// 1. FloodRule        — 防刷屏 (频率限制)
-    /// 2. DuplicateRule    — 重复消息检测
-    /// 3. BlacklistRule    — 正则黑名单
-    /// 4. StopWordRule     — 停用词匹配
-    /// 5. EmojiRule        — Emoji 数量限制
-    /// 6. LinkLimitRule    — 链接数量限制
-    /// 7. CommandRule       — 管理指令 (/ban, /mute, /kick, /warn)
-    /// 8. JoinRequestRule   — 入群审批 + 欢迎消息
-    /// 9. DefaultRule       — 兜底 (无动作)
+    ///  0. CallbackRule       — Inline 键盘回调 (最高优先级)
+    ///  1. ApproveRule        — 白名单用户无条件放行
+    ///  2. CasRule            — Combot Anti-Spam 全局黑名单
+    ///  3. GbanRule           — 全局封禁检查
+    ///  4. RaidRule           — 批量入群保护
+    ///  5. FloodRule          — 防刷屏 (频率限制)
+    ///  6. DuplicateRule      — 重复消息检测
+    ///  7. CaptchaRule        — 新成员验证码
+    ///  8. NewMemberAuditRule — 新成员消息审计
+    ///  9. MentionFloodRule   — @mention 数量限制
+    /// 10. BlacklistRule      — 正则黑名单
+    /// 11. StopWordRule       — 停用词匹配
+    /// 12. HomoglyphRule      — Unicode 同形字检测
+    /// 13. ProfanityRule      — 脏话过滤
+    /// 14. NsfwRule           — NSFW 内容检测
+    /// 15. EmojiRule          — Emoji 数量限制
+    /// 16. LinkLimitRule      — 链接数量限制
+    /// 17. SimilarityRule     — TF-IDF 垃圾检测
+    /// 18. AntiPhishingRule   — 钓鱼链接检测
+    /// 19. LockRule           — 消息类型锁定
+    /// 20. AutoModRule        — 可组合自定义规则
+    /// 21. CustomFilterRule   — 自定义命令/过滤器
+    /// 22. CommandRule         — 管理指令 (/ban, /mute, /kick, /warn)
+    /// 23. JoinRequestRule    — 入群审批 + 欢迎消息
+    /// 24. LogChannelRule     — 日志转发
+    /// 25. AdFooterRule       — 广告尾缀
+    /// 26. DefaultRule         — 兖底 (始终最后)
     pub fn from_config(
         store: Arc<LocalStore>,
         config: &ChainCommunityConfig,
@@ -105,12 +136,28 @@ impl RuleEngine {
         // 0. CallbackQuery (Inline 键盘回调, 最高优先级)
         rules.push(Box::new(CallbackRule::new()));
 
-        // 1. Flood
+        // 1. Approve (白名单用户无条件放行)
+        rules.push(Box::new(ApproveRule::new()));
+
+        // 2. CAS (Combot Anti-Spam)
+        if config.cas_enabled {
+            rules.push(Box::new(CasRule::new()));
+        }
+
+        // 3. Gban (全局封禁)
+        rules.push(Box::new(GbanRule::new()));
+
+        // 4. Raid (批量入群保护)
+        if config.raid_enabled {
+            rules.push(Box::new(RaidRule::new(config.raid_window_secs, config.raid_join_threshold)));
+        }
+
+        // 5. Flood
         if config.anti_flood_enabled {
             rules.push(Box::new(FloodRule::new(config.flood_limit)));
         }
 
-        // 2. Duplicate
+        // 6. Duplicate
         if config.anti_duplicate_enabled {
             rules.push(Box::new(DuplicateRule::new(
                 config.duplicate_window_secs,
@@ -118,27 +165,76 @@ impl RuleEngine {
             )));
         }
 
-        // 3. Blacklist (regex patterns)
+        // 7. Captcha (新成员验证)
+        if config.captcha_enabled {
+            rules.push(Box::new(CaptchaRule::new(config.captcha_timeout_secs)));
+        }
+
+        // 8. NewMemberAudit (新成员消息审计)
+        if config.new_member_audit_count > 0 {
+            rules.push(Box::new(NewMemberAuditRule::new(config.new_member_audit_count)));
+        }
+
+        // 9. MentionFlood (@mention 数量限制)
+        if config.max_mentions > 0 {
+            rules.push(Box::new(MentionFloodRule::new(config.max_mentions)));
+        }
+
+        // 10. Blacklist (regex patterns)
         if !blacklist_patterns.is_empty() {
             rules.push(Box::new(BlacklistRule::with_patterns(blacklist_patterns)));
         }
 
-        // 4. StopWord
+        // 11. StopWord
         if !config.stop_words.is_empty() {
             rules.push(Box::new(StopWordRule::from_csv(&config.stop_words)));
         }
 
-        // 5. Emoji
+        // 12. Homoglyph (Unicode 同形字检测)
+        if !config.homoglyph_keywords.is_empty() {
+            let keywords: Vec<String> = config.homoglyph_keywords
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !keywords.is_empty() {
+                rules.push(Box::new(HomoglyphRule::new(keywords)));
+            }
+        }
+
+        // 13. Profanity (脏话过滤)
+        if !config.profanity_words.is_empty() {
+            let words: Vec<String> = config.profanity_words
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !words.is_empty() {
+                let action = match config.profanity_action {
+                    1 => ProfanityAction::Delete,
+                    2 => ProfanityAction::Mute,
+                    _ => ProfanityAction::Warn,
+                };
+                rules.push(Box::new(ProfanityRule::new(words, action)));
+            }
+        }
+
+        // 14. NSFW
+        if config.nsfw_mode > 0 {
+            rules.push(Box::new(NsfwRule::from_mode(config.nsfw_mode)));
+        }
+
+        // 15. Emoji
         if config.max_emoji > 0 {
             rules.push(Box::new(EmojiRule::new(config.max_emoji)));
         }
 
-        // 6. LinkLimit
+        // 16. LinkLimit
         if config.max_links > 0 {
             rules.push(Box::new(LinkLimitRule::new(config.max_links)));
         }
 
-        // 7. Similarity (TF-IDF spam detection)
+        // 17. Similarity (TF-IDF spam detection)
         if !config.spam_samples.is_empty() {
             let samples: Vec<String> = config.spam_samples
                 .lines()
@@ -151,12 +247,12 @@ impl RuleEngine {
             }
         }
 
-        // 8. AntiPhishing
+        // 18. AntiPhishing
         if config.antiphishing_enabled {
             rules.push(Box::new(AntiPhishingRule::with_defaults()));
         }
 
-        // 9. LockRule (消息类型锁定)
+        // 19. LockRule (消息类型锁定)
         if !config.locked_types_csv.is_empty() {
             let lock_rule = LockRule::new(&config.locked_types_csv);
             if !lock_rule.is_empty() {
@@ -164,10 +260,21 @@ impl RuleEngine {
             }
         }
 
-        // 10. Command
+        // 20. AutoMod (可组合自定义规则)
+        if !config.automod_rules_json.is_empty() {
+            let automod = AutoModRule::from_json(&config.automod_rules_json);
+            rules.push(Box::new(automod));
+        }
+
+        // 21. CustomFilter (自定义命令/过滤器)
+        if !config.custom_commands_csv.is_empty() {
+            rules.push(Box::new(CustomFilterRule::from_csv(&config.custom_commands_csv)));
+        }
+
+        // 22. Command
         rules.push(Box::new(CommandRule::new()));
 
-        // 9. JoinRequest + Welcome
+        // 23. JoinRequest + Welcome
         let welcome_template = if config.welcome_enabled {
             Some(config.welcome_template.clone())
         } else {
@@ -175,7 +282,12 @@ impl RuleEngine {
         };
         rules.push(Box::new(JoinRequestRule::with_welcome(true, welcome_template)));
 
-        // 11. AdFooter (Free 层级: 回复附带广告)
+        // 24. LogChannel (日志转发)
+        if !config.log_channel_id.is_empty() {
+            rules.push(Box::new(LogChannelRule::new(&config.log_channel_id)));
+        }
+
+        // 25. AdFooter (Free 层级: 回复附带广告)
         if config.subscription_tier == 0 {
             rules.push(Box::new(AdFooterRule::new(true)));
         }
@@ -188,7 +300,7 @@ impl RuleEngine {
             rules.truncate(max + 1);
         }
 
-        // 12. Default (兜底, 始终最后)
+        // 26. Default (兖底, 始终最后)
         rules.push(Box::new(DefaultRule));
 
         // WarnTracker (post-processor)
@@ -260,6 +372,9 @@ mod tests {
                 text.splitn(2, ' ').skip(1).flat_map(|s| s.split_whitespace()).map(|s| s.to_string()).collect()
             } else { vec![] },
             is_join_request: false,
+            is_new_member: false,
+            is_left_member: false,
+            service_message_id: None,
             is_admin: false,
             message_type: None,
             callback_query_id: None,
@@ -300,6 +415,17 @@ mod tests {
             forced_ads_per_day: 0,
             can_disable_ads: true,
             community_id_hash: String::new(),
+            cas_enabled: false,
+            raid_enabled: false,
+            raid_window_secs: 60,
+            raid_join_threshold: 10,
+            max_mentions: 0,
+            new_member_audit_count: 0,
+            nsfw_mode: 0,
+            profanity_words: String::new(),
+            profanity_action: 0,
+            homoglyph_keywords: String::new(),
+            automod_rules_json: String::new(),
         }
     }
 

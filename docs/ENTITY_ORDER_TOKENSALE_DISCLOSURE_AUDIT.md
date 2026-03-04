@@ -1,7 +1,7 @@
 # Entity Pallets Audit Round 3: Order / TokenSale / Disclosure + Cross-cutting
 
 **Date:** 2026-03-02
-**Scope:** `pallet-entity-order`, `pallet-entity-tokensale`, `pallet-entity-disclosure`, `pallet-entity-service`, `pallet-entity-governance`, `pallet-entity-review`
+**Scope:** `pallet-entity-order`, `pallet-entity-tokensale`, `pallet-entity-disclosure`, `pallet-entity-product`, `pallet-entity-governance`, `pallet-entity-review`
 
 ## Summary
 
@@ -68,7 +68,7 @@ Cross-cutting review of `pallet-entity-review` (232 lines): **no issues found**.
 
 ---
 
-### L1 [Low] — `pallet-entity-service`: `NextProductId` 溢出 (cross-cutting)
+### L1 [Low] — `pallet-entity-product`: `NextProductId` 溢出 (cross-cutting)
 
 **问题:** 同 order L1，`saturating_add(1)` 在 `u64::MAX` 时不增加。
 
@@ -130,13 +130,13 @@ Cross-cutting review of `pallet-entity-review` (232 lines): **no issues found**.
 cargo check -p pallet-entity-order         ✅
 cargo check -p pallet-entity-tokensale     ✅
 cargo check -p pallet-entity-disclosure    ✅
-cargo check -p pallet-entity-service       ✅
+cargo check -p pallet-entity-product       ✅
 cargo check -p pallet-entity-governance    ✅
 cargo check -p nexus-runtime               ✅
 cargo test  -p pallet-entity-order         59/59 ✅
 cargo test  -p pallet-entity-tokensale     56/56 ✅
 cargo test  -p pallet-entity-disclosure    73/73 ✅
-cargo test  -p pallet-entity-service       65 ✅ (shared with governance+review)
+cargo test  -p pallet-entity-product       65 ✅ (shared with governance+review)
 ```
 
 ## Not Fixed (documented only)

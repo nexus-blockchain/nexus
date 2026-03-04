@@ -78,6 +78,12 @@ impl SubscriptionProvider for MockSubscription {
 	fn effective_feature_gate(bot_id_hash: &BotIdHash) -> TierFeatureGate {
 		MockSubscription::effective_tier(bot_id_hash).feature_gate()
 	}
+	fn is_subscription_active(bot_id_hash: &BotIdHash) -> bool {
+		MockSubscription::effective_tier(bot_id_hash).is_paid()
+	}
+	fn subscription_status(bot_id_hash: &BotIdHash) -> Option<SubscriptionStatus> {
+		if MockSubscription::effective_tier(bot_id_hash).is_paid() { Some(SubscriptionStatus::Active) } else { None }
+	}
 }
 
 // ============================================================================
@@ -117,6 +123,15 @@ impl BotRegistryProvider<u64> for MockBotRegistry {
 			_ => None,
 		}
 	}
+	fn bot_status(_: &BotIdHash) -> Option<BotStatus> {
+		Some(BotStatus::Active)
+	}
+	fn attestation_level(_: &BotIdHash) -> u8 { 0 }
+	fn tee_type(_: &BotIdHash) -> Option<TeeType> { None }
+}
+
+parameter_types! {
+	pub const UnbondingPeriodBlocks: u64 = 10;
 }
 
 impl pallet_ads_grouprobot::Config for Test {
@@ -131,6 +146,8 @@ impl pallet_ads_grouprobot::Config for Test {
 	type AudienceSurgeThresholdPct = ConstU32<100>;
 	type NodeDeviationThresholdPct = ConstU32<20>;
 	type AdSlashPercentage = ConstU32<30>;
+	type UnbondingPeriod = UnbondingPeriodBlocks;
+	type StakerRewardPct = ConstU32<10>;
 }
 
 pub const STAKER: u64 = 1;

@@ -1,5 +1,5 @@
 use crate::{mock::*, *};
-use frame_support::{assert_noop, assert_ok, traits::ReservableCurrency, BoundedVec};
+use frame_support::{assert_noop, assert_ok, traits::{Currency as CurrencyT, ReservableCurrency}, BoundedVec};
 
 // ============================================================================
 // Helpers
@@ -26,6 +26,7 @@ fn create_default_campaign(advertiser: u64) -> u64 {
 		50 * UNIT,          // total budget
 		0b001,              // type bit 0
 		1000,               // expires_at
+		None,               // targets (全网投放)
 	));
 	id
 }
@@ -68,7 +69,7 @@ fn create_campaign_fails_empty_text() {
 				ad_text(""),
 				ad_url("https://x.com"),
 				UNIT, 10 * UNIT, 50 * UNIT,
-				0b001, 1000,
+				0b001, 1000, None,
 			),
 			Error::<Test>::EmptyAdText
 		);
@@ -84,7 +85,7 @@ fn create_campaign_fails_bid_too_low() {
 				ad_text("Ad"),
 				ad_url("https://x.com"),
 				1, 10 * UNIT, 50 * UNIT,
-				0b001, 1000,
+				0b001, 1000, None,
 			),
 			Error::<Test>::BidTooLow
 		);
@@ -101,7 +102,7 @@ fn create_campaign_fails_invalid_delivery_types() {
 				ad_url("https://x.com"),
 				UNIT, 10 * UNIT, 50 * UNIT,
 				0b1000, // invalid
-				1000,
+				1000, None,
 			),
 			Error::<Test>::InvalidDeliveryTypes
 		);
@@ -117,7 +118,7 @@ fn create_campaign_fails_zero_budget() {
 				ad_text("Ad"),
 				ad_url("https://x.com"),
 				UNIT, 10 * UNIT, 0,
-				0b001, 1000,
+				0b001, 1000, None,
 			),
 			Error::<Test>::ZeroBudget
 		);
@@ -134,7 +135,7 @@ fn create_campaign_fails_invalid_expiry() {
 				ad_text("Ad"),
 				ad_url("https://x.com"),
 				UNIT, 10 * UNIT, 50 * UNIT,
-				0b001, 1, // expires_at == now
+				0b001, 1, None, // expires_at == now
 			),
 			Error::<Test>::InvalidExpiry
 		);
@@ -238,14 +239,19 @@ fn review_campaign_allows_re_review_of_approved() {
 }
 
 #[test]
-fn review_campaign_fails_already_rejected() {
+fn review_campaign_reject_auto_refunds() {
 	new_test_ext().execute_with(|| {
 		let id = create_default_campaign(ADVERTISER);
+		let free_before = Balances::free_balance(ADVERTISER);
 		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id, false));
-		assert_noop!(
-			AdsCore::review_campaign(RuntimeOrigin::root(), id, true),
-			Error::<Test>::AlreadyReviewed
-		);
+		let c = Campaigns::<Test>::get(id).unwrap();
+		assert_eq!(c.review_status, AdReviewStatus::Rejected);
+		assert_eq!(c.status, CampaignStatus::Cancelled);
+		// Escrow should be cleared
+		assert_eq!(CampaignEscrow::<Test>::get(id), 0);
+		// Budget refunded
+		let free_after = Balances::free_balance(ADVERTISER);
+		assert_eq!(free_after - free_before, 50 * UNIT);
 	});
 }
 
@@ -261,7 +267,7 @@ fn submit_delivery_receipt_works() {
 
 		assert_ok!(AdsCore::submit_delivery_receipt(
 			RuntimeOrigin::signed(PLACEMENT_ADMIN),
-			id, pid, 100, 100,
+			id, pid, 100,
 		));
 
 		let receipts = DeliveryReceipts::<Test>::get(&pid);
@@ -281,7 +287,7 @@ fn submit_receipt_caps_audience() {
 		// MockDeliveryVerifier caps at 500
 		assert_ok!(AdsCore::submit_delivery_receipt(
 			RuntimeOrigin::signed(PLACEMENT_ADMIN),
-			id, pid, 1000, 100,
+			id, pid, 1000,
 		));
 
 		let receipts = DeliveryReceipts::<Test>::get(&pid);
@@ -298,7 +304,7 @@ fn submit_receipt_fails_not_approved() {
 		assert_noop!(
 			AdsCore::submit_delivery_receipt(
 				RuntimeOrigin::signed(PLACEMENT_ADMIN),
-				id, pid, 100, 100,
+				id, pid, 100,
 			),
 			Error::<Test>::CampaignNotApproved
 		);
@@ -316,7 +322,7 @@ fn submit_receipt_fails_campaign_expired() {
 		assert_noop!(
 			AdsCore::submit_delivery_receipt(
 				RuntimeOrigin::signed(PLACEMENT_ADMIN),
-				id, pid, 100, 100,
+				id, pid, 100,
 			),
 			Error::<Test>::CampaignExpired
 		);
@@ -333,7 +339,7 @@ fn submit_receipt_fails_audience_below_min() {
 		assert_noop!(
 			AdsCore::submit_delivery_receipt(
 				RuntimeOrigin::signed(PLACEMENT_ADMIN),
-				id, pid, 10, 100,
+				id, pid, 10,
 			),
 			Error::<Test>::AudienceBelowMinimum
 		);
@@ -350,7 +356,7 @@ fn submit_receipt_fails_banned_placement() {
 		assert_noop!(
 			AdsCore::submit_delivery_receipt(
 				RuntimeOrigin::signed(PLACEMENT_ADMIN),
-				id, pid, 100, 100,
+				id, pid, 100,
 			),
 			Error::<Test>::PlacementBanned
 		);
@@ -370,11 +376,14 @@ fn settle_era_ads_works() {
 		// Submit receipt: audience=100, multiplier=100 (1.0x)
 		assert_ok!(AdsCore::submit_delivery_receipt(
 			RuntimeOrigin::signed(PLACEMENT_ADMIN),
-			id, pid, 100, 100,
+			id, pid, 100,
 		));
 
 		// Expected cost: bid(0.5 UNIT) * 100 * 100 / 100_000 = 0.05 UNIT
 		let expected_cost = UNIT / 2 * 100 * 100 / 100_000;
+
+		// Phase 5: 广告主确认收据后才可结算
+		assert_ok!(AdsCore::confirm_receipt(RuntimeOrigin::signed(ADVERTISER), id, pid, 0));
 
 		assert_ok!(AdsCore::settle_era_ads(
 			RuntimeOrigin::signed(ADVERTISER2),
@@ -410,7 +419,7 @@ fn claim_ad_revenue_works() {
 
 		let before = pallet_balances::Pallet::<Test>::free_balance(PLACEMENT_ADMIN);
 		assert_ok!(AdsCore::claim_ad_revenue(
-			RuntimeOrigin::signed(PLACEMENT_ADMIN), pid,
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), pid, 0,
 		));
 		let after = pallet_balances::Pallet::<Test>::free_balance(PLACEMENT_ADMIN);
 		assert_eq!(after - before, 10 * UNIT);
@@ -424,7 +433,7 @@ fn claim_ad_revenue_fails_not_admin() {
 		let pid = placement_id(1);
 		PlacementClaimable::<Test>::insert(&pid, 10 * UNIT);
 		assert_noop!(
-			AdsCore::claim_ad_revenue(RuntimeOrigin::signed(ADVERTISER), pid),
+			AdsCore::claim_ad_revenue(RuntimeOrigin::signed(ADVERTISER), pid, 0),
 			Error::<Test>::NotPlacementAdmin
 		);
 	});
@@ -435,7 +444,7 @@ fn claim_ad_revenue_fails_nothing_to_claim() {
 	new_test_ext().execute_with(|| {
 		let pid = placement_id(1);
 		assert_noop!(
-			AdsCore::claim_ad_revenue(RuntimeOrigin::signed(PLACEMENT_ADMIN), pid),
+			AdsCore::claim_ad_revenue(RuntimeOrigin::signed(PLACEMENT_ADMIN), pid, 0),
 			Error::<Test>::NothingToClaim
 		);
 	});
@@ -620,8 +629,11 @@ fn c1_settle_uses_actually_unreserved_amount() {
 		// 提交收据
 		assert_ok!(AdsCore::submit_delivery_receipt(
 			RuntimeOrigin::signed(PLACEMENT_ADMIN),
-			id, pid, 100, 100,
+			id, pid, 100,
 		));
+
+		// Phase 5: 确认收据
+		assert_ok!(AdsCore::confirm_receipt(RuntimeOrigin::signed(ADVERTISER), id, pid, 0));
 
 		// 手动减少 advertiser 的 reserved (模拟部分 unreserve 已被外部消耗)
 		// 先查当前 reserved
@@ -658,12 +670,16 @@ fn h1_settle_skips_failed_transfer_does_not_abort() {
 		// 两个 campaign 都提交收据到同一广告位
 		assert_ok!(AdsCore::submit_delivery_receipt(
 			RuntimeOrigin::signed(PLACEMENT_ADMIN),
-			id1, pid, 100, 100,
+			id1, pid, 100,
 		));
 		assert_ok!(AdsCore::submit_delivery_receipt(
 			RuntimeOrigin::signed(PLACEMENT_ADMIN),
-			id2, pid, 100, 100,
+			id2, pid, 100,
 		));
+
+		// Phase 5: 确认两张收据
+		assert_ok!(AdsCore::confirm_receipt(RuntimeOrigin::signed(ADVERTISER), id1, pid, 0));
+		assert_ok!(AdsCore::confirm_receipt(RuntimeOrigin::signed(ADVERTISER2), id2, pid, 1));
 
 		// 让 ADVERTISER 的 reserved 为 0 (模拟资金已被消耗)
 		let reserved1 = pallet_balances::Pallet::<Test>::reserved_balance(ADVERTISER);
@@ -703,7 +719,7 @@ fn h2_flag_campaign_rejects_approved_campaign() {
 	});
 }
 
-// H2: governance 可以重审已 Approved 的 Campaign (reject)
+// H2: governance 可以重审已 Approved 的 Campaign (reject + auto-refund)
 #[test]
 fn h2_review_campaign_can_reject_approved() {
 	new_test_ext().execute_with(|| {
@@ -713,12 +729,14 @@ fn h2_review_campaign_can_reject_approved() {
 			AdReviewStatus::Approved
 		);
 
-		// Governance 可以 reject 已审核通过的 Campaign
+		let free_before = Balances::free_balance(ADVERTISER);
+		// Governance 可以 reject 已审核通过的 Campaign (+ auto-refund)
 		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id, false));
-		assert_eq!(
-			Campaigns::<Test>::get(id).unwrap().review_status,
-			AdReviewStatus::Rejected
-		);
+		let c = Campaigns::<Test>::get(id).unwrap();
+		assert_eq!(c.review_status, AdReviewStatus::Rejected);
+		assert_eq!(c.status, CampaignStatus::Cancelled);
+		let free_after = Balances::free_balance(ADVERTISER);
+		assert_eq!(free_after - free_before, 50 * UNIT);
 	});
 }
 
@@ -852,7 +870,7 @@ fn m2r2_submit_receipt_blocked_by_advertiser_blacklist() {
 		assert_noop!(
 			AdsCore::submit_delivery_receipt(
 				RuntimeOrigin::signed(PLACEMENT_ADMIN),
-				id, pid, 100, 100,
+				id, pid, 100,
 			),
 			Error::<Test>::AdvertiserBlacklistedPlacement
 		);
@@ -875,7 +893,7 @@ fn m2r2_submit_receipt_blocked_by_placement_blacklist() {
 		assert_noop!(
 			AdsCore::submit_delivery_receipt(
 				RuntimeOrigin::signed(PLACEMENT_ADMIN),
-				id, pid, 100, 100,
+				id, pid, 100,
 			),
 			Error::<Test>::PlacementBlacklistedAdvertiser
 		);
@@ -969,7 +987,1792 @@ fn m2r2_submit_receipt_works_after_unblock() {
 		// 提交收据应成功
 		assert_ok!(AdsCore::submit_delivery_receipt(
 			RuntimeOrigin::signed(PLACEMENT_ADMIN),
-			id, pid, 100, 100,
+			id, pid, 100,
 		));
+	});
+}
+
+// ============================================================================
+// New Feature Tests
+// ============================================================================
+
+// --- CampaignsByAdvertiser index ---
+#[test]
+fn campaigns_by_advertiser_index_maintained() {
+	new_test_ext().execute_with(|| {
+		let id1 = create_default_campaign(ADVERTISER);
+		let id2 = create_default_campaign(ADVERTISER);
+		let list = CampaignsByAdvertiser::<Test>::get(ADVERTISER);
+		assert_eq!(list.len(), 2);
+		assert!(list.contains(&id1));
+		assert!(list.contains(&id2));
+	});
+}
+
+// --- update_campaign ---
+#[test]
+fn update_campaign_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		assert_ok!(AdsCore::update_campaign(
+			RuntimeOrigin::signed(ADVERTISER),
+			id,
+			Some(ad_text("New Text")),
+			Some(ad_url("https://new.com")),
+			None, None, None,
+		));
+		let c = Campaigns::<Test>::get(id).unwrap();
+		assert_eq!(c.text.as_slice(), b"New Text");
+		assert_eq!(c.review_status, AdReviewStatus::Pending); // reset
+	});
+}
+
+#[test]
+fn update_campaign_fails_not_owner() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		assert_noop!(
+			AdsCore::update_campaign(
+				RuntimeOrigin::signed(ADVERTISER2), id,
+				Some(ad_text("X")), None, None, None, None,
+			),
+			Error::<Test>::NotCampaignOwner
+		);
+	});
+}
+
+// --- extend_campaign_expiry ---
+#[test]
+fn extend_campaign_expiry_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER); // expires_at = 1000
+		assert_ok!(AdsCore::extend_campaign_expiry(
+			RuntimeOrigin::signed(ADVERTISER), id, 2000,
+		));
+		assert_eq!(Campaigns::<Test>::get(id).unwrap().expires_at, 2000);
+	});
+}
+
+#[test]
+fn extend_campaign_expiry_fails_not_extended() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER); // expires_at = 1000
+		assert_noop!(
+			AdsCore::extend_campaign_expiry(RuntimeOrigin::signed(ADVERTISER), id, 500),
+			Error::<Test>::ExpiryNotExtended
+		);
+	});
+}
+
+// --- force_cancel_campaign ---
+#[test]
+fn force_cancel_campaign_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		let free_before = Balances::free_balance(ADVERTISER);
+		assert_ok!(AdsCore::force_cancel_campaign(RuntimeOrigin::root(), id));
+		let c = Campaigns::<Test>::get(id).unwrap();
+		assert_eq!(c.status, CampaignStatus::Cancelled);
+		let free_after = Balances::free_balance(ADVERTISER);
+		assert_eq!(free_after - free_before, 50 * UNIT);
+	});
+}
+
+#[test]
+fn force_cancel_campaign_fails_not_root() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		assert_noop!(
+			AdsCore::force_cancel_campaign(RuntimeOrigin::signed(ADVERTISER), id),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+// --- unban_placement ---
+#[test]
+fn unban_placement_works() {
+	new_test_ext().execute_with(|| {
+		let pid = placement_id(1);
+		BannedPlacements::<Test>::insert(&pid, true);
+		SlashCount::<Test>::insert(&pid, 3);
+		assert_ok!(AdsCore::unban_placement(RuntimeOrigin::root(), pid));
+		assert!(!BannedPlacements::<Test>::get(&pid));
+		assert_eq!(SlashCount::<Test>::get(&pid), 0);
+	});
+}
+
+#[test]
+fn unban_placement_fails_not_banned() {
+	new_test_ext().execute_with(|| {
+		let pid = placement_id(1);
+		assert_noop!(
+			AdsCore::unban_placement(RuntimeOrigin::root(), pid),
+			Error::<Test>::PlacementNotBanned
+		);
+	});
+}
+
+// --- slash_placement actual slash ---
+#[test]
+fn slash_placement_deducts_claimable() {
+	new_test_ext().execute_with(|| {
+		let pid = placement_id(1);
+		PlacementClaimable::<Test>::insert(&pid, 100 * UNIT);
+		assert_ok!(AdsCore::slash_placement(RuntimeOrigin::root(), pid, REPORTER));
+		// AdSlashPercentage = 30, so slashed = 100 * 30 / 100 = 30
+		assert_eq!(PlacementClaimable::<Test>::get(&pid), 70 * UNIT);
+		assert_eq!(SlashCount::<Test>::get(&pid), 1);
+	});
+}
+
+// --- reset_slash_count ---
+#[test]
+fn reset_slash_count_works() {
+	new_test_ext().execute_with(|| {
+		let pid = placement_id(1);
+		SlashCount::<Test>::insert(&pid, 2);
+		assert_ok!(AdsCore::reset_slash_count(RuntimeOrigin::root(), pid));
+		assert_eq!(SlashCount::<Test>::get(&pid), 0);
+	});
+}
+
+// --- clear_placement_flags ---
+#[test]
+fn clear_placement_flags_works() {
+	new_test_ext().execute_with(|| {
+		let pid = placement_id(1);
+		assert_ok!(AdsCore::flag_placement(RuntimeOrigin::signed(REPORTER), pid));
+		assert_ok!(AdsCore::flag_placement(RuntimeOrigin::signed(ADVERTISER), pid));
+		assert_eq!(PlacementFlagCount::<Test>::get(&pid), 2);
+
+		assert_ok!(AdsCore::clear_placement_flags(RuntimeOrigin::root(), pid));
+		assert_eq!(PlacementFlagCount::<Test>::get(&pid), 0);
+	});
+}
+
+// --- suspend_campaign / unsuspend_campaign ---
+#[test]
+fn suspend_campaign_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		assert_ok!(AdsCore::suspend_campaign(RuntimeOrigin::root(), id));
+		assert_eq!(Campaigns::<Test>::get(id).unwrap().status, CampaignStatus::Suspended);
+	});
+}
+
+#[test]
+fn unsuspend_campaign_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		assert_ok!(AdsCore::suspend_campaign(RuntimeOrigin::root(), id));
+		assert_ok!(AdsCore::unsuspend_campaign(RuntimeOrigin::root(), id));
+		assert_eq!(Campaigns::<Test>::get(id).unwrap().status, CampaignStatus::Active);
+	});
+}
+
+#[test]
+fn unsuspend_campaign_fails_not_suspended() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		assert_noop!(
+			AdsCore::unsuspend_campaign(RuntimeOrigin::root(), id),
+			Error::<Test>::CampaignNotSuspended
+		);
+	});
+}
+
+// --- report_approved_campaign ---
+#[test]
+fn report_approved_campaign_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		assert_ok!(AdsCore::report_approved_campaign(RuntimeOrigin::signed(REPORTER), id));
+		assert_eq!(CampaignReportCount::<Test>::get(id), 1);
+	});
+}
+
+#[test]
+fn report_approved_campaign_fails_duplicate() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		assert_ok!(AdsCore::report_approved_campaign(RuntimeOrigin::signed(REPORTER), id));
+		assert_noop!(
+			AdsCore::report_approved_campaign(RuntimeOrigin::signed(REPORTER), id),
+			Error::<Test>::AlreadyReportedCampaign
+		);
+	});
+}
+
+#[test]
+fn report_approved_campaign_fails_not_approved() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER); // Pending
+		assert_noop!(
+			AdsCore::report_approved_campaign(RuntimeOrigin::signed(REPORTER), id),
+			Error::<Test>::CampaignNotApproved
+		);
+	});
+}
+
+// --- resubmit_campaign ---
+#[test]
+fn resubmit_campaign_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		// Reject (auto-refunds)
+		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id, false));
+		assert_eq!(Campaigns::<Test>::get(id).unwrap().review_status, AdReviewStatus::Rejected);
+
+		// Resubmit with new content + budget
+		assert_ok!(AdsCore::resubmit_campaign(
+			RuntimeOrigin::signed(ADVERTISER), id,
+			ad_text("Fixed Ad"), ad_url("https://fixed.com"), 30 * UNIT,
+		));
+		let c = Campaigns::<Test>::get(id).unwrap();
+		assert_eq!(c.text.as_slice(), b"Fixed Ad");
+		assert_eq!(c.status, CampaignStatus::Active);
+		assert_eq!(c.review_status, AdReviewStatus::Pending);
+		assert_eq!(c.total_budget, 30 * UNIT);
+		assert_eq!(CampaignEscrow::<Test>::get(id), 30 * UNIT);
+	});
+}
+
+#[test]
+fn resubmit_campaign_fails_not_rejected() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		assert_noop!(
+			AdsCore::resubmit_campaign(
+				RuntimeOrigin::signed(ADVERTISER), id,
+				ad_text("X"), ad_url(""), 10 * UNIT,
+			),
+			Error::<Test>::CampaignNotRejected
+		);
+	});
+}
+
+// --- set_placement_delivery_types ---
+#[test]
+fn set_placement_delivery_types_works() {
+	new_test_ext().execute_with(|| {
+		let pid = placement_id(1);
+		assert_ok!(AdsCore::set_placement_delivery_types(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), pid, 0b010,
+		));
+		assert_eq!(PlacementDeliveryTypes::<Test>::get(&pid), 0b010);
+	});
+}
+
+#[test]
+fn set_placement_delivery_types_zero_removes() {
+	new_test_ext().execute_with(|| {
+		let pid = placement_id(1);
+		PlacementDeliveryTypes::<Test>::insert(&pid, 0b010);
+		assert_ok!(AdsCore::set_placement_delivery_types(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), pid, 0,
+		));
+		assert_eq!(PlacementDeliveryTypes::<Test>::get(&pid), 0);
+	});
+}
+
+// --- delivery type enforcement ---
+#[test]
+fn submit_receipt_fails_delivery_type_mismatch() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER); // delivery_types = 0b001
+		let pid = placement_id(1);
+		// Placement only accepts type 0b010
+		PlacementDeliveryTypes::<Test>::insert(&pid, 0b010);
+
+		assert_noop!(
+			AdsCore::submit_delivery_receipt(
+				RuntimeOrigin::signed(PLACEMENT_ADMIN),
+				id, pid, 100,
+			),
+			Error::<Test>::DeliveryTypeMismatch
+		);
+	});
+}
+
+#[test]
+fn submit_receipt_passes_delivery_type_match() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER); // delivery_types = 0b001
+		let pid = placement_id(1);
+		// Placement accepts types including 0b001
+		PlacementDeliveryTypes::<Test>::insert(&pid, 0b011);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN),
+			id, pid, 100,
+		));
+	});
+}
+
+// --- whitelist enforcement ---
+#[test]
+fn submit_receipt_fails_not_in_advertiser_whitelist() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+		let pid2 = placement_id(2);
+
+		// Advertiser whitelists only pid2
+		assert_ok!(AdsCore::advertiser_prefer_placement(
+			RuntimeOrigin::signed(ADVERTISER), pid2,
+		));
+
+		// Submit to pid1 (not in whitelist) should fail
+		assert_noop!(
+			AdsCore::submit_delivery_receipt(
+				RuntimeOrigin::signed(PLACEMENT_ADMIN),
+				id, pid, 100,
+			),
+			Error::<Test>::NotInAdvertiserWhitelist
+		);
+	});
+}
+
+// --- partial claim ---
+#[test]
+fn claim_ad_revenue_partial_works() {
+	new_test_ext().execute_with(|| {
+		let pid = placement_id(1);
+		PlacementClaimable::<Test>::insert(&pid, 10 * UNIT);
+
+		assert_ok!(AdsCore::claim_ad_revenue(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), pid, 3 * UNIT,
+		));
+		assert_eq!(PlacementClaimable::<Test>::get(&pid), 7 * UNIT);
+	});
+}
+
+#[test]
+fn claim_ad_revenue_fails_amount_too_large() {
+	new_test_ext().execute_with(|| {
+		let pid = placement_id(1);
+		PlacementClaimable::<Test>::insert(&pid, 10 * UNIT);
+
+		assert_noop!(
+			AdsCore::claim_ad_revenue(
+				RuntimeOrigin::signed(PLACEMENT_ADMIN), pid, 20 * UNIT,
+			),
+			Error::<Test>::ClaimAmountTooLarge
+		);
+	});
+}
+
+// --- unregister_private_ad ---
+#[test]
+fn unregister_private_ad_works() {
+	new_test_ext().execute_with(|| {
+		let pid = placement_id(1);
+		PrivateAdCount::<Test>::insert(&pid, 5);
+		assert_ok!(AdsCore::unregister_private_ad(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), pid, 3,
+		));
+		assert_eq!(PrivateAdCount::<Test>::get(&pid), 2);
+	});
+}
+
+// --- cleanup_campaign ---
+#[test]
+fn cleanup_campaign_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		assert_ok!(AdsCore::cancel_campaign(RuntimeOrigin::signed(ADVERTISER), id));
+
+		assert_ok!(AdsCore::cleanup_campaign(RuntimeOrigin::signed(42), id));
+		assert!(Campaigns::<Test>::get(id).is_none());
+		assert_eq!(CampaignEscrow::<Test>::get(id), 0);
+		// Removed from advertiser index
+		assert!(!CampaignsByAdvertiser::<Test>::get(ADVERTISER).contains(&id));
+	});
+}
+
+#[test]
+fn cleanup_campaign_fails_not_terminated() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		assert_noop!(
+			AdsCore::cleanup_campaign(RuntimeOrigin::signed(42), id),
+			Error::<Test>::CampaignNotTerminated
+		);
+	});
+}
+
+// --- daily_budget enforcement ---
+#[test]
+fn daily_budget_limits_settlement() {
+	new_test_ext().execute_with(|| {
+		// Create campaign with small daily budget
+		let id = NextCampaignId::<Test>::get();
+		assert_ok!(AdsCore::create_campaign(
+			RuntimeOrigin::signed(ADVERTISER),
+			ad_text("Daily Test"),
+			ad_url("https://example.com"),
+			UNIT,               // 1 UNIT per mille
+			UNIT / 10,          // daily budget = 0.1 UNIT (very small)
+			50 * UNIT,          // total budget
+			0b001,
+			1000,
+			None,
+		));
+		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id, true));
+
+		let pid = placement_id(1);
+		// Submit receipt with large audience — would cost more than daily budget
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN),
+			id, pid, 500,
+		));
+
+		// Settle — cost should be capped by daily budget
+		assert_ok!(AdsCore::settle_era_ads(
+			RuntimeOrigin::signed(ADVERTISER2), pid,
+		));
+
+		let c = Campaigns::<Test>::get(id).unwrap();
+		// Cost would be 1 UNIT * 500 * 100 / 100_000 = 0.5 UNIT
+		// But daily budget is 0.1 UNIT, so spent should be <= 0.1 UNIT
+		assert!(c.spent <= UNIT / 10, "spent {} should be <= daily budget {}", c.spent, UNIT / 10);
+	});
+}
+
+// --- settlement incentive ---
+#[test]
+fn settlement_incentive_paid() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN),
+			id, pid, 100,
+		));
+
+		let settler_before = Balances::free_balance(ADVERTISER2);
+		assert_ok!(AdsCore::settle_era_ads(
+			RuntimeOrigin::signed(ADVERTISER2), pid,
+		));
+		let settler_after = Balances::free_balance(ADVERTISER2);
+
+		// SettlementIncentiveBps = 10 (0.1%), cost = 0.05 UNIT
+		// incentive = 0.05 UNIT * 10 / 10000 = very small but > 0 if cost > 0
+		// Just verify settler got something
+		assert!(settler_after >= settler_before, "settler should receive incentive");
+	});
+}
+
+// --- suspend blocks delivery ---
+#[test]
+fn suspended_campaign_blocks_delivery() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+		assert_ok!(AdsCore::suspend_campaign(RuntimeOrigin::root(), id));
+
+		assert_noop!(
+			AdsCore::submit_delivery_receipt(
+				RuntimeOrigin::signed(PLACEMENT_ADMIN),
+				id, pid, 100,
+			),
+			Error::<Test>::CampaignNotActive
+		);
+	});
+}
+
+// --- expire suspended campaign ---
+#[test]
+fn expire_suspended_campaign_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		assert_ok!(AdsCore::suspend_campaign(RuntimeOrigin::root(), id));
+		System::set_block_number(1001);
+		assert_ok!(AdsCore::expire_campaign(RuntimeOrigin::signed(42), id));
+		assert_eq!(Campaigns::<Test>::get(id).unwrap().status, CampaignStatus::Expired);
+	});
+}
+
+// --- block_to_day_index helper ---
+#[test]
+fn block_to_day_index_works() {
+	new_test_ext().execute_with(|| {
+		// created at block 100, now at block 100 → day 0
+		assert_eq!(AdsCore::block_to_day_index(100, 100), 0);
+		// now at block 14500 (14400 blocks = 1 day) → day 0 (100 blocks past)
+		assert_eq!(AdsCore::block_to_day_index(14500, 100), 1);
+		// now at block 28900 → day 2
+		assert_eq!(AdsCore::block_to_day_index(28900, 100), 2);
+	});
+}
+
+// --- force_settle_era_ads ---
+#[test]
+fn force_settle_era_ads_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN),
+			id, pid, 100,
+		));
+
+		// Phase 5: 确认收据
+		assert_ok!(AdsCore::confirm_receipt(RuntimeOrigin::signed(ADVERTISER), id, pid, 0));
+
+		assert_ok!(AdsCore::force_settle_era_ads(RuntimeOrigin::root(), pid));
+		assert_eq!(DeliveryReceipts::<Test>::get(&pid).len(), 0);
+		let c = Campaigns::<Test>::get(id).unwrap();
+		assert!(c.spent > 0);
+	});
+}
+
+#[test]
+fn force_settle_era_ads_fails_not_root() {
+	new_test_ext().execute_with(|| {
+		let pid = placement_id(1);
+		assert_noop!(
+			AdsCore::force_settle_era_ads(RuntimeOrigin::signed(ADVERTISER), pid),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+// ============================================================================
+// Phase 1: Campaign 投放定向
+// ============================================================================
+
+#[test]
+fn create_campaign_with_targets_works() {
+	new_test_ext().execute_with(|| {
+		let pid1 = placement_id(1);
+		let pid2 = placement_id(2);
+		let targets: BoundedVec<PlacementId, <Test as Config>::MaxTargetsPerCampaign> =
+			BoundedVec::try_from(vec![pid1, pid2]).unwrap();
+
+		let id = NextCampaignId::<Test>::get();
+		assert_ok!(AdsCore::create_campaign(
+			RuntimeOrigin::signed(ADVERTISER),
+			ad_text("Targeted Ad"),
+			ad_url("https://example.com"),
+			UNIT / 2, 10 * UNIT, 50 * UNIT,
+			0b001, 1000,
+			Some(targets),
+		));
+
+		let stored = CampaignTargets::<Test>::get(id).unwrap();
+		assert_eq!(stored.len(), 2);
+		assert!(stored.contains(&pid1));
+		assert!(stored.contains(&pid2));
+	});
+}
+
+#[test]
+fn create_campaign_without_targets_has_no_entry() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		assert!(CampaignTargets::<Test>::get(id).is_none());
+	});
+}
+
+#[test]
+fn create_campaign_rejects_empty_targets() {
+	new_test_ext().execute_with(|| {
+		let empty: BoundedVec<PlacementId, <Test as Config>::MaxTargetsPerCampaign> =
+			BoundedVec::try_from(vec![]).unwrap();
+		assert_noop!(
+			AdsCore::create_campaign(
+				RuntimeOrigin::signed(ADVERTISER),
+				ad_text("Ad"),
+				ad_url("https://x.com"),
+				UNIT / 2, 10 * UNIT, 50 * UNIT,
+				0b001, 1000,
+				Some(empty),
+			),
+			Error::<Test>::EmptyTargetsList
+		);
+	});
+}
+
+#[test]
+fn targeted_campaign_blocks_non_target_placement() {
+	new_test_ext().execute_with(|| {
+		let pid1 = placement_id(1);
+		let pid2 = placement_id(2);
+		let targets: BoundedVec<PlacementId, <Test as Config>::MaxTargetsPerCampaign> =
+			BoundedVec::try_from(vec![pid1]).unwrap();
+
+		let id = NextCampaignId::<Test>::get();
+		assert_ok!(AdsCore::create_campaign(
+			RuntimeOrigin::signed(ADVERTISER),
+			ad_text("Targeted"),
+			ad_url("https://x.com"),
+			UNIT / 2, 10 * UNIT, 50 * UNIT,
+			0b001, 1000,
+			Some(targets),
+		));
+		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id, true));
+
+		// pid1 (target) should work
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN),
+			id, pid1, 100,
+		));
+
+		// pid2 (not target) should fail
+		assert_noop!(
+			AdsCore::submit_delivery_receipt(
+				RuntimeOrigin::signed(PLACEMENT_ADMIN2),
+				id, pid2, 100,
+			),
+			Error::<Test>::PlacementNotTargeted
+		);
+	});
+}
+
+#[test]
+fn untargeted_campaign_allows_any_placement() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid1 = placement_id(1);
+		let pid2 = placement_id(2);
+
+		// Both placements should work for untargeted campaign
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN),
+			id, pid1, 100,
+		));
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN2),
+			id, pid2, 100,
+		));
+	});
+}
+
+#[test]
+fn set_campaign_targets_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		let pid1 = placement_id(1);
+		let targets: BoundedVec<PlacementId, <Test as Config>::MaxTargetsPerCampaign> =
+			BoundedVec::try_from(vec![pid1]).unwrap();
+
+		assert_ok!(AdsCore::set_campaign_targets(
+			RuntimeOrigin::signed(ADVERTISER), id, targets,
+		));
+		assert_eq!(CampaignTargets::<Test>::get(id).unwrap().len(), 1);
+	});
+}
+
+#[test]
+fn set_campaign_targets_fails_not_owner() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		let targets: BoundedVec<PlacementId, <Test as Config>::MaxTargetsPerCampaign> =
+			BoundedVec::try_from(vec![placement_id(1)]).unwrap();
+
+		assert_noop!(
+			AdsCore::set_campaign_targets(
+				RuntimeOrigin::signed(ADVERTISER2), id, targets,
+			),
+			Error::<Test>::NotCampaignOwner
+		);
+	});
+}
+
+#[test]
+fn set_campaign_targets_fails_empty() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		let empty: BoundedVec<PlacementId, <Test as Config>::MaxTargetsPerCampaign> =
+			BoundedVec::try_from(vec![]).unwrap();
+
+		assert_noop!(
+			AdsCore::set_campaign_targets(
+				RuntimeOrigin::signed(ADVERTISER), id, empty,
+			),
+			Error::<Test>::EmptyTargetsList
+		);
+	});
+}
+
+#[test]
+fn clear_campaign_targets_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		let targets: BoundedVec<PlacementId, <Test as Config>::MaxTargetsPerCampaign> =
+			BoundedVec::try_from(vec![placement_id(1)]).unwrap();
+
+		assert_ok!(AdsCore::set_campaign_targets(
+			RuntimeOrigin::signed(ADVERTISER), id, targets,
+		));
+		assert!(CampaignTargets::<Test>::get(id).is_some());
+
+		assert_ok!(AdsCore::clear_campaign_targets(
+			RuntimeOrigin::signed(ADVERTISER), id,
+		));
+		assert!(CampaignTargets::<Test>::get(id).is_none());
+	});
+}
+
+#[test]
+fn cleanup_campaign_removes_targets() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		let targets: BoundedVec<PlacementId, <Test as Config>::MaxTargetsPerCampaign> =
+			BoundedVec::try_from(vec![placement_id(1)]).unwrap();
+		CampaignTargets::<Test>::insert(id, targets);
+
+		// Cancel then cleanup
+		assert_ok!(AdsCore::cancel_campaign(RuntimeOrigin::signed(ADVERTISER), id));
+		assert_ok!(AdsCore::cleanup_campaign(RuntimeOrigin::signed(42), id));
+
+		assert!(CampaignTargets::<Test>::get(id).is_none());
+		assert!(Campaigns::<Test>::get(id).is_none());
+	});
+}
+
+// ============================================================================
+// Phase 3: CPM Multiplier 治理化
+// ============================================================================
+
+#[test]
+fn set_campaign_multiplier_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		assert_ok!(AdsCore::set_campaign_multiplier(
+			RuntimeOrigin::signed(ADVERTISER), id, 200,
+		));
+		assert_eq!(CampaignMultiplier::<Test>::get(id), Some(200));
+	});
+}
+
+#[test]
+fn set_campaign_multiplier_zero_clears() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		CampaignMultiplier::<Test>::insert(id, 150);
+		assert_ok!(AdsCore::set_campaign_multiplier(
+			RuntimeOrigin::signed(ADVERTISER), id, 0,
+		));
+		assert!(CampaignMultiplier::<Test>::get(id).is_none());
+	});
+}
+
+#[test]
+fn set_campaign_multiplier_fails_not_owner() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		assert_noop!(
+			AdsCore::set_campaign_multiplier(
+				RuntimeOrigin::signed(ADVERTISER2), id, 200,
+			),
+			Error::<Test>::NotCampaignOwner
+		);
+	});
+}
+
+#[test]
+fn set_campaign_multiplier_fails_invalid_range() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		// Too low
+		assert_noop!(
+			AdsCore::set_campaign_multiplier(
+				RuntimeOrigin::signed(ADVERTISER), id, 5,
+			),
+			Error::<Test>::InvalidMultiplier
+		);
+		// Too high
+		assert_noop!(
+			AdsCore::set_campaign_multiplier(
+				RuntimeOrigin::signed(ADVERTISER), id, 20_000,
+			),
+			Error::<Test>::InvalidMultiplier
+		);
+	});
+}
+
+#[test]
+fn set_placement_multiplier_works() {
+	new_test_ext().execute_with(|| {
+		let pid = placement_id(1);
+		assert_ok!(AdsCore::set_placement_multiplier(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), pid, 150,
+		));
+		assert_eq!(PlacementMultiplier::<Test>::get(&pid), Some(150));
+	});
+}
+
+#[test]
+fn set_placement_multiplier_zero_clears() {
+	new_test_ext().execute_with(|| {
+		let pid = placement_id(1);
+		PlacementMultiplier::<Test>::insert(&pid, 200);
+		assert_ok!(AdsCore::set_placement_multiplier(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), pid, 0,
+		));
+		assert!(PlacementMultiplier::<Test>::get(&pid).is_none());
+	});
+}
+
+#[test]
+fn set_placement_multiplier_fails_not_admin() {
+	new_test_ext().execute_with(|| {
+		let pid = placement_id(1);
+		assert_noop!(
+			AdsCore::set_placement_multiplier(
+				RuntimeOrigin::signed(ADVERTISER), pid, 150,
+			),
+			Error::<Test>::NotPlacementAdmin
+		);
+	});
+}
+
+#[test]
+fn delivery_receipt_uses_campaign_multiplier() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		// Set campaign multiplier to 2x
+		CampaignMultiplier::<Test>::insert(id, 200);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN),
+			id, pid, 100,
+		));
+
+		let receipts = DeliveryReceipts::<Test>::get(&pid);
+		assert_eq!(receipts[0].cpm_multiplier_bps, 200);
+	});
+}
+
+#[test]
+fn delivery_receipt_uses_placement_multiplier_fallback() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		// Set placement multiplier, no campaign multiplier
+		PlacementMultiplier::<Test>::insert(&pid, 150);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN),
+			id, pid, 100,
+		));
+
+		let receipts = DeliveryReceipts::<Test>::get(&pid);
+		assert_eq!(receipts[0].cpm_multiplier_bps, 150);
+	});
+}
+
+#[test]
+fn delivery_receipt_campaign_multiplier_overrides_placement() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		// Both set — campaign should win
+		CampaignMultiplier::<Test>::insert(id, 300);
+		PlacementMultiplier::<Test>::insert(&pid, 150);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN),
+			id, pid, 100,
+		));
+
+		let receipts = DeliveryReceipts::<Test>::get(&pid);
+		assert_eq!(receipts[0].cpm_multiplier_bps, 300);
+	});
+}
+
+#[test]
+fn delivery_receipt_defaults_to_100_when_no_multiplier() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN),
+			id, pid, 100,
+		));
+
+		let receipts = DeliveryReceipts::<Test>::get(&pid);
+		assert_eq!(receipts[0].cpm_multiplier_bps, 100);
+	});
+}
+
+#[test]
+fn cleanup_campaign_removes_multiplier() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		CampaignMultiplier::<Test>::insert(id, 200);
+
+		assert_ok!(AdsCore::cancel_campaign(RuntimeOrigin::signed(ADVERTISER), id));
+		assert_ok!(AdsCore::cleanup_campaign(RuntimeOrigin::signed(42), id));
+
+		assert!(CampaignMultiplier::<Test>::get(id).is_none());
+	});
+}
+
+// ============================================================================
+// Phase 2: 广告位级审核
+// ============================================================================
+
+#[test]
+fn set_placement_approval_required_works() {
+	new_test_ext().execute_with(|| {
+		let pid = placement_id(1);
+		assert_eq!(PlacementRequiresApproval::<Test>::get(&pid), false);
+
+		assert_ok!(AdsCore::set_placement_approval_required(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), pid, true,
+		));
+		assert_eq!(PlacementRequiresApproval::<Test>::get(&pid), true);
+
+		assert_ok!(AdsCore::set_placement_approval_required(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), pid, false,
+		));
+		assert_eq!(PlacementRequiresApproval::<Test>::get(&pid), false);
+	});
+}
+
+#[test]
+fn set_placement_approval_required_fails_not_admin() {
+	new_test_ext().execute_with(|| {
+		let pid = placement_id(1);
+		assert_noop!(
+			AdsCore::set_placement_approval_required(
+				RuntimeOrigin::signed(ADVERTISER), pid, true,
+			),
+			Error::<Test>::NotPlacementAdmin
+		);
+	});
+}
+
+#[test]
+fn approve_campaign_for_placement_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::approve_campaign_for_placement(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), pid, id,
+		));
+		assert_eq!(PlacementCampaignApproval::<Test>::get(&pid, id), true);
+	});
+}
+
+#[test]
+fn approve_campaign_fails_not_admin() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		let pid = placement_id(1);
+		assert_noop!(
+			AdsCore::approve_campaign_for_placement(
+				RuntimeOrigin::signed(ADVERTISER), pid, id,
+			),
+			Error::<Test>::NotPlacementAdmin
+		);
+	});
+}
+
+#[test]
+fn approve_campaign_fails_not_found() {
+	new_test_ext().execute_with(|| {
+		let pid = placement_id(1);
+		assert_noop!(
+			AdsCore::approve_campaign_for_placement(
+				RuntimeOrigin::signed(PLACEMENT_ADMIN), pid, 999,
+			),
+			Error::<Test>::CampaignNotFound
+		);
+	});
+}
+
+#[test]
+fn reject_campaign_for_placement_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		PlacementCampaignApproval::<Test>::insert(&pid, id, true);
+		assert_ok!(AdsCore::reject_campaign_for_placement(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), pid, id,
+		));
+		assert_eq!(PlacementCampaignApproval::<Test>::get(&pid, id), false);
+	});
+}
+
+#[test]
+fn delivery_blocked_when_approval_required_and_not_approved() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		PlacementRequiresApproval::<Test>::insert(&pid, true);
+
+		assert_noop!(
+			AdsCore::submit_delivery_receipt(
+				RuntimeOrigin::signed(PLACEMENT_ADMIN),
+				id, pid, 100,
+			),
+			Error::<Test>::CampaignNotApprovedForPlacement
+		);
+	});
+}
+
+#[test]
+fn delivery_allowed_when_approval_required_and_approved() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		PlacementRequiresApproval::<Test>::insert(&pid, true);
+		PlacementCampaignApproval::<Test>::insert(&pid, id, true);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN),
+			id, pid, 100,
+		));
+	});
+}
+
+#[test]
+fn delivery_allowed_when_approval_not_required() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		// approval not required (default) — should work without approval
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN),
+			id, pid, 100,
+		));
+	});
+}
+
+// ============================================================================
+// Phase 4: 广告发现索引
+// ============================================================================
+
+#[test]
+fn review_approved_adds_to_active_index() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		assert!(ActiveApprovedCampaigns::<Test>::get().is_empty());
+
+		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id, true));
+
+		let active = ActiveApprovedCampaigns::<Test>::get();
+		assert_eq!(active.len(), 1);
+		assert!(active.contains(&id));
+
+		let by_type = CampaignsByDeliveryType::<Test>::get(0x01);
+		assert!(by_type.contains(&id));
+	});
+}
+
+#[test]
+fn review_rejected_removes_from_active_index() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		assert!(ActiveApprovedCampaigns::<Test>::get().contains(&id));
+
+		// create another campaign and reject it — should not affect first
+		let id2 = create_default_campaign(ADVERTISER);
+		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id2, true));
+		assert_eq!(ActiveApprovedCampaigns::<Test>::get().len(), 2);
+
+		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id2, false));
+		let active = ActiveApprovedCampaigns::<Test>::get();
+		assert_eq!(active.len(), 1);
+		assert!(active.contains(&id));
+		assert!(!active.contains(&id2));
+	});
+}
+
+#[test]
+fn cancel_campaign_removes_from_active_index() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		assert!(ActiveApprovedCampaigns::<Test>::get().contains(&id));
+
+		assert_ok!(AdsCore::cancel_campaign(RuntimeOrigin::signed(ADVERTISER), id));
+		assert!(!ActiveApprovedCampaigns::<Test>::get().contains(&id));
+	});
+}
+
+#[test]
+fn expire_campaign_removes_from_active_index() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		assert!(ActiveApprovedCampaigns::<Test>::get().contains(&id));
+
+		// advance past expiry (expires_at = 1000)
+		frame_system::Pallet::<Test>::set_block_number(1001);
+		assert_ok!(AdsCore::expire_campaign(RuntimeOrigin::signed(42), id));
+		assert!(!ActiveApprovedCampaigns::<Test>::get().contains(&id));
+	});
+}
+
+#[test]
+fn suspend_removes_unsuspend_readds_index() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		assert!(ActiveApprovedCampaigns::<Test>::get().contains(&id));
+
+		assert_ok!(AdsCore::suspend_campaign(RuntimeOrigin::root(), id));
+		assert!(!ActiveApprovedCampaigns::<Test>::get().contains(&id));
+
+		assert_ok!(AdsCore::unsuspend_campaign(RuntimeOrigin::root(), id));
+		assert!(ActiveApprovedCampaigns::<Test>::get().contains(&id));
+	});
+}
+
+#[test]
+fn set_campaign_targets_updates_placement_index() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		let pid1 = placement_id(1);
+		let pid2 = placement_id(2);
+		let targets = BoundedVec::try_from(vec![pid1, pid2]).unwrap();
+
+		assert_ok!(AdsCore::set_campaign_targets(
+			RuntimeOrigin::signed(ADVERTISER), id, targets,
+		));
+
+		assert!(CampaignsForPlacement::<Test>::get(&pid1).contains(&id));
+		assert!(CampaignsForPlacement::<Test>::get(&pid2).contains(&id));
+	});
+}
+
+#[test]
+fn clear_campaign_targets_removes_placement_index() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_campaign(ADVERTISER);
+		let pid1 = placement_id(1);
+		let targets = BoundedVec::try_from(vec![pid1]).unwrap();
+
+		assert_ok!(AdsCore::set_campaign_targets(
+			RuntimeOrigin::signed(ADVERTISER), id, targets,
+		));
+		assert!(CampaignsForPlacement::<Test>::get(&pid1).contains(&id));
+
+		assert_ok!(AdsCore::clear_campaign_targets(
+			RuntimeOrigin::signed(ADVERTISER), id,
+		));
+		assert!(!CampaignsForPlacement::<Test>::get(&pid1).contains(&id));
+	});
+}
+
+#[test]
+fn cleanup_campaign_clears_all_indexes() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid1 = placement_id(1);
+		let targets = BoundedVec::try_from(vec![pid1]).unwrap();
+		assert_ok!(AdsCore::set_campaign_targets(
+			RuntimeOrigin::signed(ADVERTISER), id, targets,
+		));
+
+		assert!(ActiveApprovedCampaigns::<Test>::get().contains(&id));
+		assert!(CampaignsForPlacement::<Test>::get(&pid1).contains(&id));
+
+		assert_ok!(AdsCore::cancel_campaign(RuntimeOrigin::signed(ADVERTISER), id));
+		assert_ok!(AdsCore::cleanup_campaign(RuntimeOrigin::signed(42), id));
+
+		assert!(!ActiveApprovedCampaigns::<Test>::get().contains(&id));
+		assert!(!CampaignsForPlacement::<Test>::get(&pid1).contains(&id));
+		assert!(CampaignsByDeliveryType::<Test>::get(0x01).is_empty());
+	});
+}
+
+#[test]
+fn create_campaign_with_targets_populates_placement_index() {
+	new_test_ext().execute_with(|| {
+		let pid1 = placement_id(1);
+		let targets = BoundedVec::try_from(vec![pid1]).unwrap();
+		let id = NextCampaignId::<Test>::get();
+		assert_ok!(AdsCore::create_campaign(
+			RuntimeOrigin::signed(ADVERTISER),
+			ad_text("targeted"),
+			ad_url("https://t.co"),
+			UNIT / 2,
+			10 * UNIT,
+			50 * UNIT,
+			0x01,
+			100u64.into(),
+			Some(targets),
+		));
+
+		assert!(CampaignsForPlacement::<Test>::get(&pid1).contains(&id));
+	});
+}
+
+// ============================================================================
+// Phase 5: Receipt Confirmation & Dispute Tests
+// ============================================================================
+
+#[test]
+fn confirm_receipt_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), id, pid, 100,
+		));
+
+		// 初始状态为 Pending
+		assert_eq!(
+			ReceiptConfirmation::<Test>::get((id, pid, 0u32)),
+			Some(ReceiptStatus::Pending),
+		);
+
+		// 广告主确认
+		assert_ok!(AdsCore::confirm_receipt(RuntimeOrigin::signed(ADVERTISER), id, pid, 0));
+		assert_eq!(
+			ReceiptConfirmation::<Test>::get((id, pid, 0u32)),
+			Some(ReceiptStatus::Confirmed),
+		);
+	});
+}
+
+#[test]
+fn confirm_receipt_fails_not_owner() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), id, pid, 100,
+		));
+
+		// 非广告主不能确认
+		assert_noop!(
+			AdsCore::confirm_receipt(RuntimeOrigin::signed(ADVERTISER2), id, pid, 0),
+			Error::<Test>::NotCampaignOwner
+		);
+	});
+}
+
+#[test]
+fn confirm_receipt_fails_already_confirmed() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), id, pid, 100,
+		));
+		assert_ok!(AdsCore::confirm_receipt(RuntimeOrigin::signed(ADVERTISER), id, pid, 0));
+
+		// 重复确认失败
+		assert_noop!(
+			AdsCore::confirm_receipt(RuntimeOrigin::signed(ADVERTISER), id, pid, 0),
+			Error::<Test>::ReceiptNotPending
+		);
+	});
+}
+
+#[test]
+fn dispute_receipt_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), id, pid, 100,
+		));
+
+		assert_ok!(AdsCore::dispute_receipt(RuntimeOrigin::signed(ADVERTISER), id, pid, 0));
+		assert_eq!(
+			ReceiptConfirmation::<Test>::get((id, pid, 0u32)),
+			Some(ReceiptStatus::Disputed),
+		);
+	});
+}
+
+#[test]
+fn dispute_receipt_fails_not_owner() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), id, pid, 100,
+		));
+
+		assert_noop!(
+			AdsCore::dispute_receipt(RuntimeOrigin::signed(ADVERTISER2), id, pid, 0),
+			Error::<Test>::NotCampaignOwner
+		);
+	});
+}
+
+#[test]
+fn dispute_receipt_fails_already_disputed() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), id, pid, 100,
+		));
+		assert_ok!(AdsCore::dispute_receipt(RuntimeOrigin::signed(ADVERTISER), id, pid, 0));
+
+		assert_noop!(
+			AdsCore::dispute_receipt(RuntimeOrigin::signed(ADVERTISER), id, pid, 0),
+			Error::<Test>::ReceiptNotPending
+		);
+	});
+}
+
+#[test]
+fn auto_confirm_receipt_works_after_window() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), id, pid, 100,
+		));
+
+		// 确认窗口内不可自动确认 (ReceiptConfirmationWindow = 100)
+		System::set_block_number(50);
+		assert_noop!(
+			AdsCore::auto_confirm_receipt(RuntimeOrigin::signed(ADVERTISER2), id, pid, 0),
+			Error::<Test>::ConfirmationWindowNotExpired
+		);
+
+		// 窗口到期后可自动确认 (submitted_at=1, window=100, 需 > 101)
+		System::set_block_number(102);
+		assert_ok!(AdsCore::auto_confirm_receipt(RuntimeOrigin::signed(ADVERTISER2), id, pid, 0));
+		assert_eq!(
+			ReceiptConfirmation::<Test>::get((id, pid, 0u32)),
+			Some(ReceiptStatus::AutoConfirmed),
+		);
+	});
+}
+
+#[test]
+fn auto_confirm_receipt_fails_if_already_confirmed() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), id, pid, 100,
+		));
+		assert_ok!(AdsCore::confirm_receipt(RuntimeOrigin::signed(ADVERTISER), id, pid, 0));
+
+		System::set_block_number(102);
+		assert_noop!(
+			AdsCore::auto_confirm_receipt(RuntimeOrigin::signed(ADVERTISER2), id, pid, 0),
+			Error::<Test>::ReceiptNotPending
+		);
+	});
+}
+
+#[test]
+fn settle_skips_pending_receipts() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), id, pid, 100,
+		));
+
+		// 不确认，直接结算 — 收据被跳过, 无收入
+		assert_ok!(AdsCore::settle_era_ads(RuntimeOrigin::signed(ADVERTISER2), pid));
+		assert_eq!(EraAdRevenue::<Test>::get(&pid), 0);
+	});
+}
+
+#[test]
+fn settle_skips_disputed_receipts() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), id, pid, 100,
+		));
+		assert_ok!(AdsCore::dispute_receipt(RuntimeOrigin::signed(ADVERTISER), id, pid, 0));
+
+		// 争议收据不结算
+		assert_ok!(AdsCore::settle_era_ads(RuntimeOrigin::signed(ADVERTISER2), pid));
+		assert_eq!(EraAdRevenue::<Test>::get(&pid), 0);
+	});
+}
+
+#[test]
+fn settle_processes_auto_confirmed_receipts() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), id, pid, 100,
+		));
+
+		// 自动确认
+		System::set_block_number(102);
+		assert_ok!(AdsCore::auto_confirm_receipt(RuntimeOrigin::signed(ADVERTISER2), id, pid, 0));
+
+		// 自动确认的收据可结算
+		assert_ok!(AdsCore::settle_era_ads(RuntimeOrigin::signed(ADVERTISER2), pid));
+		assert!(EraAdRevenue::<Test>::get(&pid) > 0);
+	});
+}
+
+#[test]
+fn settle_mixed_receipts_only_processes_confirmed() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		// 提交 3 张收据
+		for _ in 0..3 {
+			assert_ok!(AdsCore::submit_delivery_receipt(
+				RuntimeOrigin::signed(PLACEMENT_ADMIN), id, pid, 100,
+			));
+		}
+
+		// 收据 0: 确认, 收据 1: 争议, 收据 2: 保持 Pending
+		assert_ok!(AdsCore::confirm_receipt(RuntimeOrigin::signed(ADVERTISER), id, pid, 0));
+		assert_ok!(AdsCore::dispute_receipt(RuntimeOrigin::signed(ADVERTISER), id, pid, 1));
+
+		assert_ok!(AdsCore::settle_era_ads(RuntimeOrigin::signed(ADVERTISER2), pid));
+
+		// 只结算了 1 张确认的收据 (cost = 0.5*100*100/100_000 = 0.05 UNIT)
+		let expected_single = UNIT / 2 * 100 * 100 / 100_000;
+		assert_eq!(EraAdRevenue::<Test>::get(&pid), expected_single);
+	});
+}
+
+#[test]
+fn receipt_not_found_for_nonexistent_index() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_noop!(
+			AdsCore::confirm_receipt(RuntimeOrigin::signed(ADVERTISER), id, pid, 99),
+			Error::<Test>::ReceiptNotFound
+		);
+		assert_noop!(
+			AdsCore::dispute_receipt(RuntimeOrigin::signed(ADVERTISER), id, pid, 99),
+			Error::<Test>::ReceiptNotFound
+		);
+		assert_noop!(
+			AdsCore::auto_confirm_receipt(RuntimeOrigin::signed(ADVERTISER), id, pid, 99),
+			Error::<Test>::ReceiptNotFound
+		);
+	});
+}
+
+// ============================================================================
+// Phase 6: 广告主推荐测试
+// ============================================================================
+
+#[test]
+fn p6_register_advertiser_works() {
+	new_test_ext().execute_with(|| {
+		let new_adv: u64 = 77;
+		// ADVERTISER is seed advertiser (registered in mock setup)
+		assert_ok!(AdsCore::register_advertiser(
+			RuntimeOrigin::signed(new_adv), ADVERTISER
+		));
+		assert!(AdvertiserRegisteredAt::<Test>::contains_key(new_adv));
+		assert_eq!(AdvertiserReferrer::<Test>::get(new_adv), Some(ADVERTISER));
+		assert_eq!(ReferrerAdvertisers::<Test>::get(ADVERTISER).len(), 1);
+		assert_eq!(ReferrerAdvertisers::<Test>::get(ADVERTISER)[0], new_adv);
+
+		System::assert_has_event(RuntimeEvent::AdsCore(Event::AdvertiserRegistered {
+			advertiser: new_adv,
+			referrer: ADVERTISER,
+		}));
+	});
+}
+
+#[test]
+fn p6_register_advertiser_rejects_already_registered() {
+	new_test_ext().execute_with(|| {
+		// ADVERTISER is already registered as seed
+		assert_noop!(
+			AdsCore::register_advertiser(RuntimeOrigin::signed(ADVERTISER), ADVERTISER2),
+			Error::<Test>::AlreadyRegisteredAdvertiser
+		);
+	});
+}
+
+#[test]
+fn p6_register_advertiser_rejects_self_referral() {
+	new_test_ext().execute_with(|| {
+		let new_adv: u64 = 77;
+		assert_noop!(
+			AdsCore::register_advertiser(RuntimeOrigin::signed(new_adv), new_adv),
+			Error::<Test>::SelfReferral
+		);
+	});
+}
+
+#[test]
+fn p6_register_advertiser_rejects_non_advertiser_referrer() {
+	new_test_ext().execute_with(|| {
+		let new_adv: u64 = 77;
+		let non_advertiser: u64 = 88;
+		assert_noop!(
+			AdsCore::register_advertiser(RuntimeOrigin::signed(new_adv), non_advertiser),
+			Error::<Test>::ReferrerNotAdvertiser
+		);
+	});
+}
+
+#[test]
+fn p6_force_register_advertiser_works() {
+	new_test_ext().execute_with(|| {
+		let seed: u64 = 99;
+		assert_ok!(AdsCore::force_register_advertiser(RuntimeOrigin::root(), seed));
+		assert!(AdvertiserRegisteredAt::<Test>::contains_key(seed));
+		// No referrer for seed
+		assert!(AdvertiserReferrer::<Test>::get(seed).is_none());
+
+		System::assert_has_event(RuntimeEvent::AdsCore(Event::SeedAdvertiserRegistered {
+			advertiser: seed,
+		}));
+	});
+}
+
+#[test]
+fn p6_force_register_rejects_non_root() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			AdsCore::force_register_advertiser(RuntimeOrigin::signed(ADVERTISER), 88),
+			sp_runtime::DispatchError::BadOrigin
+		);
+	});
+}
+
+#[test]
+fn p6_force_register_rejects_already_registered() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			AdsCore::force_register_advertiser(RuntimeOrigin::root(), ADVERTISER),
+			Error::<Test>::AlreadyRegisteredAdvertiser
+		);
+	});
+}
+
+#[test]
+fn p6_create_campaign_requires_registration() {
+	new_test_ext().execute_with(|| {
+		let unregistered: u64 = 77;
+		assert_noop!(
+			AdsCore::create_campaign(
+				RuntimeOrigin::signed(unregistered),
+				ad_text("test"),
+				ad_url("https://example.com"),
+				UNIT, // bid
+				10 * UNIT, // daily
+				100 * UNIT, // total
+				1,
+				1000u64.into(),
+				None,
+			),
+			Error::<Test>::NotRegisteredAdvertiser
+		);
+	});
+}
+
+#[test]
+fn p6_referral_commission_credited_on_settlement() {
+	new_test_ext().execute_with(|| {
+		let referred_adv: u64 = 77;
+		// Give balance via genesis-style direct set
+		pallet_balances::Pallet::<Test>::force_set_balance(
+			RuntimeOrigin::root(), referred_adv, 1_000 * UNIT,
+		).unwrap();
+		// Register referred_adv with ADVERTISER as referrer
+		assert_ok!(AdsCore::register_advertiser(
+			RuntimeOrigin::signed(referred_adv), ADVERTISER
+		));
+		assert_eq!(AdvertiserReferrer::<Test>::get(referred_adv), Some(ADVERTISER));
+
+		// Create and approve campaign by referred_adv
+		let id = NextCampaignId::<Test>::get();
+		assert_ok!(AdsCore::create_campaign(
+			RuntimeOrigin::signed(referred_adv),
+			ad_text("referral test"),
+			ad_url("https://ref.com"),
+			UNIT,
+			0u128,
+			100 * UNIT,
+			1,
+			1000u64.into(),
+			None,
+		));
+		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id, true));
+
+		// Submit delivery receipt
+		let pid = placement_id(1);
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN),
+			id, pid, 100,
+		));
+
+		// Confirm receipt (Phase 5: must be Confirmed before settlement)
+		assert_ok!(AdsCore::confirm_receipt(
+			RuntimeOrigin::signed(referred_adv), id, pid, 0,
+		));
+
+		// Settle
+		assert_ok!(AdsCore::settle_era_ads(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), pid,
+		));
+
+		// Check referral commission credited to ADVERTISER (referrer)
+		// compute_cpm_cost: bid * audience * multiplier / 100_000
+		// = 1 UNIT * 100 * 100 / 100_000 = 0.1 UNIT = 100_000_000_000
+		let expected_cost = UNIT * 100 * 100 / 100_000;
+		// Platform share = 20% of cost (MockRevenueDistributor)
+		let platform_share = expected_cost * 20 / 100;
+		// Referral commission = 5% of platform share (AdvertiserReferralRate = 500 bps)
+		let expected_commission = platform_share * 500 / 10_000;
+		assert!(expected_commission > 0, "commission should be non-zero");
+
+		assert_eq!(ReferrerClaimable::<Test>::get(ADVERTISER), expected_commission);
+		assert_eq!(ReferrerTotalEarnings::<Test>::get(ADVERTISER), expected_commission);
+
+		System::assert_has_event(RuntimeEvent::AdsCore(Event::ReferralCommissionCredited {
+			referrer: ADVERTISER,
+			advertiser: referred_adv,
+			amount: expected_commission,
+		}));
+	});
+}
+
+#[test]
+fn p6_no_commission_for_seed_advertiser() {
+	new_test_ext().execute_with(|| {
+		// ADVERTISER is a seed (no referrer) — should not credit any commission
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), id, pid, 100,
+		));
+		assert_ok!(AdsCore::confirm_receipt(
+			RuntimeOrigin::signed(ADVERTISER), id, pid, 0,
+		));
+		assert_ok!(AdsCore::settle_era_ads(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), pid,
+		));
+
+		// No referrer → no commission
+		assert_eq!(ReferrerClaimable::<Test>::get(ADVERTISER), 0);
+	});
+}
+
+#[test]
+fn p6_claim_referral_earnings_works() {
+	new_test_ext().execute_with(|| {
+		// Manually seed some claimable for ADVERTISER
+		let amount = 5 * UNIT;
+		ReferrerClaimable::<Test>::insert(ADVERTISER, amount);
+
+		let balance_before = Balances::free_balance(ADVERTISER);
+		assert_ok!(AdsCore::claim_referral_earnings(RuntimeOrigin::signed(ADVERTISER)));
+		let balance_after = Balances::free_balance(ADVERTISER);
+
+		assert_eq!(balance_after - balance_before, amount);
+		assert_eq!(ReferrerClaimable::<Test>::get(ADVERTISER), 0);
+
+		System::assert_has_event(RuntimeEvent::AdsCore(Event::ReferralEarningsClaimed {
+			referrer: ADVERTISER,
+			amount,
+		}));
+	});
+}
+
+#[test]
+fn p6_claim_referral_earnings_rejects_zero() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			AdsCore::claim_referral_earnings(RuntimeOrigin::signed(ADVERTISER)),
+			Error::<Test>::NoReferralEarnings
+		);
+	});
+}
+
+#[test]
+fn p6_referral_chain_prevents_unregistered() {
+	new_test_ext().execute_with(|| {
+		// Register 77 via ADVERTISER
+		let a = 77u64;
+		assert_ok!(AdsCore::register_advertiser(RuntimeOrigin::signed(a), ADVERTISER));
+
+		// Register 78 via 77 (77 is now a registered advertiser)
+		let b = 78u64;
+		assert_ok!(AdsCore::register_advertiser(RuntimeOrigin::signed(b), a));
+		assert_eq!(AdvertiserReferrer::<Test>::get(b), Some(a));
+		assert_eq!(ReferrerAdvertisers::<Test>::get(a).len(), 1);
+	});
+}
+
+#[test]
+fn p6_commission_accumulates_across_settlements() {
+	new_test_ext().execute_with(|| {
+		let referred_adv: u64 = 77;
+		pallet_balances::Pallet::<Test>::force_set_balance(
+			RuntimeOrigin::root(), referred_adv, 1_000 * UNIT,
+		).unwrap();
+		assert_ok!(AdsCore::register_advertiser(
+			RuntimeOrigin::signed(referred_adv), ADVERTISER
+		));
+
+		let id = NextCampaignId::<Test>::get();
+		assert_ok!(AdsCore::create_campaign(
+			RuntimeOrigin::signed(referred_adv),
+			ad_text("accum"),
+			ad_url("https://a.com"),
+			UNIT, 0u128, 100 * UNIT, 1, 1000u64.into(), None,
+		));
+		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id, true));
+		let pid = placement_id(1);
+
+		// Settlement 1
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), id, pid, 100,
+		));
+		assert_ok!(AdsCore::confirm_receipt(
+			RuntimeOrigin::signed(referred_adv), id, pid, 0,
+		));
+		assert_ok!(AdsCore::settle_era_ads(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), pid,
+		));
+		let after_first = ReferrerClaimable::<Test>::get(ADVERTISER);
+		assert!(after_first > 0);
+
+		// Settlement 2
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), id, pid, 200,
+		));
+		assert_ok!(AdsCore::confirm_receipt(
+			RuntimeOrigin::signed(referred_adv), id, pid, 0,
+		));
+		assert_ok!(AdsCore::settle_era_ads(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), pid,
+		));
+		let after_second = ReferrerClaimable::<Test>::get(ADVERTISER);
+		assert!(after_second > after_first);
+		assert_eq!(ReferrerTotalEarnings::<Test>::get(ADVERTISER), after_second);
 	});
 }

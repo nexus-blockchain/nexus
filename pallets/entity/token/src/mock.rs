@@ -126,6 +126,9 @@ thread_local! {
     static KYC_LEVELS: RefCell<HashMap<u64, u8>> = RefCell::new(HashMap::new());
     /// (entity_id, account) -> is_member
     static MEMBERS: RefCell<HashMap<(u64, u64), bool>> = RefCell::new(HashMap::new());
+    /// P0: (entity_id, account) -> permission_mask
+    static ENTITY_ADMINS: RefCell<HashMap<(u64, u64), u32>> = RefCell::new(HashMap::new());
+    static ENTITY_LOCKED: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
 }
 
 pub struct MockEntityProvider;
@@ -144,7 +147,16 @@ impl EntityProviderTrait<u64> for MockEntityProvider {
     }
     fn entity_account(_entity_id: u64) -> u64 { 999 }
     fn update_entity_stats(_: u64, _: u128, _: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
-    fn update_entity_rating(_: u64, _: u8) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+    fn is_entity_admin(entity_id: u64, account: &u64, required_permission: u32) -> bool {
+        ENTITY_ADMINS.with(|a| {
+            a.borrow().get(&(entity_id, *account))
+                .map(|mask| mask & required_permission == required_permission)
+                .unwrap_or(false)
+        })
+    }
+    fn is_entity_locked(entity_id: u64) -> bool {
+        ENTITY_LOCKED.with(|l| l.borrow().contains(&entity_id))
+    }
 }
 
 // ==================== Mock KYC & Member Providers ====================
@@ -185,6 +197,7 @@ impl pallet_entity_token::Config for Test {
     type MaxDividendRecipients = ConstU32<50>;
     type KycProvider = MockKycProvider;
     type MemberProvider = MockMemberProvider;
+    type DisclosureProvider = pallet_entity_common::NullDisclosureProvider;
     type WeightInfo = ();
 }
 
@@ -217,6 +230,20 @@ pub fn set_kyc_level(who: u64, level: u8) {
 /// 设置成员资格
 pub fn set_member(entity_id: u64, who: u64, is_member: bool) {
     MEMBERS.with(|m| m.borrow_mut().insert((entity_id, who), is_member));
+}
+
+pub fn set_entity_locked(entity_id: u64) {
+    ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id));
+}
+
+/// P0: 设置实体管理员权限
+pub fn set_entity_admin(entity_id: u64, who: u64, permission: u32) {
+    ENTITY_ADMINS.with(|a| a.borrow_mut().insert((entity_id, who), permission));
+}
+
+/// P0: 移除实体管理员权限
+pub fn remove_entity_admin(entity_id: u64, who: u64) {
+    ENTITY_ADMINS.with(|a| a.borrow_mut().remove(&(entity_id, who)));
 }
 
 // ==================== Test Externalities Builder ====================

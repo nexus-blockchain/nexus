@@ -14,7 +14,6 @@ use alloc::collections::BTreeMap;
 
 thread_local! {
     static MEMBERS: RefCell<BTreeMap<(u64, u64), bool>> = RefCell::new(BTreeMap::new());
-    static ACTIVATED: RefCell<BTreeMap<(u64, u64), bool>> = RefCell::new(BTreeMap::new());
     static CUSTOM_LEVEL_IDS: RefCell<BTreeMap<(u64, u64), u8>> = RefCell::new(BTreeMap::new());
     static LEVEL_MEMBER_COUNTS: RefCell<BTreeMap<(u64, u8), u32>> = RefCell::new(BTreeMap::new());
     static POOL_BALANCES: RefCell<BTreeMap<u64, Balance>> = RefCell::new(BTreeMap::new());
@@ -22,11 +21,12 @@ thread_local! {
     static TOKEN_BALANCES: RefCell<BTreeMap<(u64, u64), Balance>> = RefCell::new(BTreeMap::new());
     static KYC_BLOCKED: RefCell<BTreeMap<(u64, u64), bool>> = RefCell::new(BTreeMap::new());
     static ENTITY_INACTIVE: RefCell<BTreeMap<u64, bool>> = RefCell::new(BTreeMap::new());
+    static ENTITY_ADMINS: RefCell<BTreeMap<(u64, u64), u32>> = RefCell::new(BTreeMap::new());
+    static ENTITY_LOCKED: RefCell<BTreeMap<u64, bool>> = RefCell::new(BTreeMap::new());
 }
 
 fn clear_mocks() {
     MEMBERS.with(|m| m.borrow_mut().clear());
-    ACTIVATED.with(|a| a.borrow_mut().clear());
     CUSTOM_LEVEL_IDS.with(|c| c.borrow_mut().clear());
     LEVEL_MEMBER_COUNTS.with(|l| l.borrow_mut().clear());
     POOL_BALANCES.with(|p| p.borrow_mut().clear());
@@ -34,6 +34,8 @@ fn clear_mocks() {
     TOKEN_BALANCES.with(|m| m.borrow_mut().clear());
     KYC_BLOCKED.with(|k| k.borrow_mut().clear());
     ENTITY_INACTIVE.with(|e| e.borrow_mut().clear());
+    ENTITY_ADMINS.with(|a| a.borrow_mut().clear());
+    ENTITY_LOCKED.with(|l| l.borrow_mut().clear());
 }
 
 fn set_kyc_blocked(entity_id: u64, account: u64) {
@@ -44,13 +46,17 @@ fn set_entity_inactive(entity_id: u64) {
     ENTITY_INACTIVE.with(|e| e.borrow_mut().insert(entity_id, true));
 }
 
+fn set_entity_admin(entity_id: u64, account: u64, permissions: u32) {
+    ENTITY_ADMINS.with(|a| a.borrow_mut().insert((entity_id, account), permissions));
+}
+
+fn set_entity_locked(entity_id: u64) {
+    ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id, true));
+}
+
 fn set_member(entity_id: u64, account: u64, level: u8) {
     MEMBERS.with(|m| m.borrow_mut().insert((entity_id, account), true));
     CUSTOM_LEVEL_IDS.with(|c| c.borrow_mut().insert((entity_id, account), level));
-}
-
-fn set_member_inactive(entity_id: u64, account: u64) {
-    ACTIVATED.with(|a| a.borrow_mut().insert((entity_id, account), false));
 }
 
 fn set_level_count(entity_id: u64, level_id: u8, count: u32) {
@@ -141,9 +147,6 @@ impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
     fn is_member(entity_id: u64, account: &u64) -> bool {
         MEMBERS.with(|m| m.borrow().contains_key(&(entity_id, *account)))
     }
-    fn is_activated(entity_id: u64, account: &u64) -> bool {
-        ACTIVATED.with(|a| a.borrow().get(&(entity_id, *account)).copied().unwrap_or(true))
-    }
     fn get_referrer(_: u64, _: &u64) -> Option<u64> { None }
     fn get_member_stats(_: u64, _: &u64) -> (u32, u32, u128) { (0, 0, 0) }
     fn uses_custom_levels(_: u64) -> bool { true }
@@ -174,10 +177,19 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
         !ENTITY_INACTIVE.with(|e| e.borrow().get(&entity_id).copied().unwrap_or(false))
     }
     fn entity_status(_: u64) -> Option<pallet_entity_common::EntityStatus> { None }
-    fn entity_owner(_: u64) -> Option<u64> { Some(999) }
+    fn entity_owner(_: u64) -> Option<u64> { Some(OWNER) }
     fn entity_account(entity_id: u64) -> u64 { entity_id + 9000 }
     fn update_entity_stats(_: u64, _: u128, _: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
-    fn update_entity_rating(_: u64, _: u8) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+    fn is_entity_admin(_entity_id: u64, account: &u64, required_permission: u32) -> bool {
+        ENTITY_ADMINS.with(|a| {
+            a.borrow().get(&(_entity_id, *account))
+                .map(|perms| perms & required_permission == required_permission)
+                .unwrap_or(false)
+        })
+    }
+    fn is_entity_locked(entity_id: u64) -> bool {
+        ENTITY_LOCKED.with(|l| l.borrow().get(&entity_id).copied().unwrap_or(false))
+    }
 }
 
 // -- Mock PoolBalanceProvider --
@@ -238,6 +250,8 @@ impl pallet::Config for Test {
 
 /// Entity account = entity_id + 9000
 const ENTITY_ACCOUNT: u64 = 9001; // entity_id=1
+/// Entity owner (mock returns 999 for all entities)
+const OWNER: u64 = 999;
 
 fn new_test_ext() -> sp_io::TestExternalities {
     clear_mocks();
@@ -249,6 +263,10 @@ fn new_test_ext() -> sp_io::TestExternalities {
         let _ = pallet_balances::Pallet::<Test>::force_set_balance(
             RuntimeOrigin::root(), ENTITY_ACCOUNT, 1_000_000,
         );
+        // Fund owner account
+        let _ = pallet_balances::Pallet::<Test>::force_set_balance(
+            RuntimeOrigin::root(), OWNER, 1_000_000,
+        );
     });
     ext
 }
@@ -258,7 +276,7 @@ fn setup_config(entity_id: u64) {
     let ratios: frame_support::BoundedVec<(u8, u16), ConstU32<10>> =
         vec![(1u8, 5000u16), (2, 5000)].try_into().unwrap();
     assert_ok!(CommissionPoolReward::set_pool_reward_config(
-        RuntimeOrigin::root(), entity_id, ratios, 100,
+        RuntimeOrigin::signed(OWNER), entity_id, ratios, 100,
     ));
 }
 
@@ -271,7 +289,7 @@ fn set_config_works() {
     new_test_ext().execute_with(|| {
         let ratios = vec![(1u8, 3000u16), (2, 7000)];
         assert_ok!(CommissionPoolReward::set_pool_reward_config(
-            RuntimeOrigin::root(), 1, ratios.try_into().unwrap(), 200,
+            RuntimeOrigin::signed(OWNER), 1, ratios.try_into().unwrap(), 200,
         ));
         let config = pallet::PoolRewardConfigs::<Test>::get(1).unwrap();
         assert_eq!(config.level_ratios.len(), 2);
@@ -285,7 +303,7 @@ fn set_config_rejects_ratio_sum_mismatch() {
         let ratios = vec![(1u8, 3000u16), (2, 3000)]; // sum=6000
         assert_noop!(
             CommissionPoolReward::set_pool_reward_config(
-                RuntimeOrigin::root(), 1, ratios.try_into().unwrap(), 100,
+                RuntimeOrigin::signed(OWNER), 1, ratios.try_into().unwrap(), 100,
             ),
             Error::<Test>::RatioSumMismatch
         );
@@ -298,7 +316,7 @@ fn set_config_rejects_zero_ratio() {
         let ratios = vec![(1u8, 0u16), (2, 10000)];
         assert_noop!(
             CommissionPoolReward::set_pool_reward_config(
-                RuntimeOrigin::root(), 1, ratios.try_into().unwrap(), 100,
+                RuntimeOrigin::signed(OWNER), 1, ratios.try_into().unwrap(), 100,
             ),
             Error::<Test>::InvalidRatio
         );
@@ -311,7 +329,7 @@ fn set_config_rejects_duplicate_level() {
         let ratios = vec![(1u8, 5000u16), (1, 5000)];
         assert_noop!(
             CommissionPoolReward::set_pool_reward_config(
-                RuntimeOrigin::root(), 1, ratios.try_into().unwrap(), 100,
+                RuntimeOrigin::signed(OWNER), 1, ratios.try_into().unwrap(), 100,
             ),
             Error::<Test>::DuplicateLevelId
         );
@@ -324,7 +342,7 @@ fn set_config_rejects_zero_duration() {
         let ratios = vec![(1u8, 10000u16)];
         assert_noop!(
             CommissionPoolReward::set_pool_reward_config(
-                RuntimeOrigin::root(), 1, ratios.try_into().unwrap(), 0,
+                RuntimeOrigin::signed(OWNER), 1, ratios.try_into().unwrap(), 0,
             ),
             Error::<Test>::InvalidRoundDuration
         );
@@ -332,14 +350,14 @@ fn set_config_rejects_zero_duration() {
 }
 
 #[test]
-fn set_config_requires_root() {
+fn set_config_rejects_unauthorized() {
     new_test_ext().execute_with(|| {
         let ratios = vec![(1u8, 10000u16)];
         assert_noop!(
             CommissionPoolReward::set_pool_reward_config(
                 RuntimeOrigin::signed(1), 1, ratios.try_into().unwrap(), 100,
             ),
-            sp_runtime::DispatchError::BadOrigin
+            Error::<Test>::NotAuthorized
         );
     });
 }
@@ -436,14 +454,14 @@ fn force_new_round_works() {
         set_pool_balance(entity_id, 5_000);
 
         assert_ok!(CommissionPoolReward::force_new_round(
-            RuntimeOrigin::root(), entity_id,
+            RuntimeOrigin::signed(OWNER), entity_id,
         ));
         let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
         assert_eq!(round.round_id, 1);
 
         // Force again creates round 2
         assert_ok!(CommissionPoolReward::force_new_round(
-            RuntimeOrigin::root(), entity_id,
+            RuntimeOrigin::signed(OWNER), entity_id,
         ));
         let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
         assert_eq!(round.round_id, 2);
@@ -767,7 +785,7 @@ fn plan_writer_clear_config() {
 fn setup_config_with_token(entity_id: u64) {
     setup_config(entity_id);
     assert_ok!(CommissionPoolReward::set_token_pool_enabled(
-        RuntimeOrigin::root(), entity_id, true,
+        RuntimeOrigin::signed(OWNER), entity_id, true,
     ));
 }
 
@@ -780,7 +798,7 @@ fn set_token_pool_enabled_works() {
         assert!(!config.token_pool_enabled);
 
         assert_ok!(CommissionPoolReward::set_token_pool_enabled(
-            RuntimeOrigin::root(), entity_id, true,
+            RuntimeOrigin::signed(OWNER), entity_id, true,
         ));
         let config = pallet::PoolRewardConfigs::<Test>::get(entity_id).unwrap();
         assert!(config.token_pool_enabled);
@@ -792,7 +810,7 @@ fn set_token_pool_enabled_requires_config() {
     new_test_ext().execute_with(|| {
         assert_noop!(
             CommissionPoolReward::set_token_pool_enabled(
-                RuntimeOrigin::root(), 999, true,
+                RuntimeOrigin::signed(OWNER), 999, true,
             ),
             Error::<Test>::ConfigNotFound
         );
@@ -812,7 +830,7 @@ fn round_includes_token_snapshot_when_enabled() {
 
         // Fund entity account for NEX transfer
         assert_ok!(CommissionPoolReward::force_new_round(
-            RuntimeOrigin::root(), entity_id,
+            RuntimeOrigin::signed(OWNER), entity_id,
         ));
 
         let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
@@ -838,7 +856,7 @@ fn round_no_token_snapshot_when_disabled() {
         set_token_pool_balance(entity_id, 5_000);
 
         assert_ok!(CommissionPoolReward::force_new_round(
-            RuntimeOrigin::root(), entity_id,
+            RuntimeOrigin::signed(OWNER), entity_id,
         ));
 
         let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
@@ -984,18 +1002,18 @@ fn h2_set_config_preserves_token_pool_enabled() {
         // Set initial config
         let ratios = vec![(1u8, 5000u16), (2, 5000)];
         assert_ok!(CommissionPoolReward::set_pool_reward_config(
-            RuntimeOrigin::root(), 1, ratios.try_into().unwrap(), 100,
+            RuntimeOrigin::signed(OWNER), 1, ratios.try_into().unwrap(), 100,
         ));
         // Enable token pool
         assert_ok!(CommissionPoolReward::set_token_pool_enabled(
-            RuntimeOrigin::root(), 1, true,
+            RuntimeOrigin::signed(OWNER), 1, true,
         ));
         assert!(pallet::PoolRewardConfigs::<Test>::get(1).unwrap().token_pool_enabled);
 
         // Update config (change ratios) — token_pool_enabled should be preserved
         let new_ratios = vec![(1u8, 3000u16), (2, 7000)];
         assert_ok!(CommissionPoolReward::set_pool_reward_config(
-            RuntimeOrigin::root(), 1, new_ratios.try_into().unwrap(), 200,
+            RuntimeOrigin::signed(OWNER), 1, new_ratios.try_into().unwrap(), 200,
         ));
         let config = pallet::PoolRewardConfigs::<Test>::get(1).unwrap();
         assert!(config.token_pool_enabled, "token_pool_enabled should be preserved after config update");
@@ -1059,39 +1077,15 @@ fn h3_clear_config_resets_last_claimed_round() {
     });
 }
 
-// ====================================================================
-// 补充审计测试 — 边界场景
-// ====================================================================
-
 #[test]
-fn claim_rejects_inactive_member() {
-    new_test_ext().execute_with(|| {
-        let entity_id = 1u64;
-        setup_config(entity_id);
-        set_member(entity_id, 10, 1);
-        set_member_inactive(entity_id, 10);
-        set_level_count(entity_id, 1, 1);
-        set_level_count(entity_id, 2, 1);
-        set_pool_balance(entity_id, 10_000);
-
-        assert_noop!(
-            CommissionPoolReward::claim_pool_reward(
-                RuntimeOrigin::signed(10), entity_id,
-            ),
-            Error::<Test>::MemberNotActivated
-        );
-    });
-}
-
-#[test]
-fn force_new_round_requires_root() {
+fn force_new_round_rejects_unauthorized() {
     new_test_ext().execute_with(|| {
         setup_config(1);
         assert_noop!(
             CommissionPoolReward::force_new_round(
                 RuntimeOrigin::signed(10), 1,
             ),
-            sp_runtime::DispatchError::BadOrigin
+            Error::<Test>::NotAuthorized
         );
     });
 }
@@ -1101,7 +1095,7 @@ fn force_new_round_rejects_no_config() {
     new_test_ext().execute_with(|| {
         assert_noop!(
             CommissionPoolReward::force_new_round(
-                RuntimeOrigin::root(), 999,
+                RuntimeOrigin::signed(OWNER), 999,
             ),
             Error::<Test>::ConfigNotFound
         );
@@ -1109,14 +1103,14 @@ fn force_new_round_rejects_no_config() {
 }
 
 #[test]
-fn set_token_pool_enabled_requires_root() {
+fn set_token_pool_enabled_rejects_unauthorized() {
     new_test_ext().execute_with(|| {
         setup_config(1);
         assert_noop!(
             CommissionPoolReward::set_token_pool_enabled(
                 RuntimeOrigin::signed(10), 1, true,
             ),
-            sp_runtime::DispatchError::BadOrigin
+            Error::<Test>::NotAuthorized
         );
     });
 }
@@ -1152,7 +1146,7 @@ fn claim_insufficient_pool_after_snapshot() {
 
         // 创建快照（per_member = 5000）
         assert_ok!(CommissionPoolReward::force_new_round(
-            RuntimeOrigin::root(), entity_id,
+            RuntimeOrigin::signed(OWNER), entity_id,
         ));
 
         // 快照后将池余额降到不足（模拟外部消耗）
@@ -1173,7 +1167,7 @@ fn set_config_rejects_ratio_over_10000() {
         let ratios = vec![(1u8, 10001u16)];
         assert_noop!(
             CommissionPoolReward::set_pool_reward_config(
-                RuntimeOrigin::root(), 1, ratios.try_into().unwrap(), 100,
+                RuntimeOrigin::signed(OWNER), 1, ratios.try_into().unwrap(), 100,
             ),
             Error::<Test>::InvalidRatio
         );
@@ -1193,7 +1187,7 @@ fn multi_entity_isolation() {
         // Entity 2
         let ratios2 = vec![(1u8, 10000u16)];
         assert_ok!(CommissionPoolReward::set_pool_reward_config(
-            RuntimeOrigin::root(), 2, ratios2.try_into().unwrap(), 50,
+            RuntimeOrigin::signed(OWNER), 2, ratios2.try_into().unwrap(), 50,
         ));
         set_member(2, 20, 1);
         set_level_count(2, 1, 1);
@@ -1259,7 +1253,7 @@ fn token_deduct_fail_rolls_back_transfer() {
         let entity_id = 1u64;
         setup_config(entity_id);
         assert_ok!(CommissionPoolReward::set_token_pool_enabled(
-            RuntimeOrigin::root(), entity_id, true,
+            RuntimeOrigin::signed(OWNER), entity_id, true,
         ));
         set_member(entity_id, 10, 1);
         set_level_count(entity_id, 1, 1);
@@ -1270,7 +1264,7 @@ fn token_deduct_fail_rolls_back_transfer() {
 
         // 创建快照（token per_member = 2500）
         assert_ok!(CommissionPoolReward::force_new_round(
-            RuntimeOrigin::root(), entity_id,
+            RuntimeOrigin::signed(OWNER), entity_id,
         ));
         // 快照后清空 token pool → deduct_token_pool 会失败
         set_token_pool_balance(entity_id, 0);
@@ -1301,7 +1295,7 @@ fn snapshot_with_empty_pool_produces_zero_rewards() {
         set_pool_balance(entity_id, 0);
 
         assert_ok!(CommissionPoolReward::force_new_round(
-            RuntimeOrigin::root(), entity_id,
+            RuntimeOrigin::signed(OWNER), entity_id,
         ));
 
         let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
@@ -1352,7 +1346,7 @@ fn m1_round_id_overflow_rejected() {
         // force_new_round should also fail
         assert_noop!(
             CommissionPoolReward::force_new_round(
-                RuntimeOrigin::root(), entity_id,
+                RuntimeOrigin::signed(OWNER), entity_id,
             ),
             Error::<Test>::RoundIdOverflow
         );
@@ -1403,7 +1397,7 @@ fn h2_config_update_invalidates_current_round() {
 
         // 创建轮次快照
         assert_ok!(CommissionPoolReward::force_new_round(
-            RuntimeOrigin::root(), entity_id,
+            RuntimeOrigin::signed(OWNER), entity_id,
         ));
         let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
         assert_eq!(round.round_id, 1);
@@ -1413,7 +1407,7 @@ fn h2_config_update_invalidates_current_round() {
         // 更新配置: 移除 level_2, 添加 level_3
         let new_ratios = vec![(1u8, 3000u16), (3u8, 7000u16)];
         assert_ok!(CommissionPoolReward::set_pool_reward_config(
-            RuntimeOrigin::root(), entity_id, new_ratios.try_into().unwrap(), 100,
+            RuntimeOrigin::signed(OWNER), entity_id, new_ratios.try_into().unwrap(), 100,
         ));
 
         // CurrentRound 应被清除
@@ -1449,7 +1443,7 @@ fn h2_plan_writer_config_update_invalidates_round() {
 
         // 创建快照
         assert_ok!(CommissionPoolReward::force_new_round(
-            RuntimeOrigin::root(), entity_id,
+            RuntimeOrigin::signed(OWNER), entity_id,
         ));
         assert!(pallet::CurrentRound::<Test>::get(entity_id).is_some());
 
@@ -1483,7 +1477,7 @@ fn h2_config_update_mid_round_allows_reclaim() {
         // 管理员更新配置（清除 CurrentRound + LastClaimedRound）
         let new_ratios = vec![(1u8, 10000u16)];
         assert_ok!(CommissionPoolReward::set_pool_reward_config(
-            RuntimeOrigin::root(), entity_id, new_ratios.try_into().unwrap(), 100,
+            RuntimeOrigin::signed(OWNER), entity_id, new_ratios.try_into().unwrap(), 100,
         ));
 
         // M2-R3: LastClaimedRound 不再被 clear_prefix 清除，保留历史值
@@ -1557,7 +1551,7 @@ fn m1_r3_token_enable_invalidates_round_and_adds_token_snapshot() {
 
         // 创建轮次（无 token 快照）
         assert_ok!(CommissionPoolReward::force_new_round(
-            RuntimeOrigin::root(), entity_id,
+            RuntimeOrigin::signed(OWNER), entity_id,
         ));
         let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
         assert_eq!(round.round_id, 1);
@@ -1565,7 +1559,7 @@ fn m1_r3_token_enable_invalidates_round_and_adds_token_snapshot() {
 
         // 启用 token 池 → 当前轮次应失效
         assert_ok!(CommissionPoolReward::set_token_pool_enabled(
-            RuntimeOrigin::root(), entity_id, true,
+            RuntimeOrigin::signed(OWNER), entity_id, true,
         ));
         assert!(pallet::CurrentRound::<Test>::get(entity_id).is_none());
 
@@ -1596,14 +1590,14 @@ fn m1_r3_token_disable_invalidates_round_removes_token_snapshot() {
 
         // 创建轮次（有 token 快照）
         assert_ok!(CommissionPoolReward::force_new_round(
-            RuntimeOrigin::root(), entity_id,
+            RuntimeOrigin::signed(OWNER), entity_id,
         ));
         let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
         assert!(round.token_level_snapshots.is_some());
 
         // 禁用 token 池 → 当前轮次应失效
         assert_ok!(CommissionPoolReward::set_token_pool_enabled(
-            RuntimeOrigin::root(), entity_id, false,
+            RuntimeOrigin::signed(OWNER), entity_id, false,
         ));
         assert!(pallet::CurrentRound::<Test>::get(entity_id).is_none());
 
@@ -1639,7 +1633,7 @@ fn m2_r3_config_update_round_id_monotonic() {
         // 更新配置
         let new_ratios = vec![(1u8, 10000u16)];
         assert_ok!(CommissionPoolReward::set_pool_reward_config(
-            RuntimeOrigin::root(), entity_id, new_ratios.try_into().unwrap(), 100,
+            RuntimeOrigin::signed(OWNER), entity_id, new_ratios.try_into().unwrap(), 100,
         ));
 
         // LastClaimedRound 保留（不再 clear_prefix）
@@ -1675,13 +1669,13 @@ fn m2_r3_multiple_config_updates_round_id_keeps_increasing() {
         // Config update #1
         let ratios = vec![(1u8, 10000u16)];
         assert_ok!(CommissionPoolReward::set_pool_reward_config(
-            RuntimeOrigin::root(), entity_id, ratios.try_into().unwrap(), 100,
+            RuntimeOrigin::signed(OWNER), entity_id, ratios.try_into().unwrap(), 100,
         ));
 
         // Config update #2 (no claim in between)
         let ratios2 = vec![(1u8, 4000u16), (2u8, 6000u16)];
         assert_ok!(CommissionPoolReward::set_pool_reward_config(
-            RuntimeOrigin::root(), entity_id, ratios2.try_into().unwrap(), 100,
+            RuntimeOrigin::signed(OWNER), entity_id, ratios2.try_into().unwrap(), 100,
         ));
 
         // LastRoundId should still be 1 from the original round
@@ -1755,14 +1749,14 @@ fn l1_r4_idempotent_token_toggle_preserves_round() {
 
         // 创建轮次
         assert_ok!(CommissionPoolReward::force_new_round(
-            RuntimeOrigin::root(), entity_id,
+            RuntimeOrigin::signed(OWNER), entity_id,
         ));
         let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
         assert_eq!(round.round_id, 1);
 
         // 幂等调用: 已经是 true，再次设置 true → 轮次应保留
         assert_ok!(CommissionPoolReward::set_token_pool_enabled(
-            RuntimeOrigin::root(), entity_id, true,
+            RuntimeOrigin::signed(OWNER), entity_id, true,
         ));
         let round_after = pallet::CurrentRound::<Test>::get(entity_id);
         assert!(round_after.is_some(), "Idempotent toggle should NOT invalidate round");
@@ -1788,7 +1782,7 @@ fn l1_r4_plan_writer_idempotent_token_toggle_preserves_round() {
 
         // 创建轮次
         assert_ok!(CommissionPoolReward::force_new_round(
-            RuntimeOrigin::root(), entity_id,
+            RuntimeOrigin::signed(OWNER), entity_id,
         ));
         assert_eq!(pallet::CurrentRound::<Test>::get(entity_id).unwrap().round_id, 1);
 
@@ -1811,13 +1805,13 @@ fn l1_r4_actual_change_still_invalidates_round() {
         set_token_pool_balance(entity_id, 5_000);
 
         assert_ok!(CommissionPoolReward::force_new_round(
-            RuntimeOrigin::root(), entity_id,
+            RuntimeOrigin::signed(OWNER), entity_id,
         ));
         assert!(pallet::CurrentRound::<Test>::get(entity_id).is_some());
 
         // 实际变更: true → false → 轮次应失效
         assert_ok!(CommissionPoolReward::set_token_pool_enabled(
-            RuntimeOrigin::root(), entity_id, false,
+            RuntimeOrigin::signed(OWNER), entity_id, false,
         ));
         assert!(pallet::CurrentRound::<Test>::get(entity_id).is_none(),
             "Actual change should invalidate round");
@@ -1843,7 +1837,7 @@ fn m1_r5_force_new_round_rejects_inactive_entity() {
 
         assert_noop!(
             CommissionPoolReward::force_new_round(
-                RuntimeOrigin::root(), entity_id,
+                RuntimeOrigin::signed(OWNER), entity_id,
             ),
             Error::<Test>::EntityNotActive
         );
@@ -1862,7 +1856,7 @@ fn m1_r5_force_new_round_works_when_entity_active() {
 
         // Entity 默认活跃
         assert_ok!(CommissionPoolReward::force_new_round(
-            RuntimeOrigin::root(), entity_id,
+            RuntimeOrigin::signed(OWNER), entity_id,
         ));
         let round = pallet::CurrentRound::<Test>::get(entity_id).unwrap();
         assert_eq!(round.round_id, 1);
@@ -1928,4 +1922,364 @@ fn m1_r4_weight_values_are_reasonable() {
     let w4 = SubstrateWeight::set_token_pool_enabled();
     assert!(w4.ref_time() >= 40_000_000, "set_token_pool_enabled ref_time too low");
     assert!(w4.proof_size() >= 4_000, "set_token_pool_enabled proof_size too low");
+}
+
+// ====================================================================
+// P0: Owner/Admin 权限下放测试
+// ====================================================================
+
+/// P0: Admin(COMMISSION_MANAGE) 可以 set_pool_reward_config
+#[test]
+fn p0_admin_can_set_pool_reward_config() {
+    new_test_ext().execute_with(|| {
+        let admin = 888u64;
+        // Fund admin
+        let _ = pallet_balances::Pallet::<Test>::force_set_balance(
+            RuntimeOrigin::root(), admin, 100_000,
+        );
+        set_entity_admin(1, admin, pallet_entity_common::AdminPermission::COMMISSION_MANAGE);
+        let ratios = vec![(1u8, 10000u16)];
+        assert_ok!(CommissionPoolReward::set_pool_reward_config(
+            RuntimeOrigin::signed(admin), 1, ratios.try_into().unwrap(), 100,
+        ));
+        assert!(pallet::PoolRewardConfigs::<Test>::get(1).is_some());
+    });
+}
+
+/// P0: Admin 无 COMMISSION_MANAGE 权限被拒绝
+#[test]
+fn p0_admin_without_commission_manage_rejected() {
+    new_test_ext().execute_with(|| {
+        let admin = 888u64;
+        // 仅有 ORDER_MANAGE 权限，无 COMMISSION_MANAGE
+        set_entity_admin(1, admin, pallet_entity_common::AdminPermission::ORDER_MANAGE);
+        let ratios = vec![(1u8, 10000u16)];
+        assert_noop!(
+            CommissionPoolReward::set_pool_reward_config(
+                RuntimeOrigin::signed(admin), 1, ratios.try_into().unwrap(), 100,
+            ),
+            Error::<Test>::NotAuthorized
+        );
+    });
+}
+
+/// P0: Admin(COMMISSION_MANAGE) 可以 force_new_round
+#[test]
+fn p0_admin_can_force_new_round() {
+    new_test_ext().execute_with(|| {
+        let admin = 888u64;
+        set_entity_admin(1, admin, pallet_entity_common::AdminPermission::COMMISSION_MANAGE);
+        setup_config(1);
+        set_level_count(1, 1, 1);
+        set_level_count(1, 2, 1);
+        set_pool_balance(1, 10_000);
+        assert_ok!(CommissionPoolReward::force_new_round(
+            RuntimeOrigin::signed(admin), 1,
+        ));
+        assert_eq!(pallet::CurrentRound::<Test>::get(1).unwrap().round_id, 1);
+    });
+}
+
+/// P0: Admin(COMMISSION_MANAGE) 可以 set_token_pool_enabled
+#[test]
+fn p0_admin_can_set_token_pool_enabled() {
+    new_test_ext().execute_with(|| {
+        let admin = 888u64;
+        set_entity_admin(1, admin, pallet_entity_common::AdminPermission::COMMISSION_MANAGE);
+        setup_config(1);
+        assert_ok!(CommissionPoolReward::set_token_pool_enabled(
+            RuntimeOrigin::signed(admin), 1, true,
+        ));
+        assert!(pallet::PoolRewardConfigs::<Test>::get(1).unwrap().token_pool_enabled);
+    });
+}
+
+/// P0: Root origin 被 ensure_signed 拒绝（Root 通过 PlanWriter trait 操作）
+#[test]
+fn p0_root_origin_rejected() {
+    new_test_ext().execute_with(|| {
+        let ratios = vec![(1u8, 10000u16)];
+        assert_noop!(
+            CommissionPoolReward::set_pool_reward_config(
+                RuntimeOrigin::root(), 1, ratios.try_into().unwrap(), 100,
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        setup_config(1);
+        assert_noop!(
+            CommissionPoolReward::force_new_round(RuntimeOrigin::root(), 1),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        assert_noop!(
+            CommissionPoolReward::set_token_pool_enabled(RuntimeOrigin::root(), 1, true),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+/// P0: 非活跃 Entity 的 Owner 不能配置
+#[test]
+fn p0_owner_rejected_for_inactive_entity() {
+    new_test_ext().execute_with(|| {
+        set_entity_inactive(1);
+        let ratios = vec![(1u8, 10000u16)];
+        assert_noop!(
+            CommissionPoolReward::set_pool_reward_config(
+                RuntimeOrigin::signed(OWNER), 1, ratios.try_into().unwrap(), 100,
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+// ========================================================================
+// P1: EntityLocked 检查 + Root force_* 紧急覆写
+// ========================================================================
+
+/// P1: 锁定 Entity 后 set_pool_reward_config 被拒绝
+#[test]
+fn p1_locked_entity_rejects_set_config() {
+    new_test_ext().execute_with(|| {
+        set_entity_locked(1);
+        let ratios = vec![(1u8, 10000u16)];
+        assert_noop!(
+            CommissionPoolReward::set_pool_reward_config(
+                RuntimeOrigin::signed(OWNER), 1, ratios.try_into().unwrap(), 100,
+            ),
+            Error::<Test>::EntityLocked
+        );
+    });
+}
+
+/// P1: 锁定 Entity 后 force_new_round 被拒绝
+#[test]
+fn p1_locked_entity_rejects_force_new_round() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        set_entity_locked(1);
+        assert_noop!(
+            CommissionPoolReward::force_new_round(RuntimeOrigin::signed(OWNER), 1),
+            Error::<Test>::EntityLocked
+        );
+    });
+}
+
+/// P1: 锁定 Entity 后 set_token_pool_enabled 被拒绝
+#[test]
+fn p1_locked_entity_rejects_set_token_pool_enabled() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        set_entity_locked(1);
+        assert_noop!(
+            CommissionPoolReward::set_token_pool_enabled(RuntimeOrigin::signed(OWNER), 1, true),
+            Error::<Test>::EntityLocked
+        );
+    });
+}
+
+/// P1: Root force_set_pool_reward_config 绕过锁定
+#[test]
+fn p1_root_force_set_config_bypasses_lock() {
+    new_test_ext().execute_with(|| {
+        set_entity_locked(1);
+        let ratios = vec![(1u8, 10000u16)];
+        assert_ok!(CommissionPoolReward::force_set_pool_reward_config(
+            RuntimeOrigin::root(), 1, ratios.try_into().unwrap(), 100,
+        ));
+        assert!(CommissionPoolReward::pool_reward_config(1).is_some());
+    });
+}
+
+/// P1: Root force_set_token_pool_enabled 绕过锁定
+#[test]
+fn p1_root_force_set_token_pool_enabled_bypasses_lock() {
+    new_test_ext().execute_with(|| {
+        // 先设配置（未锁定时）
+        setup_config(1);
+        set_entity_locked(1);
+        assert_ok!(CommissionPoolReward::force_set_token_pool_enabled(
+            RuntimeOrigin::root(), 1, true,
+        ));
+        let config = CommissionPoolReward::pool_reward_config(1).unwrap();
+        assert!(config.token_pool_enabled);
+    });
+}
+
+/// P1: Root force_start_new_round 绕过锁定
+#[test]
+fn p1_root_force_start_new_round_bypasses_lock() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        set_pool_balance(1, 10_000);
+        set_level_count(1, 1, 5);
+        set_entity_locked(1);
+        assert_ok!(CommissionPoolReward::force_start_new_round(
+            RuntimeOrigin::root(), 1,
+        ));
+        assert!(CommissionPoolReward::current_round(1).is_some());
+    });
+}
+
+/// P1: 非 Root 不能调用 force_set_pool_reward_config
+#[test]
+fn p1_force_set_config_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        let ratios = vec![(1u8, 10000u16)];
+        assert_noop!(
+            CommissionPoolReward::force_set_pool_reward_config(
+                RuntimeOrigin::signed(OWNER), 1, ratios.try_into().unwrap(), 100,
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+/// P1: 非 Root 不能调用 force_set_token_pool_enabled
+#[test]
+fn p1_force_set_token_pool_enabled_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_noop!(
+            CommissionPoolReward::force_set_token_pool_enabled(
+                RuntimeOrigin::signed(OWNER), 1, true,
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+/// P1: 非 Root 不能调用 force_start_new_round
+#[test]
+fn p1_force_start_new_round_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_noop!(
+            CommissionPoolReward::force_start_new_round(RuntimeOrigin::signed(OWNER), 1),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+/// P1: Admin 在锁定 Entity 上也被拒绝
+#[test]
+fn p1_admin_rejected_on_locked_entity() {
+    new_test_ext().execute_with(|| {
+        let admin = 888;
+        set_entity_admin(1, admin, pallet_entity_common::AdminPermission::COMMISSION_MANAGE);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), admin, 10_000_000).unwrap();
+        set_entity_locked(1);
+        let ratios = vec![(1u8, 10000u16)];
+        assert_noop!(
+            CommissionPoolReward::set_pool_reward_config(
+                RuntimeOrigin::signed(admin), 1, ratios.try_into().unwrap(), 100,
+            ),
+            Error::<Test>::EntityLocked
+        );
+    });
+}
+
+// ========================================================================
+// P2: clear_pool_reward_config + force_clear_pool_reward_config
+// ========================================================================
+
+/// P2: Owner 清除配置成功
+#[test]
+fn p2_clear_pool_reward_config_works() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert!(CommissionPoolReward::pool_reward_config(1).is_some());
+        assert_ok!(CommissionPoolReward::clear_pool_reward_config(
+            RuntimeOrigin::signed(OWNER), 1,
+        ));
+        assert!(CommissionPoolReward::pool_reward_config(1).is_none());
+        // 当前轮次也被清除
+        assert!(CommissionPoolReward::current_round(1).is_none());
+    });
+}
+
+/// P2: 清除配置 — 无配置时返回 ConfigNotFound
+#[test]
+fn p2_clear_config_rejects_no_config() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            CommissionPoolReward::clear_pool_reward_config(RuntimeOrigin::signed(OWNER), 1),
+            Error::<Test>::ConfigNotFound
+        );
+    });
+}
+
+/// P2: 清除配置 — 非授权用户被拒
+#[test]
+fn p2_clear_config_rejects_unauthorized() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_noop!(
+            CommissionPoolReward::clear_pool_reward_config(RuntimeOrigin::signed(42), 1),
+            Error::<Test>::NotAuthorized
+        );
+    });
+}
+
+/// P2: 清除配置 — 锁定 Entity 被拒
+#[test]
+fn p2_clear_config_rejects_locked_entity() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        set_entity_locked(1);
+        assert_noop!(
+            CommissionPoolReward::clear_pool_reward_config(RuntimeOrigin::signed(OWNER), 1),
+            Error::<Test>::EntityLocked
+        );
+    });
+}
+
+/// P2: Admin 可清除配置
+#[test]
+fn p2_admin_can_clear_config() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        let admin = 888;
+        set_entity_admin(1, admin, pallet_entity_common::AdminPermission::COMMISSION_MANAGE);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), admin, 10_000_000).unwrap();
+        assert_ok!(CommissionPoolReward::clear_pool_reward_config(
+            RuntimeOrigin::signed(admin), 1,
+        ));
+        assert!(CommissionPoolReward::pool_reward_config(1).is_none());
+    });
+}
+
+/// P2: Root force_clear 成功（含锁定绕过）
+#[test]
+fn p2_root_force_clear_bypasses_lock() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        set_entity_locked(1);
+        assert_ok!(CommissionPoolReward::force_clear_pool_reward_config(
+            RuntimeOrigin::root(), 1,
+        ));
+        assert!(CommissionPoolReward::pool_reward_config(1).is_none());
+    });
+}
+
+/// P2: Root force_clear 无配置时静默成功（X2: 防幻影事件）
+#[test]
+fn p2_root_force_clear_no_config_silent() {
+    new_test_ext().execute_with(|| {
+        // 无配置时调用 — 不 panic、不发事件
+        assert_ok!(CommissionPoolReward::force_clear_pool_reward_config(
+            RuntimeOrigin::root(), 1,
+        ));
+    });
+}
+
+/// P2: 非 Root 不能调用 force_clear
+#[test]
+fn p2_force_clear_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_noop!(
+            CommissionPoolReward::force_clear_pool_reward_config(RuntimeOrigin::signed(OWNER), 1),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
 }

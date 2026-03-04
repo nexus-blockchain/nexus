@@ -101,6 +101,40 @@ pub struct ChainCommunityConfig {
     /// 社区 ID hash (hex)
     #[serde(default)]
     pub community_id_hash: String,
+    // ── Phase 5 新增字段 ──
+    /// CAS (Combot Anti-Spam) 是否启用
+    #[serde(default)]
+    pub cas_enabled: bool,
+    /// Raid 保护是否启用
+    #[serde(default)]
+    pub raid_enabled: bool,
+    /// Raid 检测窗口 (秒)
+    #[serde(default = "default_raid_window")]
+    pub raid_window_secs: u64,
+    /// Raid 入群阈值 (窗口内入群人数)
+    #[serde(default = "default_raid_threshold")]
+    pub raid_join_threshold: u16,
+    /// @mention 数量限制 (0=不限制)
+    #[serde(default)]
+    pub max_mentions: u16,
+    /// 新成员审计消息数 (前 N 条消息受限, 0=不启用)
+    #[serde(default)]
+    pub new_member_audit_count: u16,
+    /// NSFW 检测模式 (0=禁用, 1=删除, 2=删除+审核, 3=仅审核)
+    #[serde(default)]
+    pub nsfw_mode: u8,
+    /// 脏话过滤词列表 (逗号分隔)
+    #[serde(default)]
+    pub profanity_words: String,
+    /// 脏话过滤动作 (0=warn, 1=delete, 2=mute)
+    #[serde(default)]
+    pub profanity_action: u8,
+    /// Homoglyph 检测关键词 (逗号分隔)
+    #[serde(default)]
+    pub homoglyph_keywords: String,
+    /// AutoMod 自定义规则 (JSON 数组)
+    #[serde(default)]
+    pub automod_rules_json: String,
 }
 
 fn default_duplicate_window() -> u64 { 300 }
@@ -110,6 +144,8 @@ fn default_similarity_threshold() -> u8 { 70 }
 fn default_captcha_timeout() -> u64 { 120 }
 fn default_bayes_threshold() -> u8 { 80 }
 fn default_max_rules() -> u16 { 3 } // Free tier default
+fn default_raid_window() -> u64 { 60 }
+fn default_raid_threshold() -> u16 { 10 }
 
 /// 待提交的动作日志
 #[derive(Debug, Clone)]

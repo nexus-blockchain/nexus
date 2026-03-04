@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use regex::Regex;
 
 use crate::infra::local_store::LocalStore;
 use crate::platform::MessageContext;
@@ -57,7 +58,7 @@ struct AutoModEntry {
 enum Trigger {
     Message,
     Join,
-    Regex(String),
+    CompiledRegex(Regex),
 }
 
 #[derive(Debug, Clone)]
@@ -110,7 +111,7 @@ impl AutoModRule {
         } else if s == "join" {
             Some(Trigger::Join)
         } else if let Some(pattern) = s.strip_prefix("regex:") {
-            Some(Trigger::Regex(pattern.to_string()))
+            Regex::new(pattern).ok().map(Trigger::CompiledRegex)
         } else {
             None
         }
@@ -162,11 +163,9 @@ impl AutoModRule {
                     && !ctx.message_text.is_empty()
             }
             Trigger::Join => ctx.is_new_member || ctx.is_join_request,
-            Trigger::Regex(pattern) => {
+            Trigger::CompiledRegex(re) => {
                 if ctx.message_text.is_empty() { return false; }
-                regex::Regex::new(pattern)
-                    .map(|re| re.is_match(&ctx.message_text))
-                    .unwrap_or(false)
+                re.is_match(&ctx.message_text)
             }
         }
     }

@@ -27,8 +27,10 @@ pub mod pallet {
     use frame_system::pallet_prelude::*;
     use pallet_commission_common::{
         CommissionModes, CommissionOutput, CommissionType, MemberCommissionStatsData,
+        MemberProvider,
     };
-    use sp_runtime::traits::{AtLeast32BitUnsigned, Saturating, Zero};
+    use pallet_entity_common::{EntityProvider, AdminPermission};
+    use sp_runtime::traits::{AtLeast32BitUnsigned, Zero};
 
     pub type BalanceOf<T> =
         <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
@@ -85,6 +87,12 @@ pub mod pallet {
         /// 用于查询买家会员等级 ID（可选，用于按等级自定义层数）
         type MemberLevelProvider: SingleLineMemberLevelProvider<Self::AccountId>;
 
+        /// 实体查询接口（权限校验、Owner/Admin 判断）
+        type EntityProvider: EntityProvider<Self::AccountId>;
+
+        /// 会员查询接口（is_banned 检查）
+        type MemberProvider: pallet_commission_common::MemberProvider<Self::AccountId>;
+
         #[pallet::constant]
         type MaxSingleLineLength: Get<u32>;
     }
@@ -112,7 +120,10 @@ pub mod pallet {
         fn custom_level_id(_: u64, _: &AccountId) -> u8 { 0 }
     }
 
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     // ========================================================================
@@ -166,6 +177,8 @@ pub mod pallet {
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
         SingleLineConfigUpdated { entity_id: u64 },
+        /// 单线收益配置已清除
+        SingleLineConfigCleared { entity_id: u64 },
         AddedToSingleLine { entity_id: u64, account: T::AccountId, index: u32 },
         /// 单链加入失败（可能链已满，需人工干预）
         SingleLineJoinFailed { entity_id: u64, account: T::AccountId },
@@ -182,6 +195,16 @@ pub mod pallet {
         InvalidLevels,
         /// base_upline_levels > max_upline_levels 或 base_downline_levels > max_downline_levels
         BaseLevelsExceedMax,
+        /// 实体不存在
+        EntityNotFound,
+        /// 非实体所有者或无 COMMISSION_MANAGE 权限
+        NotEntityOwnerOrAdmin,
+        /// 配置不存在（清除/更新时）
+        ConfigNotFound,
+        /// 更新参数全部为 None（无操作）
+        NothingToUpdate,
+        /// 实体已被全局锁定，所有配置操作不可用
+        EntityLocked,
     }
 
     // ========================================================================
@@ -190,9 +213,7 @@ pub mod pallet {
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        /// 设置单线收益配置
-        ///
-        /// CSL-H1 审计修复: 参数统一为 entity_id，与插件查询键一致
+        /// 设置单线收益配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
         #[pallet::call_index(0)]
         #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_single_line_config(
@@ -206,10 +227,10 @@ pub mod pallet {
             max_upline_levels: u8,
             max_downline_levels: u8,
         ) -> DispatchResult {
-            ensure_root(origin)?;
-            ensure!(upline_rate <= 1000 && downline_rate <= 1000, Error::<T>::InvalidRate);
-            ensure!(base_upline_levels <= max_upline_levels, Error::<T>::BaseLevelsExceedMax);
-            ensure!(base_downline_levels <= max_downline_levels, Error::<T>::BaseLevelsExceedMax);
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            Self::validate_config(upline_rate, downline_rate, base_upline_levels, base_downline_levels, max_upline_levels, max_downline_levels)?;
 
             SingleLineConfigs::<T>::insert(entity_id, SingleLineConfig {
                 upline_rate,
@@ -225,13 +246,66 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 设置按会员等级自定义的收益层数
+        /// 清除单线收益配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
+        #[pallet::call_index(1)]
+        #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
+        pub fn clear_single_line_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(SingleLineConfigs::<T>::contains_key(entity_id), Error::<T>::ConfigNotFound);
+
+            SingleLineConfigs::<T>::remove(entity_id);
+            Self::deposit_event(Event::SingleLineConfigCleared { entity_id });
+            Ok(())
+        }
+
+        /// 部分更新单线收益参数（不重提全部参数）
+        #[pallet::call_index(2)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn update_single_line_params(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            upline_rate: Option<u16>,
+            downline_rate: Option<u16>,
+            level_increment_threshold: Option<BalanceOf<T>>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(
+                upline_rate.is_some() || downline_rate.is_some() || level_increment_threshold.is_some(),
+                Error::<T>::NothingToUpdate
+            );
+
+            SingleLineConfigs::<T>::try_mutate(entity_id, |maybe| -> DispatchResult {
+                let config = maybe.as_mut().ok_or(Error::<T>::ConfigNotFound)?;
+                if let Some(r) = upline_rate {
+                    ensure!(r <= 1000, Error::<T>::InvalidRate);
+                    config.upline_rate = r;
+                }
+                if let Some(r) = downline_rate {
+                    ensure!(r <= 1000, Error::<T>::InvalidRate);
+                    config.downline_rate = r;
+                }
+                if let Some(t) = level_increment_threshold {
+                    config.level_increment_threshold = t;
+                }
+                Ok(())
+            })?;
+
+            Self::deposit_event(Event::SingleLineConfigUpdated { entity_id });
+            Ok(())
+        }
+
+        /// 设置按会员等级自定义的收益层数（Entity Owner 或 Admin）
         ///
         /// 当买家拥有对应等级时，使用此处的 upline_levels/downline_levels 替代
         /// SingleLineConfig 中的 base_upline_levels/base_downline_levels。
-        ///
-        /// level_id 为自定义等级 ID（对应 EntityLevelSystems）
-        #[pallet::call_index(1)]
+        #[pallet::call_index(3)]
         #[pallet::weight(Weight::from_parts(30_000_000, 4_000))]
         pub fn set_level_based_levels(
             origin: OriginFor<T>,
@@ -240,7 +314,9 @@ pub mod pallet {
             upline_levels: u8,
             downline_levels: u8,
         ) -> DispatchResult {
-            ensure_root(origin)?;
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             ensure!(upline_levels > 0 || downline_levels > 0, Error::<T>::InvalidLevels);
 
             let levels = LevelBasedLevels { upline_levels, downline_levels };
@@ -250,19 +326,66 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 移除指定等级的自定义层数配置（回退到 SingleLineConfig 基础值）
-        #[pallet::call_index(2)]
+        /// 移除指定等级的自定义层数配置（Entity Owner 或 Admin）
+        #[pallet::call_index(4)]
         #[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
         pub fn remove_level_based_levels(
             origin: OriginFor<T>,
             entity_id: u64,
             level_id: u8,
         ) -> DispatchResult {
-            ensure_root(origin)?;
-            // M3 修复: 仅在存在时移除并发出事件，避免幽灵事件
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             if SingleLineCustomLevelOverrides::<T>::contains_key(entity_id, level_id) {
                 SingleLineCustomLevelOverrides::<T>::remove(entity_id, level_id);
                 Self::deposit_event(Event::LevelBasedLevelsRemoved { entity_id, level_id });
+            }
+            Ok(())
+        }
+
+        /// [Root] 强制设置单线收益配置
+        #[pallet::call_index(5)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn force_set_single_line_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            upline_rate: u16,
+            downline_rate: u16,
+            base_upline_levels: u8,
+            base_downline_levels: u8,
+            level_increment_threshold: BalanceOf<T>,
+            max_upline_levels: u8,
+            max_downline_levels: u8,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            Self::validate_config(upline_rate, downline_rate, base_upline_levels, base_downline_levels, max_upline_levels, max_downline_levels)?;
+
+            SingleLineConfigs::<T>::insert(entity_id, SingleLineConfig {
+                upline_rate,
+                downline_rate,
+                base_upline_levels,
+                base_downline_levels,
+                level_increment_threshold,
+                max_upline_levels,
+                max_downline_levels,
+            });
+
+            Self::deposit_event(Event::SingleLineConfigUpdated { entity_id });
+            Ok(())
+        }
+
+        /// [Root] 强制清除单线收益配置
+        #[pallet::call_index(6)]
+        #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
+        pub fn force_clear_single_line_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            if SingleLineConfigs::<T>::contains_key(entity_id) {
+                SingleLineConfigs::<T>::remove(entity_id);
+                Self::deposit_event(Event::SingleLineConfigCleared { entity_id });
             }
             Ok(())
         }
@@ -273,6 +396,35 @@ pub mod pallet {
     // ========================================================================
 
     impl<T: Config> Pallet<T> {
+        /// 验证 Entity Owner 或 Admin(COMMISSION_MANAGE) 权限
+        fn ensure_owner_or_admin(entity_id: u64, who: &T::AccountId) -> DispatchResult {
+            let owner = T::EntityProvider::entity_owner(entity_id)
+                .ok_or(Error::<T>::EntityNotFound)?;
+            if *who == owner {
+                return Ok(());
+            }
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, who, AdminPermission::COMMISSION_MANAGE),
+                Error::<T>::NotEntityOwnerOrAdmin
+            );
+            Ok(())
+        }
+
+        /// 校验配置参数合法性
+        fn validate_config(
+            upline_rate: u16,
+            downline_rate: u16,
+            base_upline_levels: u8,
+            base_downline_levels: u8,
+            max_upline_levels: u8,
+            max_downline_levels: u8,
+        ) -> DispatchResult {
+            ensure!(upline_rate <= 1000 && downline_rate <= 1000, Error::<T>::InvalidRate);
+            ensure!(base_upline_levels <= max_upline_levels, Error::<T>::BaseLevelsExceedMax);
+            ensure!(base_downline_levels <= max_downline_levels, Error::<T>::BaseLevelsExceedMax);
+            Ok(())
+        }
+
         /// 获取买家的有效基础层数
         ///
         /// 查询买家的自定义等级 ID，并检查是否有对应的层数覆盖。
@@ -355,6 +507,11 @@ pub mod pallet {
                 if upline_index >= line.len() { break; }
                 let upline = &line[upline_index];
 
+                // P0: 跳过被封禁会员（消耗 depth 但不发佣金）
+                if T::MemberProvider::is_banned(entity_id, upline) {
+                    continue;
+                }
+
                 // C2 审计修复: 佣金基于当前订单金额，而非受益人累计收益
                 let commission = order_amount
                     .saturating_mul(B::from(config.upline_rate as u32))
@@ -407,6 +564,11 @@ pub mod pallet {
                 let downline_index = buyer_index.saturating_add(i) as usize;
                 if downline_index >= line.len() { break; }
                 let downline = &line[downline_index];
+
+                // P0: 跳过被封禁会员（消耗 depth 但不发佣金）
+                if T::MemberProvider::is_banned(entity_id, downline) {
+                    continue;
+                }
 
                 // C2 审计修复: 佣金基于当前订单金额，而非受益人累计收益
                 let commission = order_amount
@@ -527,5 +689,63 @@ where
         _buyer_order_count: u32,
     ) -> (alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>, TB) {
         Self::do_calculate(entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order)
+    }
+}
+
+// ============================================================================
+// SingleLinePlanWriter implementation
+// ============================================================================
+
+impl<T: pallet::Config> pallet_commission_common::SingleLinePlanWriter
+    for pallet::Pallet<T>
+{
+    fn set_single_line_config(
+        entity_id: u64,
+        upline_rate: u16,
+        downline_rate: u16,
+        base_upline_levels: u8,
+        base_downline_levels: u8,
+        level_increment_threshold: u128,
+        max_upline_levels: u8,
+        max_downline_levels: u8,
+    ) -> Result<(), sp_runtime::DispatchError> {
+        frame_support::ensure!(
+            upline_rate <= 1000 && downline_rate <= 1000,
+            sp_runtime::DispatchError::Other("InvalidRate")
+        );
+        frame_support::ensure!(
+            base_upline_levels <= max_upline_levels,
+            sp_runtime::DispatchError::Other("BaseLevelsExceedMax")
+        );
+        frame_support::ensure!(
+            base_downline_levels <= max_downline_levels,
+            sp_runtime::DispatchError::Other("BaseLevelsExceedMax")
+        );
+
+        let threshold: pallet::BalanceOf<T> =
+            sp_runtime::SaturatedConversion::saturated_into(level_increment_threshold);
+
+        pallet::SingleLineConfigs::<T>::insert(
+            entity_id,
+            pallet::SingleLineConfig {
+                upline_rate,
+                downline_rate,
+                base_upline_levels,
+                base_downline_levels,
+                level_increment_threshold: threshold,
+                max_upline_levels,
+                max_downline_levels,
+            },
+        );
+        pallet::Pallet::<T>::deposit_event(pallet::Event::SingleLineConfigUpdated { entity_id });
+        Ok(())
+    }
+
+    fn clear_config(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
+        if pallet::SingleLineConfigs::<T>::contains_key(entity_id) {
+            pallet::SingleLineConfigs::<T>::remove(entity_id);
+            pallet::Pallet::<T>::deposit_event(pallet::Event::SingleLineConfigCleared { entity_id });
+        }
+        Ok(())
     }
 }

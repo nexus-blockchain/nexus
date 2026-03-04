@@ -86,6 +86,10 @@ pub trait Config: frame_system::Config {
     type StatsProvider: SingleLineStatsProvider<Self::AccountId, BalanceOf<Self>>;
     /// 查询买家会员等级 ID（可选，用于按等级自定义层数）
     type MemberLevelProvider: SingleLineMemberLevelProvider<Self::AccountId>;
+    /// 实体查询接口（权限校验）
+    type EntityProvider: EntityProvider<Self::AccountId>;
+    /// 会员查询接口（is_banned 检查）
+    type MemberProvider: MemberProvider<Self::AccountId>;
     #[pallet::constant]
     type MaxSingleLineLength: Get<u32>;
 }
@@ -124,11 +128,21 @@ pub trait SingleLineMemberLevelProvider<AccountId> {
 
 | call_index | 方法 | 权限 | 说明 |
 |------------|------|------|------|
-| 0 | `set_single_line_config` | Root | 设置单线收益配置 |
-| 1 | `set_level_based_levels` | Root | 设置按等级自定义层数 |
-| 2 | `remove_level_based_levels` | Root | 移除按等级自定义层数 |
+| 0 | `set_single_line_config` | Owner/Admin | 设置单线收益配置 |
+| 1 | `clear_single_line_config` | Owner/Admin | 清除单线收益配置 |
+| 2 | `force_set_single_line_config` | Root | 强制设置单线收益配置（无权限检查） |
+| 3 | `force_clear_single_line_config` | Root | 强制清除单线收益配置 |
+| 4 | `set_level_based_levels` | Owner/Admin | 设置按等级自定义层数 |
+| 5 | `remove_level_based_levels` | Owner/Admin | 移除按等级自定义层数 |
+| 6 | `update_single_line_params` | Owner/Admin | 部分更新配置参数（upline_rate/downline_rate/threshold） |
 
 > `upline_rate` 和 `downline_rate` 上限为 1000 基点（10%），建议设置 5-10 基点（0.05%-0.1%）避免资金压力。
+
+### 权限模型
+
+- **Owner/Admin**: Entity 所有者或拥有 `COMMISSION_MANAGE` 权限的管理员可调用 set/clear/update/set_level/remove_level
+- **Root**: `force_set` 和 `force_clear` 仅限 Root 调用，无 entity 权限检查
+- 被封禁会员（`is_banned`）在佣金计算时自动跳过（消耗层数但不发放）
 
 ## 计算逻辑
 
@@ -158,12 +172,14 @@ CommissionPlugin::calculate()
 
 - **`CommissionPlugin`** — 由 core 调度引擎调用，配置和单链均按 `entity_id` 查询（跨店共享单链）
 - **`TokenCommissionPlugin`** — Token 多资产返佣计算
+- **`SingleLinePlanWriter`** — 治理集成接口，支持通过提案设置/清除配置
 
 ## Events
 
 | 事件 | 说明 |
 |------|------|
 | `SingleLineConfigUpdated` | 单线收益配置更新 |
+| `SingleLineConfigCleared` | 单线收益配置已清除 |
 | `AddedToSingleLine` | 用户加入单链（entity_id, account, index） |
 | `SingleLineJoinFailed` | 单链加入失败（链已满） |
 | `LevelBasedLevelsUpdated` | 按等级自定义层数已更新 |
@@ -177,6 +193,10 @@ CommissionPlugin::calculate()
 | `SingleLineFull` | 消费单链已满 |
 | `InvalidLevels` | upline_levels 和 downline_levels 不能同时为 0 |
 | `BaseLevelsExceedMax` | base_upline_levels > max_upline_levels 或 base_downline_levels > max_downline_levels |
+| `EntityNotFound` | 实体不存在 |
+| `NotEntityOwnerOrAdmin` | 调用者非 Entity Owner 或 Admin |
+| `ConfigNotFound` | 配置不存在（clear/update 时） |
+| `NothingToUpdate` | update_single_line_params 无参数待更新 |
 
 ## 审计记录
 
@@ -193,11 +213,22 @@ CommissionPlugin::calculate()
 | M1-R3 | Medium | 同 M3-R2 的实施轮次: NEX + Token 共 4 个 process 函数签名均增加 `line: &[T::AccountId]` 参数，消除冗余存储读取 |
 | L5-R3 | Low | Token 版 `_token` 函数与 NEX 版逻辑大量重复（~170 行）。修复: `process_upline`/`process_downline` 泛型化为 `<B: AtLeast32BitUnsigned + Copy>`，删除 `process_upline_token`/`process_downline_token`；新增 `do_calculate<B>` 统一分发，`calculate`/`calculate_token` 各委托一行 |
 
+### P0/P1 重构记录
+
+| ID | 级别 | 描述 |
+|----|------|------|
+| P0-权限 | 重构 | 权限下放: set/set_level/remove_level 从 Root 改为 Owner/Admin signed origin，新增 ensure_owner_or_admin 检查 |
+| P0-clear | 新增 | `clear_single_line_config` (Owner/Admin) + `force_clear_single_line_config` (Root) |
+| P0-force | 新增 | `force_set_single_line_config` (Root) — 无权限检查的配置设置 |
+| P0-ban | 新增 | process_upline/process_downline 跳过 is_banned 受益人（消耗层数但不发佣金） |
+| P1-update | 新增 | `update_single_line_params` 部分更新（upline_rate/downline_rate/threshold） |
+| P1-writer | 新增 | `SingleLinePlanWriter` trait 实现，支持治理提案设置/清除配置 |
+
 ### 记录但未修复
 
 | ID | 级别 | 描述 |
 |----|------|------|
-| L4-D | Low | 3 个 extrinsic 硬编码 Weight，无 WeightInfo trait |
+| L4-D | Low | extrinsic 硬编码 Weight，无 WeightInfo trait |
 
 ## 依赖
 

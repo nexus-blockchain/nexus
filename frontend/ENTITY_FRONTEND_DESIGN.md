@@ -1106,7 +1106,7 @@ NEXT_PUBLIC_CHAIN_NAME=Nexus Testnet
 |--------|------|---------------|------|
 | `pallet-entity-registry` | 实体注册 | 18 | Owner/Admin/Governance |
 | `pallet-entity-shop` | 店铺管理 | 14 | Owner/Admin/Manager |
-| `pallet-entity-service` | 商品管理 | 5 | Owner/Admin |
+| `pallet-entity-product` | 商品管理 | 5 | Owner/Admin |
 | `pallet-entity-order` | 订单管理 | 9 | Buyer/Seller |
 | `pallet-entity-review` | 评价管理 | 2 | Buyer/Admin |
 | `pallet-entity-token` | 代币管理 | 16 | Owner/Admin/User |

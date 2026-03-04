@@ -14,7 +14,12 @@ thread_local! {
     static REFERRERS: RefCell<BTreeMap<(u64, u64), u64>> = RefCell::new(BTreeMap::new());
     static MEMBER_STATS: RefCell<BTreeMap<(u64, u64), (u32, u32, u128)>> = RefCell::new(BTreeMap::new());
     static MEMBER_SPENT_USDT: RefCell<BTreeMap<(u64, u64), u64>> = RefCell::new(BTreeMap::new());
-    static ACTIVATED: RefCell<BTreeMap<(u64, u64), bool>> = RefCell::new(BTreeMap::new());
+    static BANNED_MEMBERS: RefCell<BTreeMap<(u64, u64), bool>> = RefCell::new(BTreeMap::new());
+    static ENTITY_OWNERS: RefCell<BTreeMap<u64, u64>> = RefCell::new(BTreeMap::new());
+    static ENTITY_ADMINS: RefCell<BTreeMap<(u64, u64), u32>> = RefCell::new(BTreeMap::new());
+    static NON_MEMBERS: RefCell<BTreeMap<(u64, u64), bool>> = RefCell::new(BTreeMap::new());
+    static INACTIVE_ENTITIES: RefCell<BTreeMap<u64, bool>> = RefCell::new(BTreeMap::new());
+    static ENTITY_LOCKED: RefCell<BTreeMap<u64, bool>> = RefCell::new(BTreeMap::new());
 }
 
 pub fn set_referrer(entity_id: u64, account: u64, referrer: u64) {
@@ -35,17 +40,40 @@ pub fn set_spent_usdt(entity_id: u64, account: u64, usdt: u64) {
     });
 }
 
-pub fn set_activated(entity_id: u64, account: u64, active: bool) {
-    ACTIVATED.with(|a| {
-        a.borrow_mut().insert((entity_id, account), active);
-    });
+pub fn ban_member(entity_id: u64, account: u64) {
+    BANNED_MEMBERS.with(|b| { b.borrow_mut().insert((entity_id, account), true); });
+}
+
+pub fn set_entity_owner(entity_id: u64, owner: u64) {
+    ENTITY_OWNERS.with(|o| { o.borrow_mut().insert(entity_id, owner); });
+}
+
+pub fn set_entity_admin(entity_id: u64, admin: u64, perm: u32) {
+    ENTITY_ADMINS.with(|a| { a.borrow_mut().insert((entity_id, admin), perm); });
+}
+
+pub fn set_non_member(entity_id: u64, account: u64) {
+    NON_MEMBERS.with(|n| { n.borrow_mut().insert((entity_id, account), true); });
+}
+
+pub fn set_entity_inactive(entity_id: u64) {
+    INACTIVE_ENTITIES.with(|e| { e.borrow_mut().insert(entity_id, true); });
+}
+
+pub fn set_entity_locked(entity_id: u64) {
+    ENTITY_LOCKED.with(|l| { l.borrow_mut().insert(entity_id, true); });
 }
 
 pub fn clear_thread_locals() {
     REFERRERS.with(|r| r.borrow_mut().clear());
     MEMBER_STATS.with(|s| s.borrow_mut().clear());
     MEMBER_SPENT_USDT.with(|s| s.borrow_mut().clear());
-    ACTIVATED.with(|a| a.borrow_mut().clear());
+    BANNED_MEMBERS.with(|b| b.borrow_mut().clear());
+    ENTITY_OWNERS.with(|o| o.borrow_mut().clear());
+    ENTITY_ADMINS.with(|a| a.borrow_mut().clear());
+    NON_MEMBERS.with(|n| n.borrow_mut().clear());
+    INACTIVE_ENTITIES.with(|e| e.borrow_mut().clear());
+    ENTITY_LOCKED.with(|l| l.borrow_mut().clear());
 }
 
 /// 设置线性推荐链: buyer -> r1 -> r2 -> r3 -> ...
@@ -64,7 +92,9 @@ pub fn setup_chain(entity_id: u64, buyer: u64, referrers: &[u64]) {
 pub struct MockMemberProvider;
 
 impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
-    fn is_member(_: u64, _: &u64) -> bool { true }
+    fn is_member(entity_id: u64, account: &u64) -> bool {
+        NON_MEMBERS.with(|n| !n.borrow().get(&(entity_id, *account)).copied().unwrap_or(false))
+    }
     fn get_referrer(entity_id: u64, account: &u64) -> Option<u64> {
         REFERRERS.with(|r| r.borrow().get(&(entity_id, *account)).copied())
     }
@@ -86,8 +116,39 @@ impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
         MEMBER_SPENT_USDT.with(|s| s.borrow().get(&(entity_id, *account)).copied().unwrap_or(0))
     }
     fn auto_register_qualified(_: u64, _: &u64, _: Option<u64>, _: bool) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
-    fn is_activated(entity_id: u64, account: &u64) -> bool {
-        ACTIVATED.with(|a| a.borrow().get(&(entity_id, *account)).copied().unwrap_or(true))
+    fn is_banned(entity_id: u64, account: &u64) -> bool {
+        BANNED_MEMBERS.with(|b| b.borrow().get(&(entity_id, *account)).copied().unwrap_or(false))
+    }
+}
+
+// ============================================================================
+// MockEntityProvider
+// ============================================================================
+
+pub struct MockEntityProvider;
+
+impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
+    fn entity_exists(entity_id: u64) -> bool {
+        ENTITY_OWNERS.with(|o| o.borrow().contains_key(&entity_id))
+    }
+    fn is_entity_active(entity_id: u64) -> bool {
+        INACTIVE_ENTITIES.with(|e| !e.borrow().get(&entity_id).copied().unwrap_or(false))
+    }
+    fn entity_status(_entity_id: u64) -> Option<pallet_entity_common::EntityStatus> { None }
+    fn entity_owner(entity_id: u64) -> Option<u64> {
+        ENTITY_OWNERS.with(|o| o.borrow().get(&entity_id).copied())
+    }
+    fn entity_account(_entity_id: u64) -> u64 { 0 }
+    fn update_entity_stats(_entity_id: u64, _sales_amount: u128, _order_count: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+    fn is_entity_admin(entity_id: u64, account: &u64, required: u32) -> bool {
+        ENTITY_ADMINS.with(|a| {
+            a.borrow().get(&(entity_id, *account))
+                .map(|perm| perm & required == required)
+                .unwrap_or(false)
+        })
+    }
+    fn is_entity_locked(entity_id: u64) -> bool {
+        ENTITY_LOCKED.with(|l| l.borrow().get(&entity_id).copied().unwrap_or(false))
     }
 }
 
@@ -112,7 +173,9 @@ parameter_types! {
 }
 
 impl pallet_commission_multi_level::Config for Test {
+    type RuntimeEvent = RuntimeEvent;
     type MemberProvider = MockMemberProvider;
+    type EntityProvider = MockEntityProvider;
     type MaxMultiLevels = MaxMultiLevels;
     type WeightInfo = ();
 }
