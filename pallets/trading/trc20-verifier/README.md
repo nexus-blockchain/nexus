@@ -98,12 +98,21 @@ pub fn verify_trc20_transaction(
 ```rust
 pub enum VerificationError {
     HttpRequestFailed(&'static str),   // HTTP 请求失败
-    InvalidJson,                        // JSON 解析失败
-    InvalidUtf8,                        // UTF-8 解码失败
-    AllEndpointsFailed,                 // 所有端点均失败
-    RateLimited,                        // 速率限制中
+    HttpSendFailed,                    // HTTP 发送失败
+    HttpTimeout,                       // HTTP 超时
+    HttpBadStatus(u16),                // HTTP 非 200 状态码
+    EmptyResponse,                     // 响应体为空
+    InvalidJson,                       // JSON 解析失败
+    InvalidUtf8,                       // UTF-8 解码失败
+    AllEndpointsFailed,                // 所有端点均失败
+    NoEndpoints,                       // 无可用端点
+    RateLimited,                       // 速率限制中
     InvalidEndpointUrl(&'static str),  // 端点 URL 校验失败
     MaxEndpointsReached,               // 端点数量超限
+    InvalidTronAddress(&'static str),  // TRON 地址格式无效 (C2)
+    TimestampTooOld,                   // 时间戳超出最大回溯窗口 (C3)
+    InvalidConfig(&'static str),       // 配置参数无效 (H1)
+    VerificationLocked,                // OCW 验证锁冲突 (M1)
 }
 ```
 
@@ -172,12 +181,14 @@ impl AmountStatus {
 
 ```rust
 pub struct VerifierConfig {
-    pub usdt_contract: Option<String>,       // 覆盖 USDT 合约地址
-    pub min_confirmations: Option<u32>,      // 覆盖最小确认数
-    pub rate_limit_interval_ms: u64,         // 请求间隔（默认 200ms）
-    pub cache_ttl_ms: u64,                   // 响应缓存 TTL（默认 30s）
-    pub max_pages: u32,                      // 分页上限（默认 3）
+    pub usdt_contract: String,               // USDT 合约地址（默认 TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t）
+    pub min_confirmations: u32,              // 最小确认数（默认 19，校验 ≥ 10）
+    pub rate_limit_interval_ms: u64,         // 请求间隔（默认 200ms，校验 0 或 ≥ 50）
+    pub cache_ttl_ms: u64,                   // 响应缓存 TTL（默认 30s，校验 0 或 ≥ 1000）
+    pub max_pages: u32,                      // 分页上限（默认 3，校验 1..=10）
     pub audit_log_retention: u32,            // 审计日志保留条数（默认 100）
+    pub max_lookback_ms: u64,               // 最大回溯窗口（默认 72h=259200000，校验 0 或 ≥ 1h）
+    pub updated_at: u64,                     // 最后更新时间戳
 }
 ```
 
@@ -187,13 +198,13 @@ pub struct VerifierConfig {
 
 ```rust
 pub struct EndpointConfig {
-    pub endpoints: Vec<String>,      // 端点 URL 列表
-    pub parallel_mode: bool,         // 是否并行竞速（默认 true）
-    pub updated_at: u64,             // 最后更新时间
-    pub api_keys: Vec<String>,       // 每个端点的 API Key（索引对应）
-    pub timeout_ms: Option<u64>,     // 覆盖串行超时
-    pub timeout_race_ms: Option<u64>,// 覆盖竞速超时
-    pub priority_boosts: Vec<i32>,   // 端点评分加成（索引对应）
+    pub endpoints: Vec<String>,               // 端点 URL 列表
+    pub parallel_mode: bool,                  // 是否并行竞速（默认 true）
+    pub updated_at: u64,                      // 最后更新时间
+    pub api_keys: Vec<(String, String)>,      // (endpoint, api_key) 对
+    pub timeout_ms: u64,                      // 串行超时（默认 10000ms）
+    pub timeout_race_ms: u64,                 // 竞速超时（默认 5000ms）
+    pub priority_boosts: Vec<(String, i32)>,  // (endpoint, boost) 评分加成对
 }
 ```
 
@@ -204,7 +215,7 @@ pub struct EndpointConfig {
 | 函数 | 说明 |
 |------|------|
 | `add_endpoint(url)` | 添加端点（HTTPS 校验 + 最大 10 个限制） |
-| `remove_endpoint(url)` | 移除端点 |
+| `remove_endpoint(url)` | 移除端点（同时清理 api_key 和 priority_boost） |
 | `get_sorted_endpoints()` | 按健康评分+优先级降序排列 |
 | `reset_endpoint_health(endpoint)` | 重置指定端点健康数据 |
 | `get_all_endpoint_diagnostics()` | 批量获取所有端点诊断信息 |
@@ -272,12 +283,15 @@ pub struct AuditLogEntry {
     pub actual_amount: u64,
     pub result_ok: bool,
     pub error_msg: Vec<u8>,
+    pub tx_hash: Vec<u8>,          // 匹配到的交易哈希 (M5)
+    pub endpoint_used: Vec<u8>,    // 使用的端点 (M5)
+    pub duration_ms: u64,          // 验证耗时（毫秒）(M5)
 }
 ```
 
 | 函数 | 说明 |
 |------|------|
-| `get_audit_logs()` | 获取所有审计日志 |
+| `get_recent_audit_logs(max_count)` | 获取最近 N 条审计日志 |
 | `write_audit_log(entry)` | 写入日志（自动截断至 `audit_log_retention`） |
 
 ---
@@ -345,6 +359,8 @@ pub struct AuditLogEntry {
 | **最大端点数** | 限制 10 个，防存储膨胀 |
 | **故障隔离** | 单端点失败不影响其他端点 |
 | **速率限制** | 全局请求间隔防 API 限流 |
+| **OCW 并发锁** | 防止同一 from→to 并发验证 |
+| **配置安全验证** | `save_verifier_config` 校验所有参数范围 |
 
 ---
 
@@ -354,17 +370,25 @@ pub struct AuditLogEntry {
 cargo test -p pallet-trading-trc20-verifier
 ```
 
-覆盖范围（45 个测试）：
+覆盖范围（105 个测试）：
 
 **基础工具** — `bytes_to_hex`, `hex_to_bytes`（含 0x 前缀），边界值
 
-**端点健康** — 评分公式（默认/高成功率/慢响应）
+**端点健康** — 评分公式（默认/高成功率/慢响应），窗口化半衰（M2），端点移除清理（M1）
 
 **JSON 解析 (lite-json)** — `json_find_str`, `json_has_str_value` 精确匹配, `extract_amount`, `extract_json_string_value`, `extract_json_number`, `find_matching_brace`
 
 **转账搜索** — 精确匹配 / 多付 / 少付 / 严重少付 / from 不匹配 / 空数组 / API failure / 多笔累加 / 非 USDT 合约忽略 / JSON 字符串中的 `{}` 特殊字符
 
-**审计回归** — H1 Base58 匹配, H6 发送方校验, H7 expected=0, H8 端点校验, C1 精确字段匹配, C2 字段名提取, M2 大金额不溢出, M5 lite-json 替代, M8 极端值防回绕, L1 最大单笔跟踪, L2 expected=0, L6 0x 前缀
+**配置校验** — 最小确认数 / 速率限制 / 回溯窗口 / 缓存 TTL / 分页上限 / 审计日志保留量 / USDT 合约地址 / 默认通过
+
+**OCW 并发锁** — 获取/释放/不同 ID 独立
+
+**监控指标** — 默认值 / 记录 / 重置
+
+**缓存清理** — 注册+清理 / 容量淘汰
+
+**审计回归** — H1 Base58 匹配, H6 发送方校验, H7 expected=0, H8 端点校验, C1 精确字段匹配, C2 字段名提取/地址校验, C3 回溯窗口, M2 大金额不溢出, M5 lite-json 替代, M8 极端值防回绕, L1 最大单笔跟踪, L2 expected=0, L6 0x 前缀, H1-R1 锁释放, M2-R1 配置校验, H1-R2 审计日志保留量校验, M2-R2 is_acceptable 辅助方法, H1-R3 API Key 精确匹配(防前缀泄漏), M1-R3 EMA 溢出保护, M2-R3 set_api_key 端点验证, M1-R4 set_endpoint_priority_boost 端点验证, M2-R4 get_recent_audit_logs 迭代限制, M3-R4 merge_transfer_results tx_hash 去重, M4-R4 精确 token_info.address 合约检查
 
 ---
 
@@ -386,6 +410,10 @@ cargo test -p pallet-trading-trc20-verifier
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
+| v0.3.4 | 2026-03 | **审计 Round 4**: M1-R4 set_endpoint_priority_boost 验证端点存在(与 M2-R3 对齐), M2-R4 get_recent_audit_logs 迭代次数限制(防大 max_count DoS), M3-R4 merge_transfer_results 按 tx_hash 去重(防分页重叠金额膨胀), M4-R4 精确 token_info.address 合约检查(替代全树搜索), L1-R4 文档修正 |
+| v0.3.3 | 2026-03 | **审计 Round 3**: H1-R3 API Key 精确匹配(starts_with→==, 防前缀泄漏), M1-R3 EMA u64 中间计算(防 u32 溢出), M2-R3 set_api_key 验证端点存在(防孤立条目) |
+| v0.3.2 | 2026-03 | **审计 Round 2**: H1-R2 audit_log_retention 校验(≤10000), M1-R2 响应时间 saturating_sub(防 panic), M2-R2 est_conf 截断保护(.min(u32::MAX)), L1-R2 移除死代码 extract_confirmations |
+| v0.3.1 | 2026-03 | **审计修复**: H1-R1 OCW 锁泄漏(错误路径不释放), M2-R1 配置校验增强(cache_ttl_ms/max_pages), M3-R1 审计日志 counter saturating_add |
 | v0.3.0 | 2026-03-04 | **重大增强**: VerificationError 枚举统一错误处理, VerifierConfig 运行时配置(合约/确认数/速率/缓存/分页/审计), EndpointConfig 增强(API Key/超时/优先级), TronVerifier trait 抽象, 分页支持(fingerprint), 速率限制+响应缓存, 审计日志, TransferSearchResult 增强(matched_transfers/remaining_amount/estimated_confirmations/truncated), AmountStatus.is_acceptable()+to_verification_result_name(), 端点健康重置+批量诊断, lite-json 结构化解析, 端点最大数量限制(10), 废弃 verify_trc20_transaction |
 | v0.2.0 | 2026-02-23 | 新增 `verify_trc20_by_transfer`、`TransferSearchResult`、`parse_trc20_transfer_list`、JSON 工具函数 |
 | v0.1.0 | 2026-02-08 | 从 `pallet-trading-swap/src/ocw.rs` 提取为独立共享库 |

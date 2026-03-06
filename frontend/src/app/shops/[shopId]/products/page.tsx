@@ -31,14 +31,22 @@ export default function ProductsPage({ params }: { params: Promise<{ shopId: str
         </Button>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-5">
         <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Total Products</CardTitle></CardHeader>
+          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Total</CardTitle></CardHeader>
           <CardContent><p className="text-2xl font-bold">{products.length}</p></CardContent>
         </Card>
         <Card>
-          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Active</CardTitle></CardHeader>
-          <CardContent><p className="text-2xl font-bold">{products.filter((p) => p.status === "Active").length}</p></CardContent>
+          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">On Sale</CardTitle></CardHeader>
+          <CardContent><p className="text-2xl font-bold text-green-600">{products.filter((p) => p.status === "OnSale").length}</p></CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Draft</CardTitle></CardHeader>
+          <CardContent><p className="text-2xl font-bold text-muted-foreground">{products.filter((p) => p.status === "Draft").length}</p></CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Sold Out</CardTitle></CardHeader>
+          <CardContent><p className="text-2xl font-bold text-red-600">{products.filter((p) => p.status === "SoldOut").length}</p></CardContent>
         </Card>
         <Card>
           <CardHeader className="pb-2"><CardTitle className="text-sm font-medium">Total Sales</CardTitle></CardHeader>
@@ -88,8 +96,9 @@ export default function ProductsPage({ params }: { params: Promise<{ shopId: str
                   <span className="text-muted-foreground">Sales</span>
                   <span>{product.salesCount}</span>
                 </div>
-                <div className="flex items-center gap-1">
-                  {product.isDigital && <Badge variant="secondary" className="text-xs">Digital</Badge>}
+                <div className="flex items-center gap-1 flex-wrap">
+                  <Badge variant="secondary" className="text-[10px]">{product.category}</Badge>
+                  <Badge variant="outline" className="text-[10px]">{product.visibility}</Badge>
                 </div>
                 <div className="flex gap-2 pt-2">
                   <Button variant="outline" size="sm" asChild className="flex-1">

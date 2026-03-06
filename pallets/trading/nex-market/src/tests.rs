@@ -1,5 +1,5 @@
 use crate::{mock::*, pallet::*};
-use frame_support::{assert_noop, assert_ok, traits::Hooks, weights::Weight};
+use frame_support::{assert_noop, assert_ok, traits::{Currency, Hooks}, weights::Weight};
 use sp_runtime::traits::{ValidateUnsigned, Zero};
 use sp_runtime::transaction_validity::TransactionSource;
 
@@ -2317,5 +2317,964 @@ fn m7_tx_hash_gc_cleans_expired_entries() {
 
         // tx_hash 应已被清理
         assert!(!UsedTxHashes::<Test>::contains_key(&hash));
+    });
+}
+
+// ==================== P0 #6: 紧急暂停市场 ====================
+
+#[test]
+fn force_pause_market_blocks_trading() {
+    new_test_ext().execute_with(|| {
+        let nex = 100_000_000_000_000u128;
+        let price = 500_000u64;
+
+        // 暂停市场
+        assert_ok!(NexMarket::force_pause_market(RuntimeOrigin::root()));
+        assert!(NexMarket::market_paused());
+
+        // 挂单被拒绝
+        assert_noop!(
+            NexMarket::place_sell_order(RuntimeOrigin::signed(ALICE), nex, price, tron_address()),
+            Error::<Test>::MarketIsPaused,
+        );
+
+        // 恢复后可以挂单
+        assert_ok!(NexMarket::force_resume_market(RuntimeOrigin::root()));
+        assert!(!NexMarket::market_paused());
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+        ));
+    });
+}
+
+#[test]
+fn force_pause_blocks_buy_order() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        assert_ok!(NexMarket::force_pause_market(RuntimeOrigin::root()));
+
+        assert_noop!(
+            NexMarket::place_buy_order(
+                RuntimeOrigin::signed(BOB), 100_000_000_000_000u128, 500_000, buyer_tron(),
+            ),
+            Error::<Test>::MarketIsPaused,
+        );
+    });
+}
+
+#[test]
+fn force_pause_blocks_reserve_sell_order() {
+    new_test_ext().execute_with(|| {
+        let nex = 100_000_000_000_000u128;
+        let price = 500_000u64;
+
+        // 先挂单
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+        ));
+
+        // 暂停后无法吃单
+        assert_ok!(NexMarket::force_pause_market(RuntimeOrigin::root()));
+        assert_noop!(
+            NexMarket::reserve_sell_order(
+                RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
+            ),
+            Error::<Test>::MarketIsPaused,
+        );
+    });
+}
+
+// ==================== P0 #7: 管理员强制结算/取消交易 ====================
+
+/// 辅助函数：创建一个 AwaitingPayment 状态的交易
+fn setup_awaiting_payment_trade() -> u64 {
+    setup_seed_price();
+    let nex = 100_000_000_000_000u128;
+    let price = 500_000u64;
+
+    assert_ok!(NexMarket::place_sell_order(
+        RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+    ));
+    assert_ok!(NexMarket::reserve_sell_order(
+        RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
+    ));
+    0 // trade_id
+}
+
+#[test]
+fn force_cancel_trade_refunds_both_parties() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+
+        let alice_reserved_before = Balances::reserved_balance(ALICE);
+        let bob_reserved_before = Balances::reserved_balance(BOB);
+
+        assert_ok!(NexMarket::force_cancel_trade(RuntimeOrigin::root(), trade_id));
+
+        let trade = NexMarket::usdt_trades(trade_id).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Refunded);
+
+        // NEX 退还给卖家
+        assert!(Balances::reserved_balance(ALICE) < alice_reserved_before);
+        // 保证金退还给买家
+        assert!(Balances::reserved_balance(BOB) < bob_reserved_before);
+    });
+}
+
+#[test]
+fn force_cancel_trade_rejects_completed() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+
+        // 强制取消
+        assert_ok!(NexMarket::force_cancel_trade(RuntimeOrigin::root(), trade_id));
+
+        // 不能重复取消
+        assert_noop!(
+            NexMarket::force_cancel_trade(RuntimeOrigin::root(), trade_id),
+            Error::<Test>::InvalidTradeStatus,
+        );
+    });
+}
+
+#[test]
+fn force_settle_trade_release_to_buyer() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+
+        // confirm_payment 进入 AwaitingVerification
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), trade_id));
+
+        let buyer_free_before = Balances::free_balance(BOB);
+
+        assert_ok!(NexMarket::force_settle_trade(
+            RuntimeOrigin::root(), trade_id, 50_000_000, DisputeResolution::ReleaseToBuyer,
+        ));
+
+        let trade = NexMarket::usdt_trades(trade_id).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Completed);
+        // 买家收到 NEX
+        assert!(Balances::free_balance(BOB) > buyer_free_before);
+    });
+}
+
+#[test]
+fn force_settle_trade_refund_to_seller() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), trade_id));
+
+        let alice_reserved_before = Balances::reserved_balance(ALICE);
+
+        assert_ok!(NexMarket::force_settle_trade(
+            RuntimeOrigin::root(), trade_id, 0, DisputeResolution::RefundToSeller,
+        ));
+
+        let trade = NexMarket::usdt_trades(trade_id).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Refunded);
+        // NEX 退还给卖家
+        assert!(Balances::reserved_balance(ALICE) < alice_reserved_before);
+    });
+}
+
+// ==================== P0 #1: 争议仲裁 ====================
+
+#[test]
+fn dispute_trade_works() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+
+        // 先让交易超时变成 Refunded
+        System::set_block_number(10000);
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), trade_id));
+
+        let trade = NexMarket::usdt_trades(trade_id).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Refunded);
+
+        // 买家发起争议
+        let evidence = b"QmTestCid12345".to_vec();
+        assert_ok!(NexMarket::dispute_trade(
+            RuntimeOrigin::signed(BOB), trade_id, evidence.clone(),
+        ));
+
+        let dispute = NexMarket::trade_disputes(trade_id).unwrap();
+        assert_eq!(dispute.status, DisputeStatus::Open);
+        assert_eq!(dispute.initiator, BOB);
+    });
+}
+
+#[test]
+fn dispute_trade_rejects_non_participant() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        System::set_block_number(10000);
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), trade_id));
+
+        assert_noop!(
+            NexMarket::dispute_trade(
+                RuntimeOrigin::signed(CHARLIE), trade_id, b"QmTest".to_vec(),
+            ),
+            Error::<Test>::NotTradeParticipant,
+        );
+    });
+}
+
+#[test]
+fn dispute_trade_rejects_non_refunded() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+
+        assert_noop!(
+            NexMarket::dispute_trade(
+                RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
+            ),
+            Error::<Test>::TradeNotDisputable,
+        );
+    });
+}
+
+#[test]
+fn dispute_trade_rejects_duplicate() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        System::set_block_number(10000);
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), trade_id));
+
+        assert_ok!(NexMarket::dispute_trade(
+            RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
+        ));
+
+        assert_noop!(
+            NexMarket::dispute_trade(
+                RuntimeOrigin::signed(ALICE), trade_id, b"QmTest2".to_vec(),
+            ),
+            Error::<Test>::TradeAlreadyDisputed,
+        );
+    });
+}
+
+#[test]
+fn resolve_dispute_release_to_buyer() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        System::set_block_number(10000);
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), trade_id));
+
+        assert_ok!(NexMarket::dispute_trade(
+            RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
+        ));
+
+        let buyer_free_before = Balances::free_balance(BOB);
+        assert_ok!(NexMarket::resolve_dispute(
+            RuntimeOrigin::root(), trade_id, DisputeResolution::ReleaseToBuyer,
+        ));
+
+        let dispute = NexMarket::trade_disputes(trade_id).unwrap();
+        assert_eq!(dispute.status, DisputeStatus::ResolvedForBuyer);
+        // 国库补偿 NEX 给买家
+        assert!(Balances::free_balance(BOB) > buyer_free_before);
+    });
+}
+
+#[test]
+fn resolve_dispute_refund_to_seller() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        System::set_block_number(10000);
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), trade_id));
+
+        assert_ok!(NexMarket::dispute_trade(
+            RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
+        ));
+
+        assert_ok!(NexMarket::resolve_dispute(
+            RuntimeOrigin::root(), trade_id, DisputeResolution::RefundToSeller,
+        ));
+
+        let dispute = NexMarket::trade_disputes(trade_id).unwrap();
+        assert_eq!(dispute.status, DisputeStatus::ResolvedForSeller);
+    });
+}
+
+#[test]
+fn resolve_dispute_rejects_already_closed() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        System::set_block_number(10000);
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), trade_id));
+
+        assert_ok!(NexMarket::dispute_trade(
+            RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
+        ));
+        assert_ok!(NexMarket::resolve_dispute(
+            RuntimeOrigin::root(), trade_id, DisputeResolution::RefundToSeller,
+        ));
+
+        assert_noop!(
+            NexMarket::resolve_dispute(
+                RuntimeOrigin::root(), trade_id, DisputeResolution::ReleaseToBuyer,
+            ),
+            Error::<Test>::DisputeAlreadyClosed,
+        );
+    });
+}
+
+// ==================== P1 #9: 手续费 ====================
+
+#[test]
+fn set_trading_fee_works() {
+    new_test_ext().execute_with(|| {
+        assert_eq!(NexMarket::trading_fee_bps(), 0);
+        assert_ok!(NexMarket::set_trading_fee(RuntimeOrigin::root(), 100)); // 1%
+        assert_eq!(NexMarket::trading_fee_bps(), 100);
+    });
+}
+
+#[test]
+fn set_trading_fee_rejects_over_max() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            NexMarket::set_trading_fee(RuntimeOrigin::root(), 1001),
+            Error::<Test>::FeeTooHigh,
+        );
+    });
+}
+
+// ==================== P1 #4: 最低交易金额 ====================
+
+#[test]
+fn place_sell_order_rejects_below_minimum() {
+    new_test_ext().execute_with(|| {
+        // MinOrderNexAmount = 1 NEX = 1_000_000_000_000
+        let too_small = 999_999_999_999u128;
+        assert_noop!(
+            NexMarket::place_sell_order(
+                RuntimeOrigin::signed(ALICE), too_small, 500_000, tron_address(),
+            ),
+            Error::<Test>::OrderAmountBelowMinimum,
+        );
+    });
+}
+
+#[test]
+fn place_buy_order_rejects_below_minimum() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let too_small = 999_999_999_999u128;
+        assert_noop!(
+            NexMarket::place_buy_order(
+                RuntimeOrigin::signed(BOB), too_small, 500_000, buyer_tron(),
+            ),
+            Error::<Test>::OrderAmountBelowMinimum,
+        );
+    });
+}
+
+// ==================== P2 #3: 订单修改 ====================
+
+#[test]
+fn update_order_price_works() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128;
+        let price = 500_000u64;
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+        ));
+
+        let new_price = 600_000u64;
+        assert_ok!(NexMarket::update_order_price(
+            RuntimeOrigin::signed(ALICE), 0, new_price,
+        ));
+
+        let order = NexMarket::orders(0).unwrap();
+        assert_eq!(order.usdt_price, new_price);
+    });
+}
+
+#[test]
+fn update_order_price_rejects_non_owner() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128;
+        let price = 500_000u64;
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+        ));
+
+        assert_noop!(
+            NexMarket::update_order_price(RuntimeOrigin::signed(BOB), 0, 600_000),
+            Error::<Test>::NotOrderOwner,
+        );
+    });
+}
+
+#[test]
+fn update_order_price_rejects_when_paused() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128;
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+        ));
+        assert_ok!(NexMarket::force_pause_market(RuntimeOrigin::root()));
+
+        assert_noop!(
+            NexMarket::update_order_price(RuntimeOrigin::signed(ALICE), 0, 600_000),
+            Error::<Test>::MarketIsPaused,
+        );
+    });
+}
+
+// ==================== P1 #8: 保证金动态汇率 ====================
+
+#[test]
+fn update_deposit_exchange_rate_works() {
+    new_test_ext().execute_with(|| {
+        // 默认无覆盖
+        assert_eq!(NexMarket::deposit_exchange_rate(), None);
+
+        // 设置新汇率
+        assert_ok!(NexMarket::update_deposit_exchange_rate(RuntimeOrigin::root(), 2_000_000));
+        assert_eq!(NexMarket::deposit_exchange_rate(), Some(2_000_000));
+
+        // 设为 0 恢复默认
+        assert_ok!(NexMarket::update_deposit_exchange_rate(RuntimeOrigin::root(), 0));
+        assert_eq!(NexMarket::deposit_exchange_rate(), None);
+    });
+}
+
+// ==================== P1 #2/#12: 交易历史+索引 ====================
+
+#[test]
+fn user_trades_indexed_on_create() {
+    new_test_ext().execute_with(|| {
+        let _trade_id = setup_awaiting_payment_trade();
+
+        // 卖家和买家都应该有交易记录
+        let alice_trades = NexMarket::user_trades(ALICE);
+        assert_eq!(alice_trades.len(), 1);
+        assert_eq!(alice_trades[0], 0);
+
+        let bob_trades = NexMarket::user_trades(BOB);
+        assert_eq!(bob_trades.len(), 1);
+        assert_eq!(bob_trades[0], 0);
+    });
+}
+
+#[test]
+fn order_trades_indexed_on_create() {
+    new_test_ext().execute_with(|| {
+        let _trade_id = setup_awaiting_payment_trade();
+
+        let trades = NexMarket::order_trades(0u64);
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0], 0);
+    });
+}
+
+#[test]
+fn get_user_trade_list_returns_trades() {
+    new_test_ext().execute_with(|| {
+        let _trade_id = setup_awaiting_payment_trade();
+
+        let trades = NexMarket::get_user_trade_list(&BOB);
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].trade_id, 0);
+    });
+}
+
+#[test]
+fn get_trades_by_order_works() {
+    new_test_ext().execute_with(|| {
+        let _trade_id = setup_awaiting_payment_trade();
+
+        let trades = NexMarket::get_trades_by_order(0);
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].trade_id, 0);
+    });
+}
+
+#[test]
+fn get_active_trades_filters_correctly() {
+    new_test_ext().execute_with(|| {
+        let _trade_id = setup_awaiting_payment_trade();
+
+        // AwaitingPayment → 活跃
+        let active = NexMarket::get_active_trades(&BOB);
+        assert_eq!(active.len(), 1);
+
+        // 超时后 → 不再活跃
+        System::set_block_number(10000);
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+        let active = NexMarket::get_active_trades(&BOB);
+        assert_eq!(active.len(), 0);
+    });
+}
+
+// ==================== 审计回归测试 ====================
+
+// ---- C1: resolve_dispute 传播国库转账失败 ----
+
+#[test]
+fn c1_resolve_dispute_fails_when_treasury_underfunded() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+
+        // 超时 → Refunded
+        System::set_block_number(10000);
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), trade_id));
+
+        // 发起争议
+        assert_ok!(NexMarket::dispute_trade(
+            RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
+        ));
+
+        // 掏空国库余额（Treasury=99）
+        let treasury_balance = Balances::free_balance(99u64);
+        // 转走国库资金使其不足以补偿 trade.nex_amount
+        let _ = <Balances as Currency<u64>>::transfer(
+            &99u64, &10u64, treasury_balance - 1, frame_support::traits::ExistenceRequirement::KeepAlive,
+        );
+
+        // 解决争议应失败（国库余额不足）
+        assert_noop!(
+            NexMarket::resolve_dispute(
+                RuntimeOrigin::root(), trade_id, DisputeResolution::ReleaseToBuyer,
+            ),
+            Error::<Test>::InsufficientBalance,
+        );
+
+        // 争议仍为 Open
+        let dispute = NexMarket::trade_disputes(trade_id).unwrap();
+        assert_eq!(dispute.status, DisputeStatus::Open);
+    });
+}
+
+// ---- H1: update_order_price 买单保证金重算 ----
+
+#[test]
+fn h1_update_buy_order_price_adjusts_deposit_upward() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        // 禁用价格保护以允许极端价差
+        assert_ok!(NexMarket::configure_price_protection(
+            RuntimeOrigin::root(), false, 0, 0, 0,
+        ));
+        // 500 NEX，低价 10 USDT/NEX → deposit=5 NEX → clamped to min=10 NEX
+        let nex = 500_000_000_000_000u128;
+        let low_price = 10_000_000u64;
+
+        assert_ok!(NexMarket::place_buy_order(
+            RuntimeOrigin::signed(BOB), nex, low_price, buyer_tron(),
+        ));
+
+        let order = NexMarket::orders(0).unwrap();
+        let old_deposit = order.buyer_deposit;
+        let bob_reserved_before = Balances::reserved_balance(BOB);
+
+        // 提高价格到 100 USDT/NEX → deposit=50 NEX > min
+        let high_price = 100_000_000u64;
+        assert_ok!(NexMarket::update_order_price(
+            RuntimeOrigin::signed(BOB), 0, high_price,
+        ));
+
+        let order_after = NexMarket::orders(0).unwrap();
+        assert!(order_after.buyer_deposit > old_deposit,
+            "deposit should increase: {} > {}", order_after.buyer_deposit, old_deposit);
+        assert!(Balances::reserved_balance(BOB) > bob_reserved_before,
+            "reserved should increase");
+    });
+}
+
+#[test]
+fn h1_update_buy_order_price_adjusts_deposit_downward() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        // 禁用价格保护
+        assert_ok!(NexMarket::configure_price_protection(
+            RuntimeOrigin::root(), false, 0, 0, 0,
+        ));
+        // 500 NEX，高价 100 USDT/NEX → deposit=50 NEX > min
+        let nex = 500_000_000_000_000u128;
+        let high_price = 100_000_000u64;
+
+        assert_ok!(NexMarket::place_buy_order(
+            RuntimeOrigin::signed(BOB), nex, high_price, buyer_tron(),
+        ));
+
+        let order = NexMarket::orders(0).unwrap();
+        let old_deposit = order.buyer_deposit;
+        let bob_reserved_before = Balances::reserved_balance(BOB);
+
+        // 降低价格到 10 USDT/NEX → deposit=5 NEX → clamped to min=10 NEX
+        let low_price = 10_000_000u64;
+        assert_ok!(NexMarket::update_order_price(
+            RuntimeOrigin::signed(BOB), 0, low_price,
+        ));
+
+        let order_after = NexMarket::orders(0).unwrap();
+        assert!(order_after.buyer_deposit < old_deposit,
+            "deposit should decrease: {} < {}", order_after.buyer_deposit, old_deposit);
+        assert!(Balances::reserved_balance(BOB) < bob_reserved_before,
+            "reserved should decrease");
+    });
+}
+
+#[test]
+fn h1_update_sell_order_price_no_deposit_change() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        // 禁用价格保护
+        assert_ok!(NexMarket::configure_price_protection(
+            RuntimeOrigin::root(), false, 0, 0, 0,
+        ));
+        let nex = 10_000_000_000_000u128;
+        let price = 500_000u64;
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+        ));
+
+        let alice_reserved = Balances::reserved_balance(ALICE);
+
+        // 卖单价格变更不影响 reserved（卖家锁的是 NEX，与价格无关）
+        assert_ok!(NexMarket::update_order_price(
+            RuntimeOrigin::signed(ALICE), 0, 100_000_000,
+        ));
+
+        assert_eq!(Balances::reserved_balance(ALICE), alice_reserved);
+    });
+}
+
+// ---- H2: rollback 跳过已过期订单 ----
+
+#[test]
+fn h2_rollback_skips_expired_order() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128;
+        let price = 500_000u64;
+
+        // Alice 挂卖单
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+        ));
+
+        // Bob 吃单（全量）→ 订单变 Filled，从订单簿移除
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
+        ));
+
+        let order = NexMarket::orders(0).unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+
+        // 推进到订单过期之后
+        System::set_block_number(order.expires_at.saturating_add(1u64.into()));
+
+        // 超时交易 → rollback_order_filled_amount
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+
+        // 订单应标记为 Expired，不应在订单簿中
+        let order_after = NexMarket::orders(0).unwrap();
+        assert_eq!(order_after.status, OrderStatus::Expired);
+
+        // 确认不在卖单簿中
+        let sell_orders = NexMarket::sell_orders();
+        assert!(!sell_orders.contains(&0));
+    });
+}
+
+// ---- M1: 最低吃单量检查 ----
+
+#[test]
+fn m1_reserve_sell_order_rejects_micro_fill() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128; // 100 NEX
+        let price = 500_000u64;
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+        ));
+
+        // 尝试吃 0.5 NEX（< MinOrderNexAmount = 1 NEX）
+        let micro_amount = 500_000_000_000u128;
+        assert_noop!(
+            NexMarket::reserve_sell_order(
+                RuntimeOrigin::signed(BOB), 0, Some(micro_amount), buyer_tron(),
+            ),
+            Error::<Test>::OrderAmountBelowMinimum,
+        );
+    });
+}
+
+#[test]
+fn m1_accept_buy_order_rejects_micro_fill() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128; // 100 NEX
+        let price = 500_000u64;
+
+        assert_ok!(NexMarket::place_buy_order(
+            RuntimeOrigin::signed(BOB), nex, price, buyer_tron(),
+        ));
+
+        // 尝试吃 0.5 NEX
+        let micro_amount = 500_000_000_000u128;
+        assert_noop!(
+            NexMarket::accept_buy_order(
+                RuntimeOrigin::signed(ALICE), 0, Some(micro_amount), tron_address(),
+            ),
+            Error::<Test>::OrderAmountBelowMinimum,
+        );
+    });
+}
+
+#[test]
+fn m1_reserve_sell_order_allows_tail_fill_below_minimum() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        // 挂一个刚好超过 1 NEX 的卖单
+        let nex = 1_500_000_000_000u128; // 1.5 NEX
+        let price = 500_000u64;
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+        ));
+
+        // 先吃 1 NEX → 剩余 0.5 NEX（低于最低限额）
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, Some(1_000_000_000_000u128), buyer_tron(),
+        ));
+
+        // 超时第一笔交易让 Bob 可以再吃单
+        System::set_block_number(10000);
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+
+        // 现在剩余 0.5 NEX < MinOrderNexAmount，尾单应该被允许
+        // 注意：需要使用不同买家或确保 BOB 可以再次吃单
+        // 使用 DAVE 作为新买家
+        // DAVE 需要余额
+        let _ = <Balances as Currency<u64>>::transfer(
+            &BOB, &DAVE, 100_000_000_000_000u128, frame_support::traits::ExistenceRequirement::KeepAlive,
+        );
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(DAVE), 0, None, buyer_tron(),
+        ));
+    });
+}
+
+// ==================== Round 2 审计回归测试 ====================
+
+// ---- H1-R2: rollback 不覆写 Cancelled 订单状态 ----
+
+#[test]
+fn h1r2_rollback_preserves_cancelled_order_status() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128; // 100 NEX
+        let price = 500_000u64;
+
+        // Alice 挂卖单
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+        ));
+
+        // Bob 部分吃单（50 NEX）→ 订单变 PartiallyFilled
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, Some(50_000_000_000_000u128), buyer_tron(),
+        ));
+        let order = NexMarket::orders(0).unwrap();
+        assert_eq!(order.status, OrderStatus::PartiallyFilled);
+
+        // Alice 取消订单 → 状态变 Cancelled
+        assert_ok!(NexMarket::cancel_order(RuntimeOrigin::signed(ALICE), 0));
+        let order = NexMarket::orders(0).unwrap();
+        assert_eq!(order.status, OrderStatus::Cancelled);
+
+        // Bob 的交易超时 → rollback_order_filled_amount
+        System::set_block_number(10000);
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+
+        // 订单状态应保持 Cancelled（不应被覆写为 Open）
+        let order_after = NexMarket::orders(0).unwrap();
+        assert_eq!(order_after.status, OrderStatus::Cancelled,
+            "Cancelled order should NOT be overwritten to Open by rollback");
+        // filled_amount 应已回退
+        assert!(order_after.filled_amount < 50_000_000_000_000u128);
+
+        // 确认不在卖单簿中
+        let sell_orders = NexMarket::sell_orders();
+        assert!(!sell_orders.contains(&0));
+    });
+}
+
+#[test]
+fn h1r2_rollback_preserves_expired_order_status_non_filled() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128;
+        let price = 500_000u64;
+
+        // Alice 挂卖单
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+        ));
+
+        // Bob 部分吃单
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, Some(50_000_000_000_000u128), buyer_tron(),
+        ));
+
+        let order = NexMarket::orders(0).unwrap();
+        let expires_at = order.expires_at;
+
+        // 推进到订单过期后 → on_idle GC 会标记为 Expired
+        System::set_block_number(expires_at + 1);
+        NexMarket::on_idle(expires_at + 1, Weight::from_parts(1_000_000_000_000, 100_000));
+
+        let order_after_gc = NexMarket::orders(0).unwrap();
+        assert_eq!(order_after_gc.status, OrderStatus::Expired);
+
+        // 现在 Bob 交易超时 → rollback
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+
+        // 订单状态应保持 Expired
+        let order_final = NexMarket::orders(0).unwrap();
+        assert_eq!(order_final.status, OrderStatus::Expired,
+            "Expired order should NOT be overwritten by rollback");
+    });
+}
+
+// ---- M1-R2: process_full_payment 手续费实际收取量 ----
+
+#[test]
+fn m1r2_fee_actually_charged_equals_nex_deducted() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        // 设置 1% 手续费
+        assert_ok!(NexMarket::set_trading_fee(RuntimeOrigin::root(), 100));
+
+        let nex = 100_000_000_000_000u128; // 100 NEX
+        let price = 500_000u64;
+
+        // Alice 挂卖单
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+        ));
+
+        // Bob 吃单
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
+        ));
+
+        // Bob confirm_payment
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
+
+        let bob_free_before = Balances::free_balance(BOB);
+        let treasury_free_before = Balances::free_balance(99u64);
+
+        // 模拟 OCW 提交验证结果（Exact）
+        assert_ok!(NexMarket::submit_ocw_result(
+            RuntimeOrigin::none(), 0, 50_000_000, None,
+        ));
+
+        // claim reward 完成交易
+        assert_ok!(NexMarket::claim_verification_reward(
+            RuntimeOrigin::signed(CHARLIE), 0,
+        ));
+
+        let bob_free_after = Balances::free_balance(BOB);
+        let treasury_free_after = Balances::free_balance(99u64);
+
+        // 1% of 100 NEX = 1 NEX = 1_000_000_000_000
+        let expected_fee = 1_000_000_000_000u128;
+        let treasury_received = treasury_free_after - treasury_free_before;
+        let bob_received = bob_free_after - bob_free_before;
+
+        assert_eq!(treasury_received, expected_fee,
+            "Treasury should receive exactly 1% fee");
+        // Bob should get 99 NEX (100 - 1 fee) + deposit refund
+        // Bob's deposit is also unreserved, so check NEX received >= 99 NEX
+        assert!(bob_received >= nex - expected_fee,
+            "Buyer should receive at least nex_amount - fee");
+    });
+}
+
+// ---- M2-R2: rollback 后 BestAsk/BestBid 刷新 ----
+
+#[test]
+fn m2r2_rollback_refreshes_best_ask() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128;
+        let price = 500_000u64; // 0.5 USDT/NEX
+
+        // Alice 挂卖单
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+        ));
+        assert_eq!(NexMarket::best_ask(), Some(price));
+
+        // Bob 全量吃单 → 订单变 Filled，从卖单簿移除
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
+        ));
+        let order = NexMarket::orders(0).unwrap();
+        assert_eq!(order.status, OrderStatus::Filled);
+
+        // BestAsk 应该已被清除（无其他卖单）
+        // 注意：remove_from_order_book 后 update_best_price_on_remove 可能已刷新
+        // 但由于没有其他卖单，BestAsk 应为 None 或保持旧值
+
+        // 超时交易 → rollback → 订单重新入簿
+        System::set_block_number(10000);
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+
+        // 订单重新入簿，BestAsk 应该被刷新为 price
+        let order_after = NexMarket::orders(0).unwrap();
+        assert!(
+            order_after.status == OrderStatus::Open || order_after.status == OrderStatus::Expired,
+            "Order should be Open (if not expired) or Expired"
+        );
+
+        // 如果订单未过期，BestAsk 应刷新
+        if order_after.status == OrderStatus::Open {
+            assert_eq!(NexMarket::best_ask(), Some(price),
+                "BestAsk should be refreshed after rollback re-adds order");
+        }
+    });
+}
+
+// ---- L1-R2: get_order_depth 不含过期订单 ----
+
+#[test]
+fn l1r2_order_depth_excludes_expired_orders() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128;
+        let price = 500_000u64;
+
+        // Alice 挂卖单
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+        ));
+
+        // 深度图应包含该卖单
+        let (asks, _bids) = NexMarket::get_order_depth();
+        assert_eq!(asks.len(), 1);
+
+        // 推进到过期后
+        let order = NexMarket::orders(0).unwrap();
+        System::set_block_number(order.expires_at + 1);
+
+        // 深度图不应包含过期订单
+        let (asks_after, _) = NexMarket::get_order_depth();
+        assert_eq!(asks_after.len(), 0,
+            "Expired orders should not appear in order depth");
     });
 }

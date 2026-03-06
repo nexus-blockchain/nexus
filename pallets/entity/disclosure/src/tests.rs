@@ -2,6 +2,7 @@
 
 use crate::{mock::*, pallet::*};
 use frame_support::{assert_noop, assert_ok, weights::Weight};
+use pallet_entity_common::EntityStatus;
 
 // ==================== configure_disclosure ====================
 
@@ -3074,5 +3075,1630 @@ fn entity_locked_allows_cleanup_disclosure_history() {
         assert_ok!(EntityDisclosure::cleanup_disclosure_history(
             RuntimeOrigin::signed(ALICE), ENTITY_ID, 0,
         ));
+    });
+}
+
+// ==================== F1: 批量内幕人员操作 ====================
+
+#[test]
+fn f1_batch_add_insiders_works() {
+    new_test_ext().execute_with(|| {
+        let batch = vec![
+            (ALICE, InsiderRole::Admin),
+            (BOB, InsiderRole::Auditor),
+        ];
+        assert_ok!(EntityDisclosure::batch_add_insiders(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, batch,
+        ));
+
+        let insiders = Insiders::<Test>::get(ENTITY_ID);
+        assert_eq!(insiders.len(), 2);
+        assert!(insiders.iter().any(|i| i.account == ALICE && i.role == InsiderRole::Admin));
+        assert!(insiders.iter().any(|i| i.account == BOB && i.role == InsiderRole::Auditor));
+
+        // 角色历史也应记录
+        assert_eq!(InsiderRoleHistory::<Test>::get(ENTITY_ID, ALICE).len(), 1);
+        assert_eq!(InsiderRoleHistory::<Test>::get(ENTITY_ID, BOB).len(), 1);
+
+        System::assert_has_event(RuntimeEvent::EntityDisclosure(
+            Event::InsidersBatchAdded { entity_id: ENTITY_ID, count: 2 }
+        ));
+    });
+}
+
+#[test]
+fn f1_batch_add_insiders_rejects_empty() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::batch_add_insiders(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, vec![],
+            ),
+            Error::<Test>::EmptyBatch
+        );
+    });
+}
+
+#[test]
+fn f1_batch_add_insiders_rejects_duplicate() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Admin,
+        ));
+        assert_noop!(
+            EntityDisclosure::batch_add_insiders(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                vec![(ALICE, InsiderRole::Auditor)],
+            ),
+            Error::<Test>::InsiderExists
+        );
+    });
+}
+
+#[test]
+fn f1_batch_add_insiders_rejects_full() {
+    new_test_ext().execute_with(|| {
+        // MaxInsiders = 5, add 5 individually first
+        for i in 10u64..15 {
+            assert_ok!(EntityDisclosure::add_insider(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, i, InsiderRole::Admin,
+            ));
+        }
+        assert_noop!(
+            EntityDisclosure::batch_add_insiders(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                vec![(20, InsiderRole::Admin)],
+            ),
+            Error::<Test>::InsidersFull
+        );
+    });
+}
+
+#[test]
+fn f1_batch_remove_insiders_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::batch_add_insiders(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            vec![(ALICE, InsiderRole::Admin), (BOB, InsiderRole::Auditor)],
+        ));
+
+        assert_ok!(EntityDisclosure::batch_remove_insiders(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            vec![ALICE, BOB],
+        ));
+
+        assert!(Insiders::<Test>::get(ENTITY_ID).is_empty());
+
+        System::assert_has_event(RuntimeEvent::EntityDisclosure(
+            Event::InsidersBatchRemoved { entity_id: ENTITY_ID, count: 2 }
+        ));
+    });
+}
+
+#[test]
+fn f1_batch_remove_insiders_rejects_empty() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::batch_remove_insiders(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, vec![],
+            ),
+            Error::<Test>::EmptyBatch
+        );
+    });
+}
+
+#[test]
+fn f1_batch_remove_insiders_rejects_not_found() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::batch_remove_insiders(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                vec![ALICE],
+            ),
+            Error::<Test>::InsiderNotFound
+        );
+    });
+}
+
+// ==================== F2: 实体状态守卫 ====================
+
+#[test]
+fn f2_entity_not_active_rejects_configure_disclosure() {
+    new_test_ext().execute_with(|| {
+        set_entity_status(ENTITY_ID, pallet_entity_common::EntityStatus::Suspended);
+        assert_noop!(
+            EntityDisclosure::configure_disclosure(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                DisclosureLevel::Standard, true, 50u64,
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn f2_entity_not_active_rejects_publish_disclosure() {
+    new_test_ext().execute_with(|| {
+        set_entity_status(ENTITY_ID, pallet_entity_common::EntityStatus::Banned);
+        assert_noop!(
+            EntityDisclosure::publish_disclosure(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                DisclosureType::AnnualReport,
+                b"QmContent".to_vec(), None,
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn f2_entity_not_active_rejects_add_insider() {
+    new_test_ext().execute_with(|| {
+        set_entity_status(ENTITY_ID, pallet_entity_common::EntityStatus::Suspended);
+        assert_noop!(
+            EntityDisclosure::add_insider(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Admin,
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn f2_entity_not_active_rejects_publish_announcement() {
+    new_test_ext().execute_with(|| {
+        set_entity_status(ENTITY_ID, pallet_entity_common::EntityStatus::Suspended);
+        assert_noop!(
+            EntityDisclosure::publish_announcement(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                AnnouncementCategory::General,
+                b"Title".to_vec(), b"QmContent".to_vec(), None,
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn f2_entity_not_active_allows_withdraw() {
+    new_test_ext().execute_with(|| {
+        // 先发布（Active时）
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmContent".to_vec(), None,
+        ));
+        // 设置为 Suspended
+        set_entity_status(ENTITY_ID, pallet_entity_common::EntityStatus::Suspended);
+        // 撤回应仍然可以
+        assert_ok!(EntityDisclosure::withdraw_disclosure(
+            RuntimeOrigin::signed(OWNER), 0,
+        ));
+    });
+}
+
+#[test]
+fn f2_entity_not_active_rejects_batch_add() {
+    new_test_ext().execute_with(|| {
+        set_entity_status(ENTITY_ID, pallet_entity_common::EntityStatus::Suspended);
+        assert_noop!(
+            EntityDisclosure::batch_add_insiders(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                vec![(ALICE, InsiderRole::Admin)],
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+// ==================== F3: 披露级别与类型匹配校验 ====================
+
+#[test]
+fn f3_basic_level_allows_annual_report() {
+    new_test_ext().execute_with(|| {
+        // Basic是默认级别，无需配置
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmContent".to_vec(), None,
+        ));
+    });
+}
+
+#[test]
+fn f3_basic_level_rejects_quarterly_report() {
+    new_test_ext().execute_with(|| {
+        // Basic 不允许 QuarterlyReport
+        assert_noop!(
+            EntityDisclosure::publish_disclosure(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                DisclosureType::QuarterlyReport,
+                b"QmContent".to_vec(), None,
+            ),
+            Error::<Test>::DisclosureTypeNotAllowed
+        );
+    });
+}
+
+#[test]
+fn f3_standard_level_allows_quarterly_report() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::QuarterlyReport,
+            b"QmContent".to_vec(), None,
+        ));
+    });
+}
+
+#[test]
+fn f3_standard_level_rejects_token_issuance() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+        assert_noop!(
+            EntityDisclosure::publish_disclosure(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                DisclosureType::TokenIssuance,
+                b"QmContent".to_vec(), None,
+            ),
+            Error::<Test>::DisclosureTypeNotAllowed
+        );
+    });
+}
+
+#[test]
+fn f3_enhanced_level_allows_most_types() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Enhanced, false, 0u64,
+        ));
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::ManagementChange,
+            b"QmContent".to_vec(), None,
+        ));
+    });
+}
+
+#[test]
+fn f3_enhanced_level_rejects_buyback() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Enhanced, false, 0u64,
+        ));
+        assert_noop!(
+            EntityDisclosure::publish_disclosure(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                DisclosureType::Buyback,
+                b"QmContent".to_vec(), None,
+            ),
+            Error::<Test>::DisclosureTypeNotAllowed
+        );
+    });
+}
+
+#[test]
+fn f3_full_level_allows_all() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Full, false, 0u64,
+        ));
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::TokenIssuance,
+            b"QmContent".to_vec(), None,
+        ));
+    });
+}
+
+#[test]
+fn f3_draft_also_validates_type() {
+    new_test_ext().execute_with(|| {
+        // Basic 不允许 Buyback
+        assert_noop!(
+            EntityDisclosure::create_draft_disclosure(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                DisclosureType::Buyback,
+                b"QmDraft".to_vec(), None,
+            ),
+            Error::<Test>::DisclosureTypeNotAllowed
+        );
+    });
+}
+
+// ==================== F4: 内幕人员移除冷静期 ====================
+
+#[test]
+fn f4_remove_insider_records_cooldown() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Admin,
+        ));
+        assert_ok!(EntityDisclosure::remove_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE,
+        ));
+
+        // 冷静期应被记录 (block 1 + 50 = 51)
+        assert_eq!(RemovedInsiders::<Test>::get(ENTITY_ID, ALICE), Some(51));
+
+        System::assert_has_event(RuntimeEvent::EntityDisclosure(
+            Event::InsiderCooldownStarted {
+                entity_id: ENTITY_ID,
+                account: ALICE,
+                until: 51,
+            }
+        ));
+    });
+}
+
+#[test]
+fn f4_cooldown_blocks_trade_during_blackout() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 100u64,
+        ));
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Admin,
+        ));
+
+        // 移除内幕人员 → 进入冷静期
+        assert_ok!(EntityDisclosure::remove_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE,
+        ));
+
+        // 启动黑窗口期
+        assert_ok!(EntityDisclosure::start_blackout(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 100u64,
+        ));
+
+        // 冷静期内 + 黑窗口期 = 不能交易
+        assert!(!EntityDisclosure::can_insider_trade(ENTITY_ID, &ALICE));
+
+        // 推进过冷静期
+        advance_blocks(51);
+
+        // 冷静期已过 + 非内幕人员 → 允许交易
+        assert!(EntityDisclosure::can_insider_trade(ENTITY_ID, &ALICE));
+    });
+}
+
+#[test]
+fn f4_cooldown_no_effect_without_blackout() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 0u64,
+        ));
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Admin,
+        ));
+        assert_ok!(EntityDisclosure::remove_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE,
+        ));
+
+        // 冷静期内但没有黑窗口期 → 允许交易
+        assert!(EntityDisclosure::can_insider_trade(ENTITY_ID, &ALICE));
+    });
+}
+
+#[test]
+fn f4_batch_remove_records_cooldown() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::batch_add_insiders(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            vec![(ALICE, InsiderRole::Admin), (BOB, InsiderRole::Auditor)],
+        ));
+        assert_ok!(EntityDisclosure::batch_remove_insiders(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            vec![ALICE, BOB],
+        ));
+
+        assert!(RemovedInsiders::<Test>::get(ENTITY_ID, ALICE).is_some());
+        assert!(RemovedInsiders::<Test>::get(ENTITY_ID, BOB).is_some());
+    });
+}
+
+// ==================== F5: MajorHolder 阈值查询 ====================
+
+#[test]
+fn f5_major_holder_threshold_query() {
+    new_test_ext().execute_with(|| {
+        assert_eq!(EntityDisclosure::get_major_holder_threshold(), 500);
+    });
+}
+
+// ==================== F6: 违规后果执行 ====================
+
+#[test]
+fn f6_violation_threshold_marks_high_risk() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+
+        // 逾期
+        advance_blocks(501);
+
+        // 手动报告 3 次违规 (ViolationThreshold=3)
+        // 第一次
+        assert_ok!(EntityDisclosure::report_disclosure_violation(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            ViolationType::LateDisclosure,
+        ));
+        assert!(!HighRiskEntities::<Test>::get(ENTITY_ID));
+
+        // 需要推进到新周期才能再举报
+        // 通过发布披露重置周期
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmContent".to_vec(), None,
+        ));
+        advance_blocks(501);
+        assert_ok!(EntityDisclosure::report_disclosure_violation(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            ViolationType::LateDisclosure,
+        ));
+        assert!(!HighRiskEntities::<Test>::get(ENTITY_ID));
+
+        // 第三次
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmContent2".to_vec(), None,
+        ));
+        advance_blocks(501);
+        assert_ok!(EntityDisclosure::report_disclosure_violation(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            ViolationType::LateDisclosure,
+        ));
+
+        // 现在应该被标记为高风险
+        assert!(HighRiskEntities::<Test>::get(ENTITY_ID));
+
+        System::assert_has_event(RuntimeEvent::EntityDisclosure(
+            Event::EntityMarkedHighRisk {
+                entity_id: ENTITY_ID,
+                violation_count: 3,
+            }
+        ));
+    });
+}
+
+#[test]
+fn f6_high_risk_queryable_via_provider() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::DisclosureProvider;
+        assert!(!<EntityDisclosure as DisclosureProvider<u64>>::is_high_risk(ENTITY_ID));
+
+        HighRiskEntities::<Test>::insert(ENTITY_ID, true);
+        assert!(<EntityDisclosure as DisclosureProvider<u64>>::is_high_risk(ENTITY_ID));
+    });
+}
+
+// ==================== F7: DisclosureProvider trait 扩展 ====================
+
+#[test]
+fn f7_get_violation_count_works() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::DisclosureProvider;
+        assert_eq!(<EntityDisclosure as DisclosureProvider<u64>>::get_violation_count(ENTITY_ID), 0);
+
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+        advance_blocks(501);
+        assert_ok!(EntityDisclosure::report_disclosure_violation(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            ViolationType::LateDisclosure,
+        ));
+
+        assert_eq!(<EntityDisclosure as DisclosureProvider<u64>>::get_violation_count(ENTITY_ID), 1);
+    });
+}
+
+#[test]
+fn f7_get_insider_role_works() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::DisclosureProvider;
+        assert_eq!(<EntityDisclosure as DisclosureProvider<u64>>::get_insider_role(ENTITY_ID, &ALICE), None);
+
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Auditor,
+        ));
+
+        // Auditor = 2
+        assert_eq!(<EntityDisclosure as DisclosureProvider<u64>>::get_insider_role(ENTITY_ID, &ALICE), Some(2));
+    });
+}
+
+#[test]
+fn f7_is_disclosure_configured_works() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::DisclosureProvider;
+        assert!(!<EntityDisclosure as DisclosureProvider<u64>>::is_disclosure_configured(ENTITY_ID));
+
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+
+        assert!(<EntityDisclosure as DisclosureProvider<u64>>::is_disclosure_configured(ENTITY_ID));
+    });
+}
+
+// ==================== F8: 违规记录清理 ====================
+
+#[test]
+fn f8_reset_violation_count_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+        advance_blocks(501);
+        assert_ok!(EntityDisclosure::report_disclosure_violation(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            ViolationType::LateDisclosure,
+        ));
+        assert_eq!(DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap().violation_count, 1);
+
+        assert_ok!(EntityDisclosure::reset_violation_count(
+            RuntimeOrigin::root(), ENTITY_ID,
+        ));
+
+        assert_eq!(DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap().violation_count, 0);
+
+        System::assert_has_event(RuntimeEvent::EntityDisclosure(
+            Event::ViolationCountReset { entity_id: ENTITY_ID }
+        ));
+    });
+}
+
+#[test]
+fn f8_reset_violation_count_clears_high_risk() {
+    new_test_ext().execute_with(|| {
+        HighRiskEntities::<Test>::insert(ENTITY_ID, true);
+        assert!(HighRiskEntities::<Test>::get(ENTITY_ID));
+
+        assert_ok!(EntityDisclosure::reset_violation_count(
+            RuntimeOrigin::root(), ENTITY_ID,
+        ));
+
+        assert!(!HighRiskEntities::<Test>::get(ENTITY_ID));
+    });
+}
+
+#[test]
+fn f8_reset_violation_count_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::reset_violation_count(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn f8_reset_violation_count_rejects_entity_not_found() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::reset_violation_count(
+                RuntimeOrigin::root(), 999,
+            ),
+            Error::<Test>::EntityNotFound
+        );
+    });
+}
+
+// ==================== F9: 黑窗口期过期存储清理 ====================
+
+#[test]
+fn f9_expire_blackout_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 50u64,
+        ));
+        assert_ok!(EntityDisclosure::start_blackout(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 10u64,
+        ));
+        assert!(BlackoutPeriods::<Test>::contains_key(ENTITY_ID));
+
+        // 推进过黑窗口期
+        advance_blocks(11);
+
+        assert_ok!(EntityDisclosure::expire_blackout(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+        ));
+        assert!(!BlackoutPeriods::<Test>::contains_key(ENTITY_ID));
+
+        System::assert_has_event(RuntimeEvent::EntityDisclosure(
+            Event::BlackoutExpired { entity_id: ENTITY_ID }
+        ));
+    });
+}
+
+#[test]
+fn f9_expire_blackout_rejects_still_active() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 50u64,
+        ));
+        assert_ok!(EntityDisclosure::start_blackout(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 100u64,
+        ));
+
+        // 黑窗口期仍活跃
+        assert_noop!(
+            EntityDisclosure::expire_blackout(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            ),
+            Error::<Test>::BlackoutNotExpired
+        );
+    });
+}
+
+#[test]
+fn f9_expire_blackout_rejects_no_blackout() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::expire_blackout(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            ),
+            Error::<Test>::BlackoutNotFound
+        );
+    });
+}
+
+// ==================== 清理测试：新存储也被清理 ====================
+
+#[test]
+fn cleanup_entity_disclosure_clears_cooldown_and_high_risk() {
+    new_test_ext().execute_with(|| {
+        // 设置一些 F4/F6 数据
+        RemovedInsiders::<Test>::insert(ENTITY_ID, ALICE, 100u64);
+        HighRiskEntities::<Test>::insert(ENTITY_ID, true);
+
+        // 需要实体关闭才能清理
+        set_entity_status(ENTITY_ID, pallet_entity_common::EntityStatus::Closed);
+        assert_ok!(EntityDisclosure::cleanup_entity_disclosure(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+        ));
+
+        assert!(RemovedInsiders::<Test>::get(ENTITY_ID, ALICE).is_none());
+        assert!(!HighRiskEntities::<Test>::get(ENTITY_ID));
+    });
+}
+
+// ==================== 审计回归测试 ====================
+
+// H1-R2: on_idle 游标扫描 — skip-count 正确推进
+#[test]
+fn h1r2_on_idle_cursor_advances() {
+    new_test_ext().execute_with(|| {
+        use frame_support::traits::Hooks;
+
+        // 为 ENTITY_ID 配置披露
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+        // next_required = 1 + 500 = 501
+
+        advance_blocks(501);
+
+        // 第一次 on_idle — 扫描 1 个实体
+        EntityDisclosure::on_idle(502, Weight::from_parts(u64::MAX, u64::MAX));
+        assert_eq!(DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap().violation_count, 1);
+
+        // 游标应为 1（跳过计数）
+        assert_eq!(AutoViolationCursor::<Test>::get(), 1);
+
+        // 第二次 on_idle — skip_count=1 跳过唯一实体，scanned=0，归零
+        EntityDisclosure::on_idle(503, Weight::from_parts(u64::MAX, u64::MAX));
+        assert_eq!(AutoViolationCursor::<Test>::get(), 0);
+
+        // 同一周期 ViolationRecords 去重，violation_count 仍为 1
+        assert_eq!(DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap().violation_count, 1);
+    });
+}
+
+// H1-R2: on_idle 两个实体都能被扫描到（验证无永久跳过）
+#[test]
+fn h1r2_on_idle_scans_all_entities() {
+    new_test_ext().execute_with(|| {
+        use frame_support::traits::Hooks;
+
+        // 配置两个实体
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER_2), ENTITY_ID_2,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+
+        advance_blocks(501);
+
+        // 第一次 on_idle — 扫描两个实体（MAX_SCAN=10 > 2）
+        EntityDisclosure::on_idle(502, Weight::from_parts(u64::MAX, u64::MAX));
+
+        // 两个实体都应该被检测到违规
+        assert_eq!(DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap().violation_count, 1);
+        assert_eq!(DisclosureConfigs::<Test>::get(ENTITY_ID_2).unwrap().violation_count, 1);
+
+        // 游标应为 2
+        assert_eq!(AutoViolationCursor::<Test>::get(), 2);
+    });
+}
+
+// H1-R2: on_idle 游标回绕后重新扫描
+#[test]
+fn h1r2_on_idle_cursor_wraps_and_rescans() {
+    new_test_ext().execute_with(|| {
+        use frame_support::traits::Hooks;
+
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+
+        advance_blocks(501);
+
+        // 第一次扫描
+        EntityDisclosure::on_idle(502, Weight::from_parts(u64::MAX, u64::MAX));
+        assert_eq!(AutoViolationCursor::<Test>::get(), 1);
+
+        // 第二次扫描 — 跳过 1 个后无实体，归零
+        EntityDisclosure::on_idle(503, Weight::from_parts(u64::MAX, u64::MAX));
+        assert_eq!(AutoViolationCursor::<Test>::get(), 0);
+
+        // 发布披露重置周期
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmContent".to_vec(), None,
+        ));
+        advance_blocks(501);
+
+        // 第三次扫描 — cursor=0，从头开始，检测新周期违规
+        EntityDisclosure::on_idle(1004, Weight::from_parts(u64::MAX, u64::MAX));
+        assert_eq!(DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap().violation_count, 2);
+    });
+}
+
+// M1: governance_configure_disclosure 拒绝超出上限的 blackout_period_after
+#[test]
+fn m1_governance_configure_rejects_blackout_exceeds_max() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::DisclosureProvider;
+
+        // MaxBlackoutDuration = 200, 设置 201 应失败
+        let result = <EntityDisclosure as DisclosureProvider<u64>>::governance_configure_disclosure(
+            ENTITY_ID,
+            DisclosureLevel::Standard,
+            true,
+            201,
+        );
+        assert!(result.is_err());
+
+        // 恰好 200 应成功
+        let result = <EntityDisclosure as DisclosureProvider<u64>>::governance_configure_disclosure(
+            ENTITY_ID,
+            DisclosureLevel::Standard,
+            true,
+            200,
+        );
+        assert!(result.is_ok());
+
+        let config = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(config.blackout_period_after, 200);
+    });
+}
+
+// M2: on_idle 受限于 proof_size — 极小的 proof_size 应返回零权重
+#[test]
+fn m2_on_idle_respects_proof_size_limit() {
+    new_test_ext().execute_with(|| {
+        use frame_support::traits::Hooks;
+
+        // ref_time 充足但 proof_size 不足
+        let weight = EntityDisclosure::on_idle(1, Weight::from_parts(u64::MAX, 0));
+        assert_eq!(weight.ref_time(), 0);
+        assert_eq!(weight.proof_size(), 0);
+    });
+}
+
+// ==================== v0.6 新功能测试 ====================
+
+// ==================== P0 #2: 多方审批签核 ====================
+
+#[test]
+fn v06_configure_approval_requirements_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_approval_requirements(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 2, 0x04, // Auditor only
+        ));
+        let config = ApprovalConfigs::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(config.required_approvals, 2);
+        assert_eq!(config.allowed_roles, 0x04);
+
+        // 设置 0 禁用审批
+        assert_ok!(EntityDisclosure::configure_approval_requirements(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 0, 0,
+        ));
+        assert!(ApprovalConfigs::<Test>::get(ENTITY_ID).is_none());
+    });
+}
+
+#[test]
+fn v06_configure_approval_invalid_roles_fails() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::configure_approval_requirements(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, 2, 0, // roles=0 invalid when required>0
+            ),
+            Error::<Test>::InvalidApprovalRoles
+        );
+    });
+}
+
+#[test]
+fn v06_approve_disclosure_works() {
+    new_test_ext().execute_with(|| {
+        // 配置披露
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 10,
+        ));
+
+        // 配置审批要求: 需要 1 个 Auditor 审批
+        assert_ok!(EntityDisclosure::configure_approval_requirements(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 1, 0x04,
+        ));
+
+        // 添加审计员作为内幕人员
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Auditor,
+        ));
+
+        // 创建草稿
+        assert_ok!(EntityDisclosure::create_draft_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::QuarterlyReport, b"Qhash1".to_vec(), None,
+        ));
+
+        // 尝试未审批直接发布 → 失败
+        assert_noop!(
+            EntityDisclosure::publish_draft(RuntimeOrigin::signed(OWNER), 0),
+            Error::<Test>::InsufficientApprovals
+        );
+
+        // Auditor 审批
+        assert_ok!(EntityDisclosure::approve_disclosure(
+            RuntimeOrigin::signed(ALICE), 0,
+        ));
+        assert_eq!(DisclosureApprovalCounts::<Test>::get(0), 1);
+
+        // 不能重复审批
+        assert_noop!(
+            EntityDisclosure::approve_disclosure(RuntimeOrigin::signed(ALICE), 0),
+            Error::<Test>::AlreadyApproved
+        );
+
+        // 发布成功
+        assert_ok!(EntityDisclosure::publish_draft(RuntimeOrigin::signed(OWNER), 0));
+        let record = Disclosures::<Test>::get(0).unwrap();
+        assert_eq!(record.status, DisclosureStatus::Published);
+
+        // 审批记录已清理
+        assert_eq!(DisclosureApprovalCounts::<Test>::get(0), 0);
+    });
+}
+
+#[test]
+fn v06_reject_disclosure_resets_approvals() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0,
+        ));
+        assert_ok!(EntityDisclosure::configure_approval_requirements(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 2, 0x04 | 0x01, // Auditor + Owner
+        ));
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Auditor,
+        ));
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, OWNER, InsiderRole::Owner,
+        ));
+
+        assert_ok!(EntityDisclosure::create_draft_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport, b"cid1".to_vec(), None,
+        ));
+
+        // Owner 审批
+        assert_ok!(EntityDisclosure::approve_disclosure(RuntimeOrigin::signed(OWNER), 0));
+        assert_eq!(DisclosureApprovalCounts::<Test>::get(0), 1);
+
+        // Auditor 拒绝 → 重置
+        assert_ok!(EntityDisclosure::reject_disclosure(RuntimeOrigin::signed(ALICE), 0));
+        assert_eq!(DisclosureApprovalCounts::<Test>::get(0), 0);
+    });
+}
+
+#[test]
+fn v06_approve_not_allowed_role_fails() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0,
+        ));
+        assert_ok!(EntityDisclosure::configure_approval_requirements(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 1, 0x04, // Auditor only
+        ));
+        // 添加 ALICE 作为 Admin（不是 Auditor）
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Admin,
+        ));
+        assert_ok!(EntityDisclosure::create_draft_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport, b"cid1".to_vec(), None,
+        ));
+
+        // Admin 不在允许审批角色中
+        assert_noop!(
+            EntityDisclosure::approve_disclosure(RuntimeOrigin::signed(ALICE), 0),
+            Error::<Test>::NotApprover
+        );
+    });
+}
+
+// ==================== P0 #1: 大股东自动注册 ====================
+
+#[test]
+fn v06_register_major_holder_works() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::DisclosureProvider;
+
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 10,
+        ));
+
+        // 通过 trait 注册大股东
+        assert_ok!(<EntityDisclosure as DisclosureProvider<u64>>::register_major_holder(
+            ENTITY_ID, &ALICE,
+        ));
+
+        assert!(EntityDisclosure::is_insider(ENTITY_ID, &ALICE));
+
+        let role = <EntityDisclosure as DisclosureProvider<u64>>::get_insider_role(ENTITY_ID, &ALICE);
+        assert_eq!(role, Some(4)); // MajorHolder = 4
+
+        // 重复注册不报错（幂等）
+        assert_ok!(<EntityDisclosure as DisclosureProvider<u64>>::register_major_holder(
+            ENTITY_ID, &ALICE,
+        ));
+    });
+}
+
+#[test]
+fn v06_deregister_major_holder_works() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::DisclosureProvider;
+
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 10,
+        ));
+
+        assert_ok!(<EntityDisclosure as DisclosureProvider<u64>>::register_major_holder(
+            ENTITY_ID, &ALICE,
+        ));
+        assert!(EntityDisclosure::is_insider(ENTITY_ID, &ALICE));
+
+        assert_ok!(<EntityDisclosure as DisclosureProvider<u64>>::deregister_major_holder(
+            ENTITY_ID, &ALICE,
+        ));
+        assert!(!EntityDisclosure::is_insider(ENTITY_ID, &ALICE));
+
+        // 冷静期生效
+        assert!(RemovedInsiders::<Test>::contains_key(ENTITY_ID, &ALICE));
+    });
+}
+
+#[test]
+fn v06_major_holder_no_config_noop() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::DisclosureProvider;
+
+        // 无披露配置时注册大股东应静默成功
+        assert_ok!(<EntityDisclosure as DisclosureProvider<u64>>::register_major_holder(
+            ENTITY_ID, &ALICE,
+        ));
+        // 但不应添加为内幕人员
+        assert!(!EntityDisclosure::is_insider(ENTITY_ID, &ALICE));
+    });
+}
+
+// ==================== P0 #3: 渐进式处罚 ====================
+
+#[test]
+fn v06_auto_penalty_escalation() {
+    new_test_ext().execute_with(|| {
+        use frame_support::traits::Hooks;
+        use pallet_entity_common::DisclosureProvider;
+
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0,
+        ));
+
+        // ViolationThreshold = 3
+        // 使用 report_disclosure_violation 触发违规（通过公开接口）
+        // 每次举报需要不同的逾期周期
+
+        // 设置 3 次违规，通过 on_idle 自动检测
+        for i in 0..3u64 {
+            // 设置已过期的截止时间
+            DisclosureConfigs::<Test>::mutate(ENTITY_ID, |c| {
+                if let Some(config) = c {
+                    config.next_required_disclosure = 1 + i;
+                }
+            });
+            advance_blocks(1);
+
+            let _ = EntityDisclosure::on_idle(
+                System::block_number(),
+                Weight::from_parts(u64::MAX, u64::MAX),
+            );
+            // 重置游标
+            AutoViolationCursor::<Test>::put(0u32);
+        }
+
+        let count = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap().violation_count;
+        assert_eq!(count, 3);
+
+        // 3 次违规 >= threshold(3) → Restricted
+        assert_eq!(EntityPenalties::<Test>::get(ENTITY_ID), PenaltyLevel::Restricted);
+        assert!(HighRiskEntities::<Test>::get(ENTITY_ID));
+
+        assert!(<EntityDisclosure as DisclosureProvider<u64>>::is_penalty_active(ENTITY_ID));
+        assert_eq!(<EntityDisclosure as DisclosureProvider<u64>>::get_penalty_level(ENTITY_ID), 2);
+    });
+}
+
+#[test]
+fn v06_manual_escalate_penalty_works() {
+    new_test_ext().execute_with(|| {
+        // Root 手动升级
+        assert_ok!(EntityDisclosure::escalate_penalty(
+            RuntimeOrigin::root(), ENTITY_ID, PenaltyLevel::Warning,
+        ));
+        assert_eq!(EntityPenalties::<Test>::get(ENTITY_ID), PenaltyLevel::Warning);
+
+        // 不能降级
+        assert_noop!(
+            EntityDisclosure::escalate_penalty(
+                RuntimeOrigin::root(), ENTITY_ID, PenaltyLevel::None,
+            ),
+            Error::<Test>::PenaltyAlreadyAtLevel
+        );
+
+        // 可以升级
+        assert_ok!(EntityDisclosure::escalate_penalty(
+            RuntimeOrigin::root(), ENTITY_ID, PenaltyLevel::Suspended,
+        ));
+        assert_eq!(EntityPenalties::<Test>::get(ENTITY_ID), PenaltyLevel::Suspended);
+    });
+}
+
+#[test]
+fn v06_reset_penalty_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::escalate_penalty(
+            RuntimeOrigin::root(), ENTITY_ID, PenaltyLevel::Restricted,
+        ));
+        assert_ok!(EntityDisclosure::reset_penalty(RuntimeOrigin::root(), ENTITY_ID));
+        assert_eq!(EntityPenalties::<Test>::get(ENTITY_ID), PenaltyLevel::None);
+    });
+}
+
+// ==================== P0 #4: OnEntityStatusChange ====================
+
+#[test]
+fn v06_on_entity_suspended_pauses_deadline() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::OnEntityStatusChange;
+
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0,
+        ));
+
+        let config = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
+        let deadline = config.next_required_disclosure;
+        assert!(deadline > System::block_number());
+
+        advance_blocks(100);
+
+        // 模拟实体暂停
+        <EntityDisclosure as OnEntityStatusChange>::on_entity_suspended(ENTITY_ID);
+
+        assert!(PausedDeadlines::<Test>::contains_key(ENTITY_ID));
+        let (_, remaining) = PausedDeadlines::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(remaining, deadline - 101); // deadline - (1 + 100)
+    });
+}
+
+#[test]
+fn v06_on_entity_resumed_restores_deadline() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::OnEntityStatusChange;
+
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0,
+        ));
+
+        advance_blocks(100);
+        <EntityDisclosure as OnEntityStatusChange>::on_entity_suspended(ENTITY_ID);
+
+        let (_, remaining) = PausedDeadlines::<Test>::get(ENTITY_ID).unwrap();
+
+        advance_blocks(200);
+        <EntityDisclosure as OnEntityStatusChange>::on_entity_resumed(ENTITY_ID);
+
+        assert!(!PausedDeadlines::<Test>::contains_key(ENTITY_ID));
+
+        let config = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
+        // 新截止 = 恢复时区块 + 剩余区块
+        assert_eq!(config.next_required_disclosure, 301 + remaining);
+    });
+}
+
+#[test]
+fn v06_on_entity_closed_removes_paused() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::OnEntityStatusChange;
+
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0,
+        ));
+        <EntityDisclosure as OnEntityStatusChange>::on_entity_suspended(ENTITY_ID);
+        assert!(PausedDeadlines::<Test>::contains_key(ENTITY_ID));
+
+        <EntityDisclosure as OnEntityStatusChange>::on_entity_closed(ENTITY_ID);
+        assert!(!PausedDeadlines::<Test>::contains_key(ENTITY_ID));
+    });
+}
+
+#[test]
+fn v06_on_idle_skips_paused_entities() {
+    new_test_ext().execute_with(|| {
+        use frame_support::traits::Hooks;
+        use pallet_entity_common::OnEntityStatusChange;
+
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0,
+        ));
+
+        // 设置为已过期
+        DisclosureConfigs::<Test>::mutate(ENTITY_ID, |c| {
+            if let Some(config) = c {
+                config.next_required_disclosure = 0;
+            }
+        });
+
+        // 暂停实体
+        <EntityDisclosure as OnEntityStatusChange>::on_entity_suspended(ENTITY_ID);
+
+        // 运行 on_idle
+        let _ = EntityDisclosure::on_idle(10, Weight::from_parts(u64::MAX, u64::MAX));
+
+        // 不应产生违规
+        let config = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(config.violation_count, 0);
+    });
+}
+
+// ==================== P1 #5: 内幕人员交易申报 ====================
+
+#[test]
+fn v06_insider_transaction_report_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Admin,
+        ));
+
+        assert_ok!(EntityDisclosure::report_insider_transaction(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            InsiderTransactionType::Buy, 1000, 1,
+        ));
+
+        let reports = InsiderTransactionReports::<Test>::get(ENTITY_ID, &ALICE);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].token_amount, 1000);
+        assert_eq!(reports[0].transaction_type, InsiderTransactionType::Buy);
+    });
+}
+
+#[test]
+fn v06_insider_transaction_report_non_insider_fails() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::report_insider_transaction(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID,
+                InsiderTransactionType::Sell, 500, 1,
+            ),
+            Error::<Test>::NotInsider
+        );
+    });
+}
+
+#[test]
+fn v06_insider_transaction_report_cooldown_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Admin,
+        ));
+        assert_ok!(EntityDisclosure::remove_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE,
+        ));
+
+        // ALICE 在冷静期内仍可申报
+        assert_ok!(EntityDisclosure::report_insider_transaction(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            InsiderTransactionType::Sell, 2000, 1,
+        ));
+    });
+}
+
+// ==================== P1 #6: 紧急披露 ====================
+
+#[test]
+fn v06_emergency_disclosure_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Full, true, 20,
+        ));
+
+        assert_ok!(EntityDisclosure::publish_emergency_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::MaterialEvent, b"emergency-cid".to_vec(), None,
+        ));
+
+        let record = Disclosures::<Test>::get(0).unwrap();
+        assert_eq!(record.status, DisclosureStatus::Published);
+
+        // 紧急元数据
+        let meta = DisclosureMetadataStore::<Test>::get(0).unwrap();
+        assert!(meta.is_emergency);
+
+        // 黑窗口期 = 20 * 3 = 60（3 倍乘数）
+        let (_, end) = BlackoutPeriods::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(end, 1 + 60); // now(1) + 60
+    });
+}
+
+#[test]
+fn v06_emergency_disclosure_caps_blackout() {
+    new_test_ext().execute_with(|| {
+        // MaxBlackoutDuration = 200, blackout_after = 100, multiplier = 3 → 300 → capped to 200
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Full, true, 100,
+        ));
+
+        assert_ok!(EntityDisclosure::publish_emergency_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::MaterialEvent, b"emerg".to_vec(), None,
+        ));
+
+        let (_, end) = BlackoutPeriods::<Test>::get(ENTITY_ID).unwrap();
+        // 100 * 3 = 300, capped to MaxBlackoutDuration=200
+        assert_eq!(end, 1 + 200);
+    });
+}
+
+// ==================== P1 #7: 财务年度配置 ====================
+
+#[test]
+fn v06_configure_fiscal_year_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_fiscal_year(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 100, 1000,
+        ));
+
+        let config = FiscalYearConfigs::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(config.year_start_block, 100);
+        assert_eq!(config.year_length, 1000);
+    });
+}
+
+#[test]
+fn v06_configure_fiscal_year_zero_length_fails() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityDisclosure::configure_fiscal_year(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, 100, 0,
+            ),
+            Error::<Test>::ZeroFiscalYearLength
+        );
+    });
+}
+
+// ==================== P1 #8: 披露扩展元数据 ====================
+
+#[test]
+fn v06_set_disclosure_metadata_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0,
+        ));
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::QuarterlyReport, b"cid1".to_vec(), None,
+        ));
+
+        assert_ok!(EntityDisclosure::set_disclosure_metadata(
+            RuntimeOrigin::signed(OWNER), 0,
+            Some(100), Some(200), true,
+        ));
+
+        let meta = DisclosureMetadataStore::<Test>::get(0).unwrap();
+        assert_eq!(meta.period_start, Some(100));
+        assert_eq!(meta.period_end, Some(200));
+        assert_eq!(meta.audit_status, AuditStatus::Pending);
+        assert!(!meta.is_emergency);
+    });
+}
+
+#[test]
+fn v06_set_disclosure_metadata_invalid_period_fails() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0,
+        ));
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::QuarterlyReport, b"cid1".to_vec(), None,
+        ));
+
+        assert_noop!(
+            EntityDisclosure::set_disclosure_metadata(
+                RuntimeOrigin::signed(OWNER), 0,
+                Some(200), Some(100), true, // start > end
+            ),
+            Error::<Test>::InvalidReportingPeriod
+        );
+    });
+}
+
+// ==================== P1 #8: 审计员签核 ====================
+
+#[test]
+fn v06_audit_disclosure_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0,
+        ));
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Auditor,
+        ));
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport, b"annual".to_vec(), None,
+        ));
+
+        // 设置需要审计
+        assert_ok!(EntityDisclosure::set_disclosure_metadata(
+            RuntimeOrigin::signed(OWNER), 0, None, None, true,
+        ));
+        assert_eq!(
+            DisclosureMetadataStore::<Test>::get(0).unwrap().audit_status,
+            AuditStatus::Pending,
+        );
+
+        // 审计员签核
+        assert_ok!(EntityDisclosure::audit_disclosure(
+            RuntimeOrigin::signed(ALICE), 0, true,
+        ));
+        assert_eq!(
+            DisclosureMetadataStore::<Test>::get(0).unwrap().audit_status,
+            AuditStatus::Approved,
+        );
+    });
+}
+
+#[test]
+fn v06_audit_disclosure_reject_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0,
+        ));
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Auditor,
+        ));
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport, b"cid".to_vec(), None,
+        ));
+        assert_ok!(EntityDisclosure::set_disclosure_metadata(
+            RuntimeOrigin::signed(OWNER), 0, None, None, true,
+        ));
+
+        assert_ok!(EntityDisclosure::audit_disclosure(
+            RuntimeOrigin::signed(ALICE), 0, false,
+        ));
+        assert_eq!(
+            DisclosureMetadataStore::<Test>::get(0).unwrap().audit_status,
+            AuditStatus::Rejected,
+        );
+    });
+}
+
+#[test]
+fn v06_audit_non_auditor_fails() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0,
+        ));
+        // Add ALICE as Admin, not Auditor
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Admin,
+        ));
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport, b"cid".to_vec(), None,
+        ));
+        assert_ok!(EntityDisclosure::set_disclosure_metadata(
+            RuntimeOrigin::signed(OWNER), 0, None, None, true,
+        ));
+
+        assert_noop!(
+            EntityDisclosure::audit_disclosure(RuntimeOrigin::signed(ALICE), 0, true),
+            Error::<Test>::NotApprover
+        );
+    });
+}
+
+// ==================== P1 #9: 冷静期清理 ====================
+
+#[test]
+fn v06_cleanup_expired_cooldowns_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Admin,
+        ));
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, BOB, InsiderRole::Advisor,
+        ));
+
+        assert_ok!(EntityDisclosure::remove_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE,
+        ));
+        assert_ok!(EntityDisclosure::remove_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, BOB,
+        ));
+
+        // 两个冷静期记录
+        assert!(RemovedInsiders::<Test>::contains_key(ENTITY_ID, &ALICE));
+        assert!(RemovedInsiders::<Test>::contains_key(ENTITY_ID, &BOB));
+
+        // 超过冷静期
+        advance_blocks(100); // InsiderCooldownPeriod = 50
+
+        assert_ok!(EntityDisclosure::cleanup_expired_cooldowns(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+        ));
+
+        assert!(!RemovedInsiders::<Test>::contains_key(ENTITY_ID, &ALICE));
+        assert!(!RemovedInsiders::<Test>::contains_key(ENTITY_ID, &BOB));
+    });
+}
+
+#[test]
+fn v06_cleanup_cooldowns_not_yet_expired() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Admin,
+        ));
+        assert_ok!(EntityDisclosure::remove_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE,
+        ));
+
+        advance_blocks(10); // < 50
+
+        assert_ok!(EntityDisclosure::cleanup_expired_cooldowns(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+        ));
+
+        // 尚未过期，不应清理
+        assert!(RemovedInsiders::<Test>::contains_key(ENTITY_ID, &ALICE));
+    });
+}
+
+// ==================== PenaltyLevel 类型测试 ====================
+
+#[test]
+fn v06_penalty_level_ordering() {
+    assert!(PenaltyLevel::None < PenaltyLevel::Warning);
+    assert!(PenaltyLevel::Warning < PenaltyLevel::Restricted);
+    assert!(PenaltyLevel::Restricted < PenaltyLevel::Suspended);
+    assert!(PenaltyLevel::Suspended < PenaltyLevel::Delisted);
+}
+
+#[test]
+fn v06_penalty_level_next() {
+    assert_eq!(PenaltyLevel::None.next(), PenaltyLevel::Warning);
+    assert_eq!(PenaltyLevel::Delisted.next(), PenaltyLevel::Delisted);
+}
+
+#[test]
+fn v06_penalty_level_roundtrip() {
+    for level in [PenaltyLevel::None, PenaltyLevel::Warning, PenaltyLevel::Restricted,
+                  PenaltyLevel::Suspended, PenaltyLevel::Delisted] {
+        assert_eq!(PenaltyLevel::from_u8(level.as_u8()), level);
+    }
+}
+
+// ==================== 清理整合测试 ====================
+
+#[test]
+fn v06_cleanup_entity_disclosure_clears_new_storage() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 10,
+        ));
+        assert_ok!(EntityDisclosure::configure_approval_requirements(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 1, 0x04,
+        ));
+        assert_ok!(EntityDisclosure::configure_fiscal_year(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 1, 1000,
+        ));
+        EntityPenalties::<Test>::insert(ENTITY_ID, PenaltyLevel::Warning);
+        PausedDeadlines::<Test>::insert(ENTITY_ID, (1u64, 100u64));
+
+        // 关闭实体后清理
+        set_entity_status(ENTITY_ID, EntityStatus::Closed);
+
+        assert_ok!(EntityDisclosure::cleanup_entity_disclosure(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+        ));
+
+        assert!(DisclosureConfigs::<Test>::get(ENTITY_ID).is_none());
+        assert!(ApprovalConfigs::<Test>::get(ENTITY_ID).is_none());
+        assert!(FiscalYearConfigs::<Test>::get(ENTITY_ID).is_none());
+        assert_eq!(EntityPenalties::<Test>::get(ENTITY_ID), PenaltyLevel::None);
+        assert!(PausedDeadlines::<Test>::get(ENTITY_ID).is_none());
     });
 }

@@ -1,7 +1,7 @@
 //! 代币发售模块测试
 
 use crate::{mock::*, pallet::*};
-use frame_support::{assert_noop, assert_ok, traits::Hooks, BoundedVec};
+use frame_support::{assert_noop, assert_ok, traits::{Currency, Hooks}, BoundedVec};
 
 /// 创建标准发售轮次的辅助函数
 fn setup_round() -> u64 {
@@ -14,6 +14,7 @@ fn setup_round() -> u64 {
         100u64.into(),
         false,
         0,
+        0u128, // soft_cap
     ));
     0 // round_id
 }
@@ -54,7 +55,7 @@ fn create_sale_round_rejects_invalid_entity() {
         assert_noop!(
             EntityTokenSale::create_sale_round(
                 RuntimeOrigin::signed(CREATOR), 999,
-                SaleMode::FixedPrice, 1_000u128, 10u64.into(), 100u64.into(), false, 0,
+                SaleMode::FixedPrice, 1_000u128, 10u64.into(), 100u64.into(), false, 0, 0u128,
             ),
             Error::<Test>::EntityNotFound
         );
@@ -67,7 +68,7 @@ fn create_sale_round_rejects_non_owner() {
         assert_noop!(
             EntityTokenSale::create_sale_round(
                 RuntimeOrigin::signed(BUYER), ENTITY_ID,
-                SaleMode::FixedPrice, 1_000u128, 10u64.into(), 100u64.into(), false, 0,
+                SaleMode::FixedPrice, 1_000u128, 10u64.into(), 100u64.into(), false, 0, 0u128,
             ),
             Error::<Test>::Unauthorized
         );
@@ -80,7 +81,7 @@ fn create_sale_round_rejects_zero_supply() {
         assert_noop!(
             EntityTokenSale::create_sale_round(
                 RuntimeOrigin::signed(CREATOR), ENTITY_ID,
-                SaleMode::FixedPrice, 0u128, 10u64.into(), 100u64.into(), false, 0,
+                SaleMode::FixedPrice, 0u128, 10u64.into(), 100u64.into(), false, 0, 0u128,
             ),
             Error::<Test>::InvalidTotalSupply
         );
@@ -93,7 +94,7 @@ fn create_sale_round_rejects_bad_time_window() {
         assert_noop!(
             EntityTokenSale::create_sale_round(
                 RuntimeOrigin::signed(CREATOR), ENTITY_ID,
-                SaleMode::FixedPrice, 1_000u128, 100u64.into(), 10u64.into(), false, 0,
+                SaleMode::FixedPrice, 1_000u128, 100u64.into(), 10u64.into(), false, 0, 0u128,
             ),
             Error::<Test>::InvalidTimeWindow
         );
@@ -106,7 +107,7 @@ fn create_sale_round_rejects_invalid_kyc_level() {
         assert_noop!(
             EntityTokenSale::create_sale_round(
                 RuntimeOrigin::signed(CREATOR), ENTITY_ID,
-                SaleMode::FixedPrice, 1_000u128, 10u64.into(), 100u64.into(), true, 5,
+                SaleMode::FixedPrice, 1_000u128, 10u64.into(), 100u64.into(), true, 5, 0u128,
             ),
             Error::<Test>::InvalidKycLevel
         );
@@ -200,7 +201,7 @@ fn configure_dutch_auction_requires_not_started() {
         assert_ok!(EntityTokenSale::create_sale_round(
             RuntimeOrigin::signed(CREATOR), ENTITY_ID,
             SaleMode::DutchAuction, 1_000_000u128,
-            10u64.into(), 100u64.into(), false, 0,
+            10u64.into(), 100u64.into(), false, 0, 0u128,
         ));
         assert_ok!(EntityTokenSale::configure_dutch_auction(
             RuntimeOrigin::signed(CREATOR), 0, 1000u128, 100u128,
@@ -219,16 +220,16 @@ fn whitelist_uses_separate_storage() {
         let round_id = setup_round();
         assert_ok!(EntityTokenSale::add_to_whitelist(
             RuntimeOrigin::signed(CREATOR), round_id,
-            BoundedVec::try_from(vec![BUYER, BUYER2]).unwrap(),
+            BoundedVec::try_from(vec![(BUYER, None), (BUYER2, None)]).unwrap(),
         ));
-        assert!(RoundWhitelist::<Test>::get(round_id, BUYER));
-        assert!(RoundWhitelist::<Test>::get(round_id, BUYER2));
+        assert!(RoundWhitelist::<Test>::contains_key(round_id, BUYER));
+        assert!(RoundWhitelist::<Test>::contains_key(round_id, BUYER2));
         assert_eq!(WhitelistCount::<Test>::get(round_id), 2);
 
         // 重复添加不增加计数
         assert_ok!(EntityTokenSale::add_to_whitelist(
             RuntimeOrigin::signed(CREATOR), round_id,
-            BoundedVec::try_from(vec![BUYER]).unwrap(),
+            BoundedVec::try_from(vec![(BUYER, None)]).unwrap(),
         ));
         assert_eq!(WhitelistCount::<Test>::get(round_id), 2);
     });
@@ -241,7 +242,7 @@ fn whitelist_rejects_non_not_started() {
         assert_noop!(
             EntityTokenSale::add_to_whitelist(
                 RuntimeOrigin::signed(CREATOR), round_id,
-                BoundedVec::try_from(vec![BUYER]).unwrap(),
+                BoundedVec::try_from(vec![(BUYER, None)]).unwrap(),
             ),
             Error::<Test>::InvalidRoundStatus
         );
@@ -344,7 +345,7 @@ fn subscribe_checks_kyc() {
             RuntimeOrigin::signed(CREATOR), ENTITY_ID,
             SaleMode::FixedPrice, 1_000_000u128,
             10u64.into(), 100u64.into(),
-            true, 2, // kyc_required, min_level=2
+            true, 2, 0u128, // kyc_required, min_level=2, soft_cap
         ));
         assert_ok!(EntityTokenSale::add_payment_option(
             RuntimeOrigin::signed(CREATOR), 0, None, 100u128, 10u128, 100_000u128,
@@ -370,7 +371,7 @@ fn subscribe_checks_whitelist() {
         assert_ok!(EntityTokenSale::create_sale_round(
             RuntimeOrigin::signed(CREATOR), ENTITY_ID,
             SaleMode::WhitelistAllocation, 1_000_000u128,
-            10u64.into(), 100u64.into(), false, 0,
+            10u64.into(), 100u64.into(), false, 0, 0u128,
         ));
         assert_ok!(EntityTokenSale::add_payment_option(
             RuntimeOrigin::signed(CREATOR), 0, None, 100u128, 10u128, 100_000u128,
@@ -378,7 +379,7 @@ fn subscribe_checks_whitelist() {
         // 只添加 BUYER 到白名单
         assert_ok!(EntityTokenSale::add_to_whitelist(
             RuntimeOrigin::signed(CREATOR), 0,
-            BoundedVec::try_from(vec![BUYER]).unwrap(),
+            BoundedVec::try_from(vec![(BUYER, None)]).unwrap(),
         ));
         assert_ok!(EntityTokenSale::start_sale(RuntimeOrigin::signed(CREATOR), 0));
         frame_system::Pallet::<Test>::set_block_number(10);
@@ -554,7 +555,7 @@ fn subscribe_rejects_overflow() {
             RuntimeOrigin::signed(CREATOR), ENTITY_ID,
             SaleMode::FixedPrice,
             1_000_000u128, // total_supply
-            10u64.into(), 100u64.into(), false, 0,
+            10u64.into(), 100u64.into(), false, 0, 0u128,
         ));
         // 极高单价：amount(1000) * price(u128::MAX/1000+1) 会溢出
         let huge_price = u128::MAX / 500;
@@ -594,7 +595,7 @@ fn end_sale_allows_when_sold_out() {
         assert_ok!(EntityTokenSale::create_sale_round(
             RuntimeOrigin::signed(CREATOR), ENTITY_ID,
             SaleMode::FixedPrice, 100u128,
-            10u64.into(), 100u64.into(), false, 0,
+            10u64.into(), 100u64.into(), false, 0, 0u128,
         ));
         assert_ok!(EntityTokenSale::add_payment_option(
             RuntimeOrigin::signed(CREATOR), 0, None, 1u128, 100u128, 100u128,
@@ -770,7 +771,7 @@ fn on_initialize_handles_multiple_rounds() {
         assert_ok!(EntityTokenSale::create_sale_round(
             RuntimeOrigin::signed(CREATOR), ENTITY_ID,
             SaleMode::FixedPrice, 100_000u128,
-            10u64.into(), 50u64.into(), false, 0,
+            10u64.into(), 50u64.into(), false, 0, 0u128,
         ));
         assert_ok!(EntityTokenSale::add_payment_option(
             RuntimeOrigin::signed(CREATOR), 0, None, 100u128, 10u128, 100_000u128,
@@ -780,7 +781,7 @@ fn on_initialize_handles_multiple_rounds() {
         assert_ok!(EntityTokenSale::create_sale_round(
             RuntimeOrigin::signed(CREATOR), ENTITY_ID,
             SaleMode::FixedPrice, 100_000u128,
-            10u64.into(), 200u64.into(), false, 0,
+            10u64.into(), 200u64.into(), false, 0, 0u128,
         ));
         assert_ok!(EntityTokenSale::add_payment_option(
             RuntimeOrigin::signed(CREATOR), 1, None, 100u128, 10u128, 100_000u128,
@@ -980,7 +981,7 @@ fn dutch_auction_allows_zero_price_in_payment_option() {
         assert_ok!(EntityTokenSale::create_sale_round(
             RuntimeOrigin::signed(CREATOR), ENTITY_ID,
             SaleMode::DutchAuction, 1_000_000u128,
-            10u64.into(), 100u64.into(), false, 0,
+            10u64.into(), 100u64.into(), false, 0, 0u128,
         ));
         // DutchAuction 模式 price=0 应被允许
         assert_ok!(EntityTokenSale::add_payment_option(
@@ -1011,7 +1012,7 @@ fn dutch_auction_start_requires_configure() {
         assert_ok!(EntityTokenSale::create_sale_round(
             RuntimeOrigin::signed(CREATOR), ENTITY_ID,
             SaleMode::DutchAuction, 1_000_000u128,
-            10u64.into(), 100u64.into(), false, 0,
+            10u64.into(), 100u64.into(), false, 0, 0u128,
         ));
         assert_ok!(EntityTokenSale::add_payment_option(
             RuntimeOrigin::signed(CREATOR), 0, None, 0u128, 10u128, 100_000u128,
@@ -1097,7 +1098,7 @@ fn l3_create_sale_round_rejects_start_block_in_past() {
             EntityTokenSale::create_sale_round(
                 RuntimeOrigin::signed(CREATOR), ENTITY_ID,
                 SaleMode::FixedPrice, 1_000_000u128,
-                10u64.into(), 100u64.into(), false, 0,
+                10u64.into(), 100u64.into(), false, 0, 0u128,
             ),
             Error::<Test>::StartBlockInPast
         );
@@ -1106,7 +1107,7 @@ fn l3_create_sale_round_rejects_start_block_in_past() {
         assert_ok!(EntityTokenSale::create_sale_round(
             RuntimeOrigin::signed(CREATOR), ENTITY_ID,
             SaleMode::FixedPrice, 1_000_000u128,
-            50u64.into(), 100u64.into(), false, 0,
+            50u64.into(), 100u64.into(), false, 0, 0u128,
         ));
     });
 }
@@ -1119,7 +1120,7 @@ fn l5_dutch_auction_rejects_zero_end_price() {
         assert_ok!(EntityTokenSale::create_sale_round(
             RuntimeOrigin::signed(CREATOR), ENTITY_ID,
             SaleMode::DutchAuction, 1_000_000u128,
-            10u64.into(), 100u64.into(), false, 0,
+            10u64.into(), 100u64.into(), false, 0, 0u128,
         ));
 
         // end_price=0 应被拒绝
@@ -1192,7 +1193,7 @@ fn l2_next_round_id_overflow_detected() {
             EntityTokenSale::create_sale_round(
                 RuntimeOrigin::signed(CREATOR), ENTITY_ID,
                 SaleMode::FixedPrice, 1_000_000u128,
-                10u64.into(), 100u64.into(), false, 0,
+                10u64.into(), 100u64.into(), false, 0, 0u128,
             ),
             Error::<Test>::RoundIdOverflow
         );
@@ -1356,7 +1357,7 @@ fn m2_deep_dutch_price_clamped_to_end_price() {
         assert_ok!(EntityTokenSale::create_sale_round(
             RuntimeOrigin::signed(CREATOR), ENTITY_ID,
             SaleMode::DutchAuction, 1_000_000u128,
-            10u64.into(), 100u64.into(), false, 0,
+            10u64.into(), 100u64.into(), false, 0, 0u128,
         ));
         assert_ok!(EntityTokenSale::add_payment_option(
             RuntimeOrigin::signed(CREATOR), 0, None, 0u128, 10u128, 100_000u128,
@@ -1411,7 +1412,7 @@ fn m2_deep_dutch_price_reaches_end_price_at_end() {
         assert_ok!(EntityTokenSale::create_sale_round(
             RuntimeOrigin::signed(CREATOR), ENTITY_ID,
             SaleMode::DutchAuction, 1_000_000u128,
-            10u64.into(), 100u64.into(), false, 0,
+            10u64.into(), 100u64.into(), false, 0, 0u128,
         ));
         assert_ok!(EntityTokenSale::add_payment_option(
             RuntimeOrigin::signed(CREATOR), 0, None, 0u128, 10u128, 100_000u128,
@@ -1794,7 +1795,7 @@ fn p1_increase_subscription_rejects_sold_out() {
         // 创建供应量只有 200 的轮次
         assert_ok!(EntityTokenSale::create_sale_round(
             RuntimeOrigin::signed(CREATOR), ENTITY_ID,
-            SaleMode::FixedPrice, 200u128, 10u64.into(), 100u64.into(), false, 0,
+            SaleMode::FixedPrice, 200u128, 10u64.into(), 100u64.into(), false, 0, 0u128,
         ));
         assert_ok!(EntityTokenSale::add_payment_option(
             RuntimeOrigin::signed(CREATOR), 0, None, 100u128, 10u128, 200u128,
@@ -1821,7 +1822,7 @@ fn p1_remove_from_whitelist_works() {
         // 先添加白名单
         assert_ok!(EntityTokenSale::add_to_whitelist(
             RuntimeOrigin::signed(CREATOR), round_id,
-            BoundedVec::try_from(vec![BUYER, BUYER2]).unwrap(),
+            BoundedVec::try_from(vec![(BUYER, None), (BUYER2, None)]).unwrap(),
         ));
         assert_eq!(WhitelistCount::<Test>::get(round_id), 2);
 
@@ -1830,8 +1831,8 @@ fn p1_remove_from_whitelist_works() {
             RuntimeOrigin::signed(CREATOR), round_id,
             BoundedVec::try_from(vec![BUYER]).unwrap(),
         ));
-        assert!(!RoundWhitelist::<Test>::get(round_id, BUYER));
-        assert!(RoundWhitelist::<Test>::get(round_id, BUYER2));
+        assert!(!RoundWhitelist::<Test>::contains_key(round_id, BUYER));
+        assert!(RoundWhitelist::<Test>::contains_key(round_id, BUYER2));
         assert_eq!(WhitelistCount::<Test>::get(round_id), 1);
     });
 }
@@ -1842,7 +1843,7 @@ fn p1_remove_from_whitelist_ignores_nonexistent() {
         let round_id = setup_round();
         assert_ok!(EntityTokenSale::add_to_whitelist(
             RuntimeOrigin::signed(CREATOR), round_id,
-            BoundedVec::try_from(vec![BUYER]).unwrap(),
+            BoundedVec::try_from(vec![(BUYER, None)]).unwrap(),
         ));
         // 移除不在白名单中的地址 — 不报错，removed_count=0
         assert_ok!(EntityTokenSale::remove_from_whitelist(
@@ -2104,9 +2105,797 @@ fn entity_locked_rejects_create_sale_round() {
         assert_noop!(
             EntityTokenSale::create_sale_round(
                 RuntimeOrigin::signed(CREATOR), ENTITY_ID,
-                SaleMode::FixedPrice, 1_000u128, 10u64.into(), 100u64.into(), false, 0,
+                SaleMode::FixedPrice, 1_000u128, 10u64.into(), 100u64.into(), false, 0, 0u128,
             ),
             Error::<Test>::EntityLocked
         );
+    });
+}
+
+// ==================== F2: Soft Cap 保护 ====================
+
+#[test]
+fn f2_soft_cap_met_ends_normally() {
+    new_test_ext().execute_with(|| {
+        // 创建 soft_cap = 500 的轮次
+        assert_ok!(EntityTokenSale::create_sale_round(
+            RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+            SaleMode::FixedPrice, 1_000_000u128,
+            10u64.into(), 100u64.into(), false, 0,
+            500u128, // soft_cap
+        ));
+        assert_ok!(EntityTokenSale::add_payment_option(
+            RuntimeOrigin::signed(CREATOR), 0, None, 100u128, 10u128, 100_000u128,
+        ));
+        assert_ok!(EntityTokenSale::start_sale(RuntimeOrigin::signed(CREATOR), 0));
+        frame_system::Pallet::<Test>::set_block_number(10);
+
+        // 购买 10 个代币 → 支付 1000 NEX (10 * 100)
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), 0, 10u128, None));
+
+        // 推进到结束并结束
+        frame_system::Pallet::<Test>::set_block_number(101);
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), 0));
+
+        let round = SaleRounds::<Test>::get(0).unwrap();
+        assert_eq!(round.status, RoundStatus::Ended);
+    });
+}
+
+#[test]
+fn f2_soft_cap_not_met_auto_cancels() {
+    new_test_ext().execute_with(|| {
+        // 创建 soft_cap = 50000 的轮次
+        assert_ok!(EntityTokenSale::create_sale_round(
+            RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+            SaleMode::FixedPrice, 1_000_000u128,
+            10u64.into(), 100u64.into(), false, 0,
+            50000u128, // soft_cap 很高
+        ));
+        assert_ok!(EntityTokenSale::add_payment_option(
+            RuntimeOrigin::signed(CREATOR), 0, None, 100u128, 10u128, 100_000u128,
+        ));
+        assert_ok!(EntityTokenSale::start_sale(RuntimeOrigin::signed(CREATOR), 0));
+        frame_system::Pallet::<Test>::set_block_number(10);
+
+        // 只购买少量（不够 soft_cap）
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), 0, 10u128, None));
+
+        // 推进到结束
+        frame_system::Pallet::<Test>::set_block_number(101);
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), 0));
+
+        let round = SaleRounds::<Test>::get(0).unwrap();
+        // 未达 soft cap → 应被取消
+        assert_eq!(round.status, RoundStatus::Cancelled);
+    });
+}
+
+#[test]
+fn f2_soft_cap_auto_end_cancels() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityTokenSale::create_sale_round(
+            RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+            SaleMode::FixedPrice, 1_000_000u128,
+            10u64.into(), 100u64.into(), false, 0,
+            999_999_999u128, // 超高 soft_cap
+        ));
+        assert_ok!(EntityTokenSale::add_payment_option(
+            RuntimeOrigin::signed(CREATOR), 0, None, 100u128, 10u128, 100_000u128,
+        ));
+        assert_ok!(EntityTokenSale::start_sale(RuntimeOrigin::signed(CREATOR), 0));
+
+        // on_initialize 自动结束 → 应因 soft cap 未达标而自动取消
+        frame_system::Pallet::<Test>::set_block_number(101);
+        <EntityTokenSale as Hooks<u64>>::on_initialize(101);
+
+        let round = SaleRounds::<Test>::get(0).unwrap();
+        assert_eq!(round.status, RoundStatus::Cancelled);
+    });
+}
+
+#[test]
+fn f2_zero_soft_cap_ends_normally() {
+    new_test_ext().execute_with(|| {
+        // soft_cap = 0 意味着无最低要求
+        let round_id = setup_active_round();
+        frame_system::Pallet::<Test>::set_block_number(101);
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.status, RoundStatus::Ended);
+    });
+}
+
+// ==================== F4: Insider 交易防护 ====================
+
+#[test]
+fn f4_insider_blocked_from_subscribe() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        MockDisclosureProvider::block_insider(ENTITY_ID, BUYER);
+
+        assert_noop!(
+            EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None),
+            Error::<Test>::InsiderTradingBlocked
+        );
+    });
+}
+
+#[test]
+fn f4_non_insider_can_subscribe() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        // BUYER 不是 insider，可以正常认购
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+    });
+}
+
+#[test]
+fn f4_insider_blocked_from_increase_subscription() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        // 先正常认购
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+        // 然后标记为 insider
+        MockDisclosureProvider::block_insider(ENTITY_ID, BUYER);
+        // 追加认购被拒
+        assert_noop!(
+            EntityTokenSale::increase_subscription(RuntimeOrigin::signed(BUYER), round_id, 50u128, None),
+            Error::<Test>::InsiderTradingBlocked
+        );
+    });
+}
+
+// ==================== F5: 白名单个人额度 ====================
+
+#[test]
+fn f5_whitelist_individual_allocation_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityTokenSale::create_sale_round(
+            RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+            SaleMode::WhitelistAllocation, 1_000_000u128,
+            10u64.into(), 100u64.into(), false, 0, 0u128,
+        ));
+        assert_ok!(EntityTokenSale::add_payment_option(
+            RuntimeOrigin::signed(CREATOR), 0, None, 100u128, 10u128, 100_000u128,
+        ));
+        // BUYER 获得 50 的个人配额
+        assert_ok!(EntityTokenSale::add_to_whitelist(
+            RuntimeOrigin::signed(CREATOR), 0,
+            BoundedVec::try_from(vec![(BUYER, Some(50u128))]).unwrap(),
+        ));
+        assert_ok!(EntityTokenSale::start_sale(RuntimeOrigin::signed(CREATOR), 0));
+        frame_system::Pallet::<Test>::set_block_number(10);
+
+        // 认购 50 应成功
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), 0, 50u128, None));
+
+        // 认购超过配额应失败（通过 increase_subscription）
+        assert_noop!(
+            EntityTokenSale::increase_subscription(RuntimeOrigin::signed(BUYER), 0, 10u128, None),
+            Error::<Test>::ExceedsPurchaseLimit
+        );
+    });
+}
+
+#[test]
+fn f5_whitelist_none_allocation_uses_default() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityTokenSale::create_sale_round(
+            RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+            SaleMode::WhitelistAllocation, 1_000_000u128,
+            10u64.into(), 100u64.into(), false, 0, 0u128,
+        ));
+        // max_purchase_per_account = 100_000
+        assert_ok!(EntityTokenSale::add_payment_option(
+            RuntimeOrigin::signed(CREATOR), 0, None, 100u128, 10u128, 100_000u128,
+        ));
+        // BUYER 获得 None 配额 → 使用默认限额
+        assert_ok!(EntityTokenSale::add_to_whitelist(
+            RuntimeOrigin::signed(CREATOR), 0,
+            BoundedVec::try_from(vec![(BUYER, None)]).unwrap(),
+        ));
+        assert_ok!(EntityTokenSale::start_sale(RuntimeOrigin::signed(CREATOR), 0));
+        frame_system::Pallet::<Test>::set_block_number(10);
+
+        // 认购 100 应成功（在 100_000 限额内）
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), 0, 100u128, None));
+    });
+}
+
+// ==================== F6: 发售统计查询 ====================
+
+#[test]
+fn f6_sale_statistics_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 200u128, None));
+
+        let stats = EntityTokenSale::get_sale_statistics(round_id).unwrap();
+        assert_eq!(stats.0, 1_000_000u128); // total_supply
+        assert_eq!(stats.1, 200u128);        // sold_amount
+        assert_eq!(stats.2, 999_800u128);    // remaining_amount
+        assert_eq!(stats.3, 1);              // participants_count
+    });
+}
+
+#[test]
+fn f6_sale_statistics_none_for_missing() {
+    new_test_ext().execute_with(|| {
+        assert!(EntityTokenSale::get_sale_statistics(999).is_none());
+    });
+}
+
+// ==================== F7: TokenSaleProvider trait ====================
+
+#[test]
+fn f7_token_sale_provider_active_round() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::TokenSaleProvider;
+
+        // 无活跃轮次
+        assert_eq!(<EntityTokenSale as TokenSaleProvider<u128>>::active_sale_round(ENTITY_ID), None);
+
+        let round_id = setup_active_round();
+        // 有活跃轮次
+        assert_eq!(<EntityTokenSale as TokenSaleProvider<u128>>::active_sale_round(ENTITY_ID), Some(round_id));
+
+        // 状态
+        let status = <EntityTokenSale as TokenSaleProvider<u128>>::sale_round_status(round_id);
+        assert_eq!(status, Some(pallet_entity_common::TokenSaleStatus::Active));
+
+        // 数据
+        assert_eq!(<EntityTokenSale as TokenSaleProvider<u128>>::sold_amount(round_id), Some(0u128));
+        assert_eq!(<EntityTokenSale as TokenSaleProvider<u128>>::remaining_amount(round_id), Some(1_000_000u128));
+        assert_eq!(<EntityTokenSale as TokenSaleProvider<u128>>::participants_count(round_id), Some(0));
+        assert_eq!(<EntityTokenSale as TokenSaleProvider<u128>>::sale_entity_id(round_id), Some(ENTITY_ID));
+        assert_eq!(<EntityTokenSale as TokenSaleProvider<u128>>::sale_total_supply(round_id), Some(1_000_000u128));
+    });
+}
+
+#[test]
+fn f7_token_sale_provider_missing_round() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::TokenSaleProvider;
+        assert_eq!(<EntityTokenSale as TokenSaleProvider<u128>>::sale_round_status(999), None);
+        assert_eq!(<EntityTokenSale as TokenSaleProvider<u128>>::sold_amount(999), None);
+    });
+}
+
+// ==================== F8: 存储清理机制 ====================
+
+#[test]
+fn f8_cleanup_round_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+
+        // 结束轮次
+        frame_system::Pallet::<Test>::set_block_number(101);
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // 提取资金
+        assert_ok!(EntityTokenSale::withdraw_funds(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // 现在清理
+        assert_ok!(EntityTokenSale::cleanup_round(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // 验证存储已清理
+        assert!(!Subscriptions::<Test>::contains_key(round_id, BUYER));
+        assert_eq!(WhitelistCount::<Test>::get(round_id), 0);
+        assert!(RoundPaymentOptions::<Test>::get(round_id).is_empty());
+    });
+}
+
+#[test]
+fn f8_cleanup_rejects_active_round() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_noop!(
+            EntityTokenSale::cleanup_round(RuntimeOrigin::signed(CREATOR), round_id),
+            Error::<Test>::RoundNotCleanable
+        );
+    });
+}
+
+#[test]
+fn f8_cleanup_rejects_non_creator() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        frame_system::Pallet::<Test>::set_block_number(101);
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
+        assert_ok!(EntityTokenSale::withdraw_funds(RuntimeOrigin::signed(CREATOR), round_id));
+
+        assert_noop!(
+            EntityTokenSale::cleanup_round(RuntimeOrigin::signed(BUYER), round_id),
+            Error::<Test>::Unauthorized
+        );
+    });
+}
+
+#[test]
+fn f8_cleanup_rejects_funds_not_withdrawn() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        frame_system::Pallet::<Test>::set_block_number(101);
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // 未提取资金
+        assert_noop!(
+            EntityTokenSale::cleanup_round(RuntimeOrigin::signed(CREATOR), round_id),
+            Error::<Test>::RoundNotCleanable
+        );
+    });
+}
+
+// ==================== F9: 批量强制退款 ====================
+
+#[test]
+fn f9_force_batch_refund_works() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+
+        let buyer_balance_before = pallet_balances::Pallet::<Test>::free_balance(BUYER);
+
+        // 取消轮次
+        assert_ok!(EntityTokenSale::cancel_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // 批量退款
+        assert_ok!(EntityTokenSale::force_batch_refund(
+            RuntimeOrigin::root(), round_id,
+            BoundedVec::try_from(vec![BUYER]).unwrap(),
+        ));
+
+        // 验证退款
+        let sub = Subscriptions::<Test>::get(round_id, BUYER).unwrap();
+        assert!(sub.refunded);
+        let buyer_balance_after = pallet_balances::Pallet::<Test>::free_balance(BUYER);
+        assert!(buyer_balance_after > buyer_balance_before);
+    });
+}
+
+#[test]
+fn f9_force_batch_refund_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::cancel_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        assert_noop!(
+            EntityTokenSale::force_batch_refund(
+                RuntimeOrigin::signed(CREATOR), round_id,
+                BoundedVec::try_from(vec![BUYER]).unwrap(),
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn f9_force_batch_refund_rejects_non_cancelled() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_noop!(
+            EntityTokenSale::force_batch_refund(
+                RuntimeOrigin::root(), round_id,
+                BoundedVec::try_from(vec![BUYER]).unwrap(),
+            ),
+            Error::<Test>::SaleNotCancelled
+        );
+    });
+}
+
+#[test]
+fn f9_force_batch_refund_rejects_empty_batch() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::cancel_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        assert_noop!(
+            EntityTokenSale::force_batch_refund(
+                RuntimeOrigin::root(), round_id,
+                BoundedVec::try_from(vec![]).unwrap(),
+            ),
+            Error::<Test>::EmptyBatch
+        );
+    });
+}
+
+#[test]
+fn f9_force_batch_refund_skips_already_refunded() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+
+        assert_ok!(EntityTokenSale::cancel_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // 先单独退款
+        assert_ok!(EntityTokenSale::force_refund(RuntimeOrigin::root(), round_id, BUYER));
+
+        // 再批量退款 — 不应重复退
+        assert_ok!(EntityTokenSale::force_batch_refund(
+            RuntimeOrigin::root(), round_id,
+            BoundedVec::try_from(vec![BUYER]).unwrap(),
+        ));
+        // 事件中 refunded_count 应为 0
+    });
+}
+
+// ==================== F11: Lottery 模式阻断 ====================
+
+#[test]
+fn f11_lottery_mode_rejected() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityTokenSale::create_sale_round(
+                RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+                SaleMode::Lottery, 1_000u128, 10u64.into(), 100u64.into(), false, 0, 0u128,
+            ),
+            Error::<Test>::LotteryNotImplemented
+        );
+    });
+}
+
+// ==================== F12: 发售期间代币转让限制 ====================
+
+#[test]
+fn f12_has_active_sale_returns_true_when_active() {
+    new_test_ext().execute_with(|| {
+        let _round_id = setup_active_round();
+        assert!(EntityTokenSale::has_active_sale(ENTITY_ID));
+    });
+}
+
+#[test]
+fn f12_has_active_sale_returns_false_when_none() {
+    new_test_ext().execute_with(|| {
+        assert!(!EntityTokenSale::has_active_sale(ENTITY_ID));
+    });
+}
+
+#[test]
+fn f12_has_active_sale_returns_false_after_end() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        frame_system::Pallet::<Test>::set_block_number(101);
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
+        assert!(!EntityTokenSale::has_active_sale(ENTITY_ID));
+    });
+}
+
+#[test]
+fn f12_has_active_sale_true_when_paused() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::pause_sale(RuntimeOrigin::signed(CREATOR), round_id));
+        // Paused 仍算活跃
+        assert!(EntityTokenSale::has_active_sale(ENTITY_ID));
+    });
+}
+
+// ==================== 审计回归测试 ====================
+
+#[test]
+fn h1h2_force_batch_refund_unreserves_entity_tokens() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+
+        let reserved_before = MockTokenProvider::get_reserved(ENTITY_ID, ENTITY_ACCOUNT);
+        assert!(reserved_before >= 100, "tokens should be reserved after subscribe");
+
+        assert_ok!(EntityTokenSale::cancel_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // 批量退款应释放 Entity 代币
+        assert_ok!(EntityTokenSale::force_batch_refund(
+            RuntimeOrigin::root(), round_id,
+            BoundedVec::try_from(vec![BUYER]).unwrap(),
+        ));
+
+        let reserved_after = MockTokenProvider::get_reserved(ENTITY_ID, ENTITY_ACCOUNT);
+        // cancel_sale 释放 remaining_amount，batch_refund 应释放 sold_amount (100)
+        assert_eq!(reserved_after, 0, "all entity tokens should be unreserved after batch refund");
+    });
+}
+
+#[test]
+fn m1_force_batch_refund_updates_total_refunded_tokens() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER2), round_id, 200u128, None));
+
+        assert_ok!(EntityTokenSale::cancel_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        assert_ok!(EntityTokenSale::force_batch_refund(
+            RuntimeOrigin::root(), round_id,
+            BoundedVec::try_from(vec![BUYER, BUYER2]).unwrap(),
+        ));
+
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        assert_eq!(round.total_refunded_tokens, 300u128, "total_refunded_tokens should include both subscribers");
+        assert!(round.total_refunded_nex > 0, "total_refunded_nex should be updated");
+    });
+}
+
+#[test]
+fn h1_force_batch_refund_skips_on_transfer_failure() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+
+        assert_ok!(EntityTokenSale::cancel_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // 清空 pallet 账户余额使 NEX 转账失败
+        let pallet_account = EntityTokenSale::pallet_account();
+        let pallet_bal = <pallet_balances::Pallet<Test> as Currency<u64>>::free_balance(&pallet_account);
+        if pallet_bal > 1 {
+            // 转走 pallet 账户的钱使其不足以退款
+            let _ = <pallet_balances::Pallet<Test> as Currency<u64>>::transfer(
+                &pallet_account, &99u64, pallet_bal - 1,
+                frame_support::traits::ExistenceRequirement::KeepAlive,
+            );
+        }
+
+        // 批量退款应成功（不 panic），但 BUYER 不会被标记为 refunded
+        assert_ok!(EntityTokenSale::force_batch_refund(
+            RuntimeOrigin::root(), round_id,
+            BoundedVec::try_from(vec![BUYER]).unwrap(),
+        ));
+
+        let sub = Subscriptions::<Test>::get(round_id, BUYER).unwrap();
+        assert!(!sub.refunded, "subscriber should NOT be marked refunded when NEX transfer fails");
+    });
+}
+
+// ==================== H1-R6: soft cap failure 后 claim_refund 可正常退款 ====================
+
+#[test]
+/// H1-R6: end_sale soft cap 未达标后，claim_refund 应能正常退还 NEX
+fn h1r6_claim_refund_works_after_end_sale_soft_cap_failure() {
+    new_test_ext().execute_with(|| {
+        // 创建 soft_cap = 999_999 的轮次（几乎不可能达标）
+        assert_ok!(EntityTokenSale::create_sale_round(
+            RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+            SaleMode::FixedPrice, 1_000_000u128,
+            10u64.into(), 100u64.into(), false, 0,
+            999_999u128, // 极高 soft_cap
+        ));
+        assert_ok!(EntityTokenSale::add_payment_option(
+            RuntimeOrigin::signed(CREATOR), 0, None, 100u128, 10u128, 100_000u128,
+        ));
+        assert_ok!(EntityTokenSale::start_sale(RuntimeOrigin::signed(CREATOR), 0));
+        frame_system::Pallet::<Test>::set_block_number(10);
+
+        let buyer_before = Balances::free_balance(BUYER);
+
+        // 认购 100 tokens, 支付 10_000 NEX
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), 0, 100u128, None));
+
+        // 推进到 end_block 之后，结束发售 — soft cap 未达标
+        frame_system::Pallet::<Test>::set_block_number(101);
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), 0));
+
+        let round = SaleRounds::<Test>::get(0).unwrap();
+        assert_eq!(round.status, RoundStatus::Cancelled);
+
+        // H1-R6: claim_refund 应成功（修复前因 IncompleteUnreserve 失败）
+        assert_ok!(EntityTokenSale::claim_refund(RuntimeOrigin::signed(BUYER), 0));
+
+        let buyer_after = Balances::free_balance(BUYER);
+        assert_eq!(buyer_after, buyer_before, "NEX should be fully refunded");
+
+        // 验证 entity tokens 全部释放
+        let reserved = MockTokenProvider::get_reserved(ENTITY_ID, ENTITY_ACCOUNT);
+        assert_eq!(reserved, 0, "all entity tokens should be unreserved after refund");
+    });
+}
+
+#[test]
+/// H1-R6: on_initialize auto-cancel (soft cap) 后 claim_refund 应正常工作
+fn h1r6_claim_refund_works_after_auto_end_soft_cap_failure() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityTokenSale::create_sale_round(
+            RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+            SaleMode::FixedPrice, 1_000_000u128,
+            10u64.into(), 100u64.into(), false, 0,
+            999_999u128,
+        ));
+        assert_ok!(EntityTokenSale::add_payment_option(
+            RuntimeOrigin::signed(CREATOR), 0, None, 100u128, 10u128, 100_000u128,
+        ));
+        assert_ok!(EntityTokenSale::start_sale(RuntimeOrigin::signed(CREATOR), 0));
+        frame_system::Pallet::<Test>::set_block_number(10);
+
+        let buyer_before = Balances::free_balance(BUYER);
+
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), 0, 100u128, None));
+
+        // on_initialize 自动结束 → soft cap 未达标 → 自动取消
+        frame_system::Pallet::<Test>::set_block_number(101);
+        <EntityTokenSale as Hooks<u64>>::on_initialize(101);
+
+        let round = SaleRounds::<Test>::get(0).unwrap();
+        assert_eq!(round.status, RoundStatus::Cancelled);
+
+        // claim_refund 应成功
+        assert_ok!(EntityTokenSale::claim_refund(RuntimeOrigin::signed(BUYER), 0));
+
+        let buyer_after = Balances::free_balance(BUYER);
+        assert_eq!(buyer_after, buyer_before, "NEX should be fully refunded after auto-cancel");
+    });
+}
+
+#[test]
+/// H1-R6: soft cap 取消后 reclaim_unclaimed_tokens 也应正常工作
+fn h1r6_reclaim_works_after_soft_cap_cancel() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityTokenSale::create_sale_round(
+            RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+            SaleMode::FixedPrice, 1_000_000u128,
+            10u64.into(), 100u64.into(), false, 0,
+            999_999u128,
+        ));
+        assert_ok!(EntityTokenSale::add_payment_option(
+            RuntimeOrigin::signed(CREATOR), 0, None, 100u128, 10u128, 100_000u128,
+        ));
+        assert_ok!(EntityTokenSale::start_sale(RuntimeOrigin::signed(CREATOR), 0));
+        frame_system::Pallet::<Test>::set_block_number(10);
+
+        // 2 个用户认购
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), 0, 100u128, None));
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER2), 0, 200u128, None));
+
+        // end_sale → soft cap 未达标 → 取消
+        frame_system::Pallet::<Test>::set_block_number(101);
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), 0));
+
+        // BUYER 领取退款
+        assert_ok!(EntityTokenSale::claim_refund(RuntimeOrigin::signed(BUYER), 0));
+
+        // BUYER2 不领取退款 — 宽限期后 reclaim
+        frame_system::Pallet::<Test>::set_block_number(210); // cancelled_at=101, grace=100, deadline=201
+        let entity_before = Balances::free_balance(ENTITY_ACCOUNT);
+        assert_ok!(EntityTokenSale::reclaim_unclaimed_tokens(RuntimeOrigin::signed(CREATOR), 0));
+
+        // BUYER2 的 20_000 NEX 应转给 entity
+        let entity_after = Balances::free_balance(ENTITY_ACCOUNT);
+        assert_eq!(entity_after - entity_before, 20_000u128);
+
+        let round = SaleRounds::<Test>::get(0).unwrap();
+        assert_eq!(round.status, RoundStatus::Completed);
+    });
+}
+
+#[test]
+fn m2_dutch_price_no_overflow_with_large_values() {
+    new_test_ext().execute_with(|| {
+        // 创建荷兰拍卖轮次，使用接近 u128 上限的价格
+        assert_ok!(EntityTokenSale::create_sale_round(
+            RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+            SaleMode::DutchAuction, 1_000u128, 10u64.into(), 110u64.into(), false, 0, 0u128,
+        ));
+        let round_id = 0u64;
+        assert_ok!(EntityTokenSale::add_payment_option(
+            RuntimeOrigin::signed(CREATOR), round_id,
+            None, 1u128, 1u128, 100_000u128,
+        ));
+
+        // 使用非常大的价格范围
+        let large_start: u128 = u128::MAX / 2;
+        let large_end: u128 = 1_000_000;
+        assert_ok!(EntityTokenSale::configure_dutch_auction(
+            RuntimeOrigin::signed(CREATOR), round_id,
+            large_start, large_end,
+        ));
+
+        assert_ok!(EntityTokenSale::start_sale(
+            RuntimeOrigin::signed(CREATOR), round_id,
+        ));
+
+        // 设置在中间时刻 (start=10, end=110, midpoint=60)
+        frame_system::Pallet::<Test>::set_block_number(60);
+
+        let round = SaleRounds::<Test>::get(round_id).unwrap();
+        let price = EntityTokenSale::calculate_dutch_price(&round).unwrap();
+        let price_u128: u128 = price;
+
+        // 价格应在 start 和 end 之间
+        assert!(price_u128 >= large_end, "price should be >= end_price, got {}", price_u128);
+        assert!(price_u128 <= large_start, "price should be <= start_price, got {}", price_u128);
+        // 中间点价格应大致在中间
+        let expected_mid = large_start / 2;
+        let tolerance = large_start / 10;
+        assert!(
+            price_u128 > expected_mid.saturating_sub(tolerance) && price_u128 < expected_mid.saturating_add(tolerance),
+            "price at midpoint should be roughly half of start_price, got {} vs expected ~{}", price_u128, expected_mid
+        );
+    });
+}
+
+// ==================== M1-R7: cleanup_round 释放 EntityRounds 槽位 ====================
+
+#[test]
+fn m1r7_cleanup_round_frees_entity_rounds_slot() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+
+        // 结束 + 提取资金
+        frame_system::Pallet::<Test>::set_block_number(101);
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
+        assert_ok!(EntityTokenSale::withdraw_funds(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // 确认 EntityRounds 包含该轮次
+        let rounds_before = EntityRounds::<Test>::get(ENTITY_ID);
+        assert!(rounds_before.contains(&round_id));
+
+        // cleanup
+        assert_ok!(EntityTokenSale::cleanup_round(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // M1-R7: EntityRounds 应不再包含该轮次
+        let rounds_after = EntityRounds::<Test>::get(ENTITY_ID);
+        assert!(!rounds_after.contains(&round_id), "round should be removed from EntityRounds after cleanup");
+    });
+}
+
+#[test]
+fn m1r7_cleanup_allows_new_round_after_slot_freed() {
+    new_test_ext().execute_with(|| {
+        // 创建多个轮次，清理后应能继续创建
+        let round_id = setup_active_round();
+
+        // 结束 + 提取 + 清理
+        frame_system::Pallet::<Test>::set_block_number(101);
+        assert_ok!(EntityTokenSale::end_sale(RuntimeOrigin::signed(CREATOR), round_id));
+        assert_ok!(EntityTokenSale::withdraw_funds(RuntimeOrigin::signed(CREATOR), round_id));
+        assert_ok!(EntityTokenSale::cleanup_round(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // 应能创建新轮次（EntityRounds 槽位已释放）
+        assert_ok!(EntityTokenSale::create_sale_round(
+            RuntimeOrigin::signed(CREATOR), ENTITY_ID,
+            SaleMode::FixedPrice, 500_000u128,
+            200u64.into(), 300u64.into(), false, 0, 0u128,
+        ));
+
+        let rounds = EntityRounds::<Test>::get(ENTITY_ID);
+        assert_eq!(rounds.len(), 1, "only the new round should be in EntityRounds");
+        assert_eq!(rounds[0], 1u64, "new round id should be 1");
+    });
+}
+
+// ==================== L1-R7: force_batch_refund 部分 unreserve 回滚 ====================
+
+#[test]
+fn l1r7_force_batch_refund_rereserves_on_partial_unreserve() {
+    new_test_ext().execute_with(|| {
+        let round_id = setup_active_round();
+        assert_ok!(EntityTokenSale::subscribe(RuntimeOrigin::signed(BUYER), round_id, 100u128, None));
+
+        assert_ok!(EntityTokenSale::cancel_sale(RuntimeOrigin::signed(CREATOR), round_id));
+
+        // 篡改 reserved：降低到只剩 50（正常应有 100 给 BUYER）
+        // cancel_sale 已释放 remaining_amount，只剩 sold_amount (100) 在 reserved
+        // 手动降低 reserved 模拟异常状态
+        MockTokenProvider::set_reserved(ENTITY_ID, ENTITY_ACCOUNT, 50);
+
+        let reserved_before = MockTokenProvider::get_reserved(ENTITY_ID, ENTITY_ACCOUNT);
+        assert_eq!(reserved_before, 50);
+
+        // 批量退款 — unreserve(100) 只能释放 50，deficit=50
+        // L1-R7: 应回滚已释放的 50，reserved 恢复为 50
+        assert_ok!(EntityTokenSale::force_batch_refund(
+            RuntimeOrigin::root(), round_id,
+            BoundedVec::try_from(vec![BUYER]).unwrap(),
+        ));
+
+        // BUYER 不应被标记 refunded（因为 unreserve 不完整）
+        let sub = Subscriptions::<Test>::get(round_id, BUYER).unwrap();
+        assert!(!sub.refunded, "subscriber should NOT be refunded when unreserve has deficit");
+
+        // L1-R7: reserved 应恢复（re-reserve 了 freed 的 50）
+        let reserved_after = MockTokenProvider::get_reserved(ENTITY_ID, ENTITY_ACCOUNT);
+        assert_eq!(reserved_after, 50, "reserved should be restored after re-reserve");
     });
 }

@@ -14,9 +14,9 @@ mod tests;
 
 // 函数级中文注释：导入log用于记录自动pin失败的警告
 extern crate log;
-// 函数级中文注释：导入pallet_memo_ipfs用于IpfsPinner trait
+// 函数级中文注释：导入pallet_memo_ipfs用于StoragePin trait
 extern crate pallet_storage_service;
-use pallet_storage_service::IpfsPinner;
+use pallet_storage_service::StoragePin;
 extern crate pallet_crypto_common;
 
 // 函数级中文注释：权重模块导入，提供 WeightInfo 接口用于基于输入规模计算交易权重。
@@ -68,6 +68,22 @@ pub mod pallet {
         Mixed,
         /// 纯文本描述
         Text,
+    }
+
+    /// P1-1: 证据状态枚举
+    ///
+    /// 支持证据生命周期管理：活跃、已撤回、已密封（仲裁冻结）、已移除（强制）
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, Debug, Default)]
+    pub enum EvidenceStatus {
+        /// 活跃状态（正常可用）
+        #[default]
+        Active,
+        /// 已撤回（提交者主动撤回，不可再用于仲裁）
+        Withdrawn,
+        /// 已密封（仲裁期间冻结，不可修改/撤回/取消链接）
+        Sealed,
+        /// 已移除（Root强制移除违规内容）
+        Removed,
     }
 
     /// 存储膨胀防护：归档证据摘要（精简版，~50字节）
@@ -239,7 +255,7 @@ pub mod pallet {
         /// 注意：
         /// - 证据通常关联到target_id（如subject_id）
         /// - 由Runtime注入实现（pallet_storage_service::Pallet<Runtime>）
-        type IpfsPinner: pallet_storage_service::IpfsPinner<Self::AccountId, Self::Balance>;
+        type StoragePin: pallet_storage_service::StoragePin<Self::AccountId>;
         
         /// 函数级中文注释：余额类型（用于IPFS存储费用支付）
         type Balance: Parameter + Member + AtLeast32BitUnsigned + Default + Copy + MaxEncodedLen;
@@ -402,6 +418,27 @@ pub mod pallet {
     /// 🆕 防膨胀: 归档清理游标（记录已清理到的归档ID）
     #[pallet::storage]
     pub type ArchiveCleanupCursor<T: Config> = StorageValue<_, u64, ValueQuery>;
+
+    // ==================== P0-3: 证据密封（仲裁冻结）====================
+
+    /// 已密封的证据集合：evidence_id → 密封发起者
+    /// 密封后证据不可修改、撤回、取消链接
+    #[pallet::storage]
+    pub type SealedEvidences<T: Config> =
+        StorageMap<_, Blake2_128Concat, u64, T::AccountId, OptionQuery>;
+
+    // ==================== P1-1: 证据状态 ====================
+
+    /// 证据状态存储（默认 Active）
+    #[pallet::storage]
+    pub type EvidenceStatuses<T: Config> =
+        StorageMap<_, Blake2_128Concat, u64, EvidenceStatus, ValueQuery>;
+
+    // ==================== P1-5: PendingManifest 过期清理游标 ====================
+
+    /// 过期 PendingManifest 清理游标
+    #[pallet::storage]
+    pub type PendingManifestCleanupCursor<T: Config> = StorageValue<_, u64, ValueQuery>;
 
     // ==================== 证据追加链 ====================
 
@@ -566,7 +603,7 @@ pub mod pallet {
         /// 用户公钥已注册
         PublicKeyRegistered {
             user: T::AccountId,
-            key_type: u8,
+            key_type: pallet_crypto_common::KeyType,
         },
 
         // === 归档事件 ===
@@ -617,6 +654,66 @@ pub mod pallet {
         AccessPolicyUpdated {
             content_id: u64,
             updated_by: T::AccountId,
+        },
+
+        // ==================== 新增事件 ====================
+
+        /// P0-2: 承诺已揭示（Commit-Reveal 的 Reveal 阶段）
+        CommitmentRevealed {
+            id: u64,
+            ns: [u8; 8],
+            subject_id: u64,
+            content_cid: BoundedVec<u8, T::MaxContentCidLen>,
+            owner: T::AccountId,
+        },
+
+        /// P0-3: 证据已密封（仲裁冻结）
+        EvidenceSealed {
+            id: u64,
+            sealed_by: T::AccountId,
+        },
+
+        /// P0-3: 证据密封已解除
+        EvidenceUnsealed {
+            id: u64,
+            unsealed_by: T::AccountId,
+        },
+
+        /// P0-4: 证据已被强制移除（Root操作）
+        EvidenceForceRemoved {
+            id: u64,
+            domain: u8,
+            target_id: u64,
+        },
+
+        /// P1-1: 证据已撤回
+        EvidenceWithdrawn {
+            id: u64,
+            owner: T::AccountId,
+        },
+
+        /// P1-3: 私密内容已删除
+        PrivateContentDeleted {
+            content_id: u64,
+            deleted_by: T::AccountId,
+        },
+
+        /// P1-6: 证据已被强制归档（管理员操作）
+        EvidenceForceArchived {
+            id: u64,
+            domain: u8,
+            target_id: u64,
+        },
+
+        /// P1-6: 用户公钥已撤销
+        PublicKeyRevoked {
+            user: T::AccountId,
+        },
+
+        /// P2: 访问请求已取消
+        AccessRequestCancelled {
+            content_id: u64,
+            requester: T::AccountId,
         },
     }
 
@@ -686,6 +783,27 @@ pub mod pallet {
         AlreadyAuthorized,
         /// 不能向自己发送访问请求
         SelfAccessRequest,
+
+        // ==================== 新增错误 ====================
+
+        /// P0-2: 承诺哈希不存在（reveal 时找不到对应的 commit_hash 证据）
+        CommitNotFound,
+        /// P0-2: 揭示数据与承诺哈希不匹配
+        CommitMismatch,
+        /// P0-2: 证据已经揭示过（不可重复揭示）
+        AlreadyRevealed,
+        /// P0-3: 证据已被密封，不可修改/撤回/取消链接
+        EvidenceSealed,
+        /// P0-3: 证据未被密封（解封时使用）
+        EvidenceNotSealed,
+        /// P1-1: 证据已被撤回
+        EvidenceWithdrawn,
+        /// P1-1: 证据状态不允许此操作
+        InvalidEvidenceStatus,
+        /// P1-3: 私密内容仍有活跃访问者（删除前需先撤销所有访问权限）
+        ContentHasActiveUsers,
+        /// P2: 访问请求不存在
+        AccessRequestNotFound,
     }
 
     #[allow(deprecated)]
@@ -779,14 +897,15 @@ pub mod pallet {
 
             // 函数级详细中文注释：自动pin证据CID到IPFS（P1重构：使用证据专用接口）
             // 🔮 Phase 1.5 计划：pin content_cid及其包含的所有媒体CID
-            // 当前方案：使用 pin_cid_for_subject（Evidence 类型，默认 Critical 级别）
+            // 当前方案：使用 pin（Evidence 类型，Critical 级别）
             let cid_vec: Vec<u8> = ev.content_cid.clone().into_inner();
-            if let Err(e) = T::IpfsPinner::pin_cid_for_subject(
+            if let Err(e) = T::StoragePin::pin(
                 who.clone(),
-                pallet_storage_service::SubjectType::Evidence,
-                id,  // 使用 evidence_id
+                b"evidence",
+                id,
+                None,
                 cid_vec,
-                None, // 使用默认层级
+                pallet_storage_service::PinTier::Critical,
             ) {
                 log::warn!(
                     target: "evidence",
@@ -890,6 +1009,9 @@ pub mod pallet {
                 <T as Config>::Authorizer::is_authorized(ev_ns, &who),
                 Error::<T>::NotAuthorized
             );
+            // 🆕 M2-R3修复: 密封和状态检查（与 unlink 对称）
+            ensure!(!SealedEvidences::<T>::contains_key(id), Error::<T>::EvidenceSealed);
+            ensure!(EvidenceStatuses::<T>::get(id) == EvidenceStatus::Active, Error::<T>::InvalidEvidenceStatus);
             EvidenceByTarget::<T>::insert((domain, target_id), id, ());
             Self::deposit_event(Event::EvidenceLinked {
                 domain,
@@ -917,6 +1039,9 @@ pub mod pallet {
             let ev = Evidences::<T>::get(id).ok_or(Error::<T>::NotFound)?;
             let ev_ns = ev.ns.ok_or(Error::<T>::NamespaceMismatch)?;
             ensure!(ev_ns == ns, Error::<T>::NamespaceMismatch);
+            // 🆕 M2-R3修复: 密封和状态检查（与 unlink_by_ns 对称）
+            ensure!(!SealedEvidences::<T>::contains_key(id), Error::<T>::EvidenceSealed);
+            ensure!(EvidenceStatuses::<T>::get(id) == EvidenceStatus::Active, Error::<T>::InvalidEvidenceStatus);
             EvidenceByNs::<T>::insert((ns, subject_id), id, ());
             Self::deposit_event(Event::EvidenceLinkedV2 { ns, subject_id, id });
             Ok(())
@@ -934,6 +1059,8 @@ pub mod pallet {
                 <T as Config>::Authorizer::is_authorized(ev_ns, &who),
                 Error::<T>::NotAuthorized
             );
+            // P0-3: 密封检查
+            ensure!(!SealedEvidences::<T>::contains_key(id), Error::<T>::EvidenceSealed);
             EvidenceByTarget::<T>::remove((domain, target_id), id);
             Self::deposit_event(Event::EvidenceUnlinked {
                 domain,
@@ -961,6 +1088,8 @@ pub mod pallet {
             let ev = Evidences::<T>::get(id).ok_or(Error::<T>::NotFound)?;
             let ev_ns = ev.ns.ok_or(Error::<T>::NamespaceMismatch)?;
             ensure!(ev_ns == ns, Error::<T>::NamespaceMismatch);
+            // P0-3: 密封检查
+            ensure!(!SealedEvidences::<T>::contains_key(id), Error::<T>::EvidenceSealed);
             EvidenceByNs::<T>::remove((ns, subject_id), id);
             Self::deposit_event(Event::EvidenceUnlinkedV2 { ns, subject_id, id });
             Ok(())
@@ -974,29 +1103,15 @@ pub mod pallet {
         pub fn register_public_key(
             origin: OriginFor<T>,
             key_data: BoundedVec<u8, T::MaxKeyLen>,
-            key_type: u8, // 1=RSA-2048, 2=Ed25519, 3=ECDSA-P256
+            key_type: pallet_crypto_common::KeyType,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // 验证密钥类型
+            // 验证密钥长度（使用 KeyType 枚举的类型安全验证）
             ensure!(
-                key_type >= 1 && key_type <= 3,
-                Error::<T>::UnsupportedKeyType
+                key_type.validate_key_len(key_data.len()),
+                Error::<T>::InvalidEncryptedKey
             );
-
-            // 验证密钥长度
-            match key_type {
-                1 => ensure!(
-                    key_data.len() >= 270 && key_data.len() <= 512,
-                    Error::<T>::InvalidEncryptedKey
-                ), // RSA-2048 DER
-                2 => ensure!(key_data.len() == 32, Error::<T>::InvalidEncryptedKey), // Ed25519
-                3 => ensure!(
-                    key_data.len() == 33 || key_data.len() == 65,
-                    Error::<T>::InvalidEncryptedKey
-                ), // ECDSA
-                _ => return Err(Error::<T>::UnsupportedKeyType.into()),
-            }
 
             let now = <frame_system::Pallet<T>>::block_number();
 
@@ -1025,7 +1140,7 @@ pub mod pallet {
             subject_id: u64,
             cid: BoundedVec<u8, T::MaxCidLen>,
             content_hash: H256,
-            encryption_method: u8,
+            encryption_method: pallet_crypto_common::EncryptionMethod,
             access_policy: private_content::AccessPolicy<T>,
             encrypted_keys: EncryptedKeyBundles<T>,
         ) -> DispatchResult {
@@ -1044,10 +1159,14 @@ pub mod pallet {
                 Error::<T>::InvalidCidFormat
             );
 
-            // CID格式验证（使用IPFS规范）
-            let cid_str = core::str::from_utf8(cid_bytes)
+            // P0-1修复: 加密CID的格式验证 — 剥离加密前缀后验证底层IPFS CID
+            // 旧代码直接调用 IpfsHelper::validate_cid(full_cid)，但加密前缀(enc-/sealed-等)
+            // 与 IPFS CID 格式要求(首字符 b/z/f/m/Q)互斥，导致所有加密CID验证失败。
+            let inner_cid_bytes = crate::cid_validator::strip_encrypted_prefix(cid_bytes);
+            ensure!(!inner_cid_bytes.is_empty(), Error::<T>::InvalidCidFormat);
+            let inner_cid_str = core::str::from_utf8(inner_cid_bytes)
                 .map_err(|_| Error::<T>::InvalidCidFormat)?;
-            IpfsHelper::validate_cid(cid_str)
+            IpfsHelper::validate_cid(inner_cid_str)
                 .map_err(|_| Error::<T>::InvalidCidFormat)?;
 
             // CID 去重检查
@@ -1094,6 +1213,7 @@ pub mod pallet {
                 creator: who.clone(),
                 access_policy,
                 encrypted_keys,
+                status: pallet_crypto_common::ContentStatus::Active,
                 created_at: now,
                 updated_at: now,
             };
@@ -1193,10 +1313,12 @@ pub mod pallet {
                 ensure!(content.creator == who, Error::<T>::AccessDenied);
                 ensure!(user != who, Error::<T>::AccessDenied); // 不能撤销自己的权限
 
-                // 移除用户
+                // 🆕 M1修复: 验证用户确实在授权列表中，避免静默无操作
+                let before_len = content.encrypted_keys.len();
                 content
                     .encrypted_keys
                     .retain(|(existing_user, _)| existing_user != &user);
+                ensure!(content.encrypted_keys.len() < before_len, Error::<T>::NotFound);
                 content.updated_at = <frame_system::Pallet<T>>::block_number();
 
                 Self::deposit_event(Event::AccessRevoked {
@@ -1319,6 +1441,17 @@ pub mod pallet {
                 Error::<T>::CannotAppendToArchived
             );
             
+            // 🆕 H2修复: 验证父证据未被密封且状态为 Active
+            ensure!(
+                !SealedEvidences::<T>::contains_key(parent_id),
+                Error::<T>::EvidenceSealed
+            );
+            let parent_status = EvidenceStatuses::<T>::get(parent_id);
+            ensure!(
+                parent_status == EvidenceStatus::Active,
+                Error::<T>::InvalidEvidenceStatus
+            );
+            
             // 3. 验证权限（同命名空间）
             let ns = T::EvidenceNsBytes::get();
             ensure!(
@@ -1335,6 +1468,13 @@ pub mod pallet {
                 Error::<T>::TooManySupplements
             );
             
+            // 🆕 M3-R4修复: 检查 per-subject 配额（与 commit 一致）
+            let target_count = EvidenceCountByTarget::<T>::get((parent.domain, parent.target_id));
+            ensure!(
+                target_count < T::MaxPerSubjectTarget::get(),
+                Error::<T>::TooManyForSubject
+            );
+
             // 5. 限频检查
             let now = <frame_system::Pallet<T>>::block_number();
             Self::touch_window(&who, now)?;
@@ -1343,6 +1483,8 @@ pub mod pallet {
             Self::validate_cid_vec(&imgs)?;
             Self::validate_cid_vec(&vids)?;
             Self::validate_cid_vec(&docs)?;
+            // 🆕 M1-R3修复: 全局 CID 去重检查（与 commit 保持一致）
+            Self::ensure_global_cid_unique([imgs.as_slice(), vids.as_slice(), docs.as_slice()])?;
             
             // 7. 生成新证据ID
             let id = NextEvidenceId::<T>::mutate(|n| {
@@ -1390,6 +1532,13 @@ pub mod pallet {
                     *c = c.saturating_add(1);
                 },
             );
+            // 🆕 M1-R3修复: 注册子证据 content_cid 到 CidHashIndex（与 commit 保持一致）
+            if T::EnableGlobalCidDedup::get() {
+                let h = H256::from(blake2_256(&ev.content_cid.clone().into_inner()));
+                if CidHashIndex::<T>::get(h).is_none() {
+                    CidHashIndex::<T>::insert(h, id);
+                }
+            }
             
             // 10. 建立父子关系
             EvidenceParent::<T>::insert(id, parent_id);
@@ -1399,12 +1548,13 @@ pub mod pallet {
             
             // 11. 自动pin证据CID
             let cid_vec: Vec<u8> = ev.content_cid.clone().into_inner();
-            if let Err(e) = T::IpfsPinner::pin_cid_for_subject(
+            if let Err(e) = T::StoragePin::pin(
                 who.clone(),
-                pallet_storage_service::SubjectType::Evidence,
+                b"evidence",
                 id,
-                cid_vec,
                 None,
+                cid_vec,
+                pallet_storage_service::PinTier::Critical,
             ) {
                 log::warn!(
                     target: "evidence",
@@ -1448,6 +1598,9 @@ pub mod pallet {
             let pending = PendingManifests::<T>::get(evidence_id)
                 .ok_or(Error::<T>::PendingManifestNotFound)?;
             
+            // P0-3: 密封检查
+            ensure!(!SealedEvidences::<T>::contains_key(evidence_id), Error::<T>::EvidenceSealed);
+
             // 2. 验证修改窗口
             let now = <frame_system::Pallet<T>>::block_number();
             let edit_window = T::EvidenceEditWindow::get();
@@ -1577,6 +1730,467 @@ pub mod pallet {
             })
         }
 
+        // ==================== P0-2: 承诺揭示 (Commit-Reveal 的 Reveal 阶段) ====================
+
+        /// 揭示承诺哈希对应的真实 CID
+        ///
+        /// 提交者在 commit_hash 阶段提交了 H(ns || subject_id || cid || salt || ver)，
+        /// 现在揭示原始参数，链上验证哈希匹配后将 content_cid 写入证据。
+        #[pallet::call_index(15)]
+        #[pallet::weight(T::WeightInfo::reveal_commitment())]
+        pub fn reveal_commitment(
+            origin: OriginFor<T>,
+            evidence_id: u64,
+            cid: BoundedVec<u8, T::MaxCidLen>,
+            salt: BoundedVec<u8, T::MaxMemoLen>,
+            version: u32,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            // 1. 获取证据并验证
+            let mut ev = Evidences::<T>::get(evidence_id).ok_or(Error::<T>::NotFound)?;
+            ensure!(ev.owner == who, Error::<T>::NotAuthorized);
+
+            // 2. 检查状态
+            let status = EvidenceStatuses::<T>::get(evidence_id);
+            ensure!(status == EvidenceStatus::Active, Error::<T>::InvalidEvidenceStatus);
+            ensure!(!SealedEvidences::<T>::contains_key(evidence_id), Error::<T>::EvidenceSealed);
+
+            // 3. 必须是承诺模式的证据
+            let commit_hash = ev.commit.ok_or(Error::<T>::CommitNotFound)?;
+
+            // 4. 验证尚未揭示（content_cid 仍为 memo 占位值，commit 字段非 None）
+            // 揭示后 commit 字段会被清除
+            // 若已揭示过，commit 已为 None
+            // （此处 commit 存在说明还未揭示）
+
+            // 5. 验证承诺哈希
+            let ns = ev.ns.ok_or(Error::<T>::NamespaceMismatch)?;
+            let computed = Self::compute_evidence_commitment(
+                &ns,
+                ev.target_id,
+                &cid,
+                &salt,
+                version,
+            );
+            ensure!(computed == commit_hash, Error::<T>::CommitMismatch);
+
+            // 6. CID 格式验证
+            let cid_str = core::str::from_utf8(cid.as_slice())
+                .map_err(|_| Error::<T>::InvalidCidFormat)?;
+            IpfsHelper::validate_cid(cid_str)
+                .map_err(|_| Error::<T>::InvalidCidFormat)?;
+
+            // 7. 更新证据：写入真实 content_cid，清除 commit
+            let cid_vec: Vec<u8> = cid.clone().into_inner();
+            let content_cid: BoundedVec<u8, T::MaxContentCidLen> = cid_vec.clone().try_into()
+                .map_err(|_| Error::<T>::InvalidCidFormat)?;
+            ev.content_cid = content_cid.clone();
+            // 🆕 H1-R3修复: 清理 CommitIndex（reveal 后 commit hash 不再需要）
+            CommitIndex::<T>::remove(commit_hash);
+            ev.commit = None; // 标记已揭示
+            ev.is_encrypted = false;
+            Evidences::<T>::insert(evidence_id, &ev);
+
+            // 8. 自动 pin CID
+            if let Err(e) = T::StoragePin::pin(
+                who.clone(),
+                b"evidence",
+                evidence_id,
+                None,
+                cid_vec,
+                pallet_storage_service::PinTier::Critical,
+            ) {
+                log::warn!(
+                    target: "evidence",
+                    "Auto-pin CID failed for revealed evidence {:?}: {:?}",
+                    evidence_id, e
+                );
+            }
+
+            // 9. 🆕 M2修复: 全局去重索引 — 揭示时也执行去重检查（与 commit 一致）
+            if T::EnableGlobalCidDedup::get() {
+                let h = H256::from(blake2_256(&content_cid.clone().into_inner()));
+                ensure!(
+                    CidHashIndex::<T>::get(h).is_none(),
+                    Error::<T>::DuplicateCidGlobal
+                );
+                CidHashIndex::<T>::insert(h, evidence_id);
+            }
+
+            Self::deposit_event(Event::CommitmentRevealed {
+                id: evidence_id,
+                ns,
+                subject_id: ev.target_id,
+                content_cid,
+                owner: who,
+            });
+            Ok(())
+        }
+
+        // ==================== P0-3: 证据密封/解封 ====================
+
+        /// 密封证据（仲裁冻结）
+        ///
+        /// 被密封的证据不可修改、撤回、取消链接。
+        /// 仅授权账户（如仲裁 pallet 通过 Authorizer）可调用。
+        #[pallet::call_index(16)]
+        #[pallet::weight(T::WeightInfo::seal_evidence())]
+        pub fn seal_evidence(
+            origin: OriginFor<T>,
+            evidence_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            // 验证证据存在
+            let ev = Evidences::<T>::get(evidence_id).ok_or(Error::<T>::NotFound)?;
+            let ns = ev.ns.ok_or(Error::<T>::NamespaceMismatch)?;
+            ensure!(
+                <T as Config>::Authorizer::is_authorized(ns, &who),
+                Error::<T>::NotAuthorized
+            );
+
+            // 检查状态
+            let status = EvidenceStatuses::<T>::get(evidence_id);
+            ensure!(status == EvidenceStatus::Active, Error::<T>::InvalidEvidenceStatus);
+            ensure!(!SealedEvidences::<T>::contains_key(evidence_id), Error::<T>::EvidenceSealed);
+
+            // 密封
+            SealedEvidences::<T>::insert(evidence_id, &who);
+            EvidenceStatuses::<T>::insert(evidence_id, EvidenceStatus::Sealed);
+
+            Self::deposit_event(Event::EvidenceSealed {
+                id: evidence_id,
+                sealed_by: who,
+            });
+            Ok(())
+        }
+
+        /// 解封证据
+        ///
+        /// 仅授权账户可调用，解封后证据恢复为 Active 状态。
+        #[pallet::call_index(17)]
+        #[pallet::weight(T::WeightInfo::unseal_evidence())]
+        pub fn unseal_evidence(
+            origin: OriginFor<T>,
+            evidence_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            // 验证证据存在
+            let ev = Evidences::<T>::get(evidence_id).ok_or(Error::<T>::NotFound)?;
+            let ns = ev.ns.ok_or(Error::<T>::NamespaceMismatch)?;
+            ensure!(
+                <T as Config>::Authorizer::is_authorized(ns, &who),
+                Error::<T>::NotAuthorized
+            );
+
+            // 检查已密封
+            ensure!(SealedEvidences::<T>::contains_key(evidence_id), Error::<T>::EvidenceNotSealed);
+
+            // 解封
+            SealedEvidences::<T>::remove(evidence_id);
+            EvidenceStatuses::<T>::insert(evidence_id, EvidenceStatus::Active);
+
+            Self::deposit_event(Event::EvidenceUnsealed {
+                id: evidence_id,
+                unsealed_by: who,
+            });
+            Ok(())
+        }
+
+        // ==================== P0-4: 强制移除违规证据 ====================
+
+        /// 强制移除违规证据（Root 级操作）
+        ///
+        /// 用于法律合规：移除违法内容（儿童色情、恐怖主义、法院命令等）。
+        /// 清理所有索引、密封状态、父子关系。
+        #[pallet::call_index(18)]
+        #[pallet::weight(T::WeightInfo::force_remove_evidence())]
+        pub fn force_remove_evidence(
+            origin: OriginFor<T>,
+            evidence_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            let ev = Evidences::<T>::get(evidence_id).ok_or(Error::<T>::NotFound)?;
+
+            // 清理所有索引
+            EvidenceByTarget::<T>::remove((ev.domain, ev.target_id), evidence_id);
+            if let Some(ns) = &ev.ns {
+                EvidenceByNs::<T>::remove((*ns, ev.target_id), evidence_id);
+                EvidenceCountByNs::<T>::mutate((*ns, ev.target_id), |c| {
+                    *c = c.saturating_sub(1);
+                });
+            }
+            EvidenceCountByTarget::<T>::mutate((ev.domain, ev.target_id), |c| {
+                *c = c.saturating_sub(1);
+            });
+
+            // 清理 CID 索引
+            let content_hash = H256::from(blake2_256(&ev.content_cid.clone().into_inner()));
+            CidHashIndex::<T>::remove(content_hash);
+
+            // 清理承诺索引
+            if let Some(commit) = ev.commit {
+                CommitIndex::<T>::remove(commit);
+            }
+
+            // 清理密封状态
+            SealedEvidences::<T>::remove(evidence_id);
+
+            // 清理父子关系
+            if let Some(parent_id) = EvidenceParent::<T>::get(evidence_id) {
+                EvidenceChildren::<T>::mutate(parent_id, |children| {
+                    children.retain(|&id| id != evidence_id);
+                });
+                EvidenceParent::<T>::remove(evidence_id);
+            }
+            // 将子证据的父引用也清除
+            let children = EvidenceChildren::<T>::get(evidence_id);
+            for child_id in children.iter() {
+                EvidenceParent::<T>::remove(child_id);
+            }
+            EvidenceChildren::<T>::remove(evidence_id);
+
+            // 清理 PendingManifest
+            PendingManifests::<T>::remove(evidence_id);
+
+            // 移除证据记录
+            Evidences::<T>::remove(evidence_id);
+            EvidenceStatuses::<T>::insert(evidence_id, EvidenceStatus::Removed);
+
+            Self::deposit_event(Event::EvidenceForceRemoved {
+                id: evidence_id,
+                domain: ev.domain,
+                target_id: ev.target_id,
+            });
+            Ok(())
+        }
+
+        // ==================== P1-1: 证据撤回 ====================
+
+        /// 撤回证据
+        ///
+        /// 仅证据所有者可撤回。已密封的证据不可撤回。
+        /// 撤回后证据保留在链上但标记为 Withdrawn，不可再用于仲裁。
+        #[pallet::call_index(19)]
+        #[pallet::weight(T::WeightInfo::withdraw_evidence())]
+        pub fn withdraw_evidence(
+            origin: OriginFor<T>,
+            evidence_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let ev = Evidences::<T>::get(evidence_id).ok_or(Error::<T>::NotFound)?;
+            ensure!(ev.owner == who, Error::<T>::NotAuthorized);
+
+            // 检查状态
+            let status = EvidenceStatuses::<T>::get(evidence_id);
+            ensure!(status == EvidenceStatus::Active, Error::<T>::InvalidEvidenceStatus);
+            ensure!(!SealedEvidences::<T>::contains_key(evidence_id), Error::<T>::EvidenceSealed);
+
+            // 标记为已撤回
+            EvidenceStatuses::<T>::insert(evidence_id, EvidenceStatus::Withdrawn);
+
+            Self::deposit_event(Event::EvidenceWithdrawn {
+                id: evidence_id,
+                owner: who,
+            });
+            Ok(())
+        }
+
+        // ==================== P1-3: 删除私密内容 (GDPR 合规) ====================
+
+        /// 删除私密内容
+        ///
+        /// 仅创建者可删除。清理 PrivateContents + PrivateContentByCid + PrivateContentBySubject + AccessRequests。
+        /// 删除前要求无除创建者外的活跃访问者（需先 revoke_access 所有用户）。
+        #[pallet::call_index(20)]
+        #[pallet::weight(T::WeightInfo::delete_private_content())]
+        pub fn delete_private_content(
+            origin: OriginFor<T>,
+            content_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let content = PrivateContents::<T>::get(content_id)
+                .ok_or(Error::<T>::PrivateContentNotFound)?;
+
+            // 权限检查：仅创建者
+            ensure!(content.creator == who, Error::<T>::AccessDenied);
+
+            // 检查无除创建者外的活跃访问者
+            let other_users = content.encrypted_keys.iter()
+                .filter(|(u, _)| u != &who)
+                .count();
+            ensure!(other_users == 0, Error::<T>::ContentHasActiveUsers);
+
+            // 清理索引
+            PrivateContentByCid::<T>::remove(&content.cid);
+            PrivateContentBySubject::<T>::remove((content.ns, content.subject_id), content_id);
+
+            // 清理所有访问请求
+            let _ = AccessRequests::<T>::clear_prefix(content_id, u32::MAX, None);
+
+            // 清理密钥轮换历史
+            let rotation_count = KeyRotationCounter::<T>::get(content_id);
+            for round in 1..=rotation_count {
+                KeyRotationHistory::<T>::remove(content_id, round);
+            }
+            KeyRotationCounter::<T>::remove(content_id);
+
+            // 移除主记录
+            PrivateContents::<T>::remove(content_id);
+
+            Self::deposit_event(Event::PrivateContentDeleted {
+                content_id,
+                deleted_by: who,
+            });
+            Ok(())
+        }
+
+        // ==================== P1-6: 强制归档 ====================
+
+        /// 强制归档证据（Root 操作）
+        ///
+        /// 管理员立即归档指定证据（不等 90 天），用于内容下架但保留审计线索。
+        #[pallet::call_index(21)]
+        #[pallet::weight(T::WeightInfo::force_archive_evidence())]
+        pub fn force_archive_evidence(
+            origin: OriginFor<T>,
+            evidence_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            let ev = Evidences::<T>::get(evidence_id).ok_or(Error::<T>::NotFound)?;
+            let now: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
+
+            // 创建归档记录
+            let content_hash = H256::from(blake2_256(&ev.content_cid.clone().into_inner()));
+            let archived = ArchivedEvidence {
+                id: evidence_id,
+                domain: ev.domain,
+                target_id: ev.target_id,
+                content_hash,
+                content_type: match ev.content_type {
+                    ContentType::Image => 0,
+                    ContentType::Video => 1,
+                    ContentType::Document => 2,
+                    ContentType::Mixed => 3,
+                    ContentType::Text => 4,
+                },
+                created_at: ev.created_at.saturated_into(),
+                archived_at: now,
+                year_month: pallet_storage_lifecycle::block_to_year_month(now, 14400),
+            };
+
+            ArchivedEvidences::<T>::insert(evidence_id, archived);
+
+            // 清理二级索引
+            EvidenceByTarget::<T>::remove((ev.domain, ev.target_id), evidence_id);
+            if let Some(ns) = &ev.ns {
+                EvidenceByNs::<T>::remove((*ns, ev.target_id), evidence_id);
+                EvidenceCountByNs::<T>::mutate((*ns, ev.target_id), |c| {
+                    *c = c.saturating_sub(1);
+                });
+            }
+            EvidenceCountByTarget::<T>::mutate((ev.domain, ev.target_id), |c| {
+                *c = c.saturating_sub(1);
+            });
+            CidHashIndex::<T>::remove(content_hash);
+            // 🆕 H1-R3修复: 清理 CommitIndex
+            if let Some(commit) = &ev.commit {
+                CommitIndex::<T>::remove(*commit);
+            }
+
+            // P1-5: 清理父子关系
+            if let Some(parent_id) = EvidenceParent::<T>::get(evidence_id) {
+                EvidenceChildren::<T>::mutate(parent_id, |children| {
+                    children.retain(|&id| id != evidence_id);
+                });
+                EvidenceParent::<T>::remove(evidence_id);
+            }
+            // 🆕 H1-R4修复: 清理子证据的父引用 + 移除自身 children 列表
+            // （与 archive_old_evidences / force_remove_evidence 对齐）
+            let children_list = EvidenceChildren::<T>::get(evidence_id);
+            for child_id in children_list.iter() {
+                EvidenceParent::<T>::remove(child_id);
+            }
+            EvidenceChildren::<T>::remove(evidence_id);
+
+            // 清理密封、状态、PendingManifest
+            SealedEvidences::<T>::remove(evidence_id);
+            EvidenceStatuses::<T>::remove(evidence_id);
+            PendingManifests::<T>::remove(evidence_id);
+
+            // 移除原始记录
+            Evidences::<T>::remove(evidence_id);
+
+            ArchiveStats::<T>::mutate(|stats| {
+                stats.total_archived = stats.total_archived.saturating_add(1);
+                stats.bytes_saved = stats.bytes_saved.saturating_add(150);
+                stats.last_archive_block = now;
+            });
+
+            Self::deposit_event(Event::EvidenceForceArchived {
+                id: evidence_id,
+                domain: ev.domain,
+                target_id: ev.target_id,
+            });
+            Ok(())
+        }
+
+        // ==================== P1-6: 撤销公钥 ====================
+
+        /// 撤销用户公钥
+        ///
+        /// 密钥泄露时用户可作废旧公钥。撤销后需重新注册才能接收新的加密内容。
+        #[pallet::call_index(22)]
+        #[pallet::weight(T::WeightInfo::register_public_key())]
+        pub fn revoke_public_key(
+            origin: OriginFor<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            ensure!(
+                UserPublicKeys::<T>::contains_key(&who),
+                Error::<T>::PublicKeyNotRegistered
+            );
+
+            UserPublicKeys::<T>::remove(&who);
+
+            Self::deposit_event(Event::PublicKeyRevoked { user: who });
+            Ok(())
+        }
+
+        // ==================== P2: 取消访问请求 ====================
+
+        /// 取消访问请求
+        ///
+        /// 用户取消自己对某加密内容的待处理访问请求。
+        #[pallet::call_index(23)]
+        #[pallet::weight(T::WeightInfo::request_access())]
+        pub fn cancel_access_request(
+            origin: OriginFor<T>,
+            content_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            ensure!(
+                AccessRequests::<T>::contains_key(content_id, &who),
+                Error::<T>::AccessRequestNotFound
+            );
+
+            AccessRequests::<T>::remove(content_id, &who);
+
+            Self::deposit_event(Event::AccessRequestCancelled {
+                content_id,
+                requester: who,
+            });
+            Ok(())
+        }
+
         // 只读接口应放置在 inherent impl 中，而非 extrinsics 块。
     }
 
@@ -1657,29 +2271,85 @@ pub mod pallet {
         fn is_authorized(ns: [u8; 8], who: &AccountId) -> bool;
     }
 
-    /// 只读查询 trait 占位：供其他 pallet 低耦合读取证据（可在 runtime 或外部实现）。
+    /// P1-2: 证据摘要信息（跨 pallet 查询用，轻量级）
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, Debug)]
+    pub struct EvidenceInfo<AccountId> {
+        pub id: u64,
+        pub owner: AccountId,
+        pub domain: u8,
+        pub target_id: u64,
+        pub is_encrypted: bool,
+        pub status: EvidenceStatus,
+    }
+
+    /// P1-2: 只读查询 trait：供其他 pallet 低耦合读取证据信息。
     pub trait EvidenceProvider<AccountId> {
-        /// 返回指定 ID 的证据；本 Pallet 不提供默认实现，避免类型推断问题。
-        fn get(_id: u64) -> Option<()>;
+        /// 返回指定 ID 的证据摘要信息
+        fn get(id: u64) -> Option<EvidenceInfo<AccountId>>;
+
+        /// 检查证据是否存在
+        fn exists(id: u64) -> bool;
+
+        /// 获取证据状态
+        fn get_status(id: u64) -> Option<EvidenceStatus>;
+
+        /// 检查证据是否处于活跃状态
+        fn is_active(id: u64) -> bool {
+            matches!(Self::get_status(id), Some(EvidenceStatus::Active))
+        }
     }
 
-    /// 私密内容查询接口 (供其他 pallet 使用)
-    pub trait PrivateContentProvider<AccountId> {
-        /// 检查用户是否可以访问指定的私密内容
-        fn can_access(content_id: u64, user: &AccountId) -> bool;
-        /// 获取用户的解密密钥
-        fn get_decryption_key(content_id: u64, user: &AccountId) -> Option<Vec<u8>>;
+    /// P1-2: Pallet 实现 EvidenceProvider
+    impl<T: Config> EvidenceProvider<T::AccountId> for Pallet<T> {
+        fn get(id: u64) -> Option<EvidenceInfo<T::AccountId>> {
+            Evidences::<T>::get(id).map(|ev| EvidenceInfo {
+                id: ev.id,
+                owner: ev.owner,
+                domain: ev.domain,
+                target_id: ev.target_id,
+                is_encrypted: ev.is_encrypted,
+                status: EvidenceStatuses::<T>::get(id),
+            })
+        }
+
+        fn exists(id: u64) -> bool {
+            Evidences::<T>::contains_key(id)
+        }
+
+        fn get_status(id: u64) -> Option<EvidenceStatus> {
+            if Evidences::<T>::contains_key(id) {
+                Some(EvidenceStatuses::<T>::get(id))
+            } else {
+                None
+            }
+        }
     }
 
-    /// PrivateContentProvider 实现：供其他 pallet 低耦合查询加密内容权限和密钥
-    impl<T: Config> PrivateContentProvider<T::AccountId> for Pallet<T> {
+    /// pallet_crypto_common::PrivateContentProvider 实现：
+    /// 供其他 pallet 低耦合查询加密内容权限和密钥
+    impl<T: Config> pallet_crypto_common::PrivateContentProvider<T::AccountId> for Pallet<T> {
         fn can_access(content_id: u64, user: &T::AccountId) -> bool {
             Self::can_access_private_content(content_id, user)
         }
 
-        fn get_decryption_key(content_id: u64, user: &T::AccountId) -> Option<Vec<u8>> {
+        fn get_encrypted_key(content_id: u64, user: &T::AccountId) -> Option<Vec<u8>> {
             Self::get_encrypted_key_for_user(content_id, user)
                 .map(|k| k.into_inner())
+        }
+
+        fn get_decryption_info(
+            content_id: u64,
+            user: &T::AccountId,
+        ) -> Option<(Vec<u8>, sp_core::H256, pallet_crypto_common::EncryptionMethod, Vec<u8>)> {
+            Pallet::<T>::get_decryption_info(content_id, user)
+        }
+
+        fn get_content_status(content_id: u64) -> Option<pallet_crypto_common::ContentStatus> {
+            PrivateContents::<T>::get(content_id).map(|c| c.status)
+        }
+
+        fn get_content_creator(content_id: u64) -> Option<T::AccountId> {
+            PrivateContents::<T>::get(content_id).map(|c| c.creator)
         }
     }
 
@@ -1687,11 +2357,13 @@ pub mod pallet {
         // ===== 私密内容查询方法 =====
 
         /// 检查用户是否有访问特定私密内容的权限
+        ///
+        /// 使用 AccessPolicy::is_authorized() 统一判断，避免重复 match 逻辑
         pub fn can_access_private_content(content_id: u64, user: &T::AccountId) -> bool {
             if let Some(content) = PrivateContents::<T>::get(content_id) {
-                // 检查是否是创建者
-                if &content.creator == user {
-                    return true;
+                // 已清除的内容不可访问
+                if !content.status.is_readable() {
+                    return false;
                 }
 
                 // 检查是否持有加密密钥包（由创建者通过 grant_access 显式授予）
@@ -1699,25 +2371,21 @@ pub mod pallet {
                     return true;
                 }
 
-                // 检查访问策略
-                match &content.access_policy {
-                    pallet_crypto_common::AccessPolicy::OwnerOnly => false,
-                    pallet_crypto_common::AccessPolicy::SharedWith(users) => {
-                        users.iter().any(|u| u == user)
-                    }
-                    pallet_crypto_common::AccessPolicy::TimeboxedAccess { users, expires_at } => {
-                        let now = <frame_system::Pallet<T>>::block_number();
-                        now <= *expires_at && users.iter().any(|u| u == user)
-                    }
-                    pallet_crypto_common::AccessPolicy::GovernanceControlled => {
-                        // TODO: 实现治理权限检查
-                        false
-                    }
-                    pallet_crypto_common::AccessPolicy::RoleBased(_role) => {
-                        // TODO: 实现基于角色的权限检查
-                        false
-                    }
+                // 使用 AccessPolicy 的统一授权检查
+                let now = <frame_system::Pallet<T>>::block_number();
+                if content.access_policy.is_authorized(user, &content.creator, &now) {
+                    return true;
                 }
+
+                // P1-4: GovernanceControlled 额外检查 — 委托给 Authorizer trait
+                // pallet-crypto-common 对 GovernanceControlled 返回 false（需外部逻辑），
+                // 此处补充：在治理模式下，任何被命名空间授权的账户均可访问
+                if matches!(content.access_policy, pallet_crypto_common::AccessPolicy::GovernanceControlled) {
+                    let ns = T::EvidenceNsBytes::get();
+                    return <T as Config>::Authorizer::is_authorized(ns, user);
+                }
+
+                false
             } else {
                 false
             }
@@ -1768,7 +2436,7 @@ pub mod pallet {
         pub fn get_decryption_info(
             content_id: u64,
             user: &T::AccountId,
-        ) -> Option<(Vec<u8>, sp_core::H256, u8, Vec<u8>)> {
+        ) -> Option<(Vec<u8>, sp_core::H256, pallet_crypto_common::EncryptionMethod, Vec<u8>)> {
             let content = PrivateContents::<T>::get(content_id)?;
             if !Self::can_access_private_content(content_id, user) {
                 return None;
@@ -1791,7 +2459,7 @@ pub mod pallet {
         /// 任何人可查询：id, ns, subject_id, cid, encryption_method, creator, access_policy 类型
         pub fn get_content_metadata(
             content_id: u64,
-        ) -> Option<(u64, [u8; 8], u64, Vec<u8>, u8, T::AccountId, u8)> {
+        ) -> Option<(u64, [u8; 8], u64, Vec<u8>, pallet_crypto_common::EncryptionMethod, T::AccountId, u8)> {
             let c = PrivateContents::<T>::get(content_id)?;
             let policy_tag: u8 = match &c.access_policy {
                 pallet_crypto_common::AccessPolicy::OwnerOnly => 0,
@@ -1897,6 +2565,11 @@ pub mod pallet {
 
             while archived_count < max_count && cursor < max_id {
                 if let Some(evidence) = Evidences::<T>::get(cursor) {
+                    // 🆕 H1修复: 跳过已密封的证据（仲裁冻结中，不可归档）
+                    if SealedEvidences::<T>::contains_key(cursor) {
+                        cursor = cursor.saturating_add(1);
+                        continue;
+                    }
                     let created_at: u32 = evidence.created_at.saturated_into();
                     
                     // 检查是否可归档：创建时间 + 归档延迟 <= 当前时间
@@ -1940,6 +2613,30 @@ pub mod pallet {
                         );
                         // 清理 CID 哈希索引
                         CidHashIndex::<T>::remove(content_hash);
+                        // 🆕 H1-R3修复: 清理 CommitIndex（无论是否已揭示）
+                        if let Some(commit) = &evidence.commit {
+                            CommitIndex::<T>::remove(*commit);
+                        }
+
+                        // P1-5: 归档时清理父子关系
+                        if let Some(parent_id) = EvidenceParent::<T>::get(cursor) {
+                            EvidenceChildren::<T>::mutate(parent_id, |children| {
+                                children.retain(|&id| id != cursor);
+                            });
+                            EvidenceParent::<T>::remove(cursor);
+                        }
+                        // 🆕 M3-R3修复: 清理子证据的父引用 + 移除自身 children 列表
+                        // （与 force_remove_evidence 对齐，防止孤立存储泄漏）
+                        let children_list = EvidenceChildren::<T>::get(cursor);
+                        for child_id in children_list.iter() {
+                            EvidenceParent::<T>::remove(child_id);
+                        }
+                        EvidenceChildren::<T>::remove(cursor);
+
+                        // 清理密封、状态、PendingManifest
+                        SealedEvidences::<T>::remove(cursor);
+                        EvidenceStatuses::<T>::remove(cursor);
+                        PendingManifests::<T>::remove(cursor);
 
                         // 移除原始证据记录（释放存储）
                         Evidences::<T>::remove(cursor);
@@ -1965,6 +2662,29 @@ pub mod pallet {
 
             EvidenceArchiveCursor::<T>::put(cursor);
             archived_count
+        }
+
+        /// P1-5: 清理过期的 PendingManifest（编辑窗口已过期）
+        ///
+        /// 游标式：从 PendingManifestCleanupCursor 开始扫描，删除已过期的 PendingManifest。
+        fn cleanup_expired_pending_manifests(now: BlockNumberFor<T>, max_per_call: u32) -> u32 {
+            let edit_window = T::EvidenceEditWindow::get();
+            let mut cursor = PendingManifestCleanupCursor::<T>::get();
+            let max_id = NextEvidenceId::<T>::get();
+            let mut cleaned = 0u32;
+
+            while cursor < max_id && cleaned < max_per_call {
+                if let Some(pending) = PendingManifests::<T>::get(cursor) {
+                    if now > pending.created_at.saturating_add(edit_window) {
+                        PendingManifests::<T>::remove(cursor);
+                        cleaned += 1;
+                    }
+                }
+                cursor = cursor.saturating_add(1);
+            }
+
+            PendingManifestCleanupCursor::<T>::put(cursor);
+            cleaned
         }
 
         /// 🆕 防膨胀: 清理过期归档记录
@@ -2008,11 +2728,18 @@ pub mod pallet {
             let mut weight_used = Weight::zero();
             // 🆕 V4修复: 每项归档涉及 Evidences(r) + ArchivedEvidences(w) + 二级索引清理(rw) ≈ 30M/项
             let base_weight = Weight::from_parts(30_000_000, 2_500);
+            // 🆕 M4-R3修复: 扫描开销 — 每次迭代读 Evidences + SealedEvidences，无论是否归档
+            let per_scan_weight = Weight::from_parts(10_000_000, 1_500);
+            let max_archive = 10u32;
 
-            // 确保有足够权重处理至少 1 条归档
-            if remaining_weight.ref_time() > base_weight.ref_time() * 10 {
-                let archived = Self::archive_old_evidences(10);
-                weight_used = weight_used.saturating_add(base_weight.saturating_mul(archived as u64));
+            // 确保有足够权重处理扫描 + 至少 1 条归档
+            let scan_overhead = per_scan_weight.saturating_mul(max_archive as u64);
+            if remaining_weight.ref_time() > scan_overhead.ref_time().saturating_add(base_weight.ref_time()) {
+                let archived = Self::archive_old_evidences(max_archive);
+                // 始终计入扫描开销（最多 max_archive 次迭代）+ 实际归档开销
+                weight_used = weight_used
+                    .saturating_add(scan_overhead)
+                    .saturating_add(base_weight.saturating_mul(archived as u64));
             }
 
             // 🆕 防膨胀: 清理过期归档记录
@@ -2020,6 +2747,13 @@ pub mod pallet {
             if remaining.ref_time() > base_weight.ref_time() * 5 {
                 let current_block: u32 = now.saturated_into();
                 let cleaned = Self::cleanup_old_archives(current_block, 5);
+                weight_used = weight_used.saturating_add(base_weight.saturating_mul(cleaned as u64));
+            }
+
+            // P1-5: 清理过期 PendingManifest
+            let remaining2 = remaining_weight.saturating_sub(weight_used);
+            if remaining2.ref_time() > base_weight.ref_time() * 5 {
+                let cleaned = Self::cleanup_expired_pending_manifests(now, 5);
                 weight_used = weight_used.saturating_add(base_weight.saturating_mul(cleaned as u64));
             }
 

@@ -67,6 +67,10 @@ impl pallet_nex_market::Config for Test {
     type MaxUnderpaidTrades = ConstU32<100>;
     type MaxExpiredOrdersPerBlock = ConstU32<10>;
     type TxHashTtlBlocks = ConstU32<100800>;     // ~7 days (600 blocks/h × 24h × 7d)
+    type MinOrderNexAmount = ConstU128<{ 1_000_000_000_000 }>;  // 1 NEX
+    type MaxTradesPerUser = ConstU32<200>;
+    type MaxOrderTrades = ConstU32<50>;
+    type QueueFullThresholdBps = ConstU16<8000>;  // 80%
 }
 
 pub const ALICE: u64 = 1;   // 卖家

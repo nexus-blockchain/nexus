@@ -25,8 +25,10 @@ std = [
 runtime-benchmarks = [
     "frame-support/runtime-benchmarks",
     "sp-runtime/runtime-benchmarks",
+    "pallet-entity-common/runtime-benchmarks",
 ]
 try-runtime = [
     "frame-support/try-runtime",
     "sp-runtime/try-runtime",
+    "pallet-entity-common/try-runtime",
 ]

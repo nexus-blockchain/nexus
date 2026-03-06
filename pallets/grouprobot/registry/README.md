@@ -271,12 +271,12 @@ pub struct CommunityBinding<T: Config> {
 | `PeerRegistered` / `PeerDeregistered` | Peer 注册/注销 |
 | `PeerHeartbeat` | Peer 心跳 |
 | `StalePeerReported` | 过期 Peer 已举报移除 |
+| `PeerExpired` | Peer 已过期（on_initialize 清理时使用） |
 | `OperatorRegistered` / `OperatorUpdated` / `OperatorDeregistered` | 运营商生命周期 |
 | `OperatorSlaUpdated` | 运营商 SLA 等级已更新 |
 | `BotAssignedToOperator` / `BotUnassignedFromOperator` | Bot 运营商分配/取消 |
 | `UserPlatformUnbound` | 用户平台身份已解绑 |
 | `BotOwnershipTransferred` | Bot 所有权已转移（含 old_owner / new_owner） |
-| `BotSuspended` / `BotReactivated` | Bot 暂停/恢复 |
 | `OperatorSuspended` / `OperatorUnsuspended` | 运营商暂停/恢复 |
 | `PeerEndpointUpdated` | Peer 端点 URL 已更新 |
 | `BotCleaned` | 已停用 Bot 存储已清理 |
@@ -327,6 +327,7 @@ pub struct CommunityBinding<T: Config> {
 | `OperatorNotFound` | 运营商不存在 |
 | `ApiIdHashAlreadyUsed` | app_hash 已被其他运营商使用 |
 | `OperatorNameEmpty` | 运营商名称为空 |
+| `OperatorNameTooLong` | 运营商名称过长 |
 | `MaxBotsPerOperatorReached` | 运营商下 Bot 数量已满 |
 | `BotAlreadyAssigned` | Bot 已分配给运营商 |
 | `BotNotAssigned` | Bot 未分配给运营商 |
@@ -427,4 +428,4 @@ pub struct CommunityBinding<T: Config> {
 
 **新查询方法**: `attestation_level`, `get_tee_type`, `attestation_info`
 
-**测试**: 225 tests ✅
+**测试**: 191 tests ✅

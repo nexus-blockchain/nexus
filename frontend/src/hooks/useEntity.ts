@@ -13,18 +13,21 @@ function parseEntity(raw: Record<string, unknown>): EntityData {
     name: new TextDecoder().decode(new Uint8Array(raw.name as number[])),
     logoCid: raw.logoCid ? String(raw.logoCid) : null,
     descriptionCid: raw.descriptionCid ? String(raw.descriptionCid) : null,
+    metadataUri: raw.metadataUri ? String(raw.metadataUri) : null,
     status: String(raw.status),
-    createdAt: Number(raw.createdAt),
     entityType: typeof raw.entityType === "object" ? JSON.stringify(raw.entityType) : String(raw.entityType),
+    governanceMode: String(raw.governanceMode),
+    verified: Boolean(raw.verified),
+    governanceLocked: Boolean(raw.governanceLocked),
     admins: Array.isArray(raw.admins)
       ? raw.admins.map((a: [string, number]) => ({ address: String(a[0]), permissions: Number(a[1]) }))
       : [],
-    governanceMode: String(raw.governanceMode),
-    verified: Boolean(raw.verified),
-    metadataUri: raw.metadataUri ? String(raw.metadataUri) : null,
+    shopIds: Array.isArray(raw.shopIds) ? (raw.shopIds as number[]).map(Number) : [],
     primaryShopId: Number(raw.primaryShopId),
     totalSales: BigInt(String(raw.totalSales || 0)),
     totalOrders: Number(raw.totalOrders),
+    fundBalance: BigInt(String(raw.fundBalance || 0)),
+    createdAt: Number(raw.createdAt),
   };
 }
 

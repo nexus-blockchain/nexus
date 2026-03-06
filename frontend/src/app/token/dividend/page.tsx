@@ -71,11 +71,11 @@ export default function DividendPage() {
           <CardContent className="space-y-3">
             <div className="flex justify-between"><span className="text-sm text-muted-foreground">Status</span><Badge variant={config.dividendConfig.enabled ? "default" : "secondary"}>{config.dividendConfig.enabled ? "Enabled" : "Disabled"}</Badge></div>
             <Separator />
-            <div className="flex justify-between"><span className="text-sm text-muted-foreground">Interval</span><span className="text-sm">{config.dividendConfig.interval} blocks</span></div>
+            <div className="flex justify-between"><span className="text-sm text-muted-foreground">Min Period</span><span className="text-sm">{config.dividendConfig.minPeriod} blocks</span></div>
             <Separator />
-            <div className="flex justify-between"><span className="text-sm text-muted-foreground">Min Amount</span><span className="text-sm">{config.dividendConfig.minAmount.toString()}</span></div>
+            <div className="flex justify-between"><span className="text-sm text-muted-foreground">Accumulated</span><span className="text-sm">{config.dividendConfig.accumulated.toString()}</span></div>
             <Separator />
-            <div className="flex justify-between"><span className="text-sm text-muted-foreground">Last Distributed</span><span className="text-sm">Block #{config.dividendConfig.lastDistributed}</span></div>
+            <div className="flex justify-between"><span className="text-sm text-muted-foreground">Last Distribution</span><span className="text-sm">Block #{config.dividendConfig.lastDistribution}</span></div>
           </CardContent>
         </Card>
       )}

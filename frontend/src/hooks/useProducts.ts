@@ -45,10 +45,38 @@ export function useProduct(productId: number | null) {
 export function useProductActions() {
   const { submit, state, reset } = useTx();
   return {
-    createProduct: (shopId: number, nameCid: string, imagesCid: string, detailCid: string, price: bigint, usdtPrice: number, stock: number, isDigital: boolean) =>
-      submit("entityProduct", "createProduct", [shopId, nameCid, imagesCid, detailCid, price, usdtPrice, stock, isDigital]),
-    updateProduct: (productId: number, nameCid?: string, imagesCid?: string, detailCid?: string, price?: bigint, stock?: number) =>
+    createProduct: (
+      shopId: number,
+      nameCid: string,
+      imagesCid: string,
+      detailCid: string,
+      price: bigint,
+      usdtPrice: number,
+      stock: number,
+      category: string,
+      visibility: string,
+      minOrderQty: number,
+      maxOrderQty: number,
+    ) =>
+      submit("entityProduct", "createProduct", [
+        shopId, nameCid, imagesCid, detailCid,
+        price, usdtPrice, stock,
+        category, visibility,
+        minOrderQty, maxOrderQty,
+      ]),
+    updateProduct: (
+      productId: number,
+      nameCid?: string,
+      imagesCid?: string,
+      detailCid?: string,
+      price?: bigint,
+      stock?: number,
+    ) =>
       submit("entityProduct", "updateProduct", [productId, nameCid, imagesCid, detailCid, price, stock]),
+    setProductVisibility: (productId: number, visibility: string) =>
+      submit("entityProduct", "setProductVisibility", [productId, visibility]),
+    setProductCategory: (productId: number, category: string) =>
+      submit("entityProduct", "setProductCategory", [productId, category]),
     activateProduct: (productId: number) => submit("entityProduct", "activateProduct", [productId]),
     deactivateProduct: (productId: number) => submit("entityProduct", "deactivateProduct", [productId]),
     deleteProduct: (productId: number) => submit("entityProduct", "deleteProduct", [productId]),

@@ -39,7 +39,7 @@ pub mod pallet {
         BoundedVec,
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{DisclosureProvider, EntityProvider, EntityTokenProvider};
+    use pallet_entity_common::{DisclosureProvider, EntityProvider, EntityTokenProvider, KycProvider, PricingProvider};
     use sp_runtime::traits::{CheckedAdd, CheckedMul, CheckedSub, Saturating, Zero};
     use sp_runtime::SaturatedConversion;
 
@@ -66,6 +66,12 @@ pub mod pallet {
         Limit,
         /// 市价单（立即以最优价成交）
         Market,
+        /// IOC (Immediate or Cancel) — 立即成交能成交的部分，剩余取消
+        ImmediateOrCancel,
+        /// FOK (Fill or Kill) — 全部成交或全部取消
+        FillOrKill,
+        /// Post-Only — 仅挂单，不立即撮合（做市商常用）
+        PostOnly,
     }
 
     /// 订单状态
@@ -117,8 +123,6 @@ pub mod pallet {
     pub struct MarketConfig {
         /// 是否启用 NEX 交易
         pub nex_enabled: bool,
-        /// 交易手续费率（基点，100 = 1%）
-        pub fee_rate: u16,
         /// 最小订单 Token 数量
         pub min_order_amount: u128,
         /// 订单有效期（区块数）
@@ -136,8 +140,6 @@ pub mod pallet {
         pub total_trades: u64,
         /// NEX 总交易量
         pub total_volume_nex: u128,
-        /// 总手续费（NEX）
-        pub total_fees_nex: u128,
     }
 
     // ==================== Phase 4: 订单簿深度数据结构 ====================
@@ -272,6 +274,69 @@ pub mod pallet {
         }
     }
 
+    // ==================== P1: 交易历史数据结构 ====================
+
+    /// 成交记录
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    #[scale_info(skip_type_params(T))]
+    pub struct TradeRecord<T: Config> {
+        /// 成交 ID
+        pub trade_id: u64,
+        /// 订单 ID
+        pub order_id: u64,
+        /// 实体 ID
+        pub entity_id: u64,
+        /// 挂单方 (maker)
+        pub maker: T::AccountId,
+        /// 吃单方 (taker)
+        pub taker: T::AccountId,
+        /// 交易方向（从 taker 视角）
+        pub side: OrderSide,
+        /// 成交 Token 数量
+        pub token_amount: T::TokenBalance,
+        /// 成交价格
+        pub price: BalanceOf<T>,
+        /// NEX 总额
+        pub nex_amount: BalanceOf<T>,
+        /// 成交区块
+        pub block_number: BlockNumberFor<T>,
+    }
+
+    // ==================== P3: 周期统计数据结构 ====================
+
+    /// 日统计数据
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+    pub struct DailyStats<Balance> {
+        /// 开盘价
+        pub open_price: Balance,
+        /// 最高价
+        pub high_price: Balance,
+        /// 最低价
+        pub low_price: Balance,
+        /// 收盘价（最新成交价）
+        pub close_price: Balance,
+        /// 24h 成交量 (NEX)
+        pub volume_nex: u128,
+        /// 24h 成交笔数
+        pub trade_count: u32,
+        /// 统计起始区块
+        pub period_start: u32,
+    }
+
+    // ==================== P6: 市场状态枚举 ====================
+
+    /// 市场状态（区分暂停和永久关闭）
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+    pub enum MarketStatus {
+        /// 活跃
+        #[default]
+        Active,
+        /// 暂停（可恢复）
+        Paused,
+        /// 已关闭（不可恢复，所有订单已清退）
+        Closed,
+    }
+
     // ==================== Config ====================
 
     #[pallet::config]
@@ -326,10 +391,6 @@ pub mod pallet {
         #[pallet::constant]
         type MaxActiveOrdersPerUser: Get<u32>;
 
-        /// 默认手续费率（基点）
-        #[pallet::constant]
-        type DefaultFeeRate: Get<u16>;
-
         /// 1小时对应的区块数（默认 600，假设 6秒/区块）
         #[pallet::constant]
         type BlocksPerHour: Get<u32>;
@@ -349,6 +410,19 @@ pub mod pallet {
         /// 披露查询接口（黑窗口期内幕人员交易限制）
         type DisclosureProvider: DisclosureProvider<Self::AccountId>;
 
+        /// P4: KYC 查询接口（交易前 KYC 级别检查）
+        type KycProvider: pallet_entity_common::KycProvider<Self::AccountId>;
+
+        /// P1: 每用户最大交易历史条数
+        #[pallet::constant]
+        type MaxTradeHistoryPerUser: Get<u32>;
+
+        /// P2: 每用户最大订单历史条数
+        #[pallet::constant]
+        type MaxOrderHistoryPerUser: Get<u32>;
+
+        /// NEX/USDT 定价接口（用于 Token→NEX→USDT 间接换算）
+        type PricingProvider: PricingProvider;
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -362,19 +436,32 @@ pub mod pallet {
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
         /// P1 修复: on_idle 批量清理过期订单，释放 BoundedVec 名额
+        /// 审计修复 M1-R8: 使用游标扫描替代 last-1000 限制，确保所有过期订单最终被清理
+        /// 审计修复 M2-R8: 权重包含 proof_size 估算
         fn on_idle(_n: BlockNumberFor<T>, mut remaining_weight: Weight) -> Weight {
-            let base_weight = Weight::from_parts(5_000, 0);
-            let per_order_weight = Weight::from_parts(30_000, 0);
+            let base_weight = Weight::from_parts(5_000, 64);
+            let per_order_weight = Weight::from_parts(30_000, 512);
             let now = <frame_system::Pallet<T>>::block_number();
             let mut cleaned = 0u32;
+            // 审计修复 M1-R9: 跟踪实际消耗的权重，返回准确值
+            let mut consumed_weight = Weight::zero();
             const MAX_CLEAN_PER_BLOCK: u32 = 20;
+            const SCAN_BATCH: u64 = 200;
 
+            // 审计修复 M1-R6: 记录受影响的实体，清理后更新 BestAsk/BestBid 缓存
+            let mut affected_entities: sp_std::vec::Vec<u64> = sp_std::vec::Vec::new();
+
+            // 审计修复 M1-R8: 游标扫描 — 每块从上次位置继续，循环覆盖所有订单
             let next_id = NextOrderId::<T>::get();
-            let start = next_id.saturating_sub(1000); // 最多回溯 1000 个
+            let cursor = OnIdleCursor::<T>::get();
+            let start = if cursor >= next_id { 0 } else { cursor };
+            let scan_end = start.saturating_add(SCAN_BATCH).min(next_id);
 
-            for order_id in start..next_id {
+            for order_id in start..scan_end {
                 if cleaned >= MAX_CLEAN_PER_BLOCK { break; }
-                if remaining_weight.ref_time() < per_order_weight.ref_time() { break; }
+                // 审计修复 L1-R9: 同时检查 ref_time 和 proof_size
+                if remaining_weight.ref_time() < per_order_weight.ref_time()
+                    || remaining_weight.proof_size() < per_order_weight.proof_size() { break; }
 
                 if let Some(order) = Orders::<T>::get(order_id) {
                     if (order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled)
@@ -400,22 +487,42 @@ pub mod pallet {
                         UserOrders::<T>::mutate(&order.maker, |orders| {
                             orders.retain(|&id| id != order_id);
                         });
+                        // 审计修复 M4-R5: 添加到已完结订单历史
+                        Self::add_to_order_history(&order.maker, order_id);
+
+                        if !affected_entities.contains(&order.entity_id) {
+                            affected_entities.push(order.entity_id);
+                        }
 
                         cleaned += 1;
                         remaining_weight = remaining_weight.saturating_sub(per_order_weight);
+                        consumed_weight = consumed_weight.saturating_add(per_order_weight);
                     }
                 }
                 remaining_weight = remaining_weight.saturating_sub(base_weight);
+                consumed_weight = consumed_weight.saturating_add(base_weight);
             }
 
-            Weight::from_parts(base_weight.ref_time() * (cleaned as u64 + 1), 0)
+            // 审计修复 M1-R8: 更新游标位置（到达末尾时归零重新扫描）
+            if scan_end >= next_id {
+                OnIdleCursor::<T>::put(0);
+            } else {
+                OnIdleCursor::<T>::put(scan_end);
+            }
+
+            // 审计修复 M1-R6: 更新受影响实体的最优价格缓存
+            for entity_id in affected_entities {
+                Self::update_best_prices(entity_id);
+            }
+
+            // 审计修复 M1-R9: 返回实际消耗的权重（包含所有扫描 + 清理的开销）
+            consumed_weight
         }
 
         /// P6: Config 常量合理性校验
         #[cfg(test)]
         fn integrity_test() {
             assert!(T::DefaultOrderTTL::get() >= 10, "DefaultOrderTTL must be >= 10 blocks");
-            assert!(T::DefaultFeeRate::get() <= 5000, "DefaultFeeRate must be <= 50%");
             assert!(T::BlocksPerHour::get() > 0, "BlocksPerHour must be > 0");
             assert!(T::BlocksPerDay::get() > T::BlocksPerHour::get(), "BlocksPerDay must be > BlocksPerHour");
             assert!(T::BlocksPerWeek::get() > T::BlocksPerDay::get(), "BlocksPerWeek must be > BlocksPerDay");
@@ -524,6 +631,94 @@ pub mod pallet {
         PriceProtectionConfig<BalanceOf<T>>,
     >;
 
+    // ==================== P1: 交易历史存储 ====================
+
+    /// 下一个成交 ID
+    #[pallet::storage]
+    pub type NextTradeId<T> = StorageValue<_, u64, ValueQuery>;
+
+    /// 成交记录存储
+    #[pallet::storage]
+    pub type TradeRecords<T: Config> = StorageMap<_, Blake2_128Concat, u64, TradeRecord<T>>;
+
+    /// 用户交易历史索引（最近 N 笔，环形覆盖）
+    #[pallet::storage]
+    pub type UserTradeHistory<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        T::AccountId,
+        BoundedVec<u64, ConstU32<200>>,
+        ValueQuery,
+    >;
+
+    /// 实体交易历史索引（最近 N 笔）
+    #[pallet::storage]
+    pub type EntityTradeHistory<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64, // entity_id
+        BoundedVec<u64, ConstU32<500>>,
+        ValueQuery,
+    >;
+
+    // ==================== P2: 订单历史存储 ====================
+
+    /// 用户已完结订单历史（Filled/Cancelled/Expired）
+    #[pallet::storage]
+    pub type UserOrderHistory<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        T::AccountId,
+        BoundedVec<u64, ConstU32<200>>,
+        ValueQuery,
+    >;
+
+    // ==================== P3: 周期统计存储 ====================
+
+    /// 实体当日统计
+    #[pallet::storage]
+    pub type EntityDailyStats<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64, // entity_id
+        DailyStats<BalanceOf<T>>,
+        ValueQuery,
+    >;
+
+    // ==================== P4: KYC 门槛存储 ====================
+
+    /// 实体市场最低 KYC 级别要求（0 = 无要求）
+    #[pallet::storage]
+    pub type MarketKycRequirement<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64, // entity_id
+        u8,
+        ValueQuery,
+    >;
+
+    /// 审计修复 M1-R8: on_idle 过期订单扫描游标（cursor-based，替代 last-1000 限制）
+    #[pallet::storage]
+    pub type OnIdleCursor<T> = StorageValue<_, u64, ValueQuery>;
+
+    // ==================== P6: 市场状态存储 ====================
+
+    /// 实体市场状态（Active/Paused/Closed）
+    #[pallet::storage]
+    pub type MarketStatusStorage<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64, // entity_id
+        MarketStatus,
+        ValueQuery,
+    >;
+
+    // ==================== P11: 全局统计存储 ====================
+
+    /// 全局市场统计（所有市场累计）
+    #[pallet::storage]
+    pub type GlobalStats<T: Config> = StorageValue<_, MarketStats, ValueQuery>;
+
     // ==================== 事件 ====================
 
     #[pallet::event]
@@ -542,10 +737,10 @@ pub mod pallet {
         OrderFilled {
             order_id: u64,
             entity_id: u64,
+            maker: T::AccountId,
             taker: T::AccountId,
             filled_amount: T::TokenBalance,
             total_next: BalanceOf<T>,
-            fee: BalanceOf<T>,
         },
         /// 订单已取消
         OrderCancelled { order_id: u64, entity_id: u64 },
@@ -558,7 +753,6 @@ pub mod pallet {
             side: OrderSide,
             filled_amount: T::TokenBalance,
             total_next: BalanceOf<T>,
-            total_fee: BalanceOf<T>,
         },
         /// TWAP 价格已更新
         TwapUpdated {
@@ -617,6 +811,39 @@ pub mod pallet {
             cancelled_count: u32,
             failed_count: u32,
         },
+        /// P1: 成交记录已创建
+        TradeExecuted {
+            trade_id: u64,
+            order_id: u64,
+            entity_id: u64,
+            maker: T::AccountId,
+            taker: T::AccountId,
+            side: OrderSide,
+            token_amount: T::TokenBalance,
+            price: BalanceOf<T>,
+            nex_amount: BalanceOf<T>,
+        },
+        /// P4: KYC 要求已设置
+        KycRequirementSet {
+            entity_id: u64,
+            min_kyc_level: u8,
+        },
+        /// P6: 市场已关闭（所有订单已清退）
+        MarketClosed {
+            entity_id: u64,
+            orders_cancelled: u32,
+        },
+        /// P7: 用户在指定实体的所有订单已取消
+        AllEntityOrdersCancelled {
+            entity_id: u64,
+            user: T::AccountId,
+            cancelled_count: u32,
+        },
+        /// P10: 市场被 Root 强制关闭
+        MarketForceClosed {
+            entity_id: u64,
+            orders_cancelled: u32,
+        },
     }
 
     // ==================== 错误 ====================
@@ -667,8 +894,6 @@ pub mod pallet {
         MarketCircuitBreakerActive,
         /// TWAP 数据不足
         InsufficientTwapData,
-        /// 手续费率无效（超过 5000 bps = 50%）
-        InvalidFeeRate,
         /// 基点参数无效（超过 10000）
         InvalidBasisPoints,
         /// 实体未激活（Banned/Closed）
@@ -693,6 +918,18 @@ pub mod pallet {
         InvalidOrderStatus,
         /// 批量操作数量过多
         TooManyOrders,
+        /// P4: KYC 级别不足
+        InsufficientKycLevel,
+        /// P6: 市场已永久关闭
+        MarketAlreadyClosed,
+        /// P15: FOK 订单无法全部成交
+        FokNotFullyFillable,
+        /// P15: PostOnly 订单会立即撮合，被拒绝
+        PostOnlyWouldMatch,
+        /// 初始价格已设置且市场已有真实成交，不可重复设置
+        InitialPriceAlreadySet,
+        /// 审计修复 L1-R8: 市场未暂停（resume_market 对称性检查）
+        MarketNotPaused,
     }
 
     // ==================== Extrinsics ====================
@@ -717,6 +954,9 @@ pub mod pallet {
 
             // 验证实体和市场
             Self::ensure_market_enabled(entity_id)?;
+
+            // P4: KYC 级别检查
+            Self::ensure_kyc_requirement(entity_id, &who)?;
 
             // P0-a6: 内幕人员黑窗口期限制
             ensure!(
@@ -745,7 +985,7 @@ pub mod pallet {
             T::TokenProvider::reserve(entity_id, &who, token_amount)?;
 
             // P0 修复: 自动撮合价格交叉的买单
-            let (crossed, _nex_received, _fees) = Self::do_cross_match(
+            let (crossed, _nex_received) = Self::do_cross_match(
                 &who, entity_id, OrderSide::Sell, price, token_amount,
             )?;
             let remaining = token_amount.saturating_sub(crossed);
@@ -796,6 +1036,9 @@ pub mod pallet {
             // 验证实体和市场
             Self::ensure_market_enabled(entity_id)?;
 
+            // P4: KYC 级别检查
+            Self::ensure_kyc_requirement(entity_id, &who)?;
+
             // P0-a6: 内幕人员黑窗口期限制
             ensure!(
                 T::DisclosureProvider::can_insider_trade(entity_id, &who),
@@ -823,7 +1066,7 @@ pub mod pallet {
             T::Currency::reserve(&who, total_next).map_err(|_| Error::<T>::InsufficientBalance)?;
 
             // P0 修复: 自动撮合价格交叉的卖单
-            let (crossed, nex_spent, _fees) = Self::do_cross_match(
+            let (crossed, nex_spent) = Self::do_cross_match(
                 &who, entity_id, OrderSide::Buy, price, token_amount,
             )?;
             let remaining = token_amount.saturating_sub(crossed);
@@ -886,6 +1129,11 @@ pub mod pallet {
 
             // 审计修复 H1: 吃单前验证市场状态（暂停/封禁/未启用时不可吃单）
             Self::ensure_market_enabled(order.entity_id)?;
+            // 审计修复 H2-R7: 吃单也需检查熔断器（不经过 check_price_deviation）
+            Self::ensure_circuit_breaker_inactive(order.entity_id)?;
+
+            // P4: KYC 级别检查
+            Self::ensure_kyc_requirement(order.entity_id, &who)?;
 
             // 验证订单状态
             ensure!(
@@ -917,34 +1165,14 @@ pub mod pallet {
             let fill_u128: u128 = fill_amount.into();
             let total_next = Self::calculate_total_next(fill_u128, order.price)?;
 
-            // 计算手续费
-            let fee_rate = Self::get_fee_rate(order.entity_id);
-            let fee = Self::calculate_fee(total_next, fee_rate);
-
-            // P2 修复: 手续费买卖双方对称承担
-            // fee 从交易额 total_next 中扣除:
-            //   seller 净收入 = total_next - fee (seller 承担 fee 的一半体现在少收)
-            //   buyer 净支出 = total_next      (buyer 承担 fee 的一半体现在多付)
-            //   entity_owner 收入 = fee
-            // 两侧逻辑对称: buyer 付 total_next, seller 收 total_next - fee, fee 给 owner
-            let net_amount = total_next.saturating_sub(fee);
-
-            // 执行交易
+            // 执行交易（无手续费，全额转账）
             match order.side {
                 OrderSide::Sell => {
                     // 卖单：taker(买方) 支付 NEX，获得 Token
                     T::Currency::transfer(
-                        &who, &order.maker, net_amount,
+                        &who, &order.maker, total_next,
                         ExistenceRequirement::KeepAlive,
                     )?;
-                    if !fee.is_zero() {
-                        if let Some(ref entity_owner) = T::EntityProvider::entity_owner(order.entity_id) {
-                            T::Currency::transfer(
-                                &who, entity_owner, fee,
-                                ExistenceRequirement::KeepAlive,
-                            )?;
-                        }
-                    }
 
                     // Token: maker(卖方) → taker(买方)
                     T::TokenProvider::repatriate_reserved(
@@ -959,19 +1187,10 @@ pub mod pallet {
                         Error::<T>::InsufficientTokenBalance
                     );
 
-                    // P2 修复: 使用 repatriate_reserved 替代 unreserve→transfer
                     T::Currency::repatriate_reserved(
-                        &order.maker, &who, net_amount,
+                        &order.maker, &who, total_next,
                         frame_support::traits::BalanceStatus::Free,
                     )?;
-                    if !fee.is_zero() {
-                        if let Some(ref entity_owner) = T::EntityProvider::entity_owner(order.entity_id) {
-                            T::Currency::repatriate_reserved(
-                                &order.maker, entity_owner, fee,
-                                frame_support::traits::BalanceStatus::Free,
-                            )?;
-                        }
-                    }
 
                     // Token: taker(卖方) → maker(买方)
                     T::TokenProvider::reserve(order.entity_id, &who, fill_amount)?;
@@ -995,6 +1214,8 @@ pub mod pallet {
                 UserOrders::<T>::mutate(&order.maker, |orders| {
                     orders.retain(|&id| id != order_id);
                 });
+                // P2: 添加到已完结订单历史
+                Self::add_to_order_history(&order.maker, order_id);
             } else {
                 order.status = OrderStatus::PartiallyFilled;
             }
@@ -1002,11 +1223,17 @@ pub mod pallet {
             Orders::<T>::insert(order_id, &order);
 
             // 更新统计
-            MarketStatsStorage::<T>::mutate(order.entity_id, |stats| {
-                stats.total_trades = stats.total_trades.saturating_add(1);
-                stats.total_volume_nex = stats.total_volume_nex.saturating_add(total_next.into());
-                stats.total_fees_nex = stats.total_fees_nex.saturating_add(fee.into());
-            });
+            Self::update_trade_stats(order.entity_id, total_next);
+
+            // P1: 记录成交
+            let taker_side = match order.side {
+                OrderSide::Sell => OrderSide::Buy,
+                OrderSide::Buy => OrderSide::Sell,
+            };
+            Self::record_trade(
+                order_id, order.entity_id, order.maker.clone(), who.clone(),
+                taker_side, fill_amount, order.price, total_next,
+            );
 
             // 更新最优价格和 TWAP
             Self::update_best_prices(order.entity_id);
@@ -1015,10 +1242,10 @@ pub mod pallet {
             Self::deposit_event(Event::OrderFilled {
                 order_id,
                 entity_id: order.entity_id,
+                maker: order.maker,
                 taker: who,
                 filled_amount: fill_amount,
                 total_next,
-                fee,
             });
 
             Ok(())
@@ -1073,6 +1300,9 @@ pub mod pallet {
                 orders.retain(|&id| id != order_id);
             });
 
+            // P2: 添加到已完结订单历史
+            Self::add_to_order_history(&who, order_id);
+
             // 更新最优价格
             Self::update_best_prices(order.entity_id);
 
@@ -1088,7 +1318,6 @@ pub mod pallet {
             origin: OriginFor<T>,
             entity_id: u64,
             nex_enabled: bool,
-            fee_rate: u16,
             min_order_amount: u128,
             order_ttl: u32,
         ) -> DispatchResult {
@@ -1100,8 +1329,8 @@ pub mod pallet {
             ensure!(owner == who, Error::<T>::NotEntityOwner);
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
-            // H8: 手续费率上限验证（最高 50%）
-            ensure!(fee_rate <= 5000, Error::<T>::InvalidFeeRate);
+            // P6: 市场已关闭时不允许配置
+            ensure!(MarketStatusStorage::<T>::get(entity_id) != MarketStatus::Closed, Error::<T>::MarketAlreadyClosed);
 
             // H6 审计修复: TTL 最小值验证（防止立即过期）
             ensure!(order_ttl >= 10, Error::<T>::OrderTtlTooShort);
@@ -1109,7 +1338,6 @@ pub mod pallet {
             MarketConfigs::<T>::mutate(entity_id, |maybe_config| {
                 let config = maybe_config.get_or_insert_with(Default::default);
                 config.nex_enabled = nex_enabled;
-                config.fee_rate = fee_rate;
                 config.min_order_amount = min_order_amount;
                 config.order_ttl = order_ttl;
                 // paused 状态不变，由 pause_market/resume_market 控制
@@ -1217,6 +1445,7 @@ pub mod pallet {
         /// 初始价格用于 TWAP 冷启动期间的价格偏离检查。
         /// 当市场成交量不足时，将使用此价格作为参考。
         /// 一旦成交量达到 `min_trades_for_twap`，将自动切换到 TWAP 价格。
+        /// 仅在市场无真实成交时可调用（一次性设置），防止覆盖真实价格数据。
         #[pallet::call_index(17)]
         #[pallet::weight(Weight::from_parts(30_000_000, 4_000))]
         pub fn set_initial_price(
@@ -1233,6 +1462,11 @@ pub mod pallet {
 
             // 验证价格
             ensure!(!initial_price.is_zero(), Error::<T>::ZeroPrice);
+
+            // H1: 一次性限制 — 已有真实成交后禁止再设初始价格
+            if let Some(acc) = TwapAccumulators::<T>::get(entity_id) {
+                ensure!(acc.trade_count == 0, Error::<T>::InitialPriceAlreadySet);
+            }
 
             // 更新价格保护配置中的初始价格
             PriceProtection::<T>::mutate(entity_id, |maybe_config| {
@@ -1256,11 +1490,22 @@ pub mod pallet {
                         last_day_update: current_block,
                         last_week_update: current_block,
                     });
+                } else if let Some(acc) = maybe_acc.as_mut() {
+                    // 无真实成交时允许更新 last_price
+                    // 先将旧价格的累积量写入，再切换到新价格
+                    let blocks_elapsed = current_block.saturating_sub(acc.current_block);
+                    if blocks_elapsed > 0 {
+                        let old_price_u128: u128 = acc.last_price.into();
+                        acc.current_cumulative = acc.current_cumulative
+                            .saturating_add(old_price_u128.saturating_mul(blocks_elapsed as u128));
+                    }
+                    acc.last_price = initial_price;
+                    acc.current_block = current_block;
                 }
             });
 
-            // 设置最新成交价为初始价格
-            LastTradePrice::<T>::insert(entity_id, initial_price);
+            // H1: 不写 LastTradePrice — 初始价格仅用于 PriceProtection fallback，
+            // 不污染 LastTradePrice（该值应仅由真实成交写入）
 
             Self::deposit_event(Event::InitialPriceSet { entity_id, initial_price });
 
@@ -1287,6 +1532,11 @@ pub mod pallet {
 
             // 验证市场
             Self::ensure_market_enabled(entity_id)?;
+            // 审计修复 H2-R7: 市价单也需检查熔断器（不经过 check_price_deviation）
+            Self::ensure_circuit_breaker_inactive(entity_id)?;
+
+            // P4: KYC 级别检查
+            Self::ensure_kyc_requirement(entity_id, &who)?;
 
             // 审计修复 H2: 内幕人员黑窗口期限制（与限价单一致）
             ensure!(
@@ -1303,7 +1553,7 @@ pub mod pallet {
             ensure!(!sell_orders.is_empty(), Error::<T>::NoOrdersAvailable);
 
             // 执行市价买入
-            let (filled, total_next, fees) = Self::do_market_buy(
+            let (filled, total_next) = Self::do_market_buy(
                 &who,
                 entity_id,
                 token_amount,
@@ -1319,7 +1569,6 @@ pub mod pallet {
                 side: OrderSide::Buy,
                 filled_amount: filled,
                 total_next,
-                total_fee: fees,
             });
 
             Ok(())
@@ -1343,6 +1592,11 @@ pub mod pallet {
 
             // 验证市场
             Self::ensure_market_enabled(entity_id)?;
+            // 审计修复 H2-R7: 市价单也需检查熔断器（不经过 check_price_deviation）
+            Self::ensure_circuit_breaker_inactive(entity_id)?;
+
+            // P4: KYC 级别检查
+            Self::ensure_kyc_requirement(entity_id, &who)?;
 
             // 审计修复 H2: 内幕人员黑窗口期限制（与限价单一致）
             ensure!(
@@ -1362,7 +1616,7 @@ pub mod pallet {
             ensure!(!buy_orders.is_empty(), Error::<T>::NoOrdersAvailable);
 
             // 执行市价卖出
-            let (filled, total_receive, fees) = Self::do_market_sell(
+            let (filled, total_receive) = Self::do_market_sell(
                 &who,
                 entity_id,
                 token_amount,
@@ -1381,7 +1635,6 @@ pub mod pallet {
                 side: OrderSide::Sell,
                 filled_amount: filled,
                 total_next: total_receive,
-                total_fee: fees,
             });
 
             Ok(())
@@ -1431,6 +1684,8 @@ pub mod pallet {
             UserOrders::<T>::mutate(&order.maker, |orders| {
                 orders.retain(|&id| id != order_id);
             });
+            // 审计修复 M2-R5: 添加到已完结订单历史
+            Self::add_to_order_history(&order.maker, order_id);
 
             // 审计修复 M2: 更新最优价格缓存
             Self::update_best_prices(order.entity_id);
@@ -1450,6 +1705,8 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
             ensure!(T::EntityProvider::entity_owner(entity_id) == Some(who.clone()), Error::<T>::NotEntityOwner);
+            // 审计修复 L2-R5: 与其他 owner extrinsics 一致
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             MarketConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
                 let config = maybe_config.as_mut().ok_or(Error::<T>::MarketNotEnabled)?;
@@ -1472,9 +1729,13 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
             ensure!(T::EntityProvider::entity_owner(entity_id) == Some(who.clone()), Error::<T>::NotEntityOwner);
+            // 审计修复 L2-R5: 与其他 owner extrinsics 一致
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             MarketConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
                 let config = maybe_config.as_mut().ok_or(Error::<T>::MarketNotEnabled)?;
+                // 审计修复 L1-R8: 与 pause_market 对称 — 未暂停时不允许 resume
+                ensure!(config.paused, Error::<T>::MarketNotPaused);
                 config.paused = false;
                 Ok(())
             })?;
@@ -1484,14 +1745,14 @@ pub mod pallet {
         }
 
         /// 批量取消用户自己的订单
+        // 审计修复 M3-R9: 使用 BoundedVec 在解码阶段即限制长度
         #[pallet::call_index(28)]
         #[pallet::weight(Weight::from_parts(30_000_000u64.saturating_mul(order_ids.len() as u64), 5_000))]
         pub fn batch_cancel_orders(
             origin: OriginFor<T>,
-            order_ids: Vec<u64>,
+            order_ids: BoundedVec<u64, ConstU32<50>>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            ensure!(order_ids.len() <= 50, Error::<T>::TooManyOrders);
 
             let mut cancelled = 0u32;
             let mut failed = 0u32;
@@ -1534,6 +1795,8 @@ pub mod pallet {
                     UserOrders::<T>::mutate(&order.maker, |orders| {
                         orders.retain(|id| id != order_id);
                     });
+                    // 审计修复 M1-R5: 添加到已完结订单历史
+                    Self::add_to_order_history(&who, *order_id);
                     cancelled += 1;
                 } else {
                     failed += 1;
@@ -1584,6 +1847,8 @@ pub mod pallet {
                         UserOrders::<T>::mutate(&order.maker, |orders| {
                             orders.retain(|&id| id != order_id);
                         });
+                        // 审计修复 M3-R5: 添加到已完结订单历史
+                        Self::add_to_order_history(&order.maker, order_id);
                         cleaned += 1;
                     }
                 }
@@ -1611,6 +1876,8 @@ pub mod pallet {
                         UserOrders::<T>::mutate(&order.maker, |orders| {
                             orders.retain(|&id| id != order_id);
                         });
+                        // 审计修复 M3-R5: 添加到已完结订单历史
+                        Self::add_to_order_history(&order.maker, order_id);
                         cleaned += 1;
                     }
                 }
@@ -1646,6 +1913,19 @@ pub mod pallet {
             ensure!(order.status == OrderStatus::Open, Error::<T>::InvalidOrderStatus);
             ensure!(!new_price.is_zero(), Error::<T>::ZeroPrice);
             ensure!(!new_amount.is_zero(), Error::<T>::AmountTooSmall);
+
+            // 审计修复 M2-R9: 修改订单需验证市场状态和内幕交易限制
+            Self::ensure_market_enabled(order.entity_id)?;
+            ensure!(
+                T::DisclosureProvider::can_insider_trade(order.entity_id, &who),
+                Error::<T>::InsiderTradingRestricted
+            );
+
+            // 审计修复 M2-R6: 修改后数量不得低于最小订单量
+            let config = MarketConfigs::<T>::get(order.entity_id).unwrap_or_default();
+            if config.min_order_amount > 0 {
+                ensure!(new_amount.into() >= config.min_order_amount, Error::<T>::OrderAmountBelowMinimum);
+            }
             // 不允许增加数量（防止不锁定额外资产）
             ensure!(new_amount <= order.token_amount, Error::<T>::ModifyAmountExceedsOriginal);
 
@@ -1712,6 +1992,375 @@ pub mod pallet {
             Ok(())
         }
 
+        /// P4: 设置实体市场 KYC 要求
+        #[pallet::call_index(33)]
+        #[pallet::weight(Weight::from_parts(15_000_000, 2_000))]
+        pub fn set_kyc_requirement(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            min_kyc_level: u8,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+
+            MarketKycRequirement::<T>::insert(entity_id, min_kyc_level);
+            Self::deposit_event(Event::KycRequirementSet { entity_id, min_kyc_level });
+            Ok(())
+        }
+
+        /// P6: 关闭市场（永久关闭，强制取消所有订单并退还资产）
+        #[pallet::call_index(34)]
+        #[pallet::weight(Weight::from_parts(500_000_000, 50_000))]
+        pub fn close_market(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(owner == who, Error::<T>::NotEntityOwner);
+            // 审计修复 L1-R5: 与其他 owner extrinsics 一致
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(MarketStatusStorage::<T>::get(entity_id) != MarketStatus::Closed, Error::<T>::MarketAlreadyClosed);
+
+            let cancelled = Self::do_cancel_all_entity_orders(entity_id);
+            MarketStatusStorage::<T>::insert(entity_id, MarketStatus::Closed);
+
+            Self::deposit_event(Event::MarketClosed { entity_id, orders_cancelled: cancelled });
+            Ok(())
+        }
+
+        /// P7: 取消用户在指定实体的所有订单
+        #[pallet::call_index(35)]
+        #[pallet::weight(Weight::from_parts(200_000_000, 20_000))]
+        pub fn cancel_all_entity_orders(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+
+            let order_ids: Vec<u64> = UserOrders::<T>::get(&who)
+                .iter()
+                .copied()
+                .filter(|&oid| {
+                    Orders::<T>::get(oid)
+                        .map(|o| o.entity_id == entity_id)
+                        .unwrap_or(false)
+                })
+                .collect();
+
+            let mut cancelled = 0u32;
+            for order_id in order_ids.iter() {
+                if let Some(mut order) = Orders::<T>::get(order_id) {
+                    if order.status != OrderStatus::Open && order.status != OrderStatus::PartiallyFilled {
+                        continue;
+                    }
+                    let unfilled = order.token_amount.saturating_sub(order.filled_amount);
+                    match order.side {
+                        OrderSide::Sell => {
+                            T::TokenProvider::unreserve(entity_id, &who, unfilled);
+                        }
+                        OrderSide::Buy => {
+                            if let Ok(refund) = Self::calculate_total_next(unfilled.into(), order.price) {
+                                T::Currency::unreserve(&who, refund);
+                            }
+                        }
+                    }
+                    order.status = OrderStatus::Cancelled;
+                    Orders::<T>::insert(order_id, &order);
+                    Self::remove_from_order_book(entity_id, *order_id, order.side);
+                    Self::add_to_order_history(&who, *order_id);
+                    cancelled += 1;
+                }
+            }
+
+            UserOrders::<T>::mutate(&who, |orders| {
+                orders.retain(|oid| {
+                    Orders::<T>::get(oid)
+                        .map(|o| o.entity_id != entity_id)
+                        .unwrap_or(true)
+                });
+            });
+
+            Self::update_best_prices(entity_id);
+
+            Self::deposit_event(Event::AllEntityOrdersCancelled {
+                entity_id,
+                user: who,
+                cancelled_count: cancelled,
+            });
+            Ok(())
+        }
+
+        /// P8: 治理配置市场（Root 或治理调用）
+        #[pallet::call_index(36)]
+        #[pallet::weight(Weight::from_parts(25_000_000, 3_000))]
+        pub fn governance_configure_market(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            nex_enabled: bool,
+            min_order_amount: u128,
+            order_ttl: u32,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+            ensure!(MarketStatusStorage::<T>::get(entity_id) != MarketStatus::Closed, Error::<T>::MarketAlreadyClosed);
+            ensure!(order_ttl >= 10, Error::<T>::OrderTtlTooShort);
+
+            MarketConfigs::<T>::mutate(entity_id, |maybe_config| {
+                let config = maybe_config.get_or_insert_with(Default::default);
+                config.nex_enabled = nex_enabled;
+                config.min_order_amount = min_order_amount;
+                config.order_ttl = order_ttl;
+            });
+
+            Self::deposit_event(Event::MarketConfigured { entity_id });
+            Ok(())
+        }
+
+        /// P10: Root 强制关闭实体市场（取消所有订单）
+        #[pallet::call_index(37)]
+        #[pallet::weight(Weight::from_parts(500_000_000, 50_000))]
+        pub fn force_close_market(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+            ensure!(MarketStatusStorage::<T>::get(entity_id) != MarketStatus::Closed, Error::<T>::MarketAlreadyClosed);
+
+            let cancelled = Self::do_cancel_all_entity_orders(entity_id);
+            MarketStatusStorage::<T>::insert(entity_id, MarketStatus::Closed);
+
+            Self::deposit_event(Event::MarketForceClosed { entity_id, orders_cancelled: cancelled });
+            Ok(())
+        }
+
+        /// P15: IOC 订单（立即成交或取消）
+        #[pallet::call_index(38)]
+        #[pallet::weight(Weight::from_parts(80_000_000, 8_000))]
+        pub fn place_ioc_order(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            side: OrderSide,
+            token_amount: T::TokenBalance,
+            price: BalanceOf<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_market_enabled(entity_id)?;
+            Self::ensure_kyc_requirement(entity_id, &who)?;
+            ensure!(
+                T::DisclosureProvider::can_insider_trade(entity_id, &who),
+                Error::<T>::InsiderTradingRestricted
+            );
+            ensure!(!price.is_zero(), Error::<T>::ZeroPrice);
+            ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);
+            Self::check_price_deviation(entity_id, price)?;
+
+            // 预锁定资产
+            match side {
+                OrderSide::Sell => {
+                    ensure!(
+                        T::TokenProvider::token_balance(entity_id, &who) >= token_amount,
+                        Error::<T>::InsufficientTokenBalance
+                    );
+                    T::TokenProvider::reserve(entity_id, &who, token_amount)?;
+                }
+                OrderSide::Buy => {
+                    let total = Self::calculate_total_next(token_amount.into(), price)?;
+                    T::Currency::reserve(&who, total).map_err(|_| Error::<T>::InsufficientBalance)?;
+                }
+            }
+
+            // 尝试立即撮合
+            let (crossed, nex_spent) = Self::do_cross_match(
+                &who, entity_id, side, price, token_amount,
+            )?;
+            let remaining = token_amount.saturating_sub(crossed);
+
+            // IOC: 剩余部分直接取消，退还锁定资产
+            // 审计修复 H2-R6: 买单需同时退还未成交部分和价格改善多余的 NEX
+            match side {
+                OrderSide::Sell => {
+                    if !remaining.is_zero() {
+                        T::TokenProvider::unreserve(entity_id, &who, remaining);
+                    }
+                }
+                OrderSide::Buy => {
+                    let total_reserved = Self::calculate_total_next(token_amount.into(), price)?;
+                    let excess = total_reserved.saturating_sub(nex_spent);
+                    if !excess.is_zero() {
+                        T::Currency::unreserve(&who, excess);
+                    }
+                }
+            }
+
+            Self::update_best_prices(entity_id);
+
+            Self::deposit_event(Event::MarketOrderExecuted {
+                entity_id,
+                trader: who,
+                side,
+                filled_amount: crossed,
+                total_next: nex_spent,
+            });
+
+            Ok(())
+        }
+
+        /// P15: FOK 订单（全部成交或全部取消）
+        #[pallet::call_index(39)]
+        #[pallet::weight(Weight::from_parts(80_000_000, 8_000))]
+        pub fn place_fok_order(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            side: OrderSide,
+            token_amount: T::TokenBalance,
+            price: BalanceOf<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_market_enabled(entity_id)?;
+            Self::ensure_kyc_requirement(entity_id, &who)?;
+            ensure!(
+                T::DisclosureProvider::can_insider_trade(entity_id, &who),
+                Error::<T>::InsiderTradingRestricted
+            );
+            ensure!(!price.is_zero(), Error::<T>::ZeroPrice);
+            ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);
+            // 审计修复 H1: FOK 订单也需要价格偏离检查（与 IOC/限价单一致）
+            Self::check_price_deviation(entity_id, price)?;
+
+            // 审计修复 H1-R6: 排除自己的订单（do_cross_match 会跳过自撮合）
+            let available = Self::check_fillable_amount(entity_id, side, price, &who);
+            ensure!(available >= token_amount, Error::<T>::FokNotFullyFillable);
+
+            // 预锁定资产
+            match side {
+                OrderSide::Sell => {
+                    ensure!(
+                        T::TokenProvider::token_balance(entity_id, &who) >= token_amount,
+                        Error::<T>::InsufficientTokenBalance
+                    );
+                    T::TokenProvider::reserve(entity_id, &who, token_amount)?;
+                }
+                OrderSide::Buy => {
+                    let total = Self::calculate_total_next(token_amount.into(), price)?;
+                    T::Currency::reserve(&who, total).map_err(|_| Error::<T>::InsufficientBalance)?;
+                }
+            }
+
+            // 执行撮合
+            let (crossed, nex) = Self::do_cross_match(
+                &who, entity_id, side, price, token_amount,
+            )?;
+
+            // 审计修复 H1-R6: 退还因价格改善或未完全成交而多余的锁定资产
+            match side {
+                OrderSide::Sell => {
+                    let unfilled = token_amount.saturating_sub(crossed);
+                    if !unfilled.is_zero() {
+                        T::TokenProvider::unreserve(entity_id, &who, unfilled);
+                    }
+                }
+                OrderSide::Buy => {
+                    let total_reserved = Self::calculate_total_next(token_amount.into(), price)?;
+                    let excess = total_reserved.saturating_sub(nex);
+                    if !excess.is_zero() {
+                        T::Currency::unreserve(&who, excess);
+                    }
+                }
+            }
+
+            Self::update_best_prices(entity_id);
+
+            Self::deposit_event(Event::MarketOrderExecuted {
+                entity_id,
+                trader: who,
+                side,
+                filled_amount: crossed,
+                total_next: nex,
+            });
+
+            Ok(())
+        }
+
+        /// P15: Post-Only 订单（仅挂单，不立即撮合）
+        #[pallet::call_index(40)]
+        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        pub fn place_post_only_order(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            side: OrderSide,
+            token_amount: T::TokenBalance,
+            price: BalanceOf<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_market_enabled(entity_id)?;
+            Self::ensure_kyc_requirement(entity_id, &who)?;
+            ensure!(
+                T::DisclosureProvider::can_insider_trade(entity_id, &who),
+                Error::<T>::InsiderTradingRestricted
+            );
+            ensure!(!price.is_zero(), Error::<T>::ZeroPrice);
+            ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);
+            Self::check_price_deviation(entity_id, price)?;
+
+            // Post-Only: 检查价格不会立即撮合
+            let would_match = match side {
+                OrderSide::Buy => {
+                    BestAsk::<T>::get(entity_id)
+                        .map(|ask| price >= ask)
+                        .unwrap_or(false)
+                }
+                OrderSide::Sell => {
+                    BestBid::<T>::get(entity_id)
+                        .map(|bid| price <= bid)
+                        .unwrap_or(false)
+                }
+            };
+            ensure!(!would_match, Error::<T>::PostOnlyWouldMatch);
+
+            // 锁定资产并创建订单
+            match side {
+                OrderSide::Sell => {
+                    ensure!(
+                        T::TokenProvider::token_balance(entity_id, &who) >= token_amount,
+                        Error::<T>::InsufficientTokenBalance
+                    );
+                    T::TokenProvider::reserve(entity_id, &who, token_amount)?;
+                }
+                OrderSide::Buy => {
+                    let total = Self::calculate_total_next(token_amount.into(), price)?;
+                    T::Currency::reserve(&who, total).map_err(|_| Error::<T>::InsufficientBalance)?;
+                }
+            }
+
+            let order_id = Self::do_create_order(
+                entity_id,
+                who.clone(),
+                side,
+                OrderType::PostOnly,
+                token_amount,
+                price,
+            )?;
+
+            Self::update_best_prices(entity_id);
+
+            Self::deposit_event(Event::OrderCreated {
+                order_id,
+                entity_id,
+                maker: who,
+                side,
+                token_amount,
+                price,
+            });
+
+            Ok(())
+        }
     }
 
     // ==================== 内部函数 ====================
@@ -1729,6 +2378,9 @@ pub mod pallet {
                 Error::<T>::TokenNotEnabled
             );
 
+            // P6: 市场已关闭检查
+            ensure!(MarketStatusStorage::<T>::get(entity_id) != MarketStatus::Closed, Error::<T>::MarketAlreadyClosed);
+
             // M6: 检查市场配置（必须显式配置并启用，与 Default nex_enabled=false 一致）
             let config = MarketConfigs::<T>::get(entity_id).unwrap_or_default();
             ensure!(config.nex_enabled, Error::<T>::MarketNotEnabled);
@@ -1737,21 +2389,227 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 获取实体市场的手续费率 (bps, 10000 = 100%)
-        /// 审计修复 M1: 已配置市场直接使用 fee_rate（包括 0），仅未配置时使用默认值
-        fn get_fee_rate(entity_id: u64) -> u16 {
-            match MarketConfigs::<T>::get(entity_id) {
-                Some(config) => config.fee_rate,
-                None => T::DefaultFeeRate::get(),
+        /// 审计修复 H2-R7: 独立的熔断器检查（市价单/吃单不经过 check_price_deviation）
+        fn ensure_circuit_breaker_inactive(entity_id: u64) -> DispatchResult {
+            if let Some(config) = PriceProtection::<T>::get(entity_id) {
+                if config.enabled && config.circuit_breaker_active {
+                    let current_block: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
+                    ensure!(current_block >= config.circuit_breaker_until, Error::<T>::MarketCircuitBreakerActive);
+                }
             }
+            Ok(())
         }
 
-        /// 计算手续费 = amount × fee_rate / 10000
-        fn calculate_fee(amount: BalanceOf<T>, fee_rate: u16) -> BalanceOf<T> {
-            amount
-                .saturating_mul(fee_rate.into())
-                .checked_div(&10000u32.into())
-                .unwrap_or_else(Zero::zero)
+        /// P4: 检查用户 KYC 级别是否满足市场要求
+        fn ensure_kyc_requirement(entity_id: u64, who: &T::AccountId) -> DispatchResult {
+            let min_level = MarketKycRequirement::<T>::get(entity_id);
+            if min_level > 0 {
+                let user_level = T::KycProvider::kyc_level(entity_id, who);
+                ensure!(user_level >= min_level, Error::<T>::InsufficientKycLevel);
+            }
+            Ok(())
+        }
+
+        /// P1: 记录成交历史
+        #[allow(clippy::too_many_arguments)]
+        fn record_trade(
+            order_id: u64,
+            entity_id: u64,
+            maker: T::AccountId,
+            taker: T::AccountId,
+            side: OrderSide,
+            token_amount: T::TokenBalance,
+            price: BalanceOf<T>,
+            nex_amount: BalanceOf<T>,
+        ) {
+            let trade_id = NextTradeId::<T>::get();
+            NextTradeId::<T>::put(trade_id.saturating_add(1));
+
+            let block_number = <frame_system::Pallet<T>>::block_number();
+
+            let record = TradeRecord::<T> {
+                trade_id,
+                order_id,
+                entity_id,
+                maker: maker.clone(),
+                taker: taker.clone(),
+                side,
+                token_amount,
+                price,
+                nex_amount,
+                block_number,
+            };
+            TradeRecords::<T>::insert(trade_id, record);
+
+            // 更新用户交易历史索引（环形覆盖）
+            UserTradeHistory::<T>::mutate(&maker, |history| {
+                if history.len() as u32 >= T::MaxTradeHistoryPerUser::get() {
+                    history.remove(0);
+                }
+                let _ = history.try_push(trade_id);
+            });
+            UserTradeHistory::<T>::mutate(&taker, |history| {
+                if history.len() as u32 >= T::MaxTradeHistoryPerUser::get() {
+                    history.remove(0);
+                }
+                let _ = history.try_push(trade_id);
+            });
+
+            // 更新实体交易历史索引
+            EntityTradeHistory::<T>::mutate(entity_id, |history| {
+                if history.len() >= 500 {
+                    history.remove(0);
+                }
+                let _ = history.try_push(trade_id);
+            });
+
+            // P3: 更新日统计
+            Self::update_daily_stats(entity_id, price, nex_amount);
+
+            Self::deposit_event(Event::TradeExecuted {
+                trade_id,
+                order_id,
+                entity_id,
+                maker,
+                taker,
+                side,
+                token_amount,
+                price,
+                nex_amount,
+            });
+        }
+
+        /// P2: 添加到用户已完结订单历史
+        fn add_to_order_history(who: &T::AccountId, order_id: u64) {
+            UserOrderHistory::<T>::mutate(who, |history| {
+                if history.len() as u32 >= T::MaxOrderHistoryPerUser::get() {
+                    history.remove(0);
+                }
+                let _ = history.try_push(order_id);
+            });
+        }
+
+        /// P1/P11: 更新交易统计（实体 + 全局）
+        fn update_trade_stats(entity_id: u64, nex_amount: BalanceOf<T>) {
+            MarketStatsStorage::<T>::mutate(entity_id, |stats| {
+                stats.total_trades = stats.total_trades.saturating_add(1);
+                stats.total_volume_nex = stats.total_volume_nex.saturating_add(nex_amount.into());
+            });
+
+            // P11: 更新全局统计
+            GlobalStats::<T>::mutate(|stats| {
+                stats.total_trades = stats.total_trades.saturating_add(1);
+                stats.total_volume_nex = stats.total_volume_nex.saturating_add(nex_amount.into());
+            });
+        }
+
+        /// P3: 更新实体日统计
+        fn update_daily_stats(entity_id: u64, price: BalanceOf<T>, nex_amount: BalanceOf<T>) {
+            let current_block: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
+            let blocks_per_day = T::BlocksPerDay::get();
+
+            let zero_balance: BalanceOf<T> = Zero::zero();
+            EntityDailyStats::<T>::mutate(entity_id, |stats| {
+                // 检查是否需要重置（新的一天）
+                if current_block.saturating_sub(stats.period_start) >= blocks_per_day {
+                    stats.open_price = price;
+                    stats.high_price = price;
+                    stats.low_price = price;
+                    stats.close_price = price;
+                    stats.volume_nex = 0;
+                    stats.trade_count = 0;
+                    stats.period_start = current_block;
+                } else {
+                    if stats.open_price == zero_balance {
+                        stats.open_price = price;
+                    }
+                    if price > stats.high_price {
+                        stats.high_price = price;
+                    }
+                    if stats.low_price == zero_balance || price < stats.low_price {
+                        stats.low_price = price;
+                    }
+                    stats.close_price = price;
+                }
+                stats.volume_nex = stats.volume_nex.saturating_add(nex_amount.into());
+                stats.trade_count = stats.trade_count.saturating_add(1);
+            });
+        }
+
+        /// P6/P10: 取消实体所有活跃订单，退还锁定资产
+        fn do_cancel_all_entity_orders(entity_id: u64) -> u32 {
+            let mut cancelled = 0u32;
+
+            // 取消卖单
+            let sell_ids: Vec<u64> = EntitySellOrders::<T>::get(entity_id).into_inner();
+            for order_id in sell_ids.iter() {
+                if let Some(mut order) = Orders::<T>::get(order_id) {
+                    if order.status != OrderStatus::Open && order.status != OrderStatus::PartiallyFilled {
+                        continue;
+                    }
+                    let unfilled = order.token_amount.saturating_sub(order.filled_amount);
+                    T::TokenProvider::unreserve(entity_id, &order.maker, unfilled);
+                    order.status = OrderStatus::Cancelled;
+                    Orders::<T>::insert(order_id, &order);
+                    UserOrders::<T>::mutate(&order.maker, |orders| {
+                        orders.retain(|&id| id != *order_id);
+                    });
+                    Self::add_to_order_history(&order.maker, *order_id);
+                    cancelled += 1;
+                }
+            }
+            EntitySellOrders::<T>::mutate(entity_id, |orders| orders.clear());
+
+            // 取消买单
+            let buy_ids: Vec<u64> = EntityBuyOrders::<T>::get(entity_id).into_inner();
+            for order_id in buy_ids.iter() {
+                if let Some(mut order) = Orders::<T>::get(order_id) {
+                    if order.status != OrderStatus::Open && order.status != OrderStatus::PartiallyFilled {
+                        continue;
+                    }
+                    let unfilled = order.token_amount.saturating_sub(order.filled_amount);
+                    if let Ok(refund) = Self::calculate_total_next(unfilled.into(), order.price) {
+                        T::Currency::unreserve(&order.maker, refund);
+                    }
+                    order.status = OrderStatus::Cancelled;
+                    Orders::<T>::insert(order_id, &order);
+                    UserOrders::<T>::mutate(&order.maker, |orders| {
+                        orders.retain(|&id| id != *order_id);
+                    });
+                    Self::add_to_order_history(&order.maker, *order_id);
+                    cancelled += 1;
+                }
+            }
+            EntityBuyOrders::<T>::mutate(entity_id, |orders| orders.clear());
+
+            Self::update_best_prices(entity_id);
+            cancelled
+        }
+
+        /// P15: 检查在给定价格限制下可填充的最大数量（用于 FOK 验证）
+        /// 审计修复 H1-R6: 排除 taker 自己的订单（do_cross_match 会跳过自撮合）
+        fn check_fillable_amount(
+            entity_id: u64,
+            side: OrderSide,
+            price: BalanceOf<T>,
+            exclude_maker: &T::AccountId,
+        ) -> T::TokenBalance {
+            let counter_orders = match side {
+                OrderSide::Sell => Self::get_sorted_buy_orders(entity_id),
+                OrderSide::Buy => Self::get_sorted_sell_orders(entity_id),
+            };
+            let mut total: T::TokenBalance = Zero::zero();
+            for order in counter_orders {
+                let price_ok = match side {
+                    OrderSide::Sell => order.price >= price,
+                    OrderSide::Buy => order.price <= price,
+                };
+                if !price_ok { break; }
+                if order.maker == *exclude_maker { continue; }
+                let available = order.token_amount.saturating_sub(order.filled_amount);
+                total = total.saturating_add(available);
+            }
+            total
         }
 
         /// 计算总成本 (NEX) = token_amount × price
@@ -1771,19 +2629,16 @@ pub mod pallet {
         /// P0 修复: 挂单时自动撮合交叉订单
         /// - taker_side=Sell → 与买单撮合（buy_price >= limit_price）
         /// - taker_side=Buy  → 与卖单撮合（sell_price <= limit_price）
-        /// 返回 (已撮合数量, NEX 总额, 手续费)
+        /// 返回 (已撮合数量, NEX 总额)
         fn do_cross_match(
             taker: &T::AccountId,
             entity_id: u64,
             taker_side: OrderSide,
             limit_price: BalanceOf<T>,
             mut remaining: T::TokenBalance,
-        ) -> Result<(T::TokenBalance, BalanceOf<T>, BalanceOf<T>), DispatchError> {
+        ) -> Result<(T::TokenBalance, BalanceOf<T>), DispatchError> {
             let mut total_filled: T::TokenBalance = Zero::zero();
             let mut total_nex: BalanceOf<T> = Zero::zero();
-            let mut total_fees: BalanceOf<T> = Zero::zero();
-
-            let fee_rate = Self::get_fee_rate(entity_id);
 
             // 获取对手方订单（卖单时取买单，买单时取卖单）
             let counter_orders = match taker_side {
@@ -1808,26 +2663,16 @@ pub mod pallet {
                 // 以挂单方价格成交
                 let fill_u128: u128 = fill_amount.into();
                 let nex_amount = Self::calculate_total_next(fill_u128, counter_order.price)?;
-                let fee = Self::calculate_fee(nex_amount, fee_rate);
-                let net = nex_amount.saturating_sub(fee);
 
-                // NEX 转账: 买方(reserved) → 卖方(net) + entity_owner(fee)
+                // NEX 转账: 买方(reserved) → 卖方（无手续费，全额转账）
                 let (nex_payer, nex_receiver) = match taker_side {
                     OrderSide::Sell => (&counter_order.maker, taker),
                     OrderSide::Buy => (taker, &counter_order.maker),
                 };
                 T::Currency::repatriate_reserved(
-                    nex_payer, nex_receiver, net,
+                    nex_payer, nex_receiver, nex_amount,
                     frame_support::traits::BalanceStatus::Free,
                 )?;
-                if !fee.is_zero() {
-                    if let Some(entity_owner) = T::EntityProvider::entity_owner(entity_id) {
-                        T::Currency::repatriate_reserved(
-                            nex_payer, &entity_owner, fee,
-                            frame_support::traits::BalanceStatus::Free,
-                        )?;
-                    }
-                }
 
                 // Token 转账: 卖方(reserved) → 买方
                 let (token_from, token_to) = match taker_side {
@@ -1840,29 +2685,31 @@ pub mod pallet {
 
                 Self::update_order_fill(&counter_order, entity_id, fill_amount);
 
-                MarketStatsStorage::<T>::mutate(entity_id, |stats| {
-                    stats.total_trades = stats.total_trades.saturating_add(1);
-                    stats.total_volume_nex = stats.total_volume_nex.saturating_add(nex_amount.into());
-                    stats.total_fees_nex = stats.total_fees_nex.saturating_add(fee.into());
-                });
+                Self::update_trade_stats(entity_id, nex_amount);
+
+                // P1: 记录成交
+                Self::record_trade(
+                    counter_order.order_id, entity_id,
+                    counter_order.maker.clone(), taker.clone(),
+                    taker_side, fill_amount, counter_order.price, nex_amount,
+                );
 
                 Self::deposit_event(Event::OrderFilled {
                     order_id: counter_order.order_id,
                     entity_id,
+                    maker: counter_order.maker.clone(),
                     taker: taker.clone(),
                     filled_amount: fill_amount,
                     total_next: nex_amount,
-                    fee,
                 });
                 Self::on_trade_completed(entity_id, counter_order.price);
 
                 total_filled = total_filled.saturating_add(fill_amount);
                 total_nex = total_nex.saturating_add(nex_amount);
-                total_fees = total_fees.saturating_add(fee);
                 remaining = remaining.saturating_sub(fill_amount);
             }
 
-            Ok((total_filled, total_nex, total_fees))
+            Ok((total_filled, total_nex))
         }
 
         /// 创建订单
@@ -1943,6 +2790,8 @@ pub mod pallet {
                 UserOrders::<T>::mutate(&order.maker, |orders| {
                     orders.retain(|&id| id != order.order_id);
                 });
+                // P2: 添加到已完结订单历史
+                Self::add_to_order_history(&order.maker, order.order_id);
             } else {
                 updated.status = OrderStatus::PartiallyFilled;
             }
@@ -2005,17 +2854,17 @@ pub mod pallet {
             mut remaining: T::TokenBalance,
             max_cost: BalanceOf<T>,
             sell_orders: &mut Vec<TradeOrder<T>>,
-        ) -> Result<(T::TokenBalance, BalanceOf<T>, BalanceOf<T>), DispatchError> {
+        ) -> Result<(T::TokenBalance, BalanceOf<T>), DispatchError> {
             let mut total_filled: T::TokenBalance = Zero::zero();
             let mut total_next: BalanceOf<T> = Zero::zero();
-            let mut total_fees: BalanceOf<T> = Zero::zero();
-
-            let fee_rate = Self::get_fee_rate(entity_id);
 
             for order in sell_orders.iter_mut() {
                 if remaining.is_zero() {
                     break;
                 }
+
+                // 审计修复 H1-R7: 跳过自己的订单（防止洗盘 + TWAP 操纵）
+                if order.maker == *buyer { continue; }
 
                 // 计算可成交数量
                 let available = order.token_amount.saturating_sub(order.filled_amount);
@@ -2045,29 +2894,13 @@ pub mod pallet {
 
                 if fill_amount.is_zero() { break; }
 
-                // 计算手续费
-                let fee = Self::calculate_fee(cost, fee_rate);
-
-                // 执行转账
-                // buyer 支付 NEX → maker
+                // NEX: buyer → maker（无手续费，全额转账）
                 T::Currency::transfer(
                     buyer,
                     &order.maker,
-                    cost.saturating_sub(fee),
+                    cost,
                     ExistenceRequirement::KeepAlive,
                 )?;
-
-                // 手续费转给实体所有者
-                if !fee.is_zero() {
-                    if let Some(entity_owner) = T::EntityProvider::entity_owner(entity_id) {
-                        T::Currency::transfer(
-                            buyer,
-                            &entity_owner,
-                            fee,
-                            ExistenceRequirement::KeepAlive,
-                        )?;
-                    }
-                }
 
                 // Token: maker → buyer（从 maker 的 reserved 转出）
                 T::TokenProvider::repatriate_reserved(
@@ -2080,30 +2913,36 @@ pub mod pallet {
                 // 更新订单
                 Self::update_order_fill(order, entity_id, fill_amount);
 
+                // P1: 记录成交 + P11: 更新统计
+                Self::update_trade_stats(entity_id, cost);
+                Self::record_trade(
+                    order.order_id, entity_id, order.maker.clone(), buyer.clone(),
+                    OrderSide::Buy, fill_amount, order.price, cost,
+                );
+
+                // P12: OrderFilled 包含 maker
+                Self::deposit_event(Event::OrderFilled {
+                    order_id: order.order_id,
+                    entity_id,
+                    maker: order.maker.clone(),
+                    taker: buyer.clone(),
+                    filled_amount: fill_amount,
+                    total_next: cost,
+                });
+                Self::on_trade_completed(entity_id, order.price);
+
                 // 累计
                 total_filled = total_filled.saturating_add(fill_amount);
                 total_next = total_next.saturating_add(cost);
-                total_fees = total_fees.saturating_add(fee);
                 remaining = remaining.saturating_sub(fill_amount);
             }
 
-            // 更新统计和最优价格
+            // 更新最优价格
             if !total_filled.is_zero() {
-                MarketStatsStorage::<T>::mutate(entity_id, |stats| {
-                    stats.total_trades = stats.total_trades.saturating_add(1);
-                    stats.total_volume_nex = stats.total_volume_nex.saturating_add(total_next.into());
-                    stats.total_fees_nex = stats.total_fees_nex.saturating_add(total_fees.into());
-                });
-
-                // 更新最优价格和 TWAP（使用加权平均价格）
                 Self::update_best_prices(entity_id);
-                if !total_filled.is_zero() {
-                    let avg_price = total_next.checked_div(&total_filled.into().into()).unwrap_or_else(Zero::zero);
-                    Self::on_trade_completed(entity_id, avg_price);
-                }
             }
 
-            Ok((total_filled, total_next, total_fees))
+            Ok((total_filled, total_next))
         }
 
         /// 执行市价卖出
@@ -2113,54 +2952,38 @@ pub mod pallet {
             mut remaining: T::TokenBalance,
             min_receive: BalanceOf<T>,
             buy_orders: &mut Vec<TradeOrder<T>>,
-        ) -> Result<(T::TokenBalance, BalanceOf<T>, BalanceOf<T>), DispatchError> {
+        ) -> Result<(T::TokenBalance, BalanceOf<T>), DispatchError> {
             let mut total_filled: T::TokenBalance = Zero::zero();
             let mut total_receive: BalanceOf<T> = Zero::zero();
-            let mut total_fees: BalanceOf<T> = Zero::zero();
-
-            let fee_rate = Self::get_fee_rate(entity_id);
 
             for order in buy_orders.iter_mut() {
                 if remaining.is_zero() {
                     break;
                 }
 
+                // 审计修复 H1-R7: 跳过自己的订单（防止洗盘 + TWAP 操纵）
+                if order.maker == *seller { continue; }
+
                 // 计算可成交数量
                 let available = order.token_amount.saturating_sub(order.filled_amount);
                 let fill_amount = remaining.min(available);
 
-                // 计算收入
+                // 计算收入（无手续费，全额转账）
                 let fill_u128: u128 = fill_amount.into();
                 let gross = Self::calculate_total_next(fill_u128, order.price)?;
 
-                // 计算手续费
-                let fee = Self::calculate_fee(gross, fee_rate);
-                let net = gross.saturating_sub(fee);
-
                 // P1 修复: 滑点检查移到转账前（与 market_buy 一致）
-                // 预估成交后总收入是否满足 min_receive
-                let projected_receive = total_receive.saturating_add(net);
+                let projected_receive = total_receive.saturating_add(gross);
                 let projected_remaining = remaining.saturating_sub(fill_amount);
                 if projected_remaining.is_zero() && projected_receive < min_receive {
-                    // 最后一笔成交后仍不满足 min_receive，直接失败
                     return Err(Error::<T>::SlippageExceeded.into());
                 }
 
-                // P2 修复: 使用 repatriate_reserved 替代 unreserve→transfer
-                // seller 收到 net (= gross - fee)
+                // NEX: maker(reserved) → seller（全额转账）
                 T::Currency::repatriate_reserved(
-                    &order.maker, seller, net,
+                    &order.maker, seller, gross,
                     frame_support::traits::BalanceStatus::Free,
                 )?;
-                // fee 给 entity_owner
-                if !fee.is_zero() {
-                    if let Some(entity_owner) = T::EntityProvider::entity_owner(entity_id) {
-                        T::Currency::repatriate_reserved(
-                            &order.maker, &entity_owner, fee,
-                            frame_support::traits::BalanceStatus::Free,
-                        )?;
-                    }
-                }
 
                 // Token: seller → maker（先锁定 seller 的 Token，再转给 maker）
                 T::TokenProvider::reserve(entity_id, seller, fill_amount)?;
@@ -2174,31 +2997,36 @@ pub mod pallet {
                 // 更新订单
                 Self::update_order_fill(order, entity_id, fill_amount);
 
+                // P1: 记录成交 + P11: 更新统计
+                Self::update_trade_stats(entity_id, gross);
+                Self::record_trade(
+                    order.order_id, entity_id, order.maker.clone(), seller.clone(),
+                    OrderSide::Sell, fill_amount, order.price, gross,
+                );
+
+                // P12: OrderFilled 包含 maker
+                Self::deposit_event(Event::OrderFilled {
+                    order_id: order.order_id,
+                    entity_id,
+                    maker: order.maker.clone(),
+                    taker: seller.clone(),
+                    filled_amount: fill_amount,
+                    total_next: gross,
+                });
+                Self::on_trade_completed(entity_id, order.price);
+
                 // 累计
                 total_filled = total_filled.saturating_add(fill_amount);
-                total_receive = total_receive.saturating_add(net);
-                total_fees = total_fees.saturating_add(fee);
+                total_receive = total_receive.saturating_add(gross);
                 remaining = remaining.saturating_sub(fill_amount);
             }
 
-            // 更新统计和最优价格
+            // 更新最优价格
             if !total_filled.is_zero() {
-                MarketStatsStorage::<T>::mutate(entity_id, |stats| {
-                    stats.total_trades = stats.total_trades.saturating_add(1);
-                    stats.total_volume_nex = stats.total_volume_nex.saturating_add(total_receive.saturating_add(total_fees).into());
-                    stats.total_fees_nex = stats.total_fees_nex.saturating_add(total_fees.into());
-                });
-
-                // 更新最优价格和 TWAP
                 Self::update_best_prices(entity_id);
-                let total_gross = total_receive.saturating_add(total_fees);
-                if !total_gross.is_zero() {
-                    let avg_price = total_gross.checked_div(&total_filled.into().into()).unwrap_or_else(Zero::zero);
-                    Self::on_trade_completed(entity_id, avg_price);
-                }
             }
 
-            Ok((total_filled, total_receive, total_fees))
+            Ok((total_filled, total_receive))
         }
 
         /// 更新最优买卖价格
@@ -2556,20 +3384,30 @@ pub mod pallet {
 
 impl<T: Config> Pallet<T> {
     /// 获取实体卖单列表
+    /// 审计修复 L1-R6: 过滤过期订单（与 calculate_best_ask/bid 一致）
     pub fn get_sell_orders(entity_id: u64) -> Vec<TradeOrder<T>> {
+        let now = <frame_system::Pallet<T>>::block_number();
         EntitySellOrders::<T>::get(entity_id)
             .iter()
             .filter_map(|&id| Orders::<T>::get(id))
-            .filter(|o| o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+            .filter(|o| {
+                (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+                    && now <= o.expires_at
+            })
             .collect()
     }
 
     /// 获取实体买单列表
+    /// 审计修复 L1-R6: 过滤过期订单（与 calculate_best_bid 一致）
     pub fn get_buy_orders(entity_id: u64) -> Vec<TradeOrder<T>> {
+        let now = <frame_system::Pallet<T>>::block_number();
         EntityBuyOrders::<T>::get(entity_id)
             .iter()
             .filter_map(|&id| Orders::<T>::get(id))
-            .filter(|o| o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+            .filter(|o| {
+                (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+                    && now <= o.expires_at
+            })
             .collect()
     }
 
@@ -2716,11 +3554,17 @@ impl<T: Config> Pallet<T> {
         let (best_ask, best_bid) = Self::get_best_prices(entity_id);
         let last_price = LastTradePrice::<T>::get(entity_id);
 
+        let now = <frame_system::Pallet<T>>::block_number();
+
+        // 审计修复 M5-R5: 过滤过期订单（与 calculate_best_ask/bid 一致）
         // 计算卖单总量
         let total_ask_amount: T::TokenBalance = EntitySellOrders::<T>::get(entity_id)
             .iter()
             .filter_map(|&id| Orders::<T>::get(id))
-            .filter(|o| o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+            .filter(|o| {
+                (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+                    && now <= o.expires_at
+            })
             .fold(Zero::zero(), |acc: T::TokenBalance, o| {
                 acc.saturating_add(o.token_amount.saturating_sub(o.filled_amount))
             });
@@ -2729,7 +3573,10 @@ impl<T: Config> Pallet<T> {
         let total_bid_amount: T::TokenBalance = EntityBuyOrders::<T>::get(entity_id)
             .iter()
             .filter_map(|&id| Orders::<T>::get(id))
-            .filter(|o| o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+            .filter(|o| {
+                (o.status == OrderStatus::Open || o.status == OrderStatus::PartiallyFilled)
+                    && now <= o.expires_at
+            })
             .fold(Zero::zero(), |acc: T::TokenBalance, o| {
                 acc.saturating_add(o.token_amount.saturating_sub(o.filled_amount))
             });
@@ -2760,6 +3607,76 @@ impl<T: Config> Pallet<T> {
         (asks, bids)
     }
 
+    // ==================== P13: 分页查询接口 ====================
+
+    /// P13: 分页获取用户交易历史
+    pub fn get_user_trade_history(
+        user: &T::AccountId,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<TradeRecord<T>> {
+        let history = UserTradeHistory::<T>::get(user);
+        let start = (page * page_size) as usize;
+        history.iter()
+            .rev()
+            .skip(start)
+            .take(page_size as usize)
+            .filter_map(|&id| TradeRecords::<T>::get(id))
+            .collect()
+    }
+
+    /// P13: 分页获取实体交易历史
+    pub fn get_entity_trade_history(
+        entity_id: u64,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<TradeRecord<T>> {
+        let history = EntityTradeHistory::<T>::get(entity_id);
+        let start = (page * page_size) as usize;
+        history.iter()
+            .rev()
+            .skip(start)
+            .take(page_size as usize)
+            .filter_map(|&id| TradeRecords::<T>::get(id))
+            .collect()
+    }
+
+    /// P13: 分页获取用户已完结订单历史
+    pub fn get_user_order_history(
+        user: &T::AccountId,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<TradeOrder<T>> {
+        let history = UserOrderHistory::<T>::get(user);
+        let start = (page * page_size) as usize;
+        history.iter()
+            .rev()
+            .skip(start)
+            .take(page_size as usize)
+            .filter_map(|&id| Orders::<T>::get(id))
+            .collect()
+    }
+
+    /// P3: 获取实体日统计
+    pub fn get_daily_stats(entity_id: u64) -> DailyStats<BalanceOf<T>> {
+        EntityDailyStats::<T>::get(entity_id)
+    }
+
+    /// P11: 获取全局统计
+    pub fn get_global_stats() -> MarketStats {
+        GlobalStats::<T>::get()
+    }
+
+    /// P6: 获取市场状态
+    pub fn get_market_status(entity_id: u64) -> MarketStatus {
+        MarketStatusStorage::<T>::get(entity_id)
+    }
+
+    /// P4: 获取市场 KYC 要求
+    pub fn get_kyc_requirement(entity_id: u64) -> u8 {
+        MarketKycRequirement::<T>::get(entity_id)
+    }
+
 }
 
 // ==================== EntityTokenPriceProvider 实现 ====================
@@ -2778,9 +3695,18 @@ impl<T: Config> pallet_entity_common::EntityTokenPriceProvider for Pallet<T> {
             })
     }
 
-    fn get_token_price_usdt(_entity_id: u64) -> Option<u64> {
-        // USDT trading channel removed
-        None
+    fn get_token_price_usdt(entity_id: u64) -> Option<u64> {
+        use pallet_entity_common::PricingProvider as _;
+        // 间接换算: Token → NEX → USDT
+        // token_nex_price 精度 10^12, nex_usdt_price 精度 10^6
+        // result (精度 10^6) = token_nex_price × nex_usdt_price / 10^12
+        let token_nex_price: u128 = Self::get_token_price(entity_id)?.into();
+        let nex_usdt_price: u128 = T::PricingProvider::get_nex_usdt_price() as u128;
+        if nex_usdt_price == 0 { return None; }
+        let usdt = token_nex_price
+            .saturating_mul(nex_usdt_price)
+            .checked_div(1_000_000_000_000u128)?;
+        Some(usdt as u64)
     }
 
     fn token_price_confidence(entity_id: u64) -> u8 {

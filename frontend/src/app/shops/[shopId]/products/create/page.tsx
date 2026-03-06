@@ -6,11 +6,17 @@ import { useProductActions } from "@/hooks/useProducts";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Switch } from "@/components/ui/switch";
 import { TxButton } from "@/components/shared/TxButton";
-import { ArrowLeft, Package } from "lucide-react";
+import { PRODUCT_CATEGORIES } from "@/lib/constants";
+import { ArrowLeft, Package, Eye, Tag } from "lucide-react";
 import Link from "next/link";
+
+const VISIBILITY_OPTIONS = [
+  { value: "Public", label: "Public", desc: "Visible to all users" },
+  { value: "MembersOnly", label: "Members Only", desc: "Only entity members can view" },
+  { value: "Private", label: "Private", desc: "Hidden, accessible by direct link only" },
+  { value: "Unlisted", label: "Unlisted", desc: "Not in search results, but accessible" },
+] as const;
 
 export default function CreateProductPage({ params }: { params: Promise<{ shopId: string }> }) {
   const { shopId: shopIdStr } = use(params);
@@ -24,7 +30,10 @@ export default function CreateProductPage({ params }: { params: Promise<{ shopId
   const [price, setPrice] = useState("");
   const [usdtPrice, setUsdtPrice] = useState("");
   const [stock, setStock] = useState("");
-  const [isDigital, setIsDigital] = useState(false);
+  const [category, setCategory] = useState("Physical");
+  const [visibility, setVisibility] = useState("Public");
+  const [minOrderQty, setMinOrderQty] = useState("1");
+  const [maxOrderQty, setMaxOrderQty] = useState("0");
 
   const handleCreate = async () => {
     if (!nameCid.trim() || !price) return;
@@ -36,7 +45,10 @@ export default function CreateProductPage({ params }: { params: Promise<{ shopId
       BigInt(price),
       Number(usdtPrice || 0),
       Number(stock || 0),
-      isDigital
+      category,
+      visibility,
+      Number(minOrderQty || 1),
+      Number(maxOrderQty || 0),
     );
   };
 
@@ -77,7 +89,7 @@ export default function CreateProductPage({ params }: { params: Promise<{ shopId
         <Card>
           <CardHeader>
             <CardTitle>Pricing & Inventory</CardTitle>
-            <CardDescription>Set price, stock, and product type</CardDescription>
+            <CardDescription>Set price, stock, and order quantity limits</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
@@ -92,12 +104,64 @@ export default function CreateProductPage({ params }: { params: Promise<{ shopId
               <label className="text-sm font-medium">Stock Quantity</label>
               <Input type="number" value={stock} onChange={(e) => setStock(e.target.value)} placeholder="0 = unlimited" min="0" />
             </div>
-            <div className="flex items-center justify-between">
-              <div>
-                <label className="text-sm font-medium">Digital Product</label>
-                <p className="text-xs text-muted-foreground">No physical shipping required</p>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Min Order Qty</label>
+                <Input type="number" value={minOrderQty} onChange={(e) => setMinOrderQty(e.target.value)} min="1" />
               </div>
-              <Switch checked={isDigital} onCheckedChange={setIsDigital} />
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Max Order Qty</label>
+                <Input type="number" value={maxOrderQty} onChange={(e) => setMaxOrderQty(e.target.value)} placeholder="0 = no limit" min="0" />
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><Tag className="h-5 w-5" />Category</CardTitle>
+            <CardDescription>Choose the product category that best fits</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 gap-2">
+              {PRODUCT_CATEGORIES.map((cat) => (
+                <button
+                  key={cat}
+                  onClick={() => setCategory(cat)}
+                  className={`rounded-lg border p-3 text-left text-sm transition-colors ${
+                    category === cat
+                      ? "border-primary bg-primary/5 font-medium text-primary"
+                      : "border-border hover:border-primary/50 hover:bg-accent"
+                  }`}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><Eye className="h-5 w-5" />Visibility</CardTitle>
+            <CardDescription>Control who can see this product</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {VISIBILITY_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => setVisibility(opt.value)}
+                  className={`flex w-full flex-col rounded-lg border p-3 text-left transition-colors ${
+                    visibility === opt.value
+                      ? "border-primary bg-primary/5"
+                      : "border-border hover:border-primary/50 hover:bg-accent"
+                  }`}
+                >
+                  <span className={`text-sm ${visibility === opt.value ? "font-medium text-primary" : ""}`}>{opt.label}</span>
+                  <span className="text-xs text-muted-foreground">{opt.desc}</span>
+                </button>
+              ))}
             </div>
           </CardContent>
         </Card>
@@ -113,9 +177,9 @@ export default function CreateProductPage({ params }: { params: Promise<{ shopId
       </div>
 
       {actions.txState.status === "finalized" && (
-        <div className="rounded-lg border border-green-200 bg-green-50 p-4">
-          <p className="text-sm text-green-800">Product created successfully!</p>
-          <Button variant="link" className="mt-1 h-auto p-0 text-green-700" onClick={() => router.push(`/shops/${shopId}/products`)}>
+        <div className="rounded-lg border border-green-200 bg-green-50 p-4 dark:border-green-800 dark:bg-green-950">
+          <p className="text-sm text-green-800 dark:text-green-200">Product created successfully!</p>
+          <Button variant="link" className="mt-1 h-auto p-0 text-green-700 dark:text-green-300" onClick={() => router.push(`/shops/${shopId}/products`)}>
             Back to Products
           </Button>
         </div>

@@ -31,6 +31,7 @@ impl pallet_balances::Config for Test {
 
 // Mock EntityProvider
 
+use pallet_storage_service::{StoragePin, PinTier};
 use core::cell::RefCell;
 use alloc::collections::BTreeSet;
 extern crate alloc;
@@ -111,6 +112,31 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
     }
 }
 
+// ==================== Mock StoragePin ====================
+
+pub struct MockProductProvider;
+impl pallet_entity_common::ProductProvider<u64, u64> for MockProductProvider {
+    fn product_exists(_: u64) -> bool { false }
+    fn is_product_on_sale(_: u64) -> bool { false }
+    fn product_shop_id(_: u64) -> Option<u64> { None }
+    fn product_price(_: u64) -> Option<u64> { None }
+    fn product_stock(_: u64) -> Option<u32> { None }
+    fn product_category(_: u64) -> Option<pallet_entity_common::ProductCategory> { None }
+    fn deduct_stock(_: u64, _: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+    fn restore_stock(_: u64, _: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+    fn add_sold_count(_: u64, _: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+}
+
+pub struct MockStoragePin;
+impl StoragePin<u64> for MockStoragePin {
+    fn pin(_owner: u64, _domain: &[u8], _subject_id: u64, _entity_id: Option<u64>, _cid: Vec<u8>, _tier: PinTier) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
+    fn unpin(_owner: u64, _cid: Vec<u8>) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
+}
+
 parameter_types! {
     pub const MaxShopNameLength: u32 = 64;
     pub const MaxCidLength: u32 = 64;
@@ -137,6 +163,8 @@ impl pallet_entity_shop::Config for Test {
     type CommissionFundGuard = ();
     type ShopClosingGracePeriod = ShopClosingGracePeriod;
     type MaxShopsPerEntity = MaxShopsPerEntity;
+    type StoragePin = MockStoragePin;
+    type ProductProvider = MockProductProvider;
 }
 
 // Build genesis storage according to the mock runtime.

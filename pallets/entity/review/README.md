@@ -1,309 +1,372 @@
 # pallet-entity-review
 
-> ⭐ Entity 订单评价模块 — 订单完成后提交评分与评价
+> 订单评价模块 — 买家评分 · 商家回复 · 商品评价索引
 
-## 概述
+**pallet_index** `123` · **version** `0.10.0` · **tests** `95`
 
-`pallet-entity-review` 是 Entity 商城系统的评价管理模块，负责订单完成后的评分提交和店铺评分更新。
+---
 
-- **Runtime pallet_index:** 123
-- **版本:** 0.9.0
+## 功能概览
 
-### 核心功能
+| 功能 | 说明 |
+|------|------|
+| 订单评价 | 买家对已完成订单提交 1–5 星评分，可附 IPFS CID 文字内容 |
+| 评价修改 | 买家在时间窗口内可修改一次评分和内容 |
+| 商家回复 | Entity owner/admin 对评价发表一次回复 |
+| 评价移除 | Root 可删除违规评价，买家可重新评价 |
+| Entity 开关 | Entity 管理员可关闭/开启旗下所有 Shop 的评价功能 |
+| 店铺评分联动 | 提交评价时 best-effort 更新 `ShopProvider` 评分，失败不回滚 |
+| 商品评价索引 | 按 `product_id` 维护评价列表、计数、评分总和，支持商品平均分查询 |
+| 用户评价索引 | 按账户维护已评价 order_id 列表，支持"我的评价"查询 |
 
-- **订单评价** — 买家在订单完成后提交 1-5 星评分
-- **评价内容** — 支持通过 IPFS CID 关联评价详情（可选）
-- **店铺评分联动** — 评价提交后通过 `ShopProvider::update_shop_rating` 更新店铺评分（best-effort，失败不回滚评价）
-- **一单一评** — 每个订单仅允许一次评价，以 `order_id` 为 key 存储
-- **用户评价索引** — 每个用户的评价 order_id 列表，支持“我的评价”查询
-- **Entity 评价开关** — Entity owner/admin 可控制是否开启评价功能，关闭后该 Entity 下所有 Shop 的订单不可提交评价
+### 设计约束
+
+- **一单一评** — `order_id` 为主键，评价不可重复（删除后可重新提交）
+- **评价时间窗口** — 订单完成后 `ReviewWindowBlocks` 区块内可评价，超时拒绝
+- **修改时间窗口** — 评价提交后 `EditWindowBlocks` 区块内可修改，仅限一次
+- **best-effort 副作用** — 店铺评分更新、ShopReviewCount、商品索引的失败不回滚主评价写入
+
+---
 
 ## 数据结构
 
-### MallReview — 评价记录
+### MallReview
 
 ```rust
-#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
 pub struct MallReview<AccountId, BlockNumber, MaxCidLen: Get<u32>> {
-    pub order_id: u64,                                  // 订单 ID
-    pub reviewer: AccountId,                            // 评价者账户
-    pub rating: u8,                                     // 评分（1-5）
-    pub content_cid: Option<BoundedVec<u8, MaxCidLen>>, // 评价内容 IPFS CID（可选）
-    pub created_at: BlockNumber,                        // 评价区块高度
+    pub order_id: u64,
+    pub reviewer: AccountId,
+    pub rating: u8,                                     // 1–5
+    pub content_cid: Option<BoundedVec<u8, MaxCidLen>>, // IPFS CID
+    pub created_at: BlockNumber,
+    pub product_id: Option<u64>,
+    pub edited: bool,
 }
 ```
 
-类型别名：
+### ReviewReply
 
 ```rust
-pub type MallReviewOf<T> = MallReview<
-    <T as frame_system::Config>::AccountId,
-    BlockNumberFor<T>,
-    <T as Config>::MaxCidLength,
->;
+pub struct ReviewReply<AccountId, BlockNumber, MaxCidLen: Get<u32>> {
+    pub replier: AccountId,
+    pub content_cid: BoundedVec<u8, MaxCidLen>,
+    pub created_at: BlockNumber,
+}
 ```
+
+---
 
 ## Runtime 配置
 
 ```rust
-// runtime/src/configs/mod.rs
 impl pallet_entity_review::Config for Runtime {
-    type EntityProvider = EntityRegistry;     // 实体查询 — pallet-entity-registry
-    type OrderProvider = EntityTransaction;   // 订单查询 — pallet-entity-order
-    type ShopProvider = EntityShop;           // 店铺评分更新 — pallet-entity-shop
-    type MaxCidLength = ConstU32<64>;         // CID 最大长度 64 字节
-    type MaxReviewsPerUser = ConstU32<500>;   // 每用户最大评价数
-    type WeightInfo = pallet_entity_review::weights::SubstrateWeight<Runtime>;
+    type EntityProvider    = EntityRegistry;              // pallet-entity-registry
+    type OrderProvider     = EntityTransaction;           // pallet-entity-order
+    type ShopProvider      = EntityShop;                  // pallet-entity-shop
+    type MaxCidLength      = ConstU32<64>;
+    type MaxReviewsPerUser = ConstU32<500>;
+    type ReviewWindowBlocks = ConstU64<100800>;           // ~7 days
+    type EditWindowBlocks   = ConstU64<14400>;            // ~1 day
+    type MaxProductReviews  = ConstU32<10000>;
+    type WeightInfo        = pallet_entity_review::weights::SubstrateWeight<Runtime>;
 }
 ```
 
-> **注意：** `RuntimeEvent` 已从 Config trait 中移除（polkadot-sdk #7229 自动追加）。
-
-### Config 关联类型
-
-| 类型 | 约束 | 说明 |
+| 常量 | 类型 | 说明 |
 |------|------|------|
-| `EntityProvider` | `EntityProvider<AccountId>` | 实体查询接口（存在性、状态、admin 校验） |
-| `OrderProvider` | `OrderProvider<AccountId, u128>` | 订单查询接口 |
-| `ShopProvider` | `ShopProvider<AccountId>` | 店铺更新接口 |
-| `MaxCidLength` | `Get<u32>` (常量) | CID 最大长度 |
-| `MaxReviewsPerUser` | `Get<u32>` (常量) | 每用户最大评价数 |
-| `WeightInfo` | `WeightInfo` | 权重信息（benchmark 集成） |
+| `MaxCidLength` | `u32` | IPFS CID 最大字节长度 |
+| `MaxReviewsPerUser` | `u32` | 单用户可评价的最大订单数 |
+| `ReviewWindowBlocks` | `u64` | 评价提交窗口（0 = 不限制） |
+| `EditWindowBlocks` | `u64` | 评价修改窗口（0 = 不限制） |
+| `MaxProductReviews` | `u32` | 单商品最大评价索引数 |
+
+---
 
 ## Extrinsics
 
-### remove_review (call_index 2)
+### `submit_review` — call_index 0
+
+买家提交订单评价。
+
+```
+签名: Signed(buyer)
+参数: order_id: u64, rating: u8, content_cid: Option<Vec<u8>>
+```
+
+**流程:**
+1. `rating ∈ [1, 5]` · 调用者 == 订单买家 · 订单已完成 · 未争议 · 未评价
+2. 评价时间窗口校验（`ReviewWindowBlocks`）
+3. Entity 评价开关校验（order → shop → entity → `EntityReviewDisabled`）
+4. CID 校验（非空 + 长度 ≤ `MaxCidLength`）
+5. 写入 `UserReviews`（bounded push） → `Reviews` → `ReviewCount`（checked_add）
+6. best-effort: `ShopProvider::update_shop_rating` → `ShopReviewCount` → 商品索引
+7. 事件: `ReviewSubmitted { order_id, reviewer, shop_id, rating }`
+
+### `set_review_enabled` — call_index 1
+
+Entity 管理员控制评价开关。
+
+```
+签名: Signed(admin)
+参数: entity_id: u64, enabled: bool
+权限: Entity owner 或 admin (REVIEW_MANAGE)
+前置: Entity 存在 · 活跃 · 未锁定
+```
+
+仅在状态实际变更时写入存储和发射事件 `ReviewConfigUpdated`。
+
+### `remove_review` — call_index 2
 
 Root 移除违规评价。
 
-```rust
-#[pallet::call_index(2)]
-#[pallet::weight(T::WeightInfo::remove_review())]
-pub fn remove_review(
-    origin: OriginFor<T>,
-    order_id: u64,
-) -> DispatchResult
+```
+签名: Root
+参数: order_id: u64
 ```
 
-**权限：** Root only
+清理: `Reviews` · `ReviewCount` · `ShopReviewCount` · `UserReviews` · `ReviewReplies` · `ProductReviews` · `ProductReviewCount` · `ProductRatingSum`。删除后买家可重新评价。
 
-**验证流程：**
-1. 评价存在 → `ReviewNotFound`
+### `reply_to_review` — call_index 3
 
-**执行逻辑：**
-1. `Reviews::take` 删除评价记录
-2. `ReviewCount` 递减（saturating_sub，best-effort）
-3. `ShopReviewCount` 递减（best-effort）
-4. `UserReviews` 中移除该 order_id
-5. 发出 `ReviewRemoved` 事件
-6. 删除后买家可重新提交评价
+商家回复评价（每条评价限一次回复）。
 
-### set_review_enabled (call_index 1)
-
-设置 Entity 评价开关。
-
-```rust
-#[pallet::call_index(1)]
-#[pallet::weight(T::WeightInfo::set_review_enabled())]
-pub fn set_review_enabled(
-    origin: OriginFor<T>,
-    entity_id: u64,
-    enabled: bool,
-) -> DispatchResult
+```
+签名: Signed(admin)
+参数: order_id: u64, content_cid: Vec<u8>
+权限: Entity owner 或 admin (REVIEW_MANAGE)
+前置: 评价存在 · 未回复 · 内容非空 · Entity 活跃
 ```
 
-**权限：** Entity owner 或 admin
+写入 `ReviewReplies`，事件: `ReviewReplied { order_id, replier }`。
 
-**验证流程：**
-1. Entity 存在 → `EntityNotFound`
-2. Entity 已激活 → `EntityNotActive`
-3. 调用者是 Entity admin → `NotEntityAdmin`
+### `edit_review` — call_index 4
 
-**执行逻辑：**
-- `enabled=true` → 移除 `EntityReviewDisabled` key（开启评价）
-- `enabled=false` → 写入 `EntityReviewDisabled` key（关闭评价）
-- 发出 `ReviewConfigUpdated` 事件
+买家修改评价（仅限一次，在时间窗口内）。
 
-### submit_review (call_index 0)
-
-提交订单评价。
-
-```rust
-#[pallet::call_index(0)]
-#[pallet::weight(T::WeightInfo::submit_review())]
-pub fn submit_review(
-    origin: OriginFor<T>,
-    order_id: u64,
-    rating: u8,                    // 1-5 星
-    content_cid: Option<Vec<u8>>,  // IPFS CID（可选）
-) -> DispatchResult
+```
+签名: Signed(reviewer)
+参数: order_id: u64, new_rating: u8, new_content_cid: Option<Vec<u8>>
+前置: 评价存在 · 调用者是评价者 · 未修改过 · Entity 评价未关闭 · 窗口内
 ```
 
-**权限：** 仅订单买家（signed extrinsic）
+更新 `Reviews`（`edited = true`）+ `ProductRatingSum`（精确差值修正）。
+不更新店铺评分（`ShopProvider::update_shop_rating` 是追加模式，无减法 API）。
+事件: `ReviewEdited { order_id, reviewer, old_rating, new_rating }`。
 
-**验证流程：**
-1. `rating` 在 1-5 范围内 → `InvalidRating`
-2. 获取订单买家并验证调用者身份 → `OrderNotFound` / `NotOrderBuyer`（`OrderProvider::order_buyer`）
-3. 订单已完成 → `OrderNotCompleted`（`OrderProvider::is_order_completed`）
-4. 该订单尚未评价 → `AlreadyReviewed`（`Reviews` 不含该 key）
-5. CID 非空且长度校验 → `EmptyCid` / `CidTooLong`
-
-**执行逻辑：**
-1. 检查 Entity 评价开关：order → shop_id → entity_id → `EntityReviewDisabled` → `ReviewsDisabledForEntity`
-2. 转换并校验 CID
-3. 更新 `UserReviews` 索引（`try_push`，达上限返回 `UserReviewLimitReached`）
-4. 构建 `MallReview` 记录（含当前区块号），写入 `Reviews` 存储（key = `order_id`）
-5. `ReviewCount` 递增（`saturating_add`）
-6. 通过 `OrderProvider::order_shop_id` 获取店铺 ID，调用 `ShopProvider::update_shop_rating` 更新评分（**best-effort**，失败发出 `ShopRatingUpdateFailed` 事件但不回滚评价）
-7. 发出 `ReviewSubmitted` 事件（含 `shop_id`）
+---
 
 ## Storage
 
-| 存储项 | 类型 | 说明 |
-|--------|------|------|
-| `Reviews` | `StorageMap<Blake2_128Concat, u64, MallReviewOf<T>>` | 订单 ID → 评价记录 |
-| `ReviewCount` | `StorageValue<u64, ValueQuery>` | 全局评价总数（默认 0） |
-| `ShopReviewCount` | `StorageMap<Blake2_128Concat, u64, u64, ValueQuery>` | 店铺 ID → 该店铺评价数量 |
-| `UserReviews` | `StorageMap<Blake2_128Concat, AccountId, BoundedVec<u64, MaxReviewsPerUser>, ValueQuery>` | 用户 → 已评价 order_id 列表 |
-| `EntityReviewDisabled` | `StorageMap<Blake2_128Concat, u64, (), OptionQuery>` | Entity 评价关闭标记（存在=关闭，不存在=开启） |
+| 存储项 | Key | Value | Query |
+|--------|-----|-------|-------|
+| `Reviews` | `u64` (order_id) | `MallReviewOf<T>` | Option |
+| `ReviewCount` | — | `u64` | ValueQuery (0) |
+| `ShopReviewCount` | `u64` (shop_id) | `u64` | ValueQuery (0) |
+| `UserReviews` | `AccountId` | `BoundedVec<u64, MaxReviewsPerUser>` | ValueQuery |
+| `EntityReviewDisabled` | `u64` (entity_id) | `()` | Option |
+| `ReviewReplies` | `u64` (order_id) | `ReviewReplyOf<T>` | Option |
+| `ProductReviews` | `u64` (product_id) | `BoundedVec<u64, MaxProductReviews>` | ValueQuery |
+| `ProductReviewCount` | `u64` (product_id) | `u64` | ValueQuery (0) |
+| `ProductRatingSum` | `u64` (product_id) | `u64` | ValueQuery (0) |
+
+---
 
 ## Events
 
-| 事件 | 字段 | 说明 |
-|------|------|------|
-| `ReviewSubmitted` | `order_id: u64`, `reviewer: AccountId`, `shop_id: Option<u64>`, `rating: u8` | 评价已提交 |
-| `ShopRatingUpdateFailed` | `order_id: u64`, `shop_id: u64` | 店铺评分更新失败（评价仍已记录） |
-| `ReviewConfigUpdated` | `entity_id: u64`, `enabled: bool` | Entity 评价配置已更新 |
-| `ReviewRemoved` | `order_id: u64`, `reviewer: AccountId` | 评价已被 Root 移除 |
+| 事件 | 字段 | 触发时机 |
+|------|------|----------|
+| `ReviewSubmitted` | `order_id, reviewer, shop_id: Option<u64>, rating` | 评价提交成功 |
+| `ShopRatingUpdateFailed` | `order_id, shop_id` | 店铺评分更新失败（评价仍已存储） |
+| `ReviewConfigUpdated` | `entity_id, enabled` | Entity 评价开关变更 |
+| `ReviewRemoved` | `order_id, reviewer` | Root 移除评价 |
+| `ReviewReplied` | `order_id, replier` | 商家回复评价 |
+| `ProductReviewIndexed` | `product_id, order_id` | 商品评价索引成功 |
+| `ReviewEdited` | `order_id, reviewer, old_rating, new_rating` | 评价修改成功 |
+
+---
 
 ## Errors
 
-| 错误 | 说明 |
-|------|------|
+| 错误 | 触发场景 |
+|------|----------|
+| `InvalidRating` | 评分不在 1–5 |
 | `OrderNotFound` | 订单不存在 |
-| `NotOrderBuyer` | 调用者不是订单买家 |
-| `OrderNotCompleted` | 订单尚未完成 |
-| `AlreadyReviewed` | 该订单已评价 |
-| `InvalidRating` | 评分不在 1-5 范围 |
-| `CidTooLong` | CID 超过 `MaxCidLength` 限制 |
-| `EmptyCid` | CID 为空（`Some(vec![])` 无意义） |
-| `UserReviewLimitReached` | 用户评价数已达 `MaxReviewsPerUser` 上限 |
-| `ReviewsDisabledForEntity` | 该 Entity 已关闭评价功能 |
-| `NotEntityAdmin` | 调用者不是 Entity owner/admin |
+| `NotOrderBuyer` | 调用者非订单买家 / 非评价者 |
+| `OrderNotCompleted` | 订单未完成 |
+| `OrderDisputed` | 订单处于争议中 |
+| `AlreadyReviewed` | 订单已评价 |
+| `ReviewNotFound` | 评价不存在 |
+| `ReviewWindowExpired` | 超出评价提交窗口 |
+| `EditWindowExpired` | 超出评价修改窗口 |
+| `AlreadyEdited` | 评价已修改过（仅限一次） |
+| `CidTooLong` | CID 超过 MaxCidLength |
+| `EmptyCid` | CID 为空字节 |
+| `UserReviewLimitReached` | 用户评价数达 MaxReviewsPerUser |
+| `ReviewsDisabledForEntity` | Entity 关闭了评价功能 |
 | `EntityNotFound` | Entity 不存在 |
 | `EntityNotActive` | Entity 未激活 |
-| `OrderDisputed` | 订单处于争议状态 |
-| `ReviewCountOverflow` | 评价计数溢出（u64::MAX） |
-| `ReviewWindowExpired` | 评价时间窗口已过期 |
-| `ReviewNotFound` | 评价不存在（Root 删除时） |
+| `EntityLocked` | Entity 已被全局锁定 |
+| `NotEntityAdmin` | 调用者非 Entity admin |
+| `NotShopEntityAdmin` | 调用者非店铺关联 Entity admin |
+| `AlreadyReplied` | 评价已有回复 |
+| `ReplyContentEmpty` | 回复内容为空 |
+| `ProductReviewsFull` | 商品评价索引达 MaxProductReviews |
+| `ReviewCountOverflow` | 全局评价计数溢出 u64 |
+
+---
+
+## 权重估算
+
+| Extrinsic | ref_time | proof_size | reads | writes |
+|-----------|----------|------------|-------|--------|
+| `submit_review` | 55M | 8K | 10 | 5 |
+| `set_review_enabled` | 25M | 4K | 4 | 1 |
+| `remove_review` | 45M | 7K | 3 | 8 |
+| `reply_to_review` | 35M | 5K | 6 | 1 |
+| `edit_review` | 40M | 6K | 5 | 2 |
+
+> 预估值（pre-benchmark），实际权重将由 `frame-benchmarking` 生成。
+
+---
 
 ## 依赖接口
 
-### OrderProvider（来自 pallet-entity-common）
+本模块通过 3 个 trait 与外部 pallet 解耦：
 
-由 `pallet-entity-order` 实现。
+### OrderProvider (pallet-entity-common → pallet-entity-order)
 
-```rust
-pub trait OrderProvider<AccountId, Balance> {
-    fn order_exists(order_id: u64) -> bool;
-    fn order_buyer(order_id: u64) -> Option<AccountId>;
-    fn order_shop_id(order_id: u64) -> Option<u64>;
-    fn is_order_completed(order_id: u64) -> bool;
-}
-```
+本模块使用的方法：
 
-### ShopProvider（来自 pallet-entity-common）
+| 方法 | 返回 | 用途 |
+|------|------|------|
+| `order_buyer` | `Option<AccountId>` | 验证买家身份 |
+| `is_order_completed` | `bool` | 订单完成校验 |
+| `is_order_disputed` | `bool` | 争议状态校验 |
+| `order_completed_at` | `Option<u64>` | 时间窗口计算 |
+| `order_shop_id` | `Option<u64>` | 关联店铺 |
+| `order_product_id` | `Option<u64>` | 关联商品 |
 
-由 `pallet-entity-shop` 实现，本模块使用 `update_shop_rating(shop_id, rating)` 方法。
+### ShopProvider (pallet-entity-common → pallet-entity-shop)
+
+| 方法 | 说明 |
+|------|------|
+| `update_shop_rating(shop_id, rating)` | 追加模式更新店铺评分（sum += rating, count += 1） |
+| `shop_entity_id(shop_id)` | 获取店铺所属 Entity ID |
+
+### EntityProvider (pallet-entity-common → pallet-entity-registry)
+
+| 方法 | 说明 |
+|------|------|
+| `entity_exists` | Entity 存在性 |
+| `is_entity_active` | Entity 激活状态 |
+| `is_entity_locked` | Entity 全局锁定 |
+| `is_entity_admin(entity_id, account, permission)` | Admin 权限校验（REVIEW_MANAGE 位） |
+
+---
 
 ## 文件结构
 
 ```
 pallets/entity/review/
-├── Cargo.toml
+├── Cargo.toml          # v0.10.0
 ├── README.md
 └── src/
-    ├── lib.rs      # 主模块（Config、Storage、Extrinsics、Events、Errors）
-    ├── weights.rs  # 权重定义（WeightInfo trait + SubstrateWeight）
-    ├── mock.rs     # 测试 mock runtime
-    └── tests.rs    # 单元测试（62 tests）
+    ├── lib.rs           # 645 行 — Config · Storage · Events · Errors · 5 Extrinsics
+    ├── weights.rs       # 87 行 — WeightInfo trait + SubstrateWeight 预估
+    ├── mock.rs          # Mock runtime (EntityProvider / OrderProvider / ShopProvider)
+    └── tests.rs         # 95 tests (93 #[test] + 2 auto-generated)
 ```
 
-## 审计记录 (v0.2.0)
+---
+
+## 审计历史
+
+<details>
+<summary>v0.2.0 — 初始审计（9 项修复，22 tests）</summary>
 
 | 级别 | ID | 问题 | 修复 |
 |------|-----|------|------|
-| Critical | C1 | `MallReview` 缺少 `DecodeWithMemTracking` | 添加 derive |
-| Critical | C2 | `mock.rs` / `tests.rs` 不存在，零测试覆盖 | 创建 22 个测试 |
-| Critical | C3 | `submit_review` weight `proof_size=0` | 修复为 `(35_000_000, 5_000)` |
-| High | H1 | `update_shop_rating` 失败被 `let _ =` 静默忽略 | 改为传播错误 `?` |
-| High | H2 | `order_exists` 冗余调用（`order_buyer` 已隐含检查） | 移除 |
-| Medium | M1 | Cargo.toml 有未使用依赖（`log`/`sp-runtime`/`sp-std`） | 移除，dev-deps 加 `std` features |
-| Medium | M2 | `ReviewSubmitted` 事件缺少 `shop_id` | 添加 `shop_id: Option<u64>` |
-| Medium | M3 | Config 中 `RuntimeEvent` 已弃用 | 移除，使用 bound 语法 |
-| Low | L1 | 无用户→评价索引 | 文档标注，暂不实现 |
+| Critical | C1 | `MallReview` 缺 `DecodeWithMemTracking` | 添加 derive |
+| Critical | C2 | 零测试覆盖 | 创建 mock + 22 tests |
+| Critical | C3 | weight `proof_size=0` | 修复为 `(35M, 5K)` |
+| High | H1 | `update_shop_rating` 失败被静默忽略 | 改为 `?` 传播 |
+| High | H2 | `order_exists` 冗余调用 | 移除 |
+| Medium | M1 | 未使用依赖 | 清理 |
+| Medium | M2 | 事件缺 `shop_id` | 添加 |
+| Medium | M3 | 弃用 `RuntimeEvent` | 移除 |
+| Low | L1 | 无用户索引 | 记录 |
 
-## 审计记录 (v0.3.0)
+</details>
 
-| 级别 | ID | 问题 | 修复 |
-|------|-----|------|------|
-| High | H1 | `submit_review` 接受空 CID `Some(vec![])` — 无语义价值，浪费存储 | 添加 `ensure!(!c.is_empty(), EmptyCid)` |
-| High | H2 | 无 per-shop 评价计数 — 查询店铺评价数量需全表扫描 | 新增 `ShopReviewCount` StorageMap |
-| Medium | M1 | 权重硬编码 `(35M, 5K)` 无 `WeightInfo` trait — 不支持 benchmark 集成 | 新建 `weights.rs` + Config `WeightInfo` |
-| Medium | M2 | README 说 "24 tests" 实际 22 个 | 修正 |
-| Low | L1 | 无评价时间窗口 — 订单完成后可无限期评价 | 记录（需 OrderProvider 扩展） |
-| Low | L2 | 无评价审核/删除机制 — 管理员无法处理虚假评价 | 记录（设计决策） |
-| Low | L3 | CID 格式不验证（仅长度检查，不校验 IPFS 编码） | 记录（链上验证成本过高） |
-
-## 审计记录 (v0.4.0)
+<details>
+<summary>v0.3.0 — Round 2（4 项修复，29 tests）</summary>
 
 | 级别 | ID | 问题 | 修复 |
 |------|-----|------|------|
-| High | H1 | `update_shop_rating` 失败导致整个评价回滚 — 评价与店铺评分强耦合，shop 关闭/删除时无法提交评价 | 改为 best-effort，失败发出 `ShopRatingUpdateFailed` 事件但不回滚 |
-| High | H2 | 无用户评价索引 — 按用户查询评价需全表扫描 O(N) | 新增 `UserReviews` StorageMap + `MaxReviewsPerUser` Config 常量 |
-| Medium | M1 | `ReviewCount` 全局计数器可被 `ShopReviewCount` 各店铺值之和替代 | 记录（保留，快速查询全局总数仍有价值） |
-| Medium | M2 | 无评价修改/追评机制 | 记录（设计决策） |
-| Medium | M3 | 纯评分无内容评价业务价值低 | 记录（应用层引导） |
-| Low | L1 | `MallReview` 命名与 pallet 名不一致（历史遗留） | 记录（重命名需存储迁移） |
-| Low | L2 | README weight 代码片段与实际代码不一致 | 已修正 |
-| Low | L3 | `ReviewCount` 与 `ShopReviewCount` 存储冗余 | 记录（保留便捷查询） |
+| High | H1 | 接受空 CID `Some(vec![])` | 添加 `EmptyCid` 校验 |
+| High | H2 | 无 per-shop 计数 | 新增 `ShopReviewCount` |
+| Medium | M1 | 权重硬编码无 trait | 新建 `weights.rs` |
+| Medium | M2 | 测试计数错误 | 修正 |
 
-## 审计记录 (v0.8.0)
+</details>
 
-| 级别 | ID | 问题 | 修复 |
-|------|-----|------|------|
-| High | H1 | `submit_review` 不检查订单争议状态 — 争议中的订单可提交评价，争议结果未定时评价可能不公 | 添加 `is_order_disputed` 检查 + `OrderDisputed` 错误 |
-| High | H2 | `set_review_enabled` 无状态变更检测 — 重复设置同一值仍写存储并发射事件，误导前端/索引器 | 添加 `currently_disabled != want_disabled` 守卫，状态不变时跳过写入和事件 |
-| Medium | M1 | `submit_review` 仅更新 Shop 评分，Entity 级别评分独立于 Shop 评分 | 记录：Entity 评分已移至 Shop 层级管理，无需在 review 模块中重复更新 |
-| Medium | M2 | `ReviewCount` / `ShopReviewCount` 使用 `saturating_add` — u64::MAX 时静默停止计数，计数器永久失准 | `ReviewCount`: `checked_add` + `ReviewCountOverflow`。`ShopReviewCount`: best-effort `checked_add`，溢出仅 log::warn，不阻塞评价 |
-| Medium | M1-R7 | `ShopReviewCount` 溢出通过 `?` 传播错误，整个 extrinsic 回滚 — 与 shop rating best-effort 设计矛盾 | 改为 `mutate` + `checked_add`，溢出仅 log::warn，不阻塞评价 |
-| Low | L1 | `set_review_enabled` 的 `enabled=true` 对已开启实体是 no-op 但仍写存储 | 已由 H2 一并修复 |
-| Low | L2 | 无评价时间窗口 — 订单完成后可无限期评价 | 新增 `ReviewWindowBlocks` Config 常量 + `order_completed_at` OrderProvider 方法 + `ReviewWindowExpired` 错误，7 天窗口 |
-| Low | L1-R7 | `order_shop_id` 被调用两次（entity 检查 + 评分更新）— 冗余跨 pallet 存储读取 | 复用 `shop_id_for_gate` 变量 |
-| Low | L2-R7 | Weight 估算过时 — 注释写 5 reads/5 writes，实际约 8 reads/6 writes | 更新 weight 注释和估算值 |
-
-## 审计记录 (v0.9.0)
+<details>
+<summary>v0.4.0 — Round 3（3 项修复，33 tests）</summary>
 
 | 级别 | ID | 问题 | 修复 |
 |------|-----|------|------|
-| Medium | M1 | 无 `integrity_test` — `MaxCidLength=0` / `MaxReviewsPerUser=0` 无校验 | 新增 `#[pallet::hooks]` + `integrity_test` 校验 MaxCidLength, MaxReviewsPerUser > 0 |
-| Medium | M2 | `set_review_enabled` weight 漏算 1 read (`EntityReviewDisabled::contains_key`) | 3→4 reads |
-| Medium | M3 | Cargo.toml `version = "0.4.0"` 与 README v0.8.0 不同步 | 更新为 0.9.0 |
-| Medium | M4 | 无 `remove_review` Root extrinsic — 治理无法处理违规评价 | 新增 `remove_review` (call_index 2)，Root 可删除评价并清理所有关联存储 |
-| Medium | M5 | Mock `is_entity_admin` 忽略 `required_permission` 参数 — 测试未验证权限粒度 | Mock 改用 `ENTITY_ADMINS` 权限位图，检查 `perms & required_permission == required_permission` |
-| Low | L1 | README v0.8.0 M1 称已添加 `update_entity_rating`，但该方法不存在于 `EntityProvider` trait | 修正为"Entity 评分已移至 Shop 层级管理" |
-| Low | L2 | `submit_review` weight 注释与实际读写数不匹配（8→10 reads） | 更新 weight 注释和 DB read/write 计数 |
+| High | H1 | shop rating 失败导致整个评价回滚 | 改为 best-effort |
+| High | H2 | 无用户评价索引 | 新增 `UserReviews` + `MaxReviewsPerUser` |
+| Low | L2 | README weight 片段过时 | 修正 |
 
-## 版本历史
+</details>
 
-| 版本 | 日期 | 变更 |
-|------|------|------|
-| v0.9.0 | 2026-03-04 | 深度审计 Round 9：M1(integrity_test)、M2(weight 修正)、M3(Cargo.toml 版本同步)、M4(remove_review Root extrinsic)、M5(mock admin 权限粒度)、L1(README M1-v0.8.0 修正)、L2(weight 注释更新)，+8 测试（62 total） |
-| v0.8.0 | 2026-03-03 | 再次审计 Round 7：M1-R7(ShopReviewCount best-effort)、L1-R7(去重 order_shop_id)、L2-R7(weight 更新)，54 tests |
-| v0.7.0 | 2026-03-03 | 评价时间窗口：+ReviewWindowBlocks Config、+order_completed_at OrderProvider、+ReviewWindowExpired 错误，+4 测试（52 total） |
-| v0.6.0 | 2026-03-08 | 深度审计 Round 5：H1/H2/M1/M2 共 4 项修复，+6 测试（48 total） |
-| v0.5.0 | 2026-03-02 | Entity 评价开关：+EntityProvider Config、+set_review_enabled extrinsic、+EntityReviewDisabled 存储、+submit_review 门控、+8 测试（41 total） |
-| v0.4.0 | 2026-03-03 | 深度审计 Round 3：H1/H2/L2 共 3 项修复，+4 测试（33 total） |
-| v0.3.0 | 2026-02-26 | 深度审计 Round 2：H1/H2/M1/M2 共 4 项修复，+7 测试（29 total） |
-| v0.2.0 | 2026-02-09 | 深度审计：C3/H2/M3/L1 共 9 项修复，22 测试 |
-| v0.1.0 | 2026-01-31 | 从 pallet-mall 拆分，独立评价模块 |
+<details>
+<summary>v0.5.0 — Entity 评价开关（41 tests）</summary>
+
+新增 `EntityProvider` Config · `set_review_enabled` extrinsic · `EntityReviewDisabled` 存储 · `submit_review` 门控。
+
+</details>
+
+<details>
+<summary>v0.6.0 — Round 5（4 项修复，48 tests）</summary>
+
+争议状态检查 · 幂等 `set_review_enabled` · `ReviewCount` checked_add · `ShopReviewCount` best-effort overflow。
+
+</details>
+
+<details>
+<summary>v0.7.0 — 评价时间窗口（52 tests）</summary>
+
+新增 `ReviewWindowBlocks` · `order_completed_at` · `ReviewWindowExpired`。
+
+</details>
+
+<details>
+<summary>v0.8.0 — Round 7（3 项修复，54 tests）</summary>
+
+`ShopReviewCount` best-effort · `order_shop_id` 去重 · weight 注释更新。
+
+</details>
+
+<details>
+<summary>v0.9.0 — Round 9（7 项修复，62→89 tests）</summary>
+
+`integrity_test` · `remove_review` Root extrinsic · Mock admin 权限粒度 · `reply_to_review` (F1) · 商品评价索引 (F3) · `edit_review` (F6) · Entity rating 缓存 (R7) 。
+
+</details>
+
+<details>
+<summary>v0.10.0 — Round 10（8 项修复，95 tests）</summary>
+
+| 级别 | ID | 问题 | 修复 |
+|------|-----|------|------|
+| High | H1 | `edit_review` 调用追加模式 `update_shop_rating` 腐蚀店铺平均分 | 移除调用，仅更新 `ProductRatingSum` |
+| Medium | M1 | `edit_review` 不检查 Entity 评价开关 | 添加 `EntityReviewDisabled` 校验 |
+| Medium | M2 | `reply_to_review` 不检查 Entity 激活状态 | 添加 `is_entity_active` 校验 |
+| Medium | M3 | `integrity_test` 不校验 `MaxProductReviews` | 添加断言 |
+| Low | L1–L2 | weights.rs 注释/reads/writes 不一致 | 修正 3 个函数 |
+| Low | L3 | Cargo.toml 缺 feature 传播 | 添加 `pallet-entity-common` flags |
+| Low | L4 | README 严重过时 | 全面同步 |
+
+</details>

@@ -3266,3 +3266,301 @@ fn entity_locked_rejects_set_member_policy() {
         );
     });
 }
+
+// ============================================================================
+// is_activated: 激活状态（首次消费达标）
+// ============================================================================
+
+#[test]
+fn member_provider_is_activated_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        // 新注册会员: activated=false → 未激活
+        let m = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
+        assert!(!m.activated);
+        assert!(!<MemberPallet as crate::MemberProvider<u64>>::is_activated(ENTITY_1, &ALICE));
+        // 但未被封禁
+        assert!(!<MemberPallet as crate::MemberProvider<u64>>::is_banned(ENTITY_1, &ALICE));
+
+        // 消费后 → activated=true + MemberActivated 事件
+        assert_ok!(<MemberPallet as crate::MemberProvider<u64>>::update_spent(ENTITY_1, &ALICE, 100));
+        let m = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
+        assert!(m.activated);
+        assert!(<MemberPallet as crate::MemberProvider<u64>>::is_activated(ENTITY_1, &ALICE));
+        System::assert_has_event(RuntimeEvent::MemberPallet(
+            crate::Event::MemberActivated { entity_id: ENTITY_1, account: ALICE },
+        ));
+
+        // 再次消费不重复发出事件（已激活）
+        let events_before = System::events().len();
+        assert_ok!(<MemberPallet as crate::MemberProvider<u64>>::update_spent(ENTITY_1, &ALICE, 200));
+        // 不应有新的 MemberActivated 事件
+        let all_events = System::events();
+        let activated_events: Vec<_> = all_events[events_before..].iter()
+            .filter(|e| matches!(e.event, RuntimeEvent::MemberPallet(crate::Event::MemberActivated { .. })))
+            .collect();
+        assert!(activated_events.is_empty());
+
+        // 封禁后仍为已激活（激活与封禁是独立概念）
+        assert_ok!(MemberPallet::ban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, None));
+        assert!(<MemberPallet as crate::MemberProvider<u64>>::is_activated(ENTITY_1, &ALICE));
+        assert!(<MemberPallet as crate::MemberProvider<u64>>::is_banned(ENTITY_1, &ALICE));
+
+        // 非会员 → 未激活
+        assert!(!<MemberPallet as crate::MemberProvider<u64>>::is_activated(ENTITY_1, &BOB));
+    });
+}
+
+#[test]
+fn activate_member_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        // 注册后未激活
+        assert!(!<MemberPallet as crate::MemberProvider<u64>>::is_activated(ENTITY_1, &ALICE));
+
+        // Owner 手动激活
+        assert_ok!(MemberPallet::activate_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE));
+        assert!(<MemberPallet as crate::MemberProvider<u64>>::is_activated(ENTITY_1, &ALICE));
+        System::assert_has_event(RuntimeEvent::MemberPallet(
+            crate::Event::MemberActivated { entity_id: ENTITY_1, account: ALICE },
+        ));
+
+        // 重复激活应失败
+        assert_noop!(
+            MemberPallet::activate_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE),
+            Error::<Test>::AlreadyActivated
+        );
+    });
+}
+
+#[test]
+fn deactivate_member_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        // 消费后激活
+        assert_ok!(<MemberPallet as crate::MemberProvider<u64>>::update_spent(ENTITY_1, &ALICE, 100));
+        assert!(<MemberPallet as crate::MemberProvider<u64>>::is_activated(ENTITY_1, &ALICE));
+
+        // Owner 手动取消激活
+        assert_ok!(MemberPallet::deactivate_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE));
+        assert!(!<MemberPallet as crate::MemberProvider<u64>>::is_activated(ENTITY_1, &ALICE));
+        System::assert_has_event(RuntimeEvent::MemberPallet(
+            crate::Event::MemberDeactivated { entity_id: ENTITY_1, account: ALICE },
+        ));
+
+        // 重复取消激活应失败
+        assert_noop!(
+            MemberPallet::deactivate_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE),
+            Error::<Test>::NotActivated
+        );
+    });
+}
+
+#[test]
+fn activate_deactivate_rejects_non_owner() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        // 非 Owner/Admin 不能激活
+        assert_noop!(
+            MemberPallet::activate_member(RuntimeOrigin::signed(ALICE), SHOP_1, ALICE),
+            Error::<Test>::NotEntityAdmin
+        );
+
+        // 消费后激活
+        assert_ok!(<MemberPallet as crate::MemberProvider<u64>>::update_spent(ENTITY_1, &ALICE, 100));
+
+        // 非 Owner/Admin 不能取消激活
+        assert_noop!(
+            MemberPallet::deactivate_member(RuntimeOrigin::signed(ALICE), SHOP_1, ALICE),
+            Error::<Test>::NotEntityAdmin
+        );
+    });
+}
+
+#[test]
+fn activate_deactivate_rejects_entity_locked() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+        set_entity_locked(ENTITY_1);
+
+        assert_noop!(
+            MemberPallet::activate_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE),
+            Error::<Test>::EntityLocked
+        );
+
+        assert_noop!(
+            MemberPallet::deactivate_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE),
+            Error::<Test>::EntityLocked
+        );
+    });
+}
+
+#[test]
+fn deactivate_then_reactivate_by_spending() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        // 消费激活
+        assert_ok!(<MemberPallet as crate::MemberProvider<u64>>::update_spent(ENTITY_1, &ALICE, 100));
+        assert!(<MemberPallet as crate::MemberProvider<u64>>::is_activated(ENTITY_1, &ALICE));
+
+        // 管理员取消激活
+        assert_ok!(MemberPallet::deactivate_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE));
+        assert!(!<MemberPallet as crate::MemberProvider<u64>>::is_activated(ENTITY_1, &ALICE));
+
+        // 再次消费 → 重新激活
+        assert_ok!(<MemberPallet as crate::MemberProvider<u64>>::update_spent(ENTITY_1, &ALICE, 50));
+        assert!(<MemberPallet as crate::MemberProvider<u64>>::is_activated(ENTITY_1, &ALICE));
+    });
+}
+
+// ============================================================================
+// H1 审计回归: apply_upgrade 在等级系统不存在时应静默跳过
+// ============================================================================
+
+#[test]
+fn h1_apply_upgrade_skips_when_level_system_absent() {
+    new_test_ext().execute_with(|| {
+        // 初始化等级系统 + 升级规则
+        assert_ok!(MemberPallet::init_level_system(
+            RuntimeOrigin::signed(OWNER), SHOP_1, true, LevelUpgradeMode::AutoUpgrade,
+        ));
+        let name1: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
+            b"VIP1".to_vec().try_into().unwrap();
+        let name2: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
+            b"VIP2".to_vec().try_into().unwrap();
+        assert_ok!(MemberPallet::add_custom_level(
+            RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u64, 0, 0,
+        ));
+        assert_ok!(MemberPallet::add_custom_level(
+            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 200u64, 0, 0,
+        ));
+
+        // 注册会员
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        // 初始化升级规则系统，规则目标 level_id=1 (VIP2)
+        assert_ok!(MemberPallet::init_upgrade_rule_system(
+            RuntimeOrigin::signed(OWNER), SHOP_1, ConflictStrategy::HighestLevel,
+        ));
+        let rule_name: BoundedVec<u8, frame_support::traits::ConstU32<64>> =
+            b"Buy100".to_vec().try_into().unwrap();
+        assert_ok!(MemberPallet::add_upgrade_rule(
+            RuntimeOrigin::signed(OWNER), SHOP_1, rule_name,
+            UpgradeTrigger::SingleOrder { threshold: 50 }, 1, None, 1, false, None,
+        ));
+
+        // 重置等级系统（但升级规则系统仍在）
+        assert_ok!(MemberPallet::reset_level_system(
+            RuntimeOrigin::signed(OWNER), SHOP_1,
+        ));
+        assert!(crate::EntityLevelSystems::<Test>::get(ENTITY_1).is_none());
+        assert!(crate::EntityUpgradeRules::<Test>::get(ENTITY_1).is_some());
+
+        // 通过 check_order_upgrade_rules 触发规则 → 调用 apply_upgrade
+        // apply_upgrade 应静默跳过，不会把会员设到不存在的等级
+        System::reset_events();
+        assert_ok!(<MemberPallet as crate::MemberProvider<u64>>::check_order_upgrade_rules(
+            ENTITY_1, &ALICE, 0, 200,
+        ));
+
+        let member = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
+        assert_eq!(member.custom_level_id, 0, "H1: should not upgrade when level system absent");
+
+        // 不应有 MemberUpgradedByRule 事件
+        let events = System::events();
+        let upgraded = events.iter().any(|e| {
+            matches!(&e.event, RuntimeEvent::MemberPallet(crate::Event::MemberUpgradedByRule { .. }))
+        });
+        assert!(!upgraded, "H1: no upgrade event when level system absent");
+    });
+}
+
+// ============================================================================
+// H2 审计回归: batch_approve 过期记录应发出 PendingMemberExpired 事件
+// ============================================================================
+
+#[test]
+fn h2_batch_approve_emits_expired_event() {
+    new_test_ext().execute_with(|| {
+        // 设置 APPROVAL_REQUIRED
+        assert_ok!(MemberPallet::set_member_policy(
+            RuntimeOrigin::signed(OWNER), SHOP_1, 0b0000_0100,
+        ));
+
+        // ALICE 在 block 1 申请
+        System::set_block_number(1);
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+
+        // BOB 在 block 150 申请（未过期）
+        System::set_block_number(150);
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(BOB), SHOP_1, None));
+
+        // block 200: ALICE 过期 (1+100 < 200), BOB 未过期 (150+100 >= 200)
+        System::set_block_number(200);
+        System::reset_events();
+
+        assert_ok!(MemberPallet::batch_approve_members(
+            RuntimeOrigin::signed(OWNER), SHOP_1,
+            vec![ALICE, BOB],
+        ));
+
+        // ALICE 应收到 PendingMemberExpired 事件
+        System::assert_has_event(RuntimeEvent::MemberPallet(
+            crate::Event::PendingMemberExpired { entity_id: ENTITY_1, account: ALICE },
+        ));
+
+        // BOB 应注册成功
+        assert!(EntityMembers::<Test>::contains_key(ENTITY_1, &BOB));
+
+        // ALICE 的 PendingMembers 应已被 take() 清除
+        assert!(!PendingMembers::<Test>::contains_key(ENTITY_1, &ALICE));
+    });
+}
+
+// ============================================================================
+// M1 审计回归: remove_member 递减推荐人的 qualified_referrals
+// ============================================================================
+
+#[test]
+fn m1_remove_member_decrements_qualified_referrals() {
+    new_test_ext().execute_with(|| {
+        // ALICE 注册，BOB 以 ALICE 为推荐人注册（qualified=true）
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(BOB), SHOP_1, Some(ALICE)));
+
+        // 验证 ALICE: direct=1, qualified=1
+        let alice = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
+        assert_eq!(alice.direct_referrals, 1);
+        assert_eq!(alice.qualified_referrals, 1);
+
+        // 移除 BOB（叶子节点，无下线）
+        assert_ok!(MemberPallet::remove_member(RuntimeOrigin::signed(OWNER), SHOP_1, BOB));
+
+        // M1: qualified_referrals 应被递减
+        let alice = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
+        assert_eq!(alice.direct_referrals, 0, "direct_referrals decremented");
+        assert_eq!(alice.qualified_referrals, 0, "M1: qualified_referrals must be decremented on remove");
+    });
+}
+
+#[test]
+fn m1_leave_entity_decrements_qualified_referrals() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+        assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(BOB), SHOP_1, Some(ALICE)));
+
+        let alice = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
+        assert_eq!(alice.qualified_referrals, 1);
+
+        // BOB 主动退出
+        assert_ok!(MemberPallet::leave_entity(RuntimeOrigin::signed(BOB), ENTITY_1));
+
+        let alice = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
+        assert_eq!(alice.qualified_referrals, 0, "M1: leave_entity also decrements qualified_referrals");
+    });
+}

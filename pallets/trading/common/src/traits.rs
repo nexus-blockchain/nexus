@@ -13,20 +13,19 @@
 /// 提供 NEX/USD 实时汇率查询功能
 ///
 /// ## 使用者
-/// - `pallet-trading-p2p`: 计算订单金额、上报成交价
-/// - `pallet-trading-maker`: 计算押金价值
+/// - `pallet-nex-market`: 订单金额计算、上报成交价
 /// - `pallet-arbitration`: 投诉押金换算
 /// - `pallet-storage-service`: 运营者保证金计算
 ///
 /// ## 实现者
-/// - `pallet-trading-pricing`: 提供聚合价格
+/// - `TradingPricingProvider`（runtime/src/configs/mod.rs）: 基于 pallet-nex-market TWAP
 pub trait PricingProvider<Balance> {
     /// 获取 NEX/USD 汇率（精度 10^6）
     ///
     /// ## 返回
     /// - `Some(rate)`: 当前汇率（如 1_000_000 表示 1 NEX = 1 USD）
     /// - `None`: 价格不可用（冷启动期或无数据）
-    fn get_cos_to_usd_rate() -> Option<Balance>;
+    fn get_nex_to_usd_rate() -> Option<Balance>;
     
     /// 🆕 v0.2.0: 上报 P2P 成交到价格聚合（统一 Buy/Sell 两方向）
     ///
@@ -51,7 +50,7 @@ pub trait PricingProvider<Balance> {
 
 /// PricingProvider 的空实现
 impl<Balance> PricingProvider<Balance> for () {
-    fn get_cos_to_usd_rate() -> Option<Balance> {
+    fn get_nex_to_usd_rate() -> Option<Balance> {
         None
     }
     
@@ -69,10 +68,7 @@ impl<Balance> PricingProvider<Balance> for () {
 /// 所有需要保证金的模块都应使用此接口
 ///
 /// ## 使用者
-/// - `pallet-livestream`: 直播间创建保证金
 /// - `pallet-storage-service`: 运营者保证金
-/// - `pallet-trading-maker`: 做市商押金
-/// - `pallet-trading-p2p`: 交易押金
 /// - `pallet-arbitration`: 投诉押金
 ///
 /// ## 实现者
@@ -111,7 +107,7 @@ where
 {
     fn calculate_deposit(usd_amount: u64, fallback: Balance) -> Balance {
         // 尝试使用实时汇率计算
-        if let Some(rate) = P::get_cos_to_usd_rate() {
+        if let Some(rate) = P::get_nex_to_usd_rate() {
             if rate > Balance::zero() {
                 // 🆕 M7修复: NEX 精度为 10^12（UNIT = 1_000_000_000_000）
                 // nex_amount = usd_amount * 10^12 / rate
@@ -119,9 +115,9 @@ where
                 // 结果精度 10^12（NEX 标准精度）
                 let usd_u128 = usd_amount as u128;
                 let rate_u128: u128 = rate.into();
-                let cos_precision: u128 = 1_000_000_000_000u128; // 10^12
+                let nex_precision: u128 = 1_000_000_000_000u128; // 10^12
                 // 🆕 M9修复: 使用 checked_div 与 saturating_mul 风格一致
-                let nex_amount_u128 = match usd_u128.saturating_mul(cos_precision).checked_div(rate_u128) {
+                let nex_amount_u128 = match usd_u128.saturating_mul(nex_precision).checked_div(rate_u128) {
                     Some(v) => v,
                     None => return fallback,
                 };
@@ -146,7 +142,11 @@ impl<Balance: Default> DepositCalculator<Balance> for () {
 // ===== 🆕 v0.6.0: TWAP 价格预言机接口 =====
 
 /// TWAP 查询窗口
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(
+    codec::Encode, codec::Decode, codec::DecodeWithMemTracking,
+    Clone, Copy, PartialEq, Eq, Debug,
+    scale_info::TypeInfo, frame_support::pallet_prelude::MaxEncodedLen,
+)]
 pub enum TwapWindow {
     /// ~10min 实际窗口
     OneHour,
@@ -244,7 +244,7 @@ mod tests {
     pub struct MockPricingProvider;
 
     impl PricingProvider<u128> for MockPricingProvider {
-        fn get_cos_to_usd_rate() -> Option<u128> {
+        fn get_nex_to_usd_rate() -> Option<u128> {
             Some(100_000) // 0.1 USD/NEX
         }
         
@@ -257,7 +257,7 @@ mod tests {
     pub struct NoPricePricingProvider;
 
     impl PricingProvider<u128> for NoPricePricingProvider {
-        fn get_cos_to_usd_rate() -> Option<u128> {
+        fn get_nex_to_usd_rate() -> Option<u128> {
             None
         }
         
@@ -270,7 +270,7 @@ mod tests {
     pub struct ZeroPricePricingProvider;
 
     impl PricingProvider<u128> for ZeroPricePricingProvider {
-        fn get_cos_to_usd_rate() -> Option<u128> {
+        fn get_nex_to_usd_rate() -> Option<u128> {
             Some(0)
         }
         
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn test_pricing_provider_empty_impl() {
-        let rate = <() as PricingProvider<u128>>::get_cos_to_usd_rate();
+        let rate = <() as PricingProvider<u128>>::get_nex_to_usd_rate();
         assert!(rate.is_none());
         
         let result = <() as PricingProvider<u128>>::report_p2p_trade(0, 0, 0);
@@ -358,6 +358,38 @@ mod tests {
         assert_eq!(<() as ExchangeRateProvider>::get_nex_usdt_rate(), None);
         assert_eq!(<() as ExchangeRateProvider>::price_confidence(), 0);
         assert!(!<() as ExchangeRateProvider>::is_rate_reliable());
+    }
+
+    // ===== R2 回归测试: DepositCalculator 边界 =====
+
+    #[test]
+    fn r2_deposit_calculator_max_usd_amount() {
+        // u64::MAX usd_amount 不应 panic（saturating_mul 保护）
+        type Calculator = DepositCalculatorImpl<MockPricingProvider, u128>;
+        let result = Calculator::calculate_deposit(u64::MAX, 999);
+        // u64::MAX * 10^12 / 100_000 — 结果仍在 u128 范围内
+        assert!(result > 0);
+        assert_ne!(result, 999); // 不应走 fallback
+    }
+
+    #[test]
+    fn r2_deposit_calculator_zero_usd_amount() {
+        type Calculator = DepositCalculatorImpl<MockPricingProvider, u128>;
+        // 0 USDT → 0 NEX（不走 fallback，计算结果为 0）
+        let result = Calculator::calculate_deposit(0, 999);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn r2_price_oracle_empty_defaults() {
+        // 空实现应返回安全默认值
+        assert_eq!(<() as PriceOracle>::get_twap(TwapWindow::OneHour), None);
+        assert_eq!(<() as PriceOracle>::get_twap(TwapWindow::OneDay), None);
+        assert_eq!(<() as PriceOracle>::get_twap(TwapWindow::OneWeek), None);
+        assert_eq!(<() as PriceOracle>::get_last_trade_price(), None);
+        assert!(<() as PriceOracle>::is_price_stale(0));
+        assert!(<() as PriceOracle>::is_price_stale(u32::MAX));
+        assert_eq!(<() as PriceOracle>::get_trade_count(), 0);
     }
 
     #[test]

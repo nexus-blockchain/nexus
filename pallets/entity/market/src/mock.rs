@@ -6,7 +6,7 @@ use frame_support::{
 };
 use frame_system as system;
 use pallet_entity_common::{
-    EntityProvider, EntityStatus, EntityTokenProvider, TokenType,
+    EntityProvider, EntityStatus, EntityTokenProvider, TokenType, KycProvider,
 };
 use sp_core::H256;
 use sp_runtime::{
@@ -210,6 +210,7 @@ impl EntityTokenProvider<u64, u128> for MockTokenProvider {
     fn governance_burn(_entity_id: u64, _amount: u128) -> Result<(), DispatchError> {
         Ok(())
     }
+    fn available_balance(_: u64, _: &u64) -> u128 { 0 }
 }
 
 // ==================== 测试常量 ====================
@@ -224,14 +225,32 @@ pub const ENTITY_ID_2: u64 = 2;
 pub const TREASURY: u64 = 99;
 pub const REWARD_SOURCE: u64 = 98;
 
+// ==================== Mock KycProvider ====================
+
+thread_local! {
+    static KYC_LEVELS: RefCell<HashMap<(u64, u64), u8>> = RefCell::new(HashMap::new());
+}
+
+pub fn set_kyc_level(entity_id: u64, who: u64, level: u8) {
+    KYC_LEVELS.with(|k| k.borrow_mut().insert((entity_id, who), level));
+}
+
+pub struct MockKycProvider;
+impl KycProvider<u64> for MockKycProvider {
+    fn kyc_level(entity_id: u64, account: &u64) -> u8 {
+        KYC_LEVELS.with(|k| *k.borrow().get(&(entity_id, *account)).unwrap_or(&0))
+    }
+}
+
 parameter_types! {
     pub const DefaultOrderTTL: u32 = 1000;
     pub const MaxActiveOrdersPerUser: u32 = 50;
-    pub const DefaultFeeRate: u16 = 100; // 1%
     pub const BlocksPerHour: u32 = 600;
     pub const BlocksPerDay: u32 = 14400;
     pub const BlocksPerWeek: u32 = 100800;
     pub const CircuitBreakerDuration: u32 = 600;
+    pub const MaxTradeHistoryPerUser: u32 = 200;
+    pub const MaxOrderHistoryPerUser: u32 = 200;
 }
 
 impl pallet_entity_market::Config for Test {
@@ -243,12 +262,25 @@ impl pallet_entity_market::Config for Test {
     type TokenProvider = MockTokenProvider;
     type DefaultOrderTTL = DefaultOrderTTL;
     type MaxActiveOrdersPerUser = MaxActiveOrdersPerUser;
-    type DefaultFeeRate = DefaultFeeRate;
     type BlocksPerHour = BlocksPerHour;
     type BlocksPerDay = BlocksPerDay;
     type BlocksPerWeek = BlocksPerWeek;
     type CircuitBreakerDuration = CircuitBreakerDuration;
     type DisclosureProvider = pallet_entity_common::NullDisclosureProvider;
+    type KycProvider = MockKycProvider;
+    type MaxTradeHistoryPerUser = MaxTradeHistoryPerUser;
+    type MaxOrderHistoryPerUser = MaxOrderHistoryPerUser;
+    type PricingProvider = MockPricingProvider;
+}
+
+// ==================== Mock PricingProvider ====================
+
+pub struct MockPricingProvider;
+impl pallet_entity_common::PricingProvider for MockPricingProvider {
+    fn get_nex_usdt_price() -> u64 {
+        // 默认 1 NEX = 1 USDT (精度 10^6)
+        1_000_000
+    }
 }
 
 // ==================== 测试构建器 ====================
@@ -298,7 +330,6 @@ pub fn configure_market_enabled(entity_id: u64) {
         RuntimeOrigin::signed(if entity_id == ENTITY_ID { ENTITY_OWNER } else { ENTITY_OWNER_2 }),
         entity_id,
         true,  // nex_enabled
-        100,   // fee_rate = 1%
         1,     // min_order_amount
         1000,  // order_ttl
     ).is_ok());

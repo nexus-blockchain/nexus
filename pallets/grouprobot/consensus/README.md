@@ -2,317 +2,455 @@
 
 > 路径：`pallets/grouprobot/consensus/`
 
-节点共识系统，提供节点质押、TEE 加权奖励分配、消息去重、Era 编排、Equivocation 举报与 Slash。
+GroupRobot 节点共识模块 — 节点质押准入、TEE 可信计算验证、Era 经济编排、Equivocation 举报惩罚、消息序列去重。
 
-> **注意**: 订阅管理和奖励领取已拆分到 `pallet-grouprobot-subscription` 和 `pallet-grouprobot-rewards`。
+> **注意**: 订阅管理和奖励领取已拆分到独立模块 `pallet-grouprobot-subscription` 和 `pallet-grouprobot-rewards`。
+
+---
+
+## 目录
+
+- [设计理念](#设计理念)
+- [架构概览](#架构概览)
+- [Extrinsics](#extrinsics)
+- [存储](#存储)
+- [事件](#事件)
+- [错误](#错误)
+- [核心类型](#核心类型)
+- [Era 经济模型](#era-经济模型)
+- [Config 配置](#config-配置)
+- [Hooks](#hooks)
+- [Trait 实现](#trait-实现)
+- [公共查询方法](#公共查询方法)
+- [内部函数](#内部函数)
+- [测试覆盖](#测试覆盖)
+- [相关模块](#相关模块)
+
+---
 
 ## 设计理念
 
-- **质押准入**：节点注册时锁定最低质押（`MinStake`），退出需经冷却期（Suspended 节点也可退出）
-- **质押灵活性**：运营者可随时补充质押（`increase_stake`），Slash 后可补质押恢复
-- **TEE 专属奖励**：仅 TEE 节点参与 Era 奖励分配，非 TEE 节点权重为 0
-- **TEE 自动降级**：Era 结束时检查绑定 Bot 的证明有效性，过期自动降级 + 清理 NodeBotBinding
-- **Bot 绑定灵活性**：运营者可主动解绑 Bot（`unbind_bot`）后重新绑定
-- **Era 编排**：`on_era_end` 委托 SubscriptionSettler → RewardDistributor → PeerUptimeRecorder 完成结算
-- **Equivocation 惩罚**：同序列双签举报 → Root 执行 Slash（质押百分比罚没 + 暂停节点 + 重置 TEE 状态 + 举报者奖励）
-- **举报者激励**：Slash 时按可配置百分比（`ReporterRewardPct`）奖励举报者
-- **节点恢复**：Suspended 节点可由运营者恢复（需质押 ≥ MinStake）或治理强制恢复
-- **运营权转移**：支持节点操作者变更（`replace_operator`），质押随之转移
-- **治理工具**：Root 可暂停/移除/恢复节点、调整 Slash 百分比、手动触发 Era 结算
-- **消息去重**：`ProcessedSequences` 防止重复处理，自动过期清理避免存储膨胀
-- **孤儿奖励**：节点退出时通过 `OrphanRewardClaimer` 自动领取残留奖励
-- **配置完整性**：`integrity_test` 校验所有 Config 常量有效性
+### 节点生命周期
+
+```
+                  register_node
+                       │
+                       ▼
+         ┌──────── Active ◄──────────┐
+         │             │             │
+   force_suspend   request_exit   reinstate_node
+         │             │         force_reinstate
+         ▼             ▼             │
+    Suspended ──►  Exiting      Suspended
+         │             │
+   request_exit   finalize_exit
+         │             │
+         ▼             ▼
+      Exiting      [已移除]
+         │
+    finalize_exit
+         │
+         ▼
+      [已移除]
+```
+
+- **质押准入** — 注册时锁定最低质押（`MinStake`），退出需经冷却期
+- **质押灵活性** — 运营者可随时补充质押（`increase_stake`），Slash 后可补质押恢复
+- **TEE 专属奖励** — 仅通过 Registry 证明验证的 TEE 节点参与 Era 奖励分配，非 TEE 节点权重为 0
+- **TEE 自动降级** — Era 结束时检查绑定 Bot 的证明有效性，过期自动降级并清理 `NodeBotBinding`
+- **Bot 绑定灵活性** — 运营者可主动解绑 Bot（`unbind_bot`）后重新绑定其他 Bot
+
+### Equivocation 惩罚机制
+
+- 同序列双签举报（ed25519 签名链上验证）→ Root 审核执行 Slash
+- Slash 罚没质押百分比 + 暂停节点 + 重置 TEE 状态 + 清理 Bot 绑定
+- 举报者按可配置百分比（`ReporterRewardPct`，bps）获得奖励
+
+### 消息去重
+
+- `ProcessedSequences` 存储已处理消息序列号，防止重复处理
+- `on_initialize` 游标式自动清理过期记录，避免存储膨胀
+
+### Era 编排
+
+- `on_era_end` 委托外部模块完成完整结算流程：
+  SubscriptionSettler → TEE 降级检查 → RewardDistributor → PeerUptimeRecorder → Era 推进
+
+---
+
+## 架构概览
+
+```
+┌─────────────────────────────────────────────────┐
+│           pallet-grouprobot-consensus           │
+│                                                 │
+│  ┌──────────┐ ┌────────────┐ ┌──────────────┐  │
+│  │ 节点管理  │ │ Equivocation│ │  消息去重    │  │
+│  │ 注册/退出 │ │  举报/Slash │ │ Sequence TTL │  │
+│  │ 质押/恢复 │ │  清理/奖励  │ │  自动清理    │  │
+│  └──────────┘ └────────────┘ └──────────────┘  │
+│                                                 │
+│  ┌──────────────── Era 编排 ─────────────────┐  │
+│  │ on_era_end:                               │  │
+│  │  1. SubscriptionSettler::settle_era()     │  │
+│  │  2. TEE 证明有效性检查 + 自动降级         │  │
+│  │  3. compute_node_weight() → 权重向量      │  │
+│  │  4. RewardDistributor::distribute()       │  │
+│  │  5. PeerUptimeRecorder::record()          │  │
+│  │  6. Era 推进 + prune_old_eras()           │  │
+│  └───────────────────────────────────────────┘  │
+│                                                 │
+│  依赖 Trait:                                    │
+│  ├── BotRegistryProvider (Bot/TEE 查询)         │
+│  ├── SubscriptionSettler (订阅费结算)           │
+│  ├── SubscriptionProvider (Tier 层级查询)       │
+│  ├── EraRewardDistributor (奖励分配)            │
+│  ├── PeerUptimeRecorder (心跳快照)              │
+│  └── OrphanRewardClaimer (退出领取残留奖励)     │
+│                                                 │
+│  对外提供:                                      │
+│  └── NodeConsensusProvider (节点状态查询)        │
+└─────────────────────────────────────────────────┘
+```
+
+---
 
 ## Extrinsics
 
-### 节点管理
-| call_index | 方法 | Origin | 说明 |
-|:---:|------|:---:|------|
-| 0 | `register_node` | Signed | 注册节点 + 质押锁定 |
-| 1 | `request_exit` | Signed | 申请退出（Active/Suspended 均可，进入冷却期） |
-| 2 | `finalize_exit` | Signed | 完成退出 + 领取残留奖励 + 退还质押 + 清理 NodeBotBinding |
-| 11 | `verify_node_tee` | Signed | 通过 Registry 证明验证节点 TEE 状态 |
-| 14 | `increase_stake` | Signed | 运营者补充质押（Active/Suspended 均可） |
-| 15 | `reinstate_node` | Signed | 运营者恢复 Suspended 节点（需 stake ≥ MinStake） |
-| 18 | `unbind_bot` | Signed | 解除节点 Bot 绑定 + 重置 TEE 状态 |
-| 19 | `replace_operator` | Signed | 转移节点运营权给新操作者（质押随之转移） |
+### 节点管理（Signed）
 
-### Equivocation
-| call_index | 方法 | Origin | 说明 |
-|:---:|------|:---:|------|
-| 3 | `report_equivocation` | Signed | 举报双签（P14: ed25519 签名链上验证 + 两组证据不同） |
-| 4 | `slash_equivocation` | Root | 执行 Slash（罚没质押 + 暂停节点 + 重置 TEE + 举报者奖励） |
-| 13 | `cleanup_resolved_equivocation` | Signed | 清理已解决的单条 Equivocation 记录 |
-| 23 | `batch_cleanup_equivocations` | Signed | 批量清理已解决的 Equivocation 记录 |
+| call_index | 方法 | 说明 |
+|:---:|------|------|
+| 0 | `register_node(node_id, stake)` | 注册节点 + 质押锁定（reserve），加入 ActiveNodeList |
+| 1 | `request_exit(node_id)` | 申请退出（Active/Suspended 均可），进入冷却期 |
+| 2 | `finalize_exit(node_id)` | 冷却期满后完成退出：领取残留奖励 → 退还质押 → 清理所有存储 |
+| 11 | `verify_node_tee(node_id, bot_id_hash)` | 通过 BotRegistry 证明验证 TEE 状态，仅 Active 节点可调用 |
+| 14 | `increase_stake(node_id, amount)` | 运营者补充质押（Active/Suspended 均可） |
+| 15 | `reinstate_node(node_id)` | 运营者恢复 Suspended 节点为 Active（需 stake ≥ MinStake） |
+| 18 | `unbind_bot(node_id)` | 解除 Bot 绑定 + 重置 TEE 状态为 false |
+| 19 | `replace_operator(node_id, new_operator)` | 转移运营权：unreserve 旧操作者 → reserve 新操作者，重置 TEE 状态 |
 
-### 去重
-| call_index | 方法 | Origin | 说明 |
-|:---:|------|:---:|------|
-| 10 | `mark_sequence_processed` | Signed | 标记消息序列已处理（Tier gate + Bot 所有者或操作者授权） |
+### Equivocation（混合 Origin）
 
-### 治理（Root）
 | call_index | 方法 | Origin | 说明 |
 |:---:|------|:---:|------|
-| 12 | `set_tee_reward_params` | Root | 设置 TEE 奖励参数（tee_multiplier, sgx_bonus） |
-| 16 | `force_suspend_node` | Root | 治理暂停活跃节点 |
-| 17 | `force_remove_node` | Root | 治理强制移除节点 + 全额 Slash |
-| 20 | `set_slash_percentage` | Root | 运行时可调 Slash 百分比（0=恢复 Config 默认值） |
-| 21 | `set_reporter_reward_pct` | Root | 设置举报者奖励百分比（bps, 0-5000） |
-| 22 | `force_reinstate_node` | Root | 治理强制恢复 Suspended 节点（无需质押校验） |
-| 24 | `force_era_end` | Root | 手动触发 Era 结束结算 |
+| 3 | `report_equivocation(node_id, seq, msg_hash_a, sig_a, msg_hash_b, sig_b)` | Signed | 举报双签，ed25519 链上验签（NodeId = 公钥），两组消息必须不同 |
+| 4 | `slash_equivocation(node_id, seq)` | Root | 执行 Slash：罚没质押 + 暂停节点 + 重置 TEE + 举报者奖励 |
+| 13 | `cleanup_resolved_equivocation(node_id, seq)` | Signed | 清理已解决的单条记录 |
+| 23 | `batch_cleanup_equivocations(items)` | Signed | 批量清理已解决记录（BoundedVec，上限 MaxActiveNodes） |
+
+### 消息去重（Signed）
+
+| call_index | 方法 | 说明 |
+|:---:|------|------|
+| 10 | `mark_sequence_processed(bot_id_hash, seq)` | Tier gate（Free 不可用） + Bot Owner/Operator 授权，幂等（重复返回 SequenceDuplicate 事件） |
+
+### 治理操作（Root）
+
+| call_index | 方法 | 说明 |
+|:---:|------|------|
+| 12 | `set_tee_reward_params(tee_multiplier, sgx_bonus)` | TEE 奖励参数（bps），tee_multiplier ≤ 50000，sgx_bonus ≤ 10000 |
+| 16 | `force_suspend_node(node_id)` | 暂停 Active 节点 + 重置 TEE + 清理绑定 |
+| 17 | `force_remove_node(node_id)` | 强制移除节点 + 全额 Slash 质押 + 清理所有存储 |
+| 20 | `set_slash_percentage(new_pct)` | 运行时 Slash 百分比（1-100，0=恢复 Config 默认值） |
+| 21 | `set_reporter_reward_pct(pct)` | 举报者奖励百分比（bps，0-5000，0=关闭奖励） |
+| 22 | `force_reinstate_node(node_id)` | 强制恢复 Suspended 节点（无需质押校验） |
+| 24 | `force_era_end()` | 手动触发 Era 结束结算（无需等待 EraLength） |
+
+---
 
 ## 存储
 
-### 节点
 | 存储项 | 类型 | 说明 |
 |--------|------|------|
-| `Nodes` | `Map<NodeId, ProjectNode>` | 节点信息 |
-| `OperatorNodes` | `Map<AccountId, NodeId>` | 操作者 → 节点 ID |
-| `ActiveNodeList` | `BoundedVec<NodeId>` | 活跃节点列表 |
-| `ExitRequests` | `Map<NodeId, BlockNumber>` | 退出请求（冷却起始区块） |
-
-### 消息去重
-| 存储项 | 类型 | 说明 |
-|--------|------|------|
-| `ProcessedSequences` | `DoubleMap<BotIdHash, u64, BlockNumber>` | 已处理的消息序列 |
-
-### TEE 绑定
-| 存储项 | 类型 | 说明 |
-|--------|------|------|
-| `NodeBotBinding` | `Map<NodeId, BotIdHash>` | 节点→Bot TEE 绑定 |
-
-### Equivocation
-| 存储项 | 类型 | 说明 |
-|--------|------|------|
-| `EquivocationRecords` | `DoubleMap<NodeId, u64, EquivocationRecord>` | 双签记录 |
-
-### Era 经济
-| 存储项 | 类型 | 说明 |
-|--------|------|------|
-| `CurrentEra` | `u64` | 当前 Era |
-| `EraStartBlock` | `BlockNumber` | Era 起始区块 |
-| `TeeRewardMultiplier` | `u32` | TEE 奖励倍数（bps, 0=默认10000=1.0x, 15000=1.5x） |
-| `SgxEnclaveBonus` | `u32` | SGX 双证明额外奖励（bps） |
-
-### 运行时可调参数
-| 存储项 | 类型 | 说明 |
-|--------|------|------|
+| `Nodes` | `Map<NodeId → ProjectNode>` | 节点完整信息 |
+| `OperatorNodes` | `Map<AccountId → NodeId>` | 操作者到节点的反向索引（1:1） |
+| `ActiveNodeList` | `BoundedVec<NodeId, MaxActiveNodes>` | 活跃节点列表（参与 Era 分配） |
+| `ExitRequests` | `Map<NodeId → BlockNumber>` | 退出冷却起始区块 |
+| `ProcessedSequences` | `DoubleMap<BotIdHash, u64 → BlockNumber>` | 已处理消息序列（含记录时间，用于 TTL 过期） |
+| `NodeBotBinding` | `Map<NodeId → BotIdHash>` | 节点与 Bot 的 TEE 绑定关系 |
+| `EquivocationRecords` | `DoubleMap<NodeId, u64 → EquivocationRecord>` | 双签证据记录 |
+| `CurrentEra` | `u64` | 当前 Era 编号（ValueQuery，默认 0） |
+| `EraStartBlock` | `BlockNumber` | 当前 Era 起始区块（ValueQuery） |
+| `TeeRewardMultiplier` | `u32` | TEE 奖励倍数（bps，0=使用默认 10000=1.0x） |
+| `SgxEnclaveBonus` | `u32` | SGX 双证明额外奖励（bps，叠加到 TEE 倍数） |
 | `SlashPercentageOverride` | `Option<u32>` | 运行时 Slash 百分比覆盖（None=使用 Config 默认值） |
-| `ReporterRewardPct` | `u32` | 举报者奖励百分比（bps, 0=关闭, 1000=10%） |
+| `ReporterRewardPct` | `u32` | 举报者奖励百分比（bps，ValueQuery，默认 0=关闭） |
+
+---
 
 ## 事件
 
-| 事件 | 说明 |
-|------|------|
-| `NodeRegistered` | 节点注册成功（含 node_id, operator, stake） |
-| `ExitRequested` | 节点申请退出 |
-| `ExitFinalized` | 节点完成退出（含退还质押金额） |
-| `EquivocationReported` | 双签已举报（含 node_id, reporter, sequence） |
-| `NodeSlashed` | 节点已被 Slash（含实际罚没金额） |
-| `SequenceProcessed` | 消息序列已标记处理 |
-| `SequenceDuplicate` | 检测到重复序列（幂等返回，不失败） |
-| `NodeTeeStatusChanged` | 节点 TEE 状态变更（含 is_tee 标志） |
-| `EraCompleted` | Era 完成（含 era 编号和分配总额） |
-| `TeeRewardParamsUpdated` | TEE 奖励参数已更新（含 tee_multiplier, sgx_bonus） |
-| `StakeIncreased` | 质押已增加（含 node_id, added, new_total） |
-| `NodeReinstated` | 节点已恢复为活跃 |
-| `NodeForceSuspended` | 节点被治理暂停 |
-| `NodeForceRemoved` | 节点被治理强制移除（含 stake_slashed） |
-| `ReporterRewarded` | 举报者获得奖励（含 reporter, amount） |
-| `BotUnbound` | 节点 Bot 绑定已解除 |
-| `OperatorReplaced` | 节点操作者已转移（含 old_operator, new_operator） |
-| `SlashPercentageUpdated` | Slash 百分比已更新 |
-| `ReporterRewardPctUpdated` | 举报者奖励百分比已更新 |
-| `NodeForceReinstated` | 节点被治理强制恢复 |
-| `EraForceEnded` | Era 被手动触发结束 |
+| 事件 | 字段 | 触发场景 |
+|------|------|----------|
+| `NodeRegistered` | node_id, operator, stake | `register_node` 成功 |
+| `ExitRequested` | node_id | `request_exit` 成功 |
+| `ExitFinalized` | node_id, stake_returned | `finalize_exit` 完成退还质押 |
+| `EquivocationReported` | node_id, reporter, sequence | `report_equivocation` 成功 |
+| `NodeSlashed` | node_id, amount | `slash_equivocation` 执行罚没 |
+| `ReporterRewarded` | reporter, amount | Slash 时举报者获得奖励（pct > 0） |
+| `SequenceProcessed` | bot_id_hash, sequence | 新序列标记成功 |
+| `SequenceDuplicate` | bot_id_hash, sequence | 重复序列（幂等，不失败） |
+| `NodeTeeStatusChanged` | node_id, is_tee | TEE 状态变更（验证/降级/解绑） |
+| `EraCompleted` | era, total_distributed | Era 结算完成 |
+| `TeeRewardParamsUpdated` | tee_multiplier, sgx_bonus | `set_tee_reward_params` 成功 |
+| `StakeIncreased` | node_id, added, new_total | `increase_stake` 成功 |
+| `NodeReinstated` | node_id | `reinstate_node` 恢复为 Active |
+| `NodeForceSuspended` | node_id | `force_suspend_node` 治理暂停 |
+| `NodeForceRemoved` | node_id, stake_slashed | `force_remove_node` 治理移除 |
+| `BotUnbound` | node_id | `unbind_bot` 解除绑定 |
+| `OperatorReplaced` | node_id, old_operator, new_operator | `replace_operator` 转移运营权 |
+| `SlashPercentageUpdated` | new_pct | `set_slash_percentage` 更新 |
+| `ReporterRewardPctUpdated` | new_pct | `set_reporter_reward_pct` 更新 |
+| `NodeForceReinstated` | node_id | `force_reinstate_node` 治理恢复 |
+| `EraForceEnded` | era | `force_era_end` 手动触发 |
 
-## 主要类型
+---
 
-### ProjectNode（节点信息）
+## 错误
+
+| 错误 | 说明 | 触发 extrinsic |
+|------|------|----------------|
+| `NodeAlreadyRegistered` | 节点 ID 或操作者已注册 | register_node |
+| `NodeNotFound` | 节点不存在 | 多处 |
+| `NotOperator` | 调用者不是节点操作者 | 节点管理类 |
+| `InsufficientStake` | 质押不足（< MinStake 或 amount=0） | register_node, increase_stake, reinstate_node |
+| `MaxNodesReached` | ActiveNodeList 已满 | register_node, reinstate_node, force_reinstate_node |
+| `NodeNotActive` | 节点非 Active 状态 | request_exit, verify_node_tee, force_suspend_node |
+| `AlreadyExiting` | 已有退出请求 | request_exit |
+| `CooldownNotComplete` | 冷却期未满 | finalize_exit |
+| `NotExiting` | 节点不在 Exiting 状态 | finalize_exit |
+| `BotNotRegistered` | Bot 未注册或非活跃 | verify_node_tee |
+| `BotOwnerMismatch` | Bot 所有者 ≠ 节点操作者 | verify_node_tee |
+| `AttestationNotValid` | Bot TEE 证明无效或已过期 | verify_node_tee |
+| `AlreadyTeeVerified` | 节点已是 TEE 节点 | verify_node_tee |
+| `FreeTierNotAllowed` | Free 层级不允许此操作 | mark_sequence_processed |
+| `NotBotOperator` | 调用者非 Bot Owner/Operator | mark_sequence_processed |
+| `EquivocationAlreadyReported` | 该序列已被举报 | report_equivocation |
+| `InvalidEquivocationEvidence` | 证据无效（相同哈希/签名/签名验证失败） | report_equivocation |
+| `EquivocationNotFound` | 双签记录不存在 | slash_equivocation, cleanup |
+| `EquivocationAlreadyResolved` | 已解决，不可重复 Slash | slash_equivocation |
+| `EquivocationNotResolved` | 未解决，不可清理 | cleanup_resolved_equivocation |
+| `NodeNotSuspended` | 节点非 Suspended 状态 | reinstate_node, force_reinstate_node |
+| `NoBotBinding` | 节点未绑定 Bot | unbind_bot |
+| `NewOperatorAlreadyHasNode` | 新操作者已拥有节点 | replace_operator |
+| `InvalidSlashPercentage` | 百分比超出 0-100 范围 | set_slash_percentage |
+| `InvalidReporterRewardPct` | 百分比超出 0-5000 范围 | set_reporter_reward_pct |
+| `InvalidTeeRewardParams` | tee_multiplier > 50000 或 sgx_bonus > 10000 | set_tee_reward_params |
+| `NothingToCleanup` | 批量清理无有效记录 | batch_cleanup_equivocations |
+| `EraNotReady` | Era 未到结束条件（保留，force_era_end 不受此限制） | — |
+
+---
+
+## 核心类型
+
+### ProjectNode — 节点信息
+
 ```rust
 pub struct ProjectNode<T: Config> {
-    pub operator: T::AccountId,
-    pub node_id: NodeId,
-    pub status: NodeStatus,         // Active/Suspended/Exiting
-    pub stake: BalanceOf<T>,
-    pub registered_at: BlockNumberFor<T>,
-    pub is_tee_node: bool,
+    pub operator: T::AccountId,      // 节点操作者（质押持有者）
+    pub node_id: NodeId,             // 节点 ID（ed25519 公钥，[u8; 32]）
+    pub status: NodeStatus,          // Active / Suspended / Exiting
+    pub stake: BalanceOf<T>,         // 当前质押余额
+    pub registered_at: BlockNumberFor<T>,  // 注册区块
+    pub is_tee_node: bool,           // 是否通过 TEE 验证
 }
 ```
 
-### EquivocationRecord（双签证据）
+### EquivocationRecord — 双签证据
+
 ```rust
 pub struct EquivocationRecord<T: Config> {
-    pub node_id: NodeId,
-    pub sequence: u64,
-    pub msg_hash_a: [u8; 32],
-    pub signature_a: [u8; 64],
-    pub msg_hash_b: [u8; 32],
-    pub signature_b: [u8; 64],
-    pub reporter: T::AccountId,
-    pub reported_at: BlockNumberFor<T>,
-    pub resolved: bool,
+    pub node_id: NodeId,             // 被举报节点
+    pub sequence: u64,               // 消息序列号
+    pub msg_hash_a: [u8; 32],       // 第一条消息哈希
+    pub signature_a: [u8; 64],      // 第一条 ed25519 签名
+    pub msg_hash_b: [u8; 32],       // 第二条消息哈希（必须 ≠ msg_hash_a）
+    pub signature_b: [u8; 64],      // 第二条 ed25519 签名（必须 ≠ signature_a）
+    pub reporter: T::AccountId,      // 举报者
+    pub reported_at: BlockNumberFor<T>,  // 举报区块
+    pub resolved: bool,              // 是否已被 Slash 处理
 }
 ```
+
+### NodeStatus（来自 primitives）
+
+```
+Active     — 正常运行，参与 Era 分配
+Suspended  — 被暂停（Slash/治理），可补质押恢复或退出
+Exiting    — 退出冷却中，等待 finalize_exit
+```
+
+---
 
 ## Era 经济模型
 
 ```
-每 Era (EraLength 个区块):
-1. 收取活跃订阅费 → subscription_income
-   - 余额不足 → Active→PastDue→Suspended（逐 Era 降级）
-2. 拆分订阅收入：90% 节点 + 10% 国库
-3. 铸币通胀：InflationPerEra
-4. 可分配总额 = 仅通胀（节点份额已由 subscription pallet 直接分配）
-5. 按权重分配（仅 TEE 节点参与）：
-   - 非 TEE 节点 weight = 0（不参与分配）
-   - TEE 节点 weight = BASE_NODE_WEIGHT × TeeRewardMultiplier / 10000
-   - SGX 双证明 weight = BASE_NODE_WEIGHT × (TeeRewardMultiplier + SgxEnclaveBonus) / 10000
-   - BASE_NODE_WEIGHT = 500,000（固定常量）
+每 Era（EraLength 个区块）触发 on_era_end:
+
+1. 订阅结算
+   └─ SubscriptionSettler::settle_era() → EraSettlementResult
+      ├─ 收取活跃订阅费（余额不足则逐 Era 降级）
+      ├─ node_share → 已由 subscription pallet 直接分配给运营者
+      └─ treasury_share → 国库
+
+2. TEE 证明有效性检查
+   └─ 遍历活跃节点，查 NodeBotBinding → BotRegistry 验证
+      └─ 过期 → is_tee_node = false + 清理绑定 + 发出事件
+
+3. 节点权重计算
+   ├─ 非 TEE 节点: weight = 0（不参与分配）
+   ├─ TEE 节点: weight = BASE_NODE_WEIGHT × tee_multiplier / 10000
+   └─ SGX 双证明: weight = BASE_NODE_WEIGHT × (tee_multiplier + sgx_bonus) / 10000
+   （BASE_NODE_WEIGHT = 500,000 固定常量）
+   （tee_multiplier 默认 10000 = 1.0x，0 视为 10000）
+
+4. 奖励分配
+   └─ RewardDistributor::distribute_and_record(era, 通胀, 权重向量, ...)
+      └─ 可分配总额 = InflationPerEra（订阅收入已直接分配，不参与权重分配）
+
+5. Uptime 快照
+   └─ PeerUptimeRecorder::record_era_uptime(era)
+
+6. Era 推进
+   ├─ CurrentEra += 1, EraStartBlock = now
+   └─ RewardDistributor::prune_old_eras(era)
 ```
 
-## 错误
+> 无活跃节点时仍执行订阅结算 + Uptime 快照 + Era 推进（跳过权重计算和奖励分配）。
 
-| 错误 | 说明 |
-|------|------|
-| `NodeAlreadyRegistered` | 节点或操作者已注册 |
-| `NodeNotFound` | 节点不存在 |
-| `NotOperator` | 不是节点操作者 |
-| `InsufficientStake` | 质押不足 |
-| `MaxNodesReached` | 活跃节点数已满 |
-| `NodeNotActive` | 节点非活跃 |
-| `AlreadyExiting` | 节点已在退出中 |
-| `CooldownNotComplete` | 冷却期未到 |
-| `NotExiting` | 节点不在退出状态 |
-| `BotNotRegistered` | Bot 未注册 |
-| `NotBotOwner` | 不是 Bot 所有者 |
-| `EquivocationAlreadyReported` | 已举报 |
-| `SequenceAlreadyProcessed` | 序列已处理 |
-| `BotOwnerMismatch` | Bot 所有者与操作者不匹配 |
-| `AttestationNotValid` | TEE 证明无效或已过期 |
-| `AlreadyTeeVerified` | 节点已是 TEE 节点 |
-| `FreeTierNotAllowed` | Free 层级不允许此功能 |
-| `InvalidEquivocationEvidence` | 双签证据无效（相同哈希或签名） |
-| `EquivocationNotFound` | 双签记录不存在 |
-| `NotBotOperator` | 调用者不是 Bot 操作者或所有者 |
-| `InvalidTeeRewardParams` | TEE 奖励参数超出允许范围 |
-| `EquivocationAlreadyResolved` | Equivocation 已被解决（不可重复 Slash） |
-| `EquivocationNotResolved` | Equivocation 尚未解决（不可清理） |
-| `NodeNotSuspended` | 节点不是 Suspended 状态（无法恢复） |
-| `NoBotBinding` | 节点未绑定 Bot |
-| `NewOperatorAlreadyHasNode` | 新操作者已有节点 |
-| `InvalidSlashPercentage` | Slash 百分比超出范围（0-100） |
-| `InvalidReporterRewardPct` | 举报者奖励百分比超出范围（0-5000） |
-| `NothingToCleanup` | 没有可清理的记录 |
-| `EraNotReady` | Era 尚未到达结束条件 |
+---
 
-> **Note:** `NotBotOwner` 已在 Round 1.1 中移除（死错误码，从未使用）。SCALE 索引已变更。
+## Config 配置
 
-## 配置参数
+### 常量（`#[pallet::constant]`）
 
-| 参数 | 说明 |
-|------|------|
-| `Currency` | ReservableCurrency（质押/Slash） |
-| `MaxActiveNodes` | 最大活跃节点数 |
-| `MinStake` | 最小质押额 |
-| `ExitCooldownPeriod` | 退出冷却期（区块数） |
-| `EraLength` | Era 长度（区块数） |
-| `InflationPerEra` | 每 Era 通胀铸币量 |
-| `SlashPercentage` | Slash 百分比（如 10 = 10%） |
-| `BotRegistry` | Bot 注册查询（`BotRegistryProvider`） |
-| `SequenceTtlBlocks` | ProcessedSequences 过期区块数 |
-| `MaxSequenceCleanupPerBlock` | 每块最多清理的过期序列数 |
-| `SubscriptionSettler` | 订阅结算（`SubscriptionSettler`） |
-| `RewardDistributor` | 奖励分配（`EraRewardDistributor`） |
-| `Subscription` | 订阅层级查询（`SubscriptionProvider`） |
-| `PeerUptimeRecorder` | Peer Uptime 记录（`PeerUptimeRecorder`） |
-| `OrphanRewardClaimer` | 节点退出时领取残留奖励（`OrphanRewardClaimer`） |
+| 参数 | 类型 | 说明 | integrity_test 校验 |
+|------|------|------|---------------------|
+| `MaxActiveNodes` | `u32` | 最大活跃节点数（ActiveNodeList 上限） | > 0 |
+| `MinStake` | `BalanceOf` | 最小质押额 | > 0 |
+| `ExitCooldownPeriod` | `BlockNumber` | 退出冷却期（区块数） | > 0 |
+| `EraLength` | `BlockNumber` | Era 长度（区块数） | > 0 |
+| `InflationPerEra` | `BalanceOf` | 每 Era 通胀铸币量 | — |
+| `SlashPercentage` | `u32` | 默认 Slash 百分比（如 10 = 10%） | ∈ 1..=100 |
+| `SequenceTtlBlocks` | `BlockNumber` | ProcessedSequences 过期 TTL | — |
+| `MaxSequenceCleanupPerBlock` | `u32` | 每块最多清理的过期序列数 | — |
+
+### 依赖 Trait
+
+| 参数 | Trait | 说明 |
+|------|-------|------|
+| `Currency` | `ReservableCurrency` | 质押 reserve/unreserve、Slash |
+| `BotRegistry` | `BotRegistryProvider<AccountId>` | Bot 注册/TEE/证明查询 |
+| `SubscriptionSettler` | `SubscriptionSettler` | Era 结束时订阅费结算 |
+| `RewardDistributor` | `EraRewardDistributor` | Era 奖励按权重分配 + 历史清理 |
+| `Subscription` | `SubscriptionProvider` | 订阅层级查询（Tier gate） |
+| `PeerUptimeRecorder` | `PeerUptimeRecorder` | Era 结束时 Peer 心跳快照 |
+| `OrphanRewardClaimer` | `OrphanRewardClaimer<AccountId>` | 节点退出时领取残留奖励 |
+
+---
 
 ## Hooks
 
-- **`on_initialize`**：
-  1. **防膨胀清理**：游标式清理过期 `ProcessedSequences`（扫描上限 = `MaxSequenceCleanupPerBlock × 3`，清理上限 = `MaxSequenceCleanupPerBlock`）
-  2. **Era 边界检测**：`n - era_start >= EraLength` 时触发 `on_era_end`
+### `on_initialize(n)`
 
-- **`integrity_test`**：
-  - 校验 `MinStake > 0`, `EraLength > 0`, `SlashPercentage ∈ 1..=100`, `ExitCooldownPeriod > 0`, `MaxActiveNodes > 0`
+每个区块执行，包含两个阶段：
 
-- **`on_era_end`** 编排流程：
-  1. **订阅结算**：委托 `SubscriptionSettler::settle_era()` 收取订阅费（无节点时仍执行）
-  2. **TEE 验证降级**：遍历活跃节点，检查 `NodeBotBinding` 绑定 Bot 的证明有效性，过期则 `is_tee_node = false` + 清理绑定
-  3. **权重计算**：非 TEE 权重 = 0，TEE 权重 = BASE_NODE_WEIGHT × (tee_factor + sgx_bonus) / 10000
-  4. **奖励分配**：委托 `RewardDistributor::distribute_and_record()` 铸币 + 按权重分配
-  5. **Uptime 快照**：委托 `PeerUptimeRecorder::record_era_uptime()` 快照心跳计数
-  6. **清理**：递增 Era，委托 `RewardDistributor::prune_old_eras()` 清理过期记录
+1. **防膨胀清理** — 游标式清理过期 `ProcessedSequences`
+   - 扫描上限 = `MaxSequenceCleanupPerBlock × 3`（防全表扫描）
+   - 清理上限 = `MaxSequenceCleanupPerBlock`
+   - 过期条件: `now - recorded_block > SequenceTtlBlocks`
+   - Weight: 动态计算（5M base + 5M×scanned + 10M×cleaned ref_time）
+
+2. **Era 边界检测** — `n - era_start >= EraLength` 时触发 `on_era_end(n)`
+   - 首次运行时初始化 `EraStartBlock`
+
+### `integrity_test`
+
+启动时校验 Config 常量有效性：
+- `MinStake > 0`
+- `EraLength > 0`
+- `SlashPercentage ∈ 1..=100`
+- `ExitCooldownPeriod > 0`
+- `MaxActiveNodes > 0`
+
+---
 
 ## Trait 实现
 
-### NodeConsensusProvider\<AccountId\>
+### `NodeConsensusProvider<AccountId>`
 
-供其他模块查询节点状态：
-- `is_node_active(node_id)` — 节点是否活跃
-- `node_operator(node_id)` — 获取操作者
-- `is_tee_node_by_operator(operator)` — 操作者是否运行 TEE 节点
+供其他模块（ads、subscription 等）查询节点状态：
+
+| 方法 | 返回 | 说明 |
+|------|------|------|
+| `is_node_active(node_id)` | `bool` | 节点是否为 Active 状态 |
+| `node_operator(node_id)` | `Option<AccountId>` | 获取节点操作者 |
+| `is_tee_node_by_operator(operator)` | `bool` | 操作者是否运行 TEE 节点 |
+
+---
 
 ## 公共查询方法
 
-- `is_sequence_processed(bot_id_hash, sequence)` — 序列是否已处理
-- `effective_slash_percentage()` — 获取有效 Slash 百分比（运行时覆盖 > Config 默认值）
-- `active_node_count()` — 活跃节点数
-- `current_era()` — 当前 Era 编号
-- `era_blocks_remaining()` — 距下一 Era 结束的剩余块数
+| 方法 | 返回 | 说明 |
+|------|------|------|
+| `is_sequence_processed(bot_id_hash, seq)` | `bool` | 序列是否已处理 |
+| `effective_slash_percentage()` | `u32` | 有效 Slash 百分比（运行时覆盖 > Config 默认值） |
+| `active_node_count()` | `u32` | 当前活跃节点数 |
+| `current_era()` | `u64` | 当前 Era 编号 |
+| `era_blocks_remaining()` | `BlockNumber` | 距下一 Era 结束的剩余区块数 |
+
+---
+
+## 内部函数
+
+| 函数 | 说明 |
+|------|------|
+| `on_era_end(now)` | Era 完整编排流程（订阅结算 → TEE 检查 → 权重计算 → 奖励分配 → Uptime → 推进） |
+| `compute_node_weight(node, node_id)` | 计算单个节点权重（非 TEE=0，TEE=base×factor/10000，SGX 叠加 bonus） |
+| `cleanup_expired_sequences(now)` | 游标式清理过期 ProcessedSequences，返回动态 Weight |
+
+---
 
 ## 测试覆盖
 
-当前测试数：82
+当前测试数：**80**
 
-## 审计历史
+| 分类 | 测试数 | 覆盖范围 |
+|------|:------:|----------|
+| 节点注册 | 4 | 成功、重复节点、重复操作者、质押不足 |
+| 退出流程 | 2 | 完整流程、非操作者拒绝 |
+| Equivocation 举报 | 2 | 举报成功、Slash 执行 |
+| 消息去重 | 2 | 标记成功、重复检测 |
+| TEE 验证 | 4 | 成功、重复验证、非 TEE Bot、所有者不匹配 |
+| Era 结算 | 3 | 正常结算、无节点、非 TEE 零权重 |
+| TEE 奖励参数 | 1 | Root 权限校验 |
+| 过期清理 | 2 | 过期清理、新鲜保留 |
+| Trait 实现 | 1 | NodeConsensusProvider 三个方法 |
+| Tier 层级 | 2 | is_paid 逻辑、默认 Free |
+| Tier Gate | 2 | Free 拒绝、Paid 通过 |
+| 审计回归 (R1) | 12 | H1 证据校验、H2 授权、H4 绑定清理、H5 暂停退出、H6 参数校验、H8 TEE 重置、R1 Slash/清理/TEE/M5 |
+| P1 补充质押 | 4 | 成功、非操作者、零金额、Suspended |
+| P2 节点恢复 | 4 | 成功、非 Suspended、质押不足、Slash 后补充恢复 |
+| P3 治理暂停 | 3 | 成功、非 Root、非 Active |
+| P4 治理移除 | 2 | 成功、非 Root |
+| P5 举报奖励 | 5 | 设置/校验/Root、Slash 奖励、零百分比 |
+| P7 解绑 Bot | 3 | 成功、无绑定、解绑重绑 |
+| P8 运营权转移 | 3 | 成功、新操作者已有节点、质押转移 |
+| P9 Slash 百分比 | 3 | 设置/恢复默认、超范围、运行时生效 |
+| P10 治理恢复 | 2 | 成功、非 Root |
+| P12 批量清理/查询 | 4 | 批量清理、空清理、节点数查询、Era 查询 |
+| P13 手动 Era | 2 | 成功、非 Root |
+| P14 签名验证 | 3 | 无效签名拒绝、有效签名通过、单签名无效 |
 
-### Round 1 (Mar 2026)
-
-| ID | 严重级 | 描述 | 状态 |
-|---|---|---|---|
-| H1 | High | `slash_equivocation` 不检查 `resolved` — 可重复 Slash | ✅ 已修复 |
-| M1 | Medium | `report_equivocation` 不验证签名有效性 | ✅ P14 已修复 |
-| M2 | Medium | `EquivocationRecords` 无清理机制 | ✅ 已修复 |
-| M3 | Medium | `verify_node_tee` 不检查节点活跃状态 | ✅ 已修复 |
-| M4 | Medium | `uptime_blocks`/`last_active`/`reputation` 死字段/静态字段 | 记录 |
-| M5 | Medium | `on_era_end` 无节点时跳过订阅结算+uptime+pruning | ✅ 已修复 |
-| L1 | Low | `log`+`sp-core` 死依赖 | ✅ 已修复 |
-| L2 | Low | `try-runtime` feature 缺失传播 | ✅ 已修复 |
-| L3 | Low | `NotBotOwner` 死错误码 | ✅ R1.1 已修复 |
-| L4 | Low | `treasury_share` 硬编码 10% 耦合 | ✅ R1.1 已修复 |
-
-### Round 1.1 (Mar 2026)
-
-| ID | 严重级 | 描述 | 状态 |
-|---|---|---|---|
-| L3 | Low | 移除死错误码 `NotBotOwner` | ✅ 已修复 |
-| L4 | Low | `SubscriptionSettler::settle_era()` 返回 `EraSettlementResult` 含 `treasury_share`，消除硬编码 | ✅ 已修复 |
-
-### Round 2 — 用户角色功能扩展 (Mar 2026)
-
-| ID | 优先级 | 描述 | 状态 |
-|---|---|---|---|
-| P1 | High | `increase_stake` — 运营者补充质押 | ✅ 已实现 |
-| P2 | High | `reinstate_node` — Suspended 恢复为 Active（需 stake ≥ MinStake） | ✅ 已实现 |
-| P3 | High | `force_suspend_node` — 治理直接暂停节点 | ✅ 已实现 |
-| P4 | High | `force_remove_node` — 治理强制移除节点 + 全额 Slash | ✅ 已实现 |
-| P5 | High | 举报者奖励 — Slash 金额按 `ReporterRewardPct` 奖励 reporter | ✅ 已实现 |
-| P6 | High | 死字段清理 — 移除 `reputation`/`uptime_blocks`/`last_active` + `Probation` 变体 | ✅ 已实现 |
-| P7 | Medium | `unbind_bot` — Bot 绑定解除 + 重新绑定 | ✅ 已实现 |
-| P8 | Medium | `replace_operator` — 运营权转移（质押随之转移） | ✅ 已实现 |
-| P9 | Medium | `set_slash_percentage` — 运行时可调 Slash 百分比 | ✅ 已实现 |
-| P10 | Medium | `force_reinstate_node` — 治理强制恢复节点（无需质押校验） | ✅ 已实现 |
-| P11 | Low | `integrity_test` — Config 完整性校验 | ✅ 已实现 |
-| P12 | Low | 公共查询方法 + `batch_cleanup_equivocations` | ✅ 已实现 |
-| P13 | Low | `force_era_end` — 手动触发 Era 结算 | ✅ 已实现 |
-| P14 | Medium | Equivocation ed25519 签名链上验证 — NodeId 作为公钥验签 | ✅ 已实现 |
+---
 
 ## 相关模块
 
-- [primitives/](../primitives/) — NodeStatus、NodeId、BalanceOf、BotRegistryProvider 等
-- [registry/](../registry/) — Bot 注册（BotRegistryProvider + PeerUptimeRecorder 实现）
-- [subscription/](../subscription/) — 订阅管理（SubscriptionSettler + SubscriptionProvider 实现）
-- [rewards/](../rewards/) — 奖励分配（EraRewardDistributor + OrphanRewardClaimer 实现）
-- [community/](../community/) — 社区管理
+| 模块 | 路径 | 关系 |
+|------|------|------|
+| **primitives** | `../primitives/` | NodeStatus、NodeId、BalanceOf、BotRegistryProvider 等基础类型和 Trait 定义 |
+| **registry** | `../registry/` | Bot 注册管理，实现 `BotRegistryProvider` + `PeerUptimeRecorder` |
+| **subscription** | `../subscription/` | 订阅管理，实现 `SubscriptionSettler` + `SubscriptionProvider` |
+| **rewards** | `../rewards/` | 奖励分配，实现 `EraRewardDistributor` + `OrphanRewardClaimer` |
+| **community** | `../community/` | 社区管理（独立模块，无直接依赖） |

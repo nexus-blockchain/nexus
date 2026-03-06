@@ -163,11 +163,11 @@ impl EntityProviderTrait<u64> for MockEntityProvider {
 
 pub struct MockKycProvider;
 impl pallet_entity_token::KycLevelProvider<u64> for MockKycProvider {
-    fn get_kyc_level(who: &u64) -> u8 {
+    fn get_kyc_level(_entity_id: u64, who: &u64) -> u8 {
         KYC_LEVELS.with(|k| k.borrow().get(who).copied().unwrap_or(0))
     }
-    fn meets_kyc_requirement(who: &u64, min_level: u8) -> bool {
-        Self::get_kyc_level(who) >= min_level
+    fn meets_kyc_requirement(entity_id: u64, who: &u64, min_level: u8) -> bool {
+        Self::get_kyc_level(entity_id, who) >= min_level
     }
 }
 
@@ -259,6 +259,13 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     }
     .assimilate_storage(&mut storage)
     .unwrap();
+
+    // L1-R2: 清理 thread-local 状态，防止测试间污染
+    SHOPS.with(|s| s.borrow_mut().clear());
+    KYC_LEVELS.with(|k| k.borrow_mut().clear());
+    MEMBERS.with(|m| m.borrow_mut().clear());
+    ENTITY_ADMINS.with(|a| a.borrow_mut().clear());
+    ENTITY_LOCKED.with(|l| l.borrow_mut().clear());
 
     let mut ext = sp_io::TestExternalities::new(storage);
     ext.execute_with(|| {

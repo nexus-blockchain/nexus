@@ -28,6 +28,7 @@ pub mod pallet {
     };
     use pallet_entity_common::{EntityProvider, AdminPermission};
     use sp_runtime::traits::{Saturating, Zero};
+    use sp_runtime::SaturatedConversion;
 
     pub type BalanceOf<T> =
         <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
@@ -75,6 +76,51 @@ pub mod pallet {
         pub min_orders: u32,
     }
 
+    /// F1: 推荐人激活条件配置
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+    pub struct ReferrerGuardConfig {
+        /// 推荐人最低累计消费（u128 匹配 MemberProvider::get_member_stats 返回值，0=无限制）
+        pub min_referrer_spent: u128,
+        /// 推荐人最低成功订单数（0=无限制）
+        pub min_referrer_orders: u32,
+    }
+
+    /// F2: 返佣上限配置
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    pub struct CommissionCapConfig<Balance> {
+        /// 单笔返佣上限（0=无限制）
+        pub max_per_order: Balance,
+        /// 推荐人累计返佣上限（0=无限制）
+        pub max_total_earned: Balance,
+    }
+
+    impl<Balance: Default> Default for CommissionCapConfig<Balance> {
+        fn default() -> Self {
+            Self { max_per_order: Balance::default(), max_total_earned: Balance::default() }
+        }
+    }
+
+    /// F5: 推荐关系有效期配置
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+    pub struct ReferralValidityConfig {
+        /// 推荐关系有效区块数（0=永久有效）
+        pub validity_blocks: u32,
+        /// 推荐关系有效订单数（0=无限制）
+        pub valid_orders: u32,
+    }
+
+    /// F10: 配置变更模式（事件粒度增强）
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    pub enum ReferralConfigMode {
+        DirectReward,
+        FixedAmount,
+        FirstOrder,
+        RepeatPurchase,
+        ReferrerGuard,
+        CommissionCap,
+        ReferralValidity,
+    }
+
     /// 推荐链返佣总配置（per-entity）
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     pub struct ReferralConfig<Balance> {
@@ -108,6 +154,9 @@ pub mod pallet {
         type MemberProvider: MemberProvider<Self::AccountId>;
         /// 实体查询接口（权限校验、Owner/Admin 判断）
         type EntityProvider: EntityProvider<Self::AccountId>;
+        /// F8: 全局推荐返佣率上限（基点，如 5000 = 50%，10000 = 无限制）
+        #[pallet::constant]
+        type MaxTotalReferralRate: Get<u16>;
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -129,6 +178,48 @@ pub mod pallet {
         ReferralConfigOf<T>,
     >;
 
+    /// F1: 推荐人激活条件 entity_id -> ReferrerGuardConfig
+    #[pallet::storage]
+    pub type ReferrerGuardConfigs<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat, u64,
+        ReferrerGuardConfig,
+    >;
+
+    /// F2: 返佣上限配置 entity_id -> CommissionCapConfig
+    #[pallet::storage]
+    pub type CommissionCapConfigs<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat, u64,
+        CommissionCapConfig<BalanceOf<T>>,
+    >;
+
+    /// F2: 推荐人累计获佣跟踪 (entity_id, referrer) -> total_earned
+    #[pallet::storage]
+    pub type ReferrerTotalEarned<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat, u64,
+        Blake2_128Concat, T::AccountId,
+        BalanceOf<T>,
+        ValueQuery,
+    >;
+
+    /// F3: 配置生效时间 entity_id -> block_number
+    #[pallet::storage]
+    pub type ConfigEffectiveAfter<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat, u64,
+        BlockNumberFor<T>,
+    >;
+
+    /// F5: 推荐关系有效期配置 entity_id -> ReferralValidityConfig
+    #[pallet::storage]
+    pub type ReferralValidityConfigs<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat, u64,
+        ReferralValidityConfig,
+    >;
+
     // ========================================================================
     // Events
     // ========================================================================
@@ -136,8 +227,11 @@ pub mod pallet {
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
-        ReferralConfigUpdated { entity_id: u64 },
+        /// F10: 配置变更事件（含变更模式）
+        ReferralConfigUpdated { entity_id: u64, mode: ReferralConfigMode },
         ReferralConfigCleared { entity_id: u64 },
+        /// F3: 配置生效时间设置
+        ConfigEffectiveAfterSet { entity_id: u64, block_number: BlockNumberFor<T> },
     }
 
     // ========================================================================
@@ -155,6 +249,8 @@ pub mod pallet {
         ConfigNotFound,
         /// 实体已被全局锁定，所有配置操作不可用
         EntityLocked,
+        /// F4: 实体未激活（暂停/封禁/关闭时不可修改配置）
+        EntityNotActive,
     }
 
     // ========================================================================
@@ -174,6 +270,7 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             Self::ensure_owner_or_admin(entity_id, &who)?;
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(rate <= 10000, Error::<T>::InvalidRate);
 
             ReferralConfigs::<T>::mutate(entity_id, |maybe| {
@@ -181,7 +278,7 @@ pub mod pallet {
                 config.direct_reward.rate = rate;
             });
 
-            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id, mode: ReferralConfigMode::DirectReward });
             Ok(())
         }
 
@@ -196,13 +293,14 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             Self::ensure_owner_or_admin(entity_id, &who)?;
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
 
             ReferralConfigs::<T>::mutate(entity_id, |maybe| {
                 let config = maybe.get_or_insert_with(ReferralConfig::default);
                 config.fixed_amount = FixedAmountConfig { amount };
             });
 
-            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id, mode: ReferralConfigMode::FixedAmount });
             Ok(())
         }
 
@@ -219,6 +317,7 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             Self::ensure_owner_or_admin(entity_id, &who)?;
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(rate <= 10000, Error::<T>::InvalidRate);
 
             ReferralConfigs::<T>::mutate(entity_id, |maybe| {
@@ -226,7 +325,7 @@ pub mod pallet {
                 config.first_order = FirstOrderConfig { amount, rate, use_amount };
             });
 
-            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id, mode: ReferralConfigMode::FirstOrder });
             Ok(())
         }
 
@@ -242,6 +341,7 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             Self::ensure_owner_or_admin(entity_id, &who)?;
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(rate <= 10000, Error::<T>::InvalidRate);
 
             ReferralConfigs::<T>::mutate(entity_id, |maybe| {
@@ -249,7 +349,7 @@ pub mod pallet {
                 config.repeat_purchase = RepeatPurchaseConfig { rate, min_orders };
             });
 
-            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id, mode: ReferralConfigMode::RepeatPurchase });
             Ok(())
         }
 
@@ -263,9 +363,10 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             Self::ensure_owner_or_admin(entity_id, &who)?;
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(ReferralConfigs::<T>::contains_key(entity_id), Error::<T>::ConfigNotFound);
 
-            ReferralConfigs::<T>::remove(entity_id);
+            Self::do_clear_all_config(entity_id);
             Self::deposit_event(Event::ReferralConfigCleared { entity_id });
             Ok(())
         }
@@ -288,7 +389,7 @@ pub mod pallet {
                 config.direct_reward.rate = rate;
             });
 
-            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id, mode: ReferralConfigMode::DirectReward });
             Ok(())
         }
 
@@ -307,7 +408,7 @@ pub mod pallet {
                 config.fixed_amount = FixedAmountConfig { amount };
             });
 
-            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id, mode: ReferralConfigMode::FixedAmount });
             Ok(())
         }
 
@@ -329,7 +430,7 @@ pub mod pallet {
                 config.first_order = FirstOrderConfig { amount, rate, use_amount };
             });
 
-            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id, mode: ReferralConfigMode::FirstOrder });
             Ok(())
         }
 
@@ -350,7 +451,7 @@ pub mod pallet {
                 config.repeat_purchase = RepeatPurchaseConfig { rate, min_orders };
             });
 
-            Self::deposit_event(Event::ReferralConfigUpdated { entity_id });
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id, mode: ReferralConfigMode::RepeatPurchase });
             Ok(())
         }
 
@@ -364,10 +465,116 @@ pub mod pallet {
             ensure_root(origin)?;
             // X2: 仅配置存在时才 remove + emit，防止幻影事件
             if ReferralConfigs::<T>::contains_key(entity_id) {
-                ReferralConfigs::<T>::remove(entity_id);
+                Self::do_clear_all_config(entity_id);
                 Self::deposit_event(Event::ReferralConfigCleared { entity_id });
             }
             Ok(())
+        }
+
+        // ===== F1/F2/F3/F5 新增 extrinsics =====
+
+        /// F1: 设置推荐人激活条件
+        #[pallet::call_index(11)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn set_referrer_guard_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            min_referrer_spent: u128,
+            min_referrer_orders: u32,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+
+            ReferrerGuardConfigs::<T>::insert(entity_id, ReferrerGuardConfig {
+                min_referrer_spent,
+                min_referrer_orders,
+            });
+
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id, mode: ReferralConfigMode::ReferrerGuard });
+            Ok(())
+        }
+
+        /// F2: 设置返佣上限配置
+        #[pallet::call_index(12)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn set_commission_cap_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            max_per_order: BalanceOf<T>,
+            max_total_earned: BalanceOf<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+
+            CommissionCapConfigs::<T>::insert(entity_id, CommissionCapConfig {
+                max_per_order,
+                max_total_earned,
+            });
+
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id, mode: ReferralConfigMode::CommissionCap });
+            Ok(())
+        }
+
+        /// F5: 设置推荐关系有效期配置
+        #[pallet::call_index(13)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn set_referral_validity_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            validity_blocks: u32,
+            valid_orders: u32,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+
+            ReferralValidityConfigs::<T>::insert(entity_id, ReferralValidityConfig {
+                validity_blocks,
+                valid_orders,
+            });
+
+            Self::deposit_event(Event::ReferralConfigUpdated { entity_id, mode: ReferralConfigMode::ReferralValidity });
+            Ok(())
+        }
+
+        /// F3: 设置配置生效时间
+        #[pallet::call_index(14)]
+        #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
+        pub fn set_config_effective_after(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            block_number: BlockNumberFor<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+
+            ConfigEffectiveAfter::<T>::insert(entity_id, block_number);
+            Self::deposit_event(Event::ConfigEffectiveAfterSet { entity_id, block_number });
+            Ok(())
+        }
+    }
+
+    // ========================================================================
+    // F9: integrity_test
+    // ========================================================================
+
+    #[pallet::hooks]
+    impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        #[cfg(feature = "std")]
+        fn integrity_test() {
+            let max_rate = T::MaxTotalReferralRate::get();
+            assert!(
+                max_rate <= 10000,
+                "MaxTotalReferralRate must be <= 10000 (100%), got {}",
+                max_rate,
+            );
         }
     }
 
@@ -376,6 +583,17 @@ pub mod pallet {
     // ========================================================================
 
     impl<T: Config> Pallet<T> {
+        /// H1: 清除所有关联配置（主配置 + 附属存储）
+        /// M1-R4: 同时清除 ReferrerTotalEarned，防止旧计划期累计值影响新 CommissionCapConfig
+        pub(crate) fn do_clear_all_config(entity_id: u64) {
+            ReferralConfigs::<T>::remove(entity_id);
+            ReferrerGuardConfigs::<T>::remove(entity_id);
+            CommissionCapConfigs::<T>::remove(entity_id);
+            ReferralValidityConfigs::<T>::remove(entity_id);
+            ConfigEffectiveAfter::<T>::remove(entity_id);
+            let _ = ReferrerTotalEarned::<T>::clear_prefix(entity_id, u32::MAX, None);
+        }
+
         /// 验证 Entity Owner 或 Admin(COMMISSION_MANAGE) 权限
         fn ensure_owner_or_admin(entity_id: u64, who: &T::AccountId) -> DispatchResult {
             let owner = T::EntityProvider::entity_owner(entity_id)
@@ -390,6 +608,83 @@ pub mod pallet {
             Ok(())
         }
 
+        /// F1/F5/F6: 验证推荐人资格（封禁/冻结/激活条件/有效期）
+        pub(crate) fn is_referrer_qualified(
+            entity_id: u64,
+            buyer: &T::AccountId,
+            referrer: &T::AccountId,
+        ) -> bool {
+            // M1 审计修复: 非会员推荐人不获佣（移除后推荐链未清理时防漏发）
+            if !T::MemberProvider::is_member(entity_id, referrer) { return false; }
+            // X1: 跳过被封禁或未激活的推荐人
+            if T::MemberProvider::is_banned(entity_id, referrer) { return false; }
+            if !T::MemberProvider::is_activated(entity_id, referrer) { return false; }
+            // F6: 跳过冻结/暂停的推荐人
+            if !T::MemberProvider::is_member_active(entity_id, referrer) { return false; }
+            // F1: 推荐人激活条件检查
+            if let Some(guard) = ReferrerGuardConfigs::<T>::get(entity_id) {
+                if guard.min_referrer_spent > 0 {
+                    let (_, _, spent) = T::MemberProvider::get_member_stats(entity_id, referrer);
+                    if spent < guard.min_referrer_spent { return false; }
+                }
+                if guard.min_referrer_orders > 0 {
+                    let orders = T::MemberProvider::completed_order_count(entity_id, referrer);
+                    if orders < guard.min_referrer_orders { return false; }
+                }
+            }
+            // F5: 推荐关系有效期检查
+            if let Some(validity) = ReferralValidityConfigs::<T>::get(entity_id) {
+                if validity.validity_blocks > 0 {
+                    let registered_at = T::MemberProvider::referral_registered_at(entity_id, buyer);
+                    if registered_at > 0 {
+                        let now: u64 = frame_system::Pallet::<T>::block_number().saturated_into();
+                        if now > registered_at.saturating_add(validity.validity_blocks as u64) {
+                            return false;
+                        }
+                    }
+                }
+                if validity.valid_orders > 0 {
+                    let buyer_completed = T::MemberProvider::completed_order_count(entity_id, buyer);
+                    if buyer_completed >= validity.valid_orders { return false; }
+                }
+            }
+            true
+        }
+
+        /// F2: 应用单笔和累计返佣上限
+        fn apply_commission_cap(
+            entity_id: u64,
+            referrer: &T::AccountId,
+            mut amount: BalanceOf<T>,
+        ) -> BalanceOf<T> {
+            if let Some(cap) = CommissionCapConfigs::<T>::get(entity_id) {
+                // F2a: 单笔上限
+                if !cap.max_per_order.is_zero() {
+                    amount = amount.min(cap.max_per_order);
+                }
+                // F2b: 累计上限
+                if !cap.max_total_earned.is_zero() {
+                    let earned = ReferrerTotalEarned::<T>::get(entity_id, referrer);
+                    let space = cap.max_total_earned.saturating_sub(earned);
+                    amount = amount.min(space);
+                }
+            }
+            amount
+        }
+
+        /// F2: 更新推荐人累计获佣
+        fn track_referrer_earned(
+            entity_id: u64,
+            referrer: &T::AccountId,
+            amount: BalanceOf<T>,
+        ) {
+            if !amount.is_zero() {
+                ReferrerTotalEarned::<T>::mutate(entity_id, referrer, |earned| {
+                    *earned = earned.saturating_add(amount);
+                });
+            }
+        }
+
         pub fn process_direct_reward(
             entity_id: u64,
             buyer: &T::AccountId,
@@ -400,12 +695,13 @@ pub mod pallet {
         ) {
             if config.rate == 0 { return; }
             if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
-                // X1: 跳过被封禁的推荐人
-                if T::MemberProvider::is_banned(entity_id, &referrer) { return; }
+                if !Self::is_referrer_qualified(entity_id, buyer, &referrer) { return; }
                 let commission = order_amount.saturating_mul(config.rate.into()) / 10000u32.into();
-                let actual = commission.min(*remaining);
+                let capped = Self::apply_commission_cap(entity_id, &referrer, commission);
+                let actual = capped.min(*remaining);
                 if !actual.is_zero() {
                     *remaining = remaining.saturating_sub(actual);
+                    Self::track_referrer_earned(entity_id, &referrer, actual);
                     outputs.push(CommissionOutput {
                         beneficiary: referrer,
                         amount: actual,
@@ -425,11 +721,12 @@ pub mod pallet {
         ) {
             if config.amount.is_zero() { return; }
             if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
-                // X1: 跳过被封禁的推荐人
-                if T::MemberProvider::is_banned(entity_id, &referrer) { return; }
-                let actual = config.amount.min(*remaining);
+                if !Self::is_referrer_qualified(entity_id, buyer, &referrer) { return; }
+                let capped = Self::apply_commission_cap(entity_id, &referrer, config.amount);
+                let actual = capped.min(*remaining);
                 if !actual.is_zero() {
                     *remaining = remaining.saturating_sub(actual);
+                    Self::track_referrer_earned(entity_id, &referrer, actual);
                     outputs.push(CommissionOutput {
                         beneficiary: referrer,
                         amount: actual,
@@ -452,16 +749,17 @@ pub mod pallet {
             if config.use_amount && config.amount.is_zero() { return; }
             if !config.use_amount && config.rate == 0 { return; }
             if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
-                // X1: 跳过被封禁的推荐人
-                if T::MemberProvider::is_banned(entity_id, &referrer) { return; }
+                if !Self::is_referrer_qualified(entity_id, buyer, &referrer) { return; }
                 let commission = if config.use_amount {
                     config.amount
                 } else {
                     order_amount.saturating_mul(config.rate.into()) / 10000u32.into()
                 };
-                let actual = commission.min(*remaining);
+                let capped = Self::apply_commission_cap(entity_id, &referrer, commission);
+                let actual = capped.min(*remaining);
                 if !actual.is_zero() {
                     *remaining = remaining.saturating_sub(actual);
+                    Self::track_referrer_earned(entity_id, &referrer, actual);
                     outputs.push(CommissionOutput {
                         beneficiary: referrer,
                         amount: actual,
@@ -483,12 +781,13 @@ pub mod pallet {
         ) {
             if config.rate == 0 || buyer_order_count < config.min_orders { return; }
             if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
-                // X1: 跳过被封禁的推荐人
-                if T::MemberProvider::is_banned(entity_id, &referrer) { return; }
+                if !Self::is_referrer_qualified(entity_id, buyer, &referrer) { return; }
                 let commission = order_amount.saturating_mul(config.rate.into()) / 10000u32.into();
-                let actual = commission.min(*remaining);
+                let capped = Self::apply_commission_cap(entity_id, &referrer, commission);
+                let actual = capped.min(*remaining);
                 if !actual.is_zero() {
                     *remaining = remaining.saturating_sub(actual);
+                    Self::track_referrer_earned(entity_id, &referrer, actual);
                     outputs.push(CommissionOutput {
                         beneficiary: referrer,
                         amount: actual,
@@ -512,10 +811,20 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
         order_amount: pallet::BalanceOf<T>,
         remaining: pallet::BalanceOf<T>,
         enabled_modes: pallet_commission_common::CommissionModes,
-        is_first_order: bool,
+        _is_first_order: bool,
         buyer_order_count: u32,
     ) -> (alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, pallet::BalanceOf<T>>>, pallet::BalanceOf<T>) {
         use pallet_commission_common::CommissionModes;
+        use sp_runtime::traits::{Zero, Saturating};
+        use frame_support::traits::Get;
+
+        // F3: 配置生效时间检查
+        if let Some(effective_after) = pallet::ConfigEffectiveAfter::<T>::get(entity_id) {
+            let now = frame_system::Pallet::<T>::block_number();
+            if now < effective_after {
+                return (alloc::vec::Vec::new(), remaining);
+            }
+        }
 
         let config = match pallet::ReferralConfigs::<T>::get(entity_id) {
             Some(c) => c,
@@ -524,6 +833,9 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
 
         let mut remaining = remaining;
         let mut outputs = alloc::vec::Vec::new();
+
+        // F7: 使用已完成订单数判断首单，取消/退款订单不影响首单判定
+        let is_first_order = T::MemberProvider::completed_order_count(entity_id, buyer) == 0;
 
         if enabled_modes.contains(CommissionModes::DIRECT_REWARD) {
             pallet::Pallet::<T>::process_direct_reward(
@@ -547,6 +859,27 @@ impl<T: pallet::Config> pallet_commission_common::CommissionPlugin<T::AccountId,
             pallet::Pallet::<T>::process_repeat_purchase(
                 entity_id, buyer, order_amount, &mut remaining, &config.repeat_purchase, buyer_order_count, &mut outputs,
             );
+        }
+
+        // F8: 全局返佣率上限
+        let max_rate: u16 = T::MaxTotalReferralRate::get();
+        if max_rate < 10000u16 && !outputs.is_empty() {
+            let max_amount = order_amount.saturating_mul((max_rate as u32).into()) / 10000u32.into();
+            let mut total_used = pallet::BalanceOf::<T>::zero();
+            for output in outputs.iter_mut() {
+                let space = max_amount.saturating_sub(total_used);
+                if output.amount > space {
+                    let excess = output.amount.saturating_sub(space);
+                    remaining = remaining.saturating_add(excess);
+                    // M2 审计修复: F8 裁剪后修正 ReferrerTotalEarned，防止累计上限(F2b)虚高
+                    pallet::ReferrerTotalEarned::<T>::mutate(entity_id, &output.beneficiary, |earned| {
+                        *earned = earned.saturating_sub(excess);
+                    });
+                    output.amount = space;
+                }
+                total_used = total_used.saturating_add(output.amount);
+            }
+            outputs.retain(|o| !o.amount.is_zero());
         }
 
         (outputs, remaining)
@@ -576,8 +909,7 @@ impl<T: pallet::Config> pallet::Pallet<T> {
     {
         if rate == 0 { return; }
         if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
-            // X1: 跳过被封禁的推荐人
-            if T::MemberProvider::is_banned(entity_id, &referrer) { return; }
+            if !Self::is_referrer_qualified(entity_id, buyer, &referrer) { return; }
             let commission = order_amount.saturating_mul(TB::from(rate as u32)) / TB::from(10000u32);
             let actual = commission.min(*remaining);
             if !actual.is_zero() {
@@ -605,8 +937,7 @@ impl<T: pallet::Config> pallet::Pallet<T> {
         // Token: 仅支持 rate 模式，use_amount=true（固定金额）跳过
         if config.use_amount || config.rate == 0 { return; }
         if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
-            // X1: 跳过被封禁的推荐人
-            if T::MemberProvider::is_banned(entity_id, &referrer) { return; }
+            if !Self::is_referrer_qualified(entity_id, buyer, &referrer) { return; }
             let commission = order_amount.saturating_mul(TB::from(config.rate as u32)) / TB::from(10000u32);
             let actual = commission.min(*remaining);
             if !actual.is_zero() {
@@ -634,8 +965,7 @@ impl<T: pallet::Config> pallet::Pallet<T> {
     {
         if config.rate == 0 || buyer_order_count < config.min_orders { return; }
         if let Some(referrer) = T::MemberProvider::get_referrer(entity_id, buyer) {
-            // X1: 跳过被封禁的推荐人
-            if T::MemberProvider::is_banned(entity_id, &referrer) { return; }
+            if !Self::is_referrer_qualified(entity_id, buyer, &referrer) { return; }
             let commission = order_amount.saturating_mul(TB::from(config.rate as u32)) / TB::from(10000u32);
             let actual = commission.min(*remaining);
             if !actual.is_zero() {
@@ -667,10 +997,19 @@ where
         order_amount: TB,
         remaining: TB,
         enabled_modes: pallet_commission_common::CommissionModes,
-        is_first_order: bool,
+        _is_first_order: bool,
         buyer_order_count: u32,
     ) -> (alloc::vec::Vec<pallet_commission_common::CommissionOutput<T::AccountId, TB>>, TB) {
         use pallet_commission_common::CommissionModes;
+        use frame_support::traits::Get;
+
+        // F3: 配置生效时间检查
+        if let Some(effective_after) = pallet::ConfigEffectiveAfter::<T>::get(entity_id) {
+            let now = frame_system::Pallet::<T>::block_number();
+            if now < effective_after {
+                return (alloc::vec::Vec::new(), remaining);
+            }
+        }
 
         let config = match pallet::ReferralConfigs::<T>::get(entity_id) {
             Some(c) => c,
@@ -679,6 +1018,9 @@ where
 
         let mut remaining = remaining;
         let mut outputs = alloc::vec::Vec::new();
+
+        // F7: 使用已完成订单数判断首单
+        let is_first_order = T::MemberProvider::completed_order_count(entity_id, buyer) == 0;
 
         if enabled_modes.contains(CommissionModes::DIRECT_REWARD) {
             pallet::Pallet::<T>::process_direct_reward_token::<TB>(
@@ -703,6 +1045,22 @@ where
             );
         }
 
+        // F8: 全局返佣率上限
+        let max_rate: u16 = T::MaxTotalReferralRate::get();
+        if max_rate < 10000u16 && !outputs.is_empty() {
+            let max_amount = order_amount.saturating_mul(TB::from(max_rate as u32)) / TB::from(10000u32);
+            let mut total_used = TB::zero();
+            for output in outputs.iter_mut() {
+                let space = max_amount.saturating_sub(total_used);
+                if output.amount > space {
+                    remaining = remaining.saturating_add(output.amount.saturating_sub(space));
+                    output.amount = space;
+                }
+                total_used = total_used.saturating_add(output.amount);
+            }
+            outputs.retain(|o| !o.amount.is_zero());
+        }
+
         (outputs, remaining)
     }
 }
@@ -719,7 +1077,7 @@ impl<T: pallet::Config> pallet_commission_common::ReferralPlanWriter<pallet::Bal
             let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
             config.direct_reward.rate = rate;
         });
-        pallet::Pallet::<T>::deposit_event(pallet::Event::ReferralConfigUpdated { entity_id });
+        pallet::Pallet::<T>::deposit_event(pallet::Event::ReferralConfigUpdated { entity_id, mode: pallet::ReferralConfigMode::DirectReward });
         Ok(())
     }
 
@@ -728,7 +1086,7 @@ impl<T: pallet::Config> pallet_commission_common::ReferralPlanWriter<pallet::Bal
             let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
             config.fixed_amount = pallet::FixedAmountConfig { amount };
         });
-        pallet::Pallet::<T>::deposit_event(pallet::Event::ReferralConfigUpdated { entity_id });
+        pallet::Pallet::<T>::deposit_event(pallet::Event::ReferralConfigUpdated { entity_id, mode: pallet::ReferralConfigMode::FixedAmount });
         Ok(())
     }
 
@@ -739,7 +1097,7 @@ impl<T: pallet::Config> pallet_commission_common::ReferralPlanWriter<pallet::Bal
             let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
             config.first_order = pallet::FirstOrderConfig { amount, rate, use_amount };
         });
-        pallet::Pallet::<T>::deposit_event(pallet::Event::ReferralConfigUpdated { entity_id });
+        pallet::Pallet::<T>::deposit_event(pallet::Event::ReferralConfigUpdated { entity_id, mode: pallet::ReferralConfigMode::FirstOrder });
         Ok(())
     }
 
@@ -750,14 +1108,15 @@ impl<T: pallet::Config> pallet_commission_common::ReferralPlanWriter<pallet::Bal
             let config = maybe.get_or_insert_with(pallet::ReferralConfig::default);
             config.repeat_purchase = pallet::RepeatPurchaseConfig { rate, min_orders };
         });
-        pallet::Pallet::<T>::deposit_event(pallet::Event::ReferralConfigUpdated { entity_id });
+        pallet::Pallet::<T>::deposit_event(pallet::Event::ReferralConfigUpdated { entity_id, mode: pallet::ReferralConfigMode::RepeatPurchase });
         Ok(())
     }
 
     fn clear_config(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
         // X2: 仅配置存在时才 remove + emit，防止幻影事件误导 indexer
+        // H1: 清除主配置 + 全部附属存储
         if pallet::ReferralConfigs::<T>::contains_key(entity_id) {
-            pallet::ReferralConfigs::<T>::remove(entity_id);
+            pallet::Pallet::<T>::do_clear_all_config(entity_id);
             pallet::Pallet::<T>::deposit_event(pallet::Event::ReferralConfigCleared { entity_id });
         }
         Ok(())

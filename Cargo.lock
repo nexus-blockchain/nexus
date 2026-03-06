@@ -6577,10 +6577,8 @@ dependencies = [
  "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
- "sp-core",
  "sp-io",
  "sp-runtime",
- "sp-std",
 ]
 
 [[package]]
@@ -6596,7 +6594,6 @@ dependencies = [
  "scale-info",
  "sp-io",
  "sp-runtime",
- "sp-std",
 ]
 
 [[package]]
@@ -6611,7 +6608,6 @@ dependencies = [
  "scale-info",
  "sp-io",
  "sp-runtime",
- "sp-std",
 ]
 
 [[package]]
@@ -6642,7 +6638,6 @@ dependencies = [
  "scale-info",
  "sp-io",
  "sp-runtime",
- "sp-std",
 ]
 
 [[package]]
@@ -6656,10 +6651,8 @@ dependencies = [
  "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
- "sp-core",
  "sp-io",
  "sp-runtime",
- "sp-std",
 ]
 
 [[package]]
@@ -6668,16 +6661,13 @@ version = "0.1.0"
 dependencies = [
  "frame-support",
  "frame-system",
- "log",
  "pallet-balances",
  "pallet-commission-common",
  "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
- "sp-core",
  "sp-io",
  "sp-runtime",
- "sp-std",
 ]
 
 [[package]]
@@ -6897,6 +6887,7 @@ dependencies = [
  "log",
  "pallet-balances",
  "pallet-entity-common",
+ "pallet-storage-service",
  "parity-scale-codec",
  "scale-info",
  "sp-api",
@@ -6908,7 +6899,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-entity-review"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "frame-support",
  "frame-system",
@@ -6928,8 +6919,10 @@ version = "0.1.0"
 dependencies = [
  "frame-support",
  "frame-system",
+ "log",
  "pallet-balances",
  "pallet-entity-common",
+ "pallet-storage-service",
  "parity-scale-codec",
  "scale-info",
  "sp-core",
@@ -6958,7 +6951,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-entity-tokensale"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "frame-support",
  "frame-system",
@@ -7191,6 +7184,7 @@ dependencies = [
  "parity-scale-codec",
  "scale-info",
  "serde",
+ "sp-api",
  "sp-core",
  "sp-io",
  "sp-runtime",
@@ -7245,13 +7239,14 @@ dependencies = [
 
 [[package]]
 name = "pallet-storage-lifecycle"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
  "frame-system",
  "parity-scale-codec",
  "scale-info",
+ "sp-api",
  "sp-core",
  "sp-io",
  "sp-runtime",
@@ -7317,7 +7312,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-trading-common"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "frame-support",
  "parity-scale-codec",

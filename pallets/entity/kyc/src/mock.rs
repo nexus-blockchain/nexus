@@ -11,15 +11,19 @@ type Block = frame_system::mocking::MockBlock<Test>;
 
 pub const ADMIN: u64 = 1;
 pub const PROVIDER: u64 = 2;
+pub const PROVIDER2: u64 = 7;
 pub const USER: u64 = 3;
+pub const USER2: u64 = 4;
 pub const ENTITY_OWNER: u64 = 5;
 pub const ENTITY_ADMIN_USER: u64 = 6;
+
+pub const ENTITY_1: u64 = 1;
+pub const ENTITY_2: u64 = 2;
 
 // ==================== Mock EntityProvider ====================
 
 thread_local! {
     static ENTITY_OWNERS: RefCell<HashMap<u64, u64>> = RefCell::new(HashMap::new());
-    // (entity_id, account) -> permissions bitmask
     static ENTITY_ADMINS: RefCell<HashMap<(u64, u64), u32>> = RefCell::new(HashMap::new());
     static ENTITY_LOCKED: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
 }
@@ -84,6 +88,7 @@ parameter_types! {
     pub const StandardKycValidity: u64 = 500;
     pub const EnhancedKycValidity: u64 = 2000;
     pub const InstitutionalKycValidity: u64 = 3000;
+    pub const PendingKycTimeout: u64 = 100;
 }
 
 impl pallet_entity_kyc::Config for Test {
@@ -97,9 +102,16 @@ impl pallet_entity_kyc::Config for Test {
     type InstitutionalKycValidity = InstitutionalKycValidity;
     type AdminOrigin = EnsureRoot<u64>;
     type EntityProvider = MockEntityProvider;
+    type MaxHistoryEntries = ConstU32<50>;
+    type PendingKycTimeout = PendingKycTimeout;
+    type OnKycStatusChange = ();
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
+    ENTITY_OWNERS.with(|m| m.borrow_mut().clear());
+    ENTITY_ADMINS.with(|m| m.borrow_mut().clear());
+    ENTITY_LOCKED.with(|l| l.borrow_mut().clear());
+
     let t = frame_system::GenesisConfig::<Test>::default()
         .build_storage()
         .unwrap();

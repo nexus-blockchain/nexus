@@ -23,6 +23,9 @@ thread_local! {
     static ENTITY_INACTIVE: RefCell<BTreeMap<u64, bool>> = RefCell::new(BTreeMap::new());
     static ENTITY_ADMINS: RefCell<BTreeMap<(u64, u64), u32>> = RefCell::new(BTreeMap::new());
     static ENTITY_LOCKED: RefCell<BTreeMap<u64, bool>> = RefCell::new(BTreeMap::new());
+    // M1-R8: 封禁/冻结会员
+    static BANNED_MEMBERS: RefCell<BTreeMap<(u64, u64), bool>> = RefCell::new(BTreeMap::new());
+    static FROZEN_MEMBERS: RefCell<BTreeMap<(u64, u64), bool>> = RefCell::new(BTreeMap::new());
 }
 
 fn clear_mocks() {
@@ -36,6 +39,8 @@ fn clear_mocks() {
     ENTITY_INACTIVE.with(|e| e.borrow_mut().clear());
     ENTITY_ADMINS.with(|a| a.borrow_mut().clear());
     ENTITY_LOCKED.with(|l| l.borrow_mut().clear());
+    BANNED_MEMBERS.with(|b| b.borrow_mut().clear());
+    FROZEN_MEMBERS.with(|f| f.borrow_mut().clear());
 }
 
 fn set_kyc_blocked(entity_id: u64, account: u64) {
@@ -52,6 +57,14 @@ fn set_entity_admin(entity_id: u64, account: u64, permissions: u32) {
 
 fn set_entity_locked(entity_id: u64) {
     ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id, true));
+}
+
+fn ban_member(entity_id: u64, account: u64) {
+    BANNED_MEMBERS.with(|b| b.borrow_mut().insert((entity_id, account), true));
+}
+
+fn freeze_member(entity_id: u64, account: u64) {
+    FROZEN_MEMBERS.with(|f| f.borrow_mut().insert((entity_id, account), true));
 }
 
 fn set_member(entity_id: u64, account: u64, level: u8) {
@@ -164,6 +177,13 @@ impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
     fn member_count_by_level(entity_id: u64, level_id: u8) -> u32 {
         LEVEL_MEMBER_COUNTS.with(|l| l.borrow().get(&(entity_id, level_id)).copied().unwrap_or(0))
     }
+    fn is_banned(entity_id: u64, account: &u64) -> bool {
+        BANNED_MEMBERS.with(|b| b.borrow().get(&(entity_id, *account)).copied().unwrap_or(false))
+    }
+    fn is_member_active(entity_id: u64, account: &u64) -> bool {
+        !Self::is_banned(entity_id, account) &&
+        !FROZEN_MEMBERS.with(|f| f.borrow().get(&(entity_id, *account)).copied().unwrap_or(false))
+    }
 }
 
 // -- Mock EntityProvider --
@@ -233,6 +253,10 @@ impl pallet_balances::Config for Test {
     type Balance = Balance;
 }
 
+frame_support::parameter_types! {
+    pub const MinRoundDuration: u64 = 10;
+}
+
 impl pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
@@ -246,6 +270,9 @@ impl pallet::Config for Test {
     type TokenTransferProvider = MockTokenTransferProvider;
     type ParticipationGuard = MockParticipationGuard;
     type WeightInfo = ();
+    type MinRoundDuration = MinRoundDuration;
+    type MaxRoundHistory = ConstU32<5>;
+    type ClaimCallback = ();
 }
 
 /// Entity account = entity_id + 9000
@@ -2281,5 +2308,809 @@ fn p2_force_clear_rejects_non_root() {
             CommissionPoolReward::force_clear_pool_reward_config(RuntimeOrigin::signed(OWNER), 1),
             sp_runtime::DispatchError::BadOrigin
         );
+    });
+}
+
+// ====================================================================
+// F1: get_claimable 可领取金额预查询
+// ====================================================================
+
+#[test]
+fn f1_get_claimable_basic() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 5);
+        set_level_count(entity_id, 2, 2);
+        set_pool_balance(entity_id, 10_000);
+
+        let (nex, token) = CommissionPoolReward::get_claimable(entity_id, &10);
+        // level 1 = 50% of 10000 / 5 members = 1000
+        assert_eq!(nex, 1000);
+        assert_eq!(token, 0);
+    });
+}
+
+#[test]
+fn f1_get_claimable_returns_zero_when_paused() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 5);
+        set_pool_balance(entity_id, 10_000);
+
+        assert_ok!(CommissionPoolReward::pause_pool_reward(RuntimeOrigin::signed(OWNER), entity_id));
+        let (nex, _) = CommissionPoolReward::get_claimable(entity_id, &10);
+        assert_eq!(nex, 0);
+    });
+}
+
+#[test]
+fn f1_get_claimable_returns_zero_when_global_paused() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 5);
+        set_pool_balance(entity_id, 10_000);
+
+        assert_ok!(CommissionPoolReward::set_global_pool_reward_paused(RuntimeOrigin::root(), true));
+        let (nex, _) = CommissionPoolReward::get_claimable(entity_id, &10);
+        assert_eq!(nex, 0);
+    });
+}
+
+#[test]
+fn f1_get_claimable_returns_zero_after_claim() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 10, 100_000).unwrap();
+
+        // Before claim, should be claimable
+        let (nex_before, _) = CommissionPoolReward::get_claimable(entity_id, &10);
+        assert!(nex_before > 0);
+
+        assert_ok!(CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id));
+
+        // After claim, should be 0 for current round
+        let (nex_after, _) = CommissionPoolReward::get_claimable(entity_id, &10);
+        assert_eq!(nex_after, 0);
+    });
+}
+
+#[test]
+fn f1_get_claimable_non_member_returns_zero() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_pool_balance(entity_id, 10_000);
+        // account 99 is not a member
+        let (nex, token) = CommissionPoolReward::get_claimable(entity_id, &99);
+        assert_eq!(nex, 0);
+        assert_eq!(token, 0);
+    });
+}
+
+// ====================================================================
+// F3: 暂停/恢复分配 pause/resume
+// ====================================================================
+
+#[test]
+fn f3_pause_pool_reward_works() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_ok!(CommissionPoolReward::pause_pool_reward(RuntimeOrigin::signed(OWNER), 1));
+        assert!(pallet::PoolRewardPaused::<Test>::get(1));
+
+        // Check event
+        System::assert_has_event(RuntimeEvent::CommissionPoolReward(
+            pallet::Event::PoolRewardPausedEvent { entity_id: 1 }
+        ));
+    });
+}
+
+#[test]
+fn f3_resume_pool_reward_works() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_ok!(CommissionPoolReward::pause_pool_reward(RuntimeOrigin::signed(OWNER), 1));
+        assert_ok!(CommissionPoolReward::resume_pool_reward(RuntimeOrigin::signed(OWNER), 1));
+        assert!(!pallet::PoolRewardPaused::<Test>::get(1));
+
+        System::assert_has_event(RuntimeEvent::CommissionPoolReward(
+            pallet::Event::PoolRewardResumedEvent { entity_id: 1 }
+        ));
+    });
+}
+
+#[test]
+fn f3_pause_rejects_already_paused() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_ok!(CommissionPoolReward::pause_pool_reward(RuntimeOrigin::signed(OWNER), 1));
+        assert_noop!(
+            CommissionPoolReward::pause_pool_reward(RuntimeOrigin::signed(OWNER), 1),
+            pallet::Error::<Test>::PoolRewardIsPaused
+        );
+    });
+}
+
+#[test]
+fn f3_resume_rejects_not_paused() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_noop!(
+            CommissionPoolReward::resume_pool_reward(RuntimeOrigin::signed(OWNER), 1),
+            pallet::Error::<Test>::PoolRewardNotPaused
+        );
+    });
+}
+
+#[test]
+fn f3_pause_rejects_no_config() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            CommissionPoolReward::pause_pool_reward(RuntimeOrigin::signed(OWNER), 1),
+            pallet::Error::<Test>::ConfigNotFound
+        );
+    });
+}
+
+#[test]
+fn f3_pause_rejects_locked_entity() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        set_entity_locked(1);
+        assert_noop!(
+            CommissionPoolReward::pause_pool_reward(RuntimeOrigin::signed(OWNER), 1),
+            pallet::Error::<Test>::EntityLocked
+        );
+    });
+}
+
+#[test]
+fn f3_pause_rejects_unauthorized() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_noop!(
+            CommissionPoolReward::pause_pool_reward(RuntimeOrigin::signed(42), 1),
+            pallet::Error::<Test>::NotAuthorized
+        );
+    });
+}
+
+#[test]
+fn f3_claim_blocked_when_paused() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 10, 100_000).unwrap();
+
+        assert_ok!(CommissionPoolReward::pause_pool_reward(RuntimeOrigin::signed(OWNER), entity_id));
+
+        assert_noop!(
+            CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id),
+            pallet::Error::<Test>::PoolRewardIsPaused
+        );
+    });
+}
+
+#[test]
+fn f3_claim_works_after_resume() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 10, 100_000).unwrap();
+
+        assert_ok!(CommissionPoolReward::pause_pool_reward(RuntimeOrigin::signed(OWNER), entity_id));
+        assert_ok!(CommissionPoolReward::resume_pool_reward(RuntimeOrigin::signed(OWNER), entity_id));
+        assert_ok!(CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id));
+    });
+}
+
+// ====================================================================
+// F4: MinRoundDuration 最小轮次间隔校验
+// ====================================================================
+
+#[test]
+fn f4_set_config_rejects_duration_below_min() {
+    new_test_ext().execute_with(|| {
+        // MinRoundDuration = 10, so duration=9 should fail
+        let ratios: frame_support::BoundedVec<(u8, u16), ConstU32<10>> =
+            vec![(1u8, 5000u16), (2, 5000)].try_into().unwrap();
+        assert_noop!(
+            CommissionPoolReward::set_pool_reward_config(
+                RuntimeOrigin::signed(OWNER), 1, ratios, 9,
+            ),
+            pallet::Error::<Test>::RoundDurationTooShort
+        );
+    });
+}
+
+#[test]
+fn f4_set_config_accepts_duration_at_min() {
+    new_test_ext().execute_with(|| {
+        let ratios: frame_support::BoundedVec<(u8, u16), ConstU32<10>> =
+            vec![(1u8, 5000u16), (2, 5000)].try_into().unwrap();
+        assert_ok!(CommissionPoolReward::set_pool_reward_config(
+            RuntimeOrigin::signed(OWNER), 1, ratios, 10,
+        ));
+    });
+}
+
+#[test]
+fn f4_force_set_config_rejects_duration_below_min() {
+    new_test_ext().execute_with(|| {
+        let ratios: frame_support::BoundedVec<(u8, u16), ConstU32<10>> =
+            vec![(1u8, 5000u16), (2, 5000)].try_into().unwrap();
+        assert_noop!(
+            CommissionPoolReward::force_set_pool_reward_config(
+                RuntimeOrigin::root(), 1, ratios, 5,
+            ),
+            pallet::Error::<Test>::RoundDurationTooShort
+        );
+    });
+}
+
+// ====================================================================
+// F5: get_round_statistics 轮次领取进度查询
+// ====================================================================
+
+#[test]
+fn f5_get_round_statistics_none_without_round() {
+    new_test_ext().execute_with(|| {
+        assert!(CommissionPoolReward::get_round_statistics(1).is_none());
+    });
+}
+
+#[test]
+fn f5_get_round_statistics_shows_progress() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_member(entity_id, 20, 1);
+        set_level_count(entity_id, 1, 2);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 10, 100_000).unwrap();
+
+        // Trigger round creation via claim
+        assert_ok!(CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id));
+
+        let stats = CommissionPoolReward::get_round_statistics(entity_id).unwrap();
+        // Level 1: 2 members, 1 claimed
+        let level1 = stats.iter().find(|s| s.0 == 1).unwrap();
+        assert_eq!(level1.1, 2); // member_count
+        assert_eq!(level1.2, 1); // claimed_count
+        assert!(level1.3 > 0);  // per_member_reward > 0
+    });
+}
+
+// ====================================================================
+// F8: 全局紧急暂停 GlobalPoolRewardPaused
+// ====================================================================
+
+#[test]
+fn f8_global_pause_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(CommissionPoolReward::set_global_pool_reward_paused(RuntimeOrigin::root(), true));
+        assert!(pallet::GlobalPoolRewardPaused::<Test>::get());
+
+        System::assert_has_event(RuntimeEvent::CommissionPoolReward(
+            pallet::Event::GlobalPoolRewardPausedEvent
+        ));
+    });
+}
+
+#[test]
+fn f8_global_resume_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(CommissionPoolReward::set_global_pool_reward_paused(RuntimeOrigin::root(), true));
+        assert_ok!(CommissionPoolReward::set_global_pool_reward_paused(RuntimeOrigin::root(), false));
+        assert!(!pallet::GlobalPoolRewardPaused::<Test>::get());
+
+        System::assert_has_event(RuntimeEvent::CommissionPoolReward(
+            pallet::Event::GlobalPoolRewardResumedEvent
+        ));
+    });
+}
+
+#[test]
+fn f8_global_pause_rejects_already_paused() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(CommissionPoolReward::set_global_pool_reward_paused(RuntimeOrigin::root(), true));
+        assert_noop!(
+            CommissionPoolReward::set_global_pool_reward_paused(RuntimeOrigin::root(), true),
+            pallet::Error::<Test>::GlobalPaused
+        );
+    });
+}
+
+#[test]
+fn f8_global_resume_rejects_not_paused() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            CommissionPoolReward::set_global_pool_reward_paused(RuntimeOrigin::root(), false),
+            pallet::Error::<Test>::GlobalNotPaused
+        );
+    });
+}
+
+#[test]
+fn f8_global_pause_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            CommissionPoolReward::set_global_pool_reward_paused(RuntimeOrigin::signed(OWNER), true),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn f8_claim_blocked_when_global_paused() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 10, 100_000).unwrap();
+
+        assert_ok!(CommissionPoolReward::set_global_pool_reward_paused(RuntimeOrigin::root(), true));
+
+        assert_noop!(
+            CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id),
+            pallet::Error::<Test>::GlobalPaused
+        );
+    });
+}
+
+// ====================================================================
+// F9: 累计分配统计 TotalDistributed
+// ====================================================================
+
+#[test]
+fn f9_distribution_stats_updated_on_claim() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 10, 100_000).unwrap();
+
+        assert_ok!(CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id));
+
+        let stats = pallet::DistributionStatistics::<Test>::get(entity_id);
+        assert_eq!(stats.total_claims, 1);
+        assert!(stats.total_nex_distributed > 0);
+        assert_eq!(stats.total_token_distributed, 0);
+    });
+}
+
+#[test]
+fn f9_distribution_stats_accumulate() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_member(entity_id, 20, 2);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 10, 100_000).unwrap();
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 20, 100_000).unwrap();
+
+        assert_ok!(CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id));
+        assert_ok!(CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(20), entity_id));
+
+        let stats = pallet::DistributionStatistics::<Test>::get(entity_id);
+        assert_eq!(stats.total_claims, 2);
+        // level1: 50% of 10000 / 1 = 5000, level2: 50% of 10000 / 1 = 5000
+        assert_eq!(stats.total_nex_distributed, 10_000);
+    });
+}
+
+#[test]
+fn f9_rounds_completed_increments_on_new_round() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 10, 100_000).unwrap();
+
+        // First claim creates round 1
+        assert_ok!(CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id));
+
+        // Advance past round duration and claim again (creates round 2, archives round 1)
+        System::set_block_number(200);
+        set_pool_balance(entity_id, 10_000);
+        assert_ok!(CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id));
+
+        let stats = pallet::DistributionStatistics::<Test>::get(entity_id);
+        assert_eq!(stats.total_rounds_completed, 1); // round 1 completed
+        assert_eq!(stats.total_claims, 2);
+    });
+}
+
+// ====================================================================
+// F10: 轮次历史存储 RoundHistory
+// ====================================================================
+
+#[test]
+fn f10_round_history_archived_on_new_round() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 10, 100_000).unwrap();
+
+        // Create round 1 via claim
+        assert_ok!(CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id));
+
+        // Advance and create round 2
+        System::set_block_number(200);
+        set_pool_balance(entity_id, 10_000);
+        assert_ok!(CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id));
+
+        let history = pallet::RoundHistory::<Test>::get(entity_id);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].round_id, 1);
+        assert_eq!(history[0].start_block, 1);
+        assert_eq!(history[0].end_block, 200);
+    });
+}
+
+#[test]
+fn f10_round_history_evicts_oldest_when_full() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 10, 100_000).unwrap();
+
+        // MaxRoundHistory = 5, create 7 rounds to trigger 2 evictions
+        for i in 0..7u64 {
+            set_pool_balance(entity_id, 10_000);
+            System::set_block_number(1 + i * 200);
+            assert_ok!(CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id));
+        }
+
+        let history = pallet::RoundHistory::<Test>::get(entity_id);
+        assert_eq!(history.len(), 5); // capped at MaxRoundHistory
+        // 7 claims → 6 archives (rounds 1-6). Round 1 evicted → oldest is round 2
+        assert_eq!(history[0].round_id, 2);
+        assert_eq!(history[4].round_id, 6);
+    });
+}
+
+#[test]
+fn f10_round_archived_event_emitted() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 10, 100_000).unwrap();
+
+        assert_ok!(CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id));
+
+        System::set_block_number(200);
+        set_pool_balance(entity_id, 10_000);
+        assert_ok!(CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id));
+
+        System::assert_has_event(RuntimeEvent::CommissionPoolReward(
+            pallet::Event::RoundArchived { entity_id, round_id: 1 }
+        ));
+    });
+}
+
+// ====================================================================
+// F11: NewRoundDetails 事件信息扩展
+// ====================================================================
+
+#[test]
+fn f11_new_round_details_event_emitted() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 3);
+        set_level_count(entity_id, 2, 2);
+        set_pool_balance(entity_id, 10_000);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 10, 100_000).unwrap();
+
+        assert_ok!(CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id));
+
+        // Check that NewRoundDetails was emitted with correct level info
+        let events: Vec<_> = System::events().into_iter()
+            .filter_map(|e| {
+                if let RuntimeEvent::CommissionPoolReward(pallet::Event::NewRoundDetails {
+                    entity_id: eid, round_id, pool_snapshot, level_snapshots, ..
+                }) = e.event {
+                    Some((eid, round_id, pool_snapshot, level_snapshots))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(events.len(), 1);
+        let (eid, rid, pool, levels) = &events[0];
+        assert_eq!(*eid, entity_id);
+        assert_eq!(*rid, 1);
+        assert_eq!(*pool, 10_000);
+        assert_eq!(levels.len(), 2);
+        // level 1: 3 members, per_member = 50% * 10000 / 3 = 1666
+        let l1 = levels.iter().find(|l| l.0 == 1).unwrap();
+        assert_eq!(l1.1, 3); // member_count
+        assert_eq!(l1.2, 1666); // per_member_reward
+    });
+}
+
+// ====================================================================
+// F3/F8 interaction: per-entity pause + global pause
+// ====================================================================
+
+#[test]
+fn f3_f8_global_pause_overrides_entity_resume() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 10, 100_000).unwrap();
+
+        // Entity is not paused, but global is
+        assert_ok!(CommissionPoolReward::set_global_pool_reward_paused(RuntimeOrigin::root(), true));
+
+        assert_noop!(
+            CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id),
+            pallet::Error::<Test>::GlobalPaused
+        );
+    });
+}
+
+// ====================================================================
+// PlanWriter clear_config cleans new storage
+// ====================================================================
+
+#[test]
+fn plan_writer_clear_config_cleans_new_storage() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+
+        // Set some new storage items
+        pallet::PoolRewardPaused::<Test>::insert(entity_id, true);
+        pallet::DistributionStatistics::<Test>::insert(entity_id, pallet::DistributionStats {
+            total_nex_distributed: 1000u128,
+            total_token_distributed: 500u128,
+            total_rounds_completed: 5,
+            total_claims: 10,
+        });
+
+        // clear via PlanWriter
+        use pallet_commission_common::PoolRewardPlanWriter;
+        assert_ok!(CommissionPoolReward::clear_config(entity_id));
+
+        assert!(!pallet::PoolRewardPaused::<Test>::contains_key(entity_id));
+        assert_eq!(pallet::DistributionStatistics::<Test>::get(entity_id).total_claims, 0);
+        assert_eq!(pallet::RoundHistory::<Test>::get(entity_id).len(), 0);
+    });
+}
+
+// ====================================================================
+// R7 审计回归测试
+// ====================================================================
+
+/// M1-R7: clear_pool_reward_config 清除 PoolRewardPaused，防止 re-create 后残留
+#[test]
+fn m1_r7_clear_config_cleans_paused_state() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+
+        // Pause the entity
+        assert_ok!(CommissionPoolReward::pause_pool_reward(RuntimeOrigin::signed(OWNER), entity_id));
+        assert!(pallet::PoolRewardPaused::<Test>::get(entity_id));
+
+        // Clear config — should also clear paused state
+        assert_ok!(CommissionPoolReward::clear_pool_reward_config(RuntimeOrigin::signed(OWNER), entity_id));
+        assert!(!pallet::PoolRewardPaused::<Test>::contains_key(entity_id));
+
+        // Re-create config — should NOT be paused
+        let ratios: frame_support::BoundedVec<(u8, u16), ConstU32<10>> =
+            vec![(1u8, 5000u16), (2, 5000)].try_into().unwrap();
+        assert_ok!(CommissionPoolReward::set_pool_reward_config(
+            RuntimeOrigin::signed(OWNER), entity_id, ratios, 100,
+        ));
+        assert!(!pallet::PoolRewardPaused::<Test>::get(entity_id));
+    });
+}
+
+/// M1-R7: force_clear_pool_reward_config 清除 PoolRewardPaused
+#[test]
+fn m1_r7_force_clear_config_cleans_paused_state() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+
+        // Pause the entity
+        assert_ok!(CommissionPoolReward::pause_pool_reward(RuntimeOrigin::signed(OWNER), entity_id));
+        assert!(pallet::PoolRewardPaused::<Test>::get(entity_id));
+
+        // Force clear config — should also clear paused state
+        assert_ok!(CommissionPoolReward::force_clear_pool_reward_config(RuntimeOrigin::root(), entity_id));
+        assert!(!pallet::PoolRewardPaused::<Test>::contains_key(entity_id));
+    });
+}
+
+/// M1-R7: clear 后 re-create 不会继承旧的暂停状态，用户可正常 claim
+#[test]
+fn m1_r7_recreate_after_clear_allows_claim() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+
+        // Pause → clear → re-create
+        assert_ok!(CommissionPoolReward::pause_pool_reward(RuntimeOrigin::signed(OWNER), entity_id));
+        assert_ok!(CommissionPoolReward::clear_pool_reward_config(RuntimeOrigin::signed(OWNER), entity_id));
+
+        let ratios: frame_support::BoundedVec<(u8, u16), ConstU32<10>> =
+            vec![(1u8, 5000u16), (2, 5000)].try_into().unwrap();
+        assert_ok!(CommissionPoolReward::set_pool_reward_config(
+            RuntimeOrigin::signed(OWNER), entity_id, ratios, 100,
+        ));
+
+        // User should be able to claim (not blocked by orphaned pause)
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 10, 100_000).unwrap();
+
+        assert_ok!(CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id));
+    });
+}
+
+/// M2-R7: 新增 weight 函数值合理性检查
+#[test]
+fn m2_r7_new_weight_values_are_reasonable() {
+    use crate::weights::{WeightInfo, SubstrateWeight};
+
+    let w_pause = SubstrateWeight::pause_pool_reward();
+    assert!(w_pause.ref_time() >= 25_000_000, "pause_pool_reward ref_time too low");
+    assert!(w_pause.proof_size() >= 3_000, "pause_pool_reward proof_size too low");
+    // Should be lighter than set_pool_reward_config
+    let w_set = SubstrateWeight::set_pool_reward_config();
+    assert!(w_pause.ref_time() < w_set.ref_time(), "pause should be lighter than set_config");
+
+    let w_resume = SubstrateWeight::resume_pool_reward();
+    assert!(w_resume.ref_time() >= 25_000_000, "resume_pool_reward ref_time too low");
+    assert!(w_resume.ref_time() < w_set.ref_time(), "resume should be lighter than set_config");
+
+    let w_global = SubstrateWeight::set_global_pool_reward_paused();
+    assert!(w_global.ref_time() >= 10_000_000, "set_global_paused ref_time too low");
+    assert!(w_global.ref_time() < w_pause.ref_time(), "global_pause should be lighter than entity pause");
+}
+
+// ====================================================================
+// 审计 R8: M1 — 封禁/冻结会员不可领取池奖励
+// ====================================================================
+
+#[test]
+fn m1_r8_banned_member_cannot_claim_pool_reward() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 10, 100_000).unwrap();
+
+        // 封禁会员
+        ban_member(entity_id, 10);
+
+        assert_noop!(
+            CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id),
+            pallet::Error::<Test>::NotMember
+        );
+    });
+}
+
+#[test]
+fn m1_r8_frozen_member_cannot_claim_pool_reward() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+        pallet_balances::Pallet::<Test>::force_set_balance(RuntimeOrigin::root(), 10, 100_000).unwrap();
+
+        // 冻结会员
+        freeze_member(entity_id, 10);
+
+        assert_noop!(
+            CommissionPoolReward::claim_pool_reward(RuntimeOrigin::signed(10), entity_id),
+            pallet::Error::<Test>::NotMember
+        );
+    });
+}
+
+#[test]
+fn m1_r8_get_claimable_returns_zero_for_banned_member() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+
+        // 正常时可领取
+        let (nex, _) = pallet::Pallet::<Test>::get_claimable(entity_id, &10);
+        assert!(nex > 0, "should be claimable before ban");
+
+        // 封禁后返 0
+        ban_member(entity_id, 10);
+        let (nex, token) = pallet::Pallet::<Test>::get_claimable(entity_id, &10);
+        assert_eq!(nex, 0);
+        assert_eq!(token, 0);
+    });
+}
+
+#[test]
+fn m1_r8_get_claimable_returns_zero_for_frozen_member() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        set_member(entity_id, 10, 1);
+        set_level_count(entity_id, 1, 1);
+        set_level_count(entity_id, 2, 1);
+        set_pool_balance(entity_id, 10_000);
+
+        // 正常时可领取
+        let (nex, _) = pallet::Pallet::<Test>::get_claimable(entity_id, &10);
+        assert!(nex > 0, "should be claimable before freeze");
+
+        // 冻结后返 0
+        freeze_member(entity_id, 10);
+        let (nex, token) = pallet::Pallet::<Test>::get_claimable(entity_id, &10);
+        assert_eq!(nex, 0);
+        assert_eq!(token, 0);
     });
 }

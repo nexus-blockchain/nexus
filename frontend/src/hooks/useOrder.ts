@@ -24,21 +24,62 @@ export function useOrders(shopId: number | null) {
   return { orders, isLoading, refetch: fetch };
 }
 
+export function useUserOrders(account: string | null) {
+  const [orders, setOrders] = useState<OrderData[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const fetch = useCallback(async () => {
+    if (!account) return;
+    setIsLoading(true);
+    try {
+      const api = await getApi();
+      const entries = await (api.query as any).entityOrder.buyerOrders.entries(account);
+      const results = entries.map(([_key, val]: [unknown, { toJSON: () => OrderData }]) => val.toJSON());
+      setOrders(results);
+    } catch { /* ignore */ } finally { setIsLoading(false); }
+  }, [account]);
+
+  useEffect(() => { fetch(); }, [fetch]);
+  return { orders, isLoading, refetch: fetch };
+}
+
 export function useOrderActions() {
   const { submit, state, reset } = useTx();
   return {
-    placeOrder: (shopId: number, productId: number, quantity: number, shippingCid: string, useTokens: bigint | null, useShoppingBalance: bigint | null) =>
-      submit("entityOrder", "placeOrder", [shopId, productId, quantity, shippingCid, useTokens, useShoppingBalance]),
-    cancelOrder: (orderId: number) => submit("entityOrder", "cancelOrder", [orderId]),
+    placeOrder: (
+      shopId: number,
+      productId: number,
+      quantity: number,
+      paymentAsset: string,
+      shippingCid: string,
+      useTokens: bigint | null,
+      useShoppingBalance: bigint | null,
+    ) =>
+      submit("entityOrder", "placeOrder", [
+        shopId, productId, quantity,
+        paymentAsset, shippingCid,
+        useTokens, useShoppingBalance,
+      ]),
+    cancelOrder: (orderId: number) =>
+      submit("entityOrder", "cancelOrder", [orderId]),
+    payOrder: (orderId: number) =>
+      submit("entityOrder", "payOrder", [orderId]),
     shipOrder: (orderId: number, trackingCid: string) =>
       submit("entityOrder", "shipOrder", [orderId, trackingCid]),
-    confirmReceipt: (orderId: number) => submit("entityOrder", "confirmReceipt", [orderId]),
+    confirmReceipt: (orderId: number) =>
+      submit("entityOrder", "confirmReceipt", [orderId]),
     requestRefund: (orderId: number, reasonCid: string) =>
       submit("entityOrder", "requestRefund", [orderId, reasonCid]),
-    approveRefund: (orderId: number) => submit("entityOrder", "approveRefund", [orderId]),
-    startService: (orderId: number) => submit("entityOrder", "startService", [orderId]),
-    completeService: (orderId: number) => submit("entityOrder", "completeService", [orderId]),
-    confirmService: (orderId: number) => submit("entityOrder", "confirmService", [orderId]),
+    approveRefund: (orderId: number) =>
+      submit("entityOrder", "approveRefund", [orderId]),
+    disputeOrder: (orderId: number, reasonCid: string) =>
+      submit("entityOrder", "disputeOrder", [orderId, reasonCid]),
+    startService: (orderId: number) =>
+      submit("entityOrder", "startService", [orderId]),
+    completeService: (orderId: number) =>
+      submit("entityOrder", "completeService", [orderId]),
+    confirmService: (orderId: number) =>
+      submit("entityOrder", "confirmService", [orderId]),
     txState: state,
     resetTx: reset,
   };

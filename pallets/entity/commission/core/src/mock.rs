@@ -36,12 +36,19 @@ thread_local! {
     /// F1: Mock Admin 权限: (entity_id, account) → permission bitmask
     static ENTITY_ADMINS: RefCell<BTreeMap<(u64, u64), u32>> = RefCell::new(BTreeMap::new());
     static ENTITY_LOCKED: RefCell<std::collections::BTreeSet<u64>> = RefCell::new(std::collections::BTreeSet::new());
+    static ENTITY_INACTIVE: RefCell<std::collections::BTreeSet<u64>> = RefCell::new(std::collections::BTreeSet::new());
+    /// R8: Mock governance mode per entity (None=0, FullDAO=1)
+    static GOVERNANCE_MODES: RefCell<BTreeMap<u64, u8>> = RefCell::new(BTreeMap::new());
 }
 
 pub fn setup_default() {
     SHOP_ENTITY.with(|m| m.borrow_mut().insert(SHOP_ID, ENTITY_ID));
     ENTITY_OWNERS.with(|m| m.borrow_mut().insert(ENTITY_ID, SELLER));
     SHOP_OWNERS.with(|m| m.borrow_mut().insert(SHOP_ID, SELLER));
+}
+
+pub fn set_entity_owner(entity_id: u64, owner: u64) {
+    ENTITY_OWNERS.with(|m| m.borrow_mut().insert(entity_id, owner));
 }
 
 pub fn set_entity_referrer(entity_id: u64, referrer: u64) {
@@ -56,6 +63,15 @@ pub fn set_entity_locked(entity_id: u64) {
     ENTITY_LOCKED.with(|m| m.borrow_mut().insert(entity_id));
 }
 
+pub fn set_entity_inactive(entity_id: u64) {
+    ENTITY_INACTIVE.with(|m| m.borrow_mut().insert(entity_id));
+}
+
+/// R8: 设置 Mock governance mode (0=None, 1=FullDAO)
+pub fn set_governance_mode(entity_id: u64, mode: u8) {
+    GOVERNANCE_MODES.with(|m| m.borrow_mut().insert(entity_id, mode));
+}
+
 pub fn clear_thread_locals() {
     SHOP_ENTITY.with(|m| m.borrow_mut().clear());
     ENTITY_OWNERS.with(|m| m.borrow_mut().clear());
@@ -67,6 +83,8 @@ pub fn clear_thread_locals() {
     NON_MEMBERS.with(|m| m.borrow_mut().clear());
     ENTITY_ADMINS.with(|m| m.borrow_mut().clear());
     ENTITY_LOCKED.with(|m| m.borrow_mut().clear());
+    ENTITY_INACTIVE.with(|m| m.borrow_mut().clear());
+    GOVERNANCE_MODES.with(|m| m.borrow_mut().clear());
 }
 
 /// 设置 Mock Token 余额
@@ -111,7 +129,9 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
     fn entity_exists(entity_id: u64) -> bool {
         ENTITY_OWNERS.with(|m| m.borrow().contains_key(&entity_id))
     }
-    fn is_entity_active(_: u64) -> bool { true }
+    fn is_entity_active(entity_id: u64) -> bool {
+        !ENTITY_INACTIVE.with(|m| m.borrow().contains(&entity_id))
+    }
     fn entity_status(_: u64) -> Option<pallet_entity_common::EntityStatus> { None }
     fn entity_owner(entity_id: u64) -> Option<u64> {
         ENTITY_OWNERS.with(|m| m.borrow().get(&entity_id).copied())
@@ -171,6 +191,25 @@ impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
     fn update_custom_level(_: u64, _: u8, _: Option<&[u8]>, _: Option<u128>, _: Option<u16>, _: Option<u16>) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
     fn remove_custom_level(_: u64, _: u8) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
     fn custom_level_count(_: u64) -> u8 { 0 }
+}
+
+// R8: Mock GovernanceProvider
+pub struct MockGovernanceProvider;
+
+impl pallet_entity_common::GovernanceProvider for MockGovernanceProvider {
+    fn governance_mode(entity_id: u64) -> pallet_entity_common::GovernanceMode {
+        GOVERNANCE_MODES.with(|m| {
+            match m.borrow().get(&entity_id).copied().unwrap_or(0) {
+                1 => pallet_entity_common::GovernanceMode::FullDAO,
+                _ => pallet_entity_common::GovernanceMode::None,
+            }
+        })
+    }
+    fn has_active_proposals(_entity_id: u64) -> bool { false }
+    fn is_governance_locked(entity_id: u64) -> bool {
+        ENTITY_LOCKED.with(|m| m.borrow().contains(&entity_id))
+    }
+    fn is_governance_paused(_entity_id: u64) -> bool { false }
 }
 
 pub struct MockEntityReferrerProvider;
@@ -244,6 +283,7 @@ impl pallet_commission_core::Config for Test {
     type Currency = Balances;
     type ShopProvider = MockShopProvider;
     type EntityProvider = MockEntityProvider;
+    type GovernanceProvider = MockGovernanceProvider;
     type MemberProvider = MockMemberProvider;
     type ReferralPlugin = ();
     type MultiLevelPlugin = ();
@@ -270,6 +310,8 @@ impl pallet_commission_core::Config for Test {
     type TokenSingleLinePlugin = ();
     type TokenTeamPlugin = ();
     type TokenTransferProvider = MockTokenTransferProvider;
+    type MaxWithdrawalRecords = ConstU32<50>;
+    type MaxMemberOrderIds = ConstU32<100>;
 }
 
 // ============================================================================

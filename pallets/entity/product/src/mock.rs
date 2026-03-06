@@ -9,7 +9,7 @@ use pallet_entity_common::{
     EntityProvider, EntityStatus, ShopProvider, ShopType,
     PricingProvider,
 };
-use pallet_storage_service::{IpfsPinner, SubjectType, PinTier};
+use pallet_storage_service::{StoragePin, PinTier};
 use sp_runtime::DispatchError;
 use std::cell::RefCell;
 
@@ -241,17 +241,18 @@ pub fn add_entity_admin(entity_id: u64, account: u64, permissions: u32) {
     });
 }
 
-// ==================== Mock IpfsPinner ====================
+// ==================== Mock StoragePin ====================
 
-pub struct MockIpfsPinner;
+pub struct MockStoragePin;
 
-impl IpfsPinner<u64, u128> for MockIpfsPinner {
-    fn pin_cid_for_subject(
-        _caller: u64,
-        _subject_type: SubjectType,
+impl StoragePin<u64> for MockStoragePin {
+    fn pin(
+        _owner: u64,
+        _domain: &[u8],
         subject_id: u64,
+        _entity_id: Option<u64>,
         cid: Vec<u8>,
-        _tier: Option<PinTier>,
+        _tier: PinTier,
     ) -> Result<(), DispatchError> {
         if PIN_SHOULD_FAIL.with(|f| *f.borrow()) {
             return Err(DispatchError::Other("MockPinFailed"));
@@ -260,10 +261,7 @@ impl IpfsPinner<u64, u128> for MockIpfsPinner {
         Ok(())
     }
 
-    fn unpin_cid(
-        _caller: u64,
-        cid: Vec<u8>,
-    ) -> Result<(), DispatchError> {
+    fn unpin(_owner: u64, cid: Vec<u8>) -> Result<(), DispatchError> {
         if PIN_SHOULD_FAIL.with(|f| *f.borrow()) {
             return Err(DispatchError::Other("MockUnpinFailed"));
         }
@@ -289,7 +287,7 @@ impl pallet_entity_product::Config for Test {
     type ProductDepositUsdt = ConstU64<1_000_000>;       // 1 USDT
     type MinProductDepositCos = ConstU128<100>;           // 最小 100
     type MaxProductDepositCos = ConstU128<10_000_000_000_000>; // 最大 10_000 UNIT
-    type IpfsPinner = MockIpfsPinner;
+    type StoragePin = MockStoragePin;
     type MaxBatchSize = ConstU32<20>;
     type MaxReasonLength = ConstU32<256>;
 }

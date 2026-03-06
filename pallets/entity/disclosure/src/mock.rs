@@ -64,6 +64,10 @@ impl EntityProvider<u64> for MockEntityProvider {
         entity_id == ENTITY_ID || entity_id == ENTITY_ID_2
     }
     fn is_entity_active(entity_id: u64) -> bool {
+        let override_status = ENTITY_STATUSES.with(|s| s.borrow().get(&entity_id).cloned());
+        if let Some(status) = override_status {
+            return status == EntityStatus::Active;
+        }
         entity_id == ENTITY_ID || entity_id == ENTITY_ID_2
     }
     fn entity_status(entity_id: u64) -> Option<EntityStatus> {
@@ -99,6 +103,10 @@ impl EntityProvider<u64> for MockEntityProvider {
 
 parameter_types! {
     pub const MaxBlackoutDuration: u64 = 200; // 测试用较小值
+    pub const InsiderCooldownPeriod: u64 = 50; // F4: 测试用冷静期
+    pub const MajorHolderThreshold: u32 = 500; // F5: 5% (basis points)
+    pub const ViolationThreshold: u32 = 3;     // F6: 3次违规标记高风险
+    pub const EmergencyBlackoutMultiplier: u32 = 3; // v0.6: 紧急披露黑窗口 3 倍
 }
 
 impl pallet_entity_disclosure::Config for Test {
@@ -114,9 +122,21 @@ impl pallet_entity_disclosure::Config for Test {
     type MaxTitleLength = ConstU32<128>;
     type MaxPinnedAnnouncements = ConstU32<3>;
     type MaxInsiderRoleHistory = ConstU32<10>;
+    type InsiderCooldownPeriod = InsiderCooldownPeriod;
+    type MajorHolderThreshold = MajorHolderThreshold;
+    type ViolationThreshold = ViolationThreshold;
+    type MaxApprovers = ConstU32<5>;
+    type MaxInsiderTransactionHistory = ConstU32<20>;
+    type EmergencyBlackoutMultiplier = EmergencyBlackoutMultiplier;
+    type OnDisclosureViolation = ();
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
+    // L1-audit: 清理 thread-local 状态，防止测试间泄漏
+    ADMINS.with(|a| a.borrow_mut().clear());
+    ENTITY_STATUSES.with(|s| s.borrow_mut().clear());
+    ENTITY_LOCKED.with(|l| l.borrow_mut().clear());
+
     let t = frame_system::GenesisConfig::<Test>::default()
         .build_storage()
         .unwrap();

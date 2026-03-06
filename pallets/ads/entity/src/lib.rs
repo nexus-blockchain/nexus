@@ -90,6 +90,8 @@ pub struct AdPlacementInfo<T: Config> {
 	pub level: PlacementLevel,
 	/// 每日展示量上限 (0 = 无限制)
 	pub daily_impression_cap: u32,
+	/// 每日点击量上限 (0 = 无限制)
+	pub daily_click_cap: u32,
 	/// 已注册者 (Entity owner 或 Shop manager)
 	pub registered_by: T::AccountId,
 	/// 注册区块号
@@ -192,6 +194,21 @@ pub mod pallet {
 	pub type ImpressionResetBlock<T: Config> =
 		StorageMap<_, Blake2_128Concat, PlacementId, BlockNumberFor<T>, ValueQuery>;
 
+	/// 广告位今日点击量计数 (CPC)
+	#[pallet::storage]
+	pub type DailyClicks<T: Config> =
+		StorageMap<_, Blake2_128Concat, PlacementId, u32, ValueQuery>;
+
+	/// 广告位累计点击量 (CPC)
+	#[pallet::storage]
+	pub type TotalClicks<T: Config> =
+		StorageMap<_, Blake2_128Concat, PlacementId, u64, ValueQuery>;
+
+	/// 点击量计数器最后重置区块 (用于每日重置)
+	#[pallet::storage]
+	pub type ClickResetBlock<T: Config> =
+		StorageMap<_, Blake2_128Concat, PlacementId, BlockNumberFor<T>, ValueQuery>;
+
 	// ========================================================================
 	// Events
 	// ========================================================================
@@ -234,6 +251,11 @@ pub mod pallet {
 		/// Entity 禁令解除
 		EntityUnbanned {
 			entity_id: u64,
+		},
+		/// 每日点击量上限已更新
+		ClickCapUpdated {
+			placement_id: PlacementId,
+			daily_cap: u32,
 		},
 	}
 
@@ -279,6 +301,10 @@ pub mod pallet {
 		PlacementStatusUnchanged,
 		/// 每日展示量上限未变更
 		ImpressionCapUnchanged,
+		/// 每日点击量已达上限
+		DailyClickCapReached,
+		/// 每日点击量上限未变更
+		ClickCapUnchanged,
 		/// 实体已被全局锁定
 		EntityLocked,
 	}
@@ -334,6 +360,7 @@ pub mod pallet {
 				shop_id: 0,
 				level: PlacementLevel::Entity,
 				daily_impression_cap: T::DefaultDailyImpressionCap::get(),
+				daily_click_cap: 0,
 				registered_by: who,
 				registered_at: frame_system::Pallet::<T>::block_number(),
 				active: true,
@@ -404,6 +431,7 @@ pub mod pallet {
 				shop_id,
 				level: PlacementLevel::Shop,
 				daily_impression_cap: T::DefaultDailyImpressionCap::get(),
+				daily_click_cap: 0,
 				registered_by: who,
 				registered_at: frame_system::Pallet::<T>::block_number(),
 				active: true,
@@ -456,6 +484,9 @@ pub mod pallet {
 			DailyImpressions::<T>::remove(&placement_id);
 			TotalImpressions::<T>::remove(&placement_id);
 			ImpressionResetBlock::<T>::remove(&placement_id);
+			DailyClicks::<T>::remove(&placement_id);
+			TotalClicks::<T>::remove(&placement_id);
+			ClickResetBlock::<T>::remove(&placement_id);
 
 			EntityPlacementIds::<T>::mutate(info.entity_id, |ids| {
 				ids.retain(|id| id != &placement_id);
@@ -593,6 +624,38 @@ pub mod pallet {
 			Self::deposit_event(Event::EntityUnbanned { entity_id });
 			Ok(())
 		}
+
+		/// 设置广告位每日点击量上限 (CPC)
+		#[pallet::call_index(8)]
+		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		pub fn set_click_cap(
+			origin: OriginFor<T>,
+			placement_id: PlacementId,
+			daily_cap: u32,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			RegisteredPlacements::<T>::try_mutate(&placement_id, |maybe_info| {
+				let info = maybe_info.as_mut().ok_or(Error::<T>::PlacementNotRegistered)?;
+				ensure!(!T::EntityProvider::is_entity_locked(info.entity_id), Error::<T>::EntityLocked);
+				ensure!(
+					T::EntityProvider::entity_owner(info.entity_id) == Some(who.clone()) ||
+					T::EntityProvider::is_entity_admin(info.entity_id, &who, pallet_entity_common::AdminPermission::ADS_MANAGE) ||
+					info.registered_by == who,
+					Error::<T>::NotEntityAdmin
+				);
+
+				ensure!(info.daily_click_cap != daily_cap, Error::<T>::ClickCapUnchanged);
+
+				info.daily_click_cap = daily_cap;
+
+				Self::deposit_event(Event::ClickCapUpdated {
+					placement_id,
+					daily_cap,
+				});
+				Ok(())
+			})
+		}
 	}
 
 	// ========================================================================
@@ -633,6 +696,18 @@ pub mod pallet {
 		/// 查找 PlacementId 对应的 entity_id
 		pub fn placement_entity_id(placement_id: &PlacementId) -> Option<u64> {
 			RegisteredPlacements::<T>::get(placement_id).map(|info| info.entity_id)
+		}
+
+		/// 检查并重置每日点击量计数器 (周期由 Config::BlocksPerDay 定义)
+		pub fn check_and_reset_daily_clicks(placement_id: &PlacementId) {
+			let now = frame_system::Pallet::<T>::block_number();
+			let last_reset = ClickResetBlock::<T>::get(placement_id);
+			let day_blocks: BlockNumberFor<T> = T::BlocksPerDay::get().into();
+
+			if now.saturating_sub(last_reset) >= day_blocks {
+				DailyClicks::<T>::insert(placement_id, 0u32);
+				ClickResetBlock::<T>::insert(placement_id, now);
+			}
 		}
 	}
 
@@ -685,6 +760,62 @@ pub mod pallet {
 				*c = c.saturating_add(effective);
 			});
 			TotalImpressions::<T>::mutate(placement_id, |c| {
+				*c = c.saturating_add(effective as u64);
+			});
+
+			Ok(effective)
+		}
+	}
+
+	// ========================================================================
+	// ClickVerifier 实现 — Entity 点击量验证 (CPC)
+	// ========================================================================
+
+	impl<T: Config> ClickVerifier<T::AccountId> for Pallet<T> {
+		fn verify_and_cap_clicks(
+			who: &T::AccountId,
+			placement_id: &PlacementId,
+			click_count: u32,
+			_verified_clicks: u32,
+		) -> Result<u32, sp_runtime::DispatchError> {
+			// 1. 广告位必须已注册且激活
+			let info = RegisteredPlacements::<T>::get(placement_id)
+				.ok_or(Error::<T>::PlacementNotRegistered)?;
+			ensure!(info.active, Error::<T>::PlacementNotActive);
+
+			// 2. Entity 必须活跃且未被禁止
+			ensure!(
+				T::EntityProvider::is_entity_active(info.entity_id),
+				Error::<T>::EntityNotActive
+			);
+			ensure!(!BannedEntities::<T>::get(info.entity_id), Error::<T>::EntityBanned);
+
+			// 3. 调用者权限: Entity owner/admin 或 shop manager
+			let is_authorized = T::EntityProvider::entity_owner(info.entity_id) == Some(who.clone())
+				|| T::EntityProvider::is_entity_admin(info.entity_id, who, pallet_entity_common::AdminPermission::ADS_MANAGE)
+				|| (info.shop_id > 0 && T::ShopProvider::is_shop_manager(info.shop_id, who));
+			ensure!(is_authorized, Error::<T>::NotEntityAdmin);
+
+			// 4. 每日点击量上限检查与重置
+			Self::check_and_reset_daily_clicks(placement_id);
+
+			let current = DailyClicks::<T>::get(placement_id);
+			let cap = info.daily_click_cap;
+			let effective = if cap > 0 {
+				let remaining = cap.saturating_sub(current);
+				if remaining == 0 {
+					return Err(Error::<T>::DailyClickCapReached.into());
+				}
+				core::cmp::min(click_count, remaining)
+			} else {
+				click_count
+			};
+
+			// 5. 更新点击量计数
+			DailyClicks::<T>::mutate(placement_id, |c| {
+				*c = c.saturating_add(effective);
+			});
+			TotalClicks::<T>::mutate(placement_id, |c| {
 				*c = c.saturating_add(effective as u64);
 			});
 

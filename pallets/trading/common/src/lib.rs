@@ -23,6 +23,10 @@
 //! - v0.2.0 (2026-01-18): 添加统一的 MakerCreditInterface trait
 //! - v0.3.0 (2026-01-18): 添加时间转换工具函数
 //! - v0.4.0 (2026-01-18): 统一公共类型和 Trait 定义
+//! - v0.5.0 (2026-02-08): report_swap_order → report_p2p_trade; define_balance_of! 宏; M7/M9 精度修复
+//! - v0.6.0 (2026-02-23): PriceOracle + TwapWindow; 共享枚举 + 多档判定函数
+//! - v0.7.0 (2026-02-26): ExchangeRateProvider（带置信度的统一兑换比率接口）
+//! - v0.8.0 (2026-03-10): 深度审计 — M1 cos→nex 重命名; M2 mask panic 防护; M3 TwapWindow SCALE derives
 
 pub mod types;
 pub mod traits;
@@ -66,4 +70,7 @@ pub use time::{
     estimate_remaining_seconds,
     format_duration,
     DEFAULT_BLOCK_TIME_SECS,
+    BLOCKS_PER_MINUTE,
+    BLOCKS_PER_HOUR,
+    BLOCKS_PER_DAY,
 };

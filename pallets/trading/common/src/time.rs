@@ -300,4 +300,36 @@ mod tests {
         assert_eq!(BLOCKS_PER_HOUR, 600);
         assert_eq!(BLOCKS_PER_DAY, 14400);
     }
+
+    // ===== R2 回归测试: 边界值 =====
+
+    #[test]
+    fn r2_seconds_to_blocks_max_u64_no_overflow() {
+        // saturating_add 防止溢出
+        let result = seconds_to_blocks(u64::MAX);
+        assert_eq!(result, u64::MAX / DEFAULT_BLOCK_TIME_SECS);
+    }
+
+    #[test]
+    fn r2_blocks_to_seconds_max_u64_saturates() {
+        // u64::MAX * 6 会溢出，saturating_mul 返回 u64::MAX
+        let result = blocks_to_seconds(u64::MAX);
+        assert_eq!(result, u64::MAX);
+    }
+
+    #[test]
+    fn r2_estimate_timestamp_underflow_saturates() {
+        // 目标在远古过去，current_timestamp 很小 → saturating_sub 保护
+        let result = estimate_timestamp_from_block(0, 1_000_000, 100);
+        assert_eq!(result, 0); // 不会 underflow 到 u64::MAX
+    }
+
+    #[test]
+    fn r2_format_duration_max_u64() {
+        // 极大值不应 panic
+        let result = format_duration(u64::MAX);
+        assert!(!result.is_empty());
+        // 应包含 "d"（天数格式）
+        assert!(result.windows(1).any(|w| w == b"d"));
+    }
 }

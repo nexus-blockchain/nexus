@@ -31,7 +31,7 @@ mod benchmarks {
         let size_bytes: u64 = 1024;
 
         #[extrinsic_call]
-        _(RawOrigin::Signed(caller), subject_id, cid, size_bytes, 0, None);
+        _(RawOrigin::Signed(caller), subject_id, cid, size_bytes, None);
     }
 
     #[benchmark]

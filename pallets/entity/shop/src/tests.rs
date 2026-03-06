@@ -3413,3 +3413,324 @@ fn integrity_test_passes() {
         <Shop as Hooks<u64>>::integrity_test();
     });
 }
+
+// ============================================================================
+// Audit Round 5: Regression Tests
+// ============================================================================
+
+/// H1: redeem_points 必须检查佣金保护资金
+/// （mock CommissionFundGuard = ()，protected_funds 返回 0，
+///   因此这里验证正常兑换仍可工作，佣金保护逻辑由 H1 代码路径保证）
+#[test]
+fn h1_redeem_points_works_with_commission_guard() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+        assert_ok!(Shop::enable_points(
+            RuntimeOrigin::signed(1), 1, name, symbol, 500, 1000, true,
+        ));
+
+        // Issue points to account 4
+        assert_ok!(Shop::manager_issue_points(RuntimeOrigin::signed(1), 1, 4, 1000));
+
+        let shop_account = Shop::shop_account_id(1);
+        let shop_bal_before = Balances::free_balance(shop_account);
+        let user_bal_before = Balances::free_balance(4);
+
+        // exchange_rate = 1000 bps = 10%, redeem 100 points → payout = 10
+        assert_ok!(Shop::redeem_points(RuntimeOrigin::signed(4), 1, 100));
+
+        assert_eq!(Balances::free_balance(shop_account), shop_bal_before - 10);
+        assert_eq!(Balances::free_balance(4), user_bal_before + 10);
+        assert_eq!(Shop::shop_points_balance(1, 4), 900);
+    });
+}
+
+/// H1: redeem_points 在运营资金不足时失败（佣金保护路径的间接测试）
+#[test]
+fn h1_redeem_points_fails_insufficient_operating_fund() {
+    new_test_ext().execute_with(|| {
+        // 仅充入极少运营资金
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 100,
+        ));
+
+        let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+        assert_ok!(Shop::enable_points(
+            RuntimeOrigin::signed(1), 1, name, symbol, 500, 5000, true,
+        ));
+
+        // Issue large points to account 4
+        assert_ok!(Shop::manager_issue_points(RuntimeOrigin::signed(1), 1, 4, 10000));
+
+        // exchange_rate = 5000 bps = 50%, redeem 10000 points → payout = 5000
+        // shop only has 100 balance
+        assert_noop!(
+            Shop::redeem_points(RuntimeOrigin::signed(4), 1, 10000),
+            Error::<Test>::InsufficientOperatingFund
+        );
+    });
+}
+
+/// M1: close_shop 拒绝 Banned 状态 — 防止 owner 绕过封禁
+#[test]
+fn m1_close_shop_rejects_banned() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        // Root ban the shop
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+
+        // Owner tries to close — should be rejected
+        assert_noop!(
+            Shop::close_shop(RuntimeOrigin::signed(1), 1),
+            Error::<Test>::ShopBanned
+        );
+    });
+}
+
+/// M2: transfer_points 延长接收方积分有效期
+#[test]
+fn m2_transfer_points_extends_receiver_expiry() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+        assert_ok!(Shop::enable_points(
+            RuntimeOrigin::signed(1), 1, name, symbol, 500, 1000, true,
+        ));
+
+        // Set TTL = 100 blocks
+        assert_ok!(Shop::set_points_ttl(RuntimeOrigin::signed(1), 1, 100));
+
+        // Issue points to account 2 at block 1 → expiry = 101
+        assert_ok!(Shop::manager_issue_points(RuntimeOrigin::signed(1), 1, 2, 500));
+        assert_eq!(crate::ShopPointsExpiresAt::<Test>::get(1, 2), Some(101));
+
+        // Transfer to account 3 at block 50
+        System::set_block_number(50);
+        assert_ok!(Shop::transfer_points(RuntimeOrigin::signed(2), 1, 3, 200));
+
+        // M2: Receiver (account 3) should have expiry set = 50 + 100 = 150
+        assert_eq!(crate::ShopPointsExpiresAt::<Test>::get(1, 3), Some(150));
+    });
+}
+
+/// M2: 无 TTL 时 transfer_points 不设置过期时间
+#[test]
+fn m2_transfer_points_no_ttl_no_expiry() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+        assert_ok!(Shop::enable_points(
+            RuntimeOrigin::signed(1), 1, name, symbol, 500, 1000, true,
+        ));
+
+        // No TTL set — issue points to account 2
+        assert_ok!(Shop::manager_issue_points(RuntimeOrigin::signed(1), 1, 2, 500));
+
+        // Transfer to account 3
+        assert_ok!(Shop::transfer_points(RuntimeOrigin::signed(2), 1, 3, 200));
+
+        // No expiry should be set for either
+        assert_eq!(crate::ShopPointsExpiresAt::<Test>::get(1, 3), None);
+    });
+}
+
+/// M3: transfer_shop 拒绝目标 Entity 已达 Shop 数量上限
+#[test]
+fn m3_transfer_shop_rejects_target_entity_at_limit() {
+    new_test_ext().execute_with(|| {
+        // Create MaxShopsPerEntity(5) shops for entity 2
+        for i in 0..5 {
+            assert_ok!(Shop::create_shop(
+                RuntimeOrigin::signed(2), 2,
+                bounded_name(format!("Shop {}", i).as_bytes()),
+                ShopType::OnlineStore, 100,
+            ));
+        }
+
+        // Create a shop for entity 1
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Transfer Shop"), ShopType::OnlineStore, 100,
+        ));
+        let transfer_shop_id = 6; // shops 1-5 for entity 2, 6 for entity 1
+
+        // Transfer entity 1's shop to entity 2 — should fail (entity 2 at limit)
+        assert_noop!(
+            Shop::transfer_shop(RuntimeOrigin::signed(1), transfer_shop_id, 2),
+            Error::<Test>::ShopLimitReached
+        );
+    });
+}
+
+/// M3: transfer_shop 在目标 Entity 未达上限时成功
+#[test]
+fn m3_transfer_shop_works_when_target_has_capacity() {
+    new_test_ext().execute_with(|| {
+        // Entity 2 has 1 shop
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(2), 2,
+            bounded_name(b"Entity2 Shop"), ShopType::OnlineStore, 100,
+        ));
+
+        // Entity 1 has 1 shop
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Transfer Shop"), ShopType::OnlineStore, 100,
+        ));
+
+        // Transfer entity 1's shop to entity 2 — should succeed
+        assert_ok!(Shop::transfer_shop(RuntimeOrigin::signed(1), 2, 2));
+        assert_eq!(Shop::shops(2).unwrap().entity_id, 2);
+    });
+}
+
+/// M4: banned shop 不可转移积分
+#[test]
+fn m4_transfer_points_rejects_banned() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+        assert_ok!(Shop::enable_points(
+            RuntimeOrigin::signed(1), 1, name, symbol, 500, 1000, true,
+        ));
+        assert_ok!(Shop::manager_issue_points(RuntimeOrigin::signed(1), 1, 2, 500));
+
+        // Ban the shop
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+
+        assert_noop!(
+            Shop::transfer_points(RuntimeOrigin::signed(2), 1, 3, 100),
+            Error::<Test>::ShopBanned
+        );
+    });
+}
+
+/// M4: banned shop 不可兑换积分
+#[test]
+fn m4_redeem_points_rejects_banned() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+        assert_ok!(Shop::enable_points(
+            RuntimeOrigin::signed(1), 1, name, symbol, 500, 1000, true,
+        ));
+        assert_ok!(Shop::manager_issue_points(RuntimeOrigin::signed(1), 1, 4, 1000));
+
+        // Ban the shop
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+
+        assert_noop!(
+            Shop::redeem_points(RuntimeOrigin::signed(4), 1, 100),
+            Error::<Test>::ShopBanned
+        );
+    });
+}
+
+/// M4: banned shop 不可 manager_burn_points
+#[test]
+fn m4_manager_burn_points_rejects_banned() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+        assert_ok!(Shop::enable_points(
+            RuntimeOrigin::signed(1), 1, name, symbol, 500, 1000, true,
+        ));
+        assert_ok!(Shop::manager_issue_points(RuntimeOrigin::signed(1), 1, 4, 500));
+
+        // Ban the shop
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+
+        assert_noop!(
+            Shop::manager_burn_points(RuntimeOrigin::signed(1), 1, 4, 100),
+            Error::<Test>::ShopBanned
+        );
+    });
+}
+
+/// M4: banned shop 不可通过 issue_points helper 发放积分
+#[test]
+fn m4_issue_points_helper_rejects_banned() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+        assert_ok!(Shop::enable_points(
+            RuntimeOrigin::signed(1), 1, name, symbol, 500, 1000, true,
+        ));
+
+        // Ban the shop
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+
+        assert_noop!(
+            Shop::issue_points(1, &4, 100),
+            Error::<Test>::ShopBanned
+        );
+    });
+}
+
+/// M4: banned shop 不可通过 burn_points helper 销毁积分
+#[test]
+fn m4_burn_points_helper_rejects_banned() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+        assert_ok!(Shop::enable_points(
+            RuntimeOrigin::signed(1), 1, name, symbol, 500, 1000, true,
+        ));
+        assert_ok!(Shop::issue_points(1, &4, 500));
+
+        // Ban the shop
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+
+        assert_noop!(
+            Shop::burn_points(1, &4, 100),
+            Error::<Test>::ShopBanned
+        );
+    });
+}

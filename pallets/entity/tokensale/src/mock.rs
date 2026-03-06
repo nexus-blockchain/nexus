@@ -151,6 +151,8 @@ impl pallet_entity_common::EntityTokenProvider<u64, u128> for MockTokenProvider 
     }
     fn get_token_type(_: u64) -> pallet_entity_common::TokenType { Default::default() }
     fn total_supply(_: u64) -> u128 { TOKEN_SUPPLY }
+    fn governance_burn(_: u64, _: u128) -> Result<(), DispatchError> { Ok(()) }
+    fn available_balance(_: u64, _: &u64) -> u128 { 0 }
 }
 
 // ==================== Mock KycChecker ====================
@@ -168,9 +170,35 @@ impl MockKycChecker {
 }
 
 impl pallet_entity_tokensale::KycChecker<u64> for MockKycChecker {
-    fn kyc_level(account: &u64) -> u8 {
+    fn kyc_level(_entity_id: u64, account: &u64) -> u8 {
         KYC_LEVELS.with(|k| *k.borrow().get(account).unwrap_or(&0))
     }
+}
+
+// ==================== Mock DisclosureProvider (F4) ====================
+
+thread_local! {
+    static INSIDER_BLOCKED: RefCell<alloc::collections::BTreeSet<(u64, u64)>> = RefCell::new(alloc::collections::BTreeSet::new());
+}
+
+pub struct MockDisclosureProvider;
+
+impl MockDisclosureProvider {
+    pub fn block_insider(entity_id: u64, account: u64) {
+        INSIDER_BLOCKED.with(|s| s.borrow_mut().insert((entity_id, account)));
+    }
+}
+
+impl pallet_entity_common::DisclosureProvider<u64> for MockDisclosureProvider {
+    fn is_in_blackout(_entity_id: u64) -> bool { false }
+    fn is_insider(_entity_id: u64, _account: &u64) -> bool { false }
+    fn can_insider_trade(entity_id: u64, account: &u64) -> bool {
+        !INSIDER_BLOCKED.with(|s| s.borrow().contains(&(entity_id, *account)))
+    }
+    fn get_disclosure_level(_entity_id: u64) -> pallet_entity_common::DisclosureLevel {
+        pallet_entity_common::DisclosureLevel::Basic
+    }
+    fn is_disclosure_overdue(_entity_id: u64) -> bool { false }
 }
 
 // ==================== Pallet Config ====================
@@ -190,12 +218,14 @@ impl pallet_entity_tokensale::Config for Test {
     type EntityProvider = MockEntityProvider;
     type TokenProvider = MockTokenProvider;
     type KycChecker = MockKycChecker;
+    type DisclosureProvider = MockDisclosureProvider;
     type MaxPaymentOptions = ConstU32<5>;
     type MaxWhitelistSize = ConstU32<100>;
     type MaxRoundsHistory = ConstU32<50>;
     type MaxSubscriptionsPerRound = ConstU32<1000>;
     type MaxActiveRounds = ConstU32<10>;
     type RefundGracePeriod = RefundGracePeriod;
+    type MaxBatchRefund = ConstU32<50>;
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
@@ -217,6 +247,13 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 
     let mut ext = sp_io::TestExternalities::new(t);
     ext.execute_with(|| {
+        // M1-R6: 清理 thread-local 状态，防止测试间污染
+        TOKEN_BALANCES.with(|b| b.borrow_mut().clear());
+        TOKEN_RESERVED.with(|r| r.borrow_mut().clear());
+        ENTITY_LOCKED.with(|l| l.borrow_mut().clear());
+        KYC_LEVELS.with(|k| k.borrow_mut().clear());
+        INSIDER_BLOCKED.with(|s| s.borrow_mut().clear());
+
         // 设置 Entity 代币余额
         MockTokenProvider::set_balance(ENTITY_ID, ENTITY_ACCOUNT, TOKEN_SUPPLY);
     });

@@ -308,13 +308,14 @@ fn cancel_proposal_by_proposer() {
 }
 
 #[test]
-fn cancel_proposal_by_owner() {
+fn cancel_proposal_by_owner_as_proposer() {
+    // C4: FullDAO 模式下 Owner 只能取消自己创建的提案
     ExtBuilder::build().execute_with(|| {
         assert_ok!(EntityGovernance::create_proposal(
-            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            RuntimeOrigin::signed(OWNER), SHOP_ID,
             proposal_type_general(), b"Test".to_vec(), None,
         ));
-        // Shop owner can cancel
+        // Owner 作为提案者可以取消
         assert_ok!(EntityGovernance::cancel_proposal(RuntimeOrigin::signed(OWNER), 0));
 
         let proposal = Proposals::<Test>::get(0).unwrap();
@@ -477,14 +478,19 @@ fn create_proposal_fails_governance_mode_none() {
 }
 
 #[test]
-fn create_proposal_works_no_config_backward_compat() {
+fn c1_no_config_blocks_proposal_creation() {
+    // C1-audit: 无治理配置时默认 None 模式，禁止创建提案
     ExtBuilder::build().execute_with(|| {
-        // 无治理配置时应允许创建提案（向后兼容）
+        // 移除 ExtBuilder 默认设置的 FullDAO 配置
+        GovernanceConfigs::<Test>::remove(1u64);
         assert!(GovernanceConfigs::<Test>::get(1).is_none());
-        assert_ok!(EntityGovernance::create_proposal(
-            RuntimeOrigin::signed(ALICE), SHOP_ID,
-            proposal_type_general(), b"Test".to_vec(), None,
-        ));
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                proposal_type_general(), b"Test".to_vec(), None,
+            ),
+            Error::<Test>::GovernanceModeNotAllowed
+        );
     });
 }
 
@@ -1512,7 +1518,7 @@ fn h2_already_expired_proposal_rejects_second_execute() {
 
 #[test]
 fn h3_vote_records_cleaned_after_finalize() {
-    // H3: finalize_voting (通过 remove_from_active) 应清理 VoteRecords
+    // H3+F9: VoteRecords preserved after finalize, cleaned on cleanup_proposal
     ExtBuilder::build().execute_with(|| {
         assert_ok!(EntityGovernance::create_proposal(
             RuntimeOrigin::signed(ALICE), SHOP_ID,
@@ -1528,7 +1534,19 @@ fn h3_vote_records_cleaned_after_finalize() {
         advance_blocks(101);
         assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
 
-        // finalize 后 VoteRecords 应被清理
+        // F9: finalize 后 VoteRecords 仍保留（延迟清理）
+        assert!(VoteRecords::<Test>::get(0, BOB).is_some());
+        assert!(VoteRecords::<Test>::get(0, CHARLIE).is_some());
+
+        // 如果通过则执行
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        if proposal.status == ProposalStatus::Passed {
+            advance_blocks(51);
+            assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
+        }
+
+        // cleanup 后 VoteRecords 才被清理
+        assert_ok!(EntityGovernance::cleanup_proposal(RuntimeOrigin::signed(ALICE), 0));
         assert!(VoteRecords::<Test>::get(0, BOB).is_none());
         assert!(VoteRecords::<Test>::get(0, CHARLIE).is_none());
     });
@@ -1536,7 +1554,7 @@ fn h3_vote_records_cleaned_after_finalize() {
 
 #[test]
 fn h3_vote_records_cleaned_after_cancel() {
-    // H3: cancel_proposal (通过 remove_from_active) 也应清理 VoteRecords
+    // H3+F9: VoteRecords preserved after cancel, cleaned on cleanup_proposal
     ExtBuilder::build().execute_with(|| {
         assert_ok!(EntityGovernance::create_proposal(
             RuntimeOrigin::signed(ALICE), SHOP_ID,
@@ -1550,14 +1568,18 @@ fn h3_vote_records_cleaned_after_cancel() {
         // 提案者取消
         assert_ok!(EntityGovernance::cancel_proposal(RuntimeOrigin::signed(ALICE), 0));
 
-        // 取消后 VoteRecords 应被清理
+        // F9: 取消后 VoteRecords 仍保留
+        assert!(VoteRecords::<Test>::get(0, BOB).is_some());
+
+        // cleanup 后才清理
+        assert_ok!(EntityGovernance::cleanup_proposal(RuntimeOrigin::signed(ALICE), 0));
         assert!(VoteRecords::<Test>::get(0, BOB).is_none());
     });
 }
 
 #[test]
 fn h3_vote_records_cleaned_after_veto() {
-    // H3: veto_proposal (通过 remove_from_active) 也应清理 VoteRecords
+    // H3+F9: VoteRecords preserved after veto, cleaned on cleanup_proposal
     ExtBuilder::build().execute_with(|| {
         use pallet_entity_common::GovernanceMode;
         // FullDAO + veto enabled（紧急制动模式，设计意图）
@@ -1575,7 +1597,11 @@ fn h3_vote_records_cleaned_after_veto() {
 
         assert_ok!(EntityGovernance::veto_proposal(RuntimeOrigin::signed(OWNER), 0));
 
-        // veto 后 VoteRecords 应被清理
+        // F9: veto 后 VoteRecords 仍保留
+        assert!(VoteRecords::<Test>::get(0, BOB).is_some());
+
+        // cleanup 后才清理
+        assert_ok!(EntityGovernance::cleanup_proposal(RuntimeOrigin::signed(ALICE), 0));
         assert!(VoteRecords::<Test>::get(0, BOB).is_none());
     });
 }
@@ -2591,5 +2617,1121 @@ fn c3_on_idle_zero_weight_returns_zero() {
             frame_support::weights::Weight::zero(),
         );
         assert_eq!(weight, frame_support::weights::Weight::zero());
+    });
+}
+
+// ==================== F7: Quorum/PassThreshold 最小值校验 ====================
+
+#[test]
+fn f7_configure_governance_rejects_zero_quorum() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::configure_governance(
+                RuntimeOrigin::signed(OWNER),
+                SHOP_ID,
+                pallet_entity_common::GovernanceMode::FullDAO,
+                None,      // voting_period
+                None,      // execution_delay
+                Some(0),   // quorum = 0
+                Some(50),  // pass
+                None, None,
+            ),
+            Error::<Test>::QuorumTooLow
+        );
+    });
+}
+
+#[test]
+fn f7_configure_governance_rejects_zero_pass_threshold() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::configure_governance(
+                RuntimeOrigin::signed(OWNER),
+                SHOP_ID,
+                pallet_entity_common::GovernanceMode::FullDAO,
+                None,      // voting_period
+                None,      // execution_delay
+                Some(10),  // quorum
+                Some(0),   // pass = 0
+                None, None,
+            ),
+            Error::<Test>::PassThresholdTooLow
+        );
+    });
+}
+
+#[test]
+fn f7_quorum_change_proposal_rejects_zero() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE),
+                SHOP_ID,
+                ProposalType::QuorumChange { new_quorum: 0 },
+                b"Zero quorum".to_vec(),
+                None,
+            ),
+            Error::<Test>::QuorumTooLow
+        );
+    });
+}
+
+#[test]
+fn f7_pass_threshold_change_proposal_rejects_zero() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE),
+                SHOP_ID,
+                ProposalType::PassThresholdChange { new_pass: 0 },
+                b"Zero pass".to_vec(),
+                None,
+            ),
+            Error::<Test>::PassThresholdTooLow
+        );
+    });
+}
+
+#[test]
+fn f7_valid_quorum_and_pass_accepted() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER),
+            SHOP_ID,
+            pallet_entity_common::GovernanceMode::FullDAO,
+            None,    // voting_period
+            None,    // execution_delay
+            Some(1), // minimum valid quorum
+            Some(1), // minimum valid pass
+            None, None,
+        ));
+    });
+}
+
+// ==================== F5: Entity active check ====================
+
+#[test]
+fn f5_vote_rejects_inactive_entity() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE),
+            SHOP_ID,
+            proposal_type_general(),
+            b"Test".to_vec(),
+            None,
+        ));
+
+        // Deactivate entity
+        set_entity_active(SHOP_ID, false);
+
+        assert_noop!(
+            EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn f5_finalize_rejects_inactive_entity() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE),
+            SHOP_ID,
+            proposal_type_general(),
+            b"Test".to_vec(),
+            None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        advance_blocks(101);
+
+        set_entity_active(SHOP_ID, false);
+
+        assert_noop!(
+            EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn f5_execute_rejects_inactive_entity() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE),
+            SHOP_ID,
+            proposal_type_general(),
+            b"Test".to_vec(),
+            None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+        advance_blocks(51);
+
+        set_entity_active(SHOP_ID, false);
+
+        assert_noop!(
+            EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn f5_change_vote_rejects_inactive_entity() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE),
+            SHOP_ID,
+            proposal_type_general(),
+            b"Test".to_vec(),
+            None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+
+        set_entity_active(SHOP_ID, false);
+
+        assert_noop!(
+            EntityGovernance::change_vote(RuntimeOrigin::signed(BOB), 0, VoteType::No),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+// ==================== F1: 修改投票 ====================
+
+#[test]
+fn f1_change_vote_works() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE),
+            SHOP_ID,
+            proposal_type_general(),
+            b"Test".to_vec(),
+            None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        let yes_before = proposal.yes_votes;
+        assert!(yes_before > 0);
+
+        assert_ok!(EntityGovernance::change_vote(RuntimeOrigin::signed(BOB), 0, VoteType::No));
+
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        assert_eq!(proposal.yes_votes, 0);
+        assert_eq!(proposal.no_votes, yes_before);
+    });
+}
+
+#[test]
+fn f1_change_vote_same_type_noop() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE),
+            SHOP_ID,
+            proposal_type_general(),
+            b"Test".to_vec(),
+            None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+
+        // Same vote type — should be no-op
+        assert_ok!(EntityGovernance::change_vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        assert!(proposal.yes_votes > 0);
+    });
+}
+
+#[test]
+fn f1_change_vote_rejects_no_prior_vote() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE),
+            SHOP_ID,
+            proposal_type_general(),
+            b"Test".to_vec(),
+            None,
+        ));
+        // BOB never voted — H2-audit: 使用 NotVoted 错误
+        assert_noop!(
+            EntityGovernance::change_vote(RuntimeOrigin::signed(BOB), 0, VoteType::No),
+            Error::<Test>::NotVoted
+        );
+    });
+}
+
+#[test]
+fn f1_change_vote_rejects_after_voting_period() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE),
+            SHOP_ID,
+            proposal_type_general(),
+            b"Test".to_vec(),
+            None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        advance_blocks(101);
+
+        assert_noop!(
+            EntityGovernance::change_vote(RuntimeOrigin::signed(BOB), 0, VoteType::No),
+            Error::<Test>::VotingEnded
+        );
+    });
+}
+
+#[test]
+fn f1_change_vote_yes_to_abstain() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE),
+            SHOP_ID,
+            proposal_type_general(),
+            b"Test".to_vec(),
+            None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        let weight = Proposals::<Test>::get(0).unwrap().yes_votes;
+
+        assert_ok!(EntityGovernance::change_vote(RuntimeOrigin::signed(BOB), 0, VoteType::Abstain));
+
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        assert_eq!(proposal.yes_votes, 0);
+        assert_eq!(proposal.abstain_votes, weight);
+    });
+}
+
+// ==================== F2: 委托链检查 ====================
+
+#[test]
+fn f2_delegate_to_already_delegated_rejected() {
+    ExtBuilder::build().execute_with(|| {
+        // BOB delegates to CHARLIE
+        assert_ok!(EntityGovernance::delegate_vote(
+            RuntimeOrigin::signed(BOB),
+            SHOP_ID,
+            CHARLIE,
+        ));
+
+        // ALICE tries to delegate to BOB (who has delegated to CHARLIE)
+        assert_noop!(
+            EntityGovernance::delegate_vote(
+                RuntimeOrigin::signed(ALICE),
+                SHOP_ID,
+                BOB,
+            ),
+            Error::<Test>::DelegateAlreadyDelegated
+        );
+    });
+}
+
+#[test]
+fn f2_delegate_to_non_delegated_works() {
+    ExtBuilder::build().execute_with(|| {
+        // CHARLIE has not delegated — so ALICE can delegate to CHARLIE
+        assert_ok!(EntityGovernance::delegate_vote(
+            RuntimeOrigin::signed(ALICE),
+            SHOP_ID,
+            CHARLIE,
+        ));
+    });
+}
+
+// ==================== F6: 紧急暂停治理 ====================
+
+#[test]
+fn f6_pause_governance_works() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::pause_governance(
+            RuntimeOrigin::signed(OWNER),
+            SHOP_ID,
+        ));
+        assert!(GovernancePaused::<Test>::get(SHOP_ID));
+    });
+}
+
+#[test]
+fn f6_pause_rejects_non_owner() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::pause_governance(RuntimeOrigin::signed(ALICE), SHOP_ID),
+            Error::<Test>::NotShopOwner
+        );
+    });
+}
+
+#[test]
+fn f6_pause_rejects_already_paused() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+        assert_noop!(
+            EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID),
+            Error::<Test>::GovernanceIsPaused
+        );
+    });
+}
+
+#[test]
+fn f6_resume_governance_works() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+        assert_ok!(EntityGovernance::resume_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+        assert!(!GovernancePaused::<Test>::get(SHOP_ID));
+    });
+}
+
+#[test]
+fn f6_resume_rejects_not_paused() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::resume_governance(RuntimeOrigin::signed(OWNER), SHOP_ID),
+            Error::<Test>::GovernanceNotPaused
+        );
+    });
+}
+
+#[test]
+fn f6_paused_blocks_create_proposal() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE),
+                SHOP_ID,
+                proposal_type_general(),
+                b"Blocked".to_vec(),
+                None,
+            ),
+            Error::<Test>::GovernanceIsPaused
+        );
+    });
+}
+
+#[test]
+fn f6_paused_blocks_vote() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE),
+            SHOP_ID,
+            proposal_type_general(),
+            b"Test".to_vec(),
+            None,
+        ));
+
+        assert_ok!(EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+
+        assert_noop!(
+            EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes),
+            Error::<Test>::GovernanceIsPaused
+        );
+    });
+}
+
+#[test]
+fn f6_batch_cancel_proposals_works() {
+    ExtBuilder::build().execute_with(|| {
+        // Create 2 proposals
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE),
+            SHOP_ID,
+            proposal_type_general(),
+            b"Proposal 1".to_vec(),
+            None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE),
+            SHOP_ID,
+            proposal_type_price_change(),
+            b"Proposal 2".to_vec(),
+            None,
+        ));
+
+        assert_ok!(EntityGovernance::batch_cancel_proposals(
+            RuntimeOrigin::signed(OWNER),
+            SHOP_ID,
+        ));
+
+        let p0 = Proposals::<Test>::get(0).unwrap();
+        let p1 = Proposals::<Test>::get(1).unwrap();
+        assert_eq!(p0.status, ProposalStatus::Cancelled);
+        assert_eq!(p1.status, ProposalStatus::Cancelled);
+    });
+}
+
+#[test]
+fn f6_batch_cancel_rejects_non_owner() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::batch_cancel_proposals(RuntimeOrigin::signed(ALICE), SHOP_ID),
+            Error::<Test>::NotShopOwner
+        );
+    });
+}
+
+// ==================== F3: ProductProvider 链上执行 ====================
+
+#[test]
+fn f3_price_change_executes_on_chain() {
+    ExtBuilder::build().execute_with(|| {
+        // Setup product
+        set_product_price(1, 100);
+
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE),
+            SHOP_ID,
+            ProposalType::PriceChange { product_id: 1, new_price: 500 },
+            b"Price change".to_vec(),
+            None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+        advance_blocks(51);
+        assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
+
+        // Verify price was updated
+        assert_eq!(get_product_price(1), Some(500));
+    });
+}
+
+#[test]
+fn f3_inventory_adjustment_executes_on_chain() {
+    ExtBuilder::build().execute_with(|| {
+        set_product_stock(1, 10);
+
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE),
+            SHOP_ID,
+            ProposalType::InventoryAdjustment { product_id: 1, new_inventory: 200 },
+            b"Stock change".to_vec(),
+            None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+        advance_blocks(51);
+        assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
+
+        assert_eq!(get_product_stock(1), Some(200));
+    });
+}
+
+// ==================== F9: VoteRecords 延迟清理 ====================
+
+#[test]
+fn f9_vote_records_preserved_after_finalize() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE),
+            SHOP_ID,
+            proposal_type_general(),
+            b"Test".to_vec(),
+            None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+
+        // VoteRecords should still exist after finalize (F9: delayed cleanup)
+        assert!(VoteRecords::<Test>::get(0, BOB).is_some());
+    });
+}
+
+#[test]
+fn f9_vote_records_cleaned_on_cleanup() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE),
+            SHOP_ID,
+            proposal_type_general(),
+            b"Test".to_vec(),
+            None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+
+        // Verify records exist
+        assert!(VoteRecords::<Test>::get(0, BOB).is_some());
+
+        // Now cleanup the failed/passed proposal
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        assert!(matches!(proposal.status, ProposalStatus::Passed | ProposalStatus::Failed));
+
+        // If passed, execute first
+        if proposal.status == ProposalStatus::Passed {
+            advance_blocks(51);
+            assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
+        }
+
+        // Cleanup
+        assert_ok!(EntityGovernance::cleanup_proposal(RuntimeOrigin::signed(ALICE), 0));
+
+        // VoteRecords should be gone now
+        assert!(VoteRecords::<Test>::get(0, BOB).is_none());
+        // Proposal should be removed
+        assert!(Proposals::<Test>::get(0).is_none());
+    });
+}
+
+// ==================== Audit 回归测试 ====================
+
+#[test]
+fn m1_audit_change_vote_blocked_when_paused() {
+    // M1-audit: change_vote 应在治理暂停时被阻止（与 vote 一致）
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+
+        // 暂停治理
+        assert_ok!(EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+
+        // change_vote 应被阻止
+        assert_noop!(
+            EntityGovernance::change_vote(RuntimeOrigin::signed(BOB), 0, VoteType::No),
+            Error::<Test>::GovernanceIsPaused
+        );
+    });
+}
+
+#[test]
+fn m3_audit_batch_cancel_preserves_vote_records() {
+    // M3-audit: batch_cancel 不再立即清理 VoteRecords（F9 延迟清理一致性）
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"P1".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+
+        // 确认投票记录存在
+        assert!(VoteRecords::<Test>::get(0, BOB).is_some());
+
+        // batch_cancel
+        assert_ok!(EntityGovernance::batch_cancel_proposals(RuntimeOrigin::signed(OWNER), SHOP_ID));
+
+        // M3-audit: VoteRecords 应仍保留（延迟清理）
+        assert!(VoteRecords::<Test>::get(0, BOB).is_some());
+
+        // 通过 cleanup_proposal 统一清理
+        assert_ok!(EntityGovernance::cleanup_proposal(RuntimeOrigin::signed(ALICE), 0));
+        assert!(VoteRecords::<Test>::get(0, BOB).is_none());
+    });
+}
+
+#[test]
+fn h2_audit_change_vote_not_voted_error() {
+    // H2-audit: change_vote 对未投票用户返回 NotVoted（非 ProposalNotFound）
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        // CHARLIE 未投票
+        assert_noop!(
+            EntityGovernance::change_vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes),
+            Error::<Test>::NotVoted
+        );
+    });
+}
+
+// ==================== Round 2 审计回归测试 ====================
+
+#[test]
+fn m1r2_create_proposal_inactive_entity_returns_entity_not_active() {
+    // M1-R2: inactive entity 应返回 EntityNotActive（非 ShopNotFound）
+    ExtBuilder::build().execute_with(|| {
+        set_entity_active(SHOP_ID, false);
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                proposal_type_general(), b"Test".to_vec(), None,
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn m1r2_delegate_vote_inactive_entity_returns_entity_not_active() {
+    // M1-R2: delegate_vote 对 inactive entity 也应返回 EntityNotActive
+    ExtBuilder::build().execute_with(|| {
+        set_entity_active(SHOP_ID, false);
+        assert_noop!(
+            EntityGovernance::delegate_vote(RuntimeOrigin::signed(ALICE), SHOP_ID, BOB),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn m2r2_cleanup_proposal_removes_proposal_when_all_cleared() {
+    // M2-R2: cleanup 在投票记录 <500 时应完全删除 Proposal
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::cancel_proposal(RuntimeOrigin::signed(ALICE), 0));
+
+        // cleanup 应删除 Proposal + VoteRecords
+        assert_ok!(EntityGovernance::cleanup_proposal(RuntimeOrigin::signed(ALICE), 0));
+        assert!(Proposals::<Test>::get(0).is_none());
+        assert!(VoteRecords::<Test>::get(0, BOB).is_none());
+    });
+}
+
+// ==================== F8: integrity_test ====================
+
+#[test]
+fn f8_integrity_test_passes() {
+    ExtBuilder::build().execute_with(|| {
+        // The integrity_test runs at compile-time in Hooks.
+        // We verify it doesn't panic with our mock config.
+        <EntityGovernance as Hooks<u64>>::integrity_test();
+    });
+}
+
+// ==================== R7 审计修复回归测试 ====================
+
+#[test]
+fn r7_h1_delegate_undelegate_then_vote_blocked() {
+    // R7-H1: 委托→代理投票→取消委托→自行投票 — 双重计票应被阻止
+    ExtBuilder::build().execute_with(|| {
+        // ALICE(20k) delegates to BOB(150k)
+        assert_ok!(EntityGovernance::delegate_vote(
+            RuntimeOrigin::signed(ALICE), SHOP_ID, BOB,
+        ));
+
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(CHARLIE), SHOP_ID,
+            proposal_type_general(), b"Double Count Test".to_vec(), None,
+        ));
+
+        // BOB votes → weight includes ALICE's delegated power (170k)
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        assert_eq!(proposal.yes_votes, 170_000u128); // BOB(150k) + ALICE(20k)
+
+        // VoterTokenLocks should exist for ALICE (set by delegate vote path)
+        assert!(VoterTokenLocks::<Test>::contains_key(0, ALICE));
+
+        // ALICE undelegates
+        assert_ok!(EntityGovernance::undelegate_vote(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+        ));
+
+        // ALICE tries to vote directly → should be blocked by VoterTokenLocks check
+        assert_noop!(
+            EntityGovernance::vote(RuntimeOrigin::signed(ALICE), 0, VoteType::Yes),
+            Error::<Test>::AlreadyVoted
+        );
+
+        // Verify votes unchanged (no double-counting)
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        assert_eq!(proposal.yes_votes, 170_000u128);
+    });
+}
+
+#[test]
+fn r7_h1_non_delegated_user_can_still_vote() {
+    // R7-H1: VoterTokenLocks 检查不应误拦正常投票者
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Normal Vote".to_vec(), None,
+        ));
+
+        // CHARLIE has no delegation relationship — should vote normally
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes));
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        assert_eq!(proposal.yes_votes, 50_000u128);
+    });
+}
+
+#[test]
+fn r7_h1_delegator_can_vote_on_different_proposal() {
+    // R7-H1: 委托者在代理人仅投票提案 P0 后，可以对 P1 自行投票（取消委托后）
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::delegate_vote(
+            RuntimeOrigin::signed(ALICE), SHOP_ID, BOB,
+        ));
+
+        // Create two proposals
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(CHARLIE), SHOP_ID,
+            proposal_type_general(), b"P0".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(CHARLIE), SHOP_ID,
+            proposal_type_price_change(), b"P1".to_vec(), None,
+        ));
+
+        // BOB votes on P0 only
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+
+        // ALICE undelegates
+        assert_ok!(EntityGovernance::undelegate_vote(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+        ));
+
+        // ALICE should be blocked on P0 (VoterTokenLocks exists)
+        assert_noop!(
+            EntityGovernance::vote(RuntimeOrigin::signed(ALICE), 0, VoteType::No),
+            Error::<Test>::AlreadyVoted
+        );
+
+        // ALICE should be allowed on P1 (no VoterTokenLocks for P1)
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(ALICE), 1, VoteType::Yes));
+    });
+}
+
+#[test]
+fn r7_m2_cleanup_partial_no_clean_event() {
+    // R7-M2: cleanup_proposal 部分清理时应发出 ProposalPartialCleaned 而非 ProposalCleaned
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::cancel_proposal(RuntimeOrigin::signed(ALICE), 0));
+
+        System::reset_events();
+        assert_ok!(EntityGovernance::cleanup_proposal(RuntimeOrigin::signed(BOB), 0));
+
+        // With few records, should be fully cleaned → ProposalCleaned
+        let events = System::events();
+        assert!(
+            events.iter().any(|e| {
+                matches!(
+                    e.event,
+                    RuntimeEvent::EntityGovernance(Event::ProposalCleaned { proposal_id: 0 })
+                )
+            }),
+            "ProposalCleaned event expected for full cleanup"
+        );
+        assert!(
+            !events.iter().any(|e| {
+                matches!(
+                    e.event,
+                    RuntimeEvent::EntityGovernance(Event::ProposalPartialCleaned { .. })
+                )
+            }),
+            "ProposalPartialCleaned should not appear for full cleanup"
+        );
+        // Proposal should be removed
+        assert!(Proposals::<Test>::get(0).is_none());
+    });
+}
+
+#[test]
+fn r7_l1_disclosure_level_change_rejects_invalid_level() {
+    // R7-L1: DisclosureLevelChange level > 3 应被拒绝
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::DisclosureLevelChange {
+                    level: 4,
+                    insider_trading_control: true,
+                    blackout_period_after: 100,
+                },
+                b"Bad level".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        // level = 255 (extreme)
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::DisclosureLevelChange {
+                    level: 255,
+                    insider_trading_control: false,
+                    blackout_period_after: 50,
+                },
+                b"Bad level 255".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+    });
+}
+
+#[test]
+fn r7_l1_disclosure_level_change_accepts_valid_levels() {
+    // R7-L1: level 0-3 均应接受
+    ExtBuilder::build().execute_with(|| {
+        for level in 0..=3u8 {
+            assert_ok!(EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::DisclosureLevelChange {
+                    level,
+                    insider_trading_control: true,
+                    blackout_period_after: 100,
+                },
+                format!("Level {}", level).into_bytes(), None,
+            ));
+        }
+    });
+}
+
+#[test]
+fn r7_l3_governance_provider_is_governance_paused() {
+    // R7-L3: GovernanceProvider 应暴露 is_governance_paused
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceProvider;
+
+        // Initially not paused
+        assert!(!EntityGovernance::is_governance_paused(SHOP_ID));
+
+        // Pause governance
+        assert_ok!(EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+
+        // Should report paused
+        assert!(EntityGovernance::is_governance_paused(SHOP_ID));
+
+        // Resume
+        assert_ok!(EntityGovernance::resume_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+
+        // Should report not paused
+        assert!(!EntityGovernance::is_governance_paused(SHOP_ID));
+    });
+}
+
+// ==================== R8: DAO 可控紧急权限 ====================
+
+fn setup_fulldao_locked() {
+    use pallet_entity_common::GovernanceMode;
+    GovernanceConfigs::<Test>::insert(
+        SHOP_ID,
+        crate::pallet::GovernanceConfig::<u64> {
+            mode: GovernanceMode::FullDAO,
+            voting_period: 0,
+            execution_delay: 0,
+            quorum_threshold: 0,
+            pass_threshold: 0,
+            proposal_threshold: 0,
+            admin_veto_enabled: false,
+        },
+    );
+    GovernanceLocked::<Test>::insert(SHOP_ID, true);
+}
+
+#[test]
+fn r8_pause_allowed_when_fulldao_locked_and_enabled() {
+    ExtBuilder::build().execute_with(|| {
+        setup_fulldao_locked();
+        // EmergencyPauseEnabled defaults to true (None → true)
+        assert_ok!(EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+        assert!(GovernancePaused::<Test>::get(SHOP_ID));
+    });
+}
+
+#[test]
+fn r8_pause_blocked_when_fulldao_locked_and_disabled() {
+    ExtBuilder::build().execute_with(|| {
+        setup_fulldao_locked();
+        EmergencyPauseEnabled::<Test>::insert(SHOP_ID, false);
+        assert_noop!(
+            EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID),
+            Error::<Test>::EmergencyPauseDisabled
+        );
+    });
+}
+
+#[test]
+fn r8_pause_allowed_when_locked_none_mode() {
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        GovernanceConfigs::<Test>::insert(
+            SHOP_ID,
+            crate::pallet::GovernanceConfig::<u64> {
+                mode: GovernanceMode::None,
+                voting_period: 0, execution_delay: 0,
+                quorum_threshold: 0, pass_threshold: 0,
+                proposal_threshold: 0, admin_veto_enabled: false,
+            },
+        );
+        GovernanceLocked::<Test>::insert(SHOP_ID, true);
+        // None 模式锁定不受 EmergencyPauseEnabled 限制
+        assert_ok!(EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+    });
+}
+
+#[test]
+fn r8_pause_allowed_when_fulldao_not_locked() {
+    ExtBuilder::build().execute_with(|| {
+        // FullDAO but NOT locked — Owner has full control, no EmergencyPauseEnabled check
+        EmergencyPauseEnabled::<Test>::insert(SHOP_ID, false);
+        assert_ok!(EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+    });
+}
+
+#[test]
+fn r8_batch_cancel_allowed_when_fulldao_locked_and_enabled() {
+    ExtBuilder::build().execute_with(|| {
+        setup_fulldao_locked();
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        // BatchCancelEnabled defaults to true
+        assert_ok!(EntityGovernance::batch_cancel_proposals(RuntimeOrigin::signed(OWNER), SHOP_ID));
+        let p = Proposals::<Test>::get(0).unwrap();
+        assert_eq!(p.status, ProposalStatus::Cancelled);
+    });
+}
+
+#[test]
+fn r8_batch_cancel_blocked_when_fulldao_locked_and_disabled() {
+    ExtBuilder::build().execute_with(|| {
+        setup_fulldao_locked();
+        BatchCancelEnabled::<Test>::insert(SHOP_ID, false);
+        assert_noop!(
+            EntityGovernance::batch_cancel_proposals(RuntimeOrigin::signed(OWNER), SHOP_ID),
+            Error::<Test>::BatchCancelDisabled
+        );
+    });
+}
+
+#[test]
+fn r8_batch_cancel_allowed_when_fulldao_not_locked() {
+    ExtBuilder::build().execute_with(|| {
+        // FullDAO but NOT locked — no BatchCancelEnabled check
+        BatchCancelEnabled::<Test>::insert(SHOP_ID, false);
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::batch_cancel_proposals(RuntimeOrigin::signed(OWNER), SHOP_ID));
+    });
+}
+
+#[test]
+fn r8_emergency_pause_toggle_proposal_executes() {
+    ExtBuilder::build().execute_with(|| {
+        setup_fulldao_locked();
+
+        // Create proposal to disable emergency pause
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::EmergencyPauseToggle { enabled: false },
+            b"Disable pause".to_vec(), None,
+        ));
+
+        // Vote (Bob has 15%)
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+
+        // Finalize
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+        assert_eq!(Proposals::<Test>::get(0).unwrap().status, ProposalStatus::Passed);
+
+        // Execute
+        advance_blocks(51);
+        assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
+
+        // Verify: EmergencyPauseEnabled is now false
+        assert_eq!(EmergencyPauseEnabled::<Test>::get(SHOP_ID), Some(false));
+
+        // Owner can no longer pause
+        assert_noop!(
+            EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID),
+            Error::<Test>::EmergencyPauseDisabled
+        );
+    });
+}
+
+#[test]
+fn r8_batch_cancel_toggle_proposal_executes() {
+    ExtBuilder::build().execute_with(|| {
+        setup_fulldao_locked();
+
+        // Create proposal to disable batch cancel
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::BatchCancelToggle { enabled: false },
+            b"Disable batch cancel".to_vec(), None,
+        ));
+
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+        advance_blocks(51);
+        assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
+
+        assert_eq!(BatchCancelEnabled::<Test>::get(SHOP_ID), Some(false));
+
+        // Owner can no longer batch cancel
+        assert_noop!(
+            EntityGovernance::batch_cancel_proposals(RuntimeOrigin::signed(OWNER), SHOP_ID),
+            Error::<Test>::BatchCancelDisabled
+        );
+    });
+}
+
+#[test]
+fn r8_dao_can_re_enable_emergency_powers() {
+    ExtBuilder::build().execute_with(|| {
+        setup_fulldao_locked();
+
+        // Disable then re-enable emergency pause
+        EmergencyPauseEnabled::<Test>::insert(SHOP_ID, false);
+
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::EmergencyPauseToggle { enabled: true },
+            b"Re-enable pause".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+        advance_blocks(51);
+        assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
+
+        assert_eq!(EmergencyPauseEnabled::<Test>::get(SHOP_ID), Some(true));
+
+        // Owner can pause again
+        assert_ok!(EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+    });
+}
+
+#[test]
+fn r8_resume_still_works_after_pause_disabled() {
+    ExtBuilder::build().execute_with(|| {
+        setup_fulldao_locked();
+
+        // Pause first (while enabled)
+        assert_ok!(EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+
+        // DAO disables pause ability
+        EmergencyPauseEnabled::<Test>::insert(SHOP_ID, false);
+
+        // Resume should still work (must be able to unpause even if pause is disabled)
+        assert_ok!(EntityGovernance::resume_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+        assert!(!GovernancePaused::<Test>::get(SHOP_ID));
+
+        // But can't pause again
+        assert_noop!(
+            EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID),
+            Error::<Test>::EmergencyPauseDisabled
+        );
+    });
+}
+
+#[test]
+fn r8_explicit_enable_overrides_default() {
+    ExtBuilder::build().execute_with(|| {
+        setup_fulldao_locked();
+
+        // Explicitly set to true
+        EmergencyPauseEnabled::<Test>::insert(SHOP_ID, true);
+        assert_ok!(EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
     });
 }

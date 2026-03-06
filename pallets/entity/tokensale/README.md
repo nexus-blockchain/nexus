@@ -1,22 +1,25 @@
 # pallet-entity-tokensale
 
-> NEXUS Entity 代币发售模块 — 多模式公开发售、实际资金转账、锁仓解锁、KYC 集成 | Runtime Index: 132
+> NEXUS Entity 代币发售模块 — 多模式发售、实际资金转账、锁仓解锁、KYC/内幕交易防护、Soft Cap、存储清理 | Runtime Index: 132
 
 ## 概述
 
-`pallet-entity-tokensale` 实现 Entity 组织的代币公开发售（Token Sale / IEO）功能。Entity owner/admin 可配置多轮发售，支持 5 种发售模式、NEX 支付、灵活的锁仓解锁策略、KYC 准入控制和完整的资金托管流。
+`pallet-entity-tokensale` 实现 Entity 组织的代币公开发售（Token Sale / IEO）功能。Entity owner/admin 可配置多轮发售，支持 5 种发售模式、NEX 支付、灵活锁仓解锁策略、KYC 准入控制、内幕交易防护、Soft Cap 最低募资目标和完整的资金托管流。
 
 ## 资金流
 
 ```
-subscribe:      认购者 NEX ──→ Pallet 托管账户
-start_sale:     Entity 代币 ──reserve──→ 锁定
-claim_tokens:   Entity 代币 ──repatriate──→ 认购者（初始解锁）
-unlock_tokens:  Entity 代币 ──repatriate──→ 认购者（后续解锁）
-end_sale:       未售代币 ──unreserve──→ Entity 账户
-cancel_sale:    未售代币 ──unreserve──→ Entity 账户
-claim_refund:   NEX ──→ 认购者 + Entity 代币 ──unreserve
-withdraw_funds: NEX ──→ Entity 派生账户
+subscribe:                认购者 NEX ──→ Pallet 托管账户
+start_sale:               Entity 代币 ──reserve──→ 锁定
+claim_tokens:             Entity 代币 ──repatriate──→ 认购者（初始解锁）
+unlock_tokens:            Entity 代币 ──repatriate──→ 认购者（后续解锁）
+end_sale:                 未售代币 ──unreserve──→ Entity 账户
+end_sale (soft cap 未达): 未售代币 ──unreserve，状态→Cancelled
+cancel_sale:              未售代币 ──unreserve──→ Entity 账户
+claim_refund:             NEX ──→ 认购者 + Entity 代币 ──unreserve
+withdraw_funds:           NEX ──→ Entity 派生账户
+reclaim_unclaimed_tokens: 宽限期后未领退款 NEX+代币 → Entity
+cleanup_round:            清理存储 + 释放 EntityRounds 槽位
 ```
 
 ## 架构
@@ -25,32 +28,41 @@ withdraw_funds: NEX ──→ Entity 派生账户
 pallet-entity-tokensale (pallet_index = 132)
 │
 ├── 外部依赖
-│   ├── EntityProvider       Entity 存在性 / 权限 / 派生账户
-│   ├── Currency (NEX)       认购支付 / 退款 / 提取
-│   ├── EntityTokenProvider  Entity 代币 reserve / unreserve / repatriate
-│   └── KycChecker           KYC 级别查询
+│   ├── EntityProvider        Entity 存在性 / 激活状态 / 权限 / 派生账户 / 锁定检查
+│   ├── Currency (NEX)        认购支付 / 退款 / 提取
+│   ├── EntityTokenProvider   Entity 代币 reserve / unreserve / repatriate
+│   ├── KycChecker            KYC 级别查询 (0-4)
+│   └── DisclosureProvider    内幕交易防护（黑窗口期检查）
 │
 ├── 数据结构
-│   ├── SaleRound            轮次主体（模式、供应量、支付、锁仓）
-│   ├── Subscription         认购记录（金额、支付、领取、解锁、退款标记）
-│   ├── VestingConfig        锁仓策略
-│   └── PaymentConfig        支付选项
+│   ├── SaleRound             轮次主体（模式、供应量、锁仓、soft cap）
+│   ├── Subscription          认购记录（金额、支付、领取、解锁、退款标记）
+│   ├── VestingConfig         锁仓策略（None / Linear / Cliff / Custom）
+│   └── PaymentConfig         支付选项（价格、限额、启用状态）
 │
 ├── 独立存储
-│   ├── RoundWhitelist       白名单（DoubleMap，避免大 struct 加载）
-│   └── WhitelistCount       白名单计数
+│   ├── RoundPaymentOptions   支付选项（从 SaleRound 拆出，减少 I/O）
+│   ├── RoundWhitelist        白名单 + 个人额度（DoubleMap）
+│   ├── WhitelistCount        白名单计数
+│   └── ActiveRounds          活跃轮次列表（on_initialize 扫描用）
 │
 ├── 内部函数
 │   ├── calculate_payment_amount    checked_mul 防溢出
-│   ├── calculate_dutch_price       线性递减（SaturatedConversion）
-│   ├── calculate_initial_unlock    基点计算
-│   └── calculate_unlockable        悬崖期 + 线性/阶梯释放
+│   ├── calculate_dutch_price       先除后乘避免 u128 溢出
+│   ├── calculate_initial_unlock    基点计算 (bps / 10000)
+│   ├── calculate_unlockable        悬崖期 + 线性/阶梯释放
+│   └── do_auto_end_sale            on_initialize 自动结束（含 soft cap）
 │
-└── 查询函数
-    ├── pallet_account              托管账户地址
-    ├── get_current_price           当前价格
-    ├── get_subscription            认购信息
-    └── get_unlockable_amount       可解锁数量
+├── 查询函数
+│   ├── pallet_account              托管账户地址
+│   ├── get_current_price           当前价格（荷兰拍实时计算）
+│   ├── get_subscription            认购信息
+│   ├── get_unlockable_amount       可解锁数量
+│   ├── get_sale_statistics         统计（供应/已售/剩余/参与者/募集额/soft cap）
+│   └── has_active_sale             实体是否有活跃发售
+│
+└── Trait 实现
+    └── TokenSaleProvider           跨 pallet 查询接口（7 个方法）
 ```
 
 ## 发售模式
@@ -58,10 +70,10 @@ pallet-entity-tokensale (pallet_index = 132)
 | 模式 | 说明 | 价格机制 |
 |------|------|----------|
 | `FixedPrice` | 固定价格发售（默认） | 恒定价格 |
-| `DutchAuction` | 荷兰拍卖 | 从 `start_price` 线性递减到 `end_price` |
-| `WhitelistAllocation` | 白名单定向分配 | 固定价格，仅白名单可参与 |
+| `DutchAuction` | 荷兰拍卖 | 从 `start_price` 线性递减到 `end_price`（end_price > 0） |
+| `WhitelistAllocation` | 白名单定向分配 | 固定价格，仅白名单可参与，支持个人额度 |
 | `FCFS` | 先到先得 | 固定价格，售完即止 |
-| `Lottery` | 抽签发售 | 固定价格，随机分配（预留） |
+| `Lottery` | 抽签发售 | 尚未实现（创建时返回 `LotteryNotImplemented`） |
 
 ## 发售生命周期
 
@@ -70,15 +82,18 @@ pallet-entity-tokensale (pallet_index = 132)
                           ├─ set_vesting_config
 create_sale_round ──→ [NotStarted] ──┤
 (Entity owner/admin)      ├─ configure_dutch_auction (荷兰拍卖)
-                          └─ add_to_whitelist (白名单模式)
+                          ├─ add_to_whitelist (白名单模式，支持个人额度)
+                          ├─ update_sale_round (可选更新参数)
+                          ├─ remove_payment_option / remove_from_whitelist
+                          └─ cancel_sale (取消，不释放代币)
                                 │
-                         start_sale (锁定 Entity 代币)
+                         start_sale (reserve Entity 代币)
                                 │
                                 ▼
-                           [Active] ←── subscribe (NEX → 托管)
-                          /   │   \          时间窗口 + KYC 校验
+                           [Active] ←── subscribe / increase_subscription
+                          /   │   \          时间窗口 + KYC + 内幕检查 + 白名单
                   end_sale  pause  cancel_sale
-                  (释放未售) _sale   (释放未售)
+                  (soft cap) _sale  (释放未售)
                       │       │         │
                       │       ▼         │
                       │   [Paused]      │
@@ -92,24 +107,33 @@ create_sale_round ──→ [NotStarted] ──┤
                       ▼        ▼     ▼
                   [Ended]  [Ended] [Cancelled]
                       │              │
-               claim_tokens     claim_refund
-               (代币→用户)      (NEX→用户 + 释放代币)
-                      │
-               unlock_tokens (悬崖期后)
+               claim_tokens    claim_refund / force_batch_refund
+               (代币→用户)     (NEX→用户 + 释放代币)
+                      │              │
+               unlock_tokens    reclaim_unclaimed_tokens
+               (悬崖期后)       (宽限期后→Completed)
                       │
                withdraw_funds (NEX→Entity)
+                      │
+               cleanup_round (清理存储 + 释放 EntityRounds 槽位)
 ```
 
 ### 轮次状态 (RoundStatus)
 
-| 状态 | 说明 |
-|------|------|
-| `NotStarted` | 已创建，配置阶段 |
-| `Active` | 发售进行中，可认购 |
-| `Ended` | 创建者手动结束 |
-| `Cancelled` | 已取消（认购者可退款） |
-| `Completed` | 已完成 |
-| `Paused` | 已暂停（可恢复，v0.5.0 新增） |
+| 状态 | 说明 | 可转入 |
+|------|------|--------|
+| `NotStarted` | 已创建，配置阶段 | start_sale→Active, cancel_sale→Cancelled |
+| `Active` | 发售进行中，可认购 | end_sale→Ended/Cancelled, pause_sale→Paused, cancel_sale→Cancelled |
+| `Paused` | 已暂停（不可认购，可恢复） | resume_sale→Active, end_sale→Ended, cancel_sale→Cancelled |
+| `Ended` | 已结束（可领取代币/提取资金） | — |
+| `Cancelled` | 已取消（认购者可退款） | reclaim_unclaimed_tokens→Completed |
+| `Completed` | 退款宽限期后回收完成 | — |
+
+### Soft Cap 机制
+
+当 `soft_cap > 0` 且 `end_sale` / `on_initialize` 自动结束时，检查募集额是否达到 soft cap：
+- **达标**: 正常结束 → `Ended`
+- **未达标**: 自动转为 `Cancelled`，仅释放未售代币；已售代币保留 reserved，由 `claim_refund` 逐个释放
 
 ## 数据结构
 
@@ -135,10 +159,11 @@ pub struct SaleRound<AccountId, Balance, BlockNumber> {
     pub dutch_end_price: Option<Balance>,
     pub creator: AccountId,
     pub created_at: BlockNumber,
-    pub funds_withdrawn: bool,                 // v0.2.0 新增
-    pub cancelled_at: Option<BlockNumber>,      // v0.3.0 新增
-    pub total_refunded_tokens: Balance,         // v0.3.0 新增
-    pub total_refunded_nex: Balance,            // v0.3.0 新增
+    pub funds_withdrawn: bool,
+    pub cancelled_at: Option<BlockNumber>,
+    pub total_refunded_tokens: Balance,
+    pub total_refunded_nex: Balance,
+    pub soft_cap: Balance,                     // 最低募资目标（0 = 无 soft cap）
 }
 ```
 
@@ -154,8 +179,7 @@ pub struct Subscription<AccountId, Balance, BlockNumber, AssetId> {
     pub subscribed_at: BlockNumber,
     pub claimed: bool,                         // 是否已领取初始解锁
     pub unlocked_amount: Balance,              // 累计已解锁
-    pub last_unlock_at: BlockNumber,
-    pub refunded: bool,                        // v0.2.0 新增：是否已退款
+    pub refunded: bool,                        // 是否已退款
 }
 ```
 
@@ -186,69 +210,81 @@ impl pallet_entity_tokensale::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;                      // NEX 支付/退款
     type AssetId = u64;
-    type EntityProvider = EntityRegistry;           // Entity 权限/账户
+    type EntityProvider = EntityRegistry;           // Entity 权限/账户/锁定
     type TokenProvider = EntityToken;               // Entity 代币操作
     type KycChecker = TokenSaleKycBridge;           // KYC 级别查询
+    type DisclosureProvider = EntityDisclosure;     // 内幕交易防护
     type MaxPaymentOptions = ConstU32<5>;
     type MaxWhitelistSize = ConstU32<1000>;
     type MaxRoundsHistory = ConstU32<50>;
     type MaxSubscriptionsPerRound = ConstU32<10000>;
+    type MaxActiveRounds = ConstU32<100>;
+    type RefundGracePeriod = ConstU64<14400>;       // ~48h
+    type MaxBatchRefund = ConstU32<50>;
 }
 ```
 
 | 参数 | 说明 |
 |------|------|
 | `Currency` | NEX 货币（认购收款、退款、提取） |
-| `EntityProvider` | Entity 存在性/激活状态/权限/派生账户 |
+| `EntityProvider` | Entity 存在性/激活状态/权限/派生账户/锁定检查 |
 | `TokenProvider` | Entity 代币 reserve/unreserve/repatriate |
 | `KycChecker` | KYC 级别查询（0-4） |
+| `DisclosureProvider` | 内幕交易防护（黑窗口期禁止认购） |
 | `MaxPaymentOptions` | 每轮最大支付选项数 |
-| `MaxWhitelistSize` | 每轮白名单最大容量 |
-| `MaxRoundsHistory` | 每 Entity 最大历史轮次数 |
+| `MaxWhitelistSize` | 每轮白名单最大容量（add_to_whitelist 输入上限） |
+| `MaxRoundsHistory` | 每 Entity 最大历史轮次数（cleanup_round 释放槽位） |
 | `MaxSubscriptionsPerRound` | 每轮最大参与者数 |
+| `MaxActiveRounds` | on_initialize 扫描上限（活跃轮次列表） |
+| `RefundGracePeriod` | 退款宽限期（取消后多少区块内可退款） |
+| `MaxBatchRefund` | force_batch_refund 每批最大退款数 |
 
 ## 存储项
 
 | 存储 | 类型 | 说明 |
 |------|------|------|
-| `NextRoundId` | `StorageValue<u64>` | 自增轮次 ID |
+| `NextRoundId` | `StorageValue<u64>` | 自增轮次 ID（checked_add 防溢出） |
 | `SaleRounds` | `StorageMap<u64, SaleRound>` | 轮次主表 |
-| `EntityRounds` | `StorageMap<u64, BoundedVec<u64>>` | Entity → 轮次索引 |
+| `EntityRounds` | `StorageMap<u64, BoundedVec<u64, MaxRoundsHistory>>` | Entity → 轮次索引（cleanup_round 释放槽位） |
 | `Subscriptions` | `StorageDoubleMap<u64, AccountId, Subscription>` | 认购记录 |
-| `RoundParticipants` | `StorageMap<u64, BoundedVec<AccountId>>` | 参与者列表 |
-| `RaisedFunds` | `StorageDoubleMap<u64, Option<AssetId>, Balance>` | 已募集金额 |
-| `RoundWhitelist` | `StorageDoubleMap<u64, AccountId, bool>` | 白名单（v0.2.0 独立） |
+| `RoundParticipants` | `StorageMap<u64, BoundedVec<AccountId, MaxSubscriptionsPerRound>>` | 参与者列表 |
+| `RaisedFunds` | `StorageDoubleMap<u64, Option<AssetId>, Balance>` | 已募集金额（按资产分账） |
+| `RoundPaymentOptions` | `StorageMap<u64, BoundedVec<PaymentConfig, MaxPaymentOptions>>` | 支付选项（从 SaleRound 拆出） |
+| `ActiveRounds` | `StorageValue<BoundedVec<u64, MaxActiveRounds>>` | 活跃轮次 ID 列表（on_initialize 扫描） |
+| `RoundWhitelist` | `StorageDoubleMap<u64, AccountId, Option<Balance>>` | 白名单 + 个人额度（None=默认限额） |
 | `WhitelistCount` | `StorageMap<u64, u32>` | 白名单计数 |
 
 ## Extrinsics
 
 | # | 调用 | 权限 | 前置状态 | 说明 |
 |---|------|------|----------|------|
-| 0 | `create_sale_round` | Entity owner/admin | — | 创建轮次（校验 Entity 存在+激活+权限） |
-| 1 | `add_payment_option` | 创建者 | NotStarted | 添加支付选项（price > 0, max >= min） |
-| 2 | `set_vesting_config` | 创建者 | NotStarted | 锁仓配置（total >= cliff） |
-| 3 | `configure_dutch_auction` | 创建者 | NotStarted + DutchAuction | 价格曲线（start > end） |
-| 4 | `add_to_whitelist` | 创建者 | NotStarted | 独立存储白名单（BoundedVec 输入） |
-| 5 | `start_sale` | 创建者 | NotStarted | 锁定 Entity 代币 + 需 ≥1 支付选项 |
-| 6 | `subscribe` | signed | Active | NEX → 托管（时间窗口+KYC+白名单校验） |
-| 7 | `end_sale` | 创建者 | Active | 释放未售代币（须 ≥ end_block 或已售罄） |
-| 8 | `claim_tokens` | 认购者 | Ended | Entity 代币 → 用户（初始解锁） |
-| 9 | `unlock_tokens` | 认购者 | 已 claimed | Entity 代币 → 用户（后续解锁） |
-| 10 | `cancel_sale` | 创建者 | NotStarted/Active | 释放未售代币 → Cancelled |
-| 11 | `claim_refund` | 认购者 | Cancelled | NEX 退还 + 释放对应代币 |
-| 12 | `withdraw_funds` | 创建者 | Ended/Completed | NEX → Entity 派生账户 |
-| 13 | `reclaim_unclaimed_tokens` | 创建者 | Cancelled + 宽限期后 | 回收未领退款 |
+| 0 | `create_sale_round` | Entity owner/admin | — | 创建轮次（Entity 存在+激活+未锁定+soft_cap） |
+| 1 | `add_payment_option` | 创建者 | NotStarted | 添加支付选项（price>0, max>=min, 去重asset_id） |
+| 2 | `set_vesting_config` | 创建者 | NotStarted | 锁仓配置（bps≤10000, total≥cliff） |
+| 3 | `configure_dutch_auction` | 创建者 | NotStarted + DutchAuction | 价格曲线（start>end>0） |
+| 4 | `add_to_whitelist` | 创建者 | NotStarted | 白名单+个人额度（BoundedVec 输入） |
+| 5 | `start_sale` | 创建者 | NotStarted | reserve Entity 代币 + 需≥1支付选项 |
+| 6 | `subscribe` | signed | Active | NEX→托管（时间窗口+KYC+内幕+白名单） |
+| 7 | `end_sale` | 创建者 | Active/Paused | 释放未售（须≥end_block或售罄，soft cap检查） |
+| 8 | `claim_tokens` | 认购者 | Ended | Entity 代币→用户（初始解锁） |
+| 9 | `unlock_tokens` | 认购者 | Ended + 已claimed | Entity 代币→用户（后续解锁） |
+| 10 | `cancel_sale` | 创建者 | NotStarted/Active/Paused | 释放未售代币→Cancelled |
+| 11 | `claim_refund` | 认购者 | Cancelled | NEX退还 + 释放对应代币 |
+| 12 | `withdraw_funds` | 创建者 | Ended/Completed | NEX→Entity 派生账户 |
+| 13 | `reclaim_unclaimed_tokens` | 创建者 | Cancelled + 宽限期后 | 回收未领退款→Completed |
 | 14 | `force_cancel_sale` | Root | NotStarted/Active/Paused | 治理强制取消 |
 | 15 | `force_end_sale` | Root | Active/Paused | 治理强制结束 |
 | 16 | `force_refund` | Root | Cancelled | 治理强制退款指定认购者 |
 | 17 | `force_withdraw_funds` | Root | Ended/Completed | 治理强制提取资金 |
 | 18 | `update_sale_round` | 创建者 | NotStarted | 更新轮次参数（可选字段） |
-| 19 | `increase_subscription` | 认购者 | Active | 追加认购量 |
+| 19 | `increase_subscription` | 已认购者 | Active | 追加认购量（内幕+KYC+限额检查） |
 | 20 | `remove_from_whitelist` | 创建者 | NotStarted | 从白名单移除地址 |
 | 21 | `remove_payment_option` | 创建者 | NotStarted | 按索引移除支付选项 |
-| 22 | `extend_sale` | 创建者 | Active/Paused | 延长发售时间（仅延长） |
+| 22 | `extend_sale` | 创建者 | Active/Paused | 延长发售时间（仅延长不缩短） |
 | 23 | `pause_sale` | 创建者 | Active | 暂停发售（Active→Paused） |
 | 24 | `resume_sale` | 创建者 | Paused | 恢复发售（Paused→Active） |
+| 25 | `cleanup_round` | 创建者 | Ended/Completed + 已提取 | 清理存储 + 释放 EntityRounds 槽位 |
+| 26 | `force_batch_refund` | Root | Cancelled | 批量强制退款（跳过已退/失败项） |
 
 ### subscribe 详细流程
 
@@ -256,19 +292,27 @@ impl pallet_entity_tokensale::Config for Runtime {
 2. 验证 `remaining_amount >= amount`
 3. **时间窗口校验**：`now ∈ [start_block, end_block]`
 4. 验证未重复认购
-5. **KYC 校验**：`kyc_required` 时检查 `KycChecker::kyc_level >= min_kyc_level`
-6. **白名单校验**：WhitelistAllocation 模式查 `RoundWhitelist` 存储
-7. 查找匹配支付选项
-8. 验证购买量 `[min_purchase, max_purchase_per_account]`
-9. **checked_mul** 计算支付金额（溢出返回 ArithmeticOverflow）
-10. **Currency::transfer** 从用户到 Pallet 托管账户
-11. 创建认购记录，更新轮次数据，更新募集统计
+5. **内幕交易防护**：`DisclosureProvider::can_insider_trade` 检查黑窗口期
+6. **KYC 校验**：`kyc_required` 时检查 `KycChecker::kyc_level >= min_kyc_level`
+7. **白名单校验**：WhitelistAllocation 模式查 `RoundWhitelist` 存储
+8. **预检参与者容量**：`RoundParticipants.len() < MaxSubscriptionsPerRound`
+9. 查找匹配支付选项（asset_id + enabled）
+10. 验证购买量 `[min_purchase, effective_max]`（白名单个人额度优先）
+11. **checked_mul** 计算支付金额（溢出返回 ArithmeticOverflow）
+12. **Currency::transfer** 从用户到 Pallet 托管账户
+13. 创建认购记录，更新轮次数据，更新募集统计
 
 ### 荷兰拍卖价格
 
 ```
-current_price = start_price - (start_price - end_price) × elapsed / total_duration
+price_range = start_price - end_price
+quotient = price_range / total_duration
+remainder = price_range % total_duration
+price_drop = quotient × elapsed + (remainder × elapsed / total_duration)
+current_price = max(start_price - price_drop, end_price)
 ```
+
+先除后乘避免 u128 溢出，余数单独处理保留精度。`now ≤ start` 返回 `start_price`，`now ≥ end` 返回 `end_price`。
 
 ## 锁仓解锁
 
@@ -326,194 +370,258 @@ new_unlock = (initial_unlock + unlocked) - already_unlocked
 | `SaleExtended` | round_id, new_end_block | extend_sale |
 | `SaleRoundPaused` | round_id | pause_sale |
 | `SaleRoundResumed` | round_id | resume_sale |
+| `SaleAutoEnded` | round_id, sold_amount, participants_count | on_initialize 自动结束 |
+| `SoftCapNotMet` | round_id, raised, soft_cap | end_sale / on_initialize soft cap 未达标 |
+| `RoundStorageCleaned` | round_id, subscriptions_removed | cleanup_round |
+| `ForceBatchRefundIssued` | round_id, refunded_count, total_nex | force_batch_refund |
 
 ## Errors
 
 | 错误 | 说明 |
 |------|------|
+| `RoundNotFound` | 轮次不存在 |
+| `RoundNotStarted` | 轮次未开始 |
+| `RoundEnded` | 轮次已结束 |
+| `RoundCancelled` | 轮次已取消 |
+| `SoldOut` | 剩余不足 |
+| `InvalidRoundStatus` | 无效的轮次状态 |
+| `InsufficientBalance` | 余额不足 |
+| `ExceedsPurchaseLimit` | 超过购买限额 |
+| `BelowMinPurchase` | 低于最小购买量 |
+| `NotInWhitelist` | 白名单模式下不在名单 |
+| `InsufficientKycLevel` | KYC 级别 < min_kyc_level |
+| `InvalidPaymentAsset` | 无效支付资产（当前仅支持 NEX） |
+| `AlreadySubscribed` | 重复认购 |
+| `NotSubscribed` | 未认购 |
+| `AlreadyClaimed` | 重复领取 |
+| `NoTokensToUnlock` | 无可解锁代币 |
+| `CliffNotReached` | 悬崖期未到 |
+| `Unauthorized` | 非 Entity owner/admin |
+| `WhitelistFull` | 白名单已满 |
+| `RoundsHistoryFull` | 轮次历史已满（cleanup_round 释放槽位） |
+| `ParticipantsFull` | 参与者已满 |
+| `PaymentOptionsFull` | 支付选项已满 |
+| `InvalidDutchAuctionConfig` | 荷兰拍卖配置无效（start ≤ end 或 end = 0） |
+| `InvalidVestingConfig` | 锁仓配置无效（bps > 10000） |
 | `EntityNotFound` | Entity 不存在 |
 | `EntityNotActive` | Entity 未激活 |
-| `Unauthorized` | 非 Entity owner/admin |
 | `InvalidTotalSupply` | total_supply = 0 |
-| `InvalidTimeWindow` | end_block <= start_block |
-| `InvalidKycLevel` | min_kyc_level > 4 |
+| `InvalidTimeWindow` | end_block ≤ start_block |
 | `InvalidPrice` | price = 0 或 min_purchase = 0 |
-| `InvalidPurchaseLimits` | max < min |
 | `InvalidVestingDuration` | cliff > total |
-| `InvalidVestingConfig` | initial_unlock_bps > 10000 |
-| `InvalidDutchAuctionConfig` | start_price <= end_price |
-| `NoPaymentOptions` | start_sale 时无支付选项 |
-| `InsufficientTokenSupply` | Entity 代币余额不足 |
-| `SaleNotInTimeWindow` | 认购时不在 [start, end]；或提前结束发售 |
-| `InsufficientKycLevel` | KYC 级别 < min_kyc_level |
-| `NotInWhitelist` | 白名单模式下不在名单 |
+| `SaleNotInTimeWindow` | 认购不在时间窗口；或提前结束发售 |
 | `ArithmeticOverflow` | amount × price 溢出 u128 |
-| `SoldOut` | 剩余不足 |
-| `AlreadySubscribed` | 重复认购 |
-| `AlreadyClaimed` | 重复领取 |
-| `AlreadyRefunded` | 重复退款 |
-| `SaleNotCancelled` | 退款需 Cancelled 状态 |
+| `NoPaymentOptions` | start_sale 时无支付选项 |
+| `InvalidKycLevel` | min_kyc_level > 4 |
+| `InsufficientTokenSupply` | Entity 代币余额不足 |
 | `FundsAlreadyWithdrawn` | 重复提取 |
+| `SaleNotCancelled` | 退款需 Cancelled 状态 |
+| `AlreadyRefunded` | 重复退款 |
+| `InvalidPurchaseLimits` | max < min |
+| `RefundPeriodNotExpired` | 退款宽限期未到期 |
+| `DutchAuctionNotConfigured` | 荷兰拍卖未配置价格曲线 |
+| `ActiveRoundsFull` | 活跃轮次已满 |
+| `RoundIdOverflow` | 轮次 ID 溢出（u64） |
+| `StartBlockInPast` | start_block 在过去 |
+| `IncompleteUnreserve` | Entity 代币 unreserve 不完整 |
+| `DuplicatePaymentOption` | 重复的支付选项（相同 asset_id） |
+| `EntityLocked` | 实体已被全局锁定 |
 | `NoUpdateProvided` | update_sale_round 所有参数均为 None |
 | `PaymentOptionNotFound` | 支付选项索引不存在 |
 | `InvalidExtension` | 新结束时间必须大于当前结束时间 |
 | `SaleNotPaused` | 发售未处于暂停状态 |
+| `InsiderTradingBlocked` | 内幕人员在黑窗口期禁止认购 |
+| `RoundNotCleanable` | 轮次不可清理（未到终态或资金未提取） |
+| `EmptyBatch` | 批量操作列表为空 |
+| `LotteryNotImplemented` | Lottery 模式尚未实现 |
+| `SoftCapNotMet` | Soft cap 未达标，发售已自动取消 |
 
 ## 权限模型
 
+所有 Entity owner/创建者操作均检查 `EntityLocked` 状态。Root 操作不检查锁定。
+
 | 操作 | 调用方 | 前置条件 |
 |------|--------|----------|
-| `create_sale_round` | Entity owner/admin | Entity 存在且激活 |
-| `add_payment_option` | 轮次创建者 | NotStarted |
-| `set_vesting_config` | 轮次创建者 | NotStarted |
-| `configure_dutch_auction` | 轮次创建者 | NotStarted + DutchAuction |
-| `add_to_whitelist` | 轮次创建者 | NotStarted |
-| `start_sale` | 轮次创建者 | NotStarted + ≥1 支付选项 |
-| `subscribe` | signed | Active + 时间窗口 + KYC + 白名单 |
-| `end_sale` | 轮次创建者 | Active + (now ≥ end_block 或 已售罄) |
+| `create_sale_round` | Entity owner/admin | Entity 存在+激活+未锁定 |
+| `add_payment_option` | 轮次创建者 | NotStarted + Entity 未锁定 |
+| `set_vesting_config` | 轮次创建者 | NotStarted + Entity 未锁定 |
+| `configure_dutch_auction` | 轮次创建者 | NotStarted + DutchAuction + Entity 未锁定 |
+| `add_to_whitelist` | 轮次创建者 | NotStarted + Entity 未锁定 |
+| `start_sale` | 轮次创建者 | NotStarted + ≥1 支付选项 + Entity 未锁定 |
+| `subscribe` | signed | Active + 时间窗口 + KYC + 内幕检查 + 白名单 |
+| `end_sale` | 轮次创建者 | Active/Paused + (now≥end_block 或售罄) + Entity 未锁定 |
 | `claim_tokens` | 认购者 | Ended + 未 claimed |
-| `unlock_tokens` | 认购者 | 已 claimed + 悬崖期后 |
-| `cancel_sale` | 轮次创建者 | NotStarted/Active/Paused |
+| `unlock_tokens` | 认购者 | Ended + 已 claimed + 悬崖期后 |
+| `cancel_sale` | 轮次创建者 | NotStarted/Active/Paused + Entity 未锁定 |
 | `claim_refund` | 认购者 | Cancelled + 未退款 |
-| `withdraw_funds` | 轮次创建者 | Ended/Completed + 未提取 |
+| `withdraw_funds` | 轮次创建者 | Ended/Completed + 未提取 + Entity 未锁定 |
+| `reclaim_unclaimed_tokens` | 轮次创建者 | Cancelled + 宽限期后 + Entity 未锁定 |
 | `force_cancel_sale` | Root | NotStarted/Active/Paused |
 | `force_end_sale` | Root | Active/Paused |
-| `force_refund` | Root | Cancelled + 指定认购者 |
+| `force_refund` | Root | Cancelled + 指定认购者未退款 |
 | `force_withdraw_funds` | Root | Ended/Completed + 未提取 |
 | `update_sale_round` | 轮次创建者 | NotStarted + Entity 未锁定 |
-| `increase_subscription` | 已认购者 | Active + 时间窗口 + 限额内 |
+| `increase_subscription` | 已认购者 | Active + 时间窗口 + 内幕检查 + 限额内 |
 | `remove_from_whitelist` | 轮次创建者 | NotStarted + Entity 未锁定 |
 | `remove_payment_option` | 轮次创建者 | NotStarted + Entity 未锁定 |
 | `extend_sale` | 轮次创建者 | Active/Paused + Entity 未锁定 |
 | `pause_sale` | 轮次创建者 | Active + Entity 未锁定 |
 | `resume_sale` | 轮次创建者 | Paused + Entity 未锁定 |
+| `cleanup_round` | 轮次创建者 | Ended/Completed + funds_withdrawn |
+| `force_batch_refund` | Root | Cancelled |
 
 ## 测试
 
 ```bash
 cargo test -p pallet-entity-tokensale
-# 108 tests passed
+# 146 tests passed
 ```
 
-| 测试 | 覆盖 |
-|------|------|
-| `create_sale_round_works` | 创建轮次、状态、funds_withdrawn |
-| `create_sale_round_rejects_invalid_entity` | Entity 不存在 |
-| `create_sale_round_rejects_non_owner` | 非 owner/admin |
-| `create_sale_round_rejects_zero_supply` | total_supply = 0 |
-| `create_sale_round_rejects_bad_time_window` | end <= start |
-| `create_sale_round_rejects_invalid_kyc_level` | level > 4 |
-| `add_payment_option_works` | 添加支付选项 |
-| `add_payment_option_rejects_zero_price` | price = 0 |
-| `add_payment_option_rejects_bad_limits` | max < min |
-| `set_vesting_config_works` | 锁仓配置 |
-| `set_vesting_config_rejects_cliff_gt_total` | cliff > total |
-| `configure_dutch_auction_requires_not_started` | 荷兰拍卖配置 |
-| `whitelist_uses_separate_storage` | 独立白名单存储+去重 |
-| `whitelist_rejects_non_not_started` | Active 状态不可添加 |
-| `start_sale_requires_payment_options` | 无选项时拒绝 |
-| `start_sale_locks_entity_tokens` | 锁定代币 |
-| `subscribe_transfers_nex` | NEX 实际转账到托管 |
-| `subscribe_rejects_outside_time_window` | 时间窗口校验 |
-| `subscribe_rejects_duplicate` | 重复认购 |
-| `subscribe_checks_kyc` | KYC 级别检查 |
-| `subscribe_checks_whitelist` | 白名单模式 |
-| `end_sale_releases_unsold_tokens` | 释放未售代币 |
-| `claim_tokens_distributes_entity_tokens` | 代币分发 |
-| `claim_tokens_rejects_double_claim` | 重复领取 |
-| `cancel_and_refund_works` | 取消+退款全流程 |
-| `claim_refund_rejects_non_cancelled` | 非 Cancelled 退款 |
-| `withdraw_funds_works` | NEX 提取到 Entity |
-| `calculate_initial_unlock_works` | 20% 初始解锁 |
-| `calculate_initial_unlock_no_vesting_returns_total` | 无锁仓全额 |
-| `subscribe_rejects_overflow` | checked_mul 溢出保护 |
-| `end_sale_rejects_premature_end` | 提前结束发售被拒绝 |
-| `end_sale_allows_when_sold_out` | 售罄时可提前结束 |
-| `end_sale_allows_after_end_block` | 超过 end_block 后正常结束 |
-| `cliff_vesting_unlock_interval_step_function` | Cliff 阶梯解锁各阶段验证 |
-| `linear_vesting_continuous_unlock` | Linear 连续线性不受 interval 影响 |
-| `on_initialize_auto_ends_expired_sale` | on_initialize 自动结束过期发售 |
-| `on_initialize_does_not_end_before_expiry` | 未过期不结束 |
-| `on_initialize_handles_multiple_rounds` | 多轮次部分过期处理 |
-| `payment_options_stored_separately` | 支付选项独立存储验证 |
-| `reclaim_unclaimed_tokens_after_grace_period` | 退款宽限期回收流程 |
-| `reclaim_rejects_non_creator` | 非创建者不能回收 |
-| `dutch_auction_allows_zero_price_in_payment_option` | 荷兰拍卖允许 price=0 |
-| `non_dutch_rejects_zero_price` | 非荷兰拍卖拒绝 price=0 |
-| `dutch_auction_start_requires_configure` | 荷兰拍卖需先配置 |
-| `c1_reclaim_blocks_subsequent_withdraw` | C1: reclaim 后阻止 withdraw 双重提取 |
-| `h2_claim_tokens_rejects_completed_from_cancel` | H2: Completed 状态拒绝 claim_tokens |
-| `h3_add_payment_option_rejects_non_none_asset_id` | H3: 拒绝非 None asset_id |
-| `m2_unlock_tokens_rejects_non_ended_status` | M2: Ended 状态下 unlock |
-| `m2_unlock_tokens_rejects_cancelled_status` | M2: Cancelled 拒绝 unlock |
-| `l3_create_sale_round_rejects_start_block_in_past` | L3: 过去 start_block |
-| `l5_dutch_auction_rejects_zero_end_price` | L5: 荷兰拍卖 end_price=0 |
-| `m1_end_sale_zeros_remaining_amount` | M1: end_sale 后 remaining=0 |
-| `m1_auto_end_sale_zeros_remaining_amount` | M1: 自动结束后 remaining=0 |
-| `l2_next_round_id_overflow_detected` | L2: NextRoundId 溢出检测 |
-| `h1_deep_claim_tokens_rejects_partial_repatriation` | H1: claim 不完整转移 |
-| `h1_deep_unlock_tokens_rejects_partial_repatriation` | H1: unlock 不完整转移 |
-| `h1_deep_claim_and_unlock_full_amount_succeeds` | H1: 正常全额转移 |
-| `m1_deep_cancel_sale_zeros_remaining_amount` | M1: cancel 后 remaining=0 |
-| `m1_deep_cancel_not_started_keeps_remaining` | M1: NotStarted cancel 保持 |
-| `m2_deep_dutch_price_clamped_to_end_price` | M2: 极端价格钳制 |
-| `m1_r5_add_payment_option_rejects_duplicate_asset_id` | M1-R5: 重复 asset_id |
-| `m2_deep_dutch_price_reaches_end_price_at_end` | M2: 正常递减到 end_price |
-| `p0_force_cancel_sale_works` | P0: Root 强制取消 |
-| `p0_force_cancel_sale_rejects_non_root` | P0: 非 Root 拒绝 |
-| `p0_force_cancel_sale_rejects_ended` | P0: Ended 拒绝强制取消 |
-| `p0_force_cancel_not_started_works` | P0: NotStarted 强制取消 |
-| `p0_force_end_sale_works` | P0: Root 强制结束 |
-| `p0_force_end_sale_rejects_non_root` | P0: 非 Root 拒绝 |
-| `p0_force_end_sale_rejects_not_active` | P0: 非 Active 拒绝 |
-| `p1_force_refund_works` | P1: Root 强制退款 |
-| `p1_force_refund_rejects_non_root` | P1: 非 Root 拒绝 |
-| `p1_force_refund_rejects_not_cancelled` | P1: 非 Cancelled 拒绝 |
-| `p1_force_refund_rejects_already_refunded` | P1: 重复退款拒绝 |
-| `p1_force_withdraw_funds_works` | P1: Root 强制提取 |
-| `p1_force_withdraw_funds_rejects_non_root` | P1: 非 Root 拒绝 |
-| `p1_force_withdraw_funds_rejects_active` | P1: Active 拒绝 |
-| `p1_update_sale_round_works` | P1: 更新轮次参数 |
-| `p1_update_sale_round_rejects_non_creator` | P1: 非创建者拒绝 |
-| `p1_update_sale_round_rejects_active` | P1: Active 拒绝 |
-| `p1_update_sale_round_rejects_no_update` | P1: 无更新拒绝 |
-| `p1_update_sale_round_validates_time_window` | P1: 时间窗口校验 |
-| `p1_update_sale_round_rejects_zero_supply` | P1: 零供应量拒绝 |
-| `p1_increase_subscription_works` | P1: 追加认购 |
-| `p1_increase_subscription_rejects_not_subscribed` | P1: 未认购拒绝 |
-| `p1_increase_subscription_rejects_exceeds_limit` | P1: 超限额拒绝 |
-| `p1_increase_subscription_rejects_sold_out` | P1: 售罄拒绝 |
-| `p1_remove_from_whitelist_works` | P1: 移除白名单 |
-| `p1_remove_from_whitelist_ignores_nonexistent` | P1: 不存在地址跳过 |
-| `p1_remove_from_whitelist_rejects_active` | P1: Active 拒绝 |
-| `p2_remove_payment_option_works` | P2: 移除支付选项 |
-| `p2_remove_payment_option_rejects_invalid_index` | P2: 无效索引拒绝 |
-| `p2_remove_payment_option_rejects_active` | P2: Active 拒绝 |
-| `p2_extend_sale_works` | P2: 延长发售 |
-| `p2_extend_sale_rejects_shorter` | P2: 缩短拒绝 |
-| `p2_extend_sale_rejects_not_active` | P2: 非 Active 拒绝 |
-| `p2_extend_paused_sale_works` | P2: Paused 可延长 |
-| `p3_pause_sale_works` | P3: 暂停发售 |
-| `p3_pause_sale_rejects_not_active` | P3: 非 Active 拒绝 |
-| `p3_resume_sale_works` | P3: 恢复发售 |
-| `p3_resume_sale_rejects_not_paused` | P3: 非 Paused 拒绝 |
-| `p3_subscribe_rejects_paused` | P3: Paused 拒绝认购 |
-| `p3_cancel_paused_sale_works` | P3: Paused 可取消 |
-| `p3_end_paused_sale_works` | P3: Paused 可结束 |
-| `p3_force_end_paused_sale_works` | P3: Root 强制结束 Paused |
-| `p3_force_cancel_paused_sale_works` | P3: Root 强制取消 Paused |
-| `p3_on_initialize_skips_paused_round` | P3: 自动结束跳过 Paused |
+**按类别分组（146 个）：**
+
+### 基础功能 (49)
+
+- 创建/配置/启动/认购/结束/领取/取消/退款/提取/回收全流程
+- 输入校验（zero supply, bad time, kyc level, price, limits, overflow）
+- 白名单独立存储 + 去重 + 状态检查
+- 荷兰拍卖配置 + price=0 允许/拒绝
+- Cliff/Linear 解锁计算验证
+- on_initialize 自动结束（单轮/多轮/未过期跳过）
+- 支付选项独立存储验证
+- 退款宽限期回收流程
+
+### 审计回归 (27)
+
+- **C1**: reclaim 后阻止 withdraw 双重提取
+- **H2**: Completed 状态拒绝 claim_tokens
+- **H3**: 拒绝非 None asset_id
+- **M1**: end_sale/auto_end/cancel_sale 清零 remaining_amount
+- **M2**: Ended 状态限制 unlock_tokens
+- **L2**: NextRoundId 溢出检测
+- **L3**: 过去 start_block 拒绝
+- **L5**: 荷兰拍卖 end_price=0 拒绝
+- **H1-deep**: claim/unlock 不完整转移检测
+- **M1-deep**: cancel NotStarted 保持 remaining
+- **M2-deep**: 荷兰拍卖价格钳制 + 精确递减
+- **M1-R5**: 重复 asset_id 拒绝
+
+### Root 治理 (12)
+
+- force_cancel_sale / force_end_sale / force_refund / force_withdraw_funds
+- 各函数 origin 检查 + 状态校验
+
+### 功能增强 P1-P3 (25)
+
+- update_sale_round（参数更新/校验/状态检查）
+- increase_subscription（追加认购/限额/售罄检查）
+- remove_from_whitelist（移除/不存在跳过/状态检查）
+- remove_payment_option（移除/索引校验/状态检查）
+- extend_sale（延长/缩短拒绝/Paused 可延长）
+- pause_sale / resume_sale（状态转换/状态检查）
+- Paused 状态下 subscribe 拒绝 / cancel / end / force_end / force_cancel / on_initialize 跳过
+
+### Soft Cap (4)
+
+- soft cap 达标正常结束
+- soft cap 未达标自动取消
+- on_initialize soft cap 自动取消
+- zero soft cap 正常结束
+
+### 内幕交易防护 (3)
+
+- insider 被 subscribe 阻止
+- 非 insider 可正常认购
+- insider 被 increase_subscription 阻止
+
+### 白名单个人额度 (2)
+
+- 个人额度限制生效
+- None 额度使用默认限额
+
+### 发售统计 (2)
+
+- get_sale_statistics 返回正确数据
+- 不存在轮次返回 None
+
+### TokenSaleProvider trait (2)
+
+- active_sale_round 返回活跃轮次
+- 不存在轮次返回 None
+
+### 存储清理 F8 (4)
+
+- cleanup_round 清理全部存储
+- 拒绝活跃轮次清理
+- 拒绝非创建者清理
+- 拒绝资金未提取清理
+
+### 批量强制退款 F9 (5)
+
+- force_batch_refund 正常退款
+- 拒绝非 root
+- 拒绝非 Cancelled 状态
+- 拒绝空批量
+- 跳过已退款项
+
+### EntityLocked (1)
+
+- Entity 锁定时拒绝 create_sale_round
+
+### 活跃发售检查 F12 (4)
+
+- has_active_sale 返回 true
+- 无活跃发售返回 false
+- 结束后返回 false
+- Paused 仍返回 true
+
+### 审计回归 R6 (3)
+
+- H1-R6: claim_refund 在 end_sale soft cap 失败后正常工作
+- H1-R6: claim_refund 在 auto_end soft cap 失败后正常工作
+- H1-R6: reclaim 在 soft cap 取消后正常工作
+
+### 审计回归 R7 (3)
+
+- M1-R7: cleanup_round 释放 EntityRounds 槽位
+- M1-R7: cleanup 后允许创建新轮次
+- L1-R7: force_batch_refund 部分 unreserve 时重新锁定代币
+
+## Hooks
+
+### on_initialize
+
+每个区块自动扫描 `ActiveRounds` 列表，结束所有 `now > end_block` 且状态为 `Active` 的轮次（跳过 `Paused`）。包含 Soft Cap 检查。
+
+### integrity_test
+
+`#[cfg(test)]` 模式下校验所有 Config 常量 > 0：`MaxPaymentOptions`, `MaxWhitelistSize`, `MaxRoundsHistory`, `MaxSubscriptionsPerRound`, `MaxActiveRounds`, `MaxBatchRefund`。
+
+## TokenSaleProvider Trait
+
+跨 pallet 查询接口（`pallet_entity_common::TokenSaleProvider`）：
+
+| 方法 | 返回 | 说明 |
+|------|------|------|
+| `active_sale_round(entity_id)` | `Option<u64>` | 实体活跃轮次 ID（含 Paused） |
+| `sale_round_status(round_id)` | `Option<TokenSaleStatus>` | 轮次状态映射 |
+| `sold_amount(round_id)` | `Option<Balance>` | 已售数量 |
+| `remaining_amount(round_id)` | `Option<Balance>` | 剩余数量 |
+| `participants_count(round_id)` | `Option<u32>` | 参与者数 |
+| `sale_total_supply(round_id)` | `Option<Balance>` | 总供应量 |
+| `sale_entity_id(round_id)` | `Option<u64>` | 轮次所属 Entity |
 
 ## 版本历史
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
 | v0.1.0 | 2026-02-03 | Phase 8 初始版本 |
-| v0.1.1 | 2026-02-09 | 模块文件夹从 `sale` 重命名为 `tokensale`，更新 README |
-| v0.2.0 | 2026-02-09 | 深度审计修复（20 项），详见下方 |
-| v0.3.0 | 2026-02-23 | 二次深度审计（4 项修复 + 5 新测试），详见下方 |
-| v0.4.0 | 2026-02-26 | 三次审计（3 项修复 + 3 新测试），详见下方 |
-| v0.5.0 | 2026-03 | 功能增强（11 新 extrinsics + Paused 状态 + 59 新测试），详见下方 |
+| v0.1.1 | 2026-02-09 | 模块文件夹从 `sale` 重命名为 `tokensale` |
+| v0.2.0 | 2026-02-09 | 深度审计修复（20 项） |
+| v0.3.0 | 2026-02-23 | 二次深度审计（4 项修复 + 5 新测试） |
+| v0.4.0 | 2026-02-26 | 三次审计（3 项修复 + 3 新测试） |
+| v0.5.0 | 2026-03 | 功能增强（11 新 extrinsics + Paused + 59 新测试） |
+| v0.6.0 | 2026-03 | 审计 R5-R6（F2-F12 功能 + soft cap + 内幕防护 + 存储清理 + 批量退款） |
+| v0.7.0 | 2026-03 | 审计 R7（M1-R7 cleanup_round 释放 EntityRounds 槽位 + L1-R7 force_batch_refund 回滚 + 3 回归测试） |
 
 ### v0.2.0 审计修复详情
 
@@ -539,51 +647,56 @@ cargo test -p pallet-entity-tokensale
 
 ### v0.3.0 二次深度审计
 
-- **C1**: `add_to_whitelist` 参数从 `Vec<T::AccountId>` 改为 `BoundedVec<T::AccountId, T::MaxWhitelistSize>`，防止无界输入 DoS
-- **H1**: `subscribe` 在 NEX 转账前预检 `RoundParticipants` 容量（fail-fast），避免浪费计算
-- **H2**: `end_sale` 新增时间窗口强制检查：`now >= end_block || remaining_amount == 0`，防止创建者提前截止损害参与者权益
-- **M1**: `calculate_unlockable` 实现 `VestingType::Cliff` 的 `unlock_interval` 阶梯解锁（原实现忽略 interval，全部按线性处理）
-- 新增 5 个测试覆盖上述修复
-- 已有 4 个测试适配 H2 变更（end_sale 前需推进到 end_block）
+- **C1**: `add_to_whitelist` 参数改为 `BoundedVec`，防无界输入 DoS
+- **H1**: `subscribe` NEX 转账前预检参与者容量（fail-fast）
+- **H2**: `end_sale` 强制检查 `now >= end_block || remaining_amount == 0`
+- **M1**: `calculate_unlockable` 实现 Cliff 阶梯解锁（原忽略 interval）
+- 新增 5 个测试 + 4 个已有测试适配
 
-### v0.4.0 三次审计（3 项修复 + 3 新测试）
+### v0.4.0 三次审计
 
-- **C1**: `reclaim_unclaimed_tokens` 未设置 `funds_withdrawn = true` → 允许 `withdraw_funds` 双重提取，跨轮资金污染。修复: reclaim 时同步标记 `funds_withdrawn = true`
-- **H2**: `claim_tokens` 允许 `Completed` 状态（来自 cancel→reclaim 路径，代币已 unreserve）→ 认购者拿不到代币但状态标记已领取。修复: 仅允许 `Ended` 状态
-- **H3**: `add_payment_option` 允许 `asset_id = Some(x)` → `RaisedFunds` 键不一致，`withdraw_funds` 只读 `None` 键导致资金永久锁定。修复: 强制 `asset_id = None`
-- **M4**: Mock `repatriate_reserved` 返回值语义与真实 pallet 不一致（返回差额 vs 实际量）。修复: 改为返回 `Ok(actual)`
+- **C1**: `reclaim_unclaimed_tokens` 标记 `funds_withdrawn = true`，防双重提取
+- **H2**: `claim_tokens` 仅允许 `Ended` 状态（拒绝 Completed）
+- **H3**: `add_payment_option` 强制 `asset_id = None`（防键不一致）
 - 新增 3 个回归测试
-
-**已知设计局限（标记未修）：**
-- L1: `EntityTokenProvider::repatriate_reserved` 返回值语义（实际量 vs 差额）与 Substrate `ReservableCurrency` 惯例不同，跨 pallet 影响范围较广（market 等也使用），暂不修改
-- ~~L2: `RoundStatus` 枚举中 `WhitelistOpen`、`SoldOut`、`Settling` 预留变体~~ — Round 5 已移除
 
 ### v0.5.0 功能增强
 
-**新增 RoundStatus:**
-- `Paused`: 发售暂停（Active→Paused→Active 可恢复，也可直接 cancel/end）
+**新增 RoundStatus:** `Paused`（Active→Paused→Active 可恢复）
 
 **新增 Extrinsics (11):**
-- **P0 Root 治理**: `force_cancel_sale`(14), `force_end_sale`(15) — 无需等待时间窗口
-- **P1 Root 治理**: `force_refund`(16) 指定用户退款, `force_withdraw_funds`(17) 强制提取
-- **P1 Owner**: `update_sale_round`(18) NotStarted 阶段更新参数, `remove_from_whitelist`(20)
-- **P1 Subscriber**: `increase_subscription`(19) 追加认购量
-- **P2 Owner**: `remove_payment_option`(21), `extend_sale`(22) 延长时间
-- **P3 Owner**: `pause_sale`(23), `resume_sale`(24)
+- Root 治理: `force_cancel_sale`(14), `force_end_sale`(15), `force_refund`(16), `force_withdraw_funds`(17)
+- Owner: `update_sale_round`(18), `remove_from_whitelist`(20), `remove_payment_option`(21), `extend_sale`(22), `pause_sale`(23), `resume_sale`(24)
+- Subscriber: `increase_subscription`(19)
 
-**新增 Events (13):**
-- SaleRoundForceCancelled, SaleRoundForceEnded, ForceRefundIssued, ForceFundsWithdrawn
-- SaleRoundUpdated, SubscriptionIncreased, WhitelistRemoved, PaymentOptionRemoved
-- SaleExtended, SaleRoundPaused, SaleRoundResumed, ExpiredRefundsReclaimed
+**新增 Events (13), Errors (4), 测试 59 个** (108 total)
 
-**新增 Errors (4):**
-- NoUpdateProvided, PaymentOptionNotFound, InvalidExtension, SaleNotPaused
+### v0.6.0 审计 R5-R6
 
-**修改已有 Extrinsics:**
-- `cancel_sale`: 新增 Paused 状态支持
-- `end_sale`: 新增 Paused 状态支持
+**新增功能:**
+- **F2**: Soft Cap 最低募资目标（`soft_cap` 字段 + `SoftCapNotMet` 事件/错误）
+- **F4**: 内幕交易防护（`DisclosureProvider` + `InsiderTradingBlocked` 错误）
+- **F5**: 白名单个人额度（`RoundWhitelist` 值改为 `Option<Balance>`）
+- **F6**: 发售统计查询 `get_sale_statistics`
+- **F7**: `TokenSaleProvider` trait 实现
+- **F8**: 存储清理 `cleanup_round`(25)（清理认购/白名单/支付/募集/EntityRounds）
+- **F9**: 批量强制退款 `force_batch_refund`(26)（跳过已退/失败项 + 统计更新）
+- **F10**: `integrity_test` 配置参数校验
+- **F11**: Lottery 模式拒绝（`LotteryNotImplemented`）
+- **F12**: 活跃发售检查 `has_active_sale`
 
-**新增测试: 59 个** (108 total, was 49)
+**审计修复:**
+- **M1-R5**: `add_payment_option` 检查重复 `asset_id`（`DuplicatePaymentOption`）
+- **H1-R6**: Soft cap 失败时仅释放未售代币，已售代币由 `claim_refund` 逐个释放
+- **M1-R6**: Mock `new_test_ext()` 清理 thread-local 状态
+
+**新增测试: 38 个** (146 total)
+
+### v0.7.0 审计 R7
+
+- **M1-R7**: `cleanup_round` 新增 `EntityRounds::mutate` 移除 round_id，释放 `MaxRoundsHistory` 槽位
+- **L1-R7**: `force_batch_refund` 部分 unreserve 时重新 reserve 已释放代币，保持状态一致
+- 新增 3 个回归测试（cleanup 槽位释放 + 新轮次创建 + 部分 unreserve 回滚）
 
 ## 许可证
 

@@ -51,10 +51,7 @@ pub fn is_valid_tron_address(address: &[u8]) -> bool {
         let checksum = &decoded[21..25];
         let hash1 = sp_core::hashing::sha2_256(payload);
         let hash2 = sp_core::hashing::sha2_256(&hash1);
-        hash2[0] == checksum[0]
-            && hash2[1] == checksum[1]
-            && hash2[2] == checksum[2]
-            && hash2[3] == checksum[3]
+        hash2[..4] == *checksum
     } else {
         false
     }
@@ -132,5 +129,26 @@ mod tests {
         let bytes = decoded.unwrap();
         assert_eq!(bytes.len(), 25);
         assert_eq!(bytes[0], 0x41); // TRON 主网前缀
+    }
+
+    // ===== R2 回归测试: 边界值 =====
+
+    #[test]
+    fn r2_empty_address_rejected() {
+        assert!(!is_valid_tron_address(b""));
+    }
+
+    #[test]
+    fn r2_all_t_address_rejected() {
+        // 34 个 'T' — Base58 合法字符但校验和不通过
+        assert!(!is_valid_tron_address(b"TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT"));
+    }
+
+    #[test]
+    fn r2_non_ascii_bytes_rejected() {
+        // 含非 Base58 字符 (0xff) 的 34 字节输入
+        let mut bad = [b'T'; 34];
+        bad[10] = 0xff;
+        assert!(!is_valid_tron_address(&bad));
     }
 }

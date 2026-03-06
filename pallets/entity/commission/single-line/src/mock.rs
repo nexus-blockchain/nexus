@@ -26,8 +26,17 @@ thread_local! {
     /// Banned members: (entity_id, account)
     pub static BANNED_MEMBERS: RefCell<BTreeSet<(u64, u64)>> =
         RefCell::new(BTreeSet::new());
+    /// Unactivated members: (entity_id, account)
+    pub static UNACTIVATED_MEMBERS: RefCell<BTreeSet<(u64, u64)>> =
+        RefCell::new(BTreeSet::new());
     /// Locked entities
     pub static ENTITY_LOCKED: RefCell<BTreeSet<u64>> =
+        RefCell::new(BTreeSet::new());
+    /// Inactive entities (for F1 tests)
+    pub static ENTITY_INACTIVE: RefCell<BTreeSet<u64>> =
+        RefCell::new(BTreeSet::new());
+    /// Frozen/suspended members (for M1-R5 is_member_active tests)
+    pub static FROZEN_MEMBERS: RefCell<BTreeSet<(u64, u64)>> =
         RefCell::new(BTreeSet::new());
 }
 
@@ -37,7 +46,10 @@ pub fn clear_mocks() {
     ENTITY_OWNERS.with(|m| m.borrow_mut().clear());
     ENTITY_ADMINS.with(|m| m.borrow_mut().clear());
     BANNED_MEMBERS.with(|m| m.borrow_mut().clear());
+    UNACTIVATED_MEMBERS.with(|m| m.borrow_mut().clear());
     ENTITY_LOCKED.with(|m| m.borrow_mut().clear());
+    ENTITY_INACTIVE.with(|m| m.borrow_mut().clear());
+    FROZEN_MEMBERS.with(|m| m.borrow_mut().clear());
 }
 
 pub fn set_member_stats(entity_id: u64, account: u64, total_earned: Balance) {
@@ -71,9 +83,22 @@ pub fn set_banned(entity_id: u64, account: u64) {
     BANNED_MEMBERS.with(|m| { m.borrow_mut().insert((entity_id, account)); });
 }
 
+pub fn set_unactivated(entity_id: u64, account: u64) {
+    UNACTIVATED_MEMBERS.with(|m| { m.borrow_mut().insert((entity_id, account)); });
+}
+
 pub fn set_entity_locked(entity_id: u64) {
     ENTITY_LOCKED.with(|m| { m.borrow_mut().insert(entity_id); });
 }
+
+pub fn set_entity_inactive(entity_id: u64) {
+    ENTITY_INACTIVE.with(|m| { m.borrow_mut().insert(entity_id); });
+}
+
+pub fn set_member_frozen(entity_id: u64, account: u64) {
+    FROZEN_MEMBERS.with(|m| { m.borrow_mut().insert((entity_id, account)); });
+}
+
 
 // ============================================================================
 // Mock providers
@@ -107,7 +132,12 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
         ENTITY_OWNERS.with(|m| m.borrow().contains_key(&entity_id))
     }
     fn is_entity_active(entity_id: u64) -> bool {
-        ENTITY_OWNERS.with(|m| m.borrow().contains_key(&entity_id))
+        ENTITY_INACTIVE.with(|inactive| {
+            if inactive.borrow().contains(&entity_id) {
+                return false;
+            }
+            ENTITY_OWNERS.with(|m| m.borrow().contains_key(&entity_id))
+        })
     }
     fn entity_status(_entity_id: u64) -> Option<pallet_entity_common::EntityStatus> { None }
     fn entity_owner(entity_id: u64) -> Option<u64> {
@@ -130,7 +160,9 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
 pub struct MockMemberProvider;
 
 impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
-    fn is_member(_entity_id: u64, _account: &u64) -> bool { true }
+    fn is_member(_entity_id: u64, _account: &u64) -> bool {
+        true
+    }
     fn get_referrer(_entity_id: u64, _account: &u64) -> Option<u64> { None }
     fn custom_level_id(_entity_id: u64, _account: &u64) -> u8 { 0 }
     fn get_level_commission_bonus(_entity_id: u64, _level_id: u8) -> u16 { 0 }
@@ -139,6 +171,12 @@ impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
     fn auto_register(_entity_id: u64, _account: &u64, _referrer: Option<u64>) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
     fn is_banned(entity_id: u64, account: &u64) -> bool {
         BANNED_MEMBERS.with(|m| m.borrow().contains(&(entity_id, *account)))
+    }
+    fn is_activated(entity_id: u64, account: &u64) -> bool {
+        !UNACTIVATED_MEMBERS.with(|m| m.borrow().contains(&(entity_id, *account)))
+    }
+    fn is_member_active(entity_id: u64, account: &u64) -> bool {
+        !FROZEN_MEMBERS.with(|m| m.borrow().contains(&(entity_id, *account)))
     }
 }
 

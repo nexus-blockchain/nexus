@@ -35,7 +35,7 @@ export const useEntityStore = create<EntityStore>((set, get) => ({
   hasPermission: (entityId, required) => {
     const perms = get().permissions[entityId];
     if (perms === undefined) return false;
-    if (perms === 0xff) return true;
+    if (perms === 0xffffffff) return true;
     return (perms & required) === required;
   },
 }));

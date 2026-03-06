@@ -19,105 +19,205 @@ import {
   Rocket,
   ChevronLeft,
   ChevronRight,
+  ArrowLeftRight,
+  HardDrive,
+  Bot,
+  Scale,
+  Megaphone,
   type LucideIcon,
 } from "lucide-react";
 
-interface NavChild { href: string; labelKey: string }
-interface NavEntry { href?: string; labelKey: string; icon: LucideIcon; children?: NavChild[] }
+interface NavChild {
+  href: string;
+  labelKey: string;
+}
+interface NavEntry {
+  href?: string;
+  labelKey: string;
+  icon: LucideIcon;
+  children?: NavChild[];
+}
+interface NavSection {
+  sectionKey?: string;
+  items: NavEntry[];
+}
 
-const navItems: NavEntry[] = [
-  { href: "/", labelKey: "dashboard", icon: LayoutDashboard },
+const navSections: NavSection[] = [
   {
-    labelKey: "entity",
-    icon: Building2,
-    children: [
-      { href: "/entity/create", labelKey: "createEntity" },
-      { href: "/entity/settings", labelKey: "settings" },
-      { href: "/entity/admins", labelKey: "admins" },
-      { href: "/entity/fund", labelKey: "fund" },
+    items: [
+      { href: "/", labelKey: "dashboard", icon: LayoutDashboard },
     ],
   },
   {
-    labelKey: "shops",
-    icon: Store,
-    children: [
-      { href: "/shops", labelKey: "shops" },
-      { href: "/shops/create", labelKey: "createShop" },
+    sectionKey: "sectionEntity",
+    items: [
+      {
+        labelKey: "entity",
+        icon: Building2,
+        children: [
+          { href: "/entity/create", labelKey: "createEntity" },
+          { href: "/entity/settings", labelKey: "settings" },
+          { href: "/entity/admins", labelKey: "admins" },
+          { href: "/entity/fund", labelKey: "fund" },
+        ],
+      },
+      {
+        labelKey: "shops",
+        icon: Store,
+        children: [
+          { href: "/shops", labelKey: "shops" },
+          { href: "/shops/create", labelKey: "createShop" },
+        ],
+      },
+      {
+        labelKey: "token",
+        icon: Coins,
+        children: [
+          { href: "/token/config", labelKey: "tokenConfig" },
+          { href: "/token/holders", labelKey: "holders" },
+          { href: "/token/dividend", labelKey: "dividend" },
+          { href: "/token/lock", labelKey: "lock" },
+          { href: "/token/transfer", labelKey: "transfer" },
+        ],
+      },
+      {
+        labelKey: "market",
+        icon: TrendingUp,
+        children: [
+          { href: "/market", labelKey: "market" },
+          { href: "/market/orders", labelKey: "myOrders" },
+          { href: "/market/settings", labelKey: "settings" },
+        ],
+      },
+      {
+        labelKey: "members",
+        icon: Users,
+        children: [
+          { href: "/members", labelKey: "members" },
+          { href: "/members/levels", labelKey: "levels" },
+          { href: "/members/rules", labelKey: "rules" },
+          { href: "/members/pending", labelKey: "pending" },
+          { href: "/members/policy", labelKey: "policy" },
+        ],
+      },
+      {
+        labelKey: "commission",
+        icon: Wallet,
+        children: [
+          { href: "/commission", labelKey: "commission" },
+          { href: "/commission/config", labelKey: "config" },
+          { href: "/commission/withdraw", labelKey: "withdraw" },
+          { href: "/commission/pool", labelKey: "pool" },
+        ],
+      },
+      {
+        labelKey: "governance",
+        icon: Vote,
+        children: [
+          { href: "/governance", labelKey: "governance" },
+          { href: "/governance/config", labelKey: "config" },
+        ],
+      },
+      {
+        labelKey: "disclosure",
+        icon: FileText,
+        children: [
+          { href: "/disclosure", labelKey: "disclosure" },
+          { href: "/disclosure/insiders", labelKey: "insiders" },
+        ],
+      },
+      {
+        labelKey: "kyc",
+        icon: ShieldCheck,
+        children: [
+          { href: "/kyc", labelKey: "kyc" },
+          { href: "/kyc/settings", labelKey: "settings" },
+          { href: "/kyc/providers", labelKey: "providers" },
+        ],
+      },
+      {
+        labelKey: "tokensale",
+        icon: Rocket,
+        children: [
+          { href: "/tokensale", labelKey: "tokensale" },
+          { href: "/tokensale/create", labelKey: "createRound" },
+        ],
+      },
     ],
   },
   {
-    labelKey: "token",
-    icon: Coins,
-    children: [
-      { href: "/token/config", labelKey: "tokenConfig" },
-      { href: "/token/holders", labelKey: "holders" },
-      { href: "/token/dividend", labelKey: "dividend" },
-      { href: "/token/lock", labelKey: "lock" },
-      { href: "/token/transfer", labelKey: "transfer" },
+    sectionKey: "sectionTrading",
+    items: [
+      {
+        labelKey: "trading",
+        icon: ArrowLeftRight,
+        children: [
+          { href: "/trading", labelKey: "tradingOrderbook" },
+          { href: "/trading/my-orders", labelKey: "tradingMyOrders" },
+          { href: "/trading/my-trades", labelKey: "tradingMyTrades" },
+          { href: "/trading/disputes", labelKey: "tradingDisputes" },
+        ],
+      },
     ],
   },
   {
-    labelKey: "market",
-    icon: TrendingUp,
-    children: [
-      { href: "/market", labelKey: "market" },
-      { href: "/market/usdt", labelKey: "usdtOtc" },
-      { href: "/market/orders", labelKey: "myOrders" },
-      { href: "/market/settings", labelKey: "settings" },
+    sectionKey: "sectionStorage",
+    items: [
+      {
+        labelKey: "storage",
+        icon: HardDrive,
+        children: [
+          { href: "/storage", labelKey: "storagePins" },
+          { href: "/storage/operators", labelKey: "storageOperators" },
+          { href: "/storage/billing", labelKey: "storageBilling" },
+        ],
+      },
     ],
   },
   {
-    labelKey: "members",
-    icon: Users,
-    children: [
-      { href: "/members", labelKey: "members" },
-      { href: "/members/levels", labelKey: "levels" },
-      { href: "/members/rules", labelKey: "rules" },
-      { href: "/members/pending", labelKey: "pending" },
-      { href: "/members/policy", labelKey: "policy" },
+    sectionKey: "sectionRobot",
+    items: [
+      {
+        labelKey: "robot",
+        icon: Bot,
+        children: [
+          { href: "/robot", labelKey: "robotBots" },
+          { href: "/robot/operators", labelKey: "robotOperators" },
+          { href: "/robot/communities", labelKey: "robotCommunities" },
+          { href: "/robot/nodes", labelKey: "robotNodes" },
+          { href: "/robot/rewards", labelKey: "robotRewards" },
+          { href: "/robot/subscriptions", labelKey: "robotSubscriptions" },
+        ],
+      },
     ],
   },
   {
-    labelKey: "commission",
-    icon: Wallet,
-    children: [
-      { href: "/commission", labelKey: "commission" },
-      { href: "/commission/config", labelKey: "config" },
-      { href: "/commission/withdraw", labelKey: "withdraw" },
-      { href: "/commission/pool", labelKey: "pool" },
+    sectionKey: "sectionDispute",
+    items: [
+      {
+        labelKey: "dispute",
+        icon: Scale,
+        children: [
+          { href: "/dispute", labelKey: "disputeComplaints" },
+          { href: "/dispute/escrow", labelKey: "disputeEscrow" },
+          { href: "/dispute/evidence", labelKey: "disputeEvidence" },
+        ],
+      },
     ],
   },
   {
-    labelKey: "governance",
-    icon: Vote,
-    children: [
-      { href: "/governance", labelKey: "governance" },
-      { href: "/governance/config", labelKey: "config" },
-    ],
-  },
-  {
-    labelKey: "disclosure",
-    icon: FileText,
-    children: [
-      { href: "/disclosure", labelKey: "disclosure" },
-      { href: "/disclosure/insiders", labelKey: "insiders" },
-    ],
-  },
-  {
-    labelKey: "kyc",
-    icon: ShieldCheck,
-    children: [
-      { href: "/kyc", labelKey: "kyc" },
-      { href: "/kyc/settings", labelKey: "settings" },
-      { href: "/kyc/providers", labelKey: "providers" },
-    ],
-  },
-  {
-    labelKey: "tokensale",
-    icon: Rocket,
-    children: [
-      { href: "/tokensale", labelKey: "tokensale" },
-      { href: "/tokensale/create", labelKey: "createRound" },
+    sectionKey: "sectionAds",
+    items: [
+      {
+        labelKey: "ads",
+        icon: Megaphone,
+        children: [
+          { href: "/ads", labelKey: "adsCampaigns" },
+          { href: "/ads/placements", labelKey: "adsPlacements" },
+          { href: "/ads/staking", labelKey: "adsStaking" },
+          { href: "/ads/revenue", labelKey: "adsRevenue" },
+        ],
+      },
     ],
   },
 ];
@@ -151,13 +251,15 @@ function NavItem({ item, collapsed, pathname, t }: NavItemProps) {
   }
 
   const children = item.children || [];
-  const isGroupActive = children.some((c) => pathname === c.href || pathname.startsWith(c.href + "/"));
+  const isGroupActive = children.some(
+    (c) => pathname === c.href || pathname.startsWith(c.href + "/")
+  );
 
   return (
-    <div className="space-y-1">
+    <div className="space-y-0.5">
       <div
         className={cn(
-          "flex items-center gap-3 rounded-lg px-3 py-2 text-xs font-semibold uppercase tracking-wider",
+          "flex items-center gap-3 rounded-lg px-3 py-1.5 text-xs font-semibold uppercase tracking-wider",
           isGroupActive ? "text-sidebar-primary" : "text-sidebar-foreground/50"
         )}
       >
@@ -166,7 +268,9 @@ function NavItem({ item, collapsed, pathname, t }: NavItemProps) {
       </div>
       {!collapsed &&
         children.map((child) => {
-          const isActive = pathname === child.href || pathname.startsWith(child.href + "/");
+          const isActive =
+            pathname === child.href ||
+            pathname.startsWith(child.href + "/");
           return (
             <Link
               key={child.href}
@@ -206,13 +310,37 @@ export function Sidebar() {
           onClick={toggleSidebar}
           className="rounded-md p-1.5 text-sidebar-foreground/50 hover:bg-sidebar-accent hover:text-sidebar-foreground"
         >
-          {sidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+          {sidebarCollapsed ? (
+            <ChevronRight className="h-4 w-4" />
+          ) : (
+            <ChevronLeft className="h-4 w-4" />
+          )}
         </button>
       </div>
 
       <nav className="flex-1 space-y-1 overflow-y-auto p-3">
-        {navItems.map((item, i) => (
-          <NavItem key={i} item={item} collapsed={sidebarCollapsed} pathname={pathname} t={t} />
+        {navSections.map((section, si) => (
+          <div key={si}>
+            {section.sectionKey && !sidebarCollapsed && (
+              <div className="mb-1 mt-4 border-t pt-3 px-3">
+                <span className="text-[10px] font-bold uppercase tracking-widest text-sidebar-foreground/30">
+                  {t(section.sectionKey)}
+                </span>
+              </div>
+            )}
+            {section.sectionKey && sidebarCollapsed && (
+              <div className="my-2 border-t" />
+            )}
+            {section.items.map((item, ii) => (
+              <NavItem
+                key={ii}
+                item={item}
+                collapsed={sidebarCollapsed}
+                pathname={pathname}
+                t={t}
+              />
+            ))}
+          </div>
         ))}
       </nav>
     </aside>

@@ -44,8 +44,9 @@ pub mod pallet {
     use frame_system::pallet_prelude::*;
     use pallet_entity_common::{
         CommissionFundGuard, EffectiveShopStatus, EntityProvider, EntityStatus,
-        ShopOperatingStatus, ShopProvider, ShopType,
+        ProductProvider, ShopOperatingStatus, ShopProvider, ShopType,
     };
+    use pallet_storage_service::{StoragePin, PinTier};
     use sp_runtime::{
         traits::{AccountIdConversion, Saturating, Zero},
         DispatchError, SaturatedConversion,
@@ -190,6 +191,12 @@ pub mod pallet {
         /// 每个 Entity 最大 Shop 数量
         #[pallet::constant]
         type MaxShopsPerEntity: Get<u32>;
+
+        /// IPFS Pin 管理接口（用于店铺元数据 CID 持久化）
+        type StoragePin: StoragePin<Self::AccountId>;
+
+        /// Product 提供者（用于 Shop 关闭时级联 unpin Product CID）
+        type ProductProvider: ProductProvider<Self::AccountId, BalanceOf<Self>>;
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -565,6 +572,14 @@ pub mod pallet {
                 // H3: 已关闭/关闭中/封禁的 Shop 不可修改
                 ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
 
+                // 获取 entity owner 用于 IPFS 操作
+                let owner = T::EntityProvider::entity_owner(shop.entity_id)
+                    .unwrap_or_else(|| who.clone());
+
+                // 捕获旧 CID 用于 ΔPin
+                let old_logo = shop.logo_cid.clone();
+                let old_desc = shop.description_cid.clone();
+
                 if let Some(n) = name {
                     // H2: 名称不能为空
                     ensure!(!n.is_empty(), Error::<T>::ShopNameEmpty);
@@ -572,21 +587,25 @@ pub mod pallet {
                 }
                 // Option<Option<CID>>: None=不修改, Some(None)=清除, Some(Some(cid))=设新值
                 match logo_cid {
-                    Some(Some(cid)) => {
+                    Some(Some(ref cid)) => {
                         ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
-                        shop.logo_cid = Some(cid);
+                        shop.logo_cid = Some(cid.clone());
                     }
                     Some(None) => { shop.logo_cid = None; }
                     None => {}
                 }
                 match description_cid {
-                    Some(Some(cid)) => {
+                    Some(Some(ref cid)) => {
                         ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
-                        shop.description_cid = Some(cid);
+                        shop.description_cid = Some(cid.clone());
                     }
                     Some(None) => { shop.description_cid = None; }
                     None => {}
                 }
+
+                // IPFS ΔPin
+                Self::ipfs_handle_triple_option(&owner, shop_id, &old_logo, &logo_cid);
+                Self::ipfs_handle_triple_option(&owner, shop_id, &old_desc, &description_cid);
                 
                 Self::deposit_event(Event::ShopUpdated { shop_id });
                 Ok(())
@@ -778,6 +797,13 @@ pub mod pallet {
                 ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
                 ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
                 ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
+
+                let owner = T::EntityProvider::entity_owner(shop.entity_id)
+                    .unwrap_or_else(|| who.clone());
+
+                // 捕获旧 CID 用于 ΔPin
+                let old_addr = shop.address_cid.clone();
+                let old_hours = shop.business_hours_cid.clone();
                 
                 // 验证位置（经度 -180~180，纬度 -90~90，精度 10^6）
                 if let Some((lng, lat)) = location {
@@ -788,21 +814,25 @@ pub mod pallet {
                 shop.location = location;
                 // Option<Option<CID>>: None=不修改, Some(None)=清除, Some(Some(cid))=设新值
                 match address_cid {
-                    Some(Some(cid)) => {
+                    Some(Some(ref cid)) => {
                         ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
-                        shop.address_cid = Some(cid);
+                        shop.address_cid = Some(cid.clone());
                     }
                     Some(None) => { shop.address_cid = None; }
                     None => {}
                 }
                 match business_hours_cid {
-                    Some(Some(cid)) => {
+                    Some(Some(ref cid)) => {
                         ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
-                        shop.business_hours_cid = Some(cid);
+                        shop.business_hours_cid = Some(cid.clone());
                     }
                     Some(None) => { shop.business_hours_cid = None; }
                     None => {}
                 }
+
+                // IPFS ΔPin
+                Self::ipfs_handle_triple_option(&owner, shop_id, &old_addr, &address_cid);
+                Self::ipfs_handle_triple_option(&owner, shop_id, &old_hours, &business_hours_cid);
                 
                 Self::deposit_event(Event::ShopLocationUpdated { shop_id, location });
                 Ok(())
@@ -883,6 +913,8 @@ pub mod pallet {
                 // 检查状态
                 ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
                 ensure!(shop.status != ShopOperatingStatus::Closing, Error::<T>::ShopAlreadyClosing);
+                // M1: 封禁状态仅 Root 可通过 unban_shop 解封，owner 不可通过 close 绕过封禁
+                ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
                 
                 shop.status = ShopOperatingStatus::Closing;
                 
@@ -919,6 +951,12 @@ pub mod pallet {
                 let now = <frame_system::Pallet<T>>::block_number();
                 let grace = T::ShopClosingGracePeriod::get();
                 ensure!(now >= closing_at.saturating_add(grace), Error::<T>::ClosingGracePeriodNotElapsed);
+
+                // IPFS Unpin: 关闭时释放所有 Shop + Product CID
+                if let Some(owner) = T::EntityProvider::entity_owner(shop.entity_id) {
+                    Self::ipfs_unpin_all_shop_cids(shop, &owner);
+                }
+                let _ = T::ProductProvider::force_unpin_shop_products(shop_id);
 
                 shop.status = ShopOperatingStatus::Closed;
 
@@ -1056,6 +1094,8 @@ pub mod pallet {
 
             let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
             ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
+            // M4: 封禁状态不可转移积分
+            ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
 
             let config = ShopPointsConfigs::<T>::get(shop_id)
                 .ok_or(Error::<T>::PointsNotEnabled)?;
@@ -1069,6 +1109,9 @@ pub mod pallet {
 
             ShopPointsBalances::<T>::mutate(shop_id, &who, |b| *b = b.saturating_sub(amount));
             ShopPointsBalances::<T>::mutate(shop_id, &to, |b| *b = b.saturating_add(amount));
+
+            // M2: 延长接收方积分有效期（防止通过转账绕过 TTL）
+            Self::maybe_extend_points_expiry(shop_id, &to);
 
             Self::deposit_event(Event::PointsTransferred {
                 shop_id,
@@ -1212,7 +1255,9 @@ pub mod pallet {
             ensure!(Self::can_manage_shop(&shop, &who), Error::<T>::NotAuthorized);
             ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
             ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
+            // M4: 已关闭不可销毁（Closing 宽限期内允许），封禁不可销毁
             ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
+            ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
             ensure!(ShopPointsConfigs::<T>::contains_key(shop_id), Error::<T>::PointsNotEnabled);
 
             // 懒过期检查
@@ -1244,6 +1289,8 @@ pub mod pallet {
 
             let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
             ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
+            // M4: 封禁状态不可兑换积分
+            ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
 
             let config = ShopPointsConfigs::<T>::get(shop_id)
                 .ok_or(Error::<T>::PointsNotEnabled)?;
@@ -1261,8 +1308,14 @@ pub mod pallet {
             let payout = amount.saturating_mul(rate) / divisor;
             ensure!(!payout.is_zero(), Error::<T>::RedeemPayoutZero);
 
-            // 从 Shop 运营账户转给用户
+            // H1: 佣金保护 — 不得侵占已承诺的佣金资金
             let shop_account = Self::shop_account_id(shop_id);
+            let balance = T::Currency::free_balance(&shop_account);
+            let protected: BalanceOf<T> = T::CommissionFundGuard::protected_funds(shop.entity_id).saturated_into();
+            let available = balance.saturating_sub(protected);
+            ensure!(available >= payout, Error::<T>::InsufficientOperatingFund);
+
+            // 从 Shop 运营账户转给用户
             T::Currency::transfer(&shop_account, &who, payout, ExistenceRequirement::AllowDeath)?;
 
             // 销毁积分
@@ -1303,6 +1356,13 @@ pub mod pallet {
                 // 目标 Entity 必须存在且激活
                 ensure!(T::EntityProvider::entity_exists(to_entity_id), Error::<T>::EntityNotFound);
                 ensure!(T::EntityProvider::is_entity_active(to_entity_id), Error::<T>::EntityNotActive);
+
+                // M3: 检查目标 Entity 的 Shop 数量上限
+                let target_shops = T::EntityProvider::entity_shops(to_entity_id);
+                ensure!(
+                    (target_shops.len() as u32) < T::MaxShopsPerEntity::get(),
+                    Error::<T>::ShopLimitReached
+                );
 
                 // 注销原 Entity 关联，注册到新 Entity
                 T::EntityProvider::unregister_shop(from_entity_id, shop_id)?;
@@ -1489,12 +1549,24 @@ pub mod pallet {
                 ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
                 ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
 
+                let owner = T::EntityProvider::entity_owner(shop.entity_id)
+                    .unwrap_or_else(|| who.clone());
+                let old_hours = shop.business_hours_cid.clone();
+
                 match business_hours_cid {
-                    Some(cid) => {
+                    Some(ref cid) => {
                         ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
-                        shop.business_hours_cid = Some(cid);
+                        shop.business_hours_cid = Some(cid.clone());
                     }
                     None => { shop.business_hours_cid = None; }
+                }
+
+                // IPFS ΔPin: Unpin 旧 + Pin 新（或仅 Unpin 清除）
+                if old_hours != shop.business_hours_cid {
+                    Self::ipfs_unpin_optional(&owner, &old_hours);
+                    if let Some(ref c) = shop.business_hours_cid {
+                        Self::ipfs_pin_cid(&owner, shop_id, c);
+                    }
                 }
 
                 Self::deposit_event(Event::ShopBusinessHoursUpdated { shop_id });
@@ -1520,12 +1592,24 @@ pub mod pallet {
                 ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
                 ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
 
+                let owner = T::EntityProvider::entity_owner(shop.entity_id)
+                    .unwrap_or_else(|| who.clone());
+                let old_policies = shop.policies_cid.clone();
+
                 match policies_cid {
-                    Some(cid) => {
+                    Some(ref cid) => {
                         ensure!(!cid.is_empty(), Error::<T>::EmptyCid);
-                        shop.policies_cid = Some(cid);
+                        shop.policies_cid = Some(cid.clone());
                     }
                     None => { shop.policies_cid = None; }
+                }
+
+                // IPFS ΔPin
+                if old_policies != shop.policies_cid {
+                    Self::ipfs_unpin_optional(&owner, &old_policies);
+                    if let Some(ref c) = shop.policies_cid {
+                        Self::ipfs_pin_cid(&owner, shop_id, c);
+                    }
                 }
 
                 Self::deposit_event(Event::ShopPoliciesUpdated { shop_id });
@@ -1742,6 +1826,68 @@ pub mod pallet {
             shop.managers.contains(account)
         }
 
+        // ==================== IPFS Pin/Unpin 辅助函数 ====================
+
+        fn ipfs_pin_cid(
+            caller: &T::AccountId,
+            shop_id: u64,
+            cid: &BoundedVec<u8, T::MaxCidLength>,
+        ) {
+            if cid.is_empty() { return; }
+            let entity_id = ShopEntity::<T>::get(shop_id);
+            if let Err(e) = T::StoragePin::pin(caller.clone(), b"shop", shop_id, entity_id, cid.to_vec(), PinTier::Standard) {
+                log::warn!(
+                    target: "entity-shop",
+                    "IPFS Pin failed for shop {}: {:?}", shop_id, e
+                );
+            }
+        }
+
+        fn ipfs_unpin_cid(caller: &T::AccountId, cid: &BoundedVec<u8, T::MaxCidLength>) {
+            if cid.is_empty() { return; }
+            if let Err(e) = T::StoragePin::unpin(caller.clone(), cid.to_vec()) {
+                log::warn!(
+                    target: "entity-shop",
+                    "IPFS Unpin failed: {:?}", e
+                );
+            }
+        }
+
+        fn ipfs_unpin_optional(caller: &T::AccountId, cid: &Option<BoundedVec<u8, T::MaxCidLength>>) {
+            if let Some(c) = cid {
+                Self::ipfs_unpin_cid(caller, c);
+            }
+        }
+
+        /// 处理 Option<Option<CID>> 三态语义的 ΔPin
+        /// None = 不修改, Some(None) = 清除, Some(Some(cid)) = 设新值
+        fn ipfs_handle_triple_option(
+            caller: &T::AccountId,
+            shop_id: u64,
+            current: &Option<BoundedVec<u8, T::MaxCidLength>>,
+            input: &Option<Option<BoundedVec<u8, T::MaxCidLength>>>,
+        ) {
+            match input {
+                Some(Some(new_cid)) => {
+                    Self::ipfs_unpin_optional(caller, current);
+                    Self::ipfs_pin_cid(caller, shop_id, new_cid);
+                }
+                Some(None) => {
+                    Self::ipfs_unpin_optional(caller, current);
+                }
+                None => {}
+            }
+        }
+
+        /// Unpin Shop 的所有 CID（关闭/封禁时调用）
+        fn ipfs_unpin_all_shop_cids(shop: &ShopOf<T>, caller: &T::AccountId) {
+            Self::ipfs_unpin_optional(caller, &shop.logo_cid);
+            Self::ipfs_unpin_optional(caller, &shop.description_cid);
+            Self::ipfs_unpin_optional(caller, &shop.address_cid);
+            Self::ipfs_unpin_optional(caller, &shop.business_hours_cid);
+            Self::ipfs_unpin_optional(caller, &shop.policies_cid);
+        }
+
         /// 检查并清除过期积分（懒过期）
         fn check_points_expiry(shop_id: u64, account: &T::AccountId) {
             if let Some(expiry) = ShopPointsExpiresAt::<T>::get(shop_id, account) {
@@ -1796,6 +1942,8 @@ pub mod pallet {
             // M5: 已关闭/关闭中的 Shop 不可发放积分
             let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
             ensure!(!shop.status.is_closed_or_closing(), Error::<T>::ShopAlreadyClosed);
+            // M4: 封禁状态不可发放积分
+            ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
             ensure!(
                 ShopPointsConfigs::<T>::contains_key(shop_id),
                 Error::<T>::PointsNotEnabled
@@ -1824,9 +1972,11 @@ pub mod pallet {
             amount: BalanceOf<T>,
         ) -> DispatchResult {
             ensure!(!amount.is_zero(), Error::<T>::InsufficientPointsBalance);
-            // M5: 已关闭的 Shop 不可销毁积分
+            // M5: 已关闭的 Shop 不可销毁积分（Closing 孽限期内允许销毁）
             let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
             ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
+            // M4: 封禁状态不可销毁积分
+            ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
             ensure!(
                 ShopPointsConfigs::<T>::contains_key(shop_id),
                 Error::<T>::PointsNotEnabled
@@ -2169,6 +2319,13 @@ pub mod pallet {
                 let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
                 // M1-R3: 防止重复关闭发射重复事件
                 ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
+
+                // IPFS Unpin: 强制关闭时释放所有 Shop CID + 级联 Product CID
+                if let Some(owner) = T::EntityProvider::entity_owner(shop.entity_id) {
+                    Self::ipfs_unpin_all_shop_cids(shop, &owner);
+                }
+                let _ = T::ProductProvider::force_unpin_shop_products(shop_id);
+
                 shop.status = ShopOperatingStatus::Closed;
 
                 // 清理 Closing 计时器（如果正在 Closing）

@@ -15,11 +15,14 @@ thread_local! {
     static MEMBER_STATS: RefCell<BTreeMap<(u64, u64), (u32, u32, u128)>> = RefCell::new(BTreeMap::new());
     static MEMBER_SPENT_USDT: RefCell<BTreeMap<(u64, u64), u64>> = RefCell::new(BTreeMap::new());
     static BANNED_MEMBERS: RefCell<BTreeMap<(u64, u64), bool>> = RefCell::new(BTreeMap::new());
+    static UNACTIVATED_MEMBERS: RefCell<BTreeMap<(u64, u64), bool>> = RefCell::new(BTreeMap::new());
     static ENTITY_OWNERS: RefCell<BTreeMap<u64, u64>> = RefCell::new(BTreeMap::new());
     static ENTITY_ADMINS: RefCell<BTreeMap<(u64, u64), u32>> = RefCell::new(BTreeMap::new());
     static NON_MEMBERS: RefCell<BTreeMap<(u64, u64), bool>> = RefCell::new(BTreeMap::new());
     static INACTIVE_ENTITIES: RefCell<BTreeMap<u64, bool>> = RefCell::new(BTreeMap::new());
     static ENTITY_LOCKED: RefCell<BTreeMap<u64, bool>> = RefCell::new(BTreeMap::new());
+    // M1-R8: 冻结/暂停会员
+    static FROZEN_MEMBERS: RefCell<BTreeMap<(u64, u64), bool>> = RefCell::new(BTreeMap::new());
 }
 
 pub fn set_referrer(entity_id: u64, account: u64, referrer: u64) {
@@ -44,6 +47,10 @@ pub fn ban_member(entity_id: u64, account: u64) {
     BANNED_MEMBERS.with(|b| { b.borrow_mut().insert((entity_id, account), true); });
 }
 
+pub fn set_unactivated(entity_id: u64, account: u64) {
+    UNACTIVATED_MEMBERS.with(|u| { u.borrow_mut().insert((entity_id, account), true); });
+}
+
 pub fn set_entity_owner(entity_id: u64, owner: u64) {
     ENTITY_OWNERS.with(|o| { o.borrow_mut().insert(entity_id, owner); });
 }
@@ -64,16 +71,22 @@ pub fn set_entity_locked(entity_id: u64) {
     ENTITY_LOCKED.with(|l| { l.borrow_mut().insert(entity_id, true); });
 }
 
+pub fn freeze_member(entity_id: u64, account: u64) {
+    FROZEN_MEMBERS.with(|f| { f.borrow_mut().insert((entity_id, account), true); });
+}
+
 pub fn clear_thread_locals() {
     REFERRERS.with(|r| r.borrow_mut().clear());
     MEMBER_STATS.with(|s| s.borrow_mut().clear());
     MEMBER_SPENT_USDT.with(|s| s.borrow_mut().clear());
     BANNED_MEMBERS.with(|b| b.borrow_mut().clear());
+    UNACTIVATED_MEMBERS.with(|u| u.borrow_mut().clear());
     ENTITY_OWNERS.with(|o| o.borrow_mut().clear());
     ENTITY_ADMINS.with(|a| a.borrow_mut().clear());
     NON_MEMBERS.with(|n| n.borrow_mut().clear());
     INACTIVE_ENTITIES.with(|e| e.borrow_mut().clear());
     ENTITY_LOCKED.with(|l| l.borrow_mut().clear());
+    FROZEN_MEMBERS.with(|f| f.borrow_mut().clear());
 }
 
 /// 设置线性推荐链: buyer -> r1 -> r2 -> r3 -> ...
@@ -118,6 +131,13 @@ impl pallet_commission_common::MemberProvider<u64> for MockMemberProvider {
     fn auto_register_qualified(_: u64, _: &u64, _: Option<u64>, _: bool) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
     fn is_banned(entity_id: u64, account: &u64) -> bool {
         BANNED_MEMBERS.with(|b| b.borrow().get(&(entity_id, *account)).copied().unwrap_or(false))
+    }
+    fn is_activated(entity_id: u64, account: &u64) -> bool {
+        !UNACTIVATED_MEMBERS.with(|u| u.borrow().get(&(entity_id, *account)).copied().unwrap_or(false))
+    }
+    fn is_member_active(entity_id: u64, account: &u64) -> bool {
+        !Self::is_banned(entity_id, account) &&
+        !FROZEN_MEMBERS.with(|f| f.borrow().get(&(entity_id, *account)).copied().unwrap_or(false))
     }
 }
 
@@ -170,6 +190,7 @@ impl frame_system::Config for Test {
 
 parameter_types! {
     pub const MaxMultiLevels: u32 = 15;
+    pub const ConfigChangeDelay: u32 = 10;
 }
 
 impl pallet_commission_multi_level::Config for Test {
@@ -177,6 +198,7 @@ impl pallet_commission_multi_level::Config for Test {
     type MemberProvider = MockMemberProvider;
     type EntityProvider = MockEntityProvider;
     type MaxMultiLevels = MaxMultiLevels;
+    type ConfigChangeDelay = ConfigChangeDelay;
     type WeightInfo = ();
 }
 

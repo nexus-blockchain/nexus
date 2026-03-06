@@ -6,7 +6,10 @@ use frame_support::{
 };
 use frame_system as system;
 use pallet_entity_common::{
+    DisclosureLevel, DisclosureProvider,
     EntityProvider, EntityStatus, EntityTokenProvider,
+    GovernanceMode,
+    ProductProvider, ProductCategory,
     ShopProvider, ShopType, TokenType,
 };
 use pallet_entity_commission::{NullCommissionProvider, NullMemberProvider};
@@ -79,7 +82,9 @@ impl EntityProvider<u64> for MockEntityProvider {
         entity_id == 1 || entity_id == 2
     }
     fn is_entity_active(entity_id: u64) -> bool {
-        entity_id == 1 || entity_id == 2
+        ENTITY_ACTIVE.with(|e| {
+            *e.borrow().get(&entity_id).unwrap_or(&(entity_id == 1 || entity_id == 2))
+        })
     }
     fn entity_status(entity_id: u64) -> Option<EntityStatus> {
         if entity_id <= 2 { Some(EntityStatus::Active) } else { None }
@@ -145,6 +150,11 @@ thread_local! {
     static TOKEN_ENABLED: RefCell<HashMap<u64, bool>> = RefCell::new(HashMap::new());
     // H2: 追踪 reserve/unreserve 调用
     static RESERVED_BALANCES: RefCell<HashMap<(u64, u64), u128>> = RefCell::new(HashMap::new());
+    // F5: 可配置实体活跃状态
+    static ENTITY_ACTIVE: RefCell<HashMap<u64, bool>> = RefCell::new(HashMap::new());
+    // F3: Mock 商品存储
+    static PRODUCT_PRICES: RefCell<HashMap<u64, u128>> = RefCell::new(HashMap::new());
+    static PRODUCT_STOCKS: RefCell<HashMap<u64, u32>> = RefCell::new(HashMap::new());
 }
 
 pub fn set_token_balance(shop_id: u64, who: u64, amount: u128) {
@@ -161,6 +171,29 @@ pub fn get_token_balance(shop_id: u64, who: u64) -> u128 {
 
 pub fn get_reserved_balance(entity_id: u64, who: u64) -> u128 {
     RESERVED_BALANCES.with(|b| *b.borrow().get(&(entity_id, who)).unwrap_or(&0))
+}
+
+/// F5: 设置实体活跃状态
+pub fn set_entity_active(entity_id: u64, active: bool) {
+    ENTITY_ACTIVE.with(|e| e.borrow_mut().insert(entity_id, active));
+}
+
+/// F3: 设置商品价格
+pub fn set_product_price(product_id: u64, price: u128) {
+    PRODUCT_PRICES.with(|p| p.borrow_mut().insert(product_id, price));
+}
+
+/// F3: 设置商品库存
+pub fn set_product_stock(product_id: u64, stock: u32) {
+    PRODUCT_STOCKS.with(|p| p.borrow_mut().insert(product_id, stock));
+}
+
+pub fn get_product_price(product_id: u64) -> Option<u128> {
+    PRODUCT_PRICES.with(|p| p.borrow().get(&product_id).copied())
+}
+
+pub fn get_product_stock(product_id: u64) -> Option<u32> {
+    PRODUCT_STOCKS.with(|p| p.borrow().get(&product_id).copied())
 }
 
 pub struct MockTokenProvider;
@@ -199,6 +232,9 @@ impl EntityTokenProvider<u64, u128> for MockTokenProvider {
     fn repatriate_reserved(_: u64, _: &u64, _: &u64, _: u128) -> Result<u128, DispatchError> { Ok(0) }
     fn get_token_type(_: u64) -> TokenType { TokenType::Governance }
     fn total_supply(_: u64) -> u128 { TOTAL_SUPPLY }
+    fn available_balance(entity_id: u64, holder: &u64) -> u128 {
+        TOKEN_BALANCES.with(|b| *b.borrow().get(&(entity_id, *holder)).unwrap_or(&0))
+    }
     fn governance_burn(entity_id: u64, amount: u128) -> Result<(), DispatchError> {
         TOKEN_BALANCES.with(|b| {
             let mut map = b.borrow_mut();
@@ -211,6 +247,51 @@ impl EntityTokenProvider<u64, u128> for MockTokenProvider {
             map.insert(key, balance.saturating_sub(amount));
             Ok(())
         })
+    }
+}
+
+// ==================== Mock DisclosureProvider ====================
+
+pub struct MockDisclosureProvider;
+impl DisclosureProvider<u64> for MockDisclosureProvider {
+    fn is_in_blackout(_entity_id: u64) -> bool { false }
+    fn is_insider(_entity_id: u64, _account: &u64) -> bool { false }
+    fn can_insider_trade(_entity_id: u64, _account: &u64) -> bool { true }
+    fn get_disclosure_level(_entity_id: u64) -> DisclosureLevel { DisclosureLevel::Basic }
+    fn is_disclosure_overdue(_entity_id: u64) -> bool { false }
+}
+
+// ==================== Mock ProductProvider ====================
+
+pub struct MockProductProvider;
+impl ProductProvider<u64, u128> for MockProductProvider {
+    fn product_exists(product_id: u64) -> bool {
+        PRODUCT_PRICES.with(|p| p.borrow().contains_key(&product_id))
+    }
+    fn is_product_on_sale(product_id: u64) -> bool {
+        PRODUCT_STOCKS.with(|p| p.borrow().get(&product_id).copied().unwrap_or(0) > 0)
+    }
+    fn product_shop_id(_product_id: u64) -> Option<u64> { Some(SHOP_ID) }
+    fn product_price(product_id: u64) -> Option<u128> {
+        get_product_price(product_id)
+    }
+    fn product_stock(product_id: u64) -> Option<u32> {
+        get_product_stock(product_id)
+    }
+    fn product_category(_: u64) -> Option<ProductCategory> { Some(ProductCategory::Physical) }
+    fn deduct_stock(_: u64, _: u32) -> Result<(), DispatchError> { Ok(()) }
+    fn restore_stock(_: u64, _: u32) -> Result<(), DispatchError> { Ok(()) }
+    fn add_sold_count(_: u64, _: u32) -> Result<(), DispatchError> { Ok(()) }
+    fn update_price(product_id: u64, new_price: u128) -> Result<(), DispatchError> {
+        if new_price == 0 {
+            return Err(DispatchError::Other("PriceCannotBeZero"));
+        }
+        PRODUCT_PRICES.with(|p| p.borrow_mut().insert(product_id, new_price));
+        Ok(())
+    }
+    fn set_inventory(product_id: u64, new_inventory: u32) -> Result<(), DispatchError> {
+        PRODUCT_STOCKS.with(|p| p.borrow_mut().insert(product_id, new_inventory));
+        Ok(())
     }
 }
 
@@ -257,7 +338,10 @@ impl pallet_entity_governance::Config for Test {
     type MinExecutionDelay = MinExecutionDelay;
     type TimeWeightFullPeriod = TimeWeightFullPeriod;
     type TimeWeightMaxMultiplier = TimeWeightMaxMultiplier;
+    type ProductProvider = MockProductProvider;
+    type DisclosureProvider = MockDisclosureProvider;
     type MultiLevelWriter = ();
+    type TeamWriter = ();
 }
 
 // ==================== 构建器 ====================
@@ -293,6 +377,20 @@ impl ExtBuilder {
             set_token_balance(SHOP_ID, BOB, 150_000);
             set_token_balance(SHOP_ID, CHARLIE, 50_000);
             set_token_balance(SHOP_ID, OWNER, 100_000);
+            // C1-audit: 默认设置 FullDAO 模式，大多数测试需要创建提案
+            // 测试 None 模式行为的用例需显式覆盖此配置
+            pallet_entity_governance::GovernanceConfigs::<Test>::insert(
+                1u64,
+                pallet_entity_governance::GovernanceConfig::<u64> {
+                    mode: GovernanceMode::FullDAO,
+                    voting_period: 0u64,
+                    execution_delay: 0u64,
+                    quorum_threshold: 0u8,
+                    pass_threshold: 0u8,
+                    proposal_threshold: 0u16,
+                    admin_veto_enabled: false,
+                },
+            );
         });
         ext
     }

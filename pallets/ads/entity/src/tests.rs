@@ -882,3 +882,230 @@ fn entity_locked_rejects_set_entity_ad_share() {
 		);
 	});
 }
+
+// ============================================================================
+// CPC (Cost-Per-Click) Tests
+// ============================================================================
+
+#[test]
+fn set_click_cap_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 1));
+		let pid = crate::entity_placement_id(1);
+
+		// 默认 daily_click_cap = 0 (无限制)
+		let info = RegisteredPlacements::<Test>::get(&pid).unwrap();
+		assert_eq!(info.daily_click_cap, 0);
+
+		// 设置为 500
+		assert_ok!(AdsEntity::set_click_cap(RuntimeOrigin::signed(ALICE), pid, 500));
+		let info = RegisteredPlacements::<Test>::get(&pid).unwrap();
+		assert_eq!(info.daily_click_cap, 500);
+
+		// 事件验证
+		System::assert_last_event(RuntimeEvent::AdsEntity(
+			crate::Event::ClickCapUpdated { placement_id: pid, daily_cap: 500 }
+		));
+	});
+}
+
+#[test]
+fn set_click_cap_fails_unchanged() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 1));
+		let pid = crate::entity_placement_id(1);
+
+		// 默认是 0, 设置为 0 应该失败
+		assert_noop!(
+			AdsEntity::set_click_cap(RuntimeOrigin::signed(ALICE), pid, 0),
+			Error::<Test>::ClickCapUnchanged
+		);
+	});
+}
+
+#[test]
+fn set_click_cap_fails_not_admin() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 1));
+		let pid = crate::entity_placement_id(1);
+
+		assert_noop!(
+			AdsEntity::set_click_cap(RuntimeOrigin::signed(CHARLIE), pid, 100),
+			Error::<Test>::NotEntityAdmin
+		);
+	});
+}
+
+#[test]
+fn set_click_cap_fails_not_registered() {
+	new_test_ext().execute_with(|| {
+		let pid = crate::entity_placement_id(1);
+		assert_noop!(
+			AdsEntity::set_click_cap(RuntimeOrigin::signed(ALICE), pid, 100),
+			Error::<Test>::PlacementNotRegistered
+		);
+	});
+}
+
+#[test]
+fn entity_locked_rejects_set_click_cap() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 1));
+		let pid = crate::entity_placement_id(1);
+		set_entity_locked(1);
+		assert_noop!(
+			AdsEntity::set_click_cap(RuntimeOrigin::signed(ALICE), pid, 500),
+			Error::<Test>::EntityLocked
+		);
+	});
+}
+
+#[test]
+fn click_verifier_no_cap_passes_through() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 1));
+		let pid = crate::entity_placement_id(1);
+
+		// daily_click_cap = 0 → 无上限, 全量通过
+		use pallet_ads_primitives::ClickVerifier;
+		let result = <AdsEntity as ClickVerifier<u64>>::verify_and_cap_clicks(
+			&ALICE, &pid, 1000, 1000,
+		);
+		assert_ok!(&result);
+		assert_eq!(result.unwrap(), 1000);
+
+		// 验证计数更新
+		assert_eq!(DailyClicks::<Test>::get(&pid), 1000);
+		assert_eq!(TotalClicks::<Test>::get(&pid), 1000);
+	});
+}
+
+#[test]
+fn click_verifier_caps_at_daily_limit() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 1));
+		let pid = crate::entity_placement_id(1);
+
+		// 设置每日上限 200
+		assert_ok!(AdsEntity::set_click_cap(RuntimeOrigin::signed(ALICE), pid, 200));
+
+		use pallet_ads_primitives::ClickVerifier;
+
+		// 第一次: 请求 150, 通过 150
+		let r1 = <AdsEntity as ClickVerifier<u64>>::verify_and_cap_clicks(
+			&ALICE, &pid, 150, 150,
+		);
+		assert_eq!(r1.unwrap(), 150);
+		assert_eq!(DailyClicks::<Test>::get(&pid), 150);
+
+		// 第二次: 请求 100, 只剩 50, 裁切到 50
+		let r2 = <AdsEntity as ClickVerifier<u64>>::verify_and_cap_clicks(
+			&ALICE, &pid, 100, 100,
+		);
+		assert_eq!(r2.unwrap(), 50);
+		assert_eq!(DailyClicks::<Test>::get(&pid), 200);
+
+		// 第三次: 已达上限, 拒绝
+		let r3 = <AdsEntity as ClickVerifier<u64>>::verify_and_cap_clicks(
+			&ALICE, &pid, 10, 10,
+		);
+		assert_noop!(r3, Error::<Test>::DailyClickCapReached);
+	});
+}
+
+#[test]
+fn click_verifier_fails_inactive_placement() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 1));
+		let pid = crate::entity_placement_id(1);
+
+		// 禁用广告位
+		assert_ok!(AdsEntity::set_placement_active(RuntimeOrigin::signed(ALICE), pid, false));
+
+		use pallet_ads_primitives::ClickVerifier;
+		let result = <AdsEntity as ClickVerifier<u64>>::verify_and_cap_clicks(
+			&ALICE, &pid, 10, 10,
+		);
+		assert_noop!(result, Error::<Test>::PlacementNotActive);
+	});
+}
+
+#[test]
+fn click_verifier_fails_banned_entity() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 1));
+		let pid = crate::entity_placement_id(1);
+
+		// 禁止 Entity
+		assert_ok!(AdsEntity::ban_entity(RuntimeOrigin::root(), 1));
+
+		use pallet_ads_primitives::ClickVerifier;
+		let result = <AdsEntity as ClickVerifier<u64>>::verify_and_cap_clicks(
+			&ALICE, &pid, 10, 10,
+		);
+		assert_noop!(result, Error::<Test>::EntityBanned);
+	});
+}
+
+#[test]
+fn click_verifier_daily_reset_works() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 1));
+		let pid = crate::entity_placement_id(1);
+
+		// 设置每日上限 100
+		assert_ok!(AdsEntity::set_click_cap(RuntimeOrigin::signed(ALICE), pid, 100));
+
+		use pallet_ads_primitives::ClickVerifier;
+
+		// 消耗全部上限
+		let r1 = <AdsEntity as ClickVerifier<u64>>::verify_and_cap_clicks(
+			&ALICE, &pid, 100, 100,
+		);
+		assert_eq!(r1.unwrap(), 100);
+		assert_eq!(DailyClicks::<Test>::get(&pid), 100);
+
+		// 上限已达, 拒绝
+		let r2 = <AdsEntity as ClickVerifier<u64>>::verify_and_cap_clicks(
+			&ALICE, &pid, 10, 10,
+		);
+		assert_noop!(r2, Error::<Test>::DailyClickCapReached);
+
+		// 推进 BlocksPerDay 个区块, 触发每日重置
+		// BlocksPerDay = 14400
+		System::set_block_number(14401);
+
+		// 重置后应该可以再次提交
+		let r3 = <AdsEntity as ClickVerifier<u64>>::verify_and_cap_clicks(
+			&ALICE, &pid, 50, 50,
+		);
+		assert_eq!(r3.unwrap(), 50);
+		assert_eq!(DailyClicks::<Test>::get(&pid), 50);
+
+		// TotalClicks 是累计的, 不会重置
+		assert_eq!(TotalClicks::<Test>::get(&pid), 150);
+	});
+}
+
+#[test]
+fn deregister_placement_clears_click_storage() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(AdsEntity::register_entity_placement(RuntimeOrigin::signed(ALICE), 1));
+		let pid = crate::entity_placement_id(1);
+
+		// 产生一些点击数据
+		use pallet_ads_primitives::ClickVerifier;
+		let _ = <AdsEntity as ClickVerifier<u64>>::verify_and_cap_clicks(
+			&ALICE, &pid, 100, 100,
+		);
+		assert_eq!(DailyClicks::<Test>::get(&pid), 100);
+		assert_eq!(TotalClicks::<Test>::get(&pid), 100);
+
+		// 注销广告位
+		assert_ok!(AdsEntity::deregister_placement(RuntimeOrigin::signed(ALICE), pid));
+
+		// 点击存储应被清理
+		assert_eq!(DailyClicks::<Test>::get(&pid), 0);
+		assert_eq!(TotalClicks::<Test>::get(&pid), 0);
+	});
+}

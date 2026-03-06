@@ -41,8 +41,12 @@ pub mod pallet {
         BoundedVec,
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{AdminPermission, DisclosureProvider, EntityProvider, EntityStatus};
+    use pallet_entity_common::{
+        AdminPermission, DisclosureProvider, EntityProvider, EntityStatus,
+        OnDisclosureViolation, OnEntityStatusChange,
+    };
     use sp_runtime::traits::{Saturating, Zero};
+    use sp_runtime::SaturatedConversion;
 
     // Re-export DisclosureLevel from pallet-entity-common
     pub use pallet_entity_common::DisclosureLevel;
@@ -254,6 +258,141 @@ pub mod pallet {
         MajorHolder,
     }
 
+    // ==================== v0.6 新增类型 ====================
+
+    /// 审计状态
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+    pub enum AuditStatus {
+        #[default]
+        NotRequired,
+        Pending,
+        Approved,
+        Rejected,
+    }
+
+    /// 处罚级别（渐进式）
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+    pub enum PenaltyLevel {
+        #[default]
+        None,
+        /// 口头警告（仅记录）
+        Warning,
+        /// 限制交易（内幕交易控制强制开启）
+        Restricted,
+        /// 暂停运营（所有披露写操作冻结）
+        Suspended,
+        /// 退市（最高级别处罚）
+        Delisted,
+    }
+
+    impl PenaltyLevel {
+        pub fn as_u8(&self) -> u8 {
+            match self {
+                PenaltyLevel::None => 0,
+                PenaltyLevel::Warning => 1,
+                PenaltyLevel::Restricted => 2,
+                PenaltyLevel::Suspended => 3,
+                PenaltyLevel::Delisted => 4,
+            }
+        }
+
+        pub fn from_u8(v: u8) -> Self {
+            match v {
+                1 => PenaltyLevel::Warning,
+                2 => PenaltyLevel::Restricted,
+                3 => PenaltyLevel::Suspended,
+                4 => PenaltyLevel::Delisted,
+                _ => PenaltyLevel::None,
+            }
+        }
+
+        pub fn next(&self) -> Self {
+            match self {
+                PenaltyLevel::None => PenaltyLevel::Warning,
+                PenaltyLevel::Warning => PenaltyLevel::Restricted,
+                PenaltyLevel::Restricted => PenaltyLevel::Suspended,
+                PenaltyLevel::Suspended => PenaltyLevel::Delisted,
+                PenaltyLevel::Delisted => PenaltyLevel::Delisted,
+            }
+        }
+    }
+
+    /// 内幕人员交易类型
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+    pub enum InsiderTransactionType {
+        #[default]
+        Buy,
+        Sell,
+        Transfer,
+        Pledge,
+        Gift,
+    }
+
+    /// 内幕人员交易申报记录
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    pub struct InsiderTransactionReport<AccountId, BlockNumber> {
+        pub account: AccountId,
+        pub transaction_type: InsiderTransactionType,
+        pub token_amount: u128,
+        pub reported_at: BlockNumber,
+        pub transaction_block: BlockNumber,
+    }
+
+    pub type InsiderTransactionReportOf<T> = InsiderTransactionReport<
+        <T as frame_system::Config>::AccountId,
+        BlockNumberFor<T>,
+    >;
+
+    /// 审批配置（多方签核要求）
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    pub struct ApprovalConfig {
+        /// 发布前所需审批人数
+        pub required_approvals: u32,
+        /// 允许审批的角色位掩码: Owner=0x01, Admin=0x02, Auditor=0x04, Advisor=0x08, MajorHolder=0x10
+        pub allowed_roles: u8,
+    }
+
+    impl Default for ApprovalConfig {
+        fn default() -> Self {
+            Self { required_approvals: 0, allowed_roles: 0 }
+        }
+    }
+
+    impl ApprovalConfig {
+        pub fn role_allowed(&self, role: InsiderRole) -> bool {
+            let bit = match role {
+                InsiderRole::Owner => 0x01,
+                InsiderRole::Admin => 0x02,
+                InsiderRole::Auditor => 0x04,
+                InsiderRole::Advisor => 0x08,
+                InsiderRole::MajorHolder => 0x10,
+            };
+            self.allowed_roles & bit != 0
+        }
+    }
+
+    /// 披露扩展元数据（与 DisclosureRecord 分离存储，避免迁移）
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+    pub struct DisclosureMetadata<BlockNumber: Default> {
+        pub period_start: Option<BlockNumber>,
+        pub period_end: Option<BlockNumber>,
+        pub audit_status: AuditStatus,
+        pub is_emergency: bool,
+    }
+
+    pub type DisclosureMetadataOf<T> = DisclosureMetadata<BlockNumberFor<T>>;
+
+    /// 财务年度配置
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    pub struct FiscalYearConfig<BlockNumber> {
+        /// 财务年度起始区块
+        pub year_start_block: BlockNumber,
+        /// 财务年度周期长度（区块数）
+        pub year_length: BlockNumber,
+    }
+
+    pub type FiscalYearConfigOf<T> = FiscalYearConfig<BlockNumberFor<T>>;
+
     /// 内幕人员记录类型别名
     pub type InsiderRecordOf<T> = InsiderRecord<
         <T as frame_system::Config>::AccountId,
@@ -310,6 +449,33 @@ pub mod pallet {
         /// P2-a23: 每个内幕人员最大角色变更历史记录数
         #[pallet::constant]
         type MaxInsiderRoleHistory: Get<u32>;
+
+        /// F4: 内幕人员移除后冷静期（区块数，期间仍受黑窗口限制）
+        #[pallet::constant]
+        type InsiderCooldownPeriod: Get<BlockNumberFor<Self>>;
+
+        /// F5: 大股东认定阈值（basis points，如 500 = 5%）
+        #[pallet::constant]
+        type MajorHolderThreshold: Get<u32>;
+
+        /// F6: 违规次数阈值（达到后标记为高风险）
+        #[pallet::constant]
+        type ViolationThreshold: Get<u32>;
+
+        /// v0.6: 每个披露最大审批人数
+        #[pallet::constant]
+        type MaxApprovers: Get<u32>;
+
+        /// v0.6: 每个内幕人员最大交易申报记录数
+        #[pallet::constant]
+        type MaxInsiderTransactionHistory: Get<u32>;
+
+        /// v0.6: 紧急披露黑窗口期倍数（正常黑窗口期 × 此倍数）
+        #[pallet::constant]
+        type EmergencyBlackoutMultiplier: Get<u32>;
+
+        /// v0.6: 披露违规回调（通知下游模块处罚升级）
+        type OnDisclosureViolation: OnDisclosureViolation;
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -437,6 +603,114 @@ pub mod pallet {
         T::AccountId,
         BoundedVec<InsiderRoleChangeRecord<BlockNumberFor<T>>, T::MaxInsiderRoleHistory>,
         ValueQuery,
+    >;
+
+    /// F4: 已移除内幕人员冷静期记录 (entity_id, account) -> cooldown_until
+    #[pallet::storage]
+    pub type RemovedInsiders<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        u64,  // entity_id
+        Blake2_128Concat,
+        T::AccountId,
+        BlockNumberFor<T>,
+    >;
+
+    /// H1-R2: on_idle 自动违规检测游标（跳过计数，避免重复扫描同一批实体）
+    #[pallet::storage]
+    pub type AutoViolationCursor<T: Config> = StorageValue<_, u32, ValueQuery>;
+
+    /// F6: 高风险实体标记（违规次数达到阈值）
+    #[pallet::storage]
+    pub type HighRiskEntities<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // entity_id
+        bool,
+        ValueQuery,
+    >;
+
+    // ==================== v0.6 新增存储 ====================
+
+    /// 审批配置（实体级别的多方签核要求）
+    #[pallet::storage]
+    pub type ApprovalConfigs<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // entity_id
+        ApprovalConfig,
+    >;
+
+    /// 披露审批记录 (disclosure_id, approver_account) → approved
+    #[pallet::storage]
+    pub type DisclosureApprovals<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        u64,  // disclosure_id
+        Blake2_128Concat,
+        T::AccountId,
+        bool,
+        ValueQuery,
+    >;
+
+    /// 披露已获审批计数 disclosure_id → count
+    #[pallet::storage]
+    pub type DisclosureApprovalCounts<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // disclosure_id
+        u32,
+        ValueQuery,
+    >;
+
+    /// 内幕人员交易申报记录
+    #[pallet::storage]
+    pub type InsiderTransactionReports<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        u64,  // entity_id
+        Blake2_128Concat,
+        T::AccountId,
+        BoundedVec<InsiderTransactionReportOf<T>, T::MaxInsiderTransactionHistory>,
+        ValueQuery,
+    >;
+
+    /// 实体处罚级别（渐进式处罚）
+    #[pallet::storage]
+    #[pallet::getter(fn entity_penalties)]
+    pub type EntityPenalties<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // entity_id
+        PenaltyLevel,
+        ValueQuery,
+    >;
+
+    /// 财务年度配置
+    #[pallet::storage]
+    pub type FiscalYearConfigs<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // entity_id
+        FiscalYearConfigOf<T>,
+    >;
+
+    /// 暂停的披露截止时间 entity_id → (paused_at, remaining_blocks_to_deadline)
+    #[pallet::storage]
+    pub type PausedDeadlines<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // entity_id
+        (BlockNumberFor<T>, BlockNumberFor<T>),
+    >;
+
+    /// 披露扩展元数据（报告期间、审计状态等）
+    #[pallet::storage]
+    pub type DisclosureMetadataStore<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // disclosure_id
+        DisclosureMetadataOf<T>,
     >;
 
     // ==================== 事件 ====================
@@ -571,6 +845,106 @@ pub mod pallet {
             entity_id: u64,
             announcement_id: u64,
         },
+        /// F1: 批量添加内幕人员
+        InsidersBatchAdded {
+            entity_id: u64,
+            count: u32,
+        },
+        /// F1: 批量移除内幕人员
+        InsidersBatchRemoved {
+            entity_id: u64,
+            count: u32,
+        },
+        /// F4: 内幕人员冷静期开始
+        InsiderCooldownStarted {
+            entity_id: u64,
+            account: T::AccountId,
+            until: BlockNumberFor<T>,
+        },
+        /// F6: 实体被标记为高风险
+        EntityMarkedHighRisk {
+            entity_id: u64,
+            violation_count: u32,
+        },
+        /// F8: 违规次数已重置
+        ViolationCountReset {
+            entity_id: u64,
+        },
+        /// F9: 黑窗口期已过期清理
+        BlackoutExpired {
+            entity_id: u64,
+        },
+
+        // ==================== v0.6 新增事件 ====================
+
+        /// 披露已获审批
+        DisclosureApproved {
+            disclosure_id: u64,
+            approver: T::AccountId,
+            approval_count: u32,
+            required: u32,
+        },
+        /// 披露审批被拒绝
+        DisclosureRejected {
+            disclosure_id: u64,
+            rejector: T::AccountId,
+        },
+        /// 审批要求已配置
+        ApprovalRequirementConfigured {
+            entity_id: u64,
+            required_approvals: u32,
+        },
+        /// 紧急披露已发布
+        EmergencyDisclosurePublished {
+            disclosure_id: u64,
+            entity_id: u64,
+            discloser: T::AccountId,
+        },
+        /// 内幕人员交易已申报
+        InsiderTransactionReported {
+            entity_id: u64,
+            account: T::AccountId,
+            transaction_type: InsiderTransactionType,
+            token_amount: u128,
+        },
+        /// 处罚已升级
+        PenaltyEscalated {
+            entity_id: u64,
+            old_level: PenaltyLevel,
+            new_level: PenaltyLevel,
+        },
+        /// 处罚已重置
+        PenaltyReset {
+            entity_id: u64,
+        },
+        /// 财务年度已配置
+        FiscalYearConfigured {
+            entity_id: u64,
+        },
+        /// 过期冷静期已清理
+        CooldownsCleaned {
+            entity_id: u64,
+            count: u32,
+        },
+        /// 披露截止时间已暂停（实体被暂停/封禁时）
+        DeadlinePaused {
+            entity_id: u64,
+        },
+        /// 披露截止时间已恢复（实体恢复运营时）
+        DeadlineResumed {
+            entity_id: u64,
+            new_deadline: BlockNumberFor<T>,
+        },
+        /// 大股东已自动注册为内幕人员
+        MajorHolderRegistered {
+            entity_id: u64,
+            account: T::AccountId,
+        },
+        /// 大股东已自动注销内幕人员身份
+        MajorHolderDeregistered {
+            entity_id: u64,
+            account: T::AccountId,
+        },
     }
 
     /// 违规类型
@@ -666,6 +1040,51 @@ pub mod pallet {
         RoleHistoryFull,
         /// 实体已被全局锁定，所有配置操作不可用
         EntityLocked,
+        /// F1: 批量操作列表为空
+        EmptyBatch,
+        /// F2: 实体不是 Active 状态，写操作被拒绝
+        EntityNotActive,
+        /// F3: 披露类型不允许在当前披露级别下使用
+        DisclosureTypeNotAllowed,
+        /// F4: 内幕人员处于冷静期，交易受限
+        InsiderInCooldown,
+        /// F9: 黑窗口期尚未过期
+        BlackoutNotExpired,
+
+        // ==================== v0.6 新增错误 ====================
+
+        /// 已经审批过此披露
+        AlreadyApproved,
+        /// 不具备审批资格（角色不在允许列表中）
+        NotApprover,
+        /// 审批数量不足，不可发布
+        InsufficientApprovals,
+        /// 未配置审批要求
+        ApprovalNotConfigured,
+        /// 交易申报记录已满
+        TransactionHistoryFull,
+        /// 处罚级别无效
+        InvalidPenaltyLevel,
+        /// 处罚已达到或超过指定级别
+        PenaltyAlreadyAtLevel,
+        /// 截止时间未暂停
+        DeadlineNotPaused,
+        /// 截止时间已暂停
+        DeadlineAlreadyPaused,
+        /// 不是内幕人员（交易申报需要内幕人员身份）
+        NotInsider,
+        /// 报告期间无效（start >= end）
+        InvalidReportingPeriod,
+        /// 无效的审批角色配置（allowed_roles 为 0）
+        InvalidApprovalRoles,
+        /// 审批要求数量为零（required_approvals > 0）
+        ZeroApprovalCount,
+        /// 实体当前受到处罚限制，写操作被拒绝
+        PenaltyRestricted,
+        /// 财务年度周期长度不能为零
+        ZeroFiscalYearLength,
+        /// 大股东已在内幕人员列表中
+        MajorHolderAlreadyRegistered,
     }
 
     // ==================== Hooks ====================
@@ -679,23 +1098,63 @@ pub mod pallet {
         fn on_idle(_n: BlockNumberFor<T>, remaining_weight: Weight) -> Weight {
             const MAX_SCAN: u32 = 10;
             let per_entity_weight = Weight::from_parts(15_000_000, 2_000);
+            // M1-R2: 跳过的实体仍消耗存储读取，需计入权重（读开销较小）
+            let per_skip_weight = Weight::from_parts(5_000_000, 1_000);
             let base_weight = Weight::from_parts(5_000_000, 1_000);
 
-            if remaining_weight.ref_time() < base_weight.ref_time() {
+            // M2: 同时检查 ref_time 和 proof_size
+            if remaining_weight.ref_time() < base_weight.ref_time()
+                || remaining_weight.proof_size() < base_weight.proof_size()
+            {
                 return Weight::zero();
             }
 
             let now = <frame_system::Pallet<T>>::block_number();
             let mut scanned = 0u32;
+            let mut skipped = 0u32;
             let mut used_weight = base_weight;
 
+            // H1-R2: 使用跳过计数（而非 entity_id 比较），因为 StorageMap::iter()
+            // 按哈希顺序迭代，不按 key 数值排序
+            let skip_count = AutoViolationCursor::<T>::get();
+
             for (entity_id, config) in DisclosureConfigs::<T>::iter() {
+                // 跳过前 skip_count 个实体
+                if skipped < skip_count {
+                    skipped += 1;
+                    // M1-R2: 计入跳过的权重
+                    used_weight = used_weight.saturating_add(per_skip_weight);
+                    if used_weight.ref_time() > remaining_weight.ref_time()
+                        || used_weight.proof_size() > remaining_weight.proof_size()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
                 if scanned >= MAX_SCAN {
                     break;
                 }
                 let needed = used_weight.saturating_add(per_entity_weight);
-                if needed.ref_time() > remaining_weight.ref_time() {
+                // M2: 同时检查 ref_time 和 proof_size
+                if needed.ref_time() > remaining_weight.ref_time()
+                    || needed.proof_size() > remaining_weight.proof_size()
+                {
                     break;
+                }
+
+                // v0.6: 跳过已暂停截止时间的实体（实体被暂停/封禁时不计违规）
+                if PausedDeadlines::<T>::contains_key(entity_id) {
+                    scanned += 1;
+                    used_weight = needed;
+                    continue;
+                }
+
+                // v0.6: 跳过非 Active 状态实体
+                if !T::EntityProvider::is_entity_active(entity_id) {
+                    scanned += 1;
+                    used_weight = needed;
+                    continue;
                 }
 
                 // 检查是否逾期
@@ -714,6 +1173,9 @@ pub mod pallet {
                             .map(|c| c.violation_count)
                             .unwrap_or(0);
 
+                        // F6: 检查是否达到高风险阈值
+                        Self::check_violation_threshold(entity_id, new_count);
+
                         Self::deposit_event(Event::AutoViolationDetected {
                             entity_id,
                             violation_count: new_count,
@@ -723,6 +1185,15 @@ pub mod pallet {
 
                 scanned += 1;
                 used_weight = needed;
+            }
+
+            // H1-R2: 更新游标
+            if scanned == 0 {
+                // 没有扫描到任何实体（已到末尾或权重耗尽在跳过阶段），归零重新开始
+                AutoViolationCursor::<T>::put(0u32);
+            } else {
+                // 下次从 skip_count + scanned 开始
+                AutoViolationCursor::<T>::put(skip_count.saturating_add(scanned));
             }
 
             used_weight
@@ -747,6 +1218,7 @@ pub mod pallet {
 
             // H2: 验证实体存在 + 管理员权限
             T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(
                 T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
                 Error::<T>::NotAdmin
@@ -804,11 +1276,15 @@ pub mod pallet {
 
             // H2: 验证实体存在 + 管理员权限
             T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(
                 T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
                 Error::<T>::NotAdmin
             );
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+
+            // F3: 验证披露类型是否允许在当前级别下使用
+            Self::validate_disclosure_type(entity_id, disclosure_type)?;
 
             // H2: 内容 CID 不能为空
             ensure!(!content_cid.is_empty(), Error::<T>::EmptyCid);
@@ -893,11 +1369,15 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
 
             T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(
                 T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
                 Error::<T>::NotAdmin
             );
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+
+            // F3: 验证披露类型是否允许在当前级别下使用
+            Self::validate_disclosure_type(entity_id, disclosure_type)?;
 
             ensure!(!content_cid.is_empty(), Error::<T>::EmptyCid);
             let content_bounded: BoundedVec<u8, T::MaxCidLength> =
@@ -953,6 +1433,7 @@ pub mod pallet {
                 ensure!(record.status == DisclosureStatus::Draft, Error::<T>::DisclosureNotDraft);
 
                 T::EntityProvider::entity_owner(record.entity_id).ok_or(Error::<T>::EntityNotFound)?;
+                ensure!(T::EntityProvider::is_entity_active(record.entity_id), Error::<T>::EntityNotActive);
                 ensure!(
                     T::EntityProvider::is_entity_admin(record.entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
                     Error::<T>::NotAdmin
@@ -989,6 +1470,7 @@ pub mod pallet {
             ensure!(record.status == DisclosureStatus::Draft, Error::<T>::DisclosureNotDraft);
 
             T::EntityProvider::entity_owner(record.entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(T::EntityProvider::is_entity_active(record.entity_id), Error::<T>::EntityNotActive);
             ensure!(
                 T::EntityProvider::is_entity_admin(record.entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
                 Error::<T>::NotAdmin
@@ -1016,11 +1498,20 @@ pub mod pallet {
                 ensure!(record.status == DisclosureStatus::Draft, Error::<T>::DisclosureNotDraft);
 
                 T::EntityProvider::entity_owner(record.entity_id).ok_or(Error::<T>::EntityNotFound)?;
+                ensure!(T::EntityProvider::is_entity_active(record.entity_id), Error::<T>::EntityNotActive);
                 ensure!(
                     T::EntityProvider::is_entity_admin(record.entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
                     Error::<T>::NotAdmin
                 );
                 ensure!(!T::EntityProvider::is_entity_locked(record.entity_id), Error::<T>::EntityLocked);
+
+                // v0.6: 检查审批要求
+                if let Some(approval_config) = ApprovalConfigs::<T>::get(record.entity_id) {
+                    if approval_config.required_approvals > 0 {
+                        let count = DisclosureApprovalCounts::<T>::get(disclosure_id);
+                        ensure!(count >= approval_config.required_approvals, Error::<T>::InsufficientApprovals);
+                    }
+                }
 
                 let now = <frame_system::Pallet<T>>::block_number();
                 record.status = DisclosureStatus::Published;
@@ -1028,6 +1519,10 @@ pub mod pallet {
 
                 Ok(record.entity_id)
             })?;
+
+            // v0.6: 清理审批记录
+            let _ = DisclosureApprovals::<T>::clear_prefix(disclosure_id, u32::MAX, None);
+            DisclosureApprovalCounts::<T>::remove(disclosure_id);
 
             let now = <frame_system::Pallet<T>>::block_number();
 
@@ -1123,6 +1618,7 @@ pub mod pallet {
             // H2: 验证实体存在 + 管理员权限
             T::EntityProvider::entity_owner(old_record.entity_id)
                 .ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(T::EntityProvider::is_entity_active(old_record.entity_id), Error::<T>::EntityNotActive);
             ensure!(
                 T::EntityProvider::is_entity_admin(old_record.entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
                 Error::<T>::NotAdmin
@@ -1219,6 +1715,7 @@ pub mod pallet {
 
             // H2: 验证实体存在 + 管理员权限
             T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(
                 T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
                 Error::<T>::NotAdmin
@@ -1274,6 +1771,7 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
 
             T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(
                 T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
                 Error::<T>::NotAdmin
@@ -1336,6 +1834,19 @@ pub mod pallet {
                 Ok(())
             })?;
 
+            // F4: 记录冷静期
+            let cooldown = T::InsiderCooldownPeriod::get();
+            if !cooldown.is_zero() {
+                let now = <frame_system::Pallet<T>>::block_number();
+                let until = now.saturating_add(cooldown);
+                RemovedInsiders::<T>::insert(entity_id, &account, until);
+                Self::deposit_event(Event::InsiderCooldownStarted {
+                    entity_id,
+                    account: account.clone(),
+                    until,
+                });
+            }
+
             Self::deposit_event(Event::InsiderRemoved {
                 entity_id,
                 account,
@@ -1355,6 +1866,7 @@ pub mod pallet {
 
             // H2: 验证实体存在 + 管理员权限
             T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(
                 T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
                 Error::<T>::NotAdmin
@@ -1429,6 +1941,7 @@ pub mod pallet {
             // H2: 验证实体存在 + 管理员权限
             T::EntityProvider::entity_owner(entity_id)
                 .ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(
                 T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
                 Error::<T>::NotAdmin
@@ -1513,6 +2026,7 @@ pub mod pallet {
                 // H2: 验证实体存在 + 管理员权限
                 T::EntityProvider::entity_owner(record.entity_id)
                     .ok_or(Error::<T>::EntityNotFound)?;
+                ensure!(T::EntityProvider::is_entity_active(record.entity_id), Error::<T>::EntityNotActive);
                 ensure!(
                     T::EntityProvider::is_entity_admin(record.entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
                     Error::<T>::NotAdmin
@@ -1616,6 +2130,7 @@ pub mod pallet {
 
             T::EntityProvider::entity_owner(entity_id)
                 .ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(
                 T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
                 Error::<T>::NotAdmin
@@ -1661,6 +2176,7 @@ pub mod pallet {
 
             T::EntityProvider::entity_owner(entity_id)
                 .ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(
                 T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
                 Error::<T>::NotAdmin
@@ -1827,6 +2343,9 @@ pub mod pallet {
                 .map(|c| c.violation_count)
                 .unwrap_or(0);
 
+            // F6: 检查是否达到高风险阈值
+            Self::check_violation_threshold(entity_id, new_count);
+
             Self::deposit_event(Event::DisclosureViolation {
                 entity_id,
                 violation_type,
@@ -1933,8 +2452,622 @@ pub mod pallet {
             let _ = ViolationRecords::<T>::clear_prefix(entity_id, u32::MAX, None);
             // P2-a23: 清理内幕人员角色变更历史
             let _ = InsiderRoleHistory::<T>::clear_prefix(entity_id, u32::MAX, None);
+            // F4: 清理冷静期记录
+            let _ = RemovedInsiders::<T>::clear_prefix(entity_id, u32::MAX, None);
+            // F6: 清理高风险标记
+            HighRiskEntities::<T>::remove(entity_id);
+            // v0.6: 清理新增存储
+            ApprovalConfigs::<T>::remove(entity_id);
+            FiscalYearConfigs::<T>::remove(entity_id);
+            EntityPenalties::<T>::remove(entity_id);
+            PausedDeadlines::<T>::remove(entity_id);
+            let _ = InsiderTransactionReports::<T>::clear_prefix(entity_id, u32::MAX, None);
 
             Self::deposit_event(Event::EntityDisclosureCleaned { entity_id });
+            Ok(())
+        }
+
+        /// F1: 批量添加内幕人员
+        #[pallet::call_index(24)]
+        #[pallet::weight(Weight::from_parts(50_000_000, 6_000))]
+        pub fn batch_add_insiders(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            insiders_list: Vec<(T::AccountId, InsiderRole)>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            ensure!(!insiders_list.is_empty(), Error::<T>::EmptyBatch);
+
+            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                Error::<T>::NotAdmin
+            );
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+
+            let now = <frame_system::Pallet<T>>::block_number();
+            let mut added: u32 = 0;
+
+            Insiders::<T>::try_mutate(entity_id, |insiders| -> DispatchResult {
+                for (account, role) in insiders_list.iter() {
+                    ensure!(
+                        !insiders.iter().any(|i| &i.account == account),
+                        Error::<T>::InsiderExists
+                    );
+                    let record = InsiderRecord {
+                        account: account.clone(),
+                        role: *role,
+                        added_at: now,
+                    };
+                    insiders.try_push(record).map_err(|_| Error::<T>::InsidersFull)?;
+                    added += 1;
+                }
+                Ok(())
+            })?;
+
+            // 记录角色历史
+            for (account, role) in insiders_list.iter() {
+                InsiderRoleHistory::<T>::try_mutate(entity_id, account, |history| -> DispatchResult {
+                    let record = InsiderRoleChangeRecord {
+                        old_role: None,
+                        new_role: *role,
+                        changed_at: now,
+                    };
+                    history.try_push(record).map_err(|_| Error::<T>::RoleHistoryFull)?;
+                    Ok(())
+                })?;
+            }
+
+            Self::deposit_event(Event::InsidersBatchAdded { entity_id, count: added });
+            Ok(())
+        }
+
+        /// F1: 批量移除内幕人员
+        #[pallet::call_index(25)]
+        #[pallet::weight(Weight::from_parts(50_000_000, 6_000))]
+        pub fn batch_remove_insiders(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            accounts: Vec<T::AccountId>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            ensure!(!accounts.is_empty(), Error::<T>::EmptyBatch);
+
+            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                Error::<T>::NotAdmin
+            );
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+
+            let removed_count = accounts.len() as u32;
+
+            Insiders::<T>::try_mutate(entity_id, |insiders| -> DispatchResult {
+                for account in accounts.iter() {
+                    let pos = insiders.iter().position(|i| &i.account == account)
+                        .ok_or(Error::<T>::InsiderNotFound)?;
+                    insiders.swap_remove(pos);
+                }
+                Ok(())
+            })?;
+
+            // F4: 记录冷静期
+            let cooldown = T::InsiderCooldownPeriod::get();
+            if !cooldown.is_zero() {
+                let now = <frame_system::Pallet<T>>::block_number();
+                let until = now.saturating_add(cooldown);
+                for account in accounts.iter() {
+                    RemovedInsiders::<T>::insert(entity_id, account, until);
+                }
+            }
+
+            Self::deposit_event(Event::InsidersBatchRemoved { entity_id, count: removed_count });
+            Ok(())
+        }
+
+        /// F8: 重置违规次数（仅 Root 可调用）
+        #[pallet::call_index(26)]
+        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+        pub fn reset_violation_count(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+
+            DisclosureConfigs::<T>::mutate(entity_id, |maybe_config| {
+                if let Some(config) = maybe_config {
+                    config.violation_count = 0;
+                }
+            });
+
+            // F6: 同时清除高风险标记
+            HighRiskEntities::<T>::remove(entity_id);
+
+            Self::deposit_event(Event::ViolationCountReset { entity_id });
+            Ok(())
+        }
+
+        /// F9: 清理已过期的黑窗口期存储（任何人可调用）
+        #[pallet::call_index(27)]
+        #[pallet::weight(Weight::from_parts(15_000_000, 2_000))]
+        pub fn expire_blackout(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_signed(origin)?;
+
+            let (_, end) = BlackoutPeriods::<T>::get(entity_id)
+                .ok_or(Error::<T>::BlackoutNotFound)?;
+
+            let now = <frame_system::Pallet<T>>::block_number();
+            ensure!(now > end, Error::<T>::BlackoutNotExpired);
+
+            BlackoutPeriods::<T>::remove(entity_id);
+
+            Self::deposit_event(Event::BlackoutExpired { entity_id });
+            Ok(())
+        }
+
+        // ==================== v0.6 新增 Extrinsics ====================
+
+        /// v0.6: 配置审批要求（多方签核才能发布草稿）
+        #[pallet::call_index(28)]
+        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+        pub fn configure_approval_requirements(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            required_approvals: u32,
+            allowed_roles: u8,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                Error::<T>::NotAdmin
+            );
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+
+            if required_approvals > 0 {
+                ensure!(allowed_roles != 0, Error::<T>::InvalidApprovalRoles);
+            }
+
+            if required_approvals == 0 {
+                ApprovalConfigs::<T>::remove(entity_id);
+            } else {
+                ApprovalConfigs::<T>::insert(entity_id, ApprovalConfig {
+                    required_approvals,
+                    allowed_roles,
+                });
+            }
+
+            Self::deposit_event(Event::ApprovalRequirementConfigured {
+                entity_id,
+                required_approvals,
+            });
+            Ok(())
+        }
+
+        /// v0.6: 审批披露草稿（多方签核）
+        #[pallet::call_index(29)]
+        #[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+        pub fn approve_disclosure(
+            origin: OriginFor<T>,
+            disclosure_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let record = Disclosures::<T>::get(disclosure_id)
+                .ok_or(Error::<T>::DisclosureNotFound)?;
+            ensure!(record.status == DisclosureStatus::Draft, Error::<T>::DisclosureNotDraft);
+
+            let entity_id = record.entity_id;
+
+            let approval_config = ApprovalConfigs::<T>::get(entity_id)
+                .ok_or(Error::<T>::ApprovalNotConfigured)?;
+
+            // 验证审批人是内幕人员且角色在允许列表中
+            let insider_role = Insiders::<T>::get(entity_id)
+                .iter()
+                .find(|i| i.account == who)
+                .map(|i| i.role)
+                .ok_or(Error::<T>::NotApprover)?;
+
+            ensure!(approval_config.role_allowed(insider_role), Error::<T>::NotApprover);
+
+            // 检查是否已审批过
+            ensure!(
+                !DisclosureApprovals::<T>::get(disclosure_id, &who),
+                Error::<T>::AlreadyApproved
+            );
+
+            DisclosureApprovals::<T>::insert(disclosure_id, &who, true);
+            let new_count = DisclosureApprovalCounts::<T>::mutate(disclosure_id, |c| {
+                *c = c.saturating_add(1);
+                *c
+            });
+
+            Self::deposit_event(Event::DisclosureApproved {
+                disclosure_id,
+                approver: who,
+                approval_count: new_count,
+                required: approval_config.required_approvals,
+            });
+            Ok(())
+        }
+
+        /// v0.6: 拒绝披露草稿审批
+        #[pallet::call_index(30)]
+        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+        pub fn reject_disclosure(
+            origin: OriginFor<T>,
+            disclosure_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let record = Disclosures::<T>::get(disclosure_id)
+                .ok_or(Error::<T>::DisclosureNotFound)?;
+            ensure!(record.status == DisclosureStatus::Draft, Error::<T>::DisclosureNotDraft);
+
+            let entity_id = record.entity_id;
+
+            let approval_config = ApprovalConfigs::<T>::get(entity_id)
+                .ok_or(Error::<T>::ApprovalNotConfigured)?;
+
+            let insider_role = Insiders::<T>::get(entity_id)
+                .iter()
+                .find(|i| i.account == who)
+                .map(|i| i.role)
+                .ok_or(Error::<T>::NotApprover)?;
+
+            ensure!(approval_config.role_allowed(insider_role), Error::<T>::NotApprover);
+
+            // 拒绝时重置审批计数，要求重新审批
+            let _ = DisclosureApprovals::<T>::clear_prefix(disclosure_id, u32::MAX, None);
+            DisclosureApprovalCounts::<T>::remove(disclosure_id);
+
+            Self::deposit_event(Event::DisclosureRejected {
+                disclosure_id,
+                rejector: who,
+            });
+            Ok(())
+        }
+
+        /// v0.6: 发布紧急披露（跳过审批，触发加倍黑窗口期）
+        #[pallet::call_index(31)]
+        #[pallet::weight(Weight::from_parts(50_000_000, 6_000))]
+        pub fn publish_emergency_disclosure(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            disclosure_type: DisclosureType,
+            content_cid: Vec<u8>,
+            summary_cid: Option<Vec<u8>>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                Error::<T>::NotAdmin
+            );
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+
+            Self::validate_disclosure_type(entity_id, disclosure_type)?;
+
+            ensure!(!content_cid.is_empty(), Error::<T>::EmptyCid);
+            let content_bounded: BoundedVec<u8, T::MaxCidLength> =
+                content_cid.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+            if let Some(ref s) = summary_cid {
+                ensure!(!s.is_empty(), Error::<T>::EmptyCid);
+            }
+            let summary_bounded = summary_cid
+                .map(|s| s.try_into().map_err(|_| Error::<T>::CidTooLong))
+                .transpose()?;
+
+            let now = <frame_system::Pallet<T>>::block_number();
+            let disclosure_id = NextDisclosureId::<T>::get();
+
+            let record = DisclosureRecord {
+                id: disclosure_id,
+                entity_id,
+                disclosure_type,
+                content_cid: content_bounded,
+                summary_cid: summary_bounded,
+                discloser: who.clone(),
+                disclosed_at: now,
+                status: DisclosureStatus::Published,
+                previous_id: None,
+            };
+
+            Disclosures::<T>::insert(disclosure_id, record);
+            NextDisclosureId::<T>::put(
+                disclosure_id.checked_add(1).ok_or(Error::<T>::IdOverflow)?
+            );
+
+            EntityDisclosures::<T>::try_mutate(entity_id, |history| -> DispatchResult {
+                history.try_push(disclosure_id).map_err(|_| Error::<T>::HistoryFull)?;
+                Ok(())
+            })?;
+
+            // 存储紧急元数据
+            DisclosureMetadataStore::<T>::insert(disclosure_id, DisclosureMetadata {
+                period_start: None,
+                period_end: None,
+                audit_status: AuditStatus::NotRequired,
+                is_emergency: true,
+            });
+
+            // 更新配置 + 触发加倍黑窗口期
+            DisclosureConfigs::<T>::mutate(entity_id, |maybe_config| {
+                if let Some(config) = maybe_config {
+                    config.last_disclosure = now;
+                    config.next_required_disclosure = Self::calculate_next_disclosure(config.level, now);
+
+                    if !config.blackout_period_after.is_zero() {
+                        let multiplier: BlockNumberFor<T> = T::EmergencyBlackoutMultiplier::get().into();
+                        let extended = config.blackout_period_after.saturating_mul(multiplier);
+                        let max_blackout = T::MaxBlackoutDuration::get();
+                        let capped = extended.min(max_blackout);
+                        let end_block = now.saturating_add(capped);
+                        let actual_end = Self::set_or_extend_blackout(entity_id, now, end_block);
+                        Self::deposit_event(Event::BlackoutStarted {
+                            entity_id,
+                            start_block: now,
+                            end_block: actual_end,
+                        });
+                    }
+                }
+            });
+
+            Self::deposit_event(Event::EmergencyDisclosurePublished {
+                disclosure_id,
+                entity_id,
+                discloser: who,
+            });
+            Ok(())
+        }
+
+        /// v0.6: 内幕人员交易申报
+        #[pallet::call_index(32)]
+        #[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+        pub fn report_insider_transaction(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            transaction_type: InsiderTransactionType,
+            token_amount: u128,
+            transaction_block: BlockNumberFor<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+
+            // 必须是内幕人员或在冷静期内
+            let is_current = Self::is_insider(entity_id, &who);
+            let in_cooldown = RemovedInsiders::<T>::contains_key(entity_id, &who);
+            ensure!(is_current || in_cooldown, Error::<T>::NotInsider);
+
+            let now = <frame_system::Pallet<T>>::block_number();
+
+            let report = InsiderTransactionReport {
+                account: who.clone(),
+                transaction_type,
+                token_amount,
+                reported_at: now,
+                transaction_block,
+            };
+
+            InsiderTransactionReports::<T>::try_mutate(entity_id, &who, |reports| -> DispatchResult {
+                reports.try_push(report).map_err(|_| Error::<T>::TransactionHistoryFull)?;
+                Ok(())
+            })?;
+
+            Self::deposit_event(Event::InsiderTransactionReported {
+                entity_id,
+                account: who,
+                transaction_type,
+                token_amount,
+            });
+            Ok(())
+        }
+
+        /// v0.6: 配置财务年度
+        #[pallet::call_index(33)]
+        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+        pub fn configure_fiscal_year(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            year_start_block: BlockNumberFor<T>,
+            year_length: BlockNumberFor<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                Error::<T>::NotAdmin
+            );
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(!year_length.is_zero(), Error::<T>::ZeroFiscalYearLength);
+
+            FiscalYearConfigs::<T>::insert(entity_id, FiscalYearConfig {
+                year_start_block,
+                year_length,
+            });
+
+            Self::deposit_event(Event::FiscalYearConfigured { entity_id });
+            Ok(())
+        }
+
+        /// v0.6: 手动升级处罚级别（仅 Root）
+        #[pallet::call_index(34)]
+        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+        pub fn escalate_penalty(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            new_level: PenaltyLevel,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+
+            let old_level = EntityPenalties::<T>::get(entity_id);
+            ensure!(new_level > old_level, Error::<T>::PenaltyAlreadyAtLevel);
+
+            EntityPenalties::<T>::insert(entity_id, new_level);
+
+            T::OnDisclosureViolation::on_violation_threshold_reached(
+                entity_id,
+                DisclosureConfigs::<T>::get(entity_id)
+                    .map(|c| c.violation_count)
+                    .unwrap_or(0),
+                new_level.as_u8(),
+            );
+
+            Self::deposit_event(Event::PenaltyEscalated {
+                entity_id,
+                old_level,
+                new_level,
+            });
+            Ok(())
+        }
+
+        /// v0.6: 重置处罚级别（仅 Root）
+        #[pallet::call_index(35)]
+        #[pallet::weight(Weight::from_parts(15_000_000, 2_000))]
+        pub fn reset_penalty(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+
+            EntityPenalties::<T>::remove(entity_id);
+
+            Self::deposit_event(Event::PenaltyReset { entity_id });
+            Ok(())
+        }
+
+        /// v0.6: 清理已过期的冷静期记录（任何人可调用）
+        #[pallet::call_index(36)]
+        #[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+        pub fn cleanup_expired_cooldowns(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_signed(origin)?;
+
+            let now = <frame_system::Pallet<T>>::block_number();
+            let mut cleaned = 0u32;
+
+            let mut to_remove = Vec::new();
+            for (account, until) in RemovedInsiders::<T>::iter_prefix(entity_id) {
+                if now > until {
+                    to_remove.push(account);
+                }
+            }
+
+            for account in to_remove.iter() {
+                RemovedInsiders::<T>::remove(entity_id, account);
+                cleaned += 1;
+            }
+
+            Self::deposit_event(Event::CooldownsCleaned {
+                entity_id,
+                count: cleaned,
+            });
+            Ok(())
+        }
+
+        /// v0.6: 设置披露扩展元数据（报告期间、审计要求）
+        #[pallet::call_index(37)]
+        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+        pub fn set_disclosure_metadata(
+            origin: OriginFor<T>,
+            disclosure_id: u64,
+            period_start: Option<BlockNumberFor<T>>,
+            period_end: Option<BlockNumberFor<T>>,
+            requires_audit: bool,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let record = Disclosures::<T>::get(disclosure_id)
+                .ok_or(Error::<T>::DisclosureNotFound)?;
+
+            T::EntityProvider::entity_owner(record.entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(
+                T::EntityProvider::is_entity_admin(record.entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                Error::<T>::NotAdmin
+            );
+
+            if let (Some(start), Some(end)) = (period_start, period_end) {
+                ensure!(start < end, Error::<T>::InvalidReportingPeriod);
+            }
+
+            let audit_status = if requires_audit { AuditStatus::Pending } else { AuditStatus::NotRequired };
+
+            DisclosureMetadataStore::<T>::insert(disclosure_id, DisclosureMetadata {
+                period_start,
+                period_end,
+                audit_status,
+                is_emergency: false,
+            });
+
+            Ok(())
+        }
+
+        /// v0.6: 审计员签核披露（更新审计状态）
+        #[pallet::call_index(38)]
+        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+        pub fn audit_disclosure(
+            origin: OriginFor<T>,
+            disclosure_id: u64,
+            approved: bool,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let record = Disclosures::<T>::get(disclosure_id)
+                .ok_or(Error::<T>::DisclosureNotFound)?;
+
+            let entity_id = record.entity_id;
+
+            // 审计员必须是内幕人员且角色为 Auditor
+            let insider_role = Insiders::<T>::get(entity_id)
+                .iter()
+                .find(|i| i.account == who)
+                .map(|i| i.role)
+                .ok_or(Error::<T>::NotApprover)?;
+            ensure!(insider_role == InsiderRole::Auditor, Error::<T>::NotApprover);
+
+            DisclosureMetadataStore::<T>::try_mutate(disclosure_id, |maybe_meta| -> DispatchResult {
+                let meta = maybe_meta.as_mut().ok_or(Error::<T>::DisclosureNotFound)?;
+                ensure!(meta.audit_status == AuditStatus::Pending, Error::<T>::InvalidDisclosureStatus);
+
+                meta.audit_status = if approved { AuditStatus::Approved } else { AuditStatus::Rejected };
+                Ok(())
+            })?;
+
+            if approved {
+                Self::deposit_event(Event::DisclosureApproved {
+                    disclosure_id,
+                    approver: who,
+                    approval_count: 1,
+                    required: 1,
+                });
+            } else {
+                Self::deposit_event(Event::DisclosureRejected {
+                    disclosure_id,
+                    rejector: who,
+                });
+            }
             Ok(())
         }
     }
@@ -1984,21 +3117,29 @@ pub mod pallet {
 
         /// 检查内幕人员是否可以交易
         pub fn can_insider_trade(entity_id: u64, account: &T::AccountId) -> bool {
-            // 如果不是内幕人员，允许交易
-            if !Self::is_insider(entity_id, account) {
-                return true;
-            }
-
             // 检查是否启用了内幕交易控制
-            if let Some(config) = DisclosureConfigs::<T>::get(entity_id) {
-                if !config.insider_trading_control {
-                    return true;
-                }
+            let config = match DisclosureConfigs::<T>::get(entity_id) {
+                Some(c) if c.insider_trading_control => c,
+                _ => return true,
+            };
+            let _ = config; // 确认已启用内幕交易控制
+
+            let is_current_insider = Self::is_insider(entity_id, account);
+
+            // F4: 检查是否在冷静期内（已移除但未过冷静期）
+            let in_cooldown = if let Some(until) = RemovedInsiders::<T>::get(entity_id, account) {
+                let now = <frame_system::Pallet<T>>::block_number();
+                now <= until
             } else {
+                false
+            };
+
+            // 非内幕人员且不在冷静期，允许交易
+            if !is_current_insider && !in_cooldown {
                 return true;
             }
 
-            // 检查是否在黑窗口期内
+            // 内幕人员或冷静期内，检查是否在黑窗口期内
             !Self::is_in_blackout(entity_id)
         }
 
@@ -2031,6 +3172,164 @@ pub mod pallet {
                 }
             }
             false
+        }
+
+        /// F3: 验证披露类型是否允许在当前披露级别下使用
+        fn validate_disclosure_type(entity_id: u64, disclosure_type: DisclosureType) -> DispatchResult {
+            let level = Self::get_disclosure_level(entity_id);
+            let allowed = match level {
+                DisclosureLevel::Basic => matches!(disclosure_type,
+                    DisclosureType::AnnualReport | DisclosureType::Other),
+                DisclosureLevel::Standard => matches!(disclosure_type,
+                    DisclosureType::AnnualReport | DisclosureType::QuarterlyReport |
+                    DisclosureType::MaterialEvent | DisclosureType::RiskWarning |
+                    DisclosureType::Other),
+                DisclosureLevel::Enhanced => !matches!(disclosure_type,
+                    DisclosureType::TokenIssuance | DisclosureType::Buyback),
+                DisclosureLevel::Full => true,
+            };
+            ensure!(allowed, Error::<T>::DisclosureTypeNotAllowed);
+            Ok(())
+        }
+
+        /// F5: 获取大股东认定阈值（basis points）
+        pub fn get_major_holder_threshold() -> u32 {
+            T::MajorHolderThreshold::get()
+        }
+
+        /// F6: 检查并标记高风险实体 + v0.6 渐进式处罚自动升级
+        fn check_violation_threshold(entity_id: u64, violation_count: u32) {
+            let threshold = T::ViolationThreshold::get();
+            if threshold > 0 && violation_count >= threshold && !HighRiskEntities::<T>::get(entity_id) {
+                HighRiskEntities::<T>::insert(entity_id, true);
+                Self::deposit_event(Event::EntityMarkedHighRisk {
+                    entity_id,
+                    violation_count,
+                });
+            }
+
+            // v0.6: 渐进式处罚自动升级
+            if threshold > 0 {
+                let current_penalty = EntityPenalties::<T>::get(entity_id);
+                let new_penalty = if violation_count >= threshold.saturating_mul(3) {
+                    PenaltyLevel::Delisted
+                } else if violation_count >= threshold.saturating_mul(2) {
+                    PenaltyLevel::Suspended
+                } else if violation_count >= threshold {
+                    PenaltyLevel::Restricted
+                } else if violation_count >= threshold / 2 {
+                    PenaltyLevel::Warning
+                } else {
+                    PenaltyLevel::None
+                };
+
+                if new_penalty > current_penalty {
+                    EntityPenalties::<T>::insert(entity_id, new_penalty);
+                    Self::deposit_event(Event::PenaltyEscalated {
+                        entity_id,
+                        old_level: current_penalty,
+                        new_level: new_penalty,
+                    });
+
+                    T::OnDisclosureViolation::on_violation_threshold_reached(
+                        entity_id,
+                        violation_count,
+                        new_penalty.as_u8(),
+                    );
+                }
+            }
+        }
+
+        // ==================== v0.6 新增辅助函数 ====================
+
+        /// v0.6: 暂停披露截止时间（保存剩余区块数）
+        fn pause_deadline(entity_id: u64) {
+            if let Some(config) = DisclosureConfigs::<T>::get(entity_id) {
+                if PausedDeadlines::<T>::contains_key(entity_id) {
+                    return;
+                }
+                let now = <frame_system::Pallet<T>>::block_number();
+                let remaining = if config.next_required_disclosure > now {
+                    config.next_required_disclosure.saturating_sub(now)
+                } else {
+                    Zero::zero()
+                };
+                PausedDeadlines::<T>::insert(entity_id, (now, remaining));
+                Self::deposit_event(Event::DeadlinePaused { entity_id });
+            }
+        }
+
+        /// v0.6: 恢复披露截止时间（基于暂停时保存的剩余区块数）
+        fn resume_deadline(entity_id: u64) {
+            if let Some((_, remaining)) = PausedDeadlines::<T>::take(entity_id) {
+                let now = <frame_system::Pallet<T>>::block_number();
+                let new_deadline = now.saturating_add(remaining);
+                DisclosureConfigs::<T>::mutate(entity_id, |maybe_config| {
+                    if let Some(config) = maybe_config {
+                        config.next_required_disclosure = new_deadline;
+                    }
+                });
+                Self::deposit_event(Event::DeadlineResumed {
+                    entity_id,
+                    new_deadline,
+                });
+            }
+        }
+
+        /// v0.6: 将账户注册为大股东内幕人员
+        fn do_register_major_holder(entity_id: u64, account: &T::AccountId) -> sp_runtime::DispatchResult {
+            Insiders::<T>::try_mutate(entity_id, |insiders| -> sp_runtime::DispatchResult {
+                if insiders.iter().any(|i| &i.account == account) {
+                    return Ok(());
+                }
+
+                let now = <frame_system::Pallet<T>>::block_number();
+                let record = InsiderRecord {
+                    account: account.clone(),
+                    role: InsiderRole::MajorHolder,
+                    added_at: now,
+                };
+                insiders.try_push(record).map_err(|_| Error::<T>::InsidersFull)?;
+
+                InsiderRoleHistory::<T>::try_mutate(entity_id, account, |history| -> sp_runtime::DispatchResult {
+                    let change = InsiderRoleChangeRecord {
+                        old_role: None,
+                        new_role: InsiderRole::MajorHolder,
+                        changed_at: now,
+                    };
+                    history.try_push(change).map_err(|_| Error::<T>::RoleHistoryFull)?;
+                    Ok(())
+                })?;
+
+                Self::deposit_event(Event::MajorHolderRegistered {
+                    entity_id,
+                    account: account.clone(),
+                });
+                Ok(())
+            })
+        }
+
+        /// v0.6: 注销大股东内幕人员身份
+        fn do_deregister_major_holder(entity_id: u64, account: &T::AccountId) -> sp_runtime::DispatchResult {
+            Insiders::<T>::try_mutate(entity_id, |insiders| -> sp_runtime::DispatchResult {
+                let pos = insiders.iter().position(|i| &i.account == account && i.role == InsiderRole::MajorHolder);
+                if let Some(idx) = pos {
+                    insiders.swap_remove(idx);
+
+                    let cooldown = T::InsiderCooldownPeriod::get();
+                    if !cooldown.is_zero() {
+                        let now = <frame_system::Pallet<T>>::block_number();
+                        let until = now.saturating_add(cooldown);
+                        RemovedInsiders::<T>::insert(entity_id, account, until);
+                    }
+
+                    Self::deposit_event(Event::MajorHolderDeregistered {
+                        entity_id,
+                        account: account.clone(),
+                    });
+                }
+                Ok(())
+            })
         }
 
         /// P2-a14: 获取所有有效的置顶公告 ID
@@ -2078,6 +3377,118 @@ pub mod pallet {
 
         fn is_disclosure_overdue(entity_id: u64) -> bool {
             Pallet::<T>::is_disclosure_overdue(entity_id)
+        }
+
+        fn get_violation_count(entity_id: u64) -> u32 {
+            DisclosureConfigs::<T>::get(entity_id)
+                .map(|c| c.violation_count)
+                .unwrap_or(0)
+        }
+
+        fn get_insider_role(entity_id: u64, account: &T::AccountId) -> Option<u8> {
+            Insiders::<T>::get(entity_id)
+                .iter()
+                .find(|i| &i.account == account)
+                .map(|i| i.role as u8)
+        }
+
+        fn is_disclosure_configured(entity_id: u64) -> bool {
+            DisclosureConfigs::<T>::contains_key(entity_id)
+        }
+
+        fn is_high_risk(entity_id: u64) -> bool {
+            HighRiskEntities::<T>::get(entity_id)
+        }
+
+        fn governance_configure_disclosure(
+            entity_id: u64,
+            level: DisclosureLevel,
+            insider_trading_control: bool,
+            blackout_period_after: u64,
+        ) -> sp_runtime::DispatchResult {
+            let blackout_after: BlockNumberFor<T> = blackout_period_after.saturated_into();
+            // M1-audit: 验证 blackout_period_after 不超过上限
+            let max_blackout: BlockNumberFor<T> = T::MaxBlackoutDuration::get();
+            frame_support::ensure!(
+                blackout_after <= max_blackout,
+                Error::<T>::BlackoutExceedsMax
+            );
+            let now = <frame_system::Pallet<T>>::block_number();
+            let next_required = Pallet::<T>::calculate_next_disclosure(level, now);
+
+            let existing = DisclosureConfigs::<T>::get(entity_id);
+            let existing_violations = existing.as_ref().map(|c| c.violation_count).unwrap_or(0);
+            let existing_last = existing.as_ref().map(|c| c.last_disclosure).unwrap_or_else(Zero::zero);
+
+            DisclosureConfigs::<T>::insert(entity_id, DisclosureConfig {
+                level,
+                insider_trading_control,
+                blackout_period_after: blackout_after,
+                next_required_disclosure: next_required,
+                last_disclosure: existing_last,
+                violation_count: existing_violations,
+            });
+
+            Pallet::<T>::deposit_event(Event::DisclosureConfigUpdated {
+                entity_id,
+                level,
+            });
+            Ok(())
+        }
+
+        fn governance_reset_violations(entity_id: u64) -> sp_runtime::DispatchResult {
+            DisclosureConfigs::<T>::mutate(entity_id, |maybe_config| {
+                if let Some(config) = maybe_config {
+                    config.violation_count = 0;
+                }
+            });
+            HighRiskEntities::<T>::remove(entity_id);
+
+            Pallet::<T>::deposit_event(Event::ViolationCountReset { entity_id });
+            Ok(())
+        }
+
+        // ==================== v0.6: 大股东自动注册 ====================
+
+        fn register_major_holder(entity_id: u64, account: &T::AccountId) -> sp_runtime::DispatchResult {
+            if !DisclosureConfigs::<T>::contains_key(entity_id) {
+                return Ok(());
+            }
+            Pallet::<T>::do_register_major_holder(entity_id, account)
+        }
+
+        fn deregister_major_holder(entity_id: u64, account: &T::AccountId) -> sp_runtime::DispatchResult {
+            Pallet::<T>::do_deregister_major_holder(entity_id, account)
+        }
+
+        // ==================== v0.6: 渐进式处罚 ====================
+
+        fn get_penalty_level(entity_id: u64) -> u8 {
+            EntityPenalties::<T>::get(entity_id).as_u8()
+        }
+
+        fn is_penalty_active(entity_id: u64) -> bool {
+            EntityPenalties::<T>::get(entity_id) >= PenaltyLevel::Restricted
+        }
+    }
+
+    // ==================== v0.6: OnEntityStatusChange 实现 ====================
+
+    impl<T: Config> OnEntityStatusChange for Pallet<T> {
+        fn on_entity_suspended(entity_id: u64) {
+            Self::pause_deadline(entity_id);
+        }
+
+        fn on_entity_banned(entity_id: u64) {
+            Self::pause_deadline(entity_id);
+        }
+
+        fn on_entity_resumed(entity_id: u64) {
+            Self::resume_deadline(entity_id);
+        }
+
+        fn on_entity_closed(entity_id: u64) {
+            PausedDeadlines::<T>::remove(entity_id);
         }
     }
 }

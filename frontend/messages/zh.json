@@ -63,7 +63,44 @@
     "createShop": "创建店铺",
     "commission": "佣金",
     "withdraw": "提现",
-    "pool": "奖池"
+    "pool": "奖池",
+
+    "sectionEntity": "实体系统",
+    "sectionTrading": "P2P 交易",
+    "sectionStorage": "IPFS 存储",
+    "sectionRobot": "机器人",
+    "sectionDispute": "争议处理",
+    "sectionAds": "广告投放",
+
+    "trading": "NEX/USDT 市场",
+    "tradingOrderbook": "订单簿",
+    "tradingMyOrders": "我的挂单",
+    "tradingMyTrades": "我的交易",
+    "tradingDisputes": "交易争议",
+
+    "storage": "存储",
+    "storagePins": "Pin 管理",
+    "storageOperators": "运营商",
+    "storageBilling": "账单",
+
+    "robot": "机器人",
+    "robotBots": "我的机器人",
+    "robotOperators": "运营商",
+    "robotCommunities": "社区",
+    "robotNodes": "共识节点",
+    "robotRewards": "奖励",
+    "robotSubscriptions": "订阅",
+
+    "dispute": "争议",
+    "disputeComplaints": "投诉",
+    "disputeEscrow": "托管资金",
+    "disputeEvidence": "证据",
+
+    "ads": "广告",
+    "adsCampaigns": "广告活动",
+    "adsPlacements": "广告位",
+    "adsStaking": "社区质押",
+    "adsRevenue": "收入"
   },
   "header": {
     "connectWallet": "连接钱包",

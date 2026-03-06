@@ -112,6 +112,32 @@ impl Default for PlacementStatus {
 }
 
 // ============================================================================
+// Click Attestation — C2b Proxy Account 点击证明
+// ============================================================================
+
+/// 点击证明 — 由用户的 Proxy Account 签名的点击事件
+///
+/// C2b 方案: 用户主账户通过 `proxy.addProxy` 委托有限签名权给 DApp 管理的 proxy 账户。
+/// 用户点击广告时, DApp 自动使用 proxy 账户签名生成 ClickAttestation。
+/// Entity 将批量 attestation 聚合后提交上链。
+#[derive(
+	Encode, Decode, codec::DecodeWithMemTracking, Clone, RuntimeDebug, PartialEq, Eq,
+	TypeInfo, MaxEncodedLen,
+)]
+pub struct ClickAttestation<AccountId> {
+	/// 点击者 (用户主账户)
+	pub clicker: AccountId,
+	/// 签名者 (proxy 账户, 已被 clicker 授权)
+	pub proxy: AccountId,
+	/// 点击的 Campaign ID
+	pub campaign_id: u64,
+	/// 广告位 ID
+	pub placement_id: PlacementId,
+	/// 点击时间戳 (区块号)
+	pub clicked_at: u64,
+}
+
+// ============================================================================
 // Trait Interfaces — 适配层需实现
 // ============================================================================
 
@@ -146,6 +172,38 @@ impl<AccountId> DeliveryVerifier<AccountId> for () {
 		_node_id: Option<[u8; 32]>,
 	) -> Result<u32, sp_runtime::DispatchError> {
 		Ok(audience_size)
+	}
+}
+
+/// 点击收据验证 — 各适配层实现点击真实性验证与每日上限
+///
+/// Entity: Entity 活跃状态检查 + 每日点击量上限 + 权限验证
+pub trait ClickVerifier<AccountId> {
+	/// 验证点击收据的合法性
+	///
+	/// - `who`: 提交者 (Entity owner/admin/shop manager)
+	/// - `placement_id`: 广告位
+	/// - `click_count`: 本次提交的点击数
+	/// - `verified_clicks`: 经 proxy 签名验证的点击数 (C2b)
+	///
+	/// 返回: 验证通过后的有效点击数 (可能被每日上限裁切)
+	fn verify_and_cap_clicks(
+		who: &AccountId,
+		placement_id: &PlacementId,
+		click_count: u32,
+		verified_clicks: u32,
+	) -> Result<u32, sp_runtime::DispatchError>;
+}
+
+/// ClickVerifier 空实现 (直通, 用于测试)
+impl<AccountId> ClickVerifier<AccountId> for () {
+	fn verify_and_cap_clicks(
+		_: &AccountId,
+		_: &PlacementId,
+		click_count: u32,
+		_verified_clicks: u32,
+	) -> Result<u32, sp_runtime::DispatchError> {
+		Ok(click_count)
 	}
 }
 

@@ -12,7 +12,6 @@ scale-info = { features = ["derive"], workspace = true }
 frame-support = { workspace = true }
 frame-system = { workspace = true }
 sp-runtime = { workspace = true }
-sp-std = { workspace = true }
 
 pallet-commission-common = { path = "../common", default-features = false }
 pallet-entity-common = { path = "../../common", default-features = false }
@@ -29,7 +28,6 @@ std = [
     "frame-support/std",
     "frame-system/std",
     "sp-runtime/std",
-    "sp-std/std",
     "pallet-commission-common/std",
     "pallet-entity-common/std",
 ]
@@ -38,10 +36,12 @@ runtime-benchmarks = [
     "frame-system/runtime-benchmarks",
     "sp-runtime/runtime-benchmarks",
     "pallet-entity-common/runtime-benchmarks",
+    "pallet-commission-common/runtime-benchmarks",
 ]
 try-runtime = [
     "frame-support/try-runtime",
     "frame-system/try-runtime",
     "sp-runtime/try-runtime",
     "pallet-entity-common/try-runtime",
+    "pallet-commission-common/try-runtime",
 ]

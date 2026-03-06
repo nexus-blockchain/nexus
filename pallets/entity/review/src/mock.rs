@@ -47,6 +47,8 @@ thread_local! {
     static SHOP_ENTITY: RefCell<std::collections::HashMap<u64, u64>> = RefCell::new(std::collections::HashMap::new());
     // Entity locked state
     static ENTITY_LOCKED: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
+    // F3: Order -> product_id mapping
+    static ORDER_PRODUCTS: RefCell<std::collections::HashMap<u64, u64>> = RefCell::new(std::collections::HashMap::new());
 }
 
 pub fn add_order(order_id: u64, buyer: u64, shop_id: u64, completed: bool) {
@@ -95,6 +97,10 @@ pub fn set_entity_locked(entity_id: u64) {
     ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id));
 }
 
+pub fn set_order_product_id(order_id: u64, product_id: u64) {
+    ORDER_PRODUCTS.with(|m| m.borrow_mut().insert(order_id, product_id));
+}
+
 pub fn reset_mock_state() {
     ORDERS.with(|o| o.borrow_mut().clear());
     DISPUTED_ORDERS.with(|d| d.borrow_mut().clear());
@@ -106,6 +112,7 @@ pub fn reset_mock_state() {
     SHOP_ENTITY.with(|m| m.borrow_mut().clear());
     ORDER_COMPLETED_AT.with(|m| m.borrow_mut().clear());
     ENTITY_LOCKED.with(|l| l.borrow_mut().clear());
+    ORDER_PRODUCTS.with(|m| m.borrow_mut().clear());
 }
 
 // ==================== Mock OrderProvider ====================
@@ -147,6 +154,10 @@ impl OrderProvider<u64, u128> for MockOrderProvider {
 
     fn order_completed_at(order_id: u64) -> Option<u64> {
         ORDER_COMPLETED_AT.with(|m| m.borrow().get(&order_id).copied())
+    }
+
+    fn order_product_id(order_id: u64) -> Option<u64> {
+        ORDER_PRODUCTS.with(|m| m.borrow().get(&order_id).copied())
     }
 }
 
@@ -311,6 +322,7 @@ impl EntityProvider<u64> for MockEntityProvider {
 
 parameter_types! {
     pub const ReviewWindowBlocks: u64 = 100800; // ~7 days at 6s blocks
+    pub const EditWindowBlocks: u64 = 14400; // ~1 day at 6s blocks
 }
 
 impl pallet_entity_review::Config for Test {
@@ -320,6 +332,8 @@ impl pallet_entity_review::Config for Test {
     type MaxCidLength = ConstU32<64>;
     type MaxReviewsPerUser = ConstU32<100>;
     type ReviewWindowBlocks = ReviewWindowBlocks;
+    type EditWindowBlocks = EditWindowBlocks;
+    type MaxProductReviews = ConstU32<200>;
     type WeightInfo = ();
 }
 

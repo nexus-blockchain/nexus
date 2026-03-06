@@ -2261,3 +2261,223 @@ fn batch_delete_best_effort_partial_success() {
         assert!(Products::<Test>::get(1).is_some());
     });
 }
+
+// ==================== 审计 M1: force_unpublish reason 校验顺序 ====================
+
+#[test]
+fn m1_force_unpublish_rejects_reason_too_long_before_mutation() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+        assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
+        assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::OnSale);
+        assert_eq!(ProductStats::<Test>::get().on_sale_products, 1);
+
+        // MaxReasonLength = 256, 提供 257 字节的 reason
+        let long_reason = vec![0u8; 257];
+        assert_noop!(
+            EntityProduct::force_unpublish_product(
+                RuntimeOrigin::root(), 0, Some(long_reason),
+            ),
+            Error::<Test>::ReasonTooLong
+        );
+
+        // M1: 状态不应被修改（reason 校验在 try_mutate 之前）
+        assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::OnSale);
+        assert_eq!(ProductStats::<Test>::get().on_sale_products, 1);
+    });
+}
+
+#[test]
+fn m1_force_unpublish_accepts_max_length_reason() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+        assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
+
+        // 恰好 256 字节应成功
+        let exact_reason = vec![b'x'; 256];
+        assert_ok!(EntityProduct::force_unpublish_product(
+            RuntimeOrigin::root(), 0, Some(exact_reason),
+        ));
+
+        assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::OffShelf);
+        assert_eq!(ProductStats::<Test>::get().on_sale_products, 0);
+    });
+}
+
+// ==================== 审计 v0.8.0 回归测试 ====================
+
+#[test]
+fn h2_delist_product_works_for_soldout() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product();
+        assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
+
+        // 扣光库存 → SoldOut
+        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::SoldOut);
+
+        // H2: delist_product 应能下架 SoldOut 商品
+        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::delist_product(0));
+
+        let product = Products::<Test>::get(0).unwrap();
+        assert_eq!(product.status, ProductStatus::OffShelf);
+    });
+}
+
+#[test]
+fn h2_delist_product_onsale_decrements_stats() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product();
+        assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
+        assert_eq!(ProductStats::<Test>::get().on_sale_products, 1);
+
+        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::delist_product(0));
+
+        assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::OffShelf);
+        assert_eq!(ProductStats::<Test>::get().on_sale_products, 0);
+    });
+}
+
+#[test]
+fn h2_delist_product_soldout_no_stat_change() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product();
+        assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
+        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        // SoldOut 时 on_sale 已经被减为 0
+        assert_eq!(ProductStats::<Test>::get().on_sale_products, 0);
+
+        // H2: delist SoldOut 不应再减 on_sale_products（避免下溢）
+        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::delist_product(0));
+        assert_eq!(ProductStats::<Test>::get().on_sale_products, 0);
+    });
+}
+
+#[test]
+fn h2_delist_product_draft_noop() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product(); // Draft
+        // delist Draft 应静默成功（不改变状态）
+        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::delist_product(0));
+        assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::Draft);
+    });
+}
+
+#[test]
+fn m1_batch_publish_empty_list_noop() {
+    new_test_ext().execute_with(|| {
+        // M1: 空列表不应发射事件，直接成功返回
+        System::reset_events();
+        assert_ok!(EntityProduct::batch_publish_products(
+            RuntimeOrigin::signed(1), vec![],
+        ));
+        // 不应有 BatchCompleted 事件
+        let batch_events: Vec<_> = System::events().into_iter().filter(|e| {
+            matches!(e.event, RuntimeEvent::EntityProduct(Event::BatchCompleted { .. }))
+        }).collect();
+        assert!(batch_events.is_empty(), "empty batch should not emit BatchCompleted");
+    });
+}
+
+#[test]
+fn m1_batch_unpublish_empty_list_noop() {
+    new_test_ext().execute_with(|| {
+        System::reset_events();
+        assert_ok!(EntityProduct::batch_unpublish_products(
+            RuntimeOrigin::signed(1), vec![],
+        ));
+        let batch_events: Vec<_> = System::events().into_iter().filter(|e| {
+            matches!(e.event, RuntimeEvent::EntityProduct(Event::BatchCompleted { .. }))
+        }).collect();
+        assert!(batch_events.is_empty());
+    });
+}
+
+#[test]
+fn m1_batch_delete_empty_list_noop() {
+    new_test_ext().execute_with(|| {
+        System::reset_events();
+        assert_ok!(EntityProduct::batch_delete_products(
+            RuntimeOrigin::signed(1), vec![],
+        ));
+        let batch_events: Vec<_> = System::events().into_iter().filter(|e| {
+            matches!(e.event, RuntimeEvent::EntityProduct(Event::BatchCompleted { .. }))
+        }).collect();
+        assert!(batch_events.is_empty());
+    });
+}
+
+#[test]
+fn m3_delete_product_unpins_tags_and_sku_cids() {
+    new_test_ext().execute_with(|| {
+        // 创建带 tags_cid 和 sku_cid 的商品
+        assert_ok!(EntityProduct::create_product(
+            RuntimeOrigin::signed(1), 1,
+            b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
+            1_000_000_000_000u128, 0, 100, ProductCategory::Physical, 0,
+            b"QmTags".to_vec(),
+            b"QmSku".to_vec(),
+            1, 0, ProductVisibility::Public,
+        ));
+        clear_pin_tracking();
+
+        assert_ok!(EntityProduct::delete_product(RuntimeOrigin::signed(1), 0));
+
+        let unpinned = get_unpinned_cids();
+        // M3: 应 unpin 5 个 CID（name + images + detail + tags + sku）
+        assert_eq!(unpinned.len(), 5);
+        assert!(unpinned.contains(&b"QmName".to_vec()));
+        assert!(unpinned.contains(&b"QmImages".to_vec()));
+        assert!(unpinned.contains(&b"QmDetail".to_vec()));
+        assert!(unpinned.contains(&b"QmTags".to_vec()));
+        assert!(unpinned.contains(&b"QmSku".to_vec()));
+    });
+}
+
+#[test]
+fn m3_delete_product_no_unpin_empty_tags_sku() {
+    new_test_ext().execute_with(|| {
+        // 创建不带 tags/sku 的商品
+        create_default_product();
+        clear_pin_tracking();
+
+        assert_ok!(EntityProduct::delete_product(RuntimeOrigin::signed(1), 0));
+
+        let unpinned = get_unpinned_cids();
+        // 只应 unpin 3 个（name + images + detail），空 tags/sku 不触发
+        assert_eq!(unpinned.len(), 3);
+    });
+}
+
+#[test]
+fn m2_batch_delete_unpins_tags_and_sku_cids() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityProduct::create_product(
+            RuntimeOrigin::signed(1), 1,
+            b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
+            1_000_000_000_000u128, 0, 100, ProductCategory::Physical, 0,
+            b"QmTags".to_vec(),
+            b"QmSku".to_vec(),
+            1, 0, ProductVisibility::Public,
+        ));
+        clear_pin_tracking();
+
+        assert_ok!(EntityProduct::batch_delete_products(
+            RuntimeOrigin::signed(1), vec![0],
+        ));
+
+        let unpinned = get_unpinned_cids();
+        // M2: 应 unpin 5 个 CID
+        assert_eq!(unpinned.len(), 5);
+        assert!(unpinned.contains(&b"QmTags".to_vec()));
+        assert!(unpinned.contains(&b"QmSku".to_vec()));
+    });
+}

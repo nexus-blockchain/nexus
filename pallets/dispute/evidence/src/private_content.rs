@@ -11,7 +11,10 @@ use crate::pallet::Config;
 use frame_system::pallet_prelude::BlockNumberFor;
 
 // ── 重导出枚举和 trait（无泛型，直接使用） ──
-pub use pallet_crypto_common::{EncryptionMethod, KeyType, PrivateContentManager};
+pub use pallet_crypto_common::{
+    ContentStatus, EncryptionMethod, KeyManager, KeyType,
+    PrivateContentManager, PrivateContentProvider,
+};
 
 // ── 授权用户列表 ──
 pub type AuthorizedUsers<T> = frame_support::BoundedVec<

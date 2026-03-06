@@ -757,15 +757,22 @@ fn request_pin_with_tier_works() {
         };
         crate::Operators::<Test>::insert(&operator2, operator_info2);
         
+        // ✅ P0-16: 维护活跃运营者索引
+        let idx: BoundedVec<AccountId, frame_support::traits::ConstU32<256>> =
+            BoundedVec::try_from(alloc::vec![operator1, operator2]).unwrap();
+        crate::ActiveOperatorIndex::<Test>::put(idx);
+        
         // 给IpfsPool充足余额
         let pool = IpfsPoolAccount::get();
         let _ = <Test as crate::Config>::Currency::deposit_creating(&pool, 10_000_000_000_000_000);
         
         // 执行pin（使用Standard tier）
+        let size_bytes: u64 = cid.len() as u64 * 1024;
         assert_ok!(crate::Pallet::<Test>::request_pin_for_subject(
             RuntimeOrigin::signed(caller),
             subject_id,
             cid.clone(),
+            size_bytes,
             Some(PinTier::Standard),
         ));
         
@@ -1474,3 +1481,247 @@ fn p1_ocw_report_health_works() {
     });
 }
 
+/// P0-6: check_pin_health 基于链上数据判断健康状态
+#[test]
+fn p0_6_check_pin_health_returns_correct_status() {
+    use crate::types::HealthStatus;
+    
+    new_test_ext().execute_with(|| {
+        let cid_hash = H256::from_low_u64_be(600);
+        let op1: AccountId = 10;
+        let op2: AccountId = 11;
+        let op3: AccountId = 12;
+
+        // 无分配 → Unknown
+        assert_eq!(
+            crate::Pallet::<Test>::check_pin_health(&cid_hash),
+            HealthStatus::Unknown
+        );
+
+        // 设置3个运营者分配，目标3副本
+        let ops: frame_support::BoundedVec<AccountId, frame_support::traits::ConstU32<16>> =
+            frame_support::BoundedVec::try_from(alloc::vec![op1, op2, op3]).unwrap();
+        crate::PinAssignments::<Test>::insert(cid_hash, ops);
+        crate::PinMeta::<Test>::insert(cid_hash, crate::pallet::PinMetadata {
+            size: 1024,
+            replicas: 3,
+            created_at: 1u64,
+            last_activity: 1u64,
+        });
+
+        // 0/3 在线 → Critical
+        assert_eq!(
+            crate::Pallet::<Test>::check_pin_health(&cid_hash),
+            HealthStatus::Critical { current_replicas: 0 }
+        );
+
+        // 1/3 在线 → Critical (< 2)
+        crate::PinSuccess::<Test>::insert(cid_hash, op1, true);
+        assert_eq!(
+            crate::Pallet::<Test>::check_pin_health(&cid_hash),
+            HealthStatus::Critical { current_replicas: 1 }
+        );
+
+        // 2/3 在线 → Degraded (>= 2 但 < target 3)
+        crate::PinSuccess::<Test>::insert(cid_hash, op2, true);
+        assert_eq!(
+            crate::Pallet::<Test>::check_pin_health(&cid_hash),
+            HealthStatus::Degraded { current_replicas: 2, target: 3 }
+        );
+
+        // 3/3 在线 → Healthy
+        crate::PinSuccess::<Test>::insert(cid_hash, op3, true);
+        assert_eq!(
+            crate::Pallet::<Test>::check_pin_health(&cid_hash),
+            HealthStatus::Healthy { current_replicas: 3 }
+        );
+    });
+}
+
+/// P0-11: governance_force_unpin 治理强制下架
+#[test]
+fn p0_11_governance_force_unpin_works() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(1);
+        let cid = b"QmTestGovernanceForceUnpin".to_vec();
+        use sp_runtime::traits::Hash;
+        let cid_hash = BlakeTwo256::hash(&cid[..]);
+
+        // CID不存在 → OrderNotFound
+        assert_noop!(
+            crate::Pallet::<Test>::governance_force_unpin(
+                RuntimeOrigin::root(),
+                cid.clone(),
+                b"violation".to_vec(),
+            ),
+            crate::Error::<Test>::OrderNotFound
+        );
+
+        // 非root → BadOrigin
+        assert_noop!(
+            crate::Pallet::<Test>::governance_force_unpin(
+                RuntimeOrigin::signed(1),
+                cid.clone(),
+                b"violation".to_vec(),
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+
+        // 插入PinMeta使CID存在
+        crate::PinMeta::<Test>::insert(cid_hash, crate::pallet::PinMetadata {
+            size: 1024,
+            replicas: 2,
+            created_at: 1u64,
+            last_activity: 1u64,
+        });
+
+        // root调用成功
+        assert_ok!(crate::Pallet::<Test>::governance_force_unpin(
+            RuntimeOrigin::root(),
+            cid.clone(),
+            b"illegal content".to_vec(),
+        ));
+
+        // 验证：PinBilling state=2（已标记过期）或 MarkedForUnpin事件已发出
+        // 通过事件验证
+        let events = frame_system::Pallet::<Test>::events();
+        let has_force_unpin_event = events.iter().any(|e| {
+            matches!(
+                &e.event,
+                RuntimeEvent::Ipfs(crate::Event::GovernanceForceUnpinned { .. })
+            )
+        });
+        assert!(has_force_unpin_event, "GovernanceForceUnpinned event should be emitted");
+    });
+}
+
+/// P0-13: cleanup_expired_cids 手动清理过期CID
+#[test]
+fn p0_13_cleanup_expired_cids_works() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(1);
+        
+        // limit=0 → BadParams
+        assert_noop!(
+            crate::Pallet::<Test>::cleanup_expired_cids(
+                RuntimeOrigin::signed(1),
+                0,
+            ),
+            crate::Error::<Test>::BadParams
+        );
+        
+        // 无过期CID时调用成功（清理0个），且设置ExpiredCidPending=false
+        crate::ExpiredCidPending::<Test>::put(true);
+        assert_ok!(crate::Pallet::<Test>::cleanup_expired_cids(
+            RuntimeOrigin::signed(1),
+            10,
+        ));
+        assert!(!crate::ExpiredCidPending::<Test>::get());
+        
+        // 设置2个过期CID（state=2）
+        let cid_hash_a = H256::from_low_u64_be(1301);
+        let cid_hash_b = H256::from_low_u64_be(1302);
+        crate::PinBilling::<Test>::insert(cid_hash_a, (1u64, 50u128, 2u8));
+        crate::PinBilling::<Test>::insert(cid_hash_b, (1u64, 50u128, 2u8));
+        crate::PinMeta::<Test>::insert(cid_hash_a, crate::pallet::PinMetadata {
+            size: 1024, replicas: 2, created_at: 1u64, last_activity: 1u64,
+        });
+        crate::PinMeta::<Test>::insert(cid_hash_b, crate::pallet::PinMetadata {
+            size: 2048, replicas: 1, created_at: 1u64, last_activity: 1u64,
+        });
+        crate::ExpiredCidPending::<Test>::put(true);
+        
+        // limit=1 → 只清理1个，ExpiredCidPending仍为true
+        assert_ok!(crate::Pallet::<Test>::cleanup_expired_cids(
+            RuntimeOrigin::signed(1),
+            1,
+        ));
+        // 剩余1个过期CID
+        let remaining: u32 = crate::PinBilling::<Test>::iter()
+            .filter(|(_, (_, _, s))| *s == 2u8)
+            .count() as u32;
+        assert_eq!(remaining, 1);
+        
+        // limit=10 → 清理剩余，ExpiredCidPending=false
+        assert_ok!(crate::Pallet::<Test>::cleanup_expired_cids(
+            RuntimeOrigin::signed(1),
+            10,
+        ));
+        let remaining2: u32 = crate::PinBilling::<Test>::iter()
+            .filter(|(_, (_, _, s))| *s == 2u8)
+            .count() as u32;
+        assert_eq!(remaining2, 0);
+        assert!(!crate::ExpiredCidPending::<Test>::get());
+        
+        // PinMeta也应被清理
+        assert!(!crate::PinMeta::<Test>::contains_key(cid_hash_a));
+        assert!(!crate::PinMeta::<Test>::contains_key(cid_hash_b));
+    });
+}
+
+/// P0-15: try_auto_repair 副本数不足自动补充运营者
+#[test]
+fn p0_15_try_auto_repair_adds_operators() {
+    use crate::{OperatorInfo, OperatorLayer};
+    
+    new_test_ext().execute_with(|| {
+        System::set_block_number(1);
+        
+        let cid_hash = H256::from_low_u64_be(1501);
+        let op1: AccountId = 101;
+        let op2: AccountId = 102;
+        let op3: AccountId = 103;
+        
+        // 注册3个活跃运营者
+        for op in [op1, op2, op3] {
+            crate::Operators::<Test>::insert(op, OperatorInfo {
+                peer_id: Default::default(),
+                capacity_gib: 100,
+                endpoint_hash: H256::zero(),
+                cert_fingerprint: None,
+                status: 0, // Active
+                registered_at: 1u64,
+                layer: OperatorLayer::Core,
+                priority: 0,
+            });
+        }
+        // ✅ P0-16: 同步维护活跃索引
+        let idx: BoundedVec<AccountId, frame_support::traits::ConstU32<256>> =
+            BoundedVec::try_from(alloc::vec![op1, op2, op3]).unwrap();
+        crate::ActiveOperatorIndex::<Test>::put(idx);
+        
+        // CID 当前只分配给 op1
+        let assignments: BoundedVec<AccountId, frame_support::traits::ConstU32<16>> = 
+            BoundedVec::try_from(alloc::vec![op1]).unwrap();
+        crate::PinAssignments::<Test>::insert(cid_hash, assignments);
+        crate::PinMeta::<Test>::insert(cid_hash, crate::pallet::PinMetadata {
+            size: 1024, replicas: 3, created_at: 1u64, last_activity: 1u64,
+        });
+        crate::OperatorPinCount::<Test>::insert(op1, 1u32);
+        
+        // 当前1个副本，目标3个 → 应补充2个
+        crate::Pallet::<Test>::try_auto_repair(&cid_hash, 1, 3);
+        
+        // 验证：PinAssignments 应有3个运营者
+        let updated = crate::PinAssignments::<Test>::get(cid_hash).unwrap();
+        assert_eq!(updated.len(), 3, "Should have 3 operators after repair");
+        assert!(updated.contains(&op1), "Original operator should still be assigned");
+        
+        // 验证：新运营者的PinCount应增加
+        let new_ops: alloc::vec::Vec<&AccountId> = updated.iter().filter(|o| **o != op1).collect();
+        for op in new_ops {
+            assert_eq!(crate::OperatorPinCount::<Test>::get(op), 1);
+        }
+        
+        // 验证事件
+        let events = frame_system::Pallet::<Test>::events();
+        let has_trigger = events.iter().any(|e| {
+            matches!(&e.event, RuntimeEvent::Ipfs(crate::Event::AutoRepairTriggered { .. }))
+        });
+        let has_complete = events.iter().any(|e| {
+            matches!(&e.event, RuntimeEvent::Ipfs(crate::Event::AutoRepairCompleted { .. }))
+        });
+        assert!(has_trigger, "AutoRepairTriggered event should be emitted");
+        assert!(has_complete, "AutoRepairCompleted event should be emitted");
+    });
+}

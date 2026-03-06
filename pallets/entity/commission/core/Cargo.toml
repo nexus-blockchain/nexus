@@ -12,7 +12,6 @@ scale-info = { features = ["derive"], workspace = true }
 frame-support = { workspace = true }
 frame-system = { workspace = true }
 sp-runtime = { workspace = true }
-sp-std = { workspace = true }
 log = { workspace = true }
 
 pallet-entity-common = { path = "../../common", default-features = false }
@@ -21,7 +20,6 @@ pallet-commission-common = { path = "../common", default-features = false }
 [dev-dependencies]
 pallet-balances = { workspace = true, features = ["std"] }
 sp-io = { workspace = true, features = ["std"] }
-sp-core = { workspace = true, features = ["std"] }
 
 [features]
 default = ["std"]
@@ -31,7 +29,6 @@ std = [
     "frame-support/std",
     "frame-system/std",
     "sp-runtime/std",
-    "sp-std/std",
     "log/std",
     "pallet-entity-common/std",
     "pallet-commission-common/std",

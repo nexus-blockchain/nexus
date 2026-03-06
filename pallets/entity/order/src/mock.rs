@@ -3,7 +3,7 @@
 use crate as pallet_entity_order;
 use frame_support::{
     derive_impl, parameter_types,
-    traits::{ConstU32, ConstU64, ConstU16},
+    traits::{ConstU32, ConstU64},
 };
 use sp_runtime::BuildStorage;
 use frame_support::weights::Weight;
@@ -105,6 +105,30 @@ impl pallet_escrow::pallet::Escrow<u64, u64> for MockEscrow {
     fn set_resolved(id: u64) -> sp_runtime::DispatchResult {
         ESCROW_STATES.with(|s| s.borrow_mut().insert(id, 0));
         Ok(())
+    }
+
+    fn refund_partial(id: u64, _to: &u64, amount: u64) -> sp_runtime::DispatchResult {
+        ESCROW_BALANCES.with(|b| {
+            let mut map = b.borrow_mut();
+            let entry = map.entry(id).or_insert(0);
+            if *entry < amount {
+                return Err(sp_runtime::DispatchError::Token(sp_runtime::TokenError::FundsUnavailable));
+            }
+            *entry = entry.saturating_sub(amount);
+            Ok(())
+        })
+    }
+
+    fn release_partial(id: u64, _to: &u64, amount: u64) -> sp_runtime::DispatchResult {
+        ESCROW_BALANCES.with(|b| {
+            let mut map = b.borrow_mut();
+            let entry = map.entry(id).or_insert(0);
+            if *entry < amount {
+                return Err(sp_runtime::DispatchError::Token(sp_runtime::TokenError::FundsUnavailable));
+            }
+            *entry = entry.saturating_sub(amount);
+            Ok(())
+        })
     }
 }
 
@@ -390,6 +414,11 @@ impl pallet_entity_common::EntityTokenProvider<u64, u64> for MockEntityToken {
     fn total_supply(_entity_id: u64) -> u64 {
         0
     }
+
+    fn governance_burn(_entity_id: u64, _amount: u64) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
+    fn available_balance(_: u64, _: &u64) -> u64 { 0 }
 }
 
 // ==================== Mock ShoppingBalanceProvider ====================
@@ -502,6 +531,88 @@ impl pallet_entity_common::PricingProvider for MockPricingProvider {
     }
 }
 
+// ==================== Mock TokenPriceProvider ====================
+
+pub struct MockTokenPriceProvider;
+
+thread_local! {
+    static TOKEN_PRICE_NEX: RefCell<HashMap<u64, u64>> = RefCell::new(HashMap::new());
+    static TOKEN_PRICE_RELIABLE: RefCell<HashMap<u64, bool>> = RefCell::new(HashMap::new());
+}
+
+#[allow(dead_code)]
+pub fn set_token_price(entity_id: u64, price_nex: u64) {
+    TOKEN_PRICE_NEX.with(|p| p.borrow_mut().insert(entity_id, price_nex));
+}
+
+#[allow(dead_code)]
+pub fn set_token_price_reliable(entity_id: u64, reliable: bool) {
+    TOKEN_PRICE_RELIABLE.with(|r| r.borrow_mut().insert(entity_id, reliable));
+}
+
+impl pallet_entity_common::EntityTokenPriceProvider for MockTokenPriceProvider {
+    type Balance = u64;
+
+    fn get_token_price(entity_id: u64) -> Option<u64> {
+        TOKEN_PRICE_NEX.with(|p| p.borrow().get(&entity_id).copied())
+    }
+
+    fn get_token_price_usdt(_entity_id: u64) -> Option<u64> {
+        None
+    }
+
+    fn token_price_confidence(entity_id: u64) -> u8 {
+        if TOKEN_PRICE_NEX.with(|p| p.borrow().contains_key(&entity_id)) { 80 } else { 0 }
+    }
+
+    fn is_token_price_stale(_entity_id: u64, _max_age_blocks: u32) -> bool {
+        false
+    }
+
+    fn is_token_price_reliable(entity_id: u64) -> bool {
+        TOKEN_PRICE_RELIABLE.with(|r| r.borrow().get(&entity_id).copied().unwrap_or(false))
+    }
+}
+
+// ==================== Mock MemberProvider ====================
+
+pub struct MockMemberProvider;
+
+thread_local! {
+    static MEMBER_SET: RefCell<HashMap<(u64, u64), bool>> = RefCell::new(HashMap::new());
+    static MEMBER_LEVELS: RefCell<HashMap<(u64, u64), u8>> = RefCell::new(HashMap::new());
+}
+
+#[allow(dead_code)]
+pub fn set_member(entity_id: u64, account: u64, is_member: bool) {
+    MEMBER_SET.with(|m| m.borrow_mut().insert((entity_id, account), is_member));
+}
+
+#[allow(dead_code)]
+pub fn set_member_level(entity_id: u64, account: u64, level: u8) {
+    MEMBER_LEVELS.with(|l| l.borrow_mut().insert((entity_id, account), level));
+}
+
+impl pallet_entity_common::MemberProvider<u64> for MockMemberProvider {
+    fn is_member(entity_id: u64, account: &u64) -> bool {
+        MEMBER_SET.with(|m| m.borrow().get(&(entity_id, *account)).copied().unwrap_or(false))
+    }
+
+    fn get_referrer(_entity_id: u64, _account: &u64) -> Option<u64> { None }
+    fn custom_level_id(_entity_id: u64, _account: &u64) -> u8 { 0 }
+
+    fn get_effective_level(entity_id: u64, account: &u64) -> u8 {
+        MEMBER_LEVELS.with(|l| l.borrow().get(&(entity_id, *account)).copied().unwrap_or(0))
+    }
+
+    fn get_level_commission_bonus(_entity_id: u64, _level_id: u8) -> u16 { 0 }
+    fn uses_custom_levels(_entity_id: u64) -> bool { false }
+    fn get_member_stats(_entity_id: u64, _account: &u64) -> (u32, u32, u128) { (0, 0, 0) }
+    fn auto_register(_entity_id: u64, _account: &u64, _referrer: Option<u64>) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+    fn update_spent(_entity_id: u64, _account: &u64, _amount_usdt: u64) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+    fn check_order_upgrade_rules(_entity_id: u64, _buyer: &u64, _product_id: u64, _amount_usdt: u64) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+}
+
 // ==================== Mock MemberHandler ====================
 
 pub struct MockMemberHandler;
@@ -571,6 +682,8 @@ impl pallet_entity_order::Config for Test {
     type ShoppingBalance = MockShoppingBalanceProvider;
     type MemberHandler = MockMemberHandler;
     type PricingProvider = MockPricingProvider;
+    type TokenPriceProvider = MockTokenPriceProvider;
+    type MemberProvider = MockMemberProvider;
     type MaxCidLength = ConstU32<64>;
 }
 
@@ -610,6 +723,11 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         SHOPPING_BALANCES.with(|b| b.borrow_mut().clear());
         MEMBER_REGISTERED.with(|r| r.borrow_mut().clear());
         MEMBER_SPENT.with(|s| s.borrow_mut().clear());
+        MEMBER_SET.with(|m| m.borrow_mut().clear());
+        MEMBER_LEVELS.with(|l| l.borrow_mut().clear());
+        TOKEN_FEE_RATES.with(|r| r.borrow_mut().clear());
+        TOKEN_PRICE_NEX.with(|p| p.borrow_mut().clear());
+        TOKEN_PRICE_RELIABLE.with(|r| r.borrow_mut().clear());
     });
     ext
 }

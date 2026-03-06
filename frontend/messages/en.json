@@ -63,7 +63,44 @@
     "createShop": "Create Shop",
     "commission": "Commission",
     "withdraw": "Withdraw",
-    "pool": "Reward Pool"
+    "pool": "Reward Pool",
+
+    "sectionEntity": "Entity System",
+    "sectionTrading": "P2P Trading",
+    "sectionStorage": "IPFS Storage",
+    "sectionRobot": "GroupRobot",
+    "sectionDispute": "Disputes",
+    "sectionAds": "Advertising",
+
+    "trading": "NEX/USDT Market",
+    "tradingOrderbook": "Orderbook",
+    "tradingMyOrders": "My Orders",
+    "tradingMyTrades": "My Trades",
+    "tradingDisputes": "Trade Disputes",
+
+    "storage": "Storage",
+    "storagePins": "Pin Management",
+    "storageOperators": "Operators",
+    "storageBilling": "Billing",
+
+    "robot": "GroupRobot",
+    "robotBots": "My Bots",
+    "robotOperators": "Operators",
+    "robotCommunities": "Communities",
+    "robotNodes": "Consensus Nodes",
+    "robotRewards": "Rewards",
+    "robotSubscriptions": "Subscriptions",
+
+    "dispute": "Disputes",
+    "disputeComplaints": "Complaints",
+    "disputeEscrow": "Escrow",
+    "disputeEvidence": "Evidence",
+
+    "ads": "Advertising",
+    "adsCampaigns": "Campaigns",
+    "adsPlacements": "Placements",
+    "adsStaking": "Community Staking",
+    "adsRevenue": "Revenue"
   },
   "header": {
     "connectWallet": "Connect Wallet",

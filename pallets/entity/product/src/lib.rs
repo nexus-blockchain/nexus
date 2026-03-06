@@ -45,7 +45,7 @@ pub mod pallet {
         AdminPermission, PricingProvider, ProductCategory, ProductProvider, ProductStatus,
         ProductVisibility, EntityProvider, ShopProvider,
     };
-    use pallet_storage_service::{IpfsPinner, SubjectType, PinTier};
+    use pallet_storage_service::{StoragePin, PinTier};
     use sp_runtime::{
         traits::{AccountIdConversion, Zero, Saturating},
         SaturatedConversion,
@@ -158,7 +158,7 @@ pub mod pallet {
         type MaxProductDepositCos: Get<BalanceOf<Self>>;
 
         /// IPFS Pin 管理接口（用于商品元数据 CID 持久化）
-        type IpfsPinner: IpfsPinner<Self::AccountId, BalanceOf<Self>>;
+        type StoragePin: StoragePin<Self::AccountId>;
 
         /// 批量操作最大数量
         #[pallet::constant]
@@ -179,6 +179,20 @@ pub mod pallet {
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
         #[cfg(feature = "try-runtime")]
         fn try_state(_n: BlockNumberFor<T>) -> Result<(), sp_runtime::TryRuntimeError> {
+            // L3: 验证 on_sale_products 统计与实际 OnSale 商品数一致
+            let actual_on_sale = Products::<T>::iter_values()
+                .filter(|p| p.status == ProductStatus::OnSale)
+                .count() as u64;
+            let stats = ProductStats::<T>::get();
+            frame_support::ensure!(
+                stats.on_sale_products == actual_on_sale,
+                sp_runtime::TryRuntimeError::Other("on_sale_products mismatch")
+            );
+            let actual_total = Products::<T>::iter_values().count() as u64;
+            frame_support::ensure!(
+                stats.total_products == actual_total,
+                sp_runtime::TryRuntimeError::Other("total_products mismatch")
+            );
             Ok(())
         }
 
@@ -750,6 +764,13 @@ pub mod pallet {
             Self::unpin_product_cid(&who, &product.name_cid);
             Self::unpin_product_cid(&who, &product.images_cid);
             Self::unpin_product_cid(&who, &product.detail_cid);
+            // M3: 补充 unpin tags_cid 和 sku_cid（非空时）
+            if !product.tags_cid.is_empty() {
+                Self::unpin_product_cid(&who, &product.tags_cid);
+            }
+            if !product.sku_cid.is_empty() {
+                Self::unpin_product_cid(&who, &product.sku_cid);
+            }
 
             // 删除商品
             Products::<T>::remove(product_id);
@@ -786,6 +807,15 @@ pub mod pallet {
         ) -> DispatchResult {
             ensure_root(origin)?;
 
+            // M1 审计修复: 先校验 reason 长度，避免状态变更后因 ReasonTooLong 回滚浪费计算
+            let bounded_reason = match reason {
+                Some(r) => Some(
+                    BoundedVec::<u8, T::MaxReasonLength>::try_from(r)
+                        .map_err(|_| Error::<T>::ReasonTooLong)?
+                ),
+                None => None,
+            };
+
             Products::<T>::try_mutate(product_id, |maybe_product| -> DispatchResult {
                 let product = maybe_product.as_mut().ok_or(Error::<T>::ProductNotFound)?;
                 ensure!(
@@ -804,14 +834,6 @@ pub mod pallet {
                 }
                 Ok(())
             })?;
-
-            let bounded_reason = match reason {
-                Some(r) => Some(
-                    BoundedVec::<u8, T::MaxReasonLength>::try_from(r)
-                        .map_err(|_| Error::<T>::ReasonTooLong)?
-                ),
-                None => None,
-            };
 
             Self::deposit_event(Event::ProductForceUnpublished {
                 product_id,
@@ -834,6 +856,10 @@ pub mod pallet {
                 product_ids.len() <= T::MaxBatchSize::get() as usize,
                 Error::<T>::BatchTooLarge
             );
+            // M1: 空列表短路返回
+            if product_ids.is_empty() {
+                return Ok(());
+            }
 
             let mut succeeded = 0u32;
             let mut failed_ids = Vec::new();
@@ -892,6 +918,10 @@ pub mod pallet {
                 product_ids.len() <= T::MaxBatchSize::get() as usize,
                 Error::<T>::BatchTooLarge
             );
+            // M1: 空列表短路返回
+            if product_ids.is_empty() {
+                return Ok(());
+            }
 
             let mut succeeded = 0u32;
             let mut failed_ids = Vec::new();
@@ -952,6 +982,10 @@ pub mod pallet {
                 product_ids.len() <= T::MaxBatchSize::get() as usize,
                 Error::<T>::BatchTooLarge
             );
+            // M1: 空列表短路返回
+            if product_ids.is_empty() {
+                return Ok(());
+            }
 
             let mut succeeded = 0u32;
             let mut failed_ids = Vec::new();
@@ -986,6 +1020,13 @@ pub mod pallet {
                 Self::unpin_product_cid(&who, &product.name_cid);
                 Self::unpin_product_cid(&who, &product.images_cid);
                 Self::unpin_product_cid(&who, &product.detail_cid);
+                // M2: 补充 unpin tags_cid 和 sku_cid（非空时）
+                if !product.tags_cid.is_empty() {
+                    Self::unpin_product_cid(&who, &product.tags_cid);
+                }
+                if !product.sku_cid.is_empty() {
+                    Self::unpin_product_cid(&who, &product.sku_cid);
+                }
 
                 Products::<T>::remove(pid);
                 ShopProducts::<T>::mutate(product.shop_id, |ids| {
@@ -1093,14 +1134,9 @@ pub mod pallet {
             product_id: u64,
             cid: &BoundedVec<u8, T::MaxCidLength>,
         ) {
-            let cid_vec: Vec<u8> = cid.clone().into_inner();
-            if let Err(e) = T::IpfsPinner::pin_cid_for_subject(
-                caller.clone(),
-                SubjectType::Product,
-                product_id,
-                cid_vec,
-                Some(PinTier::Standard),
-            ) {
+            let entity_id = Products::<T>::get(product_id)
+                .and_then(|p| T::ShopProvider::shop_entity_id(p.shop_id));
+            if let Err(e) = T::StoragePin::pin(caller.clone(), b"product", product_id, entity_id, cid.to_vec(), PinTier::Standard) {
                 log::warn!(
                     target: "entity-product",
                     "Failed to pin CID for product {}: {:?}",
@@ -1114,11 +1150,7 @@ pub mod pallet {
             caller: &T::AccountId,
             cid: &BoundedVec<u8, T::MaxCidLength>,
         ) {
-            let cid_vec: Vec<u8> = cid.clone().into_inner();
-            if let Err(e) = T::IpfsPinner::unpin_cid(
-                caller.clone(),
-                cid_vec,
-            ) {
+            if let Err(e) = T::StoragePin::unpin(caller.clone(), cid.to_vec()) {
                 log::warn!(
                     target: "entity-product",
                     "Failed to unpin CID: {:?}",
@@ -1241,6 +1273,25 @@ pub mod pallet {
             ShopProducts::<T>::get(shop_id).into_inner()
         }
 
+        fn force_unpin_shop_products(shop_id: u64) -> Result<(), DispatchError> {
+            let owner = T::ShopProvider::shop_owner(shop_id)
+                .unwrap_or_else(|| T::ShopProvider::shop_account(shop_id));
+            for pid in ShopProducts::<T>::get(shop_id).iter() {
+                if let Some(product) = Products::<T>::get(pid) {
+                    Self::unpin_product_cid(&owner, &product.name_cid);
+                    Self::unpin_product_cid(&owner, &product.images_cid);
+                    Self::unpin_product_cid(&owner, &product.detail_cid);
+                    if !product.tags_cid.is_empty() {
+                        Self::unpin_product_cid(&owner, &product.tags_cid);
+                    }
+                    if !product.sku_cid.is_empty() {
+                        Self::unpin_product_cid(&owner, &product.sku_cid);
+                    }
+                }
+            }
+            Ok(())
+        }
+
         fn product_visibility(product_id: u64) -> Option<ProductVisibility> {
             Products::<T>::get(product_id).map(|p| p.visibility)
         }
@@ -1269,12 +1320,16 @@ pub mod pallet {
         fn delist_product(product_id: u64) -> Result<(), sp_runtime::DispatchError> {
             Products::<T>::try_mutate(product_id, |maybe_product| -> Result<(), sp_runtime::DispatchError> {
                 let product = maybe_product.as_mut().ok_or(Error::<T>::ProductNotFound)?;
+                // H2: OnSale 和 SoldOut 均可治理下架（与 force_unpublish_product 一致）
                 if product.status == ProductStatus::OnSale {
                     product.status = ProductStatus::OffShelf;
                     product.updated_at = <frame_system::Pallet<T>>::block_number();
                     ProductStats::<T>::mutate(|stats| {
                         stats.on_sale_products = stats.on_sale_products.saturating_sub(1);
                     });
+                } else if product.status == ProductStatus::SoldOut {
+                    product.status = ProductStatus::OffShelf;
+                    product.updated_at = <frame_system::Pallet<T>>::block_number();
                 }
                 Ok(())
             })

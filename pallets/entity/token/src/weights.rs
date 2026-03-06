@@ -38,6 +38,10 @@ pub trait WeightInfo {
     fn force_unfreeze_transfers() -> Weight;
     fn force_burn() -> Weight;
     fn set_global_token_pause() -> Weight;
+    fn burn_tokens() -> Weight;
+    fn update_token_metadata() -> Weight;
+    fn force_transfer() -> Weight;
+    fn force_enable_token() -> Weight;
 }
 
 /// Weights for `pallet_entity_token` using the Substrate node and recommended hardware.
@@ -188,16 +192,53 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().writes(1))
     }
 
-    /// Storage: EntityTokenConfigs (r:1), Assets::burn_from (r:1 w:1)
+    /// Storage: EntityTokenConfigs (r:1), Assets::burn_from (r:1 w:1),
+    ///          Assets::balance (r:1), LockedTokens (r:1 w:1), ReservedTokens (r:1 w:1),
+    ///          PendingDividends (r:1 w:1), TotalPendingDividends (r:1 w:1)
+    /// M1-R2: 含零余额清理路径的最坏情况
     fn force_burn() -> Weight {
-        Weight::from_parts(100_000_000, 5_000)
-            .saturating_add(T::DbWeight::get().reads(2))
-            .saturating_add(T::DbWeight::get().writes(1))
+        Weight::from_parts(120_000_000, 7_000)
+            .saturating_add(T::DbWeight::get().reads(7))
+            .saturating_add(T::DbWeight::get().writes(5))
     }
 
     /// Storage: GlobalTokenPaused (w:1)
     fn set_global_token_pause() -> Weight {
         Weight::from_parts(30_000_000, 3_000)
+            .saturating_add(T::DbWeight::get().writes(1))
+    }
+
+    /// Storage: GlobalTokenPaused (r:1), EntityTokenConfigs (r:1), Assets::balance (r:1),
+    ///          LockedTokens (r:1), ReservedTokens (r:1), Assets::burn_from (w:1)
+    /// M2-R2: 补充 GlobalTokenPaused 读取
+    fn burn_tokens() -> Weight {
+        Weight::from_parts(120_000_000, 6_000)
+            .saturating_add(T::DbWeight::get().reads(5))
+            .saturating_add(T::DbWeight::get().writes(1))
+    }
+
+    /// Storage: EntityProvider (r:1), EntityTokenConfigs (r:1), EntityTokenMetadata (r:1 w:1),
+    ///          Assets::set_metadata (w:1)
+    fn update_token_metadata() -> Weight {
+        Weight::from_parts(100_000_000, 6_000)
+            .saturating_add(T::DbWeight::get().reads(3))
+            .saturating_add(T::DbWeight::get().writes(2))
+    }
+
+    /// Storage: EntityTokenConfigs (r:1), Assets::transfer (r:2 w:2),
+    ///          Assets::balance (r:1), LockedTokens (r:1 w:1), ReservedTokens (r:1 w:1),
+    ///          PendingDividends (r:1 w:1), TotalPendingDividends (r:1 w:1)
+    /// M1-R2: 含零余额清理路径的最坏情况
+    fn force_transfer() -> Weight {
+        Weight::from_parts(150_000_000, 8_000)
+            .saturating_add(T::DbWeight::get().reads(8))
+            .saturating_add(T::DbWeight::get().writes(6))
+    }
+
+    /// Storage: EntityTokenConfigs (r:1 w:1)
+    fn force_enable_token() -> Weight {
+        Weight::from_parts(50_000_000, 4_000)
+            .saturating_add(T::DbWeight::get().reads(1))
             .saturating_add(T::DbWeight::get().writes(1))
     }
 }
@@ -224,4 +265,8 @@ impl WeightInfo for () {
     fn force_unfreeze_transfers() -> Weight { Weight::from_parts(50_000_000, 4_000) }
     fn force_burn() -> Weight { Weight::from_parts(100_000_000, 5_000) }
     fn set_global_token_pause() -> Weight { Weight::from_parts(30_000_000, 3_000) }
+    fn burn_tokens() -> Weight { Weight::from_parts(120_000_000, 6_000) }
+    fn update_token_metadata() -> Weight { Weight::from_parts(100_000_000, 6_000) }
+    fn force_transfer() -> Weight { Weight::from_parts(120_000_000, 6_000) }
+    fn force_enable_token() -> Weight { Weight::from_parts(50_000_000, 4_000) }
 }

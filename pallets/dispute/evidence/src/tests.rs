@@ -161,7 +161,7 @@ fn register_public_key_works() {
         let key: BoundedVec<u8, <Test as Config>::MaxKeyLen> =
             BoundedVec::truncate_from([0xABu8; 32].to_vec()); // Ed25519 = exactly 32 bytes
         assert_ok!(EvidencePallet::register_public_key(
-            RuntimeOrigin::signed(1), key, 2, // key_type: Ed25519
+            RuntimeOrigin::signed(1), key, pallet_crypto_common::KeyType::Ed25519,
         ));
         let stored = UserPublicKeys::<Test>::get(1);
         assert!(stored.is_some());
@@ -214,7 +214,7 @@ fn register_key(account: u64) {
     let key: BoundedVec<u8, <Test as Config>::MaxKeyLen> =
         BoundedVec::truncate_from([0xABu8; 32].to_vec());
     assert_ok!(EvidencePallet::register_public_key(
-        RuntimeOrigin::signed(account), key, 2,
+        RuntimeOrigin::signed(account), key, pallet_crypto_common::KeyType::Ed25519,
     ));
 }
 
@@ -248,10 +248,11 @@ fn store_test_private_content() -> u64 {
         subject_id: 500,
         cid: cid.clone(),
         content_hash: sp_core::H256::repeat_byte(0x11),
-        encryption_method: 1, // AES-256-GCM
+        encryption_method: pallet_crypto_common::EncryptionMethod::Aes256Gcm,
         creator: 1u64,
         access_policy: pallet_crypto_common::AccessPolicy::OwnerOnly,
         encrypted_keys,
+        status: pallet_crypto_common::ContentStatus::Active,
         created_at: 1u64,
         updated_at: 1u64,
     };
@@ -414,9 +415,9 @@ fn private_content_provider_can_access() {
     new_test_ext().execute_with(|| {
         let content_id = store_test_private_content();
         // Creator can access
-        assert!(<EvidencePallet as crate::pallet::PrivateContentProvider<u64>>::can_access(content_id, &1));
+        assert!(<EvidencePallet as pallet_crypto_common::PrivateContentProvider<u64>>::can_access(content_id, &1));
         // Non-authorized cannot
-        assert!(!<EvidencePallet as crate::pallet::PrivateContentProvider<u64>>::can_access(content_id, &2));
+        assert!(!<EvidencePallet as pallet_crypto_common::PrivateContentProvider<u64>>::can_access(content_id, &2));
     });
 }
 
@@ -425,11 +426,11 @@ fn private_content_provider_get_decryption_key() {
     new_test_ext().execute_with(|| {
         let content_id = store_test_private_content();
         // Creator should get their key
-        let key = <EvidencePallet as crate::pallet::PrivateContentProvider<u64>>::get_decryption_key(content_id, &1);
+        let key = <EvidencePallet as pallet_crypto_common::PrivateContentProvider<u64>>::get_encrypted_key(content_id, &1);
         assert!(key.is_some());
         assert_eq!(key.unwrap(), vec![0xFFu8; 32]);
         // Non-authorized gets None
-        let key2 = <EvidencePallet as crate::pallet::PrivateContentProvider<u64>>::get_decryption_key(content_id, &2);
+        let key2 = <EvidencePallet as pallet_crypto_common::PrivateContentProvider<u64>>::get_encrypted_key(content_id, &2);
         assert!(key2.is_none());
     });
 }
@@ -445,7 +446,7 @@ fn get_decryption_info_works() {
         let (cid, hash, method, key) = info.unwrap();
         assert_eq!(cid, b"enc-bafybeigdyrzt5sfp7udm7hu".to_vec());
         assert_eq!(hash, sp_core::H256::repeat_byte(0x11));
-        assert_eq!(method, 1);
+        assert_eq!(method, pallet_crypto_common::EncryptionMethod::Aes256Gcm);
         assert_eq!(key, vec![0xFFu8; 32]);
     });
 }
@@ -470,6 +471,385 @@ fn list_access_requests_works() {
         assert_ok!(EvidencePallet::request_access(RuntimeOrigin::signed(3), content_id));
         let requests = EvidencePallet::list_access_requests(content_id);
         assert_eq!(requests.len(), 2);
+    });
+}
+
+// ==================== H1: archive_old_evidences skips sealed evidence ====================
+
+#[test]
+fn h1_archive_skips_sealed_evidence() {
+    new_test_ext().execute_with(|| {
+        // Create two evidences
+        assert_ok!(EvidencePallet::commit(
+            RuntimeOrigin::signed(1), 1, 100,
+            imgs_n(&[1]), empty_vids(), empty_docs(), None,
+        ));
+        assert_ok!(EvidencePallet::commit(
+            RuntimeOrigin::signed(1), 1, 101,
+            imgs_n(&[2]), empty_vids(), empty_docs(), None,
+        ));
+        // Seal evidence 0
+        assert_ok!(EvidencePallet::seal_evidence(RuntimeOrigin::signed(1), 0));
+        assert!(SealedEvidences::<Test>::contains_key(0));
+
+        // Advance blocks past archive delay (50 in mock)
+        System::set_block_number(100);
+
+        // Run archive — should skip sealed evidence 0, archive evidence 1
+        let archived = EvidencePallet::archive_old_evidences(10);
+        // Evidence 0 should NOT be archived (sealed)
+        assert!(Evidences::<Test>::get(0).is_some(), "sealed evidence must not be archived");
+        assert!(ArchivedEvidences::<Test>::get(0).is_none());
+        // Evidence 1 should be archived
+        assert!(Evidences::<Test>::get(1).is_none(), "unsealed evidence should be archived");
+        assert!(ArchivedEvidences::<Test>::get(1).is_some());
+        assert_eq!(archived, 1);
+    });
+}
+
+// ==================== H2: append_evidence rejects sealed/withdrawn parent ====================
+
+#[test]
+fn h2_append_rejects_sealed_parent() {
+    new_test_ext().execute_with(|| {
+        // Create parent evidence
+        assert_ok!(EvidencePallet::commit(
+            RuntimeOrigin::signed(1), 1, 100,
+            imgs_n(&[1]), empty_vids(), empty_docs(), None,
+        ));
+        // Seal it
+        assert_ok!(EvidencePallet::seal_evidence(RuntimeOrigin::signed(1), 0));
+
+        // Try to append to sealed parent — should fail
+        assert_noop!(
+            EvidencePallet::append_evidence(
+                RuntimeOrigin::signed(1), 0,
+                imgs_n(&[2]), empty_vids(), empty_docs(), None,
+            ),
+            Error::<Test>::EvidenceSealed
+        );
+    });
+}
+
+#[test]
+fn h2_append_rejects_withdrawn_parent() {
+    new_test_ext().execute_with(|| {
+        // Create parent evidence
+        assert_ok!(EvidencePallet::commit(
+            RuntimeOrigin::signed(1), 1, 100,
+            imgs_n(&[1]), empty_vids(), empty_docs(), None,
+        ));
+        // Withdraw it
+        assert_ok!(EvidencePallet::withdraw_evidence(RuntimeOrigin::signed(1), 0));
+
+        // Try to append to withdrawn parent — should fail
+        assert_noop!(
+            EvidencePallet::append_evidence(
+                RuntimeOrigin::signed(1), 0,
+                imgs_n(&[2]), empty_vids(), empty_docs(), None,
+            ),
+            Error::<Test>::InvalidEvidenceStatus
+        );
+    });
+}
+
+#[test]
+fn h2_append_works_for_active_parent() {
+    new_test_ext().execute_with(|| {
+        // Create parent evidence
+        assert_ok!(EvidencePallet::commit(
+            RuntimeOrigin::signed(1), 1, 100,
+            imgs_n(&[1]), empty_vids(), empty_docs(), None,
+        ));
+        // Append to active parent — should succeed
+        assert_ok!(EvidencePallet::append_evidence(
+            RuntimeOrigin::signed(1), 0,
+            imgs_n(&[2]), empty_vids(), empty_docs(), None,
+        ));
+        assert_eq!(NextEvidenceId::<Test>::get(), 2);
+        let children = EvidenceChildren::<Test>::get(0);
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0], 1);
+    });
+}
+
+// ==================== M1: revoke_access rejects non-existent user ====================
+
+#[test]
+fn m1_revoke_access_rejects_non_authorized_user() {
+    new_test_ext().execute_with(|| {
+        let content_id = store_test_private_content();
+        // Try to revoke access for user 5 who was never granted access
+        assert_noop!(
+            EvidencePallet::revoke_access(RuntimeOrigin::signed(1), content_id, 5),
+            Error::<Test>::NotFound
+        );
+    });
+}
+
+// ==================== H1-R3: CommitIndex cleaned on reveal ====================
+
+#[test]
+fn h1r3_reveal_cleans_commit_index() {
+    new_test_ext().execute_with(|| {
+        let ns = *b"evidence";
+        let cid: BoundedVec<u8, <Test as Config>::MaxCidLen> =
+            BoundedVec::truncate_from(b"bafkreiaaaaaaaaaa000077".to_vec());
+        let salt: BoundedVec<u8, <Test as Config>::MaxMemoLen> =
+            BoundedVec::truncate_from(b"salt123".to_vec());
+        let version = 1u32;
+        let commit_hash = EvidencePallet::compute_evidence_commitment(
+            &ns, 200, cid.as_slice(), salt.as_slice(), version,
+        );
+        // commit_hash creates CommitIndex entry
+        let memo: BoundedVec<u8, <Test as Config>::MaxMemoLen> =
+            BoundedVec::truncate_from(b"bafkreiaaaaaaaaaa000088".to_vec());
+        assert_ok!(EvidencePallet::commit_hash(
+            RuntimeOrigin::signed(1), ns, 200, commit_hash, Some(memo),
+        ));
+        assert!(CommitIndex::<Test>::get(commit_hash).is_some());
+
+        // reveal should clean CommitIndex
+        assert_ok!(EvidencePallet::reveal_commitment(
+            RuntimeOrigin::signed(1), 0, cid, salt, version,
+        ));
+        assert!(CommitIndex::<Test>::get(commit_hash).is_none(), "CommitIndex must be cleaned after reveal");
+    });
+}
+
+// ==================== H1-R3: CommitIndex cleaned on archive ====================
+
+#[test]
+fn h1r3_archive_cleans_commit_index() {
+    new_test_ext().execute_with(|| {
+        let commit_hash = sp_core::H256::repeat_byte(0x55);
+        let memo: BoundedVec<u8, <Test as Config>::MaxMemoLen> =
+            BoundedVec::truncate_from(b"bafkreiaaaaaaaaaa000066".to_vec());
+        assert_ok!(EvidencePallet::commit_hash(
+            RuntimeOrigin::signed(1), *b"evidence", 300, commit_hash, Some(memo),
+        ));
+        assert!(CommitIndex::<Test>::get(commit_hash).is_some());
+
+        // Advance past archive delay
+        System::set_block_number(100);
+        let archived = EvidencePallet::archive_old_evidences(10);
+        assert_eq!(archived, 1);
+        // CommitIndex must be cleaned
+        assert!(CommitIndex::<Test>::get(commit_hash).is_none(), "CommitIndex must be cleaned after archive");
+    });
+}
+
+// ==================== M1-R3: append_evidence respects global CID dedup ====================
+
+#[test]
+fn m1r3_append_rejects_duplicate_cid() {
+    new_test_ext().execute_with(|| {
+        // Create parent with CID [1]
+        assert_ok!(EvidencePallet::commit(
+            RuntimeOrigin::signed(1), 1, 100,
+            imgs_n(&[1]), empty_vids(), empty_docs(), None,
+        ));
+        // Append with the same CID [1] — should fail due to global dedup
+        assert_noop!(
+            EvidencePallet::append_evidence(
+                RuntimeOrigin::signed(1), 0,
+                imgs_n(&[1]), empty_vids(), empty_docs(), None,
+            ),
+            Error::<Test>::DuplicateCidGlobal
+        );
+    });
+}
+
+#[test]
+fn m1r3_append_registers_cid_in_index() {
+    new_test_ext().execute_with(|| {
+        // Create parent with CID [1]
+        assert_ok!(EvidencePallet::commit(
+            RuntimeOrigin::signed(1), 1, 100,
+            imgs_n(&[1]), empty_vids(), empty_docs(), None,
+        ));
+        // Append with CID [2] — should succeed
+        assert_ok!(EvidencePallet::append_evidence(
+            RuntimeOrigin::signed(1), 0,
+            imgs_n(&[2]), empty_vids(), empty_docs(), None,
+        ));
+        // Now committing with CID [2] should fail — it was registered by append
+        assert_noop!(
+            EvidencePallet::commit(
+                RuntimeOrigin::signed(1), 1, 101,
+                imgs_n(&[2]), empty_vids(), empty_docs(), None,
+            ),
+            Error::<Test>::DuplicateCidGlobal
+        );
+    });
+}
+
+// ==================== M2-R3: link rejects sealed/withdrawn evidence ====================
+
+#[test]
+fn m2r3_link_rejects_sealed_evidence() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EvidencePallet::commit(
+            RuntimeOrigin::signed(1), 1, 100,
+            imgs_n(&[1]), empty_vids(), empty_docs(), None,
+        ));
+        assert_ok!(EvidencePallet::seal_evidence(RuntimeOrigin::signed(1), 0));
+        assert_noop!(
+            EvidencePallet::link(RuntimeOrigin::signed(1), 2, 200, 0),
+            Error::<Test>::EvidenceSealed
+        );
+    });
+}
+
+#[test]
+fn m2r3_link_rejects_withdrawn_evidence() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EvidencePallet::commit(
+            RuntimeOrigin::signed(1), 1, 100,
+            imgs_n(&[1]), empty_vids(), empty_docs(), None,
+        ));
+        assert_ok!(EvidencePallet::withdraw_evidence(RuntimeOrigin::signed(1), 0));
+        assert_noop!(
+            EvidencePallet::link(RuntimeOrigin::signed(1), 2, 200, 0),
+            Error::<Test>::InvalidEvidenceStatus
+        );
+    });
+}
+
+// ==================== M3-R3: archive cleans children refs both directions ====================
+
+#[test]
+fn m3r3_archive_cleans_children_parent_refs() {
+    new_test_ext().execute_with(|| {
+        // Create parent evidence (id=0)
+        assert_ok!(EvidencePallet::commit(
+            RuntimeOrigin::signed(1), 1, 100,
+            imgs_n(&[1]), empty_vids(), empty_docs(), None,
+        ));
+        // Append child (id=1)
+        assert_ok!(EvidencePallet::append_evidence(
+            RuntimeOrigin::signed(1), 0,
+            imgs_n(&[2]), empty_vids(), empty_docs(), None,
+        ));
+        assert!(EvidenceParent::<Test>::get(1).is_some());
+        assert_eq!(EvidenceChildren::<Test>::get(0).len(), 1);
+
+        // Archive parent
+        System::set_block_number(100);
+        let archived = EvidencePallet::archive_old_evidences(10);
+        assert!(archived >= 1);
+
+        // Child's EvidenceParent should be cleaned (M3-R3 fix)
+        assert!(EvidenceParent::<Test>::get(1).is_none(), "child parent ref must be cleaned after parent archived");
+        // Parent's EvidenceChildren should be removed
+        assert_eq!(EvidenceChildren::<Test>::get(0).len(), 0, "archived evidence children list must be cleaned");
+    });
+}
+
+// ==================== H1-R4: force_archive_evidence cleans children parent refs ====================
+
+#[test]
+fn h1r4_force_archive_cleans_children_parent_refs() {
+    new_test_ext().execute_with(|| {
+        // Create parent evidence (id=0)
+        assert_ok!(EvidencePallet::commit(
+            RuntimeOrigin::signed(1), 1, 100,
+            imgs_n(&[1]), empty_vids(), empty_docs(), None,
+        ));
+        // Append child (id=1)
+        assert_ok!(EvidencePallet::append_evidence(
+            RuntimeOrigin::signed(1), 0,
+            imgs_n(&[2]), empty_vids(), empty_docs(), None,
+        ));
+        // Append another child (id=2)
+        assert_ok!(EvidencePallet::append_evidence(
+            RuntimeOrigin::signed(1), 0,
+            imgs_n(&[3]), empty_vids(), empty_docs(), None,
+        ));
+        assert_eq!(EvidenceChildren::<Test>::get(0).len(), 2);
+        assert!(EvidenceParent::<Test>::get(1).is_some());
+        assert!(EvidenceParent::<Test>::get(2).is_some());
+
+        // Force archive parent
+        assert_ok!(EvidencePallet::force_archive_evidence(RuntimeOrigin::root(), 0));
+
+        // Children's EvidenceParent should be cleaned (H1-R4 fix)
+        assert!(EvidenceParent::<Test>::get(1).is_none(), "child 1 parent ref must be cleaned");
+        assert!(EvidenceParent::<Test>::get(2).is_none(), "child 2 parent ref must be cleaned");
+        // Parent's EvidenceChildren should be removed
+        assert_eq!(EvidenceChildren::<Test>::get(0).len(), 0, "archived evidence children list must be cleaned");
+        // Archived record should exist
+        assert!(ArchivedEvidences::<Test>::get(0).is_some());
+    });
+}
+
+// ==================== M3-R4: append_evidence respects MaxPerSubjectTarget quota ====================
+
+#[test]
+fn m3r4_append_rejects_when_subject_quota_exceeded() {
+    new_test_ext().execute_with(|| {
+        // MaxPerSubjectTarget = 100, MaxPerWindow = 50, WindowBlocks = 100
+        // Create parent evidence (id=0) for (domain=1, target_id=100)
+        assert_ok!(EvidencePallet::commit(
+            RuntimeOrigin::signed(1), 1, 100,
+            imgs_n(&[1]), empty_vids(), empty_docs(), None,
+        ));
+        // Fill up quota in batches, advancing blocks to avoid rate limiting
+        for i in 1..50u32 {
+            assert_ok!(EvidencePallet::commit(
+                RuntimeOrigin::signed(1), 1, 100,
+                imgs_n(&[1000 + i]), empty_vids(), empty_docs(), None,
+            ));
+        }
+        // Advance past window to reset rate limit
+        System::set_block_number(200);
+        for i in 50..100u32 {
+            assert_ok!(EvidencePallet::commit(
+                RuntimeOrigin::signed(1), 1, 100,
+                imgs_n(&[1000 + i]), empty_vids(), empty_docs(), None,
+            ));
+        }
+        assert_eq!(EvidenceCountByTarget::<Test>::get((1u8, 100u64)), 100);
+
+        // Advance again to reset rate limit for the append call
+        System::set_block_number(400);
+        // Append should now fail due to MaxPerSubjectTarget quota
+        assert_noop!(
+            EvidencePallet::append_evidence(
+                RuntimeOrigin::signed(1), 0,
+                imgs_n(&[9999]), empty_vids(), empty_docs(), None,
+            ),
+            Error::<Test>::TooManyForSubject
+        );
+    });
+}
+
+// ==================== M2-R5: grant_access cleans AccessRequests (functional regression) ====================
+
+#[test]
+fn m2r5_grant_access_always_removes_access_request() {
+    new_test_ext().execute_with(|| {
+        let content_id = store_test_private_content();
+        register_key(2);
+        register_key(3);
+
+        // Two users request access
+        assert_ok!(EvidencePallet::request_access(RuntimeOrigin::signed(2), content_id));
+        assert_ok!(EvidencePallet::request_access(RuntimeOrigin::signed(3), content_id));
+        assert!(AccessRequests::<Test>::get(content_id, 2u64).is_some());
+        assert!(AccessRequests::<Test>::get(content_id, 3u64).is_some());
+
+        // Grant access to user 2 — should auto-remove their request
+        let enc_key: BoundedVec<u8, frame_support::traits::ConstU32<512>> =
+            BoundedVec::truncate_from(vec![0xDDu8; 32]);
+        assert_ok!(EvidencePallet::grant_access(
+            RuntimeOrigin::signed(1), content_id, 2, enc_key,
+        ));
+        // User 2's request cleaned, user 3's remains
+        assert!(AccessRequests::<Test>::get(content_id, 2u64).is_none(),
+            "M2-R5: grant_access must remove pending AccessRequest");
+        assert!(AccessRequests::<Test>::get(content_id, 3u64).is_some(),
+            "unrelated request must survive");
     });
 }
 

@@ -69,6 +69,10 @@ impl pallet_escrow::Config for Test {
     type MaxSplitEntries = ConstU32<10>;
     type ExpiryPolicy = TestExpiryPolicy;
     type WeightInfo = ();
+    type MaxReasonLen = ConstU32<128>;
+    type TokenHandler = ();
+    type Observer = ();
+    type MaxCleanupPerCall = ConstU32<10>;
 }
 
 // -- Mock ArbitrationRouter --
@@ -132,6 +136,8 @@ impl pallet_escrow::pallet::Escrow<u64, Balance> for MockEscrow {
     fn split_partial(_id: u64, _release_to: &u64, _refund_to: &u64, _bps: u16) -> sp_runtime::DispatchResult { Ok(()) }
     fn set_disputed(_id: u64) -> sp_runtime::DispatchResult { Ok(()) }
     fn set_resolved(_id: u64) -> sp_runtime::DispatchResult { Ok(()) }
+    fn refund_partial(_id: u64, _to: &u64, _amount: Balance) -> sp_runtime::DispatchResult { Ok(()) }
+    fn release_partial(_id: u64, _to: &u64, _amount: Balance) -> sp_runtime::DispatchResult { Ok(()) }
 }
 
 // -- Mock CidLockManager --
@@ -149,7 +155,7 @@ pub struct MockPricing;
 impl pallet_trading_common::PricingProvider<Balance> for MockPricing {
     // Rate = 10_000_000 means 1 COS = 10 USD => deposit = 1_000_000 * 1_000_000 / 10_000_000 = 100
     // This equals ComplaintDeposit (min_deposit), so deposit_amount = 100
-    fn get_cos_to_usd_rate() -> Option<Balance> { Some(10_000_000) }
+    fn get_nex_to_usd_rate() -> Option<Balance> { Some(10_000_000) }
     fn report_p2p_trade(_timestamp: u64, _price_usdt: u64, _nex_qty: u128) -> sp_runtime::DispatchResult { Ok(()) }
 }
 

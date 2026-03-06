@@ -2,6 +2,8 @@
 //!
 //! 提供姓名、身份证、生日的脱敏处理
 
+extern crate alloc;
+use alloc::string::String;
 use sp_std::prelude::*;
 
 /// 函数级详细中文注释：姓名脱敏
@@ -19,9 +21,6 @@ use sp_std::prelude::*;
 /// # 返回
 /// - 脱敏后的姓名字节数组
 pub fn mask_name(full_name: &str) -> Vec<u8> {
-    extern crate alloc;
-    use alloc::string::String;
-
     let chars: Vec<char> = full_name.chars().collect();
     let len = chars.len();
 
@@ -61,12 +60,10 @@ pub fn mask_name(full_name: &str) -> Vec<u8> {
 /// # 返回
 /// - 脱敏后的身份证号字节数组
 pub fn mask_id_card(id_card: &str) -> Vec<u8> {
-    extern crate alloc;
-    use alloc::string::String;
-
     let len = id_card.len();
 
-    if len < 8 {
+    // M2修复: 非 ASCII 输入直接全部替换为星号，防止字节切片 panic
+    if !id_card.is_ascii() || len < 8 {
         let masked: String = (0..len).map(|_| '*').collect();
         return masked.as_bytes().to_vec();
     }
@@ -98,15 +95,14 @@ pub fn mask_id_card(id_card: &str) -> Vec<u8> {
 /// # 返回
 /// - 脱敏后的生日字节数组
 pub fn mask_birthday(birthday: &str) -> Vec<u8> {
-    extern crate alloc;
-
-    if birthday.len() >= 4 {
-        let year = &birthday[0..4];
-        let masked = alloc::format!("{}-xx-xx", year);
-        masked.as_bytes().to_vec()
-    } else {
-        b"****-xx-xx".to_vec()
+    // M2修复: 非 ASCII 输入直接返回全掩码，防止字节切片 panic
+    if !birthday.is_ascii() || birthday.len() < 4 {
+        return b"****-xx-xx".to_vec();
     }
+
+    let year = &birthday[0..4];
+    let masked = alloc::format!("{}-xx-xx", year);
+    masked.as_bytes().to_vec()
 }
 
 // ===== 单元测试 =====
@@ -135,5 +131,34 @@ mod tests {
     fn test_mask_birthday() {
         assert_eq!(mask_birthday("1990-01-01"), b"1990-xx-xx");
         assert_eq!(mask_birthday("123"), b"****-xx-xx");
+    }
+
+    // ===== M2 回归测试: 非 ASCII 输入不 panic =====
+
+    #[test]
+    fn m2_mask_id_card_non_ascii_no_panic() {
+        // 多字节 UTF-8 字符不应导致 panic
+        let result = mask_id_card("中文身份证号码测试输入");
+        // 非 ASCII 输入走全掩码路径
+        assert!(result.iter().all(|&b| b == b'*'));
+    }
+
+    #[test]
+    fn m2_mask_birthday_non_ascii_no_panic() {
+        let result = mask_birthday("二〇二五年三月");
+        assert_eq!(result, b"****-xx-xx");
+    }
+
+    #[test]
+    fn m2_mask_id_card_emoji_no_panic() {
+        let result = mask_id_card("🎉🎊🎈🎁🎂🎄🎅🎆🎇🧨");
+        assert!(result.iter().all(|&b| b == b'*'));
+    }
+
+    #[test]
+    fn m2_mask_name_multibyte_works() {
+        // mask_name 已使用 chars() 迭代，多字节安全
+        assert_eq!(mask_name("欧阳修"), "欧×修".as_bytes());
+        assert_eq!(mask_name("司马相如"), "司×如".as_bytes());
     }
 }

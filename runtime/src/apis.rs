@@ -43,7 +43,7 @@ use sp_version::RuntimeVersion;
 // Local module imports
 use super::{
 	AccountId, Aura, Balance, Block, Executive, Grandpa, InherentDataExt, Nonce, Runtime,
-	RuntimeCall, RuntimeGenesisConfig, SessionKeys, StorageService, System, TransactionPayment, VERSION,
+	RuntimeCall, RuntimeGenesisConfig, SessionKeys, StorageService, NexMarket, System, TransactionPayment, VERSION,
 };
 
 impl_runtime_apis! {
@@ -330,6 +330,47 @@ impl_runtime_apis! {
 
 		fn campaign_details(campaign_id: u64) -> Option<pallet_ads_core::runtime_api::CampaignDetail<AccountId, Balance>> {
 			pallet_ads_core::Pallet::<Runtime>::campaign_details(campaign_id)
+		}
+	}
+
+	impl pallet_nex_market::runtime_api::NexMarketApi<Block, AccountId, Balance> for Runtime {
+		fn get_sell_orders() -> Vec<pallet_nex_market::runtime_api::OrderInfo<AccountId, Balance>> {
+			NexMarket::api_get_sell_orders()
+		}
+
+		fn get_buy_orders() -> Vec<pallet_nex_market::runtime_api::OrderInfo<AccountId, Balance>> {
+			NexMarket::api_get_buy_orders()
+		}
+
+		fn get_user_orders(user: AccountId) -> Vec<pallet_nex_market::runtime_api::OrderInfo<AccountId, Balance>> {
+			NexMarket::api_get_user_orders(&user)
+		}
+
+		fn get_user_trades(user: AccountId) -> Vec<pallet_nex_market::runtime_api::TradeInfo<AccountId, Balance>> {
+			NexMarket::api_get_user_trades(&user)
+		}
+
+		fn get_order_trades(order_id: u64) -> Vec<pallet_nex_market::runtime_api::TradeInfo<AccountId, Balance>> {
+			NexMarket::api_get_order_trades(order_id)
+		}
+
+		fn get_active_trades(user: AccountId) -> Vec<pallet_nex_market::runtime_api::TradeInfo<AccountId, Balance>> {
+			NexMarket::api_get_active_trades(&user)
+		}
+
+		fn get_order_depth() -> (
+			Vec<pallet_nex_market::runtime_api::DepthEntry<Balance>>,
+			Vec<pallet_nex_market::runtime_api::DepthEntry<Balance>>,
+		) {
+			NexMarket::api_get_order_depth()
+		}
+
+		fn get_best_prices() -> (Option<u64>, Option<u64>) {
+			NexMarket::get_best_prices()
+		}
+
+		fn get_market_summary() -> pallet_nex_market::runtime_api::MarketSummary {
+			NexMarket::api_get_market_summary()
 		}
 	}
 

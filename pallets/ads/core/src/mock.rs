@@ -56,6 +56,24 @@ impl DeliveryVerifier<u64> for MockDeliveryVerifier {
 }
 
 // ============================================================================
+// Mock ClickVerifier — 直通验证, 裁切到 cap=200
+// ============================================================================
+
+pub struct MockClickVerifier;
+
+impl ClickVerifier<u64> for MockClickVerifier {
+	fn verify_and_cap_clicks(
+		_who: &u64,
+		_placement_id: &PlacementId,
+		click_count: u32,
+		_verified_clicks: u32,
+	) -> Result<u32, sp_runtime::DispatchError> {
+		// 简单裁切到 200
+		Ok(core::cmp::min(click_count, 200))
+	}
+}
+
+// ============================================================================
 // Mock PlacementAdminProvider
 // ============================================================================
 
@@ -122,6 +140,8 @@ impl pallet_ads_core::Config for Test {
 	type AdSlashPercentage = ConstU32<30>;
 	type TreasuryAccount = TreasuryAccountId;
 	type DeliveryVerifier = MockDeliveryVerifier;
+	type ClickVerifier = MockClickVerifier;
+	type MinBidPerClick = ConstU128<50_000_000_000>; // 0.05 UNIT
 	type PlacementAdmin = MockPlacementAdmin;
 	type RevenueDistributor = MockRevenueDistributor;
 	type PrivateAdRegistrationFee = ConstU128<1_000_000_000_000>; // 1 UNIT

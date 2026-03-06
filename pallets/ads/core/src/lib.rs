@@ -56,6 +56,10 @@ pub struct AdCampaign<T: Config> {
 	pub url: BoundedVec<u8, T::MaxAdUrlLength>,
 	/// 每千人触达出价 (CPM)
 	pub bid_per_mille: BalanceOf<T>,
+	/// 每次点击出价 (CPC) — 仅 CampaignType::Cpc 使用
+	pub bid_per_click: BalanceOf<T>,
+	/// 活动类型 (CPM / CPC / Fixed / Private)
+	pub campaign_type: CampaignType,
 	/// 每日预算上限
 	pub daily_budget: BalanceOf<T>,
 	/// 总预算
@@ -70,6 +74,8 @@ pub struct AdCampaign<T: Config> {
 	pub review_status: AdReviewStatus,
 	/// 累计投放次数
 	pub total_deliveries: u64,
+	/// 累计点击次数 (CPC)
+	pub total_clicks: u64,
 	/// 创建区块
 	pub created_at: BlockNumberFor<T>,
 	/// 过期区块
@@ -82,8 +88,12 @@ pub struct AdCampaign<T: Config> {
 pub struct DeliveryReceipt<T: Config> {
 	pub campaign_id: u64,
 	pub placement_id: PlacementId,
-	/// 受众规模 (已裁切)
+	/// 受众规模 (已裁切) — CPM 模式使用
 	pub audience_size: u32,
+	/// 点击数 (已裁切) — CPC 模式使用
+	pub click_count: u32,
+	/// 经 proxy 签名验证的点击数 — CPC-Verified 模式
+	pub verified_clicks: u32,
 	/// CPM 倍率 (基点)
 	pub cpm_multiplier_bps: u32,
 	pub delivered_at: BlockNumberFor<T>,
@@ -164,6 +174,13 @@ pub mod pallet {
 
 		/// 投放验证器 (适配层实现)
 		type DeliveryVerifier: DeliveryVerifier<Self::AccountId>;
+
+		/// 点击验证器 (适配层实现, C2b Proxy Account)
+		type ClickVerifier: ClickVerifier<Self::AccountId>;
+
+		/// 最低 CPC 出价
+		#[pallet::constant]
+		type MinBidPerClick: Get<BalanceOf<Self>>;
 
 		/// 广告位管理员 (适配层实现)
 		type PlacementAdmin: PlacementAdminProvider<Self::AccountId>;
@@ -482,6 +499,8 @@ pub mod pallet {
 			advertiser: T::AccountId,
 			total_budget: BalanceOf<T>,
 			bid_per_mille: BalanceOf<T>,
+			campaign_type: CampaignType,
+			bid_per_click: BalanceOf<T>,
 		},
 		/// 追加预算
 		CampaignFunded {
@@ -645,6 +664,13 @@ pub mod pallet {
 		ReferralCommissionCredited { referrer: T::AccountId, advertiser: T::AccountId, amount: BalanceOf<T> },
 		/// 推荐佣金已提取
 		ReferralEarningsClaimed { referrer: T::AccountId, amount: BalanceOf<T> },
+		/// 点击收据已提交 (CPC)
+		ClickReceiptSubmitted {
+			campaign_id: u64,
+			placement_id: PlacementId,
+			click_count: u32,
+			verified_clicks: u32,
+		},
 	}
 
 	// ========================================================================
@@ -763,6 +789,16 @@ pub mod pallet {
 		NotRegisteredAdvertiser,
 		/// 无可提取推荐佣金
 		NoReferralEarnings,
+		/// CPC 出价低于最低值
+		ClickBidTooLow,
+		/// 点击数为零
+		ZeroClickCount,
+		/// 点击验证失败
+		ClickVerificationFailed,
+		/// Campaign 类型不匹配 (e.g. 向 CPM campaign 提交点击收据)
+		CampaignTypeMismatch,
+		/// 经验证点击数不能超过总点击数
+		VerifiedExceedsTotal,
 	}
 
 	// ========================================================================
@@ -785,6 +821,8 @@ pub mod pallet {
 			delivery_types: u8,
 			expires_at: BlockNumberFor<T>,
 			targets: Option<BoundedVec<PlacementId, T::MaxTargetsPerCampaign>>,
+			campaign_type: CampaignType,
+			bid_per_click: BalanceOf<T>,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 
@@ -793,8 +831,17 @@ pub mod pallet {
 
 			ensure!(!text.is_empty(), Error::<T>::EmptyAdText);
 			ensure!(delivery_types > 0 && delivery_types <= 0b111, Error::<T>::InvalidDeliveryTypes);
-			ensure!(bid_per_mille >= T::MinBidPerMille::get(), Error::<T>::BidTooLow);
 			ensure!(!total_budget.is_zero(), Error::<T>::ZeroBudget);
+
+			// 根据 campaign_type 验证出价
+			match campaign_type {
+				CampaignType::Cpc => {
+					ensure!(bid_per_click >= T::MinBidPerClick::get(), Error::<T>::ClickBidTooLow);
+				},
+				_ => {
+					ensure!(bid_per_mille >= T::MinBidPerMille::get(), Error::<T>::BidTooLow);
+				},
+			}
 
 			let now = frame_system::Pallet::<T>::block_number();
 			ensure!(expires_at > now, Error::<T>::InvalidExpiry);
@@ -811,6 +858,8 @@ pub mod pallet {
 				text,
 				url,
 				bid_per_mille,
+				bid_per_click,
+				campaign_type,
 				daily_budget,
 				total_budget,
 				spent: Zero::zero(),
@@ -818,6 +867,7 @@ pub mod pallet {
 				status: CampaignStatus::Active,
 				review_status: AdReviewStatus::Pending,
 				total_deliveries: 0,
+				total_clicks: 0,
 				created_at: now,
 				expires_at,
 			};
@@ -840,6 +890,8 @@ pub mod pallet {
 				advertiser: who,
 				total_budget,
 				bid_per_mille,
+				campaign_type,
+				bid_per_click,
 			});
 			Ok(())
 		}
@@ -997,6 +1049,9 @@ pub mod pallet {
 			ensure!(campaign.status == CampaignStatus::Active, Error::<T>::CampaignNotActive);
 			ensure!(campaign.review_status == AdReviewStatus::Approved, Error::<T>::CampaignNotApproved);
 
+			// CPM 收据仅允许 CPM/Fixed/Private 类型 Campaign
+			ensure!(campaign.campaign_type != CampaignType::Cpc, Error::<T>::CampaignTypeMismatch);
+
 			let now = frame_system::Pallet::<T>::block_number();
 			ensure!(now <= campaign.expires_at, Error::<T>::CampaignExpired);
 
@@ -1070,6 +1125,8 @@ pub mod pallet {
 				campaign_id,
 				placement_id,
 				audience_size: effective_audience,
+				click_count: 0,
+				verified_clicks: 0,
 				cpm_multiplier_bps,
 				delivered_at: now,
 				settled: false,
@@ -1103,6 +1160,147 @@ pub mod pallet {
 				campaign_id,
 				placement_id,
 				audience_size: effective_audience,
+			});
+			Ok(())
+		}
+
+		/// 提交点击收据 (CPC Campaign)
+		///
+		/// C2b Proxy Account 方案:
+		/// 1. Entity 聚合用户点击事件
+		/// 2. verified_clicks = 经 proxy 签名验证的点击数
+		/// 3. 委托 ClickVerifier 做领域验证 + 每日上限裁切
+		/// 4. 存储收据 (与 CPM 收据共用 DeliveryReceipts 存储)
+		#[pallet::call_index(49)]
+		#[pallet::weight(Weight::from_parts(60_000_000, 10_000))]
+		pub fn submit_click_receipt(
+			origin: OriginFor<T>,
+			campaign_id: u64,
+			placement_id: PlacementId,
+			click_count: u32,
+			verified_clicks: u32,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			ensure!(click_count > 0, Error::<T>::ZeroClickCount);
+			ensure!(verified_clicks <= click_count, Error::<T>::VerifiedExceedsTotal);
+
+			let campaign = Campaigns::<T>::get(campaign_id)
+				.ok_or(Error::<T>::CampaignNotFound)?;
+			ensure!(campaign.status == CampaignStatus::Active, Error::<T>::CampaignNotActive);
+			ensure!(campaign.review_status == AdReviewStatus::Approved, Error::<T>::CampaignNotApproved);
+			ensure!(campaign.campaign_type == CampaignType::Cpc, Error::<T>::CampaignTypeMismatch);
+
+			let now = frame_system::Pallet::<T>::block_number();
+			ensure!(now <= campaign.expires_at, Error::<T>::CampaignExpired);
+
+			ensure!(!BannedPlacements::<T>::get(&placement_id), Error::<T>::PlacementBanned);
+
+			// Campaign 定向检查
+			if let Some(targets) = CampaignTargets::<T>::get(campaign_id) {
+				ensure!(targets.contains(&placement_id), Error::<T>::PlacementNotTargeted);
+			}
+
+			// 广告位级审核
+			if PlacementRequiresApproval::<T>::get(&placement_id) {
+				ensure!(
+					PlacementCampaignApproval::<T>::get(&placement_id, campaign_id),
+					Error::<T>::CampaignNotApprovedForPlacement
+				);
+			}
+
+			// 双向黑名单检查
+			let advertiser_bl = AdvertiserBlacklist::<T>::get(&campaign.advertiser);
+			ensure!(
+				!advertiser_bl.contains(&placement_id),
+				Error::<T>::AdvertiserBlacklistedPlacement
+			);
+			let placement_bl = PlacementBlacklist::<T>::get(&placement_id);
+			ensure!(
+				!placement_bl.contains(&campaign.advertiser),
+				Error::<T>::PlacementBlacklistedAdvertiser
+			);
+
+			// 白名单执行
+			let advertiser_wl = AdvertiserWhitelist::<T>::get(&campaign.advertiser);
+			if !advertiser_wl.is_empty() {
+				ensure!(
+					advertiser_wl.contains(&placement_id),
+					Error::<T>::NotInAdvertiserWhitelist
+				);
+			}
+
+			// 投放类型匹配
+			let placement_dt = PlacementDeliveryTypes::<T>::get(&placement_id);
+			if placement_dt > 0 {
+				ensure!(
+					campaign.delivery_types & placement_dt > 0,
+					Error::<T>::DeliveryTypeMismatch
+				);
+			}
+
+			// 委托适配层验证 + 裁切 click_count
+			let effective_clicks = T::ClickVerifier::verify_and_cap_clicks(
+				&who,
+				&placement_id,
+				click_count,
+				verified_clicks,
+			)?;
+
+			// CPM 倍率 (CPC 模式下也可能有加价/折扣)
+			let cpm_multiplier_bps = CampaignMultiplier::<T>::get(campaign_id)
+				.or_else(|| PlacementMultiplier::<T>::get(&placement_id))
+				.unwrap_or(100u32);
+
+			// verified_clicks 按同比例裁切
+			let effective_verified = if click_count > 0 && effective_clicks < click_count {
+				(verified_clicks as u64)
+					.saturating_mul(effective_clicks as u64)
+					/ (click_count as u64)
+			} else {
+				verified_clicks as u64
+			} as u32;
+
+			let receipt = DeliveryReceipt::<T> {
+				campaign_id,
+				placement_id,
+				audience_size: 0,
+				click_count: effective_clicks,
+				verified_clicks: effective_verified,
+				cpm_multiplier_bps,
+				delivered_at: now,
+				settled: false,
+				submitter: who,
+			};
+
+			let receipt_index = DeliveryReceipts::<T>::get(&placement_id).len() as u32;
+			DeliveryReceipts::<T>::try_mutate(&placement_id, |receipts| {
+				receipts.try_push(receipt).map_err(|_| Error::<T>::ReceiptsFull)
+			})?;
+
+			ReceiptConfirmation::<T>::insert(
+				(campaign_id, placement_id, receipt_index),
+				ReceiptStatus::Pending,
+			);
+			ReceiptSubmittedAt::<T>::insert(
+				(campaign_id, placement_id, receipt_index),
+				now,
+			);
+
+			PlacementEraDeliveries::<T>::mutate(&placement_id, |c| *c = c.saturating_add(1));
+
+			Campaigns::<T>::mutate(campaign_id, |maybe| {
+				if let Some(c) = maybe {
+					c.total_deliveries = c.total_deliveries.saturating_add(1);
+					c.total_clicks = c.total_clicks.saturating_add(effective_clicks as u64);
+				}
+			});
+
+			Self::deposit_event(Event::ClickReceiptSubmitted {
+				campaign_id,
+				placement_id,
+				click_count: effective_clicks,
+				verified_clicks: effective_verified,
 			});
 			Ok(())
 		}
@@ -1144,11 +1342,19 @@ pub mod pallet {
 				}
 				// M3: 对无法结算的收据记录警告，避免静默丢弃
 				if let Some(campaign) = Campaigns::<T>::get(receipt.campaign_id) {
-					let cost = Self::compute_cpm_cost(
-						campaign.bid_per_mille,
-						receipt.audience_size,
-						receipt.cpm_multiplier_bps,
-					);
+					// 根据 campaign_type 计算费用
+					let cost = match campaign.campaign_type {
+						CampaignType::Cpc => Self::compute_cpc_cost(
+							campaign.bid_per_click,
+							receipt.click_count,
+							receipt.cpm_multiplier_bps,
+						),
+						_ => Self::compute_cpm_cost(
+							campaign.bid_per_mille,
+							receipt.audience_size,
+							receipt.cpm_multiplier_bps,
+						),
+					};
 					let escrow = CampaignEscrow::<T>::get(receipt.campaign_id);
 					// daily_budget 执行: 计算当日剩余预算
 					let daily_remaining = if !campaign.daily_budget.is_zero() {
@@ -1773,6 +1979,7 @@ pub mod pallet {
 			bid_per_mille: Option<BalanceOf<T>>,
 			daily_budget: Option<BalanceOf<T>>,
 			delivery_types: Option<u8>,
+			bid_per_click: Option<BalanceOf<T>>,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 
@@ -1791,9 +1998,16 @@ pub mod pallet {
 				if let Some(u) = url {
 					c.url = u;
 				}
+				// 根据 campaign_type 分派出价验证
 				if let Some(b) = bid_per_mille {
+					ensure!(c.campaign_type != CampaignType::Cpc, Error::<T>::CampaignTypeMismatch);
 					ensure!(b >= T::MinBidPerMille::get(), Error::<T>::BidTooLow);
 					c.bid_per_mille = b;
+				}
+				if let Some(b) = bid_per_click {
+					ensure!(c.campaign_type == CampaignType::Cpc, Error::<T>::CampaignTypeMismatch);
+					ensure!(b >= T::MinBidPerClick::get(), Error::<T>::ClickBidTooLow);
+					c.bid_per_click = b;
 				}
 				if let Some(d) = daily_budget {
 					c.daily_budget = d;
@@ -2011,6 +2225,10 @@ pub mod pallet {
 				ensure!(c.advertiser == who, Error::<T>::NotCampaignOwner);
 				ensure!(c.review_status == AdReviewStatus::Rejected, Error::<T>::CampaignNotRejected);
 
+				// H1-R2: 先验证过期, 再执行 reserve 等副作用
+				let now = frame_system::Pallet::<T>::block_number();
+				ensure!(c.expires_at > now, Error::<T>::CampaignExpired);
+
 				// 重新 reserve 预算 (rejected 时已退款)
 				T::Currency::reserve(&who, total_budget)?;
 
@@ -2018,13 +2236,13 @@ pub mod pallet {
 				c.url = url;
 				c.total_budget = total_budget;
 				c.spent = Zero::zero();
+				// M3-R2: 重置累计投放/点击计数
+				c.total_deliveries = 0;
+				c.total_clicks = 0;
 				c.status = CampaignStatus::Active;
 				c.review_status = AdReviewStatus::Pending;
 
 				CampaignEscrow::<T>::insert(campaign_id, total_budget);
-
-				let now = frame_system::Pallet::<T>::block_number();
-				ensure!(c.expires_at > now, Error::<T>::CampaignExpired);
 
 				Ok::<(), DispatchError>(())
 			})?;
@@ -2151,11 +2369,19 @@ pub mod pallet {
 					_ => continue,
 				}
 				if let Some(campaign) = Campaigns::<T>::get(receipt.campaign_id) {
-					let cost = Self::compute_cpm_cost(
-						campaign.bid_per_mille,
-						receipt.audience_size,
-						receipt.cpm_multiplier_bps,
-					);
+					// 根据 campaign_type 计算费用
+					let cost = match campaign.campaign_type {
+						CampaignType::Cpc => Self::compute_cpc_cost(
+							campaign.bid_per_click,
+							receipt.click_count,
+							receipt.cpm_multiplier_bps,
+						),
+						_ => Self::compute_cpm_cost(
+							campaign.bid_per_mille,
+							receipt.audience_size,
+							receipt.cpm_multiplier_bps,
+						),
+					};
 					let escrow = CampaignEscrow::<T>::get(receipt.campaign_id);
 					let daily_remaining = if !campaign.daily_budget.is_zero() {
 						let now = frame_system::Pallet::<T>::block_number();
@@ -2603,6 +2829,15 @@ pub mod pallet {
 				.saturating_mul(multiplier) / divisor
 		}
 
+		/// 计算 CPC 费用: bid_per_click * click_count * multiplier / 100
+		pub fn compute_cpc_cost(bid_per_click: BalanceOf<T>, click_count: u32, multiplier_bps: u32) -> BalanceOf<T> {
+			let clicks: BalanceOf<T> = click_count.into();
+			let multiplier: BalanceOf<T> = multiplier_bps.into();
+			let divisor: BalanceOf<T> = 100u32.into();
+			bid_per_click.saturating_mul(clicks)
+				.saturating_mul(multiplier) / divisor
+		}
+
 		/// 将区块号转换为相对于 Campaign 创建时间的天索引
 		/// 假设每天 14400 个区块 (6 秒/区块)
 		pub fn block_to_day_index(now: BlockNumberFor<T>, created_at: BlockNumberFor<T>) -> u32 {
@@ -2656,9 +2891,6 @@ pub mod pallet {
 			};
 
 			for cid in candidate_ids {
-				if results.len() >= max {
-					break;
-				}
 				if let Some(c) = Campaigns::<T>::get(cid) {
 					if c.status != CampaignStatus::Active
 						|| c.review_status != AdReviewStatus::Approved
@@ -2687,18 +2919,33 @@ pub mod pallet {
 						.or_else(|| PlacementMultiplier::<T>::get(placement_id))
 						.unwrap_or(100u32);
 
+					// 计算有效出价: 基础出价 × multiplier / 100
+					let base_bid = if c.campaign_type == CampaignType::Cpc {
+						c.bid_per_click
+					} else {
+						c.bid_per_mille
+					};
+					let effective_bid = base_bid
+						.saturating_mul(multiplier_bps.into()) / 100u32.into();
+
 					results.push(runtime_api::CampaignSummary {
 						campaign_id: cid,
 						advertiser: c.advertiser,
 						bid_per_mille: c.bid_per_mille,
+						bid_per_click: c.bid_per_click,
+						campaign_type: c.campaign_type as u8,
 						daily_budget: c.daily_budget,
 						total_budget: c.total_budget,
 						spent: c.spent,
 						delivery_types: c.delivery_types,
 						multiplier_bps,
+						effective_bid,
 					});
 				}
 			}
+			// 按有效出价降序排列 — 高出价广告优先展示
+			results.sort_by(|a, b| b.effective_bid.cmp(&a.effective_bid));
+			results.truncate(max);
 			results
 		}
 
@@ -2717,13 +2964,17 @@ pub mod pallet {
 				text: c.text.into_inner(),
 				url: c.url.into_inner(),
 				bid_per_mille: c.bid_per_mille,
+				bid_per_click: c.bid_per_click,
+				campaign_type: c.campaign_type as u8,
 				daily_budget: c.daily_budget,
 				total_budget: c.total_budget,
 				spent: c.spent,
 				delivery_types: c.delivery_types,
 				status: c.status as u8,
 				review_status: c.review_status as u8,
-				total_deliveries: c.total_deliveries as u32,
+				// M2-R2: 安全截断, 与 total_clicks 修复一致
+				total_deliveries: c.total_deliveries.min(u32::MAX as u64) as u32,
+				total_clicks: c.total_clicks.min(u32::MAX as u64) as u32,
 				created_at: c.created_at.try_into().unwrap_or(0u64),
 				expires_at: c.expires_at.try_into().unwrap_or(0u64),
 				multiplier_bps,
@@ -2777,6 +3028,19 @@ pub mod pallet {
 			assert!(
 				T::SettlementIncentiveBps::get() <= 10_000,
 				"SettlementIncentiveBps must be <= 10000"
+			);
+			assert!(
+				!T::MinBidPerClick::get().is_zero(),
+				"MinBidPerClick must be > 0"
+			);
+			// M1-R2: 防止免费 CPM campaign
+			assert!(
+				!T::MinBidPerMille::get().is_zero(),
+				"MinBidPerMille must be > 0"
+			);
+			assert!(
+				T::AdvertiserReferralRate::get() <= 10_000,
+				"AdvertiserReferralRate must be <= 10000 bps"
 			);
 		}
 	}

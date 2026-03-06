@@ -5,19 +5,33 @@ import { useProduct, useProductActions } from "@/hooks/useProducts";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
+import { Separator } from "@/components/ui/separator";
 import { TxButton } from "@/components/shared/TxButton";
 import { StatusBadge } from "@/components/shared/StatusBadge";
-import { formatBalance } from "@/lib/utils";
-import { ArrowLeft, Save, Eye, EyeOff, Trash2 } from "lucide-react";
+import { PRODUCT_CATEGORIES, PRODUCT_STATUS } from "@/lib/constants";
+import { ArrowLeft, Save, Eye, EyeOff, Trash2, Tag, ShieldCheck, Package } from "lucide-react";
 import Link from "next/link";
+
+const VISIBILITY_OPTIONS = [
+  { value: "Public", label: "Public" },
+  { value: "MembersOnly", label: "Members Only" },
+  { value: "Private", label: "Private" },
+  { value: "Unlisted", label: "Unlisted" },
+] as const;
+
+const STATUS_FLOW: Record<string, string[]> = {
+  Draft: ["OnSale"],
+  OnSale: ["OffShelf"],
+  OffShelf: ["OnSale"],
+  SoldOut: ["OnSale"],
+};
 
 export default function ProductEditPage({ params }: { params: Promise<{ shopId: string; productId: string }> }) {
   const { shopId: shopIdStr, productId: productIdStr } = use(params);
   const shopId = Number(shopIdStr);
   const productId = Number(productIdStr);
-  const { product, isLoading } = useProduct(productId);
+  const { product, isLoading, refetch } = useProduct(productId);
   const actions = useProductActions();
 
   const [nameCid, setNameCid] = useState("");
@@ -55,6 +69,8 @@ export default function ProductEditPage({ params }: { params: Promise<{ shopId: 
     );
   };
 
+  const nextStatuses = STATUS_FLOW[product.status] || [];
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-4">
@@ -65,22 +81,24 @@ export default function ProductEditPage({ params }: { params: Promise<{ shopId: 
           <div className="flex items-center gap-3">
             <h1 className="text-3xl font-bold tracking-tight">Product #{productId}</h1>
             <StatusBadge status={product.status} />
-            {product.isDigital && <Badge variant="secondary">Digital</Badge>}
+            <Badge variant="secondary">{product.category}</Badge>
+            <Badge variant="outline">{product.visibility}</Badge>
           </div>
           <p className="text-muted-foreground">Shop #{shopId} &middot; {product.salesCount} sales</p>
         </div>
         <div className="flex gap-2">
-          {product.status === "Active" ? (
-            <Button variant="outline" onClick={() => actions.deactivateProduct(productId)}>
-              <EyeOff className="mr-2 h-4 w-4" />Deactivate
-            </Button>
-          ) : (
-            <Button variant="outline" onClick={() => actions.activateProduct(productId)}>
-              <Eye className="mr-2 h-4 w-4" />Activate
+          {nextStatuses.includes("OnSale") && (
+            <Button variant="outline" onClick={() => { actions.activateProduct(productId); }}>
+              <Eye className="mr-2 h-4 w-4" />Put On Sale
             </Button>
           )}
-          <Button variant="destructive" onClick={() => actions.deleteProduct(productId)}>
-            <Trash2 className="mr-2 h-4 w-4" />Delete
+          {nextStatuses.includes("OffShelf") && (
+            <Button variant="outline" onClick={() => { actions.deactivateProduct(productId); }}>
+              <EyeOff className="mr-2 h-4 w-4" />Take Off Shelf
+            </Button>
+          )}
+          <Button variant="destructive" size="icon" onClick={() => actions.deleteProduct(productId)} title="Delete">
+            <Trash2 className="h-4 w-4" />
           </Button>
         </div>
       </div>
@@ -88,7 +106,7 @@ export default function ProductEditPage({ params }: { params: Promise<{ shopId: 
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle>Product Content</CardTitle>
+            <CardTitle className="flex items-center gap-2"><Package className="h-5 w-5" />Product Content</CardTitle>
             <CardDescription>IPFS content identifiers</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -125,10 +143,60 @@ export default function ProductEditPage({ params }: { params: Promise<{ shopId: 
               <label className="text-sm font-medium">Stock</label>
               <Input type="number" value={stock} onChange={(e) => setStock(e.target.value)} min="0" />
             </div>
-            <div className="rounded-lg border p-3 space-y-2">
+            <Separator />
+            <div className="space-y-2 rounded-lg border p-3">
               <div className="flex justify-between text-sm"><span className="text-muted-foreground">Created</span><span>Block #{product.createdAt}</span></div>
               <div className="flex justify-between text-sm"><span className="text-muted-foreground">Total Sales</span><span>{product.salesCount}</span></div>
-              <div className="flex justify-between text-sm"><span className="text-muted-foreground">Digital</span><span>{product.isDigital ? "Yes" : "No"}</span></div>
+              <div className="flex justify-between text-sm"><span className="text-muted-foreground">Min Order</span><span>{product.minOrderQty}</span></div>
+              <div className="flex justify-between text-sm"><span className="text-muted-foreground">Max Order</span><span>{product.maxOrderQty || "No limit"}</span></div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><Tag className="h-5 w-5" />Category</CardTitle>
+            <CardDescription>Change the product category</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-3 gap-2">
+              {PRODUCT_CATEGORIES.map((cat) => (
+                <button
+                  key={cat}
+                  onClick={() => actions.setProductCategory(productId, cat)}
+                  className={`rounded-lg border p-2.5 text-sm transition-colors ${
+                    product.category === cat
+                      ? "border-primary bg-primary/5 font-medium text-primary"
+                      : "border-border hover:border-primary/50 hover:bg-accent"
+                  }`}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><ShieldCheck className="h-5 w-5" />Visibility</CardTitle>
+            <CardDescription>Control who can see this product</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {VISIBILITY_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => actions.setProductVisibility(productId, opt.value)}
+                  className={`flex w-full rounded-lg border p-3 text-left text-sm transition-colors ${
+                    product.visibility === opt.value
+                      ? "border-primary bg-primary/5 font-medium text-primary"
+                      : "border-border hover:border-primary/50 hover:bg-accent"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
             </div>
           </CardContent>
         </Card>

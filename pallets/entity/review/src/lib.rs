@@ -51,7 +51,30 @@ pub mod pallet {
         pub content_cid: Option<BoundedVec<u8, MaxCidLen>>,
         /// 评价时间
         pub created_at: BlockNumber,
+        /// F3: 商品 ID（可选，来自 OrderProvider）
+        pub product_id: Option<u64>,
+        /// F6: 是否已编辑
+        pub edited: bool,
     }
+
+    /// F1: 商家回复评价
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    #[scale_info(skip_type_params(MaxCidLen))]
+    pub struct ReviewReply<AccountId, BlockNumber, MaxCidLen: Get<u32>> {
+        /// 回复者（商家/管理员）
+        pub replier: AccountId,
+        /// 回复内容 IPFS CID
+        pub content_cid: BoundedVec<u8, MaxCidLen>,
+        /// 回复时间
+        pub created_at: BlockNumber,
+    }
+
+    /// F1: 回复类型别名
+    pub type ReviewReplyOf<T> = ReviewReply<
+        <T as frame_system::Config>::AccountId,
+        BlockNumberFor<T>,
+        <T as Config>::MaxCidLength,
+    >;
 
     /// 评价类型别名
     pub type MallReviewOf<T> = MallReview<
@@ -84,6 +107,15 @@ pub mod pallet {
         #[pallet::constant]
         type ReviewWindowBlocks: Get<u64>;
 
+        /// F6: 评价修改时间窗口（区块数），评价提交后超过此区块数则不可修改
+        /// 设为 0 表示不限制
+        #[pallet::constant]
+        type EditWindowBlocks: Get<u64>;
+
+        /// F3: 每个商品最大评价索引数
+        #[pallet::constant]
+        type MaxProductReviews: Get<u32>;
+
         /// 权重信息
         type WeightInfo: WeightInfo;
     }
@@ -101,6 +133,7 @@ pub mod pallet {
         fn integrity_test() {
             assert!(T::MaxCidLength::get() > 0, "MaxCidLength must be > 0");
             assert!(T::MaxReviewsPerUser::get() > 0, "MaxReviewsPerUser must be > 0");
+            assert!(T::MaxProductReviews::get() > 0, "MaxProductReviews must be > 0");
         }
     }
 
@@ -134,6 +167,29 @@ pub mod pallet {
     #[pallet::getter(fn entity_review_disabled)]
     pub type EntityReviewDisabled<T: Config> = StorageMap<_, Blake2_128Concat, u64, (), OptionQuery>;
 
+    /// F1: 商家回复存储（order_id → ReviewReply）
+    #[pallet::storage]
+    #[pallet::getter(fn review_replies)]
+    pub type ReviewReplies<T: Config> = StorageMap<_, Blake2_128Concat, u64, ReviewReplyOf<T>>;
+
+    /// F3: 商品评价索引（product_id → order_id 列表）
+    #[pallet::storage]
+    #[pallet::getter(fn product_reviews)]
+    pub type ProductReviews<T: Config> = StorageMap<
+        _, Blake2_128Concat, u64,
+        BoundedVec<u64, T::MaxProductReviews>, ValueQuery,
+    >;
+
+    /// F3: 商品评价计数
+    #[pallet::storage]
+    #[pallet::getter(fn product_review_count)]
+    pub type ProductReviewCount<T: Config> = StorageMap<_, Blake2_128Concat, u64, u64, ValueQuery>;
+
+    /// F3: 商品评分总和（用于计算平均分）
+    #[pallet::storage]
+    #[pallet::getter(fn product_rating_sum)]
+    pub type ProductRatingSum<T: Config> = StorageMap<_, Blake2_128Concat, u64, u64, ValueQuery>;
+
     // ==================== 事件 ====================
 
     #[pallet::event]
@@ -160,6 +216,23 @@ pub mod pallet {
         ReviewRemoved {
             order_id: u64,
             reviewer: T::AccountId,
+        },
+        /// F1: 商家已回复评价
+        ReviewReplied {
+            order_id: u64,
+            replier: T::AccountId,
+        },
+        /// F3: 商品评价已索引
+        ProductReviewIndexed {
+            product_id: u64,
+            order_id: u64,
+        },
+        /// F6: 评价已修改
+        ReviewEdited {
+            order_id: u64,
+            reviewer: T::AccountId,
+            old_rating: u8,
+            new_rating: u8,
         },
     }
 
@@ -201,6 +274,18 @@ pub mod pallet {
         ReviewNotFound,
         /// 实体已被全局锁定
         EntityLocked,
+        /// F1: 该评价已有回复
+        AlreadyReplied,
+        /// F1: 回复内容 CID 为空
+        ReplyContentEmpty,
+        /// F1: 不是店铺关联的 Entity 管理员
+        NotShopEntityAdmin,
+        /// F3: 商品评价索引已满
+        ProductReviewsFull,
+        /// F6: 评价修改窗口已过期
+        EditWindowExpired,
+        /// F6: 评价已被修改过（仅允许修改一次）
+        AlreadyEdited,
     }
 
     // ==================== Extrinsics ====================
@@ -262,12 +347,17 @@ pub mod pallet {
 
             let now = <frame_system::Pallet<T>>::block_number();
 
+            // F3: 获取商品 ID
+            let product_id = T::OrderProvider::order_product_id(order_id);
+
             let review = MallReview {
                 order_id,
                 reviewer: who.clone(),
                 rating,
                 content_cid,
                 created_at: now,
+                product_id,
+                edited: false,
             };
 
             // H2: 更新用户评价索引
@@ -312,6 +402,23 @@ pub mod pallet {
                 // Note: Entity 级别评分已移至 Shop 层级，此处不再更新 Entity 评分
             }
 
+            // F3: 更新商品评价索引（best-effort）
+            if let Some(pid) = product_id {
+                let indexed = ProductReviews::<T>::try_mutate(pid, |reviews| {
+                    reviews.try_push(order_id).map_err(|_| Error::<T>::ProductReviewsFull)
+                });
+                if indexed.is_ok() {
+                    ProductReviewCount::<T>::mutate(pid, |c| *c = c.saturating_add(1));
+                    ProductRatingSum::<T>::mutate(pid, |s| *s = s.saturating_add(rating as u64));
+                    Self::deposit_event(Event::ProductReviewIndexed {
+                        product_id: pid,
+                        order_id,
+                    });
+                } else {
+                    log::warn!("ProductReviews full for product {}, order {} not indexed", pid, order_id);
+                }
+            }
+
             Self::deposit_event(Event::ReviewSubmitted {
                 order_id,
                 reviewer: who,
@@ -347,6 +454,18 @@ pub mod pallet {
             UserReviews::<T>::mutate(&review.reviewer, |reviews| {
                 reviews.retain(|&id| id != order_id);
             });
+
+            // F3: 清理商品评价索引
+            if let Some(pid) = review.product_id {
+                ProductReviews::<T>::mutate(pid, |reviews| {
+                    reviews.retain(|&id| id != order_id);
+                });
+                ProductReviewCount::<T>::mutate(pid, |c| *c = c.saturating_sub(1));
+                ProductRatingSum::<T>::mutate(pid, |s| *s = s.saturating_sub(review.rating as u64));
+            }
+
+            // F1: 清理商家回复
+            ReviewReplies::<T>::remove(order_id);
 
             Self::deposit_event(Event::ReviewRemoved {
                 order_id,
@@ -384,6 +503,140 @@ pub mod pallet {
 
                 Self::deposit_event(Event::ReviewConfigUpdated { entity_id, enabled });
             }
+
+            Ok(())
+        }
+
+        /// F1: 商家回复评价
+        #[pallet::call_index(3)]
+        #[pallet::weight(T::WeightInfo::reply_to_review())]
+        pub fn reply_to_review(
+            origin: OriginFor<T>,
+            order_id: u64,
+            content_cid: Vec<u8>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            // 评价必须存在
+            ensure!(Reviews::<T>::contains_key(order_id), Error::<T>::ReviewNotFound);
+            // 不能重复回复
+            ensure!(!ReviewReplies::<T>::contains_key(order_id), Error::<T>::AlreadyReplied);
+
+            // 回复内容不能为空
+            ensure!(!content_cid.is_empty(), Error::<T>::ReplyContentEmpty);
+            let bounded_cid: BoundedVec<u8, T::MaxCidLength> = content_cid
+                .try_into().map_err(|_| Error::<T>::CidTooLong)?;
+
+            // 权限检查：必须是订单关联店铺的 Entity Owner 或 Admin (REVIEW_MANAGE)
+            let shop_id = T::OrderProvider::order_shop_id(order_id)
+                .ok_or(Error::<T>::NotShopEntityAdmin)?;
+            let entity_id = T::ShopProvider::shop_entity_id(shop_id)
+                .ok_or(Error::<T>::NotShopEntityAdmin)?;
+            // M2-R10: Entity 必须处于激活状态
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::REVIEW_MANAGE),
+                Error::<T>::NotShopEntityAdmin
+            );
+
+            let now = <frame_system::Pallet<T>>::block_number();
+
+            let reply = ReviewReply {
+                replier: who.clone(),
+                content_cid: bounded_cid,
+                created_at: now,
+            };
+
+            ReviewReplies::<T>::insert(order_id, reply);
+
+            Self::deposit_event(Event::ReviewReplied {
+                order_id,
+                replier: who,
+            });
+
+            Ok(())
+        }
+
+        /// F6: 买家修改评价（仅允许修改一次，在时间窗口内）
+        #[pallet::call_index(4)]
+        #[pallet::weight(T::WeightInfo::edit_review())]
+        pub fn edit_review(
+            origin: OriginFor<T>,
+            order_id: u64,
+            new_rating: u8,
+            new_content_cid: Option<Vec<u8>>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            // 验证新评分范围
+            ensure!(new_rating >= 1 && new_rating <= 5, Error::<T>::InvalidRating);
+
+            // 评价必须存在
+            let mut review = Reviews::<T>::get(order_id)
+                .ok_or(Error::<T>::ReviewNotFound)?;
+
+            // 必须是评价者本人
+            ensure!(review.reviewer == who, Error::<T>::NotOrderBuyer);
+
+            // 仅允许修改一次
+            ensure!(!review.edited, Error::<T>::AlreadyEdited);
+
+            // M1-R10: 检查 Entity 评价开关（评价关闭时不允许修改）
+            let shop_id = T::OrderProvider::order_shop_id(order_id);
+            let entity_id = shop_id.and_then(|sid| T::ShopProvider::shop_entity_id(sid));
+            if let Some(eid) = entity_id {
+                ensure!(!EntityReviewDisabled::<T>::contains_key(eid), Error::<T>::ReviewsDisabledForEntity);
+            }
+
+            // 修改时间窗口检查
+            let edit_window = T::EditWindowBlocks::get();
+            if edit_window > 0 {
+                let created_u64: u64 = review.created_at
+                    .try_into().unwrap_or(u64::MAX);
+                let now_u64: u64 = <frame_system::Pallet<T>>::block_number()
+                    .try_into().unwrap_or(u64::MAX);
+                ensure!(
+                    now_u64.saturating_sub(created_u64) <= edit_window,
+                    Error::<T>::EditWindowExpired
+                );
+            }
+
+            // 转换新 CID
+            let new_cid: Option<BoundedVec<u8, T::MaxCidLength>> = new_content_cid
+                .map(|c| {
+                    ensure!(!c.is_empty(), Error::<T>::EmptyCid);
+                    c.try_into().map_err(|_| Error::<T>::CidTooLong)
+                })
+                .transpose()?;
+
+            let old_rating = review.rating;
+
+            // 更新评价
+            review.rating = new_rating;
+            review.content_cid = new_cid;
+            review.edited = true;
+
+            Reviews::<T>::insert(order_id, review);
+
+            // H1-R10: 更新商品评分差值（ShopProvider::update_shop_rating 是追加模式，
+            // 无法减去旧评分，故 edit 不更新店铺评分，仅更新商品评分）
+            if old_rating != new_rating {
+                // F3: 更新商品评分（ProductRatingSum 是模块自管理的，可精确修正）
+                let product_id = T::OrderProvider::order_product_id(order_id);
+                if let Some(pid) = product_id {
+                    ProductRatingSum::<T>::mutate(pid, |s| {
+                        *s = s.saturating_sub(old_rating as u64)
+                            .saturating_add(new_rating as u64);
+                    });
+                }
+            }
+
+            Self::deposit_event(Event::ReviewEdited {
+                order_id,
+                reviewer: who,
+                old_rating,
+                new_rating,
+            });
 
             Ok(())
         }

@@ -10,6 +10,7 @@ use sp_runtime::{
 };
 use frame_system::EnsureRoot;
 use pallet_entity_common::{ShopProvider, ShopType, ShopOperatingStatus, EffectiveShopStatus, PricingProvider, GovernanceProvider, GovernanceMode};
+use pallet_storage_service::{StoragePin, PinTier};
 use core::cell::RefCell;
 use sp_std::collections::btree_set::BTreeSet;
 
@@ -102,6 +103,25 @@ pub fn clear_entity_locked(entity_id: u64) {
     LOCKED_ENTITIES.with(|m| m.borrow_mut().remove(&entity_id));
 }
 
+// ==================== Mock StoragePin ====================
+
+pub struct MockStoragePin;
+impl StoragePin<u64> for MockStoragePin {
+    fn pin(
+        _owner: u64,
+        _domain: &[u8],
+        _subject_id: u64,
+        _entity_id: Option<u64>,
+        _cid: sp_std::vec::Vec<u8>,
+        _tier: PinTier,
+    ) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
+    fn unpin(_owner: u64, _cid: sp_std::vec::Vec<u8>) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
+}
+
 // ==================== PlatformAccount ====================
 
 parameter_types! {
@@ -127,6 +147,9 @@ impl pallet_entity_registry::Config for Test {
     type PlatformAccount = PlatformAccountId;
     type GovernanceProvider = MockGovernanceProvider;
     type CloseRequestTimeout = ConstU64<100>;
+    type MaxReferralsPerReferrer = ConstU32<100>;
+    type StoragePin = MockStoragePin;
+    type OnEntityStatusChange = ();
 }
 
 // ==================== Test Externalities Builder ====================

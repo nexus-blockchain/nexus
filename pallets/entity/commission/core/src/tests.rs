@@ -1398,23 +1398,24 @@ fn e2e_cancel_nex_does_not_affect_token_records() {
 }
 
 #[test]
-fn e2e_token_commission_not_configured_rejected() {
+fn e2e_token_commission_not_configured_returns_ok() {
+    // M2-R5: 未配置时优雅返回 Ok（与 NEX 版对称）
     new_test_ext().execute_with(|| {
         let ea = entity_account(ENTITY_ID);
         set_token_balance(ENTITY_ID, ea, 100_000);
         // 不配置 CommissionConfigs
 
-        assert_noop!(
-            CommissionCore::process_token_commission(
-                ENTITY_ID, SHOP_ID, 4001, &BUYER, 20_000, 20_000, 0,
-            ),
-            Error::<Test>::CommissionNotConfigured
-        );
+        assert_ok!(CommissionCore::process_token_commission(
+            ENTITY_ID, SHOP_ID, 4001, &BUYER, 20_000, 20_000, 0,
+        ));
+        // 未配置时不产生佣金记录
+        assert_eq!(TokenPendingTotal::<Test>::get(ENTITY_ID), 0);
     });
 }
 
 #[test]
-fn e2e_token_commission_disabled_rejected() {
+fn e2e_token_commission_disabled_returns_ok() {
+    // M2-R5: 配置存在但禁用时优雅返回 Ok（与 NEX 版对称）
     new_test_ext().execute_with(|| {
         let ea = entity_account(ENTITY_ID);
         set_token_balance(ENTITY_ID, ea, 100_000);
@@ -1428,12 +1429,10 @@ fn e2e_token_commission_disabled_rejected() {
             token_withdrawal_cooldown: 0,
         });
 
-        assert_noop!(
-            CommissionCore::process_token_commission(
-                ENTITY_ID, SHOP_ID, 4002, &BUYER, 20_000, 20_000, 0,
-            ),
-            Error::<Test>::CommissionNotConfigured
-        );
+        assert_ok!(CommissionCore::process_token_commission(
+            ENTITY_ID, SHOP_ID, 4002, &BUYER, 20_000, 20_000, 0,
+        ));
+        assert_eq!(TokenPendingTotal::<Test>::get(ENTITY_ID), 0);
     });
 }
 
@@ -2650,6 +2649,12 @@ fn h4_trait_set_commission_modes_tracks_pool_reward() {
     // H4: CommissionProvider::set_commission_modes 现在跟踪 POOL_REWARD 变化
     use pallet_commission_common::CommissionProvider;
     new_test_ext().execute_with(|| {
+        // M1-R6: 必须先设置 enabled=true，否则重新开启 POOL_REWARD 不会清除 cooldown
+        CommissionConfigs::<Test>::mutate(ENTITY_ID, |maybe| {
+            let config = maybe.get_or_insert_with(CoreCommissionConfig::default);
+            config.enabled = true;
+        });
+
         // 开启 POOL_REWARD
         assert_ok!(<CommissionCore as CommissionProvider<u64, u128>>::set_commission_modes(
             ENTITY_ID,
@@ -3052,6 +3057,127 @@ fn set_creator_reward_rate_rejects_non_owner() {
                 3000,
             ),
             Error::<Test>::NotEntityOwnerOrAdmin
+        );
+    });
+}
+
+// ============================================================================
+// R8: creator_reward_rate — None+Locked 单调递减豁免
+// ============================================================================
+
+#[test]
+fn r8_locked_none_allows_decrease() {
+    new_test_ext().execute_with(|| {
+        // Set initial rate to 3000
+        assert_ok!(CommissionCore::set_creator_reward_rate(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, 3000,
+        ));
+
+        // Lock in None mode
+        set_entity_locked(ENTITY_ID);
+        set_governance_mode(ENTITY_ID, 0); // None
+
+        // Decrease to 2000 → allowed
+        assert_ok!(CommissionCore::set_creator_reward_rate(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, 2000,
+        ));
+        assert_eq!(CommissionConfigs::<Test>::get(ENTITY_ID).unwrap().creator_reward_rate, 2000);
+
+        // Decrease to 0 → allowed
+        assert_ok!(CommissionCore::set_creator_reward_rate(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, 0,
+        ));
+        assert_eq!(CommissionConfigs::<Test>::get(ENTITY_ID).unwrap().creator_reward_rate, 0);
+    });
+}
+
+#[test]
+fn r8_locked_none_blocks_increase() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(CommissionCore::set_creator_reward_rate(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, 2000,
+        ));
+        set_entity_locked(ENTITY_ID);
+        set_governance_mode(ENTITY_ID, 0);
+
+        // Increase from 2000 → 3000 → blocked
+        assert_noop!(
+            CommissionCore::set_creator_reward_rate(
+                RuntimeOrigin::signed(SELLER), ENTITY_ID, 3000,
+            ),
+            Error::<Test>::LockedOnlyDecreaseAllowed
+        );
+    });
+}
+
+#[test]
+fn r8_locked_none_blocks_same_value() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(CommissionCore::set_creator_reward_rate(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, 2000,
+        ));
+        set_entity_locked(ENTITY_ID);
+        set_governance_mode(ENTITY_ID, 0);
+
+        // Same value (2000 → 2000) → blocked (must be strictly less)
+        assert_noop!(
+            CommissionCore::set_creator_reward_rate(
+                RuntimeOrigin::signed(SELLER), ENTITY_ID, 2000,
+            ),
+            Error::<Test>::LockedOnlyDecreaseAllowed
+        );
+    });
+}
+
+#[test]
+fn r8_locked_fulldao_blocks_all() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(CommissionCore::set_creator_reward_rate(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, 3000,
+        ));
+        set_entity_locked(ENTITY_ID);
+        set_governance_mode(ENTITY_ID, 1); // FullDAO
+
+        // FullDAO locked → EntityLocked (even decrease)
+        assert_noop!(
+            CommissionCore::set_creator_reward_rate(
+                RuntimeOrigin::signed(SELLER), ENTITY_ID, 1000,
+            ),
+            Error::<Test>::EntityLocked
+        );
+    });
+}
+
+#[test]
+fn r8_unlocked_allows_any_value() {
+    new_test_ext().execute_with(|| {
+        // Not locked → free to set any value
+        assert_ok!(CommissionCore::set_creator_reward_rate(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, 3000,
+        ));
+        assert_ok!(CommissionCore::set_creator_reward_rate(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, 5000,
+        ));
+        assert_ok!(CommissionCore::set_creator_reward_rate(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, 1000,
+        ));
+        assert_eq!(CommissionConfigs::<Test>::get(ENTITY_ID).unwrap().creator_reward_rate, 1000);
+    });
+}
+
+#[test]
+fn r8_locked_none_no_config_blocks_increase() {
+    new_test_ext().execute_with(|| {
+        // No config exists → current = 0
+        set_entity_locked(ENTITY_ID);
+        set_governance_mode(ENTITY_ID, 0);
+
+        // Trying to set to any positive value from 0 → increase → blocked
+        assert_noop!(
+            CommissionCore::set_creator_reward_rate(
+                RuntimeOrigin::signed(SELLER), ENTITY_ID, 1000,
+            ),
+            Error::<Test>::LockedOnlyDecreaseAllowed
         );
     });
 }
@@ -3857,5 +3983,1010 @@ fn entity_locked_rejects_clear_commission_config() {
             ),
             Error::<Test>::EntityLocked
         );
+    });
+}
+
+// ==================== #4 Entity 活跃状态校验 ====================
+
+#[test]
+fn f4_entity_inactive_rejects_set_commission_rate() {
+    new_test_ext().execute_with(|| {
+        set_entity_inactive(ENTITY_ID);
+        assert_noop!(
+            CommissionCore::set_commission_rate(
+                RuntimeOrigin::signed(SELLER), ENTITY_ID, 5000,
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn f4_entity_inactive_rejects_set_commission_modes() {
+    new_test_ext().execute_with(|| {
+        setup_config(5000);
+        set_entity_inactive(ENTITY_ID);
+        assert_noop!(
+            CommissionCore::set_commission_modes(
+                RuntimeOrigin::signed(SELLER), ENTITY_ID,
+                CommissionModes(CommissionModes::DIRECT_REWARD),
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn f4_entity_inactive_rejects_enable_commission() {
+    new_test_ext().execute_with(|| {
+        setup_config(5000);
+        set_entity_inactive(ENTITY_ID);
+        assert_noop!(
+            CommissionCore::enable_commission(
+                RuntimeOrigin::signed(SELLER), ENTITY_ID, false,
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn f4_entity_inactive_rejects_set_withdrawal_config() {
+    new_test_ext().execute_with(|| {
+        set_entity_inactive(ENTITY_ID);
+        assert_noop!(
+            CommissionCore::set_withdrawal_config(
+                RuntimeOrigin::signed(SELLER), ENTITY_ID,
+                WithdrawalMode::FullWithdrawal,
+                WithdrawalTierConfig { withdrawal_rate: 10000, repurchase_rate: 0 },
+                BoundedVec::<_, ConstU32<10>>::default(),
+                0,
+                true,
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn f4_entity_inactive_rejects_set_creator_reward_rate() {
+    new_test_ext().execute_with(|| {
+        set_entity_inactive(ENTITY_ID);
+        assert_noop!(
+            CommissionCore::set_creator_reward_rate(
+                RuntimeOrigin::signed(SELLER), ENTITY_ID, 1000,
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn f4_entity_inactive_rejects_set_withdrawal_cooldown() {
+    new_test_ext().execute_with(|| {
+        set_entity_inactive(ENTITY_ID);
+        assert_noop!(
+            CommissionCore::set_withdrawal_cooldown(
+                RuntimeOrigin::signed(SELLER), ENTITY_ID, 100, 200,
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+// ==================== #8 全局紧急暂停 ====================
+
+#[test]
+fn f8_force_global_pause_works() {
+    new_test_ext().execute_with(|| {
+        assert!(!GlobalCommissionPaused::<Test>::get());
+        assert_ok!(CommissionCore::force_global_pause(RuntimeOrigin::root(), true));
+        assert!(GlobalCommissionPaused::<Test>::get());
+
+        // 非 Root 无法调用
+        assert_noop!(
+            CommissionCore::force_global_pause(RuntimeOrigin::signed(SELLER), false),
+            sp_runtime::DispatchError::BadOrigin
+        );
+
+        // Root 恢复
+        assert_ok!(CommissionCore::force_global_pause(RuntimeOrigin::root(), false));
+        assert!(!GlobalCommissionPaused::<Test>::get());
+    });
+}
+
+#[test]
+fn f8_global_pause_blocks_process_commission() {
+    new_test_ext().execute_with(|| {
+        fund(PLATFORM, 1_000_000);
+        setup_config(10000);
+
+        GlobalCommissionPaused::<Test>::put(true);
+
+        assert_noop!(
+            CommissionCore::process_commission(
+                ENTITY_ID, SHOP_ID, 9999, &BUYER, 100_000, 100_000, 10_000,
+            ),
+            Error::<Test>::GlobalCommissionPaused
+        );
+    });
+}
+
+#[test]
+fn f8_global_pause_blocks_withdraw_commission() {
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        fund(ea, 100_000);
+        set_entity_referrer(ENTITY_ID, REFERRER);
+        setup_config(10000);
+
+        // 先产生佣金
+        assert_ok!(CommissionCore::process_commission(
+            ENTITY_ID, SHOP_ID, 9998, &BUYER, 100_000, 100_000, 10_000,
+        ));
+
+        // 暂停后提现失败
+        GlobalCommissionPaused::<Test>::put(true);
+
+        assert_noop!(
+            CommissionCore::withdraw_commission(
+                RuntimeOrigin::signed(REFERRER), ENTITY_ID, None, None, None,
+            ),
+            Error::<Test>::GlobalCommissionPaused
+        );
+    });
+}
+
+// ==================== #7 全局 Token 最大佣金率 ====================
+
+#[test]
+fn f7_set_global_max_token_commission_rate_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(CommissionCore::set_global_max_token_commission_rate(
+            RuntimeOrigin::root(), ENTITY_ID, 5000,
+        ));
+        assert_eq!(GlobalMaxTokenCommissionRate::<Test>::get(ENTITY_ID), 5000);
+    });
+}
+
+#[test]
+fn f7_global_max_token_rate_rejects_invalid() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            CommissionCore::set_global_max_token_commission_rate(
+                RuntimeOrigin::root(), ENTITY_ID, 10001,
+            ),
+            Error::<Test>::InvalidCommissionRate
+        );
+    });
+}
+
+#[test]
+fn f7_global_max_token_rate_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            CommissionCore::set_global_max_token_commission_rate(
+                RuntimeOrigin::signed(SELLER), ENTITY_ID, 5000,
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+// ==================== #5 提现暂停开关 ====================
+
+#[test]
+fn f5_pause_withdrawals_works() {
+    new_test_ext().execute_with(|| {
+        assert!(!WithdrawalPaused::<Test>::get(ENTITY_ID));
+
+        assert_ok!(CommissionCore::pause_withdrawals(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, true,
+        ));
+        assert!(WithdrawalPaused::<Test>::get(ENTITY_ID));
+
+        assert_ok!(CommissionCore::pause_withdrawals(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, false,
+        ));
+        assert!(!WithdrawalPaused::<Test>::get(ENTITY_ID));
+    });
+}
+
+#[test]
+fn f5_pause_withdrawals_blocks_nex_withdraw() {
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        fund(ea, 100_000);
+        set_entity_referrer(ENTITY_ID, REFERRER);
+        setup_config(10000);
+
+        assert_ok!(CommissionCore::process_commission(
+            ENTITY_ID, SHOP_ID, 9997, &BUYER, 100_000, 100_000, 10_000,
+        ));
+
+        WithdrawalPaused::<Test>::insert(ENTITY_ID, true);
+
+        assert_noop!(
+            CommissionCore::withdraw_commission(
+                RuntimeOrigin::signed(REFERRER), ENTITY_ID, None, None, None,
+            ),
+            Error::<Test>::WithdrawalPausedByOwner
+        );
+    });
+}
+
+#[test]
+fn f5_pause_withdrawals_blocks_token_withdraw() {
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        inject_token_pending(ENTITY_ID, REFERRER, 10_000);
+        set_token_balance(ENTITY_ID, ea, 50_000);
+
+        WithdrawalPaused::<Test>::insert(ENTITY_ID, true);
+
+        assert_noop!(
+            CommissionCore::withdraw_token_commission(
+                RuntimeOrigin::signed(REFERRER), ENTITY_ID, None, None, None,
+            ),
+            Error::<Test>::WithdrawalPausedByOwner
+        );
+    });
+}
+
+#[test]
+fn f5_pause_withdrawals_rejects_locked_entity() {
+    new_test_ext().execute_with(|| {
+        set_entity_locked(ENTITY_ID);
+        assert_noop!(
+            CommissionCore::pause_withdrawals(
+                RuntimeOrigin::signed(SELLER), ENTITY_ID, true,
+            ),
+            Error::<Test>::EntityLocked
+        );
+    });
+}
+
+// ==================== #2 会员级佣金记录索引 ====================
+
+#[test]
+fn f2_member_commission_order_ids_indexed() {
+    new_test_ext().execute_with(|| {
+        fund(PLATFORM, 1_000_000);
+        set_entity_referrer(ENTITY_ID, REFERRER);
+        setup_config(10000);
+
+        // 产生多个订单的佣金
+        assert_ok!(CommissionCore::process_commission(
+            ENTITY_ID, SHOP_ID, 7001, &BUYER, 100_000, 100_000, 10_000,
+        ));
+        assert_ok!(CommissionCore::process_commission(
+            ENTITY_ID, SHOP_ID, 7002, &BUYER, 100_000, 100_000, 10_000,
+        ));
+        assert_ok!(CommissionCore::process_commission(
+            ENTITY_ID, SHOP_ID, 7003, &BUYER, 100_000, 100_000, 10_000,
+        ));
+
+        let ids = MemberCommissionOrderIds::<Test>::get(ENTITY_ID, REFERRER);
+        assert!(ids.contains(&7001));
+        assert!(ids.contains(&7002));
+        assert!(ids.contains(&7003));
+        assert_eq!(ids.len(), 3);
+    });
+}
+
+#[test]
+fn f2_member_commission_order_ids_deduplicates() {
+    new_test_ext().execute_with(|| {
+        fund(PLATFORM, 1_000_000);
+        set_entity_referrer(ENTITY_ID, REFERRER);
+        setup_config(10000);
+
+        // 同一订单多次佣金不重复
+        assert_ok!(CommissionCore::process_commission(
+            ENTITY_ID, SHOP_ID, 7010, &BUYER, 100_000, 100_000, 10_000,
+        ));
+        // 再来一个不同的订单
+        assert_ok!(CommissionCore::process_commission(
+            ENTITY_ID, SHOP_ID, 7010, &BUYER, 100_000, 100_000, 10_000,
+        ));
+
+        let ids = MemberCommissionOrderIds::<Test>::get(ENTITY_ID, REFERRER);
+        // order 7010 应只出现一次
+        assert_eq!(ids.iter().filter(|&&id| id == 7010).count(), 1);
+    });
+}
+
+// ==================== #3 提现记录存储 ====================
+
+#[test]
+fn f3_nex_withdrawal_history_recorded() {
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        fund(PLATFORM, 1_000_000);
+        fund(ea, 100_000);
+        set_entity_referrer(ENTITY_ID, REFERRER);
+        setup_config(10000);
+
+        assert_ok!(CommissionCore::process_commission(
+            ENTITY_ID, SHOP_ID, 7020, &BUYER, 100_000, 100_000, 10_000,
+        ));
+
+        let stats = MemberCommissionStats::<Test>::get(ENTITY_ID, REFERRER);
+        assert!(stats.pending > 0, "referrer should have pending commission");
+
+        assert_ok!(CommissionCore::withdraw_commission(
+            RuntimeOrigin::signed(REFERRER), ENTITY_ID, None, None, None,
+        ));
+
+        let history = MemberWithdrawalHistory::<Test>::get(ENTITY_ID, REFERRER);
+        assert_eq!(history.len(), 1);
+        assert!(history[0].total_amount > 0);
+        assert_eq!(history[0].block_number, 1u64);
+    });
+}
+
+#[test]
+fn f3_token_withdrawal_history_recorded() {
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        inject_token_pending(ENTITY_ID, REFERRER, 10_000);
+        set_token_balance(ENTITY_ID, ea, 50_000);
+
+        assert_ok!(CommissionCore::withdraw_token_commission(
+            RuntimeOrigin::signed(REFERRER), ENTITY_ID, None, None, None,
+        ));
+
+        let history = MemberTokenWithdrawalHistory::<Test>::get(ENTITY_ID, REFERRER);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].total_amount, 10_000);
+        assert_eq!(history[0].withdrawn, 10_000);
+    });
+}
+
+// ==================== #10 历史记录清理机制 ====================
+
+#[test]
+fn f10_archive_order_records_works() {
+    new_test_ext().execute_with(|| {
+        // 手动插入已完结的 NEX 佣金记录
+        OrderCommissionRecords::<Test>::mutate(5001u64, |records| {
+            let _ = records.try_push(crate::pallet::CommissionRecordOf::<Test> {
+                entity_id: ENTITY_ID,
+                shop_id: SHOP_ID,
+                order_id: 5001,
+                buyer: BUYER,
+                beneficiary: REFERRER,
+                amount: 1000,
+                commission_type: CommissionType::DirectReward,
+                level: 0,
+                status: CommissionStatus::Withdrawn,
+                created_at: 1u64,
+            });
+        });
+        OrderTreasuryTransfer::<Test>::insert(5001u64, 500u128);
+
+        assert_ok!(CommissionCore::archive_order_records(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, 5001,
+        ));
+
+        assert!(OrderCommissionRecords::<Test>::get(5001u64).is_empty());
+        assert_eq!(OrderTreasuryTransfer::<Test>::get(5001u64), 0);
+    });
+}
+
+#[test]
+fn f10_archive_rejects_non_finalized_records() {
+    new_test_ext().execute_with(|| {
+        OrderCommissionRecords::<Test>::mutate(5002u64, |records| {
+            let _ = records.try_push(crate::pallet::CommissionRecordOf::<Test> {
+                entity_id: ENTITY_ID,
+                shop_id: SHOP_ID,
+                order_id: 5002,
+                buyer: BUYER,
+                beneficiary: REFERRER,
+                amount: 1000,
+                commission_type: CommissionType::DirectReward,
+                level: 0,
+                status: CommissionStatus::Pending, // 未完结
+                created_at: 1u64,
+            });
+        });
+
+        assert_noop!(
+            CommissionCore::archive_order_records(
+                RuntimeOrigin::signed(SELLER), ENTITY_ID, 5002,
+            ),
+            Error::<Test>::OrderRecordsNotFinalized
+        );
+    });
+}
+
+#[test]
+fn f10_archive_rejects_empty_order() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            CommissionCore::archive_order_records(
+                RuntimeOrigin::signed(SELLER), ENTITY_ID, 9999,
+            ),
+            Error::<Test>::OrderRecordsNotFound
+        );
+    });
+}
+
+// ==================== #11 Storage 版本与迁移钩子 ====================
+
+#[test]
+fn f11_on_runtime_upgrade_bumps_version() {
+    new_test_ext().execute_with(|| {
+        use frame_support::traits::Hooks;
+        use frame_support::traits::StorageVersion;
+
+        // 模拟旧版本
+        StorageVersion::new(0).put::<CommissionCore>();
+        let weight = CommissionCore::on_runtime_upgrade();
+        assert!(weight.ref_time() > 0);
+
+        // 验证版本已升到 1
+        let on_chain = StorageVersion::get::<CommissionCore>();
+        assert_eq!(on_chain, StorageVersion::new(1));
+
+        // 再次升级应无操作
+        let weight2 = CommissionCore::on_runtime_upgrade();
+        assert_eq!(weight2.ref_time(), 0);
+    });
+}
+
+// ============================================================================
+// R5 审计回归测试
+// ============================================================================
+
+// ---------- H1-R5: enable_commission(false) 必须触发 POOL_REWARD cooldown ----------
+
+#[test]
+fn h1r5_enable_commission_false_sets_pool_reward_disabled_at() {
+    new_test_ext().execute_with(|| {
+        // 开启 POOL_REWARD + enabled=true
+        CommissionConfigs::<Test>::insert(ENTITY_ID, CoreCommissionConfig {
+            enabled_modes: CommissionModes(CommissionModes::DIRECT_REWARD | CommissionModes::POOL_REWARD),
+            max_commission_rate: 5000,
+            enabled: true,
+            withdrawal_cooldown: 0,
+            creator_reward_rate: 0,
+            token_withdrawal_cooldown: 0,
+        });
+        UnallocatedPool::<Test>::insert(ENTITY_ID, 50_000u128);
+        let ea = entity_account(ENTITY_ID);
+        fund(ea, 100_000);
+
+        // disable commission at block 10
+        System::set_block_number(10);
+        assert_ok!(CommissionCore::enable_commission(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, false,
+        ));
+
+        // PoolRewardDisabledAt 必须被设置
+        assert_eq!(PoolRewardDisabledAt::<Test>::get(ENTITY_ID), Some(10));
+
+        // cooldown 期内不可提取池资金
+        System::set_block_number(50);
+        // available = 100000 - 50000(pool locked) - 1(min) = 49999
+        assert_ok!(CommissionCore::withdraw_entity_funds(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, 49_999,
+        ));
+        // 池资金仍锁定
+        assert_eq!(UnallocatedPool::<Test>::get(ENTITY_ID), 50_000);
+    });
+}
+
+#[test]
+fn h1r5_enable_commission_true_clears_pool_reward_cooldown() {
+    new_test_ext().execute_with(|| {
+        // 先开启 POOL_REWARD 然后 disable
+        CommissionConfigs::<Test>::insert(ENTITY_ID, CoreCommissionConfig {
+            enabled_modes: CommissionModes(CommissionModes::DIRECT_REWARD | CommissionModes::POOL_REWARD),
+            max_commission_rate: 5000,
+            enabled: true,
+            withdrawal_cooldown: 0,
+            creator_reward_rate: 0,
+            token_withdrawal_cooldown: 0,
+        });
+
+        System::set_block_number(10);
+        assert_ok!(CommissionCore::enable_commission(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, false,
+        ));
+        assert!(PoolRewardDisabledAt::<Test>::get(ENTITY_ID).is_some());
+
+        // 重新启用 → cooldown 应被清除（因 POOL_REWARD mode 仍存在）
+        System::set_block_number(20);
+        assert_ok!(CommissionCore::enable_commission(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, true,
+        ));
+        assert!(PoolRewardDisabledAt::<Test>::get(ENTITY_ID).is_none());
+    });
+}
+
+// ---------- H1-R5: clear_commission_config 必须触发 POOL_REWARD cooldown ----------
+
+#[test]
+fn h1r5_clear_commission_config_sets_pool_reward_disabled_at() {
+    new_test_ext().execute_with(|| {
+        CommissionConfigs::<Test>::insert(ENTITY_ID, CoreCommissionConfig {
+            enabled_modes: CommissionModes(CommissionModes::DIRECT_REWARD | CommissionModes::POOL_REWARD),
+            max_commission_rate: 5000,
+            enabled: true,
+            withdrawal_cooldown: 0,
+            creator_reward_rate: 0,
+            token_withdrawal_cooldown: 0,
+        });
+        UnallocatedPool::<Test>::insert(ENTITY_ID, 30_000u128);
+        let ea = entity_account(ENTITY_ID);
+        fund(ea, 100_000);
+
+        System::set_block_number(10);
+        assert_ok!(CommissionCore::clear_commission_config(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID,
+        ));
+
+        // 配置已清除
+        assert!(CommissionConfigs::<Test>::get(ENTITY_ID).is_none());
+        // cooldown 必须被设置
+        assert_eq!(PoolRewardDisabledAt::<Test>::get(ENTITY_ID), Some(10));
+
+        // cooldown 期内池仍锁定
+        System::set_block_number(50);
+        let balance = Balances::free_balance(ea);
+        let available = balance.saturating_sub(30_000).saturating_sub(1); // pool locked + ED
+        assert_ok!(CommissionCore::withdraw_entity_funds(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, available,
+        ));
+        assert_eq!(UnallocatedPool::<Test>::get(ENTITY_ID), 30_000);
+    });
+}
+
+#[test]
+fn h1r5_clear_config_without_pool_reward_no_cooldown() {
+    // 没有 POOL_REWARD 的配置被清除时不应设置 cooldown
+    new_test_ext().execute_with(|| {
+        CommissionConfigs::<Test>::insert(ENTITY_ID, CoreCommissionConfig {
+            enabled_modes: CommissionModes(CommissionModes::DIRECT_REWARD),
+            max_commission_rate: 5000,
+            enabled: true,
+            withdrawal_cooldown: 0,
+            creator_reward_rate: 0,
+            token_withdrawal_cooldown: 0,
+        });
+
+        assert_ok!(CommissionCore::clear_commission_config(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID,
+        ));
+        assert!(PoolRewardDisabledAt::<Test>::get(ENTITY_ID).is_none());
+    });
+}
+
+// ---------- H1-R5: force_disable_entity_commission 必须触发 POOL_REWARD cooldown ----------
+
+#[test]
+fn h1r5_force_disable_sets_pool_reward_disabled_at() {
+    new_test_ext().execute_with(|| {
+        CommissionConfigs::<Test>::insert(ENTITY_ID, CoreCommissionConfig {
+            enabled_modes: CommissionModes(CommissionModes::DIRECT_REWARD | CommissionModes::POOL_REWARD),
+            max_commission_rate: 5000,
+            enabled: true,
+            withdrawal_cooldown: 0,
+            creator_reward_rate: 0,
+            token_withdrawal_cooldown: 0,
+        });
+        UnallocatedPool::<Test>::insert(ENTITY_ID, 20_000u128);
+        let ea = entity_account(ENTITY_ID);
+        fund(ea, 100_000);
+
+        System::set_block_number(10);
+        assert_ok!(CommissionCore::force_disable_entity_commission(
+            RuntimeOrigin::root(), ENTITY_ID,
+        ));
+
+        // cooldown 被设置
+        assert_eq!(PoolRewardDisabledAt::<Test>::get(ENTITY_ID), Some(10));
+
+        // cooldown 期内池锁定
+        System::set_block_number(50);
+        let balance = Balances::free_balance(ea);
+        let available = balance.saturating_sub(20_000).saturating_sub(1);
+        assert_ok!(CommissionCore::withdraw_entity_funds(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, available,
+        ));
+        assert_eq!(UnallocatedPool::<Test>::get(ENTITY_ID), 20_000);
+
+        // cooldown 过后池解锁
+        System::set_block_number(111); // 10 + 100 + 1
+        let balance2 = Balances::free_balance(ea);
+        let pool_left = UnallocatedPool::<Test>::get(ENTITY_ID);
+        // 池不再锁定，可全部提取
+        let max_withdraw = balance2.saturating_sub(1); // only ED
+        assert_ok!(CommissionCore::withdraw_entity_funds(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, max_withdraw.min(pool_left),
+        ));
+    });
+}
+
+// ---------- M1-R5: archive_order_records 跨实体越权归档 ----------
+
+#[test]
+fn m1r5_archive_order_rejects_cross_entity() {
+    new_test_ext().execute_with(|| {
+        let other_entity_id = 2u64;
+        // 设置 entity 2 的 owner
+        set_entity_owner(other_entity_id, 77);
+
+        // 在 entity 1 下创建已完结的订单记录
+        let record = pallet_commission_common::CommissionRecord {
+            entity_id: ENTITY_ID,
+            shop_id: SHOP_ID,
+            order_id: 999,
+            buyer: BUYER,
+            beneficiary: REFERRER,
+            amount: 100u128,
+            commission_type: CommissionType::DirectReward,
+            level: 1,
+            status: CommissionStatus::Cancelled,
+            created_at: 1u64,
+        };
+        OrderCommissionRecords::<Test>::mutate(999u64, |records| {
+            let _ = records.try_push(record);
+        });
+
+        // entity 2 的 owner 尝试归档 entity 1 的订单 → 应失败
+        assert_noop!(
+            CommissionCore::archive_order_records(
+                RuntimeOrigin::signed(77), other_entity_id, 999,
+            ),
+            Error::<Test>::OrderRecordsNotFound
+        );
+
+        // entity 1 的 owner 可以归档
+        assert_ok!(CommissionCore::archive_order_records(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, 999,
+        ));
+        assert!(OrderCommissionRecords::<Test>::get(999u64).is_empty());
+    });
+}
+
+// ---------- M2-R5: process_token_commission 未配置时优雅返回 ----------
+
+#[test]
+fn m2r5_process_token_commission_ok_when_not_configured() {
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        set_token_balance(ENTITY_ID, ea, 50_000);
+
+        // 不设置任何 CommissionConfig → 应成功返回而非报错
+        assert_ok!(CommissionCore::process_token_commission(
+            ENTITY_ID, SHOP_ID, 2001, &BUYER, 10_000, 10_000, 500,
+        ));
+
+        // token_platform_fee (500) 通过 sweep 被计入 accounted balance
+        // 但不会进入 pending/pool/shopping（因无配置）
+        assert_eq!(TokenPendingTotal::<Test>::get(ENTITY_ID), 0);
+        assert_eq!(UnallocatedTokenPool::<Test>::get(ENTITY_ID), 0);
+    });
+}
+
+#[test]
+fn m2r5_process_token_commission_ok_when_disabled() {
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        set_token_balance(ENTITY_ID, ea, 50_000);
+
+        // 配置存在但 enabled=false
+        CommissionConfigs::<Test>::insert(ENTITY_ID, CoreCommissionConfig {
+            enabled_modes: CommissionModes(CommissionModes::DIRECT_REWARD),
+            max_commission_rate: 5000,
+            enabled: false,
+            withdrawal_cooldown: 0,
+            creator_reward_rate: 0,
+            token_withdrawal_cooldown: 0,
+        });
+
+        assert_ok!(CommissionCore::process_token_commission(
+            ENTITY_ID, SHOP_ID, 2002, &BUYER, 10_000, 10_000, 500,
+        ));
+
+        assert_eq!(TokenPendingTotal::<Test>::get(ENTITY_ID), 0);
+    });
+}
+
+// ============================================================================
+// M1-R6: set_commission_modes POOL_REWARD cooldown bypass 回归测试
+// ============================================================================
+
+#[test]
+fn m1r6_mode_toggle_while_disabled_preserves_cooldown() {
+    // 攻击路径: enable_commission(false) → remove POOL_REWARD → add POOL_REWARD back
+    // 预期: cooldown 不被清除（pool 仍锁定）
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        fund(ea, 100_000);
+        fund(PLATFORM, 100_000);
+        fund(SELLER, 100_000);
+
+        // 1. 启用佣金 + POOL_REWARD，让池有资金
+        CommissionConfigs::<Test>::insert(ENTITY_ID, CoreCommissionConfig {
+            enabled_modes: CommissionModes(CommissionModes::DIRECT_REWARD | CommissionModes::POOL_REWARD),
+            max_commission_rate: 5000,
+            enabled: true,
+            withdrawal_cooldown: 0,
+            creator_reward_rate: 0,
+            token_withdrawal_cooldown: 0,
+        });
+        UnallocatedPool::<Test>::insert(ENTITY_ID, 10_000u128);
+
+        // 2. 禁用佣金 → cooldown 开始
+        assert_ok!(CommissionCore::enable_commission(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, false,
+        ));
+        assert!(PoolRewardDisabledAt::<Test>::contains_key(ENTITY_ID));
+
+        // 3. 移除 POOL_REWARD 模式位 → cooldown 重写（合法）
+        assert_ok!(CommissionCore::set_commission_modes(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID,
+            CommissionModes(CommissionModes::DIRECT_REWARD),
+        ));
+        // cooldown 仍存在（被重写为 now）
+        assert!(PoolRewardDisabledAt::<Test>::contains_key(ENTITY_ID));
+
+        // 4. 在 enabled=false 的状态下重新添加 POOL_REWARD
+        assert_ok!(CommissionCore::set_commission_modes(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID,
+            CommissionModes(CommissionModes::DIRECT_REWARD | CommissionModes::POOL_REWARD),
+        ));
+
+        // M1-R6 修复: cooldown 不应被清除（enabled 仍为 false）
+        assert!(PoolRewardDisabledAt::<Test>::contains_key(ENTITY_ID),
+            "cooldown should NOT be cleared when adding POOL_REWARD while enabled=false");
+    });
+}
+
+#[test]
+fn m1r6_mode_toggle_while_enabled_clears_cooldown() {
+    // 对照测试: enabled=true 时添加 POOL_REWARD 应正常清除 cooldown
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        fund(ea, 100_000);
+        fund(SELLER, 100_000);
+
+        // 1. 有 POOL_REWARD 且 enabled
+        CommissionConfigs::<Test>::insert(ENTITY_ID, CoreCommissionConfig {
+            enabled_modes: CommissionModes(CommissionModes::DIRECT_REWARD | CommissionModes::POOL_REWARD),
+            max_commission_rate: 5000,
+            enabled: true,
+            withdrawal_cooldown: 0,
+            creator_reward_rate: 0,
+            token_withdrawal_cooldown: 0,
+        });
+
+        // 2. 移除 POOL_REWARD → cooldown 设置
+        assert_ok!(CommissionCore::set_commission_modes(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID,
+            CommissionModes(CommissionModes::DIRECT_REWARD),
+        ));
+        assert!(PoolRewardDisabledAt::<Test>::contains_key(ENTITY_ID));
+
+        // 3. 重新添加 POOL_REWARD（enabled=true）→ cooldown 应清除
+        assert_ok!(CommissionCore::set_commission_modes(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID,
+            CommissionModes(CommissionModes::DIRECT_REWARD | CommissionModes::POOL_REWARD),
+        ));
+        assert!(!PoolRewardDisabledAt::<Test>::contains_key(ENTITY_ID),
+            "cooldown SHOULD be cleared when adding POOL_REWARD while enabled=true");
+    });
+}
+
+#[test]
+fn m1r6_full_attack_path_pool_stays_locked() {
+    // 完整攻击路径验证: 尝试通过 mode toggle 提取 pool 资金应失败
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        fund(ea, 100_000);
+        fund(SELLER, 100_000);
+
+        // 1. 设置有 POOL_REWARD 的 Entity，池有资金
+        CommissionConfigs::<Test>::insert(ENTITY_ID, CoreCommissionConfig {
+            enabled_modes: CommissionModes(CommissionModes::DIRECT_REWARD | CommissionModes::POOL_REWARD),
+            max_commission_rate: 5000,
+            enabled: true,
+            withdrawal_cooldown: 0,
+            creator_reward_rate: 0,
+            token_withdrawal_cooldown: 0,
+        });
+        UnallocatedPool::<Test>::insert(ENTITY_ID, 50_000u128);
+
+        // 2. 禁用佣金
+        assert_ok!(CommissionCore::enable_commission(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, false,
+        ));
+
+        // 3. 尝试 mode toggle bypass
+        assert_ok!(CommissionCore::set_commission_modes(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID,
+            CommissionModes(CommissionModes::DIRECT_REWARD),
+        ));
+        assert_ok!(CommissionCore::set_commission_modes(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID,
+            CommissionModes(CommissionModes::DIRECT_REWARD | CommissionModes::POOL_REWARD),
+        ));
+
+        // 4. 尝试提取 pool 资金 — 应失败（pool 仍锁定，cooldown 未过期）
+        assert_noop!(
+            CommissionCore::withdraw_entity_funds(
+                RuntimeOrigin::signed(SELLER), ENTITY_ID, 50_000,
+            ),
+            Error::<Test>::InsufficientEntityFunds
+        );
+    });
+}
+
+// ============================================================================
+// M2-R6: Token cancel 回退 Pool A 留存 回归测试
+// ============================================================================
+
+#[test]
+fn m2r6_token_cancel_reverses_pool_a_retention() {
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        set_token_balance(ENTITY_ID, ea, 100_000);
+
+        // 配置启用佣金 + POOL_REWARD
+        CommissionConfigs::<Test>::insert(ENTITY_ID, CoreCommissionConfig {
+            enabled_modes: CommissionModes(CommissionModes::DIRECT_REWARD | CommissionModes::POOL_REWARD),
+            max_commission_rate: 5000,
+            enabled: true,
+            withdrawal_cooldown: 0,
+            creator_reward_rate: 0,
+            token_withdrawal_cooldown: 0,
+        });
+
+        let order_id = 3001u64;
+        let token_platform_fee = 1000u128;
+
+        // process_token_commission: platform_fee (1000) 无 referrer → 全部进 pool_a_retention
+        assert_ok!(CommissionCore::process_token_commission(
+            ENTITY_ID, SHOP_ID, order_id, &BUYER, 10_000, 10_000, token_platform_fee,
+        ));
+
+        // pool_a_retention = 1000 (全部 platform_fee，无 referrer)
+        // Pool B remaining (max_commission=5000, no plugins → all 5000 to pool)
+        // Total pool = 1000 (Pool A) + 5000 (Pool B) = 6000
+        let pool_before = UnallocatedTokenPool::<Test>::get(ENTITY_ID);
+        assert_eq!(pool_before, 6000, "pool = pool_a_retention(1000) + pool_b_remaining(5000)");
+
+        // 验证 OrderTokenPlatformRetention 被记录
+        let (ret_eid, ret_amount) = OrderTokenPlatformRetention::<Test>::get(order_id);
+        assert_eq!(ret_eid, ENTITY_ID);
+        assert_eq!(ret_amount, token_platform_fee);
+
+        // cancel → Pool B refund (-5000) + Pool A retention refund (-1000) = 0
+        assert_ok!(CommissionCore::do_cancel_token_commission(order_id));
+
+        let pool_after = UnallocatedTokenPool::<Test>::get(ENTITY_ID);
+        assert_eq!(pool_after, 0,
+            "pool should be 0 after both Pool B and Pool A retention are reversed");
+
+        // OrderTokenPlatformRetention 应被清除
+        assert!(!OrderTokenPlatformRetention::<Test>::contains_key(order_id));
+    });
+}
+
+#[test]
+fn m2r6_token_cancel_with_referrer_partial_retention() {
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        set_token_balance(ENTITY_ID, ea, 100_000);
+
+        // 设置 entity referrer → pool_a 会分出 referrer 份额
+        set_entity_referrer(ENTITY_ID, REFERRER);
+
+        CommissionConfigs::<Test>::insert(ENTITY_ID, CoreCommissionConfig {
+            enabled_modes: CommissionModes(CommissionModes::DIRECT_REWARD | CommissionModes::POOL_REWARD),
+            max_commission_rate: 5000,
+            enabled: true,
+            withdrawal_cooldown: 0,
+            creator_reward_rate: 0,
+            token_withdrawal_cooldown: 0,
+        });
+
+        let order_id = 3002u64;
+        let token_platform_fee = 1000u128;
+
+        assert_ok!(CommissionCore::process_token_commission(
+            ENTITY_ID, SHOP_ID, order_id, &BUYER, 10_000, 10_000, token_platform_fee,
+        ));
+
+        // ReferrerShareBps = 5000 (50%), so referrer gets 500, retention = 500
+        let (ret_eid, ret_amount) = OrderTokenPlatformRetention::<Test>::get(order_id);
+        assert_eq!(ret_eid, ENTITY_ID);
+        assert_eq!(ret_amount, 500); // 1000 - 500 referrer
+
+        // Pool = 500 (Pool A retention) + Pool B remaining
+        let pool_before = UnallocatedTokenPool::<Test>::get(ENTITY_ID);
+        assert!(pool_before >= 500, "pool should include at least pool_a_retention");
+
+        // cancel reverses both Pool B and Pool A retention
+        assert_ok!(CommissionCore::do_cancel_token_commission(order_id));
+
+        let pool_after = UnallocatedTokenPool::<Test>::get(ENTITY_ID);
+        assert_eq!(pool_after, 0, "pool should be fully reversed after cancel");
+        assert!(!OrderTokenPlatformRetention::<Test>::contains_key(order_id));
+    });
+}
+
+#[test]
+fn m2r6_archive_cleans_order_token_platform_retention() {
+    new_test_ext().execute_with(|| {
+        let ea = entity_account(ENTITY_ID);
+        set_token_balance(ENTITY_ID, ea, 100_000);
+        fund(ea, 100_000);
+        fund(PLATFORM, 100_000);
+        fund(SELLER, 100_000);
+
+        CommissionConfigs::<Test>::insert(ENTITY_ID, CoreCommissionConfig {
+            enabled_modes: CommissionModes(CommissionModes::DIRECT_REWARD | CommissionModes::POOL_REWARD),
+            max_commission_rate: 5000,
+            enabled: true,
+            withdrawal_cooldown: 0,
+            creator_reward_rate: 0,
+            token_withdrawal_cooldown: 0,
+        });
+
+        let order_id = 3003u64;
+
+        // Process token commission to populate OrderTokenPlatformRetention
+        assert_ok!(CommissionCore::process_token_commission(
+            ENTITY_ID, SHOP_ID, order_id, &BUYER, 10_000, 10_000, 1000,
+        ));
+        assert!(OrderTokenPlatformRetention::<Test>::contains_key(order_id));
+
+        // Cancel to make records finalized (Cancelled)
+        assert_ok!(CommissionCore::do_cancel_token_commission(order_id));
+
+        // Insert cancelled NEX + Token records so archive passes validation
+        use pallet_commission_common::CommissionRecord;
+        OrderCommissionRecords::<Test>::mutate(order_id, |records| {
+            let _ = records.try_push(CommissionRecord {
+                entity_id: ENTITY_ID,
+                shop_id: SHOP_ID,
+                order_id,
+                buyer: BUYER,
+                beneficiary: BUYER,
+                amount: 100u128,
+                commission_type: CommissionType::DirectReward,
+                level: 0,
+                status: CommissionStatus::Cancelled,
+                created_at: 1u64,
+            });
+        });
+
+        use pallet_commission_common::TokenCommissionRecord;
+        OrderTokenCommissionRecords::<Test>::mutate(order_id, |records| {
+            records.clear();
+            let _ = records.try_push(TokenCommissionRecord {
+                entity_id: ENTITY_ID,
+                order_id,
+                buyer: BUYER,
+                beneficiary: BUYER,
+                amount: 100u128,
+                commission_type: CommissionType::DirectReward,
+                level: 0,
+                status: CommissionStatus::Cancelled,
+                created_at: 1u64,
+            });
+        });
+
+        assert_ok!(CommissionCore::archive_order_records(
+            RuntimeOrigin::signed(SELLER), ENTITY_ID, order_id,
+        ));
+
+        // OrderTokenPlatformRetention should be cleaned
+        assert!(!OrderTokenPlatformRetention::<Test>::contains_key(order_id));
     });
 }

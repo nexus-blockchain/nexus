@@ -58,6 +58,31 @@ where
 }
 
 // ============================================================================
+// ClickVerifier 路由
+// ============================================================================
+
+impl<T> ClickVerifier<T::AccountId> for AdsRouter<T>
+where
+	T: pallet_ads_entity::Config + pallet_ads_grouprobot::Config,
+{
+	fn verify_and_cap_clicks(
+		who: &T::AccountId,
+		placement_id: &PlacementId,
+		click_count: u32,
+		verified_clicks: u32,
+	) -> Result<u32, DispatchError> {
+		if is_entity_placement::<T>(placement_id) {
+			<pallet_ads_entity::Pallet<T> as ClickVerifier<T::AccountId>>::verify_and_cap_clicks(
+				who, placement_id, click_count, verified_clicks,
+			)
+		} else {
+			// GroupRobot 暂不支持 CPC, 拒绝点击收据提交
+			Err(DispatchError::Other("CPC not supported for GroupRobot placements"))
+		}
+	}
+}
+
+// ============================================================================
 // PlacementAdminProvider 路由
 // ============================================================================
 

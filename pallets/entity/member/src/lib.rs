@@ -253,6 +253,8 @@ pub mod pallet {
         pub joined_at: BlockNumber,
         /// 最后活跃时间（消费时更新，可用于活跃度查询）
         pub last_active_at: BlockNumber,
+        /// 激活状态：首次消费达标后为 true（与封禁独立）
+        pub activated: bool,
         /// 封禁状态：None=正常，Some(block)=封禁时间
         pub banned_at: Option<BlockNumber>,
         /// A2: 封禁原因（管理员填写，可选）
@@ -652,6 +654,16 @@ pub mod pallet {
             entity_id: u64,
             account: T::AccountId,
         },
+        /// 会员已激活（首次消费达标或管理员手动激活）
+        MemberActivated {
+            entity_id: u64,
+            account: T::AccountId,
+        },
+        /// 会员已取消激活（管理员手动操作）
+        MemberDeactivated {
+            entity_id: u64,
+            account: T::AccountId,
+        },
         /// 批量审批通过
         BatchMembersApproved {
             entity_id: u64,
@@ -804,6 +816,10 @@ pub mod pallet {
         EntityLocked,
         /// U1: 会员不属于该实体（或已被封禁无法主动退出）
         CannotLeave,
+        /// 会员已激活
+        AlreadyActivated,
+        /// 会员未激活
+        NotActivated,
     }
 
     // ============================================================================
@@ -1774,8 +1790,12 @@ pub mod pallet {
 
             for account in accounts.iter() {
                 if let Some((referrer, applied_at)) = PendingMembers::<T>::take(entity_id, account) {
-                    // 跳过已过期的记录（静默跳过，不中断批量操作）
+                    // H2 审计修复: 过期记录发出事件（take 已移除存储，需通知链下）
                     if !expiry.is_zero() && now > applied_at.saturating_add(expiry) {
+                        Self::deposit_event(Event::PendingMemberExpired {
+                            entity_id,
+                            account: account.clone(),
+                        });
                         continue;
                     }
                     // 尝试注册，失败则静默跳过（如已是会员）
@@ -2030,6 +2050,74 @@ pub mod pallet {
 
             Ok(())
         }
+
+        /// 手动激活会员（Owner/Admin 操作）
+        ///
+        /// 管理员可手动激活未消费的会员（白名单场景），
+        /// 激活后会员可获得佣金分配。
+        ///
+        /// # 参数
+        /// - `shop_id`: 关联 Shop
+        /// - `account`: 要激活的会员账户
+        #[pallet::call_index(31)]
+        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        pub fn activate_member(
+            origin: OriginFor<T>,
+            shop_id: u64,
+            account: T::AccountId,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            let entity_id = Self::ensure_shop_owner_or_admin(shop_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+
+            EntityMembers::<T>::try_mutate(entity_id, &account, |maybe_member| -> DispatchResult {
+                let member = maybe_member.as_mut().ok_or(Error::<T>::NotMember)?;
+                ensure!(!member.activated, Error::<T>::AlreadyActivated);
+                member.activated = true;
+                Ok(())
+            })?;
+
+            Self::deposit_event(Event::MemberActivated {
+                entity_id,
+                account,
+            });
+
+            Ok(())
+        }
+
+        /// 手动取消激活会员（Owner/Admin 操作）
+        ///
+        /// 管理员可手动取消会员激活状态（惩罚但不封禁），
+        /// 取消激活后会员不再获得佣金分配。
+        ///
+        /// # 参数
+        /// - `shop_id`: 关联 Shop
+        /// - `account`: 要取消激活的会员账户
+        #[pallet::call_index(32)]
+        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        pub fn deactivate_member(
+            origin: OriginFor<T>,
+            shop_id: u64,
+            account: T::AccountId,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            let entity_id = Self::ensure_shop_owner_or_admin(shop_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+
+            EntityMembers::<T>::try_mutate(entity_id, &account, |maybe_member| -> DispatchResult {
+                let member = maybe_member.as_mut().ok_or(Error::<T>::NotMember)?;
+                ensure!(member.activated, Error::<T>::NotActivated);
+                member.activated = false;
+                Ok(())
+            })?;
+
+            Self::deposit_event(Event::MemberDeactivated {
+                entity_id,
+                account,
+            });
+
+            Ok(())
+        }
     }
 
     // ============================================================================
@@ -2084,6 +2172,8 @@ pub mod pallet {
                 EntityMembers::<T>::mutate(entity_id, referrer, |maybe_ref| {
                     if let Some(ref mut r) = maybe_ref {
                         r.direct_referrals = r.direct_referrals.saturating_sub(1);
+                        // M1 审计修复: 同步递减 qualified_referrals（与 decrement_team_size_by_entity 对称）
+                        r.qualified_referrals = r.qualified_referrals.saturating_sub(1);
                     }
                 });
                 // 递减推荐链上所有祖先的 team_size
@@ -2122,6 +2212,7 @@ pub mod pallet {
                 custom_level_id: 0,
                 joined_at: now,
                 last_active_at: now,
+                activated: false,
                 banned_at: None,
                 ban_reason: None,
             };
@@ -2600,16 +2691,20 @@ pub mod pallet {
                 }
             }
 
+            // H1 审计修复: 等级系统不存在时静默跳过（reset_level_system 后规则仍可能触发）
+            let level_system = match EntityLevelSystems::<T>::get(entity_id) {
+                Some(s) => s,
+                None => return Ok(()),
+            };
+
             let now = <frame_system::Pallet<T>>::block_number();
 
             EntityMembers::<T>::mutate(entity_id, account, |maybe_member| -> DispatchResult {
                 let member = maybe_member.as_mut().ok_or(Error::<T>::NotMember)?;
 
                 // H7 审计修复: 验证目标等级仍然存在（等级可能在规则创建后被删除）
-                if let Some(ref system) = EntityLevelSystems::<T>::get(entity_id) {
-                    if system.use_custom && (target_level_id as usize) >= system.levels.len() {
-                        return Ok(());
-                    }
+                if level_system.use_custom && (target_level_id as usize) >= level_system.levels.len() {
+                    return Ok(());
                 }
 
                 let old_level_id = member.custom_level_id;
@@ -2959,6 +3054,15 @@ pub mod pallet {
 
                 member.total_spent = member.total_spent.saturating_add(amount_usdt);
                 member.last_active_at = <frame_system::Pallet<T>>::block_number();
+
+                // 首次消费达标 → 激活会员
+                if !member.activated && amount_usdt > 0 {
+                    member.activated = true;
+                    Self::deposit_event(Event::MemberActivated {
+                        entity_id,
+                        account: account.clone(),
+                    });
+                }
 
                 // P4 修复: 检查自定义等级是否已过期，若过期则立即修正存储
                 // 确保后续比较基于正确的 custom_level_id
@@ -3422,6 +3526,12 @@ impl<T: pallet::Config> MemberProvider<T::AccountId> for pallet::Pallet<T> {
     fn is_banned(entity_id: u64, account: &T::AccountId) -> bool {
         pallet::EntityMembers::<T>::get(entity_id, account)
             .map(|m| m.banned_at.is_some())
+            .unwrap_or(false)
+    }
+
+    fn is_activated(entity_id: u64, account: &T::AccountId) -> bool {
+        pallet::EntityMembers::<T>::get(entity_id, account)
+            .map(|m| m.activated)
             .unwrap_or(false)
     }
 

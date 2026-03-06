@@ -37,7 +37,7 @@ pub mod pallet {
         traits::{Currency, ExistenceRequirement, Get},
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{AdminPermission, EntityProvider, ShopProvider};
+    use pallet_entity_common::{AdminPermission, EntityProvider, GovernanceMode, GovernanceProvider, ShopProvider};
     use pallet_commission_common::{ReferralPlanWriter, LevelDiffPlanWriter, TeamPlanWriter, MultiLevelPlanWriter};
     use sp_runtime::traits::{Saturating, Zero};
 
@@ -158,6 +158,9 @@ pub mod pallet {
         /// Entity 查询接口
         type EntityProvider: EntityProvider<Self::AccountId>;
 
+        /// 治理查询接口（R8: 用于 locked+None 模式的单调递减豁免）
+        type GovernanceProvider: GovernanceProvider;
+
         /// 会员查询接口
         type MemberProvider: MemberProvider<Self::AccountId>;
 
@@ -255,9 +258,35 @@ pub mod pallet {
 
         /// Token 转账接口（entity_id 级）
         type TokenTransferProvider: TokenTransferProviderT<Self::AccountId, TokenBalanceOf<Self>>;
+
+        /// F6: 会员提现记录上限（每个 (entity_id, account) 最多保留的提现记录数）
+        #[pallet::constant]
+        type MaxWithdrawalRecords: Get<u32>;
+
+        /// F7: 会员佣金关联订单 ID 上限（每个 (entity_id, account) 最多保留的 order_id 数）
+        #[pallet::constant]
+        type MaxMemberOrderIds: Get<u32>;
     }
 
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+    /// 提现记录
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    pub struct WithdrawalRecord<Balance, BlockNumber> {
+        /// 提现总额（withdrawal + repurchase + bonus）
+        pub total_amount: Balance,
+        /// 到手金额
+        pub withdrawn: Balance,
+        /// 复购金额
+        pub repurchased: Balance,
+        /// 自愿多复购奖励
+        pub bonus: Balance,
+        /// 提现区块号
+        pub block_number: BlockNumber,
+    }
+
+    pub type WithdrawalRecordOf<T> = WithdrawalRecord<BalanceOf<T>, BlockNumberFor<T>>;
+    pub type TokenWithdrawalRecordOf<T> = WithdrawalRecord<TokenBalanceOf<T>, BlockNumberFor<T>>;
+
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -447,6 +476,17 @@ pub mod pallet {
         ValueQuery,
     >;
 
+    /// M2-R6 审计修复: Token 订单平台费留存 order_id → (entity_id, TokenBalance)
+    /// 记录 process_token_commission 中 Pool A 留存（platform_fee - referrer），
+    /// 供 cancel 时从 UnallocatedTokenPool 回退
+    #[pallet::storage]
+    pub type OrderTokenPlatformRetention<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat, u64,
+        (u64, TokenBalanceOf<T>),
+        ValueQuery,
+    >;
+
     /// Token 订单平台费率（基点，100 = 1%）
     /// 可通过 set_token_platform_fee_rate 治理调整，0 = 关闭 Token 平台费
     #[pallet::storage]
@@ -534,6 +574,73 @@ pub mod pallet {
         _,
         Blake2_128Concat, u64,
         u16,
+        ValueQuery,
+    >;
+
+    /// F16: 全局 Token 佣金率上限 entity_id → u16（万分比，由 Root 设定）
+    /// 与 NEX GlobalMaxCommissionRate 对称
+    #[pallet::storage]
+    #[pallet::getter(fn global_max_token_commission_rate)]
+    pub type GlobalMaxTokenCommissionRate<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat, u64,
+        u16,
+        ValueQuery,
+    >;
+
+    /// F17: 全局佣金紧急暂停开关（true = 暂停所有 Entity 的佣金处理和提现）
+    #[pallet::storage]
+    #[pallet::getter(fn global_commission_paused)]
+    pub type GlobalCommissionPaused<T> = StorageValue<_, bool, ValueQuery>;
+
+    /// F18: Entity 级提现暂停开关 entity_id → bool
+    /// 与 WithdrawalConfig.enabled 独立，轻量级暂停/恢复
+    #[pallet::storage]
+    #[pallet::getter(fn withdrawal_paused)]
+    pub type WithdrawalPaused<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat, u64,
+        bool,
+        ValueQuery,
+    >;
+
+    /// F19: 会员佣金关联订单 ID 索引 (entity_id, account) → BoundedVec<order_id>
+    #[pallet::storage]
+    pub type MemberCommissionOrderIds<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat, u64,
+        Blake2_128Concat, T::AccountId,
+        BoundedVec<u64, T::MaxMemberOrderIds>,
+        ValueQuery,
+    >;
+
+    /// F19: Token 版会员佣金关联订单 ID 索引
+    #[pallet::storage]
+    pub type MemberTokenCommissionOrderIds<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat, u64,
+        Blake2_128Concat, T::AccountId,
+        BoundedVec<u64, T::MaxMemberOrderIds>,
+        ValueQuery,
+    >;
+
+    /// F20: 会员 NEX 提现历史 (entity_id, account) → BoundedVec<WithdrawalRecord>
+    #[pallet::storage]
+    pub type MemberWithdrawalHistory<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat, u64,
+        Blake2_128Concat, T::AccountId,
+        BoundedVec<WithdrawalRecordOf<T>, T::MaxWithdrawalRecords>,
+        ValueQuery,
+    >;
+
+    /// F20: 会员 Token 提现历史
+    #[pallet::storage]
+    pub type MemberTokenWithdrawalHistory<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat, u64,
+        Blake2_128Concat, T::AccountId,
+        BoundedVec<TokenWithdrawalRecordOf<T>, T::MaxWithdrawalRecords>,
         ValueQuery,
     >;
 
@@ -707,6 +814,14 @@ pub mod pallet {
         WithdrawalConfigCleared { entity_id: u64 },
         /// F4: Token 提现配置已清除
         TokenWithdrawalConfigCleared { entity_id: u64 },
+        /// F16: 全局 Token 佣金率上限已更新
+        GlobalMaxTokenCommissionRateSet { entity_id: u64, rate: u16 },
+        /// F17: 全局佣金紧急暂停/恢复
+        GlobalCommissionPauseToggled { paused: bool },
+        /// F18: Entity 级提现暂停/恢复
+        WithdrawalPauseToggled { entity_id: u64, paused: bool },
+        /// F21: 订单佣金记录已归档清理
+        OrderRecordsArchived { order_id: u64 },
     }
 
     // ========================================================================
@@ -765,12 +880,26 @@ pub mod pallet {
         TokenPlatformFeeRateTooHigh,
         /// 实体已被全局锁定，所有配置操作不可用
         EntityLocked,
+        /// R8: 锁定状态下仅允许降低（无币实体单调递减豁免）
+        LockedOnlyDecreaseAllowed,
         /// F1: 调用者既不是 Entity Owner 也不是拥有 COMMISSION_MANAGE 权限的 Admin
         NotEntityOwnerOrAdmin,
         /// F15: Entity Owner 设置的 max_commission_rate 超过全局上限
         CommissionRateExceedsGlobalMax,
         /// F4: 佣金配置不存在，无法清除
         ConfigNotFound,
+        /// F16: Entity Owner 设置的 Token max_commission_rate 超过全局 Token 上限
+        TokenCommissionRateExceedsGlobalMax,
+        /// F17: 全局佣金紧急暂停中，所有佣金操作不可用
+        GlobalCommissionPaused,
+        /// F18: Entity 级提现已暂停
+        WithdrawalPausedByOwner,
+        /// F4+: Entity 未处于活跃状态（配置类操作需要 Entity active）
+        EntityNotActive,
+        /// F21: 订单记录不存在或已归档
+        OrderRecordsNotFound,
+        /// F21: 订单佣金记录中存在未完结的记录（Pending/Distributed），不可归档
+        OrderRecordsNotFinalized,
     }
 
     // ========================================================================
@@ -790,6 +919,7 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             Self::ensure_owner_or_admin(entity_id, &who)?;
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(modes.is_valid(), Error::<T>::InvalidCommissionRate);
 
             let old_has_pool = CommissionConfigs::<T>::get(entity_id)
@@ -808,8 +938,15 @@ pub mod pallet {
                 let now = <frame_system::Pallet<T>>::block_number();
                 PoolRewardDisabledAt::<T>::insert(entity_id, now);
             } else if !old_has_pool && new_has_pool {
-                // POOL_REWARD 被开启 → 清除 cooldown 记录
-                PoolRewardDisabledAt::<T>::remove(entity_id);
+                // M1-R6 审计修复: 仅当 commission 已启用时才清除 cooldown
+                // 若 enabled=false，添加 POOL_REWARD 模式位不会真正激活沉淀池，
+                // 不应清除合法的 cooldown（否则可通过 toggle 模式位绕过冻结期）
+                let is_enabled = CommissionConfigs::<T>::get(entity_id)
+                    .map(|c| c.enabled)
+                    .unwrap_or(false);
+                if is_enabled {
+                    PoolRewardDisabledAt::<T>::remove(entity_id);
+                }
             }
 
             Self::deposit_event(Event::CommissionModesUpdated { entity_id, modes });
@@ -829,6 +966,7 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             Self::ensure_owner_or_admin(entity_id, &who)?;
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(max_rate <= 10000, Error::<T>::InvalidCommissionRate);
 
             // F15: 全局佣金率上限校验
@@ -857,11 +995,28 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             Self::ensure_owner_or_admin(entity_id, &who)?;
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+
+            // H1-R5 审计修复: 跟踪 POOL_REWARD 状态变化（与 set_commission_modes 一致）
+            let old_pool_on = CommissionConfigs::<T>::get(entity_id)
+                .map(|c| c.enabled && c.enabled_modes.contains(CommissionModes::POOL_REWARD))
+                .unwrap_or(false);
 
             CommissionConfigs::<T>::mutate(entity_id, |maybe| {
                 let config = maybe.get_or_insert_with(CoreCommissionConfig::default);
                 config.enabled = enabled;
             });
+
+            let new_pool_on = CommissionConfigs::<T>::get(entity_id)
+                .map(|c| c.enabled && c.enabled_modes.contains(CommissionModes::POOL_REWARD))
+                .unwrap_or(false);
+
+            if old_pool_on && !new_pool_on {
+                let now = <frame_system::Pallet<T>>::block_number();
+                PoolRewardDisabledAt::<T>::insert(entity_id, now);
+            } else if !old_pool_on && new_pool_on {
+                PoolRewardDisabledAt::<T>::remove(entity_id);
+            }
 
             Self::deposit_event(Event::CommissionConfigUpdated { entity_id });
             Ok(())
@@ -885,6 +1040,11 @@ pub mod pallet {
             repurchase_target: Option<T::AccountId>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+
+            // F17: 全局紧急暂停检查
+            ensure!(!GlobalCommissionPaused::<T>::get(), Error::<T>::GlobalCommissionPaused);
+            // F18: Entity 级提现暂停检查
+            ensure!(!WithdrawalPaused::<T>::get(entity_id), Error::<T>::WithdrawalPausedByOwner);
 
             // H1 审计修复: NEX 提现也需检查参与权（与 Token 提现一致）
             ensure!(
@@ -997,6 +1157,24 @@ pub mod pallet {
                     *total = total.saturating_sub(total_amount);
                 });
 
+                // F20: 记录 NEX 提现历史（满则丢弃最旧）
+                let now = <frame_system::Pallet<T>>::block_number();
+                MemberWithdrawalHistory::<T>::mutate(entity_id, &who, |history| {
+                    let record = WithdrawalRecord {
+                        total_amount,
+                        withdrawn: split.withdrawal,
+                        repurchased: split.repurchase,
+                        bonus: split.bonus,
+                        block_number: now,
+                    };
+                    if history.try_push(record.clone()).is_err() {
+                        if !history.is_empty() {
+                            history.remove(0);
+                        }
+                        let _ = history.try_push(record);
+                    }
+                });
+
                 // 发出事件
                 Self::deposit_event(Event::TieredWithdrawal {
                     entity_id,
@@ -1026,6 +1204,7 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             Self::ensure_owner_or_admin(entity_id, &who)?;
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
 
             // 校验模式参数
             match &mode {
@@ -1114,6 +1293,7 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             Self::ensure_owner_or_admin(entity_id, &who)?;
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
 
             // 校验模式参数
             match &mode {
@@ -1194,6 +1374,11 @@ pub mod pallet {
             repurchase_target: Option<T::AccountId>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+
+            // F17: 全局紧急暂停检查
+            ensure!(!GlobalCommissionPaused::<T>::get(), Error::<T>::GlobalCommissionPaused);
+            // F18: Entity 级提现暂停检查
+            ensure!(!WithdrawalPaused::<T>::get(entity_id), Error::<T>::WithdrawalPausedByOwner);
 
             // H1 审计修复: Token 提现也需检查参与权（与 NEX 提现一致）
             ensure!(
@@ -1307,6 +1492,24 @@ pub mod pallet {
                 // 释放 pending 锁定
                 TokenPendingTotal::<T>::mutate(entity_id, |total| {
                     *total = total.saturating_sub(total_amount);
+                });
+
+                // F20: 记录 Token 提现历史（满则丢弃最旧）
+                let now = <frame_system::Pallet<T>>::block_number();
+                MemberTokenWithdrawalHistory::<T>::mutate(entity_id, &who, |history| {
+                    let record = WithdrawalRecord {
+                        total_amount,
+                        withdrawn: split.withdrawal,
+                        repurchased: split.repurchase,
+                        bonus: split.bonus,
+                        block_number: now,
+                    };
+                    if history.try_push(record.clone()).is_err() {
+                        if !history.is_empty() {
+                            history.remove(0);
+                        }
+                        let _ = history.try_push(record);
+                    }
                 });
 
                 Self::deposit_event(Event::TokenTieredWithdrawal {
@@ -1450,6 +1653,9 @@ pub mod pallet {
         ///
         /// 仅 Entity Owner 可调用。rate 为基点，0 = 不启用，上限 5000（50%）
         /// 需同时启用 CREATOR_REWARD 模式位才会实际生效
+        ///
+        /// R8: 无币实体（None 模式）锁定后，仍允许单调递减（只减不增）。
+        /// FullDAO 锁定的实体需通过 DAO 提案修改。
         #[pallet::call_index(14)]
         #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn set_creator_reward_rate(
@@ -1459,7 +1665,18 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::ensure_owner_or_admin(entity_id, &who)?;
-            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+
+            // R8: 锁定状态下仅 None 模式允许单调递减
+            if T::EntityProvider::is_entity_locked(entity_id) {
+                let mode = T::GovernanceProvider::governance_mode(entity_id);
+                ensure!(mode == GovernanceMode::None, Error::<T>::EntityLocked);
+                let current = CommissionConfigs::<T>::get(entity_id)
+                    .map(|c| c.creator_reward_rate)
+                    .unwrap_or(0);
+                ensure!(rate < current, Error::<T>::LockedOnlyDecreaseAllowed);
+            }
+
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
             ensure!(rate <= 5000, Error::<T>::InvalidCommissionRate);
 
             CommissionConfigs::<T>::mutate(entity_id, |maybe| {
@@ -1517,6 +1734,7 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             Self::ensure_owner_or_admin(entity_id, &who)?;
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
 
             CommissionConfigs::<T>::mutate(entity_id, |maybe| {
                 let config = maybe.get_or_insert_with(CoreCommissionConfig::default);
@@ -1541,10 +1759,20 @@ pub mod pallet {
         ) -> DispatchResult {
             ensure_root(origin)?;
 
+            // H1-R5 审计修复: 禁用前检查 POOL_REWARD 状态，防止绕过 cooldown
+            let old_pool_on = CommissionConfigs::<T>::get(entity_id)
+                .map(|c| c.enabled && c.enabled_modes.contains(CommissionModes::POOL_REWARD))
+                .unwrap_or(false);
+
             CommissionConfigs::<T>::mutate(entity_id, |maybe| {
                 let config = maybe.get_or_insert_with(CoreCommissionConfig::default);
                 config.enabled = false;
             });
+
+            if old_pool_on {
+                let now = <frame_system::Pallet<T>>::block_number();
+                PoolRewardDisabledAt::<T>::insert(entity_id, now);
+            }
 
             Self::deposit_event(Event::CommissionForceDisabled { entity_id });
             Ok(())
@@ -1579,7 +1807,18 @@ pub mod pallet {
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             ensure!(CommissionConfigs::<T>::contains_key(entity_id), Error::<T>::ConfigNotFound);
 
+            // H1-R5 审计修复: 清除前检查 POOL_REWARD 状态，防止绕过 cooldown
+            let old_pool_on = CommissionConfigs::<T>::get(entity_id)
+                .map(|c| c.enabled && c.enabled_modes.contains(CommissionModes::POOL_REWARD))
+                .unwrap_or(false);
+
             CommissionConfigs::<T>::remove(entity_id);
+
+            if old_pool_on {
+                let now = <frame_system::Pallet<T>>::block_number();
+                PoolRewardDisabledAt::<T>::insert(entity_id, now);
+            }
+
             Self::deposit_event(Event::CommissionConfigCleared { entity_id });
             Ok(())
         }
@@ -1615,6 +1854,117 @@ pub mod pallet {
 
             TokenWithdrawalConfigs::<T>::remove(entity_id);
             Self::deposit_event(Event::TokenWithdrawalConfigCleared { entity_id });
+            Ok(())
+        }
+
+        /// F16: 设置全局 Token 佣金率上限（Root）
+        ///
+        /// Entity Owner 的 Token max_commission_rate 不得超过此值。0 = 无限制。
+        #[pallet::call_index(23)]
+        #[pallet::weight(Weight::from_parts(30_000_000, 3_000))]
+        pub fn set_global_max_token_commission_rate(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            rate: u16,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(rate <= 10000, Error::<T>::InvalidCommissionRate);
+            GlobalMaxTokenCommissionRate::<T>::insert(entity_id, rate);
+            Self::deposit_event(Event::GlobalMaxTokenCommissionRateSet { entity_id, rate });
+            Ok(())
+        }
+
+        /// F17: 全局佣金紧急暂停/恢复（Root）
+        ///
+        /// 暂停后所有 Entity 的 process_commission、withdraw_commission 均被阻止
+        #[pallet::call_index(24)]
+        #[pallet::weight(Weight::from_parts(20_000_000, 2_000))]
+        pub fn force_global_pause(
+            origin: OriginFor<T>,
+            paused: bool,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            GlobalCommissionPaused::<T>::put(paused);
+            Self::deposit_event(Event::GlobalCommissionPauseToggled { paused });
+            Ok(())
+        }
+
+        /// F18: Entity 级提现暂停/恢复（Entity Owner/Admin）
+        ///
+        /// 轻量级开关，不影响 WithdrawalConfig 本身
+        #[pallet::call_index(25)]
+        #[pallet::weight(Weight::from_parts(30_000_000, 3_000))]
+        pub fn pause_withdrawals(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            paused: bool,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+
+            WithdrawalPaused::<T>::insert(entity_id, paused);
+            Self::deposit_event(Event::WithdrawalPauseToggled { entity_id, paused });
+            Ok(())
+        }
+
+        /// F21: 归档已完结订单的佣金记录（释放链上存储）
+        ///
+        /// 仅允许 Entity Owner/Admin 调用。订单所有 NEX 和 Token 佣金记录
+        /// 状态必须为 Withdrawn 或 Cancelled 才可归档。
+        #[pallet::call_index(26)]
+        #[pallet::weight(Weight::from_parts(60_000_000, 6_000))]
+        pub fn archive_order_records(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            order_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+
+            // 检查 NEX 记录是否可归档
+            let nex_records = OrderCommissionRecords::<T>::get(order_id);
+            let token_records = OrderTokenCommissionRecords::<T>::get(order_id);
+
+            // 至少有一种记录存在
+            ensure!(
+                !nex_records.is_empty() || !token_records.is_empty(),
+                Error::<T>::OrderRecordsNotFound
+            );
+
+            // M1-R5 审计修复: 验证订单记录确属该 entity_id，防止跨实体越权归档
+            for record in nex_records.iter() {
+                ensure!(record.entity_id == entity_id, Error::<T>::OrderRecordsNotFound);
+            }
+            for record in token_records.iter() {
+                ensure!(record.entity_id == entity_id, Error::<T>::OrderRecordsNotFound);
+            }
+
+            // 所有 NEX 记录必须已完结
+            for record in nex_records.iter() {
+                ensure!(
+                    record.status == CommissionStatus::Withdrawn || record.status == CommissionStatus::Cancelled,
+                    Error::<T>::OrderRecordsNotFinalized
+                );
+            }
+
+            // 所有 Token 记录必须已完结
+            for record in token_records.iter() {
+                ensure!(
+                    record.status == CommissionStatus::Withdrawn || record.status == CommissionStatus::Cancelled,
+                    Error::<T>::OrderRecordsNotFinalized
+                );
+            }
+
+            // 清理所有关联存储
+            OrderCommissionRecords::<T>::remove(order_id);
+            OrderTokenCommissionRecords::<T>::remove(order_id);
+            OrderTreasuryTransfer::<T>::remove(order_id);
+            OrderUnallocated::<T>::remove(order_id);
+            OrderTokenUnallocated::<T>::remove(order_id);
+            OrderTokenPlatformRetention::<T>::remove(order_id);
+
+            Self::deposit_event(Event::OrderRecordsArchived { order_id });
             Ok(())
         }
 
@@ -1982,6 +2332,9 @@ pub mod pallet {
             available_pool: BalanceOf<T>,
             platform_fee: BalanceOf<T>,
         ) -> DispatchResult {
+            // F17: 全局紧急暂停检查
+            ensure!(!GlobalCommissionPaused::<T>::get(), Error::<T>::GlobalCommissionPaused);
+
             let platform_account = T::PlatformAccount::get();
 
             // ── 平台费无条件转国库（无论佣金是否配置，保障平台收入） ──
@@ -2042,12 +2395,9 @@ pub mod pallet {
             let mut total_from_seller = BalanceOf::<T>::zero();
 
             // ── 池 A：招商推荐人奖金（从平台费扣除，比例由全局常量控制） ──
-            let referrer_share_bps = T::ReferrerShareBps::get();
-            if referrer_share_bps > 0 {
+            // L1-R5 审计修复: 复用上方已计算的 referrer_quota 和 has_referrer，避免重复存储读取和计算
+            if has_referrer {
                 if let Some(referrer) = T::EntityReferrerProvider::entity_referrer(entity_id) {
-                    let referrer_quota = platform_fee
-                        .saturating_mul(referrer_share_bps.into())
-                        / 10000u32.into();
                     // KeepAlive 要求转账后余额 >= ED
                     let platform_balance = T::Currency::free_balance(&platform_account);
                     let min_balance = T::Currency::minimum_balance();
@@ -2270,6 +2620,19 @@ pub mod pallet {
                 *total = total.saturating_add(amount);
             });
 
+            // F19: 记录会员佣金关联订单 ID（去重，满则丢弃最旧）
+            MemberCommissionOrderIds::<T>::mutate(entity_id, beneficiary, |ids| {
+                if !ids.contains(&order_id) {
+                    if ids.try_push(order_id).is_err() {
+                        // 满了 → 移除最旧的，腾出空间
+                        if !ids.is_empty() {
+                            ids.remove(0);
+                        }
+                        let _ = ids.try_push(order_id);
+                    }
+                }
+            });
+
             Self::deposit_event(Event::CommissionDistributed {
                 entity_id,
                 order_id,
@@ -2299,12 +2662,16 @@ pub mod pallet {
             token_available_pool: TokenBalanceOf<T>,
             token_platform_fee: TokenBalanceOf<T>,
         ) -> DispatchResult {
-            let config = CommissionConfigs::<T>::get(entity_id)
-                .filter(|c| c.enabled)
-                .ok_or(Error::<T>::CommissionNotConfigured)?;
+            // F17: 全局紧急暂停检查
+            ensure!(!GlobalCommissionPaused::<T>::get(), Error::<T>::GlobalCommissionPaused);
 
-            // 检测外部直接转入的 Token 并归入沉淀池（token_platform_fee 是已知合法入账）
+            // M2-R5 审计修复: 先 sweep 再检查配置，未配置时优雅返回（与 NEX 版 process_commission 对称）
             Self::sweep_token_free_balance(entity_id, token_platform_fee);
+
+            let config = match CommissionConfigs::<T>::get(entity_id).filter(|c| c.enabled) {
+                Some(c) => c,
+                None => return Ok(()),
+            };
 
             let enabled_modes = config.enabled_modes;
             let entity_account = T::EntityProvider::entity_account(entity_id);
@@ -2335,6 +2702,8 @@ pub mod pallet {
                 UnallocatedTokenPool::<T>::mutate(entity_id, |pool| {
                     *pool = pool.saturating_add(pool_a_retention);
                 });
+                // M2-R6 审计修复: 记录 Pool A 留存，供 cancel 时回退
+                OrderTokenPlatformRetention::<T>::insert(order_id, (entity_id, pool_a_retention));
                 Self::deposit_event(Event::TokenUnallocatedPooled {
                     entity_id, order_id, amount: pool_a_retention,
                 });
@@ -2499,6 +2868,18 @@ pub mod pallet {
 
             // P3 审计修复: Token 入账更新独立冻结时间（与 NEX 的 MemberLastCredited 解耦）
             MemberTokenLastCredited::<T>::insert(entity_id, beneficiary, now);
+
+            // F19: 记录会员 Token 佣金关联订单 ID（去重，满则丢弃最旧）
+            MemberTokenCommissionOrderIds::<T>::mutate(entity_id, beneficiary, |ids| {
+                if !ids.contains(&order_id) {
+                    if ids.try_push(order_id).is_err() {
+                        if !ids.is_empty() {
+                            ids.remove(0);
+                        }
+                        let _ = ids.try_push(order_id);
+                    }
+                }
+            });
 
             Self::deposit_event(Event::TokenCommissionDistributed {
                 entity_id, order_id,
@@ -2735,6 +3116,16 @@ pub mod pallet {
                 }
             }
 
+            // M2-R6 审计修复: 回退 Pool A 留存（token_platform_fee 中未分配给 referrer 的部分）
+            // 与 NEX cancel 退还 OrderTreasuryTransfer 对称
+            let (retention_entity_id, retention_amount) = OrderTokenPlatformRetention::<T>::get(order_id);
+            if !retention_amount.is_zero() {
+                UnallocatedTokenPool::<T>::mutate(retention_entity_id, |pool| {
+                    *pool = pool.saturating_sub(retention_amount);
+                });
+                OrderTokenPlatformRetention::<T>::remove(order_id);
+            }
+
             if token_cancelled > 0 {
                 Self::deposit_event(Event::TokenCommissionCancelled {
                     order_id, cancelled_count: token_cancelled,
@@ -2742,6 +3133,59 @@ pub mod pallet {
             }
 
             Ok(())
+        }
+    }
+
+    // ========================================================================
+    // Hooks (#11: Storage 版本与迁移钩子)
+    // ========================================================================
+
+    #[pallet::hooks]
+    impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        fn on_runtime_upgrade() -> Weight {
+            let on_chain = StorageVersion::get::<Pallet<T>>();
+            if on_chain < 1 {
+                log::info!(
+                    target: "pallet-commission-core",
+                    "🔄 Migrating from v{:?} to v1 (no-op data migration, new storage items have defaults)",
+                    on_chain,
+                );
+                StorageVersion::new(1).put::<Pallet<T>>();
+                Weight::from_parts(10_000_000, 1_000)
+            } else {
+                Weight::zero()
+            }
+        }
+
+        #[cfg(feature = "try-runtime")]
+        fn try_state(_n: BlockNumberFor<T>) -> Result<(), sp_runtime::TryRuntimeError> {
+            // 验证 GlobalCommissionPaused 布尔一致性（总是 valid，占位检查）
+            let _ = GlobalCommissionPaused::<T>::get();
+            Ok(())
+        }
+
+        fn integrity_test() {
+            // #12: Config 常量合理性检查
+            assert!(
+                T::ReferrerShareBps::get() <= 10000,
+                "ReferrerShareBps must be <= 10000 (100%)"
+            );
+            assert!(
+                T::MaxCommissionRecordsPerOrder::get() > 0,
+                "MaxCommissionRecordsPerOrder must be > 0"
+            );
+            assert!(
+                T::MaxCustomLevels::get() > 0,
+                "MaxCustomLevels must be > 0"
+            );
+            assert!(
+                T::MaxWithdrawalRecords::get() > 0,
+                "MaxWithdrawalRecords must be > 0"
+            );
+            assert!(
+                T::MaxMemberOrderIds::get() > 0,
+                "MaxMemberOrderIds must be > 0"
+            );
         }
     }
 }
@@ -2801,7 +3245,13 @@ impl<T: pallet::Config> CommissionProvider<T::AccountId, pallet::BalanceOf<T>> f
             let now = <frame_system::Pallet<T>>::block_number();
             pallet::PoolRewardDisabledAt::<T>::insert(entity_id, now);
         } else if !old_has_pool && new_has_pool {
-            pallet::PoolRewardDisabledAt::<T>::remove(entity_id);
+            // M1-R6 审计修复: 仅当 commission 已启用时才清除 cooldown（与 extrinsic 一致）
+            let is_enabled = pallet::CommissionConfigs::<T>::get(entity_id)
+                .map(|c| c.enabled)
+                .unwrap_or(false);
+            if is_enabled {
+                pallet::PoolRewardDisabledAt::<T>::remove(entity_id);
+            }
         }
 
         Ok(())

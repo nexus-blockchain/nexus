@@ -34,6 +34,8 @@ pub trait WeightInfo {
     fn update_domain_config() -> Weight;
     fn request_unpin() -> Weight;
     fn set_domain_priority() -> Weight;
+    fn governance_force_unpin() -> Weight;
+    fn cleanup_expired_cids(n: u32) -> Weight;
 }
 
 /// Substrate 权重实现
@@ -172,6 +174,17 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
         Weight::from_parts(15_000_000, 500)
             .saturating_add(T::DbWeight::get().writes(1))
     }
+    fn governance_force_unpin() -> Weight {
+        Weight::from_parts(40_000_000, 2_000)
+            .saturating_add(T::DbWeight::get().reads(2))
+            .saturating_add(T::DbWeight::get().writes(4))
+    }
+    fn cleanup_expired_cids(n: u32) -> Weight {
+        Weight::from_parts(30_000_000, 1_500)
+            .saturating_add(Weight::from_parts(20_000_000, 500).saturating_mul(n as u64))
+            .saturating_add(T::DbWeight::get().reads(1 + n as u64 * 3))
+            .saturating_add(T::DbWeight::get().writes(n as u64 * 10))
+    }
 }
 
 /// 默认权重实现（用于测试）
@@ -203,4 +216,6 @@ impl WeightInfo for () {
     fn update_domain_config() -> Weight { Weight::from_parts(25_000_000, 1_000) }
     fn request_unpin() -> Weight { Weight::from_parts(35_000_000, 1_500) }
     fn set_domain_priority() -> Weight { Weight::from_parts(15_000_000, 500) }
+    fn governance_force_unpin() -> Weight { Weight::from_parts(40_000_000, 2_000) }
+    fn cleanup_expired_cids(n: u32) -> Weight { Weight::from_parts(30_000_000 + 20_000_000 * n as u64, 1_500) }
 }

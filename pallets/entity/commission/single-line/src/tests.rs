@@ -144,7 +144,11 @@ fn set_config_emits_event() {
     new_test_ext().execute_with(|| {
         setup_config(1);
         frame_system::Pallet::<Test>::assert_has_event(
-            pallet::Event::<Test>::SingleLineConfigUpdated { entity_id: 1 }.into(),
+            pallet::Event::<Test>::SingleLineConfigUpdated {
+                entity_id: 1, upline_rate: 100, downline_rate: 100,
+                base_upline_levels: 10, base_downline_levels: 15,
+                max_upline_levels: 150, max_downline_levels: 200,
+            }.into(),
         );
     });
 }
@@ -164,11 +168,11 @@ fn add_to_single_line_works() {
         assert_eq!(pallet::SingleLineIndex::<Test>::get(1, 20), Some(1));
         assert_eq!(pallet::SingleLineIndex::<Test>::get(1, 30), Some(2));
 
-        let line = pallet::SingleLines::<Test>::get(1);
-        assert_eq!(line.len(), 3);
-        assert_eq!(line[0], 10);
-        assert_eq!(line[1], 20);
-        assert_eq!(line[2], 30);
+        let seg = pallet::SingleLineSegments::<Test>::get(1, 0u32);
+        assert_eq!(seg.len(), 3);
+        assert_eq!(seg[0], 10);
+        assert_eq!(seg[1], 20);
+        assert_eq!(seg[2], 30);
     });
 }
 
@@ -177,8 +181,7 @@ fn add_to_single_line_idempotent() {
     new_test_ext().execute_with(|| {
         assert_ok!(SingleLine::add_to_single_line(1, &10));
         assert_ok!(SingleLine::add_to_single_line(1, &10));
-        let line = pallet::SingleLines::<Test>::get(1);
-        assert_eq!(line.len(), 1);
+        assert_eq!(SingleLine::single_line_length(1), 1);
     });
 }
 
@@ -191,10 +194,8 @@ fn add_to_single_line_cross_entity_isolation() {
         assert_eq!(pallet::SingleLineIndex::<Test>::get(1, 10), Some(0));
         assert_eq!(pallet::SingleLineIndex::<Test>::get(2, 10), Some(0));
 
-        let line1 = pallet::SingleLines::<Test>::get(1);
-        let line2 = pallet::SingleLines::<Test>::get(2);
-        assert_eq!(line1.len(), 1);
-        assert_eq!(line2.len(), 1);
+        assert_eq!(SingleLine::single_line_length(1), 1);
+        assert_eq!(SingleLine::single_line_length(2), 1);
     });
 }
 
@@ -244,9 +245,8 @@ fn process_upline_basic() {
         let mut outputs = alloc::vec::Vec::new();
 
         // buyer=50 (index=4), upline_rate=100 (1%), base_upline_levels=10
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let (base_up, _) = SingleLine::effective_base_levels(entity_id, &50, &config);
-        SingleLine::process_upline(entity_id, &50, 100_000, &mut remaining, &config, base_up, &line, &mut outputs);
+        SingleLine::process_upline(entity_id, &50, 100_000, &mut remaining, &config, base_up, &mut outputs);
 
         // 向上 4 层: 40,30,20,10，每层 100000 * 100 / 10000 = 1000
         assert_eq!(outputs.len(), 4);
@@ -275,9 +275,8 @@ fn process_upline_buyer_at_index_0_no_output() {
         let mut remaining: u128 = 10000;
         let mut outputs = alloc::vec::Vec::new();
         // buyer=10 是第一个人 (index=0)，没有上线
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let (base_up, _) = SingleLine::effective_base_levels(entity_id, &10, &config);
-        SingleLine::process_upline(entity_id, &10, 10000, &mut remaining, &config, base_up, &line, &mut outputs);
+        SingleLine::process_upline(entity_id, &10, 10000, &mut remaining, &config, base_up, &mut outputs);
 
         assert!(outputs.is_empty());
         assert_eq!(remaining, 10000);
@@ -295,9 +294,8 @@ fn process_upline_buyer_not_in_line_no_output() {
         let mut remaining: u128 = 10000;
         let mut outputs = alloc::vec::Vec::new();
         // buyer=99 不在单链中
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let (base_up, _) = SingleLine::effective_base_levels(entity_id, &99, &config);
-        SingleLine::process_upline(entity_id, &99, 10000, &mut remaining, &config, base_up, &line, &mut outputs);
+        SingleLine::process_upline(entity_id, &99, 10000, &mut remaining, &config, base_up, &mut outputs);
 
         assert!(outputs.is_empty());
     });
@@ -314,9 +312,8 @@ fn process_upline_capped_by_remaining() {
         // remaining 只有 1500，每层 1000
         let mut remaining: u128 = 1500;
         let mut outputs = alloc::vec::Vec::new();
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let (base_up, _) = SingleLine::effective_base_levels(entity_id, &50, &config);
-        SingleLine::process_upline(entity_id, &50, 100_000, &mut remaining, &config, base_up, &line, &mut outputs);
+        SingleLine::process_upline(entity_id, &50, 100_000, &mut remaining, &config, base_up, &mut outputs);
 
         // 40: 1000, remaining=500
         // 30: min(1000, 500)=500, remaining=0
@@ -346,9 +343,8 @@ fn process_upline_dynamic_levels_with_extra() {
         let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
         let mut remaining: u128 = 100_000;
         let mut outputs = alloc::vec::Vec::new();
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let (base_up, _) = SingleLine::effective_base_levels(entity_id, &6, &config);
-        SingleLine::process_upline(entity_id, &6, 100_000, &mut remaining, &config, base_up, &line, &mut outputs);
+        SingleLine::process_upline(entity_id, &6, 100_000, &mut remaining, &config, base_up, &mut outputs);
 
         // 向上最多 5 层，但只有 5 个人在上面 (index 0..4)
         assert_eq!(outputs.len(), 5);
@@ -374,9 +370,8 @@ fn process_downline_basic() {
         let mut outputs = alloc::vec::Vec::new();
 
         // buyer=20 (index=1), downline_rate=100 (1%), base_downline_levels=15
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let (_, base_down) = SingleLine::effective_base_levels(entity_id, &20, &config);
-        SingleLine::process_downline(entity_id, &20, 100_000, &mut remaining, &config, base_down, &line, &mut outputs);
+        SingleLine::process_downline(entity_id, &20, 100_000, &mut remaining, &config, base_down, &mut outputs);
 
         // 向下 3 层: 30,40,50，每层 1000
         assert_eq!(outputs.len(), 3);
@@ -402,9 +397,8 @@ fn process_downline_zero_rate_no_output() {
         let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
         let mut remaining: u128 = 10000;
         let mut outputs = alloc::vec::Vec::new();
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let (_, base_down) = SingleLine::effective_base_levels(entity_id, &10, &config);
-        SingleLine::process_downline(entity_id, &10, 10000, &mut remaining, &config, base_down, &line, &mut outputs);
+        SingleLine::process_downline(entity_id, &10, 10000, &mut remaining, &config, base_down, &mut outputs);
 
         assert!(outputs.is_empty());
     });
@@ -421,9 +415,8 @@ fn process_downline_last_in_line_no_output() {
         let mut remaining: u128 = 10000;
         let mut outputs = alloc::vec::Vec::new();
         // buyer=30 是最后一个人，没有下线
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let (_, base_down) = SingleLine::effective_base_levels(entity_id, &30, &config);
-        SingleLine::process_downline(entity_id, &30, 10000, &mut remaining, &config, base_down, &line, &mut outputs);
+        SingleLine::process_downline(entity_id, &30, 10000, &mut remaining, &config, base_down, &mut outputs);
 
         assert!(outputs.is_empty());
     });
@@ -440,9 +433,8 @@ fn process_downline_capped_by_remaining() {
         let mut remaining: u128 = 2500;
         let mut outputs = alloc::vec::Vec::new();
         // buyer=10 (index=0), 下线: 20,30,40,50 每层 1000
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let (_, base_down) = SingleLine::effective_base_levels(entity_id, &10, &config);
-        SingleLine::process_downline(entity_id, &10, 100_000, &mut remaining, &config, base_down, &line, &mut outputs);
+        SingleLine::process_downline(entity_id, &10, 100_000, &mut remaining, &config, base_down, &mut outputs);
 
         // 20: 1000, remaining=1500
         // 30: 1000, remaining=500
@@ -473,9 +465,8 @@ fn process_downline_dynamic_levels_with_extra() {
         let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
         let mut remaining: u128 = 100_000;
         let mut outputs = alloc::vec::Vec::new();
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let (_, base_down) = SingleLine::effective_base_levels(entity_id, &1, &config);
-        SingleLine::process_downline(entity_id, &1, 100_000, &mut remaining, &config, base_down, &line, &mut outputs);
+        SingleLine::process_downline(entity_id, &1, 100_000, &mut remaining, &config, base_down, &mut outputs);
 
         // 下线有 4 个人 (index 1..4)，effective=4 → 全部覆盖
         assert_eq!(outputs.len(), 4);
@@ -588,25 +579,25 @@ fn plugin_first_order_adds_to_single_line() {
         );
 
         assert_eq!(pallet::SingleLineIndex::<Test>::get(entity_id, 10), Some(0));
-        let line = pallet::SingleLines::<Test>::get(entity_id);
-        assert_eq!(line.len(), 1);
-        assert_eq!(line[0], 10);
+        assert_eq!(SingleLine::single_line_length(entity_id), 1);
+        let seg = pallet::SingleLineSegments::<Test>::get(entity_id, 0u32);
+        assert_eq!(seg[0], 10);
     });
 }
 
 #[test]
-fn plugin_not_first_order_does_not_add() {
+fn plugin_not_first_order_still_adds_if_not_in_line() {
     new_test_ext().execute_with(|| {
         let entity_id = 1u64;
         setup_config(entity_id);
 
         let modes = CommissionModes(CommissionModes::SINGLE_LINE_UPLINE);
-        // is_first_order=false → 不应加入单链
+        // F5 修复后: is_first_order 不再控制加入，未在链中的用户每次消费都自动尝试加入
         let _ = <SingleLine as CommissionPlugin<u64, u128>>::calculate(
             entity_id, &10, 100_000, 100_000, modes, false, 1,
         );
 
-        assert_eq!(pallet::SingleLineIndex::<Test>::get(entity_id, 10), None);
+        assert_eq!(pallet::SingleLineIndex::<Test>::get(entity_id, 10), Some(0));
     });
 }
 
@@ -692,9 +683,8 @@ fn upline_levels_capped_by_max_upline_levels() {
         let mut remaining: u128 = 100_000;
         let mut outputs = alloc::vec::Vec::new();
         // buyer=5 (index=4), base=10 but max=2 → clamped to 2
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let (base_up, _) = SingleLine::effective_base_levels(entity_id, &5, &config);
-        SingleLine::process_upline(entity_id, &5, 100_000, &mut remaining, &config, base_up, &line, &mut outputs);
+        SingleLine::process_upline(entity_id, &5, 100_000, &mut remaining, &config, base_up, &mut outputs);
 
         assert_eq!(outputs.len(), 2);
         assert_eq!(outputs[0].beneficiary, 4); // level=1
@@ -722,9 +712,8 @@ fn downline_levels_capped_by_max_downline_levels() {
         let mut remaining: u128 = 100_000;
         let mut outputs = alloc::vec::Vec::new();
         // buyer=1 (index=0), base=15 but max=1 → clamped to 1
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let (_, base_down) = SingleLine::effective_base_levels(entity_id, &1, &config);
-        SingleLine::process_downline(entity_id, &1, 100_000, &mut remaining, &config, base_down, &line, &mut outputs);
+        SingleLine::process_downline(entity_id, &1, 100_000, &mut remaining, &config, base_down, &mut outputs);
 
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].beneficiary, 2);
@@ -742,9 +731,8 @@ fn commission_based_on_order_amount_not_remaining() {
         // order_amount=100000, remaining=50000
         let mut remaining: u128 = 50_000;
         let mut outputs = alloc::vec::Vec::new();
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let (base_up, _) = SingleLine::effective_base_levels(entity_id, &20, &config);
-        SingleLine::process_upline(entity_id, &20, 100_000, &mut remaining, &config, base_up, &line, &mut outputs);
+        SingleLine::process_upline(entity_id, &20, 100_000, &mut remaining, &config, base_up, &mut outputs);
 
         // commission = 100000 * 100 / 10000 = 1000 (基于 order_amount)
         assert_eq!(outputs.len(), 1);
@@ -753,30 +741,34 @@ fn commission_based_on_order_amount_not_remaining() {
 }
 
 #[test]
-fn single_line_full_emits_event() {
+fn single_line_auto_extends_on_full_segment() {
     new_test_ext().execute_with(|| {
         let entity_id = 1u64;
         setup_config(entity_id);
 
-        // MaxSingleLineLength=100，填满单链
+        // MaxSingleLineLength=100，填满第一段
         for i in 0..100u64 {
             assert_ok!(SingleLine::add_to_single_line(entity_id, &i));
         }
+        assert_eq!(pallet::SingleLineSegmentCount::<Test>::get(entity_id), 1);
 
-        // 第 101 个应失败
-        assert!(SingleLine::add_to_single_line(entity_id, &200).is_err());
+        // 第 101 个自动创建新段
+        assert_ok!(SingleLine::add_to_single_line(entity_id, &200));
+        assert_eq!(pallet::SingleLineSegmentCount::<Test>::get(entity_id), 2);
+        assert_eq!(SingleLine::single_line_length(entity_id), 101);
+        assert_eq!(SingleLine::user_position(entity_id, &200), Some(100));
 
-        // 通过 plugin 路径触发 SingleLineJoinFailed 事件
+        // 通过 plugin 路径也能成功加入
         let modes = CommissionModes(CommissionModes::SINGLE_LINE_UPLINE);
         let _ = <SingleLine as CommissionPlugin<u64, u128>>::calculate(
             entity_id, &201, 10000, 10000, modes, true, 1,
         );
+        assert_eq!(SingleLine::user_position(entity_id, &201), Some(101));
         frame_system::Pallet::<Test>::assert_has_event(
-            pallet::Event::<Test>::SingleLineJoinFailed {
+            pallet::Event::<Test>::NewSegmentCreated {
                 entity_id,
-                account: 201,
-            }
-            .into(),
+                segment_id: 1,
+            }.into(),
         );
     });
 }
@@ -887,11 +879,10 @@ fn level_override_affects_upline_levels() {
 
         // buyer=7 (index=6) 无等级 → 使用 base=2
         let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let mut remaining: u128 = 100_000;
         let mut outputs = alloc::vec::Vec::new();
         let (base_up, _) = SingleLine::effective_base_levels(entity_id, &7, &config);
-        SingleLine::process_upline(entity_id, &7, 100_000, &mut remaining, &config, base_up, &line, &mut outputs);
+        SingleLine::process_upline(entity_id, &7, 100_000, &mut remaining, &config, base_up, &mut outputs);
         assert_eq!(outputs.len(), 2); // base=2
 
         // buyer=7 设为自定义等级 1 → 使用 override=5
@@ -899,7 +890,7 @@ fn level_override_affects_upline_levels() {
         remaining = 100_000;
         outputs.clear();
         let (base_up, _) = SingleLine::effective_base_levels(entity_id, &7, &config);
-        SingleLine::process_upline(entity_id, &7, 100_000, &mut remaining, &config, base_up, &line, &mut outputs);
+        SingleLine::process_upline(entity_id, &7, 100_000, &mut remaining, &config, base_up, &mut outputs);
         assert_eq!(outputs.len(), 5); // override=5
         assert_eq!(outputs[0].beneficiary, 6);
         assert_eq!(outputs[4].beneficiary, 2);
@@ -923,11 +914,10 @@ fn level_override_affects_downline_levels() {
 
         // buyer=1 (index=0) 无等级 → base=1
         let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let mut remaining: u128 = 100_000;
         let mut outputs = alloc::vec::Vec::new();
         let (_, base_down) = SingleLine::effective_base_levels(entity_id, &1, &config);
-        SingleLine::process_downline(entity_id, &1, 100_000, &mut remaining, &config, base_down, &line, &mut outputs);
+        SingleLine::process_downline(entity_id, &1, 100_000, &mut remaining, &config, base_down, &mut outputs);
         assert_eq!(outputs.len(), 1); // base=1
 
         // buyer=1 设为自定义等级 2 → override=4
@@ -935,7 +925,7 @@ fn level_override_affects_downline_levels() {
         remaining = 100_000;
         outputs.clear();
         let (_, base_down) = SingleLine::effective_base_levels(entity_id, &1, &config);
-        SingleLine::process_downline(entity_id, &1, 100_000, &mut remaining, &config, base_down, &line, &mut outputs);
+        SingleLine::process_downline(entity_id, &1, 100_000, &mut remaining, &config, base_down, &mut outputs);
         assert_eq!(outputs.len(), 4); // override=4
         assert_eq!(outputs[0].beneficiary, 2);
         assert_eq!(outputs[3].beneficiary, 5);
@@ -960,11 +950,10 @@ fn level_override_fallback_when_no_override_for_level() {
         // buyer=7 自定义等级 3（无 override）→ 回退到 base=2
         set_custom_level(entity_id, 7, 3);
         let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let mut remaining: u128 = 100_000;
         let mut outputs = alloc::vec::Vec::new();
         let (base_up, _) = SingleLine::effective_base_levels(entity_id, &7, &config);
-        SingleLine::process_upline(entity_id, &7, 100_000, &mut remaining, &config, base_up, &line, &mut outputs);
+        SingleLine::process_upline(entity_id, &7, 100_000, &mut remaining, &config, base_up, &mut outputs);
         assert_eq!(outputs.len(), 2); // fallback base=2
     });
 }
@@ -986,11 +975,10 @@ fn level_override_still_capped_by_max() {
 
         set_custom_level(entity_id, 7, 0);
         let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let mut remaining: u128 = 100_000;
         let mut outputs = alloc::vec::Vec::new();
         let (base_up, _) = SingleLine::effective_base_levels(entity_id, &7, &config);
-        SingleLine::process_upline(entity_id, &7, 100_000, &mut remaining, &config, base_up, &line, &mut outputs);
+        SingleLine::process_upline(entity_id, &7, 100_000, &mut remaining, &config, base_up, &mut outputs);
         // override=10 但 max=3 → 只有 3 层
         assert_eq!(outputs.len(), 3);
     });
@@ -1017,11 +1005,10 @@ fn level_override_combined_with_extra_levels() {
         set_member_stats(entity_id, 8, 2000);
 
         let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let mut remaining: u128 = 100_000;
         let mut outputs = alloc::vec::Vec::new();
         let (base_up, _) = SingleLine::effective_base_levels(entity_id, &8, &config);
-        SingleLine::process_upline(entity_id, &8, 100_000, &mut remaining, &config, base_up, &line, &mut outputs);
+        SingleLine::process_upline(entity_id, &8, 100_000, &mut remaining, &config, base_up, &mut outputs);
         assert_eq!(outputs.len(), 5); // override(3) + extra(2) = 5
         assert_eq!(outputs[0].beneficiary, 7);
         assert_eq!(outputs[4].beneficiary, 3);
@@ -1116,9 +1103,12 @@ fn m1_deep_add_to_single_line_emits_event() {
             })
             .collect();
 
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0], pallet::Event::AddedToSingleLine { entity_id, account: 10, index: 0 });
-        assert_eq!(events[1], pallet::Event::AddedToSingleLine { entity_id, account: 20, index: 1 });
+        // 第一次加入创建新段 → NewSegmentCreated + AddedToSingleLine
+        // 第二次加入同段 → AddedToSingleLine
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0], pallet::Event::NewSegmentCreated { entity_id, segment_id: 0 });
+        assert_eq!(events[1], pallet::Event::AddedToSingleLine { entity_id, account: 10, index: 0 });
+        assert_eq!(events[2], pallet::Event::AddedToSingleLine { entity_id, account: 20, index: 1 });
 
         // 重复加入不发射事件
         System::reset_events();
@@ -1169,16 +1159,15 @@ fn m1_r3_shared_line_upline_downline_consistent() {
         setup_single_line(entity_id, &[1, 2, 3, 4, 5]);
 
         let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
-        // M1-R3: 一次加载 line，传给 upline + downline
-        let line = pallet::SingleLines::<Test>::get(entity_id);
+        // M1-R3: upline + downline 加载段数据
         let (base_up, base_down) = SingleLine::effective_base_levels(entity_id, &3, &config);
 
         let mut remaining: u128 = 100_000;
         let mut outputs = alloc::vec::Vec::new();
 
         // buyer=3 (index=2): upline=[2,1], downline=[4,5]
-        SingleLine::process_upline(entity_id, &3, 100_000, &mut remaining, &config, base_up, &line, &mut outputs);
-        SingleLine::process_downline(entity_id, &3, 100_000, &mut remaining, &config, base_down, &line, &mut outputs);
+        SingleLine::process_upline(entity_id, &3, 100_000, &mut remaining, &config, base_up, &mut outputs);
+        SingleLine::process_downline(entity_id, &3, 100_000, &mut remaining, &config, base_down, &mut outputs);
 
         let up_out: alloc::vec::Vec<_> = outputs.iter().filter(|o| o.commission_type == CommissionType::SingleLineUpline).collect();
         let dn_out: alloc::vec::Vec<_> = outputs.iter().filter(|o| o.commission_type == CommissionType::SingleLineDownline).collect();
@@ -1232,7 +1221,11 @@ fn force_set_config_works() {
         assert_eq!(config.upline_rate, 200);
         assert_eq!(config.downline_rate, 300);
         frame_system::Pallet::<Test>::assert_has_event(
-            pallet::Event::<Test>::SingleLineConfigUpdated { entity_id: 1 }.into(),
+            pallet::Event::<Test>::SingleLineConfigUpdated {
+                entity_id: 1, upline_rate: 200, downline_rate: 300,
+                base_upline_levels: 5, base_downline_levels: 10,
+                max_upline_levels: 50, max_downline_levels: 100,
+            }.into(),
         );
     });
 }
@@ -1372,7 +1365,7 @@ fn update_params_upline_rate_only() {
     new_test_ext().execute_with(|| {
         setup_config(1);
         assert_ok!(SingleLine::update_single_line_params(
-            RuntimeOrigin::signed(OWNER), 1, Some(500), None, None,
+            RuntimeOrigin::signed(OWNER), 1, Some(500), None, None, None, None, None, None,
         ));
         let config = pallet::SingleLineConfigs::<Test>::get(1).unwrap();
         assert_eq!(config.upline_rate, 500);
@@ -1385,7 +1378,7 @@ fn update_params_downline_rate_only() {
     new_test_ext().execute_with(|| {
         setup_config(1);
         assert_ok!(SingleLine::update_single_line_params(
-            RuntimeOrigin::signed(OWNER), 1, None, Some(800), None,
+            RuntimeOrigin::signed(OWNER), 1, None, Some(800), None, None, None, None, None,
         ));
         let config = pallet::SingleLineConfigs::<Test>::get(1).unwrap();
         assert_eq!(config.upline_rate, 100); // unchanged
@@ -1398,7 +1391,7 @@ fn update_params_threshold_only() {
     new_test_ext().execute_with(|| {
         setup_config(1);
         assert_ok!(SingleLine::update_single_line_params(
-            RuntimeOrigin::signed(OWNER), 1, None, None, Some(9999),
+            RuntimeOrigin::signed(OWNER), 1, None, None, Some(9999), None, None, None, None,
         ));
         let config = pallet::SingleLineConfigs::<Test>::get(1).unwrap();
         assert_eq!(config.level_increment_threshold, 9999);
@@ -1411,7 +1404,7 @@ fn update_params_multiple() {
     new_test_ext().execute_with(|| {
         setup_config(1);
         assert_ok!(SingleLine::update_single_line_params(
-            RuntimeOrigin::signed(OWNER), 1, Some(200), Some(300), Some(5000),
+            RuntimeOrigin::signed(OWNER), 1, Some(200), Some(300), Some(5000), None, None, None, None,
         ));
         let config = pallet::SingleLineConfigs::<Test>::get(1).unwrap();
         assert_eq!(config.upline_rate, 200);
@@ -1426,7 +1419,7 @@ fn update_params_rejects_nothing_to_update() {
         setup_config(1);
         assert_noop!(
             SingleLine::update_single_line_params(
-                RuntimeOrigin::signed(OWNER), 1, None, None, None,
+                RuntimeOrigin::signed(OWNER), 1, None, None, None, None, None, None, None,
             ),
             pallet::Error::<Test>::NothingToUpdate,
         );
@@ -1439,7 +1432,7 @@ fn update_params_rejects_config_not_found() {
         setup_entity(1);
         assert_noop!(
             SingleLine::update_single_line_params(
-                RuntimeOrigin::signed(OWNER), 1, Some(100), None, None,
+                RuntimeOrigin::signed(OWNER), 1, Some(100), None, None, None, None, None, None,
             ),
             pallet::Error::<Test>::ConfigNotFound,
         );
@@ -1452,13 +1445,13 @@ fn update_params_rejects_invalid_rate() {
         setup_config(1);
         assert_noop!(
             SingleLine::update_single_line_params(
-                RuntimeOrigin::signed(OWNER), 1, Some(1001), None, None,
+                RuntimeOrigin::signed(OWNER), 1, Some(1001), None, None, None, None, None, None,
             ),
             pallet::Error::<Test>::InvalidRate,
         );
         assert_noop!(
             SingleLine::update_single_line_params(
-                RuntimeOrigin::signed(OWNER), 1, None, Some(1001), None,
+                RuntimeOrigin::signed(OWNER), 1, None, Some(1001), None, None, None, None, None,
             ),
             pallet::Error::<Test>::InvalidRate,
         );
@@ -1471,7 +1464,7 @@ fn update_params_rejects_non_owner() {
         setup_config(1);
         assert_noop!(
             SingleLine::update_single_line_params(
-                RuntimeOrigin::signed(NOBODY), 1, Some(100), None, None,
+                RuntimeOrigin::signed(NOBODY), 1, Some(100), None, None, None, None, None, None,
             ),
             pallet::Error::<Test>::NotEntityOwnerOrAdmin,
         );
@@ -1484,10 +1477,14 @@ fn update_params_emits_event() {
         setup_config(1);
         System::reset_events();
         assert_ok!(SingleLine::update_single_line_params(
-            RuntimeOrigin::signed(OWNER), 1, Some(200), None, None,
+            RuntimeOrigin::signed(OWNER), 1, Some(200), None, None, None, None, None, None,
         ));
         frame_system::Pallet::<Test>::assert_has_event(
-            pallet::Event::<Test>::SingleLineConfigUpdated { entity_id: 1 }.into(),
+            pallet::Event::<Test>::SingleLineConfigUpdated {
+                entity_id: 1, upline_rate: 200, downline_rate: 100,
+                base_upline_levels: 10, base_downline_levels: 15,
+                max_upline_levels: 150, max_downline_levels: 200,
+            }.into(),
         );
     });
 }
@@ -1510,9 +1507,8 @@ fn banned_upline_skipped() {
         let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
         let mut remaining: u128 = 100_000;
         let mut outputs = alloc::vec::Vec::new();
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let (base_up, _) = SingleLine::effective_base_levels(entity_id, &50, &config);
-        SingleLine::process_upline(entity_id, &50, 100_000, &mut remaining, &config, base_up, &line, &mut outputs);
+        SingleLine::process_upline(entity_id, &50, 100_000, &mut remaining, &config, base_up, &mut outputs);
 
         // 上线: 40(banned→skip), 30, 20, 10 → 3 outputs
         assert_eq!(outputs.len(), 3);
@@ -1535,9 +1531,8 @@ fn banned_downline_skipped() {
         let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
         let mut remaining: u128 = 100_000;
         let mut outputs = alloc::vec::Vec::new();
-        let line = pallet::SingleLines::<Test>::get(entity_id);
         let (_, base_down) = SingleLine::effective_base_levels(entity_id, &10, &config);
-        SingleLine::process_downline(entity_id, &10, 100_000, &mut remaining, &config, base_down, &line, &mut outputs);
+        SingleLine::process_downline(entity_id, &10, 100_000, &mut remaining, &config, base_down, &mut outputs);
 
         // 下线: 20, 30(banned→skip), 40, 50 → 3 outputs
         assert_eq!(outputs.len(), 3);
@@ -1588,7 +1583,11 @@ fn plan_writer_set_config_works() {
         assert_eq!(config.max_upline_levels, 50);
         assert_eq!(config.max_downline_levels, 100);
         frame_system::Pallet::<Test>::assert_has_event(
-            pallet::Event::<Test>::SingleLineConfigUpdated { entity_id: 1 }.into(),
+            pallet::Event::<Test>::SingleLineConfigUpdated {
+                entity_id: 1, upline_rate: 200, downline_rate: 300,
+                base_upline_levels: 5, base_downline_levels: 10,
+                max_upline_levels: 50, max_downline_levels: 100,
+            }.into(),
         );
     });
 }
@@ -1677,6 +1676,877 @@ fn entity_locked_rejects_clear_single_line_config() {
         assert_noop!(
             CommissionSingleLine::clear_single_line_config(RuntimeOrigin::signed(OWNER), 1),
             pallet::Error::<Test>::EntityLocked
+        );
+    });
+}
+
+// ============================================================================
+// F1: Entity 活跃状态检查测试
+// ============================================================================
+
+#[test]
+fn f1_set_config_rejects_inactive_entity() {
+    new_test_ext().execute_with(|| {
+        setup_entity(1);
+        set_entity_inactive(1);
+        assert_noop!(
+            SingleLine::set_single_line_config(
+                RuntimeOrigin::signed(OWNER), 1, 100, 100, 10, 15, 1000, 150, 200,
+            ),
+            pallet::Error::<Test>::EntityNotActive,
+        );
+    });
+}
+
+#[test]
+fn f1_clear_config_rejects_inactive_entity() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        set_entity_inactive(1);
+        assert_noop!(
+            SingleLine::clear_single_line_config(RuntimeOrigin::signed(OWNER), 1),
+            pallet::Error::<Test>::EntityNotActive,
+        );
+    });
+}
+
+#[test]
+fn f1_update_params_rejects_inactive_entity() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        set_entity_inactive(1);
+        assert_noop!(
+            SingleLine::update_single_line_params(
+                RuntimeOrigin::signed(OWNER), 1, Some(200), None, None, None, None, None, None,
+            ),
+            pallet::Error::<Test>::EntityNotActive,
+        );
+    });
+}
+
+#[test]
+fn f1_set_level_rejects_inactive_entity() {
+    new_test_ext().execute_with(|| {
+        setup_entity(1);
+        set_entity_inactive(1);
+        assert_noop!(
+            SingleLine::set_level_based_levels(RuntimeOrigin::signed(OWNER), 1, 1, 5, 5),
+            pallet::Error::<Test>::EntityNotActive,
+        );
+    });
+}
+
+#[test]
+fn f1_remove_level_rejects_inactive_entity() {
+    new_test_ext().execute_with(|| {
+        setup_entity(1);
+        set_entity_inactive(1);
+        assert_noop!(
+            SingleLine::remove_level_based_levels(RuntimeOrigin::signed(OWNER), 1, 1),
+            pallet::Error::<Test>::EntityNotActive,
+        );
+    });
+}
+
+#[test]
+fn f1_do_calculate_skips_inactive_entity() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        setup_single_line(1, &[10, 20, 30]);
+        set_entity_inactive(1);
+
+        let modes = CommissionModes(CommissionModes::SINGLE_LINE_UPLINE);
+        let (outputs, remaining) = <SingleLine as CommissionPlugin<u64, u128>>::calculate(
+            1, &30, 100_000, 100_000, modes, false, 1,
+        );
+        assert_eq!(outputs.len(), 0);
+        assert_eq!(remaining, 100_000);
+    });
+}
+
+// ============================================================================
+// F2: 单线收益暂停/恢复测试
+// ============================================================================
+
+#[test]
+fn f2_pause_single_line_works() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert!(SingleLine::is_single_line_enabled(1));
+
+        assert_ok!(SingleLine::pause_single_line(RuntimeOrigin::signed(OWNER), 1));
+        assert!(!SingleLine::is_single_line_enabled(1));
+        frame_system::Pallet::<Test>::assert_has_event(
+            pallet::Event::<Test>::SingleLinePaused { entity_id: 1 }.into(),
+        );
+    });
+}
+
+#[test]
+fn f2_resume_single_line_works() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_ok!(SingleLine::pause_single_line(RuntimeOrigin::signed(OWNER), 1));
+
+        assert_ok!(SingleLine::resume_single_line(RuntimeOrigin::signed(OWNER), 1));
+        assert!(SingleLine::is_single_line_enabled(1));
+        frame_system::Pallet::<Test>::assert_has_event(
+            pallet::Event::<Test>::SingleLineResumed { entity_id: 1 }.into(),
+        );
+    });
+}
+
+#[test]
+fn f2_pause_rejects_already_paused() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_ok!(SingleLine::pause_single_line(RuntimeOrigin::signed(OWNER), 1));
+        assert_noop!(
+            SingleLine::pause_single_line(RuntimeOrigin::signed(OWNER), 1),
+            pallet::Error::<Test>::SingleLineIsPaused,
+        );
+    });
+}
+
+#[test]
+fn f2_resume_rejects_not_paused() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_noop!(
+            SingleLine::resume_single_line(RuntimeOrigin::signed(OWNER), 1),
+            pallet::Error::<Test>::SingleLineNotPaused,
+        );
+    });
+}
+
+#[test]
+fn f2_paused_skips_commission_calculation() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        setup_single_line(1, &[10, 20, 30]);
+        assert_ok!(SingleLine::pause_single_line(RuntimeOrigin::signed(OWNER), 1));
+
+        let modes = CommissionModes(CommissionModes::SINGLE_LINE_UPLINE);
+        let (outputs, remaining) = <SingleLine as CommissionPlugin<u64, u128>>::calculate(
+            1, &30, 100_000, 100_000, modes, false, 1,
+        );
+        assert_eq!(outputs.len(), 0);
+        assert_eq!(remaining, 100_000);
+    });
+}
+
+#[test]
+fn f2_resumed_restores_commission_calculation() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        setup_single_line(1, &[10, 20, 30]);
+        assert_ok!(SingleLine::pause_single_line(RuntimeOrigin::signed(OWNER), 1));
+        assert_ok!(SingleLine::resume_single_line(RuntimeOrigin::signed(OWNER), 1));
+
+        let modes = CommissionModes(CommissionModes::SINGLE_LINE_UPLINE);
+        let (outputs, _remaining) = <SingleLine as CommissionPlugin<u64, u128>>::calculate(
+            1, &30, 100_000, 100_000, modes, false, 1,
+        );
+        assert!(outputs.len() > 0);
+    });
+}
+
+#[test]
+fn f2_pause_rejects_non_owner() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_noop!(
+            SingleLine::pause_single_line(RuntimeOrigin::signed(NOBODY), 1),
+            pallet::Error::<Test>::NotEntityOwnerOrAdmin,
+        );
+    });
+}
+
+// ============================================================================
+// F3: update_params 支持 level 参数测试
+// ============================================================================
+
+#[test]
+fn f3_update_base_upline_levels() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_ok!(SingleLine::update_single_line_params(
+            RuntimeOrigin::signed(OWNER), 1, None, None, None, Some(20), None, None, None,
+        ));
+        let config = pallet::SingleLineConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.base_upline_levels, 20);
+        assert_eq!(config.base_downline_levels, 15);
+    });
+}
+
+#[test]
+fn f3_update_max_levels() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_ok!(SingleLine::update_single_line_params(
+            RuntimeOrigin::signed(OWNER), 1, None, None, None, None, None, Some(200), Some(250),
+        ));
+        let config = pallet::SingleLineConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.max_upline_levels, 200);
+        assert_eq!(config.max_downline_levels, 250);
+    });
+}
+
+#[test]
+fn f3_update_rejects_base_exceeds_max() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_noop!(
+            SingleLine::update_single_line_params(
+                RuntimeOrigin::signed(OWNER), 1, None, None, None, Some(200), None, None, None,
+            ),
+            pallet::Error::<Test>::BaseLevelsExceedMax,
+        );
+    });
+}
+
+#[test]
+fn f3_update_rejects_max_below_base() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_noop!(
+            SingleLine::update_single_line_params(
+                RuntimeOrigin::signed(OWNER), 1, None, None, None, None, None, Some(5), None,
+            ),
+            pallet::Error::<Test>::BaseLevelsExceedMax,
+        );
+    });
+}
+
+// ============================================================================
+// F4: 查询辅助函数测试
+// ============================================================================
+
+#[test]
+fn f4_single_line_length() {
+    new_test_ext().execute_with(|| {
+        assert_eq!(SingleLine::single_line_length(1), 0);
+        setup_single_line(1, &[10, 20, 30]);
+        assert_eq!(SingleLine::single_line_length(1), 3);
+    });
+}
+
+#[test]
+fn f4_single_line_remaining_capacity() {
+    new_test_ext().execute_with(|| {
+        assert_eq!(SingleLine::single_line_remaining_capacity(1), 100);
+        setup_single_line(1, &[10, 20, 30]);
+        assert_eq!(SingleLine::single_line_remaining_capacity(1), 97);
+    });
+}
+
+#[test]
+fn f4_user_position() {
+    new_test_ext().execute_with(|| {
+        assert_eq!(SingleLine::user_position(1, &10), None);
+        setup_single_line(1, &[10, 20, 30]);
+        assert_eq!(SingleLine::user_position(1, &10), Some(0));
+        assert_eq!(SingleLine::user_position(1, &20), Some(1));
+        assert_eq!(SingleLine::user_position(1, &30), Some(2));
+        assert_eq!(SingleLine::user_position(1, &99), None);
+    });
+}
+
+#[test]
+fn f4_user_effective_levels() {
+    new_test_ext().execute_with(|| {
+        assert_eq!(SingleLine::user_effective_levels(1, &10), None);
+        setup_config(1);
+        assert_eq!(SingleLine::user_effective_levels(1, &10), Some((10, 15)));
+        set_member_stats(1, 10, 5000);
+        assert_eq!(SingleLine::user_effective_levels(1, &10), Some((15, 20)));
+    });
+}
+
+// ============================================================================
+// F5: 单链满后返回错误测试
+// ============================================================================
+
+#[test]
+fn f5_add_to_single_line_auto_extends_past_segment() {
+    new_test_ext().execute_with(|| {
+        for i in 0..100u64 {
+            assert_ok!(SingleLine::add_to_single_line(1, &i));
+        }
+        assert_eq!(SingleLine::single_line_length(1), 100);
+        // 段满后自动扩展，不再报错
+        assert_ok!(SingleLine::add_to_single_line(1, &100));
+        assert_eq!(SingleLine::single_line_length(1), 101);
+        assert_eq!(pallet::SingleLineSegmentCount::<Test>::get(1), 2);
+    });
+}
+
+// ============================================================================
+// F7: force_reset_single_line 测试
+// ============================================================================
+
+#[test]
+fn f7_force_reset_single_line_works() {
+    new_test_ext().execute_with(|| {
+        setup_single_line(1, &[10, 20, 30, 40, 50]);
+        assert_eq!(SingleLine::single_line_length(1), 5);
+
+        assert_ok!(SingleLine::force_reset_single_line(RuntimeOrigin::root(), 1));
+        assert_eq!(SingleLine::single_line_length(1), 0);
+        assert_eq!(SingleLine::user_position(1, &10), None);
+        assert_eq!(SingleLine::user_position(1, &50), None);
+        frame_system::Pallet::<Test>::assert_has_event(
+            pallet::Event::<Test>::SingleLineReset { entity_id: 1, removed_count: 5 }.into(),
+        );
+    });
+}
+
+#[test]
+fn f7_force_reset_empty_is_noop() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(SingleLine::force_reset_single_line(RuntimeOrigin::root(), 99));
+        let pallet_events: alloc::vec::Vec<_> = System::events().into_iter()
+            .filter(|e| matches!(e.event, RuntimeEvent::CommissionSingleLine(_)))
+            .collect();
+        assert_eq!(pallet_events.len(), 0);
+    });
+}
+
+#[test]
+fn f7_force_reset_rejects_signed() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            SingleLine::force_reset_single_line(RuntimeOrigin::signed(OWNER), 1),
+            frame_support::error::BadOrigin,
+        );
+    });
+}
+
+#[test]
+fn f7_force_reset_allows_re_add() {
+    new_test_ext().execute_with(|| {
+        setup_single_line(1, &[10, 20, 30]);
+        assert_ok!(SingleLine::force_reset_single_line(RuntimeOrigin::root(), 1));
+        assert_ok!(SingleLine::add_to_single_line(1, &10));
+        assert_eq!(SingleLine::user_position(1, &10), Some(0));
+        assert_eq!(SingleLine::single_line_length(1), 1);
+    });
+}
+
+// ============================================================================
+// F10: PlanWriter set/clear level_based_levels 测试
+// ============================================================================
+
+#[test]
+fn f10_plan_writer_set_level_based_levels() {
+    new_test_ext().execute_with(|| {
+        use pallet_commission_common::SingleLinePlanWriter;
+        assert_ok!(<SingleLine as SingleLinePlanWriter>::set_level_based_levels(1, 3, 8, 12));
+        let o = pallet::SingleLineCustomLevelOverrides::<Test>::get(1, 3).unwrap();
+        assert_eq!(o.upline_levels, 8);
+        assert_eq!(o.downline_levels, 12);
+        frame_system::Pallet::<Test>::assert_has_event(
+            pallet::Event::<Test>::LevelBasedLevelsUpdated { entity_id: 1, level_id: 3 }.into(),
+        );
+    });
+}
+
+#[test]
+fn f10_plan_writer_set_level_rejects_zero() {
+    new_test_ext().execute_with(|| {
+        use pallet_commission_common::SingleLinePlanWriter;
+        assert!(<SingleLine as SingleLinePlanWriter>::set_level_based_levels(1, 3, 0, 0).is_err());
+    });
+}
+
+#[test]
+fn f10_plan_writer_clear_level_overrides() {
+    new_test_ext().execute_with(|| {
+        use pallet_commission_common::SingleLinePlanWriter;
+        assert_ok!(<SingleLine as SingleLinePlanWriter>::set_level_based_levels(1, 3, 8, 12));
+        assert_ok!(<SingleLine as SingleLinePlanWriter>::clear_level_overrides(1, 3));
+        assert!(pallet::SingleLineCustomLevelOverrides::<Test>::get(1, 3).is_none());
+        frame_system::Pallet::<Test>::assert_has_event(
+            pallet::Event::<Test>::LevelBasedLevelsRemoved { entity_id: 1, level_id: 3 }.into(),
+        );
+    });
+}
+
+#[test]
+fn f10_plan_writer_clear_nonexistent_is_noop() {
+    new_test_ext().execute_with(|| {
+        use pallet_commission_common::SingleLinePlanWriter;
+        assert_ok!(<SingleLine as SingleLinePlanWriter>::clear_level_overrides(1, 99));
+        let pallet_events: alloc::vec::Vec<_> = System::events().into_iter()
+            .filter(|e| matches!(e.event, RuntimeEvent::CommissionSingleLine(_)))
+            .collect();
+        assert_eq!(pallet_events.len(), 0);
+    });
+}
+
+// ============================================================================
+// F12: clear_config 级联清理 LevelOverrides 测试
+// ============================================================================
+
+#[test]
+fn f12_clear_config_cascades_level_overrides() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_ok!(SingleLine::set_level_based_levels(RuntimeOrigin::signed(OWNER), 1, 1, 5, 5));
+        assert_ok!(SingleLine::set_level_based_levels(RuntimeOrigin::signed(OWNER), 1, 2, 8, 8));
+
+        assert_ok!(SingleLine::clear_single_line_config(RuntimeOrigin::signed(OWNER), 1));
+        assert!(pallet::SingleLineConfigs::<Test>::get(1).is_none());
+        assert!(pallet::SingleLineCustomLevelOverrides::<Test>::get(1, 1).is_none());
+        assert!(pallet::SingleLineCustomLevelOverrides::<Test>::get(1, 2).is_none());
+    });
+}
+
+#[test]
+fn f12_force_clear_config_cascades_level_overrides() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(SingleLine::force_set_single_line_config(
+            RuntimeOrigin::root(), 1, 100, 100, 10, 15, 1000, 150, 200,
+        ));
+        pallet::SingleLineCustomLevelOverrides::<Test>::insert(
+            1, 5, pallet::LevelBasedLevels { upline_levels: 3, downline_levels: 3 },
+        );
+
+        assert_ok!(SingleLine::force_clear_single_line_config(RuntimeOrigin::root(), 1));
+        assert!(pallet::SingleLineConfigs::<Test>::get(1).is_none());
+        assert!(pallet::SingleLineCustomLevelOverrides::<Test>::get(1, 5).is_none());
+    });
+}
+
+#[test]
+fn f12_plan_writer_clear_config_cascades() {
+    new_test_ext().execute_with(|| {
+        use pallet_commission_common::SingleLinePlanWriter;
+        assert_ok!(<SingleLine as SingleLinePlanWriter>::set_single_line_config(
+            1, 100, 100, 5, 10, 2000, 50, 100,
+        ));
+        assert_ok!(<SingleLine as SingleLinePlanWriter>::set_level_based_levels(1, 1, 5, 5));
+
+        assert_ok!(<SingleLine as SingleLinePlanWriter>::clear_config(1));
+        assert!(pallet::SingleLineConfigs::<Test>::get(1).is_none());
+        assert!(pallet::SingleLineCustomLevelOverrides::<Test>::get(1, 1).is_none());
+    });
+}
+
+#[test]
+fn f12_clear_config_does_not_affect_other_entity() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        set_entity_owner(2, OWNER);
+        set_entity_admin(2, ADMIN, AdminPermission::COMMISSION_MANAGE);
+        assert_ok!(SingleLine::set_single_line_config(
+            RuntimeOrigin::signed(OWNER), 2, 100, 100, 10, 15, 1000, 150, 200,
+        ));
+        assert_ok!(SingleLine::set_level_based_levels(RuntimeOrigin::signed(OWNER), 1, 1, 5, 5));
+        assert_ok!(SingleLine::set_level_based_levels(RuntimeOrigin::signed(OWNER), 2, 1, 8, 8));
+
+        assert_ok!(SingleLine::clear_single_line_config(RuntimeOrigin::signed(OWNER), 1));
+        assert!(pallet::SingleLineConfigs::<Test>::get(2).is_some());
+        assert!(pallet::SingleLineCustomLevelOverrides::<Test>::get(2, 1).is_some());
+    });
+}
+
+// ============================================================================
+// F5: 单链满后自动重试 + 手动加入 测试
+// ============================================================================
+
+#[test]
+fn f5_auto_extend_join_on_full_segment() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+
+        // 填满第一段（MaxSingleLineLength=100）
+        for i in 0..100u64 {
+            assert_ok!(SingleLine::add_to_single_line(entity_id, &i));
+        }
+
+        // 用户 200 首单时段满 → 自动创建新段，加入成功
+        let modes = CommissionModes(CommissionModes::SINGLE_LINE_UPLINE);
+        let _ = <SingleLine as CommissionPlugin<u64, u128>>::calculate(
+            entity_id, &200, 10000, 10000, modes, true, 1,
+        );
+        assert_eq!(SingleLine::user_position(entity_id, &200), Some(100));
+        assert_eq!(pallet::SingleLineSegmentCount::<Test>::get(entity_id), 2);
+        frame_system::Pallet::<Test>::assert_has_event(
+            pallet::Event::<Test>::AddedToSingleLine {
+                entity_id,
+                account: 200,
+                index: 100,
+            }.into(),
+        );
+    });
+}
+
+#[test]
+fn f5_already_joined_user_no_duplicate_attempt() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+
+        // 用户 10 首单加入
+        let modes = CommissionModes(CommissionModes::SINGLE_LINE_UPLINE);
+        let _ = <SingleLine as CommissionPlugin<u64, u128>>::calculate(
+            entity_id, &10, 10000, 10000, modes, true, 1,
+        );
+        assert_eq!(SingleLine::user_position(entity_id, &10), Some(0));
+
+        // 第二笔订单 → 用户已在链中，不会重复添加
+        let _ = <SingleLine as CommissionPlugin<u64, u128>>::calculate(
+            entity_id, &10, 10000, 10000, modes, false, 2,
+        );
+        // 链长度仍为 1（无重复）
+        assert_eq!(SingleLine::single_line_length(entity_id), 1);
+    });
+}
+
+// ============================================================================
+// R4 审计回归测试
+// ============================================================================
+
+#[test]
+fn m1_r4_clear_config_emits_all_level_overrides_cleared() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_ok!(SingleLine::set_level_based_levels(RuntimeOrigin::signed(OWNER), 1, 1, 5, 5));
+        assert_ok!(SingleLine::set_level_based_levels(RuntimeOrigin::signed(OWNER), 1, 2, 8, 8));
+        System::reset_events();
+
+        assert_ok!(SingleLine::clear_single_line_config(RuntimeOrigin::signed(OWNER), 1));
+        frame_system::Pallet::<Test>::assert_has_event(
+            pallet::Event::<Test>::AllLevelOverridesCleared { entity_id: 1 }.into(),
+        );
+    });
+}
+
+#[test]
+fn m1_r4_clear_config_no_overrides_no_event() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        System::reset_events();
+
+        assert_ok!(SingleLine::clear_single_line_config(RuntimeOrigin::signed(OWNER), 1));
+        // AllLevelOverridesCleared should NOT be emitted when no overrides exist
+        let override_events: alloc::vec::Vec<_> = System::events().into_iter()
+            .filter(|e| matches!(e.event, RuntimeEvent::CommissionSingleLine(
+                pallet::Event::AllLevelOverridesCleared { .. }
+            )))
+            .collect();
+        assert_eq!(override_events.len(), 0);
+    });
+}
+
+#[test]
+fn m3_r4_entity_locked_rejects_pause() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        set_entity_locked(1);
+        assert_noop!(
+            SingleLine::pause_single_line(RuntimeOrigin::signed(OWNER), 1),
+            pallet::Error::<Test>::EntityLocked,
+        );
+    });
+}
+
+#[test]
+fn m3_r4_entity_locked_rejects_resume() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        assert_ok!(SingleLine::pause_single_line(RuntimeOrigin::signed(OWNER), 1));
+        set_entity_locked(1);
+        assert_noop!(
+            SingleLine::resume_single_line(RuntimeOrigin::signed(OWNER), 1),
+            pallet::Error::<Test>::EntityLocked,
+        );
+    });
+}
+
+#[test]
+fn m3_r4_entity_locked_rejects_update_params() {
+    new_test_ext().execute_with(|| {
+        setup_config(1);
+        set_entity_locked(1);
+        assert_noop!(
+            SingleLine::update_single_line_params(
+                RuntimeOrigin::signed(OWNER), 1, Some(200), None, None, None, None, None, None,
+            ),
+            pallet::Error::<Test>::EntityLocked,
+        );
+    });
+}
+
+#[test]
+fn m3_r4_entity_locked_rejects_set_level() {
+    new_test_ext().execute_with(|| {
+        setup_entity(1);
+        set_entity_locked(1);
+        assert_noop!(
+            SingleLine::set_level_based_levels(RuntimeOrigin::signed(OWNER), 1, 1, 5, 5),
+            pallet::Error::<Test>::EntityLocked,
+        );
+    });
+}
+
+#[test]
+fn m3_r4_entity_locked_rejects_remove_level() {
+    new_test_ext().execute_with(|| {
+        setup_entity(1);
+        set_entity_locked(1);
+        assert_noop!(
+            SingleLine::remove_level_based_levels(RuntimeOrigin::signed(OWNER), 1, 1),
+            pallet::Error::<Test>::EntityLocked,
+        );
+    });
+}
+
+#[test]
+fn l4_r4_unactivated_upline_skipped() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        setup_single_line(entity_id, &[10, 20, 30, 40, 50]);
+
+        // unactivate 40 (index=3)
+        set_unactivated(entity_id, 40);
+
+        let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
+        let mut remaining: u128 = 100_000;
+        let mut outputs = alloc::vec::Vec::new();
+        let (base_up, _) = SingleLine::effective_base_levels(entity_id, &50, &config);
+        SingleLine::process_upline(entity_id, &50, 100_000, &mut remaining, &config, base_up, &mut outputs);
+
+        // 上线: 40(unactivated→skip), 30, 20, 10 → 3 outputs
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[0].beneficiary, 30);
+        assert_eq!(outputs[1].beneficiary, 20);
+        assert_eq!(outputs[2].beneficiary, 10);
+    });
+}
+
+#[test]
+fn l4_r4_unactivated_downline_skipped() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        setup_single_line(entity_id, &[10, 20, 30, 40, 50]);
+
+        // unactivate 30 (index=2)
+        set_unactivated(entity_id, 30);
+
+        let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
+        let mut remaining: u128 = 100_000;
+        let mut outputs = alloc::vec::Vec::new();
+        let (_, base_down) = SingleLine::effective_base_levels(entity_id, &10, &config);
+        SingleLine::process_downline(entity_id, &10, 100_000, &mut remaining, &config, base_down, &mut outputs);
+
+        // 下线: 20, 30(unactivated→skip), 40, 50 → 3 outputs
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[0].beneficiary, 20);
+        assert_eq!(outputs[1].beneficiary, 40);
+        assert_eq!(outputs[2].beneficiary, 50);
+    });
+}
+
+#[test]
+fn m1r5_frozen_upline_skipped() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        setup_single_line(entity_id, &[10, 20, 30, 40, 50]);
+
+        // freeze 40 (index=3)
+        set_member_frozen(entity_id, 40);
+
+        let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
+        let mut remaining: u128 = 100_000;
+        let mut outputs = alloc::vec::Vec::new();
+        let (base_up, _) = SingleLine::effective_base_levels(entity_id, &50, &config);
+        SingleLine::process_upline(entity_id, &50, 100_000, &mut remaining, &config, base_up, &mut outputs);
+
+        // 上线: 40(frozen→skip), 30, 20, 10 → 3 outputs
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[0].beneficiary, 30);
+        assert_eq!(outputs[1].beneficiary, 20);
+        assert_eq!(outputs[2].beneficiary, 10);
+    });
+}
+
+#[test]
+fn m1r5_frozen_downline_skipped() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        setup_single_line(entity_id, &[10, 20, 30, 40, 50]);
+
+        // freeze 30 (index=2)
+        set_member_frozen(entity_id, 30);
+
+        let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
+        let mut remaining: u128 = 100_000;
+        let mut outputs = alloc::vec::Vec::new();
+        let (_, base_down) = SingleLine::effective_base_levels(entity_id, &10, &config);
+        SingleLine::process_downline(entity_id, &10, 100_000, &mut remaining, &config, base_down, &mut outputs);
+
+        // 下线: 20, 30(frozen→skip), 40, 50 → 3 outputs
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[0].beneficiary, 20);
+        assert_eq!(outputs[1].beneficiary, 40);
+        assert_eq!(outputs[2].beneficiary, 50);
+    });
+}
+
+#[test]
+fn m1r5_frozen_via_plugin_integration() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        setup_single_line(entity_id, &[10, 20, 30]);
+
+        set_member_frozen(entity_id, 20);
+
+        let modes = CommissionModes(CommissionModes::SINGLE_LINE_UPLINE);
+        let (outputs, _) = <SingleLine as CommissionPlugin<u64, u128>>::calculate(
+            entity_id, &30, 100_000, 100_000, modes, false, 1,
+        );
+
+        // 上线: 20(frozen→skip), 10 → only 10
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].beneficiary, 10);
+    });
+}
+
+#[test]
+fn m1r5_frozen_token_plugin_integration() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_config(entity_id);
+        setup_single_line(entity_id, &[10, 20, 30]);
+
+        set_member_frozen(entity_id, 20);
+
+        let modes = CommissionModes(CommissionModes::SINGLE_LINE_DOWNLINE);
+        let (outputs, _) = <SingleLine as TokenCommissionPlugin<u64, u128>>::calculate_token(
+            entity_id, &10, 100_000u128, 100_000u128, modes, false, 1,
+        );
+
+        // 下线: 20(frozen→skip), 30 → only 30
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].beneficiary, 30);
+    });
+}
+
+#[test]
+fn l4_r4_process_upline_zero_rate_no_output() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_entity(entity_id);
+        assert_ok!(SingleLine::set_single_line_config(
+            RuntimeOrigin::signed(OWNER), entity_id, 0, 100, 10, 15, 1000, 150, 200,
+        ));
+        setup_single_line(entity_id, &[10, 20, 30]);
+
+        let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
+        let mut remaining: u128 = 10000;
+        let mut outputs = alloc::vec::Vec::new();
+        let (base_up, _) = SingleLine::effective_base_levels(entity_id, &30, &config);
+        SingleLine::process_upline(entity_id, &30, 10000, &mut remaining, &config, base_up, &mut outputs);
+
+        assert!(outputs.is_empty());
+        assert_eq!(remaining, 10000);
+    });
+}
+
+#[test]
+fn l4_r4_cross_segment_upline_traversal() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_entity(entity_id);
+        // base_upline_levels=5, max=150
+        assert_ok!(SingleLine::set_single_line_config(
+            RuntimeOrigin::signed(OWNER), entity_id, 100, 100, 5, 5, 1000, 150, 200,
+        ));
+
+        // 填满第一段(100) + 第二段前3个
+        for i in 0..103u64 {
+            assert_ok!(SingleLine::add_to_single_line(entity_id, &i));
+        }
+        assert_eq!(pallet::SingleLineSegmentCount::<Test>::get(entity_id), 2);
+
+        // buyer=102 (index=102, segment 1), upline=101,100,99,98,97 (跨段边界)
+        let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
+        let mut remaining: u128 = 100_000;
+        let mut outputs = alloc::vec::Vec::new();
+        let (base_up, _) = SingleLine::effective_base_levels(entity_id, &102, &config);
+        SingleLine::process_upline(entity_id, &102, 100_000, &mut remaining, &config, base_up, &mut outputs);
+
+        // 5 层: 101(seg1), 100(seg1), 99(seg0), 98(seg0), 97(seg0) — 跨段
+        assert_eq!(outputs.len(), 5);
+        assert_eq!(outputs[0].beneficiary, 101); // level=1
+        assert_eq!(outputs[1].beneficiary, 100); // level=2, seg boundary
+        assert_eq!(outputs[2].beneficiary, 99);  // level=3, seg 0
+        assert_eq!(outputs[3].beneficiary, 98);  // level=4
+        assert_eq!(outputs[4].beneficiary, 97);  // level=5
+    });
+}
+
+#[test]
+fn l4_r4_cross_segment_downline_traversal() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        setup_entity(entity_id);
+        // base_downline_levels=5, max=200
+        assert_ok!(SingleLine::set_single_line_config(
+            RuntimeOrigin::signed(OWNER), entity_id, 100, 100, 5, 5, 1000, 150, 200,
+        ));
+
+        // 填满第一段(100) + 第二段前5个
+        for i in 0..105u64 {
+            assert_ok!(SingleLine::add_to_single_line(entity_id, &i));
+        }
+        assert_eq!(pallet::SingleLineSegmentCount::<Test>::get(entity_id), 2);
+
+        // buyer=98 (index=98, segment 0), downline=99,100,101,102,103 (跨段边界)
+        let config = pallet::SingleLineConfigs::<Test>::get(entity_id).unwrap();
+        let mut remaining: u128 = 100_000;
+        let mut outputs = alloc::vec::Vec::new();
+        let (_, base_down) = SingleLine::effective_base_levels(entity_id, &98, &config);
+        SingleLine::process_downline(entity_id, &98, 100_000, &mut remaining, &config, base_down, &mut outputs);
+
+        // 5 层: 99(seg0), 100(seg1), 101(seg1), 102(seg1), 103(seg1) — 跨段
+        assert_eq!(outputs.len(), 5);
+        assert_eq!(outputs[0].beneficiary, 99);  // level=1, seg 0
+        assert_eq!(outputs[1].beneficiary, 100); // level=2, seg boundary
+        assert_eq!(outputs[2].beneficiary, 101); // level=3, seg 1
+        assert_eq!(outputs[3].beneficiary, 102); // level=4
+        assert_eq!(outputs[4].beneficiary, 103); // level=5
+    });
+}
+
+#[test]
+fn l4_r4_force_reset_multi_segment() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+
+        // Fill 2.5 segments (250 accounts)
+        for i in 0..250u64 {
+            assert_ok!(SingleLine::add_to_single_line(entity_id, &i));
+        }
+        assert_eq!(pallet::SingleLineSegmentCount::<Test>::get(entity_id), 3);
+        assert_eq!(SingleLine::single_line_length(entity_id), 250);
+
+        assert_ok!(SingleLine::force_reset_single_line(RuntimeOrigin::root(), entity_id));
+        assert_eq!(SingleLine::single_line_length(entity_id), 0);
+        assert_eq!(pallet::SingleLineSegmentCount::<Test>::get(entity_id), 0);
+        assert_eq!(SingleLine::user_position(entity_id, &0), None);
+        assert_eq!(SingleLine::user_position(entity_id, &100), None);
+        assert_eq!(SingleLine::user_position(entity_id, &249), None);
+        frame_system::Pallet::<Test>::assert_has_event(
+            pallet::Event::<Test>::SingleLineReset { entity_id, removed_count: 250 }.into(),
         );
     });
 }

@@ -37,16 +37,16 @@ mod mock;
 #[cfg(test)]
 mod tests;
 
-/// KYC 检查接口
+/// KYC 检查接口（per-entity: 用户在指定 Entity 下的 KYC 级别）
 pub trait KycChecker<AccountId> {
-    /// 获取账户 KYC 级别 (0=None, 1=Basic, 2=Enhanced, 3=Premium, 4=Institutional)
-    fn kyc_level(account: &AccountId) -> u8;
+    /// 获取账户在指定 Entity 下的 KYC 级别 (0=None, 1=Basic, 2=Standard, 3=Enhanced, 4=Institutional)
+    fn kyc_level(entity_id: u64, account: &AccountId) -> u8;
 }
 
 /// 空 KYC 检查器（不检查 KYC，所有人返回 0）
 pub struct NullKycChecker;
 impl<AccountId> KycChecker<AccountId> for NullKycChecker {
-    fn kyc_level(_: &AccountId) -> u8 { 0 }
+    fn kyc_level(_entity_id: u64, _: &AccountId) -> u8 { 0 }
 }
 
 #[frame_support::pallet]
@@ -58,7 +58,7 @@ pub mod pallet {
         BoundedVec, PalletId,
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{EntityProvider, EntityTokenProvider};
+    use pallet_entity_common::{DisclosureProvider, EntityProvider, EntityTokenProvider, TokenSaleStatus};
     use sp_runtime::{
         traits::{AccountIdConversion, Saturating, Zero},
         SaturatedConversion,
@@ -200,6 +200,8 @@ pub mod pallet {
         pub total_refunded_tokens: Balance,
         /// 累计已退回的 NEX 数
         pub total_refunded_nex: Balance,
+        /// F2: 最低募资目标（soft cap），0 = 无 soft cap
+        pub soft_cap: Balance,
     }
 
     /// 发售轮次类型别名
@@ -268,6 +270,9 @@ pub mod pallet {
         /// KYC 检查接口
         type KycChecker: KycChecker<Self::AccountId>;
 
+        /// F4: 披露提供者（内幕交易防护）
+        type DisclosureProvider: DisclosureProvider<Self::AccountId>;
+
         /// 最大支付选项数
         #[pallet::constant]
         type MaxPaymentOptions: Get<u32>;
@@ -291,6 +296,10 @@ pub mod pallet {
         /// 退款宽限期（取消后多少区块内可退款，之后创建者可回收未领代币）
         #[pallet::constant]
         type RefundGracePeriod: Get<BlockNumberFor<Self>>;
+
+        /// F9: 批量强制退款最大数量
+        #[pallet::constant]
+        type MaxBatchRefund: Get<u32>;
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -381,7 +390,8 @@ pub mod pallet {
         ValueQuery,
     >;
 
-    /// 白名单存储（独立于 SaleRound，避免大 struct 读取）
+    /// F5: 白名单存储（独立于 SaleRound）
+    /// 值为个人额度：None = 使用默认限额，Some(amount) = 个人上限
     #[pallet::storage]
     pub type RoundWhitelist<T: Config> = StorageDoubleMap<
         _,
@@ -389,8 +399,7 @@ pub mod pallet {
         u64,  // round_id
         Blake2_128Concat,
         T::AccountId,
-        bool,
-        ValueQuery,
+        Option<BalanceOf<T>>,
     >;
 
     /// 白名单计数
@@ -534,6 +543,23 @@ pub mod pallet {
         SaleRoundPaused { round_id: u64 },
         /// 发售已恢复
         SaleRoundResumed { round_id: u64 },
+        /// F2: 未达 soft cap，发售自动转为取消
+        SoftCapNotMet {
+            round_id: u64,
+            raised: BalanceOf<T>,
+            soft_cap: BalanceOf<T>,
+        },
+        /// F8: 轮次存储已清理
+        RoundStorageCleaned {
+            round_id: u64,
+            subscriptions_removed: u32,
+        },
+        /// F9: 批量强制退款
+        ForceBatchRefundIssued {
+            round_id: u64,
+            refunded_count: u32,
+            total_nex: BalanceOf<T>,
+        },
     }
 
     // ==================== 错误 ====================
@@ -642,6 +668,16 @@ pub mod pallet {
         InvalidExtension,
         /// 发售未处于暂停状态
         SaleNotPaused,
+        /// F4: 内幕人员在黑窗口期禁止认购
+        InsiderTradingBlocked,
+        /// F8: 轮次不可清理（未到终态或还有未完成操作）
+        RoundNotCleanable,
+        /// F9: 批量操作列表为空
+        EmptyBatch,
+        /// F11: Lottery 模式尚未实现
+        LotteryNotImplemented,
+        /// F2: Soft cap 未达标，发售已自动取消
+        SoftCapNotMet,
     }
 
     // ==================== Hooks ====================
@@ -676,6 +712,17 @@ pub mod pallet {
             ActiveRounds::<T>::put(remaining);
             weight.saturating_add(T::DbWeight::get().writes(1))
         }
+
+        /// F10: 配置参数合理性校验
+        #[cfg(test)]
+        fn integrity_test() {
+            assert!(T::MaxPaymentOptions::get() > 0, "MaxPaymentOptions must be > 0");
+            assert!(T::MaxWhitelistSize::get() > 0, "MaxWhitelistSize must be > 0");
+            assert!(T::MaxRoundsHistory::get() > 0, "MaxRoundsHistory must be > 0");
+            assert!(T::MaxSubscriptionsPerRound::get() > 0, "MaxSubscriptionsPerRound must be > 0");
+            assert!(T::MaxActiveRounds::get() > 0, "MaxActiveRounds must be > 0");
+            assert!(T::MaxBatchRefund::get() > 0, "MaxBatchRefund must be > 0");
+        }
     }
 
     // ==================== Extrinsics ====================
@@ -694,8 +741,12 @@ pub mod pallet {
             end_block: BlockNumberFor<T>,
             kyc_required: bool,
             min_kyc_level: u8,
+            soft_cap: BalanceOf<T>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+
+            // F11: Lottery 模式尚未实现
+            ensure!(mode != SaleMode::Lottery, Error::<T>::LotteryNotImplemented);
 
             // H3: Entity 存在性 + 权限验证
             ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
@@ -739,6 +790,7 @@ pub mod pallet {
                 cancelled_at: None,
                 total_refunded_tokens: Zero::zero(),
                 total_refunded_nex: Zero::zero(),
+                soft_cap,
             };
 
             SaleRounds::<T>::insert(round_id, round);
@@ -887,13 +939,14 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 添加白名单（仅 NotStarted 状态，使用独立存储）
+        /// F5: 添加白名单（仅 NotStarted 状态，支持个人额度）
+        /// allocations: 每个账户的个人额度，None = 使用默认限额，Some(amount) = 个人上限
         #[pallet::call_index(4)]
         #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
         pub fn add_to_whitelist(
             origin: OriginFor<T>,
             round_id: u64,
-            accounts: BoundedVec<T::AccountId, T::MaxWhitelistSize>,
+            accounts: BoundedVec<(T::AccountId, Option<BalanceOf<T>>), T::MaxWhitelistSize>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -906,12 +959,12 @@ pub mod pallet {
             let max_size = T::MaxWhitelistSize::get();
             let mut current_count = WhitelistCount::<T>::get(round_id);
 
-            for account in accounts {
-                if !RoundWhitelist::<T>::get(round_id, &account) {
+            for (account, allocation) in accounts {
+                if !RoundWhitelist::<T>::contains_key(round_id, &account) {
                     ensure!(current_count < max_size, Error::<T>::WhitelistFull);
-                    RoundWhitelist::<T>::insert(round_id, &account, true);
                     current_count = current_count.saturating_add(1);
                 }
+                RoundWhitelist::<T>::insert(round_id, &account, allocation);
             }
 
             WhitelistCount::<T>::insert(round_id, current_count);
@@ -988,15 +1041,21 @@ pub mod pallet {
             // 验证未重复认购
             ensure!(!Subscriptions::<T>::contains_key(round_id, &who), Error::<T>::AlreadySubscribed);
 
+            // F4: 内幕交易防护
+            ensure!(
+                T::DisclosureProvider::can_insider_trade(round.entity_id, &who),
+                Error::<T>::InsiderTradingBlocked
+            );
+
             // H8: KYC 校验
             if round.kyc_required {
-                let level = T::KycChecker::kyc_level(&who);
+                let level = T::KycChecker::kyc_level(round.entity_id, &who);
                 ensure!(level >= round.min_kyc_level, Error::<T>::InsufficientKycLevel);
             }
 
-            // 白名单校验（使用独立存储）
+            // F5: 白名单校验（使用独立存储，支持个人额度）
             if round.mode == SaleMode::WhitelistAllocation {
-                ensure!(RoundWhitelist::<T>::get(round_id, &who), Error::<T>::NotInWhitelist);
+                ensure!(RoundWhitelist::<T>::contains_key(round_id, &who), Error::<T>::NotInWhitelist);
             }
 
             // H1-audit: 预检参与者容量，避免转账后才发现已满
@@ -1016,7 +1075,15 @@ pub mod pallet {
 
             // 验证购买限额
             ensure!(amount >= payment_option.min_purchase, Error::<T>::BelowMinPurchase);
-            ensure!(amount <= payment_option.max_purchase_per_account, Error::<T>::ExceedsPurchaseLimit);
+            // F5: 白名单个人额度优先于默认限额
+            let effective_max = if round.mode == SaleMode::WhitelistAllocation {
+                RoundWhitelist::<T>::get(round_id, &who)
+                    .flatten()
+                    .unwrap_or(payment_option.max_purchase_per_account)
+            } else {
+                payment_option.max_purchase_per_account
+            };
+            ensure!(amount <= effective_max, Error::<T>::ExceedsPurchaseLimit);
 
             // H10: checked_mul 替代 saturating_mul
             let payment_amount = Self::calculate_payment_amount(&round, amount, payment_option)?;
@@ -1100,6 +1167,32 @@ pub mod pallet {
                     now >= round.end_block || round.remaining_amount.is_zero(),
                     Error::<T>::SaleNotInTimeWindow
                 );
+
+                // F2: Soft cap 检查
+                let raised = RaisedFunds::<T>::get(round_id, Option::<AssetIdOf<T>>::None);
+                if !round.soft_cap.is_zero() && raised < round.soft_cap {
+                    // 未达 soft cap，自动转为取消
+                    let entity_account = T::EntityProvider::entity_account(round.entity_id);
+                    // H1-R6: 只释放未售部分，已售部分由 claim_refund 逐个释放
+                    if !round.remaining_amount.is_zero() {
+                        T::TokenProvider::unreserve(round.entity_id, &entity_account, round.remaining_amount);
+                    }
+                    round.remaining_amount = Zero::zero();
+                    round.status = RoundStatus::Cancelled;
+                    let now = <frame_system::Pallet<T>>::block_number();
+                    round.cancelled_at = Some(now);
+
+                    ActiveRounds::<T>::mutate(|active| {
+                        active.retain(|&id| id != round_id);
+                    });
+
+                    Self::deposit_event(Event::SoftCapNotMet {
+                        round_id,
+                        raised,
+                        soft_cap: round.soft_cap,
+                    });
+                    return Ok(());
+                }
 
                 // 释放未售 Entity 代币
                 if !round.remaining_amount.is_zero() {
@@ -1681,9 +1774,15 @@ pub mod pallet {
             // 必须已认购
             let sub = Subscriptions::<T>::get(round_id, &who).ok_or(Error::<T>::NotSubscribed)?;
 
+            // F4: 内幕交易防护
+            ensure!(
+                T::DisclosureProvider::can_insider_trade(round.entity_id, &who),
+                Error::<T>::InsiderTradingBlocked
+            );
+
             // KYC 校验
             if round.kyc_required {
-                let level = T::KycChecker::kyc_level(&who);
+                let level = T::KycChecker::kyc_level(round.entity_id, &who);
                 ensure!(level >= round.min_kyc_level, Error::<T>::InsufficientKycLevel);
             }
 
@@ -1693,9 +1792,16 @@ pub mod pallet {
                 .find(|o| o.asset_id == payment_asset && o.enabled)
                 .ok_or(Error::<T>::InvalidPaymentAsset)?;
 
-            // 验证追加后总量在限额内
+            // F5: 验证追加后总量在限额内（白名单个人额度优先）
             let new_total = sub.amount.saturating_add(additional_amount);
-            ensure!(new_total <= payment_option.max_purchase_per_account, Error::<T>::ExceedsPurchaseLimit);
+            let effective_max = if round.mode == SaleMode::WhitelistAllocation {
+                RoundWhitelist::<T>::get(round_id, &who)
+                    .flatten()
+                    .unwrap_or(payment_option.max_purchase_per_account)
+            } else {
+                payment_option.max_purchase_per_account
+            };
+            ensure!(new_total <= effective_max, Error::<T>::ExceedsPurchaseLimit);
 
             // 计算追加支付金额
             let additional_payment = Self::calculate_payment_amount(&round, additional_amount, payment_option)?;
@@ -1876,6 +1982,133 @@ pub mod pallet {
                 Ok(())
             })
         }
+
+        // ==================== F8: 存储清理机制 ====================
+
+        /// 清理已结束/已完成轮次的存储（认购记录、参与者列表、白名单、支付选项等）
+        /// 前提：轮次处于 Ended/Completed 状态 且 funds_withdrawn=true
+        #[pallet::call_index(25)]
+        #[pallet::weight(Weight::from_parts(500_000_000, 20_000))]
+        pub fn cleanup_round(
+            origin: OriginFor<T>,
+            round_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let round = SaleRounds::<T>::get(round_id).ok_or(Error::<T>::RoundNotFound)?;
+            ensure!(round.creator == who, Error::<T>::Unauthorized);
+            ensure!(
+                round.status == RoundStatus::Ended || round.status == RoundStatus::Completed,
+                Error::<T>::RoundNotCleanable
+            );
+            ensure!(round.funds_withdrawn, Error::<T>::RoundNotCleanable);
+
+            // 清理认购记录
+            let participants = RoundParticipants::<T>::take(round_id);
+            let removed = participants.len() as u32;
+            for p in &participants {
+                Subscriptions::<T>::remove(round_id, p);
+            }
+
+            // 清理白名单
+            let _ = RoundWhitelist::<T>::clear_prefix(round_id, u32::MAX, None);
+            WhitelistCount::<T>::remove(round_id);
+
+            // 清理支付选项
+            RoundPaymentOptions::<T>::remove(round_id);
+
+            // 清理募集资金统计
+            let _ = RaisedFunds::<T>::clear_prefix(round_id, u32::MAX, None);
+
+            // M1-R7: 从 EntityRounds 中移除，释放 MaxRoundsHistory 槽位
+            EntityRounds::<T>::mutate(round.entity_id, |rounds| {
+                rounds.retain(|&id| id != round_id);
+            });
+
+            Self::deposit_event(Event::RoundStorageCleaned {
+                round_id,
+                subscriptions_removed: removed,
+            });
+            Ok(())
+        }
+
+        // ==================== F9: 批量强制退款 ====================
+
+        /// 治理批量强制退款（仅 root，取消状态下批量退款）
+        #[pallet::call_index(26)]
+        #[pallet::weight(Weight::from_parts(500_000_000, 20_000))]
+        pub fn force_batch_refund(
+            origin: OriginFor<T>,
+            round_id: u64,
+            subscribers: BoundedVec<T::AccountId, T::MaxBatchRefund>,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(!subscribers.is_empty(), Error::<T>::EmptyBatch);
+
+            let round = SaleRounds::<T>::get(round_id).ok_or(Error::<T>::RoundNotFound)?;
+            ensure!(round.status == RoundStatus::Cancelled, Error::<T>::SaleNotCancelled);
+
+            let pallet_account = Self::pallet_account();
+            let entity_account = T::EntityProvider::entity_account(round.entity_id);
+            let mut refunded_count: u32 = 0;
+            let mut total_nex: BalanceOf<T> = Zero::zero();
+            let mut total_tokens: BalanceOf<T> = Zero::zero();
+
+            for subscriber in &subscribers {
+                if let Some(mut sub) = Subscriptions::<T>::get(round_id, subscriber) {
+                    if sub.refunded {
+                        continue;
+                    }
+                    // H2-fix: 释放认购者对应的 Entity 代币锁定
+                    let deficit = T::TokenProvider::unreserve(round.entity_id, &entity_account, sub.amount);
+                    if !deficit.is_zero() {
+                        // L1-R7: 回滚部分释放的代币，保持状态一致
+                        let freed = sub.amount.saturating_sub(deficit);
+                        if !freed.is_zero() {
+                            let _ = T::TokenProvider::reserve(round.entity_id, &entity_account, freed);
+                        }
+                        log::warn!("force_batch_refund: unreserve deficit {:?} for subscriber {:?}", deficit, subscriber);
+                        continue;
+                    }
+                    // H1-fix: 传播转账错误，失败时跳过（不标记 refunded）
+                    if T::Currency::transfer(
+                        &pallet_account,
+                        subscriber,
+                        sub.payment_amount,
+                        ExistenceRequirement::AllowDeath,
+                    ).is_err() {
+                        // 退还 NEX 失败，回滚 unreserve（重新锁定代币）
+                        let _ = T::TokenProvider::reserve(round.entity_id, &entity_account, sub.amount);
+                        log::warn!("force_batch_refund: NEX transfer failed for subscriber {:?}", subscriber);
+                        continue;
+                    }
+                    sub.refunded = true;
+                    total_nex = total_nex.saturating_add(sub.payment_amount);
+                    // M1-fix: 同步跟踪已退还代币数量
+                    total_tokens = total_tokens.saturating_add(sub.amount);
+                    refunded_count = refunded_count.saturating_add(1);
+                    Subscriptions::<T>::insert(round_id, subscriber, sub);
+                }
+            }
+
+            // 更新轮次退款统计
+            if refunded_count > 0 {
+                SaleRounds::<T>::mutate(round_id, |maybe_round| {
+                    if let Some(r) = maybe_round.as_mut() {
+                        r.total_refunded_nex = r.total_refunded_nex.saturating_add(total_nex);
+                        // M1-fix: 更新 total_refunded_tokens
+                        r.total_refunded_tokens = r.total_refunded_tokens.saturating_add(total_tokens);
+                    }
+                });
+            }
+
+            Self::deposit_event(Event::ForceBatchRefundIssued {
+                round_id,
+                refunded_count,
+                total_nex,
+            });
+            Ok(())
+        }
     }
 
     // ==================== 辅助函数 ====================
@@ -1906,7 +2139,7 @@ pub mod pallet {
         }
 
         /// 计算荷兰拍卖当前价格
-        fn calculate_dutch_price(round: &SaleRoundOf<T>) -> Result<BalanceOf<T>, DispatchError> {
+        pub(crate) fn calculate_dutch_price(round: &SaleRoundOf<T>) -> Result<BalanceOf<T>, DispatchError> {
             let start_price = round.dutch_start_price.ok_or(Error::<T>::InvalidDutchAuctionConfig)?;
             let end_price = round.dutch_end_price.ok_or(Error::<T>::InvalidDutchAuctionConfig)?;
 
@@ -1928,8 +2161,11 @@ pub mod pallet {
             let end_u128: u128 = end_price.saturated_into();
             let price_range: u128 = start_u128.saturating_sub(end_u128);
 
-            let price_drop = price_range.saturating_mul(elapsed) / total_duration;
-            // M2-deep: 防止 saturating_mul 溢出导致价格低于 end_price
+            // M2-fix: 先除后乘避免 u128 溢出，余数单独处理保留精度
+            let quotient = price_range / total_duration;
+            let remainder = price_range % total_duration;
+            let price_drop = quotient.saturating_mul(elapsed)
+                .saturating_add(remainder.saturating_mul(elapsed) / total_duration);
             let current_price: u128 = start_u128.saturating_sub(price_drop).max(end_u128);
 
             Ok(current_price.saturated_into())
@@ -2033,15 +2269,35 @@ pub mod pallet {
         fn do_auto_end_sale(round_id: u64) {
             SaleRounds::<T>::mutate(round_id, |maybe_round| {
                 if let Some(round) = maybe_round.as_mut() {
+                    let entity_account = T::EntityProvider::entity_account(round.entity_id);
+
+                    // F2: Soft cap 检查
+                    let raised = RaisedFunds::<T>::get(round_id, Option::<AssetIdOf<T>>::None);
+                    if !round.soft_cap.is_zero() && raised < round.soft_cap {
+                        // 未达 soft cap，自动取消
+                        // H1-R6: 只释放未售部分，已售部分由 claim_refund 逐个释放
+                        if !round.remaining_amount.is_zero() {
+                            T::TokenProvider::unreserve(round.entity_id, &entity_account, round.remaining_amount);
+                        }
+                        round.remaining_amount = Zero::zero();
+                        round.status = RoundStatus::Cancelled;
+                        let now = <frame_system::Pallet<T>>::block_number();
+                        round.cancelled_at = Some(now);
+
+                        Self::deposit_event(Event::SoftCapNotMet {
+                            round_id,
+                            raised,
+                            soft_cap: round.soft_cap,
+                        });
+                        return;
+                    }
+
                     // 释放未售 Entity 代币
                     if !round.remaining_amount.is_zero() {
-                        let entity_account = T::EntityProvider::entity_account(round.entity_id);
                         let deficit = T::TokenProvider::unreserve(round.entity_id, &entity_account, round.remaining_amount);
-                        // M3-deep: 记录 unreserve 不完整
                         if !deficit.is_zero() {
                             log::warn!("tokensale do_auto_end_sale: unreserve deficit {:?} for round {}", deficit, round_id);
                         }
-                        // M1-fix: 清零 remaining_amount，防止查询返回过时数据
                         round.remaining_amount = Zero::zero();
                     }
                     let sold = round.sold_amount;
@@ -2068,6 +2324,45 @@ pub mod pallet {
             block.unique_saturated_into()
         }
 
+        // ==================== F6: 发售统计查询 ====================
+
+        /// 获取发售统计信息
+        pub fn get_sale_statistics(round_id: u64) -> Option<(
+            BalanceOf<T>,  // total_supply
+            BalanceOf<T>,  // sold_amount
+            BalanceOf<T>,  // remaining_amount
+            u32,           // participants_count
+            BalanceOf<T>,  // raised_nex
+            BalanceOf<T>,  // soft_cap
+        )> {
+            let round = SaleRounds::<T>::get(round_id)?;
+            let raised = RaisedFunds::<T>::get(round_id, Option::<AssetIdOf<T>>::None);
+            Some((
+                round.total_supply,
+                round.sold_amount,
+                round.remaining_amount,
+                round.participants_count,
+                raised,
+                round.soft_cap,
+            ))
+        }
+
+        // ==================== F12: 发售期间代币转让限制 ====================
+
+        /// 检查实体是否有活跃发售轮次
+        pub fn has_active_sale(entity_id: u64) -> bool {
+            let active = ActiveRounds::<T>::get();
+            for &round_id in active.iter() {
+                if let Some(round) = SaleRounds::<T>::get(round_id) {
+                    if round.entity_id == entity_id &&
+                       (round.status == RoundStatus::Active || round.status == RoundStatus::Paused) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+
         /// 获取用户可解锁代币数量
         pub fn get_unlockable_amount(round_id: u64, account: &T::AccountId) -> BalanceOf<T> {
             let round = match SaleRounds::<T>::get(round_id) {
@@ -2092,6 +2387,56 @@ pub mod pallet {
                 sub.subscribed_at,
                 now,
             ).unwrap_or(Zero::zero())
+        }
+    }
+
+    // ==================== F7: TokenSaleProvider trait 实现 ====================
+
+    use pallet_entity_common::TokenSaleProvider;
+
+    impl<T: Config> TokenSaleProvider<BalanceOf<T>> for Pallet<T> {
+        fn active_sale_round(entity_id: u64) -> Option<u64> {
+            let active = ActiveRounds::<T>::get();
+            for &round_id in active.iter() {
+                if let Some(round) = SaleRounds::<T>::get(round_id) {
+                    if round.entity_id == entity_id &&
+                       (round.status == RoundStatus::Active || round.status == RoundStatus::Paused) {
+                        return Some(round_id);
+                    }
+                }
+            }
+            None
+        }
+
+        fn sale_round_status(round_id: u64) -> Option<TokenSaleStatus> {
+            SaleRounds::<T>::get(round_id).map(|r| match r.status {
+                RoundStatus::NotStarted => TokenSaleStatus::NotStarted,
+                RoundStatus::Active => TokenSaleStatus::Active,
+                RoundStatus::Paused => TokenSaleStatus::Paused,
+                RoundStatus::Ended => TokenSaleStatus::Ended,
+                RoundStatus::Cancelled => TokenSaleStatus::Cancelled,
+                RoundStatus::Completed => TokenSaleStatus::Completed,
+            })
+        }
+
+        fn sold_amount(round_id: u64) -> Option<BalanceOf<T>> {
+            SaleRounds::<T>::get(round_id).map(|r| r.sold_amount)
+        }
+
+        fn remaining_amount(round_id: u64) -> Option<BalanceOf<T>> {
+            SaleRounds::<T>::get(round_id).map(|r| r.remaining_amount)
+        }
+
+        fn participants_count(round_id: u64) -> Option<u32> {
+            SaleRounds::<T>::get(round_id).map(|r| r.participants_count)
+        }
+
+        fn sale_total_supply(round_id: u64) -> Option<BalanceOf<T>> {
+            SaleRounds::<T>::get(round_id).map(|r| r.total_supply)
+        }
+
+        fn sale_entity_id(round_id: u64) -> Option<u64> {
+            SaleRounds::<T>::get(round_id).map(|r| r.entity_id)
         }
     }
 }

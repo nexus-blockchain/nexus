@@ -1,347 +1,200 @@
 # pallet-storage-lifecycle
 
-存储生命周期管理模块，提供分级归档框架。
+存储生命周期管理模块，提供生产级分级归档系统。
 
 ## 模块概述
 
-本模块为 Substrate 链上数据提供统一的生命周期管理机制，通过分级归档策略有效降低链上存储成本。模块定义了 `ArchivableData` trait 用于数据生命周期管理，支持三级存储层次，并在 `on_idle` 中自动处理归档任务。
+本模块为 Substrate 链上数据提供统一的生命周期管理机制，通过分级归档策略有效降低链上存储成本。支持三级存储层次，在 `on_idle` 中自动处理多阶段归档，并提供完整的治理控制和用户 API。
 
 ### 核心功能
 
-- **分级归档**：支持三级存储层次（活跃 → L1归档 → L2归档 → 清除）
-- **自动处理**：在 `on_idle` 中自动处理归档任务
-- **可扩展 Trait**：通过 `ArchivableData` trait 支持任意数据类型
-- **批次管理**：记录归档批次信息，便于追踪和审计
-- **统计分析**：实时统计归档数量和节省的存储空间
+| 编号 | 功能 | 描述 |
+|------|------|------|
+| **D1** | 三阶段归档 | `on_idle` 自动处理 Active→L1→L2→Purge |
+| **D2** | 多级归档操作 | `StorageArchiver` trait 支持按级别扫描和归档 |
+| **D3** | 归档回调 | `OnArchiveHandler` 通知下游 pallet |
+| **G1** | 运行时可调配置 | `set_archive_config` 治理调参 |
+| **G2** | 暂停/恢复归档 | `pause_archival` / `resume_archival` |
+| **G3** | 按类型策略 | `set_archive_policy` 每种数据类型独立策略 |
+| **G4** | 强制归档 + 清除保护 | `force_archive` / `protect_from_purge` |
+| **U1** | 数据状态查询 | `query_data_status` 查询单条数据归档级别 |
+| **U2** | 归档前预警 | `on_idle` 自动检测即将归档的数据并发出 `ArchivalWarning` 事件 |
+| **U3** | Active 期延长 | `extend_active_period` 延长数据活跃期 |
+| **U4** | 归档恢复 | `restore_from_archive` 从 L1 恢复 |
+| **O1** | 批次统计 | 自动记录批次和归档统计 |
+| **O2** | 仪表盘 API | Runtime API 和 `get_dashboard` 查询 |
+| **O3** | 积压告警 | 待处理记录过多时发出告警事件 |
+| **O4** | 基准权重 | `WeightInfo` trait 支持 |
 
 ### 架构图
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    存储生命周期管理                              │
+│                    存储生命周期管理 (on_idle)                     │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  ┌────────────┐    L1延迟     ┌────────────┐    L2延迟          │
-│  │  活跃数据   │ ──────────▶  │  L1归档    │ ──────────▶        │
-│  │  (完整)    │              │  (~50-80%) │                    │
-│  └────────────┘              └────────────┘                    │
-│                                    │                            │
-│                               L2延迟                            │
-│                                    ▼                            │
-│                              ┌────────────┐    清除延迟          │
-│                              │  L2归档    │ ──────────▶ 清除    │
-│                              │  (~90%+)   │                     │
-│                              └────────────┘                     │
+│  ┌────────────┐  L1 delay  ┌────────────┐  L2 delay            │
+│  │  Active    │ ─────────▶ │ ArchivedL1 │ ─────────▶           │
+│  │  (完整)    │            │  (~50-80%) │                      │
+│  └────────────┘            └────────────┘                      │
+│       │                          │                              │
+│   延期保护                   L2 delay                           │
+│  (U3 extend)                     ▼                              │
+│                            ┌────────────┐  Purge delay          │
+│                            │ ArchivedL2 │ ─────────▶ Purged    │
+│                            │  (~90%+)   │    (G4保护过滤)       │
+│                            └────────────┘                       │
 │                                                                 │
+│  治理控制: G1(配置) G2(暂停) G3(策略) G4(保护)                   │
+│  用户 API: U1(查询) U3(延期) U4(恢复)                            │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 归档策略
+### 归档级别
 
-| 归档级别 | 描述 | 存储节省 | 保留内容 |
-|---------|------|---------|---------|
-| **Active** | 活跃数据 | 0% | 完整存储 |
-| **ArchivedL1** | 一级归档 | 50-80% | 核心字段，压缩存储 |
-| **ArchivedL2** | 二级归档 | 90%+ | 仅统计摘要 |
-| **Purged** | 已清除 | 100% | 仅永久统计 |
+| 级别 | 值 | 存储节省 | 说明 |
+|------|---|---------|------|
+| **Active** | 0 | 0% | 完整存储 |
+| **ArchivedL1** | 1 | 50-80% | 核心字段，压缩存储 |
+| **ArchivedL2** | 2 | 90%+ | 仅统计摘要 |
+| **Purged** | 3 | 100% | 完全删除，仅保留永久统计 |
 
 ## Extrinsics
 
-本模块为基础框架模块，不直接提供外部可调用函数（extrinsics）。归档逻辑通过以下方式触发：
-
-- **自动归档**：在 `on_idle` hook 中自动处理
-- **程序化调用**：其他模块通过 `StorageLifecycleManager` 的方法进行归档操作
+| 调用 | 权限 | 描述 |
+|------|------|------|
+| `set_archive_config(config)` | Root | G1: 设置全局归档配置 |
+| `pause_archival()` | Root | G2: 暂停归档 |
+| `resume_archival()` | Root | G2: 恢复归档 |
+| `set_archive_policy(data_type, policy)` | Root | G3: 设置按类型策略 |
+| `force_archive(data_type, ids, level)` | Root | G4: 强制归档指定数据 |
+| `protect_from_purge(data_type, data_id)` | Root | G4: 标记清除保护 |
+| `remove_purge_protection(data_type, data_id)` | Root | G4: 移除清除保护 |
+| `extend_active_period(data_type, data_id, blocks)` | Root | U3: 延长活跃期 |
+| `restore_from_archive(data_type, data_id)` | Root | U4: 从 L1 恢复到 Active |
 
 ## 存储项
 
-| 存储项 | 键类型 | 值类型 | 描述 |
-|--------|--------|--------|------|
-| `ArchiveCursor` | `BoundedVec<u8, 32>` | `u64` | 归档游标，记录每种数据类型当前处理到的ID |
-| `ArchiveBatches` | `BoundedVec<u8, 32>` | `BoundedVec<ArchiveBatch, 100>` | 归档批次记录，保留最近100个批次 |
-| `ArchiveStats` | `BoundedVec<u8, 32>` | `ArchiveStatistics` | 归档统计信息 |
+| 存储项 | 类型 | 描述 |
+|--------|------|------|
+| `ArchiveCursor` | `Map(DataType → u64)` | 归档游标 |
+| `ArchiveBatches` | `Map(DataType → Vec<ArchiveBatch>)` | 最近100个批次记录 |
+| `ArchiveStats` | `Map(DataType → ArchiveStatistics)` | 归档统计 |
+| `ArchivalPaused` | `Value(bool)` | 归档暂停标志 (G2) |
+| `ArchiveConfigOverride` | `Value(Option<ArchiveConfig>)` | 运行时配置覆盖 (G1) |
+| `ArchivePolicies` | `Map(DataType → ArchivePolicy)` | 按类型策略 (G3) |
+| `DataArchiveStatus` | `DoubleMap(DataType, u64 → ArchiveLevel)` | 数据归档状态 (U1) |
+| `PurgeProtected` | `DoubleMap(DataType, u64 → bool)` | 清除保护标志 (G4) |
+| `ActiveExtensions` | `DoubleMap(DataType, u64 → u64)` | 活跃期延长截止块 (U3) |
+| `TotalBatchCount` | `Map(DataType → u64)` | 总批次计数 (O1) |
 
 ## 事件
 
-| 事件 | 参数 | 描述 |
-|------|------|------|
-| `ArchivedToL1` | `data_type`, `count`, `saved_bytes` | 数据已归档到L1级别 |
-| `ArchivedToL2` | `data_type`, `count`, `saved_bytes` | 数据已归档到L2级别 |
-| `DataPurged` | `data_type`, `count` | 数据已被清除 |
-| `BatchCompleted` | `data_type`, `batch_id`, `level` | 归档批次处理完成 |
+| 事件 | 描述 |
+|------|------|
+| `ArchivedToL1 { data_type, count, saved_bytes }` | 数据归档到 L1 |
+| `ArchivedToL2 { data_type, count, saved_bytes }` | 数据归档到 L2 |
+| `DataPurged { data_type, count }` | 数据被清除 |
+| `ArchiveConfigUpdated { config }` | 归档配置已更新 (G1) |
+| `ArchivalPausedEvent` | 归档已暂停 (G2) |
+| `ArchivalResumedEvent` | 归档已恢复 (G2) |
+| `ArchivePolicySet { data_type, policy }` | 类型策略已设置 (G3) |
+| `PurgeProtectionChanged { data_type, data_id, protected }` | 清除保护状态变更 (G4) |
+| `DataForceArchived { data_type, data_ids, target_level }` | 数据被强制归档 (G4) |
+| `ActivePeriodExtended { data_type, data_id, extended_until }` | 活跃期已延长 (U3) |
+| `DataRestored { data_type, data_id, from_level }` | 数据已恢复 (U4) |
+| `ArchivalWarning { data_type, approaching_count }` | 即将归档预警 (U2) |
+| `ArchivalBacklog { data_type, pending_count }` | 积压告警 (O3) |
 
 ## 错误
 
 | 错误 | 描述 |
 |------|------|
-| `DataTypeTooLong` | 数据类型标识过长（超过32字节） |
-| `BatchQueueFull` | 归档批次队列已满（超过100个批次） |
-| `DataNotFound` | 指定的数据不存在 |
-| `InvalidArchiveState` | 数据当前状态不允许进行归档操作 |
+| `BatchQueueFull` | 批次队列已满 |
+| `InvalidArchiveState` | 当前状态不允许操作 |
+| `ArchivalAlreadyPaused` | 归档已暂停 |
+| `ArchivalNotPaused` | 归档未暂停 |
+| `CannotRestoreFromLevel` | 仅 L1 可恢复 |
+| `InvalidConfig` | 配置无效（延迟为0、purge_enabled时purge_delay为0等） |
+| `ExtensionTooShort` | 延长期过短（<100块） |
+| `AlreadyProtected` | 数据已受保护 |
+| `NotProtected` | 数据未受保护 |
+| `RestoreFailed` | 底层恢复操作失败 |
 
 ## 配置参数
 
 | 参数 | 类型 | 描述 | 建议值 |
 |------|------|------|--------|
-| `RuntimeEvent` | `Event` | 运行时事件类型 | - |
-| `L1ArchiveDelay` | `u32` | L1归档延迟（区块数），数据完成后多久可以归档到L1 | ~7天（约100,800块） |
-| `L2ArchiveDelay` | `u32` | L2归档延迟（区块数），L1归档后多久可以转为L2 | ~30天（约432,000块） |
-| `PurgeDelay` | `u32` | 清除延迟（区块数），L2归档后多久可以清除 | ~90天（约1,296,000块） |
-| `EnablePurge` | `bool` | 是否启用清除功能 | `false` |
-| `MaxBatchSize` | `u32` | 每次 `on_idle` 最大处理数量 | `100` |
+| `L1ArchiveDelay` | `u32` | L1归档延迟（区块数） | ~7天（100,800块） |
+| `L2ArchiveDelay` | `u32` | L2归档延迟 | ~30天（432,000块） |
+| `PurgeDelay` | `u32` | 清除延迟 | ~90天（1,296,000块） |
+| `EnablePurge` | `bool` | 是否启用清除 | `false` |
+| `MaxBatchSize` | `u32` | 每次 on_idle 最大处理数 | `100` |
+| `StorageArchiver` | `impl StorageArchiver` | 归档器实现 | - |
+| `OnArchive` | `impl OnArchiveHandler` | 归档回调处理器 | - |
+| `WeightInfo` | `impl WeightInfo` | 权重函数 | `SubstrateWeight` |
 
-## 核心类型
+## 核心 Trait
 
-### ArchivableData Trait
-
-所有需要生命周期管理的数据类型都应实现此 Trait：
+### StorageArchiver
 
 ```rust
-pub trait ArchivableData: Encode + Decode + Clone {
-    /// 一级归档类型（精简摘要，~50-80%压缩）
-    type ArchivedL1: Encode + Decode + Clone + MaxEncodedLen;
-    /// 二级归档类型（最小摘要，~90%+压缩）
-    type ArchivedL2: Encode + Decode + Clone + MaxEncodedLen;
-    /// 永久统计类型
-    type PermanentStats: Encode + Decode + Clone + MaxEncodedLen + Default;
-
-    /// 获取数据ID
-    fn get_id(&self) -> u64;
-    
-    /// 判断是否可以归档到 L1
-    /// - `now`: 当前区块号
-    /// - `l1_delay`: L1归档延迟（区块数）
-    fn can_archive_l1(&self, now: u64, l1_delay: u64) -> bool;
-    
-    /// 转换为一级归档
-    fn to_archived_l1(&self) -> Self::ArchivedL1;
-    
-    /// 判断L1归档是否可以转为L2
-    /// - `archived`: L1归档数据
-    /// - `now`: 当前区块号
-    /// - `l2_delay`: L2归档延迟（区块数）
-    fn can_archive_l2(archived: &Self::ArchivedL1, now: u64, l2_delay: u64) -> bool;
-    
-    /// 从一级归档转换为二级归档
-    fn l1_to_l2(archived: &Self::ArchivedL1) -> Self::ArchivedL2;
-    
-    /// 更新永久统计
-    fn update_stats(stats: &mut Self::PermanentStats, archived: &Self::ArchivedL1);
+pub trait StorageArchiver {
+    fn scan_archivable(delay: u64, max_count: u32) -> Vec<u64>;
+    fn archive_records(ids: &[u64]);
+    fn scan_for_level(data_type: &[u8], target: ArchiveLevel, delay: u64, max: u32) -> Vec<u64>;
+    fn archive_to_level(data_type: &[u8], ids: &[u64], target: ArchiveLevel);
+    fn registered_data_types() -> Vec<Vec<u8>>;
+    fn query_archive_level(data_type: &[u8], data_id: u64) -> ArchiveLevel;
+    fn restore_record(data_type: &[u8], data_id: u64, from: ArchiveLevel) -> bool;
 }
 ```
 
-### ArchiveLevel 枚举
+### OnArchiveHandler
 
 ```rust
-pub enum ArchiveLevel {
-    Active,     // 活跃数据（完整存储）
-    ArchivedL1, // 一级归档（精简存储）
-    ArchivedL2, // 二级归档（最小存储）
-    Purged,     // 已清除（仅统计）
+pub trait OnArchiveHandler {
+    fn on_archived(data_type: &[u8], data_id: u64, from: ArchiveLevel, to: ArchiveLevel);
 }
 ```
 
-**方法**：
-- `to_u8()` - 转换为 u8 值（0-3）
-- `from_u8(val)` - 从 u8 值转换
-
-### ArchiveRecord 结构
+### ArchiveConfig / ArchivePolicy
 
 ```rust
-pub struct ArchiveRecord {
-    pub data_id: u64,        // 数据ID
-    pub level: ArchiveLevel, // 归档级别
-    pub archived_at: u64,    // 归档时间（区块号）
-    pub original_size: u32,  // 原始大小（字节）
-    pub archived_size: u32,  // 归档后大小（字节）
+pub struct ArchiveConfig {
+    pub l1_delay: u32,
+    pub l2_delay: u32,
+    pub purge_delay: u32,
+    pub purge_enabled: bool,
+    pub max_batch_size: u32,
+}
+
+pub struct ArchivePolicy {
+    pub l1_delay: u32,
+    pub l2_delay: u32,
+    pub purge_delay: u32,
+    pub purge_enabled: bool,
 }
 ```
 
-### ArchiveBatch 结构
+## Runtime API
 
-```rust
-pub struct ArchiveBatch {
-    pub batch_id: u64,     // 批次ID
-    pub id_start: u64,     // 数据ID范围起始
-    pub id_end: u64,       // 数据ID范围结束
-    pub count: u32,        // 归档数量
-    pub archived_at: u64,  // 归档时间（区块号）
-    pub level: u8,         // 归档级别 (0=Active, 1=L1, 2=L2, 3=Purged)
-}
-```
+`StorageLifecycleApi` 提供以下查询接口（定义于 `runtime_api.rs`）：
 
-### ArchiveStatistics 结构
-
-```rust
-pub struct ArchiveStatistics {
-    pub total_l1_archived: u64,  // 总归档到L1数量
-    pub total_l2_archived: u64,  // 总归档到L2数量
-    pub total_purged: u64,       // 总清除数量
-    pub total_bytes_saved: u64,  // 节省的存储字节数
-    pub last_archive_at: u64,    // 最后归档时间（区块号）
-}
-```
-
-### StorageLifecycleManager
-
-存储生命周期管理器，提供分级归档的核心逻辑：
-
-| 方法 | 描述 |
-|------|------|
-| `new()` | 创建新的管理器实例 |
-| `process_archival(now, max_to_process, data_type)` | 处理分级归档（在 on_idle 中调用） |
-| `record_batch(data_type, id_start, id_end, count, level, now)` | 记录归档批次 |
-| `update_cursor(data_type, cursor)` | 更新归档游标 |
-| `get_cursor(data_type)` | 获取归档游标 |
-| `record_bytes_saved(data_type, bytes)` | 更新节省的存储统计 |
-
-## 辅助函数
-
-| 函数 | 参数 | 描述 |
+| 方法 | 返回 | 描述 |
 |------|------|------|
-| `block_to_year_month` | `block_number: u32`, `blocks_per_day: u32` | 区块号转换为YYMM格式（假设创世区块是2024年1月） |
-| `amount_to_tier` | `amount: u64` | 金额转换为档位（0-5） |
+| `get_archive_stats(data_type)` | `(u64,u64,u64,u64,u64)` | L1/L2/Purged 数量、节省字节、最后归档时间 |
+| `get_archive_config()` | `(u32,u32,u32,bool,u32)` | 当前有效配置 |
+| `get_data_status(data_type, data_id)` | `u8` | 数据归档级别 |
+| `is_archival_paused()` | `bool` | 归档是否暂停 |
 
-**金额档位对照表**：
-
-| 档位 | 金额范围 |
-|------|---------|
-| 0 | < 100 |
-| 1 | 100 - 999 |
-| 2 | 1,000 - 9,999 |
-| 3 | 10,000 - 99,999 |
-| 4 | 100,000 - 999,999 |
-| 5 | ≥ 1,000,000 |
-
-## 使用示例
-
-### 1. 实现 ArchivableData Trait
-
-```rust
-use pallet_storage_lifecycle::{ArchivableData, ArchiveLevel};
-use codec::{Encode, Decode};
-use frame_support::pallet_prelude::*;
-
-#[derive(Encode, Decode, Clone)]
-pub struct MyData {
-    pub id: u64,
-    pub content: Vec<u8>,
-    pub created_at: u64,
-    pub metadata: Vec<u8>,
-}
-
-#[derive(Encode, Decode, Clone, MaxEncodedLen)]
-pub struct MyDataL1 {
-    pub id: u64,
-    pub content_hash: [u8; 32],
-    pub created_at: u64,
-}
-
-#[derive(Encode, Decode, Clone, MaxEncodedLen)]
-pub struct MyDataL2 {
-    pub id: u64,
-    pub created_at: u64,
-}
-
-#[derive(Encode, Decode, Clone, MaxEncodedLen, Default)]
-pub struct MyStats {
-    pub total_count: u64,
-    pub total_size: u64,
-}
-
-impl ArchivableData for MyData {
-    type ArchivedL1 = MyDataL1;
-    type ArchivedL2 = MyDataL2;
-    type PermanentStats = MyStats;
-
-    fn get_id(&self) -> u64 { 
-        self.id 
-    }
-
-    fn can_archive_l1(&self, now: u64, l1_delay: u64) -> bool {
-        now > self.created_at + l1_delay
-    }
-
-    fn to_archived_l1(&self) -> Self::ArchivedL1 {
-        MyDataL1 {
-            id: self.id,
-            content_hash: sp_io::hashing::blake2_256(&self.content),
-            created_at: self.created_at,
-        }
-    }
-
-    fn can_archive_l2(archived: &Self::ArchivedL1, now: u64, l2_delay: u64) -> bool {
-        now > archived.created_at + l2_delay
-    }
-    
-    fn l1_to_l2(archived: &Self::ArchivedL1) -> Self::ArchivedL2 {
-        MyDataL2 {
-            id: archived.id,
-            created_at: archived.created_at,
-        }
-    }
-
-    fn update_stats(stats: &mut Self::PermanentStats, _archived: &Self::ArchivedL1) {
-        stats.total_count += 1;
-    }
-}
-```
-
-### 2. 在 on_idle 中调用归档
-
-```rust
-fn on_idle(_n: BlockNumberFor<T>, remaining_weight: Weight) -> Weight {
-    use pallet_storage_lifecycle::StorageLifecycleManager;
-    
-    let now = <frame_system::Pallet<T>>::block_number().saturated_into::<u64>();
-    let max_process = T::MaxBatchSize::get();
-    
-    StorageLifecycleManager::<T>::process_archival(
-        now,
-        max_process,
-        b"my_data",
-    );
-    
-    remaining_weight
-}
-```
-
-### 3. 记录归档批次
-
-```rust
-use pallet_storage_lifecycle::{StorageLifecycleManager, ArchiveLevel};
-use frame_support::BoundedVec;
-
-// 创建数据类型标识
-let data_type: BoundedVec<u8, ConstU32<32>> = 
-    b"my_data".to_vec().try_into().expect("data type too long");
-
-// 记录归档批次
-StorageLifecycleManager::<T>::record_batch(
-    data_type.clone(),
-    1,      // id_start
-    100,    // id_end
-    100,    // count
-    ArchiveLevel::ArchivedL1,
-    now,
-)?;
-
-// 更新游标
-StorageLifecycleManager::<T>::update_cursor(data_type.clone(), 100);
-
-// 记录节省的存储空间
-StorageLifecycleManager::<T>::record_bytes_saved(&data_type, 50000);
-```
-
-### 4. 配置示例
+## 配置示例
 
 ```rust
 parameter_types! {
-    // 约7天（假设6秒一个块）
-    pub const L1ArchiveDelay: u32 = 100_800;
-    // 约30天
-    pub const L2ArchiveDelay: u32 = 432_000;
-    // 约90天
-    pub const PurgeDelay: u32 = 1_296_000;
+    pub const L1ArchiveDelay: u32 = 100_800;  // ~7天
+    pub const L2ArchiveDelay: u32 = 432_000;  // ~30天
+    pub const PurgeDelay: u32 = 1_296_000;    // ~90天
     pub const EnablePurge: bool = false;
     pub const MaxBatchSize: u32 = 100;
 }
@@ -353,16 +206,55 @@ impl pallet_storage_lifecycle::Config for Runtime {
     type PurgeDelay = PurgeDelay;
     type EnablePurge = EnablePurge;
     type MaxBatchSize = MaxBatchSize;
+    type StorageArchiver = MyArchiver;
+    type OnArchive = MyArchiveHandler;
+    type WeightInfo = pallet_storage_lifecycle::SubstrateWeight;
 }
 ```
 
-## 最佳实践
+## 测试覆盖
 
-1. **延迟配置**：根据数据访问频率合理配置归档延迟，高频访问数据应设置较长的 L1 延迟
-2. **批次大小**：根据链上性能调整 `MaxBatchSize`，避免单次处理过多数据影响出块
-3. **清除策略**：谨慎启用 `EnablePurge`，确保重要数据已备份或已提取必要统计信息
-4. **存储估算**：预估归档后的存储节省，优化 L1/L2 归档格式设计
-5. **数据类型标识**：使用简短且唯一的数据类型标识，不超过32字节
+76 个测试覆盖所有功能：
+
+- 基础工具函数（`block_to_year_month`, `amount_to_tier`, `ArchiveLevel` 转换）
+- 批次记录与统计（record_batch, cursor, bytes_saved, queue eviction）
+- D1: 三阶段归档（Active→L1→L2→Purge, 权重不足跳过）
+- D3: 归档回调验证
+- U2: 归档前预警（on_idle 事件 + query_approaching_archival 查询）
+- G1: 配置管理（设置、无效拒绝、Root 权限、常量回退）
+- G2: 暂停/恢复（on_idle 跳过、重复暂停拒绝）
+- G3: 按类型策略（设置、无效拒绝、全局回退）
+- G4: 强制归档 + 清除保护（保护/移除/on_idle 过滤）
+- U1: 数据状态查询
+- U3: Active 延长（叠加、过短拒绝、非活跃拒绝、on_idle 过滤）
+- U4: 归档恢复（L1恢复、非L1拒绝、底层失败）
+- O1/O2: 统计和仪表盘
+- 综合流程（全生命周期、策略覆盖）
+- H1-R1: on_idle 权重准确性（扫描开销、项目开销）
+- H2-R1: force_archive 回调（回调触发、from_level 正确性）
+- M1-R1: purge_delay 校验（启用时拒绝零值、禁用时允许）
+- M2-R1: TotalBatchCount 递增（手动和 on_idle）
+- H1-R2: on_idle 权重不超过 remaining_weight（普通和紧缩限制）
+- M1-R2: on_idle 回调读取实际 from_level
+- M2-R2: 积压告警事件可触发
+- M3-R2: force_archive 清理 ActiveExtensions 和 PurgeProtected
+- H1-R3: force_archive 跳过后退/同级转换（3 个测试）
+- M1-R3: on_idle 中途超预算中止
+- M2-R3: 延迟顺序校验（config 和 policy 各 3 个测试）
+- M1-R4: restore_from_archive 触发 OnArchive 回调（2 个测试）
+- M2-R4: DataForceArchived 事件仅含实际归档 ID（2 个测试）
+- M3-R4: force_archive 缓存 from_level 正确性
+
+## 版本历史
+
+| 版本 | 变更 |
+|------|------|
+| v0.1.0 | 初始框架：ArchivableData trait, on_idle 基础归档 |
+| v0.2.0 | 生产级实现：多级 StorageArchiver, OnArchiveHandler, 9 个治理/用户 extrinsics, Runtime API, 45 个测试 |
+| v0.2.1 | 深度审计 Round 1：H1(权重准确性), H2(force_archive回调), M1(purge_delay校验), M2(TotalBatchCount), M3(死代码), L1(死错误), L2(README同步) — 55 个测试 |
+| v0.2.2 | 深度审计 Round 2：H1(权重不超过remaining_weight), M1(回调读取实际from_level), M2(积压告警回归), M3(force_archive存储清理), L1(死BatchCompleted), L2(死ArchiveRecord), L4(Cargo版本) — 61 个测试 |
+| v0.2.3 | 深度审计 Round 3：H1(force_archive拒绝后退转换), M1(on_idle中途预算中止), M2(延迟顺序校验l1≤l2≤purge), L1(移除死new()) — 71 个测试 |
+| v0.2.4 | 深度审计 Round 4：M1(restore_from_archive触发OnArchive回调), M2(DataForceArchived事件仅含forward_ids), M3(force_archive缓存from_level避免二次读取) — 76 个测试 |
 
 ## 许可证
 

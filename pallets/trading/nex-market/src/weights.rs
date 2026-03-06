@@ -18,6 +18,15 @@ pub trait WeightInfo {
     fn auto_confirm_payment() -> Weight;
     fn submit_underpaid_update() -> Weight;
     fn finalize_underpaid() -> Weight;
+    fn force_pause_market() -> Weight;
+    fn force_resume_market() -> Weight;
+    fn force_settle_trade() -> Weight;
+    fn force_cancel_trade() -> Weight;
+    fn dispute_trade() -> Weight;
+    fn resolve_dispute() -> Weight;
+    fn set_trading_fee() -> Weight;
+    fn update_order_price() -> Weight;
+    fn update_deposit_exchange_rate() -> Weight;
 }
 
 /// 保守权重估算（未经 benchmark，基于 DB 读写分析）
@@ -64,4 +73,22 @@ impl WeightInfo for () {
     fn submit_underpaid_update() -> Weight { Weight::from_parts(60_000_000, 5_000) }
     // 17: finalize_underpaid — R:4 W:7 (similar to claim_reward + deposit forfeit)
     fn finalize_underpaid() -> Weight { Weight::from_parts(110_000_000, 8_000) }
+    // 18: force_pause_market — R:0 W:1
+    fn force_pause_market() -> Weight { Weight::from_parts(30_000_000, 4_000) }
+    // 19: force_resume_market — R:0 W:1
+    fn force_resume_market() -> Weight { Weight::from_parts(30_000_000, 4_000) }
+    // 20: force_settle_trade — R:3 W:8 (Trade+Order+queues + unreserve/transfer)
+    fn force_settle_trade() -> Weight { Weight::from_parts(120_000_000, 10_000) }
+    // 21: force_cancel_trade — R:2 W:7 (Trade+Order+queues + unreserve)
+    fn force_cancel_trade() -> Weight { Weight::from_parts(100_000_000, 8_000) }
+    // 22: dispute_trade — R:2(Trade+Dispute) W:1(Dispute)
+    fn dispute_trade() -> Weight { Weight::from_parts(50_000_000, 5_000) }
+    // 23: resolve_dispute — R:2(Dispute+Trade) W:2(Dispute+transfer)
+    fn resolve_dispute() -> Weight { Weight::from_parts(80_000_000, 6_000) }
+    // 24: set_trading_fee — R:1 W:1
+    fn set_trading_fee() -> Weight { Weight::from_parts(30_000_000, 4_000) }
+    // 25: update_order_price — R:3(Order+OrderTrades+BestPrice) W:2(Order+BestPrice)
+    fn update_order_price() -> Weight { Weight::from_parts(60_000_000, 5_000) }
+    // 26: update_deposit_exchange_rate — R:1 W:1
+    fn update_deposit_exchange_rate() -> Weight { Weight::from_parts(30_000_000, 4_000) }
 }

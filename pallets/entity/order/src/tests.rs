@@ -1,6 +1,6 @@
 use crate::mock::*;
 use crate::pallet::*;
-use frame_support::{assert_noop, assert_ok};
+use frame_support::{assert_noop, assert_ok, weights::Weight};
 use pallet_entity_common::OrderStatus;
 
 // ==================== place_order ====================
@@ -14,6 +14,7 @@ fn place_order_physical_works() {
             1, // product_id
             2, // quantity
             Some(b"addr_cid".to_vec()),
+            None,
             None,
             None,
             None,
@@ -43,6 +44,7 @@ fn place_order_digital_auto_completes() {
             None,
             None,
             None,
+            None,
         ));
 
         let order = Transaction::orders(1).expect("order should exist");
@@ -64,6 +66,7 @@ fn place_order_service_works() {
             None,
             None,
             None,
+            None,
         ));
 
         let order = Transaction::orders(1).expect("order should exist");
@@ -77,7 +80,7 @@ fn place_order_service_works() {
 fn place_order_fails_zero_quantity() {
     new_test_ext().execute_with(|| {
         assert_noop!(
-            Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 0, None, None, None, None),
+            Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 0, None, None, None, None, None),
             Error::<Test>::InvalidQuantity
         );
     });
@@ -87,7 +90,7 @@ fn place_order_fails_zero_quantity() {
 fn place_order_fails_product_not_found() {
     new_test_ext().execute_with(|| {
         assert_noop!(
-            Transaction::place_order(RuntimeOrigin::signed(BUYER), 99, 1, None, None, None, None),
+            Transaction::place_order(RuntimeOrigin::signed(BUYER), 99, 1, None, None, None, None, None),
             Error::<Test>::ProductNotFound
         );
     });
@@ -98,7 +101,7 @@ fn place_order_fails_buy_own_product() {
     new_test_ext().execute_with(|| {
         // SELLER owns shop 1, product 1 belongs to shop 1
         assert_noop!(
-            Transaction::place_order(RuntimeOrigin::signed(SELLER), 1, 1, None, None, None, None),
+            Transaction::place_order(RuntimeOrigin::signed(SELLER), 1, 1, None, None, None, None, None),
             Error::<Test>::CannotBuyOwnProduct
         );
     });
@@ -109,7 +112,7 @@ fn place_order_fails_buy_own_product() {
 #[test]
 fn cancel_order_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         assert_ok!(Transaction::cancel_order(RuntimeOrigin::signed(BUYER), 1));
 
@@ -124,7 +127,7 @@ fn cancel_order_works() {
 #[test]
 fn cancel_order_fails_digital() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None, None));
 
         assert_noop!(
             Transaction::cancel_order(RuntimeOrigin::signed(BUYER), 1),
@@ -136,7 +139,7 @@ fn cancel_order_fails_digital() {
 #[test]
 fn cancel_order_fails_not_buyer() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         assert_noop!(
             Transaction::cancel_order(RuntimeOrigin::signed(BUYER2), 1),
@@ -148,7 +151,7 @@ fn cancel_order_fails_not_buyer() {
 #[test]
 fn cancel_order_fails_after_shipped() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track123".to_vec()));
 
         assert_noop!(
@@ -163,7 +166,7 @@ fn cancel_order_fails_after_shipped() {
 #[test]
 fn ship_order_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track_cid".to_vec()));
 
         let order = Transaction::orders(1).expect("order should exist");
@@ -176,7 +179,7 @@ fn ship_order_works() {
 #[test]
 fn ship_order_fails_not_seller() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         assert_noop!(
             Transaction::ship_order(RuntimeOrigin::signed(BUYER), 1, b"track".to_vec()),
@@ -190,7 +193,7 @@ fn ship_order_fails_not_seller() {
 #[test]
 fn confirm_receipt_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
         assert_ok!(Transaction::confirm_receipt(RuntimeOrigin::signed(BUYER), 1));
 
@@ -207,7 +210,7 @@ fn confirm_receipt_works() {
 #[test]
 fn confirm_receipt_fails_not_shipped() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         assert_noop!(
             Transaction::confirm_receipt(RuntimeOrigin::signed(BUYER), 1),
@@ -221,7 +224,7 @@ fn confirm_receipt_fails_not_shipped() {
 #[test]
 fn request_refund_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         assert_ok!(Transaction::request_refund(
             RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()
@@ -235,7 +238,7 @@ fn request_refund_works() {
 #[test]
 fn request_refund_fails_digital() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None, None));
 
         assert_noop!(
             Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()),
@@ -247,7 +250,7 @@ fn request_refund_fails_digital() {
 #[test]
 fn approve_refund_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
         assert_ok!(Transaction::approve_refund(RuntimeOrigin::signed(SELLER), 1));
 
@@ -262,7 +265,7 @@ fn approve_refund_works() {
 #[test]
 fn approve_refund_fails_not_seller() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
 
         assert_noop!(
@@ -278,7 +281,7 @@ fn approve_refund_fails_not_seller() {
 fn service_order_full_flow() {
     new_test_ext().execute_with(|| {
         // Product 3 = Service
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None));
 
         let order = Transaction::orders(1).unwrap();
         assert_eq!(order.status, OrderStatus::Paid);
@@ -305,7 +308,7 @@ fn service_order_full_flow() {
 fn start_service_fails_not_service_order() {
     new_test_ext().execute_with(|| {
         // Product 1 = Physical
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         assert_noop!(
             Transaction::start_service(RuntimeOrigin::signed(SELLER), 1),
@@ -317,7 +320,7 @@ fn start_service_fails_not_service_order() {
 #[test]
 fn confirm_service_fails_without_completion() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None));
         assert_ok!(Transaction::start_service(RuntimeOrigin::signed(SELLER), 1));
 
         // service_completed_at is None → should fail
@@ -334,7 +337,7 @@ fn confirm_service_fails_without_completion() {
 fn ship_timeout_auto_refunds() {
     new_test_ext().execute_with(|| {
         // Physical product, ShipTimeout = 100 blocks
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Paid);
 
         // Advance to block 1 + 100 = 101
@@ -351,7 +354,7 @@ fn ship_timeout_auto_refunds() {
 #[test]
 fn confirm_timeout_auto_completes() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
 
         // shipped_at = 1, ConfirmTimeout = 200, expiry = 1 + 200 = 201
@@ -366,7 +369,7 @@ fn confirm_timeout_auto_completes() {
 fn service_timeout_auto_refunds() {
     new_test_ext().execute_with(|| {
         // Service product, ShipTimeout = 100
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None));
 
         // Don't start service, wait for timeout
         run_to_block(101);
@@ -385,7 +388,7 @@ fn order_provider_trait_works() {
 
         assert!(!<Transaction as OrderProvider<u64, u64>>::order_exists(1));
 
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         assert!(<Transaction as OrderProvider<u64, u64>>::order_exists(1));
         assert_eq!(<Transaction as OrderProvider<u64, u64>>::order_buyer(1), Some(BUYER));
@@ -404,8 +407,8 @@ fn order_provider_trait_works() {
 #[test]
 fn order_stats_tracking() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 2, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 2, Some(b"addr".to_vec()), None, None, None, None));
 
         let stats = Transaction::order_stats();
         assert_eq!(stats.total_orders, 2);
@@ -426,7 +429,7 @@ fn order_stats_tracking() {
 fn platform_fee_calculated_correctly() {
     new_test_ext().execute_with(|| {
         // Price 100 * qty 1 = 100, platform_fee = 100 * 100 / 10000 = 1
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         let order = Transaction::orders(1).unwrap();
         assert_eq!(order.total_amount, 100);
@@ -441,7 +444,7 @@ fn service_in_progress_not_auto_completed_by_ship_timeout() {
     new_test_ext().execute_with(|| {
         // H5: Service order started but ShipTimeout fires → should NOT auto-complete
         // because service_completed_at is still None (service not done yet)
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None));
 
         // Seller starts service at block 50 (before ShipTimeout at 101)
         System::set_block_number(50);
@@ -464,7 +467,7 @@ fn service_in_progress_not_auto_completed_by_ship_timeout() {
 fn service_completed_auto_confirms_after_service_confirm_timeout() {
     new_test_ext().execute_with(|| {
         // Service order: start → complete → auto-confirm after ServiceConfirmTimeout
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None));
 
         System::set_block_number(10);
         assert_ok!(Transaction::start_service(RuntimeOrigin::signed(SELLER), 1));
@@ -488,7 +491,7 @@ fn service_completed_auto_confirms_after_service_confirm_timeout() {
 fn c2_ship_order_rejects_service_order() {
     new_test_ext().execute_with(|| {
         // Product 3 = Service
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None));
 
         assert_noop!(
             Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()),
@@ -502,7 +505,7 @@ fn c2_ship_order_rejects_service_order() {
 fn c2_confirm_receipt_rejects_service_order() {
     new_test_ext().execute_with(|| {
         // Product 3 = Service, use start_service to get to Shipped
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None));
         assert_ok!(Transaction::start_service(RuntimeOrigin::signed(SELLER), 1));
 
         assert_noop!(
@@ -516,7 +519,7 @@ fn c2_confirm_receipt_rejects_service_order() {
 #[test]
 fn m5_request_refund_rejects_empty_reason() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         assert_noop!(
             Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"".to_vec()),
@@ -529,7 +532,7 @@ fn m5_request_refund_rejects_empty_reason() {
 #[test]
 fn m5_request_refund_rejects_long_reason() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         let long_cid = vec![b'x'; 65]; // MaxCidLength = 64
         assert_noop!(
@@ -545,13 +548,13 @@ fn m6_physical_order_requires_shipping_cid() {
     new_test_ext().execute_with(|| {
         // Product 1 = Physical, no shipping_cid → should fail
         assert_noop!(
-            Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None, None, None),
+            Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, None, None, None, None, None),
             Error::<Test>::ShippingCidRequired
         );
 
         // With shipping_cid → should succeed
         assert_ok!(Transaction::place_order(
-            RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None
+            RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None
         ));
     });
 }
@@ -561,7 +564,7 @@ fn m6_physical_order_requires_shipping_cid() {
 fn m6_service_order_no_shipping_cid_ok() {
     new_test_ext().execute_with(|| {
         // Product 3 = Service, no shipping_cid → should succeed
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None));
     });
 }
 
@@ -570,9 +573,9 @@ fn m6_service_order_no_shipping_cid_ok() {
 fn c1_expiry_queue_preserves_unprocessed() {
     new_test_ext().execute_with(|| {
         // Place 3 physical orders — all expire at block 1 + 100 = 101
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"a".to_vec()), None, None, None));
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"b".to_vec()), None, None, None));
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"c".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"a".to_vec()), None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"b".to_vec()), None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"c".to_vec()), None, None, None, None));
 
         // Verify all 3 are in the expiry queue at block 101
         let queue = crate::ExpiryQueue::<Test>::get(101u64);
@@ -622,17 +625,18 @@ fn order_complete_triggers_member_register_and_update_spent() {
             1,
             None, None, None,
             None,
+            None,
         ));
 
-        // auto_register should have been called with (shop_id=1, buyer=1)
+        // auto_register should have been called with (entity_id=1, buyer=1)
         let registered = get_member_registered();
         assert_eq!(registered.len(), 1);
-        assert_eq!(registered[0], (SHOP_1, BUYER));
+        assert_eq!(registered[0], (ENTITY_1, BUYER));
 
-        // update_spent should have been called with (shop_id=1, buyer=1, amount_usdt)
+        // update_spent should have been called with (entity_id=1, buyer=1, amount_usdt)
         let spent = get_member_spent();
         assert_eq!(spent.len(), 1);
-        assert_eq!(spent[0].0, SHOP_1);
+        assert_eq!(spent[0].0, ENTITY_1);
         assert_eq!(spent[0].1, BUYER);
         // amount_usdt: 50 * 1_000_000 / 10^12 = 0（mock NEX amount 太小导致精度截断）
         assert_eq!(spent[0].2, 0);
@@ -648,6 +652,7 @@ fn confirm_order_triggers_member_handler() {
             1, // Physical, price 100
             1,
             Some(b"addr".to_vec()), None, None,
+            None,
             None,
         ));
 
@@ -667,11 +672,11 @@ fn confirm_order_triggers_member_handler() {
 
         let registered = get_member_registered();
         assert_eq!(registered.len(), 1);
-        assert_eq!(registered[0], (SHOP_1, BUYER));
+        assert_eq!(registered[0], (ENTITY_1, BUYER));
 
         let spent = get_member_spent();
         assert_eq!(spent.len(), 1);
-        assert_eq!(spent[0].0, SHOP_1);
+        assert_eq!(spent[0].0, ENTITY_1);
         assert_eq!(spent[0].1, BUYER);
         // amount_usdt: 100 * 1_000_000 / 10^12 = 0（mock NEX amount 太小导致精度截断）
         assert_eq!(spent[0].2, 0);
@@ -685,6 +690,7 @@ fn auto_complete_timeout_triggers_member_handler() {
         assert_ok!(Transaction::place_order(
             RuntimeOrigin::signed(BUYER),
             1, 1, Some(b"addr".to_vec()), None, None,
+            None,
             None,
         ));
         assert_ok!(Transaction::ship_order(
@@ -701,7 +707,7 @@ fn auto_complete_timeout_triggers_member_handler() {
 
         let registered = get_member_registered();
         assert_eq!(registered.len(), 1);
-        assert_eq!(registered[0], (SHOP_1, BUYER));
+        assert_eq!(registered[0], (ENTITY_1, BUYER));
 
         let spent = get_member_spent();
         assert_eq!(spent.len(), 1);
@@ -726,6 +732,7 @@ fn token_place_order_physical_works() {
             RuntimeOrigin::signed(BUYER), 1, 1,
             Some(b"addr".to_vec()), None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
 
         let order = Transaction::orders(1).unwrap();
@@ -750,6 +757,7 @@ fn token_place_order_digital_auto_completes() {
             RuntimeOrigin::signed(BUYER), 2, 1, // Digital, price 50
             None, None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
 
         let order = Transaction::orders(1).unwrap();
@@ -778,6 +786,7 @@ fn token_cancel_order_unreserves_tokens() {
             RuntimeOrigin::signed(BUYER), 1, 1,
             Some(b"addr".to_vec()), None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
         assert_eq!(get_token_reserved(ENTITY_1, BUYER), 100);
 
@@ -805,6 +814,7 @@ fn token_confirm_receipt_transfers_to_seller() {
             RuntimeOrigin::signed(BUYER), 1, 1,
             Some(b"addr".to_vec()), None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
         assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
         assert_ok!(Transaction::confirm_receipt(RuntimeOrigin::signed(BUYER), 1));
@@ -833,6 +843,7 @@ fn token_approve_refund_unreserves_tokens() {
             RuntimeOrigin::signed(BUYER), 1, 1,
             Some(b"addr".to_vec()), None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
         assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
         assert_ok!(Transaction::approve_refund(RuntimeOrigin::signed(SELLER), 1));
@@ -859,6 +870,7 @@ fn token_ship_timeout_auto_refunds() {
             RuntimeOrigin::signed(BUYER), 1, 1,
             Some(b"addr".to_vec()), None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
 
         run_to_block(101); // ShipTimeout = 100
@@ -881,6 +893,7 @@ fn token_confirm_timeout_auto_completes() {
             RuntimeOrigin::signed(BUYER), 1, 1,
             Some(b"addr".to_vec()), None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
         assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
 
@@ -904,6 +917,7 @@ fn token_place_order_fails_token_not_enabled() {
                 RuntimeOrigin::signed(BUYER), 1, 1,
                 Some(b"addr".to_vec()), None, None,
                 Some(PaymentAsset::EntityToken),
+                None,
             ),
             Error::<Test>::EntityTokenNotEnabled
         );
@@ -921,6 +935,7 @@ fn token_place_order_fails_insufficient_balance() {
                 RuntimeOrigin::signed(BUYER), 1, 1,
                 Some(b"addr".to_vec()), None, None,
                 Some(PaymentAsset::EntityToken),
+                None,
             ),
             Error::<Test>::InsufficientTokenBalance
         );
@@ -933,7 +948,7 @@ fn token_place_order_none_defaults_to_native() {
         // payment_asset = None should default to Native
         assert_ok!(Transaction::place_order(
             RuntimeOrigin::signed(BUYER), 1, 1,
-            Some(b"addr".to_vec()), None, None, None,
+            Some(b"addr".to_vec()), None, None, None, None,
         ));
 
         let order = Transaction::orders(1).unwrap();
@@ -951,7 +966,7 @@ fn h2_zero_stock_rejects_purchase() {
     new_test_ext().execute_with(|| {
         set_product_stock(1, 0); // Physical product, stock=0
         assert_noop!(
-            Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None),
+            Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None),
             Error::<Test>::InsufficientStock
         );
     });
@@ -961,7 +976,7 @@ fn h2_zero_stock_rejects_purchase() {
 #[test]
 fn h3_ship_order_rejects_empty_tracking_cid() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_noop!(
             Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"".to_vec()),
             Error::<Test>::EmptyTrackingCid
@@ -974,7 +989,7 @@ fn h3_ship_order_rejects_empty_tracking_cid() {
 fn h4_service_start_timeout_auto_refunds() {
     new_test_ext().execute_with(|| {
         // Product 3 = Service, ShipTimeout=100, ServiceConfirmTimeout=150
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None));
 
         // Start service at block 10
         System::set_block_number(10);
@@ -1002,7 +1017,7 @@ fn h4_service_start_timeout_auto_refunds() {
 #[test]
 fn h4_service_normal_flow_unaffected() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None));
 
         System::set_block_number(10);
         assert_ok!(Transaction::start_service(RuntimeOrigin::signed(SELLER), 1));
@@ -1025,7 +1040,7 @@ fn m3_reward_uses_resolved_entity_id() {
         // Digital product auto-completes → do_complete_order → reward_on_purchase
         // This test verifies it doesn't panic and completes successfully
         assert_ok!(Transaction::place_order(
-            RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None,
+            RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None, None,
         ));
         let order = Transaction::orders(1).unwrap();
         assert_eq!(order.status, OrderStatus::Completed);
@@ -1047,6 +1062,7 @@ fn c1_token_order_request_refund_works() {
             RuntimeOrigin::signed(BUYER), 3, 1,
             None, None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
         let order = Transaction::orders(1).unwrap();
         assert_eq!(order.payment_asset, PaymentAsset::EntityToken);
@@ -1067,7 +1083,7 @@ fn c1_native_order_request_refund_still_uses_escrow() {
     new_test_ext().execute_with(|| {
         // 服务类产品不需要 shipping_cid
         assert_ok!(Transaction::place_order(
-            RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None,
+            RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None,
         ));
         assert_ok!(Transaction::request_refund(
             RuntimeOrigin::signed(BUYER), 1, b"reason_cid".to_vec(),
@@ -1090,6 +1106,7 @@ fn c1_token_order_approve_refund_unreserves_tokens() {
             RuntimeOrigin::signed(BUYER), 3, 1,
             None, None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
 
         // 买家申请退款
@@ -1119,7 +1136,7 @@ fn h1_expiry_queue_retains_in_service_not_yet_due() {
     new_test_ext().execute_with(|| {
         // Service order (product 3, price=200, ServiceConfirmTimeout=150)
         assert_ok!(Transaction::place_order(
-            RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None,
+            RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None,
         ));
 
         // Start service at block 50
@@ -1160,7 +1177,7 @@ fn h3_place_order_rejects_overflow() {
         // We can't easily overflow with the mock's fixed prices.
         // Instead, verify the checked_mul path exists by confirming normal orders still work.
         assert_ok!(Transaction::place_order(
-            RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None,
+            RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None,
         ));
         let order = Transaction::orders(1).unwrap();
         assert_eq!(order.total_amount, 100);
@@ -1180,12 +1197,11 @@ fn m1_token_order_stats_track_token_volume() {
             RuntimeOrigin::signed(BUYER), 2, 1,
             None, None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
 
         let stats = crate::OrderStats::<Test>::get();
         assert_eq!(stats.completed_orders, 1);
-        // Token volume should be 50 (product 2 price)
-        assert_eq!(stats.total_token_volume, 50);
         // M2-R5-fix: total_volume (NEX) should be 0 for Token-only orders
         assert_eq!(stats.total_volume, 0);
     });
@@ -1197,14 +1213,13 @@ fn m1_nex_order_stats_zero_token_volume() {
     new_test_ext().execute_with(|| {
         // Digital NEX order (auto-completes)
         assert_ok!(Transaction::place_order(
-            RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None,
+            RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None, None,
         ));
 
         let stats = crate::OrderStats::<Test>::get();
         assert_eq!(stats.completed_orders, 1);
         assert_eq!(stats.total_volume, 50); // NEX
-        assert_eq!(stats.total_token_volume, 0); // no Token
-        assert_eq!(stats.total_token_platform_fees, 0);
+        assert_eq!(stats.total_platform_fees, 0); // product 2 is digital, no platform fee
     });
 }
 
@@ -1223,6 +1238,7 @@ fn m3_token_order_reward_uses_token_amount() {
             RuntimeOrigin::signed(BUYER), 2, 1,
             None, None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
 
         let order = Transaction::orders(1).unwrap();
@@ -1247,6 +1263,7 @@ fn h2_token_order_shop_stats_uses_token_amount() {
             RuntimeOrigin::signed(BUYER), 2, 1,
             None, None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
 
         // If update_shop_stats was called with 0 (old bug), shop revenue tracking is wrong.
@@ -1274,6 +1291,7 @@ fn h1r5_token_order_update_spent_passes_zero() {
             RuntimeOrigin::signed(BUYER), 2, 1,
             None, None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
 
         // Check MockMemberHandler recorded calls
@@ -1294,7 +1312,7 @@ fn h1r5_nex_order_update_spent_passes_correct_amounts() {
     new_test_ext().execute_with(|| {
         // Digital NEX order auto-completes
         assert_ok!(Transaction::place_order(
-            RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None,
+            RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None, None,
         ));
 
         let spent = get_member_spent();
@@ -1312,7 +1330,7 @@ fn m1r5_ship_timeout_emits_order_refunded_event() {
         // Physical order (product 1, price=100, requires_shipping=true)
         assert_ok!(Transaction::place_order(
             RuntimeOrigin::signed(BUYER), 1, 1,
-            Some(b"addr".to_vec()), None, None, None,
+            Some(b"addr".to_vec()), None, None, None, None,
         ));
 
         // ShipTimeout = 100, so expire at block 101
@@ -1339,7 +1357,7 @@ fn m1r5_service_timeout_emits_order_refunded_event() {
     new_test_ext().execute_with(|| {
         // Service order (product 3, price=200)
         assert_ok!(Transaction::place_order(
-            RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None,
+            RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None,
         ));
 
         // ShipTimeout = 100, service not started → expire at block 101
@@ -1359,7 +1377,7 @@ fn m1r5_service_timeout_emits_order_refunded_event() {
     });
 }
 
-// M2-R5: Token 订单不计入 total_volume（NEX），仅计入 total_token_volume
+// M2-R5: Token 订单不计入 total_volume（NEX）
 #[test]
 fn m2r5_token_order_does_not_inflate_nex_volume() {
     new_test_ext().execute_with(|| {
@@ -1372,14 +1390,13 @@ fn m2r5_token_order_does_not_inflate_nex_volume() {
             RuntimeOrigin::signed(BUYER), 2, 1,
             None, None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
         let stats = crate::OrderStats::<Test>::get();
         assert_eq!(stats.completed_orders, 1);
         // M2-R5-fix: total_volume (NEX) should be 0 for Token-only orders
         assert_eq!(stats.total_volume, 0, "M2-R5: Token order should not inflate NEX total_volume");
         assert_eq!(stats.total_platform_fees, 0);
-        // Token stats should have the token amount
-        assert_eq!(stats.total_token_volume, 50);
     });
 }
 
@@ -1391,7 +1408,7 @@ fn m1r6_complete_service_rejects_second_call() {
     new_test_ext().execute_with(|| {
         // Service order (product 3, price=200)
         assert_ok!(Transaction::place_order(
-            RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None,
+            RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None,
         ));
 
         // Start service
@@ -1422,7 +1439,7 @@ fn m1r6_complete_service_rejects_second_call() {
 fn m1r6_service_flow_still_works() {
     new_test_ext().execute_with(|| {
         assert_ok!(Transaction::place_order(
-            RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None,
+            RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None,
         ));
 
         System::set_block_number(10);
@@ -1449,18 +1466,18 @@ fn m2r5_mixed_orders_stats_separated() {
 
         // NEX digital order (product 2, price=50)
         assert_ok!(Transaction::place_order(
-            RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None,
+            RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None, None,
         ));
         // Token digital order (product 2, price=50)
         assert_ok!(Transaction::place_order(
             RuntimeOrigin::signed(BUYER), 2, 1,
             None, None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
         let stats = crate::OrderStats::<Test>::get();
         assert_eq!(stats.completed_orders, 2);
         assert_eq!(stats.total_volume, 50, "Only NEX order counted in total_volume");
-        assert_eq!(stats.total_token_volume, 50, "Only Token order counted in total_token_volume");
     });
 }
 
@@ -1529,6 +1546,7 @@ fn m1r7_token_order_completed_event_seller_received_is_zero() {
             RuntimeOrigin::signed(BUYER), 2, 1,
             None, None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
 
         // Find OrderCompleted event
@@ -1561,7 +1579,7 @@ fn m1r7_nex_order_completed_event_seller_received_correct() {
     new_test_ext().execute_with(|| {
         // Digital NEX order (product 2, price=50) auto-completes
         assert_ok!(Transaction::place_order(
-            RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None,
+            RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None, None,
         ));
 
         let events = System::events();
@@ -1603,12 +1621,13 @@ fn m2r7_token_platform_fee_computed_once_correctly() {
             RuntimeOrigin::signed(BUYER), 2, 1,
             None, None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
 
-        // Verify stats — token_platform_fee = 50 * 500 / 10000 = 2
+        // Verify stats — Token orders don't contribute to NEX OrderStats
         let stats = crate::OrderStats::<Test>::get();
-        assert_eq!(stats.total_token_volume, 50);
-        assert_eq!(stats.total_token_platform_fees, 2, "M2-R7: token_platform_fee = 50 * 500 / 10000 = 2");
+        assert_eq!(stats.completed_orders, 1);
+        assert_eq!(stats.total_volume, 0, "Token order should not inflate NEX volume");
 
         // Verify event — token_seller_received = 50 - 2 = 48
         let events = System::events();
@@ -1637,7 +1656,7 @@ fn l1r7_expiry_queue_no_orphan_after_service_skip() {
     new_test_ext().execute_with(|| {
         // Service order (product 3, price=200)
         assert_ok!(Transaction::place_order(
-            RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None,
+            RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None,
         ));
 
         // Start service at block 50 → creates ExpiryQueue entry at 50+150=200
@@ -1670,16 +1689,16 @@ fn l5r7_cleanup_buyer_orders_removes_terminal_orders() {
         // Place 3 orders: digital (auto-completes), physical (will cancel), physical (stays Paid)
         // Order 1: digital, auto-completes → Completed
         assert_ok!(Transaction::place_order(
-            RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None,
+            RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None, None,
         ));
         // Order 2: physical → Paid, then cancel → Cancelled
         assert_ok!(Transaction::place_order(
-            RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None,
+            RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None,
         ));
         assert_ok!(Transaction::cancel_order(RuntimeOrigin::signed(BUYER), 2));
         // Order 3: physical → stays Paid
         assert_ok!(Transaction::place_order(
-            RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None,
+            RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None,
         ));
 
         // Before cleanup: 3 orders in index
@@ -1708,7 +1727,7 @@ fn l5r7_cleanup_buyer_orders_nothing_to_clean() {
     new_test_ext().execute_with(|| {
         // Place physical order → stays Paid
         assert_ok!(Transaction::place_order(
-            RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None,
+            RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None,
         ));
 
         assert_noop!(
@@ -1734,7 +1753,7 @@ fn l5r7_cleanup_buyer_orders_empty_list() {
 #[test]
 fn reject_refund_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
 
         assert_ok!(Transaction::reject_refund(RuntimeOrigin::signed(SELLER), 1, b"reject_reason".to_vec()));
@@ -1759,7 +1778,7 @@ fn reject_refund_works() {
 #[test]
 fn reject_refund_fails_not_seller() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
 
         assert_noop!(
@@ -1772,7 +1791,7 @@ fn reject_refund_fails_not_seller() {
 #[test]
 fn reject_refund_fails_not_disputed() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         assert_noop!(
             Transaction::reject_refund(RuntimeOrigin::signed(SELLER), 1, b"reject".to_vec()),
@@ -1784,7 +1803,7 @@ fn reject_refund_fails_not_disputed() {
 #[test]
 fn reject_refund_fails_empty_reason() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
 
         assert_noop!(
@@ -1799,7 +1818,7 @@ fn reject_refund_fails_empty_reason() {
 #[test]
 fn dispute_timeout_auto_refunds() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
 
         // Seller rejects at block 1, dispute timeout = 300, expiry at 301
@@ -1829,6 +1848,7 @@ fn dispute_timeout_token_order_auto_refunds() {
             RuntimeOrigin::signed(BUYER), 1, 1,
             Some(b"addr".to_vec()), None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
         assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
         assert_ok!(Transaction::reject_refund(RuntimeOrigin::signed(SELLER), 1, b"reject".to_vec()));
@@ -1846,7 +1866,7 @@ fn dispute_timeout_token_order_auto_refunds() {
 #[test]
 fn dispute_approved_before_timeout_no_double_refund() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
         assert_ok!(Transaction::reject_refund(RuntimeOrigin::signed(SELLER), 1, b"reject".to_vec()));
 
@@ -1865,7 +1885,7 @@ fn dispute_approved_before_timeout_no_double_refund() {
 #[test]
 fn seller_cancel_order_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         assert_ok!(Transaction::seller_cancel_order(RuntimeOrigin::signed(SELLER), 1, b"no_stock".to_vec()));
 
@@ -1894,6 +1914,7 @@ fn seller_cancel_order_token_works() {
             RuntimeOrigin::signed(BUYER), 1, 1,
             Some(b"addr".to_vec()), None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
 
         assert_ok!(Transaction::seller_cancel_order(RuntimeOrigin::signed(SELLER), 1, b"reason".to_vec()));
@@ -1908,7 +1929,7 @@ fn seller_cancel_order_token_works() {
 #[test]
 fn seller_cancel_order_fails_not_seller() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         assert_noop!(
             Transaction::seller_cancel_order(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()),
@@ -1920,7 +1941,7 @@ fn seller_cancel_order_fails_not_seller() {
 #[test]
 fn seller_cancel_order_fails_after_shipped() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
 
         assert_noop!(
@@ -1933,7 +1954,7 @@ fn seller_cancel_order_fails_after_shipped() {
 #[test]
 fn seller_cancel_order_fails_digital() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None, None));
 
         assert_noop!(
             Transaction::seller_cancel_order(RuntimeOrigin::signed(SELLER), 1, b"reason".to_vec()),
@@ -1947,9 +1968,9 @@ fn seller_cancel_order_fails_digital() {
 #[test]
 fn force_refund_paid_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
-        assert_ok!(Transaction::force_refund(RuntimeOrigin::root(), 1));
+        assert_ok!(Transaction::force_refund(RuntimeOrigin::root(), 1, None));
 
         let order = Transaction::orders(1).unwrap();
         assert_eq!(order.status, OrderStatus::Refunded);
@@ -1965,10 +1986,10 @@ fn force_refund_paid_works() {
 #[test]
 fn force_refund_shipped_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
 
-        assert_ok!(Transaction::force_refund(RuntimeOrigin::root(), 1));
+        assert_ok!(Transaction::force_refund(RuntimeOrigin::root(), 1, None));
         assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Refunded);
     });
 }
@@ -1976,10 +1997,10 @@ fn force_refund_shipped_works() {
 #[test]
 fn force_refund_disputed_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
 
-        assert_ok!(Transaction::force_refund(RuntimeOrigin::root(), 1));
+        assert_ok!(Transaction::force_refund(RuntimeOrigin::root(), 1, None));
         assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Refunded);
     });
 }
@@ -1994,10 +2015,11 @@ fn force_refund_token_disputed_works() {
             RuntimeOrigin::signed(BUYER), 1, 1,
             Some(b"addr".to_vec()), None, None,
             Some(PaymentAsset::EntityToken),
+            None,
         ));
         assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
 
-        assert_ok!(Transaction::force_refund(RuntimeOrigin::root(), 1));
+        assert_ok!(Transaction::force_refund(RuntimeOrigin::root(), 1, None));
         assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Refunded);
         assert_eq!(get_token_reserved(ENTITY_1, BUYER), 0);
         assert_eq!(get_token_balance(ENTITY_1, BUYER), 10_000);
@@ -2007,10 +2029,10 @@ fn force_refund_token_disputed_works() {
 #[test]
 fn force_refund_fails_non_root() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         assert_noop!(
-            Transaction::force_refund(RuntimeOrigin::signed(BUYER), 1),
+            Transaction::force_refund(RuntimeOrigin::signed(BUYER), 1, None),
             sp_runtime::DispatchError::BadOrigin
         );
     });
@@ -2020,10 +2042,10 @@ fn force_refund_fails_non_root() {
 fn force_refund_fails_completed() {
     new_test_ext().execute_with(|| {
         // Digital auto-completes
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None, None));
 
         assert_noop!(
-            Transaction::force_refund(RuntimeOrigin::root(), 1),
+            Transaction::force_refund(RuntimeOrigin::root(), 1, None),
             Error::<Test>::CannotForceOrder
         );
     });
@@ -2034,9 +2056,9 @@ fn force_refund_fails_completed() {
 #[test]
 fn force_complete_paid_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
-        assert_ok!(Transaction::force_complete(RuntimeOrigin::root(), 1));
+        assert_ok!(Transaction::force_complete(RuntimeOrigin::root(), 1, None));
 
         let order = Transaction::orders(1).unwrap();
         assert_eq!(order.status, OrderStatus::Completed);
@@ -2052,10 +2074,10 @@ fn force_complete_paid_works() {
 #[test]
 fn force_complete_disputed_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
 
-        assert_ok!(Transaction::force_complete(RuntimeOrigin::root(), 1));
+        assert_ok!(Transaction::force_complete(RuntimeOrigin::root(), 1, None));
         assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Completed);
 
         // Stats updated
@@ -2067,10 +2089,10 @@ fn force_complete_disputed_works() {
 #[test]
 fn force_complete_fails_non_root() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         assert_noop!(
-            Transaction::force_complete(RuntimeOrigin::signed(SELLER), 1),
+            Transaction::force_complete(RuntimeOrigin::signed(SELLER), 1, None),
             sp_runtime::DispatchError::BadOrigin
         );
     });
@@ -2079,10 +2101,10 @@ fn force_complete_fails_non_root() {
 #[test]
 fn force_complete_fails_already_completed() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None, None));
 
         assert_noop!(
-            Transaction::force_complete(RuntimeOrigin::root(), 1),
+            Transaction::force_complete(RuntimeOrigin::root(), 1, None),
             Error::<Test>::CannotForceOrder
         );
     });
@@ -2093,7 +2115,7 @@ fn force_complete_fails_already_completed() {
 #[test]
 fn update_shipping_address_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"old_addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"old_addr".to_vec()), None, None, None, None));
 
         assert_ok!(Transaction::update_shipping_address(
             RuntimeOrigin::signed(BUYER), 1, b"new_addr_cid".to_vec()
@@ -2113,7 +2135,7 @@ fn update_shipping_address_works() {
 #[test]
 fn update_shipping_address_fails_not_buyer() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         assert_noop!(
             Transaction::update_shipping_address(RuntimeOrigin::signed(SELLER), 1, b"new".to_vec()),
@@ -2125,7 +2147,7 @@ fn update_shipping_address_fails_not_buyer() {
 #[test]
 fn update_shipping_address_fails_after_shipped() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
 
         assert_noop!(
@@ -2138,7 +2160,7 @@ fn update_shipping_address_fails_after_shipped() {
 #[test]
 fn update_shipping_address_fails_service_order() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None));
 
         assert_noop!(
             Transaction::update_shipping_address(RuntimeOrigin::signed(BUYER), 1, b"new".to_vec()),
@@ -2150,7 +2172,7 @@ fn update_shipping_address_fails_service_order() {
 #[test]
 fn update_shipping_address_fails_empty_cid() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         assert_noop!(
             Transaction::update_shipping_address(RuntimeOrigin::signed(BUYER), 1, b"".to_vec()),
@@ -2164,7 +2186,7 @@ fn update_shipping_address_fails_empty_cid() {
 #[test]
 fn extend_confirm_timeout_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
 
         // Extend at block 1, ConfirmExtension = 100, new deadline = 101
@@ -2188,7 +2210,7 @@ fn extend_confirm_timeout_works() {
 #[test]
 fn extend_confirm_timeout_fails_second_time() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
 
         assert_ok!(Transaction::extend_confirm_timeout(RuntimeOrigin::signed(BUYER), 1));
@@ -2203,7 +2225,7 @@ fn extend_confirm_timeout_fails_second_time() {
 #[test]
 fn extend_confirm_timeout_fails_not_shipped() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         assert_noop!(
             Transaction::extend_confirm_timeout(RuntimeOrigin::signed(BUYER), 1),
@@ -2215,7 +2237,7 @@ fn extend_confirm_timeout_fails_not_shipped() {
 #[test]
 fn extend_confirm_timeout_fails_not_buyer() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
 
         assert_noop!(
@@ -2228,7 +2250,7 @@ fn extend_confirm_timeout_fails_not_buyer() {
 #[test]
 fn extend_confirm_timeout_delays_auto_complete() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
 
         // Original ConfirmTimeout = 200, shipped at block 1, expiry at 201
@@ -2250,12 +2272,12 @@ fn extend_confirm_timeout_delays_auto_complete() {
 fn cleanup_shop_orders_works() {
     new_test_ext().execute_with(|| {
         // Order 1: digital auto-completes → Completed
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None, None));
         // Order 2: physical → cancel → Cancelled
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
         assert_ok!(Transaction::cancel_order(RuntimeOrigin::signed(BUYER), 2));
         // Order 3: physical → stays Paid
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         // Before cleanup: 3 orders in shop 1 index
         let before = crate::ShopOrders::<Test>::get(SHOP_1);
@@ -2279,7 +2301,7 @@ fn cleanup_shop_orders_works() {
 #[test]
 fn cleanup_shop_orders_fails_not_owner() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None, None));
 
         assert_noop!(
             Transaction::cleanup_shop_orders(RuntimeOrigin::signed(BUYER), SHOP_1),
@@ -2292,7 +2314,7 @@ fn cleanup_shop_orders_fails_not_owner() {
 fn cleanup_shop_orders_fails_nothing_to_clean() {
     new_test_ext().execute_with(|| {
         // Only Paid order, nothing terminal
-        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None));
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
 
         assert_noop!(
             Transaction::cleanup_shop_orders(RuntimeOrigin::signed(SELLER), SHOP_1),
@@ -2308,5 +2330,379 @@ fn cleanup_shop_orders_fails_shop_not_found() {
             Transaction::cleanup_shop_orders(RuntimeOrigin::signed(SELLER), 999),
             Error::<Test>::ShopNotFound
         );
+    });
+}
+
+// ==================== Token→USDT 换算测试 ====================
+
+// F2: Token 订单完成时，amount_usdt 通过 Token→NEX→USDT 间接换算
+// MockPricingProvider: 1 USDT/NEX (1_000_000)
+// token_payment_amount=50, token_nex_price=2_000_000_000_000 (2 NEX/Token)
+// amount_usdt = 50 * 2_000_000_000_000 * 1_000_000 / 10^12 = 100_000_000 → 100 USDT
+#[test]
+fn f2_token_order_amount_usdt_indirect_conversion() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        set_token_enabled(entity_id, true);
+        set_token_balance(entity_id, BUYER, 10_000);
+        // Set token price: 2 NEX per Token (precision 10^12)
+        set_token_price(entity_id, 2_000_000_000_000);
+        set_token_price_reliable(entity_id, true);
+
+        // Digital token order (product 2, price=50) auto-completes
+        assert_ok!(Transaction::place_order(
+            RuntimeOrigin::signed(BUYER), 2, 1,
+            None, None, None,
+            Some(pallet_entity_common::PaymentAsset::EntityToken),
+            None,
+        ));
+
+        // Verify member_spent was called with correct amount_usdt
+        // amount_usdt = 50 * 2_000_000_000_000 * 1_000_000 / 10^12 = 100_000_000
+        let spent = get_member_spent();
+        let entry = spent.iter().find(|(eid, acc, _)| *eid == entity_id && *acc == BUYER);
+        assert!(entry.is_some(), "update_spent should have been called");
+        let (_, _, amount_usdt) = entry.unwrap();
+        assert_eq!(*amount_usdt, 100_000_000u64, "F2: amount_usdt = 50 tokens * 2 NEX/Token * 1 USDT/NEX = 100 USDT (10^6)");
+    });
+}
+
+// F3: Token 价格不可靠时，amount_usdt 安全降级为 0
+#[test]
+fn f3_token_order_unreliable_price_degrades_to_zero() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        set_token_enabled(entity_id, true);
+        set_token_balance(entity_id, BUYER, 10_000);
+        // Set token price but mark as unreliable
+        set_token_price(entity_id, 2_000_000_000_000);
+        set_token_price_reliable(entity_id, false);
+
+        assert_ok!(Transaction::place_order(
+            RuntimeOrigin::signed(BUYER), 2, 1,
+            None, None, None,
+            Some(pallet_entity_common::PaymentAsset::EntityToken),
+            None,
+        ));
+
+        let spent = get_member_spent();
+        let entry = spent.iter().find(|(eid, acc, _)| *eid == entity_id && *acc == BUYER);
+        assert!(entry.is_some(), "update_spent should have been called");
+        let (_, _, amount_usdt) = entry.unwrap();
+        assert_eq!(*amount_usdt, 0u64, "F3: unreliable price should degrade amount_usdt to 0");
+    });
+}
+
+// F4: Token 价格不可用时（None），amount_usdt 安全降级为 0
+#[test]
+fn f4_token_order_missing_price_degrades_to_zero() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        set_token_enabled(entity_id, true);
+        set_token_balance(entity_id, BUYER, 10_000);
+        // Mark as reliable but don't set price (get_token_price returns None)
+        set_token_price_reliable(entity_id, true);
+
+        assert_ok!(Transaction::place_order(
+            RuntimeOrigin::signed(BUYER), 2, 1,
+            None, None, None,
+            Some(pallet_entity_common::PaymentAsset::EntityToken),
+            None,
+        ));
+
+        let spent = get_member_spent();
+        let entry = spent.iter().find(|(eid, acc, _)| *eid == entity_id && *acc == BUYER);
+        assert!(entry.is_some(), "update_spent should have been called");
+        let (_, _, amount_usdt) = entry.unwrap();
+        assert_eq!(*amount_usdt, 0u64, "F4: missing token price should degrade amount_usdt to 0");
+    });
+}
+
+// ==================== Audit Round 8 回归测试 ====================
+
+// H1-R8: reject_refund 禁止重复调用
+#[test]
+fn h1r8_reject_refund_cannot_be_called_twice() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
+        assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
+
+        // First reject succeeds
+        assert_ok!(Transaction::reject_refund(RuntimeOrigin::signed(SELLER), 1, b"reject".to_vec()));
+        let order = Transaction::orders(1).unwrap();
+        assert!(order.dispute_deadline.is_some());
+
+        // Second reject fails with DisputeAlreadyRejected
+        assert_noop!(
+            Transaction::reject_refund(RuntimeOrigin::signed(SELLER), 1, b"reject_again".to_vec()),
+            Error::<Test>::DisputeAlreadyRejected
+        );
+
+        // ExpiryQueue should have exactly 1 entry (not 2)
+        let deadline = order.dispute_deadline.unwrap();
+        let queue = crate::ExpiryQueue::<Test>::get(deadline);
+        assert_eq!(queue.iter().filter(|&&id| id == 1).count(), 1,
+            "H1-R8: ExpiryQueue should have exactly 1 dispute timeout entry");
+    });
+}
+
+// H1-R8: reject_refund 正常流程仍然工作
+#[test]
+fn h1r8_reject_refund_then_timeout_still_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
+        assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
+        assert_ok!(Transaction::reject_refund(RuntimeOrigin::signed(SELLER), 1, b"reject".to_vec()));
+
+        // Dispute timeout at block 1 + 300 = 301
+        run_to_block(301);
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.status, OrderStatus::Refunded);
+    });
+}
+
+// M1-R8: process_expired_orders weight 包含跳过订单的读开销
+#[test]
+fn m1r8_expired_orders_weight_includes_skipped() {
+    new_test_ext().execute_with(|| {
+        // Place digital order (auto-completes → Completed) — will be skipped by expiry handler
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None, None));
+        // Place physical order — will be processed
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
+
+        // Manually insert order 1 (Completed) into ExpiryQueue at block 101 to simulate a skip
+        crate::ExpiryQueue::<Test>::mutate(101u64, |ids| {
+            let _ = ids.try_push(1); // order 1 is Completed, will be skipped
+        });
+
+        // At block 101: order 1 skipped (Completed), order 2 processed (Paid → Refunded)
+        // Use on_idle which calls process_expired_orders internally
+        System::set_block_number(101);
+        let weight = <Transaction as frame_support::traits::Hooks<u64>>::on_idle(
+            101u64,
+            Weight::from_parts(10_000_000_000, 1_000_000),
+        );
+
+        // Weight should be > base (50M) + processed (200M * 1) = 250M
+        // because skipped orders add 25M each
+        assert!(weight.ref_time() > 250_000_000, "M1-R8: weight should include skipped order read cost");
+        assert!(weight.proof_size() > 4_000 + 8_000, "M1-R8: proof_size should include skipped order");
+    });
+}
+
+// M2-R8: Token 订单完成后 total_token_volume 和 total_token_platform_fees 正确更新
+#[test]
+fn m2r8_token_order_stats_track_token_volume_and_fees() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        set_token_enabled(entity_id, true);
+        set_token_balance(entity_id, BUYER, 10_000);
+        set_token_fee_rate(entity_id, 500); // 5%
+
+        // Digital token order auto-completes (product 2, price=50)
+        assert_ok!(Transaction::place_order(
+            RuntimeOrigin::signed(BUYER), 2, 1,
+            None, None, None,
+            Some(PaymentAsset::EntityToken),
+            None,
+        ));
+
+        let stats = crate::OrderStats::<Test>::get();
+        assert_eq!(stats.completed_orders, 1);
+        // NEX stats should be 0
+        assert_eq!(stats.total_volume, 0);
+        assert_eq!(stats.total_platform_fees, 0);
+        // M2-R8: Token stats should be populated
+        assert_eq!(stats.total_token_volume, 50, "M2-R8: total_token_volume should track token orders");
+        // token_platform_fee = 50 * 500 / 10000 = 2
+        assert_eq!(stats.total_token_platform_fees, 2, "M2-R8: total_token_platform_fees should track token fees");
+    });
+}
+
+// M2-R8: NEX 订单不影响 Token 统计字段
+#[test]
+fn m2r8_nex_order_does_not_affect_token_stats() {
+    new_test_ext().execute_with(|| {
+        // Digital NEX order auto-completes (product 2, price=50)
+        assert_ok!(Transaction::place_order(
+            RuntimeOrigin::signed(BUYER), 2, 1, None, None, None, None, None,
+        ));
+
+        let stats = crate::OrderStats::<Test>::get();
+        assert_eq!(stats.completed_orders, 1);
+        assert_eq!(stats.total_volume, 50);
+        assert_eq!(stats.total_token_volume, 0, "M2-R8: NEX order should not inflate token volume");
+        assert_eq!(stats.total_token_platform_fees, 0);
+    });
+}
+
+// M3-R8: token_platform_fee_rate 超过 10000 时被防御性截断
+#[test]
+fn m3r8_token_fee_rate_capped_at_10000() {
+    new_test_ext().execute_with(|| {
+        let entity_id = 1u64;
+        set_token_enabled(entity_id, true);
+        set_token_balance(entity_id, BUYER, 10_000);
+        // Set absurd fee rate: 20000 bps (200%) — should be capped to 10000 (100%)
+        set_token_fee_rate(entity_id, 20000);
+
+        // Digital token order auto-completes (product 2, price=50)
+        assert_ok!(Transaction::place_order(
+            RuntimeOrigin::signed(BUYER), 2, 1,
+            None, None, None,
+            Some(PaymentAsset::EntityToken),
+            None,
+        ));
+
+        let stats = crate::OrderStats::<Test>::get();
+        // With cap: token_platform_fee = 50 * 10000 / 10000 = 50 (all goes to platform)
+        // Without cap: 50 * 20000 / 10000 = 100 (exceeds token amount)
+        assert_eq!(stats.total_token_platform_fees, 50, "M3-R8: fee should be capped at 100% of token amount");
+
+        // Verify event: seller should receive 0 (all goes to platform fee)
+        let events = System::events();
+        let completed = events.iter().find(|e| {
+            matches!(&e.event, RuntimeEvent::Transaction(crate::Event::OrderCompleted { order_id: 1, .. }))
+        }).expect("OrderCompleted event should exist");
+
+        match &completed.event {
+            RuntimeEvent::Transaction(crate::Event::OrderCompleted { token_seller_received, .. }) => {
+                assert_eq!(*token_seller_received, 0, "M3-R8: seller gets 0 when fee rate capped at 100%");
+            },
+            _ => panic!("Expected OrderCompleted event"),
+        }
+    });
+}
+
+// L1-R8: extend_confirm_timeout 拒绝服务类订单
+#[test]
+fn l1r8_extend_confirm_timeout_rejects_service_order() {
+    new_test_ext().execute_with(|| {
+        // Service order (product 3)
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None));
+
+        // Start service → status becomes Shipped
+        System::set_block_number(10);
+        assert_ok!(Transaction::start_service(RuntimeOrigin::signed(SELLER), 1));
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Shipped);
+
+        // Buyer tries to extend confirm timeout on service order → should fail
+        assert_noop!(
+            Transaction::extend_confirm_timeout(RuntimeOrigin::signed(BUYER), 1),
+            Error::<Test>::ServiceOrderCannotShip
+        );
+    });
+}
+
+// L1-R8: extend_confirm_timeout 仍然支持物理商品订单
+#[test]
+fn l1r8_extend_confirm_timeout_works_for_physical() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
+        assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
+
+        assert_ok!(Transaction::extend_confirm_timeout(RuntimeOrigin::signed(BUYER), 1));
+        let order = Transaction::orders(1).unwrap();
+        assert!(order.confirm_extended);
+    });
+}
+
+// ==================== Audit Round 9 regression tests ====================
+
+// M2-R9: process_expired_orders 空队列返回 proof_size > 0
+#[test]
+fn m2r9_empty_expiry_queue_returns_nonzero_proof_size() {
+    new_test_ext().execute_with(|| {
+        // Block 999 has no expiry entries
+        System::set_block_number(999);
+        let w = <Transaction as frame_support::traits::Hooks<u64>>::on_idle(
+            999,
+            Weight::from_parts(10_000_000_000, 1_000_000),
+        );
+        // proof_size should be > 0 even for empty queue (1 storage read)
+        assert!(w.proof_size() > 0, "M2-R9: empty queue should report nonzero proof_size");
+    });
+}
+
+// L1-R9: do_auto_refund — ship timeout still refunds physical orders correctly
+#[test]
+fn l1r9_do_auto_refund_ship_timeout_physical() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Paid);
+
+        run_to_block(101); // ShipTimeout = 100
+
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.status, OrderStatus::Refunded);
+        assert!(get_cancelled_orders().contains(&1));
+
+        // Verify OrderRefunded event emitted
+        let events = frame_system::Pallet::<Test>::events();
+        assert!(events.iter().any(|e| {
+            match &e.event {
+                RuntimeEvent::Transaction(crate::Event::OrderRefunded { order_id, .. }) => *order_id == 1,
+                _ => false,
+            }
+        }), "L1-R9: OrderRefunded event should be emitted by do_auto_refund");
+    });
+}
+
+// L1-R9: do_auto_refund — service timeout still refunds service orders correctly
+#[test]
+fn l1r9_do_auto_refund_service_timeout() {
+    new_test_ext().execute_with(|| {
+        // Service order (product 3)
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 3, 1, None, None, None, None, None));
+
+        // Start service at block 10
+        System::set_block_number(10);
+        assert_ok!(Transaction::start_service(RuntimeOrigin::signed(SELLER), 1));
+
+        // ServiceConfirmTimeout = 150, so deadline = 10 + 150 = 160
+        run_to_block(161);
+
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.status, OrderStatus::Refunded);
+    });
+}
+
+// L1-R9: do_auto_refund — dispute timeout still refunds correctly
+#[test]
+fn l1r9_do_auto_refund_dispute_timeout() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order(RuntimeOrigin::signed(BUYER), 1, 1, Some(b"addr".to_vec()), None, None, None, None));
+        assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
+        assert_ok!(Transaction::reject_refund(RuntimeOrigin::signed(SELLER), 1, b"no".to_vec()));
+
+        // DisputeTimeout = 300, reject at block 1 → deadline = 1 + 300 = 301
+        run_to_block(301);
+
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.status, OrderStatus::Refunded);
+    });
+}
+
+// L1-R9: do_auto_refund — token order timeout refund unreserves tokens
+#[test]
+fn l1r9_do_auto_refund_token_order_timeout() {
+    new_test_ext().execute_with(|| {
+        set_token_enabled(ENTITY_1, true);
+        set_token_balance(ENTITY_1, BUYER, 10_000);
+
+        assert_ok!(Transaction::place_order(
+            RuntimeOrigin::signed(BUYER), 1, 1,
+            Some(b"addr".to_vec()), None, None,
+            Some(PaymentAsset::EntityToken), None,
+        ));
+        assert_eq!(get_token_reserved(ENTITY_1, BUYER), 100);
+
+        run_to_block(101); // ShipTimeout
+
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.status, OrderStatus::Refunded);
+        assert_eq!(get_token_reserved(ENTITY_1, BUYER), 0);
+        assert_eq!(get_token_balance(ENTITY_1, BUYER), 10_000);
+        assert!(get_token_cancelled_orders().contains(&1));
     });
 }

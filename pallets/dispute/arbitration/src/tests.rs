@@ -476,3 +476,529 @@ fn complaint_status_is_resolved() {
     assert!(!ComplaintStatus::Responded.is_resolved());
     assert!(!ComplaintStatus::Arbitrating.is_resolved());
 }
+
+// ==================== Regression: H1 — evidence validation before state mutations ====================
+
+#[test]
+fn h1_dispute_with_two_way_deposit_rejects_bad_evidence_no_state_change() {
+    new_test_ext().execute_with(|| {
+        set_evidence_exists(false);
+        let balance_before = Balances::free_balance(1);
+        assert_noop!(
+            Arbitration::dispute_with_two_way_deposit(
+                RuntimeOrigin::signed(1), DOMAIN, 1, 999,
+            ),
+            Error::<Test>::EvidenceNotFound
+        );
+        // No state mutation: no dispute recorded, balance unchanged
+        assert!(Disputed::<Test>::get(DOMAIN, 1).is_none());
+        assert_eq!(Balances::free_balance(1), balance_before);
+    });
+}
+
+// ==================== Regression: H2 — counter_evidence validation before state mutations ====================
+
+#[test]
+fn h2_respond_to_dispute_rejects_bad_evidence_no_state_change() {
+    new_test_ext().execute_with(|| {
+        // First create a valid dispute
+        assert_ok!(Arbitration::dispute_with_two_way_deposit(
+            RuntimeOrigin::signed(1), DOMAIN, 1, 42,
+        ));
+        // Now set evidence to not exist for the response
+        set_evidence_exists(false);
+        assert_noop!(
+            Arbitration::respond_to_dispute(
+                RuntimeOrigin::signed(2), DOMAIN, 1, 100,
+            ),
+            Error::<Test>::EvidenceNotFound
+        );
+        // TwoWayDeposit should still not have responded
+        let deposit = TwoWayDeposits::<Test>::get(DOMAIN, 1).unwrap();
+        assert!(!deposit.has_responded);
+    });
+}
+
+// ==================== Regression: M2 — append_evidence_id blocked when paused ====================
+
+#[test]
+fn m2_append_evidence_id_blocked_when_paused() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::dispute(
+            RuntimeOrigin::signed(1), DOMAIN, 1, vec![],
+        ));
+        // Pause the module
+        assert_ok!(Arbitration::set_paused(RawOrigin::Root.into(), true));
+        assert_noop!(
+            Arbitration::append_evidence_id(
+                RuntimeOrigin::signed(1), DOMAIN, 1, 100,
+            ),
+            Error::<Test>::ModulePaused
+        );
+    });
+}
+
+// ==================== Regression: L1 — DomainPenaltyRates overrides ComplaintSlashBps ====================
+
+#[test]
+fn l1_domain_penalty_rate_overrides_complaint_slash() {
+    new_test_ext().execute_with(|| {
+        // Set domain-specific penalty rate to 8000 bps (80%) instead of default 5000 (50%)
+        assert_ok!(Arbitration::set_domain_penalty_rate(
+            RawOrigin::Root.into(), DOMAIN, Some(8000),
+        ));
+
+        let balance_before = Balances::free_balance(1);
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver,
+            cid(b"details"), None,
+        ));
+        let balance_after_filing = Balances::free_balance(1);
+        let deposit = balance_before - balance_after_filing;
+        assert!(deposit > 0);
+
+        assert_ok!(Arbitration::respond_to_complaint(
+            RuntimeOrigin::signed(2), 0, cid(b"response"),
+        ));
+        assert_ok!(Arbitration::escalate_to_arbitration(
+            RuntimeOrigin::signed(1), 0,
+        ));
+
+        let respondent_before = Balances::free_balance(2);
+
+        // decision=1 → respondent wins → slash complainant deposit at domain rate (80%)
+        assert_ok!(Arbitration::resolve_complaint(
+            RawOrigin::Root.into(), 0, 1, cid(b"reason"), None,
+        ));
+
+        let respondent_after = Balances::free_balance(2);
+        let slashed_to_respondent = respondent_after - respondent_before;
+
+        // 80% of deposit should go to respondent (DomainPenaltyRate=8000)
+        let expected_slash = sp_runtime::Permill::from_parts(8000u32 * 100).mul_floor(deposit);
+        assert_eq!(slashed_to_respondent, expected_slash);
+    });
+}
+
+// ==================== Regression: L4 — immediate user index cleanup ====================
+
+#[test]
+fn l4_withdraw_complaint_cleans_user_indexes_immediately() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver,
+            cid(b"details"), None,
+        ));
+        // Verify indexes exist
+        assert!(!UserActiveComplaints::<Test>::get(1).is_empty());
+        assert!(!RespondentActiveComplaints::<Test>::get(2).is_empty());
+
+        assert_ok!(Arbitration::withdraw_complaint(
+            RuntimeOrigin::signed(1), 0,
+        ));
+
+        // Indexes should be cleaned immediately, not waiting for archive
+        assert!(UserActiveComplaints::<Test>::get(1).is_empty());
+        assert!(RespondentActiveComplaints::<Test>::get(2).is_empty());
+        assert!(ObjectComplaints::<Test>::get(DOMAIN, 1).is_empty());
+    });
+}
+
+#[test]
+fn l4_settle_complaint_cleans_user_indexes_immediately() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver,
+            cid(b"details"), None,
+        ));
+        assert_ok!(Arbitration::respond_to_complaint(
+            RuntimeOrigin::signed(2), 0, cid(b"response"),
+        ));
+
+        assert!(!UserActiveComplaints::<Test>::get(1).is_empty());
+
+        assert_ok!(Arbitration::settle_complaint(
+            RuntimeOrigin::signed(1), 0, cid(b"settlement"),
+        ));
+
+        assert!(UserActiveComplaints::<Test>::get(1).is_empty());
+        assert!(RespondentActiveComplaints::<Test>::get(2).is_empty());
+        assert!(ObjectComplaints::<Test>::get(DOMAIN, 1).is_empty());
+    });
+}
+
+#[test]
+fn l4_resolve_complaint_cleans_user_indexes_immediately() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver,
+            cid(b"details"), None,
+        ));
+        assert_ok!(Arbitration::respond_to_complaint(
+            RuntimeOrigin::signed(2), 0, cid(b"response"),
+        ));
+        assert_ok!(Arbitration::escalate_to_arbitration(
+            RuntimeOrigin::signed(1), 0,
+        ));
+
+        assert!(!UserActiveComplaints::<Test>::get(1).is_empty());
+
+        assert_ok!(Arbitration::resolve_complaint(
+            RawOrigin::Root.into(), 0, 0, cid(b"reason"), None,
+        ));
+
+        assert!(UserActiveComplaints::<Test>::get(1).is_empty());
+        assert!(RespondentActiveComplaints::<Test>::get(2).is_empty());
+        assert!(ObjectComplaints::<Test>::get(DOMAIN, 1).is_empty());
+    });
+}
+
+#[test]
+fn l4_dismiss_complaint_cleans_user_indexes_immediately() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver,
+            cid(b"details"), None,
+        ));
+
+        assert!(!UserActiveComplaints::<Test>::get(1).is_empty());
+
+        assert_ok!(Arbitration::dismiss_complaint(
+            RawOrigin::Root.into(), 0,
+        ));
+
+        assert!(UserActiveComplaints::<Test>::get(1).is_empty());
+        assert!(RespondentActiveComplaints::<Test>::get(2).is_empty());
+        assert!(ObjectComplaints::<Test>::get(DOMAIN, 1).is_empty());
+    });
+}
+
+#[test]
+fn l4_expire_complaint_cleans_user_indexes_immediately() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver,
+            cid(b"details"), None,
+        ));
+
+        assert!(!UserActiveComplaints::<Test>::get(1).is_empty());
+
+        // Advance past deadline
+        System::set_block_number(200);
+        let expired = Arbitration::expire_old_complaints(10);
+        assert_eq!(expired, 1);
+
+        assert!(UserActiveComplaints::<Test>::get(1).is_empty());
+        assert!(RespondentActiveComplaints::<Test>::get(2).is_empty());
+        assert!(ObjectComplaints::<Test>::get(DOMAIN, 1).is_empty());
+    });
+}
+
+// ==================== Regression: H1-R2 — force_close_complaint cleans user indexes ====================
+
+#[test]
+fn h1r2_force_close_complaint_cleans_user_indexes() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver,
+            cid(b"details"), None,
+        ));
+
+        // Verify indexes populated
+        assert!(!UserActiveComplaints::<Test>::get(1).is_empty());
+        assert!(!RespondentActiveComplaints::<Test>::get(2).is_empty());
+        assert!(!ObjectComplaints::<Test>::get(DOMAIN, 1).is_empty());
+
+        assert_ok!(Arbitration::force_close_complaint(
+            RawOrigin::Root.into(), 0,
+        ));
+
+        // Indexes must be cleaned immediately
+        assert!(UserActiveComplaints::<Test>::get(1).is_empty());
+        assert!(RespondentActiveComplaints::<Test>::get(2).is_empty());
+        assert!(ObjectComplaints::<Test>::get(DOMAIN, 1).is_empty());
+    });
+}
+
+// ==================== Regression: H2-R2 — respondent cannot settle Mediating complaint ====================
+
+#[test]
+fn h2r2_respondent_cannot_settle_mediating_complaint() {
+    new_test_ext().execute_with(|| {
+        // File → Respond → Mediate
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver,
+            cid(b"details"), None,
+        ));
+        assert_ok!(Arbitration::respond_to_complaint(
+            RuntimeOrigin::signed(2), 0, cid(b"response"),
+        ));
+        assert_ok!(Arbitration::start_mediation(
+            RawOrigin::Root.into(), 0,
+        ));
+        let complaint = Complaints::<Test>::get(0).unwrap();
+        assert_eq!(complaint.status, ComplaintStatus::Mediating);
+
+        // Respondent (account 2) tries to settle — should fail
+        assert_noop!(
+            Arbitration::settle_complaint(
+                RuntimeOrigin::signed(2), 0, cid(b"settlement"),
+            ),
+            Error::<Test>::NotAuthorized
+        );
+
+        // Complainant (account 1) CAN still settle
+        assert_ok!(Arbitration::settle_complaint(
+            RuntimeOrigin::signed(1), 0, cid(b"settlement"),
+        ));
+        let complaint = Complaints::<Test>::get(0).unwrap();
+        assert_eq!(complaint.status, ComplaintStatus::ResolvedSettlement);
+    });
+}
+
+#[test]
+fn h2r2_respondent_can_still_settle_responded_complaint() {
+    new_test_ext().execute_with(|| {
+        // File → Respond (no mediation)
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver,
+            cid(b"details"), None,
+        ));
+        assert_ok!(Arbitration::respond_to_complaint(
+            RuntimeOrigin::signed(2), 0, cid(b"response"),
+        ));
+
+        // Respondent CAN settle from Responded state (unchanged behavior)
+        assert_ok!(Arbitration::settle_complaint(
+            RuntimeOrigin::signed(2), 0, cid(b"settlement"),
+        ));
+        let complaint = Complaints::<Test>::get(0).unwrap();
+        assert_eq!(complaint.status, ComplaintStatus::ResolvedSettlement);
+    });
+}
+
+// ==================== Regression: M2-R2 — expire skips non-monotonic deadlines ====================
+
+#[test]
+fn m2r2_expire_does_not_skip_later_expired_complaint() {
+    new_test_ext().execute_with(|| {
+        // File complaint 0 at block 1 → deadline = 1 + 100 = 101
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver,
+            cid(b"details"), None,
+        ));
+
+        // Respond to complaint 0 so it's no longer Submitted (won't expire)
+        assert_ok!(Arbitration::respond_to_complaint(
+            RuntimeOrigin::signed(2), 0, cid(b"response"),
+        ));
+
+        // File complaint 1 at block 1 → deadline = 1 + 100 = 101
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 2,
+            ComplaintType::OtcSellerNotDeliver,
+            cid(b"details2"), None,
+        ));
+
+        // Advance past deadline
+        System::set_block_number(200);
+
+        // Complaint 0 is Responded (skipped), complaint 1 is Submitted+expired
+        // Without the M2-R2 fix, the old break logic would stop at complaint 0
+        // (which is not Submitted) and never check complaint 1
+        let expired = Arbitration::expire_old_complaints(10);
+        assert_eq!(expired, 1);
+
+        // Complaint 1 should be expired
+        let c1 = Complaints::<Test>::get(1).unwrap();
+        assert_eq!(c1.status, ComplaintStatus::Expired);
+    });
+}
+
+// ==================== Regression: M-1 — per-type penalty_rate used when no domain override ====================
+
+#[test]
+fn m1_per_type_penalty_rate_used_without_domain_override() {
+    new_test_ext().execute_with(|| {
+        // OtcTradeFraud has penalty_rate() = 8000 (80%)
+        // No DomainPenaltyRate set, so per-type rate should be used
+        let balance_before = Balances::free_balance(1);
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcTradeFraud,
+            cid(b"details"), None,
+        ));
+        let balance_after_filing = Balances::free_balance(1);
+        let deposit = balance_before - balance_after_filing;
+        assert!(deposit > 0);
+
+        assert_ok!(Arbitration::respond_to_complaint(
+            RuntimeOrigin::signed(2), 0, cid(b"response"),
+        ));
+        assert_ok!(Arbitration::escalate_to_arbitration(
+            RuntimeOrigin::signed(1), 0,
+        ));
+
+        let respondent_before = Balances::free_balance(2);
+
+        // decision=1 → respondent wins → slash at OtcTradeFraud penalty_rate (80%)
+        assert_ok!(Arbitration::resolve_complaint(
+            RawOrigin::Root.into(), 0, 1, cid(b"reason"), None,
+        ));
+
+        let respondent_after = Balances::free_balance(2);
+        let slashed_to_respondent = respondent_after - respondent_before;
+
+        // 80% of deposit should go to respondent (OtcTradeFraud penalty_rate=8000)
+        let expected_slash = sp_runtime::Permill::from_parts(8000u32 * 100).mul_floor(deposit);
+        assert_eq!(slashed_to_respondent, expected_slash);
+    });
+}
+
+#[test]
+fn m1_domain_override_takes_precedence_over_type_rate() {
+    new_test_ext().execute_with(|| {
+        // OtcTradeFraud has penalty_rate() = 8000 (80%)
+        // But set domain rate to 2000 (20%) — should override
+        assert_ok!(Arbitration::set_domain_penalty_rate(
+            RawOrigin::Root.into(), DOMAIN, Some(2000),
+        ));
+
+        let balance_before = Balances::free_balance(1);
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcTradeFraud,
+            cid(b"details"), None,
+        ));
+        let balance_after_filing = Balances::free_balance(1);
+        let deposit = balance_before - balance_after_filing;
+
+        assert_ok!(Arbitration::respond_to_complaint(
+            RuntimeOrigin::signed(2), 0, cid(b"response"),
+        ));
+        assert_ok!(Arbitration::escalate_to_arbitration(
+            RuntimeOrigin::signed(1), 0,
+        ));
+
+        let respondent_before = Balances::free_balance(2);
+
+        assert_ok!(Arbitration::resolve_complaint(
+            RawOrigin::Root.into(), 0, 1, cid(b"reason"), None,
+        ));
+
+        let respondent_after = Balances::free_balance(2);
+        let slashed_to_respondent = respondent_after - respondent_before;
+
+        // Domain rate 2000 (20%) should override type rate 8000 (80%)
+        let expected_slash = sp_runtime::Permill::from_parts(2000u32 * 100).mul_floor(deposit);
+        assert_eq!(slashed_to_respondent, expected_slash);
+    });
+}
+
+#[test]
+fn m1_default_type_penalty_rate_for_non_fraud() {
+    new_test_ext().execute_with(|| {
+        // OtcSellerNotDeliver has penalty_rate() = 3000 (30%, default)
+        let balance_before = Balances::free_balance(1);
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver,
+            cid(b"details"), None,
+        ));
+        let balance_after_filing = Balances::free_balance(1);
+        let deposit = balance_before - balance_after_filing;
+
+        assert_ok!(Arbitration::respond_to_complaint(
+            RuntimeOrigin::signed(2), 0, cid(b"response"),
+        ));
+        assert_ok!(Arbitration::escalate_to_arbitration(
+            RuntimeOrigin::signed(1), 0,
+        ));
+
+        let respondent_before = Balances::free_balance(2);
+
+        assert_ok!(Arbitration::resolve_complaint(
+            RawOrigin::Root.into(), 0, 1, cid(b"reason"), None,
+        ));
+
+        let respondent_after = Balances::free_balance(2);
+        let slashed_to_respondent = respondent_after - respondent_before;
+
+        // Default penalty_rate = 3000 (30%) for OtcSellerNotDeliver
+        let expected_slash = sp_runtime::Permill::from_parts(3000u32 * 100).mul_floor(deposit);
+        assert_eq!(slashed_to_respondent, expected_slash);
+    });
+}
+
+// ==================== Regression: M-2 — partial ruling stats ====================
+
+#[test]
+fn m2_partial_ruling_counts_as_complainant_win_not_settlement() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver,
+            cid(b"details"), None,
+        ));
+        assert_ok!(Arbitration::respond_to_complaint(
+            RuntimeOrigin::signed(2), 0, cid(b"response"),
+        ));
+        assert_ok!(Arbitration::escalate_to_arbitration(
+            RuntimeOrigin::signed(1), 0,
+        ));
+
+        // decision=2 → partial ruling
+        assert_ok!(Arbitration::resolve_complaint(
+            RawOrigin::Root.into(), 0, 2, cid(b"reason"), Some(5000),
+        ));
+
+        let stats = DomainStats::<Test>::get(DOMAIN);
+        assert_eq!(stats.resolved_count, 1);
+        // Partial ruling should count as complainant_win, not settlement
+        assert_eq!(stats.complainant_wins, 1);
+        assert_eq!(stats.settlements, 0);
+        assert_eq!(stats.respondent_wins, 0);
+    });
+}
+
+// ==================== Regression: L-1 — archive does not redundantly clean indexes ====================
+
+#[test]
+fn l1_archive_works_after_indexes_already_cleaned() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver,
+            cid(b"details"), None,
+        ));
+
+        // Withdraw cleans indexes immediately
+        assert_ok!(Arbitration::withdraw_complaint(
+            RuntimeOrigin::signed(1), 0,
+        ));
+        assert!(UserActiveComplaints::<Test>::get(1).is_empty());
+        assert!(RespondentActiveComplaints::<Test>::get(2).is_empty());
+
+        // Advance past archive delay
+        System::set_block_number(100);
+        let archived = Arbitration::archive_old_complaints(10);
+        assert_eq!(archived, 1);
+
+        // Complaint archived successfully even though indexes were already clean
+        assert!(Complaints::<Test>::get(0).is_none());
+        assert!(ArchivedComplaints::<Test>::get(0).is_some());
+        // Indexes still clean (no panic from double-remove)
+        assert!(UserActiveComplaints::<Test>::get(1).is_empty());
+        assert!(RespondentActiveComplaints::<Test>::get(2).is_empty());
+    });
+}

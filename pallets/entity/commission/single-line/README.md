@@ -120,21 +120,26 @@ pub trait SingleLineMemberLevelProvider<AccountId> {
 | 存储项 | 类型 | 说明 |
 |--------|------|------|
 | `SingleLineConfigs` | `Map<u64, SingleLineConfig>` | 单线收益配置（entity_id → config） |
-| `SingleLines` | `Map<u64, BoundedVec<AccountId>>` | 消费单链（entity_id → 按序账户列表） |
-| `SingleLineIndex` | `DoubleMap<u64, AccountId, u32>` | 用户在单链中的位置索引 |
+| `SingleLineSegments` | `DoubleMap<u64, u32, BoundedVec<AccountId>>` | 分段消费单链（entity_id, segment_id → 按序账户列表） |
+| `SingleLineSegmentCount` | `Map<u64, u32>` | 单链段数（entity_id → 段计数） |
+| `SingleLineIndex` | `DoubleMap<u64, AccountId, u32>` | 用户在单链中的全局位置索引 |
 | `SingleLineCustomLevelOverrides` | `DoubleMap<u64, u8, LevelBasedLevels>` | 按等级自定义层数（entity_id, level_id → 层数） |
+| `SingleLineEnabled` | `Map<u64, bool>` | 单线收益启用状态（默认 true） |
 
 ## Extrinsics
 
 | call_index | 方法 | 权限 | 说明 |
 |------------|------|------|------|
 | 0 | `set_single_line_config` | Owner/Admin | 设置单线收益配置 |
-| 1 | `clear_single_line_config` | Owner/Admin | 清除单线收益配置 |
-| 2 | `force_set_single_line_config` | Root | 强制设置单线收益配置（无权限检查） |
-| 3 | `force_clear_single_line_config` | Root | 强制清除单线收益配置 |
-| 4 | `set_level_based_levels` | Owner/Admin | 设置按等级自定义层数 |
-| 5 | `remove_level_based_levels` | Owner/Admin | 移除按等级自定义层数 |
-| 6 | `update_single_line_params` | Owner/Admin | 部分更新配置参数（upline_rate/downline_rate/threshold） |
+| 1 | `clear_single_line_config` | Owner/Admin | 清除单线收益配置（级联清理 LevelOverrides） |
+| 2 | `update_single_line_params` | Owner/Admin | 部分更新配置参数 |
+| 3 | `set_level_based_levels` | Owner/Admin | 设置按等级自定义层数 |
+| 4 | `remove_level_based_levels` | Owner/Admin | 移除按等级自定义层数 |
+| 5 | `force_set_single_line_config` | Root | 强制设置单线收益配置（无权限检查） |
+| 6 | `force_clear_single_line_config` | Root | 强制清除单线收益配置（级联清理 LevelOverrides） |
+| 7 | `force_reset_single_line` | Root | 强制重置单链数据（清除所有段和索引） |
+| 8 | `pause_single_line` | Owner/Admin | 暂停单线收益计算 |
+| 9 | `resume_single_line` | Owner/Admin | 恢复单线收益计算 |
 
 > `upline_rate` 和 `downline_rate` 上限为 1000 基点（10%），建议设置 5-10 基点（0.05%-0.1%）避免资金压力。
 
@@ -156,15 +161,15 @@ CommissionPlugin::calculate()
 
 ### 加入单链
 
-- 首次消费（`is_first_order = true`）时自动调用 `add_to_single_line`
-- 已在单链中的用户不会重复加入
-- 单链满（`MaxSingleLineLength`）时发出 `SingleLineJoinFailed` 事件
+- 未在链中的用户每次消费都自动尝试加入（`!SingleLineIndex::contains_key`）
+- 已在单链中的用户不会重复加入（幂等）
+- 段满时自动创建新段（`NewSegmentCreated` 事件），无需人工干预
 
 ## Token 多资产支持
 
-提供与 NEX 版对称的 Token 计算函数（泛型 `TB: AtLeast32BitUnsigned`）：
+`process_upline` / `process_downline` 已泛型化为 `<B: AtLeast32BitUnsigned + Copy>`，NEX 和 Token 共用同一实现：
 
-- `process_upline_token` / `process_downline_token`
+- `do_calculate<B>` 统一分发，`calculate` / `calculate_token` 各委托一行
 - `extra_levels` 计算仍基于 NEX `total_earned`（通过 `StatsProvider`），不使用 Token 收益
 - 单链维护（`add_to_single_line`）在 NEX 版和 Token 版的 `calculate`/`calculate_token` 中均触发（幂等，不重复加入）
 
@@ -181,22 +186,30 @@ CommissionPlugin::calculate()
 | `SingleLineConfigUpdated` | 单线收益配置更新 |
 | `SingleLineConfigCleared` | 单线收益配置已清除 |
 | `AddedToSingleLine` | 用户加入单链（entity_id, account, index） |
-| `SingleLineJoinFailed` | 单链加入失败（链已满） |
+| `SingleLineJoinFailed` | 单链加入失败（段满自动扩展后仍失败，理论上不应触发） |
 | `LevelBasedLevelsUpdated` | 按等级自定义层数已更新 |
 | `LevelBasedLevelsRemoved` | 按等级自定义层数已移除 |
+| `SingleLinePaused` | 单线收益已暂停 |
+| `SingleLineResumed` | 单线收益已恢复 |
+| `SingleLineReset` | 单链数据已重置（entity_id, removed_count） |
+| `NewSegmentCreated` | 新段已创建（entity_id, segment_id） |
+| `AllLevelOverridesCleared` | 所有等级层数覆盖已清除 |
 
 ## Errors
 
 | 错误 | 说明 |
 |------|------|
 | `InvalidRate` | 收益率超过 1000 基点 |
-| `SingleLineFull` | 消费单链已满 |
 | `InvalidLevels` | upline_levels 和 downline_levels 不能同时为 0 |
 | `BaseLevelsExceedMax` | base_upline_levels > max_upline_levels 或 base_downline_levels > max_downline_levels |
 | `EntityNotFound` | 实体不存在 |
 | `NotEntityOwnerOrAdmin` | 调用者非 Entity Owner 或 Admin |
 | `ConfigNotFound` | 配置不存在（clear/update 时） |
 | `NothingToUpdate` | update_single_line_params 无参数待更新 |
+| `EntityLocked` | 实体已锁定，不允许修改 |
+| `EntityNotActive` | 实体未激活 |
+| `SingleLineIsPaused` | 单线收益已暂停（重复暂停时） |
+| `SingleLineNotPaused` | 单线收益未暂停（未暂停时恢复） |
 
 ## 审计记录
 
@@ -210,8 +223,14 @@ CommissionPlugin::calculate()
 | M1-R2 | Medium | `AddedToSingleLine` 事件已定义但 `add_to_single_line` 从未发射。修复: 成功加入后发射事件 |
 | M2-R2 | Medium | `set_single_line_config` 不校验 `base_levels <= max_levels`，允许不合逻辑配置。修复: 添加 `BaseLevelsExceedMax` 校验 |
 | M3-R2 | Medium | `SingleLines` 在启用 upline+downline 时被 `process_upline` 和 `process_downline` 各读取一次（需签名变更）。修复: `calculate`/`calculate_token` 预读取一次，传 `&line` 引用给 process 函数（R3 已实现） |
-| M1-R3 | Medium | 同 M3-R2 的实施轮次: NEX + Token 共 4 个 process 函数签名均增加 `line: &[T::AccountId]` 参数，消除冗余存储读取 |
+| M1-R3 | Medium | 同 M3-R2 的实施轮次: NEX + Token 共 4 个 process 函数签名均增加 `line: &[T::AccountId]` 参数，消除冗余存储读取。R4 改为分段存储后按需加载段 |
 | L5-R3 | Low | Token 版 `_token` 函数与 NEX 版逻辑大量重复（~170 行）。修复: `process_upline`/`process_downline` 泛型化为 `<B: AtLeast32BitUnsigned + Copy>`，删除 `process_upline_token`/`process_downline_token`；新增 `do_calculate<B>` 统一分发，`calculate`/`calculate_token` 各委托一行 |
+| M1-R4 | Medium | `AllLevelOverridesCleared` 事件已定义但 `do_clear_all_level_overrides` 从未发射。修复: 清除后发射事件 |
+| M2-R4 | Medium | `calc_extra_levels` 有死 `else` 分支 — `threshold.is_zero()` 提前返回使 `threshold_u128 > 0` 检查恒为 true。修复: 移除死分支 |
+| M3-R4 | Medium | `pause_single_line`/`resume_single_line` 不检查 `EntityLocked`，与其他 extrinsic 不一致。修复: 添加 EntityLocked 检查 |
+| L1-R4 | Low | mock.rs 中 `NON_MEMBERS`/`set_non_member` 为死代码（随 `join_single_line` 删除）。修复: 已移除 |
+| L2-R4 | Low | README 过时（存储/Extrinsics/Events/Errors 表均不准确）。修复: 全面同步 |
+| L3-R4 | Low | `SingleLineJoinFailed` 事件注释称「需人工干预」但段满自动扩展使其不可达。修复: 更新注释 |
 
 ### P0/P1 重构记录
 
@@ -224,15 +243,32 @@ CommissionPlugin::calculate()
 | P1-update | 新增 | `update_single_line_params` 部分更新（upline_rate/downline_rate/threshold） |
 | P1-writer | 新增 | `SingleLinePlanWriter` trait 实现，支持治理提案设置/清除配置 |
 
+### Round 5（v0.5.0）— 审计修复
+
+| ID | 级别 | 描述 | 状态 |
+|----|------|------|------|
+| M1-R5 | Medium | `process_upline`/`process_downline` 缺少 `is_member_active` 检查（与 referral/multi-level 不一致） → 已添加 | ✅ 已修复 |
+| L1-R5 | Low | 未使用的 `sp-std` 依赖 → 已移除 | ✅ 已修复 |
+| L2-R5 | Low | 未使用的 `sp-core` dev-dependency → 已移除 | ✅ 已修复 |
+
 ### 记录但未修复
 
 | ID | 级别 | 描述 |
 |----|------|------|
 | L4-D | Low | extrinsic 硬编码 Weight，无 WeightInfo trait |
 
+## 测试覆盖
+
+共 **140** 个单元测试。
+
 ## 依赖
 
 ```toml
 [dependencies]
+codec = { features = ["derive"] }
+scale-info = { features = ["derive"] }
+frame-support = { workspace = true }
+frame-system = { workspace = true }
+sp-runtime = { workspace = true }
 pallet-entity-common = { path = "../../common" }
 pallet-commission-common = { path = "../common" }

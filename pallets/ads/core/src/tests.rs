@@ -27,6 +27,8 @@ fn create_default_campaign(advertiser: u64) -> u64 {
 		0b001,              // type bit 0
 		1000,               // expires_at
 		None,               // targets (全网投放)
+		CampaignType::Cpm,  // campaign_type
+		0u128,              // bid_per_click (CPM 模式不使用)
 	));
 	id
 }
@@ -70,6 +72,7 @@ fn create_campaign_fails_empty_text() {
 				ad_url("https://x.com"),
 				UNIT, 10 * UNIT, 50 * UNIT,
 				0b001, 1000, None,
+				CampaignType::Cpm, 0u128,
 			),
 			Error::<Test>::EmptyAdText
 		);
@@ -86,6 +89,7 @@ fn create_campaign_fails_bid_too_low() {
 				ad_url("https://x.com"),
 				1, 10 * UNIT, 50 * UNIT,
 				0b001, 1000, None,
+				CampaignType::Cpm, 0u128,
 			),
 			Error::<Test>::BidTooLow
 		);
@@ -103,6 +107,7 @@ fn create_campaign_fails_invalid_delivery_types() {
 				UNIT, 10 * UNIT, 50 * UNIT,
 				0b1000, // invalid
 				1000, None,
+				CampaignType::Cpm, 0u128,
 			),
 			Error::<Test>::InvalidDeliveryTypes
 		);
@@ -119,6 +124,7 @@ fn create_campaign_fails_zero_budget() {
 				ad_url("https://x.com"),
 				UNIT, 10 * UNIT, 0,
 				0b001, 1000, None,
+				CampaignType::Cpm, 0u128,
 			),
 			Error::<Test>::ZeroBudget
 		);
@@ -136,6 +142,7 @@ fn create_campaign_fails_invalid_expiry() {
 				ad_url("https://x.com"),
 				UNIT, 10 * UNIT, 50 * UNIT,
 				0b001, 1, None, // expires_at == now
+				CampaignType::Cpm, 0u128,
 			),
 			Error::<Test>::InvalidExpiry
 		);
@@ -1019,7 +1026,7 @@ fn update_campaign_works() {
 			id,
 			Some(ad_text("New Text")),
 			Some(ad_url("https://new.com")),
-			None, None, None,
+			None, None, None, None,
 		));
 		let c = Campaigns::<Test>::get(id).unwrap();
 		assert_eq!(c.text.as_slice(), b"New Text");
@@ -1034,7 +1041,7 @@ fn update_campaign_fails_not_owner() {
 		assert_noop!(
 			AdsCore::update_campaign(
 				RuntimeOrigin::signed(ADVERTISER2), id,
-				Some(ad_text("X")), None, None, None, None,
+				Some(ad_text("X")), None, None, None, None, None,
 			),
 			Error::<Test>::NotCampaignOwner
 		);
@@ -1418,6 +1425,7 @@ fn daily_budget_limits_settlement() {
 			0b001,
 			1000,
 			None,
+			CampaignType::Cpm, 0u128,
 		));
 		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id, true));
 
@@ -1561,6 +1569,7 @@ fn create_campaign_with_targets_works() {
 			UNIT / 2, 10 * UNIT, 50 * UNIT,
 			0b001, 1000,
 			Some(targets),
+			CampaignType::Cpm, 0u128,
 		));
 
 		let stored = CampaignTargets::<Test>::get(id).unwrap();
@@ -1591,6 +1600,7 @@ fn create_campaign_rejects_empty_targets() {
 				UNIT / 2, 10 * UNIT, 50 * UNIT,
 				0b001, 1000,
 				Some(empty),
+				CampaignType::Cpm, 0u128,
 			),
 			Error::<Test>::EmptyTargetsList
 		);
@@ -1613,6 +1623,7 @@ fn targeted_campaign_blocks_non_target_placement() {
 			UNIT / 2, 10 * UNIT, 50 * UNIT,
 			0b001, 1000,
 			Some(targets),
+			CampaignType::Cpm, 0u128,
 		));
 		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id, true));
 
@@ -2208,6 +2219,7 @@ fn create_campaign_with_targets_populates_placement_index() {
 			0x01,
 			100u64.into(),
 			Some(targets),
+			CampaignType::Cpm, 0u128,
 		));
 
 		assert!(CampaignsForPlacement::<Test>::get(&pid1).contains(&id));
@@ -2586,6 +2598,7 @@ fn p6_create_campaign_requires_registration() {
 				1,
 				1000u64.into(),
 				None,
+				CampaignType::Cpm, 0u128,
 			),
 			Error::<Test>::NotRegisteredAdvertiser
 		);
@@ -2618,6 +2631,7 @@ fn p6_referral_commission_credited_on_settlement() {
 			1,
 			1000u64.into(),
 			None,
+			CampaignType::Cpm, 0u128,
 		));
 		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id, true));
 
@@ -2744,6 +2758,7 @@ fn p6_commission_accumulates_across_settlements() {
 			ad_text("accum"),
 			ad_url("https://a.com"),
 			UNIT, 0u128, 100 * UNIT, 1, 1000u64.into(), None,
+			CampaignType::Cpm, 0u128,
 		));
 		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id, true));
 		let pid = placement_id(1);
@@ -2774,5 +2789,531 @@ fn p6_commission_accumulates_across_settlements() {
 		let after_second = ReferrerClaimable::<Test>::get(ADVERTISER);
 		assert!(after_second > after_first);
 		assert_eq!(ReferrerTotalEarnings::<Test>::get(ADVERTISER), after_second);
+	});
+}
+
+// ============================================================================
+// CPC (Cost-Per-Click) Tests
+// ============================================================================
+
+fn create_default_cpc_campaign(advertiser: u64) -> u64 {
+	let id = NextCampaignId::<Test>::get();
+	assert_ok!(AdsCore::create_campaign(
+		RuntimeOrigin::signed(advertiser),
+		ad_text("CPC Ad"),
+		ad_url("https://cpc.example.com"),
+		0u128,              // bid_per_mille (CPC 不使用)
+		10 * UNIT,          // daily budget
+		50 * UNIT,          // total budget
+		0b001,              // type bit 0
+		1000,               // expires_at
+		None,               // targets
+		CampaignType::Cpc,
+		UNIT / 10,          // bid_per_click = 0.1 UNIT
+	));
+	id
+}
+
+fn create_approved_cpc_campaign(advertiser: u64) -> u64 {
+	let id = create_default_cpc_campaign(advertiser);
+	assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id, true));
+	id
+}
+
+#[test]
+fn cpc_create_campaign_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_default_cpc_campaign(ADVERTISER);
+		let c = Campaigns::<Test>::get(id).unwrap();
+		assert_eq!(c.campaign_type, CampaignType::Cpc);
+		assert_eq!(c.bid_per_click, UNIT / 10);
+		assert_eq!(c.total_clicks, 0);
+	});
+}
+
+#[test]
+fn cpc_create_campaign_fails_bid_too_low() {
+	new_test_ext().execute_with(|| {
+		assert_noop!(
+			AdsCore::create_campaign(
+				RuntimeOrigin::signed(ADVERTISER),
+				ad_text("CPC"),
+				ad_url("https://x.com"),
+				0u128, 10 * UNIT, 50 * UNIT,
+				0b001, 1000, None,
+				CampaignType::Cpc,
+				1u128, // too low
+			),
+			Error::<Test>::ClickBidTooLow
+		);
+	});
+}
+
+#[test]
+fn cpc_submit_click_receipt_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_cpc_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::submit_click_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN),
+			id, pid, 50, 50,
+		));
+
+		// 验证 receipt 存储
+		let receipts = DeliveryReceipts::<Test>::get(&pid);
+		assert_eq!(receipts.len(), 1);
+		assert_eq!(receipts[0].click_count, 50); // MockClickVerifier caps at 200, 50 < 200
+		assert_eq!(receipts[0].audience_size, 0); // CPC receipts have 0 audience
+
+		// 验证 campaign total_clicks
+		let c = Campaigns::<Test>::get(id).unwrap();
+		assert_eq!(c.total_clicks, 50);
+		assert_eq!(c.total_deliveries, 1);
+	});
+}
+
+#[test]
+fn cpc_submit_click_receipt_caps_at_verifier_limit() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_cpc_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		// MockClickVerifier caps at 200
+		assert_ok!(AdsCore::submit_click_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN),
+			id, pid, 500, 500,
+		));
+
+		let receipts = DeliveryReceipts::<Test>::get(&pid);
+		assert_eq!(receipts[0].click_count, 200); // capped
+
+		let c = Campaigns::<Test>::get(id).unwrap();
+		assert_eq!(c.total_clicks, 200);
+	});
+}
+
+#[test]
+fn cpc_submit_click_receipt_fails_zero_clicks() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_cpc_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_noop!(
+			AdsCore::submit_click_receipt(
+				RuntimeOrigin::signed(PLACEMENT_ADMIN),
+				id, pid, 0, 0,
+			),
+			Error::<Test>::ZeroClickCount
+		);
+	});
+}
+
+#[test]
+fn cpc_submit_click_receipt_fails_verified_exceeds_total() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_cpc_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_noop!(
+			AdsCore::submit_click_receipt(
+				RuntimeOrigin::signed(PLACEMENT_ADMIN),
+				id, pid, 10, 20, // verified > total
+			),
+			Error::<Test>::VerifiedExceedsTotal
+		);
+	});
+}
+
+#[test]
+fn cpc_submit_click_receipt_fails_campaign_type_mismatch() {
+	new_test_ext().execute_with(|| {
+		// CPM campaign
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_noop!(
+			AdsCore::submit_click_receipt(
+				RuntimeOrigin::signed(PLACEMENT_ADMIN),
+				id, pid, 50, 50,
+			),
+			Error::<Test>::CampaignTypeMismatch
+		);
+	});
+}
+
+#[test]
+fn cpm_submit_delivery_receipt_fails_for_cpc_campaign() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_cpc_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_noop!(
+			AdsCore::submit_delivery_receipt(
+				RuntimeOrigin::signed(PLACEMENT_ADMIN),
+				id, pid, 100,
+			),
+			Error::<Test>::CampaignTypeMismatch
+		);
+	});
+}
+
+#[test]
+fn cpc_settle_era_ads_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_cpc_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		// Submit click receipt
+		assert_ok!(AdsCore::submit_click_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN),
+			id, pid, 100, 100,
+		));
+
+		// Confirm receipt
+		assert_ok!(AdsCore::confirm_receipt(
+			RuntimeOrigin::signed(ADVERTISER), id, pid, 0,
+		));
+
+		let _before = Balances::free_balance(ADVERTISER);
+
+		// Settle
+		assert_ok!(AdsCore::settle_era_ads(
+			RuntimeOrigin::signed(ADVERTISER2), pid,
+		));
+
+		let c = Campaigns::<Test>::get(id).unwrap();
+		// CPC cost = bid_per_click * clicks * multiplier / 100
+		// = (UNIT/10) * 100 * 100 / 100 = 10 UNIT
+		assert!(c.spent > 0);
+	});
+}
+
+#[test]
+fn cpc_compute_cpc_cost_basic() {
+	new_test_ext().execute_with(|| {
+		// bid=0.1 UNIT, clicks=100, multiplier=100 (1x)
+		let cost = AdsCore::compute_cpc_cost(UNIT / 10, 100, 100);
+		assert_eq!(cost, 10 * UNIT);
+
+		// bid=0.1 UNIT, clicks=100, multiplier=50 (0.5x)
+		let cost2 = AdsCore::compute_cpc_cost(UNIT / 10, 100, 50);
+		assert_eq!(cost2, 5 * UNIT);
+
+		// bid=0.1 UNIT, clicks=0
+		let cost3 = AdsCore::compute_cpc_cost(UNIT / 10, 0, 100);
+		assert_eq!(cost3, 0);
+	});
+}
+
+#[test]
+fn cpc_update_campaign_bid_per_click_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_cpc_campaign(ADVERTISER);
+
+		// CPC campaign 可以更新 bid_per_click
+		assert_ok!(AdsCore::update_campaign(
+			RuntimeOrigin::signed(ADVERTISER), id,
+			None, None, None, None, None,
+			Some(UNIT / 5), // 新 bid_per_click
+		));
+		let c = Campaigns::<Test>::get(id).unwrap();
+		assert_eq!(c.bid_per_click, UNIT / 5);
+	});
+}
+
+#[test]
+fn cpc_update_campaign_rejects_bid_per_mille() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_cpc_campaign(ADVERTISER);
+
+		// CPC campaign 不能更新 bid_per_mille
+		assert_noop!(
+			AdsCore::update_campaign(
+				RuntimeOrigin::signed(ADVERTISER), id,
+				None, None, Some(UNIT), None, None, None,
+			),
+			Error::<Test>::CampaignTypeMismatch
+		);
+	});
+}
+
+#[test]
+fn cpm_update_campaign_rejects_bid_per_click() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+
+		// CPM campaign 不能更新 bid_per_click
+		assert_noop!(
+			AdsCore::update_campaign(
+				RuntimeOrigin::signed(ADVERTISER), id,
+				None, None, None, None, None, Some(UNIT),
+			),
+			Error::<Test>::CampaignTypeMismatch
+		);
+	});
+}
+
+#[test]
+fn cpc_update_campaign_rejects_low_bid() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_cpc_campaign(ADVERTISER);
+
+		// bid_per_click 低于 MinBidPerClick
+		assert_noop!(
+			AdsCore::update_campaign(
+				RuntimeOrigin::signed(ADVERTISER), id,
+				None, None, None, None, None, Some(1u128),
+			),
+			Error::<Test>::ClickBidTooLow
+		);
+	});
+}
+
+#[test]
+fn cpc_force_settle_era_ads_works() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_cpc_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		assert_ok!(AdsCore::submit_click_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN),
+			id, pid, 80, 80,
+		));
+
+		// Confirm receipt
+		assert_ok!(AdsCore::confirm_receipt(
+			RuntimeOrigin::signed(ADVERTISER), id, pid, 0,
+		));
+
+		// Force settle (Root)
+		assert_ok!(AdsCore::force_settle_era_ads(
+			RuntimeOrigin::root(), pid,
+		));
+
+		let c = Campaigns::<Test>::get(id).unwrap();
+		// CPC cost = (UNIT/10) * 80 * 100 / 100 = 8 UNIT
+		assert_eq!(c.spent, 8 * UNIT);
+	});
+}
+
+// ============================================================================
+// available_campaigns_for_placement — 按 effective_bid 降序排序
+// ============================================================================
+
+#[test]
+fn available_campaigns_sorted_by_effective_bid_desc() {
+	new_test_ext().execute_with(|| {
+		// Campaign A: CPM, bid_per_mille = 0.5 UNIT, multiplier = 100 → effective = 0.5 UNIT
+		let id_a = create_approved_campaign(ADVERTISER);
+
+		// Campaign B: CPM, bid_per_mille = 1 UNIT, multiplier = 100 → effective = 1 UNIT
+		let id_b = NextCampaignId::<Test>::get();
+		assert_ok!(AdsCore::create_campaign(
+			RuntimeOrigin::signed(ADVERTISER),
+			ad_text("High CPM"),
+			ad_url("https://high.com"),
+			UNIT,               // 1 UNIT per mille
+			10 * UNIT,
+			50 * UNIT,
+			0b001,
+			1000,
+			None,
+			CampaignType::Cpm,
+			0u128,
+		));
+		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id_b, true));
+
+		// Campaign C: CPC, bid_per_click = 0.1 UNIT, multiplier = 100 → effective = 0.1 UNIT
+		let id_c = create_approved_cpc_campaign(ADVERTISER);
+
+		let pid = placement_id(1);
+		let results = AdsCore::available_campaigns_for_placement(&pid, 10);
+
+		assert_eq!(results.len(), 3);
+		// 排序: B(1 UNIT) > A(0.5 UNIT) > C(0.1 UNIT)
+		assert_eq!(results[0].campaign_id, id_b);
+		assert_eq!(results[0].effective_bid, UNIT); // 1 UNIT * 100 / 100
+		assert_eq!(results[1].campaign_id, id_a);
+		assert_eq!(results[1].effective_bid, UNIT / 2); // 0.5 UNIT * 100 / 100
+		assert_eq!(results[2].campaign_id, id_c);
+		assert_eq!(results[2].effective_bid, UNIT / 10); // 0.1 UNIT * 100 / 100
+	});
+}
+
+#[test]
+fn available_campaigns_sorted_with_multiplier() {
+	new_test_ext().execute_with(|| {
+		// Campaign A: CPM, bid_per_mille = 0.5 UNIT, default multiplier 100 → effective = 0.5 UNIT
+		let id_a = create_approved_campaign(ADVERTISER);
+
+		// Campaign B: CPM, bid_per_mille = 0.3 UNIT, multiplier = 200 → effective = 0.6 UNIT
+		let id_b = NextCampaignId::<Test>::get();
+		assert_ok!(AdsCore::create_campaign(
+			RuntimeOrigin::signed(ADVERTISER2),
+			ad_text("Low bid high mult"),
+			ad_url("https://mult.com"),
+			UNIT * 3 / 10,      // 0.3 UNIT per mille
+			10 * UNIT,
+			50 * UNIT,
+			0b001,
+			1000,
+			None,
+			CampaignType::Cpm,
+			0u128,
+		));
+		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id_b, true));
+
+		// 给 Campaign B 设置 multiplier = 200
+		CampaignMultiplier::<Test>::insert(id_b, 200u32);
+
+		let pid = placement_id(1);
+		let results = AdsCore::available_campaigns_for_placement(&pid, 10);
+
+		assert_eq!(results.len(), 2);
+		// B effective = 0.3 * 200 / 100 = 0.6 UNIT
+		// A effective = 0.5 * 100 / 100 = 0.5 UNIT
+		// 排序: B > A
+		assert_eq!(results[0].campaign_id, id_b);
+		assert_eq!(results[0].effective_bid, UNIT * 3 / 10 * 200 / 100);
+		assert_eq!(results[1].campaign_id, id_a);
+		assert_eq!(results[1].effective_bid, UNIT / 2);
+	});
+}
+
+#[test]
+fn available_campaigns_sorted_truncates_to_max() {
+	new_test_ext().execute_with(|| {
+		// 创建 3 个 campaign, 请求 max_results = 2
+		let _id_a = create_approved_campaign(ADVERTISER); // 0.5 UNIT
+		let id_b = NextCampaignId::<Test>::get();
+		assert_ok!(AdsCore::create_campaign(
+			RuntimeOrigin::signed(ADVERTISER),
+			ad_text("High"),
+			ad_url("https://high.com"),
+			UNIT,
+			10 * UNIT,
+			50 * UNIT,
+			0b001,
+			1000,
+			None,
+			CampaignType::Cpm,
+			0u128,
+		));
+		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id_b, true));
+
+		let id_c = NextCampaignId::<Test>::get();
+		assert_ok!(AdsCore::create_campaign(
+			RuntimeOrigin::signed(ADVERTISER2),
+			ad_text("Mid"),
+			ad_url("https://mid.com"),
+			UNIT * 7 / 10, // 0.7 UNIT
+			10 * UNIT,
+			50 * UNIT,
+			0b001,
+			1000,
+			None,
+			CampaignType::Cpm,
+			0u128,
+		));
+		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id_c, true));
+
+		let pid = placement_id(1);
+		let results = AdsCore::available_campaigns_for_placement(&pid, 2);
+
+		// 只返回 top 2: B(1 UNIT), C(0.7 UNIT)
+		assert_eq!(results.len(), 2);
+		assert_eq!(results[0].campaign_id, id_b);
+		assert_eq!(results[1].campaign_id, id_c);
+	});
+}
+
+// ============================================================================
+// Round 2 审计回归测试
+// ============================================================================
+
+#[test]
+fn h1_r2_resubmit_campaign_rejects_expired_before_reserve() {
+	new_test_ext().execute_with(|| {
+		// 创建 campaign, 过期时间设为 block 10
+		let id = NextCampaignId::<Test>::get();
+		assert_ok!(AdsCore::create_campaign(
+			RuntimeOrigin::signed(ADVERTISER),
+			ad_text("Expire test"),
+			ad_url("https://expire.com"),
+			UNIT / 2, 0u128, 50 * UNIT, 1, 10u64, None,
+			CampaignType::Cpm, 0u128,
+		));
+		// Root 拒绝 → 退款
+		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id, false));
+
+		let balance_before = Balances::free_balance(ADVERTISER);
+
+		// 推进到 block 11 (已过期)
+		System::set_block_number(11);
+
+		// H1-R2: resubmit 应在 reserve 之前检查过期, 余额不变
+		assert_noop!(
+			AdsCore::resubmit_campaign(
+				RuntimeOrigin::signed(ADVERTISER), id,
+				ad_text("New text"),
+				ad_url("https://new.com"),
+				50 * UNIT,
+			),
+			Error::<Test>::CampaignExpired
+		);
+
+		// 验证余额未被 reserve 锁定
+		assert_eq!(Balances::free_balance(ADVERTISER), balance_before);
+	});
+}
+
+#[test]
+fn m3_r2_resubmit_campaign_resets_counters() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+		let pid = placement_id(1);
+
+		// 提交收据产生 total_deliveries
+		assert_ok!(AdsCore::submit_delivery_receipt(
+			RuntimeOrigin::signed(PLACEMENT_ADMIN), id, pid, 100,
+		));
+		let c = Campaigns::<Test>::get(id).unwrap();
+		assert_eq!(c.total_deliveries, 1);
+
+		// Root 拒绝
+		assert_ok!(AdsCore::review_campaign(RuntimeOrigin::root(), id, false));
+
+		// Resubmit
+		assert_ok!(AdsCore::resubmit_campaign(
+			RuntimeOrigin::signed(ADVERTISER), id,
+			ad_text("Resubmitted"),
+			ad_url("https://resubmit.com"),
+			50 * UNIT,
+		));
+
+		// M3-R2: 验证计数器已重置
+		let c = Campaigns::<Test>::get(id).unwrap();
+		assert_eq!(c.total_deliveries, 0);
+		assert_eq!(c.total_clicks, 0);
+		assert_eq!(c.spent, 0);
+	});
+}
+
+#[test]
+fn m2_r2_campaign_details_total_deliveries_safe_truncation() {
+	new_test_ext().execute_with(|| {
+		let id = create_approved_campaign(ADVERTISER);
+
+		// 手动设置极大 total_deliveries 以测试截断
+		Campaigns::<Test>::mutate(id, |maybe| {
+			if let Some(c) = maybe {
+				c.total_deliveries = u64::MAX;
+			}
+		});
+
+		let detail = AdsCore::campaign_details(id).unwrap();
+		// M2-R2: 应安全截断到 u32::MAX 而非溢出
+		assert_eq!(detail.total_deliveries, u32::MAX);
 	});
 }

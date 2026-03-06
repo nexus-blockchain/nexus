@@ -16,6 +16,8 @@
 
 pub use pallet::*;
 
+pub mod runtime_api;
+
 #[cfg(test)]
 mod mock;
 #[cfg(test)]
@@ -23,7 +25,8 @@ mod tests;
 
 use codec::{Decode, DecodeWithMemTracking, Encode};
 use frame_support::pallet_prelude::*;
-use sp_runtime::traits::Saturating;
+use frame_system::pallet_prelude::OriginFor;
+use frame_system::ensure_root;
 use sp_std::marker::PhantomData;
 
 /// 可归档数据 Trait
@@ -63,33 +66,6 @@ pub trait ArchivableData: Encode + Decode + Clone {
 
     /// 更新永久统计
     fn update_stats(stats: &mut Self::PermanentStats, archived: &Self::ArchivedL1);
-}
-
-/// 存储归档器 Trait
-///
-/// 由 pallet-storage-service 实现，供 lifecycle pallet 调用。
-/// 解耦归档逻辑与具体存储实现。
-pub trait StorageArchiver {
-    /// 扫描可归档的记录ID（已过期超过 delay 区块的 CID）
-    ///
-    /// # Arguments
-    /// * `delay` - 过期后等待多少区块才可归档
-    /// * `max_count` - 最多返回多少条
-    ///
-    /// # Returns
-    /// 可归档的记录ID列表
-    fn scan_archivable(delay: u64, max_count: u32) -> sp_std::vec::Vec<u64>;
-
-    /// 执行归档清理（删除链上存储记录）
-    fn archive_records(ids: &[u64]);
-}
-
-/// 空实现（runtime 未接入 service pallet 时使用）
-impl StorageArchiver for () {
-    fn scan_archivable(_delay: u64, _max_count: u32) -> sp_std::vec::Vec<u64> {
-        sp_std::vec::Vec::new()
-    }
-    fn archive_records(_ids: &[u64]) {}
 }
 
 /// 归档状态
@@ -134,19 +110,121 @@ impl ArchiveLevel {
     }
 }
 
-/// 归档记录
+/// 存储归档器 Trait (D2: 多级操作支持)
+///
+/// 由 pallet-storage-service 实现，供 lifecycle pallet 调用。
+/// 解耦归档逻辑与具体存储实现。
+pub trait StorageArchiver {
+    /// 扫描可归档的记录ID（已过期超过 delay 区块的 CID）
+    fn scan_archivable(delay: u64, max_count: u32) -> sp_std::vec::Vec<u64>;
+
+    /// 执行归档清理（删除链上存储记录）
+    fn archive_records(ids: &[u64]);
+
+    /// 按目标归档级别扫描可处理的记录 (D2)
+    fn scan_for_level(
+        _data_type: &[u8],
+        target_level: ArchiveLevel,
+        delay: u64,
+        max_count: u32,
+    ) -> sp_std::vec::Vec<u64> {
+        if matches!(target_level, ArchiveLevel::Purged) {
+            Self::scan_archivable(delay, max_count)
+        } else {
+            sp_std::vec::Vec::new()
+        }
+    }
+
+    /// 执行指定级别的归档操作 (D2)
+    fn archive_to_level(
+        _data_type: &[u8],
+        ids: &[u64],
+        target_level: ArchiveLevel,
+    ) {
+        if matches!(target_level, ArchiveLevel::Purged) {
+            Self::archive_records(ids);
+        }
+    }
+
+    /// 返回已注册的数据类型列表 (D4)
+    fn registered_data_types() -> sp_std::vec::Vec<sp_std::vec::Vec<u8>> {
+        sp_std::vec![b"pin_storage".to_vec()]
+    }
+
+    /// 查询数据当前归档级别 (U1)
+    fn query_archive_level(_data_type: &[u8], _data_id: u64) -> ArchiveLevel {
+        ArchiveLevel::Active
+    }
+
+    /// 请求恢复已归档数据到 Active (U4)
+    fn restore_record(_data_type: &[u8], _data_id: u64, _from_level: ArchiveLevel) -> bool {
+        false
+    }
+}
+
+/// 空实现（runtime 未接入 service pallet 时使用）
+impl StorageArchiver for () {
+    fn scan_archivable(_delay: u64, _max_count: u32) -> sp_std::vec::Vec<u64> {
+        sp_std::vec::Vec::new()
+    }
+    fn archive_records(_ids: &[u64]) {}
+}
+
+/// 归档回调 Trait (D3)
+///
+/// 归档完成后通知下游 pallet
+pub trait OnArchiveHandler {
+    fn on_archived(data_type: &[u8], data_id: u64, from_level: ArchiveLevel, to_level: ArchiveLevel);
+}
+
+impl OnArchiveHandler for () {
+    fn on_archived(_: &[u8], _: u64, _: ArchiveLevel, _: ArchiveLevel) {}
+}
+
+/// 归档全局配置 (G1: 运行时可调)
 #[derive(Encode, Decode, DecodeWithMemTracking, Clone, PartialEq, Eq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
-pub struct ArchiveRecord {
-    /// 数据ID
-    pub data_id: u64,
-    /// 归档级别
-    pub level: ArchiveLevel,
-    /// 归档时间（区块号）
-    pub archived_at: u64,
-    /// 原始大小（字节）
-    pub original_size: u32,
-    /// 归档后大小（字节）
-    pub archived_size: u32,
+pub struct ArchiveConfig {
+    pub l1_delay: u32,
+    pub l2_delay: u32,
+    pub purge_delay: u32,
+    pub purge_enabled: bool,
+    pub max_batch_size: u32,
+}
+
+/// 按数据类型的归档策略 (G3: 差异化归档)
+#[derive(Encode, Decode, DecodeWithMemTracking, Clone, PartialEq, Eq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+pub struct ArchivePolicy {
+    pub l1_delay: u32,
+    pub l2_delay: u32,
+    pub purge_delay: u32,
+    pub purge_enabled: bool,
+}
+
+/// WeightInfo trait (O4: Benchmark 权重框架)
+pub trait WeightInfo {
+    fn set_archive_config() -> Weight;
+    fn pause_archival() -> Weight;
+    fn resume_archival() -> Weight;
+    fn set_archive_policy() -> Weight;
+    fn force_archive() -> Weight;
+    fn protect_from_purge() -> Weight;
+    fn remove_purge_protection() -> Weight;
+    fn extend_active_period() -> Weight;
+    fn restore_from_archive() -> Weight;
+}
+
+/// 默认权重实现
+pub struct SubstrateWeight;
+impl WeightInfo for SubstrateWeight {
+    fn set_archive_config() -> Weight { Weight::from_parts(10_000_000, 1_000) }
+    fn pause_archival() -> Weight { Weight::from_parts(5_000_000, 500) }
+    fn resume_archival() -> Weight { Weight::from_parts(5_000_000, 500) }
+    fn set_archive_policy() -> Weight { Weight::from_parts(10_000_000, 1_000) }
+    fn force_archive() -> Weight { Weight::from_parts(50_000_000, 5_000) }
+    fn protect_from_purge() -> Weight { Weight::from_parts(10_000_000, 1_000) }
+    fn remove_purge_protection() -> Weight { Weight::from_parts(10_000_000, 1_000) }
+    fn extend_active_period() -> Weight { Weight::from_parts(10_000_000, 1_000) }
+    fn restore_from_archive() -> Weight { Weight::from_parts(50_000_000, 5_000) }
 }
 
 /// 归档批次信息
@@ -201,6 +279,12 @@ pub mod pallet {
 
         /// 存储归档器：提供可归档记录的扫描与清理接口
         type StorageArchiver: StorageArchiver;
+
+        /// 归档回调处理器 (D3)
+        type OnArchive: OnArchiveHandler;
+
+        /// 权重信息 (O4)
+        type WeightInfo: WeightInfo;
     }
 
     #[pallet::hooks]
@@ -209,47 +293,176 @@ pub mod pallet {
             n: frame_system::pallet_prelude::BlockNumberFor<T>,
             remaining_weight: Weight,
         ) -> Weight {
-            let max_batch = T::MaxBatchSize::get();
-            // 最小权重门槛：至少能处理 1 条记录
+            // G2: 检查暂停状态
+            if ArchivalPaused::<T>::get() {
+                return Weight::zero();
+            }
+
             let min_weight = Weight::from_parts(50_000_000, 5_000);
             if remaining_weight.any_lt(min_weight) {
                 return Weight::zero();
             }
 
             let now: u64 = n.try_into().unwrap_or(0u64);
-            let l1_delay = T::L1ArchiveDelay::get() as u64;
+            let config = Pallet::<T>::effective_config();
+            // D4: 多数据类型支持
+            let data_types = T::StorageArchiver::registered_data_types();
+            let mut total_processed = 0u32;
+            let types_count = (data_types.len() as u32).max(1);
+            let batch_per_type = config.max_batch_size / types_count;
+            // M1-R3: 预算跟踪，避免无限制消耗资源
+            let per_scan_weight = Weight::from_parts(5_000_000, 1_000);
+            let per_item_weight = Weight::from_parts(10_000_000, 2_000);
+            let mut budget_used = min_weight; // base overhead
 
-            // 扫描可归档记录（已过期超过 L1ArchiveDelay 的 CID）
-            let expired_ids = T::StorageArchiver::scan_archivable(l1_delay, max_batch);
-            let count = expired_ids.len() as u32;
+            for dt_bytes in data_types.iter() {
+                let data_type: BoundedVec<u8, ConstU32<32>> =
+                    BoundedVec::truncate_from(dt_bytes.clone());
+                let policy = Pallet::<T>::effective_policy(&data_type, &config);
+                let phase_batch = (batch_per_type / 3).max(1);
 
-            if count > 0 {
-                // 执行归档清理
-                T::StorageArchiver::archive_records(&expired_ids);
-
-                // 记录批次
-                let data_type_vec: sp_runtime::BoundedVec<u8, ConstU32<32>> =
-                    sp_runtime::BoundedVec::truncate_from(b"pin_storage".to_vec());
-                let _ = StorageLifecycleManager::<T>::record_batch(
-                    data_type_vec.clone(),
-                    *expired_ids.first().unwrap_or(&0),
-                    *expired_ids.last().unwrap_or(&0),
-                    count,
-                    ArchiveLevel::Purged,
-                    now,
+                // D1 阶段 1: Active → L1
+                let l1_ids = T::StorageArchiver::scan_for_level(
+                    dt_bytes, ArchiveLevel::ArchivedL1, policy.l1_delay as u64, phase_batch,
                 );
+                // U3: 过滤已延期的数据
+                let l1_ids: sp_std::vec::Vec<u64> = l1_ids.into_iter()
+                    .filter(|id| {
+                        let ext = ActiveExtensions::<T>::get(&data_type, *id);
+                        ext == 0 || now >= ext
+                    })
+                    .collect();
+                // M1-R3: 扫描计入预算
+                budget_used = budget_used.saturating_add(per_scan_weight);
+                if !l1_ids.is_empty() {
+                    let count = l1_ids.len() as u32;
+                    T::StorageArchiver::archive_to_level(dt_bytes, &l1_ids, ArchiveLevel::ArchivedL1);
+                    for id in &l1_ids {
+                        // M1-R2: 读取实际 from_level，避免硬编码
+                        let from_level = DataArchiveStatus::<T>::get(&data_type, *id);
+                        DataArchiveStatus::<T>::insert(&data_type, *id, ArchiveLevel::ArchivedL1);
+                        T::OnArchive::on_archived(dt_bytes, *id, from_level, ArchiveLevel::ArchivedL1);
+                        ActiveExtensions::<T>::remove(&data_type, *id);
+                    }
+                    let _ = StorageLifecycleManager::<T>::record_batch(
+                        data_type.clone(),
+                        *l1_ids.first().unwrap_or(&0),
+                        *l1_ids.last().unwrap_or(&0),
+                        count, ArchiveLevel::ArchivedL1, now,
+                    );
+                    Self::deposit_event(Event::ArchivedToL1 {
+                        data_type: data_type.clone(), count, saved_bytes: 0,
+                    });
+                    total_processed = total_processed.saturating_add(count);
+                    budget_used = budget_used.saturating_add(
+                        per_item_weight.saturating_mul(count as u64)
+                    );
+                }
+                // M1-R3: 超出预算则中止后续阶段
+                if budget_used.any_gt(remaining_weight) { break; }
 
-                Self::deposit_event(Event::DataPurged {
-                    data_type: data_type_vec,
-                    count,
-                });
+                // D1 阶段 2: L1 → L2
+                let l2_ids = T::StorageArchiver::scan_for_level(
+                    dt_bytes, ArchiveLevel::ArchivedL2, policy.l2_delay as u64, phase_batch,
+                );
+                budget_used = budget_used.saturating_add(per_scan_weight);
+                if !l2_ids.is_empty() {
+                    let count = l2_ids.len() as u32;
+                    T::StorageArchiver::archive_to_level(dt_bytes, &l2_ids, ArchiveLevel::ArchivedL2);
+                    for id in &l2_ids {
+                        // M1-R2: 读取实际 from_level
+                        let from_level = DataArchiveStatus::<T>::get(&data_type, *id);
+                        DataArchiveStatus::<T>::insert(&data_type, *id, ArchiveLevel::ArchivedL2);
+                        T::OnArchive::on_archived(dt_bytes, *id, from_level, ArchiveLevel::ArchivedL2);
+                    }
+                    let _ = StorageLifecycleManager::<T>::record_batch(
+                        data_type.clone(),
+                        *l2_ids.first().unwrap_or(&0),
+                        *l2_ids.last().unwrap_or(&0),
+                        count, ArchiveLevel::ArchivedL2, now,
+                    );
+                    Self::deposit_event(Event::ArchivedToL2 {
+                        data_type: data_type.clone(), count, saved_bytes: 0,
+                    });
+                    total_processed = total_processed.saturating_add(count);
+                    budget_used = budget_used.saturating_add(
+                        per_item_weight.saturating_mul(count as u64)
+                    );
+                }
+                if budget_used.any_gt(remaining_weight) { break; }
+
+                // D1 阶段 3: L2 → Purge
+                if policy.purge_enabled {
+                    let purge_ids = T::StorageArchiver::scan_for_level(
+                        dt_bytes, ArchiveLevel::Purged, policy.purge_delay as u64, phase_batch,
+                    );
+                    // G4: 过滤受保护的数据
+                    let purge_ids: sp_std::vec::Vec<u64> = purge_ids.into_iter()
+                        .filter(|id| !PurgeProtected::<T>::get(&data_type, *id))
+                        .collect();
+                    budget_used = budget_used.saturating_add(per_scan_weight);
+                    if !purge_ids.is_empty() {
+                        let count = purge_ids.len() as u32;
+                        T::StorageArchiver::archive_to_level(dt_bytes, &purge_ids, ArchiveLevel::Purged);
+                        for id in &purge_ids {
+                            // M1-R2: 读取实际 from_level
+                            let from_level = DataArchiveStatus::<T>::get(&data_type, *id);
+                            DataArchiveStatus::<T>::insert(&data_type, *id, ArchiveLevel::Purged);
+                            T::OnArchive::on_archived(dt_bytes, *id, from_level, ArchiveLevel::Purged);
+                        }
+                        let _ = StorageLifecycleManager::<T>::record_batch(
+                            data_type.clone(),
+                            *purge_ids.first().unwrap_or(&0),
+                            *purge_ids.last().unwrap_or(&0),
+                            count, ArchiveLevel::Purged, now,
+                        );
+                        Self::deposit_event(Event::DataPurged {
+                            data_type: data_type.clone(), count,
+                        });
+                        total_processed = total_processed.saturating_add(count);
+                        budget_used = budget_used.saturating_add(
+                            per_item_weight.saturating_mul(count as u64)
+                        );
+                    }
+                }
+                if budget_used.any_gt(remaining_weight) { break; }
+
+                // U2: 归档前预警 — 扫描即将达到 L1 归档条件的数据
+                let warning_delay = (policy.l1_delay as u64) * 4 / 5; // 80% of L1 delay
+                let approaching = T::StorageArchiver::scan_for_level(
+                    dt_bytes, ArchiveLevel::ArchivedL1, warning_delay, phase_batch,
+                );
+                // 排除已在本轮归档的 ID（已处理过）
+                let approaching_count = approaching.iter()
+                    .filter(|id| !l1_ids.contains(id))
+                    .count() as u32;
+                if approaching_count > 0 {
+                    Self::deposit_event(Event::ArchivalWarning {
+                        data_type: data_type.clone(),
+                        approaching_count,
+                    });
+                }
+
+                budget_used = budget_used.saturating_add(per_scan_weight);
+
+                // O3: 积压告警 — 检查是否有大量待处理记录
+                // M2-R2: 扫描上限必须 > 阈值，否则条件永远为 false
+                let backlog_threshold = config.max_batch_size.saturating_mul(3);
+                let pending = T::StorageArchiver::scan_for_level(
+                    dt_bytes, ArchiveLevel::ArchivedL1, 0, backlog_threshold.saturating_add(1),
+                ).len() as u32;
+                if pending > backlog_threshold {
+                    Self::deposit_event(Event::ArchivalBacklog {
+                        data_type: data_type.clone(),
+                        pending_count: pending,
+                    });
+                }
+                budget_used = budget_used.saturating_add(per_scan_weight);
             }
 
-            // 返回消耗的权重
-            Weight::from_parts(
-                50_000_000u64.saturating_mul(count as u64 + 1),
-                5_000u64.saturating_mul(count as u64 + 1),
-            )
+            // H1-R2: 确保不超过 remaining_weight（Substrate on_idle 契约）
+            // M1-R3: budget_used 已在循环中精确跟踪
+            budget_used.min(remaining_weight)
         }
     }
 
@@ -259,8 +472,8 @@ pub mod pallet {
     pub type ArchiveCursor<T: Config> = StorageMap<
         _,
         Blake2_128Concat,
-        BoundedVec<u8, ConstU32<32>>, // 数据类型标识
-        u64,                           // 当前处理到的ID
+        BoundedVec<u8, ConstU32<32>>,
+        u64,
         ValueQuery,
     >;
 
@@ -270,8 +483,8 @@ pub mod pallet {
     pub type ArchiveBatches<T: Config> = StorageMap<
         _,
         Blake2_128Concat,
-        BoundedVec<u8, ConstU32<32>>,                    // 数据类型标识
-        BoundedVec<ArchiveBatch, ConstU32<100>>,         // 最近100个批次
+        BoundedVec<u8, ConstU32<32>>,
+        BoundedVec<ArchiveBatch, ConstU32<100>>,
         ValueQuery,
     >;
 
@@ -281,8 +494,71 @@ pub mod pallet {
     pub type ArchiveStats<T: Config> = StorageMap<
         _,
         Blake2_128Concat,
-        BoundedVec<u8, ConstU32<32>>, // 数据类型标识
+        BoundedVec<u8, ConstU32<32>>,
         ArchiveStatistics,
+        ValueQuery,
+    >;
+
+    /// G2: 归档暂停标志
+    #[pallet::storage]
+    pub type ArchivalPaused<T: Config> = StorageValue<_, bool, ValueQuery>;
+
+    /// G1: 运行时可调归档配置覆盖
+    #[pallet::storage]
+    pub type ArchiveConfigOverride<T: Config> = StorageValue<_, ArchiveConfig>;
+
+    /// G3: 按数据类型的归档策略
+    #[pallet::storage]
+    pub type ArchivePolicies<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        BoundedVec<u8, ConstU32<32>>,
+        ArchivePolicy,
+    >;
+
+    /// U1: 数据归档状态跟踪
+    #[pallet::storage]
+    pub type DataArchiveStatus<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        BoundedVec<u8, ConstU32<32>>,
+        Blake2_128Concat,
+        u64,
+        ArchiveLevel,
+        ValueQuery,
+    >;
+
+    /// G4: 清除保护标志
+    #[pallet::storage]
+    pub type PurgeProtected<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        BoundedVec<u8, ConstU32<32>>,
+        Blake2_128Concat,
+        u64,
+        bool,
+        ValueQuery,
+    >;
+
+    /// U3: Active 延期（数据 ID → 延期截止区块号）
+    #[pallet::storage]
+    pub type ActiveExtensions<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        BoundedVec<u8, ConstU32<32>>,
+        Blake2_128Concat,
+        u64,
+        u64,
+        ValueQuery,
+    >;
+
+    /// O1: 累计批次计数
+    #[pallet::storage]
+    pub type TotalBatchCount<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        BoundedVec<u8, ConstU32<32>>,
+        u64,
         ValueQuery,
     >;
 
@@ -306,24 +582,326 @@ pub mod pallet {
             data_type: BoundedVec<u8, ConstU32<32>>,
             count: u32,
         },
-        /// 归档批次完成
-        BatchCompleted {
+        /// G1: 归档配置已更新
+        ArchiveConfigUpdated {
+            config: ArchiveConfig,
+        },
+        /// G2: 归档已暂停
+        ArchivalPausedEvent,
+        /// G2: 归档已恢复
+        ArchivalResumedEvent,
+        /// G3: 归档策略已设置
+        ArchivePolicySet {
             data_type: BoundedVec<u8, ConstU32<32>>,
-            batch_id: u64,
-            level: u8, // 0=Active, 1=L1, 2=L2, 3=Purged
+            policy: ArchivePolicy,
+        },
+        /// G4: 清除保护状态变更
+        PurgeProtectionChanged {
+            data_type: BoundedVec<u8, ConstU32<32>>,
+            data_id: u64,
+            protected: bool,
+        },
+        /// G4: 数据强制归档
+        DataForceArchived {
+            data_type: BoundedVec<u8, ConstU32<32>>,
+            data_ids: BoundedVec<u64, ConstU32<100>>,
+            target_level: u8,
+        },
+        /// U3: Active 期延长
+        ActivePeriodExtended {
+            data_type: BoundedVec<u8, ConstU32<32>>,
+            data_id: u64,
+            extended_until: u64,
+        },
+        /// U4: 数据已恢复
+        DataRestored {
+            data_type: BoundedVec<u8, ConstU32<32>>,
+            data_id: u64,
+            from_level: u8,
+        },
+        /// U2: 归档前预警（数据即将被归档到 L1）
+        ArchivalWarning {
+            data_type: BoundedVec<u8, ConstU32<32>>,
+            approaching_count: u32,
+        },
+        /// O3: 归档积压告警
+        ArchivalBacklog {
+            data_type: BoundedVec<u8, ConstU32<32>>,
+            pending_count: u32,
         },
     }
 
     #[pallet::error]
     pub enum Error<T> {
-        /// 数据类型标识过长
-        DataTypeTooLong,
         /// 归档批次已满
         BatchQueueFull,
-        /// 数据不存在
-        DataNotFound,
         /// 数据状态不允许归档
         InvalidArchiveState,
+        /// 归档已暂停
+        ArchivalAlreadyPaused,
+        /// 归档未暂停
+        ArchivalNotPaused,
+        /// 无法从该级别恢复
+        CannotRestoreFromLevel,
+        /// 配置参数无效
+        InvalidConfig,
+        /// 延期太短
+        ExtensionTooShort,
+        /// 数据已受保护
+        AlreadyProtected,
+        /// 数据未受保护
+        NotProtected,
+        /// 恢复失败
+        RestoreFailed,
+    }
+
+    #[pallet::call]
+    impl<T: Config> Pallet<T> {
+        /// G1: 设置归档全局配置（运行时可调）
+        #[pallet::call_index(0)]
+        #[pallet::weight(T::WeightInfo::set_archive_config())]
+        pub fn set_archive_config(
+            origin: OriginFor<T>,
+            config: ArchiveConfig,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(config.l1_delay > 0 && config.l2_delay > 0 && config.max_batch_size > 0, Error::<T>::InvalidConfig);
+            // M1-R1: purge_enabled 时 purge_delay 必须 > 0
+            ensure!(!config.purge_enabled || config.purge_delay > 0, Error::<T>::InvalidConfig);
+            // M2-R3: 延迟必须递增 l1 <= l2，且 purge_enabled 时 l2 <= purge
+            ensure!(config.l1_delay <= config.l2_delay, Error::<T>::InvalidConfig);
+            if config.purge_enabled {
+                ensure!(config.l2_delay <= config.purge_delay, Error::<T>::InvalidConfig);
+            }
+            ArchiveConfigOverride::<T>::put(config.clone());
+            Self::deposit_event(Event::ArchiveConfigUpdated { config });
+            Ok(())
+        }
+
+        /// G2: 暂停归档
+        #[pallet::call_index(1)]
+        #[pallet::weight(T::WeightInfo::pause_archival())]
+        pub fn pause_archival(origin: OriginFor<T>) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(!ArchivalPaused::<T>::get(), Error::<T>::ArchivalAlreadyPaused);
+            ArchivalPaused::<T>::put(true);
+            Self::deposit_event(Event::ArchivalPausedEvent);
+            Ok(())
+        }
+
+        /// G2: 恢复归档
+        #[pallet::call_index(2)]
+        #[pallet::weight(T::WeightInfo::resume_archival())]
+        pub fn resume_archival(origin: OriginFor<T>) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(ArchivalPaused::<T>::get(), Error::<T>::ArchivalNotPaused);
+            ArchivalPaused::<T>::put(false);
+            Self::deposit_event(Event::ArchivalResumedEvent);
+            Ok(())
+        }
+
+        /// G3: 设置按数据类型的归档策略
+        #[pallet::call_index(3)]
+        #[pallet::weight(T::WeightInfo::set_archive_policy())]
+        pub fn set_archive_policy(
+            origin: OriginFor<T>,
+            data_type: BoundedVec<u8, ConstU32<32>>,
+            policy: ArchivePolicy,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(policy.l1_delay > 0 && policy.l2_delay > 0, Error::<T>::InvalidConfig);
+            // M1-R1: purge_enabled 时 purge_delay 必须 > 0
+            ensure!(!policy.purge_enabled || policy.purge_delay > 0, Error::<T>::InvalidConfig);
+            // M2-R3: 延迟必须递增 l1 <= l2，且 purge_enabled 时 l2 <= purge
+            ensure!(policy.l1_delay <= policy.l2_delay, Error::<T>::InvalidConfig);
+            if policy.purge_enabled {
+                ensure!(policy.l2_delay <= policy.purge_delay, Error::<T>::InvalidConfig);
+            }
+            ArchivePolicies::<T>::insert(&data_type, policy.clone());
+            Self::deposit_event(Event::ArchivePolicySet { data_type, policy });
+            Ok(())
+        }
+
+        /// G4: 强制归档指定数据
+        #[pallet::call_index(4)]
+        #[pallet::weight(T::WeightInfo::force_archive())]
+        pub fn force_archive(
+            origin: OriginFor<T>,
+            data_type: BoundedVec<u8, ConstU32<32>>,
+            data_ids: BoundedVec<u64, ConstU32<100>>,
+            target_level: u8,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            let level = ArchiveLevel::from_u8(target_level);
+            ensure!(!matches!(level, ArchiveLevel::Active), Error::<T>::InvalidArchiveState);
+            let ids: sp_std::vec::Vec<u64> = data_ids.to_vec();
+            // H1-R3: 过滤掉后退/同级转换（Purged→L1 等无意义操作）
+            // M3-R4: 缓存 from_level 避免二次读取
+            let forward_pairs: sp_std::vec::Vec<(u64, ArchiveLevel)> = ids.iter()
+                .filter_map(|id| {
+                    let current = DataArchiveStatus::<T>::get(&data_type, *id);
+                    if current.to_u8() < level.to_u8() {
+                        Some((*id, current))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let forward_ids: sp_std::vec::Vec<u64> = forward_pairs.iter().map(|(id, _)| *id).collect();
+            T::StorageArchiver::archive_to_level(&data_type, &forward_ids, level);
+            for (id, from_level) in &forward_pairs {
+                DataArchiveStatus::<T>::insert(&data_type, *id, level);
+                // H2-R1: 通知下游 pallet
+                T::OnArchive::on_archived(&data_type, *id, *from_level, level);
+                // M3-R2: 清理延期和保护标志
+                ActiveExtensions::<T>::remove(&data_type, *id);
+                if matches!(level, ArchiveLevel::Purged) {
+                    PurgeProtected::<T>::remove(&data_type, *id);
+                }
+            }
+            // M2-R4: 事件仅报告实际归档的 forward_ids
+            let archived_ids = BoundedVec::truncate_from(forward_ids);
+            Self::deposit_event(Event::DataForceArchived {
+                data_type, data_ids: archived_ids, target_level,
+            });
+            Ok(())
+        }
+
+        /// G4: 设置清除保护
+        #[pallet::call_index(5)]
+        #[pallet::weight(T::WeightInfo::protect_from_purge())]
+        pub fn protect_from_purge(
+            origin: OriginFor<T>,
+            data_type: BoundedVec<u8, ConstU32<32>>,
+            data_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(!PurgeProtected::<T>::get(&data_type, data_id), Error::<T>::AlreadyProtected);
+            PurgeProtected::<T>::insert(&data_type, data_id, true);
+            Self::deposit_event(Event::PurgeProtectionChanged {
+                data_type, data_id, protected: true,
+            });
+            Ok(())
+        }
+
+        /// G4: 移除清除保护
+        #[pallet::call_index(6)]
+        #[pallet::weight(T::WeightInfo::remove_purge_protection())]
+        pub fn remove_purge_protection(
+            origin: OriginFor<T>,
+            data_type: BoundedVec<u8, ConstU32<32>>,
+            data_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(PurgeProtected::<T>::get(&data_type, data_id), Error::<T>::NotProtected);
+            PurgeProtected::<T>::remove(&data_type, data_id);
+            Self::deposit_event(Event::PurgeProtectionChanged {
+                data_type, data_id, protected: false,
+            });
+            Ok(())
+        }
+
+        /// U3: 延长数据 Active 期
+        #[pallet::call_index(7)]
+        #[pallet::weight(T::WeightInfo::extend_active_period())]
+        pub fn extend_active_period(
+            origin: OriginFor<T>,
+            data_type: BoundedVec<u8, ConstU32<32>>,
+            data_id: u64,
+            extend_blocks: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(extend_blocks >= 100, Error::<T>::ExtensionTooShort);
+            let current_level = DataArchiveStatus::<T>::get(&data_type, data_id);
+            ensure!(matches!(current_level, ArchiveLevel::Active), Error::<T>::InvalidArchiveState);
+            let n: u64 = <frame_system::Pallet<T>>::block_number().try_into().unwrap_or(0u64);
+            let current_ext = ActiveExtensions::<T>::get(&data_type, data_id);
+            let base = if current_ext > n { current_ext } else { n };
+            let new_until = base.saturating_add(extend_blocks);
+            ActiveExtensions::<T>::insert(&data_type, data_id, new_until);
+            Self::deposit_event(Event::ActivePeriodExtended {
+                data_type, data_id, extended_until: new_until,
+            });
+            Ok(())
+        }
+
+        /// U4: 从归档恢复数据（仅支持 L1 → Active）
+        #[pallet::call_index(8)]
+        #[pallet::weight(T::WeightInfo::restore_from_archive())]
+        pub fn restore_from_archive(
+            origin: OriginFor<T>,
+            data_type: BoundedVec<u8, ConstU32<32>>,
+            data_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            let current_level = DataArchiveStatus::<T>::get(&data_type, data_id);
+            ensure!(matches!(current_level, ArchiveLevel::ArchivedL1), Error::<T>::CannotRestoreFromLevel);
+            let success = T::StorageArchiver::restore_record(&data_type, data_id, current_level);
+            ensure!(success, Error::<T>::RestoreFailed);
+            DataArchiveStatus::<T>::insert(&data_type, data_id, ArchiveLevel::Active);
+            // M1-R4: 通知下游 pallet 数据已恢复
+            T::OnArchive::on_archived(&data_type, data_id, current_level, ArchiveLevel::Active);
+            Self::deposit_event(Event::DataRestored {
+                data_type, data_id, from_level: current_level.to_u8(),
+            });
+            Ok(())
+        }
+    }
+
+    impl<T: Config> Pallet<T> {
+        /// G1: 获取有效归档配置（运行时覆盖 > genesis 常量）
+        pub fn effective_config() -> ArchiveConfig {
+            ArchiveConfigOverride::<T>::get().unwrap_or_else(|| ArchiveConfig {
+                l1_delay: T::L1ArchiveDelay::get(),
+                l2_delay: T::L2ArchiveDelay::get(),
+                purge_delay: T::PurgeDelay::get(),
+                purge_enabled: T::EnablePurge::get(),
+                max_batch_size: T::MaxBatchSize::get(),
+            })
+        }
+
+        /// G3: 获取有效归档策略（per-type > global config）
+        pub fn effective_policy(
+            data_type: &BoundedVec<u8, ConstU32<32>>,
+            config: &ArchiveConfig,
+        ) -> ArchivePolicy {
+            ArchivePolicies::<T>::get(data_type).unwrap_or_else(|| ArchivePolicy {
+                l1_delay: config.l1_delay,
+                l2_delay: config.l2_delay,
+                purge_delay: config.purge_delay,
+                purge_enabled: config.purge_enabled,
+            })
+        }
+
+        /// U1: 查询数据归档状态
+        pub fn query_data_status(
+            data_type: &BoundedVec<u8, ConstU32<32>>,
+            data_id: u64,
+        ) -> ArchiveLevel {
+            DataArchiveStatus::<T>::get(data_type, data_id)
+        }
+
+        /// U2: 查询即将被归档的数据数量（在 L1 延迟 80% 窗口内）
+        pub fn query_approaching_archival(
+            data_type: &BoundedVec<u8, ConstU32<32>>,
+        ) -> u32 {
+            let config = Self::effective_config();
+            let policy = Self::effective_policy(data_type, &config);
+            let warning_delay = (policy.l1_delay as u64) * 4 / 5;
+            T::StorageArchiver::scan_for_level(
+                data_type, ArchiveLevel::ArchivedL1, warning_delay, config.max_batch_size,
+            ).len() as u32
+        }
+
+        /// O2: 获取归档仪表盘摘要
+        pub fn get_dashboard(
+            data_type: &BoundedVec<u8, ConstU32<32>>,
+        ) -> (ArchiveStatistics, bool, ArchiveConfig) {
+            let stats = ArchiveStats::<T>::get(data_type);
+            let paused = ArchivalPaused::<T>::get();
+            let config = Self::effective_config();
+            (stats, paused, config)
+        }
     }
 }
 
@@ -352,43 +930,6 @@ pub struct StorageLifecycleManager<T: Config> {
 }
 
 impl<T: Config> StorageLifecycleManager<T> {
-    /// 创建新的管理器实例
-    pub fn new() -> Self {
-        Self {
-            _marker: PhantomData,
-        }
-    }
-
-    /// 处理分级归档（在 on_idle 中调用）
-    ///
-    /// # Arguments
-    /// * `now` - 当前区块号
-    /// * `max_to_process` - 最大处理数量
-    /// * `data_type` - 数据类型标识
-    /// * `archive_fn` - 归档处理函数
-    ///
-    /// # Returns
-    /// 实际处理的数量
-    pub fn process_archival(
-        now: u64,
-        max_to_process: u32,
-        data_type: &[u8],
-    ) -> u32 {
-        let batch_size = max_to_process / 3;
-        let mut processed = 0u32;
-
-        // 阶段1: 活跃 → L1 (由各模块自行实现)
-        // 阶段2: L1 → L2 (由各模块自行实现)
-        // 阶段3: L2 → 清除 (如果启用)
-
-        if T::EnablePurge::get() {
-            // 清除逻辑由各模块自行实现
-            processed = processed.saturating_add(batch_size);
-        }
-
-        processed
-    }
-
     /// 记录归档批次
     pub fn record_batch(
         data_type: BoundedVec<u8, ConstU32<32>>,
@@ -415,6 +956,11 @@ impl<T: Config> StorageLifecycleManager<T> {
             }
             Ok::<(), Error<T>>(())
         })?;
+
+        // M2-R1: 递增批次计数
+        TotalBatchCount::<T>::mutate(&data_type, |count| {
+            *count = count.saturating_add(1);
+        });
 
         // 更新统计
         ArchiveStats::<T>::mutate(&data_type, |stats| {

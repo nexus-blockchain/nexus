@@ -18,11 +18,17 @@ pub struct CampaignSummary<AccountId, Balance> {
     pub campaign_id: u64,
     pub advertiser: AccountId,
     pub bid_per_mille: Balance,
+    pub bid_per_click: Balance,
+    pub campaign_type: u8,
     pub daily_budget: Balance,
     pub total_budget: Balance,
     pub spent: Balance,
     pub delivery_types: u8,
     pub multiplier_bps: u32,
+    /// 有效出价 = 基础出价 × multiplier / 100
+    /// CPM: bid_per_mille × multiplier_bps / 100
+    /// CPC: bid_per_click × multiplier_bps / 100
+    pub effective_bid: Balance,
 }
 
 /// Campaign 详情 (单条查询用)
@@ -33,6 +39,8 @@ pub struct CampaignDetail<AccountId, Balance> {
     pub text: Vec<u8>,
     pub url: Vec<u8>,
     pub bid_per_mille: Balance,
+    pub bid_per_click: Balance,
+    pub campaign_type: u8,
     pub daily_budget: Balance,
     pub total_budget: Balance,
     pub spent: Balance,
@@ -40,6 +48,7 @@ pub struct CampaignDetail<AccountId, Balance> {
     pub status: u8,
     pub review_status: u8,
     pub total_deliveries: u32,
+    pub total_clicks: u32,
     pub created_at: u64,
     pub expires_at: u64,
     pub multiplier_bps: u32,

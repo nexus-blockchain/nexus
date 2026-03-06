@@ -314,6 +314,8 @@ pub mod pallet {
         fn get_order_amount(domain: [u8; 8], id: u64) -> Result<Balance, DispatchError>;
         /// 🆕 获取做市商ID（用于信用分更新，仅OTC域有效）
         fn get_maker_id(_domain: [u8; 8], _id: u64) -> Option<u64> { None }
+        /// 🆕 F9: 执行永久封禁（由投诉裁决触发）
+        fn ban_account(_domain: [u8; 8], _who: &AccountId, _id: u64) -> DispatchResult { Ok(()) }
     }
 
     #[pallet::config]
@@ -619,6 +621,65 @@ pub mod pallet {
     #[pallet::storage]
     pub type ComplaintExpiryCursor<T: Config> = StorageValue<_, u64, ValueQuery>;
 
+    /// 🆕 F4: 被投诉人活跃投诉索引（作为被投诉方）
+    #[pallet::storage]
+    pub type RespondentActiveComplaints<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        T::AccountId,
+        BoundedVec<u64, ConstU32<50>>,
+        ValueQuery,
+    >;
+
+    /// 🆕 F6: 按业务对象查询投诉索引 (domain, object_id) => Vec<complaint_id>
+    #[pallet::storage]
+    pub type ObjectComplaints<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        [u8; 8],
+        Blake2_128Concat,
+        u64,
+        BoundedVec<u64, ConstU32<50>>,
+        ValueQuery,
+    >;
+
+    /// 🆕 F7: 待裁决仲裁纠纷队列 (domain, object_id)
+    #[pallet::storage]
+    pub type PendingArbitrationDisputes<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        [u8; 8],
+        Blake2_128Concat,
+        u64,
+        (),
+        OptionQuery,
+    >;
+
+    /// 🆕 F7: 待裁决投诉队列
+    #[pallet::storage]
+    pub type PendingArbitrationComplaints<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64, // complaint_id
+        (),
+        OptionQuery,
+    >;
+
+    /// 🆕 F11: 全局暂停开关
+    #[pallet::storage]
+    pub type Paused<T: Config> = StorageValue<_, bool, ValueQuery>;
+
+    /// 🆕 F13: 域惩罚比例动态配置 (domain => penalty_rate_bps)
+    /// 治理可调，没有配置时回退到 ComplaintType::penalty_rate()
+    #[pallet::storage]
+    pub type DomainPenaltyRates<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        [u8; 8],
+        u16, // bps
+        OptionQuery,
+    >;
+
     // ============================================================================
 
     #[pallet::event]
@@ -699,6 +760,63 @@ pub mod pallet {
         ComplaintArchived {
             complaint_id: u64,
         },
+
+        // ==================== 🆕 F1-F13: 新功能事件 ====================
+
+        /// 🆕 F1: 缺席裁决
+        DefaultJudgment {
+            domain: [u8; 8],
+            id: u64,
+            initiator: T::AccountId,
+        },
+        /// 🆕 F2/F5: 投诉补充证据
+        ComplaintEvidenceSupplemented {
+            complaint_id: u64,
+            who: T::AccountId,
+            evidence_cid: BoundedVec<u8, T::MaxCidLen>,
+        },
+        /// 🆕 F3: 仲裁纠纷双方和解
+        DisputeSettled {
+            domain: [u8; 8],
+            id: u64,
+        },
+        /// 🆕 F8: 投诉进入调解阶段
+        ComplaintMediationStarted {
+            complaint_id: u64,
+        },
+        /// 🆕 F9: 永久封禁执行
+        AccountBanned {
+            domain: [u8; 8],
+            object_id: u64,
+            account: T::AccountId,
+        },
+        /// 🆕 F10: 案件被驳回
+        DisputeDismissed {
+            domain: [u8; 8],
+            id: u64,
+        },
+        /// 🆕 F10: 投诉被驳回
+        ComplaintDismissed {
+            complaint_id: u64,
+        },
+        /// 🆕 F11: 模块暂停/恢复
+        PausedStateChanged {
+            paused: bool,
+        },
+        /// 🆕 F12: 强制关闭纠纷
+        DisputeForceClosed {
+            domain: [u8; 8],
+            id: u64,
+        },
+        /// 🆕 F12: 强制关闭投诉
+        ComplaintForceClosed {
+            complaint_id: u64,
+        },
+        /// 🆕 F13: 域惩罚比例已更新
+        DomainPenaltyRateUpdated {
+            domain: [u8; 8],
+            rate_bps: Option<u16>,
+        },
     }
 
     #[pallet::error]
@@ -730,6 +848,14 @@ pub mod pallet {
         TooManyActiveComplaints,
         /// 🆕 M-NEW-6修复: 引用的证据不存在
         EvidenceNotFound,
+        /// 🆕 F1: 应诉期未到，不能申请缺席裁决
+        ResponseDeadlineNotReached,
+        /// 🆕 F3: 双方和解需要对方确认
+        SettlementNotConfirmed,
+        /// 🆕 F11: 模块已暂停
+        ModulePaused,
+        /// 🆕 F13: 无效的惩罚比例
+        InvalidPenaltyRate,
     }
 
     #[pallet::call]
@@ -743,6 +869,7 @@ pub mod pallet {
             id: u64,
             _evidence: alloc::vec::Vec<BoundedVec<u8, T::MaxCidLen>>,
         ) -> DispatchResult {
+            ensure!(!Paused::<T>::get(), Error::<T>::ModulePaused);
             let _who = ensure_signed(origin)?;
             // 鉴权：由 Router 依据业务 pallet 规则判断是否允许发起（基准模式下跳过，便于构造场景）
             #[cfg(not(feature = "runtime-benchmarks"))]
@@ -809,6 +936,9 @@ pub mod pallet {
                 Decision::Partial(p) => (2, Some(p)),
             };
 
+            // 🆕 F7: 从待裁决队列移除
+            PendingArbitrationDisputes::<T>::remove(domain, id);
+
             // 🆕 归档已完成的仲裁并清理存储
             Self::archive_and_cleanup(domain, id, out.0, out.1.unwrap_or(0));
 
@@ -835,6 +965,7 @@ pub mod pallet {
             id: u64,
             evidence_id: u64,
         ) -> DispatchResult {
+            ensure!(!Paused::<T>::get(), Error::<T>::ModulePaused);
             let _who = ensure_signed(origin)?;
             #[cfg(not(feature = "runtime-benchmarks"))]
             {
@@ -871,6 +1002,7 @@ pub mod pallet {
             id: u64,
             evidence_id: u64,
         ) -> DispatchResult {
+            ensure!(!Paused::<T>::get(), Error::<T>::ModulePaused);
             let _who = ensure_signed(origin)?;
             ensure!(
                 Disputed::<T>::get(domain, id).is_some(),
@@ -906,6 +1038,7 @@ pub mod pallet {
             id: u64,
             evidence_id: u64,
         ) -> DispatchResult {
+            ensure!(!Paused::<T>::get(), Error::<T>::ModulePaused);
             let initiator = ensure_signed(origin)?;
 
             // 1. 权限校验
@@ -922,6 +1055,9 @@ pub mod pallet {
                 Disputed::<T>::get(domain, id).is_none(),
                 Error::<T>::AlreadyDisputed
             );
+
+            // 2.5 验证 evidence_id 存在性（在任何状态变更之前）
+            ensure!(T::EvidenceExists::evidence_exists(evidence_id), Error::<T>::EvidenceNotFound);
 
             // 3. 获取订单金额
             let order_amount = T::Router::get_order_amount(domain, id)
@@ -973,14 +1109,15 @@ pub mod pallet {
                 },
             );
 
-            // 🆕 M-NEW-6修复: 验证 evidence_id 存在性
-            ensure!(T::EvidenceExists::evidence_exists(evidence_id), Error::<T>::EvidenceNotFound);
             // 10. 添加证据引用
             EvidenceIds::<T>::try_mutate(domain, id, |v| -> Result<(), Error<T>> {
                 v.try_push(evidence_id)
                     .map_err(|_| Error::<T>::AlreadyDisputed)?;
                 Ok(())
             })?;
+
+            // 🆕 F7: 加入待裁决纠纷队列
+            PendingArbitrationDisputes::<T>::insert(domain, id, ());
 
             // 11. 触发事件
             Self::deposit_event(Event::DisputeWithDepositInitiated {
@@ -1004,6 +1141,7 @@ pub mod pallet {
             id: u64,
             counter_evidence_id: u64,
         ) -> DispatchResult {
+            ensure!(!Paused::<T>::get(), Error::<T>::ModulePaused);
             let respondent = ensure_signed(origin)?;
 
             // 1. 获取押金记录
@@ -1025,6 +1163,9 @@ pub mod pallet {
                 current_block <= deposit_record.response_deadline,
                 Error::<T>::ResponseDeadlinePassed
             );
+
+            // 4.5 验证 counter_evidence_id 存在性（在任何状态变更之前）
+            ensure!(T::EvidenceExists::evidence_exists(counter_evidence_id), Error::<T>::EvidenceNotFound);
 
             // 5. 计算押金金额（与发起方相同）
             let deposit_amount = deposit_record.initiator_deposit;
@@ -1050,8 +1191,6 @@ pub mod pallet {
             deposit_record.has_responded = true;
             TwoWayDeposits::<T>::insert(domain, id, deposit_record);
 
-            // 🆕 M-NEW-6修复: 验证 counter_evidence_id 存在性
-            ensure!(T::EvidenceExists::evidence_exists(counter_evidence_id), Error::<T>::EvidenceNotFound);
             // 9. 添加反驳证据
             EvidenceIds::<T>::try_mutate(domain, id, |v| -> Result<(), Error<T>> {
                 v.try_push(counter_evidence_id)
@@ -1083,6 +1222,7 @@ pub mod pallet {
             details_cid: BoundedVec<u8, T::MaxCidLen>,
             amount: Option<BalanceOf<T>>,
         ) -> DispatchResult {
+            ensure!(!Paused::<T>::get(), Error::<T>::ModulePaused);
             let complainant = ensure_signed(origin)?;
 
             // 1. 验证投诉权限
@@ -1106,7 +1246,7 @@ pub mod pallet {
             let min_deposit = T::ComplaintDeposit::get();
             let deposit_usd = T::ComplaintDepositUsd::get(); // 1_000_000 (1 USDT)
             
-            let deposit_amount = if let Some(price) = T::Pricing::get_cos_to_usd_rate() {
+            let deposit_amount = if let Some(price) = T::Pricing::get_nex_to_usd_rate() {
                 let price_u128: u128 = price.saturated_into();
                 if price_u128 > 0u128 {
                     // COS数量 = USD金额 * 精度 / 价格
@@ -1170,6 +1310,16 @@ pub mod pallet {
                 list.try_push(complaint_id)
             }).map_err(|_| Error::<T>::TooManyActiveComplaints)?;
 
+            // 🆕 F4: 更新被投诉人索引
+            RespondentActiveComplaints::<T>::try_mutate(&respondent, |list| {
+                list.try_push(complaint_id)
+            }).map_err(|_| Error::<T>::TooManyActiveComplaints)?;
+
+            // 🆕 F6: 更新对象投诉索引
+            ObjectComplaints::<T>::try_mutate(domain, object_id, |list| {
+                list.try_push(complaint_id)
+            }).map_err(|_| Error::<T>::TooManyComplaints)?;
+
             // 9. 更新域统计
             DomainStats::<T>::mutate(domain, |stats| {
                 stats.total_complaints = stats.total_complaints.saturating_add(1);
@@ -1196,6 +1346,7 @@ pub mod pallet {
             complaint_id: u64,
             response_cid: BoundedVec<u8, T::MaxCidLen>,
         ) -> DispatchResult {
+            ensure!(!Paused::<T>::get(), Error::<T>::ModulePaused);
             let respondent = ensure_signed(origin)?;
 
             Complaints::<T>::try_mutate(complaint_id, |maybe_complaint| -> DispatchResult {
@@ -1238,6 +1389,7 @@ pub mod pallet {
             origin: OriginFor<T>,
             complaint_id: u64,
         ) -> DispatchResult {
+            ensure!(!Paused::<T>::get(), Error::<T>::ModulePaused);
             let who = ensure_signed(origin)?;
 
             Complaints::<T>::try_mutate(complaint_id, |maybe_complaint| -> DispatchResult {
@@ -1264,6 +1416,11 @@ pub mod pallet {
                     );
                 }
 
+                // 立即清理用户索引（不等归档）
+                Self::remove_from_user_complaint_index(&complaint.complainant, complaint_id);
+                Self::remove_from_respondent_complaint_index(&complaint.respondent, complaint_id);
+                Self::remove_from_object_complaint_index(complaint.domain, complaint.object_id, complaint_id);
+
                 Self::deposit_event(Event::ComplaintWithdrawn { complaint_id });
 
                 Ok(())
@@ -1278,6 +1435,7 @@ pub mod pallet {
             complaint_id: u64,
             settlement_cid: BoundedVec<u8, T::MaxCidLen>,
         ) -> DispatchResult {
+            ensure!(!Paused::<T>::get(), Error::<T>::ModulePaused);
             let who = ensure_signed(origin)?;
 
             Complaints::<T>::try_mutate(complaint_id, |maybe_complaint| -> DispatchResult {
@@ -1294,6 +1452,11 @@ pub mod pallet {
                     matches!(complaint.status, ComplaintStatus::Responded | ComplaintStatus::Mediating),
                     Error::<T>::InvalidState
                 );
+
+                // 🆕 H2-R2修复: 调解中仅投诉方可和解（防止被投诉方单方面关闭调解绕过仲裁）
+                if complaint.status == ComplaintStatus::Mediating {
+                    ensure!(complaint.complainant == who, Error::<T>::NotAuthorized);
+                }
 
                 // 🆕 M-NEW-3修复: 使用独立字段存储和解详情，保留原始 details_cid
                 let now = frame_system::Pallet::<T>::block_number();
@@ -1317,6 +1480,11 @@ pub mod pallet {
                     stats.settlements = stats.settlements.saturating_add(1);
                 });
 
+                // 立即清理用户索引（不等归档）
+                Self::remove_from_user_complaint_index(&complaint.complainant, complaint_id);
+                Self::remove_from_respondent_complaint_index(&complaint.respondent, complaint_id);
+                Self::remove_from_object_complaint_index(complaint.domain, complaint.object_id, complaint_id);
+
                 Self::deposit_event(Event::ComplaintSettled { complaint_id });
 
                 Ok(())
@@ -1330,6 +1498,7 @@ pub mod pallet {
             origin: OriginFor<T>,
             complaint_id: u64,
         ) -> DispatchResult {
+            ensure!(!Paused::<T>::get(), Error::<T>::ModulePaused);
             let who = ensure_signed(origin)?;
 
             Complaints::<T>::try_mutate(complaint_id, |maybe_complaint| -> DispatchResult {
@@ -1348,6 +1517,9 @@ pub mod pallet {
                 let now = frame_system::Pallet::<T>::block_number();
                 complaint.status = ComplaintStatus::Arbitrating;
                 complaint.updated_at = now;
+
+                // 🆕 F7: 加入待裁决投诉队列
+                PendingArbitrationComplaints::<T>::insert(complaint_id, ());
 
                 Self::deposit_event(Event::ComplaintEscalated { complaint_id });
 
@@ -1398,48 +1570,20 @@ pub mod pallet {
                 complaint.updated_at = now;
 
                 // 处理投诉押金
-                if let Some(deposit_amount) = ComplaintDeposits::<T>::take(complaint_id) {
-                    match decision {
-                        0 => {
-                            // 投诉方胜诉：全额退还押金
-                            let _ = T::Fungible::release(
-                                &T::RuntimeHoldReason::from(HoldReason::ComplaintDeposit),
-                                &complaint.complainant,
-                                deposit_amount,
-                                frame_support::traits::tokens::Precision::BestEffort,
-                            );
-                        },
-                        1 => {
-                            // 被投诉方胜诉：罚没部分押金给被投诉方
-                            let slash_bps = T::ComplaintSlashBps::get();
-                            let slash_amount = sp_runtime::Permill::from_parts((slash_bps as u32) * 100)
-                                .mul_floor(deposit_amount);
-                            let return_amount = deposit_amount.saturating_sub(slash_amount);
-                            
-                            // 罚没部分转给被投诉方
-                            if !slash_amount.is_zero() {
-                                let _ = T::Fungible::transfer_on_hold(
-                                    &T::RuntimeHoldReason::from(HoldReason::ComplaintDeposit),
-                                    &complaint.complainant,
-                                    &complaint.respondent,
-                                    slash_amount,
-                                    frame_support::traits::tokens::Precision::BestEffort,
-                                    frame_support::traits::tokens::Restriction::Free,
-                                    frame_support::traits::tokens::Fortitude::Polite,
-                                );
-                            }
-                            // 退还剩余部分
-                            if !return_amount.is_zero() {
-                                let _ = T::Fungible::release(
-                                    &T::RuntimeHoldReason::from(HoldReason::ComplaintDeposit),
-                                    &complaint.complainant,
-                                    return_amount,
-                                    frame_support::traits::tokens::Precision::BestEffort,
-                                );
-                            }
-                        },
-                        _ => {
-                            // 和解：全额退还押金
+                match decision {
+                    1 => {
+                        // 被投诉方胜诉：罚没部分押金给被投诉方
+                        Self::slash_complaint_deposit(
+                            complaint_id,
+                            &complaint.complainant,
+                            &complaint.respondent,
+                            complaint.domain,
+                            &complaint.complaint_type,
+                        );
+                    },
+                    _ => {
+                        // 投诉方胜诉 / 和解：全额退还押金
+                        if let Some(deposit_amount) = ComplaintDeposits::<T>::take(complaint_id) {
                             let _ = T::Fungible::release(
                                 &T::RuntimeHoldReason::from(HoldReason::ComplaintDeposit),
                                 &complaint.complainant,
@@ -1450,15 +1594,38 @@ pub mod pallet {
                     }
                 }
 
+                // 🆕 F9: 投诉方胜诉且投诉类型触发永久封禁
+                if decision == 0 && complaint.complaint_type.triggers_permanent_ban() {
+                    let _ = T::Router::ban_account(
+                        complaint.domain,
+                        &complaint.respondent,
+                        complaint.object_id,
+                    );
+                    Self::deposit_event(Event::AccountBanned {
+                        domain: complaint.domain,
+                        object_id: complaint.object_id,
+                        account: complaint.respondent.clone(),
+                    });
+                }
+
+                // 🆕 F7: 从待裁决队列移除
+                PendingArbitrationComplaints::<T>::remove(complaint_id);
+
                 // 更新统计
+                // M-2修复: 部分裁决(decision>=2)计入 complainant_wins（偏向投诉方），
+                // settlements 仅统计双方自愿和解
                 DomainStats::<T>::mutate(complaint.domain, |stats| {
                     stats.resolved_count = stats.resolved_count.saturating_add(1);
                     match decision {
-                        0 => stats.complainant_wins = stats.complainant_wins.saturating_add(1),
+                        0 | 2.. => stats.complainant_wins = stats.complainant_wins.saturating_add(1),
                         1 => stats.respondent_wins = stats.respondent_wins.saturating_add(1),
-                        _ => stats.settlements = stats.settlements.saturating_add(1),
                     }
                 });
+
+                // 立即清理用户索引（不等归档）
+                Self::remove_from_user_complaint_index(&complaint.complainant, complaint_id);
+                Self::remove_from_respondent_complaint_index(&complaint.respondent, complaint_id);
+                Self::remove_from_object_complaint_index(complaint.domain, complaint.object_id, complaint_id);
 
                 Self::deposit_event(Event::ComplaintResolved {
                     complaint_id,
@@ -1467,6 +1634,432 @@ pub mod pallet {
 
                 Ok(())
             })
+        }
+
+        // ==================== 🆕 F1-F13: 新功能 Extrinsics ====================
+
+        /// 🆕 F1: 缺席裁决请求 — 应诉方超时未应诉时，发起方可请求缺席裁决（自动 Refund）
+        #[pallet::call_index(20)]
+        #[pallet::weight(<T as Config>::WeightInfo::request_default_judgment())]
+        pub fn request_default_judgment(
+            origin: OriginFor<T>,
+            domain: [u8; 8],
+            id: u64,
+        ) -> DispatchResult {
+            ensure!(!Paused::<T>::get(), Error::<T>::ModulePaused);
+            let who = ensure_signed(origin)?;
+
+            let deposit_record = TwoWayDeposits::<T>::get(domain, id)
+                .ok_or(Error::<T>::NotDisputed)?;
+
+            // 只有发起方可以请求缺席裁决
+            ensure!(deposit_record.initiator == who, Error::<T>::NotAuthorized);
+
+            // 确保应诉方未应诉
+            ensure!(!deposit_record.has_responded, Error::<T>::AlreadyResponded);
+
+            // 确保已过应诉截止期限
+            let current_block = frame_system::Pallet::<T>::block_number();
+            ensure!(
+                current_block > deposit_record.response_deadline,
+                Error::<T>::ResponseDeadlineNotReached
+            );
+
+            // 自动执行 Refund（买家胜诉）
+            let decision = Decision::Refund;
+            T::Router::apply_decision(domain, id, decision.clone())?;
+
+            // 处理押金：发起方押金全额返还，应诉方无押金（未应诉）
+            Self::handle_deposits_on_arbitration(domain, id, &decision)?;
+
+            // 解锁证据 CID
+            Self::unlock_all_evidence_cids(domain, id)?;
+
+            // 信用分更新
+            if let Some(maker_id) = T::Router::get_maker_id(domain, id) {
+                let _ = T::CreditUpdater::record_maker_dispute_result(maker_id, id, false);
+            }
+
+            // 从待裁决队列移除
+            PendingArbitrationDisputes::<T>::remove(domain, id);
+
+            // 归档
+            Self::archive_and_cleanup(domain, id, 1, 0); // 1 = Refund
+
+            Self::deposit_event(Event::DefaultJudgment {
+                domain,
+                id,
+                initiator: who,
+            });
+            Ok(())
+        }
+
+        /// 🆕 F2: 投诉人补充证据
+        #[pallet::call_index(21)]
+        #[pallet::weight(<T as Config>::WeightInfo::supplement_evidence())]
+        pub fn supplement_complaint_evidence(
+            origin: OriginFor<T>,
+            complaint_id: u64,
+            evidence_cid: BoundedVec<u8, T::MaxCidLen>,
+        ) -> DispatchResult {
+            ensure!(!Paused::<T>::get(), Error::<T>::ModulePaused);
+            let who = ensure_signed(origin)?;
+
+            let complaint = Complaints::<T>::get(complaint_id)
+                .ok_or(Error::<T>::ComplaintNotFound)?;
+
+            // 投诉人才能补充投诉证据
+            ensure!(complaint.complainant == who, Error::<T>::NotAuthorized);
+
+            // 仅在活跃状态下可补充
+            ensure!(
+                matches!(complaint.status,
+                    ComplaintStatus::Submitted | ComplaintStatus::Responded |
+                    ComplaintStatus::Mediating | ComplaintStatus::Arbitrating
+                ),
+                Error::<T>::InvalidState
+            );
+
+            Self::deposit_event(Event::ComplaintEvidenceSupplemented {
+                complaint_id,
+                who,
+                evidence_cid,
+            });
+
+            Ok(())
+        }
+
+        /// 🆕 F5: 应诉方补充证据
+        #[pallet::call_index(22)]
+        #[pallet::weight(<T as Config>::WeightInfo::supplement_evidence())]
+        pub fn supplement_response_evidence(
+            origin: OriginFor<T>,
+            complaint_id: u64,
+            evidence_cid: BoundedVec<u8, T::MaxCidLen>,
+        ) -> DispatchResult {
+            ensure!(!Paused::<T>::get(), Error::<T>::ModulePaused);
+            let who = ensure_signed(origin)?;
+
+            let complaint = Complaints::<T>::get(complaint_id)
+                .ok_or(Error::<T>::ComplaintNotFound)?;
+
+            // 被投诉方才能补充应诉证据
+            ensure!(complaint.respondent == who, Error::<T>::NotAuthorized);
+
+            // 仅在活跃状态下可补充
+            ensure!(
+                matches!(complaint.status,
+                    ComplaintStatus::Responded | ComplaintStatus::Mediating |
+                    ComplaintStatus::Arbitrating
+                ),
+                Error::<T>::InvalidState
+            );
+
+            Self::deposit_event(Event::ComplaintEvidenceSupplemented {
+                complaint_id,
+                who,
+                evidence_cid,
+            });
+
+            Ok(())
+        }
+
+        /// 🆕 F3: 仲裁纠纷双方和解 — 发起方请求和解，释放双方押金
+        #[pallet::call_index(23)]
+        #[pallet::weight(<T as Config>::WeightInfo::settle_dispute())]
+        pub fn settle_dispute(
+            origin: OriginFor<T>,
+            domain: [u8; 8],
+            id: u64,
+        ) -> DispatchResult {
+            ensure!(!Paused::<T>::get(), Error::<T>::ModulePaused);
+            let who = ensure_signed(origin)?;
+
+            // 确保纠纷存在
+            ensure!(
+                Disputed::<T>::get(domain, id).is_some(),
+                Error::<T>::NotDisputed
+            );
+
+            let deposit_record = TwoWayDeposits::<T>::get(domain, id)
+                .ok_or(Error::<T>::NotDisputed)?;
+
+            // 必须是当事人
+            ensure!(
+                deposit_record.initiator == who || deposit_record.respondent == who,
+                Error::<T>::NotAuthorized
+            );
+
+            // 双方都已参与（应诉方必须已锁定押金才能和解）
+            ensure!(deposit_record.has_responded, Error::<T>::SettlementNotConfirmed);
+
+            // 全额释放双方押金（和解无罚没）
+            let escrow_account = Self::get_escrow_account();
+            Self::release_deposit(
+                &escrow_account,
+                deposit_record.initiator_deposit,
+                &HoldReason::DisputeInitiator,
+                domain, id,
+            )?;
+            if let Some(respondent_deposit) = deposit_record.respondent_deposit {
+                Self::release_deposit(
+                    &escrow_account,
+                    respondent_deposit,
+                    &HoldReason::DisputeRespondent,
+                    domain, id,
+                )?;
+            }
+
+            // 解锁证据 CID
+            Self::unlock_all_evidence_cids(domain, id)?;
+
+            // 从待裁决队列移除
+            PendingArbitrationDisputes::<T>::remove(domain, id);
+
+            // 清理存储（不归档统计，和解不算正式裁决）
+            Disputed::<T>::remove(domain, id);
+            EvidenceIds::<T>::remove(domain, id);
+            TwoWayDeposits::<T>::remove(domain, id);
+
+            Self::deposit_event(Event::DisputeSettled { domain, id });
+            Ok(())
+        }
+
+        /// 🆕 F8: 启动调解 — 仲裁委员会将投诉转入调解阶段
+        #[pallet::call_index(24)]
+        #[pallet::weight(<T as Config>::WeightInfo::start_mediation())]
+        pub fn start_mediation(
+            origin: OriginFor<T>,
+            complaint_id: u64,
+        ) -> DispatchResult {
+            T::DecisionOrigin::ensure_origin(origin)?;
+
+            Complaints::<T>::try_mutate(complaint_id, |maybe_complaint| -> DispatchResult {
+                let complaint = maybe_complaint.as_mut().ok_or(Error::<T>::ComplaintNotFound)?;
+
+                ensure!(
+                    complaint.status == ComplaintStatus::Responded,
+                    Error::<T>::InvalidState
+                );
+
+                let now = frame_system::Pallet::<T>::block_number();
+                complaint.status = ComplaintStatus::Mediating;
+                complaint.updated_at = now;
+
+                Self::deposit_event(Event::ComplaintMediationStarted { complaint_id });
+
+                Ok(())
+            })
+        }
+
+        /// 🆕 F10: 驳回无效纠纷 — 仲裁委员会驳回并罚没发起方押金
+        #[pallet::call_index(25)]
+        #[pallet::weight(<T as Config>::WeightInfo::dismiss_dispute())]
+        pub fn dismiss_dispute(
+            origin: OriginFor<T>,
+            domain: [u8; 8],
+            id: u64,
+        ) -> DispatchResult {
+            T::DecisionOrigin::ensure_origin(origin)?;
+
+            ensure!(
+                Disputed::<T>::get(domain, id).is_some(),
+                Error::<T>::NotDisputed
+            );
+
+            // 驳回 = 发起方败诉（Release），罚没发起方押金
+            let decision = Decision::Release;
+            T::Router::apply_decision(domain, id, decision.clone())?;
+            Self::handle_deposits_on_arbitration(domain, id, &decision)?;
+            Self::unlock_all_evidence_cids(domain, id)?;
+
+            // 从待裁决队列移除
+            PendingArbitrationDisputes::<T>::remove(domain, id);
+
+            // 归档
+            Self::archive_and_cleanup(domain, id, 0, 0); // 0 = Release
+
+            Self::deposit_event(Event::DisputeDismissed { domain, id });
+            Ok(())
+        }
+
+        /// 🆕 F10: 驳回无效投诉 — 仲裁委员会驳回并罚没投诉人押金
+        #[pallet::call_index(26)]
+        #[pallet::weight(<T as Config>::WeightInfo::dismiss_complaint())]
+        pub fn dismiss_complaint(
+            origin: OriginFor<T>,
+            complaint_id: u64,
+        ) -> DispatchResult {
+            T::DecisionOrigin::ensure_origin(origin)?;
+
+            Complaints::<T>::try_mutate(complaint_id, |maybe_complaint| -> DispatchResult {
+                let complaint = maybe_complaint.as_mut().ok_or(Error::<T>::ComplaintNotFound)?;
+
+                // 只能驳回活跃状态的投诉
+                ensure!(
+                    !complaint.status.is_resolved(),
+                    Error::<T>::InvalidState
+                );
+
+                let now = frame_system::Pallet::<T>::block_number();
+                complaint.status = ComplaintStatus::ResolvedRespondentWin;
+                complaint.updated_at = now;
+
+                // 罚没投诉人押金（与被投诉方胜诉相同逻辑）
+                Self::slash_complaint_deposit(
+                    complaint_id,
+                    &complaint.complainant,
+                    &complaint.respondent,
+                    complaint.domain,
+                    &complaint.complaint_type,
+                );
+
+                // 从待裁决队列移除
+                PendingArbitrationComplaints::<T>::remove(complaint_id);
+
+                // 更新统计
+                DomainStats::<T>::mutate(complaint.domain, |stats| {
+                    stats.resolved_count = stats.resolved_count.saturating_add(1);
+                    stats.respondent_wins = stats.respondent_wins.saturating_add(1);
+                });
+
+                // 立即清理用户索引（不等归档）
+                Self::remove_from_user_complaint_index(&complaint.complainant, complaint_id);
+                Self::remove_from_respondent_complaint_index(&complaint.respondent, complaint_id);
+                Self::remove_from_object_complaint_index(complaint.domain, complaint.object_id, complaint_id);
+
+                Self::deposit_event(Event::ComplaintDismissed { complaint_id });
+
+                Ok(())
+            })
+        }
+
+        /// 🆕 F11: 紧急暂停/恢复模块（仅 Root/治理）
+        #[pallet::call_index(27)]
+        #[pallet::weight(Weight::from_parts(10_000_000, 1_000))]
+        pub fn set_paused(
+            origin: OriginFor<T>,
+            paused: bool,
+        ) -> DispatchResult {
+            T::DecisionOrigin::ensure_origin(origin)?;
+            Paused::<T>::put(paused);
+            Self::deposit_event(Event::PausedStateChanged { paused });
+            Ok(())
+        }
+
+        /// 🆕 F12: 强制关闭卡住的纠纷（仅 Root/治理）— 释放所有押金
+        #[pallet::call_index(28)]
+        #[pallet::weight(<T as Config>::WeightInfo::force_close_dispute())]
+        pub fn force_close_dispute(
+            origin: OriginFor<T>,
+            domain: [u8; 8],
+            id: u64,
+        ) -> DispatchResult {
+            T::DecisionOrigin::ensure_origin(origin)?;
+
+            ensure!(
+                Disputed::<T>::get(domain, id).is_some(),
+                Error::<T>::NotDisputed
+            );
+
+            // 释放所有押金（无罚没）
+            if let Some(deposit_record) = TwoWayDeposits::<T>::take(domain, id) {
+                let escrow_account = Self::get_escrow_account();
+                let _ = Self::release_deposit(
+                    &escrow_account,
+                    deposit_record.initiator_deposit,
+                    &HoldReason::DisputeInitiator,
+                    domain, id,
+                );
+                if let Some(respondent_deposit) = deposit_record.respondent_deposit {
+                    let _ = Self::release_deposit(
+                        &escrow_account,
+                        respondent_deposit,
+                        &HoldReason::DisputeRespondent,
+                        domain, id,
+                    );
+                }
+            }
+
+            // 解锁证据 CID
+            let _ = Self::unlock_all_evidence_cids(domain, id);
+
+            // 从待裁决队列移除
+            PendingArbitrationDisputes::<T>::remove(domain, id);
+
+            // 清理存储
+            Disputed::<T>::remove(domain, id);
+            EvidenceIds::<T>::remove(domain, id);
+
+            Self::deposit_event(Event::DisputeForceClosed { domain, id });
+            Ok(())
+        }
+
+        /// 🆕 F12: 强制关闭卡住的投诉（仅 Root/治理）— 退还投诉押金
+        #[pallet::call_index(29)]
+        #[pallet::weight(<T as Config>::WeightInfo::force_close_complaint())]
+        pub fn force_close_complaint(
+            origin: OriginFor<T>,
+            complaint_id: u64,
+        ) -> DispatchResult {
+            T::DecisionOrigin::ensure_origin(origin)?;
+
+            Complaints::<T>::try_mutate(complaint_id, |maybe_complaint| -> DispatchResult {
+                let complaint = maybe_complaint.as_mut().ok_or(Error::<T>::ComplaintNotFound)?;
+
+                // 只能关闭未解决的投诉
+                ensure!(
+                    !complaint.status.is_resolved(),
+                    Error::<T>::InvalidState
+                );
+
+                let now = frame_system::Pallet::<T>::block_number();
+                complaint.status = ComplaintStatus::Withdrawn;
+                complaint.updated_at = now;
+
+                // 退还押金
+                if let Some(deposit_amount) = ComplaintDeposits::<T>::take(complaint_id) {
+                    let _ = T::Fungible::release(
+                        &T::RuntimeHoldReason::from(HoldReason::ComplaintDeposit),
+                        &complaint.complainant,
+                        deposit_amount,
+                        frame_support::traits::tokens::Precision::BestEffort,
+                    );
+                }
+
+                // 从待裁决队列移除
+                PendingArbitrationComplaints::<T>::remove(complaint_id);
+
+                // 🆕 H1-R2修复: 立即清理用户索引（与其他解决路径一致）
+                Self::remove_from_user_complaint_index(&complaint.complainant, complaint_id);
+                Self::remove_from_respondent_complaint_index(&complaint.respondent, complaint_id);
+                Self::remove_from_object_complaint_index(complaint.domain, complaint.object_id, complaint_id);
+
+                Self::deposit_event(Event::ComplaintForceClosed { complaint_id });
+
+                Ok(())
+            })
+        }
+
+        /// 🆕 F13: 动态设置域惩罚比例（仅 Root/治理）
+        #[pallet::call_index(30)]
+        #[pallet::weight(Weight::from_parts(10_000_000, 1_000))]
+        pub fn set_domain_penalty_rate(
+            origin: OriginFor<T>,
+            domain: [u8; 8],
+            rate_bps: Option<u16>,
+        ) -> DispatchResult {
+            T::DecisionOrigin::ensure_origin(origin)?;
+
+            if let Some(rate) = rate_bps {
+                ensure!(rate <= 10_000, Error::<T>::InvalidPenaltyRate);
+                DomainPenaltyRates::<T>::insert(domain, rate);
+            } else {
+                DomainPenaltyRates::<T>::remove(domain);
+            }
+
+            Self::deposit_event(Event::DomainPenaltyRateUpdated { domain, rate_bps });
+            Ok(())
         }
     }
 
@@ -1640,6 +2233,44 @@ pub mod pallet {
             Ok(())
         }
 
+        /// 投诉押金罚没：将 slash_bps 部分转给被投诉方，退还剩余
+        /// 罚没比例优先级: DomainPenaltyRates > ComplaintType::penalty_rate() > ComplaintSlashBps
+        fn slash_complaint_deposit(
+            complaint_id: u64,
+            complainant: &T::AccountId,
+            respondent: &T::AccountId,
+            domain: [u8; 8],
+            complaint_type: &ComplaintType,
+        ) {
+            if let Some(deposit_amount) = ComplaintDeposits::<T>::take(complaint_id) {
+                let slash_bps = DomainPenaltyRates::<T>::get(domain)
+                    .unwrap_or_else(|| complaint_type.penalty_rate());
+                let slash_amount = sp_runtime::Permill::from_parts((slash_bps as u32) * 100)
+                    .mul_floor(deposit_amount);
+                let return_amount = deposit_amount.saturating_sub(slash_amount);
+
+                if !slash_amount.is_zero() {
+                    let _ = T::Fungible::transfer_on_hold(
+                        &T::RuntimeHoldReason::from(HoldReason::ComplaintDeposit),
+                        complainant,
+                        respondent,
+                        slash_amount,
+                        frame_support::traits::tokens::Precision::BestEffort,
+                        frame_support::traits::tokens::Restriction::Free,
+                        frame_support::traits::tokens::Fortitude::Polite,
+                    );
+                }
+                if !return_amount.is_zero() {
+                    let _ = T::Fungible::release(
+                        &T::RuntimeHoldReason::from(HoldReason::ComplaintDeposit),
+                        complainant,
+                        return_amount,
+                        frame_support::traits::tokens::Precision::BestEffort,
+                    );
+                }
+            }
+        }
+
         // ============================================================================
         // 🆕 P2: CID 锁定管理辅助函数
         // ============================================================================
@@ -1666,9 +2297,10 @@ pub mod pallet {
             T::CidLockManager::lock_cid(cid_hash, reason, None)?;
             
             // 记录到本地存储
+            // L-2修复: 使用语义正确的错误（BoundedVec已满 ≠ 已登记纠纷）
             LockedCidHashes::<T>::try_mutate(domain, id, |hashes| -> Result<(), DispatchError> {
                 hashes.try_push(cid_hash)
-                    .map_err(|_| Error::<T>::AlreadyDisputed)?;
+                    .map_err(|_| Error::<T>::TooManyComplaints)?;
                 Ok(())
             })?;
             
@@ -1786,8 +2418,8 @@ pub mod pallet {
                         // 移除活跃记录
                         Complaints::<T>::remove(cursor);
 
-                        // 更新用户索引
-                        Self::remove_from_user_complaint_index(&complaint.complainant, cursor);
+                        // L-1修复: 用户/被投诉人/对象索引已在解决时立即清理，
+                        // 归档阶段无需重复清理
 
                         archived_count = archived_count.saturating_add(1);
 
@@ -1808,6 +2440,20 @@ pub mod pallet {
             });
         }
 
+        /// 🆕 F4: 从被投诉人索引中移除
+        fn remove_from_respondent_complaint_index(respondent: &T::AccountId, complaint_id: u64) {
+            RespondentActiveComplaints::<T>::mutate(respondent, |list| {
+                list.retain(|&id| id != complaint_id);
+            });
+        }
+
+        /// 🆕 F6: 从对象投诉索引中移除
+        fn remove_from_object_complaint_index(domain: [u8; 8], object_id: u64, complaint_id: u64) {
+            ObjectComplaints::<T>::mutate(domain, object_id, |list| {
+                list.retain(|&id| id != complaint_id);
+            });
+        }
+
         /// 🆕 AH4修复: 使用游标代替全表扫描，处理过期投诉
         pub fn expire_old_complaints(max_count: u32) -> u32 {
             let now = frame_system::Pallet::<T>::block_number();
@@ -1817,36 +2463,37 @@ pub mod pallet {
 
             while expired_count < max_count && cursor < max_id {
                 if let Some(mut complaint) = Complaints::<T>::get(cursor) {
-                    // 🆕 H-NEW-1修复: Submitted 且未过期时 break（后续 deadline 只会更晚）
-                    if complaint.status == ComplaintStatus::Submitted {
-                        if now > complaint.response_deadline {
-                            complaint.status = ComplaintStatus::Expired;
-                            complaint.updated_at = now;
+                    // 🆕 M2-R2修复: 移除 early break 假设（ResponseDeadline 可能被 runtime 升级修改，
+                    // 导致后续投诉 deadline 更早）。cursor + max_count 已限制每次处理量。
+                    if complaint.status == ComplaintStatus::Submitted && now > complaint.response_deadline {
+                        complaint.status = ComplaintStatus::Expired;
+                        complaint.updated_at = now;
 
-                            // AH7: 过期投诉退还押金
-                            if let Some(deposit_amount) = ComplaintDeposits::<T>::take(cursor) {
-                                let _ = T::Fungible::release(
-                                    &T::RuntimeHoldReason::from(HoldReason::ComplaintDeposit),
-                                    &complaint.complainant,
-                                    deposit_amount,
-                                    frame_support::traits::tokens::Precision::BestEffort,
-                                );
-                            }
-
-                            Complaints::<T>::insert(cursor, &complaint);
-
-                            // 更新统计
-                            DomainStats::<T>::mutate(complaint.domain, |stats| {
-                                stats.resolved_count = stats.resolved_count.saturating_add(1);
-                                stats.expired_count = stats.expired_count.saturating_add(1);
-                            });
-
-                            Self::deposit_event(Event::ComplaintExpired { complaint_id: cursor });
-                            expired_count = expired_count.saturating_add(1);
-                        } else {
-                            // 未过期的 Submitted 投诉：停止扫描，后续 deadline 更晚
-                            break;
+                        // AH7: 过期投诉退还押金
+                        if let Some(deposit_amount) = ComplaintDeposits::<T>::take(cursor) {
+                            let _ = T::Fungible::release(
+                                &T::RuntimeHoldReason::from(HoldReason::ComplaintDeposit),
+                                &complaint.complainant,
+                                deposit_amount,
+                                frame_support::traits::tokens::Precision::BestEffort,
+                            );
                         }
+
+                        Complaints::<T>::insert(cursor, &complaint);
+
+                        // 更新统计
+                        DomainStats::<T>::mutate(complaint.domain, |stats| {
+                            stats.resolved_count = stats.resolved_count.saturating_add(1);
+                            stats.expired_count = stats.expired_count.saturating_add(1);
+                        });
+
+                        // 立即清理用户索引（不等归档）
+                        Self::remove_from_user_complaint_index(&complaint.complainant, cursor);
+                        Self::remove_from_respondent_complaint_index(&complaint.respondent, cursor);
+                        Self::remove_from_object_complaint_index(complaint.domain, complaint.object_id, cursor);
+
+                        Self::deposit_event(Event::ComplaintExpired { complaint_id: cursor });
+                        expired_count = expired_count.saturating_add(1);
                     }
                 }
                 cursor = cursor.saturating_add(1);
@@ -1913,18 +2560,24 @@ pub mod pallet {
             let mut weight_used = Weight::zero();
             // 🆕 A7修复: 每项处理涉及 DB 读写，权重从 10K 提升到 25M
             let base_weight = Weight::from_parts(25_000_000, 2_000);
+            // 每个阶段至少读取 cursor + max_id（2次 DB read）
+            let read_overhead = Weight::from_parts(10_000_000, 1_000);
 
             // 阶段1：处理过期投诉（每次最多5个）
             if remaining_weight.ref_time() > base_weight.ref_time() * 5 {
                 let expired = Self::expire_old_complaints(5);
-                weight_used = weight_used.saturating_add(base_weight.saturating_mul(expired as u64));
+                weight_used = weight_used.saturating_add(
+                    read_overhead.saturating_add(base_weight.saturating_mul(expired as u64))
+                );
             }
 
             // 阶段2：归档已解决投诉（每次最多10个）
             let remaining = remaining_weight.saturating_sub(weight_used);
             if remaining.ref_time() > base_weight.ref_time() * 10 {
                 let archived = Self::archive_old_complaints(10);
-                weight_used = weight_used.saturating_add(base_weight.saturating_mul(archived as u64));
+                weight_used = weight_used.saturating_add(
+                    read_overhead.saturating_add(base_weight.saturating_mul(archived as u64))
+                );
             }
 
             // 🆕 阶段3：清理过期归档记录
@@ -1932,12 +2585,16 @@ pub mod pallet {
             let remaining2 = remaining_weight.saturating_sub(weight_used);
             if remaining2.ref_time() > base_weight.ref_time() * 5 {
                 let cleaned = Self::cleanup_old_archived_disputes(current_block, 5);
-                weight_used = weight_used.saturating_add(base_weight.saturating_mul(cleaned as u64));
+                weight_used = weight_used.saturating_add(
+                    read_overhead.saturating_add(base_weight.saturating_mul(cleaned as u64))
+                );
             }
             let remaining3 = remaining_weight.saturating_sub(weight_used);
             if remaining3.ref_time() > base_weight.ref_time() * 5 {
                 let cleaned = Self::cleanup_old_archived_complaints(current_block, 5);
-                weight_used = weight_used.saturating_add(base_weight.saturating_mul(cleaned as u64));
+                weight_used = weight_used.saturating_add(
+                    read_overhead.saturating_add(base_weight.saturating_mul(cleaned as u64))
+                );
             }
 
             weight_used

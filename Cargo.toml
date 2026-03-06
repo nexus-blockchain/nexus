@@ -12,7 +12,6 @@ members = [
     "pallets/trading/trc20-verifier",
     "pallets/trading/nex-market",
     "pallets/dispute/escrow",
-    "pallets/crypto/common",
     "pallets/storage/service",
     "pallets/dispute/evidence",
     "pallets/dispute/arbitration",
@@ -40,7 +39,9 @@ members = [
     "pallets/entity/disclosure",
     "pallets/entity/kyc",
     "pallets/entity/tokensale",
-    "media-utils",
+# Common libraries (共享工具库，非 pallet)
+    "common/crypto",
+    "common/media",
     "runtime",
 # Ads pallets (通用广告系统)
     "pallets/ads/primitives",
@@ -68,10 +69,10 @@ pallet-trading-trc20-verifier = { path = "./pallets/trading/trc20-verifier", def
 pallet-nex-market = { path = "./pallets/trading/nex-market", default-features = false }
 # Escrow, Referral, IPFS pallets
 pallet-escrow = { path = "./pallets/dispute/escrow", default-features = false }
-pallet-crypto-common = { path = "./pallets/crypto/common", default-features = false }
 pallet-storage-service = { path = "./pallets/storage/service", default-features = false }
-# Nexus common libraries
-media-utils = { path = "./media-utils", default-features = false }
+# Common libraries (共享工具库，非 pallet)
+pallet-crypto-common = { path = "./common/crypto", default-features = false }
+media-utils = { path = "./common/media", default-features = false }
 # Evidence pallet
 pallet-evidence = { path = "./pallets/dispute/evidence", default-features = false }
 # Arbitration pallet

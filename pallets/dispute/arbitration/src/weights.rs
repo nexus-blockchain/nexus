@@ -20,54 +20,114 @@ pub trait WeightInfo {
     fn settle_complaint() -> Weight;
     /// escalate_to_arbitration
     fn escalate_to_arbitration() -> Weight;
+    /// 🆕 F1: request_default_judgment
+    fn request_default_judgment() -> Weight;
+    /// 🆕 F2/F5: supplement_complaint_evidence / supplement_response_evidence
+    fn supplement_evidence() -> Weight;
+    /// 🆕 F3: settle_dispute
+    fn settle_dispute() -> Weight;
+    /// 🆕 F8: start_mediation
+    fn start_mediation() -> Weight;
+    /// 🆕 F10: dismiss_dispute
+    fn dismiss_dispute() -> Weight;
+    /// 🆕 F10: dismiss_complaint
+    fn dismiss_complaint() -> Weight;
+    /// 🆕 F12: force_close_dispute
+    fn force_close_dispute() -> Weight;
+    /// 🆕 F12: force_close_complaint
+    fn force_close_complaint() -> Weight;
 }
 
 pub struct SubstrateWeight<T>(PhantomData<T>);
 impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     fn dispute(evidence_count: u32) -> Weight {
-        // 读：Disputed(r), Router::can_dispute(r) = 2; 写：Disputed(w), EvidenceIds(w) = 2
-        // 对于 two_way_deposit: 额外 Pricing(r), TwoWayDeposits(w), Fungible::hold(r+w)
         Weight::from_parts(50_000_000, 5_000)
             .saturating_add(Weight::from_parts(5_000_000, 0).saturating_mul(evidence_count as u64))
             .saturating_add(T::DbWeight::get().reads(4_u64))
             .saturating_add(T::DbWeight::get().writes(3_u64))
     }
     fn arbitrate() -> Weight {
-        // 读：Disputed(r), TwoWayDeposits(r), Escrow::locked(r) = 4
-        // 写：Disputed(w), TwoWayDeposits(w), Escrow ops(w), Router::apply_decision(r+w) = 5
         Weight::from_parts(80_000_000, 6_000)
             .saturating_add(T::DbWeight::get().reads(4_u64))
             .saturating_add(T::DbWeight::get().writes(5_u64))
     }
     fn file_complaint() -> Weight {
-        // 读：Pricing(r), UserActiveComplaints(r) = 2; 写：Complaints(w), UserActiveComplaints(w), ComplaintDeposits(w), NextComplaintId(w), DomainStats(w), Fungible::hold = 6
-        Weight::from_parts(70_000_000, 6_000)
+        // +F4 RespondentActiveComplaints(w), +F6 ObjectComplaints(w) = 8 writes
+        Weight::from_parts(75_000_000, 6_000)
             .saturating_add(T::DbWeight::get().reads(3_u64))
-            .saturating_add(T::DbWeight::get().writes(6_u64))
+            .saturating_add(T::DbWeight::get().writes(8_u64))
     }
     fn respond_to_complaint() -> Weight {
-        // 读：Complaints(r) = 1; 写：Complaints(w) = 1
         Weight::from_parts(45_000_000, 5_000)
             .saturating_add(T::DbWeight::get().reads(1_u64))
             .saturating_add(T::DbWeight::get().writes(1_u64))
     }
     fn withdraw_complaint() -> Weight {
-        // 读：Complaints(r), ComplaintDeposits(r) = 2; 写：Complaints(w), ComplaintDeposits(w), Fungible::release = 3
-        Weight::from_parts(55_000_000, 5_000)
+        // +L4: UserActiveComplaints(w), RespondentActiveComplaints(w), ObjectComplaints(w)
+        Weight::from_parts(60_000_000, 5_500)
             .saturating_add(T::DbWeight::get().reads(2_u64))
-            .saturating_add(T::DbWeight::get().writes(3_u64))
+            .saturating_add(T::DbWeight::get().writes(6_u64))
     }
     fn settle_complaint() -> Weight {
-        // 读：Complaints(r), ComplaintDeposits(r) = 2; 写：Complaints(w), ComplaintDeposits(w), DomainStats(w), Fungible::release = 4
-        Weight::from_parts(60_000_000, 5_000)
+        // +L4: 3 index cleanup writes
+        Weight::from_parts(65_000_000, 5_500)
             .saturating_add(T::DbWeight::get().reads(2_u64))
-            .saturating_add(T::DbWeight::get().writes(4_u64))
+            .saturating_add(T::DbWeight::get().writes(7_u64))
     }
     fn escalate_to_arbitration() -> Weight {
-        // 读：Complaints(r) = 1; 写：Complaints(w) = 1
+        // +F7 PendingArbitrationComplaints(w) = 2 writes
+        Weight::from_parts(45_000_000, 4_000)
+            .saturating_add(T::DbWeight::get().reads(1_u64))
+            .saturating_add(T::DbWeight::get().writes(2_u64))
+    }
+    fn request_default_judgment() -> Weight {
+        // TwoWayDeposits(r), Router(r+w), Fungible(r+w), CidLock(r+w), Archive(w)
+        Weight::from_parts(90_000_000, 7_000)
+            .saturating_add(T::DbWeight::get().reads(5_u64))
+            .saturating_add(T::DbWeight::get().writes(6_u64))
+    }
+    fn supplement_evidence() -> Weight {
+        // Complaints(r) + Paused(r) = 2
+        Weight::from_parts(35_000_000, 4_000)
+            .saturating_add(T::DbWeight::get().reads(2_u64))
+            .saturating_add(T::DbWeight::get().writes(0_u64))
+    }
+    fn settle_dispute() -> Weight {
+        // Disputed(r), TwoWayDeposits(r), Fungible release x2
+        Weight::from_parts(85_000_000, 6_000)
+            .saturating_add(T::DbWeight::get().reads(4_u64))
+            .saturating_add(T::DbWeight::get().writes(6_u64))
+    }
+    fn start_mediation() -> Weight {
+        // Complaints(r+w)
         Weight::from_parts(40_000_000, 4_000)
             .saturating_add(T::DbWeight::get().reads(1_u64))
             .saturating_add(T::DbWeight::get().writes(1_u64))
+    }
+    fn dismiss_dispute() -> Weight {
+        // Same as arbitrate
+        Weight::from_parts(85_000_000, 6_000)
+            .saturating_add(T::DbWeight::get().reads(4_u64))
+            .saturating_add(T::DbWeight::get().writes(5_u64))
+    }
+    fn dismiss_complaint() -> Weight {
+        // Complaints(r+w), ComplaintDeposits(r+w), DomainPenaltyRates(r), DomainStats(w), Fungible
+        // +L4: 3 index cleanup writes
+        Weight::from_parts(75_000_000, 6_500)
+            .saturating_add(T::DbWeight::get().reads(4_u64))
+            .saturating_add(T::DbWeight::get().writes(7_u64))
+    }
+    fn force_close_dispute() -> Weight {
+        // Same as arbitrate
+        Weight::from_parts(85_000_000, 6_000)
+            .saturating_add(T::DbWeight::get().reads(4_u64))
+            .saturating_add(T::DbWeight::get().writes(5_u64))
+    }
+    fn force_close_complaint() -> Weight {
+        // +H1-R2: 3 index cleanup writes
+        Weight::from_parts(60_000_000, 5_500)
+            .saturating_add(T::DbWeight::get().reads(2_u64))
+            .saturating_add(T::DbWeight::get().writes(6_u64))
     }
 }
 
@@ -84,9 +144,9 @@ impl WeightInfo for () {
             .saturating_add(RocksDbWeight::get().writes(5_u64))
     }
     fn file_complaint() -> Weight {
-        Weight::from_parts(70_000_000, 6_000)
+        Weight::from_parts(75_000_000, 6_000)
             .saturating_add(RocksDbWeight::get().reads(3_u64))
-            .saturating_add(RocksDbWeight::get().writes(6_u64))
+            .saturating_add(RocksDbWeight::get().writes(8_u64))
     }
     fn respond_to_complaint() -> Weight {
         Weight::from_parts(45_000_000, 5_000)
@@ -94,18 +154,58 @@ impl WeightInfo for () {
             .saturating_add(RocksDbWeight::get().writes(1_u64))
     }
     fn withdraw_complaint() -> Weight {
-        Weight::from_parts(55_000_000, 5_000)
+        Weight::from_parts(60_000_000, 5_500)
             .saturating_add(RocksDbWeight::get().reads(2_u64))
-            .saturating_add(RocksDbWeight::get().writes(3_u64))
+            .saturating_add(RocksDbWeight::get().writes(6_u64))
     }
     fn settle_complaint() -> Weight {
-        Weight::from_parts(60_000_000, 5_000)
+        Weight::from_parts(65_000_000, 5_500)
             .saturating_add(RocksDbWeight::get().reads(2_u64))
-            .saturating_add(RocksDbWeight::get().writes(4_u64))
+            .saturating_add(RocksDbWeight::get().writes(7_u64))
     }
     fn escalate_to_arbitration() -> Weight {
+        Weight::from_parts(45_000_000, 4_000)
+            .saturating_add(RocksDbWeight::get().reads(1_u64))
+            .saturating_add(RocksDbWeight::get().writes(2_u64))
+    }
+    fn request_default_judgment() -> Weight {
+        Weight::from_parts(90_000_000, 7_000)
+            .saturating_add(RocksDbWeight::get().reads(5_u64))
+            .saturating_add(RocksDbWeight::get().writes(6_u64))
+    }
+    fn supplement_evidence() -> Weight {
+        Weight::from_parts(35_000_000, 4_000)
+            .saturating_add(RocksDbWeight::get().reads(2_u64))
+            .saturating_add(RocksDbWeight::get().writes(0_u64))
+    }
+    fn settle_dispute() -> Weight {
+        Weight::from_parts(85_000_000, 6_000)
+            .saturating_add(RocksDbWeight::get().reads(4_u64))
+            .saturating_add(RocksDbWeight::get().writes(6_u64))
+    }
+    fn start_mediation() -> Weight {
         Weight::from_parts(40_000_000, 4_000)
             .saturating_add(RocksDbWeight::get().reads(1_u64))
             .saturating_add(RocksDbWeight::get().writes(1_u64))
+    }
+    fn dismiss_dispute() -> Weight {
+        Weight::from_parts(85_000_000, 6_000)
+            .saturating_add(RocksDbWeight::get().reads(4_u64))
+            .saturating_add(RocksDbWeight::get().writes(5_u64))
+    }
+    fn dismiss_complaint() -> Weight {
+        Weight::from_parts(75_000_000, 6_500)
+            .saturating_add(RocksDbWeight::get().reads(4_u64))
+            .saturating_add(RocksDbWeight::get().writes(7_u64))
+    }
+    fn force_close_dispute() -> Weight {
+        Weight::from_parts(85_000_000, 6_000)
+            .saturating_add(RocksDbWeight::get().reads(4_u64))
+            .saturating_add(RocksDbWeight::get().writes(5_u64))
+    }
+    fn force_close_complaint() -> Weight {
+        Weight::from_parts(60_000_000, 5_500)
+            .saturating_add(RocksDbWeight::get().reads(2_u64))
+            .saturating_add(RocksDbWeight::get().writes(6_u64))
     }
 }

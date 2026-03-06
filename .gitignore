@@ -144,6 +144,7 @@ my-chain-state/
 scripts/test-accounts.json
 scripts/test-accounts.txt
 scripts/node_modules/
+scripts/e2e-report-*.json
 scripts/e2e-reports/
 scripts/*.log
 

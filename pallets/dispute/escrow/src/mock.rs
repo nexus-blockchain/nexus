@@ -64,6 +64,14 @@ impl pallet_escrow::Config for Test {
     type MaxExpiringPerBlock = ConstU32<10>;
     type MaxSplitEntries = ConstU32<10>;
     type ExpiryPolicy = TestExpiryPolicy;
+    /// 🆕 F5: 争议原因最大长度
+    type MaxReasonLen = ConstU32<256>;
+    /// 🆕 F9: Token 托管处理器（测试用空实现）
+    type TokenHandler = ();
+    /// 🆕 F10: 观察者（测试用空实现）
+    type Observer = ();
+    /// 🆕 F8: 每次清理最大条目数
+    type MaxCleanupPerCall = ConstU32<50>;
     type WeightInfo = ();
 }
 

@@ -113,6 +113,19 @@ pub struct DefaultCidValidator;
 
 impl CidValidator for DefaultCidValidator {}
 
+/// P0-1修复: 剥离加密前缀，返回底层 IPFS CID 部分
+///
+/// 例如 `enc-QmXxx` → `QmXxx`, `sealed-bafxxx` → `bafxxx`
+/// 如果没有匹配的前缀，返回原始字节（不改变）
+pub fn strip_encrypted_prefix(cid: &[u8]) -> &[u8] {
+    for prefix in ENCRYPTED_PREFIXES {
+        if cid.starts_with(prefix) {
+            return &cid[prefix.len()..];
+        }
+    }
+    cid
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +186,18 @@ mod tests {
         
         // 混合CID，不要求加密，应该通过
         assert!(DefaultCidValidator::validate_batch(&mixed_cids, false).is_ok());
+    }
+
+    #[test]
+    fn test_strip_encrypted_prefix() {
+        // P0-1修复: 验证前缀剥离
+        assert_eq!(strip_encrypted_prefix(b"enc-QmXxx"), b"QmXxx");
+        assert_eq!(strip_encrypted_prefix(b"sealed-bafxxx"), b"bafxxx");
+        assert_eq!(strip_encrypted_prefix(b"priv-bagxxx"), b"bagxxx");
+        assert_eq!(strip_encrypted_prefix(b"encrypted-cidxxx"), b"cidxxx");
+        // 无前缀返回原始内容
+        assert_eq!(strip_encrypted_prefix(b"QmXxx"), b"QmXxx");
+        assert_eq!(strip_encrypted_prefix(b""), b"");
     }
 }
 

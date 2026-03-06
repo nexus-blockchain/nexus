@@ -7,6 +7,8 @@ pub trait WeightInfo {
     fn submit_review() -> Weight;
     fn set_review_enabled() -> Weight;
     fn remove_review() -> Weight;
+    fn reply_to_review() -> Weight;
+    fn edit_review() -> Weight;
 }
 
 /// Substrate weight estimates (pre-benchmark).
@@ -34,12 +36,29 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().writes(1))
     }
 
-    /// remove_review: 2 reads (Reviews::take, order_shop_id)
-    /// + 4 writes (Reviews, ReviewCount, ShopReviewCount, UserReviews)
+    /// remove_review: 3 reads (Reviews::take, order_shop_id, UserReviews)
+    /// + 8 writes (Reviews, ReviewCount, ShopReviewCount, UserReviews, ProductReviews, ProductReviewCount, ProductRatingSum, ReviewReplies)
     fn remove_review() -> Weight {
+        Weight::from_parts(45_000_000, 7_000)
+            .saturating_add(T::DbWeight::get().reads(3))
+            .saturating_add(T::DbWeight::get().writes(8))
+    }
+
+    /// reply_to_review: 6 reads (Reviews::contains_key, ReviewReplies::contains_key,
+    ///                           order_shop_id, shop_entity_id, is_entity_active, is_entity_admin)
+    /// + 1 write (ReviewReplies)
+    fn reply_to_review() -> Weight {
+        Weight::from_parts(35_000_000, 5_000)
+            .saturating_add(T::DbWeight::get().reads(6))
+            .saturating_add(T::DbWeight::get().writes(1))
+    }
+
+    /// edit_review: 5 reads (Reviews::get, order_shop_id, shop_entity_id, EntityReviewDisabled, order_product_id)
+    /// + 2 writes (Reviews, ProductRatingSum)
+    fn edit_review() -> Weight {
         Weight::from_parts(40_000_000, 6_000)
-            .saturating_add(T::DbWeight::get().reads(2))
-            .saturating_add(T::DbWeight::get().writes(4))
+            .saturating_add(T::DbWeight::get().reads(5))
+            .saturating_add(T::DbWeight::get().writes(2))
     }
 }
 
@@ -54,6 +73,14 @@ impl WeightInfo for () {
     }
 
     fn remove_review() -> Weight {
+        Weight::from_parts(45_000_000, 7_000)
+    }
+
+    fn reply_to_review() -> Weight {
+        Weight::from_parts(35_000_000, 5_000)
+    }
+
+    fn edit_review() -> Weight {
         Weight::from_parts(40_000_000, 6_000)
     }
 }

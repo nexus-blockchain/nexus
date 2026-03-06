@@ -428,7 +428,7 @@ cargo test -p pallet-nex-market    # 61 个单元测试
 
 | Trait | 方法 | 说明 | 消费方 |
 |-------|------|------|--------|
-| `PricingProvider<Balance>` | `get_cos_to_usd_rate()`, `report_p2p_trade()` | NEX/USD 底层汇率查询（精度 10^6） | arbitration, storage-service, entity-* |
+| `PricingProvider<Balance>` | `get_nex_to_usd_rate()`, `report_p2p_trade()` | NEX/USD 底层汇率查询（精度 10^6） | arbitration, storage-service, entity-* |
 | `PriceOracle` | `get_twap()`, `get_last_trade_price()`, `is_price_stale()`, `get_trade_count()` | TWAP 预言机 + 陈旧检测 + 交易量 | Runtime 桥接 |
 | `ExchangeRateProvider` | `get_nex_usdt_rate()`, `price_confidence()`, `is_rate_reliable()` | 带置信度(0-100)的统一兑换比率 | 佣金换算、打赏定价等 |
 | `DepositCalculator<Balance>` | `calculate_deposit(usd_amount, fallback)` | USD 等值 NEX 保证金计算（`usd * 10^12 / rate`） | storage-service |
@@ -537,7 +537,7 @@ EndpointHealth {
                                     │
                     ┌───────────────┴─────────────────┐
                     │         PricingProvider          │  底层汇率
-                    │   get_cos_to_usd_rate()          │
+                    │   get_nex_to_usd_rate()          │
                     │   report_p2p_trade()             │
                     └───────────────┬─────────────────┘
                                     │

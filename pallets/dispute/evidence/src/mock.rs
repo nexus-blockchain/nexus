@@ -44,20 +44,21 @@ impl pallet_evidence::pallet::EvidenceAuthorizer<u64> for MockAuthorizer {
     }
 }
 
-// -- Mock IpfsPinner --
+// -- Mock StoragePin --
 
-pub struct MockIpfsPinner;
-impl pallet_storage_service::IpfsPinner<u64, u128> for MockIpfsPinner {
-    fn pin_cid_for_subject(
-        _caller: u64,
-        _subject_type: pallet_storage_service::SubjectType,
+pub struct MockStoragePin;
+impl pallet_storage_service::StoragePin<u64> for MockStoragePin {
+    fn pin(
+        _owner: u64,
+        _domain: &[u8],
         _subject_id: u64,
+        _entity_id: Option<u64>,
         _cid: Vec<u8>,
-        _tier: Option<pallet_storage_service::PinTier>,
+        _tier: pallet_storage_service::PinTier,
     ) -> sp_runtime::DispatchResult {
         Ok(())
     }
-    fn unpin_cid(_caller: u64, _cid: Vec<u8>) -> sp_runtime::DispatchResult {
+    fn unpin(_owner: u64, _cid: Vec<u8>) -> sp_runtime::DispatchResult {
         Ok(())
     }
 }
@@ -92,7 +93,7 @@ impl pallet_evidence::pallet::Config for Test {
     type EnableGlobalCidDedup = EnableGlobalCidDedup;
     type MaxListLen = ConstU32<50>;
     type WeightInfo = ();
-    type IpfsPinner = MockIpfsPinner;
+    type StoragePin = MockStoragePin;
     type Balance = u128;
     type DefaultStoragePrice = DefaultStoragePrice;
     type EvidenceEditWindow = EvidenceEditWindow;

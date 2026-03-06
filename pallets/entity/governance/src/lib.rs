@@ -41,8 +41,8 @@ pub mod pallet {
         BoundedVec,
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{GovernanceMode, EntityProvider, EntityTokenProvider, ShopProvider};
-    use pallet_entity_commission::{CommissionProvider, MemberProvider, MultiLevelPlanWriter};
+    use pallet_entity_common::{DisclosureProvider, GovernanceMode, EntityProvider, EntityTokenProvider, ProductProvider, ShopProvider};
+    use pallet_entity_commission::{CommissionProvider, MemberProvider, MultiLevelPlanWriter, TeamPlanWriter};
     use sp_runtime::traits::{Saturating, Zero};
     use sp_runtime::SaturatedConversion;
 
@@ -223,6 +223,36 @@ pub mod pallet {
         },
         /// 删除升级规则
         RemoveUpgradeRule { rule_id: u32 },
+
+        // ==================== 披露管理类（F10）====================
+        /// F5: 团队业绩配置变更
+        TeamPerformanceChange {
+            /// 阶梯配置: Vec<(sales_threshold_u128, min_team_size, rate_bps)>
+            tiers: BoundedVec<(u128, u32, u16), ConstU32<10>>,
+            max_depth: u8,
+            allow_stacking: bool,
+            /// 0=Nex, 1=Usdt
+            threshold_mode: u8,
+        },
+        /// F5: 暂停团队业绩返佣
+        TeamPerformancePause,
+        /// F5: 恢复团队业绩返佣
+        TeamPerformanceResume,
+
+        /// 披露级别变更
+        DisclosureLevelChange {
+            level: u8,
+            insider_trading_control: bool,
+            blackout_period_after: u32,
+        },
+        /// 重置披露违规记录
+        DisclosureResetViolations,
+
+        // ==================== DAO 可控紧急权限类（R8）====================
+        /// R8: Owner 紧急暂停权限开关（FullDAO 锁定后，DAO 可关闭 Owner 的 pause 能力）
+        EmergencyPauseToggle { enabled: bool },
+        /// R8: Owner 批量取消权限开关（FullDAO 锁定后，DAO 可关闭 Owner 的 batch_cancel 能力）
+        BatchCancelToggle { enabled: bool },
 
         // ==================== 社区类 ====================
         /// 社区活动
@@ -423,8 +453,17 @@ pub mod pallet {
         #[pallet::constant]
         type TimeWeightMaxMultiplier: Get<u32>;
 
+        /// F3: 商品查询接口（治理提案执行 PriceChange/InventoryAdjustment）
+        type ProductProvider: pallet_entity_common::ProductProvider<Self::AccountId, Self::Balance>;
+
         /// F8: 多级分销写入接口（治理提案执行时调用）
         type MultiLevelWriter: MultiLevelPlanWriter;
+
+        /// F5: 团队业绩写入接口（治理提案执行时调用）
+        type TeamWriter: TeamPlanWriter<Self::Balance>;
+
+        /// F10: 披露服务接口（治理提案执行披露配置变更）
+        type DisclosureProvider: pallet_entity_common::DisclosureProvider<Self::AccountId>;
     }
 
     /// C2: 存储版本声明（安全 runtime 升级必备）
@@ -444,19 +483,24 @@ pub mod pallet {
         /// 每区块最多处理 5 个提案，weight-bounded。
         fn on_idle(now: BlockNumberFor<T>, mut remaining_weight: Weight) -> Weight {
             let base_read = T::DbWeight::get().reads(1);
+            // M2-audit: 包含 ProposalScanCursor 的 1 read + 1 write
+            let cursor_weight = T::DbWeight::get().reads_writes(1, 1);
             let per_proposal_weight = T::DbWeight::get().reads_writes(3, 5)
                 .saturating_add(Weight::from_parts(50_000_000, 5_000));
 
-            // 至少需要 1 read (NextProposalId) + 1 proposal 的 weight
-            if remaining_weight.ref_time() < base_read.ref_time().saturating_add(per_proposal_weight.ref_time()) {
+            // H1-audit: 同时检查 ref_time 和 proof_size
+            let min_weight = base_read.saturating_add(cursor_weight).saturating_add(per_proposal_weight);
+            if remaining_weight.ref_time() < min_weight.ref_time()
+                || remaining_weight.proof_size() < min_weight.proof_size()
+            {
                 return Weight::zero();
             }
 
             let next_id = NextProposalId::<T>::get();
-            remaining_weight = remaining_weight.saturating_sub(base_read);
+            remaining_weight = remaining_weight.saturating_sub(base_read).saturating_sub(cursor_weight);
 
             if next_id == 0 {
-                return base_read;
+                return base_read.saturating_add(cursor_weight);
             }
 
             // 使用存储项跟踪上次扫描位置，避免每次从 0 开始
@@ -468,8 +512,10 @@ pub mod pallet {
             let mut scanned = 0u64;
 
             // 最多扫描 100 个 proposal ID 寻找需要处理的
+            // H1-audit: 同时检查 ref_time 和 proof_size
             while scanned < 100 && processed < MAX_PER_BLOCK
                 && remaining_weight.ref_time() >= per_proposal_weight.ref_time()
+                && remaining_weight.proof_size() >= per_proposal_weight.proof_size()
             {
                 if cursor >= next_id {
                     cursor = 0; // wrap around
@@ -506,11 +552,66 @@ pub mod pallet {
             // 保存扫描位置
             ProposalScanCursor::<T>::put(cursor);
 
-            base_read.saturating_add(
+            // M2-audit: 返回权重包含 cursor 读写
+            base_read.saturating_add(cursor_weight).saturating_add(
                 T::DbWeight::get().reads(scanned).saturating_add(
                     per_proposal_weight.saturating_mul(processed.into())
                 )
             )
+        }
+
+        /// F8: integrity_test — 验证 runtime 配置常量的合理性
+        fn integrity_test() {
+            // 最小投票期必须 > 0
+            assert!(
+                T::MinVotingPeriod::get() > 0u32.into(),
+                "MinVotingPeriod must be > 0"
+            );
+            // 最小执行延迟必须 > 0
+            assert!(
+                T::MinExecutionDelay::get() > 0u32.into(),
+                "MinExecutionDelay must be > 0"
+            );
+            // 默认投票期 >= 最小投票期
+            assert!(
+                T::VotingPeriod::get() >= T::MinVotingPeriod::get(),
+                "VotingPeriod must be >= MinVotingPeriod"
+            );
+            // 默认执行延迟 >= 最小执行延迟
+            assert!(
+                T::ExecutionDelay::get() >= T::MinExecutionDelay::get(),
+                "ExecutionDelay must be >= MinExecutionDelay"
+            );
+            // 法定人数阈值 1..=100
+            assert!(
+                T::QuorumThreshold::get() >= 1 && T::QuorumThreshold::get() <= 100,
+                "QuorumThreshold must be in [1, 100]"
+            );
+            // 通过阈值 1..=100
+            assert!(
+                T::PassThreshold::get() >= 1 && T::PassThreshold::get() <= 100,
+                "PassThreshold must be in [1, 100]"
+            );
+            // 提案门槛 <= 10000 bps
+            assert!(
+                T::MinProposalThreshold::get() <= 10000,
+                "MinProposalThreshold must be <= 10000"
+            );
+            // 时间加权乘数 >= 10000 (1x)
+            assert!(
+                T::TimeWeightMaxMultiplier::get() >= 10000,
+                "TimeWeightMaxMultiplier must be >= 10000 (1x)"
+            );
+            // MaxActiveProposals > 0
+            assert!(
+                T::MaxActiveProposals::get() > 0,
+                "MaxActiveProposals must be > 0"
+            );
+            // MaxDelegatorsPerDelegate > 0
+            assert!(
+                T::MaxDelegatorsPerDelegate::get() > 0,
+                "MaxDelegatorsPerDelegate must be > 0"
+            );
         }
     }
 
@@ -645,6 +746,38 @@ pub mod pallet {
     #[pallet::storage]
     pub type ProposalScanCursor<T: Config> = StorageValue<_, ProposalId, ValueQuery>;
 
+    // ========== F6: 治理暂停 ==========
+
+    /// 治理暂停状态 (entity_id → bool)
+    #[pallet::storage]
+    pub type GovernancePaused<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // entity_id
+        bool,
+        ValueQuery,
+    >;
+
+    // ========== R8: DAO 可控紧急权限 ==========
+
+    /// FullDAO 锁定后 Owner 紧急暂停权限（None = true，DAO 可通过 EmergencyPauseToggle 关闭）
+    #[pallet::storage]
+    pub type EmergencyPauseEnabled<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // entity_id
+        bool,
+    >;
+
+    /// FullDAO 锁定后 Owner 批量取消权限（None = true，DAO 可通过 BatchCancelToggle 关闭）
+    #[pallet::storage]
+    pub type BatchCancelEnabled<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // entity_id
+        bool,
+    >;
+
     // ========== F5: 投票委托 ==========
 
     /// 投票委托映射 (entity_id, delegator) → delegate
@@ -754,6 +887,31 @@ pub mod pallet {
             proposal_id: ProposalId,
             new_status: ProposalStatus,
         },
+        /// F1: 投票已修改
+        VoteChanged {
+            proposal_id: ProposalId,
+            voter: T::AccountId,
+            old_vote: VoteType,
+            new_vote: VoteType,
+            weight: BalanceOf<T>,
+        },
+        /// F6: 治理已暂停
+        GovernancePausedEvent {
+            entity_id: u64,
+        },
+        /// F6: 治理已恢复
+        GovernanceResumedEvent {
+            entity_id: u64,
+        },
+        /// F6: 批量取消提案
+        BatchProposalsCancelled {
+            entity_id: u64,
+            cancelled_count: u32,
+        },
+        /// R7-M2: 终态提案部分清理（存储量大需多次调用 cleanup_proposal）
+        ProposalPartialCleaned {
+            proposal_id: ProposalId,
+        },
     }
 
     // ==================== 错误 ====================
@@ -827,6 +985,24 @@ pub mod pallet {
         TooManyDelegators,
         /// R3: 提案类型暂不支持创建（链上执行未实现）
         ProposalTypeNotSupported,
+        /// F7: 法定人数阈值不能为 0
+        QuorumTooLow,
+        /// F7: 通过阈值不能为 0
+        PassThresholdTooLow,
+        /// F5: 实体已停用（ban/closed），不允许治理操作
+        EntityNotActive,
+        /// F2: 委托目标自身已委托他人，不可接受委托
+        DelegateAlreadyDelegated,
+        /// F6: 治理已暂停
+        GovernanceIsPaused,
+        /// F6: 治理未暂停
+        GovernanceNotPaused,
+        /// H2-audit: 该提案没有投票记录（change_vote 时使用）
+        NotVoted,
+        /// R8: DAO 已关闭 Owner 紧急暂停权限（FullDAO 锁定后）
+        EmergencyPauseDisabled,
+        /// R8: DAO 已关闭 Owner 批量取消权限（FullDAO 锁定后）
+        BatchCancelDisabled,
     }
 
     // ==================== Extrinsics ====================
@@ -853,13 +1029,19 @@ pub mod pallet {
 
             // 验证实体存在且活跃
             ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::ShopNotFound);
-            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::ShopNotFound);
+            // M1-R2: inactive entity 应使用 EntityNotActive（非 ShopNotFound）
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+
+            // F6: 治理暂停检查
+            ensure!(!GovernancePaused::<T>::get(entity_id), Error::<T>::GovernanceIsPaused);
 
             // H1: 检查治理模式，None 模式不允许创建提案
+            // C1-fix: 无配置时默认为 None 模式，也必须阻止提案创建
             let gov_config = GovernanceConfigs::<T>::get(entity_id);
-            if let Some(ref cfg) = gov_config {
-                ensure!(cfg.mode != GovernanceMode::None, Error::<T>::GovernanceModeNotAllowed);
-            }
+            let effective_mode = gov_config.as_ref()
+                .map(|c| c.mode)
+                .unwrap_or(GovernanceMode::None);
+            ensure!(effective_mode != GovernanceMode::None, Error::<T>::GovernanceModeNotAllowed);
 
             // H2: 验证提案参数有效性
             Self::validate_proposal_type(&proposal_type)?;
@@ -973,6 +1155,12 @@ pub mod pallet {
             let mut proposal = Proposals::<T>::get(proposal_id)
                 .ok_or(Error::<T>::ProposalNotFound)?;
 
+            // F5: 实体活跃检查
+            ensure!(T::EntityProvider::is_entity_active(proposal.entity_id), Error::<T>::EntityNotActive);
+
+            // F6: 治理暂停检查
+            ensure!(!GovernancePaused::<T>::get(proposal.entity_id), Error::<T>::GovernanceIsPaused);
+
             // 验证状态
             ensure!(proposal.status == ProposalStatus::Voting, Error::<T>::InvalidProposalStatus);
 
@@ -989,6 +1177,13 @@ pub mod pallet {
             // 验证未投过票
             ensure!(
                 !VoteRecords::<T>::contains_key(proposal_id, &who),
+                Error::<T>::AlreadyVoted
+            );
+
+            // R7-H1: 防止委托→代理投票→取消委托→自行投票的双重计票攻击
+            // 代理人投票时已为所有委托者插入 VoterTokenLocks 标记
+            ensure!(
+                !VoterTokenLocks::<T>::contains_key(proposal_id, &who),
                 Error::<T>::AlreadyVoted
             );
 
@@ -1086,6 +1281,9 @@ pub mod pallet {
             let mut proposal = Proposals::<T>::get(proposal_id)
                 .ok_or(Error::<T>::ProposalNotFound)?;
 
+            // F5: 实体活跃检查
+            ensure!(T::EntityProvider::is_entity_active(proposal.entity_id), Error::<T>::EntityNotActive);
+
             // 验证状态
             ensure!(proposal.status == ProposalStatus::Voting, Error::<T>::InvalidProposalStatus);
 
@@ -1153,6 +1351,9 @@ pub mod pallet {
 
             let mut proposal = Proposals::<T>::get(proposal_id)
                 .ok_or(Error::<T>::ProposalNotFound)?;
+
+            // F5: 实体活跃检查
+            ensure!(T::EntityProvider::is_entity_active(proposal.entity_id), Error::<T>::EntityNotActive);
 
             // 验证状态
             ensure!(proposal.status == ProposalStatus::Passed, Error::<T>::InvalidProposalStatus);
@@ -1259,11 +1460,13 @@ pub mod pallet {
                 ensure!(T::TokenProvider::is_token_enabled(entity_id), Error::<T>::TokenNotEnabledForDAO);
             }
 
-            // 参数验证（上限）
+            // 参数验证（上限 + F7 下限）
             if let Some(q) = quorum_threshold {
+                ensure!(q >= 1, Error::<T>::QuorumTooLow);
                 ensure!(q <= 100, Error::<T>::InvalidParameter);
             }
             if let Some(p) = pass_threshold {
+                ensure!(p >= 1, Error::<T>::PassThresholdTooLow);
                 ensure!(p <= 100, Error::<T>::InvalidParameter);
             }
             if let Some(t) = proposal_threshold {
@@ -1364,9 +1567,27 @@ pub mod pallet {
                 Error::<T>::ProposalNotTerminal
             );
 
-            Proposals::<T>::remove(proposal_id);
+            // F9: 清理 VoteRecords（从 remove_from_active 延迟到此处）
+            // M2-R2: 检查 clear_prefix 结果，未完全清理则保留 Proposal 供重试
+            let vote_result = VoteRecords::<T>::clear_prefix(proposal_id, 500, None);
+            // 清理 VotingPowerSnapshot 残留（如果 on_idle 路径未清理干净）
+            let snapshot_result = VotingPowerSnapshot::<T>::clear_prefix(proposal_id, 500, None);
+            // L1-R2: 防御性清理 VoterTokenLocks（正常流程中应已为空）
+            let lock_result = VoterTokenLocks::<T>::clear_prefix(proposal_id, 500, None);
 
-            Self::deposit_event(Event::ProposalCleaned { proposal_id });
+            // M2-R2: 仅当所有前缀完全清理后才删除 Proposal；否则保留供再次调用
+            // MultiRemovalResults.maybe_cursor == None 表示全部清理完毕
+            let all_cleared = vote_result.maybe_cursor.is_none()
+                && snapshot_result.maybe_cursor.is_none()
+                && lock_result.maybe_cursor.is_none();
+
+            if all_cleared {
+                Proposals::<T>::remove(proposal_id);
+                Self::deposit_event(Event::ProposalCleaned { proposal_id });
+            } else {
+                Self::deposit_event(Event::ProposalPartialCleaned { proposal_id });
+            }
+
             Ok(())
         }
 
@@ -1388,7 +1609,8 @@ pub mod pallet {
 
             // 验证实体存在且活跃
             ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::ShopNotFound);
-            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::ShopNotFound);
+            // M1-R2: inactive entity 应使用 EntityNotActive（非 ShopNotFound）
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
 
             // 检查代币已启用
             ensure!(T::TokenProvider::is_token_enabled(entity_id), Error::<T>::TokenNotEnabled);
@@ -1397,6 +1619,12 @@ pub mod pallet {
             ensure!(
                 !VoteDelegation::<T>::contains_key(entity_id, &who),
                 Error::<T>::AlreadyDelegated
+            );
+
+            // F2: 检查委托目标自身未委托他人（防止投票权黑洞）
+            ensure!(
+                !VoteDelegation::<T>::contains_key(entity_id, &delegate),
+                Error::<T>::DelegateAlreadyDelegated
             );
 
             // 添加到委托者列表
@@ -1478,6 +1706,217 @@ pub mod pallet {
             });
             Ok(())
         }
+
+        /// F1: 修改投票
+        ///
+        /// 已投票的用户可以修改投票类型（Yes/No/Abstain），权重不变。
+        /// 仅在投票期内可修改。
+        #[pallet::call_index(14)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 5_000))]
+        pub fn change_vote(
+            origin: OriginFor<T>,
+            proposal_id: ProposalId,
+            new_vote: VoteType,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let mut proposal = Proposals::<T>::get(proposal_id)
+                .ok_or(Error::<T>::ProposalNotFound)?;
+
+            // F5: 实体活跃检查
+            ensure!(T::EntityProvider::is_entity_active(proposal.entity_id), Error::<T>::EntityNotActive);
+
+            // M1-audit: 治理暂停检查（与 vote 一致）
+            ensure!(!GovernancePaused::<T>::get(proposal.entity_id), Error::<T>::GovernanceIsPaused);
+
+            // 验证状态
+            ensure!(proposal.status == ProposalStatus::Voting, Error::<T>::InvalidProposalStatus);
+
+            // 验证投票期
+            let now = <frame_system::Pallet<T>>::block_number();
+            ensure!(now <= proposal.voting_end, Error::<T>::VotingEnded);
+
+            // 获取旧投票记录
+            // H2-audit: 使用 NotVoted 而非 ProposalNotFound
+            let old_record = VoteRecords::<T>::get(proposal_id, &who)
+                .ok_or(Error::<T>::NotVoted)?;
+
+            let old_vote = old_record.vote.clone();
+            let weight = old_record.weight;
+
+            // 如果投票类型相同则无需操作
+            if old_vote == new_vote {
+                return Ok(());
+            }
+
+            // 撤销旧投票权重
+            match old_vote {
+                VoteType::Yes => proposal.yes_votes = proposal.yes_votes.saturating_sub(weight),
+                VoteType::No => proposal.no_votes = proposal.no_votes.saturating_sub(weight),
+                VoteType::Abstain => proposal.abstain_votes = proposal.abstain_votes.saturating_sub(weight),
+            }
+
+            // 添加新投票权重
+            match new_vote {
+                VoteType::Yes => proposal.yes_votes = proposal.yes_votes.saturating_add(weight),
+                VoteType::No => proposal.no_votes = proposal.no_votes.saturating_add(weight),
+                VoteType::Abstain => proposal.abstain_votes = proposal.abstain_votes.saturating_add(weight),
+            }
+
+            // 更新记录
+            let new_record = VoteRecord {
+                voter: who.clone(),
+                vote: new_vote.clone(),
+                weight,
+                voted_at: now,
+            };
+            Proposals::<T>::insert(proposal_id, &proposal);
+            VoteRecords::<T>::insert(proposal_id, &who, new_record);
+
+            Self::deposit_event(Event::VoteChanged {
+                proposal_id,
+                voter: who,
+                old_vote,
+                new_vote,
+                weight,
+            });
+
+            Ok(())
+        }
+
+        /// F6: 紧急暂停治理
+        ///
+        /// 实体所有者可以暂停治理，阻止新提案创建和投票。
+        /// 已有提案仍可 finalize/execute/cancel。
+        /// R8: FullDAO 锁定后受 EmergencyPauseEnabled 控制，DAO 可关闭此权限。
+        #[pallet::call_index(15)]
+        #[pallet::weight(Weight::from_parts(15_000_000, 2_000))]
+        pub fn pause_governance(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
+            ensure!(owner == who, Error::<T>::NotShopOwner);
+
+            // R8: FullDAO 锁定后，检查 DAO 是否仍授权 Owner 紧急暂停
+            if GovernanceLocked::<T>::get(entity_id) {
+                let mode = GovernanceConfigs::<T>::get(entity_id)
+                    .map(|c| c.mode)
+                    .unwrap_or(GovernanceMode::None);
+                if mode == GovernanceMode::FullDAO {
+                    let enabled = EmergencyPauseEnabled::<T>::get(entity_id).unwrap_or(true);
+                    ensure!(enabled, Error::<T>::EmergencyPauseDisabled);
+                }
+            }
+
+            ensure!(!GovernancePaused::<T>::get(entity_id), Error::<T>::GovernanceIsPaused);
+
+            GovernancePaused::<T>::insert(entity_id, true);
+
+            Self::deposit_event(Event::GovernancePausedEvent { entity_id });
+            Ok(())
+        }
+
+        /// F6: 恢复治理
+        #[pallet::call_index(16)]
+        #[pallet::weight(Weight::from_parts(15_000_000, 2_000))]
+        pub fn resume_governance(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
+            ensure!(owner == who, Error::<T>::NotShopOwner);
+
+            ensure!(GovernancePaused::<T>::get(entity_id), Error::<T>::GovernanceNotPaused);
+
+            GovernancePaused::<T>::remove(entity_id);
+
+            Self::deposit_event(Event::GovernanceResumedEvent { entity_id });
+            Ok(())
+        }
+
+        /// F6: 批量取消所有活跃提案
+        ///
+        /// 实体所有者在紧急情况下可一次取消所有 Voting 状态提案。
+        /// R8: FullDAO 锁定后受 BatchCancelEnabled 控制，DAO 可关闭此权限。
+        #[pallet::call_index(17)]
+        #[pallet::weight(Weight::from_parts(100_000_000, 15_000))]
+        pub fn batch_cancel_proposals(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::ShopNotFound)?;
+            ensure!(owner == who, Error::<T>::NotShopOwner);
+
+            // R8: FullDAO 锁定后，检查 DAO 是否仍授权 Owner 批量取消
+            if GovernanceLocked::<T>::get(entity_id) {
+                let mode = GovernanceConfigs::<T>::get(entity_id)
+                    .map(|c| c.mode)
+                    .unwrap_or(GovernanceMode::None);
+                if mode == GovernanceMode::FullDAO {
+                    let enabled = BatchCancelEnabled::<T>::get(entity_id).unwrap_or(true);
+                    ensure!(enabled, Error::<T>::BatchCancelDisabled);
+                }
+            }
+
+            let active_ids = EntityProposals::<T>::get(entity_id);
+            let mut cancelled_count: u32 = 0;
+
+            for proposal_id in active_ids.iter() {
+                if let Some(mut proposal) = Proposals::<T>::get(proposal_id) {
+                    if proposal.status == ProposalStatus::Voting {
+                        proposal.status = ProposalStatus::Cancelled;
+                        Proposals::<T>::insert(proposal_id, &proposal);
+                        Self::deposit_event(Event::ProposalCancelled { proposal_id: *proposal_id });
+                        cancelled_count += 1;
+                    }
+                }
+            }
+
+            // 清理活跃列表中已取消的提案
+            EntityProposals::<T>::mutate(entity_id, |proposals| {
+                proposals.retain(|pid| {
+                    Proposals::<T>::get(pid)
+                        .map(|p| p.status == ProposalStatus::Voting || p.status == ProposalStatus::Passed)
+                        .unwrap_or(false)
+                });
+            });
+
+            // 解锁所有已取消提案的投票者代币
+            for proposal_id in active_ids.iter() {
+                if let Some(proposal) = Proposals::<T>::get(proposal_id) {
+                    if proposal.status == ProposalStatus::Cancelled {
+                        // 解锁投票者代币
+                        for (voter, _) in VoterTokenLocks::<T>::drain_prefix(proposal_id) {
+                            GovernanceLockCount::<T>::mutate(entity_id, &voter, |c| *c = c.saturating_sub(1));
+                            let count = GovernanceLockCount::<T>::get(entity_id, &voter);
+                            if count == 0 {
+                                let locked = GovernanceLockAmount::<T>::take(entity_id, &voter);
+                                if !locked.is_zero() {
+                                    T::TokenProvider::unreserve(entity_id, &voter, locked);
+                                }
+                                GovernanceLockCount::<T>::remove(entity_id, &voter);
+                            }
+                        }
+                        // M3-audit: 移除立即清理 VoteRecords/VotingPowerSnapshot，
+                        // 与 F9 延迟清理设计一致，改由 cleanup_proposal 统一处理
+                    }
+                }
+            }
+
+            Self::deposit_event(Event::BatchProposalsCancelled {
+                entity_id,
+                cancelled_count,
+            });
+
+            Ok(())
+        }
     }
 
     // ==================== 内部函数 ====================
@@ -1502,6 +1941,7 @@ pub mod pallet {
                     );
                 },
                 ProposalType::QuorumChange { new_quorum } => {
+                    ensure!(*new_quorum >= 1, Error::<T>::QuorumTooLow);
                     ensure!(*new_quorum <= 100, Error::<T>::InvalidParameter);
                 },
                 ProposalType::ProposalThresholdChange { new_threshold } => {
@@ -1566,15 +2006,36 @@ pub mod pallet {
                 ProposalType::AddUpgradeRule { .. } | ProposalType::RemoveUpgradeRule { .. } => {
                     return Err(Error::<T>::ProposalTypeNotSupported.into());
                 },
+                // F5: 团队业绩配置变更参数校验
+                ProposalType::TeamPerformanceChange { ref tiers, max_depth, threshold_mode, .. } => {
+                    ensure!(!tiers.is_empty(), Error::<T>::InvalidParameter);
+                    ensure!(*max_depth > 0 && *max_depth <= 30, Error::<T>::InvalidParameter);
+                    ensure!(*threshold_mode <= 1, Error::<T>::InvalidParameter);
+                    for &(_, _, rate) in tiers.iter() {
+                        ensure!(rate <= 10000, Error::<T>::InvalidParameter);
+                    }
+                    // 校验阶梯门槛严格递增
+                    for window in tiers.windows(2) {
+                        ensure!(window[1].0 > window[0].0, Error::<T>::InvalidParameter);
+                    }
+                },
+                ProposalType::TeamPerformancePause | ProposalType::TeamPerformanceResume => {},
+                // R7-L1: 披露级别变更参数校验
+                ProposalType::DisclosureLevelChange { level, .. } => {
+                    ensure!(*level <= 3, Error::<T>::InvalidParameter);
+                },
                 // F1: 新增治理参数提案类型校验
                 ProposalType::ExecutionDelayChange { new_delay_blocks } => {
                     let delay: BlockNumberFor<T> = (*new_delay_blocks).into();
                     ensure!(delay >= T::MinExecutionDelay::get(), Error::<T>::ExecutionDelayTooShort);
                 },
                 ProposalType::PassThresholdChange { new_pass } => {
+                    ensure!(*new_pass >= 1, Error::<T>::PassThresholdTooLow);
                     ensure!(*new_pass <= 100, Error::<T>::InvalidParameter);
                 },
                 ProposalType::AdminVetoToggle { .. } => {},
+                // R8: EmergencyPauseToggle / BatchCancelToggle 参数为 bool，无需校验
+                ProposalType::EmergencyPauseToggle { .. } | ProposalType::BatchCancelToggle { .. } => {},
                 // M2-R3: ShopPause/ShopResume 校验 shop_id 属于当前 entity
                 // （在 create_proposal 时无法知道 entity_id，改在 do_execute_proposal 前校验）
                 _ => {},
@@ -1654,8 +2115,7 @@ pub mod pallet {
             // M4: 清理 VotingPowerSnapshot 避免存储泄漏
             // M1-R3: 使用有界上限 500（实体级治理投票者有限），避免无界迭代
             let _ = VotingPowerSnapshot::<T>::clear_prefix(proposal_id, 500, None);
-            // H3-R2: 清理 VoteRecords 避免存储泄漏
-            let _ = VoteRecords::<T>::clear_prefix(proposal_id, 500, None);
+            // F9: VoteRecords 延迟清理到 cleanup_proposal，保留投票历史供审计
         }
 
         /// C3: on_idle 自动 finalize 过期提案
@@ -1730,13 +2190,8 @@ pub mod pallet {
             match &proposal.proposal_type {
                 // ==================== 商品管理类 ====================
                 ProposalType::PriceChange { product_id, new_price } => {
-                    // 价格变更需要 ProductProvider，暂时记录提案已批准
-                    Self::deposit_event(Event::ProposalExecutionNote {
-                        proposal_id: proposal.id,
-                        note: "PriceChange approved".into(),
-                    });
-                    let _ = (product_id, new_price);
-                    Ok(())
+                    // F3: 价格变更通过 ProductProvider 链上执行
+                    T::ProductProvider::update_price(*product_id, *new_price)
                 },
                 ProposalType::ProductListing { product_cid } => {
                     // 商品上架需要链下解析 CID，记录提案已执行
@@ -1757,12 +2212,9 @@ pub mod pallet {
                     Ok(())
                 },
                 ProposalType::InventoryAdjustment { product_id, new_inventory } => {
-                    Self::deposit_event(Event::ProposalExecutionNote {
-                        proposal_id: proposal.id,
-                        note: "InventoryAdjustment executed".into(),
-                    });
-                    let _ = (product_id, new_inventory);
-                    Ok(())
+                    // F3: 库存调整通过 ProductProvider 链上执行
+                    let inv: u32 = (*new_inventory).saturated_into();
+                    T::ProductProvider::set_inventory(*product_id, inv)
                 },
 
                 // ==================== 店铺运营类 ====================
@@ -2015,6 +2467,59 @@ pub mod pallet {
                     Err(Error::<T>::ProposalTypeNotImplemented.into())
                 },
 
+                // ==================== 团队业绩返佣配置类（F5）====================
+                ProposalType::TeamPerformanceChange { ref tiers, max_depth, allow_stacking, threshold_mode } => {
+                    T::TeamWriter::set_team_config(
+                        entity_id,
+                        tiers.iter().cloned().collect(),
+                        *max_depth,
+                        *allow_stacking,
+                        *threshold_mode,
+                    )
+                },
+                ProposalType::TeamPerformancePause => {
+                    // 暂停团队业绩返佣（通过事件记录，实际暂停由 TeamPerformanceEnabled 存储控制）
+                    Self::deposit_event(Event::ProposalExecutionNote {
+                        proposal_id: proposal.id,
+                        note: "TeamPerformancePause: requires extrinsic execution by owner/admin".into(),
+                    });
+                    Ok(())
+                },
+                ProposalType::TeamPerformanceResume => {
+                    Self::deposit_event(Event::ProposalExecutionNote {
+                        proposal_id: proposal.id,
+                        note: "TeamPerformanceResume: requires extrinsic execution by owner/admin".into(),
+                    });
+                    Ok(())
+                },
+
+                // ==================== 披露管理类（F10）====================
+                ProposalType::DisclosureLevelChange { level, insider_trading_control, blackout_period_after } => {
+                    use pallet_entity_common::DisclosureLevel;
+                    let dl = match level {
+                        0 => DisclosureLevel::Basic,
+                        1 => DisclosureLevel::Standard,
+                        2 => DisclosureLevel::Enhanced,
+                        _ => DisclosureLevel::Full,
+                    };
+                    T::DisclosureProvider::governance_configure_disclosure(
+                        entity_id, dl, *insider_trading_control, (*blackout_period_after).into(),
+                    )
+                },
+                ProposalType::DisclosureResetViolations => {
+                    T::DisclosureProvider::governance_reset_violations(entity_id)
+                },
+
+                // ==================== DAO 可控紧急权限类（R8）====================
+                ProposalType::EmergencyPauseToggle { enabled } => {
+                    EmergencyPauseEnabled::<T>::insert(entity_id, *enabled);
+                    Ok(())
+                },
+                ProposalType::BatchCancelToggle { enabled } => {
+                    BatchCancelEnabled::<T>::insert(entity_id, *enabled);
+                    Ok(())
+                },
+
                 // ==================== 社区类 ====================
                 ProposalType::CommunityEvent { event_cid: _ } => {
                     // 社区活动只是记录，无需执行
@@ -2052,5 +2557,9 @@ impl<T: Config> GovernanceProvider for Pallet<T> {
 
     fn is_governance_locked(entity_id: u64) -> bool {
         pallet::GovernanceLocked::<T>::get(entity_id)
+    }
+
+    fn is_governance_paused(entity_id: u64) -> bool {
+        pallet::GovernancePaused::<T>::get(entity_id)
     }
 }

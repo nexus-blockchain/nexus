@@ -13,6 +13,68 @@ use sp_runtime::DispatchError;
 mod tests;
 
 // ============================================================================
+// 标准化分页类型
+// ============================================================================
+
+/// 分页请求参数
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+pub struct PageRequest {
+    /// 起始偏移量（0-indexed）
+    pub offset: u32,
+    /// 每页数量（上限由各接口自行限制）
+    pub limit: u32,
+}
+
+impl Default for PageRequest {
+    fn default() -> Self {
+        Self { offset: 0, limit: 20 }
+    }
+}
+
+impl PageRequest {
+    /// 创建分页请求
+    pub fn new(offset: u32, limit: u32) -> Self {
+        Self { offset, limit }
+    }
+
+    /// 限制 limit 不超过最大值
+    pub fn capped(self, max_limit: u32) -> Self {
+        Self {
+            offset: self.offset,
+            limit: self.limit.min(max_limit),
+        }
+    }
+}
+
+/// 分页响应
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+pub struct PageResponse<T> {
+    /// 当前页数据
+    pub items: sp_std::vec::Vec<T>,
+    /// 总记录数
+    pub total: u32,
+    /// 是否有更多数据
+    pub has_more: bool,
+}
+
+impl<T> PageResponse<T> {
+    /// 创建空分页响应
+    pub fn empty() -> Self {
+        Self { items: sp_std::vec::Vec::new(), total: 0, has_more: false }
+    }
+
+    /// 从完整列表构建分页响应
+    pub fn from_slice(all_items: sp_std::vec::Vec<T>, page: &PageRequest) -> Self {
+        let total = all_items.len() as u32;
+        let start = (page.offset as usize).min(all_items.len());
+        let end = start.saturating_add(page.limit as usize).min(all_items.len());
+        let has_more = end < all_items.len();
+        let items = all_items.into_iter().skip(start).take(end - start).collect();
+        Self { items, total, has_more }
+    }
+}
+
+// ============================================================================
 // 实体类型枚举 (Phase 2 新增)
 // ============================================================================
 
@@ -118,7 +180,7 @@ pub enum GovernanceMode {
 // ============================================================================
 
 /// 实体状态（Entity 组织层状态）
-#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
 pub enum EntityStatus {
     /// 待审核（reopen_entity 重新开业时使用，新建 create_entity 跳过此状态直接 Active）
     #[default]
@@ -208,6 +270,9 @@ impl EffectiveShopStatus {
                 }
                 if matches!(shop_status, ShopOperatingStatus::Closing) {
                     return Self::Closing;
+                }
+                if matches!(shop_status, ShopOperatingStatus::Banned) {
+                    return Self::Banned;
                 }
                 return Self::PausedByEntity;
             }
@@ -322,6 +387,8 @@ impl ShopOperatingStatus {
 /// - `PURCHASE_REQUIRED` = 必须先消费才能成为会员（手动注册被拒）
 /// - `REFERRAL_REQUIRED` = 必须提供推荐人
 /// - `APPROVAL_REQUIRED` = 需要 Entity owner 审批
+/// - `KYC_REQUIRED` = 注册时需要通过 KYC 认证
+/// - `KYC_UPGRADE_REQUIRED` = 等级升级时需要通过 KYC 认证
 ///
 /// 支持组合，例如 `PURCHASE_REQUIRED | REFERRAL_REQUIRED` = 必须消费且有推荐人
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
@@ -573,7 +640,7 @@ pub struct DividendConfig<Balance, BlockNumber> {
 // ============================================================================
 
 /// 商品状态
-#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
 pub enum ProductStatus {
     /// 草稿（未上架）
     #[default]
@@ -621,7 +688,7 @@ pub enum ProductCategory {
 // ============================================================================
 
 /// 订单状态
-#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
 pub enum OrderStatus {
     /// 已创建，待支付
     #[default]
@@ -640,6 +707,128 @@ pub enum OrderStatus {
     Refunded,
     /// 已过期（支付超时）
     Expired,
+}
+
+// ============================================================================
+// 会员状态枚举
+// ============================================================================
+
+/// 会员状态
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+pub enum MemberStatus {
+    /// 正常活跃
+    #[default]
+    Active,
+    /// 待审批（APPROVAL_REQUIRED 策略时）
+    Pending,
+    /// 暂时冻结（管理员操作）
+    Frozen,
+    /// 永久封禁
+    Banned,
+    /// 有效期已到期
+    Expired,
+}
+
+impl MemberStatus {
+    /// 是否可正常参与实体活动
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Active)
+    }
+
+    /// 是否为受限状态（不可参与活动）
+    pub fn is_restricted(&self) -> bool {
+        matches!(self, Self::Frozen | Self::Banned | Self::Expired)
+    }
+
+    /// 是否可恢复为活跃
+    pub fn can_reactivate(&self) -> bool {
+        matches!(self, Self::Frozen | Self::Expired)
+    }
+
+    /// 是否为待审批状态
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending)
+    }
+}
+
+// ============================================================================
+// 争议相关类型
+// ============================================================================
+
+/// 争议状态（跨模块共享）
+///
+/// 由 dispute 模块设置，供 order/commission/review 等模块查询
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+pub enum DisputeStatus {
+    /// 无争议
+    #[default]
+    None,
+    /// 已提交，等待响应
+    Submitted,
+    /// 被投诉方已响应
+    Responded,
+    /// 调解中
+    Mediating,
+    /// 仲裁中
+    Arbitrating,
+    /// 已解决
+    Resolved,
+    /// 已撤销
+    Withdrawn,
+    /// 已过期
+    Expired,
+}
+
+impl DisputeStatus {
+    /// 是否处于活跃争议状态（未解决）
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Submitted | Self::Responded | Self::Mediating | Self::Arbitrating)
+    }
+
+    /// 是否已终结
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Resolved | Self::Withdrawn | Self::Expired)
+    }
+}
+
+/// 争议裁决结果
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+pub enum DisputeResolution {
+    /// 投诉方胜诉（全额退款）
+    ComplainantWin,
+    /// 被投诉方胜诉（全额放款）
+    RespondentWin,
+    /// 和解（双方协商）
+    Settlement,
+}
+
+// ============================================================================
+// Token Sale 相关类型
+// ============================================================================
+
+/// Token Sale 状态（跨模块共享）
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+pub enum TokenSaleStatus {
+    /// 未开始
+    #[default]
+    NotStarted,
+    /// 发售进行中
+    Active,
+    /// 已暂停
+    Paused,
+    /// 已结束
+    Ended,
+    /// 已取消
+    Cancelled,
+    /// 已完成（全部售出或手动完成）
+    Completed,
+}
+
+impl TokenSaleStatus {
+    /// 是否可以购买
+    pub fn is_purchasable(&self) -> bool {
+        matches!(self, Self::Active)
+    }
 }
 
 // ============================================================================
@@ -782,6 +971,26 @@ pub trait EntityProvider<AccountId> {
         let _ = entity_id;
         false
     }
+
+    // ==================== P6: 元数据查询 ====================
+
+    /// 获取实体名称（UTF-8 字节）
+    fn entity_name(entity_id: u64) -> sp_std::vec::Vec<u8> {
+        let _ = entity_id;
+        sp_std::vec::Vec::new()
+    }
+
+    /// 获取实体元数据 IPFS CID
+    fn entity_metadata_cid(entity_id: u64) -> Option<sp_std::vec::Vec<u8>> {
+        let _ = entity_id;
+        None
+    }
+
+    /// 获取实体描述（UTF-8 字节）
+    fn entity_description(entity_id: u64) -> sp_std::vec::Vec<u8> {
+        let _ = entity_id;
+        sp_std::vec::Vec::new()
+    }
 }
 
 
@@ -899,6 +1108,20 @@ pub trait ShopProvider<AccountId> {
         let _ = shop_id;
         Ok(())
     }
+
+    // ==================== #7 补充: 治理封禁接口 ====================
+
+    /// 封禁 Shop（治理调用，不可被 owner 恢复，需通过治理解封）
+    fn ban_shop(shop_id: u64) -> Result<(), DispatchError> {
+        let _ = shop_id;
+        Ok(())
+    }
+
+    /// 解除 Shop 封禁（治理调用）
+    fn unban_shop(shop_id: u64) -> Result<(), DispatchError> {
+        let _ = shop_id;
+        Ok(())
+    }
 }
 
 /// 商品查询接口
@@ -984,6 +1207,12 @@ pub trait ProductProvider<AccountId, Balance> {
         Ok(())
     }
     
+    /// 级联 unpin 某 Shop 下所有 Product 的 CID（Shop 关闭/封禁时调用）。
+    fn force_unpin_shop_products(shop_id: u64) -> Result<(), DispatchError> {
+        let _ = shop_id;
+        Ok(())
+    }
+
     /// 下架商品（治理调用）
     fn delist_product(product_id: u64) -> Result<(), DispatchError> {
         let _ = product_id;
@@ -1042,6 +1271,52 @@ pub trait OrderProvider<AccountId, Balance> {
         let _ = order_id;
         None
     }
+
+    // ==================== #1 补充: 关键查询方法 ====================
+
+    /// 获取订单状态
+    fn order_status(order_id: u64) -> Option<OrderStatus> {
+        let _ = order_id;
+        None
+    }
+
+    /// 获取订单所属 Entity ID（通过 shop_id 间接获取或直接存储）
+    fn order_entity_id(order_id: u64) -> Option<u64> {
+        let _ = order_id;
+        None
+    }
+
+    /// 获取订单商品 ID
+    fn order_product_id(order_id: u64) -> Option<u64> {
+        let _ = order_id;
+        None
+    }
+
+    /// 获取订单购买数量
+    fn order_quantity(order_id: u64) -> Option<u32> {
+        let _ = order_id;
+        None
+    }
+
+    // ==================== P3: 时间戳查询补全 ====================
+
+    /// 获取订单创建时间（区块号）
+    fn order_created_at(order_id: u64) -> Option<u64> {
+        let _ = order_id;
+        None
+    }
+
+    /// 获取订单支付时间（区块号）
+    fn order_paid_at(order_id: u64) -> Option<u64> {
+        let _ = order_id;
+        None
+    }
+
+    /// 获取订单发货时间（区块号）
+    fn order_shipped_at(order_id: u64) -> Option<u64> {
+        let _ = order_id;
+        None
+    }
 }
 
 // ============================================================================
@@ -1058,6 +1333,33 @@ impl<AccountId: Default> EntityProvider<AccountId> for NullEntityProvider {
     fn entity_owner(_entity_id: u64) -> Option<AccountId> { None }
     fn entity_account(_entity_id: u64) -> AccountId { AccountId::default() }
     fn update_entity_stats(_entity_id: u64, _sales_amount: u128, _order_count: u32) -> Result<(), DispatchError> { Ok(()) }
+}
+
+// ============================================================================
+// P5: Entity 状态变更级联通知
+// ============================================================================
+
+/// Entity 状态变更通知接口
+///
+/// 供下游模块（Shop、Token、Market、Ads 等）在 Entity 状态变更时做出响应。
+/// 当 Entity 被暂停/封禁/关闭/恢复时，级联通知所有关联模块执行清理逻辑。
+pub trait OnEntityStatusChange {
+    /// Entity 被暂停时触发
+    fn on_entity_suspended(entity_id: u64);
+    /// Entity 被封禁时触发
+    fn on_entity_banned(entity_id: u64);
+    /// Entity 恢复运营时触发
+    fn on_entity_resumed(entity_id: u64);
+    /// Entity 被关闭时触发
+    fn on_entity_closed(entity_id: u64);
+}
+
+/// 空 Entity 状态变更通知（测试用或无下游模块时）
+impl OnEntityStatusChange for () {
+    fn on_entity_suspended(_entity_id: u64) {}
+    fn on_entity_banned(_entity_id: u64) {}
+    fn on_entity_resumed(_entity_id: u64) {}
+    fn on_entity_closed(_entity_id: u64) {}
 }
 
 /// 空 Shop 提供者（测试用）
@@ -1111,13 +1413,46 @@ impl<AccountId, Balance> OrderProvider<AccountId, Balance> for NullOrderProvider
 }
 
 // ============================================================================
+// P2: 订单状态变更通知
+// ============================================================================
+
+/// 订单状态变更通知接口
+///
+/// 供下游模块（佣金、会员、物流、保险等）在订单状态变更时做出响应。
+/// 实现开闭原则：新增下游模块无需修改 order pallet。
+pub trait OnOrderStatusChange<AccountId, Balance> {
+    /// 订单状态变更时触发
+    fn on_order_status_changed(
+        order_id: u64,
+        entity_id: u64,
+        shop_id: u64,
+        buyer: &AccountId,
+        amount: Balance,
+        old_status: &OrderStatus,
+        new_status: &OrderStatus,
+    );
+}
+
+impl<AccountId, Balance> OnOrderStatusChange<AccountId, Balance> for () {
+    fn on_order_status_changed(
+        _order_id: u64,
+        _entity_id: u64,
+        _shop_id: u64,
+        _buyer: &AccountId,
+        _amount: Balance,
+        _old_status: &OrderStatus,
+        _new_status: &OrderStatus,
+    ) {}
+}
+
+// ============================================================================
 // 实体代币接口
 // ============================================================================
 
 /// 实体代币接口
 /// 
 /// 供 order 模块调用，实现购物返积分和积分抵扣
-pub trait EntityTokenProvider<AccountId, Balance> {
+pub trait EntityTokenProvider<AccountId, Balance: Default> {
     /// 检查实体是否启用代币
     fn is_token_enabled(entity_id: u64) -> bool;
     
@@ -1176,6 +1511,44 @@ pub trait EntityTokenProvider<AccountId, Balance> {
 
     /// H4: 治理提案销毁代币（从 entity 派生账户销毁）
     fn governance_burn(entity_id: u64, amount: Balance) -> Result<(), DispatchError>;
+
+    // ==================== #11 补充: 元数据查询 ====================
+
+    /// 获取代币名称（UTF-8 字节）
+    fn token_name(entity_id: u64) -> sp_std::vec::Vec<u8> {
+        let _ = entity_id;
+        sp_std::vec::Vec::new()
+    }
+
+    /// 获取代币符号（UTF-8 字节）
+    fn token_symbol(entity_id: u64) -> sp_std::vec::Vec<u8> {
+        let _ = entity_id;
+        sp_std::vec::Vec::new()
+    }
+
+    /// 获取代币精度
+    fn token_decimals(entity_id: u64) -> u8 {
+        let _ = entity_id;
+        0
+    }
+
+    /// 代币是否可自由转让（检查 TransferRestrictionMode）
+    fn is_token_transferable(entity_id: u64) -> bool {
+        let _ = entity_id;
+        false
+    }
+
+    /// 获取代币持有人数量
+    fn token_holder_count(entity_id: u64) -> u32 {
+        let _ = entity_id;
+        0
+    }
+
+    /// 获取可用余额（总余额 - 锁仓 - 预留）
+    fn available_balance(entity_id: u64, holder: &AccountId) -> Balance {
+        let _ = (entity_id, holder);
+        Default::default()
+    }
 }
 
 /// 空实体代币提供者（测试用或未启用代币时）
@@ -1269,6 +1642,43 @@ impl EntityTokenPriceProvider for () {
 }
 
 // ============================================================================
+// P7: 手续费配置查询接口
+// ============================================================================
+
+/// 手续费配置查询接口
+///
+/// 统一跨模块手续费查询，避免费率逻辑碎片化。
+/// 费率单位: 基点 (bps)，100 = 1%。
+pub trait FeeConfigProvider {
+    /// 获取全局 NEX 平台费率（bps）
+    fn platform_fee_rate() -> u16;
+
+    /// 获取 Entity 级平台费率覆盖（None = 使用全局默认）
+    fn entity_fee_override(entity_id: u64) -> Option<u16> {
+        let _ = entity_id;
+        None
+    }
+
+    /// 获取 Entity Token 交易费率（bps）
+    fn token_fee_rate(entity_id: u64) -> u16 {
+        let _ = entity_id;
+        0
+    }
+
+    /// 获取 Entity 有效费率（优先 entity_fee_override，回退 platform_fee_rate）
+    fn effective_fee_rate(entity_id: u64) -> u16 {
+        Self::entity_fee_override(entity_id).unwrap_or_else(Self::platform_fee_rate)
+    }
+}
+
+/// 空手续费配置提供者（测试用）
+pub struct NullFeeConfigProvider;
+
+impl FeeConfigProvider for NullFeeConfigProvider {
+    fn platform_fee_rate() -> u16 { 100 }
+}
+
+// ============================================================================
 // 披露接口
 // ============================================================================
 
@@ -1309,6 +1719,67 @@ pub trait DisclosureProvider<AccountId> {
 
     /// 检查披露是否逾期
     fn is_disclosure_overdue(entity_id: u64) -> bool;
+
+    /// F7: 获取实体违规次数
+    fn get_violation_count(_entity_id: u64) -> u32 { 0 }
+
+    /// F7: 获取内幕人员角色（返回 InsiderRole 的 u8 表示）
+    ///
+    /// 0=Owner, 1=Admin, 2=Auditor, 3=Advisor, 4=MajorHolder
+    fn get_insider_role(_entity_id: u64, _account: &AccountId) -> Option<u8> { None }
+
+    /// F7: 检查实体是否已配置披露
+    fn is_disclosure_configured(_entity_id: u64) -> bool { false }
+
+    /// F6/F7: 检查实体是否被标记为高风险（违规超阈值）
+    fn is_high_risk(_entity_id: u64) -> bool { false }
+
+    // ==================== F10: 治理写入接口 ====================
+
+    /// F10: 治理提案配置披露级别
+    fn governance_configure_disclosure(
+        _entity_id: u64,
+        _level: DisclosureLevel,
+        _insider_trading_control: bool,
+        _blackout_period_after: u64,
+    ) -> sp_runtime::DispatchResult {
+        Err(sp_runtime::DispatchError::Other("not implemented"))
+    }
+
+    /// F10: 治理提案重置违规记录
+    fn governance_reset_violations(_entity_id: u64) -> sp_runtime::DispatchResult {
+        Err(sp_runtime::DispatchError::Other("not implemented"))
+    }
+
+    // ==================== v0.6: 大股东自动注册 ====================
+
+    /// 将账户注册为大股东内幕人员（供 token 模块在持仓超过阈值时调用）
+    fn register_major_holder(_entity_id: u64, _account: &AccountId) -> sp_runtime::DispatchResult {
+        Ok(())
+    }
+
+    /// 注销大股东内幕人员身份（供 token 模块在持仓低于阈值时调用）
+    fn deregister_major_holder(_entity_id: u64, _account: &AccountId) -> sp_runtime::DispatchResult {
+        Ok(())
+    }
+
+    // ==================== v0.6: 渐进式处罚 ====================
+
+    /// 获取实体当前处罚级别 (0=None, 1=Warning, 2=Restricted, 3=Suspended, 4=Delisted)
+    fn get_penalty_level(_entity_id: u64) -> u8 { 0 }
+
+    /// 检查实体是否受到活跃处罚（Restricted 及以上）
+    fn is_penalty_active(_entity_id: u64) -> bool { false }
+}
+
+/// 披露违规回调 — 供下游模块（token/market）响应披露违规事件
+pub trait OnDisclosureViolation {
+    /// 违规达到阈值或处罚升级时调用
+    fn on_violation_threshold_reached(entity_id: u64, violation_count: u32, penalty_level: u8);
+}
+
+impl OnDisclosureViolation for () {
+    fn on_violation_threshold_reached(_: u64, _: u32, _: u8) {}
 }
 
 /// 空披露提供者（测试用或未启用披露时）
@@ -1320,6 +1791,12 @@ impl<AccountId> DisclosureProvider<AccountId> for NullDisclosureProvider {
     fn can_insider_trade(_entity_id: u64, _account: &AccountId) -> bool { true }
     fn get_disclosure_level(_entity_id: u64) -> DisclosureLevel { DisclosureLevel::Basic }
     fn is_disclosure_overdue(_entity_id: u64) -> bool { false }
+    fn get_violation_count(_entity_id: u64) -> u32 { 0 }
+    fn get_insider_role(_entity_id: u64, _account: &AccountId) -> Option<u8> { None }
+    fn is_disclosure_configured(_entity_id: u64) -> bool { false }
+    fn is_high_risk(_entity_id: u64) -> bool { false }
+    fn get_penalty_level(_entity_id: u64) -> u8 { 0 }
+    fn is_penalty_active(_entity_id: u64) -> bool { false }
 }
 
 // ============================================================================
@@ -1342,6 +1819,25 @@ pub trait KycProvider<AccountId> {
     fn meets_kyc_requirement(entity_id: u64, account: &AccountId, required_level: u8) -> bool {
         Self::kyc_level(entity_id, account) >= required_level
     }
+
+    // ==================== #9 补充: 过期与参与检查 ====================
+
+    /// KYC 认证是否已过期
+    fn is_kyc_expired(entity_id: u64, account: &AccountId) -> bool {
+        let _ = (entity_id, account);
+        false
+    }
+
+    /// 用户是否可以参与实体活动（综合 KYC 状态 + 宽限期 + 封禁状态）
+    fn can_participate(entity_id: u64, account: &AccountId) -> bool {
+        Self::is_kyc_approved(entity_id, account)
+    }
+
+    /// 获取 KYC 过期时间（区块号，0 = 永不过期或无记录）
+    fn kyc_expires_at(entity_id: u64, account: &AccountId) -> u64 {
+        let _ = (entity_id, account);
+        0
+    }
 }
 
 /// 空 KYC 提供者（测试用或未启用 KYC 时）
@@ -1349,6 +1845,19 @@ pub struct NullKycProvider;
 
 impl<AccountId> KycProvider<AccountId> for NullKycProvider {
     fn kyc_level(_entity_id: u64, _account: &AccountId) -> u8 { 0 }
+}
+
+/// KYC 状态变更通知接口
+///
+/// 供下游模块（订单、交易等）在 KYC 状态变更时做出响应。
+/// old_status / new_status 使用 u8 编码避免跨 pallet 类型依赖:
+/// 0=NotSubmitted, 1=Pending, 2=Approved, 3=Rejected, 4=Expired, 5=Revoked
+pub trait OnKycStatusChange<AccountId> {
+    fn on_kyc_status_changed(entity_id: u64, account: &AccountId, old_status: u8, new_status: u8, level: u8);
+}
+
+impl<AccountId> OnKycStatusChange<AccountId> for () {
+    fn on_kyc_status_changed(_entity_id: u64, _account: &AccountId, _old_status: u8, _new_status: u8, _level: u8) {}
 }
 
 // ============================================================================
@@ -1367,6 +1876,38 @@ pub trait GovernanceProvider {
 
     /// 实体治理是否被锁定（例如重大变更期间）
     fn is_governance_locked(entity_id: u64) -> bool;
+
+    // ==================== #10 补充: 治理查询扩展 ====================
+
+    /// 获取活跃提案数量
+    fn active_proposal_count(entity_id: u64) -> u32 {
+        let _ = entity_id;
+        0
+    }
+
+    /// 检查实体治理是否已初始化
+    fn is_governance_initialized(entity_id: u64) -> bool {
+        let _ = entity_id;
+        false
+    }
+
+    /// 获取实体治理配置中的执行延迟（区块数）
+    fn execution_delay(entity_id: u64) -> u32 {
+        let _ = entity_id;
+        0
+    }
+
+    /// 获取通过阈值（百分比 0-100）
+    fn pass_threshold(entity_id: u64) -> u8 {
+        let _ = entity_id;
+        0
+    }
+
+    /// 实体治理是否被暂停
+    fn is_governance_paused(entity_id: u64) -> bool {
+        let _ = entity_id;
+        false
+    }
 }
 
 /// 空治理提供者（测试用或未启用治理时）
@@ -1583,6 +2124,34 @@ pub trait MemberProvider<AccountId> {
         false
     }
 
+    /// 查询会员是否已激活（如首次消费达标）
+    ///
+    /// "激活"与"未封禁"是两个独立概念：
+    /// - 新注册但未消费的会员 → is_banned=false 但 is_activated=false
+    /// - 未激活会员不应获得佣金
+    fn is_activated(entity_id: u64, account: &AccountId) -> bool {
+        let _ = (entity_id, account);
+        true // 默认实现: 向后兼容，所有会员视为已激活
+    }
+
+    /// F6: 查询会员是否处于活跃状态（非冻结/非封禁/非过期）
+    fn is_member_active(entity_id: u64, account: &AccountId) -> bool {
+        // 默认实现: 非 banned 即为 active（向后兼容）
+        !Self::is_banned(entity_id, account)
+    }
+
+    /// F5: 获取推荐关系建立时间（区块号，0 = 未知/不支持）
+    fn referral_registered_at(entity_id: u64, account: &AccountId) -> u64 {
+        let _ = (entity_id, account);
+        0
+    }
+
+    /// F7: 获取已完成的成功订单数（排除取消/退款的订单）
+    fn completed_order_count(entity_id: u64, account: &AccountId) -> u32 {
+        let _ = (entity_id, account);
+        0
+    }
+
     /// 查询会员最后活跃时间（区块号，0 = 未知/非会员）
     fn last_active_at(entity_id: u64, account: &AccountId) -> u64 {
         let _ = (entity_id, account);
@@ -1611,6 +2180,17 @@ pub trait MemberProvider<AccountId> {
     fn get_member_spent_usdt(entity_id: u64, account: &AccountId) -> u64 {
         let _ = (entity_id, account);
         0
+    }
+
+    // ==================== #5 补充: 溢出推荐人查询 ====================
+
+    /// 获取真实推荐人（溢出安置时记录的原始推荐人）
+    ///
+    /// 溢出场景下 `get_referrer` 返回的是实际安置节点，
+    /// `get_introduced_by` 返回原始推荐人。无溢出时返回 None。
+    fn get_introduced_by(entity_id: u64, account: &AccountId) -> Option<AccountId> {
+        let _ = (entity_id, account);
+        None
     }
 
     // ==================== 会员注册/更新 ====================
@@ -1677,6 +2257,26 @@ pub trait MemberProvider<AccountId> {
     /// G1: 设置统计策略（治理调用）
     fn set_stats_policy(entity_id: u64, policy_bits: u8) -> Result<(), DispatchError> {
         let _ = (entity_id, policy_bits);
+        Ok(())
+    }
+
+    // ==================== #6 补充: 治理封禁/移除接口 ====================
+
+    /// 封禁会员（治理调用，禁止参与实体活动）
+    fn ban_member(entity_id: u64, account: &AccountId) -> Result<(), DispatchError> {
+        let _ = (entity_id, account);
+        Ok(())
+    }
+
+    /// 解除会员封禁（治理调用）
+    fn unban_member(entity_id: u64, account: &AccountId) -> Result<(), DispatchError> {
+        let _ = (entity_id, account);
+        Ok(())
+    }
+
+    /// 移除会员（治理调用，从实体会员列表中删除）
+    fn remove_member(entity_id: u64, account: &AccountId) -> Result<(), DispatchError> {
+        let _ = (entity_id, account);
         Ok(())
     }
 }
@@ -1746,5 +2346,342 @@ impl<AccountId, Balance: Default> EntityTokenProvider<AccountId, Balance> for Nu
     fn governance_burn(_: u64, _: Balance) -> Result<(), DispatchError> {
         Ok(())
     }
+    fn available_balance(_: u64, _: &AccountId) -> Balance {
+        Default::default()
+    }
 }
 
+// ============================================================================
+// #2 争议查询接口（跨模块）
+// ============================================================================
+
+/// 争议查询接口
+///
+/// 供 order/commission/review 等模块查询争议状态，
+/// 无需直接依赖 pallet-arbitration。
+pub trait DisputeQueryProvider<AccountId> {
+    /// 获取订单的争议状态
+    fn order_dispute_status(order_id: u64) -> DisputeStatus;
+
+    /// 获取争议的裁决结果（仅已解决的争议）
+    fn dispute_resolution(dispute_id: u64) -> Option<DisputeResolution>;
+
+    /// 查询账户在指定域下的活跃争议数量
+    fn active_dispute_count(domain: u8, account: &AccountId) -> u32;
+
+    /// 检查订单是否有活跃争议
+    fn has_active_dispute(order_id: u64) -> bool {
+        Self::order_dispute_status(order_id).is_active()
+    }
+
+    /// 获取争议 ID（通过订单 ID 查找）
+    fn dispute_id_by_order(order_id: u64) -> Option<u64> {
+        let _ = order_id;
+        None
+    }
+
+    /// 获取争议涉及金额
+    fn dispute_amount(dispute_id: u64) -> Option<u128> {
+        let _ = dispute_id;
+        None
+    }
+}
+
+/// 空争议查询提供者（测试用或未启用争议系统时）
+pub struct NullDisputeQueryProvider;
+
+impl<AccountId> DisputeQueryProvider<AccountId> for NullDisputeQueryProvider {
+    fn order_dispute_status(_order_id: u64) -> DisputeStatus { DisputeStatus::None }
+    fn dispute_resolution(_dispute_id: u64) -> Option<DisputeResolution> { None }
+    fn active_dispute_count(_domain: u8, _account: &AccountId) -> u32 { 0 }
+}
+
+// ============================================================================
+// #8 Token Sale 查询接口
+// ============================================================================
+
+/// Token Sale 查询接口
+///
+/// 供 entity/governance/frontend 等模块查询 Token Sale 状态，
+/// 无需直接依赖 pallet-entity-tokensale。
+pub trait TokenSaleProvider<Balance> {
+    /// 获取实体当前活跃的发售轮次 ID
+    fn active_sale_round(entity_id: u64) -> Option<u64>;
+
+    /// 获取发售轮次状态
+    fn sale_round_status(round_id: u64) -> Option<TokenSaleStatus>;
+
+    /// 获取轮次已售数量
+    fn sold_amount(round_id: u64) -> Option<Balance>;
+
+    /// 获取轮次剩余数量
+    fn remaining_amount(round_id: u64) -> Option<Balance>;
+
+    /// 获取轮次参与人数
+    fn participants_count(round_id: u64) -> Option<u32>;
+
+    /// 检查实体是否有活跃的发售
+    fn has_active_sale(entity_id: u64) -> bool {
+        Self::active_sale_round(entity_id).is_some()
+    }
+
+    /// 获取轮次总供应量
+    fn sale_total_supply(round_id: u64) -> Option<Balance> {
+        let _ = round_id;
+        None
+    }
+
+    /// 获取轮次所属实体 ID
+    fn sale_entity_id(round_id: u64) -> Option<u64> {
+        let _ = round_id;
+        None
+    }
+}
+
+/// 空 Token Sale 提供者（测试用或未启用 Token Sale 时）
+pub struct NullTokenSaleProvider;
+
+impl<Balance> TokenSaleProvider<Balance> for NullTokenSaleProvider {
+    fn active_sale_round(_entity_id: u64) -> Option<u64> { None }
+    fn sale_round_status(_round_id: u64) -> Option<TokenSaleStatus> { None }
+    fn sold_amount(_round_id: u64) -> Option<Balance> { None }
+    fn remaining_amount(_round_id: u64) -> Option<Balance> { None }
+    fn participants_count(_round_id: u64) -> Option<u32> { None }
+}
+
+// ============================================================================
+// #12 服务提供者接口
+// ============================================================================
+
+/// 服务类型
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+pub enum ServiceType {
+    /// 通用服务
+    #[default]
+    General,
+    /// 专业咨询
+    Consulting,
+    /// 技术服务
+    Technical,
+    /// 教育培训
+    Education,
+    /// 创意设计
+    Creative,
+    /// 其他
+    Other,
+}
+
+/// 服务状态
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+pub enum ServiceStatus {
+    /// 草稿
+    #[default]
+    Draft,
+    /// 已发布/可用
+    Available,
+    /// 已暂停
+    Suspended,
+    /// 已下架
+    Delisted,
+}
+
+/// 服务查询接口
+///
+/// 供 order/review/governance 等模块查询服务信息，
+/// 服务与商品不同：无库存概念，按时间/次数/订阅计费。
+pub trait ServiceProvider<AccountId, Balance> {
+    /// 检查服务是否存在
+    fn service_exists(service_id: u64) -> bool;
+
+    /// 检查服务是否可用
+    fn is_service_available(service_id: u64) -> bool;
+
+    /// 获取服务所属店铺 ID
+    fn service_shop_id(service_id: u64) -> Option<u64>;
+
+    /// 获取服务价格
+    fn service_price(service_id: u64) -> Option<Balance>;
+
+    /// 获取服务类型
+    fn service_type(service_id: u64) -> Option<ServiceType>;
+
+    /// 获取服务提供者（通过 Shop → Owner）
+    fn service_owner(service_id: u64) -> Option<AccountId> {
+        let _ = service_id;
+        None
+    }
+
+    /// 获取服务状态
+    fn service_status(service_id: u64) -> Option<ServiceStatus> {
+        let _ = service_id;
+        None
+    }
+}
+
+/// 空服务提供者（测试用或未启用服务系统时）
+pub struct NullServiceProvider;
+
+impl<AccountId, Balance> ServiceProvider<AccountId, Balance> for NullServiceProvider {
+    fn service_exists(_service_id: u64) -> bool { false }
+    fn is_service_available(_service_id: u64) -> bool { false }
+    fn service_shop_id(_service_id: u64) -> Option<u64> { None }
+    fn service_price(_service_id: u64) -> Option<Balance> { None }
+    fn service_type(_service_id: u64) -> Option<ServiceType> { None }
+}
+
+// ============================================================================
+// P8: 锁仓/归属 (Vesting) 接口
+// ============================================================================
+
+/// 锁仓/归属计划
+///
+/// 定义代币的线性释放规则：悬崖期 + 线性释放期。
+/// 用于 Token Sale 锁仓、团队分配、投资者保护等场景。
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+pub struct VestingSchedule {
+    /// 锁仓总量
+    pub total: u128,
+    /// 已释放量
+    pub released: u128,
+    /// 开始区块
+    pub start_block: u64,
+    /// 悬崖期（区块数，悬崖期内不释放）
+    pub cliff_blocks: u64,
+    /// 线性释放期（区块数，悬崖期后线性释放）
+    pub vesting_blocks: u64,
+}
+
+impl VestingSchedule {
+    /// 计算在指定区块时可释放的数量（尚未领取的部分）
+    pub fn releasable_at(&self, current_block: u64) -> u128 {
+        let cliff_end = self.start_block.saturating_add(self.cliff_blocks);
+        if current_block < cliff_end {
+            return 0;
+        }
+        let elapsed = current_block.saturating_sub(cliff_end);
+        let total_vested = if self.vesting_blocks == 0 || elapsed >= self.vesting_blocks {
+            self.total
+        } else {
+            self.total.saturating_mul(elapsed as u128) / (self.vesting_blocks as u128)
+        };
+        total_vested.saturating_sub(self.released)
+    }
+
+    /// 是否已完全释放
+    pub fn is_fully_released(&self) -> bool {
+        self.released >= self.total
+    }
+}
+
+/// 锁仓/归属查询接口
+///
+/// 供 token sale / governance / frontend 等模块查询和操作锁仓计划，
+/// 无需直接依赖 vesting 实现模块。
+pub trait VestingProvider<AccountId> {
+    /// 获取账户在指定实体下的锁仓余额
+    fn vesting_balance(entity_id: u64, account: &AccountId) -> u128;
+
+    /// 获取当前可释放的余额
+    fn releasable_balance(entity_id: u64, account: &AccountId) -> u128;
+
+    /// 释放已到期的锁仓代币，返回实际释放数量
+    fn release(entity_id: u64, account: &AccountId) -> Result<u128, DispatchError>;
+
+    /// 获取锁仓计划详情
+    fn vesting_schedule(entity_id: u64, account: &AccountId) -> Option<VestingSchedule> {
+        let _ = (entity_id, account);
+        None
+    }
+
+    /// 检查账户是否有活跃锁仓
+    fn has_vesting(entity_id: u64, account: &AccountId) -> bool {
+        Self::vesting_balance(entity_id, account) > 0
+    }
+}
+
+/// 空锁仓提供者（测试用或未启用锁仓时）
+pub struct NullVestingProvider;
+
+impl<AccountId> VestingProvider<AccountId> for NullVestingProvider {
+    fn vesting_balance(_: u64, _: &AccountId) -> u128 { 0 }
+    fn releasable_balance(_: u64, _: &AccountId) -> u128 { 0 }
+    fn release(_: u64, _: &AccountId) -> Result<u128, DispatchError> { Ok(0) }
+}
+
+// ============================================================================
+// P9: 分红查询接口
+// ============================================================================
+
+/// 分红查询接口
+///
+/// 供 governance / frontend 等模块查询和领取分红，
+/// 无需直接依赖 token 模块的分红实现。
+pub trait DividendProvider<AccountId, Balance: Default> {
+    /// 查询待领取分红
+    fn pending_dividend(entity_id: u64, account: &AccountId) -> Balance;
+
+    /// 领取分红
+    fn claim_dividend(entity_id: u64, account: &AccountId) -> Result<Balance, DispatchError>;
+
+    /// 检查分红是否已激活
+    fn is_dividend_active(entity_id: u64) -> bool;
+
+    /// 获取下次分红时间（区块号，None = 未配置或未激活）
+    fn next_distribution_at(entity_id: u64) -> Option<u64> {
+        let _ = entity_id;
+        None
+    }
+
+    /// 获取累计已分红总额
+    fn total_distributed(entity_id: u64) -> Balance {
+        let _ = entity_id;
+        Default::default()
+    }
+}
+
+/// 空分红提供者（测试用或未启用分红时）
+pub struct NullDividendProvider;
+
+impl<AccountId, Balance: Default> DividendProvider<AccountId, Balance> for NullDividendProvider {
+    fn pending_dividend(_: u64, _: &AccountId) -> Balance { Default::default() }
+    fn claim_dividend(_: u64, _: &AccountId) -> Result<Balance, DispatchError> { Ok(Default::default()) }
+    fn is_dividend_active(_: u64) -> bool { false }
+}
+
+// ============================================================================
+// P12: 紧急暂停接口
+// ============================================================================
+
+/// 紧急暂停接口
+///
+/// 全局紧急暂停机制，用于发现严重漏洞或遭受攻击时一键暂停核心操作。
+/// 由 Root 调用，影响所有交易、订单、Token 操作。
+pub trait EmergencyProvider {
+    /// 检查系统是否处于紧急暂停状态
+    fn is_emergency_paused() -> bool;
+
+    /// 检查指定模块是否被暂停（模块 ID 由各 pallet 自定义）
+    ///
+    /// 默认行为：跟随全局暂停状态
+    fn is_module_paused(module_id: u8) -> bool {
+        let _ = module_id;
+        Self::is_emergency_paused()
+    }
+
+    /// 暂停系统（仅 Root）
+    fn pause_system() -> Result<(), DispatchError> {
+        Err(DispatchError::Other("not implemented"))
+    }
+
+    /// 恢复系统（仅 Root）
+    fn resume_system() -> Result<(), DispatchError> {
+        Err(DispatchError::Other("not implemented"))
+    }
+}
+
+/// 空紧急暂停提供者（测试用，系统永不暂停）
+pub struct NullEmergencyProvider;
+
+impl EmergencyProvider for NullEmergencyProvider {
+    fn is_emergency_paused() -> bool { false }
+}

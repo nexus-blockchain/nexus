@@ -436,12 +436,23 @@ pub trait SingleLinePlanWriter {
     ) -> Result<(), DispatchError>;
     /// 清除单线收益配置
     fn clear_config(entity_id: u64) -> Result<(), DispatchError>;
+    /// 设置按等级自定义层数覆盖
+    fn set_level_based_levels(
+        entity_id: u64,
+        level_id: u8,
+        upline_levels: u8,
+        downline_levels: u8,
+    ) -> Result<(), DispatchError>;
+    /// 清除指定等级的层数覆盖
+    fn clear_level_overrides(entity_id: u64, level_id: u8) -> Result<(), DispatchError>;
 }
 
 /// 空 SingleLinePlanWriter 实现
 impl SingleLinePlanWriter for () {
     fn set_single_line_config(_: u64, _: u16, _: u16, _: u8, _: u8, _: u128, _: u8, _: u8) -> Result<(), DispatchError> { Ok(()) }
     fn clear_config(_: u64) -> Result<(), DispatchError> { Ok(()) }
+    fn set_level_based_levels(_: u64, _: u8, _: u8, _: u8) -> Result<(), DispatchError> { Ok(()) }
+    fn clear_level_overrides(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
 }
 
 /// 沉淀池奖励插件写入接口（由 commission-pool-reward 实现）

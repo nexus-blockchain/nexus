@@ -61,5 +61,29 @@ sp_api::decl_runtime_apis! {
 
         /// 查询已验证的活跃实体列表（带分页）
         fn get_verified_entities(offset: u32, limit: u32) -> Vec<u64>;
+
+        /// 按名称查找实体（normalized 匹配）
+        fn get_entity_by_name(name: Vec<u8>) -> Option<u64>;
+
+        /// 查询实体管理员列表（含权限位掩码）
+        fn get_entity_admins(entity_id: u64) -> Vec<(AccountId, u32)>;
+
+        /// 查询实体暂停原因
+        fn get_entity_suspension_reason(entity_id: u64) -> Option<Vec<u8>>;
+
+        /// 查询实体销售统计 (total_sales, total_orders)
+        fn get_entity_sales(entity_id: u64) -> Option<(Balance, u64)>;
+
+        /// 查询实体推荐人
+        fn get_entity_referrer(entity_id: u64) -> Option<AccountId>;
+
+        /// 查询推荐人的所有推荐实体
+        fn get_referrer_entities(account: AccountId) -> Vec<u64>;
+
+        /// 按状态查询实体列表（分页）
+        fn get_entities_by_status(status: EntityStatus, offset: u32, limit: u32) -> Vec<u64>;
+
+        /// 查询账户在实体中的权限（owner 返回 ALL_DEFINED，admin 返回权限位，非成员返回 None）
+        fn check_admin_permission(entity_id: u64, account: AccountId) -> Option<u32>;
     }
 }

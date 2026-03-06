@@ -161,12 +161,12 @@ pub mod pallet {
         type WeightInfo: WeightInfo;
     }
 
-    /// KYC 级别查询 Trait
+    /// KYC 级别查询 Trait（per-entity: 用户在指定 Entity 下的 KYC 级别）
     pub trait KycLevelProvider<AccountId> {
-        /// 获取用户 KYC 级别 (0-4)
-        fn get_kyc_level(account: &AccountId) -> u8;
-        /// 检查是否满足 KYC 要求
-        fn meets_kyc_requirement(account: &AccountId, min_level: u8) -> bool;
+        /// 获取用户在指定 Entity 下的 KYC 级别 (0-4)
+        fn get_kyc_level(entity_id: u64, account: &AccountId) -> u8;
+        /// 检查用户在指定 Entity 下是否满足 KYC 要求
+        fn meets_kyc_requirement(entity_id: u64, account: &AccountId, min_level: u8) -> bool;
     }
 
     /// 实体成员查询 Trait
@@ -178,8 +178,8 @@ pub mod pallet {
     /// 空 KYC 提供者（默认实现）
     pub struct NullKycProvider;
     impl<AccountId> KycLevelProvider<AccountId> for NullKycProvider {
-        fn get_kyc_level(_account: &AccountId) -> u8 { 0 }
-        fn meets_kyc_requirement(_account: &AccountId, min_level: u8) -> bool { min_level == 0 }
+        fn get_kyc_level(_entity_id: u64, _account: &AccountId) -> u8 { 0 }
+        fn meets_kyc_requirement(_entity_id: u64, _account: &AccountId, min_level: u8) -> bool { min_level == 0 }
     }
 
     /// 空成员提供者（默认实现）
@@ -188,7 +188,7 @@ pub mod pallet {
         fn is_member(_entity_id: u64, _account: &AccountId) -> bool { true }
     }
 
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -290,26 +290,28 @@ pub mod pallet {
 
     // ========== Phase 8 新增存储项：转账限制 ==========
 
-    /// 转账白名单 entity_id -> Vec<AccountId>
+    /// 转账白名单 (entity_id, account) -> ()  [O(1) 查询]
     #[pallet::storage]
-    #[pallet::getter(fn transfer_whitelist)]
-    pub type TransferWhitelist<T: Config> = StorageMap<
+    pub type TransferWhitelist<T: Config> = StorageDoubleMap<
         _,
         Blake2_128Concat,
         u64,  // entity_id
-        BoundedVec<T::AccountId, T::MaxTransferListSize>,
-        ValueQuery,
+        Blake2_128Concat,
+        T::AccountId,
+        (),
+        OptionQuery,
     >;
 
-    /// 转账黑名单 entity_id -> Vec<AccountId>
+    /// 转账黑名单 (entity_id, account) -> ()  [O(1) 查询]
     #[pallet::storage]
-    #[pallet::getter(fn transfer_blacklist)]
-    pub type TransferBlacklist<T: Config> = StorageMap<
+    pub type TransferBlacklist<T: Config> = StorageDoubleMap<
         _,
         Blake2_128Concat,
         u64,  // entity_id
-        BoundedVec<T::AccountId, T::MaxTransferListSize>,
-        ValueQuery,
+        Blake2_128Concat,
+        T::AccountId,
+        (),
+        OptionQuery,
     >;
 
     /// 预留代币 (entity_id, holder) -> reserved_amount
@@ -463,6 +465,27 @@ pub mod pallet {
             from: T::AccountId,
             amount: T::AssetBalance,
         },
+        /// 代币已被持有人或所有者销毁
+        TokensBurned {
+            entity_id: u64,
+            holder: T::AccountId,
+            amount: T::AssetBalance,
+        },
+        /// 代币元数据已更新
+        TokenMetadataUpdated {
+            entity_id: u64,
+            name: Vec<u8>,
+            symbol: Vec<u8>,
+        },
+        /// 合规强制转账
+        TokensForceTransferred {
+            entity_id: u64,
+            from: T::AccountId,
+            to: T::AccountId,
+            amount: T::AssetBalance,
+        },
+        /// 代币已被平台强制重新启用
+        TokenForceEnabled { entity_id: u64 },
     }
 
     // ==================== 错误 ====================
@@ -471,8 +494,7 @@ pub mod pallet {
     pub enum Error<T> {
         /// 实体不存在
         EntityNotFound,
-        /// 非实体所有者
-        NotEntityOwner,
+        // L1-R3: 移除死代码 NotEntityOwner（已被 NotAuthorized 取代）
         /// 店铺代币未启用
         TokenNotEnabled,
         /// 代币已存在
@@ -562,6 +584,17 @@ pub mod pallet {
         TransfersNotFrozen,
         /// P1: 转账已被冻结，无需重复冻结
         TransfersAlreadyFrozen,
+        // ========== 发送方限制错误 ==========
+        /// 发送方不在白名单
+        SenderNotInWhitelist,
+        /// 发送方在黑名单
+        SenderInBlacklist,
+        /// 发送方 KYC 级别不足
+        SenderKycInsufficient,
+        /// 发送方不是实体成员
+        SenderNotMember,
+        /// 代币已处于启用状态
+        TokenAlreadyEnabled,
     }
 
     // ==================== Extrinsics ====================
@@ -787,8 +820,8 @@ pub mod pallet {
             // M1: 禁止零数量转账
             ensure!(!amount.is_zero(), Error::<T>::ZeroAmount);
 
-            // Phase 8: 检查转账限制
-            Self::check_transfer_restriction(entity_id, &config, &to)?;
+            // Phase 8: 检查转账限制（双向）
+            Self::check_transfer_restriction(entity_id, &config, &who, &to)?;
 
             // P0-a6: 内幕人员黑窗口期限制
             ensure!(
@@ -1216,15 +1249,12 @@ pub mod pallet {
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             let mut added = 0u32;
-            TransferWhitelist::<T>::try_mutate(entity_id, |list| -> DispatchResult {
-                for account in accounts.iter() {
-                    if !list.contains(account) {
-                        list.try_push(account.clone()).map_err(|_| Error::<T>::TransferListFull)?;
-                        added = added.saturating_add(1);
-                    }
+            for account in accounts.iter() {
+                if !TransferWhitelist::<T>::contains_key(entity_id, account) {
+                    TransferWhitelist::<T>::insert(entity_id, account, ());
+                    added = added.saturating_add(1);
                 }
-                Ok(())
-            })?;
+            }
 
             Self::deposit_event(Event::WhitelistUpdated {
                 entity_id,
@@ -1252,14 +1282,12 @@ pub mod pallet {
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             let mut removed = 0u32;
-            TransferWhitelist::<T>::mutate(entity_id, |list| {
-                for account in accounts.iter() {
-                    if let Some(pos) = list.iter().position(|x| x == account) {
-                        list.swap_remove(pos);
-                        removed = removed.saturating_add(1);
-                    }
+            for account in accounts.iter() {
+                if TransferWhitelist::<T>::contains_key(entity_id, account) {
+                    TransferWhitelist::<T>::remove(entity_id, account);
+                    removed = removed.saturating_add(1);
                 }
-            });
+            }
 
             Self::deposit_event(Event::WhitelistUpdated {
                 entity_id,
@@ -1287,15 +1315,12 @@ pub mod pallet {
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             let mut added = 0u32;
-            TransferBlacklist::<T>::try_mutate(entity_id, |list| -> DispatchResult {
-                for account in accounts.iter() {
-                    if !list.contains(account) {
-                        list.try_push(account.clone()).map_err(|_| Error::<T>::TransferListFull)?;
-                        added = added.saturating_add(1);
-                    }
+            for account in accounts.iter() {
+                if !TransferBlacklist::<T>::contains_key(entity_id, account) {
+                    TransferBlacklist::<T>::insert(entity_id, account, ());
+                    added = added.saturating_add(1);
                 }
-                Ok(())
-            })?;
+            }
 
             Self::deposit_event(Event::BlacklistUpdated {
                 entity_id,
@@ -1323,14 +1348,12 @@ pub mod pallet {
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             let mut removed = 0u32;
-            TransferBlacklist::<T>::mutate(entity_id, |list| {
-                for account in accounts.iter() {
-                    if let Some(pos) = list.iter().position(|x| x == account) {
-                        list.swap_remove(pos);
-                        removed = removed.saturating_add(1);
-                    }
+            for account in accounts.iter() {
+                if TransferBlacklist::<T>::contains_key(entity_id, account) {
+                    TransferBlacklist::<T>::remove(entity_id, account);
+                    removed = removed.saturating_add(1);
                 }
-            });
+            }
 
             Self::deposit_event(Event::BlacklistUpdated {
                 entity_id,
@@ -1426,6 +1449,21 @@ pub mod pallet {
                 frame_support::traits::tokens::Fortitude::Force,
             )?;
 
+            // 清理关联存储：如果余额已为 0，清除锁仓、预留、待领取分红
+            let remaining = T::Assets::balance(asset_id, &from);
+            if remaining.is_zero() {
+                LockedTokens::<T>::remove(entity_id, &from);
+                let reserved = ReservedTokens::<T>::take(entity_id, &from);
+                let pending = PendingDividends::<T>::take(entity_id, &from);
+                // 递减全局待领取分红计数
+                if !pending.is_zero() {
+                    TotalPendingDividends::<T>::mutate(entity_id, |p| {
+                        *p = p.saturating_sub(pending);
+                    });
+                }
+                let _ = reserved; // reserved 已通过 take 清除
+            }
+
             Self::deposit_event(Event::TokensForceBurned {
                 entity_id,
                 from,
@@ -1448,6 +1486,197 @@ pub mod pallet {
 
             Self::deposit_event(Event::GlobalTokenPauseSet { paused });
             Ok(())
+        }
+
+        // ==================== 新增 Extrinsics ====================
+
+        /// 持有人销毁自己的代币
+        #[pallet::call_index(21)]
+        #[pallet::weight(T::WeightInfo::burn_tokens())]
+        pub fn burn_tokens(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            amount: T::AssetBalance,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            ensure!(!GlobalTokenPaused::<T>::get(), Error::<T>::GlobalPaused);
+            ensure!(!amount.is_zero(), Error::<T>::ZeroAmount);
+
+            let config = EntityTokenConfigs::<T>::get(entity_id).ok_or(Error::<T>::TokenNotEnabled)?;
+            ensure!(config.enabled, Error::<T>::TokenNotEnabled);
+            // M3: 不再要求 Entity 活跃。用户销毁自己的代币属于资产处置权，
+            // 与 unlock_tokens/claim_dividend 一样应在 Entity 不活跃时仍可执行。
+
+            // 检查可用余额（扣除锁仓和预留）
+            let asset_id = Self::entity_to_asset_id(entity_id);
+            let balance = T::Assets::balance(asset_id, &who);
+            let locked = Self::total_locked_amount(entity_id, &who);
+            let reserved = ReservedTokens::<T>::get(entity_id, &who);
+            let available = balance.saturating_sub(locked).saturating_sub(reserved);
+            ensure!(available >= amount, Error::<T>::InsufficientBalance);
+
+            T::Assets::burn_from(
+                asset_id,
+                &who,
+                amount,
+                frame_support::traits::tokens::Preservation::Preserve,
+                frame_support::traits::tokens::Precision::Exact,
+                frame_support::traits::tokens::Fortitude::Polite,
+            )?;
+
+            Self::deposit_event(Event::TokensBurned {
+                entity_id,
+                holder: who,
+                amount,
+            });
+            Ok(())
+        }
+
+        /// 更新代币元数据（名称、符号）
+        #[pallet::call_index(22)]
+        #[pallet::weight(T::WeightInfo::update_token_metadata())]
+        pub fn update_token_metadata(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            name: Vec<u8>,
+            symbol: Vec<u8>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            Self::ensure_owner_or_admin(&who, entity_id)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(EntityTokenConfigs::<T>::contains_key(entity_id), Error::<T>::TokenNotEnabled);
+
+            ensure!(!name.is_empty(), Error::<T>::EmptyName);
+            ensure!(!symbol.is_empty(), Error::<T>::EmptySymbol);
+
+            let name_bounded: BoundedVec<u8, T::MaxTokenNameLength> =
+                name.clone().try_into().map_err(|_| Error::<T>::NameTooLong)?;
+            let symbol_bounded: BoundedVec<u8, T::MaxTokenSymbolLength> =
+                symbol.clone().try_into().map_err(|_| Error::<T>::SymbolTooLong)?;
+
+            // 获取现有 decimals
+            let decimals = EntityTokenMetadata::<T>::get(entity_id)
+                .map(|(_, _, d)| d)
+                .unwrap_or(18);
+
+            // H3: 使用 Entity Owner 调用 Assets::set，因为 pallet-assets 要求资产管理员
+            // （即 create_shop_token 时的调用者）。当 TOKEN_MANAGE 管理员调用时，
+            // who 不是资产管理员，直接传 who 会导致 Assets::set 失败。
+            let owner = T::EntityProvider::entity_owner(entity_id)
+                .ok_or(Error::<T>::EntityNotFound)?;
+            let asset_id = Self::entity_to_asset_id(entity_id);
+            T::Assets::set(asset_id, &owner, name.clone(), symbol.clone(), decimals)
+                .map_err(|_| Error::<T>::AssetCreationFailed)?;
+
+            // 更新本模块存储
+            EntityTokenMetadata::<T>::insert(entity_id, (name_bounded, symbol_bounded, decimals));
+
+            Self::deposit_event(Event::TokenMetadataUpdated {
+                entity_id,
+                name,
+                symbol,
+            });
+            Ok(())
+        }
+
+        /// 合规强制转账（Root-only）
+        /// 绕过所有转账限制，用于法律/合规要求
+        #[pallet::call_index(23)]
+        #[pallet::weight(T::WeightInfo::force_transfer())]
+        pub fn force_transfer(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            from: T::AccountId,
+            to: T::AccountId,
+            amount: T::AssetBalance,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            ensure!(!amount.is_zero(), Error::<T>::ZeroAmount);
+            ensure!(EntityTokenConfigs::<T>::contains_key(entity_id), Error::<T>::TokenNotEnabled);
+
+            let asset_id = Self::entity_to_asset_id(entity_id);
+            // M1: Root 合规操作使用 Expendable，允许完全转出（如法院扣押全部资产）
+            T::Assets::transfer(
+                asset_id,
+                &from,
+                &to,
+                amount,
+                frame_support::traits::tokens::Preservation::Expendable,
+            )?;
+
+            // M1: 清理关联存储：如果剩余余额为 0，清除锁仓、预留、待领取分红
+            // force_transfer 绕过锁仓/预留检查，可能导致记账不一致
+            let remaining = T::Assets::balance(asset_id, &from);
+            if remaining.is_zero() {
+                LockedTokens::<T>::remove(entity_id, &from);
+                let pending = PendingDividends::<T>::take(entity_id, &from);
+                ReservedTokens::<T>::remove(entity_id, &from);
+                if !pending.is_zero() {
+                    TotalPendingDividends::<T>::mutate(entity_id, |p| {
+                        *p = p.saturating_sub(pending);
+                    });
+                }
+            }
+
+            Self::deposit_event(Event::TokensForceTransferred {
+                entity_id,
+                from,
+                to,
+                amount,
+            });
+            Ok(())
+        }
+
+        /// 平台强制重新启用代币（Root-only）
+        #[pallet::call_index(24)]
+        #[pallet::weight(T::WeightInfo::force_enable_token())]
+        pub fn force_enable_token(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            EntityTokenConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
+                let config = maybe_config.as_mut().ok_or(Error::<T>::TokenNotEnabled)?;
+                ensure!(!config.enabled, Error::<T>::TokenAlreadyEnabled);
+                config.enabled = true;
+                Ok(())
+            })?;
+
+            Self::deposit_event(Event::TokenForceEnabled { entity_id });
+            Ok(())
+        }
+    }
+
+    // ==================== 完整性检查 ====================
+
+    #[pallet::hooks]
+    impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        #[cfg(feature = "std")]
+        fn integrity_test() {
+            assert!(
+                T::ShopTokenOffset::get() > 0,
+                "ShopTokenOffset must be > 0 to avoid asset ID collision"
+            );
+            assert!(
+                T::MaxTokenNameLength::get() >= 1,
+                "MaxTokenNameLength must be >= 1"
+            );
+            assert!(
+                T::MaxTokenSymbolLength::get() >= 1,
+                "MaxTokenSymbolLength must be >= 1"
+            );
+            assert!(
+                T::MaxTransferListSize::get() >= 1,
+                "MaxTransferListSize must be >= 1"
+            );
+            assert!(
+                T::MaxDividendRecipients::get() >= 1,
+                "MaxDividendRecipients must be >= 1"
+            );
         }
     }
 
@@ -1486,36 +1715,45 @@ pub mod pallet {
                 .fold(T::AssetBalance::zero(), |acc, e| acc.saturating_add(e.amount))
         }
 
-        /// Phase 8: 检查转账限制
-        fn check_transfer_restriction(
+        /// Phase 8: 检查转账限制（双向：发送方 + 接收方）
+        pub(crate) fn check_transfer_restriction(
             entity_id: u64,
             config: &ShopTokenConfigOf<T>,
+            from: &T::AccountId,
             to: &T::AccountId,
         ) -> DispatchResult {
             match config.transfer_restriction {
                 TransferRestrictionMode::None => Ok(()),
                 
                 TransferRestrictionMode::Whitelist => {
-                    let whitelist = TransferWhitelist::<T>::get(entity_id);
-                    ensure!(whitelist.contains(to), Error::<T>::ReceiverNotInWhitelist);
+                    ensure!(TransferWhitelist::<T>::contains_key(entity_id, from), Error::<T>::SenderNotInWhitelist);
+                    ensure!(TransferWhitelist::<T>::contains_key(entity_id, to), Error::<T>::ReceiverNotInWhitelist);
                     Ok(())
                 }
                 
                 TransferRestrictionMode::Blacklist => {
-                    let blacklist = TransferBlacklist::<T>::get(entity_id);
-                    ensure!(!blacklist.contains(to), Error::<T>::ReceiverInBlacklist);
+                    ensure!(!TransferBlacklist::<T>::contains_key(entity_id, from), Error::<T>::SenderInBlacklist);
+                    ensure!(!TransferBlacklist::<T>::contains_key(entity_id, to), Error::<T>::ReceiverInBlacklist);
                     Ok(())
                 }
                 
                 TransferRestrictionMode::KycRequired => {
                     ensure!(
-                        T::KycProvider::meets_kyc_requirement(to, config.min_receiver_kyc),
+                        T::KycProvider::meets_kyc_requirement(entity_id, from, config.min_receiver_kyc),
+                        Error::<T>::SenderKycInsufficient
+                    );
+                    ensure!(
+                        T::KycProvider::meets_kyc_requirement(entity_id, to, config.min_receiver_kyc),
                         Error::<T>::ReceiverKycInsufficient
                     );
                     Ok(())
                 }
                 
                 TransferRestrictionMode::MembersOnly => {
+                    ensure!(
+                        T::MemberProvider::is_member(entity_id, from),
+                        Error::<T>::SenderNotMember
+                    );
                     ensure!(
                         T::MemberProvider::is_member(entity_id, to),
                         Error::<T>::ReceiverNotMember
@@ -1687,6 +1925,36 @@ impl<T: Config> Pallet<T> {
             .map(|c| c.enabled)
             .unwrap_or(false)
     }
+
+    /// 查询用户在某实体的完整代币状态
+    /// 返回 (balance, locked, reserved, pending_dividends, available)
+    pub fn get_account_token_info(
+        entity_id: u64,
+        holder: &T::AccountId,
+    ) -> (T::AssetBalance, T::AssetBalance, T::AssetBalance, T::AssetBalance, T::AssetBalance) {
+        let balance = Self::get_balance(entity_id, holder);
+        let locked = Self::total_locked_amount(entity_id, holder);
+        let reserved = pallet::ReservedTokens::<T>::get(entity_id, holder);
+        let pending = pallet::PendingDividends::<T>::get(entity_id, holder);
+        let available = balance.saturating_sub(locked).saturating_sub(reserved);
+        (balance, locked, reserved, pending, available)
+    }
+
+    /// 查询用户在某实体的锁仓条目列表
+    pub fn get_lock_entries(
+        entity_id: u64,
+        holder: &T::AccountId,
+    ) -> alloc::vec::Vec<pallet::LockEntry<T::AssetBalance, frame_system::pallet_prelude::BlockNumberFor<T>>> {
+        pallet::LockedTokens::<T>::get(entity_id, holder).into_inner()
+    }
+
+    /// 获取可用余额（总余额 - 锁仓 - 预留）
+    pub fn get_available_balance(entity_id: u64, holder: &T::AccountId) -> T::AssetBalance {
+        let balance = Self::get_balance(entity_id, holder);
+        let locked = Self::total_locked_amount(entity_id, holder);
+        let reserved = pallet::ReservedTokens::<T>::get(entity_id, holder);
+        balance.saturating_sub(locked).saturating_sub(reserved)
+    }
 }
 
 // ==================== EntityTokenProvider 实现 ====================
@@ -1701,6 +1969,10 @@ impl<T: Config> EntityTokenProvider<T::AccountId, T::AssetBalance> for Pallet<T>
 
     fn token_balance(entity_id: u64, holder: &T::AccountId) -> T::AssetBalance {
         Pallet::<T>::get_balance(entity_id, holder)
+    }
+
+    fn available_balance(entity_id: u64, holder: &T::AccountId) -> T::AssetBalance {
+        Pallet::<T>::get_available_balance(entity_id, holder)
     }
 
     fn reward_on_purchase(
@@ -1725,8 +1997,45 @@ impl<T: Config> EntityTokenProvider<T::AccountId, T::AssetBalance> for Pallet<T>
         to: &T::AccountId,
         amount: T::AssetBalance,
     ) -> Result<(), sp_runtime::DispatchError> {
-        use frame_support::traits::fungibles::Mutate;
+        use frame_support::traits::fungibles::{Inspect, Mutate};
+
+        // L2-R3: 与 transfer_tokens extrinsic 一致，拒绝零数量转账
+        if amount.is_zero() {
+            return Err(sp_runtime::DispatchError::Other("ZeroAmount"));
+        }
+
+        // 检查全局暂停、实体冻结、代币状态
+        if pallet::GlobalTokenPaused::<T>::get() {
+            return Err(sp_runtime::DispatchError::Other("GlobalPaused"));
+        }
+        if pallet::TransfersFrozen::<T>::contains_key(entity_id) {
+            return Err(sp_runtime::DispatchError::Other("TokenTransfersFrozen"));
+        }
+        // M2: 与 transfer_tokens extrinsic 保持一致，检查 Entity 是否活跃
+        if !T::EntityProvider::is_entity_active(entity_id) {
+            return Err(sp_runtime::DispatchError::Other("EntityNotActive"));
+        }
+        if let Some(config) = pallet::EntityTokenConfigs::<T>::get(entity_id) {
+            if !config.enabled {
+                return Err(sp_runtime::DispatchError::Other("TokenNotEnabled"));
+            }
+            if !config.transferable {
+                return Err(sp_runtime::DispatchError::Other("TransferNotAllowed"));
+            }
+            // 双向转账限制检查
+            Pallet::<T>::check_transfer_restriction(entity_id, &config, from, to)?;
+        }
+
+        // 检查可用余额
         let asset_id = Pallet::<T>::entity_to_asset_id(entity_id);
+        let bal = T::Assets::balance(asset_id, from);
+        let locked = Pallet::<T>::total_locked_amount(entity_id, from);
+        let reserved = pallet::ReservedTokens::<T>::get(entity_id, from);
+        let available = bal.saturating_sub(locked).saturating_sub(reserved);
+        if available < amount {
+            return Err(sp_runtime::DispatchError::Other("InsufficientBalance"));
+        }
+
         T::Assets::transfer(
             asset_id,
             from,
@@ -1742,6 +2051,10 @@ impl<T: Config> EntityTokenProvider<T::AccountId, T::AssetBalance> for Pallet<T>
         who: &T::AccountId,
         amount: T::AssetBalance,
     ) -> Result<(), sp_runtime::DispatchError> {
+        // L3-R3: 拒绝零数量预留
+        if amount.is_zero() {
+            return Err(sp_runtime::DispatchError::Other("ZeroAmount"));
+        }
         use frame_support::traits::fungibles::Inspect;
         let asset_id = Pallet::<T>::entity_to_asset_id(entity_id);
         let balance = T::Assets::balance(asset_id, who);
@@ -1781,15 +2094,26 @@ impl<T: Config> EntityTokenProvider<T::AccountId, T::AssetBalance> for Pallet<T>
         to: &T::AccountId,
         amount: T::AssetBalance,
     ) -> Result<T::AssetBalance, sp_runtime::DispatchError> {
+        use frame_support::traits::fungibles::Mutate;
         let reserved = pallet::ReservedTokens::<T>::get(entity_id, from);
         let actual = amount.min(reserved);
         if actual.is_zero() {
             return Ok(actual);
         }
-        // H1-R3: 先执行转账，成功后才扣减预留
-        // 旧代码先扣减 ReservedTokens 再 transfer，如果 transfer 失败且调用方
-        // 不回滚（如 order pallet 的 best-effort 路径），预留记账会不一致。
-        Self::transfer(entity_id, from, to, actual)?;
+        // H1-R2: 直接调用 Assets::transfer，绕过所有策略检查。
+        // 预留代币是已承诺资金（如佣金托管、订单押金），释放时不应受
+        // GlobalPaused / TransfersFrozen / EntityNotActive / 转账限制 的阻拦。
+        // 旧代码调用 Self::transfer()（含全部策略检查 + 循环可用余额扣减），
+        // 导致 Entity 不活跃或冻结时，佣金退款和订单结算永久卡死。
+        let asset_id = Pallet::<T>::entity_to_asset_id(entity_id);
+        // Expendable: 预留可能等于全部余额，释放时必须允许账户清零
+        T::Assets::transfer(
+            asset_id,
+            from,
+            to,
+            actual,
+            frame_support::traits::tokens::Preservation::Expendable,
+        )?;
         pallet::ReservedTokens::<T>::mutate(entity_id, from, |r| {
             *r = r.saturating_sub(actual);
         });
@@ -1811,9 +2135,10 @@ impl<T: Config> EntityTokenProvider<T::AccountId, T::AssetBalance> for Pallet<T>
         if amount.is_zero() {
             return Err(sp_runtime::DispatchError::Other("ZeroAmount"));
         }
-        let config = pallet::EntityTokenConfigs::<T>::get(entity_id)
-            .ok_or(sp_runtime::DispatchError::Other("TokenNotEnabled"))?;
-        let _ = config;
+        // L1: 仅验证代币存在，无需绑定 config
+        if !pallet::EntityTokenConfigs::<T>::contains_key(entity_id) {
+            return Err(sp_runtime::DispatchError::Other("TokenNotEnabled"));
+        }
         let entity_account = T::EntityProvider::entity_account(entity_id);
         let asset_id = Pallet::<T>::entity_to_asset_id(entity_id);
         T::Assets::burn_from(

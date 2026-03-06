@@ -6,23 +6,16 @@
 
 `pallet-commission-pool-reward` 是返佣系统的**沉淀池奖励插件**。当 `POOL_REWARD` 模式启用后，每笔订单中未被其他插件（Referral / LevelDiff / SingleLine / Team）分配的佣金余额自动沉淀入 **Entity 级沉淀资金池**（由 `pallet-commission-core` Phase 1.5 管理）。
 
-本插件采用**周期性等额领取**模型：按固定区块间隔（`round_duration`）划分轮次，每轮开始时快照池余额和各等级会员数量，按比率切分后平均分配给该等级会员。用户在轮次窗口内主动调用 `claim_pool_reward` 领取份额。
+本插件采用**周期性等额领取**模型：按固定区块间隔（`round_duration`）划分轮次，每轮开始时快照池余额和各等级会员数量，按比率切分后平均分配给该等级会员。用户在轮次窗口内签名调用 `claim_pool_reward` 领取份额。
 
-支持 **NEX + Entity Token 双池**同步分配。
+**核心设计原则：**
 
-**核心约束：Entity Owner 不可直接提取沉淀池资金，资金完全由算法驱动分配。**
-
-## 设计动机
-
-```
-现有问题：
-  订单佣金预算 (max_commission) 经 4 个插件分配后，剩余部分 (remaining) 留在卖家账户
-  → 这部分资金没有被有效利用
-
-沉淀池方案：
-  remaining → 沉淀资金池 → 按等级比率等额分配
-  → 形成 "消费 → 沉淀 → 奖励高等级 → 激励升级 → 更多消费" 的正向循环
-```
+- **Entity Owner 不可提取** — 沉淀池资金完全由算法驱动分配
+- **NEX + Token 双池** — 同时支持原生 NEX 和 Entity Token 两种资产分配
+- **Lazy 轮次创建** — 首个 claim 或 force_new_round 触发新轮快照，无需定时任务
+- **未领取金额留存** — 本轮未被领取的金额自然留在池中，下一轮继续分配
+- **暂停机制** — 支持 per-entity 暂停和全局紧急暂停
+- **KYC 合规** — 通过 `ParticipationGuard` 检查参与权
 
 ## 分配模型
 
@@ -31,9 +24,8 @@
 ```
    轮次 N                               轮次 N+1
 ├──────────── round_duration ──────────┤──────────────────────┤
-│                                      │                      │
 │  首次 claim 或 force_new_round       │  轮次过期后首次      │
-│  → 快照创建                          │  claim → 新轮快照    │
+│  → 快照创建（F10: 旧轮归档）        │  claim → 新轮快照    │
 │  → 用户逐个 claim                    │                      │
 │  → 未领取份额留在池中                │                      │
 ```
@@ -46,164 +38,114 @@
   配置 level_ratios: [(level_1, 5000bps), (level_2, 5000bps)]  ← 总和必须 = 10000
 
 分配计算：
-  level_1 份额 = 10,000 × 50% = 5,000 NEX
-    该等级会员数 = 5 人
-    → 每人可领 = 5,000 / 5 = 1,000 NEX
+  level_1 份额 = 10,000 × 50% = 5,000 NEX ÷ 5 人 = 1,000 NEX/人
+  level_2 份额 = 10,000 × 50% = 5,000 NEX ÷ 2 人 = 2,500 NEX/人
 
-  level_2 份额 = 10,000 × 50% = 5,000 NEX
-    该等级会员数 = 2 人
-    → 每人可领 = 5,000 / 2 = 2,500 NEX
-
-未领取的金额自然留在池中，下一轮快照时重新纳入。
+未领取的金额留在池中，下一轮重新纳入。
 ```
 
 ### NEX + Token 双池
 
-当 `token_pool_enabled = true` 时，快照同时记录 Token 沉淀池余额，按相同 `level_ratios` 分配 Token 奖励。领取时 **NEX 为主、Token 为辅**（best-effort）：Token 转账失败不影响 NEX 领取。
+当 `token_pool_enabled = true` 时，快照同时记录 Token 沉淀池余额，按相同 `level_ratios` 分配。领取时 **NEX 为主、Token 为辅**（best-effort）：Token 转账失败不影响 NEX 领取。
 
-快照构建由通用 `build_level_snapshots<B>` 内部方法完成，NEX 与 Token 共用同一份等级会员计数缓存，避免重复存储读取。
+快照构建由泛型 `build_level_snapshots<B>` 完成，NEX 与 Token 共用等级会员计数缓存，避免重复存储读取。
 
-## 沉淀入池流程（Core 管理）
-
-### NEX 沉淀池入金
-
-```
-订单触发 process_commission:
-
-Phase 1（卖家资金池 — 现有 4 插件）
-  ┌─ ReferralPlugin ──→ remaining↓
-  ├─ LevelDiffPlugin ─→ remaining↓
-  ├─ SingleLinePlugin → remaining↓
-  └─ TeamPlugin ──────→ remaining↓
-                        │
-Phase 1.5（沉淀）       ▼
-  remaining > 0 且 POOL_REWARD 启用？
-  │ YES
-  seller ──transfer──→ entity_account
-  UnallocatedPool[entity_id] += remaining
-```
-
-### Token 沉淀池入金（三路来源）
-
-Token 沉淀池 `UnallocatedTokenPool` 有 **3 条独立入金路径**，全部由 `pallet-commission-core` 管理：
-
-```
-                     Token 订单触发 process_token_commission
-                     ┌──────────────────────────────────────┐
-                     │                                      │
-                     ▼                                      ▼
-              ┌─────────────┐                     ┌──────────────────┐
-              │  池 A        │                     │  池 B             │
-              │  Token       │                     │  Entity Token    │
-              │  平台费      │                     │  返佣预算        │
-              │  (platform   │                     │  order_amount    │
-              │   _fee)      │                     │  × max_rate      │
-              └──────┬───────┘                     └────────┬─────────┘
-                     │                                      │
-          ┌──────────┴──────────┐              ┌────────────┴────────────┐
-          │ 有招商推荐人？      │              │  4 个 Token 插件分配     │
-          │                     │              │  Referral → LevelDiff   │
-          ├─ YES: 推荐人分成    │              │  → SingleLine → Team    │
-          │   (ReferrerShareBps)│              └────────────┬────────────┘
-          │                     │                           │
-          └─────────┬───────────┘                           ▼
-                    │                              remaining > 0 且
-                    ▼                              POOL_REWARD 启用？
-           池 A 留存部分                                    │ YES
-           (fee - 推荐人分成)                               ▼
-                    │                          ┌─────────────────────────┐
-                    │        路径 ②            │       路径 ①            │
-                    └────────────┐              │  Token 4插件剩余沉淀   │
-                                 │              │                         │
-                                 ▼              ▼                         │
-                    ┌────────────────────────────────┐                    │
-                    │   UnallocatedTokenPool[entity] │ ◄─────────────────┘
-                    │   (Token 沉淀池)               │
-                    └───────────────┬────────────────┘
-                                    │         ▲
-                                    │         │ 路径 ③
-                                    │  ┌──────┴────────────────────────┐
-                                    │  │  sweep_token_free_balance     │
-                                    │  │  外部直接转入 entity_account  │
-                                    │  │  的 Token 自动归集            │
-                                    │  │  (actual - accounted > 0)     │
-                                    │  └───────────────────────────────┘
-                                    ▼
-                          pool-reward 轮次快照
-                          → 会员 claim 领取
-```
-
-**三路来源详解：**
-
-| 路径 | 来源 | 触发时机 | 代码位置 |
-|------|------|----------|----------|
-| **① 4插件剩余沉淀** | `process_token_commission` 池 B：Token 返佣预算经 4 个插件分配后的 `remaining` | 每笔 Token 订单 | `core::process_token_commission` 末尾 |
-| **② 平台费留存** | `process_token_commission` 池 A：`token_platform_fee` 扣除招商推荐人分成后的剩余 | 每笔 Token 订单 | `core::process_token_commission` 池 A 段 |
-| **③ 外部转入归集** | 第三方直接向 `entity_account` 转入的 Token（非订单/返佣渠道） | `withdraw_entity_token_funds` 或 `process_token_commission` 时自动 sweep | `core::sweep_token_free_balance` |
-
-> **路径 ③ 原理：** Core 维护 `EntityTokenAccountedBalance` 记录已知渠道的 Token 余额。当 `actual_balance - accounted > 0` 时，差额视为外部转入，自动归入沉淀池。
+| 场景 | NEX | Token |
+|------|-----|-------|
+| `token_pool_enabled = false` | 正常 | 不分配 |
+| Token 余额充足 | 正常 | 正常 |
+| Token 转账失败 | **正常** | 跳过 |
+| Token pool 扣减失败 | 正常 | **回滚转账** |
 
 ## 数据结构
 
-### PoolRewardConfig — 沉淀池奖励配置（per-entity）
+### PoolRewardConfig
 
 ```rust
 pub struct PoolRewardConfig<MaxLevels: Get<u32>, BlockNumber> {
-    /// 各等级分配比率（基点），(level_id, ratio_bps)，sum 必须 = 10000
-    pub level_ratios: BoundedVec<(u8, u16), MaxLevels>,
-    /// 轮次持续时间（区块数）
-    pub round_duration: BlockNumber,
-    /// 是否启用 Entity Token 池分配（默认 false）
-    pub token_pool_enabled: bool,
+    pub level_ratios: BoundedVec<(u8, u16), MaxLevels>, // (level_id, ratio_bps), sum = 10000
+    pub round_duration: BlockNumber,                     // 轮次持续区块数
+    pub token_pool_enabled: bool,                        // 是否启用 Token 池
 }
 ```
 
-### LevelSnapshot — 等级快照
+### LevelSnapshot
 
 ```rust
 pub struct LevelSnapshot<Balance> {
     pub level_id: u8,
-    pub member_count: u32,       // 快照时该等级会员数量
+    pub member_count: u32,          // 快照时该等级会员数
     pub per_member_reward: Balance, // 每人可领取数量
-    pub claimed_count: u32,      // 已领取人数
+    pub claimed_count: u32,         // 已领取人数
 }
 ```
 
-### RoundInfo — 轮次快照数据（per-entity）
+### RoundInfo
 
 ```rust
 pub struct RoundInfo<MaxLevels, Balance, TokenBalance, BlockNumber> {
-    pub round_id: u64,           // 轮次 ID（单调递增，上限 u64::MAX）
+    pub round_id: u64,              // 单调递增，上限 u64::MAX
     pub start_block: BlockNumber,
-    pub pool_snapshot: Balance,  // 快照时 NEX 池余额
+    pub pool_snapshot: Balance,     // 快照时 NEX 池余额
     pub level_snapshots: BoundedVec<LevelSnapshot<Balance>, MaxLevels>,
-    pub token_pool_snapshot: Option<TokenBalance>,   // None = Token 池未启用
+    pub token_pool_snapshot: Option<TokenBalance>,
     pub token_level_snapshots: Option<BoundedVec<LevelSnapshot<TokenBalance>, MaxLevels>>,
 }
 ```
 
-### ClaimRecord — 领取记录
+### ClaimRecord
 
 ```rust
 pub struct ClaimRecord<Balance, TokenBalance, BlockNumber> {
     pub round_id: u64,
-    pub amount: Balance,         // NEX 领取数量
+    pub amount: Balance,            // NEX 领取数量
     pub level_id: u8,
     pub claimed_at: BlockNumber,
-    pub token_amount: TokenBalance, // Token 领取数量（0 = 无 Token 奖励）
+    pub token_amount: TokenBalance, // Token 领取数量（0 = 无）
 }
 ```
 
-### 配置示例
+### CompletedRoundSummary
 
+```rust
+pub struct CompletedRoundSummary<MaxLevels, Balance, TokenBalance, BlockNumber> {
+    pub round_id: u64,
+    pub start_block: BlockNumber,
+    pub end_block: BlockNumber,
+    pub pool_snapshot: Balance,
+    pub token_pool_snapshot: Option<TokenBalance>,
+    pub level_snapshots: BoundedVec<LevelSnapshot<Balance>, MaxLevels>,
+    pub token_level_snapshots: Option<BoundedVec<LevelSnapshot<TokenBalance>, MaxLevels>>,
+}
 ```
-Entity 沉淀池奖励配置：
-├── level_ratios:
-│   ├── level_1 = 3000 bps  (30% 分配给 level_1 全体成员)
-│   └── level_2 = 7000 bps  (70% 分配给 level_2 全体成员)
-│   （level_0 未配置 → 不参与分配）
-├── round_duration: 43200    (约 3 天 @ 6s/block)
-└── token_pool_enabled: true (同步分配 Token)
+
+### DistributionStats
+
+```rust
+pub struct DistributionStats<Balance, TokenBalance> {
+    pub total_nex_distributed: Balance,
+    pub total_token_distributed: TokenBalance,
+    pub total_rounds_completed: u64,
+    pub total_claims: u64,
+}
+```
+
+### Traits
+
+```rust
+// 领取回调（F12），供 commission-core 统一记录
+pub trait PoolRewardClaimCallback<AccountId, Balance, TokenBalance> {
+    fn on_pool_reward_claimed(
+        entity_id: u64, account: &AccountId,
+        nex_amount: Balance, token_amount: TokenBalance,
+        round_id: u64, level_id: u8,
+    );
+}
+
+// KYC/合规参与权检查
+pub trait ParticipationGuard<AccountId> {
+    fn can_participate(entity_id: u64, account: &AccountId) -> bool;
+}
 ```
 
 ## Config
@@ -218,153 +160,182 @@ pub trait Config: frame_system::Config {
     type PoolBalanceProvider: PoolBalanceProvider<BalanceOf<Self>>;
 
     #[pallet::constant]
-    type MaxPoolRewardLevels: Get<u32>;  // 最大等级配置数
+    type MaxPoolRewardLevels: Get<u32>;    // 最大等级配置数
     #[pallet::constant]
-    type MaxClaimHistory: Get<u32>;      // 每用户最大领取历史数
+    type MaxClaimHistory: Get<u32>;        // 每用户最大领取历史数
+    #[pallet::constant]
+    type MinRoundDuration: Get<BlockNumberFor<Self>>; // 最小轮次间隔
+    #[pallet::constant]
+    type MaxRoundHistory: Get<u32>;        // 每 Entity 保留最近 N 轮历史
 
     // Token 多资产扩展
     type TokenBalance: FullCodec + MaxEncodedLen + TypeInfo + Copy + Default
         + Debug + AtLeast32BitUnsigned + From<u32> + Into<u128>;
     type TokenPoolBalanceProvider: TokenPoolBalanceProvider<TokenBalanceOf<Self>>;
     type TokenTransferProvider: TokenTransferProvider<Self::AccountId, TokenBalanceOf<Self>>;
+
     type ParticipationGuard: ParticipationGuard<Self::AccountId>;
     type WeightInfo: WeightInfo;
+    type ClaimCallback: PoolRewardClaimCallback<...>;
 }
 ```
+
+`integrity_test` 校验: `MaxPoolRewardLevels >= 1`, `MaxClaimHistory >= 1`, `MinRoundDuration > 0`, `MaxRoundHistory >= 1`。
 
 ## Storage
 
 | 存储项 | 类型 | 说明 |
 |--------|------|------|
-| `PoolRewardConfigs` | `StorageMap<u64, PoolRewardConfig>` | 沉淀池奖励配置（entity_id → config） |
-| `CurrentRound` | `StorageMap<u64, RoundInfo>` | 当前轮次快照（entity_id → round） |
-| `LastClaimedRound` | `StorageDoubleMap<u64, AccountId, u64>` | 用户上次领取轮次 ID（防双领） |
+| `PoolRewardConfigs` | `StorageMap<u64, PoolRewardConfig>` | per-entity 奖励配置 |
+| `CurrentRound` | `StorageMap<u64, RoundInfo>` | 当前轮次快照 |
+| `LastRoundId` | `StorageMap<u64, u64, ValueQuery>` | 保持 round_id 单调递增 |
+| `LastClaimedRound` | `StorageDoubleMap<u64, AccountId, u64>` | 用户上次领取轮次（防双领） |
 | `ClaimRecords` | `StorageDoubleMap<u64, AccountId, BoundedVec<ClaimRecord>>` | 用户领取历史（滚动窗口） |
-| `LastRoundId` | `StorageMap<u64, u64, ValueQuery>` | 配置变更后保留上一轮次 ID，保持 round_id 单调递增 |
+| `PoolRewardPaused` | `StorageMap<u64, bool, ValueQuery>` | per-entity 暂停标志 |
+| `GlobalPoolRewardPaused` | `StorageValue<bool, ValueQuery>` | 全局紧急暂停标志 |
+| `RoundHistory` | `StorageMap<u64, BoundedVec<CompletedRoundSummary, MaxRoundHistory>>` | 轮次历史（FIFO） |
+| `DistributionStatistics` | `StorageMap<u64, DistributionStats, ValueQuery>` | 累计分配统计 |
 
-## Extrinsics
+## Extrinsics（12 个）
 
 | call_index | 方法 | 权限 | 说明 |
 |------------|------|------|------|
-| 0 | `set_pool_reward_config` | Entity Owner / Admin(COMMISSION_MANAGE) | 设置沉淀池奖励配置（保留现有 `token_pool_enabled`） |
-| 1 | `claim_pool_reward` | Signed（会员） | 领取当前轮次奖励（NEX + Token） |
-| 2 | `force_new_round` | Entity Owner / Admin(COMMISSION_MANAGE) | 开启新轮次（需 Entity 活跃） |
-| 3 | `set_token_pool_enabled` | Entity Owner / Admin(COMMISSION_MANAGE) | 启用/禁用 Token 池分配 |
-| 4 | `force_set_pool_reward_config` | Root | [Root] 强制设置配置（绕过权限和 EntityLocked） |
-| 5 | `force_set_token_pool_enabled` | Root | [Root] 强制启用/禁用 Token 池（绕过权限和 EntityLocked） |
-| 6 | `force_start_new_round` | Root | [Root] 强制开启新轮次（绕过权限和 EntityLocked） |
-| 7 | `clear_pool_reward_config` | Entity Owner / Admin(COMMISSION_MANAGE) | 清除配置（不清理历史记录） |
-| 8 | `force_clear_pool_reward_config` | Root | [Root] 强制清除配置（绕过权限和 EntityLocked，X2 防幻影事件） |
+| 0 | `set_pool_reward_config` | Owner/Admin | 设置配置（保留 `token_pool_enabled`） |
+| 1 | `claim_pool_reward` | Signed（会员） | 领取当前轮次 NEX + Token 奖励 |
+| 2 | `force_new_round` | Owner/Admin | 手动开启新轮次（需 Entity 活跃） |
+| 3 | `set_token_pool_enabled` | Owner/Admin | 启用/禁用 Token 池（幂等保护） |
+| 4 | `force_set_pool_reward_config` | Root | 强制设置配置（绕过权限 + EntityLocked） |
+| 5 | `force_set_token_pool_enabled` | Root | 强制 Token 开关（绕过权限 + EntityLocked） |
+| 6 | `force_start_new_round` | Root | 强制新轮次（绕过权限 + EntityLocked，仍检查 active） |
+| 7 | `clear_pool_reward_config` | Owner/Admin | 清除配置 + 暂停状态（不清历史） |
+| 8 | `force_clear_pool_reward_config` | Root | 强制清除（无配置时静默成功） |
+| 9 | `pause_pool_reward` | Owner/Admin | 暂停该 Entity 池奖励 |
+| 10 | `resume_pool_reward` | Owner/Admin | 恢复该 Entity 池奖励 |
+| 11 | `set_global_pool_reward_paused` | Root | 全局暂停/恢复所有 Entity |
 
-> **权限模型说明：** 日常配置操作由 Entity Owner 或拥有 `COMMISSION_MANAGE` 权限的 Admin 执行，受 EntityLocked 保护。Root 可通过 `force_*` extrinsics 或 `PoolRewardPlanWriter` trait 绕过锁定和权限检查。
+> **权限模型：** Owner/Admin = Entity Owner 或 Admin(COMMISSION_MANAGE)，受 `EntityLocked` 保护。Root `force_*` 绕过锁定和权限。`PoolRewardPlanWriter` trait 也绕过权限。
 
-### set_pool_reward_config 校验规则
+### set_pool_reward_config 校验
 
-校验由共享 `validate_level_ratios` 内部方法完成，extrinsic 和 `PoolRewardPlanWriter` 共用同一逻辑：
+由 `validate_level_ratios` 共享方法完成（extrinsic + PlanWriter 统一）：
 
-- `round_duration > 0`
+- `round_duration > 0` 且 `>= MinRoundDuration`
 - `level_ratios` 无重复 `level_id`
-- 每个 `ratio` ∈ (0, 10000]
-- 所有 `ratio` 之和**必须等于 10000**
-- 更新配置时自动保留现有 `token_pool_enabled` 值
+- 每个 `ratio` ∈ (0, 10000]，总和 = 10000
+- 自动保留现有 `token_pool_enabled` 值
+- 配置变更后调用 `invalidate_current_round`（保持 round_id 单调递增）
 
 ### claim_pool_reward 流程
 
 ```
-1. Entity 检查: is_entity_active
-2. 资格检查: is_member + ParticipationGuard::can_participate
-3. 配置检查: 用户 custom_level_id 在 level_ratios 中
-4. 轮次检查: 当前轮次有效？过期则自动创建新轮
-5. 防双领: last_claimed_round < current_round_id
-6. 配额检查: claimed_count < member_count
-7. NEX 转账: entity_account → 用户, pool -= reward
-8. Token 转账: best-effort (失败不影响 NEX; 扣池失败则回滚转账)
-9. 记录更新: claimed_count++, 写入 ClaimRecords (滚动窗口)
+ 1. is_entity_active
+ 2. !GlobalPoolRewardPaused
+ 3. !PoolRewardPaused[entity_id]
+ 4. is_member + ParticipationGuard::can_participate
+ 5. custom_level_id 在 level_ratios 中
+ 6. ensure_current_round（过期则创新轮 + F10 归档 + F11 详细事件）
+ 7. last_claimed_round < current_round_id（防双领）
+ 8. claimed_count < member_count（配额检查）
+ 9. NEX: deduct_pool → Currency::transfer（先扣记账后转实物）
+10. Token: best-effort（失败不影响 NEX；扣池失败则回滚转账）
+11. claimed_count++, ClaimRecords 写入（滚动窗口）
+12. DistributionStatistics 累加
+13. ClaimCallback::on_pool_reward_claimed
 ```
+
+### clear_pool_reward_config 清除范围
+
+extrinsic（call_index 7/8）清除：`PoolRewardConfigs` + `CurrentRound` + `LastRoundId` + `PoolRewardPaused`。`PoolRewardPlanWriter::clear_config` 额外清除 `LastClaimedRound` + `ClaimRecords` + `RoundHistory` + `DistributionStatistics`。
 
 ## 内部方法
 
 | 方法 | 说明 |
 |------|------|
-| `validate_level_ratios(&[(u8, u16)])` | 校验等级比率配置（重复、范围、总和），extrinsic + PlanWriter 共用 |
-| `build_level_snapshots<B>(pool_balance, &[(u8, u16, u32)])` | 泛型快照构建，NEX/Token 通用，避免重复代码 |
-| `ensure_current_round(entity_id, config, now)` | 若当前轮次有效则返回，否则调用 `create_new_round` |
-| `create_new_round(entity_id, config, now)` | 缓存等级会员数 → 构建 NEX/Token 快照 → 写入存储 |
-| `ensure_owner_or_admin(who, entity_id)` | 检查 Entity 活跃 + 调用者是 Owner 或 Admin(COMMISSION_MANAGE) |
+| `validate_level_ratios` | 校验等级比率（重复、范围、总和） |
+| `build_level_snapshots<B>` | 泛型快照构建，NEX/Token 通用 |
+| `ensure_current_round` | 轮次有效则返回，否则创建新轮 |
+| `create_new_round` | 缓存会员数 → 快照 → 归档旧轮 → 事件 |
+| `invalidate_current_round` | 保存 round_id 到 `LastRoundId` 后移除轮次 |
+| `ensure_owner_or_admin` | Entity 活跃 + Owner/Admin(COMMISSION_MANAGE) |
+| `get_claimable` | 预查询可领取 `(nex, token)`，只读不写 |
+| `simulate_claimable` | 模拟新轮次快照计算（轮次过期时） |
+| `get_round_statistics` | 当前轮次各等级领取进度 |
 
-## Trait 实现
+## PoolRewardPlanWriter
 
-### PoolRewardPlanWriter
-
-供 `pallet-commission-core` 的 `init_commission_plan` / 治理写入配置：
+供 `pallet-commission-core` / 治理写入配置，绕过权限检查：
 
 ```rust
 trait PoolRewardPlanWriter {
-    fn set_pool_reward_config(entity_id, level_ratios: Vec<(u8, u16)>, round_duration: u32) -> DispatchResult;
+    fn set_pool_reward_config(entity_id, level_ratios, round_duration) -> DispatchResult;
     fn clear_config(entity_id: u64) -> DispatchResult;
-    fn set_token_pool_enabled(entity_id: u64, enabled: bool) -> DispatchResult;
+    fn set_token_pool_enabled(entity_id: u64, enabled: bool) -> DispatchResult; // 默认 no-op
 }
 ```
 
-- `set_pool_reward_config`: 与 extrinsic 共用 `validate_level_ratios` 校验，保留现有 `token_pool_enabled`
-- `clear_config`: 清除 `PoolRewardConfigs` + `CurrentRound` + `LastRoundId` + `LastClaimedRound` + `ClaimRecords` 全部 5 项存储，发出 `PoolRewardConfigCleared` 事件
+- `set_pool_reward_config`: 共用 `validate_level_ratios`，保留 `token_pool_enabled`，发出 `PoolRewardConfigUpdated` 事件
+- `clear_config`: 清除全部 8 项存储（含 `LastClaimedRound`/`ClaimRecords` 的 `clear_prefix`），发出 `PoolRewardConfigCleared` 事件
+- `set_token_pool_enabled`: 仅值变更时失效轮次，发出 `TokenPoolEnabledUpdated` 事件
 
-## Events
+## Events（13 个）
 
 | 事件 | 字段 | 说明 |
 |------|------|------|
-| `PoolRewardConfigUpdated` | entity_id | 配置更新 |
-| `NewRoundStarted` | entity_id, round_id, pool_snapshot, token_pool_snapshot | 新轮次快照创建 |
-| `PoolRewardClaimed` | entity_id, account, amount, token_amount, round_id, level_id | 用户领取奖励 |
+| `PoolRewardConfigUpdated` | entity_id | 配置已更新 |
+| `NewRoundStarted` | entity_id, round_id, pool_snapshot, token_pool_snapshot | 新轮次创建 |
+| `PoolRewardClaimed` | entity_id, account, amount, token_amount, round_id, level_id | 用户领取 |
 | `TokenPoolEnabledUpdated` | entity_id, enabled | Token 池开关变更 |
-| `RoundForced` | entity_id, round_id | 管理员强制开启新轮次 |
-| `TokenTransferRollbackFailed` | entity_id, account, amount | Token 回滚转账失败（需人工干预） |
-| `PoolRewardConfigCleared` | entity_id | 配置已清除（区别于 Updated） |
+| `RoundForced` | entity_id, round_id | 强制新轮次 |
+| `TokenTransferRollbackFailed` | entity_id, account, amount | Token 回滚失败（需人工干预） |
+| `PoolRewardConfigCleared` | entity_id | 配置已清除 |
+| `PoolRewardPausedEvent` | entity_id | Entity 池奖励已暂停 |
+| `PoolRewardResumedEvent` | entity_id | Entity 池奖励已恢复 |
+| `GlobalPoolRewardPausedEvent` | — | 全局已暂停 |
+| `GlobalPoolRewardResumedEvent` | — | 全局已恢复 |
+| `RoundArchived` | entity_id, round_id | 旧轮次已归档 |
+| `NewRoundDetails` | entity_id, round_id, pool_snapshot, token_pool_snapshot, level_snapshots, token_level_snapshots | 新轮详细快照 |
 
-## Errors
+## Errors（22 个）
 
 | 错误 | 说明 |
 |------|------|
-| `InvalidRatio` | 单个比率不在 (0, 10000] 范围 |
-| `RatioSumMismatch` | 所有等级比率之和不等于 10000 |
-| `DuplicateLevelId` | 配置中存在重复的 level_id |
-| `InvalidRoundDuration` | round_duration 为 0 |
-| `NotMember` | 调用者不是该 Entity 的会员 |
-| `NotAuthorized` | 调用者不是 Entity Owner 或授权管理员 |
-| `EntityLocked` | 实体已被全局锁定，所有配置操作不可用 |
-| `LevelNotConfigured` | 用户等级未在配置中 |
-| `AlreadyClaimed` | 本轮已领取过 |
-| `LevelQuotaExhausted` | 该等级本轮领取名额已满 |
-| `NothingToClaim` | 可领取金额为 0 |
-| `InsufficientPool` | NEX 沉淀池余额不足 |
-| `ConfigNotFound` | Entity 未配置沉淀池奖励 |
-| `LevelNotInSnapshot` | 等级未在当前轮次快照中 |
-| `RoundIdOverflow` | round_id 已达 u64::MAX，无法创建新轮次 |
+| `InvalidRatio` | ratio 不在 (0, 10000] |
+| `RatioSumMismatch` | 比率总和 ≠ 10000 |
+| `DuplicateLevelId` | 重复 level_id |
+| `InvalidRoundDuration` | round_duration = 0 |
+| `RoundDurationTooShort` | round_duration < MinRoundDuration |
+| `ConfigNotFound` | 无沉淀池配置 |
 | `EntityNotActive` | Entity 不存在或未激活 |
-| `ParticipationRequirementNotMet` | 账户未满足 Entity 参与要求（如 KYC） |
+| `NotAuthorized` | 非 Owner/Admin |
+| `EntityLocked` | 实体已锁定 |
+| `NotMember` | 非会员 |
+| `ParticipationRequirementNotMet` | 未满足参与要求（KYC） |
+| `LevelNotConfigured` | 用户等级未在配置中 |
+| `LevelNotInSnapshot` | 等级未在快照中 |
+| `AlreadyClaimed` | 本轮已领取 |
+| `LevelQuotaExhausted` | 等级配额已满 |
+| `NothingToClaim` | 可领取金额 = 0 |
+| `InsufficientPool` | NEX 池余额不足 |
+| `RoundIdOverflow` | round_id 达 u64::MAX |
+| `PoolRewardIsPaused` | Entity 池奖励已暂停 |
+| `PoolRewardNotPaused` | Entity 池奖励未暂停 |
+| `GlobalPaused` | 全局已暂停 |
+| `GlobalNotPaused` | 全局未暂停 |
 
-> **注意：** `is_activated` 不在 `MemberProvider` trait 中，会员激活状态由 `is_member` 隐含覆盖。
+## Weight
 
-## Token 双池行为细节
+基于 DB read/write 分析估算（`weights.rs`），后续可通过 benchmark 替换。
 
-| 场景 | NEX 领取 | Token 领取 |
-|------|----------|------------|
-| `token_pool_enabled = false` | 正常 | 不分配，快照无 Token |
-| Token 余额充足 | 正常 | 正常 |
-| Token 转账失败 | **正常（不受影响）** | 跳过，pool 不扣减 |
-| Token pool 扣减失败 | 正常 | **回滚转账**，保持一致性 |
-
-## 风险与对策
-
-| 风险 | 对策 |
-|------|------|
-| 池余额为零 | 快照时 per_member_reward = 0，claim 返回 `NothingToClaim` |
-| 冷启动无奖励 | 池初始为空，需若干订单积累后才有分配 |
-| 等级人数暴增稀释 | 快照锁定当轮人数，新会员需等下一轮 |
-| 未领取份额 | 留在池中，下一轮自然纳入重新分配 |
-| Owner 挪用 | 偿付检查计入池余额 + POOL_REWARD cooldown 机制 |
-| 双领攻击 | `LastClaimedRound` + `claimed_count` 双重防护 |
-| round_id 溢出 | `create_new_round` 拒绝 `old_round_id == u64::MAX`，返回 `RoundIdOverflow` |
+| Extrinsic | Reads | Writes | ref_time | proof_size |
+|-----------|-------|--------|----------|------------|
+| `set_pool_reward_config` | 4 | 3 | 50M | 6K |
+| `claim_pool_reward` | 10 | 7 | 150M | 15K |
+| `force_new_round` | 7+N | 1 | 110M | 11K |
+| `set_token_pool_enabled` | 4 | 3 | 45M | 5K |
+| `clear_pool_reward_config` | 4 | 4 | 40M | 5K |
+| `pause_pool_reward` | 4 | 1 | 30M | 4K |
+| `resume_pool_reward` | 4 | 1 | 30M | 4K |
+| `set_global_pool_reward_paused` | 1 | 1 | 15M | 2K |
 
 ## 依赖
 
@@ -375,375 +346,111 @@ scale-info = { features = ["derive"], workspace = true }
 frame-support = { workspace = true }
 frame-system = { workspace = true }
 sp-runtime = { workspace = true }
-pallet-entity-common = { path = "../../common" }
-pallet-commission-common = { path = "../common" }
+pallet-entity-common = { path = "../../common", default-features = false }
+pallet-commission-common = { path = "../common", default-features = false }
+
+[features]
+runtime-benchmarks = ["frame-support/..", "frame-system/..", "sp-runtime/..", "pallet-entity-common/..", "pallet-commission-common/.."]
+try-runtime = ["frame-support/..", "frame-system/..", "sp-runtime/..", "pallet-entity-common/..", "pallet-commission-common/.."]
+
 ```
 
-## 测试覆盖（94 tests）
+## 测试覆盖（136 tests）
 
-### 配置测试（7）
+共 **136** 个测试，覆盖全部 12 个 extrinsic、3 个 PlanWriter 方法、3 个查询方法和 8 轮审计回归。
 
-| 测试 | 覆盖场景 |
-|------|----------|
-| `set_config_works` | 正常设置配置 |
-| `set_config_rejects_ratio_sum_mismatch` | 比率总和 ≠ 10000 |
-| `set_config_rejects_zero_ratio` | 单个比率为 0 |
-| `set_config_rejects_duplicate_level` | 重复 level_id |
-| `set_config_rejects_zero_duration` | round_duration = 0 |
-| `set_config_rejects_unauthorized` | 非 Owner/Admin 调用被拒 |
-| `set_config_rejects_ratio_over_10000` | ratio > 10000 拒绝 |
+### 按类别统计
 
-### 轮次测试（4）
-
-| 测试 | 覆盖场景 |
-|------|----------|
-| `first_claim_creates_round` | 首次 claim 触发轮次创建 |
-| `round_persists_within_duration` | 轮次窗口内复用同一轮 |
-| `round_rolls_over_after_expiry` | 过期后自动创建新轮 |
-| `force_new_round_works` | Owner 强制新轮 |
-
-### 领取测试（9）
-
-| 测试 | 覆盖场景 |
-|------|----------|
-| `basic_claim_works` | 基础领取 + 余额变化 |
-| `claim_correct_amount_per_level` | 多等级按比率分配 |
-| `claim_rejects_non_member` | 非会员被拒 |
-| `claim_rejects_unconfigured_level` | 未配置等级被拒 |
-| `double_claim_rejected` | 同轮双领被拒 |
-| `level_quota_exhausted` | 等级配额耗尽 |
-| `claim_deducts_pool_balance` | 池余额扣减验证 |
-| `zero_member_level_no_reward` | 空等级份额留池 |
-| `config_not_found_error` | 无配置时报错 |
-
-### 领取历史测试（3）
-
-| 测试 | 覆盖场景 |
-|------|----------|
-| `claim_history_recorded` | 历史记录写入 |
-| `claim_history_multi_rounds` | 跨轮次历史 |
-| `claim_history_evicts_oldest` | 滚动窗口淘汰最旧记录（MaxClaimHistory=5） |
-
-### PlanWriter 测试（3）
-
-| 测试 | 覆盖场景 |
-|------|----------|
-| `plan_writer_set_config` | Trait 写入配置 |
-| `plan_writer_clear_config` | Trait 清除配置 + 轮次 |
-| `plan_writer_set_token_pool_enabled` | Trait 设置 Token 开关 |
-
-### Token 双池测试（6）
-
-| 测试 | 覆盖场景 |
-|------|----------|
-| `set_token_pool_enabled_works` | Token 池开关 |
-| `set_token_pool_enabled_requires_config` | 无配置时拒绝 |
-| `round_includes_token_snapshot_when_enabled` | Token 快照正确生成 |
-| `round_no_token_snapshot_when_disabled` | 禁用时无 Token 快照 |
-| `claim_dual_pool_nex_and_token` | NEX + Token 同步领取 |
-| `claim_token_best_effort_nex_still_works` | Token 失败不影响 NEX |
-
-### 审计回归测试 Round 1（8）
-
-| 测试 | 覆盖场景 |
-|------|----------|
-| `h1_plan_writer_rejects_invalid_ratio_sum` | PlanWriter 拒绝 sum≠10000 |
-| `h1_plan_writer_rejects_zero_ratio` | PlanWriter 拒绝 ratio=0 |
-| `h1_plan_writer_rejects_duplicate_level` | PlanWriter 拒绝重复 level_id |
-| `h1_plan_writer_rejects_zero_duration` | PlanWriter 拒绝 duration=0 |
-| `h2_set_config_preserves_token_pool_enabled` | extrinsic 更新配置保留 token 开关 |
-| `h2_plan_writer_preserves_token_pool_enabled` | PlanWriter 更新配置保留 token 开关 |
-| `h3_clear_config_resets_last_claimed_round` | clear_config 清理全部 4 项存储 |
-| `m1_round_id_overflow_rejected` | round_id=u64::MAX 时拒绝创建新轮 |
-
-### 审计回归测试 Round 2（5）
-
-| 测试 | 覆盖场景 |
-|------|----------|
-| `h2_config_update_invalidates_current_round` | 配置变更清除旧快照，新 claim 创建含新 level_id 的快照 |
-| `h2_plan_writer_config_update_invalidates_round` | PlanWriter 路径同样清除旧快照 |
-| `h2_config_update_mid_round_allows_reclaim` | 配置更新后 LastClaimedRound 被清除，用户可立即 claim 新轮 |
-| `m2_claim_rejects_entity_not_active` | Banned/Closed Entity 的会员不能领取 |
-| `m2_claim_works_when_entity_active` | 正常 Entity 领取不受影响 |
-
-### 边界与集成测试（10）
-
-| 测试 | 覆盖场景 |
-|------|----------|
-| `force_new_round_rejects_unauthorized` | 非 Owner/Admin 拒绝强制新轮 |
-| `force_new_round_rejects_no_config` | 无配置时拒绝强制新轮 |
-| `set_token_pool_enabled_rejects_unauthorized` | 非 Owner/Admin 拒绝设置 Token 开关 |
-| `claim_zero_pool_balance_nothing_to_claim` | 零池余额返回 NothingToClaim |
-| `claim_insufficient_pool_after_snapshot` | 快照后池被消耗返回 InsufficientPool |
-| `multi_entity_isolation` | 多实体互不影响 |
-| `claim_after_round_rollover_allowed` | 跨轮次连续领取 |
-| `token_deduct_fail_rolls_back_transfer` | Token 扣减失败回滚转账 |
-| `snapshot_with_empty_pool_produces_zero_rewards` | 空池快照 per_member=0 |
+| 类别 | 数量 | 说明 |
+|------|------|------|
+| 配置测试 | 7 | set_config 正常/异常路径 |
+| 轮次测试 | 4 | 创建/复用/过期/强制新轮 |
+| 领取测试 | 9 | 正常 claim + 权限/配额/余额异常 |
+| 领取历史 | 3 | 记录写入/跨轮/滚动淘汰 |
+| PlanWriter | 4 | set_config/clear/token_enabled + 新存储清除 |
+| Token 双池 | 6 | 开关/快照/双池 claim/best-effort |
+| 边界与集成 | 10 | 多实体隔离/跨轮领取/Token 回滚/空池 |
+| 权限 (P0) | 7 | Admin/Owner/Root 权限验证 |
+| EntityLocked (P1) | 10 | 锁定保护 + Root force 绕过 |
+| clear_config (P2) | 8 | Owner/Admin/Root 清除 + 异常 |
+| 暂停 (F3) | 9 | pause/resume + claim 阻塞 |
+| MinRoundDuration (F4) | 3 | duration 校验 |
+| get_claimable (F1) | 5 | 预查询各场景 |
+| get_round_statistics (F5) | 2 | 无轮/有轮进度 |
+| 全局暂停 (F8) | 6 | 全局 pause/resume + claim 阻塞 |
+| 分配统计 (F9) | 3 | claim/累加/轮次完成统计 |
+| 轮次历史 (F10) | 3 | 归档/FIFO 淘汰/事件 |
+| NewRoundDetails (F11) | 1 | 详细快照事件 |
+| 审计回归 R1 | 8 | H1-H3/M1 修复验证 |
+| 审计回归 R2 | 5 | H2-R2/M2-R2 修复验证 |
+| 审计回归 R3 | 6 | M1-R3/M2-R3/L1-R3 修复验证 |
+| 审计回归 R4 | 4 | M1-R4/L1-R4 修复验证 |
+| 审计回归 R5 | 3 | M1-R5/M3-R5 修复验证 |
+| 审计回归 R7 | 4 | M1-R7/M2-R7 修复验证 |
+| 审计回归 R8 | 4 | M1-R8 封禁/冻结会员 claim 阻塞 + get_claimable 返零 |
+| 全局+实体暂停交互 | 1 | 全局暂停优先于实体恢复 |
+| 参与权检查 | 1 | ParticipationGuard 拒绝 claim |
 
 ---
 
-## 审计与优化记录
+## 审计记录摘要
 
-### Round 1
+共经历 **8 轮审计** + **3 次功能增强批次**（P0/P1/P2 权限 + F1-F12 功能），累计修复 **4 High + 11 Medium + 13 Low** 问题。当前 **136 tests** 全部通过。
 
-**审计日期**: 2026-03-02
+### 已修复的安全问题
 
-#### 安全修复
+| Round | ID | 严重度 | 描述 |
+|-------|----|--------|------|
+| R1 | H1 | High | PlanWriter 绕过 `validate_level_ratios` 校验 |
+| R1 | H2 | High | `set_pool_reward_config` 硬编码 `token_pool_enabled: false` |
+| R1 | H3 | High | `clear_config` 不清理 `LastClaimedRound`/`ClaimRecords` |
+| R2 | H2-R2 | High | 配置更新后不清除 `CurrentRound`，旧快照与新配置不一致 |
+| R1 | M1 | Medium | `round_id = u64::MAX` 时 `saturating_add` 产生重复 ID |
+| R2 | M2-R2 | Medium | `claim_pool_reward` 不检查 Entity 是否激活 |
+| R2 | M3-R2 | Medium | NEX 转账顺序：先转后扣 → 改为先扣后转 |
+| R3 | M1-R3 | Medium | Token 开关不使当前轮次失效 |
+| R3 | M2-R3 | Medium | 配置更新用 `clear_prefix` O(n)；round_id 重置为 1 |
+| R4 | M1-R4 | Medium | weights.rs DB 计数不同步 |
+| R5 | M1-R5 | Medium | `force_new_round` 不检查 Entity 激活 |
+| R5 | M3-R5 | Medium | `clear_config` 发出错误事件类型 |
+| R7 | M1-R7 | Medium | `clear_pool_reward_config` 不清除 `PoolRewardPaused` 残留 |
+| R7 | M2-R7 | Medium | 3 个 extrinsic 复用错误权重函数 |
+| R8 | M1-R8 | Medium | `claim_pool_reward`/`get_claimable` 缺 `is_banned`/`is_member_active` 检查 — 封禁或冻结会员仍可领取。修复: 添加检查 |
+| R8 | L1-R8 | Low | Cargo.toml 缺 `pallet-entity-common`/`pallet-commission-common` 的 `runtime-benchmarks`/`try-runtime` feature 传播。修复: 已添加 |
 
-| ID | 严重度 | 描述 | 修复 |
-|----|--------|------|------|
-| H1 | High | `PoolRewardPlanWriter::set_pool_reward_config` 绕过所有校验 | 提取 `validate_level_ratios` 共享方法，extrinsic + PlanWriter 统一校验 |
-| H2 | High | `set_pool_reward_config` 更新配置时硬编码 `token_pool_enabled: false`，静默禁用已启用的 Token 池 | 读取已有配置保留 `token_pool_enabled` |
-| H3 | High | `clear_config` 仅清理 2 项存储，`LastClaimedRound` 残留导致用户无法领取新轮奖励 | 清理全部 4 项存储（含 `LastClaimedRound` + `ClaimRecords`） |
-| M1 | Medium | `create_new_round` 当 `round_id = u64::MAX` 时 `saturating_add(1)` 不变，产生重复 ID | 添加 `ensure!(old_round_id < u64::MAX, RoundIdOverflow)` |
-
-#### 冗余清理
-
-| ID | 类型 | 描述 |
-|----|------|------|
-| R1 | 代码重复 | extrinsic 和 PlanWriter 校验逻辑重复 → 提取 `validate_level_ratios` 共享方法 |
-| R2 | 代码重复 | NEX/Token 快照构建逻辑重复 → 提取泛型 `build_level_snapshots<B>` 方法 |
-| R3 | 冗余存储读 | `token_pool_enabled=true` 时 `member_count_by_level` 每级调用 2 次 → 缓存 `level_counts` Vec |
-| R4 | 死绑定 | `_user_ratio` 计算后从未使用 → 替换为 `ensure!(..any(..))` 存在性检查 |
-| R5 | 死 Config | `DefaultRoundDuration` 声明但 pallet 从未读取 → 移除（pallet + runtime） |
-| R6 | 死 Error | `InsufficientTokenPool` 声明但从未抛出（Token 用 best-effort） → 移除 |
-| R7 | 多余属性 | 测试辅助函数上无用的 `#[allow(dead_code)]` → 移除 |
-| R8 | 死依赖 | `sp-std` 在 Cargo.toml 中声明但代码未使用 → 移除 |
-
-### Round 2
-
-**审计日期**: 2026-03-03
-
-#### 安全修复
-
-| ID | 严重度 | 描述 | 修复 |
-|----|--------|------|------|
-| H2-R2 | High | `set_pool_reward_config` 更新配置（level_ratios / round_duration）后不清除 `CurrentRound`，旧快照中的 level_id 集合/比率与新配置不一致。用户可能因 `LevelNotInSnapshot` 无法领取，或按旧比率领取错误金额 | extrinsic 和 PlanWriter 两条路径均清除 `CurrentRound` + `LastClaimedRound`，强制下次 claim 创建新快照 |
-| M2-R2 | Medium | `claim_pool_reward` 不检查 Entity 是否存在/激活，Banned/Closed Entity 的会员仍可继续领取沉淀池奖励 | 添加 `ensure!(EntityProvider::is_entity_active(entity_id), EntityNotActive)` 前置检查 |
-
-#### 其他修复
-
-| ID | 类型 | 描述 |
-|----|------|------|
-| L1-R2 | Low | `Cargo.toml` `try-runtime` feature 缺少 `sp-runtime/try-runtime` |
-| L1 | Low | 4 个 extrinsic 硬编码 Weight → 新建 `weights.rs`，定义 `WeightInfo` trait + `SubstrateWeight` 估算实现（基于 DB read/write 分析），Config 新增 `type WeightInfo` |
-| L2-R2 | Low | `PoolRewardDefaultRoundDuration` parameter_types 在 runtime 声明但 pallet 从未使用 → 从 runtime 删除死常量 |
-| M3-R2 | Medium | NEX 转账在 `deduct_pool` 之前执行 → 调整为「先扣记账（deduct_pool）、后转实物（Currency::transfer）」。Token 路径保持 transfer-first 顺序（best-effort 无法事务回滚） |
-
-#### 未修复（记录）
+### 记录但未修复（设计权衡）
 
 | ID | 严重度 | 描述 |
 |----|--------|------|
-| M1-R2 | Medium | `build_level_snapshots` 整除截断导致尘埃累积：`pool * ratio / 10000 / count` 的截断余额永久留池。高等级人数少时损失比例可观（设计权衡：尘埃自动滚入下轮，无资金丢失） |
+| M1-R2 | Medium | `build_level_snapshots` 整除截断尘埃累积（滚入下轮，无资金丢失） |
+| M2-R5 | Medium | 双整除可合并为单除避免精度损失（同 M1-R2） |
+| L1-R5 | Low | `claim_history` 淘汰 `remove(0)` O(n)，MaxClaimHistory ≤ 5 可忽略 |
+| L1-R7 | Low | claim 时读当前等级非快照等级（设计权衡） |
+| L2-R7 | Low | `force_new_round` 暂停期间仍可创建新轮（force 操作不受暂停限制） |
+| L3-R7 | Low | Root `force_*` 的 `is_entity_active` 检查不一致 |
 
-### Round 3
+### 功能增强批次
 
-**审计日期**: 2026-03-03
+| 批次 | 内容 | 新增 extrinsics | 新增测试 |
+|------|------|-----------------|----------|
+| P0 | 权限下放: Root → Owner/Admin(COMMISSION_MANAGE) | 0（改造现有） | 7 |
+| P1 | EntityLocked 保护 + Root `force_*` 覆写 | 3 (call_index 4/5/6) | 10 |
+| P2 | `clear_pool_reward_config` + `force_clear` | 2 (call_index 7/8) | 8 |
+| F1-F12 | 预查询/暂停/统计/历史/回调等 10 项功能 | 3 (call_index 9/10/11) | 34 |
 
-#### 安全修复
+### 版本演进
 
-| ID | 严重度 | 描述 | 修复 |
-|----|--------|------|------|
-| M1-R3 | Medium | `set_token_pool_enabled` (extrinsic + PlanWriter) 不使当前轮次失效。mid-round 启用→本轮无 token 快照用户无法领 token；mid-round 禁用→本轮仍可领 token | extrinsic 和 PlanWriter 切换后调用 `invalidate_current_round`，立即生效 |
-| M2-R3 | Medium | `set_pool_reward_config` 使用 `clear_prefix(u32::MAX)` 清除 `LastClaimedRound`，写入量 O(n) 随用户数增长，weight 仅声明 2 writes 严重低估。根因：`CurrentRound::remove` 后 round_id 重置为 1 | 新增 `LastRoundId` 存储保持 round_id 单调递增；`invalidate_current_round` helper 保存 round_id 后移除轮次；消除 `clear_prefix` |
-
-#### 其他修复
-
-| ID | 类型 | 描述 |
-|----|------|------|
-| L1-R3 | Low | PlanWriter 三个方法（`set_pool_reward_config`, `clear_config`, `set_token_pool_enabled`）不 emit 事件 → off-chain indexer 无法感知 governance 配置变更。修复：每个方法末尾 `deposit_event` |
-| L2-R3 | Low | `Cargo.toml` `runtime-benchmarks` feature 缺 `sp-runtime/runtime-benchmarks` → 已补充 |
-
-#### 新增存储
-
-| 名称 | 类型 | 说明 |
-|------|------|------|
-| `LastRoundId<T>` | `StorageMap<u64, u64, ValueQuery>` | 配置变更后保留上一轮次 ID，保持 round_id 单调递增 |
-
-#### 新增测试 (6)
-
-| 测试名 | 覆盖 |
-|--------|------|
-| `m1_r3_token_enable_invalidates_round_and_adds_token_snapshot` | M1-R3 启用 token 池立即生效 |
-| `m1_r3_token_disable_invalidates_round_removes_token_snapshot` | M1-R3 禁用 token 池立即生效 |
-| `m2_r3_config_update_round_id_monotonic` | M2-R3 配置更新后 round_id 递增 + LastClaimedRound 保留 |
-| `m2_r3_multiple_config_updates_round_id_keeps_increasing` | M2-R3 多次配置更新 round_id 始终递增 |
-| `l1_r3_plan_writer_emits_config_event` | L1-R3 PlanWriter emit PoolRewardConfigUpdated |
-| `l1_r3_plan_writer_emits_token_event` | L1-R3 PlanWriter emit TokenPoolEnabledUpdated |
-
-#### 修改已有测试 (2)
-
-| 测试名 | 变更 |
-|--------|------|
-| `h2_config_update_invalidates_current_round` | round_id 断言 1→2（单调递增） |
-| `h2_config_update_mid_round_allows_reclaim` | LastClaimedRound 不再清零，round_id 2 |
-
-**累计测试**: 64 (was 58) ✅ · `cargo check -p nexus-runtime` ✅
-
-### Round 4
-
-**审计日期**: 2026-03-03
-
-#### 修复
-
-| ID | 严重度 | 描述 | 修复 |
-|----|--------|------|------|
-| M1-R4 | Medium | `weights.rs` DB read/write 计数在 R3 修复后未同步更新。`set_pool_reward_config` 实际 reads(2)+writes(3) 但声明 reads(1)+writes(2)；`set_token_pool_enabled` 实际 reads(2)+writes(3) 但声明 reads(1)+writes(1)；`force_new_round` 缺少 `member_count_by_level` 读取；注释引用已删除的 `clear_prefix` | 更新全部 4 个 extrinsic 的 DB 计数、proof_size、注释 |
-| L1-R4 | Low | `set_token_pool_enabled` (extrinsic + PlanWriter) 幂等调用（如 enabled=true 时再次设 true）仍触发 `invalidate_current_round`，浪费有效快照 | 添加 `changed` 标志，仅在值实际变更时才失效轮次 |
-| L2-R4 | Low | `clear_config` (PlanWriter) 使用 `clear_prefix(u32::MAX)` 清除 `LastClaimedRound` + `ClaimRecords`，写入量 O(n)。调用方需在自身 weight 中计入此开销 | 添加文档注释说明 weight 责任归属 |
-
-#### 新增测试 (4)
-
-| 测试名 | 覆盖 |
-|--------|------|
-| `l1_r4_idempotent_token_toggle_preserves_round` | L1-R4 幂等 extrinsic 调用不失效轮次 |
-| `l1_r4_plan_writer_idempotent_token_toggle_preserves_round` | L1-R4 幂等 PlanWriter 调用不失效轮次 |
-| `l1_r4_actual_change_still_invalidates_round` | L1-R4 实际变更仍正确失效轮次 |
-| `m1_r4_weight_values_are_reasonable` | M1-R4 Weight 值非零且在预期范围内 |
-
-**累计测试**: 68 (was 64) ✅ · `cargo check -p nexus-runtime` ✅
-
-### Round 5
-
-**审计日期**: 2026-03-04
-
-#### 修复
-
-| ID | 严重度 | 描述 | 修复 |
-|----|--------|------|------|
-| M1-R5 | Medium | `force_new_round` 不检查 Entity 激活状态，可为 Banned/Closed Entity 创建快照 | 添加 `ensure!(is_entity_active)` 前置检查，与 `claim_pool_reward` 一致 |
-| M3-R5 | Medium | `clear_config` (PlanWriter) 发出 `PoolRewardConfigUpdated` 事件，off-chain indexer 无法区分配置更新与删除 | 新增 `PoolRewardConfigCleared` 事件，`clear_config` 改用专用事件 |
-| L2-R5 | Low | README 缺少 `EntityNotActive`/`ParticipationRequirementNotMet` 错误、`LastRoundId` 存储、`TokenTransferRollbackFailed`/`PoolRewardConfigCleared` 事件、`ParticipationGuard`/`WeightInfo` Config 项 | README 全面同步 |
-
-#### 记录（未修复）
-
-| ID | 严重度 | 描述 |
-|----|--------|------|
-| M2-R5 | Medium | `build_level_snapshots` 双整除截断可避免精度损失（`pool*ratio/10000/count` → `pool*ratio/(10000*count)`）。与 M1-R2 同属设计权衡，尘埃滚入下轮 |
-| L1-R5 | Low | `claim_pool_reward` 历史淘汰 `remove(0)` 为 O(n)，MaxClaimHistory 通常 ≤ 5，可忽略 |
-
-#### 新增事件
-
-| 名称 | 字段 | 说明 |
-|------|------|------|
-| `PoolRewardConfigCleared` | entity_id | 配置已清除（区别于 Updated） |
-
-#### 新增测试 (3)
-
-| 测试名 | 覆盖 |
-|--------|------|
-| `m1_r5_force_new_round_rejects_inactive_entity` | M1-R5 非活跃 Entity 拒绝强制新轮 |
-| `m1_r5_force_new_round_works_when_entity_active` | M1-R5 活跃 Entity 正常工作 |
-| `m3_r5_clear_config_emits_cleared_event` | M3-R5 clear_config 发出 Cleared 事件 |
-
-**累计测试**: 71 (was 68) ✅ · `cargo check -p pallet-commission-pool-reward` ✅
-
-### P0 权限下放
-
-**日期**: 2026-03
-
-#### 修改
-
-| ID | 类型 | 描述 | 修复 |
-|----|------|------|------|
-| P0-1 | Feature | `set_pool_reward_config` / `force_new_round` / `set_token_pool_enabled` 从 Root-only 改为 Entity Owner + Admin(COMMISSION_MANAGE) | `ensure_root` → `ensure_signed` + `ensure_owner_or_admin` helper |
-| P0-2 | Feature | 新增 `NotAuthorized` 错误 | 权限检查失败时返回 |
-| P0-3 | Doc | README `is_activated` 检查不存在于 `MemberProvider` trait | 修正文档，移除虚假流程步骤 |
-| P0-4 | Weight | `weights.rs` 3 个 extrinsic +2 reads (entity_active + entity_owner) | 更新 DB 计数和 ref_time |
-
-#### 新增内部方法
-
-| 方法 | 说明 |
-|------|------|
-| `ensure_owner_or_admin(who, entity_id)` | 检查 Entity 活跃 + 调用者是 Owner 或 Admin(COMMISSION_MANAGE) |
-
-#### 新增测试 (7)
-
-| 测试名 | 覆盖 |
-|--------|------|
-| `p0_admin_can_set_pool_reward_config` | Admin(COMMISSION_MANAGE) 可配置 |
-| `p0_admin_without_commission_manage_rejected` | 无权限 Admin 被拒 |
-| `p0_admin_can_force_new_round` | Admin 可强制新轮 |
-| `p0_admin_can_set_token_pool_enabled` | Admin 可设 Token 开关 |
-| `p0_root_origin_rejected` | Root origin 被 ensure_signed 拒绝 |
-| `p0_owner_rejected_for_inactive_entity` | 非活跃 Entity 的 Owner 被拒 |
-| + 2 existing tests renamed | `requires_root` → `rejects_unauthorized` |
-
-#### Mock 变更
-
-- 新增 `ENTITY_ADMINS` thread_local + `set_entity_admin` helper
-- `MockEntityProvider` 新增 `is_entity_admin` impl
-- 新增 `OWNER = 999` 常量，所有 extrinsic 测试改用 `RuntimeOrigin::signed(OWNER)`
-
-**累计测试**: 76 (was 71) ✅ · `cargo check -p pallet-commission-pool-reward` ✅
-
-### P1 EntityLocked + Root force_*
-
-**日期**: 2026-03
-
-#### 修改
-
-| ID | 类型 | 描述 | 修复 |
-|----|------|------|------|
-| P1-1 | Feature | 3 个 Owner/Admin extrinsic 缺少 `is_entity_locked` 保护，锁定 Entity 仍可配置 | 添加 `ensure!(!is_entity_locked)` guard |
-| P1-2 | Feature | Root 缺少紧急覆写路径（其他插件均有 force_* 变体） | 新增 3 个 `force_*` extrinsics (call_index 4/5/6) |
-| P1-3 | Error | 新增 `EntityLocked` 错误类型 | 配置操作在锁定时返回 |
-
-#### 新增 Extrinsics
-
-| call_index | 方法 | 权限 | 说明 |
-|------------|------|------|------|
-| 4 | `force_set_pool_reward_config` | Root | 绕过 Owner/Admin + EntityLocked，共用校验逻辑 |
-| 5 | `force_set_token_pool_enabled` | Root | 绕过 Owner/Admin + EntityLocked，幂等保护 |
-| 6 | `force_start_new_round` | Root | 绕过 Owner/Admin + EntityLocked，仍检查 entity_active |
-
-#### 新增测试 (10)
-
-| 测试名 | 覆盖 |
-|--------|------|
-| `p1_locked_entity_rejects_set_config` | Owner 在锁定 Entity 上被拒 |
-| `p1_locked_entity_rejects_force_new_round` | Owner 在锁定 Entity 上被拒 |
-| `p1_locked_entity_rejects_set_token_pool_enabled` | Owner 在锁定 Entity 上被拒 |
-| `p1_root_force_set_config_bypasses_lock` | Root force 绕过锁定 |
-| `p1_root_force_set_token_pool_enabled_bypasses_lock` | Root force 绕过锁定 |
-| `p1_root_force_start_new_round_bypasses_lock` | Root force 绕过锁定 |
-| `p1_force_set_config_rejects_non_root` | 非 Root 调用 force 被拒 |
-| `p1_force_set_token_pool_enabled_rejects_non_root` | 非 Root 调用 force 被拒 |
-| `p1_force_start_new_round_rejects_non_root` | 非 Root 调用 force 被拒 |
-| `p1_admin_rejected_on_locked_entity` | Admin 在锁定 Entity 上也被拒 |
-
-**累计测试**: 86 (was 76) ✅ · `cargo check -p pallet-commission-pool-reward` ✅
-
-### P2 clear_pool_reward_config + force_clear
-
-**日期**: 2026-03
-
-#### 修改
-
-| ID | 类型 | 描述 | 修复 |
-|----|------|------|------|
-| P2-1 | Feature | 缺少 Owner/Admin 清除配置 extrinsic（其他插件均有 clear_*） | 新增 `clear_pool_reward_config` (call_index 7) |
-| P2-2 | Feature | 缺少 Root 紧急清除路径 | 新增 `force_clear_pool_reward_config` (call_index 8，X2 防幻影事件) |
-| P2-3 | Weight | 新增 `clear_pool_reward_config` 权重函数 | 4R/3W, 40M ref_time |
-
-#### 新增 Extrinsics
-
-| call_index | 方法 | 权限 | 说明 |
-|------------|------|------|------|
-| 7 | `clear_pool_reward_config` | Owner/Admin + EntityLocked | 移除配置 + 失效轮次，不清理历史记录 |
-| 8 | `force_clear_pool_reward_config` | Root | 绕过权限+锁定，无配置时静默成功 |
-
-#### 新增测试 (8)
-
-| 测试名 | 覆盖 |
-|--------|------|
-| `p2_clear_pool_reward_config_works` | Owner 清除配置成功 |
-| `p2_clear_config_rejects_no_config` | 无配置时 ConfigNotFound |
-| `p2_clear_config_rejects_unauthorized` | 非授权用户被拒 |
-| `p2_clear_config_rejects_locked_entity` | 锁定 Entity 被拒 |
-| `p2_admin_can_clear_config` | Admin 可清除配置 |
-| `p2_root_force_clear_bypasses_lock` | Root force 绕过锁定 |
-| `p2_root_force_clear_no_config_silent` | 无配置时静默成功 |
-| `p2_force_clear_rejects_non_root` | 非 Root 被拒 |
-
-**累计测试**: 94 (was 86) ✅ · `cargo check -p pallet-commission-pool-reward` ✅
+| 阶段 | 测试数 | 关键变更 |
+|------|--------|----------|
+| 初始版本 | 52 | 基础 claim + Token 双池 |
+| R1 修复 | 58 | H1-H3 安全修复 + 冗余清理 |
+| R2 修复 | 58 | H2-R2 快照一致性 + Entity 激活检查 |
+| R3 修复 | 64 | `LastRoundId` 单调递增 + Token 开关生效 |
+| R4 修复 | 68 | Weight 同步 + 幂等保护 |
+| R5 修复 | 71 | force_new_round 激活检查 + Cleared 事件 |
+| P0 权限 | 76 | Owner/Admin 权限模型 |
+| P1 锁定 | 86 | EntityLocked + Root force_* |
+| P2 清除 | 94 | clear_config extrinsics |
+| F1-F12 | 126 | 暂停/查询/统计/历史/回调 |
+| R7 修复 | 130 | 暂停状态清除 + 专用权重函数 |
+| R8 修复 | 136 | 封禁/冻结会员 claim 阻塞 + Cargo features |

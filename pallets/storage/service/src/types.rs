@@ -7,6 +7,8 @@
 /// - 周期扣费（BillingTask, ChargeLayer）
 /// - 统计数据（GlobalHealthStats）
 
+extern crate alloc;
+use alloc::vec::Vec;
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use frame_support::{pallet_prelude::*, BoundedVec};
 use scale_info::TypeInfo;
@@ -26,56 +28,90 @@ use sp_runtime::RuntimeDebug;
 /// 
 /// 类型说明：
 /// - Evidence：证据类数据（法律文件、证明材料等）- 最高优先级
-/// - OtcOrder：OTC订单（交易证据、聊天记录等）
-/// - Chat：聊天消息（私聊/群聊媒体、文件等）
-/// - Livestream：直播间（封面图、礼物图标等）- 临时数据
-/// - Swap：Swap兑换（兑换证据等）
-/// - Arbitration：仲裁证据（申诉材料、裁决文书、证据截图）- 法律级别
-/// - UserProfile：用户档案（头像、认证材料、简介图）
+/// - Product：商品元数据（名称、图片、详情 CID）
+/// - Entity：实体元数据（logo、描述、联系方式）
+/// - Shop：店铺元数据（logo、描述、地址、营业时间、政策）
 /// - General：通用存储（默认类型）
 /// - Custom：自定义域（预留扩展）
 /// 
 /// 域ID映射（用于SubjectFunding账户派生）：
 /// - Evidence = 0
-/// - OtcOrder = 1
-/// - Chat = 5
-/// - Livestream = 6
-/// - Swap = 7
-/// - Arbitration = 8
-/// - UserProfile = 9
+/// - Product = 10
+/// - Entity = 11
+/// - Shop = 12
 /// - General = 98
 /// - Custom = 99
-/// 
-/// 注意：以下数据类型有明确生命周期，建议使用 Temporary 层级或不 PIN：
-/// - Chat（聊天消息）：180天过期，建议不 PIN 或使用 Temporary
-/// - Livestream（直播间）：临时数据，建议使用 Temporary 或不 PIN
 #[derive(Clone, Encode, Decode, DecodeWithMemTracking, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub enum SubjectType {
     /// 证据类数据（最高优先级，Critical级别，永久保存）
     Evidence,
-    /// OTC订单（交易证据、聊天记录，需长期保存）
-    OtcOrder,
-    /// 聊天消息（私聊/群聊媒体、文件）- ⚠️ 180天过期，建议 Temporary 或不 PIN
-    Chat,
-    /// 直播间（封面图、礼物图标）- ⚠️ 临时数据，建议 Temporary 或不 PIN
-    Livestream,
-    /// Swap兑换（兑换证据）
-    Swap,
-    /// 仲裁证据（申诉材料、裁决文书、证据截图）- 法律级别，永久保存
-    Arbitration,
-    /// 用户档案（头像、认证材料、简介图）
-    UserProfile,
     /// 商品元数据（名称、图片、详情 CID）- 商品在售期间持久保存
     Product,
+    /// 实体元数据（logo、描述、联系方式）- 实体存续期间持久保存
+    Entity,
+    /// 店铺元数据（logo、描述、地址、营业时间、政策）- 店铺存续期间持久保存
+    Shop,
     /// 通用存储（默认类型）
     General,
     /// 自定义域（预留扩展）
     Custom(BoundedVec<u8, ConstU32<32>>),
 }
 
+impl SubjectType {
+    /// SubjectType → 域名字节串（用于 DomainPins 索引）。
+    pub fn to_domain_name(&self) -> Vec<u8> {
+        match self {
+            Self::Evidence => b"evidence".to_vec(),
+            Self::Product => b"product".to_vec(),
+            Self::Entity => b"entity".to_vec(),
+            Self::Shop => b"shop".to_vec(),
+            Self::General => b"general".to_vec(),
+            Self::Custom(name) => name.to_vec(),
+        }
+    }
+
+    /// 域名字节串 → SubjectType（已知域映射到枚举，未知域映射到 Custom）。
+    pub fn from_domain(domain: &[u8]) -> Self {
+        match domain {
+            b"evidence" => Self::Evidence,
+            b"product" => Self::Product,
+            b"entity" => Self::Entity,
+            b"shop" => Self::Shop,
+            b"general" => Self::General,
+            other => Self::Custom(
+                BoundedVec::try_from(other.to_vec()).unwrap_or_default()
+            ),
+        }
+    }
+}
+
 impl Default for SubjectType {
     fn default() -> Self {
         Self::General
+    }
+}
+
+/// Entity 国库扣费接口。
+///
+/// 由 entity-registry 实现，storage-service 在计费时通过此 trait
+/// 尝试从 Entity 国库代付存储费，失败则 fallthrough 到下一层。
+pub trait EntityFunding<AccountId, Balance> {
+    /// 尝试从 entity_id 对应的国库转 `amount` 到 `dest`。
+    ///
+    /// - `Ok(true)` — 扣费成功
+    /// - `Ok(false)` — Entity 不存在 / 非活跃 / 余额不足，调用方应 fallthrough
+    /// - `Err(_)` — 转账本身出错（不应 fallthrough）
+    fn try_charge_entity(
+        entity_id: u64,
+        amount: Balance,
+        dest: &AccountId,
+    ) -> Result<bool, sp_runtime::DispatchError>;
+}
+
+/// Noop 实现：不涉及 Entity 的场景直接 fallthrough。
+impl<A, B> EntityFunding<A, B> for () {
+    fn try_charge_entity(_: u64, _: B, _: &A) -> Result<bool, sp_runtime::DispatchError> {
+        Ok(false)
     }
 }
 
@@ -86,7 +122,7 @@ impl Default for SubjectType {
 /// - 费用分摊机制（funding_share）
 /// 
 /// 字段说明：
-/// - subject_type：Subject类型（Evidence/OtcOrder/General等）
+/// - subject_type：Subject类型（Evidence/Product/Entity/Shop/General等）
 /// - subject_id：Subject ID
 /// - funding_share：费用分摊比例（0-100，默认100表示独占）
 /// 
@@ -134,7 +170,7 @@ pub struct DomainConfig {
     pub default_tier: PinTier,
     
     /// 域的SubjectType映射ID
-    /// - 内置类型: 1=Evidence, 2=OtcOrder, 3=General
+    /// - 内置类型: 0=Evidence, 10=Product, 11=Entity, 12=Shop, 98=General
     /// - 自定义类型: 10-255（由治理分配）
     pub subject_type_id: u8,
     
@@ -288,7 +324,7 @@ impl TierConfig {
 /// - last_check：上次巡检时间（区块号）
 /// - last_status：上次巡检结果
 /// - consecutive_failures：连续失败次数（≥5次发送告警）
-#[derive(Clone, Encode, Decode, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+#[derive(Clone, Encode, Decode, DecodeWithMemTracking, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 #[scale_info(skip_type_params(BlockNumber))]
 pub struct HealthCheckTask<BlockNumber> {
     /// CID分层等级
@@ -346,7 +382,7 @@ impl Default for HealthStatus {
 /// - critical_count：危险CID数量
 /// - last_full_scan：上次完整扫描时间
 /// - total_repairs：累计修复次数
-#[derive(Clone, Encode, Decode, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen, Default)]
+#[derive(Clone, Encode, Decode, DecodeWithMemTracking, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen, Default)]
 #[scale_info(skip_type_params(BlockNumber))]
 pub struct GlobalHealthStats<BlockNumber> {
     /// 总Pin数量
@@ -379,7 +415,7 @@ pub struct GlobalHealthStats<BlockNumber> {
 /// - healthy_count：健康CID数量
 /// - degraded_count：降级CID数量
 /// - critical_count：危险CID数量
-#[derive(Clone, Encode, Decode, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+#[derive(Clone, Encode, Decode, DecodeWithMemTracking, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub struct DomainStats {
     /// 域名
     pub domain: BoundedVec<u8, ConstU32<32>>,
@@ -412,7 +448,7 @@ pub struct DomainStats {
 /// - last_charge：上次扣费时间
 /// - grace_status：宽限期状态
 /// - charge_layer：当前使用的扣费层级
-#[derive(Clone, Encode, Decode, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+#[derive(Clone, Encode, Decode, DecodeWithMemTracking, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 #[scale_info(skip_type_params(BlockNumber, Balance))]
 pub struct BillingTask<BlockNumber, Balance> {
     /// 扣费周期（区块数）
@@ -438,15 +474,16 @@ pub struct BillingTask<BlockNumber, Balance> {
 /// - Normal：正常状态，扣费正常
 /// - InGrace：宽限期中，记录进入时间和截止时间
 /// - Expired：宽限期已过期，待Unpin
-#[derive(Clone, Encode, Decode, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+#[derive(Clone, Encode, Decode, DecodeWithMemTracking, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 #[scale_info(skip_type_params(BlockNumber))]
 pub enum GraceStatus<BlockNumber> {
     /// 正常状态
     Normal,
-    /// 宽限期中（记录进入时间和截止时间）
+    /// 宽限期中（记录进入时间、截止时间和重试次数）
     InGrace {
         entered_at: BlockNumber,
         expires_at: BlockNumber,
+        retry_count: u32,
     },
     /// 宽限期已过期，待Unpin
     Expired,
@@ -611,7 +648,7 @@ impl Default for OperatorLayer {
 /// 函数级详细中文注释：分层存储策略配置结构体
 /// 
 /// 定义不同数据类型和优先级的分层存储策略，支持：
-/// 1. 按数据类型（Evidence/OtcOrder/General等）配置
+/// 1. 按数据类型（Evidence/Product/Entity/Shop/General等）配置
 /// 2. 按优先级（Critical/Standard/Temporary）配置
 /// 3. 动态调整副本分布（Layer 1/Layer 2）
 /// 4. 治理提案修改策略
@@ -694,72 +731,6 @@ impl StorageLayerConfig {
         }
     }
 
-    /// 获取OTC订单的默认配置（标准安全）
-    /// 适用于：OtcOrder - 交易证据、聊天记录
-    pub fn otc_default() -> Self {
-        Self {
-            core_replicas: 2,
-            community_replicas: 1,
-            allow_external: true,
-            min_total_replicas: 1,
-        }
-    }
-
-    /// 获取聊天消息的默认配置（标准安全）
-    /// 适用于：Chat - 私聊/群聊媒体、文件
-    pub fn chat_default() -> Self {
-        Self {
-            core_replicas: 2,
-            community_replicas: 1,
-            allow_external: true,
-            min_total_replicas: 1,
-        }
-    }
-
-    /// 获取直播间的默认配置（低成本）
-    /// 适用于：Livestream - 封面图、礼物图标（临时数据）
-    pub fn livestream_default() -> Self {
-        Self {
-            core_replicas: 1,
-            community_replicas: 1,
-            allow_external: true,
-            min_total_replicas: 1,
-        }
-    }
-
-    /// 获取Swap兑换的默认配置（标准安全）
-    /// 适用于：Swap - 兑换证据
-    pub fn swap_default() -> Self {
-        Self {
-            core_replicas: 2,
-            community_replicas: 1,
-            allow_external: true,
-            min_total_replicas: 1,
-        }
-    }
-
-    /// 获取仲裁证据的默认配置（高安全）
-    /// 适用于：Arbitration - 申诉材料、裁决文书、证据截图（法律级别）
-    pub fn arbitration_default() -> Self {
-        Self {
-            core_replicas: 4,
-            community_replicas: 2,
-            allow_external: false,
-            min_total_replicas: 2,
-        }
-    }
-
-    /// 获取用户档案的默认配置（标准安全）
-    /// 适用于：UserProfile - 头像、认证材料、简介图
-    pub fn user_profile_default() -> Self {
-        Self {
-            core_replicas: 2,
-            community_replicas: 1,
-            allow_external: true,
-            min_total_replicas: 1,
-        }
-    }
-
     /// 获取临时数据的默认配置（低成本）
     /// 适用于：临时文件、缓存数据
     pub fn temporary_default() -> Self {
@@ -775,14 +746,10 @@ impl StorageLayerConfig {
     pub fn for_subject_type(subject_type: &SubjectType) -> Self {
         match subject_type {
             SubjectType::Evidence => Self::evidence_default(),
-            SubjectType::OtcOrder => Self::otc_default(),
-            SubjectType::Chat => Self::chat_default(),
-            SubjectType::Livestream => Self::livestream_default(),
-            SubjectType::Swap => Self::swap_default(),
-            SubjectType::Arbitration => Self::arbitration_default(),
-            SubjectType::UserProfile => Self::user_profile_default(),
-            SubjectType::Product => Self::general_default(),
-            SubjectType::General => Self::general_default(),
+            SubjectType::Product |
+            SubjectType::Entity |
+            SubjectType::Shop |
+            SubjectType::General |
             SubjectType::Custom(_) => Self::general_default(),
         }
     }
