@@ -1,16 +1,4 @@
 //! Runtime API 定义：用于前端查询 NEX/USDT 市场数据
-//!
-//! 提供以下接口：
-//! - `get_sell_orders`: 获取活跃卖单列表
-//! - `get_buy_orders`: 获取活跃买单列表
-//! - `get_user_orders`: 获取用户订单列表
-//! - `get_user_trades`: 获取用户交易历史
-//! - `get_order_trades`: 获取订单关联交易
-//! - `get_active_trades`: 获取用户活跃交易
-//! - `get_order_depth`: 获取订单深度图数据
-//! - `get_best_prices`: 获取最优买卖价格
-//! - `get_market_stats`: 获取市场统计信息
-//! - `is_market_paused`: 查询市场是否暂停
 
 use codec::{Codec, Decode, Encode};
 use scale_info::TypeInfo;
@@ -31,6 +19,7 @@ pub struct OrderInfo<AccountId, Balance> {
     pub status: u8,
     pub created_at: u64,
     pub expires_at: u64,
+    pub min_fill_amount: Balance,
 }
 
 /// 交易摘要（Runtime API 返回用）
@@ -43,9 +32,18 @@ pub struct TradeInfo<AccountId, Balance> {
     pub nex_amount: Balance,
     pub usdt_amount: u64,
     /// 0=AwaitingPayment, 1=AwaitingVerification, 2=Completed, 3=Refunded,
-    /// 4=Disputed, 5=UnderpaidPending
+    /// 4=UnderpaidPending
     pub status: u8,
     pub created_at: u64,
+    pub timeout_at: u64,
+    pub buyer_deposit: Balance,
+    /// 0=None, 1=Locked, 2=Released, 3=Forfeited
+    pub deposit_status: u8,
+    pub underpaid_deadline: Option<u64>,
+    /// W5: 交易终态时间（区块号），用于精确争议窗口
+    pub completed_at: Option<u64>,
+    /// W6: 买家是否已确认/检测到付款
+    pub payment_confirmed: bool,
 }
 
 /// 市场统计摘要
@@ -68,24 +66,22 @@ pub struct DepthEntry<Balance> {
 
 sp_api::decl_runtime_apis! {
     /// NEX Market Runtime API
-    ///
-    /// 提供订单簿查询、交易历史、市场统计等前端集成接口
     pub trait NexMarketApi<AccountId, Balance>
     where
         AccountId: Codec,
         Balance: Codec,
     {
-        /// 获取活跃卖单列表（按价格升序）
-        fn get_sell_orders() -> Vec<OrderInfo<AccountId, Balance>>;
+        /// 获取活跃卖单列表（按价格升序，支持分页）
+        fn get_sell_orders(offset: u32, limit: u32) -> Vec<OrderInfo<AccountId, Balance>>;
 
-        /// 获取活跃买单列表（按价格降序）
-        fn get_buy_orders() -> Vec<OrderInfo<AccountId, Balance>>;
+        /// 获取活跃买单列表（按价格降序，支持分页）
+        fn get_buy_orders(offset: u32, limit: u32) -> Vec<OrderInfo<AccountId, Balance>>;
 
         /// 获取用户的所有订单
         fn get_user_orders(user: AccountId) -> Vec<OrderInfo<AccountId, Balance>>;
 
-        /// 获取用户交易历史
-        fn get_user_trades(user: AccountId) -> Vec<TradeInfo<AccountId, Balance>>;
+        /// 获取用户交易历史（支持分页）
+        fn get_user_trades(user: AccountId, offset: u32, limit: u32) -> Vec<TradeInfo<AccountId, Balance>>;
 
         /// 获取订单关联的交易列表
         fn get_order_trades(order_id: u64) -> Vec<TradeInfo<AccountId, Balance>>;
@@ -101,5 +97,11 @@ sp_api::decl_runtime_apis! {
 
         /// 获取市场统计摘要
         fn get_market_summary() -> MarketSummary;
+
+        /// 获取单个订单详情
+        fn get_order_by_id(order_id: u64) -> Option<OrderInfo<AccountId, Balance>>;
+
+        /// 获取单个交易详情
+        fn get_trade_by_id(trade_id: u64) -> Option<TradeInfo<AccountId, Balance>>;
     }
 }

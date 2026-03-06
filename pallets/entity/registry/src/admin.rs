@@ -177,6 +177,8 @@ impl<T: Config> Pallet<T> {
             ensure!(entity.owner != who, Error::<T>::CannotRemoveOwner);
             // M1-R12: 与其他 admin 操作保持一致，检查治理锁
             ensure!(!T::GovernanceProvider::is_governance_locked(entity_id), Error::<T>::EntityLocked);
+            // L2 审计修复: 与 remove_admin 保持一致，拒绝对终态实体操作
+            Self::ensure_entity_operable(&entity.status)?;
 
             // 查找并移除
             let pos = entity.admins.iter().position(|(a, _)| a == &who)

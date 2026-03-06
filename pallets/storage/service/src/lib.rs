@@ -31,6 +31,7 @@ use sp_std::vec::Vec;
 pub mod types;
 pub mod weights;
 pub mod runtime_api;
+pub mod migrations;
 
 // 导出 runtime API
 pub use runtime_api::*;
@@ -103,11 +104,12 @@ pub type AuthorityId = sr25519_app::Public;
 pub trait StoragePin<AccountId> {
     /// Pin CID 到指定域。
     ///
-    /// - `owner`: 发起账户（用于所有权追踪和计费）
-    /// - `domain`: 域名（如 `b"evidence"`, `b"product"`），域不存在时自动注册
-    /// - `subject_id`: 主体 ID（用于派生资金账户）
-    /// - `entity_id`: 所属 Entity ID（用于 Entity 国库扣费层，无归属时传 `None`）
+    /// - `owner`: 发起账户
+    /// - `domain`: 域名（如 `b"evidence"`, `b"product"`）
+    /// - `subject_id`: 主体 ID
+    /// - `entity_id`: 所属 Entity ID（无归属时传 `None`）
     /// - `cid`: IPFS CID 明文
+    /// - `size_bytes`: 文件实际大小（字节），调用方必须提供真实值
     /// - `tier`: Critical / Standard / Temporary
     fn pin(
         owner: AccountId,
@@ -115,6 +117,7 @@ pub trait StoragePin<AccountId> {
         subject_id: u64,
         entity_id: Option<u64>,
         cid: Vec<u8>,
+        size_bytes: u64,
         tier: PinTier,
     ) -> DispatchResult;
 
@@ -281,7 +284,7 @@ pub mod pallet {
     type EntityFunding: crate::types::EntityFunding<Self::AccountId, BalanceOf<Self>>;
 }
 
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -299,10 +302,8 @@ pub mod pallet {
     // 默认配置已在TierConfig::default()、TierConfig::critical_default()、
     // TierConfig::temporary_default()中定义，get_tier_config会自动应用。
 
-    /// 定价参数原始字节（骨架）
-    #[pallet::storage]
-    /// 函数级中文注释：定价参数原始字节（使用 BoundedVec 以满足 MaxEncodedLen 要求）
-    pub type PricingParams<T: Config> = StorageValue<_, BoundedVec<u8, ConstU32<8192>>, ValueQuery>;
+    // [已删除] PricingParams：空壳存储，从未被任何逻辑读写。
+    // 定价通过 PricePerGiBWeek + BillingPeriodBlocks 实现。
 
     /// 函数级中文注释：Pin 订单存储
     /// 
@@ -533,41 +534,9 @@ pub mod pallet {
         ValueQuery,
     >;
 
-    // ====== 动态副本数配置 ======
-    
-    /// 函数级中文注释：推荐副本数配置（按重要性等级）
-    /// 
-    /// 说明：
-    /// - 允许治理设置不同重要性等级的推荐副本数
-    /// - Level 0: 临时文件（默认 2）
-    /// - Level 1: 一般文件（默认 3）✅ 推荐
-    /// - Level 2: 重要文件（默认 5）
-    /// - Level 3: 关键文件（默认 7）
-    #[pallet::type_value]
-    pub fn DefaultReplicasForLevel0<T: Config>() -> u32 { 2 }
-    #[pallet::type_value]
-    pub fn DefaultReplicasForLevel1<T: Config>() -> u32 { 3 }
-    #[pallet::type_value]
-    pub fn DefaultReplicasForLevel2<T: Config>() -> u32 { 5 }
-    #[pallet::type_value]
-    pub fn DefaultReplicasForLevel3<T: Config>() -> u32 { 7 }
-    
-    #[pallet::storage]
-    pub type ReplicasForLevel0<T: Config> = 
-        StorageValue<_, u32, ValueQuery, DefaultReplicasForLevel0<T>>;
-    
-    #[pallet::storage]
-    pub type ReplicasForLevel1<T: Config> = 
-        StorageValue<_, u32, ValueQuery, DefaultReplicasForLevel1<T>>;
-    
-    #[pallet::storage]
-    pub type ReplicasForLevel2<T: Config> = 
-        StorageValue<_, u32, ValueQuery, DefaultReplicasForLevel2<T>>;
-    
-    #[pallet::storage]
-    pub type ReplicasForLevel3<T: Config> = 
-        StorageValue<_, u32, ValueQuery, DefaultReplicasForLevel3<T>>;
-    
+    // [已删除] ReplicasForLevel0~3：与 PinTierConfig（TierConfig.replicas）功能重复。
+    // 副本数统一由 PinTierConfig 管理（Critical=5, Standard=3, Temporary=1）。
+
     /// 函数级中文注释：最小副本数阈值
     /// 
     /// 说明：
@@ -645,30 +614,12 @@ pub mod pallet {
     // 原因：旧版 request_pin() extrinsic 已删除，此配置无用
     // 删除日期：2025-10-26
 
-    /// 函数级中文注释：到期队列容量上限（每个区块键对应的最大 CID 数）。
-    #[pallet::type_value]
-    pub fn DefaultDueListCap<T: Config>() -> u32 {
-        1024
-    }
-    #[pallet::storage]
-    pub type DueQueue<T: Config> = StorageMap<
-        _,
-        Blake2_128Concat,
-        BlockNumberFor<T>,
-        BoundedVec<T::Hash, ConstU32<1024>>,
-        ValueQuery,
-    >;
+    // [已删除] DueQueue + DueEnqueueSpread：
+    // 旧版到期队列，已被 BillingQueue + on_finalize 自动计费替代。
 
-    /// 函数级中文注释：入队扩散窗口（块）。将到期项在 `base..base+spread` 内寻找首个未满的队列入队，平滑负载。
-    #[pallet::type_value]
-    pub fn DefaultDueEnqueueSpread<T: Config>() -> u32 {
-        10
-    }
-    #[pallet::storage]
-    pub type DueEnqueueSpread<T: Config> =
-        StorageValue<_, u32, ValueQuery, DefaultDueEnqueueSpread<T>>;
-
-    /// 函数级中文注释：每个 CID 的计费状态：下一次扣费块高、单价快照、状态（0=Active,1=Grace,2=Expired）。
+    /// 每个 CID 的计费状态：(下一次扣费块高, 单价快照, 状态)。
+    /// 状态：0=Active, 1=Grace, 2=Expired(待清理)。
+    /// 仍用于 OCW 物理删除扫描和 cleanup_expired_cids。
     #[pallet::storage]
     pub type PinBilling<T: Config> =
         StorageMap<_, Blake2_128Concat, T::Hash, (BlockNumberFor<T>, u128, u8), OptionQuery>;
@@ -730,9 +681,18 @@ pub mod pallet {
     pub type RegisteredDomains<T: Config> = StorageMap<
         _,
         Blake2_128Concat,
-        BoundedVec<u8, ConstU32<32>>,  // domain name
-        types::DomainConfig,            // 域配置
+        BoundedVec<u8, ConstU32<32>>,
+        types::DomainConfig,
         OptionQuery,
+    >;
+
+    /// 已注册域名列表索引，避免 RegisteredDomains::iter() 全表扫描。
+    /// 在 register_domain / on_finalize 域统计更新时使用。
+    #[pallet::storage]
+    pub type RegisteredDomainList<T: Config> = StorageValue<
+        _,
+        BoundedVec<BoundedVec<u8, ConstU32<32>>, ConstU32<128>>,
+        ValueQuery,
     >;
 
     /// 函数级详细中文注释：CID到Subject的反向映射，用于扣费时查找资金账户
@@ -957,6 +917,22 @@ pub mod pallet {
         OptionQuery,
     >;
 
+    /// cleanup_expired_locks 的分页 cursor，避免 CidLocks 全表扫描。
+    #[pallet::storage]
+    pub type LockCleanupCursor<T: Config> = StorageValue<
+        _,
+        BoundedVec<u8, ConstU32<128>>,
+        OptionQuery,
+    >;
+
+    /// migrate_operator_pins 的分页 cursor，避免 PinAssignments 全表扫描。
+    #[pallet::storage]
+    pub type MigrateOpCursor<T: Config> = StorageValue<
+        _,
+        BoundedVec<u8, ConstU32<128>>,
+        OptionQuery,
+    >;
+
     /// CID → BillingQueue due_block 反向索引，实现 O(1) 查找。
     /// 替代 renew_pin / upgrade_pin_tier 中的 O(billing_period) 线性扫描。
     #[pallet::storage]
@@ -1077,8 +1053,6 @@ pub mod pallet {
     /// 包含信息：
     /// - core_operators: Layer 1运营者列表
     /// - community_operators: Layer 2运营者列表
-    /// - external_used: 是否使用Layer 3
-    /// - external_network: 外部网络类型
     #[pallet::storage]
     #[pallet::getter(fn layered_pin_assignments)]
     pub type LayeredPinAssignments<T: Config> = StorageMap<
@@ -1475,7 +1449,6 @@ pub mod pallet {
             cid_hash: T::Hash,
             core_operators: BoundedVec<T::AccountId, ConstU32<8>>,
             community_operators: BoundedVec<T::AccountId, ConstU32<8>>,
-            external_used: bool,
         },
 
         /// 函数级详细中文注释：分层策略配置更新
@@ -1729,11 +1702,35 @@ pub mod pallet {
             cid_hash: T::Hash,
         },
         
-        /// L1-R2修复：计费参数已更新（治理操作审计）
+        /// 计费参数已更新（治理操作审计）
         BillingParamsUpdated,
-        
-        /// L1-R2修复：副本数配置已更新（治理操作审计）
-        ReplicasConfigUpdated,
+
+        /// 运营者奖励部分领取（池余额不足时仅部分到账）
+        RewardsClaimPartial {
+            operator: T::AccountId,
+            claimed: BalanceOf<T>,
+            unclaimed: BalanceOf<T>,
+        },
+
+        /// 用户提取存储资金
+        UserFundingWithdrawn {
+            user: T::AccountId,
+            amount: BalanceOf<T>,
+        },
+
+        /// Pin 分层等级已降级
+        PinTierDowngraded {
+            cid_hash: T::Hash,
+            old_tier: PinTier,
+            new_tier: PinTier,
+        },
+
+        /// 运营者对 slash 发起争议
+        SlashDisputed {
+            operator: T::AccountId,
+            amount: BalanceOf<T>,
+            reason: BoundedVec<u8, ConstU32<256>>,
+        },
         
     }
 
@@ -1854,9 +1851,14 @@ pub mod pallet {
         DomainPinDisabled,
         /// 函数级详细中文注释：域不存在
         DomainNotFound,
-        /// 函数级详细中文注释：域已存在（尝试重复注册）
+        /// 域已存在（尝试重复注册）
         DomainAlreadyExists,
-        
+        /// 用户存储资金余额不足（提取）
+        InsufficientUserFunding,
+        /// 无效的 Pin Tier 降级（只能向下降级）
+        InvalidTierDowngrade,
+        /// CID 格式无效
+        InvalidCidFormat,
     }
 
     impl<T: Config> Pallet<T> {
@@ -1872,6 +1874,9 @@ pub mod pallet {
             tier: Option<PinTier>,
         ) -> DispatchResult {
             use sp_runtime::traits::Hash;
+
+            Self::validate_cid(&cid)?;
+
             let cid_hash = T::Hashing::hash(&cid[..]);
 
             ensure!(!PinMeta::<T>::contains_key(&cid_hash), Error::<T>::AlreadyPinned);
@@ -1896,7 +1901,6 @@ pub mod pallet {
             let subject_info = SubjectInfo {
                 subject_type: subject_type.clone(),
                 subject_id,
-                funding_share: 100,
             };
             let subject_vec = BoundedVec::try_from(vec![subject_info])
                 .map_err(|_| Error::<T>::BadParams)?;
@@ -1947,8 +1951,6 @@ pub mod pallet {
                 LayeredPinAssignment {
                     core_operators: core_ops_for_storage.clone(),
                     community_operators: community_ops_for_storage.clone(),
-                    external_used: false,
-                    external_network: None,
                 },
             );
 
@@ -1956,7 +1958,6 @@ pub mod pallet {
                 cid_hash,
                 core_operators: core_ops_for_storage,
                 community_operators: community_ops_for_storage,
-                external_used: false,
             });
 
             let operators_bounded = BoundedVec::try_from(all_operators)
@@ -1998,7 +1999,7 @@ pub mod pallet {
 
             CidTier::<T>::insert(&cid_hash, tier.clone());
 
-            let next_check = current_block + tier_config.health_check_interval.into();
+            let next_check = current_block.saturating_add(tier_config.health_check_interval.into());
             let check_task = HealthCheckTask {
                 tier: tier.clone(),
                 last_check: current_block,
@@ -2010,7 +2011,7 @@ pub mod pallet {
             let period_fee = Self::calculate_period_fee(size_bytes, tier_config.replicas)?;
             let period_fee_adjusted = period_fee.saturating_mul(tier_config.fee_multiplier.into()) / 10000u32.into();
             let billing_period = T::DefaultBillingPeriod::get();
-            let next_billing = current_block + billing_period.into();
+            let next_billing = current_block.saturating_add(billing_period.into());
             let billing_task = BillingTask {
                 billing_period,
                 amount_per_period: period_fee_adjusted,
@@ -2097,21 +2098,18 @@ pub mod pallet {
                 SubjectType::Custom(_) => 99,
             }
         }
-        /// 函数级详细中文注释：获取推荐副本数（根据重要性等级）
-        /// 
-        /// 参数：
-        /// - `level`: 重要性等级（0-3）
-        /// 
-        /// 返回：
-        /// - 推荐的副本数
-        pub fn get_recommended_replicas(level: u8) -> u32 {
-            match level {
-                0 => ReplicasForLevel0::<T>::get(),
-                1 => ReplicasForLevel1::<T>::get(),
-                2 => ReplicasForLevel2::<T>::get(),
-                3 => ReplicasForLevel3::<T>::get(),
-                _ => ReplicasForLevel1::<T>::get(), // 默认返回 Level 1
+        /// 查询用户所有 CID 列表及元信息（供 RPC 调用）。
+        pub fn get_user_cids(
+            owner: &T::AccountId,
+        ) -> Vec<(T::Hash, PinMetadata<BlockNumberFor<T>>)> {
+            let cids = OwnerPinIndex::<T>::get(owner);
+            let mut result: Vec<(T::Hash, PinMetadata<BlockNumberFor<T>>)> = Vec::new();
+            for cid_hash in cids.iter() {
+                if let Some(meta) = PinMeta::<T>::get(cid_hash) {
+                    result.push((*cid_hash, meta));
+                }
             }
+            result
         }
         
         /// 函数级详细中文注释：CID 解密/映射内部工具函数（非外部可调用）
@@ -2163,17 +2161,33 @@ pub mod pallet {
         pub fn get_tier_config(tier: &PinTier) -> Result<TierConfig, Error<T>> {
             let config = PinTierConfig::<T>::get(tier);
             
-            // 如果没有配置，使用默认值
             if config.enabled {
                 Ok(config)
             } else {
-                // 返回默认配置
                 Ok(match tier {
                     PinTier::Critical => TierConfig::critical_default(),
                     PinTier::Standard => TierConfig::default(),
                     PinTier::Temporary => TierConfig::temporary_default(),
                 })
             }
+        }
+
+        /// CID 格式基本校验：长度 + 前缀合法性。
+        /// CIDv0 (Qm...) 以 0x12 0x20 开头（46 字节 Base58）；
+        /// CIDv1 以 0x01 开头（Base32/Base58btc）。
+        /// 此处仅做基本长度和前缀检查，不做完整的 multibase/multicodec 解析。
+        pub fn validate_cid(cid: &[u8]) -> Result<(), Error<T>> {
+            ensure!(cid.len() >= 2 && cid.len() <= 128, Error::<T>::BadParams);
+            let first = cid[0];
+            let is_v0 = first == b'Q' && cid.len() >= 46;
+            let is_v1 = first == b'b' || first == b'z' || first == b'f';
+            let is_binary_v0 = first == 0x12;
+            let is_binary_v1 = first == 0x01;
+            ensure!(
+                is_v0 || is_v1 || is_binary_v0 || is_binary_v1,
+                Error::<T>::BadParams
+            );
+            Ok(())
         }
         
         /// 函数级详细中文注释：根据SubjectType派生资金账户
@@ -2799,14 +2813,9 @@ pub mod pallet {
                     
                     for subject_info in subjects.iter() {
                         let domain = Self::subject_type_to_domain(&subject_info.subject_type);
-                        let share_amount = if subject_info.funding_share > 0 {
-                            amount.saturating_mul(subject_info.funding_share.into()) / 100u32.into()
-                        } else {
-                            amount
-                        };
                         SubjectUsage::<T>::mutate(
                             (owner.clone(), domain, subject_info.subject_id),
-                            |usage| *usage = usage.saturating_add(share_amount)
+                            |usage| *usage = usage.saturating_add(amount)
                         );
                     }
                     
@@ -2841,7 +2850,7 @@ pub mod pallet {
                 GraceStatus::Normal => {
                     let tier = CidTier::<T>::get(cid_hash);
                     let tier_config = Self::get_tier_config(&tier).unwrap_or_default();
-                    let expires_at = current_block + tier_config.grace_period_blocks.into();
+                    let expires_at = current_block.saturating_add(tier_config.grace_period_blocks.into());
                     Ok(ChargeResult::EnterGrace { expires_at })
                 },
                 GraceStatus::InGrace { expires_at, .. } => {
@@ -2930,7 +2939,7 @@ pub mod pallet {
             let quota_limit = T::MonthlyPublicFeeQuota::get();
             
             let (current_used, new_reset_block) = if current_block >= reset_block {
-                let new_reset = current_block + T::QuotaResetPeriod::get();
+                let new_reset = current_block.saturating_add(T::QuotaResetPeriod::get());
                 (BalanceOf::<T>::zero(), new_reset)
             } else {
                 (used, reset_block)
@@ -3233,7 +3242,119 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 函数级详细中文注释：为SubjectFunding账户充值（已弃用，保留向后兼容）
+        /// 用户从自己的存储资金账户提取资金。
+        #[pallet::call_index(53)]
+        #[pallet::weight(T::WeightInfo::fund_user_account())]
+        pub fn withdraw_user_funding(
+            origin: OriginFor<T>,
+            amount: BalanceOf<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(!amount.is_zero(), Error::<T>::BadParams);
+
+            let funding_account = Self::derive_user_funding_account(&who);
+            let balance = T::Currency::free_balance(&funding_account);
+            ensure!(balance >= amount, Error::<T>::InsufficientUserFunding);
+
+            T::Currency::transfer(
+                &funding_account,
+                &who,
+                amount,
+                ExistenceRequirement::KeepAlive,
+            )?;
+
+            UserFundingBalance::<T>::mutate(&who, |b| {
+                *b = b.saturating_sub(amount);
+            });
+
+            Self::deposit_event(Event::UserFundingWithdrawn {
+                user: who,
+                amount,
+            });
+            Ok(())
+        }
+
+        /// 降低 CID 的 Pin Tier（只允许向下降级：Critical→Standard→Temporary）。
+        /// 降级后费率降低，差额不退还（避免套利）。
+        #[pallet::call_index(54)]
+        #[pallet::weight(T::WeightInfo::request_pin())]
+        pub fn downgrade_pin_tier(
+            origin: OriginFor<T>,
+            cid: Vec<u8>,
+            new_tier: PinTier,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            use sp_runtime::traits::Hash;
+            let cid_hash = T::Hashing::hash(&cid[..]);
+
+            ensure!(PinMeta::<T>::contains_key(&cid_hash), Error::<T>::OrderNotFound);
+
+            if let Some((owner, _)) = PinSubjectOf::<T>::get(&cid_hash) {
+                ensure!(who == owner, Error::<T>::NotOwner);
+            } else {
+                return Err(Error::<T>::NotOwner.into());
+            }
+
+            let old_tier = CidTier::<T>::get(&cid_hash);
+            let valid_downgrade = match (&old_tier, &new_tier) {
+                (PinTier::Critical, PinTier::Standard) => true,
+                (PinTier::Critical, PinTier::Temporary) => true,
+                (PinTier::Standard, PinTier::Temporary) => true,
+                _ => false,
+            };
+            ensure!(valid_downgrade, Error::<T>::InvalidTierDowngrade);
+
+            let new_config = Self::get_tier_config(&new_tier)?;
+
+            CidTier::<T>::insert(&cid_hash, new_tier.clone());
+
+            PinMeta::<T>::mutate(&cid_hash, |meta| {
+                if let Some(m) = meta {
+                    m.replicas = new_config.replicas;
+                }
+            });
+
+            if let Some(due_block) = CidBillingDueBlock::<T>::get(&cid_hash) {
+                if let Some(mut task) = BillingQueue::<T>::take(due_block, &cid_hash) {
+                    let size = PinMeta::<T>::get(&cid_hash).map(|m| m.size).unwrap_or(0);
+                    if let Ok(new_fee) = Self::calculate_period_fee(size, new_config.replicas) {
+                        let adjusted = new_fee.saturating_mul(new_config.fee_multiplier.into()) / 10000u32.into();
+                        task.amount_per_period = adjusted;
+                    }
+                    BillingQueue::<T>::insert(due_block, &cid_hash, task);
+                }
+            }
+
+            Self::deposit_event(Event::PinTierDowngraded {
+                cid_hash,
+                old_tier,
+                new_tier,
+            });
+            Ok(())
+        }
+
+        /// 运营者对 slash 发起争议，记录链上供治理审查。
+        #[pallet::call_index(55)]
+        #[pallet::weight(T::WeightInfo::report_probe())]
+        pub fn dispute_slash(
+            origin: OriginFor<T>,
+            amount: BalanceOf<T>,
+            reason: Vec<u8>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(Operators::<T>::contains_key(&who), Error::<T>::OperatorNotFound);
+            let reason_bounded: BoundedVec<u8, ConstU32<256>> = reason.try_into()
+                .map_err(|_| Error::<T>::BadParams)?;
+
+            Self::deposit_event(Event::SlashDisputed {
+                operator: who,
+                amount,
+                reason: reason_bounded,
+            });
+            Ok(())
+        }
+
+        /// 为SubjectFunding账户充值（已弃用，保留向后兼容）
         /// 
         /// ⚠️ 已弃用：请使用 fund_user_account() 替代
         /// 
@@ -3265,32 +3386,18 @@ pub mod pallet {
         /// 
         /// ### 事件
         /// - SubjectFunded(subject_id, who, to, amount)
+        /// 已弃用：请使用 fund_user_account() 替代。
+        /// 调用此接口将直接返回 BadParams 错误。
         #[pallet::call_index(9)]
         #[pallet::weight(T::WeightInfo::fund_subject_account())]
-        #[deprecated(note = "请使用 fund_user_account() 替代，混合方案每用户一个账户")]
+        #[deprecated(note = "请使用 fund_user_account() 替代")]
         pub fn fund_subject_account(
             origin: OriginFor<T>,
-            subject_id: u64,
-            amount: BalanceOf<T>,
+            _subject_id: u64,
+            _amount: BalanceOf<T>,
         ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-            ensure!(amount != BalanceOf::<T>::default(), Error::<T>::BadParams);
-            
-            // ✅ 派生SubjectFunding地址（使用统一的v2版本）
-            #[allow(deprecated)]
-            let to = Self::derive_subject_funding_account_v2(SubjectType::General, subject_id);
-            
-            // ✅ 转账（任何人都可以充值）
-            <T as Config>::Currency::transfer(
-                &who,
-                &to,
-                amount,
-                frame_support::traits::ExistenceRequirement::KeepAlive,
-            )?;
-            
-            // ✅ 发送事件
-            Self::deposit_event(Event::SubjectFunded(subject_id, who, to, amount));
-            Ok(())
+            ensure_signed(origin)?;
+            Err(Error::<T>::BadParams.into())
         }
         // ⭐ P2优化：已删除 request_pin() extrinsic（46行）
         // 原因：已被破坏式改造的 request_pin_for_subject 替代
@@ -3337,98 +3444,8 @@ pub mod pallet {
             Self::do_request_pin(caller, SubjectType::General, subject_id, None, cid, size_bytes, tier)
         }
 
-        /// 函数级详细中文注释：【治理/服务商】处理到期扣费项（limit 条）
-        /// - Origin：GovernanceOrigin（可扩展加入白名单服务商 Origin）
-        /// - 行为：从到期队列中取出 ≤limit 个，到期的 CID 进行扣费；成功则推进下一次扣费并重新入队；余额不足则进入宽限或过期。
-        #[pallet::call_index(11)]
-        #[pallet::weight(T::WeightInfo::charge_due(*limit))]
-        pub fn charge_due(origin: OriginFor<T>, limit: u32) -> DispatchResult {
-            T::GovernanceOrigin::ensure_origin(origin)?;
-            ensure!(!BillingPaused::<T>::get(), Error::<T>::BadStatus);
-            let now = <frame_system::Pallet<T>>::block_number();
-            let mut left = core::cmp::min(limit, MaxChargePerBlock::<T>::get());
-            if left == 0 {
-                return Ok(());
-            }
-            // 取出本块到期列表
-            let mut list = DueQueue::<T>::take(now);
-            let original_len = list.len() as u32;
-            while left > 0 {
-                let Some(cid) = list.pop() else { break };
-                left = left.saturating_sub(1);
-                // 读取计费与来源
-                if let Some((_, unit_price, state)) = PinBilling::<T>::get(&cid) {
-                    if let Some((owner, subject_id)) = PinSubjectOf::<T>::get(&cid) {
-                        // 仅处理 Active/Grace，已过期则跳过
-                        if state <= 1u8 {
-                            // 计算应收：ceil(size/GiB) * replicas * unit_price
-                            if let Some(meta) = PinMeta::<T>::get(&cid) {
-                                let gib: u128 = 1_073_741_824u128; // 1024^3
-                                let sz = meta.size as u128;
-                                let replicas = meta.replicas;
-                                let units = (sz + gib - 1) / gib; // ceil
-                                let due_u128 = units
-                                    .saturating_mul(replicas as u128)
-                                    .saturating_mul(unit_price);
-                                let due_bal: BalanceOf<T> = due_u128.saturated_into();
-                                
-                                // ⭐ P0优化：使用四层扣费逻辑替代双重扣费
-                                // 创建临时的BillingTask用于扣费
-                                let mut temp_task = BillingTask {
-                                    billing_period: BillingPeriodBlocks::<T>::get().into(),
-                                    amount_per_period: due_bal,
-                                    last_charge: now,
-                                    grace_status: match state {
-                                        0 => GraceStatus::Normal,
-                                        1 => GraceStatus::InGrace { 
-                                            entered_at: now.saturating_sub(GraceBlocks::<T>::get().into()),
-                                            expires_at: now,
-                                            retry_count: 0,
-                                        },
-                                        _ => GraceStatus::Normal,
-                                    },
-                                    charge_layer: ChargeLayer::IpfsPool,
-                                };
-                                
-                                match Self::four_layer_charge(&cid, &mut temp_task) {
-                                    Ok(ChargeResult::Success { layer }) => {
-                                        // 扣费成功：推进下一期并重新入队
-                                        let period = BillingPeriodBlocks::<T>::get();
-                                        let next = now.saturating_add(period.into());
-                                        PinBilling::<T>::insert(&cid, (next, unit_price, 0u8));
-                                        Self::enqueue_due(cid, next);
-                                        Self::deposit_event(Event::PinCharged(
-                                            cid, due_bal, period, next,
-                                        ));
-                                        // C3修复：移除重复的 distribute_to_pin_operators 调用
-                                        // four_layer_charge 内部已经完成了奖励分配
-                                    },
-                                    Ok(ChargeResult::EnterGrace { expires_at }) => {
-                                        // 进入宽限期：更新状态并重新入队
-                                        PinBilling::<T>::insert(&cid, (expires_at, unit_price, 1u8));
-                                        Self::enqueue_due(cid, expires_at);
-                                        Self::deposit_event(Event::PinGrace(cid));
-                                    },
-                                    Err(_) => {
-                                        // 扣费失败（宽限期已过）：标记过期
-                                        PinBilling::<T>::insert(&cid, (now, unit_price, 2u8));
-                                        Self::deposit_event(Event::PinExpired(cid));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            // 剩余未处理的放回队列
-            if !list.is_empty() {
-                DueQueue::<T>::insert(now, list.clone());
-            }
-            let remaining = list.len() as u32;
-            let dequeued = original_len.saturating_sub(remaining);
-            Self::deposit_event(Event::DueQueueStats(now, original_len, dequeued, remaining));
-            Ok(())
-        }
+        // [已删除] charge_due (call_index 11)：断链的旧版计费路径。
+        // 计费由 on_finalize 自动处理 BillingQueue。
 
         /// 函数级详细中文注释：治理设置/暂停计费参数。
         /// - 任何入参为 None 表示保持不变；部分更新。
@@ -3475,55 +3492,7 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 函数级详细中文注释：设置推荐副本数配置
-        /// 
-        /// 权限：治理 Origin
-        /// 
-        /// 参数：
-        /// - `level0_replicas`: Level 0（临时文件）的推荐副本数
-        /// - `level1_replicas`: Level 1（一般文件）的推荐副本数
-        /// - `level2_replicas`: Level 2（重要文件）的推荐副本数
-        /// - `level3_replicas`: Level 3（关键文件）的推荐副本数
-        /// - `min_threshold`: 最小副本数阈值（触发自动补充）
-        /// 
-        /// 使用 Option 支持部分更新
-        #[pallet::call_index(14)]
-        #[pallet::weight(T::WeightInfo::set_replicas_config())]
-        pub fn set_replicas_config(
-            origin: OriginFor<T>,
-            level0_replicas: Option<u32>,
-            level1_replicas: Option<u32>,
-            level2_replicas: Option<u32>,
-            level3_replicas: Option<u32>,
-            min_threshold: Option<u32>,
-        ) -> DispatchResult {
-            T::GovernanceOrigin::ensure_origin(origin)?;
-            
-            if let Some(v) = level0_replicas {
-                ensure!(v >= 1 && v <= 10, Error::<T>::BadParams);
-                ReplicasForLevel0::<T>::put(v);
-            }
-            if let Some(v) = level1_replicas {
-                ensure!(v >= 1 && v <= 10, Error::<T>::BadParams);
-                ReplicasForLevel1::<T>::put(v);
-            }
-            if let Some(v) = level2_replicas {
-                ensure!(v >= 1 && v <= 10, Error::<T>::BadParams);
-                ReplicasForLevel2::<T>::put(v);
-            }
-            if let Some(v) = level3_replicas {
-                ensure!(v >= 1 && v <= 10, Error::<T>::BadParams);
-                ReplicasForLevel3::<T>::put(v);
-            }
-            if let Some(v) = min_threshold {
-                ensure!(v >= 1 && v <= 10, Error::<T>::BadParams);
-                MinReplicasThreshold::<T>::put(v);
-            }
-            
-            // L1-R2修复：发送配置变更事件（治理操作审计）
-            Self::deposit_event(Event::ReplicasConfigUpdated);
-            Ok(())
-        }
+        // [已删除] set_replicas_config (call_index 14)：副本数统一由 update_tier_config 管理。
 
         /// 函数级详细中文注释：将 OperatorEscrowAccount 中的资金按权重分配给活跃运营者
         /// 
@@ -3817,6 +3786,9 @@ pub mod pallet {
                         c >= T::MinCapacityGiB::get(),
                         Error::<T>::InsufficientCapacity
                     );
+                    let used_bytes = OperatorUsedBytes::<T>::get(&who);
+                    let used_gib = (used_bytes / (1024 * 1024 * 1024)) as u32;
+                    ensure!(c >= used_gib, Error::<T>::InsufficientCapacity);
                     op.capacity_gib = c;
                 }
                 if let Some(h) = endpoint_hash {
@@ -4266,9 +4238,6 @@ pub mod pallet {
                 )?;
             }
             
-            // Only deduct the actually claimed amount; retain unclaimed
-            // portion so the operator can claim again when the pool is
-            // replenished.
             let unclaimed = reward.saturating_sub(actual_reward);
             if unclaimed.is_zero() {
                 OperatorRewards::<T>::remove(&operator);
@@ -4277,9 +4246,17 @@ pub mod pallet {
             }
             
             Self::deposit_event(Event::RewardsClaimed {
-                operator,
+                operator: operator.clone(),
                 amount: actual_reward,
             });
+
+            if !unclaimed.is_zero() {
+                Self::deposit_event(Event::RewardsClaimPartial {
+                    operator,
+                    claimed: actual_reward,
+                    unclaimed,
+                });
+            }
             
             Ok(())
         }
@@ -4374,22 +4351,24 @@ pub mod pallet {
                 Error::<T>::DomainAlreadyExists
             );
             
-            // 3. 创建域配置
             let config = types::DomainConfig {
                 auto_pin_enabled,
                 default_tier,
                 subject_type_id,
-                owner_pallet: bounded_domain.clone(),
                 created_at: {
                     use sp_runtime::SaturatedConversion;
                     frame_system::Pallet::<T>::block_number().saturated_into()
                 },
             };
             
-            // 4. 保存配置
             RegisteredDomains::<T>::insert(&bounded_domain, &config);
-            
-            // 5. 发送事件
+
+            RegisteredDomainList::<T>::mutate(|list| {
+                if !list.contains(&bounded_domain) {
+                    let _ = list.try_push(bounded_domain.clone());
+                }
+            });
+
             Self::deposit_event(Event::DomainRegistered {
                 domain: bounded_domain,
                 subject_type_id,
@@ -4587,57 +4566,7 @@ pub mod pallet {
             });
             
             for cid_hash in to_clean.iter() {
-                // ✅ P1-7：获取CID大小用于回减 OperatorUsedBytes
-                let cid_size = PinMeta::<T>::get(cid_hash).map(|m| m.size).unwrap_or(0);
-                
-                // 回减 OperatorPinCount + OperatorUsedBytes
-                if let Some(assignments) = PinAssignments::<T>::get(cid_hash) {
-                    for op in assignments.iter() {
-                        OperatorPinCount::<T>::mutate(op, |c| {
-                            *c = c.saturating_sub(1);
-                        });
-                        OperatorUsedBytes::<T>::mutate(op, |b| {
-                            *b = b.saturating_sub(cid_size);
-                        });
-                    }
-                }
-                
-                // ✅ P2-4：从 OwnerPinIndex 移除
-                if let Some((owner, _)) = PinSubjectOf::<T>::get(cid_hash) {
-                    OwnerPinIndex::<T>::mutate(&owner, |cids| {
-                        cids.retain(|h| h != cid_hash);
-                    });
-                }
-                
-                // 清理所有关联存储
-                PinBilling::<T>::remove(cid_hash);
-                PinMeta::<T>::remove(cid_hash);
-                PinStateOf::<T>::remove(cid_hash);
-                PinSubjectOf::<T>::remove(cid_hash);
-                CidEntityOf::<T>::remove(cid_hash);
-                PinAssignments::<T>::remove(cid_hash);
-                CidToSubject::<T>::remove(cid_hash);
-                CidTier::<T>::remove(cid_hash);
-                CidRegistry::<T>::remove(cid_hash);
-                LayeredPinAssignments::<T>::remove(cid_hash);
-                SimplePinAssignments::<T>::remove(cid_hash);
-                PendingPins::<T>::remove(cid_hash);
-                
-                // M2-R2修复：清理 DomainPins（防止域统计膨胀）
-                Self::cleanup_domain_pins(cid_hash);
-                
-                let _ = PinSuccess::<T>::clear_prefix(cid_hash, u32::MAX, None);
-                
-                // L2-R3修复：清理 CidLocks（防止已删除CID的锁残留）
-                CidLocks::<T>::remove(cid_hash);
-                
-                // M4修复：使用存储的 UnpinReason，而非硬编码
-                let reason = CidUnpinReason::<T>::take(cid_hash)
-                    .unwrap_or(UnpinReason::InsufficientFunds);
-                Self::deposit_event(Event::PinRemoved {
-                    cid_hash: *cid_hash,
-                    reason,
-                });
+                Self::do_cleanup_single_cid(cid_hash);
             }
             
             // H1-R4：队列为空时重置标志
@@ -4815,12 +4744,9 @@ pub mod pallet {
                 LayeredPinAssignment {
                     core_operators: core_ops.clone(),
                     community_operators: community_ops.clone(),
-                    external_used: false,
-                    external_network: None,
                 },
             );
             
-            // M2-R3修复：使用截断后的列表更新统计（与实际存储的分配一致）
             let cid_size = PinMeta::<T>::get(&cid_hash).map(|m| m.size).unwrap_or(0);
             let mut all_ops: alloc::vec::Vec<T::AccountId> = core_ops.to_vec();
             all_ops.extend(community_ops.to_vec());
@@ -4836,7 +4762,6 @@ pub mod pallet {
                 cid_hash,
                 core_operators: core_ops,
                 community_operators: community_ops,
-                external_used: false,
             });
             Ok(())
         }
@@ -5216,26 +5141,47 @@ pub mod pallet {
         ) -> DispatchResult {
             ensure_signed(origin)?;
             ensure!(max_count > 0 && max_count <= 20, Error::<T>::BadParams);
-            
+
             let now = <frame_system::Pallet<T>>::block_number();
+            let cursor = LockCleanupCursor::<T>::get();
+            let mut iter = match cursor {
+                Some(ref raw) => CidLocks::<T>::iter_from(raw.to_vec()),
+                None => CidLocks::<T>::iter(),
+            };
+
             let mut cleaned = 0u32;
+            let mut scanned = 0u32;
+            let scan_limit = max_count.saturating_mul(5);
             let mut to_remove: alloc::vec::Vec<T::Hash> = alloc::vec::Vec::new();
-            
-            for (cid_hash, (_reason, until)) in CidLocks::<T>::iter() {
-                if cleaned >= max_count { break; }
+            let mut last_raw_key: Option<alloc::vec::Vec<u8>> = None;
+
+            while let Some((cid_hash, (_reason, until))) = iter.next() {
+                scanned += 1;
+                last_raw_key = Some(CidLocks::<T>::hashed_key_for(&cid_hash));
                 if let Some(expiry) = until {
                     if now > expiry {
                         to_remove.push(cid_hash);
                         cleaned += 1;
                     }
                 }
+                if cleaned >= max_count || scanned >= scan_limit { break; }
             }
-            
+
+            let exhausted = scanned < scan_limit && cleaned < max_count;
+
             for cid_hash in to_remove.iter() {
                 CidLocks::<T>::remove(cid_hash);
                 Self::deposit_event(Event::CidUnlocked { cid_hash: *cid_hash });
             }
-            
+
+            if exhausted {
+                LockCleanupCursor::<T>::kill();
+            } else if let Some(key) = last_raw_key {
+                if let Ok(bounded) = BoundedVec::try_from(key) {
+                    LockCleanupCursor::<T>::put(bounded);
+                }
+            }
+
             Ok(())
         }
         
@@ -5267,15 +5213,34 @@ pub mod pallet {
             let to_info = Operators::<T>::get(&to).ok_or(Error::<T>::OperatorNotFound)?;
             ensure!(to_info.status == 0, Error::<T>::OperatorBanned);
             
-            // 扫描 PinAssignments 找到 from 运营者负责的CID
+            let cursor = MigrateOpCursor::<T>::get();
+            let mut iter = match cursor {
+                Some(ref raw) => PinAssignments::<T>::iter_from(raw.to_vec()),
+                None => PinAssignments::<T>::iter(),
+            };
+
             let mut migrated = 0u32;
+            let mut scanned = 0u32;
+            let scan_limit = max_pins.saturating_mul(10);
             let mut cids_to_migrate: alloc::vec::Vec<T::Hash> = alloc::vec::Vec::new();
-            
-            for (cid_hash, assignments) in PinAssignments::<T>::iter() {
-                if migrated >= max_pins { break; }
+            let mut last_raw_key: Option<alloc::vec::Vec<u8>> = None;
+
+            while let Some((cid_hash, assignments)) = iter.next() {
+                scanned += 1;
+                last_raw_key = Some(PinAssignments::<T>::hashed_key_for(&cid_hash));
                 if assignments.iter().any(|a| a == &from) {
                     cids_to_migrate.push(cid_hash);
                     migrated += 1;
+                }
+                if migrated >= max_pins || scanned >= scan_limit { break; }
+            }
+
+            let exhausted = scanned < scan_limit && migrated < max_pins;
+            if exhausted {
+                MigrateOpCursor::<T>::kill();
+            } else if let Some(key) = last_raw_key {
+                if let Ok(bounded) = BoundedVec::try_from(key) {
+                    MigrateOpCursor::<T>::put(bounded);
                 }
             }
             
@@ -5724,7 +5689,7 @@ pub mod pallet {
                 // 执行四层回退扣费
                 match Self::four_layer_charge(&cid_hash, &mut task) {
                     Ok(ChargeResult::Success { layer }) => {
-                        let next_billing = current_block + task.billing_period.into();
+                        let next_billing = current_block.saturating_add(task.billing_period.into());
                         task.last_charge = current_block;
                         task.charge_layer = layer;
                         task.grace_status = GraceStatus::Normal;
@@ -5748,7 +5713,7 @@ pub mod pallet {
                             1200u32.saturating_mul(1u32 << shift),
                             28800u32, // cap at 24h
                         );
-                        let next_billing = current_block + backoff.into();
+                        let next_billing = current_block.saturating_add(backoff.into());
                         BillingQueue::<T>::insert(next_billing, &cid_hash, task);
                         BillingQueue::<T>::remove(due_block, &cid_hash);
                         CidBillingDueBlock::<T>::insert(&cid_hash, next_billing);
@@ -5825,7 +5790,7 @@ pub mod pallet {
                 match status {
                     HealthStatus::Healthy { .. } => {
                         // 健康：重新入队，正常间隔
-                        let next_check = current_block + tier_config.health_check_interval.into();
+                        let next_check = current_block.saturating_add(tier_config.health_check_interval.into());
                         task.last_check = current_block;
                         task.last_status = status.clone();
                         task.consecutive_failures = 0;
@@ -5834,7 +5799,7 @@ pub mod pallet {
                     HealthStatus::Degraded { current_replicas, target } => {
                         // 降级：缩短巡检间隔（降级期间更频繁检查）
                         let urgent_interval = tier_config.health_check_interval / 4;
-                        let next_check = current_block + urgent_interval.into();
+                        let next_check = current_block.saturating_add(urgent_interval.into());
                         task.last_check = current_block;
                         task.last_status = status.clone();
                         task.consecutive_failures = task.consecutive_failures.saturating_add(1);
@@ -5853,7 +5818,7 @@ pub mod pallet {
                     HealthStatus::Critical { current_replicas } => {
                         // 危险：极短巡检间隔（每小时检查一次）
                         let critical_interval = 1200u32; // ~1小时
-                        let next_check = current_block + critical_interval.into();
+                        let next_check = current_block.saturating_add(critical_interval.into());
                         task.last_check = current_block;
                         task.last_status = status.clone();
                         task.consecutive_failures = task.consecutive_failures.saturating_add(1);
@@ -5874,7 +5839,7 @@ pub mod pallet {
                     HealthStatus::Unknown => {
                         // 未知：可能是网络问题，稍后重试
                         let retry_interval = 600u32; // ~30分钟后重试
-                        let next_check = current_block + retry_interval.into();
+                        let next_check = current_block.saturating_add(retry_interval.into());
                         task.last_check = current_block;
                         task.last_status = status.clone();
                         task.consecutive_failures = task.consecutive_failures.saturating_add(1);
@@ -5933,56 +5898,7 @@ pub mod pallet {
                 });
                 
                 for cid_hash in to_clean.iter() {
-                    // ✅ P1-7：获取CID大小用于回减 OperatorUsedBytes
-                    let cid_size = PinMeta::<T>::get(cid_hash).map(|m| m.size).unwrap_or(0);
-                    
-                    // 回减 OperatorPinCount + OperatorUsedBytes
-                    if let Some(assignments) = PinAssignments::<T>::get(cid_hash) {
-                        for op in assignments.iter() {
-                            OperatorPinCount::<T>::mutate(op, |c| {
-                                *c = c.saturating_sub(1);
-                            });
-                            OperatorUsedBytes::<T>::mutate(op, |b| {
-                                *b = b.saturating_sub(cid_size);
-                            });
-                        }
-                    }
-                    
-                    // 清理所有关联存储
-                    // ✅ P2-4：从 OwnerPinIndex 移除
-                    if let Some((owner, _)) = PinSubjectOf::<T>::get(cid_hash) {
-                        OwnerPinIndex::<T>::mutate(&owner, |cids| {
-                            cids.retain(|h| h != cid_hash);
-                        });
-                    }
-                    
-                    PinBilling::<T>::remove(cid_hash);
-                    PinMeta::<T>::remove(cid_hash);
-                    PinStateOf::<T>::remove(cid_hash);
-                    PinSubjectOf::<T>::remove(cid_hash);
-                    PinAssignments::<T>::remove(cid_hash);
-                    CidToSubject::<T>::remove(cid_hash);
-                    CidTier::<T>::remove(cid_hash);
-                    CidRegistry::<T>::remove(cid_hash);
-                    LayeredPinAssignments::<T>::remove(cid_hash);
-                    SimplePinAssignments::<T>::remove(cid_hash);
-                    
-                    // M2-R2修复：清理 DomainPins（防止域统计膨胀）
-                    Self::cleanup_domain_pins(cid_hash);
-                    
-                    // 清理 PinSuccess（按前缀删除该 cid 的所有记录）
-                    let _ = PinSuccess::<T>::clear_prefix(cid_hash, u32::MAX, None);
-                    
-                    // L2-R3修复：清理 CidLocks（防止已删除CID的锁残留）
-                    CidLocks::<T>::remove(cid_hash);
-                    
-                    // M4修复：使用存储的 UnpinReason，而非硬编码 InsufficientFunds
-                    let reason = CidUnpinReason::<T>::take(cid_hash)
-                        .unwrap_or(UnpinReason::InsufficientFunds);
-                    Self::deposit_event(Event::PinRemoved {
-                        cid_hash: *cid_hash,
-                        reason,
-                    });
+                    Self::do_cleanup_single_cid(cid_hash);
                 }
                 
                 // H1-R4：队列为空时重置标志
@@ -6157,23 +6073,16 @@ pub mod pallet {
         /// ### 调用时机
         /// - OCW中每24小时执行一次（与全局统计同步）
         fn update_domain_health_stats_impl() {
-            use sp_std::collections::btree_set::BTreeSet;
-            
             let current_block = <frame_system::Pallet<T>>::block_number();
-            
-            // 1. 获取所有已注册的域
-            let mut domains_with_priority: Vec<(BoundedVec<u8, ConstU32<32>>, u8)> = Vec::new();
-            
-            // 遍历 DomainPins 获取所有域名
-            let mut seen_domains = BTreeSet::new();
-            for (domain, _, _) in DomainPins::<T>::iter() {
-                if seen_domains.insert(domain.clone()) {
-                    let priority = DomainPriority::<T>::get(&domain);
-                    domains_with_priority.push((domain, priority));
-                }
-            }
-            
-            // 2. 按优先级排序（数值越小优先级越高）
+
+            let registered = RegisteredDomainList::<T>::get();
+            let mut domains_with_priority: Vec<(BoundedVec<u8, ConstU32<32>>, u8)> = registered
+                .into_iter()
+                .map(|d| {
+                    let p = DomainPriority::<T>::get(&d);
+                    (d, p)
+                })
+                .collect();
             domains_with_priority.sort_by_key(|(_domain, priority)| *priority);
             
             // 3. 按域顺序统计
@@ -6242,14 +6151,15 @@ pub mod pallet {
                 });
             }
             
-            // 6. 更新全局统计（汇总所有域）
             let mut global_stats = GlobalHealthStats::<BlockNumberFor<T>>::default();
-            for (_domain, stats) in DomainHealthStats::<T>::iter() {
-                global_stats.total_pins += stats.total_pins;
-                global_stats.total_size_bytes += stats.total_size_bytes;
-                global_stats.healthy_count += stats.healthy_count;
-                global_stats.degraded_count += stats.degraded_count;
-                global_stats.critical_count += stats.critical_count;
+            for (domain, _) in domains_with_priority.iter() {
+                if let Some(stats) = DomainHealthStats::<T>::get(domain) {
+                    global_stats.total_pins += stats.total_pins;
+                    global_stats.total_size_bytes += stats.total_size_bytes;
+                    global_stats.healthy_count += stats.healthy_count;
+                    global_stats.degraded_count += stats.degraded_count;
+                    global_stats.critical_count += stats.critical_count;
+                }
             }
             global_stats.last_full_scan = current_block;
             HealthCheckStats::<T>::put(global_stats);
@@ -6362,80 +6272,27 @@ pub mod pallet {
         }
     }
 
-    impl<T: Config> Pallet<T> {
-        /// 函数级中文注释：只读统计 - 读取某块到期列表的长度（便于前端/索引层分页）。
-        pub fn due_at_count(block: BlockNumberFor<T>) -> u32 {
-            DueQueue::<T>::get(block).len() as u32
-        }
-        /// 函数级中文注释：只读 - 在闭区间 [from, to] 返回非空到期列表的块号与长度元组（最多 512 条）。
-        pub fn due_between(
-            from: BlockNumberFor<T>,
-            to: BlockNumberFor<T>,
-        ) -> BoundedVec<(BlockNumberFor<T>, u32), ConstU32<512>> {
-            let mut out: BoundedVec<(BlockNumberFor<T>, u32), ConstU32<512>> = Default::default();
-            let (lo, hi) = if from <= to { (from, to) } else { (to, from) };
-            let mut n = lo;
-            while n <= hi {
-                let c = DueQueue::<T>::get(n).len() as u32;
-                if c > 0 {
-                    let _ = out.try_push((n, c));
-                }
-                if out.len() as u32 >= 512 {
-                    break;
-                }
-                n = n.saturating_add(1u32.into());
-            }
-            out
-        }
-        /// 函数级详细中文注释：扩散入队工具函数
-        /// - 在 base..base+spread 范围内寻找首个未满的队列入队；全部满则放弃（避免单点拥塞）。
-        #[inline]
-        fn enqueue_due(cid: T::Hash, base_next: BlockNumberFor<T>) {
-            let spread: u32 = DueEnqueueSpread::<T>::get();
-            let mut inserted = false;
-            for off in 0..=spread {
-                let key = base_next.saturating_add(off.into());
-                let mut v = DueQueue::<T>::get(key);
-                if v.try_push(cid).is_ok() {
-                    DueQueue::<T>::insert(key, v);
-                    inserted = true;
-                    break;
-                }
-            }
-            if !inserted { /* 放弃，治理可通过扫描修复 */ }
-        }
+    // [已删除] due_at_count(), due_between(), enqueue_due()：
+    // DueQueue 已删除，计费完全由 BillingQueue + on_finalize 管理。
 
-        /// 将 CID 标记为待删除，并立即停止后续链上计费调度。
-        /// ✅ P2-19：锁定的CID不可删除（治理强制下架除外）
+    impl<T: Config> Pallet<T> {
+        /// 将 CID 标记为待删除，并停止后续链上计费调度。
         pub(crate) fn mark_cid_for_unpin(cid_hash: &T::Hash, reason: UnpinReason) {
-            // 锁定的CID不可删除（GovernanceDecision可覆盖锁定）
             if reason != UnpinReason::GovernanceDecision && Self::is_locked(cid_hash) {
                 return;
             }
+
             let current_block = <frame_system::Pallet<T>>::block_number();
-            if let Some((next_due, unit_price, _)) = PinBilling::<T>::get(cid_hash) {
-                // 1) 设置终态：Expired/待删除
+            if let Some((_next_due, unit_price, _)) = PinBilling::<T>::get(cid_hash) {
                 PinBilling::<T>::insert(cid_hash, (current_block, unit_price, 2u8));
-                ExpiredCidPending::<T>::put(true);
-                // H1-R4：入队到 ExpiredCidQueue，避免全表扫描
-                ExpiredCidQueue::<T>::mutate(|q| { let _ = q.try_push(*cid_hash); });
+            }
 
-                // M4修复：持久化 UnpinReason，供 cleanup 正确发射 PinRemoved 事件
-                CidUnpinReason::<T>::insert(cid_hash, reason.clone());
+            ExpiredCidPending::<T>::put(true);
+            ExpiredCidQueue::<T>::mutate(|q| { let _ = q.try_push(*cid_hash); });
+            CidUnpinReason::<T>::insert(cid_hash, reason.clone());
 
-                BillingQueue::<T>::remove(next_due, cid_hash);
-                CidBillingDueBlock::<T>::remove(cid_hash);
-
-                // 3) 移除到期队列（charge_due 使用）
-                let spread: u32 = DueEnqueueSpread::<T>::get();
-                for off in 0..=spread {
-                    let key = next_due.saturating_add(off.into());
-                    DueQueue::<T>::mutate(key, |list| {
-                        while let Some(idx) = list.iter().position(|h| h == cid_hash) {
-                            list.remove(idx);
-                        }
-                    });
-                }
+            if let Some(due_block) = CidBillingDueBlock::<T>::take(cid_hash) {
+                BillingQueue::<T>::remove(due_block, cid_hash);
             }
 
             Self::deposit_event(Event::MarkedForUnpin {
@@ -6581,14 +6438,53 @@ pub mod pallet {
         /// 
         /// 遍历硬编码域 `b"subject"` 和所有已注册域，移除该 CID 的索引。
         /// 防止过期/删除的 CID 在域统计中持续膨胀。
+        /// 清理单个 CID 的所有链上存储（供 cleanup_expired_cids 和 on_finalize 复用）。
+        pub(crate) fn do_cleanup_single_cid(cid_hash: &T::Hash) {
+            let cid_size = PinMeta::<T>::get(cid_hash).map(|m| m.size).unwrap_or(0);
+
+            if let Some(assignments) = PinAssignments::<T>::get(cid_hash) {
+                for op in assignments.iter() {
+                    OperatorPinCount::<T>::mutate(op, |c| *c = c.saturating_sub(1));
+                    OperatorUsedBytes::<T>::mutate(op, |b| *b = b.saturating_sub(cid_size));
+                }
+            }
+
+            if let Some((owner, _)) = PinSubjectOf::<T>::get(cid_hash) {
+                OwnerPinIndex::<T>::mutate(&owner, |cids| {
+                    cids.retain(|h| h != cid_hash);
+                });
+            }
+
+            PinBilling::<T>::remove(cid_hash);
+            PinMeta::<T>::remove(cid_hash);
+            PinStateOf::<T>::remove(cid_hash);
+            PinSubjectOf::<T>::remove(cid_hash);
+            CidEntityOf::<T>::remove(cid_hash);
+            PinAssignments::<T>::remove(cid_hash);
+            CidToSubject::<T>::remove(cid_hash);
+            CidTier::<T>::remove(cid_hash);
+            CidRegistry::<T>::remove(cid_hash);
+            LayeredPinAssignments::<T>::remove(cid_hash);
+            SimplePinAssignments::<T>::remove(cid_hash);
+            PendingPins::<T>::remove(cid_hash);
+            Self::cleanup_domain_pins(cid_hash);
+            let _ = PinSuccess::<T>::clear_prefix(cid_hash, u32::MAX, None);
+            CidLocks::<T>::remove(cid_hash);
+
+            let reason = CidUnpinReason::<T>::take(cid_hash)
+                .unwrap_or(UnpinReason::InsufficientFunds);
+            Self::deposit_event(Event::PinRemoved {
+                cid_hash: *cid_hash,
+                reason,
+            });
+        }
+
         fn cleanup_domain_pins(cid_hash: &T::Hash) {
-            // 1. 清理硬编码的 "subject" 域
             if let Ok(subject_domain) = BoundedVec::<u8, ConstU32<32>>::try_from(b"subject".to_vec()) {
                 DomainPins::<T>::remove(&subject_domain, cid_hash);
             }
-            // 2. 清理所有已注册域
-            for (domain, _) in RegisteredDomains::<T>::iter() {
-                DomainPins::<T>::remove(&domain, cid_hash);
+            for domain in RegisteredDomainList::<T>::get().iter() {
+                DomainPins::<T>::remove(domain, cid_hash);
             }
         }
 
@@ -6819,10 +6715,10 @@ impl<T: Config> StoragePin<<T as frame_system::Config>::AccountId> for Pallet<T>
         subject_id: u64,
         entity_id: Option<u64>,
         cid: Vec<u8>,
+        size_bytes: u64,
         tier: PinTier,
     ) -> DispatchResult {
         let subject_type = SubjectType::from_domain(domain);
-        let size_bytes = cid.len() as u64 * 1024;
         Self::do_request_pin(owner, subject_type, subject_id, entity_id, cid, size_bytes, Some(tier))
     }
 

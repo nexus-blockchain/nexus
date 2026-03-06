@@ -30,6 +30,7 @@ serde_json = { workspace = true, default-features = false, features = ["alloc"] 
 # - 运行时（no_std）使用 alloc，无需 std；
 # - std 特性仍然通过 features.std 中的 "hex/std" 启用以获得更好的集成。
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
+log = { workspace = true }
 
 [features]
 default = ["std"]

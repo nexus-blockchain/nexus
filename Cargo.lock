@@ -6569,6 +6569,7 @@ dependencies = [
 name = "pallet-commission-core"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -6577,6 +6578,7 @@ dependencies = [
  "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
+ "sp-api",
  "sp-io",
  "sp-runtime",
 ]
@@ -6600,6 +6602,7 @@ dependencies = [
 name = "pallet-commission-multi-level"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "pallet-commission-common",
@@ -6621,8 +6624,10 @@ dependencies = [
  "pallet-entity-common",
  "parity-scale-codec",
  "scale-info",
+ "sp-api",
  "sp-io",
  "sp-runtime",
+ "sp-std",
 ]
 
 [[package]]
@@ -6828,6 +6833,7 @@ dependencies = [
 name = "pallet-entity-member"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -6988,6 +6994,7 @@ dependencies = [
  "frame-system",
  "log",
  "media-utils",
+ "pallet-balances",
  "pallet-crypto-common",
  "pallet-storage-lifecycle",
  "pallet-storage-service",
@@ -7260,6 +7267,7 @@ dependencies = [
  "frame-support",
  "frame-system",
  "hex",
+ "log",
  "pallet-balances",
  "pallet-trading-common",
  "parity-scale-codec",
@@ -7324,7 +7332,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-trading-trc20-verifier"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "lite-json",
  "log",

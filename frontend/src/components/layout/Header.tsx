@@ -7,11 +7,12 @@ import { useEntityStore } from "@/stores/entity";
 import { useUserEntities } from "@/hooks/useEntity";
 import { shortenAddress, formatBalance } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Wallet, ChevronDown, Loader2, Wifi, WifiOff } from "lucide-react";
+import { Wallet, ChevronDown, Loader2, Wifi, WifiOff, Menu } from "lucide-react";
 import { useState } from "react";
 import { useTranslations } from "next-intl";
 import { LanguageSwitcher } from "@/components/shared/LanguageSwitcher";
 import { NotificationCenter } from "@/components/shared/NotificationCenter";
+import { useUiStore } from "@/stores/ui";
 
 export function Header() {
   const { connect, disconnect, accounts, isConnecting } = useWallet();
@@ -20,6 +21,7 @@ export function Header() {
   const { currentEntityId, setCurrentEntityId, userEntities } = useEntityStore();
   const [showEntityDropdown, setShowEntityDropdown] = useState(false);
   const [showAccountDropdown, setShowAccountDropdown] = useState(false);
+  const { toggleMobileSidebar } = useUiStore();
   const t = useTranslations("header");
 
   useUserEntities(address);
@@ -29,6 +31,13 @@ export function Header() {
   return (
     <header className="flex h-14 items-center justify-between border-b bg-background px-4">
       <div className="flex items-center gap-4">
+        <button
+          onClick={toggleMobileSidebar}
+          className="rounded-md p-1.5 hover:bg-accent md:hidden"
+          aria-label="Toggle menu"
+        >
+          <Menu className="h-5 w-5" />
+        </button>
         <div className="relative">
           <button
             onClick={() => setShowEntityDropdown(!showEntityDropdown)}

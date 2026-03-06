@@ -30,6 +30,10 @@ pub mod pallet {
     pub type BalanceOf<T> =
         <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 
+    pub const STATE_LOCKED: u8 = 0;
+    pub const STATE_DISPUTED: u8 = 1;
+    pub const STATE_CLOSED: u8 = 3;
+
     /// 供其他 Pallet 内部调用的托管接口
     pub trait Escrow<AccountId, Balance> {
         /// 获取托管账户地址
@@ -77,7 +81,7 @@ pub mod pallet {
     /// 🆕 F10: 托管状态变更观察者接口
     /// 函数级详细中文注释：业务模块实现此 trait 以接收托管状态变更通知，
     /// 用于同步更新订单状态等下游逻辑
-    pub trait EscrowObserver<AccountId, Balance, BlockNumber> {
+    pub trait EscrowObserver<AccountId, Balance> {
         /// 托管资金已释放（含部分释放）
         fn on_released(id: u64, to: &AccountId, amount: Balance);
         /// 托管资金已退款（含部分退款）
@@ -91,7 +95,7 @@ pub mod pallet {
     }
 
     /// 空实现：不需要回调时使用
-    impl<AccountId, Balance, BlockNumber> EscrowObserver<AccountId, Balance, BlockNumber> for () {
+    impl<AccountId, Balance> EscrowObserver<AccountId, Balance> for () {
         fn on_released(_id: u64, _to: &AccountId, _amount: Balance) {}
         fn on_refunded(_id: u64, _to: &AccountId, _amount: Balance) {}
         fn on_expired(_id: u64, _action: u8) {}
@@ -147,18 +151,22 @@ pub mod pallet {
         /// 🆕 F5: 争议原因最大长度
         #[pallet::constant]
         type MaxReasonLen: Get<u32>;
-        /// 🆕 F9: Token 托管处理器（处理 Entity Token 类型资产）
-        type TokenHandler: TokenEscrowHandler<Self::AccountId>;
         /// 🆕 F10: 托管状态变更观察者（通知业务模块）
-        type Observer: EscrowObserver<Self::AccountId, BalanceOf<Self>, BlockNumberFor<Self>>;
+        type Observer: EscrowObserver<Self::AccountId, BalanceOf<Self>>;
         /// 🆕 F8: 每次清理调用最大条目数
         #[pallet::constant]
         type MaxCleanupPerCall: Get<u32>;
+        /// 争议最大持续时间（块数）。超时后到期处理自动绕过争议状态执行 ExpiryPolicy
+        #[pallet::constant]
+        type MaxDisputeDuration: Get<BlockNumberFor<Self>>;
         /// 🆕 M2修复: 权重信息
         type WeightInfo: crate::weights::WeightInfo;
     }
 
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     /// 简单托管：订单 -> 锁定余额
@@ -170,7 +178,7 @@ pub mod pallet {
     #[pallet::storage]
     pub type Paused<T: Config> = StorageValue<_, bool, ValueQuery>;
 
-    /// 函数级中文注释：托管状态：0=Locked,1=Disputed,2=Resolved,3=Closed。
+    /// 托管状态：0=Locked, 1=Disputed, 3=Closed
     /// - Disputed 状态下仅允许仲裁决议接口处理；
     /// - Closed 表示已全部结清，不再接受出金操作。
     #[pallet::storage]
@@ -202,25 +210,11 @@ pub mod pallet {
     pub type DisputedAt<T: Config> =
         StorageMap<_, Blake2_128Concat, u64, BlockNumberFor<T>, OptionQuery>;
 
-    /// 🆕 F9: Token 托管余额（(entity_id, escrow_id) -> amount）
+    /// 🆕 R5-M1: 付款人记录（id -> payer），首次 lock_from 写入，ExpiryPolicy 默认退款目标
     #[pallet::storage]
-    pub type TokenLocked<T: Config> = StorageDoubleMap<
-        _,
-        Blake2_128Concat, u64,
-        Blake2_128Concat, u64,
-        u128,
-        ValueQuery,
-    >;
+    pub type PayerOf<T: Config> =
+        StorageMap<_, Blake2_128Concat, u64, T::AccountId, OptionQuery>;
 
-    /// 🆕 F9: Token 托管状态（(entity_id, escrow_id) -> state）
-    #[pallet::storage]
-    pub type TokenLockStateOf<T: Config> = StorageDoubleMap<
-        _,
-        Blake2_128Concat, u64,
-        Blake2_128Concat, u64,
-        u8,
-        ValueQuery,
-    >;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -228,7 +222,7 @@ pub mod pallet {
         /// 🆕 F2: 锁定到托管账户（含 payer 信息）
         Locked { id: u64, payer: T::AccountId, amount: BalanceOf<T> },
         /// 从托管部分划转（多次分账）
-        Transfered {
+        Transferred {
             id: u64,
             to: T::AccountId,
             amount: BalanceOf<T>,
@@ -292,27 +286,6 @@ pub mod pallet {
         },
         /// 🆕 F8: 已清理的 Closed 托管记录
         Cleaned { ids: Vec<u64> },
-        /// 🆕 F9: Token 托管锁定
-        TokenLocked {
-            entity_id: u64,
-            escrow_id: u64,
-            payer: T::AccountId,
-            amount: u128,
-        },
-        /// 🆕 F9: Token 托管释放
-        TokenReleased {
-            entity_id: u64,
-            escrow_id: u64,
-            to: T::AccountId,
-            amount: u128,
-        },
-        /// 🆕 F9: Token 托管退款
-        TokenRefunded {
-            entity_id: u64,
-            escrow_id: u64,
-            to: T::AccountId,
-            amount: u128,
-        },
     }
 
     #[pallet::error]
@@ -329,32 +302,17 @@ pub mod pallet {
         ExpiringAtFull,
         /// 🆕 L-2修复: 托管非争议状态（set_resolved 要求 state==1）
         NotInDispute,
-        /// 🆕 F8: 托管未关闭，不可清理
-        NotClosed,
-        /// 🆕 F9: Token 托管操作失败
-        TokenEscrowError,
     }
 
-    /// 函数级中文注释：到期处理策略接口（由 runtime 实现）。
     pub trait ExpiryPolicy<AccountId, BlockNumber> {
-        /// 返回到期应执行的动作：ReleaseAll(to) | RefundAll(to) | Noop。
+        /// 返回到期应执行的动作：ReleaseAll(to) | RefundAll(to) | Noop
         fn on_expire(id: u64) -> Result<ExpiryAction<AccountId>, sp_runtime::DispatchError>;
-        /// 返回当前块（用于调度比较）。
-        fn now() -> BlockNumber;
     }
 
-    /// 函数级中文注释：到期动作枚举。
     pub enum ExpiryAction<AccountId> {
         ReleaseAll(AccountId),
         RefundAll(AccountId),
         Noop,
-    }
-
-    impl<AccountId> ExpiryAction<AccountId> {
-        /// 用于日志/权重估算
-        pub fn is_noop(&self) -> bool {
-            matches!(self, Self::Noop)
-        }
     }
 
     impl<T: Config> Pallet<T> {
@@ -378,6 +336,50 @@ pub mod pallet {
             }
             Err(DispatchError::BadOrigin)
         }
+
+        /// 尝试将 id 调度到目标块（如目标块已满则尝试相邻块，最多 10 次）
+        fn try_schedule_expiry_at(id: u64, at: BlockNumberFor<T>) -> bool {
+            for offset in 0u32..10 {
+                let target = at.saturating_add(offset.into());
+                if ExpiringAt::<T>::try_mutate(target, |ids| {
+                    ids.try_push(id).map_err(|_| ())
+                }).is_ok() {
+                    ExpiryOf::<T>::insert(id, target);
+                    return true;
+                }
+            }
+            false
+        }
+
+        /// R5-H3: 移除 id 的到期调度（ExpiryOf + ExpiringAt 索引）
+        fn remove_expiry_schedule(id: u64) {
+            if let Some(at) = ExpiryOf::<T>::take(id) {
+                ExpiringAt::<T>::mutate(at, |ids| {
+                    if let Some(pos) = ids.iter().position(|&x| x == id) {
+                        ids.swap_remove(pos);
+                    }
+                });
+            }
+        }
+
+        /// 共享争议逻辑：set_disputed trait 与 dispute extrinsic 共用
+        fn do_set_disputed(id: u64, reason: u16, detail: BoundedVec<u8, T::MaxReasonLen>) -> DispatchResult {
+            let cur = Locked::<T>::get(id);
+            ensure!(!cur.is_zero(), Error::<T>::NoLock);
+            let state = LockStateOf::<T>::get(id);
+            ensure!(state != STATE_CLOSED, Error::<T>::AlreadyClosed);
+            ensure!(state != STATE_DISPUTED, Error::<T>::DisputeActive);
+            LockStateOf::<T>::insert(id, STATE_DISPUTED);
+            let now = <frame_system::Pallet<T>>::block_number();
+            DisputedAt::<T>::insert(id, now);
+            if ExpiryOf::<T>::get(id).is_none() {
+                let timeout_at = now.saturating_add(T::MaxDisputeDuration::get());
+                Self::try_schedule_expiry_at(id, timeout_at);
+            }
+            Self::deposit_event(Event::Disputed { id, reason, detail, at: now });
+            T::Observer::on_disputed(id);
+            Ok(())
+        }
     }
 
     impl<T: Config> Escrow<T::AccountId, BalanceOf<T>> for Pallet<T> {
@@ -385,20 +387,19 @@ pub mod pallet {
             Self::account()
         }
         fn lock_from(payer: &T::AccountId, id: u64, amount: BalanceOf<T>) -> DispatchResult {
-            // 函数级详细中文注释：从指定付款人向托管账户划转指定金额，并累加到 Locked[id]
-            // 🆕 L4修复: 拒绝零金额锁定（浪费事件和存储操作）
             ensure!(!amount.is_zero(), Error::<T>::Insufficient);
-            // 🆕 C2修复: 拒绝已关闭的托管重新注入资金
             let state = LockStateOf::<T>::get(id);
-            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
-            // 🆕 M1-R2修复: trait 层也拒绝争议中的托管追加锁定
-            ensure!(state != 1u8, Error::<T>::DisputeActive);
+            ensure!(state != STATE_CLOSED, Error::<T>::AlreadyClosed);
+            ensure!(state != STATE_DISPUTED, Error::<T>::DisputeActive);
             let escrow = Self::account();
             T::Currency::transfer(payer, &escrow, amount, ExistenceRequirement::KeepAlive)
                 .map_err(|_| Error::<T>::Insufficient)?;
             let cur = Locked::<T>::get(id);
             Locked::<T>::insert(id, cur.saturating_add(amount));
-            // 🆕 F2: Locked 事件包含 payer 信息
+            // R5-M1: 记录首次付款人（ExpiryPolicy 退款目标）
+            if !PayerOf::<T>::contains_key(id) {
+                PayerOf::<T>::insert(id, payer.clone());
+            }
             Self::deposit_event(Event::Locked { id, payer: payer.clone(), amount });
             Ok(())
         }
@@ -407,10 +408,9 @@ pub mod pallet {
             to: &T::AccountId,
             amount: BalanceOf<T>,
         ) -> DispatchResult {
-            // 🆕 C1修复: 检查状态 - 争议中(1)禁止操作，已关闭(3)禁止操作
             let state = LockStateOf::<T>::get(id);
-            ensure!(state != 1u8, Error::<T>::DisputeActive);
-            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
+            ensure!(state != STATE_DISPUTED, Error::<T>::DisputeActive);
+            ensure!(state != STATE_CLOSED, Error::<T>::AlreadyClosed);
             let cur = Locked::<T>::get(id);
             ensure!(!cur.is_zero(), Error::<T>::NoLock);
             ensure!(amount <= cur, Error::<T>::Insufficient);
@@ -428,7 +428,7 @@ pub mod pallet {
             if new.is_zero() {
                 Locked::<T>::remove(id);
             }
-            Self::deposit_event(Event::Transfered {
+            Self::deposit_event(Event::Transferred {
                 id,
                 to: to.clone(),
                 amount,
@@ -437,10 +437,9 @@ pub mod pallet {
             Ok(())
         }
         fn release_all(id: u64, to: &T::AccountId) -> DispatchResult {
-            // 🆕 P2修复: 检查状态
             let state = LockStateOf::<T>::get(id);
-            ensure!(state != 1u8, Error::<T>::DisputeActive);
-            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
+            ensure!(state != STATE_DISPUTED, Error::<T>::DisputeActive);
+            ensure!(state != STATE_CLOSED, Error::<T>::AlreadyClosed);
             
             let amount = Locked::<T>::take(id);
             ensure!(!amount.is_zero(), Error::<T>::NoLock);
@@ -449,22 +448,21 @@ pub mod pallet {
             T::Currency::transfer(&escrow, to, amount, ExistenceRequirement::AllowDeath)
                 .map_err(|_| Error::<T>::NoLock)?;
             
-            LockStateOf::<T>::insert(id, 3u8);
+            LockStateOf::<T>::insert(id, STATE_CLOSED);
+            Self::remove_expiry_schedule(id);
             
             Self::deposit_event(Event::Released {
                 id,
                 to: to.clone(),
                 amount,
             });
-            // 🆕 F10: 通知观察者
             T::Observer::on_released(id, to, amount);
             Ok(())
         }
         fn refund_all(id: u64, to: &T::AccountId) -> DispatchResult {
-            // 🆕 P2修复: 检查状态
             let state = LockStateOf::<T>::get(id);
-            ensure!(state != 1u8, Error::<T>::DisputeActive);
-            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
+            ensure!(state != STATE_DISPUTED, Error::<T>::DisputeActive);
+            ensure!(state != STATE_CLOSED, Error::<T>::AlreadyClosed);
             
             let amount = Locked::<T>::take(id);
             ensure!(!amount.is_zero(), Error::<T>::NoLock);
@@ -473,24 +471,22 @@ pub mod pallet {
             T::Currency::transfer(&escrow, to, amount, ExistenceRequirement::AllowDeath)
                 .map_err(|_| Error::<T>::NoLock)?;
             
-            LockStateOf::<T>::insert(id, 3u8);
+            LockStateOf::<T>::insert(id, STATE_CLOSED);
+            Self::remove_expiry_schedule(id);
             
             Self::deposit_event(Event::Refunded {
                 id,
                 to: to.clone(),
                 amount,
             });
-            // 🆕 F10: 通知观察者
             T::Observer::on_refunded(id, to, amount);
             Ok(())
         }
-        /// 🆕 F1: 部分退款
         fn refund_partial(id: u64, to: &T::AccountId, amount: BalanceOf<T>) -> DispatchResult {
-            // 🆕 M1-R3修复: 拒绝零金额（防止幻影事件和冗余存储写入）
             ensure!(!amount.is_zero(), Error::<T>::Insufficient);
             let state = LockStateOf::<T>::get(id);
-            ensure!(state != 1u8, Error::<T>::DisputeActive);
-            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
+            ensure!(state != STATE_DISPUTED, Error::<T>::DisputeActive);
+            ensure!(state != STATE_CLOSED, Error::<T>::AlreadyClosed);
             let cur = Locked::<T>::get(id);
             ensure!(!cur.is_zero(), Error::<T>::NoLock);
             ensure!(amount <= cur, Error::<T>::Insufficient);
@@ -506,7 +502,8 @@ pub mod pallet {
                 .map_err(|_| Error::<T>::NoLock)?;
             if new.is_zero() {
                 Locked::<T>::remove(id);
-                LockStateOf::<T>::insert(id, 3u8);
+                LockStateOf::<T>::insert(id, STATE_CLOSED);
+                Self::remove_expiry_schedule(id);
             }
             Self::deposit_event(Event::PartialRefunded {
                 id,
@@ -517,13 +514,11 @@ pub mod pallet {
             T::Observer::on_refunded(id, to, amount);
             Ok(())
         }
-        /// 🆕 F3: 部分释放（里程碑式）
         fn release_partial(id: u64, to: &T::AccountId, amount: BalanceOf<T>) -> DispatchResult {
-            // 🆕 M1-R3修复: 拒绝零金额（防止幻影事件和冗余存储写入）
             ensure!(!amount.is_zero(), Error::<T>::Insufficient);
             let state = LockStateOf::<T>::get(id);
-            ensure!(state != 1u8, Error::<T>::DisputeActive);
-            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
+            ensure!(state != STATE_DISPUTED, Error::<T>::DisputeActive);
+            ensure!(state != STATE_CLOSED, Error::<T>::AlreadyClosed);
             let cur = Locked::<T>::get(id);
             ensure!(!cur.is_zero(), Error::<T>::NoLock);
             ensure!(amount <= cur, Error::<T>::Insufficient);
@@ -539,7 +534,8 @@ pub mod pallet {
                 .map_err(|_| Error::<T>::NoLock)?;
             if new.is_zero() {
                 Locked::<T>::remove(id);
-                LockStateOf::<T>::insert(id, 3u8);
+                LockStateOf::<T>::insert(id, STATE_CLOSED);
+                Self::remove_expiry_schedule(id);
             }
             Self::deposit_event(Event::PartialReleased {
                 id,
@@ -554,32 +550,12 @@ pub mod pallet {
             Locked::<T>::get(id)
         }
         fn set_disputed(id: u64) -> DispatchResult {
-            let cur = Locked::<T>::get(id);
-            ensure!(!cur.is_zero(), Error::<T>::NoLock);
-            let state = LockStateOf::<T>::get(id);
-            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
-            // 🆕 M1修复: 防止重复 dispute 重置时间戳
-            ensure!(state != 1u8, Error::<T>::DisputeActive);
-            LockStateOf::<T>::insert(id, 1u8);
-            // 🆕 F4: 记录争议时间戳
-            let now = <frame_system::Pallet<T>>::block_number();
-            DisputedAt::<T>::insert(id, now);
-            // 🆕 F5: 扩展的争议事件
-            Self::deposit_event(Event::Disputed {
-                id,
-                reason: 0,
-                detail: BoundedVec::default(),
-                at: now,
-            });
-            // 🆕 F10: 通知观察者
-            T::Observer::on_disputed(id);
-            Ok(())
+            Self::do_set_disputed(id, 0, BoundedVec::default())
         }
         fn set_resolved(id: u64) -> DispatchResult {
             let state = LockStateOf::<T>::get(id);
-            ensure!(state == 1u8, Error::<T>::NotInDispute);
-            LockStateOf::<T>::insert(id, 0u8);
-            // 🆕 F4: 清理争议时间戳
+            ensure!(state == STATE_DISPUTED, Error::<T>::NotInDispute);
+            LockStateOf::<T>::insert(id, STATE_LOCKED);
             DisputedAt::<T>::remove(id);
             Ok(())
         }
@@ -591,9 +567,8 @@ pub mod pallet {
         ) -> DispatchResult {
             ensure!(bps <= 10_000, Error::<T>::Insufficient);
             let state = LockStateOf::<T>::get(id);
-            // 🆕 M2修复: 争议期间禁止分账（需先 set_resolved）
-            ensure!(state != 1u8, Error::<T>::DisputeActive);
-            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
+            ensure!(state != STATE_DISPUTED, Error::<T>::DisputeActive);
+            ensure!(state != STATE_CLOSED, Error::<T>::AlreadyClosed);
             
             let total = Locked::<T>::take(id);
             ensure!(!total.is_zero(), Error::<T>::NoLock);
@@ -604,7 +579,6 @@ pub mod pallet {
                 .mul_floor(total);
             let refund_amount = total.saturating_sub(release_amount);
             
-            // 🆕 H1-R2修复: 第一笔转账用 KeepAlive 防止 ED dust，最后一笔用 AllowDeath
             if !release_amount.is_zero() && !refund_amount.is_zero() {
                 T::Currency::transfer(&escrow, release_to, release_amount, ExistenceRequirement::KeepAlive)
                     .map_err(|_| Error::<T>::Insufficient)?;
@@ -618,7 +592,8 @@ pub mod pallet {
                     .map_err(|_| Error::<T>::Insufficient)?;
             }
             
-            LockStateOf::<T>::insert(id, 3u8);
+            LockStateOf::<T>::insert(id, STATE_CLOSED);
+            Self::remove_expiry_schedule(id);
             
             Self::deposit_event(Event::PartialSplit {
                 id,
@@ -627,7 +602,6 @@ pub mod pallet {
                 refund_to: refund_to.clone(),
                 refund_amount,
             });
-            // 🆕 M3-R3修复: 通知观察者分账释放和退款
             if !release_amount.is_zero() {
                 T::Observer::on_released(id, release_to, release_amount);
             }
@@ -649,36 +623,24 @@ pub mod pallet {
             payer: T::AccountId,
             amount: BalanceOf<T>,
         ) -> DispatchResult {
-            // 函数级详细中文注释（安全）：仅允许 AuthorizedOrigin | Root 调用，防止冒用 payer 盗划资金；支持全局暂停。
             Self::ensure_auth(origin)?;
             Self::ensure_not_paused()?;
-            // 🆕 EH3修复: 已关闭的托管不允许通过 extrinsic 重新打开
-            let state = LockStateOf::<T>::get(id);
-            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
-            // 🆕 E4修复: 争议中的托管禁止追加锁定（防止绕过争议保护）
-            ensure!(state != 1u8, Error::<T>::DisputeActive);
             <Self as Escrow<T::AccountId, BalanceOf<T>>>::lock_from(&payer, id, amount)
         }
         /// 释放：将托管金额转给收款人
         #[pallet::call_index(1)]
         #[pallet::weight(T::WeightInfo::release())]
         pub fn release(origin: OriginFor<T>, id: u64, to: T::AccountId) -> DispatchResult {
-            // 函数级详细中文注释（安全）：仅 AuthorizedOrigin | Root；暂停时拒绝；争议状态下拒绝普通释放。
             Self::ensure_auth(origin)?;
             Self::ensure_not_paused()?;
-            // 🆕 EM2修复: 争议中使用正确的错误码
-            ensure!(LockStateOf::<T>::get(id) != 1u8, Error::<T>::DisputeActive);
             <Self as Escrow<T::AccountId, BalanceOf<T>>>::release_all(id, &to)
         }
         /// 退款：退回付款人
         #[pallet::call_index(2)]
         #[pallet::weight(T::WeightInfo::refund())]
         pub fn refund(origin: OriginFor<T>, id: u64, to: T::AccountId) -> DispatchResult {
-            // 函数级详细中文注释（安全）：仅 AuthorizedOrigin | Root；暂停时拒绝；争议状态下拒绝普通退款。
             Self::ensure_auth(origin)?;
             Self::ensure_not_paused()?;
-            // 🆕 EM2修复: 争议中使用正确的错误码
-            ensure!(LockStateOf::<T>::get(id) != 1u8, Error::<T>::DisputeActive);
             <Self as Escrow<T::AccountId, BalanceOf<T>>>::refund_all(id, &to)
         }
 
@@ -696,14 +658,10 @@ pub mod pallet {
             Self::ensure_not_paused()?;
             let last = LockNonces::<T>::get(id);
             if nonce <= last {
+                log::debug!(target: "escrow", "Nonce replay ignored: id={}, nonce={}, last={}", id, nonce, last);
                 return Ok(());
-            } // 幂等：忽略重放
+            }
             LockNonces::<T>::insert(id, nonce);
-            // 🆕 EH3修复: 已关闭的托管不允许通过 nonce 重新打开
-            let state = LockStateOf::<T>::get(id);
-            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
-            // 🆕 E4修复: 争议中的托管禁止追加锁定（防止绕过争议保护）
-            ensure!(state != 1u8, Error::<T>::DisputeActive);
             <Self as Escrow<T::AccountId, BalanceOf<T>>>::lock_from(&payer, id, amount)
         }
 
@@ -717,11 +675,9 @@ pub mod pallet {
         ) -> DispatchResult {
             Self::ensure_auth(origin)?;
             Self::ensure_not_paused()?;
-            // 🆕 EM2修复: 争议中使用正确的错误码
             let state = LockStateOf::<T>::get(id);
-            ensure!(state != 1u8, Error::<T>::DisputeActive);
-            // 🆕 L1-R3修复: 已关闭的托管不允许再次释放
-            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
+            ensure!(state != STATE_DISPUTED, Error::<T>::DisputeActive);
+            ensure!(state != STATE_CLOSED, Error::<T>::AlreadyClosed);
             let mut cur = Locked::<T>::get(id);
             ensure!(!cur.is_zero(), Error::<T>::NoLock);
             // 校验合计
@@ -746,7 +702,7 @@ pub mod pallet {
                 };
                 T::Currency::transfer(&escrow, &to, amt, existence)
                     .map_err(|_| Error::<T>::NoLock)?;
-                Self::deposit_event(Event::Transfered {
+                Self::deposit_event(Event::Transferred {
                     id,
                     to: to.clone(),
                     amount: amt,
@@ -757,12 +713,12 @@ pub mod pallet {
             }
             if cur.is_zero() {
                 Locked::<T>::remove(id);
-                LockStateOf::<T>::insert(id, 3u8);
+                LockStateOf::<T>::insert(id, STATE_CLOSED);
+                Self::remove_expiry_schedule(id);
             }
             Ok(())
         }
 
-        /// 🆕 F5: 进入争议（仅授权/Root），支持 BoundedVec 争议详情
         #[pallet::call_index(5)]
         #[pallet::weight(T::WeightInfo::dispute())]
         pub fn dispute(
@@ -772,19 +728,7 @@ pub mod pallet {
             detail: BoundedVec<u8, T::MaxReasonLen>,
         ) -> DispatchResult {
             Self::ensure_auth(origin)?;
-            ensure!(!Locked::<T>::get(id).is_zero(), Error::<T>::NoLock);
-            // 🆕 M1修复: 检查状态 — 已关闭/已争议均拒绝
-            let state = LockStateOf::<T>::get(id);
-            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
-            ensure!(state != 1u8, Error::<T>::DisputeActive);
-            LockStateOf::<T>::insert(id, 1u8);
-            // 🆕 F4: 记录争议时间戳
-            let now = <frame_system::Pallet<T>>::block_number();
-            DisputedAt::<T>::insert(id, now);
-            Self::deposit_event(Event::Disputed { id, reason, detail, at: now });
-            // 🆕 F10: 通知观察者
-            T::Observer::on_disputed(id);
-            Ok(())
+            Self::do_set_disputed(id, reason, detail)
         }
 
         /// 函数级中文注释：仲裁决议-全额释放。
@@ -796,12 +740,10 @@ pub mod pallet {
             to: T::AccountId,
         ) -> DispatchResult {
             Self::ensure_auth(origin)?;
-            // 🆕 H1修复: 仲裁裁决仅允许在争议状态下执行
-            ensure!(LockStateOf::<T>::get(id) == 1u8, Error::<T>::NotInDispute);
-            // 解除争议状态，允许 release_all 执行
-            LockStateOf::<T>::insert(id, 0u8);
-            // 🆕 M4-R2修复: 清理争议时间戳
+            ensure!(LockStateOf::<T>::get(id) == STATE_DISPUTED, Error::<T>::NotInDispute);
+            LockStateOf::<T>::insert(id, STATE_LOCKED);
             DisputedAt::<T>::remove(id);
+            Self::remove_expiry_schedule(id);
             <Self as Escrow<T::AccountId, BalanceOf<T>>>::release_all(id, &to)?;
             Self::deposit_event(Event::DecisionApplied { id, decision: 0 });
             Ok(())
@@ -816,18 +758,16 @@ pub mod pallet {
             to: T::AccountId,
         ) -> DispatchResult {
             Self::ensure_auth(origin)?;
-            // 🆕 H1修复: 仲裁裁决仅允许在争议状态下执行
-            ensure!(LockStateOf::<T>::get(id) == 1u8, Error::<T>::NotInDispute);
-            // 解除争议状态，允许 refund_all 执行
-            LockStateOf::<T>::insert(id, 0u8);
-            // 🆕 M4-R2修复: 清理争议时间戳
+            ensure!(LockStateOf::<T>::get(id) == STATE_DISPUTED, Error::<T>::NotInDispute);
+            LockStateOf::<T>::insert(id, STATE_LOCKED);
             DisputedAt::<T>::remove(id);
+            Self::remove_expiry_schedule(id);
             <Self as Escrow<T::AccountId, BalanceOf<T>>>::refund_all(id, &to)?;
             Self::deposit_event(Event::DecisionApplied { id, decision: 1 });
             Ok(())
         }
 
-        /// 函数级中文注释：仲裁决议-按 bps 部分释放，其余退款给 refund_to。
+        /// 仲裁决议-按 bps 部分释放，其余退款给 refund_to。复用 split_partial 保证计算一致性
         #[pallet::call_index(8)]
         #[pallet::weight(T::WeightInfo::apply_decision_partial())]
         pub fn apply_decision_partial_bps(
@@ -838,37 +778,12 @@ pub mod pallet {
             bps: u16,
         ) -> DispatchResult {
             Self::ensure_auth(origin)?;
-            // 🆕 H1修复: 仲裁裁决仅允许在争议状态下执行
-            ensure!(LockStateOf::<T>::get(id) == 1u8, Error::<T>::NotInDispute);
+            ensure!(LockStateOf::<T>::get(id) == STATE_DISPUTED, Error::<T>::NotInDispute);
             ensure!(bps <= 10_000, Error::<T>::Insufficient);
-            let cur = Locked::<T>::get(id);
-            ensure!(!cur.is_zero(), Error::<T>::NoLock);
-            // 计算按 bps 的释放金额：floor(cur * bps / 10000)
-            let cur_u128: u128 =
-                sp_runtime::traits::SaturatedConversion::saturated_into::<u128>(cur);
-            let rel_u128 = (cur_u128.saturating_mul(bps as u128)) / 10_000u128;
-            let rel_amt: BalanceOf<T> =
-                sp_runtime::traits::SaturatedConversion::saturated_into::<BalanceOf<T>>(rel_u128);
-            // 解除争议状态，允许内部函数执行
-            LockStateOf::<T>::insert(id, 0u8);
-            // 🆕 M4-R2修复: 清理争议时间戳
+            LockStateOf::<T>::insert(id, STATE_LOCKED);
             DisputedAt::<T>::remove(id);
-            if !rel_amt.is_zero() {
-                <Self as Escrow<T::AccountId, BalanceOf<T>>>::transfer_from_escrow(
-                    id,
-                    &release_to,
-                    rel_amt,
-                )?;
-                // 🆕 M4-R3修复: transfer_from_escrow 不触发 Observer，手动通知
-                T::Observer::on_released(id, &release_to, rel_amt);
-            }
-            let after = Locked::<T>::get(id);
-            if !after.is_zero() {
-                <Self as Escrow<T::AccountId, BalanceOf<T>>>::refund_all(id, &refund_to)?;
-            } else {
-                // transfer_from_escrow 已转完全部，手动设置 Closed
-                LockStateOf::<T>::insert(id, 3u8);
-            }
+            Self::remove_expiry_schedule(id);
+            <Self as Escrow<T::AccountId, BalanceOf<T>>>::split_partial(id, &release_to, &refund_to, bps)?;
             Self::deposit_event(Event::DecisionApplied { id, decision: 2 });
             Ok(())
         }
@@ -883,8 +798,6 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 函数级中文注释：安排到期处理（仅 AuthorizedOrigin）。当处于 Disputed 时不生效。
-        /// H-1修复：同时更新 ExpiringAt 索引
         #[pallet::call_index(10)]
         #[pallet::weight(T::WeightInfo::schedule_expiry())]
         pub fn schedule_expiry(
@@ -893,50 +806,27 @@ pub mod pallet {
             at: BlockNumberFor<T>,
         ) -> DispatchResult {
             Self::ensure_auth(origin)?;
-            if LockStateOf::<T>::get(id) == 1u8 {
+            let state = LockStateOf::<T>::get(id);
+            ensure!(state != STATE_CLOSED, Error::<T>::AlreadyClosed);
+            ensure!(!Locked::<T>::get(id).is_zero(), Error::<T>::NoLock);
+            if state == STATE_DISPUTED {
                 return Ok(());
             }
-            
-            // 如果已有到期时间，先从旧索引中移除
-            if let Some(old_at) = ExpiryOf::<T>::get(id) {
-                ExpiringAt::<T>::mutate(old_at, |ids| {
-                    if let Some(pos) = ids.iter().position(|&x| x == id) {
-                        ids.swap_remove(pos);
-                    }
-                });
-            }
-            
-            // 更新到期时间
+            Self::remove_expiry_schedule(id);
             ExpiryOf::<T>::insert(id, at);
-            
-            // 添加到新的索引
-            // 🆕 EM1修复: 使用专用错误码
             ExpiringAt::<T>::try_mutate(at, |ids| -> DispatchResult {
                 ids.try_push(id).map_err(|_| Error::<T>::ExpiringAtFull)?;
                 Ok(())
             })?;
-            
             Self::deposit_event(Event::ExpiryScheduled { id, at });
             Ok(())
         }
 
-        /// 函数级中文注释：取消到期处理（仅 AuthorizedOrigin）。
-        /// H-1修复：同时从 ExpiringAt 索引中移除
         #[pallet::call_index(11)]
         #[pallet::weight(T::WeightInfo::cancel_expiry())]
         pub fn cancel_expiry(origin: OriginFor<T>, id: u64) -> DispatchResult {
             Self::ensure_auth(origin)?;
-            
-            // 从索引中移除
-            if let Some(at) = ExpiryOf::<T>::get(id) {
-                ExpiringAt::<T>::mutate(at, |ids| {
-                    if let Some(pos) = ids.iter().position(|&x| x == id) {
-                        ids.swap_remove(pos);
-                    }
-                });
-            }
-            
-            ExpiryOf::<T>::remove(id);
+            Self::remove_expiry_schedule(id);
             Ok(())
         }
 
@@ -954,17 +844,9 @@ pub mod pallet {
             let escrow = Self::account();
             T::Currency::transfer(&escrow, &to, amount, ExistenceRequirement::AllowDeath)
                 .map_err(|_| Error::<T>::NoLock)?;
-            LockStateOf::<T>::insert(id, 3u8);
-            // 清理争议时间戳（如果存在）
+            LockStateOf::<T>::insert(id, STATE_CLOSED);
             DisputedAt::<T>::remove(id);
-            // 🆕 M2-R3修复: 清理到期调度索引（防止 on_initialize 空转）
-            if let Some(at) = ExpiryOf::<T>::take(id) {
-                ExpiringAt::<T>::mutate(at, |ids| {
-                    if let Some(pos) = ids.iter().position(|&x| x == id) {
-                        ids.swap_remove(pos);
-                    }
-                });
-            }
+            Self::remove_expiry_schedule(id);
             Self::deposit_event(Event::ForceAction { id, action: 0, to: to.clone(), amount });
             T::Observer::on_force_action(id, 0);
             Ok(())
@@ -984,22 +866,14 @@ pub mod pallet {
             let escrow = Self::account();
             T::Currency::transfer(&escrow, &to, amount, ExistenceRequirement::AllowDeath)
                 .map_err(|_| Error::<T>::NoLock)?;
-            LockStateOf::<T>::insert(id, 3u8);
+            LockStateOf::<T>::insert(id, STATE_CLOSED);
             DisputedAt::<T>::remove(id);
-            // 🆕 M2-R3修复: 清理到期调度索引（防止 on_initialize 空转）
-            if let Some(at) = ExpiryOf::<T>::take(id) {
-                ExpiringAt::<T>::mutate(at, |ids| {
-                    if let Some(pos) = ids.iter().position(|&x| x == id) {
-                        ids.swap_remove(pos);
-                    }
-                });
-            }
+            Self::remove_expiry_schedule(id);
             Self::deposit_event(Event::ForceAction { id, action: 1, to: to.clone(), amount });
             T::Observer::on_force_action(id, 1);
             Ok(())
         }
 
-        /// 🆕 F1: 部分退款 extrinsic（仅 AuthorizedOrigin）
         #[pallet::call_index(14)]
         #[pallet::weight(T::WeightInfo::refund_partial())]
         pub fn refund_partial(
@@ -1010,11 +884,9 @@ pub mod pallet {
         ) -> DispatchResult {
             Self::ensure_auth(origin)?;
             Self::ensure_not_paused()?;
-            ensure!(LockStateOf::<T>::get(id) != 1u8, Error::<T>::DisputeActive);
             <Self as Escrow<T::AccountId, BalanceOf<T>>>::refund_partial(id, &to, amount)
         }
 
-        /// 🆕 F3: 部分释放 extrinsic（里程碑式，仅 AuthorizedOrigin）
         #[pallet::call_index(15)]
         #[pallet::weight(T::WeightInfo::release_partial())]
         pub fn release_partial(
@@ -1025,7 +897,6 @@ pub mod pallet {
         ) -> DispatchResult {
             Self::ensure_auth(origin)?;
             Self::ensure_not_paused()?;
-            ensure!(LockStateOf::<T>::get(id) != 1u8, Error::<T>::DisputeActive);
             <Self as Escrow<T::AccountId, BalanceOf<T>>>::release_partial(id, &to, amount)
         }
 
@@ -1039,30 +910,18 @@ pub mod pallet {
             let _ = ensure_signed(origin)?;
             let mut cleaned = Vec::new();
             for id in ids.iter() {
-                let state = LockStateOf::<T>::get(id);
-                // 🆕 M3修复: 跳过非 Closed 的 id，避免整体回滚
-                if state != 3u8 {
+                if LockStateOf::<T>::get(id) != STATE_CLOSED {
                     continue;
                 }
-                // 确保余额为零
-                let amount = Locked::<T>::get(id);
-                if !amount.is_zero() {
+                if !Locked::<T>::get(id).is_zero() {
                     continue;
                 }
-                // 🆕 M2-R2修复: 清理 ExpiringAt 索引中的残留引用
-                if let Some(at) = ExpiryOf::<T>::get(id) {
-                    ExpiringAt::<T>::mutate(at, |expiring_ids| {
-                        if let Some(pos) = expiring_ids.iter().position(|&x| x == *id) {
-                            expiring_ids.swap_remove(pos);
-                        }
-                    });
-                }
-                // 清理所有相关存储
+                Self::remove_expiry_schedule(*id);
                 Locked::<T>::remove(id);
                 LockStateOf::<T>::remove(id);
                 LockNonces::<T>::remove(id);
-                ExpiryOf::<T>::remove(id);
                 DisputedAt::<T>::remove(id);
+                PayerOf::<T>::remove(id);
                 cleaned.push(*id);
             }
             if !cleaned.is_empty() {
@@ -1071,109 +930,6 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 🆕 F9: Token 托管锁定
-        #[pallet::call_index(17)]
-        #[pallet::weight(T::WeightInfo::token_lock())]
-        pub fn token_lock(
-            origin: OriginFor<T>,
-            entity_id: u64,
-            escrow_id: u64,
-            payer: T::AccountId,
-            amount: u128,
-        ) -> DispatchResult {
-            Self::ensure_auth(origin)?;
-            Self::ensure_not_paused()?;
-            let state = TokenLockStateOf::<T>::get(entity_id, escrow_id);
-            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
-            ensure!(state != 1u8, Error::<T>::DisputeActive);
-            // 🆕 L5-R2修复: 拒绝零金额锁定
-            ensure!(amount > 0, Error::<T>::Insufficient);
-            T::TokenHandler::lock_token(&payer, entity_id, escrow_id, amount)
-                .map_err(|_| Error::<T>::TokenEscrowError)?;
-            let cur = TokenLocked::<T>::get(entity_id, escrow_id);
-            TokenLocked::<T>::insert(entity_id, escrow_id, cur.saturating_add(amount));
-            Self::deposit_event(Event::TokenLocked {
-                entity_id,
-                escrow_id,
-                payer: payer.clone(),
-                amount,
-            });
-            Ok(())
-        }
-
-        /// 🆕 F9: Token 托管释放
-        #[pallet::call_index(18)]
-        #[pallet::weight(T::WeightInfo::token_release())]
-        pub fn token_release(
-            origin: OriginFor<T>,
-            entity_id: u64,
-            escrow_id: u64,
-            to: T::AccountId,
-            amount: u128,
-        ) -> DispatchResult {
-            Self::ensure_auth(origin)?;
-            Self::ensure_not_paused()?;
-            let state = TokenLockStateOf::<T>::get(entity_id, escrow_id);
-            ensure!(state != 1u8, Error::<T>::DisputeActive);
-            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
-            let cur = TokenLocked::<T>::get(entity_id, escrow_id);
-            // 🆕 L5-R2修复: 拒绝零金额释放
-            ensure!(amount > 0 && amount <= cur, Error::<T>::Insufficient);
-            T::TokenHandler::release_token(entity_id, escrow_id, &to, amount)
-                .map_err(|_| Error::<T>::TokenEscrowError)?;
-            let new = cur.saturating_sub(amount);
-            // 🆕 L5-R2修复: 避免先 insert 再 remove 的冗余写入
-            if new == 0 {
-                TokenLocked::<T>::remove(entity_id, escrow_id);
-                TokenLockStateOf::<T>::insert(entity_id, escrow_id, 3u8);
-            } else {
-                TokenLocked::<T>::insert(entity_id, escrow_id, new);
-            }
-            Self::deposit_event(Event::TokenReleased {
-                entity_id,
-                escrow_id,
-                to: to.clone(),
-                amount,
-            });
-            Ok(())
-        }
-
-        /// 🆕 F9: Token 托管退款
-        #[pallet::call_index(19)]
-        #[pallet::weight(T::WeightInfo::token_refund())]
-        pub fn token_refund(
-            origin: OriginFor<T>,
-            entity_id: u64,
-            escrow_id: u64,
-            to: T::AccountId,
-            amount: u128,
-        ) -> DispatchResult {
-            Self::ensure_auth(origin)?;
-            Self::ensure_not_paused()?;
-            let state = TokenLockStateOf::<T>::get(entity_id, escrow_id);
-            ensure!(state != 1u8, Error::<T>::DisputeActive);
-            ensure!(state != 3u8, Error::<T>::AlreadyClosed);
-            let cur = TokenLocked::<T>::get(entity_id, escrow_id);
-            // 🆕 L5-R2修复: 拒绝零金额退款
-            ensure!(amount > 0 && amount <= cur, Error::<T>::Insufficient);
-            T::TokenHandler::refund_token(entity_id, escrow_id, &to, amount)
-                .map_err(|_| Error::<T>::TokenEscrowError)?;
-            let new = cur.saturating_sub(amount);
-            // 🆕 L5-R2修复: 避免先 insert 再 remove 的冗余写入
-            if new == 0 {
-                TokenLocked::<T>::remove(entity_id, escrow_id);
-                TokenLockStateOf::<T>::insert(entity_id, escrow_id, 3u8);
-            } else {
-                TokenLocked::<T>::insert(entity_id, escrow_id, new);
-            }
-            Self::deposit_event(Event::TokenRefunded {
-                entity_id,
-                escrow_id,
-                to: to.clone(),
-                amount,
-            });
-            Ok(())
-        }
     }
 
     #[pallet::hooks]
@@ -1182,41 +938,35 @@ pub mod pallet {
         /// H-1修复：使用 ExpiringAt 索引，避免迭代所有 ExpiryOf
         /// 性能提升：O(N) -> O(1)，N = 总存储项数
         fn on_initialize(n: BlockNumberFor<T>) -> Weight {
-            // 直接获取当前块到期的项，O(1) 复杂度
             let expiring_ids = ExpiringAt::<T>::take(n);
             let total = expiring_ids.len() as u32;
-            
+
             for id in expiring_ids.iter() {
-                // 🆕 H-NEW-2修复: 争议中的项重新调度到未来块，而非丢弃
-                if LockStateOf::<T>::get(id) == 1u8 {
-                    // 🆕 H2修复: 重新调度到 1 天后，失败时尝试相邻块（最多 10 次）
-                    let base_recheck = n.saturating_add(14400u32.into());
-                    let mut rescheduled = false;
-                    for offset in 0u32..10 {
-                        let target = base_recheck.saturating_add(offset.into());
-                        if ExpiringAt::<T>::try_mutate(target, |ids| {
-                            ids.try_push(*id).map_err(|_| ())
-                        }).is_ok() {
-                            ExpiryOf::<T>::insert(id, target);
-                            rescheduled = true;
-                            break;
+                if LockStateOf::<T>::get(id) == STATE_DISPUTED {
+                    // 检查争议是否超时
+                    let timed_out = DisputedAt::<T>::get(id)
+                        .map(|at| n >= at.saturating_add(T::MaxDisputeDuration::get()))
+                        .unwrap_or(true);
+
+                    if !timed_out {
+                        // 仍在争议窗口内，重调度到 1 天后
+                        let base_recheck = n.saturating_add(14400u32.into());
+                        if !Self::try_schedule_expiry_at(*id, base_recheck) {
+                            ExpiryOf::<T>::remove(id);
+                            log::warn!(target: "escrow", "Failed to reschedule disputed escrow id={}", id);
                         }
+                        continue;
                     }
-                    if !rescheduled {
-                        // 🆕 L2-R3修复: 清理 ExpiryOf 避免指向已不存在的 ExpiringAt 条目
-                        ExpiryOf::<T>::remove(id);
-                        log::warn!(target: "escrow", "Failed to reschedule disputed escrow id={}", id);
-                    }
-                    continue;
+                    LockStateOf::<T>::insert(id, STATE_LOCKED);
+                    DisputedAt::<T>::remove(id);
                 }
-                
-                // 🆕 H3修复: 仅在成功时才更新状态，失败时记录日志
+
                 match T::ExpiryPolicy::on_expire(*id) {
                     Ok(ExpiryAction::ReleaseAll(to)) => {
                         match <Self as Escrow<T::AccountId, BalanceOf<T>>>::release_all(*id, &to) {
                             Ok(_) => {
-                                // release_all 内部已设置 Closed(3)
                                 Self::deposit_event(Event::Expired { id: *id, action: 0 });
+                                T::Observer::on_expired(*id, 0);
                             }
                             Err(_) => {
                                 log::warn!(target: "escrow", "Expiry release failed for id={}", id);
@@ -1226,8 +976,8 @@ pub mod pallet {
                     Ok(ExpiryAction::RefundAll(to)) => {
                         match <Self as Escrow<T::AccountId, BalanceOf<T>>>::refund_all(*id, &to) {
                             Ok(_) => {
-                                // refund_all 内部已设置 Closed(3)
                                 Self::deposit_event(Event::Expired { id: *id, action: 1 });
+                                T::Observer::on_expired(*id, 1);
                             }
                             Err(_) => {
                                 log::warn!(target: "escrow", "Expiry refund failed for id={}", id);
@@ -1236,17 +986,14 @@ pub mod pallet {
                     }
                     _ => {
                         Self::deposit_event(Event::Expired { id: *id, action: 2 });
+                        T::Observer::on_expired(*id, 2);
                     }
                 }
-                
-                // 清理到期记录
                 ExpiryOf::<T>::remove(id);
             }
-            
-            // 🆕 E1修复: 每项到期处理涉及 LockStateOf(r) + ExpiryPolicy(r) + Currency::transfer(r+w)
-            // + Locked(rw) + LockStateOf(w) + ExpiryOf(w) + Event = ~3r+4w ≈ 50M ref_time/项
+
             let per_item = Weight::from_parts(50_000_000, 3_500);
-            let base = Weight::from_parts(5_000_000, 1_000); // ExpiringAt::take 开销
+            let base = Weight::from_parts(5_000_000, 1_000);
             base.saturating_add(per_item.saturating_mul(total as u64))
         }
     }

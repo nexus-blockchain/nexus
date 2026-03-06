@@ -5,13 +5,14 @@ use super::*;
 // ============================================================================
 
 #[test]
+#[allow(deprecated)]
 fn entity_type_default_governance() {
     assert_eq!(EntityType::Merchant.default_governance(), GovernanceMode::None);
-    assert_eq!(EntityType::Enterprise.default_governance(), GovernanceMode::FullDAO);
+    assert_eq!(EntityType::Enterprise.default_governance(), GovernanceMode::MultiSig);
     assert_eq!(EntityType::DAO.default_governance(), GovernanceMode::FullDAO);
-    assert_eq!(EntityType::Community.default_governance(), GovernanceMode::None);
+    assert_eq!(EntityType::Community.default_governance(), GovernanceMode::Council);
     assert_eq!(EntityType::Project.default_governance(), GovernanceMode::FullDAO);
-    assert_eq!(EntityType::Fund.default_governance(), GovernanceMode::FullDAO);
+    assert_eq!(EntityType::Fund.default_governance(), GovernanceMode::Council);
     assert_eq!(EntityType::ServiceProvider.default_governance(), GovernanceMode::None);
     assert_eq!(EntityType::Custom(99).default_governance(), GovernanceMode::None);
 }
@@ -53,7 +54,9 @@ fn entity_type_suggests_token_type() {
 fn entity_type_suggests_governance() {
     assert!(!EntityType::DAO.suggests_governance(&GovernanceMode::None));
     assert!(!EntityType::Fund.suggests_governance(&GovernanceMode::FullDAO));
-    assert!(EntityType::Enterprise.suggests_governance(&GovernanceMode::FullDAO));
+    assert!(!EntityType::Enterprise.suggests_governance(&GovernanceMode::FullDAO));
+    assert!(EntityType::Enterprise.suggests_governance(&GovernanceMode::MultiSig));
+    assert!(EntityType::Community.suggests_governance(&GovernanceMode::Council));
 }
 
 #[test]
@@ -199,7 +202,7 @@ fn member_policy_all_flags() {
 fn token_type_voting_power() {
     assert!(TokenType::Governance.has_voting_power());
     assert!(TokenType::Equity.has_voting_power());
-    assert!(TokenType::Hybrid(0).has_voting_power());
+    assert!(TokenType::Hybrid.has_voting_power());
     assert!(!TokenType::Points.has_voting_power());
     assert!(!TokenType::Membership.has_voting_power());
 }
@@ -208,7 +211,7 @@ fn token_type_voting_power() {
 fn token_type_dividend_rights() {
     assert!(TokenType::Equity.has_dividend_rights());
     assert!(TokenType::Share.has_dividend_rights());
-    assert!(TokenType::Hybrid(0).has_dividend_rights());
+    assert!(TokenType::Hybrid.has_dividend_rights());
     assert!(!TokenType::Points.has_dividend_rights());
     assert!(!TokenType::Governance.has_dividend_rights());
 }
@@ -242,23 +245,13 @@ fn token_type_default_transfer_restriction_returns_enum() {
     assert_eq!(TokenType::Membership.default_transfer_restriction(), TransferRestrictionMode::MembersOnly);
     assert_eq!(TokenType::Governance.default_transfer_restriction(), TransferRestrictionMode::KycRequired);
     assert_eq!(TokenType::Equity.default_transfer_restriction(), TransferRestrictionMode::Whitelist);
-    assert_eq!(TokenType::Hybrid(0).default_transfer_restriction(), TransferRestrictionMode::None);
+    assert_eq!(TokenType::Hybrid.default_transfer_restriction(), TransferRestrictionMode::None);
 }
 
 // ============================================================================
 // TransferRestrictionMode tests
 // ============================================================================
 
-#[test]
-#[allow(deprecated)]
-fn transfer_restriction_from_u8() {
-    assert_eq!(TransferRestrictionMode::from_u8(0), TransferRestrictionMode::None);
-    assert_eq!(TransferRestrictionMode::from_u8(1), TransferRestrictionMode::Whitelist);
-    assert_eq!(TransferRestrictionMode::from_u8(2), TransferRestrictionMode::Blacklist);
-    assert_eq!(TransferRestrictionMode::from_u8(3), TransferRestrictionMode::KycRequired);
-    assert_eq!(TransferRestrictionMode::from_u8(4), TransferRestrictionMode::MembersOnly);
-    assert_eq!(TransferRestrictionMode::from_u8(255), TransferRestrictionMode::None);
-}
 
 // ============================================================================
 // ShopType tests
@@ -350,7 +343,6 @@ fn m1_compute_entity_pending_shop_closing_shows_closing() {
 
 #[test]
 fn m2_admin_permission_all_defined_covers_all_bits() {
-    assert_eq!(AdminPermission::ALL_DEFINED, 0b0000_0111_1111_1111);
     assert!(AdminPermission::ALL_DEFINED & AdminPermission::SHOP_MANAGE != 0);
     assert!(AdminPermission::ALL_DEFINED & AdminPermission::MEMBER_MANAGE != 0);
     assert!(AdminPermission::ALL_DEFINED & AdminPermission::TOKEN_MANAGE != 0);
@@ -362,6 +354,8 @@ fn m2_admin_permission_all_defined_covers_all_bits() {
     assert!(AdminPermission::ALL_DEFINED & AdminPermission::GOVERNANCE_MANAGE != 0);
     assert!(AdminPermission::ALL_DEFINED & AdminPermission::ORDER_MANAGE != 0);
     assert!(AdminPermission::ALL_DEFINED & AdminPermission::COMMISSION_MANAGE != 0);
+    assert!(AdminPermission::ALL_DEFINED & AdminPermission::PRODUCT_MANAGE != 0);
+    assert!(AdminPermission::ALL_DEFINED & AdminPermission::MARKET_MANAGE != 0);
 }
 
 #[test]
@@ -375,7 +369,6 @@ fn m2_admin_permission_is_valid_accepts_defined_bits() {
 
 #[test]
 fn m2_admin_permission_is_valid_rejects_undefined_bits() {
-    assert!(!AdminPermission::is_valid(0b1000_0000_0000)); // bit 11 undefined
     assert!(!AdminPermission::is_valid(0xFFFF_FFFF)); // ALL includes undefined
     assert!(!AdminPermission::is_valid(AdminPermission::SHOP_MANAGE | 0x8000_0000));
 }
@@ -470,10 +463,11 @@ fn entity_status_is_terminal() {
 }
 
 #[test]
-fn entity_status_can_operate() {
-    assert!(EntityStatus::Active.can_operate());
-    assert!(!EntityStatus::Pending.can_operate());
-    assert!(!EntityStatus::Banned.can_operate());
+fn entity_status_is_active_covers_can_operate() {
+    assert!(EntityStatus::Active.is_active());
+    assert!(!EntityStatus::Pending.is_active());
+    assert!(!EntityStatus::Banned.is_active());
+    assert!(!EntityStatus::Suspended.is_active());
 }
 
 #[test]
@@ -503,6 +497,17 @@ fn admin_permission_new_bits_values() {
     assert_eq!(AdminPermission::GOVERNANCE_MANAGE, 0b0001_0000_0000);
     assert_eq!(AdminPermission::ORDER_MANAGE,      0b0010_0000_0000);
     assert_eq!(AdminPermission::COMMISSION_MANAGE,  0b0100_0000_0000);
+    assert_eq!(AdminPermission::PRODUCT_MANAGE,     0b1000_0000_0000);
+    assert_eq!(AdminPermission::MARKET_MANAGE,      0b0001_0000_0000_0000);
+}
+
+#[test]
+fn admin_permission_product_market_are_valid() {
+    assert!(AdminPermission::is_valid(AdminPermission::PRODUCT_MANAGE));
+    assert!(AdminPermission::is_valid(AdminPermission::MARKET_MANAGE));
+    assert!(AdminPermission::is_valid(
+        AdminPermission::PRODUCT_MANAGE | AdminPermission::MARKET_MANAGE | AdminPermission::SHOP_MANAGE
+    ));
 }
 
 // ============================================================================
@@ -555,19 +560,6 @@ fn token_sale_status_is_purchasable() {
     assert!(!TokenSaleStatus::Completed.is_purchasable());
 }
 
-// ============================================================================
-// ServiceType / ServiceStatus tests
-// ============================================================================
-
-#[test]
-fn service_type_default_is_general() {
-    assert_eq!(ServiceType::default(), ServiceType::General);
-}
-
-#[test]
-fn service_status_default_is_draft() {
-    assert_eq!(ServiceStatus::default(), ServiceStatus::Draft);
-}
 
 // ============================================================================
 // M1: EffectiveShopStatus::compute preserves Banned when Entity non-Active
@@ -1176,16 +1168,286 @@ fn null_entity_token_provider_metadata() {
 }
 
 // ============================================================================
-// #12 NullServiceProvider 测试
+// v0.9.0: GovernanceMode new variants
 // ============================================================================
 
 #[test]
-fn null_service_provider_returns_defaults() {
-    assert!(!<NullServiceProvider as ServiceProvider<u64, u128>>::service_exists(1));
-    assert!(!<NullServiceProvider as ServiceProvider<u64, u128>>::is_service_available(1));
-    assert_eq!(<NullServiceProvider as ServiceProvider<u64, u128>>::service_shop_id(1), None);
-    assert_eq!(<NullServiceProvider as ServiceProvider<u64, u128>>::service_price(1), None);
-    assert_eq!(<NullServiceProvider as ServiceProvider<u64, u128>>::service_type(1), None);
-    assert_eq!(<NullServiceProvider as ServiceProvider<u64, u128>>::service_owner(1), None);
-    assert_eq!(<NullServiceProvider as ServiceProvider<u64, u128>>::service_status(1), None);
+fn governance_mode_new_variants_exist() {
+    let ms = GovernanceMode::MultiSig;
+    let co = GovernanceMode::Council;
+    assert_ne!(ms, GovernanceMode::None);
+    assert_ne!(co, GovernanceMode::FullDAO);
+    assert_ne!(ms, co);
 }
+
+#[test]
+fn governance_mode_default_is_none() {
+    assert_eq!(GovernanceMode::default(), GovernanceMode::None);
+}
+
+// ============================================================================
+// v0.9.0: OrderStatus new variants
+// ============================================================================
+
+#[test]
+fn order_status_new_variants() {
+    let p = OrderStatus::Processing;
+    let ac = OrderStatus::AwaitingConfirmation;
+    let pr = OrderStatus::PartiallyRefunded;
+    assert_ne!(p, OrderStatus::Paid);
+    assert_ne!(ac, OrderStatus::Shipped);
+    assert_ne!(pr, OrderStatus::Refunded);
+}
+
+// ============================================================================
+// v0.9.0: DisputeResolution::PartialSettlement
+// ============================================================================
+
+#[test]
+fn dispute_resolution_partial_settlement() {
+    let ps = DisputeResolution::PartialSettlement { complainant_share_bps: 6000 };
+    assert_ne!(ps, DisputeResolution::Settlement);
+    if let DisputeResolution::PartialSettlement { complainant_share_bps } = ps {
+        assert_eq!(complainant_share_bps, 6000);
+    } else {
+        panic!("expected PartialSettlement");
+    }
+}
+
+#[test]
+fn dispute_resolution_partial_settlement_full_range() {
+    let zero = DisputeResolution::PartialSettlement { complainant_share_bps: 0 };
+    let full = DisputeResolution::PartialSettlement { complainant_share_bps: 10000 };
+    assert_ne!(zero, full);
+}
+
+// ============================================================================
+// v0.9.0: DisputeResolution validation methods
+// ============================================================================
+
+#[test]
+fn dispute_resolution_is_valid() {
+    assert!(DisputeResolution::ComplainantWin.is_valid());
+    assert!(DisputeResolution::RespondentWin.is_valid());
+    assert!(DisputeResolution::Settlement.is_valid());
+    assert!(DisputeResolution::PartialSettlement { complainant_share_bps: 0 }.is_valid());
+    assert!(DisputeResolution::PartialSettlement { complainant_share_bps: 5000 }.is_valid());
+    assert!(DisputeResolution::PartialSettlement { complainant_share_bps: 10000 }.is_valid());
+    assert!(!DisputeResolution::PartialSettlement { complainant_share_bps: 10001 }.is_valid());
+    assert!(!DisputeResolution::PartialSettlement { complainant_share_bps: u16::MAX }.is_valid());
+}
+
+#[test]
+fn dispute_resolution_complainant_share_bps() {
+    assert_eq!(DisputeResolution::ComplainantWin.complainant_share_bps(), 10000);
+    assert_eq!(DisputeResolution::RespondentWin.complainant_share_bps(), 0);
+    assert_eq!(DisputeResolution::Settlement.complainant_share_bps(), 5000);
+    assert_eq!(
+        DisputeResolution::PartialSettlement { complainant_share_bps: 7500 }.complainant_share_bps(),
+        7500
+    );
+}
+
+// ============================================================================
+// v0.9.0: PriceReliability
+// ============================================================================
+
+#[test]
+fn price_reliability_enum_values() {
+    assert_ne!(PriceReliability::Reliable, PriceReliability::Low);
+    assert_ne!(PriceReliability::Low, PriceReliability::Unavailable);
+    assert_ne!(PriceReliability::Reliable, PriceReliability::Unavailable);
+}
+
+// ============================================================================
+// v0.9.0: DividendState
+// ============================================================================
+
+#[test]
+fn dividend_state_default() {
+    let state = DividendState::<u128, u64>::default();
+    assert_eq!(state.last_distribution, 0);
+    assert_eq!(state.accumulated, 0);
+    assert_eq!(state.total_distributed, 0);
+    assert_eq!(state.round_count, 0);
+}
+
+// ============================================================================
+// v0.9.0: NullReviewProvider
+// ============================================================================
+
+#[test]
+fn null_review_provider_returns_defaults() {
+    assert_eq!(<NullReviewProvider as ReviewProvider<u64>>::shop_average_rating(1), 0);
+    assert_eq!(<NullReviewProvider as ReviewProvider<u64>>::shop_review_count(1), 0);
+    assert_eq!(<NullReviewProvider as ReviewProvider<u64>>::product_average_rating(1), 0);
+    assert_eq!(<NullReviewProvider as ReviewProvider<u64>>::product_review_count(1), 0);
+    assert!(!<NullReviewProvider as ReviewProvider<u64>>::has_reviewed_order(1, &1u64));
+    assert!(<NullReviewProvider as ReviewProvider<u64>>::is_review_enabled(1));
+    assert_eq!(<NullReviewProvider as ReviewProvider<u64>>::user_review_count(1, &1u64), 0);
+}
+
+// ============================================================================
+// v0.9.0: NullMarketProvider
+// ============================================================================
+
+#[test]
+fn null_market_provider_returns_defaults() {
+    assert!(!<NullMarketProvider as MarketProvider<u64, u128>>::has_active_market(1));
+    assert_eq!(<NullMarketProvider as MarketProvider<u64, u128>>::trading_volume_24h(1), 0);
+    assert_eq!(<NullMarketProvider as MarketProvider<u64, u128>>::best_bid(1), None);
+    assert_eq!(<NullMarketProvider as MarketProvider<u64, u128>>::best_ask(1), None);
+    assert_eq!(<NullMarketProvider as MarketProvider<u64, u128>>::user_active_order_count(1, &1u64), 0);
+    assert!(!<NullMarketProvider as MarketProvider<u64, u128>>::is_market_paused(1));
+}
+
+// ============================================================================
+// v0.9.0: NullDisclosureReadProvider / NullDisclosureWriteProvider
+// ============================================================================
+
+#[test]
+fn null_disclosure_read_provider_returns_defaults() {
+    assert!(!<NullDisclosureReadProvider as DisclosureReadProvider<u64>>::is_in_blackout(1));
+    assert!(!<NullDisclosureReadProvider as DisclosureReadProvider<u64>>::is_insider(1, &1u64));
+    assert!(<NullDisclosureReadProvider as DisclosureReadProvider<u64>>::can_insider_trade(1, &1u64));
+    assert_eq!(
+        <NullDisclosureReadProvider as DisclosureReadProvider<u64>>::get_disclosure_level(1),
+        DisclosureLevel::Basic
+    );
+    assert!(!<NullDisclosureReadProvider as DisclosureReadProvider<u64>>::is_disclosure_overdue(1));
+}
+
+#[test]
+fn null_disclosure_write_provider_defaults() {
+    assert!(
+        <NullDisclosureWriteProvider as DisclosureWriteProvider<u64>>::governance_configure_disclosure(1, DisclosureLevel::Standard, true, 100).is_err()
+    );
+    assert!(
+        <NullDisclosureWriteProvider as DisclosureWriteProvider<u64>>::governance_reset_violations(1).is_err()
+    );
+    assert_eq!(
+        <NullDisclosureWriteProvider as DisclosureWriteProvider<u64>>::register_major_holder(1, &1u64),
+        Ok(())
+    );
+    assert_eq!(
+        <NullDisclosureWriteProvider as DisclosureWriteProvider<u64>>::governance_set_penalty_level(1, 2),
+        Ok(())
+    );
+}
+
+// ============================================================================
+// v0.9.0: DisclosureProvider → DisclosureReadProvider blanket impl
+// ============================================================================
+
+#[test]
+fn disclosure_provider_bridges_to_read_provider() {
+    assert!(!<NullDisclosureProvider as DisclosureReadProvider<u64>>::is_in_blackout(1));
+    assert!(!<NullDisclosureProvider as DisclosureReadProvider<u64>>::is_insider(1, &1u64));
+    assert!(<NullDisclosureProvider as DisclosureReadProvider<u64>>::can_insider_trade(1, &1u64));
+    assert_eq!(
+        <NullDisclosureProvider as DisclosureReadProvider<u64>>::get_disclosure_level(1),
+        DisclosureLevel::Basic
+    );
+    assert!(!<NullDisclosureProvider as DisclosureReadProvider<u64>>::is_disclosure_overdue(1));
+    assert_eq!(<NullDisclosureProvider as DisclosureReadProvider<u64>>::get_violation_count(1), 0);
+    assert!(!<NullDisclosureProvider as DisclosureReadProvider<u64>>::is_high_risk(1));
+}
+
+#[test]
+fn disclosure_provider_bridges_to_write_provider() {
+    assert_eq!(
+        <NullDisclosureProvider as DisclosureWriteProvider<u64>>::register_major_holder(1, &1u64),
+        Ok(())
+    );
+    assert_eq!(
+        <NullDisclosureProvider as DisclosureWriteProvider<u64>>::deregister_major_holder(1, &1u64),
+        Ok(())
+    );
+    assert_eq!(
+        <NullDisclosureProvider as DisclosureWriteProvider<u64>>::governance_set_penalty_level(1, 0),
+        Ok(())
+    );
+}
+
+// ============================================================================
+// v0.9.0: MemberQueryProvider / MemberWriteProvider split
+// ============================================================================
+
+#[test]
+fn null_member_query_provider_returns_defaults() {
+    assert!(!<NullMemberQueryProvider as MemberQueryProvider<u64>>::is_member(1, &1u64));
+    assert_eq!(<NullMemberQueryProvider as MemberQueryProvider<u64>>::get_referrer(1, &1u64), None);
+    assert_eq!(<NullMemberQueryProvider as MemberQueryProvider<u64>>::custom_level_id(1, &1u64), 0);
+    assert_eq!(<NullMemberQueryProvider as MemberQueryProvider<u64>>::get_level_commission_bonus(1, 0), 0);
+    assert!(!<NullMemberQueryProvider as MemberQueryProvider<u64>>::uses_custom_levels(1));
+    assert_eq!(<NullMemberQueryProvider as MemberQueryProvider<u64>>::get_member_stats(1, &1u64), (0, 0, 0));
+}
+
+#[test]
+fn null_member_write_provider_returns_ok() {
+    assert_eq!(
+        <NullMemberWriteProvider as MemberWriteProvider<u64>>::auto_register(1, &1u64, None),
+        Ok(())
+    );
+}
+
+#[test]
+fn member_provider_bridges_to_query_provider() {
+    assert!(!<NullMemberProvider as MemberQueryProvider<u64>>::is_member(1, &1u64));
+    assert_eq!(<NullMemberProvider as MemberQueryProvider<u64>>::get_referrer(1, &1u64), None);
+    assert_eq!(<NullMemberProvider as MemberQueryProvider<u64>>::member_count(1), 0);
+    assert!(!<NullMemberProvider as MemberQueryProvider<u64>>::is_banned(1, &1u64));
+    assert!(<NullMemberProvider as MemberQueryProvider<u64>>::is_member_active(1, &1u64));
+}
+
+#[test]
+fn member_provider_bridges_to_write_provider() {
+    assert_eq!(
+        <NullMemberProvider as MemberWriteProvider<u64>>::auto_register(1, &1u64, None),
+        Ok(())
+    );
+    assert_eq!(
+        <NullMemberProvider as MemberWriteProvider<u64>>::update_spent(1, &1u64, 100),
+        Ok(())
+    );
+    assert_eq!(
+        <NullMemberProvider as MemberWriteProvider<u64>>::ban_member(1, &1u64),
+        Ok(())
+    );
+}
+
+// ============================================================================
+// v0.9.0: EntityProvider ownership transfer defaults
+// ============================================================================
+
+#[test]
+fn null_entity_provider_ownership_transfer_defaults() {
+    assert_eq!(
+        <NullEntityProvider as EntityProvider<u64>>::pending_ownership_transfer(1),
+        None
+    );
+    assert!(
+        <NullEntityProvider as EntityProvider<u64>>::initiate_ownership_transfer(1, &2u64).is_err()
+    );
+    assert!(
+        <NullEntityProvider as EntityProvider<u64>>::accept_ownership_transfer(1, &2u64).is_err()
+    );
+    assert!(
+        <NullEntityProvider as EntityProvider<u64>>::cancel_ownership_transfer(1).is_err()
+    );
+}
+
+// ============================================================================
+// v0.9.0: CommonError constants smoke test
+// ============================================================================
+
+#[test]
+fn common_error_constants_are_non_empty() {
+    assert!(!CommonError::ENTITY_NOT_FOUND.is_empty());
+    assert!(!CommonError::SHOP_NOT_FOUND.is_empty());
+    assert!(!CommonError::ORDER_NOT_FOUND.is_empty());
+    assert!(!CommonError::INSUFFICIENT_PERMISSION.is_empty());
+    assert!(!CommonError::EMERGENCY_PAUSED.is_empty());
+    assert!(!CommonError::PRICE_UNAVAILABLE.is_empty());
+}
+

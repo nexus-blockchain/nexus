@@ -205,7 +205,10 @@ impl pallet_balances::Config for Test {
 }
 
 parameter_types! {
-    pub const MaxSingleLineLength: u32 = 100;
+    pub const MaxSingleLineLength: u32 = 200;
+    pub const ConfigChangeDelay: u64 = 10;
+    pub const MaxSegmentCount: u32 = 1000;
+    pub const MaxTotalRateBps: u32 = 100_000;
 }
 
 impl pallet_commission_single_line::Config for Test {
@@ -215,7 +218,11 @@ impl pallet_commission_single_line::Config for Test {
     type MemberLevelProvider = MockMemberLevelProvider;
     type EntityProvider = MockEntityProvider;
     type MemberProvider = MockMemberProvider;
+    type WeightInfo = ();
     type MaxSingleLineLength = MaxSingleLineLength;
+    type ConfigChangeDelay = ConfigChangeDelay;
+    type MaxSegmentCount = MaxSegmentCount;
+    type MaxTotalRateBps = MaxTotalRateBps;
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

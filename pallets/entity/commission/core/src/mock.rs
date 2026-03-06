@@ -312,6 +312,11 @@ impl pallet_commission_core::Config for Test {
     type TokenTransferProvider = MockTokenTransferProvider;
     type MaxWithdrawalRecords = ConstU32<50>;
     type MaxMemberOrderIds = ConstU32<100>;
+    type MultiLevelQuery = ();
+    type TeamQuery = ();
+    type SingleLineQuery = ();
+    type PoolRewardQuery = ();
+    type ReferralQuery = ();
 }
 
 // ============================================================================

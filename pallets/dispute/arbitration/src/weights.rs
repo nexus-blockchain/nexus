@@ -87,10 +87,9 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().writes(6_u64))
     }
     fn supplement_evidence() -> Weight {
-        // Complaints(r) + Paused(r) = 2
-        Weight::from_parts(35_000_000, 4_000)
+        Weight::from_parts(40_000_000, 4_500)
             .saturating_add(T::DbWeight::get().reads(2_u64))
-            .saturating_add(T::DbWeight::get().writes(0_u64))
+            .saturating_add(T::DbWeight::get().writes(1_u64))
     }
     fn settle_dispute() -> Weight {
         // Disputed(r), TwoWayDeposits(r), Fungible release x2
@@ -174,9 +173,9 @@ impl WeightInfo for () {
             .saturating_add(RocksDbWeight::get().writes(6_u64))
     }
     fn supplement_evidence() -> Weight {
-        Weight::from_parts(35_000_000, 4_000)
+        Weight::from_parts(40_000_000, 4_500)
             .saturating_add(RocksDbWeight::get().reads(2_u64))
-            .saturating_add(RocksDbWeight::get().writes(0_u64))
+            .saturating_add(RocksDbWeight::get().writes(1_u64))
     }
     fn settle_dispute() -> Weight {
         Weight::from_parts(85_000_000, 6_000)

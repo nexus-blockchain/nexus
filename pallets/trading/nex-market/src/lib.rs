@@ -141,6 +141,10 @@ pub mod pallet {
         pub created_at: BlockNumberFor<T>,
         /// 证据 CID（IPFS 哈希）
         pub evidence_cid: BoundedVec<u8, ConstU32<128>>,
+        /// 对方反驳证据 CID
+        pub counter_evidence_cid: Option<BoundedVec<u8, ConstU32<128>>>,
+        /// 反驳方
+        pub counter_party: Option<T::AccountId>,
     }
 
     /// TRON 地址类型（34 字节 Base58）
@@ -177,6 +181,8 @@ pub mod pallet {
         pub buyer_deposit: BalanceOf<T>,
         /// 是否免保证金（仅 seed_liquidity 创建的卖单）
         pub deposit_waived: bool,
+        /// 卖家设置的最低吃单量（0 = 不限制）
+        pub min_fill_amount: BalanceOf<T>,
     }
 
     /// USDT 交易记录
@@ -213,6 +219,10 @@ pub mod pallet {
         pub first_actual_amount: Option<u64>,
         /// 少付补付截止区块
         pub underpaid_deadline: Option<BlockNumberFor<T>>,
+        /// W5: 交易终态时间（用于精确争议窗口）
+        pub completed_at: Option<BlockNumberFor<T>>,
+        /// W6: 买家是否已确认付款（用于争议准入判定）
+        pub payment_confirmed: bool,
     }
 
     /// 市场统计
@@ -220,7 +230,7 @@ pub mod pallet {
     pub struct MarketStats {
         pub total_orders: u64,
         pub total_trades: u64,
-        pub total_volume_usdt: u64,
+        pub total_volume_usdt: u128,
     }
 
     /// 价格快照
@@ -426,6 +436,22 @@ pub mod pallet {
         /// 当待验证队列超过此比例时自动触发市场暂停
         #[pallet::constant]
         type QueueFullThresholdBps: Get<u16>;
+
+        /// 争议发起时间窗口（区块数，超过此时间不允许发起争议）
+        #[pallet::constant]
+        type DisputeWindowBlocks: Get<u32>;
+
+        /// 单笔挂单/吃单 NEX 最大数量（防大额风险）
+        #[pallet::constant]
+        type MaxOrderNexAmount: Get<BalanceOf<Self>>;
+
+        /// 卖单订单簿最大容量（可 runtime 治理调整）
+        #[pallet::constant]
+        type MaxSellOrders: Get<u32>;
+
+        /// 买单订单簿最大容量（可 runtime 治理调整）
+        #[pallet::constant]
+        type MaxBuyOrders: Get<u32>;
     }
 
     #[pallet::pallet]
@@ -713,12 +739,12 @@ pub mod pallet {
     /// 卖单索引（卖 NEX 收 USDT）
     #[pallet::storage]
     #[pallet::getter(fn sell_orders)]
-    pub type SellOrders<T: Config> = StorageValue<_, BoundedVec<u64, ConstU32<1000>>, ValueQuery>;
+    pub type SellOrders<T: Config> = StorageValue<_, BoundedVec<u64, T::MaxSellOrders>, ValueQuery>;
 
     /// 买单索引（买 NEX 付 USDT）
     #[pallet::storage]
     #[pallet::getter(fn buy_orders)]
-    pub type BuyOrders<T: Config> = StorageValue<_, BoundedVec<u64, ConstU32<1000>>, ValueQuery>;
+    pub type BuyOrders<T: Config> = StorageValue<_, BoundedVec<u64, T::MaxBuyOrders>, ValueQuery>;
 
     /// 用户订单索引
     #[pallet::storage]
@@ -810,10 +836,10 @@ pub mod pallet {
     #[pallet::storage]
     pub type ActiveWaivedTrades<T: Config> = StorageMap<_, Blake2_128Concat, T::AccountId, u32, ValueQuery>;
 
-    /// seed_liquidity 累计成交 USDT 总额（审计用，链上 vs TRON 多签钱包对账）
+    /// 用户黑名单（true = 已封禁）
     #[pallet::storage]
-    #[pallet::getter(fn cumulative_seed_usdt_sold)]
-    pub type CumulativeSeedUsdtSold<T> = StorageValue<_, u64, ValueQuery>;
+    #[pallet::getter(fn is_banned)]
+    pub type BannedAccounts<T: Config> = StorageMap<_, Blake2_128Concat, T::AccountId, bool, ValueQuery>;
 
     /// 市场紧急暂停标志（#6 紧急暂停）
     #[pallet::storage]
@@ -1059,6 +1085,42 @@ pub mod pallet {
             fee_amount: BalanceOf<T>,
             to_treasury: T::AccountId,
         },
+        /// 卖家手动确认收款
+        SellerConfirmedReceived {
+            trade_id: u64,
+            seller: T::AccountId,
+            buyer: T::AccountId,
+        },
+        /// 用户已封禁
+        UserBanned {
+            account: T::AccountId,
+        },
+        /// 用户已解封
+        UserUnbanned {
+            account: T::AccountId,
+        },
+        /// 对方反驳证据已提交
+        CounterEvidenceSubmitted {
+            trade_id: u64,
+            party: T::AccountId,
+            evidence_cid: Vec<u8>,
+        },
+        /// 订单数量已修改
+        OrderAmountUpdated {
+            order_id: u64,
+            old_amount: BalanceOf<T>,
+            new_amount: BalanceOf<T>,
+        },
+        /// 批量强制结算完成
+        BatchForceSettled {
+            settled_count: u32,
+            failed_count: u32,
+        },
+        /// 批量强制取消完成
+        BatchForceCancelled {
+            cancelled_count: u32,
+            failed_count: u32,
+        },
     }
 
     // ==================== Errors ====================
@@ -1159,6 +1221,22 @@ pub mod pallet {
         UserTradesFull,
         /// 订单交易列表已满
         OrderTradesFull,
+        /// 用户已被封禁
+        UserIsBanned,
+        /// 争议时间窗口已过期
+        DisputeWindowExpired,
+        /// 订单金额超过最大限额
+        OrderAmountTooLarge,
+        /// 新数量低于已成交量
+        AmountBelowFilledAmount,
+        /// 低于卖家设置的最低吃单量
+        BelowMinFillAmount,
+        /// 不是交易参与方或管理员
+        NotParticipantOrAdmin,
+        /// 反驳证据已提交，不可覆盖
+        CounterEvidenceAlreadySubmitted,
+        /// 买家从未确认付款，不可争议
+        PaymentNotConfirmed,
     }
 
     // ==================== Extrinsics ====================
@@ -1175,13 +1253,16 @@ pub mod pallet {
             nex_amount: BalanceOf<T>,
             usdt_price: u64,
             tron_address: Vec<u8>,
+            min_fill_amount: Option<BalanceOf<T>>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::ensure_market_active()?;
+            Self::ensure_not_banned(&who)?;
 
             ensure!(usdt_price > 0, Error::<T>::ZeroPrice);
             ensure!(!nex_amount.is_zero(), Error::<T>::AmountTooSmall);
             ensure!(nex_amount >= T::MinOrderNexAmount::get(), Error::<T>::OrderAmountBelowMinimum);
+            ensure!(nex_amount <= T::MaxOrderNexAmount::get(), Error::<T>::OrderAmountTooLarge);
 
             // 价格偏离检查
             Self::check_price_deviation(usdt_price)?;
@@ -1194,9 +1275,9 @@ pub mod pallet {
             T::Currency::reserve(&who, nex_amount)
                 .map_err(|_| Error::<T>::InsufficientBalance)?;
 
-            // 创建订单
+            let mfa = min_fill_amount.unwrap_or_else(Zero::zero);
             let order_id = Self::do_create_order(
-                who.clone(), OrderSide::Sell, nex_amount, usdt_price, Some(tron_addr), Zero::zero(), false,
+                who.clone(), OrderSide::Sell, nex_amount, usdt_price, Some(tron_addr), Zero::zero(), false, mfa,
             )?;
 
             Self::update_best_price_on_new_order(usdt_price, OrderSide::Sell);
@@ -1221,10 +1302,12 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::ensure_market_active()?;
+            Self::ensure_not_banned(&who)?;
 
             ensure!(usdt_price > 0, Error::<T>::ZeroPrice);
             ensure!(!nex_amount.is_zero(), Error::<T>::AmountTooSmall);
             ensure!(nex_amount >= T::MinOrderNexAmount::get(), Error::<T>::OrderAmountBelowMinimum);
+            ensure!(nex_amount <= T::MaxOrderNexAmount::get(), Error::<T>::OrderAmountTooLarge);
 
             // 验证买家 TRON 地址（Base58Check 完整校验）
             ensure!(pallet_trading_common::is_valid_tron_address(&buyer_tron_address), Error::<T>::InvalidTronAddress);
@@ -1248,7 +1331,7 @@ pub mod pallet {
             }
 
             let order_id = Self::do_create_order(
-                who.clone(), OrderSide::Buy, nex_amount, usdt_price, Some(buyer_tron), buyer_deposit, false,
+                who.clone(), OrderSide::Buy, nex_amount, usdt_price, Some(buyer_tron), buyer_deposit, false, Zero::zero(),
             )?;
 
             Self::update_best_price_on_new_order(usdt_price, OrderSide::Buy);
@@ -1311,6 +1394,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::ensure_market_active()?;
+            Self::ensure_not_banned(&who)?;
 
             // H1修复: 验证买家 TRON 地址（Base58Check 完整校验，与其他 extrinsic 一致）
             ensure!(pallet_trading_common::is_valid_tron_address(&buyer_tron_address), Error::<T>::InvalidTronAddress);
@@ -1335,20 +1419,23 @@ pub mod pallet {
                 .ok_or(Error::<T>::ArithmeticOverflow)?;
             let fill_amount = amount.unwrap_or(available).min(available);
             ensure!(!fill_amount.is_zero(), Error::<T>::AmountTooSmall);
-            // 🆕 M1修复: 吃单量也需满足最低限额（防微量交易浪费 OCW 资源）
-            // 当剩余可用量本身低于最低限额时放宽检查（允许清扫尾单）
+            // M1修复: 吃单量也需满足最低限额（防微量交易浪费 OCW 资源）
             if available >= T::MinOrderNexAmount::get() {
                 ensure!(fill_amount >= T::MinOrderNexAmount::get(), Error::<T>::OrderAmountBelowMinimum);
             }
+            // S3: 卖家设置的最低吃单量
+            if !order.min_fill_amount.is_zero() && available >= order.min_fill_amount {
+                ensure!(fill_amount >= order.min_fill_amount, Error::<T>::BelowMinFillAmount);
+            }
+            // B3: 单笔吃单上限
+            ensure!(fill_amount <= T::MaxOrderNexAmount::get(), Error::<T>::OrderAmountTooLarge);
 
-            // 计算 USDT 金额
             let nex_u128: u128 = fill_amount.saturated_into();
-            // 🆕 M2修复: 安全转换防止 u64 截断
             let usdt_amount = u64::try_from(
                 nex_u128
                     .checked_mul(order.usdt_price as u128)
                     .ok_or(Error::<T>::ArithmeticOverflow)?
-                    .checked_div(1_000_000_000_000u128) // NEX 精度 10^12, USDT 精度 10^6
+                    .checked_div(1_000_000_000_000u128)
                     .ok_or(Error::<T>::ArithmeticOverflow)?
             ).map_err(|_| Error::<T>::ArithmeticOverflow)?;
             ensure!(usdt_amount > 0, Error::<T>::AmountTooSmall);
@@ -1423,6 +1510,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::ensure_market_active()?;
+            Self::ensure_not_banned(&who)?;
 
             let mut order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
             let buyer = order.maker.clone();
@@ -1448,12 +1536,11 @@ pub mod pallet {
                 .ok_or(Error::<T>::ArithmeticOverflow)?;
             let fill_amount = amount.unwrap_or(available).min(available);
             ensure!(!fill_amount.is_zero(), Error::<T>::AmountTooSmall);
-            // 🆕 M1修复: 吃单量也需满足最低限额（防微量交易浪费 OCW 资源）
             if available >= T::MinOrderNexAmount::get() {
                 ensure!(fill_amount >= T::MinOrderNexAmount::get(), Error::<T>::OrderAmountBelowMinimum);
             }
+            ensure!(fill_amount <= T::MaxOrderNexAmount::get(), Error::<T>::OrderAmountTooLarge);
 
-            // 计算 USDT
             let nex_u128: u128 = fill_amount.saturated_into();
             // 🆕 M2修复: 安全转换防止 u64 截断
             let usdt_amount = u64::try_from(
@@ -1528,6 +1615,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::ensure_market_active()?;
+            Self::ensure_not_banned(&who)?;
 
             let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
             ensure!(trade.buyer == who, Error::<T>::NotTradeParticipant);
@@ -1540,9 +1628,9 @@ pub mod pallet {
             ensure!(trade.buyer_tron_address.is_some(), Error::<T>::InvalidTronAddress);
 
             trade.status = UsdtTradeStatus::AwaitingVerification;
+            trade.payment_confirmed = true; // W6
             UsdtTrades::<T>::insert(trade_id, &trade);
 
-            // 从待付款队列移到待验证队列
             AwaitingPaymentTrades::<T>::mutate(|list| { list.retain(|&id| id != trade_id); });
             PendingUsdtTrades::<T>::try_mutate(|pending| {
                 pending.try_push(trade_id).map_err(|_| Error::<T>::PendingQueueFull)
@@ -1569,7 +1657,16 @@ pub mod pallet {
             origin: OriginFor<T>,
             trade_id: u64,
         ) -> DispatchResult {
-            let _who = ensure_signed(origin)?;
+            // C4: 先尝试 Admin origin，再尝试 signed origin（参与方）
+            let is_admin = T::MarketAdminOrigin::ensure_origin(origin.clone()).is_ok();
+            if !is_admin {
+                let who = ensure_signed(origin)?;
+                let trade_ref = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
+                ensure!(
+                    trade_ref.buyer == who || trade_ref.seller == who,
+                    Error::<T>::NotParticipantOrAdmin
+                );
+            }
 
             let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
             ensure!(
@@ -1659,9 +1756,9 @@ pub mod pallet {
             let usdt_amount = trade.usdt_amount;
 
             trade.status = UsdtTradeStatus::Refunded;
+            trade.completed_at = Some(now); // W5
             UsdtTrades::<T>::insert(trade_id, &trade);
 
-            // 清理活跃免保证金计数
             Self::cleanup_waived_trade_counter(&trade.buyer, trade.order_id);
 
             // 清理所有队列
@@ -1714,9 +1811,11 @@ pub mod pallet {
                 trade.usdt_amount, actual_amount,
             );
 
+            // W8: 先持久化 OCW 结果，结算失败时可通过 claim_verification_reward 手动恢复
+            OcwVerificationResults::<T>::insert(trade_id, (verification_result, actual_amount));
+
             match verification_result {
                 PaymentVerificationResult::Underpaid => {
-                    // 50%-99.5%: 进入补付窗口
                     let now = <frame_system::Pallet<T>>::block_number();
                     let grace: BlockNumberFor<T> = T::UnderpaidGracePeriod::get().into();
                     let deadline = now.saturating_add(grace);
@@ -1727,17 +1826,12 @@ pub mod pallet {
                     trade.underpaid_deadline = Some(deadline);
                     UsdtTrades::<T>::insert(trade_id, &trade);
 
-                    // 从 PendingUsdtTrades 移到 PendingUnderpaidTrades
                     PendingUsdtTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
                     PendingUnderpaidTrades::<T>::try_mutate(|p| {
                         p.try_push(trade_id).map_err(|_| Error::<T>::UnderpaidQueueFull)
                     })?;
 
-                    // 同时存储当前结果（claim 可在补付窗口到期后使用最新值）
-                    OcwVerificationResults::<T>::insert(trade_id, (verification_result, actual_amount));
-
                     let payment_ratio = pallet_trading_common::compute_payment_ratio_bps(trade.usdt_amount, actual_amount);
-                    let deposit_forfeit_rate = Self::calculate_deposit_forfeit_rate(payment_ratio);
                     Self::deposit_event(Event::UnderpaidDetected {
                         trade_id,
                         expected_amount: trade.usdt_amount,
@@ -1746,9 +1840,20 @@ pub mod pallet {
                         deadline,
                     });
                 }
-                _ => {
-                    // Exact/Overpaid/SeverelyUnderpaid/Invalid: 直接存储结果
-                    OcwVerificationResults::<T>::insert(trade_id, (verification_result, actual_amount));
+                PaymentVerificationResult::Exact | PaymentVerificationResult::Overpaid => {
+                    Self::process_full_payment(&mut trade, trade_id)?;
+                    PendingUsdtTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
+                    OcwVerificationResults::<T>::remove(trade_id); // W8: 结算成功才清理
+
+                    Self::deposit_event(Event::OcwResultSubmitted {
+                        trade_id, verification_result, actual_amount,
+                    });
+                }
+                PaymentVerificationResult::SeverelyUnderpaid | PaymentVerificationResult::Invalid => {
+                    let amt = if verification_result == PaymentVerificationResult::Invalid { 0 } else { actual_amount };
+                    Self::process_underpaid(&mut trade, trade_id, amt)?;
+                    PendingUsdtTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
+                    OcwVerificationResults::<T>::remove(trade_id); // W8: 结算成功才清理
 
                     Self::deposit_event(Event::OcwResultSubmitted {
                         trade_id, verification_result, actual_amount,
@@ -1756,8 +1861,6 @@ pub mod pallet {
                 }
             }
 
-            // 🆕 C3: 记录已使用的 tx_hash（防重放）
-            // 🆕 M7: 同时记录插入区块号，用于 TTL 清理
             if let Some(hash) = tx_hash {
                 let now = <frame_system::Pallet<T>>::block_number();
                 UsedTxHashes::<T>::insert(hash, (trade_id, now));
@@ -1945,7 +2048,7 @@ pub mod pallet {
 
                 let order_id = Self::do_create_order(
                     seed_account.clone(), OrderSide::Sell, nex_per_order, seed_price,
-                    Some(tron_addr.clone()), Zero::zero(), true,
+                    Some(tron_addr.clone()), Zero::zero(), true, Zero::zero(),
                 )?;
 
                 total_nex = total_nex.saturating_add(nex_per_order);
@@ -1995,9 +2098,9 @@ pub mod pallet {
                 trade.usdt_amount, actual_amount,
             );
 
+            trade.payment_confirmed = true; // W6: OCW 检测到付款
             Self::deposit_event(Event::AutoPaymentDetected { trade_id, actual_amount });
 
-            // 从待付款队列移除
             AwaitingPaymentTrades::<T>::mutate(|list| { list.retain(|&id| id != trade_id); });
 
             match verification_result {
@@ -2027,15 +2130,18 @@ pub mod pallet {
                         deadline,
                     });
                 }
-                _ => {
-                    // Exact/Overpaid/SeverelyUnderpaid/Invalid → 直接存储
-                    trade.status = UsdtTradeStatus::AwaitingVerification;
-                    UsdtTrades::<T>::insert(trade_id, &trade);
+                PaymentVerificationResult::Exact | PaymentVerificationResult::Overpaid => {
+                    // R1: 直接结算
+                    Self::process_full_payment(&mut trade, trade_id)?;
 
-                    PendingUsdtTrades::<T>::try_mutate(|pending| {
-                        pending.try_push(trade_id).map_err(|_| Error::<T>::PendingQueueFull)
-                    })?;
-                    OcwVerificationResults::<T>::insert(trade_id, (verification_result, actual_amount));
+                    Self::deposit_event(Event::OcwResultSubmitted {
+                        trade_id, verification_result, actual_amount,
+                    });
+                }
+                _ => {
+                    // SeverelyUnderpaid/Invalid → 直接处理
+                    let amt = if verification_result == PaymentVerificationResult::Invalid { 0 } else { actual_amount };
+                    Self::process_underpaid(&mut trade, trade_id, amt)?;
 
                     Self::deposit_event(Event::OcwResultSubmitted {
                         trade_id, verification_result, actual_amount,
@@ -2088,16 +2194,11 @@ pub mod pallet {
                 trade_id, previous_amount, new_amount: new_actual_amount,
             });
 
-            // 补齐了！直接升级回 AwaitingVerification + Exact/Overpaid 结果
+            // R1: 补齐后直接结算（无需二次触发）
             if matches!(new_result, PaymentVerificationResult::Exact | PaymentVerificationResult::Overpaid) {
-                trade.status = UsdtTradeStatus::AwaitingVerification;
-                UsdtTrades::<T>::insert(trade_id, &trade);
-
-                // 移回 PendingUsdtTrades
+                Self::process_full_payment(&mut trade, trade_id)?;
                 PendingUnderpaidTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
-                PendingUsdtTrades::<T>::try_mutate(|p| {
-                    p.try_push(trade_id).map_err(|_| Error::<T>::PendingQueueFull)
-                })?;
+                OcwVerificationResults::<T>::remove(trade_id);
             }
 
             Ok(())
@@ -2194,41 +2295,7 @@ pub mod pallet {
             resolution: DisputeResolution,
         ) -> DispatchResult {
             T::MarketAdminOrigin::ensure_origin(origin)?;
-
-            let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
-            ensure!(
-                trade.status == UsdtTradeStatus::AwaitingVerification ||
-                trade.status == UsdtTradeStatus::UnderpaidPending,
-                Error::<T>::InvalidTradeStatus
-            );
-
-            match resolution {
-                DisputeResolution::ReleaseToBuyer => {
-                    Self::process_full_payment(&mut trade, trade_id)?;
-                }
-                DisputeResolution::RefundToSeller => {
-                    // 退还 NEX 给卖家
-                    T::Currency::unreserve(&trade.seller, trade.nex_amount);
-                    Self::rollback_order_filled_amount(trade.order_id, trade.nex_amount);
-                    // 没收买家保证金
-                    Self::forfeit_buyer_deposit(&mut trade, trade_id);
-                    trade.status = UsdtTradeStatus::Refunded;
-                    UsdtTrades::<T>::insert(trade_id, &trade);
-                    Self::cleanup_waived_trade_counter(&trade.buyer, trade.order_id);
-                }
-            }
-
-            // 清理所有队列
-            PendingUsdtTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
-            PendingUnderpaidTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
-            AwaitingPaymentTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
-            OcwVerificationResults::<T>::remove(trade_id);
-
-            Self::deposit_event(Event::TradeForceSettled {
-                trade_id, actual_amount, resolution,
-            });
-
-            Ok(())
+            Self::do_force_settle(trade_id, actual_amount, resolution)
         }
 
         /// 管理员强制取消交易（MarketAdmin）
@@ -2242,41 +2309,7 @@ pub mod pallet {
             trade_id: u64,
         ) -> DispatchResult {
             T::MarketAdminOrigin::ensure_origin(origin)?;
-
-            let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
-            ensure!(
-                trade.status == UsdtTradeStatus::AwaitingPayment ||
-                trade.status == UsdtTradeStatus::AwaitingVerification ||
-                trade.status == UsdtTradeStatus::UnderpaidPending,
-                Error::<T>::InvalidTradeStatus
-            );
-
-            // 退还 NEX 给卖家
-            T::Currency::unreserve(&trade.seller, trade.nex_amount);
-            Self::rollback_order_filled_amount(trade.order_id, trade.nex_amount);
-
-            // 退还保证金给买家（不没收）
-            if !trade.buyer_deposit.is_zero() && trade.deposit_status == BuyerDepositStatus::Locked {
-                T::Currency::unreserve(&trade.buyer, trade.buyer_deposit);
-                trade.deposit_status = BuyerDepositStatus::Released;
-                Self::deposit_event(Event::BuyerDepositReleased {
-                    trade_id, buyer: trade.buyer.clone(), deposit: trade.buyer_deposit,
-                });
-            }
-
-            trade.status = UsdtTradeStatus::Refunded;
-            UsdtTrades::<T>::insert(trade_id, &trade);
-            Self::cleanup_waived_trade_counter(&trade.buyer, trade.order_id);
-
-            // 清理所有队列
-            AwaitingPaymentTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
-            PendingUsdtTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
-            PendingUnderpaidTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
-            OcwVerificationResults::<T>::remove(trade_id);
-
-            Self::deposit_event(Event::TradeForceCancelled { trade_id });
-
-            Ok(())
+            Self::do_force_cancel(trade_id)
         }
 
         /// 发起交易争议（买家或卖家）
@@ -2297,11 +2330,22 @@ pub mod pallet {
                 trade.buyer == who || trade.seller == who,
                 Error::<T>::NotTradeParticipant
             );
-            // 仅 Refunded 状态可争议（验证超时退款场景）
-            ensure!(trade.status == UsdtTradeStatus::Refunded, Error::<T>::TradeNotDisputable);
+            ensure!(
+                trade.status == UsdtTradeStatus::Refunded || trade.status == UsdtTradeStatus::Completed,
+                Error::<T>::TradeNotDisputable
+            );
+            // W6: Refunded 交易必须有付款确认记录，防止买家从未付款却争议获利
+            if trade.status == UsdtTradeStatus::Refunded {
+                ensure!(trade.payment_confirmed, Error::<T>::PaymentNotConfirmed);
+            }
             ensure!(!TradeDisputeStore::<T>::contains_key(trade_id), Error::<T>::TradeAlreadyDisputed);
 
+            // W5: 争议窗口锚定 completed_at（精确终态时间）
             let now = <frame_system::Pallet<T>>::block_number();
+            let window: BlockNumberFor<T> = T::DisputeWindowBlocks::get().into();
+            let anchor = trade.completed_at.unwrap_or(trade.timeout_at);
+            ensure!(now <= anchor.saturating_add(window), Error::<T>::DisputeWindowExpired);
+
             let cid: BoundedVec<u8, ConstU32<128>> = evidence_cid.clone()
                 .try_into().map_err(|_| Error::<T>::ArithmeticOverflow)?;
 
@@ -2311,6 +2355,8 @@ pub mod pallet {
                 status: DisputeStatus::Open,
                 created_at: now,
                 evidence_cid: cid,
+                counter_evidence_cid: None,
+                counter_party: None,
             };
             TradeDisputeStore::<T>::insert(trade_id, dispute);
 
@@ -2343,12 +2389,21 @@ pub mod pallet {
 
             match resolution {
                 DisputeResolution::ReleaseToBuyer => {
-                    // 🆕 C1修复: 从国库补偿 NEX 给买家（传播转账错误，防止买家得不到补偿却标记为已解决）
-                    let treasury = T::TreasuryAccount::get();
-                    T::Currency::transfer(
-                        &treasury, &trade.buyer, trade.nex_amount,
-                        ExistenceRequirement::KeepAlive,
-                    ).map_err(|_| Error::<T>::InsufficientBalance)?;
+                    // C3: Completed 交易买家已拿到 NEX，仅对 Refunded 交易补偿
+                    if trade.status == UsdtTradeStatus::Refunded {
+                        let treasury = T::TreasuryAccount::get();
+                        let treasury_balance = T::Currency::free_balance(&treasury);
+                        let min_balance = T::Currency::minimum_balance();
+                        let available = treasury_balance.saturating_sub(min_balance);
+                        let compensate_amount = trade.nex_amount.min(available);
+                        if !compensate_amount.is_zero() {
+                            T::Currency::transfer(
+                                &treasury, &trade.buyer, compensate_amount,
+                                ExistenceRequirement::KeepAlive,
+                            ).map_err(|_| Error::<T>::InsufficientBalance)?;
+                        }
+                    }
+                    // Completed 交易：买家已拿到 NEX，无需额外补偿，仅记录裁决结果
                     dispute.status = DisputeStatus::ResolvedForBuyer;
                 }
                 DisputeResolution::RefundToSeller => {
@@ -2493,6 +2548,276 @@ pub mod pallet {
 
             Ok(())
         }
+
+        // ==================== 审计新增 Extrinsics ====================
+
+        /// 卖家手动确认收款（B1/S1: OCW 故障时的备用结算路径）
+        ///
+        /// 卖家确认已收到 USDT → 直接完成交易释放 NEX。
+        /// 卖家自愿承担风险，绕过 OCW 验证。
+        #[pallet::call_index(27)]
+        #[pallet::weight(Weight::from_parts(100_000_000, 8_000))]
+        pub fn seller_confirm_received(
+            origin: OriginFor<T>,
+            trade_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
+            ensure!(trade.seller == who, Error::<T>::NotTradeParticipant);
+            // W1: 仅允许买家已确认付款后的状态（防社工攻击）
+            ensure!(
+                trade.status == UsdtTradeStatus::AwaitingVerification ||
+                trade.status == UsdtTradeStatus::UnderpaidPending,
+                Error::<T>::InvalidTradeStatus
+            );
+
+            let buyer_clone = trade.buyer.clone();
+            Self::process_full_payment(&mut trade, trade_id)?;
+
+            AwaitingPaymentTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
+            PendingUsdtTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
+            PendingUnderpaidTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
+            OcwVerificationResults::<T>::remove(trade_id);
+
+            Self::deposit_event(Event::SellerConfirmedReceived {
+                trade_id, seller: who, buyer: buyer_clone,
+            });
+
+            Ok(())
+        }
+
+        /// 封禁用户（MarketAdmin）
+        #[pallet::call_index(28)]
+        #[pallet::weight(Weight::from_parts(30_000_000, 4_000))]
+        pub fn ban_user(
+            origin: OriginFor<T>,
+            account: T::AccountId,
+        ) -> DispatchResult {
+            T::MarketAdminOrigin::ensure_origin(origin)?;
+            BannedAccounts::<T>::insert(&account, true);
+
+            // W2: 取消该用户所有无活跃交易的挂单
+            let order_ids = UserOrders::<T>::get(&account);
+            for &order_id in order_ids.iter() {
+                if let Some(mut order) = Orders::<T>::get(order_id) {
+                    if order.status != OrderStatus::Open && order.status != OrderStatus::PartiallyFilled {
+                        continue;
+                    }
+                    let trades = OrderTrades::<T>::get(order_id);
+                    let has_active = trades.iter().any(|&tid| {
+                        UsdtTrades::<T>::get(tid).map_or(false, |t| {
+                            t.status == UsdtTradeStatus::AwaitingPayment ||
+                            t.status == UsdtTradeStatus::AwaitingVerification ||
+                            t.status == UsdtTradeStatus::UnderpaidPending
+                        })
+                    });
+                    if has_active { continue; }
+
+                    if order.side == OrderSide::Sell {
+                        let unfilled = order.nex_amount.saturating_sub(order.filled_amount);
+                        if !unfilled.is_zero() {
+                            T::Currency::unreserve(&account, unfilled);
+                        }
+                    } else if !order.buyer_deposit.is_zero() {
+                        T::Currency::unreserve(&account, order.buyer_deposit);
+                    }
+                    order.status = OrderStatus::Cancelled;
+                    Orders::<T>::insert(order_id, &order);
+                    Self::remove_from_order_book(order_id, order.side);
+                    Self::update_best_price_on_remove(order.usdt_price, order.side);
+                    Self::deposit_event(Event::OrderCancelled { order_id });
+                }
+            }
+
+            Self::deposit_event(Event::UserBanned { account });
+            Ok(())
+        }
+
+        /// 解封用户（MarketAdmin）
+        #[pallet::call_index(29)]
+        #[pallet::weight(Weight::from_parts(30_000_000, 4_000))]
+        pub fn unban_user(
+            origin: OriginFor<T>,
+            account: T::AccountId,
+        ) -> DispatchResult {
+            T::MarketAdminOrigin::ensure_origin(origin)?;
+            BannedAccounts::<T>::remove(&account);
+            Self::deposit_event(Event::UserUnbanned { account });
+            Ok(())
+        }
+
+        /// 提交争议反驳证据（B2: 对方反驳）
+        #[pallet::call_index(30)]
+        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        pub fn submit_counter_evidence(
+            origin: OriginFor<T>,
+            trade_id: u64,
+            evidence_cid: Vec<u8>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
+            ensure!(
+                trade.buyer == who || trade.seller == who,
+                Error::<T>::NotTradeParticipant
+            );
+
+            let mut dispute = TradeDisputeStore::<T>::get(trade_id)
+                .ok_or(Error::<T>::DisputeNotFound)?;
+            ensure!(dispute.status == DisputeStatus::Open, Error::<T>::DisputeAlreadyClosed);
+            // 不能自己反驳自己
+            ensure!(dispute.initiator != who, Error::<T>::NotTradeParticipant);
+            // W3: 反驳证据一经提交不可覆盖
+            ensure!(dispute.counter_evidence_cid.is_none(), Error::<T>::CounterEvidenceAlreadySubmitted);
+
+            let cid: BoundedVec<u8, ConstU32<128>> = evidence_cid.clone()
+                .try_into().map_err(|_| Error::<T>::ArithmeticOverflow)?;
+
+            dispute.counter_evidence_cid = Some(cid);
+            dispute.counter_party = Some(who.clone());
+            TradeDisputeStore::<T>::insert(trade_id, dispute);
+
+            Self::deposit_event(Event::CounterEvidenceSubmitted {
+                trade_id, party: who, evidence_cid,
+            });
+
+            Ok(())
+        }
+
+        /// 修改订单数量（S2: 订单所有者）
+        ///
+        /// 仅允许无活跃交易的订单修改。
+        /// 新数量不能低于已成交量。
+        #[pallet::call_index(31)]
+        #[pallet::weight(Weight::from_parts(60_000_000, 5_000))]
+        pub fn update_order_amount(
+            origin: OriginFor<T>,
+            order_id: u64,
+            new_amount: BalanceOf<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_market_active()?;
+
+            ensure!(!new_amount.is_zero(), Error::<T>::AmountTooSmall);
+            ensure!(new_amount >= T::MinOrderNexAmount::get(), Error::<T>::OrderAmountBelowMinimum);
+            ensure!(new_amount <= T::MaxOrderNexAmount::get(), Error::<T>::OrderAmountTooLarge);
+
+            let mut order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
+            ensure!(order.maker == who, Error::<T>::NotOrderOwner);
+            ensure!(
+                order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled,
+                Error::<T>::OrderClosed
+            );
+            ensure!(new_amount >= order.filled_amount, Error::<T>::AmountBelowFilledAmount);
+
+            let trades = OrderTrades::<T>::get(order_id);
+            let has_active = trades.iter().any(|&tid| {
+                UsdtTrades::<T>::get(tid).map_or(false, |t| {
+                    t.status == UsdtTradeStatus::AwaitingPayment ||
+                    t.status == UsdtTradeStatus::AwaitingVerification ||
+                    t.status == UsdtTradeStatus::UnderpaidPending
+                })
+            });
+            ensure!(!has_active, Error::<T>::OrderHasActiveTrades);
+
+            let old_amount = order.nex_amount;
+            let now = <frame_system::Pallet<T>>::block_number();
+            ensure!(now <= order.expires_at, Error::<T>::OrderExpired);
+
+            if order.side == OrderSide::Sell {
+                let old_unfilled = old_amount.saturating_sub(order.filled_amount);
+                let new_unfilled = new_amount.saturating_sub(order.filled_amount);
+                if new_unfilled > old_unfilled {
+                    let diff = new_unfilled.saturating_sub(old_unfilled);
+                    T::Currency::reserve(&who, diff)
+                        .map_err(|_| Error::<T>::InsufficientBalance)?;
+                } else if old_unfilled > new_unfilled {
+                    let diff = old_unfilled.saturating_sub(new_unfilled);
+                    T::Currency::unreserve(&who, diff);
+                }
+            } else {
+                // C1: 买单修改数量 → 重算保证金差额
+                let nex_u128_old: u128 = old_amount.saturated_into();
+                let old_usdt = (nex_u128_old
+                    .saturating_mul(order.usdt_price as u128)
+                    .saturating_div(1_000_000_000_000u128)) as u64;
+                let old_deposit = Self::calculate_buyer_deposit(old_usdt);
+
+                let nex_u128_new: u128 = new_amount.saturated_into();
+                let new_usdt = (nex_u128_new
+                    .saturating_mul(order.usdt_price as u128)
+                    .saturating_div(1_000_000_000_000u128)) as u64;
+                let new_deposit = Self::calculate_buyer_deposit(new_usdt);
+
+                if new_deposit > old_deposit {
+                    let diff = new_deposit.saturating_sub(old_deposit);
+                    T::Currency::reserve(&who, diff)
+                        .map_err(|_| Error::<T>::InsufficientDepositBalance)?;
+                } else if old_deposit > new_deposit {
+                    let diff = old_deposit.saturating_sub(new_deposit);
+                    T::Currency::unreserve(&who, diff);
+                }
+                order.buyer_deposit = new_deposit;
+            }
+
+            order.nex_amount = new_amount;
+            Orders::<T>::insert(order_id, &order);
+
+            Self::deposit_event(Event::OrderAmountUpdated {
+                order_id, old_amount, new_amount,
+            });
+
+            Ok(())
+        }
+
+        /// 批量强制结算交易（A2: MarketAdmin，上限 20 笔）
+        #[pallet::call_index(32)]
+        #[pallet::weight(Weight::from_parts(
+            120_000_000u64.saturating_mul(trade_ids.len().min(20) as u64).saturating_add(30_000_000),
+            10_000u64.saturating_mul(trade_ids.len().min(20) as u64).saturating_add(5_000),
+        ))]
+        pub fn batch_force_settle(
+            origin: OriginFor<T>,
+            trade_ids: BoundedVec<u64, ConstU32<20>>,
+            actual_amount: u64,
+            resolution: DisputeResolution,
+        ) -> DispatchResult {
+            T::MarketAdminOrigin::ensure_origin(origin)?;
+
+            let mut settled: u32 = 0;
+            let mut failed: u32 = 0;
+            for trade_id in trade_ids.iter() {
+                let result = Self::do_force_settle(*trade_id, actual_amount, resolution);
+                if result.is_ok() { settled += 1; } else { failed += 1; }
+            }
+
+            Self::deposit_event(Event::BatchForceSettled { settled_count: settled, failed_count: failed });
+            Ok(())
+        }
+
+        /// 批量强制取消交易（A2: MarketAdmin，上限 20 笔）
+        #[pallet::call_index(33)]
+        #[pallet::weight(Weight::from_parts(
+            100_000_000u64.saturating_mul(trade_ids.len().min(20) as u64).saturating_add(30_000_000),
+            8_000u64.saturating_mul(trade_ids.len().min(20) as u64).saturating_add(5_000),
+        ))]
+        pub fn batch_force_cancel(
+            origin: OriginFor<T>,
+            trade_ids: BoundedVec<u64, ConstU32<20>>,
+        ) -> DispatchResult {
+            T::MarketAdminOrigin::ensure_origin(origin)?;
+
+            let mut cancelled: u32 = 0;
+            let mut failed: u32 = 0;
+            for trade_id in trade_ids.iter() {
+                let result = Self::do_force_cancel(*trade_id);
+                if result.is_ok() { cancelled += 1; } else { failed += 1; }
+            }
+
+            Self::deposit_event(Event::BatchForceCancelled { cancelled_count: cancelled, failed_count: failed });
+            Ok(())
+        }
     }
 
     // ==================== ValidateUnsigned ====================
@@ -2635,6 +2960,7 @@ pub mod pallet {
             tron_address: Option<TronAddress>,
             buyer_deposit: BalanceOf<T>,
             deposit_waived: bool,
+            min_fill_amount: BalanceOf<T>,
         ) -> Result<u64, DispatchError> {
             let order_id = NextOrderId::<T>::get();
             ensure!(order_id < u64::MAX, Error::<T>::ArithmeticOverflow);
@@ -2657,6 +2983,7 @@ pub mod pallet {
                 expires_at,
                 buyer_deposit,
                 deposit_waived,
+                min_fill_amount,
             };
 
             Orders::<T>::insert(order_id, order);
@@ -2743,6 +3070,8 @@ pub mod pallet {
                 first_verified_at: None,
                 first_actual_amount: None,
                 underpaid_deadline: None,
+                completed_at: None,
+                payment_confirmed: false,
             };
 
             UsdtTrades::<T>::insert(trade_id, &trade);
@@ -2795,7 +3124,9 @@ pub mod pallet {
             pallet_trading_common::calculate_payment_verification_result(expected_amount, actual_amount)
         }
 
-        /// 领取验证奖励
+        /// 手动结算交易（R1 简化：submit_ocw_result 已自动结算，此为兜底）
+        ///
+        /// 当 submit_ocw_result 因异常未能自动结算时，任何人可手动触发。
         fn do_claim_verification_reward(
             caller: &T::AccountId,
             trade_id: u64,
@@ -2826,19 +3157,8 @@ pub mod pallet {
             PendingUsdtTrades::<T>::mutate(|pending| { pending.retain(|&id| id != trade_id); });
             OcwVerificationResults::<T>::remove(trade_id);
 
-            // 支付奖励（非核心操作，失败不阻断交易结算）
-            let reward = T::VerificationReward::get();
-            let reward_paid = if reward > Zero::zero() {
-                let reward_source = T::RewardSource::get();
-                T::Currency::transfer(
-                    &reward_source, caller, reward, ExistenceRequirement::KeepAlive,
-                ).is_ok()
-            } else {
-                true
-            };
-
             Self::deposit_event(Event::VerificationRewardClaimed {
-                trade_id, claimer: caller.clone(), reward, reward_paid,
+                trade_id, claimer: caller.clone(), reward: Zero::zero(), reward_paid: true,
             });
 
             Ok(())
@@ -2896,31 +3216,20 @@ pub mod pallet {
             }
 
             trade.status = UsdtTradeStatus::Completed;
+            trade.completed_at = Some(<frame_system::Pallet<T>>::block_number()); // W5
             let usdt_amount = trade.usdt_amount;
             let order_id = trade.order_id;
             UsdtTrades::<T>::insert(trade_id, &*trade);
 
-            // L3: 标记买家已完成交易 + 清理活跃免保证金计数
             Self::finalize_waived_trade_tracking(&trade.buyer, order_id);
 
-            // 🆕 M2: 缓存 Orders 读取，避免双读存储
             let maybe_order = Orders::<T>::get(order_id);
-
-            // 审计：累计 seed_liquidity 成交 USDT
-            if let Some(ref order) = maybe_order {
-                if order.deposit_waived {
-                    CumulativeSeedUsdtSold::<T>::mutate(|total| {
-                        *total = total.saturating_add(usdt_amount);
-                    });
-                }
-            }
 
             MarketStatsStore::<T>::mutate(|stats| {
                 stats.total_trades = stats.total_trades.saturating_add(1);
-                stats.total_volume_usdt = stats.total_volume_usdt.saturating_add(usdt_amount);
+                stats.total_volume_usdt = stats.total_volume_usdt.saturating_add(usdt_amount as u128);
             });
 
-            // 更新 TWAP
             if let Some(ref order) = maybe_order {
                 Self::on_trade_completed(order.usdt_price);
             }
@@ -2992,31 +3301,21 @@ pub mod pallet {
                 trade.deposit_status = BuyerDepositStatus::Forfeited;
             }
 
-            // L2: actual_amount=0 (Invalid) 用 Refunded 更准确
             trade.status = if actual_amount > 0 {
                 UsdtTradeStatus::Completed
             } else {
                 UsdtTradeStatus::Refunded
             };
+            trade.completed_at = Some(<frame_system::Pallet<T>>::block_number()); // W5
             let expected_amount = trade.usdt_amount;
             let order_id = trade.order_id;
             UsdtTrades::<T>::insert(trade_id, &*trade);
 
-            // 清理活跃免保证金计数（不标记 CompletedBuyers，少付不算完成）
             Self::cleanup_waived_trade_counter(&trade.buyer, order_id);
-
-            // 审计：累计 seed_liquidity 实际收到的 USDT
-            if let Some(order) = Orders::<T>::get(order_id) {
-                if order.deposit_waived && actual_amount > 0 {
-                    CumulativeSeedUsdtSold::<T>::mutate(|total| {
-                        *total = total.saturating_add(actual_amount);
-                    });
-                }
-            }
 
             MarketStatsStore::<T>::mutate(|stats| {
                 stats.total_trades = stats.total_trades.saturating_add(1);
-                stats.total_volume_usdt = stats.total_volume_usdt.saturating_add(actual_amount);
+                stats.total_volume_usdt = stats.total_volume_usdt.saturating_add(actual_amount as u128);
             });
 
             Self::deposit_event(Event::UnderpaidAutoProcessed {
@@ -3660,9 +3959,83 @@ pub mod pallet {
             key
         }
 
-        /// #6: 检查市场是否暂停
+        /// 检查市场是否暂停
         fn ensure_market_active() -> DispatchResult {
             ensure!(!MarketPausedStore::<T>::get(), Error::<T>::MarketIsPaused);
+            Ok(())
+        }
+
+        /// A1: 检查用户是否被封禁
+        fn ensure_not_banned(who: &T::AccountId) -> DispatchResult {
+            ensure!(!BannedAccounts::<T>::get(who), Error::<T>::UserIsBanned);
+            Ok(())
+        }
+
+        /// A2: force_settle 内部逻辑（批量复用）
+        fn do_force_settle(trade_id: u64, actual_amount: u64, resolution: DisputeResolution) -> DispatchResult {
+            let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
+            ensure!(
+                trade.status == UsdtTradeStatus::AwaitingVerification ||
+                trade.status == UsdtTradeStatus::UnderpaidPending,
+                Error::<T>::InvalidTradeStatus
+            );
+
+            match resolution {
+                DisputeResolution::ReleaseToBuyer => {
+                    Self::process_full_payment(&mut trade, trade_id)?;
+                }
+                DisputeResolution::RefundToSeller => {
+                    T::Currency::unreserve(&trade.seller, trade.nex_amount);
+                    Self::rollback_order_filled_amount(trade.order_id, trade.nex_amount);
+                    Self::forfeit_buyer_deposit(&mut trade, trade_id);
+                    trade.status = UsdtTradeStatus::Refunded;
+                    trade.completed_at = Some(<frame_system::Pallet<T>>::block_number()); // W5
+                    UsdtTrades::<T>::insert(trade_id, &trade);
+                    Self::cleanup_waived_trade_counter(&trade.buyer, trade.order_id);
+                }
+            }
+
+            PendingUsdtTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
+            PendingUnderpaidTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
+            AwaitingPaymentTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
+            OcwVerificationResults::<T>::remove(trade_id);
+
+            Self::deposit_event(Event::TradeForceSettled { trade_id, actual_amount, resolution });
+            Ok(())
+        }
+
+        /// A2: force_cancel 内部逻辑（批量复用）
+        fn do_force_cancel(trade_id: u64) -> DispatchResult {
+            let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
+            ensure!(
+                trade.status == UsdtTradeStatus::AwaitingPayment ||
+                trade.status == UsdtTradeStatus::AwaitingVerification ||
+                trade.status == UsdtTradeStatus::UnderpaidPending,
+                Error::<T>::InvalidTradeStatus
+            );
+
+            T::Currency::unreserve(&trade.seller, trade.nex_amount);
+            Self::rollback_order_filled_amount(trade.order_id, trade.nex_amount);
+
+            if !trade.buyer_deposit.is_zero() && trade.deposit_status == BuyerDepositStatus::Locked {
+                T::Currency::unreserve(&trade.buyer, trade.buyer_deposit);
+                trade.deposit_status = BuyerDepositStatus::Released;
+                Self::deposit_event(Event::BuyerDepositReleased {
+                    trade_id, buyer: trade.buyer.clone(), deposit: trade.buyer_deposit,
+                });
+            }
+
+            trade.status = UsdtTradeStatus::Refunded;
+            trade.completed_at = Some(<frame_system::Pallet<T>>::block_number()); // W5
+            UsdtTrades::<T>::insert(trade_id, &trade);
+            Self::cleanup_waived_trade_counter(&trade.buyer, trade.order_id);
+
+            AwaitingPaymentTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
+            PendingUsdtTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
+            PendingUnderpaidTrades::<T>::mutate(|p| { p.retain(|&id| id != trade_id); });
+            OcwVerificationResults::<T>::remove(trade_id);
+
+            Self::deposit_event(Event::TradeForceCancelled { trade_id });
             Ok(())
         }
 
@@ -3843,6 +4216,7 @@ impl<T: Config> Pallet<T> {
             },
             created_at: o.created_at.saturated_into(),
             expires_at: o.expires_at.saturated_into(),
+            min_fill_amount: o.min_fill_amount,
         }
     }
 
@@ -3863,17 +4237,34 @@ impl<T: Config> Pallet<T> {
                 UsdtTradeStatus::UnderpaidPending => 4,
             },
             created_at: t.created_at.saturated_into(),
+            timeout_at: t.timeout_at.saturated_into(),
+            buyer_deposit: t.buyer_deposit,
+            deposit_status: match t.deposit_status {
+                BuyerDepositStatus::None => 0,
+                BuyerDepositStatus::Locked => 1,
+                BuyerDepositStatus::Released => 2,
+                BuyerDepositStatus::Forfeited => 3,
+            },
+            underpaid_deadline: t.underpaid_deadline.map(|d| d.saturated_into()),
+            completed_at: t.completed_at.map(|d| d.saturated_into()),
+            payment_confirmed: t.payment_confirmed,
         }
     }
 
-    /// Runtime API: 获取卖单列表（转换为 API 类型）
-    pub fn api_get_sell_orders() -> Vec<runtime_api::OrderInfo<T::AccountId, BalanceOf<T>>> {
-        Self::get_sell_order_list().iter().map(Self::order_to_info).collect()
+    /// Runtime API: 获取卖单列表（支持分页）
+    pub fn api_get_sell_orders(offset: u32, limit: u32) -> Vec<runtime_api::OrderInfo<T::AccountId, BalanceOf<T>>> {
+        let all: Vec<_> = Self::get_sell_order_list().iter().map(Self::order_to_info).collect();
+        let start = (offset as usize).min(all.len());
+        let end = (start + limit as usize).min(all.len());
+        all[start..end].to_vec()
     }
 
-    /// Runtime API: 获取买单列表
-    pub fn api_get_buy_orders() -> Vec<runtime_api::OrderInfo<T::AccountId, BalanceOf<T>>> {
-        Self::get_buy_order_list().iter().map(Self::order_to_info).collect()
+    /// Runtime API: 获取买单列表（支持分页）
+    pub fn api_get_buy_orders(offset: u32, limit: u32) -> Vec<runtime_api::OrderInfo<T::AccountId, BalanceOf<T>>> {
+        let all: Vec<_> = Self::get_buy_order_list().iter().map(Self::order_to_info).collect();
+        let start = (offset as usize).min(all.len());
+        let end = (start + limit as usize).min(all.len());
+        all[start..end].to_vec()
     }
 
     /// Runtime API: 获取用户订单
@@ -3881,9 +4272,12 @@ impl<T: Config> Pallet<T> {
         Self::get_user_order_list(user).iter().map(Self::order_to_info).collect()
     }
 
-    /// Runtime API: 获取用户交易历史
-    pub fn api_get_user_trades(user: &T::AccountId) -> Vec<runtime_api::TradeInfo<T::AccountId, BalanceOf<T>>> {
-        Self::get_user_trade_list(user).iter().map(Self::trade_to_info).collect()
+    /// Runtime API: 获取用户交易历史（支持分页）
+    pub fn api_get_user_trades(user: &T::AccountId, offset: u32, limit: u32) -> Vec<runtime_api::TradeInfo<T::AccountId, BalanceOf<T>>> {
+        let all: Vec<_> = Self::get_user_trade_list(user).iter().map(Self::trade_to_info).collect();
+        let start = (offset as usize).min(all.len());
+        let end = (start + limit as usize).min(all.len());
+        all[start..end].to_vec()
     }
 
     /// Runtime API: 获取订单交易
@@ -3919,5 +4313,15 @@ impl<T: Config> Pallet<T> {
             trading_fee_bps: TradingFeeBps::<T>::get(),
             pending_trades_count: PendingUsdtTrades::<T>::get().len() as u32,
         }
+    }
+
+    /// Runtime API: 获取单个订单详情
+    pub fn api_get_order_by_id(order_id: u64) -> Option<runtime_api::OrderInfo<T::AccountId, BalanceOf<T>>> {
+        Orders::<T>::get(order_id).map(|o| Self::order_to_info(&o))
+    }
+
+    /// Runtime API: 获取单个交易详情
+    pub fn api_get_trade_by_id(trade_id: u64) -> Option<runtime_api::TradeInfo<T::AccountId, BalanceOf<T>>> {
+        UsdtTrades::<T>::get(trade_id).map(|t| Self::trade_to_info(&t))
     }
 }

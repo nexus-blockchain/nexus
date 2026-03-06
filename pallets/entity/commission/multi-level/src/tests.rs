@@ -1,6 +1,6 @@
 use crate::mock::*;
 use crate::pallet;
-use frame_support::{assert_noop, assert_ok};
+use frame_support::{assert_noop, assert_ok, traits::Hooks};
 use pallet_commission_common::{
     CommissionModes, CommissionPlugin, MultiLevelPlanWriter,
 };
@@ -1667,14 +1667,14 @@ fn f10_resume_multi_level_works() {
 }
 
 #[test]
-fn f10_resume_when_not_paused_fails() {
+fn f10_resume_when_not_paused_fails_with_multi_level_not_paused() {
     new_test_ext().execute_with(|| {
         clear_thread_locals();
         setup_entity(1);
 
         assert_noop!(
             CommissionMultiLevel::resume_multi_level(RuntimeOrigin::signed(OWNER), 1),
-            pallet::Error::<Test>::NothingToUpdate
+            pallet::Error::<Test>::MultiLevelNotPaused
         );
     });
 }
@@ -2142,7 +2142,7 @@ fn f6_f13_update_stats_works() {
         let entity_stats = pallet::EntityMultiLevelStats::<Test>::get(1);
         assert_eq!(entity_stats.total_distributed, 1500);
         assert_eq!(entity_stats.total_orders, 1);
-        assert_eq!(entity_stats.total_beneficiaries, 2);
+        assert_eq!(entity_stats.total_distribution_entries, 2);
     });
 }
 
@@ -2170,7 +2170,7 @@ fn f6_f13_stats_accumulate() {
         let entity_stats = pallet::EntityMultiLevelStats::<Test>::get(1);
         assert_eq!(entity_stats.total_distributed, 3500);
         assert_eq!(entity_stats.total_orders, 2);
-        assert_eq!(entity_stats.total_beneficiaries, 3);
+        assert_eq!(entity_stats.total_distribution_entries, 3);
     });
 }
 
@@ -2753,5 +2753,1113 @@ fn l4_r9_audit_log_ring_buffer_wraps_around() {
         assert_eq!(pallet::ConfigChangeLogCount::<Test>::get(1), 1001);
         let log_0 = pallet::ConfigChangeLogs::<Test>::get(1, 0).unwrap();
         assert_eq!(log_0.change_type, pallet::ConfigChangeType::Resume);
+    });
+}
+
+// ============================================================================
+// R10-#1: Force 操作审计日志
+// ============================================================================
+
+#[test]
+fn r10_1_force_set_records_audit_log() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        set_entity_owner(1, OWNER);
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::force_set_multi_level_config(
+            RuntimeOrigin::root(), 1, levels.try_into().unwrap(), 3000,
+        ));
+
+        assert_eq!(pallet::ConfigChangeLogCount::<Test>::get(1), 1);
+        let log = pallet::ConfigChangeLogs::<Test>::get(1, 0).unwrap();
+        assert_eq!(log.change_type, pallet::ConfigChangeType::ForceSet);
+    });
+}
+
+#[test]
+fn r10_1_force_clear_records_audit_log() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        set_entity_owner(1, OWNER);
+
+        pallet::MultiLevelConfigs::<Test>::insert(1, pallet::MultiLevelConfig {
+            levels: vec![
+                pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            ].try_into().unwrap(),
+            max_total_rate: 2000,
+        });
+
+        assert_ok!(CommissionMultiLevel::force_clear_multi_level_config(RuntimeOrigin::root(), 1));
+        assert_eq!(pallet::ConfigChangeLogCount::<Test>::get(1), 1);
+        let log = pallet::ConfigChangeLogs::<Test>::get(1, 0).unwrap();
+        assert_eq!(log.change_type, pallet::ConfigChangeType::ForceClear);
+    });
+}
+
+#[test]
+fn r10_1_force_clear_no_config_no_audit_log() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        assert_ok!(CommissionMultiLevel::force_clear_multi_level_config(RuntimeOrigin::root(), 1));
+        assert_eq!(pallet::ConfigChangeLogCount::<Test>::get(1), 0);
+    });
+}
+
+// ============================================================================
+// R10-#2: 增量操作 rates_sum 警告
+// ============================================================================
+
+#[test]
+fn r10_2_update_params_emits_rates_sum_warning() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            vec![
+                pallet::MultiLevelTier { rate: 800, required_directs: 0, required_team_size: 0, required_spent: 0 },
+                pallet::MultiLevelTier { rate: 800, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            ].try_into().unwrap(),
+            2000,
+        ));
+        System::reset_events();
+
+        // Update tier rate to push sum above max: 800 + 1500 = 2300 > 2000
+        assert_ok!(CommissionMultiLevel::update_multi_level_params(
+            RuntimeOrigin::signed(OWNER), 1, None, Some(1),
+            Some(pallet::MultiLevelTier { rate: 1500, required_directs: 0, required_team_size: 0, required_spent: 0 }),
+        ));
+
+        let events = System::events();
+        let found = events.iter().any(|e| matches!(
+            e.event, RuntimeEvent::CommissionMultiLevel(pallet::Event::RatesSumExceedsMax { .. })
+        ));
+        assert!(found, "RatesSumExceedsMax should be emitted after update_multi_level_params");
+    });
+}
+
+#[test]
+fn r10_2_add_tier_emits_rates_sum_warning() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            vec![
+                pallet::MultiLevelTier { rate: 1500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            ].try_into().unwrap(),
+            2000,
+        ));
+        System::reset_events();
+
+        // Adding tier: 1500 + 1000 = 2500 > 2000
+        assert_ok!(CommissionMultiLevel::add_tier(
+            RuntimeOrigin::signed(OWNER), 1, 1,
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ));
+
+        let events = System::events();
+        let found = events.iter().any(|e| matches!(
+            e.event, RuntimeEvent::CommissionMultiLevel(pallet::Event::RatesSumExceedsMax { .. })
+        ));
+        assert!(found, "RatesSumExceedsMax should be emitted after add_tier");
+    });
+}
+
+#[test]
+fn r10_2_remove_tier_emits_rates_sum_warning_if_still_exceeds() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            vec![
+                pallet::MultiLevelTier { rate: 2000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+                pallet::MultiLevelTier { rate: 100, required_directs: 0, required_team_size: 0, required_spent: 0 },
+                pallet::MultiLevelTier { rate: 100, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            ].try_into().unwrap(),
+            1500,
+        ));
+        System::reset_events();
+
+        // Remove small tier: 2000 + 100 = 2100 > 1500 still
+        assert_ok!(CommissionMultiLevel::remove_tier(
+            RuntimeOrigin::signed(OWNER), 1, 2,
+        ));
+
+        let events = System::events();
+        let found = events.iter().any(|e| matches!(
+            e.event, RuntimeEvent::CommissionMultiLevel(pallet::Event::RatesSumExceedsMax { .. })
+        ));
+        assert!(found, "RatesSumExceedsMax should be emitted after remove_tier if still exceeds");
+    });
+}
+
+// ============================================================================
+// R10-#3: team_size / spent 上界校验
+// ============================================================================
+
+#[test]
+fn r10_3_set_config_rejects_invalid_team_size() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 1_000_001, required_spent: 0 },
+        ];
+        assert_noop!(
+            CommissionMultiLevel::set_multi_level_config(
+                RuntimeOrigin::signed(OWNER), 1, tiers.try_into().unwrap(), 2000,
+            ),
+            pallet::Error::<Test>::InvalidTeamSize
+        );
+    });
+}
+
+#[test]
+fn r10_3_set_config_rejects_invalid_spent() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 1_000_000_000_000_000_001 },
+        ];
+        assert_noop!(
+            CommissionMultiLevel::set_multi_level_config(
+                RuntimeOrigin::signed(OWNER), 1, tiers.try_into().unwrap(), 2000,
+            ),
+            pallet::Error::<Test>::InvalidSpent
+        );
+    });
+}
+
+#[test]
+fn r10_3_add_tier_rejects_invalid_team_size() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            vec![pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 }].try_into().unwrap(),
+            5000,
+        ));
+        assert_noop!(
+            CommissionMultiLevel::add_tier(
+                RuntimeOrigin::signed(OWNER), 1, 1,
+                pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 1_000_001, required_spent: 0 },
+            ),
+            pallet::Error::<Test>::InvalidTeamSize
+        );
+    });
+}
+
+#[test]
+fn r10_3_update_params_rejects_invalid_spent() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1,
+            vec![pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 }].try_into().unwrap(),
+            5000,
+        ));
+        assert_noop!(
+            CommissionMultiLevel::update_multi_level_params(
+                RuntimeOrigin::signed(OWNER), 1, None, Some(0),
+                Some(pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 1_000_000_000_000_000_001 }),
+            ),
+            pallet::Error::<Test>::InvalidSpent
+        );
+    });
+}
+
+#[test]
+fn r10_3_valid_team_size_and_spent_accepted() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 500, required_directs: 100, required_team_size: 1_000_000, required_spent: 1_000_000_000_000_000_000 },
+        ];
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1, tiers.try_into().unwrap(), 2000,
+        ));
+        let config = pallet::MultiLevelConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.levels[0].required_team_size, 1_000_000);
+        assert_eq!(config.levels[0].required_spent, 1_000_000_000_000_000_000);
+    });
+}
+
+// ============================================================================
+// R10-#6: force_pause / force_resume
+// ============================================================================
+
+#[test]
+fn r10_6_force_pause_works() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+
+        assert_ok!(CommissionMultiLevel::force_pause_multi_level(RuntimeOrigin::root(), 1));
+        assert!(pallet::GlobalPaused::<Test>::get(1));
+
+        let log = pallet::ConfigChangeLogs::<Test>::get(1, 0).unwrap();
+        assert_eq!(log.change_type, pallet::ConfigChangeType::ForcePause);
+    });
+}
+
+#[test]
+fn r10_6_force_pause_rejects_already_paused() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::force_pause_multi_level(RuntimeOrigin::root(), 1));
+        assert_noop!(
+            CommissionMultiLevel::force_pause_multi_level(RuntimeOrigin::root(), 1),
+            pallet::Error::<Test>::MultiLevelIsPaused
+        );
+    });
+}
+
+#[test]
+fn r10_6_force_resume_works() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+
+        assert_ok!(CommissionMultiLevel::force_pause_multi_level(RuntimeOrigin::root(), 1));
+        assert_ok!(CommissionMultiLevel::force_resume_multi_level(RuntimeOrigin::root(), 1));
+        assert!(!pallet::GlobalPaused::<Test>::get(1));
+
+        let log = pallet::ConfigChangeLogs::<Test>::get(1, 1).unwrap();
+        assert_eq!(log.change_type, pallet::ConfigChangeType::ForceResume);
+    });
+}
+
+#[test]
+fn r10_6_force_resume_rejects_not_paused() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_noop!(
+            CommissionMultiLevel::force_resume_multi_level(RuntimeOrigin::root(), 1),
+            pallet::Error::<Test>::MultiLevelNotPaused
+        );
+    });
+}
+
+#[test]
+fn r10_6_force_pause_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_noop!(
+            CommissionMultiLevel::force_pause_multi_level(RuntimeOrigin::signed(OWNER), 1),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+// ============================================================================
+// R10-#4: force_cleanup_entity
+// ============================================================================
+
+#[test]
+fn r10_4_force_cleanup_entity_clears_all_storage() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1, tiers.try_into().unwrap(), 3000,
+        ));
+        assert_ok!(CommissionMultiLevel::pause_multi_level(RuntimeOrigin::signed(OWNER), 1));
+
+        // Write some stats
+        use pallet_commission_common::{CommissionOutput, CommissionType};
+        pallet::Pallet::<Test>::update_stats(1, &[
+            CommissionOutput { beneficiary: 40u64, amount: 1000u128, commission_type: CommissionType::MultiLevel, level: 1 },
+        ]);
+
+        // Verify data exists
+        assert!(pallet::MultiLevelConfigs::<Test>::get(1).is_some());
+        assert!(pallet::GlobalPaused::<Test>::get(1));
+        assert_eq!(pallet::MemberMultiLevelStats::<Test>::get(1, 40u64).total_earned, 1000);
+        assert!(pallet::ConfigChangeLogCount::<Test>::get(1) > 0);
+
+        // Cleanup
+        assert_ok!(CommissionMultiLevel::force_cleanup_entity(RuntimeOrigin::root(), 1, 10));
+
+        // All storage should be cleared
+        assert!(pallet::MultiLevelConfigs::<Test>::get(1).is_none());
+        assert!(!pallet::GlobalPaused::<Test>::get(1));
+        assert_eq!(pallet::MemberMultiLevelStats::<Test>::get(1, 40u64).total_earned, 0);
+        assert_eq!(pallet::EntityMultiLevelStats::<Test>::get(1).total_distributed, 0);
+        assert_eq!(pallet::ConfigChangeLogCount::<Test>::get(1), 0);
+    });
+}
+
+#[test]
+fn r10_4_force_cleanup_entity_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_noop!(
+            CommissionMultiLevel::force_cleanup_entity(RuntimeOrigin::signed(OWNER), 1, 0),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+// ============================================================================
+// R10-#7: MultiLevelCommissionDistributed 事件
+// ============================================================================
+
+#[test]
+fn r10_7_update_stats_emits_commission_distributed_event() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        use pallet_commission_common::{CommissionOutput, CommissionType};
+
+        let outputs = vec![
+            CommissionOutput { beneficiary: 40u64, amount: 1000u128, commission_type: CommissionType::MultiLevel, level: 1 },
+            CommissionOutput { beneficiary: 30u64, amount: 500u128, commission_type: CommissionType::MultiLevel, level: 2 },
+        ];
+
+        pallet::Pallet::<Test>::update_stats(1, &outputs);
+
+        let events = System::events();
+        let found = events.iter().any(|e| matches!(
+            e.event,
+            RuntimeEvent::CommissionMultiLevel(pallet::Event::MultiLevelCommissionDistributed {
+                entity_id: 1, total_amount: 1500, beneficiary_count: 2
+            })
+        ));
+        assert!(found, "MultiLevelCommissionDistributed event should be emitted");
+    });
+}
+
+// ============================================================================
+// R10-#9: get_recent_change_logs
+// ============================================================================
+
+#[test]
+fn r10_9_get_recent_change_logs_returns_empty_when_none() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        let logs = pallet::Pallet::<Test>::get_recent_change_logs(1, 10);
+        assert!(logs.is_empty());
+    });
+}
+
+#[test]
+fn r10_9_get_recent_change_logs_returns_in_reverse_order() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1, tiers.try_into().unwrap(), 3000,
+        ));
+        assert_ok!(CommissionMultiLevel::pause_multi_level(RuntimeOrigin::signed(OWNER), 1));
+        assert_ok!(CommissionMultiLevel::resume_multi_level(RuntimeOrigin::signed(OWNER), 1));
+
+        let logs = pallet::Pallet::<Test>::get_recent_change_logs(1, 10);
+        assert_eq!(logs.len(), 3);
+        assert_eq!(logs[0].change_type, pallet::ConfigChangeType::Resume);
+        assert_eq!(logs[1].change_type, pallet::ConfigChangeType::Pause);
+        assert_eq!(logs[2].change_type, pallet::ConfigChangeType::SetConfig);
+    });
+}
+
+#[test]
+fn r10_9_get_recent_change_logs_respects_limit() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1, tiers.try_into().unwrap(), 3000,
+        ));
+        assert_ok!(CommissionMultiLevel::pause_multi_level(RuntimeOrigin::signed(OWNER), 1));
+        assert_ok!(CommissionMultiLevel::resume_multi_level(RuntimeOrigin::signed(OWNER), 1));
+
+        let logs = pallet::Pallet::<Test>::get_recent_change_logs(1, 2);
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].change_type, pallet::ConfigChangeType::Resume);
+        assert_eq!(logs[1].change_type, pallet::ConfigChangeType::Pause);
+    });
+}
+
+// ============================================================================
+// R10-#10: PlanWriter EntityLocked 检查
+// ============================================================================
+
+#[test]
+fn r10_10_plan_writer_rejects_locked_entity() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        set_entity_owner(1, OWNER);
+        set_entity_locked(1);
+
+        assert!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level(
+            1, vec![500], 1000,
+        ).is_err());
+    });
+}
+
+#[test]
+fn r10_10_plan_writer_full_rejects_locked_entity() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        set_entity_owner(1, OWNER);
+        set_entity_locked(1);
+
+        assert!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level_full(
+            1, vec![(500, 0, 0, 0)], 1000,
+        ).is_err());
+    });
+}
+
+#[test]
+fn r10_10_plan_writer_clear_rejects_locked_entity() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        set_entity_owner(1, OWNER);
+
+        // Set config first
+        assert_ok!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level(
+            1, vec![500], 1000,
+        ));
+
+        set_entity_locked(1);
+
+        assert!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::clear_multi_level_config(1).is_err());
+    });
+}
+
+#[test]
+fn r10_10_plan_writer_works_when_unlocked() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        set_entity_owner(1, OWNER);
+
+        assert_ok!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level(
+            1, vec![500, 300], 1000,
+        ));
+        assert!(pallet::MultiLevelConfigs::<Test>::get(1).is_some());
+    });
+}
+
+// ============================================================================
+// R10-#14: PendingConfigQueue + on_initialize 自动应用
+// ============================================================================
+
+#[test]
+fn r10_14_schedule_adds_to_pending_queue() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::schedule_config_change(
+            RuntimeOrigin::signed(OWNER), 1, levels.try_into().unwrap(), 3000,
+        ));
+
+        let queue = pallet::PendingConfigQueue::<Test>::get();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0], 1);
+    });
+}
+
+#[test]
+fn r10_14_cancel_removes_from_pending_queue() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::schedule_config_change(
+            RuntimeOrigin::signed(OWNER), 1, levels.try_into().unwrap(), 3000,
+        ));
+        assert_eq!(pallet::PendingConfigQueue::<Test>::get().len(), 1);
+
+        assert_ok!(CommissionMultiLevel::cancel_pending_config(RuntimeOrigin::signed(OWNER), 1));
+        assert!(pallet::PendingConfigQueue::<Test>::get().is_empty());
+    });
+}
+
+#[test]
+fn r10_14_manual_apply_removes_from_pending_queue() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::schedule_config_change(
+            RuntimeOrigin::signed(OWNER), 1, levels.try_into().unwrap(), 3000,
+        ));
+        assert_eq!(pallet::PendingConfigQueue::<Test>::get().len(), 1);
+
+        System::set_block_number(11);
+        assert_ok!(CommissionMultiLevel::apply_pending_config(RuntimeOrigin::signed(NOBODY), 1));
+        assert!(pallet::PendingConfigQueue::<Test>::get().is_empty());
+    });
+}
+
+#[test]
+fn r10_14_on_initialize_auto_applies_ready_config() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::schedule_config_change(
+            RuntimeOrigin::signed(OWNER), 1, levels.try_into().unwrap(), 3000,
+        ));
+
+        // Not yet ready
+        System::set_block_number(5);
+        CommissionMultiLevel::on_initialize(5);
+        assert!(pallet::PendingConfigs::<Test>::get(1).is_some());
+
+        // Now ready (block 11 >= effective_at 11)
+        System::set_block_number(11);
+        CommissionMultiLevel::on_initialize(11);
+
+        // Config applied, pending removed
+        let config = pallet::MultiLevelConfigs::<Test>::get(1).unwrap();
+        assert_eq!(config.max_total_rate, 3000);
+        assert!(pallet::PendingConfigs::<Test>::get(1).is_none());
+        assert!(pallet::PendingConfigQueue::<Test>::get().is_empty());
+
+        // Audit log records PendingAutoApplied
+        let count = pallet::ConfigChangeLogCount::<Test>::get(1);
+        let last_slot = (count - 1) % 1000;
+        let log = pallet::ConfigChangeLogs::<Test>::get(1, last_slot).unwrap();
+        assert_eq!(log.change_type, pallet::ConfigChangeType::PendingAutoApplied);
+    });
+}
+
+#[test]
+fn r10_14_on_initialize_skips_locked_entity() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+
+        let levels = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::schedule_config_change(
+            RuntimeOrigin::signed(OWNER), 1, levels.try_into().unwrap(), 3000,
+        ));
+
+        set_entity_locked(1);
+        System::set_block_number(11);
+        CommissionMultiLevel::on_initialize(11);
+
+        // Should NOT be applied
+        assert!(pallet::PendingConfigs::<Test>::get(1).is_some());
+        assert_eq!(pallet::PendingConfigQueue::<Test>::get().len(), 1);
+    });
+}
+
+// ============================================================================
+// R10-#3: PlanWriter team_size / spent 校验
+// ============================================================================
+
+#[test]
+fn r10_3_plan_writer_full_rejects_invalid_team_size() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        assert!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level_full(
+            1, vec![(500, 0, 1_000_001, 0)], 1000,
+        ).is_err());
+    });
+}
+
+#[test]
+fn r10_3_plan_writer_full_rejects_invalid_spent() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        assert!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level_full(
+            1, vec![(500, 0, 0, 1_000_000_000_000_000_001)], 1000,
+        ).is_err());
+    });
+}
+
+// ============================================================================
+// B-1: force_resume 非 Root 拒绝
+// ============================================================================
+
+#[test]
+fn b1_force_resume_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        assert_ok!(CommissionMultiLevel::force_pause_multi_level(RuntimeOrigin::root(), 1));
+        assert_noop!(
+            CommissionMultiLevel::force_resume_multi_level(RuntimeOrigin::signed(OWNER), 1),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        assert_noop!(
+            CommissionMultiLevel::force_resume_multi_level(RuntimeOrigin::signed(ADMIN), 1),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        assert_noop!(
+            CommissionMultiLevel::force_resume_multi_level(RuntimeOrigin::signed(NOBODY), 1),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        assert!(pallet::GlobalPaused::<Test>::get(1));
+    });
+}
+
+// ============================================================================
+// B-2: on_initialize 多 entity 同时生效
+// ============================================================================
+
+#[test]
+fn b2_on_initialize_applies_multiple_entities_simultaneously() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        setup_entity(2);
+        setup_entity(3);
+
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+
+        assert_ok!(CommissionMultiLevel::schedule_config_change(
+            RuntimeOrigin::signed(OWNER), 1, tiers.clone().try_into().unwrap(), 3000,
+        ));
+        assert_ok!(CommissionMultiLevel::schedule_config_change(
+            RuntimeOrigin::signed(OWNER), 2, tiers.clone().try_into().unwrap(), 4000,
+        ));
+        assert_ok!(CommissionMultiLevel::schedule_config_change(
+            RuntimeOrigin::signed(OWNER), 3, tiers.try_into().unwrap(), 5000,
+        ));
+        assert_eq!(pallet::PendingConfigQueue::<Test>::get().len(), 3);
+
+        System::set_block_number(11);
+        CommissionMultiLevel::on_initialize(11);
+
+        assert!(pallet::MultiLevelConfigs::<Test>::get(1).is_some());
+        assert!(pallet::MultiLevelConfigs::<Test>::get(2).is_some());
+        assert!(pallet::MultiLevelConfigs::<Test>::get(3).is_some());
+        assert_eq!(pallet::MultiLevelConfigs::<Test>::get(1).unwrap().max_total_rate, 3000);
+        assert_eq!(pallet::MultiLevelConfigs::<Test>::get(2).unwrap().max_total_rate, 4000);
+        assert_eq!(pallet::MultiLevelConfigs::<Test>::get(3).unwrap().max_total_rate, 5000);
+        assert!(pallet::PendingConfigs::<Test>::get(1).is_none());
+        assert!(pallet::PendingConfigs::<Test>::get(2).is_none());
+        assert!(pallet::PendingConfigs::<Test>::get(3).is_none());
+        assert!(pallet::PendingConfigQueue::<Test>::get().is_empty());
+    });
+}
+
+// ============================================================================
+// B-3: on_initialize MAX_AUTO_APPLY=5 上限
+// ============================================================================
+
+#[test]
+fn b3_on_initialize_caps_at_max_auto_apply() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        for eid in 1u64..=8u64 {
+            setup_entity(eid);
+            let tiers = vec![
+                pallet::MultiLevelTier { rate: 500, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            ];
+            assert_ok!(CommissionMultiLevel::schedule_config_change(
+                RuntimeOrigin::signed(OWNER), eid, tiers.try_into().unwrap(), 2000,
+            ));
+        }
+        assert_eq!(pallet::PendingConfigQueue::<Test>::get().len(), 8);
+
+        System::set_block_number(11);
+        CommissionMultiLevel::on_initialize(11);
+
+        let mut applied = 0u64;
+        let mut remaining = 0u64;
+        for eid in 1u64..=8u64 {
+            if pallet::PendingConfigs::<Test>::get(eid).is_none() {
+                applied += 1;
+            } else {
+                remaining += 1;
+            }
+        }
+        assert_eq!(applied, 5, "exactly 5 should be applied per block");
+        assert_eq!(remaining, 3, "3 should remain pending");
+        assert_eq!(pallet::PendingConfigQueue::<Test>::get().len(), 3);
+
+        // Second on_initialize processes the remaining 3
+        CommissionMultiLevel::on_initialize(11);
+        for eid in 1u64..=8u64 {
+            assert!(pallet::PendingConfigs::<Test>::get(eid).is_none());
+        }
+        assert!(pallet::PendingConfigQueue::<Test>::get().is_empty());
+    });
+}
+
+// ============================================================================
+// B-4: PendingQueueFull 错误路径
+// ============================================================================
+
+#[test]
+fn b4_pending_queue_full_error() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+
+        // Fill the queue to capacity (ConstU32<100>)
+        for eid in 1u64..=100u64 {
+            setup_entity(eid);
+            let tiers = vec![
+                pallet::MultiLevelTier { rate: 100, required_directs: 0, required_team_size: 0, required_spent: 0 },
+            ];
+            assert_ok!(CommissionMultiLevel::schedule_config_change(
+                RuntimeOrigin::signed(OWNER), eid, tiers.try_into().unwrap(), 1000,
+            ));
+        }
+        assert_eq!(pallet::PendingConfigQueue::<Test>::get().len(), 100);
+
+        // The 101st should fail with PendingQueueFull
+        setup_entity(101);
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 100, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_noop!(
+            CommissionMultiLevel::schedule_config_change(
+                RuntimeOrigin::signed(OWNER), 101, tiers.try_into().unwrap(), 1000,
+            ),
+            pallet::Error::<Test>::PendingQueueFull
+        );
+    });
+}
+
+// ============================================================================
+// B-5: on_initialize 孤立队列条目清理（PendingConfigs 已被手动删除）
+// ============================================================================
+
+#[test]
+fn b5_on_initialize_cleans_orphaned_queue_entries() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        setup_entity(2);
+
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+
+        assert_ok!(CommissionMultiLevel::schedule_config_change(
+            RuntimeOrigin::signed(OWNER), 1, tiers.clone().try_into().unwrap(), 3000,
+        ));
+        assert_ok!(CommissionMultiLevel::schedule_config_change(
+            RuntimeOrigin::signed(OWNER), 2, tiers.try_into().unwrap(), 4000,
+        ));
+
+        // Manually remove PendingConfigs for entity 1 (simulating manual apply or cancel)
+        pallet::PendingConfigs::<Test>::remove(1);
+
+        System::set_block_number(11);
+        CommissionMultiLevel::on_initialize(11);
+
+        // Entity 1 had no PendingConfigs → orphan cleaned from queue
+        // Entity 2 should be applied normally
+        assert!(pallet::PendingConfigQueue::<Test>::get().is_empty());
+        assert!(pallet::MultiLevelConfigs::<Test>::get(2).is_some());
+        assert_eq!(pallet::MultiLevelConfigs::<Test>::get(2).unwrap().max_total_rate, 4000);
+    });
+}
+
+// ============================================================================
+// B-6: force_cleanup 清除 PendingConfigQueue
+// ============================================================================
+
+#[test]
+fn b6_force_cleanup_removes_from_pending_queue() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+        setup_entity(2);
+
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+
+        assert_ok!(CommissionMultiLevel::schedule_config_change(
+            RuntimeOrigin::signed(OWNER), 1, tiers.clone().try_into().unwrap(), 3000,
+        ));
+        assert_ok!(CommissionMultiLevel::schedule_config_change(
+            RuntimeOrigin::signed(OWNER), 2, tiers.try_into().unwrap(), 4000,
+        ));
+        assert_eq!(pallet::PendingConfigQueue::<Test>::get().len(), 2);
+
+        assert_ok!(CommissionMultiLevel::force_cleanup_entity(RuntimeOrigin::root(), 1, 0));
+
+        // Entity 1 removed from queue, entity 2 remains
+        let queue = pallet::PendingConfigQueue::<Test>::get();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0], 2);
+
+        // All storage for entity 1 cleared
+        assert!(pallet::MultiLevelConfigs::<Test>::get(1).is_none());
+        assert!(pallet::PendingConfigs::<Test>::get(1).is_none());
+        assert_eq!(pallet::ConfigChangeLogCount::<Test>::get(1), 0);
+    });
+}
+
+// ============================================================================
+// B-7: force_cleanup 幂等性（重复调用不报错）
+// ============================================================================
+
+#[test]
+fn b7_force_cleanup_is_idempotent() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1, tiers.try_into().unwrap(), 2000,
+        ));
+
+        // First cleanup
+        assert_ok!(CommissionMultiLevel::force_cleanup_entity(RuntimeOrigin::root(), 1, 10));
+        assert!(pallet::MultiLevelConfigs::<Test>::get(1).is_none());
+
+        // Second cleanup on already-cleaned entity — should succeed (idempotent)
+        assert_ok!(CommissionMultiLevel::force_cleanup_entity(RuntimeOrigin::root(), 1, 0));
+        assert!(pallet::MultiLevelConfigs::<Test>::get(1).is_none());
+
+        // Cleanup on entity that never had data — also idempotent
+        assert_ok!(CommissionMultiLevel::force_cleanup_entity(RuntimeOrigin::root(), 999, 0));
+    });
+}
+
+// ============================================================================
+// R11-B2: PlanWriter 复用 validate_config（校验与 extrinsic 路径一致）
+// ============================================================================
+
+#[test]
+fn r11_b2_plan_writer_set_multi_level_uses_validate_config() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        // rate > 10000 should be rejected (via validate_tier inside validate_config)
+        assert!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level(
+            1, vec![10001], 5000,
+        ).is_err());
+        // max_total_rate = 0 should be rejected
+        assert!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level(
+            1, vec![500], 0,
+        ).is_err());
+        // valid input works
+        assert_ok!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level(
+            1, vec![500, 300], 2000,
+        ));
+    });
+}
+
+#[test]
+fn r11_b2_plan_writer_full_uses_validate_config() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        // team_size > 1M rejected
+        assert!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level_full(
+            1, vec![(500, 0, 1_000_001, 0)], 2000,
+        ).is_err());
+        // spent > 10^18 rejected
+        assert!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level_full(
+            1, vec![(500, 0, 0, 1_000_000_000_000_000_001)], 2000,
+        ).is_err());
+        // empty levels rejected
+        assert!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level_full(
+            1, vec![], 2000,
+        ).is_err());
+    });
+}
+
+// ============================================================================
+// R11-B3: PlanWriter 审计日志（GovernanceSet / GovernanceClear）
+// ============================================================================
+
+#[test]
+fn r11_b3_plan_writer_set_records_governance_audit_log() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        System::set_block_number(1);
+
+        assert_ok!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level(
+            1, vec![500, 300], 2000,
+        ));
+
+        let count = pallet::ConfigChangeLogCount::<Test>::get(1);
+        assert_eq!(count, 1);
+        let log = pallet::ConfigChangeLogs::<Test>::get(1, 0).unwrap();
+        assert_eq!(log.change_type, pallet::ConfigChangeType::GovernanceSet);
+    });
+}
+
+#[test]
+fn r11_b3_plan_writer_full_records_governance_audit_log() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        System::set_block_number(1);
+
+        assert_ok!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level_full(
+            1, vec![(500, 0, 0, 0)], 2000,
+        ));
+
+        let count = pallet::ConfigChangeLogCount::<Test>::get(1);
+        assert_eq!(count, 1);
+        let log = pallet::ConfigChangeLogs::<Test>::get(1, 0).unwrap();
+        assert_eq!(log.change_type, pallet::ConfigChangeType::GovernanceSet);
+    });
+}
+
+#[test]
+fn r11_b3_plan_writer_clear_records_governance_audit_log() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        System::set_block_number(1);
+
+        assert_ok!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level(
+            1, vec![500], 1000,
+        ));
+        assert_ok!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::clear_multi_level_config(1));
+
+        let count = pallet::ConfigChangeLogCount::<Test>::get(1);
+        assert_eq!(count, 2);
+        let log = pallet::ConfigChangeLogs::<Test>::get(1, 1).unwrap();
+        assert_eq!(log.change_type, pallet::ConfigChangeType::GovernanceClear);
+    });
+}
+
+#[test]
+fn r11_b3_plan_writer_clear_no_log_when_absent() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        System::set_block_number(1);
+
+        assert_ok!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::clear_multi_level_config(1));
+        assert_eq!(pallet::ConfigChangeLogCount::<Test>::get(1), 0);
+    });
+}
+
+// ============================================================================
+// R11-B4: PlanWriter emits ConfigDetailedChange
+// ============================================================================
+
+#[test]
+fn r11_b4_plan_writer_set_emits_config_detailed_change() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        System::set_block_number(1);
+
+        assert_ok!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level(
+            1, vec![500, 300], 2000,
+        ));
+
+        let events = System::events();
+        let found = events.iter().any(|e| matches!(
+            e.event,
+            RuntimeEvent::CommissionMultiLevel(pallet::Event::ConfigDetailedChange {
+                entity_id: 1, old_levels_count: 0, new_levels_count: 2, old_max_rate: 0, new_max_rate: 2000,
+            })
+        ));
+        assert!(found, "ConfigDetailedChange should be emitted for new config");
+    });
+}
+
+#[test]
+fn r11_b4_plan_writer_set_overwrite_shows_old_values() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        System::set_block_number(1);
+
+        assert_ok!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level(
+            1, vec![500], 1000,
+        ));
+        System::reset_events();
+        assert_ok!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level_full(
+            1, vec![(300, 0, 0, 0), (200, 5, 0, 0)], 3000,
+        ));
+
+        let events = System::events();
+        let found = events.iter().any(|e| matches!(
+            e.event,
+            RuntimeEvent::CommissionMultiLevel(pallet::Event::ConfigDetailedChange {
+                entity_id: 1, old_levels_count: 1, new_levels_count: 2, old_max_rate: 1000, new_max_rate: 3000,
+            })
+        ));
+        assert!(found, "ConfigDetailedChange should show old config values");
+    });
+}
+
+#[test]
+fn r11_b4_plan_writer_clear_emits_config_detailed_change() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        System::set_block_number(1);
+
+        assert_ok!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::set_multi_level(
+            1, vec![500, 300], 2000,
+        ));
+        System::reset_events();
+        assert_ok!(<pallet::Pallet<Test> as MultiLevelPlanWriter>::clear_multi_level_config(1));
+
+        let events = System::events();
+        let found = events.iter().any(|e| matches!(
+            e.event,
+            RuntimeEvent::CommissionMultiLevel(pallet::Event::ConfigDetailedChange {
+                entity_id: 1, old_levels_count: 2, new_levels_count: 0, old_max_rate: 2000, new_max_rate: 0,
+            })
+        ));
+        assert!(found, "ConfigDetailedChange should show cleared config values");
+    });
+}
+
+// ============================================================================
+// R11-B1: force_cleanup weight 参数化
+// ============================================================================
+
+#[test]
+fn r11_b1_force_cleanup_with_member_count_hint() {
+    new_test_ext().execute_with(|| {
+        clear_thread_locals();
+        setup_entity(1);
+
+        let tiers = vec![
+            pallet::MultiLevelTier { rate: 1000, required_directs: 0, required_team_size: 0, required_spent: 0 },
+        ];
+        assert_ok!(CommissionMultiLevel::set_multi_level_config(
+            RuntimeOrigin::signed(OWNER), 1, tiers.try_into().unwrap(), 2000,
+        ));
+
+        // hint=100, hint=0 both work — hint only affects weight, not behavior
+        assert_ok!(CommissionMultiLevel::force_cleanup_entity(RuntimeOrigin::root(), 1, 100));
+        assert!(pallet::MultiLevelConfigs::<Test>::get(1).is_none());
     });
 }

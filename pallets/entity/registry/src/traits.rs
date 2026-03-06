@@ -195,15 +195,26 @@ impl<T: Config> EntityProvider<T::AccountId> for Pallet<T> {
     // C2: 治理 pallet 同步调用 — 更新 Entity.governance_mode 字段
     // M2: 添加状态校验，拒绝对 Banned/Closed 实体的修改
     fn set_governance_mode(entity_id: u64, mode: GovernanceMode) -> Result<(), sp_runtime::DispatchError> {
-        Entities::<T>::try_mutate(entity_id, |maybe_entity| -> Result<(), sp_runtime::DispatchError> {
+        let old_mode = Entities::<T>::try_mutate(entity_id, |maybe_entity| -> Result<GovernanceMode, sp_runtime::DispatchError> {
             let entity = maybe_entity.as_mut().ok_or(Error::<T>::EntityNotFound)?;
             ensure!(
                 entity.status != EntityStatus::Banned && entity.status != EntityStatus::Closed,
                 Error::<T>::InvalidEntityStatus
             );
+            let old = entity.governance_mode;
             entity.governance_mode = mode;
-            Ok(())
-        })
+            Ok(old)
+        })?;
+
+        // L4 审计修复: 发射事件以保留审计轨迹
+        if old_mode != mode {
+            Self::deposit_event(Event::GovernanceModeChanged {
+                entity_id,
+                old_mode,
+                new_mode: mode,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -228,13 +239,16 @@ impl<T: Config> EntityFunding<T::AccountId, BalanceOf<T>> for Pallet<T> {
             return Ok(false);
         }
 
-        T::Currency::transfer(
+        // H2 审计修复: 使用 AllowDeath 避免精确余额扣款因 KeepAlive 失败，
+        // 转账失败时优雅返回 Ok(false) 而非向上传播 Err
+        match T::Currency::transfer(
             &treasury,
             dest,
             amount,
-            ExistenceRequirement::KeepAlive,
-        )?;
-
-        Ok(true)
+            ExistenceRequirement::AllowDeath,
+        ) {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        }
     }
 }

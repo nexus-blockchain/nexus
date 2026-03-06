@@ -115,16 +115,13 @@ impl<A, B> EntityFunding<A, B> for () {
     }
 }
 
-/// 函数级详细中文注释：Subject信息结构体
+/// Subject信息结构体
 /// 
-/// 记录CID归属的详细信息，支持：
-/// - 一个CID属于多个Subject的场景（共享媒体文件）
-/// - 费用分摊机制（funding_share）
+/// 记录CID归属的详细信息。
 /// 
 /// 字段说明：
 /// - subject_type：Subject类型（Evidence/Product/Entity/Shop/General等）
 /// - subject_id：Subject ID
-/// - funding_share：费用分摊比例（0-100，默认100表示独占）
 /// 
 /// 使用场景：
 /// - CidToSubject存储的Value
@@ -135,8 +132,6 @@ pub struct SubjectInfo {
     pub subject_type: SubjectType,
     /// Subject ID
     pub subject_id: u64,
-    /// 费用分摊比例（0-100，默认100表示独占）
-    pub funding_share: u8,
 }
 
 /// 函数级详细中文注释：域配置结构体 - 新pallet域自动PIN机制
@@ -174,9 +169,6 @@ pub struct DomainConfig {
     /// - 自定义类型: 10-255（由治理分配）
     pub subject_type_id: u8,
     
-    /// 域的所属pallet（用于标识和管理）
-    pub owner_pallet: BoundedVec<u8, ConstU32<32>>,
-    
     /// 域注册时的区块号
     pub created_at: u32,
 }
@@ -186,8 +178,7 @@ impl Default for DomainConfig {
         Self {
             auto_pin_enabled: true,
             default_tier: PinTier::Standard,
-            subject_type_id: 99, // 默认自定义类型
-            owner_pallet: BoundedVec::try_from(b"unknown".to_vec()).unwrap_or_default(),
+            subject_type_id: 99,
             created_at: 0,
         }
     }
@@ -541,29 +532,8 @@ pub enum ChargeResult<BlockNumber> {
     EnterGrace { expires_at: BlockNumber },
 }
 
-/// 函数级详细中文注释：扣费策略枚举（四层机制）
-/// 
-/// 用于区分不同类型的扣费场景：
-/// - QuotaFirst：优先使用免费配额（所有类型统一）
-/// - UserFirst：优先使用用户充值
-/// 
-/// 设计理念：
-/// - 所有 SubjectType 统一扣费顺序
-/// - 配额用于公共池补贴
-/// - 提高配额使用的精确性和公平性
-#[derive(Clone, Encode, Decode, DecodeWithMemTracking, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
-pub enum ChargeStrategy {
-    /// 配额优先：优先使用免费配额
-    QuotaFirst,
-    /// 用户优先：优先使用用户充值账户
-    UserFirst,
-}
-
-impl Default for ChargeStrategy {
-    fn default() -> Self {
-        Self::UserFirst
-    }
-}
+// [已删除] ChargeStrategy 枚举：所有路径统一使用 four_layer_charge()，
+// 不存在 QuotaFirst/UserFirst 分支选择，此枚举为死代码。
 
 /// 函数级详细中文注释：Unpin原因枚举
 /// 
@@ -590,53 +560,19 @@ pub enum UnpinReason {
 }
 
 // ============================================================================
-// 运营者分层架构相关类型（Layer 1/Layer 2/Layer 3）
+// 运营者分层架构相关类型（Layer 1/Layer 2）
 // ============================================================================
 
-/// 函数级详细中文注释：运营者层级枚举
+/// 运营者层级枚举
 /// 
-/// 定义运营者的层级分类，用于：
-/// 1. 区分核心运营者（项目方）和社区运营者
-/// 2. 实现分层存储策略（Layer 1/Layer 2/Layer 3）
-/// 3. 智能运营者选择（按层级优先级）
-/// 4. 差异化激励机制
-/// 
-/// 层级说明：
-/// - Core（核心层 - Layer 1）：
-///   * 由项目方运行和控制
-///   * 存储100%数据（完整备份）
-///   * 最高优先级（priority 0-50）
-///   * 最高信任度
-///   * 最高收益分配比例
-///   * 适合：验证者节点、专用IPFS存储节点
-/// 
-/// - Community（社区层 - Layer 2）：
-///   * 由社区成员运行
-///   * 选择性存储数据（按容量和优先级）
-///   * 中等优先级（priority 51-200）
-///   * 需要更多保证金
-///   * 通过链上奖励获利
-///   * 适合：轻节点 + IPFS
-/// 
-/// - External（外部层 - Layer 3）：
-///   * 外部存储网络（Filecoin/Crust等）
-///   * 通过跨链桥接接入
-///   * 不直接注册为运营者
-///   * 按需付费
-///   * 适合：非敏感公开数据
-/// 
-/// 设计理念：
-/// - Layer 1确保数据主权和服务连续性
-/// - Layer 2增强去中心化和冗余度
-/// - Layer 3降低成本，适用于临时数据
+/// - Core（Layer 1）：项目方运行，存储100%数据，最高优先级
+/// - Community（Layer 2）：社区成员运行，选择性存储，通过链上奖励获利
 #[derive(Clone, Encode, Decode, DecodeWithMemTracking, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub enum OperatorLayer {
     /// Layer 1：核心运营者（项目方）
     Core,
     /// Layer 2：社区运营者
     Community,
-    /// Layer 3：外部网络（预留，暂不实现）
-    External,
 }
 
 impl Default for OperatorLayer {
@@ -645,44 +581,11 @@ impl Default for OperatorLayer {
     }
 }
 
-/// 函数级详细中文注释：分层存储策略配置结构体
+/// 分层存储策略配置
 /// 
-/// 定义不同数据类型和优先级的分层存储策略，支持：
-/// 1. 按数据类型（Evidence/Product/Entity/Shop/General等）配置
-/// 2. 按优先级（Critical/Standard/Temporary）配置
-/// 3. 动态调整副本分布（Layer 1/Layer 2）
-/// 4. 治理提案修改策略
-/// 
-/// 字段说明：
-/// - core_replicas：Layer 1（核心运营者）副本数
-/// - community_replicas：Layer 2（社区运营者）副本数
-/// - allow_external：是否允许使用Layer 3（外部网络）
-/// - min_total_replicas：最低总副本数（降级阈值）
-/// 
-/// 配置示例：
-/// 
-/// 证据数据（最高安全）：
-/// - core_replicas: 5          // Layer 1必须5副本
-/// - community_replicas: 0     // 不使用Layer 2
-/// - allow_external: false     // 禁止Layer 3
-/// - min_total_replicas: 3     // 最少3副本
-/// 
-/// 通用数据（标准安全）：
-/// - core_replicas: 2          // Layer 1默认2副本
-/// - community_replicas: 1     // Layer 2补充1副本
-/// - allow_external: false     // 禁止Layer 3
-/// - min_total_replicas: 1     // 最少1副本
-/// 
-/// 临时数据（低成本）：
-/// - core_replicas: 1          // Layer 1保底1副本
-/// - community_replicas: 0     // 不使用Layer 2
-/// - allow_external: true      // 允许Layer 3
-/// - min_total_replicas: 1     // 最少1副本
-/// 
-/// 降级策略：
-/// - 如果可用运营者不足，优先满足Layer 1
-/// - Layer 1不足时，从Layer 2补充
-/// - 总副本数 < min_total_replicas 时，拒绝Pin请求并告警
+/// 定义不同数据类型和 PinTier 的分层副本分配策略。
+/// 降级策略：可用运营者不足时优先满足 Layer 1，Layer 1 不足时从 Layer 2 补充，
+/// 总副本数 < min_total_replicas 时拒绝 Pin 请求。
 #[derive(Clone, Encode, Decode, DecodeWithMemTracking, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 #[cfg_attr(feature = "std", derive(serde::Serialize, serde::Deserialize))]
 pub struct StorageLayerConfig {
@@ -690,8 +593,6 @@ pub struct StorageLayerConfig {
     pub core_replicas: u32,
     /// Layer 2社区运营者副本数（0-10）
     pub community_replicas: u32,
-    /// 是否允许Layer 3外部网络（预留）
-    pub allow_external: bool,
     /// 最低总副本数（降级阈值，1-10）
     pub min_total_replicas: u32,
 }
@@ -700,10 +601,9 @@ impl Default for StorageLayerConfig {
     /// 默认配置（标准数据）
     fn default() -> Self {
         Self {
-            core_replicas: 2,        // Layer 1默认2副本
-            community_replicas: 1,   // Layer 2默认1副本
-            allow_external: false,   // 默认不使用外部网络
-            min_total_replicas: 1,   // 最少1副本
+            core_replicas: 2,
+            community_replicas: 1,
+            min_total_replicas: 1,
         }
     }
 }
@@ -715,7 +615,6 @@ impl StorageLayerConfig {
         Self {
             core_replicas: 5,
             community_replicas: 0,
-            allow_external: false,
             min_total_replicas: 3,
         }
     }
@@ -726,7 +625,6 @@ impl StorageLayerConfig {
         Self {
             core_replicas: 2,
             community_replicas: 1,
-            allow_external: false,
             min_total_replicas: 1,
         }
     }
@@ -737,7 +635,6 @@ impl StorageLayerConfig {
         Self {
             core_replicas: 1,
             community_replicas: 0,
-            allow_external: true,
             min_total_replicas: 1,
         }
     }
@@ -783,35 +680,13 @@ pub struct LayeredOperatorSelection<AccountId> {
     pub community_operators: BoundedVec<AccountId, ConstU32<16>>,
 }
 
-/// 函数级详细中文注释：CID的分层存储记录结构体
-/// 
-/// 记录每个CID的分层Pin分配情况，用于：
-/// 1. 审计和追溯（哪些运营者存储了该CID）
-/// 2. 费用分配（按层级和运营者）
-/// 3. 健康检查（分层验证副本数）
-/// 4. 数据迁移（Layer之间的迁移）
-/// 
-/// 字段说明：
-/// - core_operators：Layer 1运营者列表（最多8个）
-/// - community_operators：Layer 2运营者列表（最多8个）
-/// - external_used：是否使用了Layer 3（外部网络）
-/// - external_network：外部网络类型（如 "Filecoin", "Crust"）
-/// 
-/// 使用场景：
-/// - 在 `request_pin_for_subject` 时创建
-/// - 在OCW健康检查时读取
-/// - 在费用分配时读取
-/// - 在数据迁移时更新
+/// CID 的分层 Pin 分配记录，包含 Layer 1（core）和 Layer 2（community）运营者列表。
 #[derive(Clone, Encode, Decode, DecodeWithMemTracking, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub struct LayeredPinAssignment<AccountId> {
     /// Layer 1运营者列表
     pub core_operators: BoundedVec<AccountId, ConstU32<8>>,
     /// Layer 2运营者列表
     pub community_operators: BoundedVec<AccountId, ConstU32<8>>,
-    /// 是否使用了Layer 3（外部网络）
-    pub external_used: bool,
-    /// 外部网络类型（如 "Filecoin", "Crust"）
-    pub external_network: Option<BoundedVec<u8, ConstU32<32>>>,
 }
 
 // ============================================================================

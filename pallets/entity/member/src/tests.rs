@@ -1091,8 +1091,13 @@ fn m14_stackable_preserves_permanent_upgrade() {
         assert_ok!(MemberPallet::add_custom_level(
             RuntimeOrigin::signed(OWNER), SHOP_1, name1, 100u64, 0, 0,
         ));
+        let name2: BoundedVec<u8, frame_support::traits::ConstU32<32>> =
+            b"VIP2".to_vec().try_into().unwrap();
+        assert_ok!(MemberPallet::add_custom_level(
+            RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u64, 0, 0,
+        ));
 
-        // Create stackable rule targeting VIP1 with 50-block duration
+        // Create stackable rule targeting VIP1 (level 0) with 50-block duration
         assert_ok!(MemberPallet::init_upgrade_rule_system(
             RuntimeOrigin::signed(OWNER), SHOP_1, ConflictStrategy::HighestLevel,
         ));
@@ -1101,28 +1106,40 @@ fn m14_stackable_preserves_permanent_upgrade() {
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, rule_name,
             UpgradeTrigger::TotalSpent { threshold: 50 },
-            0, // target VIP1
+            0, // target VIP1 (level 0)
             Some(50), // 50-block duration
             1, true, None,
         ));
 
-        // Register member and manually upgrade to VIP1 (permanent, no expiry)
+        // Register member (starts at level 0, permanent, no expiry)
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
-        assert_ok!(MemberPallet::manual_set_member_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 0,
-        ));
-        // Verify no expiry
         assert!(MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE).is_none());
 
-        // Trigger stackable rule
+        // Trigger stackable rule targeting same level (0 == 0)
         assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u64));
         assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u64));
 
-        // M14: Since member had no expiry (permanent), stacking with duration
-        // should start from now (block 1) + 50 = 51, NOT convert permanent to limited
-        // The fix starts fresh from now when no existing expiry
+        // I4 fix: member already holds level 0 permanently (no expiry).
+        // Stackable rule targeting same level must NOT demote permanent to timed.
         let expiry = MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE);
-        assert_eq!(expiry, Some(51), "first stack on no-expiry should start from now + duration");
+        assert_eq!(expiry, None, "permanent level must not be demoted to timed by stackable rule");
+
+        // Verify: stackable upgrade to a HIGHER level (target > current) with no prior expiry
+        // should correctly set a new timed expiry
+        let rule_name2: BoundedVec<u8, frame_support::traits::ConstU32<64>> =
+            b"StackVIP2".to_vec().try_into().unwrap();
+        assert_ok!(MemberPallet::add_upgrade_rule(
+            RuntimeOrigin::signed(OWNER), SHOP_1, rule_name2,
+            UpgradeTrigger::TotalSpent { threshold: 80 },
+            1, // target VIP2 (level 1) — higher than current level 0
+            Some(50), // 50-block duration
+            2, true, None,
+        ));
+        assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u64));
+        let expiry = MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE);
+        assert_eq!(expiry, Some(51), "first-time stackable upgrade to higher level should set now + duration");
+        let member = MemberPallet::entity_members(ENTITY_1, ALICE).unwrap();
+        assert_eq!(member.custom_level_id, 1, "should have been upgraded to VIP2");
     });
 }
 

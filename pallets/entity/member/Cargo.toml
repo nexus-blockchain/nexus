@@ -14,6 +14,7 @@ codec = { features = ["derive"], workspace = true }
 scale-info = { features = ["derive"], workspace = true }
 frame-support = { workspace = true }
 frame-system = { workspace = true }
+frame-benchmarking = { workspace = true, optional = true }
 sp-runtime = { workspace = true }
 sp-std = { workspace = true }
 sp-api = { workspace = true }
@@ -34,6 +35,7 @@ std = [
     "scale-info/std",
     "frame-support/std",
     "frame-system/std",
+    "frame-benchmarking?/std",
     "sp-runtime/std",
     "sp-std/std",
     "sp-api/std",
@@ -41,6 +43,7 @@ std = [
     "pallet-entity-common/std",
 ]
 runtime-benchmarks = [
+    "frame-benchmarking/runtime-benchmarks",
     "frame-support/runtime-benchmarks",
     "frame-system/runtime-benchmarks",
     "sp-runtime/runtime-benchmarks",

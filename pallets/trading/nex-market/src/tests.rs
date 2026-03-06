@@ -1,5 +1,5 @@
 use crate::{mock::*, pallet::*};
-use frame_support::{assert_noop, assert_ok, traits::{Currency, Hooks}, weights::Weight};
+use frame_support::{assert_noop, assert_ok, traits::{Currency, Hooks}, weights::Weight, BoundedVec, traits::ConstU32};
 use sp_runtime::traits::{ValidateUnsigned, Zero};
 use sp_runtime::transaction_validity::TransactionSource;
 
@@ -25,7 +25,7 @@ fn place_sell_order_works() {
         let price = 500_000u64;            // 0.5 USDT/NEX
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
         ));
 
         let order = NexMarket::orders(0).unwrap();
@@ -42,10 +42,16 @@ fn place_sell_order_works() {
 #[test]
 fn place_sell_order_insufficient_balance() {
     new_test_ext().execute_with(|| {
-        let too_much = 2_000_000_000_000_000u128; // 2000 NEX, Alice only has 1000
+        // 使用低于 MaxOrderNexAmount(500 NEX) 但高于余额的金额
+        let too_much = 500_000_000_000_000u128; // 500 NEX, Alice only has 1000
+        // 先下一半订单锁定 500 NEX
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), 500_000_000_000_000, 500_000, tron_address(), None,
+        ));
+        // 再下 500 NEX → 余额不足
         assert_noop!(
             NexMarket::place_sell_order(
-                RuntimeOrigin::signed(ALICE), too_much, 500_000, tron_address(),
+                RuntimeOrigin::signed(ALICE), too_much, 500_000, tron_address(), None,
             ),
             Error::<Test>::InsufficientBalance
         );
@@ -57,8 +63,8 @@ fn place_sell_order_zero_price() {
     new_test_ext().execute_with(|| {
         assert_noop!(
             NexMarket::place_sell_order(
-                RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 0, tron_address(),
-            ),
+                RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 0, tron_address(), None,
+        ),
             Error::<Test>::ZeroPrice
         );
     });
@@ -69,8 +75,8 @@ fn place_sell_order_invalid_tron_address() {
     new_test_ext().execute_with(|| {
         assert_noop!(
             NexMarket::place_sell_order(
-                RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, b"short".to_vec(),
-            ),
+                RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, b"short".to_vec(), None,
+        ),
             Error::<Test>::InvalidTronAddress
         );
     });
@@ -102,11 +108,10 @@ fn place_buy_order_works() {
 #[test]
 fn place_buy_order_insufficient_deposit() {
     new_test_ext().execute_with(|| {
-        // Charlie 只有 100 NEX，不够支付大额买单的保证金
-        let huge_nex = 1_000_000_000_000_000_000u128; // 1000000 NEX
+        // DAVE 余额为 0（mock 中未分配），下任意买单保证金不足
         assert_noop!(
             NexMarket::place_buy_order(
-                RuntimeOrigin::signed(CHARLIE), huge_nex, 500_000, buyer_tron(),
+                RuntimeOrigin::signed(DAVE), 100_000_000_000_000, 500_000, buyer_tron(),
             ),
             Error::<Test>::InsufficientDepositBalance
         );
@@ -122,7 +127,7 @@ fn cancel_sell_order_returns_nex() {
         let initial = Balances::free_balance(ALICE);
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_eq!(Balances::free_balance(ALICE), initial - nex);
 
@@ -138,7 +143,7 @@ fn cancel_sell_order_returns_nex() {
 fn cancel_order_not_owner() {
     new_test_ext().execute_with(|| {
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
         ));
         assert_noop!(
             NexMarket::cancel_order(RuntimeOrigin::signed(BOB), 0),
@@ -177,7 +182,7 @@ fn reserve_sell_order_works() {
 
         // Alice 挂卖单
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
         ));
 
         // Bob 预锁定（吃卖单）
@@ -211,7 +216,7 @@ fn reserve_sell_order_partial() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
 
         // Bob 只吃一半
@@ -230,7 +235,7 @@ fn reserve_sell_order_partial() {
 fn reserve_sell_order_cannot_take_own() {
     new_test_ext().execute_with(|| {
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
         ));
         assert_noop!(
             NexMarket::reserve_sell_order(RuntimeOrigin::signed(ALICE), 0, None, buyer_tron()),
@@ -276,7 +281,7 @@ fn confirm_payment_works() {
     new_test_ext().execute_with(|| {
         // 创建卖单 + 预锁定
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -301,7 +306,7 @@ fn confirm_payment_works() {
 fn confirm_payment_not_buyer() {
     new_test_ext().execute_with(|| {
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -323,7 +328,7 @@ fn full_trade_flow_exact_payment() {
 
         // 1. Alice 挂卖单
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
         ));
 
         // 2. Bob 预锁定
@@ -339,22 +344,15 @@ fn full_trade_flow_exact_payment() {
             RuntimeOrigin::signed(BOB), 0,
         ));
 
-        // 4. OCW 提交结果（精确付款）
+        // 4. OCW 提交结果（精确付款）→ R1: 自动结算
+        let bob_before = Balances::free_balance(BOB);
         assert_ok!(NexMarket::submit_ocw_result(
             RuntimeOrigin::none(), 0, usdt_amount, None,
         ));
 
-        let (result, _) = NexMarket::ocw_verification_results(0).unwrap();
-        assert_eq!(result, PaymentVerificationResult::Exact);
+        // R1: submit_ocw_result 已自动结算，OCW 结果已清理
+        assert!(NexMarket::ocw_verification_results(0).is_none());
 
-        // 5. Charlie 领取奖励
-        let bob_before = Balances::free_balance(BOB);
-
-        assert_ok!(NexMarket::claim_verification_reward(
-            RuntimeOrigin::signed(CHARLIE), 0,
-        ));
-
-        // Bob 获得 NEX + 保证金退还
         let bob_after = Balances::free_balance(BOB);
         assert!(bob_after > bob_before);
 
@@ -374,7 +372,7 @@ fn underpaid_enters_pending_then_finalize() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -437,7 +435,7 @@ fn severely_underpaid_auto_process() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -450,18 +448,14 @@ fn severely_underpaid_auto_process() {
             RuntimeOrigin::signed(BOB), 0,
         ));
 
-        // 严重少付 10%
+        // 严重少付 10% → R1: 自动处理
         let actual = expected * 10 / 100;
         assert_ok!(NexMarket::submit_ocw_result(
             RuntimeOrigin::none(), 0, actual, None,
         ));
 
-        let (result, _) = NexMarket::ocw_verification_results(0).unwrap();
-        assert_eq!(result, PaymentVerificationResult::SeverelyUnderpaid);
-
-        assert_ok!(NexMarket::claim_verification_reward(
-            RuntimeOrigin::signed(CHARLIE), 0,
-        ));
+        // R1: 自动结算后 OCW 结果已清理
+        assert!(NexMarket::ocw_verification_results(0).is_none());
 
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_eq!(trade.deposit_status, BuyerDepositStatus::Forfeited);
@@ -474,7 +468,7 @@ fn underpaid_topup_upgrades_to_exact() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -492,20 +486,13 @@ fn underpaid_topup_upgrades_to_exact() {
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_eq!(trade.status, UsdtTradeStatus::UnderpaidPending);
 
-        // 补付窗口内 OCW 检测到买家补齐了 → submit_underpaid_update
+        // 补付窗口内 OCW 检测到买家补齐了 → R1: 自动结算
         assert_ok!(NexMarket::submit_underpaid_update(RuntimeOrigin::none(), 0, expected));
 
-        // 状态回到 AwaitingVerification（补齐了）
-        let trade = NexMarket::usdt_trades(0).unwrap();
-        assert_eq!(trade.status, UsdtTradeStatus::AwaitingVerification);
-        assert!(!NexMarket::pending_underpaid_trades().contains(&0));
-        assert!(NexMarket::pending_usdt_trades().contains(&0));
-
-        // 正常 claim 流程
-        assert_ok!(NexMarket::claim_verification_reward(RuntimeOrigin::signed(CHARLIE), 0));
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_eq!(trade.status, UsdtTradeStatus::Completed);
         assert_eq!(trade.deposit_status, BuyerDepositStatus::Released);
+        assert!(!NexMarket::pending_underpaid_trades().contains(&0));
     });
 }
 
@@ -515,7 +502,7 @@ fn underpaid_update_rejects_decrease() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -543,7 +530,7 @@ fn graduated_deposit_forfeit_light_underpay() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -587,7 +574,7 @@ fn finalize_underpaid_full_topup_in_window() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -603,12 +590,8 @@ fn finalize_underpaid_full_topup_in_window() {
         assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_60, None));
         assert_eq!(NexMarket::usdt_trades(0).unwrap().status, UsdtTradeStatus::UnderpaidPending);
 
-        // 窗口内补齐到 100%，但不做 claim（仍是 AwaitingVerification）
+        // R1: 窗口内补齐到 100% → 自动结算
         assert_ok!(NexMarket::submit_underpaid_update(RuntimeOrigin::none(), 0, expected));
-        assert_eq!(NexMarket::usdt_trades(0).unwrap().status, UsdtTradeStatus::AwaitingVerification);
-
-        // 正常 claim → 全额结算
-        assert_ok!(NexMarket::claim_verification_reward(RuntimeOrigin::signed(CHARLIE), 0));
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_eq!(trade.status, UsdtTradeStatus::Completed);
         assert_eq!(trade.deposit_status, BuyerDepositStatus::Released);
@@ -621,7 +604,7 @@ fn submit_underpaid_update_rejects_wrong_status() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -642,7 +625,7 @@ fn process_timeout_handles_underpaid_pending() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -663,13 +646,13 @@ fn process_timeout_handles_underpaid_pending() {
 
         // 补付窗口未到期 → process_timeout 也失败
         assert_noop!(
-            NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0),
+            NexMarket::process_timeout(RuntimeOrigin::signed(BOB), 0),
             Error::<Test>::UnderpaidGraceNotExpired
         );
 
         // 推进到窗口到期 → process_timeout 可以终裁
         System::set_block_number(deadline + 1);
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(BOB), 0));
 
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_eq!(trade.status, UsdtTradeStatus::Completed);
@@ -683,7 +666,7 @@ fn auto_confirm_underpaid_routes_to_pending() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -713,7 +696,7 @@ fn auto_confirm_exact_routes_to_verification() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -722,16 +705,11 @@ fn auto_confirm_exact_routes_to_verification() {
         let trade = NexMarket::usdt_trades(0).unwrap();
         let expected = trade.usdt_amount;
 
-        // auto_confirm exact → AwaitingVerification
+        // R1: auto_confirm exact → 直接结算
         assert_ok!(NexMarket::auto_confirm_payment(RuntimeOrigin::none(), 0, expected, None));
 
         let trade = NexMarket::usdt_trades(0).unwrap();
-        assert_eq!(trade.status, UsdtTradeStatus::AwaitingVerification);
-        assert!(NexMarket::pending_usdt_trades().contains(&0));
-
-        // claim → Completed
-        assert_ok!(NexMarket::claim_verification_reward(RuntimeOrigin::signed(CHARLIE), 0));
-        assert_eq!(NexMarket::usdt_trades(0).unwrap().status, UsdtTradeStatus::Completed);
+        assert_eq!(trade.status, UsdtTradeStatus::Completed);
     });
 }
 
@@ -743,7 +721,7 @@ fn process_timeout_works() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -757,7 +735,7 @@ fn process_timeout_works() {
         let alice_before = Balances::free_balance(ALICE);
 
         assert_ok!(NexMarket::process_timeout(
-            RuntimeOrigin::signed(CHARLIE), 0,
+            RuntimeOrigin::signed(BOB), 0,
         ));
 
         // NEX 退还给 Alice
@@ -780,14 +758,14 @@ fn process_timeout_works() {
 fn process_timeout_before_expiry_fails() {
     new_test_ext().execute_with(|| {
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
         ));
         // 不推进区块 → 超时检查失败
         assert_noop!(
-            NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0),
+            NexMarket::process_timeout(RuntimeOrigin::signed(BOB), 0),
             Error::<Test>::InvalidTradeStatus
         );
     });
@@ -799,7 +777,7 @@ fn process_timeout_awaiting_verification_grace_period_blocks() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -814,14 +792,14 @@ fn process_timeout_awaiting_verification_grace_period_blocks() {
         // 超过 timeout 但在宽限期内 → StillInGracePeriod
         System::set_block_number(timeout_block + 1);
         assert_noop!(
-            NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0),
+            NexMarket::process_timeout(RuntimeOrigin::signed(BOB), 0),
             Error::<Test>::StillInGracePeriod
         );
 
         // 超过 timeout + grace_period → 允许超时
         // grace = 600, timeout_block + 600 + 1
         System::set_block_number(timeout_block + 601);
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(BOB), 0));
 
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_eq!(trade.status, UsdtTradeStatus::Refunded);
@@ -834,7 +812,7 @@ fn process_timeout_awaiting_verification_settles_if_ocw_result_exists() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -844,18 +822,11 @@ fn process_timeout_awaiting_verification_settles_if_ocw_result_exists() {
         let trade = NexMarket::usdt_trades(0).unwrap();
         let timeout_block: u64 = trade.timeout_at.into();
 
-        // OCW 提交了验证结果（精确到账）
+        // R1: submit_ocw_result Exact → 自动结算
+        let bob_before = Balances::free_balance(BOB);
         assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, 50_000_000, None));
 
-        // 超过 timeout + grace → 但已有 OCW 结果，应按正常流程结算
-        System::set_block_number(timeout_block + 601);
-
-        let alice_before = Balances::free_balance(ALICE);
-        let bob_before = Balances::free_balance(BOB);
-
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0));
-
-        // 应走 process_full_payment → NEX 给买家，保证金退还
+        // 交易已在 submit_ocw_result 中自动完成
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_eq!(trade.status, UsdtTradeStatus::Completed);
         assert_eq!(trade.deposit_status, BuyerDepositStatus::Released);
@@ -871,7 +842,7 @@ fn process_timeout_awaiting_payment_no_grace_period() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -884,7 +855,7 @@ fn process_timeout_awaiting_payment_no_grace_period() {
 
         // 超过 timeout 即可，不需要宽限期
         System::set_block_number(timeout_block + 1);
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(BOB), 0));
 
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_eq!(trade.status, UsdtTradeStatus::Refunded);
@@ -899,7 +870,7 @@ fn auto_confirm_payment_works() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -913,23 +884,10 @@ fn auto_confirm_payment_works() {
         // OCW 检测到 USDT 已到账 → sidecar 调用 auto_confirm_payment
         assert_ok!(NexMarket::auto_confirm_payment(RuntimeOrigin::none(), 0, 50_000_000, None));
 
-        // Trade 状态跳到 AwaitingVerification + OCW 结果已存储
-        let trade = NexMarket::usdt_trades(0).unwrap();
-        assert_eq!(trade.status, UsdtTradeStatus::AwaitingVerification);
-        assert!(NexMarket::ocw_verification_results(0).is_some());
-        let (result, amount) = NexMarket::ocw_verification_results(0).unwrap();
-        assert_eq!(result, PaymentVerificationResult::Exact);
-        assert_eq!(amount, 50_000_000);
-
-        // 从 AwaitingPaymentTrades 移除
-        assert!(!NexMarket::awaiting_payment_trades().contains(&0));
-        // 加入 PendingUsdtTrades
-        assert!(NexMarket::pending_usdt_trades().contains(&0));
-
-        // 任何人可以领取奖励完成结算
-        assert_ok!(NexMarket::claim_verification_reward(RuntimeOrigin::signed(CHARLIE), 0));
+        // R1: auto_confirm_payment Exact → 直接结算
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_eq!(trade.status, UsdtTradeStatus::Completed);
+        assert!(!NexMarket::awaiting_payment_trades().contains(&0));
     });
 }
 
@@ -939,7 +897,7 @@ fn auto_confirm_payment_rejects_non_awaiting_payment() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -961,7 +919,7 @@ fn auto_confirm_payment_rejects_signed_origin() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -982,7 +940,7 @@ fn awaiting_payment_trades_tracking() {
 
         // 创建交易 → 加入跟踪队列
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -1001,7 +959,7 @@ fn awaiting_payment_trades_cleaned_on_timeout() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -1012,7 +970,7 @@ fn awaiting_payment_trades_cleaned_on_timeout() {
         let timeout_block: u64 = trade.timeout_at.into();
         System::set_block_number(timeout_block + 1);
 
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(BOB), 0));
         assert!(!NexMarket::awaiting_payment_trades().contains(&0));
     });
 }
@@ -1054,13 +1012,13 @@ fn price_deviation_blocks_extreme_orders() {
 
         // 正常范围内的价格可以挂单
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), 10_000_000_000_000, 550_000, tron_address(), // +10%
+            RuntimeOrigin::signed(ALICE), 10_000_000_000_000, 550_000, tron_address(), None, // +10%
         ));
 
         // 偏离超过 20% 默认阈值 → 被阻止
         assert_noop!(
             NexMarket::place_sell_order(
-                RuntimeOrigin::signed(ALICE), 10_000_000_000_000, 1_000_000, tron_address(), // +100%
+                RuntimeOrigin::signed(ALICE), 10_000_000_000_000, 1_000_000, tron_address(), None, // +100%
             ),
             Error::<Test>::PriceDeviationTooHigh
         );
@@ -1073,7 +1031,7 @@ fn price_deviation_blocks_extreme_orders() {
 fn market_stats_updated() {
     new_test_ext().execute_with(|| {
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::place_buy_order(
             RuntimeOrigin::signed(BOB), 50_000_000_000_000, 500_000, buyer_tron(),
@@ -1091,11 +1049,11 @@ fn best_prices_updated() {
     new_test_ext().execute_with(|| {
         // Alice 卖 100 NEX @ 0.6
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 600_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 600_000, tron_address(), None,
         ));
         // Alice 卖 100 NEX @ 0.5
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
         ));
         // Bob 买 100 NEX @ 0.4
         assert_ok!(NexMarket::place_buy_order(
@@ -1119,7 +1077,7 @@ fn payment_verification_result_categories() {
         // 通过 OCW 提交结果间接测试多档判定
         // 精确付款
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), 10_000_000_000_000, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), 10_000_000_000_000, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -1129,13 +1087,12 @@ fn payment_verification_result_categories() {
             RuntimeOrigin::signed(BOB), 0,
         ));
 
-        // Exact
+        // R1: Exact → 自动结算
         assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None));
-        let (result, _) = NexMarket::ocw_verification_results(0).unwrap();
-        assert_eq!(result, PaymentVerificationResult::Exact);
-
-        // 清理并测试 Overpaid (需要新的 trade)
-        // Overpaid 和其他类型已在 full_trade_flow 和 underpaid 测试中覆盖
+        // R1: 自动结算后 OCW 结果已清理
+        assert!(NexMarket::ocw_verification_results(0).is_none());
+        let trade = NexMarket::usdt_trades(0).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Completed);
     });
 }
 
@@ -1384,9 +1341,6 @@ fn waived_deposit_l3_completed_buyer_blocked() {
         assert_ok!(NexMarket::submit_ocw_result(
             RuntimeOrigin::none(), 0, trade.usdt_amount, None,
         ));
-        assert_ok!(NexMarket::claim_verification_reward(
-            RuntimeOrigin::signed(CHARLIE), 0,
-        ));
 
         // L3: BOB 已标记为 CompletedBuyer
         assert!(CompletedBuyers::<Test>::get(BOB));
@@ -1423,7 +1377,7 @@ fn waived_deposit_timeout_cleans_counter() {
         System::set_block_number(timeout_block + 1);
 
         assert_ok!(NexMarket::process_timeout(
-            RuntimeOrigin::signed(CHARLIE), 0,
+            RuntimeOrigin::signed(BOB), 0,
         ));
 
         // 超时后计数器归零，BOB 未被标记为 CompletedBuyer
@@ -1437,68 +1391,7 @@ fn waived_deposit_timeout_cleans_counter() {
     });
 }
 
-#[test]
-fn cumulative_seed_usdt_sold_tracks_waived_trades() {
-    new_test_ext().execute_with(|| {
-        setup_seed_price();
-        // 初始为 0
-        assert_eq!(NexMarket::cumulative_seed_usdt_sold(), 0);
-
-        // seed_liquidity 创建免保证金卖单 (50 NEX = 30 USDT)
-        assert_ok!(NexMarket::seed_liquidity(
-            RuntimeOrigin::root(),
-            1,
-            Some(30_000_000),
-        ));
-
-        // BOB 吃单
-        assert_ok!(NexMarket::reserve_sell_order(
-            RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
-        ));
-
-        // BOB 提交付款
-        assert_ok!(NexMarket::confirm_payment(
-            RuntimeOrigin::signed(BOB), 0,
-        ));
-
-        // OCW 提交验证结果（Exact）
-        let trade = NexMarket::usdt_trades(0).unwrap();
-        assert_ok!(NexMarket::submit_ocw_result(
-            RuntimeOrigin::none(), 0, trade.usdt_amount, None,
-        ));
-
-        // claim reward → 触发 process_full_payment
-        assert_ok!(NexMarket::claim_verification_reward(
-            RuntimeOrigin::signed(CHARLIE), 0,
-        ));
-
-        // 审计值应等于该笔交易的 USDT 金额
-        assert_eq!(NexMarket::cumulative_seed_usdt_sold(), trade.usdt_amount);
-
-        // 正常卖单不影响审计值
-        let prev = NexMarket::cumulative_seed_usdt_sold();
-        assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), 50_000_000_000_000, 500_000, tron_address(),
-        ));
-        // order_id = 1 (normal order)
-        assert_ok!(NexMarket::reserve_sell_order(
-            RuntimeOrigin::signed(CHARLIE), 1, None, buyer_tron(),
-        ));
-        assert_ok!(NexMarket::confirm_payment(
-            RuntimeOrigin::signed(CHARLIE), 1,
-        ));
-        let trade2 = NexMarket::usdt_trades(1).unwrap();
-        assert_ok!(NexMarket::submit_ocw_result(
-            RuntimeOrigin::none(), 1, trade2.usdt_amount, None,
-        ));
-        assert_ok!(NexMarket::claim_verification_reward(
-            RuntimeOrigin::signed(ALICE), 1,
-        ));
-
-        // 审计值不变（正常订单不累计）
-        assert_eq!(NexMarket::cumulative_seed_usdt_sold(), prev);
-    });
-}
+// cumulative_seed_usdt_sold 已移除（R2: 可通过事件日志链下计算）
 
 #[test]
 fn on_idle_advances_twap_snapshots() {
@@ -1508,7 +1401,7 @@ fn on_idle_advances_twap_snapshots() {
         // 设置初始价格并完成一笔交易来初始化 TWAP
         assert_ok!(NexMarket::set_initial_price(RuntimeOrigin::root(), 500_000));
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -1518,7 +1411,6 @@ fn on_idle_advances_twap_snapshots() {
         ));
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None));
-        assert_ok!(NexMarket::claim_verification_reward(RuntimeOrigin::signed(CHARLIE), 0));
 
         // 交易完成后，记录当前 TWAP 累积器状态
         let acc_before = NexMarket::twap_accumulator().unwrap();
@@ -1572,7 +1464,7 @@ fn m2_reward_paid_event_tracks_success() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -1580,18 +1472,10 @@ fn m2_reward_paid_event_tracks_success() {
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
         assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None));
-        assert_ok!(NexMarket::claim_verification_reward(RuntimeOrigin::signed(CHARLIE), 0));
 
-        // 验证 VerificationRewardClaimed 事件包含 reward_paid=true
-        let events = System::events();
-        let found = events.iter().any(|e| {
-            if let RuntimeEvent::NexMarket(Event::VerificationRewardClaimed { reward_paid, .. }) = &e.event {
-                *reward_paid == true
-            } else {
-                false
-            }
-        });
-        assert!(found, "Should emit VerificationRewardClaimed with reward_paid=true");
+        // R1: submit_ocw_result 自动结算，不再需要 claim，验证交易已完成
+        let trade = NexMarket::usdt_trades(0).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Completed);
     });
 }
 
@@ -1602,7 +1486,7 @@ fn m2_reward_paid_false_when_source_empty() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -1611,29 +1495,9 @@ fn m2_reward_paid_false_when_source_empty() {
         assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
         assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None));
 
-        // 清空 RewardSource 余额 → transfer 会失败
-        let reward_source: u64 = 97;
-        let balance = Balances::free_balance(reward_source);
-        // 转走所有余额（保留 existential deposit 以外的全部）
-        let _ = Balances::transfer_allow_death(RuntimeOrigin::signed(reward_source), 99, balance);
-
-        // claim 仍应成功（奖励失败不阻断结算）
-        assert_ok!(NexMarket::claim_verification_reward(RuntimeOrigin::signed(CHARLIE), 0));
-
-        // 交易已完成
+        // R1: 自动结算，验证交易已完成
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_eq!(trade.status, UsdtTradeStatus::Completed);
-
-        // 验证 reward_paid=false
-        let events = System::events();
-        let found = events.iter().any(|e| {
-            if let RuntimeEvent::NexMarket(Event::VerificationRewardClaimed { reward_paid, .. }) = &e.event {
-                *reward_paid == false
-            } else {
-                false
-            }
-        });
-        assert!(found, "Should emit VerificationRewardClaimed with reward_paid=false");
     });
 }
 
@@ -1642,7 +1506,7 @@ fn l1_query_filters_expired_orders() {
     new_test_ext().execute_with(|| {
         // 创建卖单
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
         ));
         // 创建买单
         assert_ok!(NexMarket::place_buy_order(
@@ -1702,8 +1566,8 @@ fn h2_weight_values_are_realistic() {
 fn setup_trade_awaiting_verification() -> (u64, u64) {
     let nex = 100_000_000_000_000u128;
     assert_ok!(NexMarket::place_sell_order(
-        RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
-    ));
+        RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
+        ));
     assert_ok!(NexMarket::reserve_sell_order(
         RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
     ));
@@ -1737,7 +1601,7 @@ fn c3_submit_ocw_result_rejects_replay() {
 
         // 第一笔交易：正常提交
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -1750,7 +1614,7 @@ fn c3_submit_ocw_result_rejects_replay() {
 
         // 第二笔交易：尝试用同一 tx_hash
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 1, None, buyer_tron(),
@@ -1775,7 +1639,7 @@ fn c3_submit_ocw_result_none_tx_hash_always_accepted() {
 
         // 两笔交易都用 None tx_hash → 都应成功（向后兼容）
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -1787,7 +1651,7 @@ fn c3_submit_ocw_result_none_tx_hash_always_accepted() {
         ));
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 1, None, buyer_tron(),
@@ -1808,7 +1672,7 @@ fn c3_different_tx_hash_accepted() {
         let hash2: TxHash = b"tx_hash_bbb".to_vec().try_into().unwrap();
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -1820,7 +1684,7 @@ fn c3_different_tx_hash_accepted() {
         ));
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 1, None, buyer_tron(),
@@ -1846,7 +1710,7 @@ fn c3_auto_confirm_payment_rejects_replay() {
 
         // 第一笔：auto_confirm 消耗 tx_hash
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -1858,7 +1722,7 @@ fn c3_auto_confirm_payment_rejects_replay() {
 
         // 第二笔：尝试重放同一 tx_hash → 失败
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 1, None, buyer_tron(),
@@ -1880,7 +1744,7 @@ fn c3_cross_extrinsic_replay_blocked() {
 
         // auto_confirm 消耗 tx_hash
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -1892,7 +1756,7 @@ fn c3_cross_extrinsic_replay_blocked() {
 
         // submit_ocw_result 尝试用同一 tx_hash → 也被拒绝
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 1, None, buyer_tron(),
@@ -1942,7 +1806,7 @@ fn c4_auto_confirm_rejects_excessive_amount() {
     new_test_ext().execute_with(|| {
         let nex = 100_000_000_000_000u128;
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -1965,7 +1829,7 @@ fn c4_underpaid_update_rejects_excessive_amount() {
     new_test_ext().execute_with(|| {
         let nex = 100_000_000_000_000u128;
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -1995,7 +1859,7 @@ fn c4_underpaid_update_rejects_non_increasing_amount() {
     new_test_ext().execute_with(|| {
         let nex = 100_000_000_000_000u128;
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::reserve_sell_order(
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
@@ -2063,7 +1927,7 @@ fn h3_on_idle_gc_cleans_expired_sell_orders() {
 
         // Alice 挂卖单
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
         ));
         assert_eq!(NexMarket::sell_orders().len(), 1);
         let alice_reserved = Balances::reserved_balance(ALICE);
@@ -2122,8 +1986,8 @@ fn h3_on_idle_gc_respects_max_per_block() {
         // 创建 15 个卖单（MaxExpiredOrdersPerBlock=10）
         for _ in 0..15 {
             assert_ok!(NexMarket::place_sell_order(
-                RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
-            ));
+                RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
+        ));
         }
         assert_eq!(NexMarket::sell_orders().len(), 15);
 
@@ -2149,19 +2013,19 @@ fn h4_best_prices_update_incrementally_on_new_order() {
 
         // 第一个卖单 → 设置 best ask
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_eq!(NexMarket::best_ask(), Some(500_000));
 
         // 更低价卖单 → best ask 应更新
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 400_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 400_000, tron_address(), None,
         ));
         assert_eq!(NexMarket::best_ask(), Some(400_000));
 
         // 更高价卖单 → best ask 不变
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 600_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 600_000, tron_address(), None,
         ));
         assert_eq!(NexMarket::best_ask(), Some(400_000));
     });
@@ -2174,10 +2038,10 @@ fn h4_best_prices_rescan_on_best_order_cancel() {
 
         // 挂两个卖单: 400_000 和 500_000
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 400_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 400_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_eq!(NexMarket::best_ask(), Some(400_000));
 
@@ -2197,10 +2061,10 @@ fn h4_cancel_non_best_order_no_rescan() {
         let nex = 10_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 400_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 400_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_eq!(NexMarket::best_ask(), Some(400_000));
 
@@ -2216,7 +2080,7 @@ fn normal_sell_order_still_requires_deposit() {
     new_test_ext().execute_with(|| {
         // Alice 正常挂卖单（非 seed_liquidity）
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
         ));
 
         let order = NexMarket::orders(0).unwrap();
@@ -2246,8 +2110,8 @@ fn m6_order_id_overflow_rejected() {
         // 尝试挂卖单 → 应返回 ArithmeticOverflow
         assert_noop!(
             NexMarket::place_sell_order(
-                RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 1_000_000, tron_address(),
-            ),
+                RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 1_000_000, tron_address(), None,
+        ),
             Error::<Test>::ArithmeticOverflow,
         );
     });
@@ -2258,7 +2122,7 @@ fn m6_trade_id_overflow_rejected() {
     new_test_ext().execute_with(|| {
         // 先正常挂卖单
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 1_000_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 1_000_000, tron_address(), None,
         ));
 
         // 将 NextUsdtTradeId 设为 u64::MAX
@@ -2290,8 +2154,8 @@ fn m4_extreme_deviation_saturates_instead_of_truncating() {
         // 但 saturating: min(100_000_000, 65535) = 65535 > 5000 → PriceDeviationTooHigh
         assert_noop!(
             NexMarket::place_sell_order(
-                RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 100_000_000, tron_address(),
-            ),
+                RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 100_000_000, tron_address(), None,
+        ),
             Error::<Test>::PriceDeviationTooHigh,
         );
     });
@@ -2334,7 +2198,7 @@ fn force_pause_market_blocks_trading() {
 
         // 挂单被拒绝
         assert_noop!(
-            NexMarket::place_sell_order(RuntimeOrigin::signed(ALICE), nex, price, tron_address()),
+            NexMarket::place_sell_order(RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None),
             Error::<Test>::MarketIsPaused,
         );
 
@@ -2342,7 +2206,7 @@ fn force_pause_market_blocks_trading() {
         assert_ok!(NexMarket::force_resume_market(RuntimeOrigin::root()));
         assert!(!NexMarket::market_paused());
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
         ));
     });
 }
@@ -2370,7 +2234,7 @@ fn force_pause_blocks_reserve_sell_order() {
 
         // 先挂单
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
         ));
 
         // 暂停后无法吃单
@@ -2393,12 +2257,26 @@ fn setup_awaiting_payment_trade() -> u64 {
     let price = 500_000u64;
 
     assert_ok!(NexMarket::place_sell_order(
-        RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
-    ));
+        RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
+        ));
     assert_ok!(NexMarket::reserve_sell_order(
         RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
     ));
     0 // trade_id
+}
+
+/// W6 helper: 创建一个买家已确认付款后超时退款的交易（payment_confirmed=true, Refunded）
+fn setup_confirmed_then_refunded_trade() -> u64 {
+    let trade_id = setup_awaiting_payment_trade();
+    assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), trade_id));
+    // AwaitingVerification timeout needs: now > timeout_at + grace_period
+    // timeout_at = 1 + 7200 = 7201, grace = 600 → need block > 7801
+    System::set_block_number(8000);
+    assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(BOB), trade_id));
+    let trade = NexMarket::usdt_trades(trade_id).unwrap();
+    assert_eq!(trade.status, UsdtTradeStatus::Refunded);
+    assert!(trade.payment_confirmed);
+    trade_id
 }
 
 #[test]
@@ -2482,16 +2360,8 @@ fn force_settle_trade_refund_to_seller() {
 #[test]
 fn dispute_trade_works() {
     new_test_ext().execute_with(|| {
-        let trade_id = setup_awaiting_payment_trade();
+        let trade_id = setup_confirmed_then_refunded_trade();
 
-        // 先让交易超时变成 Refunded
-        System::set_block_number(10000);
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), trade_id));
-
-        let trade = NexMarket::usdt_trades(trade_id).unwrap();
-        assert_eq!(trade.status, UsdtTradeStatus::Refunded);
-
-        // 买家发起争议
         let evidence = b"QmTestCid12345".to_vec();
         assert_ok!(NexMarket::dispute_trade(
             RuntimeOrigin::signed(BOB), trade_id, evidence.clone(),
@@ -2508,7 +2378,7 @@ fn dispute_trade_rejects_non_participant() {
     new_test_ext().execute_with(|| {
         let trade_id = setup_awaiting_payment_trade();
         System::set_block_number(10000);
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), trade_id));
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(BOB), trade_id));
 
         assert_noop!(
             NexMarket::dispute_trade(
@@ -2536,9 +2406,7 @@ fn dispute_trade_rejects_non_refunded() {
 #[test]
 fn dispute_trade_rejects_duplicate() {
     new_test_ext().execute_with(|| {
-        let trade_id = setup_awaiting_payment_trade();
-        System::set_block_number(10000);
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), trade_id));
+        let trade_id = setup_confirmed_then_refunded_trade();
 
         assert_ok!(NexMarket::dispute_trade(
             RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
@@ -2556,9 +2424,7 @@ fn dispute_trade_rejects_duplicate() {
 #[test]
 fn resolve_dispute_release_to_buyer() {
     new_test_ext().execute_with(|| {
-        let trade_id = setup_awaiting_payment_trade();
-        System::set_block_number(10000);
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), trade_id));
+        let trade_id = setup_confirmed_then_refunded_trade();
 
         assert_ok!(NexMarket::dispute_trade(
             RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
@@ -2571,7 +2437,6 @@ fn resolve_dispute_release_to_buyer() {
 
         let dispute = NexMarket::trade_disputes(trade_id).unwrap();
         assert_eq!(dispute.status, DisputeStatus::ResolvedForBuyer);
-        // 国库补偿 NEX 给买家
         assert!(Balances::free_balance(BOB) > buyer_free_before);
     });
 }
@@ -2579,9 +2444,7 @@ fn resolve_dispute_release_to_buyer() {
 #[test]
 fn resolve_dispute_refund_to_seller() {
     new_test_ext().execute_with(|| {
-        let trade_id = setup_awaiting_payment_trade();
-        System::set_block_number(10000);
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), trade_id));
+        let trade_id = setup_confirmed_then_refunded_trade();
 
         assert_ok!(NexMarket::dispute_trade(
             RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
@@ -2599,9 +2462,7 @@ fn resolve_dispute_refund_to_seller() {
 #[test]
 fn resolve_dispute_rejects_already_closed() {
     new_test_ext().execute_with(|| {
-        let trade_id = setup_awaiting_payment_trade();
-        System::set_block_number(10000);
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), trade_id));
+        let trade_id = setup_confirmed_then_refunded_trade();
 
         assert_ok!(NexMarket::dispute_trade(
             RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
@@ -2649,8 +2510,8 @@ fn place_sell_order_rejects_below_minimum() {
         let too_small = 999_999_999_999u128;
         assert_noop!(
             NexMarket::place_sell_order(
-                RuntimeOrigin::signed(ALICE), too_small, 500_000, tron_address(),
-            ),
+                RuntimeOrigin::signed(ALICE), too_small, 500_000, tron_address(), None,
+        ),
             Error::<Test>::OrderAmountBelowMinimum,
         );
     });
@@ -2680,7 +2541,7 @@ fn update_order_price_works() {
         let price = 500_000u64;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
         ));
 
         let new_price = 600_000u64;
@@ -2701,7 +2562,7 @@ fn update_order_price_rejects_non_owner() {
         let price = 500_000u64;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
         ));
 
         assert_noop!(
@@ -2718,7 +2579,7 @@ fn update_order_price_rejects_when_paused() {
         let nex = 100_000_000_000_000u128;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
         ));
         assert_ok!(NexMarket::force_pause_market(RuntimeOrigin::root()));
 
@@ -2809,7 +2670,7 @@ fn get_active_trades_filters_correctly() {
 
         // 超时后 → 不再活跃
         System::set_block_number(10000);
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(BOB), 0));
         let active = NexMarket::get_active_trades(&BOB);
         assert_eq!(active.len(), 0);
     });
@@ -2820,37 +2681,34 @@ fn get_active_trades_filters_correctly() {
 // ---- C1: resolve_dispute 传播国库转账失败 ----
 
 #[test]
-fn c1_resolve_dispute_fails_when_treasury_underfunded() {
+fn c1_resolve_dispute_treasury_underfunded_partial_compensation() {
     new_test_ext().execute_with(|| {
-        let trade_id = setup_awaiting_payment_trade();
+        let trade_id = setup_confirmed_then_refunded_trade();
 
-        // 超时 → Refunded
-        System::set_block_number(10000);
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), trade_id));
-
-        // 发起争议
         assert_ok!(NexMarket::dispute_trade(
             RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
         ));
 
         // 掏空国库余额（Treasury=99）
         let treasury_balance = Balances::free_balance(99u64);
-        // 转走国库资金使其不足以补偿 trade.nex_amount
         let _ = <Balances as Currency<u64>>::transfer(
             &99u64, &10u64, treasury_balance - 1, frame_support::traits::ExistenceRequirement::KeepAlive,
         );
 
-        // 解决争议应失败（国库余额不足）
-        assert_noop!(
-            NexMarket::resolve_dispute(
-                RuntimeOrigin::root(), trade_id, DisputeResolution::ReleaseToBuyer,
-            ),
-            Error::<Test>::InsufficientBalance,
-        );
+        let bob_before = Balances::free_balance(BOB);
 
-        // 争议仍为 Open
+        // C3: 国库余额不足时仍可裁决（尽力补偿，不阻断）
+        assert_ok!(NexMarket::resolve_dispute(
+            RuntimeOrigin::root(), trade_id, DisputeResolution::ReleaseToBuyer,
+        ));
+
+        // 争议已解决
         let dispute = NexMarket::trade_disputes(trade_id).unwrap();
-        assert_eq!(dispute.status, DisputeStatus::Open);
+        assert_eq!(dispute.status, DisputeStatus::ResolvedForBuyer);
+
+        // 国库余额 ≤ existential deposit → 无补偿
+        // （余额只剩 1，减去 minimum_balance 后可用为 0）
+        assert_eq!(Balances::free_balance(BOB), bob_before);
     });
 }
 
@@ -2936,7 +2794,7 @@ fn h1_update_sell_order_price_no_deposit_change() {
         let price = 500_000u64;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
         ));
 
         let alice_reserved = Balances::reserved_balance(ALICE);
@@ -2961,7 +2819,7 @@ fn h2_rollback_skips_expired_order() {
 
         // Alice 挂卖单
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
         ));
 
         // Bob 吃单（全量）→ 订单变 Filled，从订单簿移除
@@ -2976,7 +2834,7 @@ fn h2_rollback_skips_expired_order() {
         System::set_block_number(order.expires_at.saturating_add(1u64.into()));
 
         // 超时交易 → rollback_order_filled_amount
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(BOB), 0));
 
         // 订单应标记为 Expired，不应在订单簿中
         let order_after = NexMarket::orders(0).unwrap();
@@ -2998,7 +2856,7 @@ fn m1_reserve_sell_order_rejects_micro_fill() {
         let price = 500_000u64;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
         ));
 
         // 尝试吃 0.5 NEX（< MinOrderNexAmount = 1 NEX）
@@ -3043,7 +2901,7 @@ fn m1_reserve_sell_order_allows_tail_fill_below_minimum() {
         let price = 500_000u64;
 
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
         ));
 
         // 先吃 1 NEX → 剩余 0.5 NEX（低于最低限额）
@@ -3053,7 +2911,7 @@ fn m1_reserve_sell_order_allows_tail_fill_below_minimum() {
 
         // 超时第一笔交易让 Bob 可以再吃单
         System::set_block_number(10000);
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(BOB), 0));
 
         // 现在剩余 0.5 NEX < MinOrderNexAmount，尾单应该被允许
         // 注意：需要使用不同买家或确保 BOB 可以再次吃单
@@ -3081,7 +2939,7 @@ fn h1r2_rollback_preserves_cancelled_order_status() {
 
         // Alice 挂卖单
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
         ));
 
         // Bob 部分吃单（50 NEX）→ 订单变 PartiallyFilled
@@ -3098,7 +2956,7 @@ fn h1r2_rollback_preserves_cancelled_order_status() {
 
         // Bob 的交易超时 → rollback_order_filled_amount
         System::set_block_number(10000);
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(BOB), 0));
 
         // 订单状态应保持 Cancelled（不应被覆写为 Open）
         let order_after = NexMarket::orders(0).unwrap();
@@ -3122,7 +2980,7 @@ fn h1r2_rollback_preserves_expired_order_status_non_filled() {
 
         // Alice 挂卖单
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
         ));
 
         // Bob 部分吃单
@@ -3141,7 +2999,7 @@ fn h1r2_rollback_preserves_expired_order_status_non_filled() {
         assert_eq!(order_after_gc.status, OrderStatus::Expired);
 
         // 现在 Bob 交易超时 → rollback
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(BOB), 0));
 
         // 订单状态应保持 Expired
         let order_final = NexMarket::orders(0).unwrap();
@@ -3164,7 +3022,7 @@ fn m1r2_fee_actually_charged_equals_nex_deducted() {
 
         // Alice 挂卖单
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
         ));
 
         // Bob 吃单
@@ -3181,11 +3039,6 @@ fn m1r2_fee_actually_charged_equals_nex_deducted() {
         // 模拟 OCW 提交验证结果（Exact）
         assert_ok!(NexMarket::submit_ocw_result(
             RuntimeOrigin::none(), 0, 50_000_000, None,
-        ));
-
-        // claim reward 完成交易
-        assert_ok!(NexMarket::claim_verification_reward(
-            RuntimeOrigin::signed(CHARLIE), 0,
         ));
 
         let bob_free_after = Balances::free_balance(BOB);
@@ -3216,7 +3069,7 @@ fn m2r2_rollback_refreshes_best_ask() {
 
         // Alice 挂卖单
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
         ));
         assert_eq!(NexMarket::best_ask(), Some(price));
 
@@ -3233,7 +3086,7 @@ fn m2r2_rollback_refreshes_best_ask() {
 
         // 超时交易 → rollback → 订单重新入簿
         System::set_block_number(10000);
-        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(CHARLIE), 0));
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(BOB), 0));
 
         // 订单重新入簿，BestAsk 应该被刷新为 price
         let order_after = NexMarket::orders(0).unwrap();
@@ -3261,7 +3114,7 @@ fn l1r2_order_depth_excludes_expired_orders() {
 
         // Alice 挂卖单
         assert_ok!(NexMarket::place_sell_order(
-            RuntimeOrigin::signed(ALICE), nex, price, tron_address(),
+            RuntimeOrigin::signed(ALICE), nex, price, tron_address(), None,
         ));
 
         // 深度图应包含该卖单
@@ -3276,5 +3129,954 @@ fn l1r2_order_depth_excludes_expired_orders() {
         let (asks_after, _) = NexMarket::get_order_depth();
         assert_eq!(asks_after.len(), 0,
             "Expired orders should not appear in order depth");
+    });
+}
+
+// ==================== 审计新增功能测试 ====================
+
+// ---- seller_confirm_received ----
+
+#[test]
+fn seller_confirm_received_awaiting_payment() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        // W1: AwaitingPayment 状态不再允许卖家确认收款（防社工攻击）
+        assert_noop!(
+            NexMarket::seller_confirm_received(RuntimeOrigin::signed(ALICE), trade_id),
+            Error::<Test>::InvalidTradeStatus
+        );
+    });
+}
+
+#[test]
+fn seller_confirm_received_awaiting_verification() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), trade_id));
+
+        assert_ok!(NexMarket::seller_confirm_received(RuntimeOrigin::signed(ALICE), trade_id));
+
+        let trade = NexMarket::usdt_trades(trade_id).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Completed);
+    });
+}
+
+#[test]
+fn seller_confirm_received_rejects_non_seller() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        assert_noop!(
+            NexMarket::seller_confirm_received(RuntimeOrigin::signed(BOB), trade_id),
+            Error::<Test>::NotTradeParticipant
+        );
+    });
+}
+
+#[test]
+fn seller_confirm_received_rejects_completed() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        // 先让买家确认付款（进入 AwaitingVerification）
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), trade_id));
+        // 卖家确认收款 → Completed
+        assert_ok!(NexMarket::seller_confirm_received(RuntimeOrigin::signed(ALICE), trade_id));
+
+        assert_noop!(
+            NexMarket::seller_confirm_received(RuntimeOrigin::signed(ALICE), trade_id),
+            Error::<Test>::InvalidTradeStatus
+        );
+    });
+}
+
+// ---- ban_user / unban_user ----
+
+#[test]
+fn ban_user_blocks_place_sell_order() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(NexMarket::ban_user(RuntimeOrigin::root(), ALICE));
+        assert!(NexMarket::is_banned(ALICE));
+
+        assert_noop!(
+            NexMarket::place_sell_order(
+                RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
+            ),
+            Error::<Test>::UserIsBanned
+        );
+    });
+}
+
+#[test]
+fn ban_user_blocks_place_buy_order() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(NexMarket::ban_user(RuntimeOrigin::root(), BOB));
+
+        assert_noop!(
+            NexMarket::place_buy_order(
+                RuntimeOrigin::signed(BOB), 100_000_000_000_000, 500_000, buyer_tron(),
+            ),
+            Error::<Test>::UserIsBanned
+        );
+    });
+}
+
+#[test]
+fn ban_user_blocks_reserve_sell_order() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
+        ));
+        assert_ok!(NexMarket::ban_user(RuntimeOrigin::root(), BOB));
+
+        assert_noop!(
+            NexMarket::reserve_sell_order(RuntimeOrigin::signed(BOB), 0, None, buyer_tron()),
+            Error::<Test>::UserIsBanned
+        );
+    });
+}
+
+#[test]
+fn ban_user_blocks_confirm_payment() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        assert_ok!(NexMarket::ban_user(RuntimeOrigin::root(), BOB));
+
+        assert_noop!(
+            NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), trade_id),
+            Error::<Test>::UserIsBanned
+        );
+    });
+}
+
+#[test]
+fn unban_user_restores_access() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(NexMarket::ban_user(RuntimeOrigin::root(), ALICE));
+        assert!(NexMarket::is_banned(ALICE));
+
+        assert_ok!(NexMarket::unban_user(RuntimeOrigin::root(), ALICE));
+        assert!(!NexMarket::is_banned(ALICE));
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
+        ));
+    });
+}
+
+#[test]
+fn ban_user_rejects_non_admin() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            NexMarket::ban_user(RuntimeOrigin::signed(ALICE), BOB),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+// ---- submit_counter_evidence ----
+
+#[test]
+fn submit_counter_evidence_works() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_confirmed_then_refunded_trade();
+
+        assert_ok!(NexMarket::dispute_trade(
+            RuntimeOrigin::signed(BOB), trade_id, b"QmBuyerEvidence".to_vec(),
+        ));
+
+        // 卖家提交反驳
+        assert_ok!(NexMarket::submit_counter_evidence(
+            RuntimeOrigin::signed(ALICE), trade_id, b"QmSellerRebuttal".to_vec(),
+        ));
+
+        let dispute = NexMarket::trade_disputes(trade_id).unwrap();
+        assert!(dispute.counter_evidence_cid.is_some());
+        assert_eq!(dispute.counter_party, Some(ALICE));
+    });
+}
+
+#[test]
+fn submit_counter_evidence_rejects_initiator() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_confirmed_then_refunded_trade();
+        assert_ok!(NexMarket::dispute_trade(
+            RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
+        ));
+
+        assert_noop!(
+            NexMarket::submit_counter_evidence(
+                RuntimeOrigin::signed(BOB), trade_id, b"QmSelf".to_vec(),
+            ),
+            Error::<Test>::NotTradeParticipant
+        );
+    });
+}
+
+#[test]
+fn submit_counter_evidence_rejects_non_participant() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_confirmed_then_refunded_trade();
+        assert_ok!(NexMarket::dispute_trade(
+            RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
+        ));
+
+        assert_noop!(
+            NexMarket::submit_counter_evidence(
+                RuntimeOrigin::signed(CHARLIE), trade_id, b"QmOther".to_vec(),
+            ),
+            Error::<Test>::NotTradeParticipant
+        );
+    });
+}
+
+// ---- update_order_amount ----
+
+#[test]
+fn update_order_amount_sell_increase() {
+    new_test_ext().execute_with(|| {
+        let nex = 100_000_000_000_000u128;
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
+        ));
+        let reserved_before = Balances::reserved_balance(ALICE);
+
+        let new_amount = 200_000_000_000_000u128;
+        assert_ok!(NexMarket::update_order_amount(RuntimeOrigin::signed(ALICE), 0, new_amount));
+
+        let order = NexMarket::orders(0).unwrap();
+        assert_eq!(order.nex_amount, new_amount);
+        assert_eq!(Balances::reserved_balance(ALICE), reserved_before + 100_000_000_000_000);
+    });
+}
+
+#[test]
+fn update_order_amount_sell_decrease() {
+    new_test_ext().execute_with(|| {
+        let nex = 200_000_000_000_000u128;
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
+        ));
+        let reserved_before = Balances::reserved_balance(ALICE);
+
+        let new_amount = 100_000_000_000_000u128;
+        assert_ok!(NexMarket::update_order_amount(RuntimeOrigin::signed(ALICE), 0, new_amount));
+
+        let order = NexMarket::orders(0).unwrap();
+        assert_eq!(order.nex_amount, new_amount);
+        assert_eq!(Balances::reserved_balance(ALICE), reserved_before - 100_000_000_000_000);
+    });
+}
+
+#[test]
+fn update_order_amount_buy_recalculates_deposit() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        // 用 100 NEX 创建买单，然后减小到 10 NEX
+        // 两者 deposit 都是 MinBuyerDeposit=10 NEX（因为计算值 < 最低值）
+        // 验证买单修改金额时 deposit 字段被更新（即使金额相同也不出错）
+        let nex = 100_000_000_000_000u128;
+        assert_ok!(NexMarket::place_buy_order(
+            RuntimeOrigin::signed(BOB), nex, 500_000, buyer_tron(),
+        ));
+        let reserved_before = Balances::reserved_balance(BOB);
+
+        // 减小到 50 NEX（deposit 仍为 MinBuyerDeposit，但金额字段更新）
+        let new_amount = 50_000_000_000_000u128;
+        assert_ok!(NexMarket::update_order_amount(RuntimeOrigin::signed(BOB), 0, new_amount));
+
+        let order = NexMarket::orders(0).unwrap();
+        assert_eq!(order.nex_amount, new_amount);
+        // deposit 相同（MinBuyerDeposit），reserved 不变
+        assert_eq!(Balances::reserved_balance(BOB), reserved_before);
+
+        // 增大到 200 NEX
+        let new_amount_2 = 200_000_000_000_000u128;
+        assert_ok!(NexMarket::update_order_amount(RuntimeOrigin::signed(BOB), 0, new_amount_2));
+        let order = NexMarket::orders(0).unwrap();
+        assert_eq!(order.nex_amount, new_amount_2);
+    });
+}
+
+#[test]
+fn update_order_amount_rejects_below_filled() {
+    new_test_ext().execute_with(|| {
+        let nex = 100_000_000_000_000u128;
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
+        ));
+
+        // 部分成交
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, Some(50_000_000_000_000), buyer_tron(),
+        ));
+        // 完成交易释放 filled_amount
+        let trade = NexMarket::usdt_trades(0).unwrap();
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None));
+
+        // 尝试减少到低于已成交量
+        assert_noop!(
+            NexMarket::update_order_amount(RuntimeOrigin::signed(ALICE), 0, 10_000_000_000_000),
+            Error::<Test>::AmountBelowFilledAmount
+        );
+    });
+}
+
+#[test]
+fn update_order_amount_rejects_non_owner() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
+        ));
+        assert_noop!(
+            NexMarket::update_order_amount(RuntimeOrigin::signed(BOB), 0, 200_000_000_000_000),
+            Error::<Test>::NotOrderOwner
+        );
+    });
+}
+
+#[test]
+fn update_order_amount_rejects_active_trades() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        // 创建大卖单，然后部分成交（保持 PartiallyFilled + 活跃交易）
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), 200_000_000_000_000, 500_000, tron_address(), None,
+        ));
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, Some(50_000_000_000_000), buyer_tron(),
+        ));
+        // 订单是 PartiallyFilled，交易在 AwaitingPayment
+        let order = NexMarket::orders(0).unwrap();
+        assert_eq!(order.status, OrderStatus::PartiallyFilled);
+
+        assert_noop!(
+            NexMarket::update_order_amount(RuntimeOrigin::signed(ALICE), 0, 300_000_000_000_000),
+            Error::<Test>::OrderHasActiveTrades
+        );
+    });
+}
+
+// ---- batch_force_settle / batch_force_cancel ----
+
+#[test]
+fn batch_force_cancel_works() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        // 创建 2 笔交易
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
+        ));
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, Some(50_000_000_000_000), buyer_tron(),
+        ));
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
+        ));
+
+        let ids: BoundedVec<u64, ConstU32<20>> = vec![0, 1].try_into().unwrap();
+        assert_ok!(NexMarket::batch_force_cancel(RuntimeOrigin::root(), ids));
+
+        assert_eq!(NexMarket::usdt_trades(0).unwrap().status, UsdtTradeStatus::Refunded);
+        assert_eq!(NexMarket::usdt_trades(1).unwrap().status, UsdtTradeStatus::Refunded);
+    });
+}
+
+#[test]
+fn batch_force_settle_works() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
+        ));
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
+        ));
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
+
+        let ids: BoundedVec<u64, ConstU32<20>> = vec![0].try_into().unwrap();
+        assert_ok!(NexMarket::batch_force_settle(
+            RuntimeOrigin::root(), ids, 50_000_000, DisputeResolution::ReleaseToBuyer,
+        ));
+
+        assert_eq!(NexMarket::usdt_trades(0).unwrap().status, UsdtTradeStatus::Completed);
+    });
+}
+
+#[test]
+fn batch_force_cancel_partial_failure() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
+        ));
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
+        ));
+
+        // trade_id 0 有效, trade_id 99 不存在
+        let ids: BoundedVec<u64, ConstU32<20>> = vec![0, 99].try_into().unwrap();
+        assert_ok!(NexMarket::batch_force_cancel(RuntimeOrigin::root(), ids));
+
+        // trade 0 已取消, 事件记录 1 成功 1 失败
+        assert_eq!(NexMarket::usdt_trades(0).unwrap().status, UsdtTradeStatus::Refunded);
+    });
+}
+
+#[test]
+fn batch_rejects_non_admin() {
+    new_test_ext().execute_with(|| {
+        let ids: BoundedVec<u64, ConstU32<20>> = vec![0].try_into().unwrap();
+        assert_noop!(
+            NexMarket::batch_force_cancel(RuntimeOrigin::signed(ALICE), ids),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+// ---- min_fill_amount ----
+
+#[test]
+fn min_fill_amount_blocks_small_fill() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128;
+        let min_fill = 50_000_000_000_000u128; // 50 NEX
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), Some(min_fill),
+        ));
+
+        let order = NexMarket::orders(0).unwrap();
+        assert_eq!(order.min_fill_amount, min_fill);
+
+        // 尝试吃单 10 NEX < 50 NEX 最低限额 → 拒绝
+        assert_noop!(
+            NexMarket::reserve_sell_order(
+                RuntimeOrigin::signed(BOB), 0, Some(10_000_000_000_000), buyer_tron(),
+            ),
+            Error::<Test>::BelowMinFillAmount
+        );
+    });
+}
+
+#[test]
+fn min_fill_amount_allows_at_minimum() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128;
+        let min_fill = 50_000_000_000_000u128;
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), Some(min_fill),
+        ));
+
+        // 吃单 50 NEX = 最低限额 → 成功
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, Some(min_fill), buyer_tron(),
+        ));
+    });
+}
+
+#[test]
+fn min_fill_amount_tail_fill_exempt() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 60_000_000_000_000u128; // 60 NEX
+        let min_fill = 50_000_000_000_000u128; // 50 NEX
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), Some(min_fill),
+        ));
+
+        // 先吃 50 NEX
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, Some(min_fill), buyer_tron(),
+        ));
+        // 完成交易
+        let trade = NexMarket::usdt_trades(0).unwrap();
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None));
+
+        // 剩余 10 NEX < min_fill(50 NEX) → 尾单豁免
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
+        ));
+    });
+}
+
+#[test]
+fn min_fill_amount_zero_means_no_restriction() {
+    new_test_ext().execute_with(|| {
+        let nex = 100_000_000_000_000u128;
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
+        ));
+
+        let order = NexMarket::orders(0).unwrap();
+        assert!(order.min_fill_amount.is_zero());
+
+        // 小额吃单可以
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, Some(1_000_000_000_000), buyer_tron(),
+        ));
+    });
+}
+
+// ---- MaxOrderNexAmount ----
+
+#[test]
+fn max_order_nex_amount_rejects_sell() {
+    new_test_ext().execute_with(|| {
+        // MaxOrderNexAmount = 500 NEX in mock
+        assert_noop!(
+            NexMarket::place_sell_order(
+                RuntimeOrigin::signed(ALICE), 501_000_000_000_000, 500_000, tron_address(), None,
+            ),
+            Error::<Test>::OrderAmountTooLarge
+        );
+    });
+}
+
+#[test]
+fn max_order_nex_amount_rejects_buy() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            NexMarket::place_buy_order(
+                RuntimeOrigin::signed(BOB), 501_000_000_000_000, 500_000, buyer_tron(),
+            ),
+            Error::<Test>::OrderAmountTooLarge
+        );
+    });
+}
+
+#[test]
+fn max_order_nex_amount_allows_at_limit() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), 500_000_000_000_000, 500_000, tron_address(), None,
+        ));
+    });
+}
+
+// ---- DisputeWindowBlocks ----
+
+#[test]
+fn dispute_window_blocks_rejects_expired() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_confirmed_then_refunded_trade();
+
+        let trade = NexMarket::usdt_trades(trade_id).unwrap();
+        // W5: 窗口锚定 completed_at（block 8000），+ DisputeWindowBlocks(100800) = 108800
+        let anchor: u64 = trade.completed_at.unwrap().into();
+        System::set_block_number(anchor + 100801);
+
+        assert_noop!(
+            NexMarket::dispute_trade(
+                RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
+            ),
+            Error::<Test>::DisputeWindowExpired
+        );
+    });
+}
+
+#[test]
+fn dispute_window_blocks_allows_within_window() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_confirmed_then_refunded_trade();
+
+        let trade = NexMarket::usdt_trades(trade_id).unwrap();
+        // W5: 窗口锚定 completed_at
+        let anchor: u64 = trade.completed_at.unwrap().into();
+        System::set_block_number(anchor + 100800); // 恰好在窗口边界
+
+        assert_ok!(NexMarket::dispute_trade(
+            RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
+        ));
+    });
+}
+
+// ---- process_timeout 调用者限制 ----
+
+#[test]
+fn process_timeout_rejects_non_participant() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        System::set_block_number(10000);
+
+        assert_noop!(
+            NexMarket::process_timeout(RuntimeOrigin::signed(DAVE), trade_id),
+            Error::<Test>::NotParticipantOrAdmin
+        );
+    });
+}
+
+#[test]
+fn process_timeout_allows_admin() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        System::set_block_number(10000);
+
+        // Root 是 MarketAdminOrigin
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::root(), trade_id));
+    });
+}
+
+#[test]
+fn process_timeout_allows_buyer() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        System::set_block_number(10000);
+
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(BOB), trade_id));
+    });
+}
+
+#[test]
+fn process_timeout_allows_seller() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        System::set_block_number(10000);
+
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(ALICE), trade_id));
+    });
+}
+
+// ---- resolve_dispute C3: Completed 不双重支付 ----
+
+#[test]
+fn resolve_dispute_completed_trade_no_double_payment() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        // 创建并完成交易
+        let nex = 100_000_000_000_000u128;
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
+        ));
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
+        ));
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
+        let trade = NexMarket::usdt_trades(0).unwrap();
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None));
+
+        // Completed 状态
+        let trade = NexMarket::usdt_trades(0).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Completed);
+
+        let bob_after_trade = Balances::free_balance(BOB);
+        let treasury_before = Balances::free_balance(99u64);
+
+        // 发起争议（Completed 现在可争议）
+        assert_ok!(NexMarket::dispute_trade(
+            RuntimeOrigin::signed(BOB), 0, b"QmTest".to_vec(),
+        ));
+
+        // 裁决为 ReleaseToBuyer
+        assert_ok!(NexMarket::resolve_dispute(
+            RuntimeOrigin::root(), 0, DisputeResolution::ReleaseToBuyer,
+        ));
+
+        // C3: Completed 交易不再从国库补偿（买家已拿到 NEX）
+        assert_eq!(Balances::free_balance(BOB), bob_after_trade);
+        assert_eq!(Balances::free_balance(99u64), treasury_before);
+
+        let dispute = NexMarket::trade_disputes(0).unwrap();
+        assert_eq!(dispute.status, DisputeStatus::ResolvedForBuyer);
+    });
+}
+
+// ---- resolve_dispute A3: Refunded 交易部分补偿 ----
+
+#[test]
+fn resolve_dispute_refunded_trade_full_compensation() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_confirmed_then_refunded_trade();
+
+        assert_ok!(NexMarket::dispute_trade(
+            RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
+        ));
+
+        let bob_before = Balances::free_balance(BOB);
+        assert_ok!(NexMarket::resolve_dispute(
+            RuntimeOrigin::root(), trade_id, DisputeResolution::ReleaseToBuyer,
+        ));
+
+        // Refunded 交易 → 从国库补偿 NEX 给买家
+        assert!(Balances::free_balance(BOB) > bob_before);
+    });
+}
+
+// ===================== WARNING 修复验证测试 =====================
+
+// ---- W1: seller_confirm_received 仅允许 AwaitingVerification / UnderpaidPending ----
+
+#[test]
+fn w1_seller_confirm_awaiting_verification_works() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), trade_id));
+
+        let trade = NexMarket::usdt_trades(trade_id).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::AwaitingVerification);
+
+        let bob_before = Balances::free_balance(BOB);
+        assert_ok!(NexMarket::seller_confirm_received(RuntimeOrigin::signed(ALICE), trade_id));
+
+        let trade = NexMarket::usdt_trades(trade_id).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Completed);
+        assert!(Balances::free_balance(BOB) > bob_before);
+    });
+}
+
+#[test]
+fn w1_seller_confirm_awaiting_payment_rejected() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        assert_noop!(
+            NexMarket::seller_confirm_received(RuntimeOrigin::signed(ALICE), trade_id),
+            Error::<Test>::InvalidTradeStatus
+        );
+    });
+}
+
+// ---- W2: ban_user 取消已有挂单 ----
+
+#[test]
+fn w2_ban_user_cancels_open_orders() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128;
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
+        ));
+        assert!(!NexMarket::sell_orders().is_empty());
+
+        let alice_reserved = Balances::reserved_balance(ALICE);
+        assert!(alice_reserved > 0);
+
+        assert_ok!(NexMarket::ban_user(RuntimeOrigin::root(), ALICE));
+
+        assert!(NexMarket::sell_orders().is_empty());
+        let order = NexMarket::orders(0).unwrap();
+        assert_eq!(order.status, OrderStatus::Cancelled);
+        assert_eq!(Balances::reserved_balance(ALICE), 0);
+    });
+}
+
+#[test]
+fn w2_ban_user_skips_orders_with_active_trades() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 200_000_000_000_000u128;
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
+        ));
+        // 创建一个交易（部分成交），使 order 有活跃 trade
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, Some(100_000_000_000_000u128), buyer_tron(),
+        ));
+
+        assert_ok!(NexMarket::ban_user(RuntimeOrigin::root(), ALICE));
+
+        // 订单仍存在（有活跃交易不能取消）
+        let order = NexMarket::orders(0).unwrap();
+        assert_eq!(order.status, OrderStatus::PartiallyFilled);
+    });
+}
+
+#[test]
+fn w2_ban_user_cancels_buy_order_refunds_deposit() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128;
+        // ALICE 创建卖单
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
+        ));
+        // BOB 创建买单
+        assert_ok!(NexMarket::place_buy_order(
+            RuntimeOrigin::signed(BOB), nex, 500_000, buyer_tron(),
+        ));
+
+        let bob_reserved = Balances::reserved_balance(BOB);
+        assert!(bob_reserved > 0);
+
+        assert_ok!(NexMarket::ban_user(RuntimeOrigin::root(), BOB));
+
+        // 买单已取消，保证金已退还
+        let order = NexMarket::orders(1).unwrap();
+        assert_eq!(order.status, OrderStatus::Cancelled);
+        assert_eq!(Balances::reserved_balance(BOB), 0);
+    });
+}
+
+// ---- W3: submit_counter_evidence 不可覆盖 ----
+
+#[test]
+fn w3_counter_evidence_immutable() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_confirmed_then_refunded_trade();
+
+        assert_ok!(NexMarket::dispute_trade(
+            RuntimeOrigin::signed(BOB), trade_id, b"QmBuyerEvidence".to_vec(),
+        ));
+        assert_ok!(NexMarket::submit_counter_evidence(
+            RuntimeOrigin::signed(ALICE), trade_id, b"QmFirstRebuttal".to_vec(),
+        ));
+
+        // 二次提交应被拒绝
+        assert_noop!(
+            NexMarket::submit_counter_evidence(
+                RuntimeOrigin::signed(ALICE), trade_id, b"QmSecondRebuttal".to_vec(),
+            ),
+            Error::<Test>::CounterEvidenceAlreadySubmitted
+        );
+
+        let dispute = NexMarket::trade_disputes(trade_id).unwrap();
+        assert_eq!(
+            dispute.counter_evidence_cid.unwrap().to_vec(),
+            b"QmFirstRebuttal".to_vec()
+        );
+    });
+}
+
+// ---- W5: 争议窗口锚定 completed_at ----
+
+#[test]
+fn w5_completed_at_set_on_full_payment() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), trade_id));
+
+        System::set_block_number(50);
+        assert_ok!(NexMarket::seller_confirm_received(RuntimeOrigin::signed(ALICE), trade_id));
+
+        let trade = NexMarket::usdt_trades(trade_id).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Completed);
+        assert_eq!(trade.completed_at, Some(50));
+    });
+}
+
+#[test]
+fn w5_completed_at_set_on_refund() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_confirmed_then_refunded_trade();
+        let trade = NexMarket::usdt_trades(trade_id).unwrap();
+        assert_eq!(trade.completed_at, Some(8000));
+    });
+}
+
+#[test]
+fn w5_dispute_window_uses_completed_at_not_timeout_at() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_confirmed_then_refunded_trade();
+        let trade = NexMarket::usdt_trades(trade_id).unwrap();
+        let completed: u64 = trade.completed_at.unwrap().into();
+        let timeout: u64 = trade.timeout_at.into();
+
+        // completed_at (8000) > timeout_at (7201)
+        assert!(completed > timeout);
+
+        // 在 timeout_at + window 之后但 completed_at + window 之前 → 仍可争议
+        System::set_block_number(completed + 100800);
+        assert_ok!(NexMarket::dispute_trade(
+            RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
+        ));
+    });
+}
+
+// ---- W6: Refunded 交易需 payment_confirmed ----
+
+#[test]
+fn w6_refunded_without_payment_not_disputable() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        // 直接超时（未 confirm_payment） → Refunded 但 payment_confirmed=false
+        System::set_block_number(10000);
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(BOB), trade_id));
+
+        let trade = NexMarket::usdt_trades(trade_id).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Refunded);
+        assert!(!trade.payment_confirmed);
+
+        assert_noop!(
+            NexMarket::dispute_trade(
+                RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
+            ),
+            Error::<Test>::PaymentNotConfirmed
+        );
+    });
+}
+
+#[test]
+fn w6_refunded_with_payment_is_disputable() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_confirmed_then_refunded_trade();
+
+        let trade = NexMarket::usdt_trades(trade_id).unwrap();
+        assert!(trade.payment_confirmed);
+
+        assert_ok!(NexMarket::dispute_trade(
+            RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
+        ));
+    });
+}
+
+#[test]
+fn w6_completed_trade_disputable_without_payment_confirmed_check() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), trade_id));
+        assert_ok!(NexMarket::seller_confirm_received(RuntimeOrigin::signed(ALICE), trade_id));
+
+        let trade = NexMarket::usdt_trades(trade_id).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Completed);
+
+        // Completed 交易不受 payment_confirmed 限制
+        assert_ok!(NexMarket::dispute_trade(
+            RuntimeOrigin::signed(BOB), trade_id, b"QmTest".to_vec(),
+        ));
+    });
+}
+
+// ---- W8: submit_ocw_result 结算失败时保留 OCW 结果 ----
+
+#[test]
+fn w8_ocw_result_stored_before_settlement() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), trade_id));
+
+        // usdt_amount = 100 NEX * 0.5 USDT = 50_000_000 usdt units
+        // 70% = 35_000_000 → Underpaid（5000~9950 bps）→ 进入 UnderpaidPending
+        assert_ok!(NexMarket::submit_ocw_result(
+            RuntimeOrigin::none(), trade_id, 35_000_000, None,
+        ));
+
+        let trade = NexMarket::usdt_trades(trade_id).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::UnderpaidPending);
+
+        // W8: Underpaid 结果保留在存储中，供补付/手动结算使用
+        assert!(NexMarket::ocw_verification_results(trade_id).is_some());
+    });
+}
+
+#[test]
+fn w8_ocw_result_cleaned_on_exact_settlement() {
+    new_test_ext().execute_with(|| {
+        let trade_id = setup_awaiting_payment_trade();
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), trade_id));
+
+        assert_ok!(NexMarket::submit_ocw_result(
+            RuntimeOrigin::none(), trade_id, 500_000, None,
+        ));
+
+        // Exact 结算成功 → OCW 结果已清理
+        let result = NexMarket::ocw_verification_results(trade_id);
+        assert!(result.is_none());
+
+        let trade = NexMarket::usdt_trades(trade_id).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Completed);
     });
 }

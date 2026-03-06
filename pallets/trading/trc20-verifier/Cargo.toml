@@ -1,6 +1,6 @@
 [package]
 name = "pallet-trading-trc20-verifier"
-version = "0.3.0"
+version = "0.4.0"
 description = "TRC20 交易验证共享库 - OCW HTTP 客户端、端点健康评分、TronGrid API 解析"
 authors = ["Nexus Team"]
 edition = "2021"

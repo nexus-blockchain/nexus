@@ -325,14 +325,12 @@ pub mod pallet {
 
     // ==================== P6: 市场状态枚举 ====================
 
-    /// 市场状态（区分暂停和永久关闭）
+    /// 市场状态
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
     pub enum MarketStatus {
-        /// 活跃
+        /// 活跃（暂停通过 MarketConfig.paused 控制）
         #[default]
         Active,
-        /// 暂停（可恢复）
-        Paused,
         /// 已关闭（不可恢复，所有订单已清退）
         Closed,
     }
@@ -513,6 +511,11 @@ pub mod pallet {
             // 审计修复 M1-R6: 更新受影响实体的最优价格缓存
             for entity_id in affected_entities {
                 Self::update_best_prices(entity_id);
+            }
+
+            // 审计修复 C2-R10: on_idle 清理过期订单时发出事件，供链下索引器追踪
+            if cleaned > 0 {
+                Self::deposit_event(Event::ExpiredOrdersAutoCleaned { count: cleaned });
             }
 
             // 审计修复 M1-R9: 返回实际消耗的权重（包含所有扫描 + 清理的开销）
@@ -703,7 +706,7 @@ pub mod pallet {
 
     // ==================== P6: 市场状态存储 ====================
 
-    /// 实体市场状态（Active/Paused/Closed）
+    /// 实体市场状态（Active / Closed）
     #[pallet::storage]
     pub type MarketStatusStorage<T: Config> = StorageMap<
         _,
@@ -843,6 +846,10 @@ pub mod pallet {
         MarketForceClosed {
             entity_id: u64,
             orders_cancelled: u32,
+        },
+        /// 审计修复 C2-R10: on_idle 自动清理过期订单
+        ExpiredOrdersAutoCleaned {
+            count: u32,
         },
     }
 
@@ -1335,13 +1342,21 @@ pub mod pallet {
             // H6 审计修复: TTL 最小值验证（防止立即过期）
             ensure!(order_ttl >= 10, Error::<T>::OrderTtlTooShort);
 
+            let was_enabled = MarketConfigs::<T>::get(entity_id)
+                .map(|c| c.nex_enabled)
+                .unwrap_or(false);
+
             MarketConfigs::<T>::mutate(entity_id, |maybe_config| {
                 let config = maybe_config.get_or_insert_with(Default::default);
                 config.nex_enabled = nex_enabled;
                 config.min_order_amount = min_order_amount;
                 config.order_ttl = order_ttl;
-                // paused 状态不变，由 pause_market/resume_market 控制
             });
+
+            // 审计修复 H2-R10: 禁用市场时自动取消所有活跃订单，退还锁定资产
+            if was_enabled && !nex_enabled {
+                Self::do_cancel_all_entity_orders(entity_id);
+            }
 
             Self::deposit_event(Event::MarketConfigured { entity_id });
 
@@ -1548,6 +1563,12 @@ pub mod pallet {
             ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);
             ensure!(!max_cost.is_zero(), Error::<T>::ZeroPrice);
 
+            // 审计修复 S3-R11: 市价单也需要 min_order_amount 检查
+            let config = MarketConfigs::<T>::get(entity_id).unwrap_or_default();
+            if config.min_order_amount > 0 {
+                ensure!(token_amount.into() >= config.min_order_amount, Error::<T>::OrderAmountBelowMinimum);
+            }
+
             // 获取卖单列表（按价格升序排列）
             let mut sell_orders = Self::get_sorted_sell_orders(entity_id);
             ensure!(!sell_orders.is_empty(), Error::<T>::NoOrdersAvailable);
@@ -1606,6 +1627,12 @@ pub mod pallet {
 
             // 验证参数
             ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);
+
+            // 审计修复 S3-R11: 市价单也需要 min_order_amount 检查
+            let config = MarketConfigs::<T>::get(entity_id).unwrap_or_default();
+            if config.min_order_amount > 0 {
+                ensure!(token_amount.into() >= config.min_order_amount, Error::<T>::OrderAmountBelowMinimum);
+            }
 
             // 检查用户 Token 余额
             let balance = T::TokenProvider::token_balance(entity_id, &who);
@@ -2111,12 +2138,21 @@ pub mod pallet {
             ensure!(MarketStatusStorage::<T>::get(entity_id) != MarketStatus::Closed, Error::<T>::MarketAlreadyClosed);
             ensure!(order_ttl >= 10, Error::<T>::OrderTtlTooShort);
 
+            let was_enabled = MarketConfigs::<T>::get(entity_id)
+                .map(|c| c.nex_enabled)
+                .unwrap_or(false);
+
             MarketConfigs::<T>::mutate(entity_id, |maybe_config| {
                 let config = maybe_config.get_or_insert_with(Default::default);
                 config.nex_enabled = nex_enabled;
                 config.min_order_amount = min_order_amount;
                 config.order_ttl = order_ttl;
             });
+
+            // 审计修复 S1-R11: 与 configure_market H2-R10 一致，禁用时自动取消订单
+            if was_enabled && !nex_enabled {
+                Self::do_cancel_all_entity_orders(entity_id);
+            }
 
             Self::deposit_event(Event::MarketConfigured { entity_id });
             Ok(())
@@ -2159,6 +2195,10 @@ pub mod pallet {
             );
             ensure!(!price.is_zero(), Error::<T>::ZeroPrice);
             ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);
+            let config = MarketConfigs::<T>::get(entity_id).unwrap_or_default();
+            if config.min_order_amount > 0 {
+                ensure!(token_amount.into() >= config.min_order_amount, Error::<T>::OrderAmountBelowMinimum);
+            }
             Self::check_price_deviation(entity_id, price)?;
 
             // 预锁定资产
@@ -2231,7 +2271,10 @@ pub mod pallet {
             );
             ensure!(!price.is_zero(), Error::<T>::ZeroPrice);
             ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);
-            // 审计修复 H1: FOK 订单也需要价格偏离检查（与 IOC/限价单一致）
+            let config = MarketConfigs::<T>::get(entity_id).unwrap_or_default();
+            if config.min_order_amount > 0 {
+                ensure!(token_amount.into() >= config.min_order_amount, Error::<T>::OrderAmountBelowMinimum);
+            }
             Self::check_price_deviation(entity_id, price)?;
 
             // 审计修复 H1-R6: 排除自己的订单（do_cross_match 会跳过自撮合）
@@ -2307,17 +2350,22 @@ pub mod pallet {
             );
             ensure!(!price.is_zero(), Error::<T>::ZeroPrice);
             ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);
+            let config = MarketConfigs::<T>::get(entity_id).unwrap_or_default();
+            if config.min_order_amount > 0 {
+                ensure!(token_amount.into() >= config.min_order_amount, Error::<T>::OrderAmountBelowMinimum);
+            }
             Self::check_price_deviation(entity_id, price)?;
 
             // Post-Only: 检查价格不会立即撮合
+            // 审计修复 R2-R10: 使用动态计算替代缓存，避免过期订单导致误判
             let would_match = match side {
                 OrderSide::Buy => {
-                    BestAsk::<T>::get(entity_id)
+                    Self::calculate_best_ask(entity_id)
                         .map(|ask| price >= ask)
                         .unwrap_or(false)
                 }
                 OrderSide::Sell => {
-                    BestBid::<T>::get(entity_id)
+                    Self::calculate_best_bid(entity_id)
                         .map(|bid| price <= bid)
                         .unwrap_or(false)
                 }
@@ -2361,6 +2409,68 @@ pub mod pallet {
 
             Ok(())
         }
+
+        /// 审计修复 H3-R10: 治理级价格保护配置（Root 调用，绕过 owner 检查）
+        #[pallet::call_index(41)]
+        #[pallet::weight(Weight::from_parts(25_000_000, 3_000))]
+        pub fn governance_configure_price_protection(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            enabled: bool,
+            max_price_deviation: u16,
+            max_slippage: u16,
+            circuit_breaker_threshold: u16,
+            min_trades_for_twap: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+
+            ensure!(max_price_deviation <= 10000, Error::<T>::InvalidBasisPoints);
+            ensure!(max_slippage <= 10000, Error::<T>::InvalidBasisPoints);
+            ensure!(circuit_breaker_threshold <= 10000, Error::<T>::InvalidBasisPoints);
+
+            let mut config = PriceProtection::<T>::get(entity_id).unwrap_or_default();
+            config.enabled = enabled;
+            config.max_price_deviation = max_price_deviation;
+            config.max_slippage = max_slippage;
+            config.circuit_breaker_threshold = circuit_breaker_threshold;
+            config.min_trades_for_twap = min_trades_for_twap;
+            PriceProtection::<T>::insert(entity_id, config);
+
+            Self::deposit_event(Event::PriceProtectionConfigured {
+                entity_id,
+                enabled,
+                max_deviation: max_price_deviation,
+                max_slippage,
+            });
+
+            Ok(())
+        }
+
+        /// 审计修复 H4-R10: Root 强制解除熔断（无需等待到期）
+        #[pallet::call_index(42)]
+        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+        pub fn force_lift_circuit_breaker(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+
+            let config = PriceProtection::<T>::get(entity_id).unwrap_or_default();
+            ensure!(config.circuit_breaker_active, Error::<T>::CircuitBreakerNotActive);
+
+            PriceProtection::<T>::mutate(entity_id, |maybe_config| {
+                if let Some(config) = maybe_config {
+                    config.circuit_breaker_active = false;
+                    config.circuit_breaker_until = 0;
+                }
+            });
+
+            Self::deposit_event(Event::CircuitBreakerLifted { entity_id });
+
+            Ok(())
+        }
     }
 
     // ==================== 内部函数 ====================
@@ -2390,11 +2500,22 @@ pub mod pallet {
         }
 
         /// 审计修复 H2-R7: 独立的熔断器检查（市价单/吃单不经过 check_price_deviation）
+        /// 审计修复 S2-R11: 到期后自动清理存储状态，避免 circuit_breaker_active 残留
         fn ensure_circuit_breaker_inactive(entity_id: u64) -> DispatchResult {
             if let Some(config) = PriceProtection::<T>::get(entity_id) {
                 if config.enabled && config.circuit_breaker_active {
                     let current_block: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
-                    ensure!(current_block >= config.circuit_breaker_until, Error::<T>::MarketCircuitBreakerActive);
+                    if current_block < config.circuit_breaker_until {
+                        return Err(Error::<T>::MarketCircuitBreakerActive.into());
+                    }
+                    // 到期后自动清理存储
+                    PriceProtection::<T>::mutate(entity_id, |maybe_config| {
+                        if let Some(c) = maybe_config {
+                            c.circuit_breaker_active = false;
+                            c.circuit_breaker_until = 0;
+                        }
+                    });
+                    Self::deposit_event(Event::CircuitBreakerLifted { entity_id });
                 }
             }
             Ok(())
@@ -3211,8 +3332,18 @@ pub mod pallet {
 
             // 检查熔断状态
             let current_block: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
-            if config.circuit_breaker_active && current_block < config.circuit_breaker_until {
-                return Err(Error::<T>::MarketCircuitBreakerActive);
+            if config.circuit_breaker_active {
+                if current_block < config.circuit_breaker_until {
+                    return Err(Error::<T>::MarketCircuitBreakerActive);
+                }
+                // 审计修复 S2-R11: 到期后自动清理存储
+                PriceProtection::<T>::mutate(entity_id, |maybe_config| {
+                    if let Some(c) = maybe_config {
+                        c.circuit_breaker_active = false;
+                        c.circuit_breaker_until = 0;
+                    }
+                });
+                Self::deposit_event(Event::CircuitBreakerLifted { entity_id });
             }
 
             // 获取参考价格

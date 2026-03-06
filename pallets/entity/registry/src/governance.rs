@@ -220,6 +220,13 @@ impl<T: Config> Pallet<T> {
         // M2-R12: 清理销售数据（banned 实体不应保留统计）
         EntitySales::<T>::remove(entity_id);
 
+        // M2 审计修复: 清理推荐关系（释放推荐人的 MaxReferralsPerReferrer 配额）
+        if let Some(referrer) = EntityReferrer::<T>::take(entity_id) {
+            ReferrerEntities::<T>::mutate(&referrer, |entities| {
+                entities.retain(|&id| id != entity_id);
+            });
+        }
+
         if entity.status == EntityStatus::Active {
             EntityStats::<T>::mutate(|stats| {
                 stats.active_entities = stats.active_entities.saturating_sub(1);
@@ -256,6 +263,14 @@ impl<T: Config> Pallet<T> {
         let owner = Entities::<T>::try_mutate(entity_id, |maybe_entity| -> Result<T::AccountId, sp_runtime::DispatchError> {
             let entity = maybe_entity.as_mut().ok_or(Error::<T>::EntityNotFound)?;
             ensure!(entity.status == EntityStatus::Banned, Error::<T>::InvalidEntityStatus);
+
+            // H1 审计修复: 预占名称索引（防止 Pending 期间名称被抢注）
+            let normalized = Self::normalize_entity_name(&entity.name)?;
+            ensure!(
+                !EntityNameIndex::<T>::contains_key(&normalized),
+                Error::<T>::NameAlreadyTaken
+            );
+            EntityNameIndex::<T>::insert(&normalized, entity_id);
 
             entity.status = EntityStatus::Pending;
             Ok(entity.owner.clone())
@@ -353,35 +368,18 @@ impl<T: Config> Pallet<T> {
 
     /// 治理拒绝关闭申请（PendingClose → Active/Suspended）
     pub(crate) fn do_reject_close_request(entity_id: u64) -> sp_runtime::DispatchResult {
-        let treasury_account = Self::entity_treasury_account(entity_id);
-        let balance = T::Currency::free_balance(&treasury_account);
-        let min_balance = T::MinOperatingBalance::get();
-        let restore_to_active = balance >= min_balance
-            && !GovernanceSuspended::<T>::get(entity_id)
-            && !OwnerPaused::<T>::get(entity_id);
+        // L3 审计修复: 使用共用 helper 消除重复逻辑
+        let restore_to_active = Self::should_restore_to_active(entity_id);
 
         Entities::<T>::try_mutate(entity_id, |maybe_entity| -> sp_runtime::DispatchResult {
             let entity = maybe_entity.as_mut().ok_or(Error::<T>::EntityNotFound)?;
             ensure!(entity.status == EntityStatus::PendingClose, Error::<T>::InvalidEntityStatus);
 
-            if restore_to_active {
-                entity.status = EntityStatus::Active;
-            } else {
-                entity.status = EntityStatus::Suspended;
-            }
+            entity.status = if restore_to_active { EntityStatus::Active } else { EntityStatus::Suspended };
             Ok(())
         })?;
 
-        // 清理关闭申请记录
-        EntityCloseRequests::<T>::remove(entity_id);
-
-        // request_close_entity 仅在 was_active 时递减 active_entities
-        // 恢复时仅在恢复到 Active 时递增
-        if restore_to_active {
-            EntityStats::<T>::mutate(|stats| {
-                stats.active_entities = stats.active_entities.saturating_add(1);
-            });
-        }
+        Self::finalize_pending_close_restore(entity_id, restore_to_active);
 
         Self::deposit_event(Event::CloseRequestRejected { entity_id });
         Ok(())

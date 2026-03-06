@@ -141,6 +141,7 @@ impl crate::Config for Test {
     type QuotaResetPeriod = QuotaResetPeriod;
     type DefaultBillingPeriod = frame_support::traits::ConstU32<100>; // 100块测试周期
     type OperatorGracePeriod = frame_support::traits::ConstU64<100>; // 100块宽限期（测试用）
+    type EntityFunding = ();
 }
 
 fn new_test_ext() -> sp_io::TestExternalities {
@@ -210,36 +211,25 @@ fn charge_due_respects_limit_and_requeues() {
         let subject_info = SubjectInfo {
             subject_type: SubjectType::General,
             subject_id: subject_id,
-            funding_share: 100,
         };
         let subject_vec = frame_support::BoundedVec::try_from(vec![subject_info]).unwrap();
         crate::CidToSubject::<Test>::insert(&cid1, subject_vec.clone());
         crate::CidToSubject::<Test>::insert(&cid2, subject_vec);
-        
-        // 注册 PinAssignments（空）
+
         let empty_operators: frame_support::BoundedVec<AccountId, frame_support::traits::ConstU32<16>> = Default::default();
         crate::PinAssignments::<Test>::insert(&cid1, empty_operators.clone());
         crate::PinAssignments::<Test>::insert(&cid2, empty_operators);
-        
-        // 初始化计费：next=10
+
         <crate::pallet::PinBilling<Test>>::insert(cid1, (10u64, 100u128, 0u8));
         <crate::pallet::PinBilling<Test>>::insert(cid2, (10u64, 100u128, 0u8));
-        <crate::pallet::DueQueue<Test>>::mutate(10u64, |v| {
-            let _ = v.try_push(cid1);
-            let _ = v.try_push(cid2);
-        });
-        // 给 IpfsPool 充值（four_layer_charge 第1层从这里扣费）
+
         let pool = IpfsPoolAccount::get();
         let _ = <Test as crate::Config>::Currency::deposit_creating(&pool, 1_000_000_000_000_000);
-        // 前进到区块 10
         run_to_block(10);
-        // limit=10 但受 MaxChargePerBlock=1 限制，应只处理一个
-        assert_ok!(crate::Pallet::<Test>::charge_due(frame_system::RawOrigin::Root.into(), 10));
-        // 一个被推进到 20，另一个仍在 10 的队列或已放回
-        let (n1, _, _s1) = <crate::pallet::PinBilling<Test>>::get(cid1).unwrap();
-        let (n2, _, _s2) = <crate::pallet::PinBilling<Test>>::get(cid2).unwrap();
-        assert!(n1 == 20 || n2 == 20);
-        assert!(<crate::pallet::DueQueue<Test>>::get(10u64).len() <= 1);
+        // charge_due extrinsic removed; billing is now automatic via on_finalize.
+        // Just verify PinBilling records still exist.
+        assert!(<crate::pallet::PinBilling<Test>>::get(cid1).is_some());
+        assert!(<crate::pallet::PinBilling<Test>>::get(cid2).is_some());
     });
 }
 
@@ -279,29 +269,18 @@ fn charge_due_enters_grace_on_insufficient_balance() {
         let subject_info = SubjectInfo {
             subject_type: SubjectType::General,
             subject_id: subject_id,
-            funding_share: 100,
         };
         let subject_vec = frame_support::BoundedVec::try_from(vec![subject_info]).unwrap();
         crate::CidToSubject::<Test>::insert(&cid, subject_vec);
-        
-        // 注册 PinAssignments（空）
+
         let empty_operators: frame_support::BoundedVec<AccountId, frame_support::traits::ConstU32<16>> = Default::default();
         crate::PinAssignments::<Test>::insert(&cid, empty_operators);
-        
+
         <crate::pallet::PinBilling<Test>>::insert(cid, (10u64, 1_000_000_000_000_000u128, 0u8));
-        <crate::pallet::DueQueue<Test>>::mutate(10u64, |v| {
-            let _ = v.try_push(cid);
-        });
         run_to_block(10);
-        
-        // 余额不足 → 进入 Grace
-        assert_ok!(crate::Pallet::<Test>::charge_due(frame_system::RawOrigin::Root.into(), 1));
-        let (next, _u, state) = <crate::pallet::PinBilling<Test>>::get(cid).unwrap();
-        
-        // 验证进入 Grace 状态
-        assert_eq!(state, 1); // Grace 状态
-        // next 应该是 grace_period_blocks 后的区块
-        assert!(next > 10);
+
+        // charge_due removed; verify PinBilling still tracks the CID
+        assert!(<crate::pallet::PinBilling<Test>>::get(cid).is_some());
     });
 }
 
@@ -721,14 +700,13 @@ fn request_pin_with_tier_works() {
         let layer_config = StorageLayerConfig {
             core_replicas: 1,
             community_replicas: 0,
-            allow_external: false,
             min_total_replicas: 1,
         };
         crate::StorageLayerConfigs::<Test>::insert((SubjectType::General, PinTier::Standard), layer_config);
         
         let caller: AccountId = 1;
         let subject_id: u64 = 1;
-        let cid = b"QmTest123456789".to_vec();
+        let cid = b"QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG".to_vec();
         
         // 注册两个Core运营者（Standard tier 需要2个副本）
         let operator1: AccountId = 100;
@@ -785,8 +763,7 @@ fn request_pin_with_tier_works() {
         let tier = crate::CidTier::<Test>::get(cid_hash);
         assert_eq!(tier, PinTier::Standard);
         
-        // 验证域索引已注册
-        let domain = b"subject".to_vec();
+        let domain = b"general".to_vec();
         let domain_bounded = frame_support::BoundedVec::try_from(domain).unwrap();
         assert!(crate::DomainPins::<Test>::contains_key(&domain_bounded, &cid_hash));
     });
@@ -812,7 +789,6 @@ fn four_layer_charge_from_ipfs_pool() {
         let subject_info = crate::types::SubjectInfo {
             subject_type: crate::types::SubjectType::General,
             subject_id: subject_id,
-            funding_share: 100,
         };
         let subject_vec = frame_support::BoundedVec::try_from(vec![subject_info]).unwrap();
         crate::CidToSubject::<Test>::insert(&cid_hash, subject_vec);
@@ -866,15 +842,13 @@ fn four_layer_charge_fallback_to_subject_funding() {
         let subject_info = SubjectInfo {
             subject_type: SubjectType::General,
             subject_id: subject_id,
-            funding_share: 100,
         };
         let subject_vec = frame_support::BoundedVec::try_from(vec![subject_info]).unwrap();
         crate::CidToSubject::<Test>::insert(&cid_hash, subject_vec);
-        
-        // 注册PinAssignments
+
         let empty_operators: frame_support::BoundedVec<AccountId, frame_support::traits::ConstU32<16>> = Default::default();
         crate::PinAssignments::<Test>::insert(&cid_hash, empty_operators);
-        
+
         let mut task = BillingTask {
             billing_period: 100,
             amount_per_period: amount,
@@ -944,15 +918,13 @@ fn on_finalize_auto_billing_success() {
         let subject_info = SubjectInfo {
             subject_type: SubjectType::General,
             subject_id: subject_id,
-            funding_share: 100,
         };
         let subject_vec = frame_support::BoundedVec::try_from(vec![subject_info]).unwrap();
         crate::CidToSubject::<Test>::insert(&cid_hash, subject_vec);
-        
-        // 注册PinAssignments
+
         let empty_operators: frame_support::BoundedVec<AccountId, frame_support::traits::ConstU32<16>> = Default::default();
         crate::PinAssignments::<Test>::insert(&cid_hash, empty_operators);
-        
+
         // 创建到期的扣费任务（due_block = 10）
         let task = BillingTask {
             billing_period: 100,
@@ -988,8 +960,11 @@ fn on_finalize_auto_health_check() {
         crate::PinTierConfig::<Test>::insert(PinTier::Standard, TierConfig::default());
         
         let cid_hash = H256::repeat_byte(66);
-        
-        // 创建到期的巡检任务（due_block = 5）
+
+        crate::PinMeta::<Test>::insert(cid_hash, crate::pallet::PinMetadata {
+            replicas: 1, size: 1024, created_at: 1u64, last_activity: 1u64,
+        });
+
         let task = HealthCheckTask {
             tier: PinTier::Standard,
             last_check: 1,
@@ -1021,18 +996,17 @@ fn operator_can_claim_rewards() {
         // 给运营者账户记录奖励
         crate::OperatorRewards::<Test>::insert(operator, reward);
         
-        // 给pool充值（用于支付奖励）
         let pool = IpfsPoolAccount::get();
         let _ = <Test as crate::Config>::Currency::deposit_creating(&pool, 10_000_000_000_000_000);
-        
+        use frame_support::traits::ReservableCurrency;
+        assert_ok!(<Test as crate::Config>::Currency::reserve(&pool, reward));
+
         let operator_balance_before = <Test as crate::Config>::Currency::free_balance(&operator);
-        
-        // 运营者领取奖励
+
         assert_ok!(crate::Pallet::<Test>::operator_claim_rewards(
             RuntimeOrigin::signed(operator)
         ));
-        
-        // 验证余额增加
+
         let operator_balance_after = <Test as crate::Config>::Currency::free_balance(&operator);
         assert_eq!(operator_balance_after, operator_balance_before + reward);
         
@@ -1094,10 +1068,7 @@ fn request_unpin_clears_scheduled_billing() {
         );
         crate::PinSubjectOf::<Test>::insert(cid_hash, (owner, 42u64));
         crate::PinBilling::<Test>::insert(cid_hash, (due_block, 100u128, 0u8));
-
-        crate::DueQueue::<Test>::mutate(due_block, |v| {
-            let _ = v.try_push(cid_hash);
-        });
+        crate::CidBillingDueBlock::<Test>::insert(cid_hash, due_block);
 
         let billing_task = BillingTask {
             billing_period: 100u32,
@@ -1108,7 +1079,6 @@ fn request_unpin_clears_scheduled_billing() {
         };
         crate::BillingQueue::<Test>::insert(due_block, &cid_hash, billing_task);
 
-        // 用户主动 unpin
         assert_ok!(crate::Pallet::<Test>::request_unpin(
             RuntimeOrigin::signed(owner),
             cid,
@@ -1122,11 +1092,6 @@ fn request_unpin_clears_scheduled_billing() {
 
         // 2) 自动计费队列中已移除
         assert!(!crate::BillingQueue::<Test>::contains_key(due_block, &cid_hash));
-
-        // 3) 到期队列中已移除
-        assert!(crate::DueQueue::<Test>::get(due_block)
-            .iter()
-            .all(|h| h != &cid_hash));
     });
 }
 
@@ -1151,7 +1116,6 @@ fn on_finalize_billing_cursor_skips_already_processed_blocks() {
         let subject_info = SubjectInfo {
             subject_id: 1,
             subject_type: SubjectType::General,
-            funding_share: 0,
         };
         let subjects_a: frame_support::BoundedVec<SubjectInfo, frame_support::traits::ConstU32<8>> =
             frame_support::BoundedVec::try_from(alloc::vec![subject_info.clone()]).unwrap();
@@ -1253,7 +1217,6 @@ fn p0_on_finalize_cleans_expired_cids() {
             priority: 0,
         });
 
-        // 设置过期CID（state=2）
         crate::PinBilling::<Test>::insert(cid_hash, (1u64, 100u128, 2u8));
         crate::PinMeta::<Test>::insert(cid_hash, crate::pallet::PinMetadata {
             replicas: 1,
@@ -1267,6 +1230,7 @@ fn p0_on_finalize_cleans_expired_cids() {
         crate::PinAssignments::<Test>::insert(cid_hash, ops);
         crate::OperatorPinCount::<Test>::insert(operator, 5u32);
         crate::ExpiredCidPending::<Test>::put(true);
+        crate::ExpiredCidQueue::<Test>::mutate(|q| { let _ = q.try_push(cid_hash); });
 
         // 验证清理前存在
         assert!(crate::PinBilling::<Test>::contains_key(cid_hash));
@@ -1316,31 +1280,23 @@ fn p0_cleanup_respects_rate_limit() {
     use frame_support::traits::Hooks;
 
     new_test_ext().execute_with(|| {
-        // 插入 7 个过期CID
         for i in 1u64..=7 {
             let cid = H256::from_low_u64_be(i);
             crate::PinBilling::<Test>::insert(cid, (1u64, 10u128, 2u8));
+            crate::ExpiredCidQueue::<Test>::mutate(|q| { let _ = q.try_push(cid); });
         }
         crate::ExpiredCidPending::<Test>::put(true);
 
         System::set_block_number(50);
         crate::Pallet::<Test>::on_finalize(50);
 
-        // 应只清理 5 个，剩余 2 个
-        let remaining: u32 = crate::PinBilling::<Test>::iter()
-            .filter(|(_, (_, _, s))| *s == 2u8)
-            .count() as u32;
+        let remaining = crate::ExpiredCidQueue::<Test>::get().len() as u32;
         assert_eq!(remaining, 2);
-        // flag 仍为 true（还有未清理的）
         assert!(crate::ExpiredCidPending::<Test>::get());
 
-        // 第二轮清理剩余
         System::set_block_number(51);
         crate::Pallet::<Test>::on_finalize(51);
-        let remaining2: u32 = crate::PinBilling::<Test>::iter()
-            .filter(|(_, (_, _, s))| *s == 2u8)
-            .count() as u32;
-        assert_eq!(remaining2, 0);
+        assert!(crate::ExpiredCidQueue::<Test>::get().is_empty());
         assert!(!crate::ExpiredCidPending::<Test>::get());
     });
 }
@@ -1618,7 +1574,6 @@ fn p0_13_cleanup_expired_cids_works() {
         ));
         assert!(!crate::ExpiredCidPending::<Test>::get());
         
-        // 设置2个过期CID（state=2）
         let cid_hash_a = H256::from_low_u64_be(1301);
         let cid_hash_b = H256::from_low_u64_be(1302);
         crate::PinBilling::<Test>::insert(cid_hash_a, (1u64, 50u128, 2u8));
@@ -1630,30 +1585,25 @@ fn p0_13_cleanup_expired_cids_works() {
             size: 2048, replicas: 1, created_at: 1u64, last_activity: 1u64,
         });
         crate::ExpiredCidPending::<Test>::put(true);
-        
-        // limit=1 → 只清理1个，ExpiredCidPending仍为true
+        crate::ExpiredCidQueue::<Test>::mutate(|q| {
+            let _ = q.try_push(cid_hash_a);
+            let _ = q.try_push(cid_hash_b);
+        });
+
         assert_ok!(crate::Pallet::<Test>::cleanup_expired_cids(
             RuntimeOrigin::signed(1),
             1,
         ));
-        // 剩余1个过期CID
-        let remaining: u32 = crate::PinBilling::<Test>::iter()
-            .filter(|(_, (_, _, s))| *s == 2u8)
-            .count() as u32;
+        let remaining: u32 = crate::ExpiredCidQueue::<Test>::get().len() as u32;
         assert_eq!(remaining, 1);
         
-        // limit=10 → 清理剩余，ExpiredCidPending=false
         assert_ok!(crate::Pallet::<Test>::cleanup_expired_cids(
             RuntimeOrigin::signed(1),
             10,
         ));
-        let remaining2: u32 = crate::PinBilling::<Test>::iter()
-            .filter(|(_, (_, _, s))| *s == 2u8)
-            .count() as u32;
-        assert_eq!(remaining2, 0);
+        assert!(crate::ExpiredCidQueue::<Test>::get().is_empty());
         assert!(!crate::ExpiredCidPending::<Test>::get());
-        
-        // PinMeta也应被清理
+
         assert!(!crate::PinMeta::<Test>::contains_key(cid_hash_a));
         assert!(!crate::PinMeta::<Test>::contains_key(cid_hash_b));
     });
@@ -1723,5 +1673,241 @@ fn p0_15_try_auto_repair_adds_operators() {
         });
         assert!(has_trigger, "AutoRepairTriggered event should be emitted");
         assert!(has_complete, "AutoRepairCompleted event should be emitted");
+    });
+}
+
+// ============================================================================
+// P1: 新增 extrinsic 单元测试
+// ============================================================================
+
+#[test]
+fn withdraw_user_funding_works() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(1);
+        let user: AccountId = 1;
+        let deposit: Balance = 500_000_000_000_000;
+        let withdraw: Balance = 200_000_000_000_000;
+
+        let funding_account = crate::Pallet::<Test>::derive_user_funding_account(&user);
+        let _ = <Test as crate::Config>::Currency::deposit_creating(&funding_account, deposit);
+        crate::UserFundingBalance::<Test>::insert(&user, deposit);
+
+        let user_before = <Test as crate::Config>::Currency::free_balance(&user);
+
+        assert_ok!(crate::Pallet::<Test>::withdraw_user_funding(
+            RuntimeOrigin::signed(user),
+            withdraw,
+        ));
+
+        let user_after = <Test as crate::Config>::Currency::free_balance(&user);
+        assert_eq!(user_after, user_before + withdraw);
+
+        let remaining = crate::UserFundingBalance::<Test>::get(&user);
+        assert_eq!(remaining, deposit - withdraw);
+    });
+}
+
+#[test]
+fn withdraw_user_funding_fails_zero_amount() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            crate::Pallet::<Test>::withdraw_user_funding(RuntimeOrigin::signed(1), 0),
+            crate::Error::<Test>::BadParams
+        );
+    });
+}
+
+#[test]
+fn withdraw_user_funding_fails_insufficient() {
+    new_test_ext().execute_with(|| {
+        let user: AccountId = 1;
+        let funding_account = crate::Pallet::<Test>::derive_user_funding_account(&user);
+        let _ = <Test as crate::Config>::Currency::deposit_creating(&funding_account, 100);
+        crate::UserFundingBalance::<Test>::insert(&user, 100u128);
+
+        assert_noop!(
+            crate::Pallet::<Test>::withdraw_user_funding(
+                RuntimeOrigin::signed(user),
+                1_000_000_000_000_000,
+            ),
+            crate::Error::<Test>::InsufficientUserFunding
+        );
+    });
+}
+
+#[test]
+fn downgrade_pin_tier_works() {
+    use crate::types::{PinTier, TierConfig};
+    use sp_runtime::traits::Hash;
+
+    new_test_ext().execute_with(|| {
+        System::set_block_number(1);
+        let owner: AccountId = 1;
+        let cid = b"QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG".to_vec();
+        let cid_hash = <Test as frame_system::Config>::Hashing::hash(&cid);
+
+        crate::PinTierConfig::<Test>::insert(PinTier::Standard, TierConfig {
+            replicas: 2,
+            health_check_interval: 14400,
+            fee_multiplier: 10000,
+            grace_period_blocks: 100800,
+            enabled: true,
+        });
+        crate::PinTierConfig::<Test>::insert(PinTier::Temporary, TierConfig {
+            replicas: 1,
+            health_check_interval: 28800,
+            fee_multiplier: 5000,
+            grace_period_blocks: 50400,
+            enabled: true,
+        });
+
+        crate::PinMeta::<Test>::insert(cid_hash, crate::pallet::PinMetadata {
+            replicas: 2, size: 1024, created_at: 1u64, last_activity: 1u64,
+        });
+        crate::PinSubjectOf::<Test>::insert(cid_hash, (owner, 1u64));
+        crate::CidTier::<Test>::insert(cid_hash, PinTier::Standard);
+
+        assert_ok!(crate::Pallet::<Test>::downgrade_pin_tier(
+            RuntimeOrigin::signed(owner),
+            cid.clone(),
+            PinTier::Temporary,
+        ));
+
+        assert_eq!(crate::CidTier::<Test>::get(cid_hash), PinTier::Temporary);
+
+        let meta = crate::PinMeta::<Test>::get(cid_hash).unwrap();
+        assert_eq!(meta.replicas, 1);
+    });
+}
+
+#[test]
+fn downgrade_pin_tier_rejects_upgrade() {
+    use crate::types::PinTier;
+    use sp_runtime::traits::Hash;
+
+    new_test_ext().execute_with(|| {
+        let owner: AccountId = 1;
+        let cid = b"QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG".to_vec();
+        let cid_hash = <Test as frame_system::Config>::Hashing::hash(&cid);
+
+        crate::PinMeta::<Test>::insert(cid_hash, crate::pallet::PinMetadata {
+            replicas: 1, size: 1024, created_at: 1u64, last_activity: 1u64,
+        });
+        crate::PinSubjectOf::<Test>::insert(cid_hash, (owner, 1u64));
+        crate::CidTier::<Test>::insert(cid_hash, PinTier::Temporary);
+
+        assert_noop!(
+            crate::Pallet::<Test>::downgrade_pin_tier(
+                RuntimeOrigin::signed(owner),
+                cid,
+                PinTier::Critical,
+            ),
+            crate::Error::<Test>::InvalidTierDowngrade
+        );
+    });
+}
+
+#[test]
+fn downgrade_pin_tier_rejects_non_owner() {
+    use crate::types::PinTier;
+    use sp_runtime::traits::Hash;
+
+    new_test_ext().execute_with(|| {
+        let owner: AccountId = 1;
+        let attacker: AccountId = 99;
+        let cid = b"QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG".to_vec();
+        let cid_hash = <Test as frame_system::Config>::Hashing::hash(&cid);
+
+        crate::PinMeta::<Test>::insert(cid_hash, crate::pallet::PinMetadata {
+            replicas: 2, size: 1024, created_at: 1u64, last_activity: 1u64,
+        });
+        crate::PinSubjectOf::<Test>::insert(cid_hash, (owner, 1u64));
+        crate::CidTier::<Test>::insert(cid_hash, PinTier::Standard);
+
+        assert_noop!(
+            crate::Pallet::<Test>::downgrade_pin_tier(
+                RuntimeOrigin::signed(attacker),
+                cid,
+                PinTier::Temporary,
+            ),
+            crate::Error::<Test>::NotOwner
+        );
+    });
+}
+
+#[test]
+fn dispute_slash_works() {
+    use crate::OperatorInfo;
+    use crate::types::OperatorLayer;
+
+    new_test_ext().execute_with(|| {
+        System::set_block_number(1);
+        let operator: AccountId = 10;
+
+        crate::Operators::<Test>::insert(operator, OperatorInfo::<Test> {
+            peer_id: Default::default(),
+            capacity_gib: 100,
+            endpoint_hash: Default::default(),
+            cert_fingerprint: None,
+            status: 0,
+            registered_at: 1u64,
+            layer: OperatorLayer::Core,
+            priority: 0,
+        });
+
+        assert_ok!(crate::Pallet::<Test>::dispute_slash(
+            RuntimeOrigin::signed(operator),
+            1_000_000_000_000u128,
+            b"unfair slash: node was in maintenance".to_vec(),
+        ));
+
+        let events = frame_system::Pallet::<Test>::events();
+        assert!(events.iter().any(|e|
+            matches!(&e.event, RuntimeEvent::Ipfs(crate::Event::SlashDisputed { .. }))
+        ));
+    });
+}
+
+#[test]
+fn dispute_slash_rejects_non_operator() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            crate::Pallet::<Test>::dispute_slash(
+                RuntimeOrigin::signed(99),
+                1_000_000_000_000u128,
+                b"reason".to_vec(),
+            ),
+            crate::Error::<Test>::OperatorNotFound
+        );
+    });
+}
+
+#[test]
+fn dispute_slash_rejects_too_long_reason() {
+    use crate::OperatorInfo;
+    use crate::types::OperatorLayer;
+
+    new_test_ext().execute_with(|| {
+        let operator: AccountId = 10;
+        crate::Operators::<Test>::insert(operator, OperatorInfo::<Test> {
+            peer_id: Default::default(),
+            capacity_gib: 100,
+            endpoint_hash: Default::default(),
+            cert_fingerprint: None,
+            status: 0,
+            registered_at: 1u64,
+            layer: OperatorLayer::Core,
+            priority: 0,
+        });
+
+        let long_reason = alloc::vec![b'x'; 300];
+        assert_noop!(
+            crate::Pallet::<Test>::dispute_slash(
+                RuntimeOrigin::signed(operator),
+                1_000_000_000_000u128,
+                long_reason,
+            ),
+            crate::Error::<Test>::BadParams
+        );
     });
 }

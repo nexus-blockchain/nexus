@@ -1,5 +1,5 @@
 use crate::mock::*;
-use crate::pallet::{self, DisputedAt, Error, ExpiringAt, ExpiryOf, Locked, LockStateOf};
+use crate::pallet::{self, DisputedAt, Error, ExpiringAt, ExpiryOf, Locked, LockStateOf, PayerOf};
 use frame_support::{assert_noop, assert_ok, traits::Hooks, BoundedVec};
 
 /// 辅助函数：创建空的争议详情
@@ -1114,15 +1114,304 @@ fn l2_r3_failed_reschedule_cleans_expiry_of() {
         assert_ok!(EscrowPallet::schedule_expiry(RuntimeOrigin::signed(1), 100, 5));
         assert_ok!(EscrowPallet::dispute(RuntimeOrigin::signed(1), 100, 1, empty_detail()));
 
-        // 填满目标重调度槽位（14405 ~ 14414），每个槽位最多 MaxExpiringPerBlock 个
-        // 在 mock 中这个值通常足够大，所以正常重调度会成功
-        // 这里先测试正常重调度场景，确认 ExpiryOf 更新
         System::set_block_number(5);
         EscrowPallet::on_initialize(5);
 
-        // 正常重调度成功: ExpiryOf 应指向新块
         let new_expiry = ExpiryOf::<Test>::get(100);
         assert!(new_expiry.is_some());
         assert!(new_expiry.unwrap() > 5);
+    });
+}
+
+// ============================================================================
+// 🆕 R4: 争议超时安全网
+// ============================================================================
+
+#[test]
+fn dispute_auto_schedules_expiry_when_none() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        // 无预设 expiry
+        assert_eq!(ExpiryOf::<Test>::get(100), None);
+
+        System::set_block_number(10);
+        assert_ok!(EscrowPallet::dispute(RuntimeOrigin::signed(1), 100, 1, empty_detail()));
+
+        // dispute 应自动调度 expiry = 10 + MaxDisputeDuration(100800)
+        let expiry = ExpiryOf::<Test>::get(100);
+        assert!(expiry.is_some());
+        assert_eq!(expiry.unwrap(), 10 + 100800);
+    });
+}
+
+#[test]
+fn dispute_preserves_existing_expiry() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_ok!(EscrowPallet::schedule_expiry(RuntimeOrigin::signed(1), 100, 50));
+        assert_eq!(ExpiryOf::<Test>::get(100), Some(50));
+
+        assert_ok!(EscrowPallet::dispute(RuntimeOrigin::signed(1), 100, 1, empty_detail()));
+
+        // 已有 expiry 不应被覆盖
+        assert_eq!(ExpiryOf::<Test>::get(100), Some(50));
+    });
+}
+
+#[test]
+fn set_disputed_trait_auto_schedules_expiry() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        System::set_block_number(5);
+
+        assert_ok!(<EscrowTrait as pallet::Escrow<u64, u128>>::set_disputed(100));
+
+        let expiry = ExpiryOf::<Test>::get(100);
+        assert!(expiry.is_some());
+        assert_eq!(expiry.unwrap(), 5 + 100800);
+    });
+}
+
+#[test]
+fn dispute_timeout_forces_expiry_action() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        System::set_block_number(10);
+        assert_ok!(EscrowPallet::dispute(RuntimeOrigin::signed(1), 100, 1, empty_detail()));
+        assert_eq!(DisputedAt::<Test>::get(100), Some(10));
+
+        // 快进到超时点: 10 + 100800 = 100810
+        let timeout_block = 10 + 100800;
+        System::set_block_number(timeout_block);
+
+        // 手动设置 ExpiringAt（模拟 on_initialize 在 timeout_block 处理）
+        // dispute 已自动调度，所以 ExpiringAt 应该已经包含 id=100
+
+        EscrowPallet::on_initialize(timeout_block);
+
+        // id=100 是偶数 → ExpiryPolicy 返回 ReleaseAll(99)
+        assert_eq!(LockStateOf::<Test>::get(100), 3u8);
+        assert_eq!(Locked::<Test>::get(100), 0);
+        assert_eq!(DisputedAt::<Test>::get(100), None);
+    });
+}
+
+#[test]
+fn dispute_within_timeout_reschedules() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_ok!(EscrowPallet::schedule_expiry(RuntimeOrigin::signed(1), 100, 5));
+        System::set_block_number(3);
+        assert_ok!(EscrowPallet::dispute(RuntimeOrigin::signed(1), 100, 1, empty_detail()));
+        assert_eq!(DisputedAt::<Test>::get(100), Some(3));
+
+        // 在 block 5 处理到期，但争议在 block 3 发起，远未超时
+        System::set_block_number(5);
+        EscrowPallet::on_initialize(5);
+
+        // 应重调度而非强制执行
+        assert_eq!(LockStateOf::<Test>::get(100), 1u8);
+        assert_eq!(Locked::<Test>::get(100), 500);
+        let new_expiry = ExpiryOf::<Test>::get(100);
+        assert!(new_expiry.is_some());
+        assert!(new_expiry.unwrap() > 5);
+    });
+}
+
+// ============================================================================
+// 🆕 R5: apply_decision_* 清理 ExpiryOf/ExpiringAt
+// ============================================================================
+
+#[test]
+fn r5_apply_decision_release_cleans_expiry() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_ok!(EscrowPallet::schedule_expiry(RuntimeOrigin::signed(1), 100, 50));
+        assert_ok!(EscrowPallet::dispute(RuntimeOrigin::signed(1), 100, 1, empty_detail()));
+
+        assert_ok!(EscrowPallet::apply_decision_release_all(RuntimeOrigin::signed(1), 100, 2));
+        assert_eq!(ExpiryOf::<Test>::get(100), None);
+        assert!(!ExpiringAt::<Test>::get(50).contains(&100));
+    });
+}
+
+#[test]
+fn r5_apply_decision_refund_cleans_expiry() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_ok!(EscrowPallet::schedule_expiry(RuntimeOrigin::signed(1), 100, 50));
+        assert_ok!(EscrowPallet::dispute(RuntimeOrigin::signed(1), 100, 1, empty_detail()));
+
+        assert_ok!(EscrowPallet::apply_decision_refund_all(RuntimeOrigin::signed(1), 100, 1));
+        assert_eq!(ExpiryOf::<Test>::get(100), None);
+        assert!(!ExpiringAt::<Test>::get(50).contains(&100));
+    });
+}
+
+#[test]
+fn r5_apply_decision_partial_cleans_expiry() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 1000));
+        assert_ok!(EscrowPallet::schedule_expiry(RuntimeOrigin::signed(1), 100, 50));
+        assert_ok!(EscrowPallet::dispute(RuntimeOrigin::signed(1), 100, 1, empty_detail()));
+
+        assert_ok!(EscrowPallet::apply_decision_partial_bps(RuntimeOrigin::signed(1), 100, 2, 3, 5000));
+        assert_eq!(ExpiryOf::<Test>::get(100), None);
+        assert!(!ExpiringAt::<Test>::get(50).contains(&100));
+    });
+}
+
+// ============================================================================
+// 🆕 R5: PayerOf 记录
+// ============================================================================
+
+#[test]
+fn r5_payer_of_recorded_on_first_lock() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_eq!(PayerOf::<Test>::get(100), Some(1));
+    });
+}
+
+#[test]
+fn r5_payer_of_not_overwritten_on_second_lock() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_eq!(PayerOf::<Test>::get(100), Some(1));
+
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 2, 300));
+        assert_eq!(PayerOf::<Test>::get(100), Some(1));
+    });
+}
+
+#[test]
+fn r5_cleanup_closed_removes_payer_of() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_eq!(PayerOf::<Test>::get(100), Some(1));
+        assert_ok!(EscrowPallet::release(RuntimeOrigin::signed(1), 100, 2));
+
+        let ids: BoundedVec<u64, <Test as crate::Config>::MaxCleanupPerCall> =
+            BoundedVec::try_from(vec![100]).unwrap();
+        assert_ok!(EscrowPallet::cleanup_closed(RuntimeOrigin::signed(1), ids));
+        assert_eq!(PayerOf::<Test>::get(100), None);
+    });
+}
+
+// ============================================================================
+// 🆕 R5: schedule_expiry 存在性验证
+// ============================================================================
+
+#[test]
+fn r5_schedule_expiry_rejects_nonexistent() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EscrowPallet::schedule_expiry(RuntimeOrigin::signed(1), 999, 50),
+            Error::<Test>::NoLock
+        );
+    });
+}
+
+#[test]
+fn r5_schedule_expiry_rejects_closed() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_ok!(EscrowPallet::release(RuntimeOrigin::signed(1), 100, 2));
+        assert_eq!(LockStateOf::<Test>::get(100), 3u8);
+
+        assert_noop!(
+            EscrowPallet::schedule_expiry(RuntimeOrigin::signed(1), 100, 50),
+            Error::<Test>::AlreadyClosed
+        );
+    });
+}
+
+// ============================================================================
+// R6: release_all / refund_all 自动清理到期调度
+// ============================================================================
+
+#[test]
+fn r6_release_all_cleans_expiry_schedule() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_ok!(EscrowPallet::schedule_expiry(RuntimeOrigin::signed(1), 100, 50));
+        assert_eq!(ExpiryOf::<Test>::get(100), Some(50));
+        assert!(ExpiringAt::<Test>::get(50).contains(&100));
+
+        assert_ok!(EscrowPallet::release(RuntimeOrigin::signed(1), 100, 2));
+
+        assert_eq!(ExpiryOf::<Test>::get(100), None);
+        assert!(!ExpiringAt::<Test>::get(50).contains(&100));
+    });
+}
+
+#[test]
+fn r6_refund_all_cleans_expiry_schedule() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_ok!(EscrowPallet::schedule_expiry(RuntimeOrigin::signed(1), 100, 50));
+        assert_eq!(ExpiryOf::<Test>::get(100), Some(50));
+
+        assert_ok!(EscrowPallet::refund(RuntimeOrigin::signed(1), 100, 1));
+
+        assert_eq!(ExpiryOf::<Test>::get(100), None);
+        assert!(!ExpiringAt::<Test>::get(50).contains(&100));
+    });
+}
+
+#[test]
+fn r6_refund_partial_cleans_expiry_on_close() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_ok!(EscrowPallet::schedule_expiry(RuntimeOrigin::signed(1), 100, 50));
+
+        // Partial refund that drains the balance
+        assert_ok!(EscrowPallet::refund_partial(RuntimeOrigin::signed(1), 100, 1, 500));
+
+        assert_eq!(LockStateOf::<Test>::get(100), 3u8);
+        assert_eq!(ExpiryOf::<Test>::get(100), None);
+        assert!(!ExpiringAt::<Test>::get(50).contains(&100));
+    });
+}
+
+#[test]
+fn r6_release_partial_cleans_expiry_on_close() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_ok!(EscrowPallet::schedule_expiry(RuntimeOrigin::signed(1), 100, 50));
+
+        assert_ok!(EscrowPallet::release_partial(RuntimeOrigin::signed(1), 100, 2, 500));
+
+        assert_eq!(LockStateOf::<Test>::get(100), 3u8);
+        assert_eq!(ExpiryOf::<Test>::get(100), None);
+    });
+}
+
+#[test]
+fn r6_release_split_cleans_expiry_on_close() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 1000));
+        assert_ok!(EscrowPallet::schedule_expiry(RuntimeOrigin::signed(1), 100, 50));
+
+        let entries: BoundedVec<(u64, u128), <Test as crate::Config>::MaxSplitEntries> =
+            BoundedVec::try_from(vec![(2, 400), (3, 600)]).unwrap();
+        assert_ok!(EscrowPallet::release_split(RuntimeOrigin::signed(1), 100, entries));
+
+        assert_eq!(LockStateOf::<Test>::get(100), 3u8);
+        assert_eq!(ExpiryOf::<Test>::get(100), None);
+    });
+}
+
+#[test]
+fn r6_split_partial_cleans_expiry_on_close() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 1000));
+        assert_ok!(EscrowPallet::schedule_expiry(RuntimeOrigin::signed(1), 100, 50));
+
+        assert_ok!(<EscrowTrait as pallet::Escrow<u64, u128>>::split_partial(100, &2, &3, 5000));
+
+        assert_eq!(LockStateOf::<Test>::get(100), 3u8);
+        assert_eq!(ExpiryOf::<Test>::get(100), None);
+        assert!(!ExpiringAt::<Test>::get(50).contains(&100));
     });
 }

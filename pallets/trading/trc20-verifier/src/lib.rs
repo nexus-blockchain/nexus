@@ -67,6 +67,10 @@ pub enum VerificationError {
     InvalidConfig(&'static str),
     /// 验证正在进行中 - OCW 并发锁 (M1)
     VerificationLocked,
+    /// 验证器已被全局禁用（kill switch）
+    VerifierDisabled,
+    /// 交易哈希已被使用（防重放）
+    TxHashAlreadyUsed,
 }
 
 impl VerificationError {
@@ -88,6 +92,8 @@ impl VerificationError {
             Self::TimestampTooOld => "Timestamp exceeds max lookback window",
             Self::InvalidConfig(reason) => reason,
             Self::VerificationLocked => "Verification already in progress",
+            Self::VerifierDisabled => "Verifier is globally disabled",
+            Self::TxHashAlreadyUsed => "Transaction hash already used",
         }
     }
 }
@@ -190,6 +196,15 @@ const CONFIG_VERSION_MARKER: u8 = 0xFF;
 const ENDPOINT_CONFIG_VERSION: u8 = 1;
 /// NEW-6: VerifierConfig 当前版本
 const VERIFIER_CONFIG_VERSION: u8 = 1;
+
+/// 已用 tx_hash 注册表存储键前缀 (P0 防重放)
+const USED_TX_HASH_PREFIX: &[u8] = b"ocw_used_tx::";
+
+/// 端点熔断：隔离持续时间（毫秒，默认 60 秒）
+const QUARANTINE_DURATION_MS: u64 = 60_000;
+
+/// 端点熔断存储键前缀
+const QUARANTINE_PREFIX: &[u8] = b"ocw_quarantine::";
 
 // ==================== 端点健康评分系统 ====================
 
@@ -351,6 +366,8 @@ pub struct VerifierConfig {
     pub updated_at: u64,
     /// NEW-9: 金额容差（基点, 1 bps = 0.01%, 默认 50 = ±0.5%）
     pub amount_tolerance_bps: u32,
+    /// 全局启用开关（kill switch，false 时所有验证立即返回 VerifierDisabled）
+    pub enabled: bool,
 }
 
 impl Default for VerifierConfig {
@@ -365,16 +382,46 @@ impl Default for VerifierConfig {
             max_lookback_ms: DEFAULT_MAX_LOOKBACK_MS, // 72h
             updated_at: 0,
             amount_tolerance_bps: 50, // ±0.5%
+            enabled: true,
         }
     }
 }
 
-/// 获取验证器配置 (NEW-6: 支持版本化存储格式 + 旧格式迁移)
+/// 获取验证器配置 (NEW-6: 支持版本化存储格式 + 多级旧格式迁移)
 pub fn get_verifier_config() -> VerifierConfig {
     match sp_io::offchain::local_storage_get(StorageKind::PERSISTENT, VERIFIER_CONFIG_KEY) {
         Some(data) if data.len() >= 2 && data[0] == CONFIG_VERSION_MARKER => {
             let _version = data[1];
-            VerifierConfig::decode(&mut &data[2..]).unwrap_or_default()
+            if let Ok(config) = VerifierConfig::decode(&mut &data[2..]) {
+                return config;
+            }
+            #[derive(Decode)]
+            struct V1VersionedConfig {
+                usdt_contract: String,
+                min_confirmations: u32,
+                rate_limit_interval_ms: u64,
+                cache_ttl_ms: u64,
+                max_pages: u32,
+                audit_log_retention: u32,
+                max_lookback_ms: u64,
+                updated_at: u64,
+                amount_tolerance_bps: u32,
+            }
+            if let Ok(v1) = V1VersionedConfig::decode(&mut &data[2..]) {
+                return VerifierConfig {
+                    usdt_contract: v1.usdt_contract,
+                    min_confirmations: v1.min_confirmations,
+                    rate_limit_interval_ms: v1.rate_limit_interval_ms,
+                    cache_ttl_ms: v1.cache_ttl_ms,
+                    max_pages: v1.max_pages,
+                    audit_log_retention: v1.audit_log_retention,
+                    max_lookback_ms: v1.max_lookback_ms,
+                    updated_at: v1.updated_at,
+                    amount_tolerance_bps: v1.amount_tolerance_bps,
+                    enabled: true,
+                };
+            }
+            VerifierConfig::default()
         }
         Some(data) if !data.is_empty() => {
             if let Ok(config) = VerifierConfig::decode(&mut &data[..]) {
@@ -402,6 +449,7 @@ pub fn get_verifier_config() -> VerifierConfig {
                     max_lookback_ms: legacy.max_lookback_ms,
                     updated_at: legacy.updated_at,
                     amount_tolerance_bps: 50,
+                    enabled: true,
                 };
             }
             VerifierConfig::default()
@@ -755,7 +803,7 @@ pub fn get_endpoint_config() -> EndpointConfig {
     }
 }
 
-/// NEW-2: 验证 EndpointConfig 安全性
+/// NEW-2: 验证 EndpointConfig 安全性（统一入口，add_endpoint 和 save_endpoint_config 均走此路径）
 fn validate_endpoint_config(config: &EndpointConfig) -> Result<(), VerificationError> {
     if config.endpoints.len() > MAX_ENDPOINTS {
         return Err(VerificationError::MaxEndpointsReached);
@@ -767,6 +815,11 @@ fn validate_endpoint_config(config: &EndpointConfig) -> Result<(), VerificationE
         if ep.len() < 10 || ep.len() > 256 {
             return Err(VerificationError::InvalidEndpointUrl(
                 "Endpoint URL length must be 10-256 characters",
+            ));
+        }
+        if ep.bytes().any(|b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r') {
+            return Err(VerificationError::InvalidEndpointUrl(
+                "Endpoint URL must not contain whitespace",
             ));
         }
         if is_private_or_loopback_url(ep) {
@@ -866,38 +919,19 @@ fn is_private_or_loopback_url(endpoint: &str) -> bool {
     false
 }
 
-/// 添加自定义端点
-///
-/// H8修复: URL 格式校验  
-/// M3修复: 端点数量上限检查
-/// S3修复: SSRF 防护 — 拒绝私有/回环地址
+/// 添加自定义端点（校验由 validate_endpoint_config 统一处理）
 pub fn add_endpoint(endpoint: &str) -> Result<(), VerificationError> {
-    if !endpoint.starts_with("https://") {
-        return Err(VerificationError::InvalidEndpointUrl("Endpoint must use HTTPS"));
-    }
-    if endpoint.len() < 10 || endpoint.len() > 256 {
-        return Err(VerificationError::InvalidEndpointUrl("Endpoint URL length must be 10-256 characters"));
-    }
-    if endpoint.bytes().any(|b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r') {
-        return Err(VerificationError::InvalidEndpointUrl("Endpoint URL must not contain whitespace"));
-    }
-    if is_private_or_loopback_url(endpoint) {
-        return Err(VerificationError::InvalidEndpointUrl("Endpoint must not target private or loopback addresses"));
-    }
-
     let mut config = get_endpoint_config();
     let endpoint_str = String::from(endpoint);
 
-    if !config.endpoints.contains(&endpoint_str) {
-        // M3: 端点数量上限
-        if config.endpoints.len() >= MAX_ENDPOINTS {
-            return Err(VerificationError::MaxEndpointsReached);
-        }
-        config.endpoints.push(endpoint_str);
-        config.updated_at = current_timestamp_ms();
-        save_endpoint_config(&config)?;
-        log::info!(target: "trc20-verifier", "Added endpoint: {}", endpoint);
+    if config.endpoints.contains(&endpoint_str) {
+        return Ok(());
     }
+
+    config.endpoints.push(endpoint_str);
+    config.updated_at = current_timestamp_ms();
+    save_endpoint_config(&config)?;
+    log::info!(target: "trc20-verifier", "Added endpoint: {}", endpoint);
     Ok(())
 }
 
@@ -951,22 +985,25 @@ pub fn remove_endpoint(endpoint: &str) {
     }
 }
 
-/// 获取按健康评分排序的端点列表 (L2 增强: 支持优先级加成)
+/// 获取按健康评分排序的端点列表 (L2 增强: 支持优先级加成 + 熔断过滤)
 pub fn get_sorted_endpoints() -> Vec<String> {
     let config = get_endpoint_config();
     let mut endpoints_with_scores: Vec<(String, u32)> = config.endpoints
         .iter()
-        .map(|e| {
+        .filter_map(|e| {
+            if is_endpoint_quarantined(e) {
+                log::debug!(target: "trc20-verifier", "Skipping quarantined endpoint: {}", e);
+                return None;
+            }
             let health = get_endpoint_health(e);
             let boost = config.priority_boosts.iter()
                 .find(|(ep, _)| ep == e)
                 .map(|(_, b)| *b)
                 .unwrap_or(0);
-            (e.clone(), health.score.saturating_add(boost))
+            Some((e.clone(), health.score.saturating_add(boost)))
         })
         .collect();
 
-    // 按评分降序排序
     endpoints_with_scores.sort_by(|a, b| b.1.cmp(&a.1));
 
     endpoints_with_scores.into_iter().map(|(e, _)| e).collect()
@@ -1006,6 +1043,56 @@ pub fn set_endpoint_priority_boost(endpoint: &str, boost: u32) -> Result<(), Ver
     config.updated_at = current_timestamp_ms();
     save_endpoint_config(&config)?;
     Ok(())
+}
+
+// ==================== 端点熔断/隔离 ====================
+
+/// 检查端点是否处于熔断隔离中
+pub fn is_endpoint_quarantined(endpoint: &str) -> bool {
+    let key = [QUARANTINE_PREFIX, endpoint.as_bytes()].concat();
+    sp_io::offchain::local_storage_get(StorageKind::PERSISTENT, &key)
+        .and_then(|d| u64::decode(&mut &d[..]).ok())
+        .map_or(false, |until| current_timestamp_ms() < until)
+}
+
+/// 对端点执行熔断隔离（持续 QUARANTINE_DURATION_MS 毫秒）
+fn quarantine_endpoint(endpoint: &str) {
+    let key = [QUARANTINE_PREFIX, endpoint.as_bytes()].concat();
+    let until = current_timestamp_ms().saturating_add(QUARANTINE_DURATION_MS);
+    sp_io::offchain::local_storage_set(StorageKind::PERSISTENT, &key, &until.encode());
+    log::warn!(target: "trc20-verifier",
+        "Endpoint quarantined for {}ms: {}", QUARANTINE_DURATION_MS, endpoint);
+}
+
+/// 清除端点的熔断状态（成功请求后调用）
+fn clear_quarantine(endpoint: &str) {
+    let key = [QUARANTINE_PREFIX, endpoint.as_bytes()].concat();
+    sp_io::offchain::local_storage_set(StorageKind::PERSISTENT, &key, &[]);
+}
+
+// ==================== tx_hash 重放防护 (P0) ====================
+
+/// 检查 tx_hash 是否已被使用过（防重放）
+pub fn is_tx_hash_used(tx_hash: &[u8]) -> bool {
+    if tx_hash.is_empty() { return false; }
+    let key = [USED_TX_HASH_PREFIX, tx_hash].concat();
+    sp_io::offchain::local_storage_get(StorageKind::PERSISTENT, &key)
+        .map_or(false, |data| !data.is_empty())
+}
+
+/// 注册单个 tx_hash 为已使用（防重放）
+pub fn register_used_tx_hash(tx_hash: &[u8]) {
+    if tx_hash.is_empty() { return; }
+    let key = [USED_TX_HASH_PREFIX, tx_hash].concat();
+    let now = current_timestamp_ms();
+    sp_io::offchain::local_storage_set(StorageKind::PERSISTENT, &key, &now.encode());
+}
+
+/// 批量注册 TransferSearchResult 中所有匹配转账的 tx_hash（上层 pallet 接受验证结果后调用）
+pub fn register_result_tx_hashes(result: &TransferSearchResult) {
+    for t in &result.matched_transfers {
+        register_used_tx_hash(&t.tx_hash);
+    }
 }
 
 // ==================== 速率限制 (H2) ====================
@@ -1140,24 +1227,6 @@ pub fn get_recent_audit_logs(max_count: u32) -> Vec<AuditLogEntry> {
 
 // ==================== TRC20 验证结果 ====================
 
-/// TRC20 交易验证结果 (NEW-8: 仅用于 test-gated parse_tron_response)
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TronTxVerification {
-    pub tx_hash: Vec<u8>,
-    pub is_valid: bool,
-    pub from_address: Option<Vec<u8>>,
-    pub to_address: Option<Vec<u8>>,
-    /// 实际转账金额（从链上读取）
-    pub actual_amount: Option<u64>,
-    /// 预期金额
-    pub expected_amount: Option<u64>,
-    pub confirmations: u32,
-    pub error: Option<Vec<u8>>,
-    /// 金额匹配状态
-    pub amount_status: AmountStatus,
-}
-
 /// 金额匹配状态
 #[derive(Debug, Clone, PartialEq, Eq, Default, Encode, Decode)]
 pub enum AmountStatus {
@@ -1182,23 +1251,6 @@ pub enum AmountStatus {
     },
     /// 金额为零或无法解析
     Invalid,
-}
-
-#[cfg(test)]
-impl Default for TronTxVerification {
-    fn default() -> Self {
-        Self {
-            tx_hash: Vec::new(),
-            is_valid: false,
-            from_address: None,
-            to_address: None,
-            actual_amount: None,
-            expected_amount: None,
-            confirmations: 0,
-            error: None,
-            amount_status: AmountStatus::Unknown,
-        }
-    }
 }
 
 // ==================== 并行请求竞速模式 ====================
@@ -1239,10 +1291,12 @@ fn build_endpoint_url(url: &str, endpoint: &str) -> String {
 }
 
 /// 发送 HTTP GET 请求（智能模式选择 + H2 速率限制 + M1 缓存）
-fn fetch_url_with_fallback(url: &str) -> Result<Vec<u8>, VerificationError> {
+///
+/// 返回 (响应体, 使用的端点名称)
+fn fetch_url_with_fallback(url: &str) -> Result<(Vec<u8>, String), VerificationError> {
     // M1: 检查缓存
     if let Some(cached) = get_cached_response(url) {
-        return Ok(cached);
+        return Ok((cached, String::from("(cached)")));
     }
 
     // H2: 速率限制
@@ -1257,7 +1311,7 @@ fn fetch_url_with_fallback(url: &str) -> Result<Vec<u8>, VerificationError> {
     };
 
     // M1+S5: 成功时写入缓存 — 仅缓存结构合法的 JSON 响应，防止缓存投毒
-    if let Ok(ref body) = result {
+    if let Ok((ref body, _)) = result {
         if !body.is_empty() && (body[0] == b'{' || body[0] == b'[') {
             set_cached_response(url, body);
         }
@@ -1266,8 +1320,8 @@ fn fetch_url_with_fallback(url: &str) -> Result<Vec<u8>, VerificationError> {
     result
 }
 
-/// 并行竞速模式：同时请求所有端点，使用最快响应 (H1 API Key + L1 可配置超时)
-fn fetch_url_parallel_race(url: &str, config: &EndpointConfig) -> Result<Vec<u8>, VerificationError> {
+/// 并行竞速模式：同时请求所有端点，使用最快响应 (H1 API Key + L1 可配置超时 + 熔断过滤)
+fn fetch_url_parallel_race(url: &str, config: &EndpointConfig) -> Result<(Vec<u8>, String), VerificationError> {
     let endpoints = &config.endpoints;
     log::info!(target: "trc20-verifier", "Starting parallel race with {} endpoints", endpoints.len());
 
@@ -1278,10 +1332,13 @@ fn fetch_url_parallel_race(url: &str, config: &EndpointConfig) -> Result<Vec<u8>
         .add(Duration::from_millis(config.timeout_race_ms));
 
     for endpoint in endpoints.iter() {
-        // H3: 使用 strip_prefix 替代 replace，避免意外替换
+        if is_endpoint_quarantined(endpoint) {
+            log::debug!(target: "trc20-verifier", "Skipping quarantined endpoint: {}", endpoint);
+            continue;
+        }
+
         let target_url = build_endpoint_url(url, endpoint);
 
-        // H1: 添加 API Key header
         let mut request = http::Request::get(&target_url);
         if let Some(api_key) = get_api_key_for_endpoint(endpoint) {
             request = request.add_header("TRON-PRO-API-KEY", &api_key);
@@ -1297,6 +1354,7 @@ fn fetch_url_parallel_race(url: &str, config: &EndpointConfig) -> Result<Vec<u8>
                 let mut health = get_endpoint_health(endpoint);
                 health.record_failure();
                 save_endpoint_health(endpoint, &health);
+                if health.score < 15 { quarantine_endpoint(endpoint); }
             }
         }
     }
@@ -1306,12 +1364,12 @@ fn fetch_url_parallel_race(url: &str, config: &EndpointConfig) -> Result<Vec<u8>
     }
 
     let mut winner_response: Option<Vec<u8>> = None;
+    let mut winner_endpoint = String::new();
     let mut failed_endpoints: Vec<String> = Vec::new();
 
     for (endpoint, pending) in pending_requests {
         match pending.try_wait(timeout) {
             Ok(Ok(response)) => {
-                // M1-R2: 使用 saturating_sub 防止 OCW 时间戳异常时 panic
                 let response_ms = current_timestamp_ms().saturating_sub(start_time) as u32;
 
                 if response.code == 200 {
@@ -1322,7 +1380,9 @@ fn fetch_url_parallel_race(url: &str, config: &EndpointConfig) -> Result<Vec<u8>
                         let mut health = get_endpoint_health(&endpoint);
                         health.record_success(response_ms);
                         save_endpoint_health(&endpoint, &health);
+                        clear_quarantine(&endpoint);
 
+                        winner_endpoint = endpoint;
                         winner_response = Some(body);
                         break;
                     }
@@ -1340,10 +1400,11 @@ fn fetch_url_parallel_race(url: &str, config: &EndpointConfig) -> Result<Vec<u8>
         let mut health = get_endpoint_health(&endpoint);
         health.record_failure();
         save_endpoint_health(&endpoint, &health);
+        if health.score < 15 { quarantine_endpoint(&endpoint); }
     }
 
     match winner_response {
-        Some(body) => Ok(body),
+        Some(body) => Ok((body, winner_endpoint)),
         None => {
             log::error!(target: "trc20-verifier", "All parallel requests failed");
             Err(VerificationError::AllEndpointsFailed)
@@ -1351,8 +1412,8 @@ fn fetch_url_parallel_race(url: &str, config: &EndpointConfig) -> Result<Vec<u8>
     }
 }
 
-/// 串行故障转移模式 (H1 API Key + L1 可配置超时)
-fn fetch_url_sequential(url: &str, config: &EndpointConfig) -> Result<Vec<u8>, VerificationError> {
+/// 串行故障转移模式 (H1 API Key + L1 可配置超时 + 熔断)
+fn fetch_url_sequential(url: &str, config: &EndpointConfig) -> Result<(Vec<u8>, String), VerificationError> {
     let sorted_endpoints = get_sorted_endpoints();
     let mut last_error = VerificationError::NoEndpoints;
 
@@ -1360,7 +1421,6 @@ fn fetch_url_sequential(url: &str, config: &EndpointConfig) -> Result<Vec<u8>, V
         sorted_endpoints.len());
 
     for (idx, endpoint) in sorted_endpoints.iter().enumerate() {
-        // H3: 使用 strip_prefix 替代 replace
         let target_url = build_endpoint_url(url, endpoint);
         let start_time = current_timestamp_ms();
 
@@ -1369,28 +1429,28 @@ fn fetch_url_sequential(url: &str, config: &EndpointConfig) -> Result<Vec<u8>, V
 
         match fetch_url_with_key(&target_url, endpoint, config.timeout_ms) {
             Ok(response) => {
-                // M1-R2: 使用 saturating_sub 防止 OCW 时间戳异常时 panic
                 let response_ms = current_timestamp_ms().saturating_sub(start_time) as u32;
 
                 let mut health = get_endpoint_health(endpoint);
                 health.record_success(response_ms);
                 save_endpoint_health(endpoint, &health);
+                clear_quarantine(endpoint);
 
                 if idx > 0 {
                     log::info!(target: "trc20-verifier", "Fallback endpoint {} succeeded ({}ms)",
                         endpoint, response_ms);
-                    // M4: 记录端点切换
                     let mut m = get_verifier_metrics();
                     m.endpoint_fallback_count = m.endpoint_fallback_count.saturating_add(1);
                     m.last_updated = current_timestamp_ms();
                     save_verifier_metrics(&m);
                 }
-                return Ok(response);
+                return Ok((response, endpoint.clone()));
             },
             Err(e) => {
                 let mut health = get_endpoint_health(endpoint);
                 health.record_failure();
                 save_endpoint_health(endpoint, &health);
+                if health.score < 15 { quarantine_endpoint(endpoint); }
 
                 log::warn!(target: "trc20-verifier", "Endpoint {} failed: {}", endpoint, e);
                 last_error = e;
@@ -1482,213 +1542,7 @@ fn json_obj_get_u64(obj: &[(Vec<char>, JsonValue)], key: &str) -> Option<u64> {
 }
 
 
-/// 在 JSON 树中递归搜索指定 key 的字符串值
-#[cfg(test)]
-fn json_find_str(value: &JsonValue, key: &str) -> Option<String> {
-    match value {
-        JsonValue::Object(obj) => {
-            if let Some(s) = json_obj_get_str(obj, key) {
-                return Some(s);
-            }
-            for (_, v) in obj.iter() {
-                if let Some(s) = json_find_str(v, key) {
-                    return Some(s);
-                }
-            }
-            None
-        },
-        JsonValue::Array(arr) => {
-            for v in arr {
-                if let Some(s) = json_find_str(v, key) {
-                    return Some(s);
-                }
-            }
-            None
-        },
-        _ => None,
-    }
-}
-
-/// 在 JSON 树中递归搜索指定 key 的 u64 数字值
-#[cfg(test)]
-fn json_find_u64(value: &JsonValue, key: &str) -> Option<u64> {
-    match value {
-        JsonValue::Object(obj) => {
-            if let Some(n) = json_obj_get_u64(obj, key) {
-                return Some(n);
-            }
-            for (_, v) in obj.iter() {
-                if let Some(n) = json_find_u64(v, key) {
-                    return Some(n);
-                }
-            }
-            None
-        },
-        JsonValue::Array(arr) => {
-            for v in arr {
-                if let Some(n) = json_find_u64(v, key) {
-                    return Some(n);
-                }
-            }
-            None
-        },
-        _ => None,
-    }
-}
-
-/// 检查 JSON 树中是否有任何字符串值完全等于 target
-#[cfg(test)]
-fn json_has_str_value(value: &JsonValue, target: &str) -> bool {
-    match value {
-        JsonValue::String(chars) => json_chars_to_string(chars) == target,
-        JsonValue::Object(obj) => obj.iter().any(|(_, v)| json_has_str_value(v, target)),
-        JsonValue::Array(arr) => arr.iter().any(|v| json_has_str_value(v, target)),
-        _ => false,
-    }
-}
-
 // ==================== 响应解析 ====================
-
-/// 解析 TronGrid 单笔交易 API 响应（仅测试使用）
-///
-/// S2修复: 移除 json_has_str_value 全树搜索回退，仅按字段精确匹配地址
-#[cfg(test)]
-fn parse_tron_response(
-    response: &[u8],
-    expected_to: &[u8],
-    expected_from: Option<&[u8]>,
-    expected_amount: u64,
-) -> Result<TronTxVerification, VerificationError> {
-    let response_str = core::str::from_utf8(response)
-        .map_err(|_| VerificationError::InvalidUtf8)?;
-
-    let mut result = TronTxVerification::default();
-    result.expected_amount = Some(expected_amount);
-
-    let json_value = parse_json(response_str)
-        .map_err(|_| VerificationError::InvalidJson)?;
-
-    // 1. 检查交易成功状态
-    let contract_ret = json_find_str(&json_value, "contractRet");
-    if contract_ret.as_deref() != Some("SUCCESS") {
-        result.error = Some(b"Transaction not successful".to_vec());
-        return Ok(result);
-    }
-
-    // 2. H3: 使用可配置 USDT 合约地址
-    let cfg = get_verifier_config();
-    let contract = effective_usdt_contract(&cfg);
-    if !json_has_str_value(&json_value, &contract) {
-        result.error = Some(b"Not a USDT TRC20 transaction".to_vec());
-        return Ok(result);
-    }
-
-    // 3. H3: 使用可配置最小确认数
-    let min_conf = effective_min_confirmations(&cfg);
-    let confirmations = json_find_u64(&json_value, "confirmations")
-        .and_then(|v| u32::try_from(v).ok())
-        .unwrap_or(0);
-    result.confirmations = confirmations;
-    if confirmations < min_conf {
-        result.error = Some(b"Insufficient confirmations".to_vec());
-        return Ok(result);
-    }
-
-    // 4. 检查发送方地址 (S2修复: 仅精确字段匹配，移除全树搜索回退)
-    if let Some(expected_from_bytes) = expected_from {
-        let expected_from_str = core::str::from_utf8(expected_from_bytes)
-            .map_err(|_| VerificationError::InvalidUtf8)?;
-        let from_addr = json_find_str(&json_value, "owner_address")
-            .or_else(|| json_find_str(&json_value, "from"));
-        if from_addr.as_deref() != Some(expected_from_str) {
-            result.error = Some(b"Sender address mismatch".to_vec());
-            return Ok(result);
-        }
-    }
-
-    // 5. 检查收款地址 (S2修复: 仅精确字段匹配，移除全树搜索回退)
-    let expected_to_str = core::str::from_utf8(expected_to)
-        .map_err(|_| VerificationError::InvalidUtf8)?;
-    let to_addr = json_find_str(&json_value, "to_address")
-        .or_else(|| json_find_str(&json_value, "to"));
-    if to_addr.as_deref() != Some(expected_to_str) {
-        result.error = Some(b"Recipient address mismatch".to_vec());
-        return Ok(result);
-    }
-
-    // 6. C2修复: 按字段名精确提取金额（不再匹配首个 "amount:" 子串位置）
-    let actual_amount = json_find_u64(&json_value, "amount");
-    result.actual_amount = actual_amount;
-
-    // 🆕 H7修复: 统一使用 calculate_amount_status，消除重复逻辑
-    // 修复前内联版本缺少 expected==0 → Invalid 保护
-    let (amount_status, is_acceptable) = match actual_amount {
-        Some(actual) => {
-            let status = calculate_amount_status(expected_amount, actual, 50);
-            let acceptable = matches!(status, AmountStatus::Exact | AmountStatus::Overpaid { .. });
-            match &status {
-                AmountStatus::Overpaid { excess } =>
-                    log::info!(target: "trc20-verifier", "Overpaid: expected={}, actual={}, excess={}",
-                        expected_amount, actual, excess),
-                AmountStatus::Underpaid { shortage } =>
-                    log::warn!(target: "trc20-verifier", "Underpaid: expected={}, actual={}, shortage={}",
-                        expected_amount, actual, shortage),
-                AmountStatus::SeverelyUnderpaid { .. } =>
-                    log::error!(target: "trc20-verifier", "Severely underpaid: expected={}, actual={}",
-                        expected_amount, actual),
-                _ => {}
-            }
-            (status, acceptable)
-        },
-        None => {
-            log::error!(target: "trc20-verifier", "Failed to extract amount from response");
-            (AmountStatus::Invalid, false)
-        }
-    };
-
-    result.amount_status = amount_status.clone();
-
-    if !is_acceptable {
-        let error_msg = match &amount_status {
-            AmountStatus::Underpaid { shortage } =>
-                format!("Underpaid by {} (expected {}, got {})",
-                    shortage, expected_amount, actual_amount.unwrap_or(0)),
-            AmountStatus::SeverelyUnderpaid { shortage } =>
-                format!("Severely underpaid by {} (possible fraud)", shortage),
-            AmountStatus::Invalid =>
-                "Invalid or zero amount".to_string(),
-            _ => "Amount mismatch".to_string(),
-        };
-        result.error = Some(error_msg.into_bytes());
-        return Ok(result);
-    }
-
-    result.is_valid = true;
-
-    Ok(result)
-}
-
-/// 从响应中提取金额（C2修复后仅测试使用）
-#[cfg(test)]
-fn extract_amount(response: &str) -> Option<u64> {
-    let patterns = ["\"amount\":", "\"amount\": "];
-
-    for pattern in patterns {
-        if let Some(start) = response.find(pattern) {
-            let after_key = &response[start + pattern.len()..];
-            let trimmed = after_key.trim_start();
-            let num_str: String = trimmed.chars()
-                .take_while(|c| c.is_numeric())
-                .collect();
-            if !num_str.is_empty() {
-                if let Ok(amount) = num_str.parse::<u64>() {
-                    return Some(amount);
-                }
-            }
-        }
-    }
-    None
-}
 
 // ==================== 按 (from, to, amount) 搜索验证 ====================
 
@@ -1758,8 +1612,15 @@ pub fn verify_trc20_by_transfer(
     let now_ms = sp_io::offchain::timestamp().unix_millis();
     let verify_start = now_ms;
 
-    // C3: 时间窗口最大值限制
     let verifier_config = get_verifier_config();
+
+    // Kill switch: 全局禁用检查
+    if !verifier_config.enabled {
+        log::warn!(target: "trc20-verifier", "Verifier is globally disabled");
+        return Err(VerificationError::VerifierDisabled);
+    }
+
+    // C3: 时间窗口最大值限制
     if verifier_config.max_lookback_ms > 0 && min_timestamp > 0 {
         let earliest_allowed = now_ms.saturating_sub(verifier_config.max_lookback_ms);
         if min_timestamp < earliest_allowed {
@@ -1795,13 +1656,13 @@ pub fn verify_trc20_by_transfer(
         to_str, from_str, expected_amount, min_timestamp);
 
     // M2: 分页循环
+    let mut last_endpoint_used = String::new();
     let paging_result: Result<TransferSearchResult, VerificationError> = (|| {
         let mut combined = TransferSearchResult::default();
         let mut fingerprint: Option<String> = None;
         let mut page = 0u32;
 
         loop {
-            // NEW-5: fingerprint 参数使用百分号编码
             let url = if let Some(ref fp) = fingerprint {
                 format!(
                     "{}/v1/accounts/{}/transactions/trc20?contract_address={}&only_to=true&min_timestamp={}&limit=50&order_by=block_timestamp,desc&fingerprint={}",
@@ -1814,8 +1675,8 @@ pub fn verify_trc20_by_transfer(
                 )
             };
 
-            let response = fetch_url_with_fallback(&url)?;
-            // NEW-3: 传入 min_conf 和 tolerance_bps 避免内部重复读取配置
+            let (response, endpoint_used) = fetch_url_with_fallback(&url)?;
+            last_endpoint_used = endpoint_used;
             let (page_result, next_fp) = parse_trc20_transfer_list_paged(
                 &response, from_str, expected_amount, now_ms, &contract, min_conf, tolerance_bps,
             )?;
@@ -1842,6 +1703,39 @@ pub fn verify_trc20_by_transfer(
 
     let mut combined = paging_result?;
 
+    // P0: tx_hash 重放过滤 — 移除已被使用过的转账，防止同一笔链上转账验证多笔订单
+    let pre_filter_count = combined.matched_transfers.len();
+    combined.matched_transfers.retain(|t| !is_tx_hash_used(&t.tx_hash));
+    if combined.matched_transfers.len() < pre_filter_count {
+        let removed = pre_filter_count - combined.matched_transfers.len();
+        log::info!(target: "trc20-verifier",
+            "Filtered {} already-used tx_hash(es) for {}=>{}", removed, from_str, to_str);
+
+        let total: u64 = combined.matched_transfers.iter().map(|t| t.amount).sum();
+        if total == 0 {
+            combined.found = false;
+            combined.actual_amount = None;
+            combined.tx_hash = None;
+            combined.block_timestamp = None;
+            combined.amount_status = AmountStatus::Invalid;
+            combined.error = Some(b"All matching transfers already used".to_vec());
+        } else {
+            combined.actual_amount = Some(total);
+            combined.amount_status = calculate_amount_status(expected_amount, total, tolerance_bps);
+            if let Some(max_t) = combined.matched_transfers.iter().max_by_key(|t| t.amount) {
+                combined.tx_hash = Some(max_t.tx_hash.clone());
+                combined.block_timestamp = Some(max_t.block_timestamp);
+                combined.estimated_confirmations = max_t.estimated_confirmations;
+            }
+            match &combined.amount_status {
+                AmountStatus::Underpaid { shortage } | AmountStatus::SeverelyUnderpaid { shortage } => {
+                    combined.remaining_amount = Some(*shortage);
+                },
+                _ => { combined.remaining_amount = None; }
+            }
+        }
+    }
+
     // C1: found=true 时保证 tx_hash 非空（防重放前提）
     if combined.found && combined.tx_hash.as_ref().map_or(true, |h| h.is_empty()) {
         log::error!(target: "trc20-verifier",
@@ -1856,7 +1750,7 @@ pub fn verify_trc20_by_transfer(
     // M4: 记录验证指标
     record_metric_verification(combined.found, duration_ms);
 
-    // M5+M7: 写入增强审计日志
+    // M5+M7: 写入增强审计日志（endpoint_used 现在由 fetch 层传回）
     write_audit_log(&AuditLogEntry {
         timestamp: now_ms,
         action: b"verify_trc20_by_transfer".to_vec(),
@@ -1867,7 +1761,7 @@ pub fn verify_trc20_by_transfer(
         result_ok: combined.found,
         error_msg: combined.error.clone().unwrap_or_default(),
         tx_hash: combined.tx_hash.clone().unwrap_or_default(),
-        endpoint_used: Vec::new(), // 端点信息由 fetch 层记录
+        endpoint_used: last_endpoint_used.into_bytes(),
         duration_ms,
     });
 
@@ -2092,75 +1986,6 @@ fn parse_trc20_transfer_list_paged(
     Ok((result, next_fingerprint))
 }
 
-/// 找到匹配的 `}` 括号（支持一层嵌套）（M5修复后仅测试使用）
-#[cfg(test)]
-fn find_matching_brace(s: &str, open_pos: usize) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut depth: u32 = 0;
-    for i in open_pos..bytes.len() {
-        match bytes[i] {
-            b'{' => depth = depth.saturating_add(1),
-            b'}' => {
-                depth = match depth.checked_sub(1) {
-                    Some(d) => d,
-                    None => return None, // L3: 防止恶意响应导致下溢
-                };
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// 从 JSON 片段中提取字符串字段值（C1修复后仅测试使用）
-/// 匹配 `"key":"value"` 或 `"key": "value"` 格式
-#[cfg(test)]
-fn extract_json_string_value<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    let patterns = [
-        format!("\"{}\":\"", key),
-        format!("\"{}\": \"", key),
-    ];
-
-    for pattern in &patterns {
-        if let Some(start) = json.find(pattern.as_str()) {
-            let value_start = start + pattern.len();
-            if let Some(end) = json[value_start..].find('"') {
-                return Some(&json[value_start..value_start + end]);
-            }
-        }
-    }
-    None
-}
-
-/// 从 JSON 片段中提取数字字段值（C1修复后仅测试使用）
-/// 匹配 `"key":12345` 或 `"key": 12345` 格式
-#[cfg(test)]
-fn extract_json_number(json: &str, key: &str) -> Option<u64> {
-    let patterns = [
-        format!("\"{}\":", key),
-        format!("\"{}\": ", key),
-    ];
-
-    for pattern in &patterns {
-        if let Some(start) = json.find(pattern.as_str()) {
-            let after_key = &json[start + pattern.len()..];
-            let trimmed = after_key.trim_start();
-            // 跳过引号（如果是字符串数字）
-            let trimmed = trimmed.trim_start_matches('"');
-            let num_str: String = trimmed.chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
-            if !num_str.is_empty() {
-                return num_str.parse::<u64>().ok();
-            }
-        }
-    }
-    None
-}
-
 /// 计算金额匹配状态 (NEW-9: 可配置容差, tolerance_bps 单位为基点, 50 = ±0.5%)
 pub fn calculate_amount_status(expected: u64, actual: u64, tolerance_bps: u32) -> AmountStatus {
     if actual == 0 {
@@ -2313,54 +2138,7 @@ mod tests {
         assert_eq!(health.calculate_score(), 70);
     }
 
-    #[test]
-    fn test_extract_amount() {
-        assert_eq!(extract_amount(r#""amount":1000000"#), Some(1000000));
-        assert_eq!(extract_amount(r#""amount": 2500000"#), Some(2500000));
-        assert_eq!(extract_amount(r#"no amount here"#), None);
-        assert_eq!(extract_amount(r#""amount":0"#), Some(0));
-    }
-
     // ==================== 转账搜索解析测试 ====================
-
-    #[test]
-    fn test_find_matching_brace() {
-        assert_eq!(find_matching_brace("{abc}", 0), Some(4));
-        assert_eq!(find_matching_brace("{a{b}c}", 0), Some(6));
-        assert_eq!(find_matching_brace("[{a},{b}]", 1), Some(3));
-        assert_eq!(find_matching_brace("{", 0), None);
-    }
-
-    #[test]
-    fn test_extract_json_string_value() {
-        let json = r#"{"from":"TBuyerAddr","to":"TSellerAddr","value":"50000000"}"#;
-        assert_eq!(extract_json_string_value(json, "from"), Some("TBuyerAddr"));
-        assert_eq!(extract_json_string_value(json, "to"), Some("TSellerAddr"));
-        assert_eq!(extract_json_string_value(json, "value"), Some("50000000"));
-        assert_eq!(extract_json_string_value(json, "missing"), None);
-    }
-
-    #[test]
-    fn test_extract_json_string_value_with_spaces() {
-        let json = r#"{"from": "TBuyerAddr", "value": "50000000"}"#;
-        assert_eq!(extract_json_string_value(json, "from"), Some("TBuyerAddr"));
-        assert_eq!(extract_json_string_value(json, "value"), Some("50000000"));
-    }
-
-    #[test]
-    fn test_extract_json_number() {
-        let json = r#"{"block_timestamp":1700000000000,"confirmations":20}"#;
-        assert_eq!(extract_json_number(json, "block_timestamp"), Some(1700000000000));
-        assert_eq!(extract_json_number(json, "confirmations"), Some(20));
-        assert_eq!(extract_json_number(json, "missing"), None);
-    }
-
-    #[test]
-    fn test_extract_json_number_string_format() {
-        // TronGrid 有时把数字放在引号里
-        let json = r#"{"block_timestamp":"1700000000000"}"#;
-        assert_eq!(extract_json_number(json, "block_timestamp"), Some(1700000000000));
-    }
 
     #[test]
     fn test_parse_transfer_list_exact_match() {
@@ -2492,28 +2270,6 @@ mod tests {
     // ==================== 审计回归测试 ====================
 
     #[test]
-    fn h1_parse_tron_response_base58_address_match() {
-        with_offchain_ext(|| {
-            let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","to_address":"TSellerAddr12345678901234567890","confirmations":100,"amount":10000000}"#;
-            let expected_to = b"TSellerAddr12345678901234567890";
-            let result = parse_tron_response(response, expected_to, None, 10_000_000).unwrap();
-            assert!(result.is_valid);
-            assert_eq!(result.amount_status, AmountStatus::Exact);
-        });
-    }
-
-    #[test]
-    fn h1_parse_tron_response_address_mismatch() {
-        with_offchain_ext(|| {
-            let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","to_address":"TSellerAddr12345678901234567890","confirmations":100,"amount":10000000}"#;
-            let wrong_to = b"TWrongAddr123456789012345678901";
-            let result = parse_tron_response(response, wrong_to, None, 10_000_000).unwrap();
-            assert!(!result.is_valid);
-            assert_eq!(result.error, Some(b"Recipient address mismatch".to_vec()));
-        });
-    }
-
-    #[test]
     fn m2_calculate_amount_status_large_amount_no_overflow() {
         // M2修复: 大金额不应溢出
         // 修复前: 10^16 * 1005 溢出 u64（u64::MAX ≈ 1.84×10^19）
@@ -2548,98 +2304,24 @@ mod tests {
     }
 
     #[test]
-    fn h1_parse_tron_response_insufficient_confirmations() {
-        with_offchain_ext(|| {
-            let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","to_address":"TSellerXXX","confirmations":5,"amount":10000000}"#;
-            let result = parse_tron_response(response, b"TSellerXXX", None, 10_000_000).unwrap();
-            assert!(!result.is_valid);
-            assert_eq!(result.confirmations, 5);
-            assert_eq!(result.error, Some(b"Insufficient confirmations".to_vec()));
-        });
-    }
-
-    #[test]
-    fn h1_parse_tron_response_not_usdt_contract() {
-        with_offchain_ext(|| {
-            let response = br#"{"contractRet":"SUCCESS","contract_address":"TFakeContract","to_address":"TSellerXXX","confirmations":100,"amount":10000000}"#;
-            let result = parse_tron_response(response, b"TSellerXXX", None, 10_000_000).unwrap();
-            assert!(!result.is_valid);
-            assert_eq!(result.error, Some(b"Not a USDT TRC20 transaction".to_vec()));
-        });
-    }
-
-    #[test]
-    fn h1_parse_tron_response_tx_not_successful() {
-        with_offchain_ext(|| {
-            let response = br#"{"contractRet":"REVERT","to_address":"TSellerXXX"}"#;
-            let result = parse_tron_response(response, b"TSellerXXX", None, 10_000_000).unwrap();
-            assert!(!result.is_valid);
-            assert_eq!(result.error, Some(b"Transaction not successful".to_vec()));
-        });
-    }
-
-    // ==================== Phase 1 新增回归测试 ====================
-
-    #[test]
-    fn h6_parse_tron_response_sender_address_check() {
-        with_offchain_ext(|| {
-            let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","from":"TBuyerAddr1234567890","to_address":"TSellerAddr12345678901234567890","confirmations":100,"amount":10000000}"#;
-            let result = parse_tron_response(
-                response, b"TSellerAddr12345678901234567890", Some(b"TBuyerAddr1234567890"), 10_000_000
-            ).unwrap();
-            assert!(result.is_valid);
-        });
-    }
-
-    #[test]
-    fn h6_parse_tron_response_sender_mismatch() {
-        with_offchain_ext(|| {
-            let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","from":"TBuyerAddr1234567890","to_address":"TSellerAddr12345678901234567890","confirmations":100,"amount":10000000}"#;
-            let result = parse_tron_response(
-                response, b"TSellerAddr12345678901234567890", Some(b"TWrongSender1234567890"), 10_000_000
-            ).unwrap();
-            assert!(!result.is_valid);
-            assert_eq!(result.error, Some(b"Sender address mismatch".to_vec()));
-        });
-    }
-
-    #[test]
-    fn h6_parse_tron_response_no_from_check_when_none() {
-        with_offchain_ext(|| {
-            let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","from":"TRandomSender","to_address":"TSellerAddr12345678901234567890","confirmations":100,"amount":10000000}"#;
-            let result = parse_tron_response(
-                response, b"TSellerAddr12345678901234567890", None, 10_000_000
-            ).unwrap();
-            assert!(result.is_valid);
-        });
-    }
-
-    #[test]
-    fn h7_parse_tron_response_expected_zero_returns_invalid() {
-        with_offchain_ext(|| {
-            let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","to_address":"TSellerAddr12345678901234567890","confirmations":100,"amount":10000000}"#;
-            let result = parse_tron_response(
-                response, b"TSellerAddr12345678901234567890", None, 0
-            ).unwrap();
-            assert!(!result.is_valid);
-            assert_eq!(result.amount_status, AmountStatus::Invalid);
-        });
-    }
-
-    #[test]
     fn h8_add_endpoint_rejects_http() {
-        // URL format validation happens before any offchain storage access
-        assert_eq!(add_endpoint("http://api.example.com"), Err(VerificationError::InvalidEndpointUrl("Endpoint must use HTTPS")));
+        with_offchain_ext(|| {
+            assert_eq!(add_endpoint("http://api.example.com"), Err(VerificationError::InvalidEndpointUrl("Endpoint must use HTTPS")));
+        });
     }
 
     #[test]
     fn h8_add_endpoint_rejects_short_url() {
-        assert_eq!(add_endpoint("https://x"), Err(VerificationError::InvalidEndpointUrl("Endpoint URL length must be 10-256 characters")));
+        with_offchain_ext(|| {
+            assert_eq!(add_endpoint("https://x"), Err(VerificationError::InvalidEndpointUrl("Endpoint URL length must be 10-256 characters")));
+        });
     }
 
     #[test]
     fn h8_add_endpoint_rejects_whitespace() {
-        assert_eq!(add_endpoint("https://api.example .com"), Err(VerificationError::InvalidEndpointUrl("Endpoint URL must not contain whitespace")));
+        with_offchain_ext(|| {
+            assert_eq!(add_endpoint("https://api.example .com"), Err(VerificationError::InvalidEndpointUrl("Endpoint URL must not contain whitespace")));
+        });
     }
 
     #[test]
@@ -2651,56 +2333,12 @@ mod tests {
         assert_eq!(hex_to_bytes("1234abcd").unwrap(), vec![0x12, 0x34, 0xab, 0xcd]);
     }
 
-    // ==================== Phase 2 新增回归测试 (C1+C2+M5) ====================
-
-    #[test]
-    fn c1_json_helpers_basic() {
-        use lite_json::parse_json;
-        let json_str = r#"{"name":"Alice","age":30,"nested":{"key":"val"}}"#;
-        let val = parse_json(json_str).unwrap();
-        assert_eq!(json_find_str(&val, "name"), Some("Alice".into()));
-        assert_eq!(json_find_u64(&val, "age"), Some(30));
-        assert_eq!(json_find_str(&val, "key"), Some("val".into()));
-        assert_eq!(json_find_str(&val, "missing"), None);
-    }
-
-    #[test]
-    fn c1_json_has_str_value_exact_match() {
-        use lite_json::parse_json;
-        // json_has_str_value should only match complete string values, not substrings
-        let json_str = r#"{"addr":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","other":"TR7NHq"}"#;
-        let val = parse_json(json_str).unwrap();
-        assert!(json_has_str_value(&val, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"));
-        assert!(json_has_str_value(&val, "TR7NHq")); // exact match of "other" field
-        assert!(!json_has_str_value(&val, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6")); // prefix, not exact
-    }
-
-    #[test]
-    fn c1_parse_tron_response_rejects_invalid_json() {
-        with_offchain_ext(|| {
-            let response = b"this is not json";
-            let result = parse_tron_response(response, b"TSeller", None, 10_000_000);
-            assert_eq!(result, Err(VerificationError::InvalidJson));
-        });
-    }
-
     #[test]
     fn c1_parse_transfer_list_rejects_invalid_json() {
         with_offchain_ext(|| {
             let response = b"not json at all";
             let result = parse_trc20_transfer_list(response, "TBuyer", 10_000_000, 0);
             assert_eq!(result, Err(VerificationError::InvalidJson));
-        });
-    }
-
-    #[test]
-    fn c2_amount_extracted_by_field_name() {
-        with_offchain_ext(|| {
-            let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","to_address":"TSellerXXX","confirmations":100,"amount":5000000}"#;
-            let result = parse_tron_response(response, b"TSellerXXX", None, 5_000_000).unwrap();
-            assert!(result.is_valid);
-            assert_eq!(result.actual_amount, Some(5_000_000));
-            assert_eq!(result.amount_status, AmountStatus::Exact);
         });
     }
 
@@ -3630,77 +3268,54 @@ mod tests {
         assert_eq!(decoded.len(), 25);
     }
 
-    // ==================== S2: 地址匹配精确化回归测试 ====================
-
-    #[test]
-    fn s2_parse_tron_response_no_tree_fallback_for_to() {
-        with_offchain_ext(|| {
-            // to_address 字段值与 expected_to 不同，但 expected_to 出现在其他字段
-            // S2修复前: json_has_str_value 全树搜索会在 memo 字段找到 → 误判匹配
-            // S2修复后: 仅检查 to_address/to 字段 → 正确拒绝
-            let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","to_address":"TRealRecipient1234567890123456789","memo":"TExpectedAddr12345678901234567890","confirmations":100,"amount":10000000}"#;
-            let result = parse_tron_response(
-                response, b"TExpectedAddr12345678901234567890", None, 10_000_000
-            ).unwrap();
-            assert!(!result.is_valid);
-            assert_eq!(result.error, Some(b"Recipient address mismatch".to_vec()));
-        });
-    }
-
-    #[test]
-    fn s2_parse_tron_response_no_tree_fallback_for_from() {
-        with_offchain_ext(|| {
-            // from 字段值与 expected_from 不同，但 expected_from 出现在 memo 字段
-            let response = br#"{"contractRet":"SUCCESS","contract_address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t","from":"TActualSender123456789012345678","to_address":"TSellerAddr12345678901234567890","memo":"TExpectedSender12345678901234567","confirmations":100,"amount":10000000}"#;
-            let result = parse_tron_response(
-                response, b"TSellerAddr12345678901234567890",
-                Some(b"TExpectedSender12345678901234567"), 10_000_000
-            ).unwrap();
-            assert!(!result.is_valid);
-            assert_eq!(result.error, Some(b"Sender address mismatch".to_vec()));
-        });
-    }
-
     // ==================== S3: SSRF 防护回归测试 ====================
 
     #[test]
     fn s3_add_endpoint_rejects_localhost() {
-        assert_eq!(
-            add_endpoint("https://localhost/api"),
-            Err(VerificationError::InvalidEndpointUrl("Endpoint must not target private or loopback addresses"))
-        );
+        with_offchain_ext(|| {
+            assert_eq!(
+                add_endpoint("https://localhost/api"),
+                Err(VerificationError::InvalidEndpointUrl("Endpoint must not target private or loopback addresses"))
+            );
+        });
     }
 
     #[test]
     fn s3_add_endpoint_rejects_loopback_ip() {
-        assert_eq!(
-            add_endpoint("https://127.0.0.1/api"),
-            Err(VerificationError::InvalidEndpointUrl("Endpoint must not target private or loopback addresses"))
-        );
+        with_offchain_ext(|| {
+            assert_eq!(
+                add_endpoint("https://127.0.0.1/api"),
+                Err(VerificationError::InvalidEndpointUrl("Endpoint must not target private or loopback addresses"))
+            );
+        });
     }
 
     #[test]
     fn s3_add_endpoint_rejects_private_ips() {
-        assert_eq!(
-            add_endpoint("https://10.0.0.1/api"),
-            Err(VerificationError::InvalidEndpointUrl("Endpoint must not target private or loopback addresses"))
-        );
-        assert_eq!(
-            add_endpoint("https://192.168.1.1/api"),
-            Err(VerificationError::InvalidEndpointUrl("Endpoint must not target private or loopback addresses"))
-        );
-        assert_eq!(
-            add_endpoint("https://172.16.0.1/api"),
-            Err(VerificationError::InvalidEndpointUrl("Endpoint must not target private or loopback addresses"))
-        );
+        with_offchain_ext(|| {
+            assert_eq!(
+                add_endpoint("https://10.0.0.1/api"),
+                Err(VerificationError::InvalidEndpointUrl("Endpoint must not target private or loopback addresses"))
+            );
+            assert_eq!(
+                add_endpoint("https://192.168.1.1/api"),
+                Err(VerificationError::InvalidEndpointUrl("Endpoint must not target private or loopback addresses"))
+            );
+            assert_eq!(
+                add_endpoint("https://172.16.0.1/api"),
+                Err(VerificationError::InvalidEndpointUrl("Endpoint must not target private or loopback addresses"))
+            );
+        });
     }
 
     #[test]
     fn s3_add_endpoint_rejects_link_local() {
-        assert_eq!(
-            add_endpoint("https://169.254.1.1/api"),
-            Err(VerificationError::InvalidEndpointUrl("Endpoint must not target private or loopback addresses"))
-        );
+        with_offchain_ext(|| {
+            assert_eq!(
+                add_endpoint("https://169.254.1.1/api"),
+                Err(VerificationError::InvalidEndpointUrl("Endpoint must not target private or loopback addresses"))
+            );
+        });
     }
 
     #[test]
@@ -3830,10 +3445,12 @@ mod tests {
 
     #[test]
     fn new1_add_endpoint_rejects_ipv4_mapped_ipv6() {
-        assert_eq!(
-            add_endpoint("https://[::ffff:127.0.0.1]/api"),
-            Err(VerificationError::InvalidEndpointUrl("Endpoint must not target private or loopback addresses"))
-        );
+        with_offchain_ext(|| {
+            assert_eq!(
+                add_endpoint("https://[::ffff:127.0.0.1]/api"),
+                Err(VerificationError::InvalidEndpointUrl("Endpoint must not target private or loopback addresses"))
+            );
+        });
     }
 
     // ==================== NEW-2: save_endpoint_config 校验 ====================
@@ -3972,6 +3589,7 @@ mod tests {
             let loaded = get_verifier_config();
             assert_eq!(loaded.min_confirmations, 30);
             assert_eq!(loaded.amount_tolerance_bps, 50); // 迁移后使用默认值
+            assert!(loaded.enabled); // 迁移后默认启用
         });
     }
 
@@ -4033,5 +3651,174 @@ mod tests {
         config.amount_tolerance_bps = 1001; // > 1000 (10%)
         let err = validate_verifier_config(&config).unwrap_err();
         assert!(matches!(err, VerificationError::InvalidConfig(_)));
+    }
+
+    // ==================== P0: tx_hash 重放防护 ====================
+
+    #[test]
+    fn p0_tx_hash_unused_by_default() {
+        with_offchain_ext(|| {
+            assert!(!is_tx_hash_used(b"tx_new_123"));
+        });
+    }
+
+    #[test]
+    fn p0_register_and_check_tx_hash() {
+        with_offchain_ext(|| {
+            let tx = b"tx_abc_456";
+            assert!(!is_tx_hash_used(tx));
+            register_used_tx_hash(tx);
+            assert!(is_tx_hash_used(tx));
+        });
+    }
+
+    #[test]
+    fn p0_empty_tx_hash_never_used() {
+        with_offchain_ext(|| {
+            register_used_tx_hash(b"");
+            assert!(!is_tx_hash_used(b""));
+        });
+    }
+
+    #[test]
+    fn p0_register_result_tx_hashes_batch() {
+        with_offchain_ext(|| {
+            let result = TransferSearchResult {
+                found: true,
+                actual_amount: Some(10_000_000),
+                matched_transfers: vec![
+                    MatchedTransfer { tx_hash: b"tx_a".to_vec(), amount: 5_000_000, block_timestamp: 1700000000000, estimated_confirmations: None },
+                    MatchedTransfer { tx_hash: b"tx_b".to_vec(), amount: 5_000_000, block_timestamp: 1700000001000, estimated_confirmations: None },
+                ],
+                ..Default::default()
+            };
+            register_result_tx_hashes(&result);
+            assert!(is_tx_hash_used(b"tx_a"));
+            assert!(is_tx_hash_used(b"tx_b"));
+            assert!(!is_tx_hash_used(b"tx_c"));
+        });
+    }
+
+    // ==================== P1: Kill switch ====================
+
+    #[test]
+    fn p1_kill_switch_default_enabled() {
+        let config = VerifierConfig::default();
+        assert!(config.enabled);
+    }
+
+    #[test]
+    fn p1_kill_switch_disabled_error() {
+        with_offchain_ext(|| {
+            let mut config = VerifierConfig::default();
+            config.enabled = false;
+            save_verifier_config(&config).unwrap();
+
+            let err = VerificationError::VerifierDisabled;
+            assert_eq!(err.as_str(), "Verifier is globally disabled");
+        });
+    }
+
+    #[test]
+    fn p1_kill_switch_legacy_migration_defaults_enabled() {
+        with_offchain_ext(|| {
+            #[derive(Encode)]
+            struct OldConfig {
+                usdt_contract: String,
+                min_confirmations: u32,
+                rate_limit_interval_ms: u64,
+                cache_ttl_ms: u64,
+                max_pages: u32,
+                audit_log_retention: u32,
+                max_lookback_ms: u64,
+                updated_at: u64,
+                amount_tolerance_bps: u32,
+            }
+            let old = OldConfig {
+                usdt_contract: String::from("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
+                min_confirmations: 25,
+                rate_limit_interval_ms: 200,
+                cache_ttl_ms: 30_000,
+                max_pages: 3,
+                audit_log_retention: 100,
+                max_lookback_ms: 259_200_000,
+                updated_at: 0,
+                amount_tolerance_bps: 50,
+            };
+            let mut versioned = alloc::vec![CONFIG_VERSION_MARKER, 1u8];
+            versioned.extend_from_slice(&old.encode());
+            sp_io::offchain::local_storage_set(
+                StorageKind::PERSISTENT, VERIFIER_CONFIG_KEY, &versioned,
+            );
+
+            let loaded = get_verifier_config();
+            assert_eq!(loaded.min_confirmations, 25);
+            assert!(loaded.enabled);
+        });
+    }
+
+    // ==================== P1: 端点熔断/隔离 ====================
+
+    #[test]
+    fn p1_quarantine_default_not_quarantined() {
+        with_offchain_ext(|| {
+            assert!(!is_endpoint_quarantined("https://api.trongrid.io"));
+        });
+    }
+
+    #[test]
+    fn p1_quarantine_and_check() {
+        with_offchain_ext(|| {
+            let ep = "https://api.trongrid.io";
+            quarantine_endpoint(ep);
+            assert!(is_endpoint_quarantined(ep));
+        });
+    }
+
+    #[test]
+    fn p1_quarantine_clear() {
+        with_offchain_ext(|| {
+            let ep = "https://api.trongrid.io";
+            quarantine_endpoint(ep);
+            assert!(is_endpoint_quarantined(ep));
+            clear_quarantine(ep);
+            assert!(!is_endpoint_quarantined(ep));
+        });
+    }
+
+    #[test]
+    fn p1_quarantine_independent_endpoints() {
+        with_offchain_ext(|| {
+            let ep_a = "https://api.trongrid.io";
+            let ep_b = "https://api.tronstack.io";
+            quarantine_endpoint(ep_a);
+            assert!(is_endpoint_quarantined(ep_a));
+            assert!(!is_endpoint_quarantined(ep_b));
+        });
+    }
+
+    #[test]
+    fn p1_sorted_endpoints_skip_quarantined() {
+        with_offchain_ext(|| {
+            add_endpoint("https://api.trongrid.io").unwrap();
+            add_endpoint("https://api.tronstack.io").unwrap();
+
+            let all = get_sorted_endpoints();
+            assert!(all.iter().any(|e| e == "https://api.trongrid.io"));
+
+            quarantine_endpoint("https://api.trongrid.io");
+
+            let filtered = get_sorted_endpoints();
+            assert!(!filtered.iter().any(|e| e == "https://api.trongrid.io"));
+            assert!(filtered.iter().any(|e| e == "https://api.tronstack.io"));
+        });
+    }
+
+    // ==================== P1: endpoint_used 审计日志 ====================
+
+    #[test]
+    fn p1_verification_error_variants_display() {
+        assert_eq!(VerificationError::VerifierDisabled.as_str(), "Verifier is globally disabled");
+        assert_eq!(VerificationError::TxHashAlreadyUsed.as_str(), "Transaction hash already used");
     }
 }

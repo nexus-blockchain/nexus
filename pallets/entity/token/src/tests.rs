@@ -207,7 +207,7 @@ fn mint_tokens_works() {
             USER_A,
             1000,
         ));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 1000);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 1000);
     });
 }
 
@@ -257,8 +257,8 @@ fn transfer_tokens_works() {
         assert_ok!(EntityToken::transfer_tokens(
             RuntimeOrigin::signed(USER_A), SHOP_ID, USER_B, 400,
         ));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 600);
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_B), 400);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 600);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_B), 400);
     });
 }
 
@@ -442,7 +442,7 @@ fn claim_dividend_works() {
         assert_ok!(EntityToken::claim_dividend(
             RuntimeOrigin::signed(USER_A), SHOP_ID,
         ));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 100);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 100);
         assert_eq!(EntityToken::pending_dividends(SHOP_ID, &USER_A), 0);
         assert_eq!(EntityToken::claimed_dividends(SHOP_ID, &USER_A), 100);
     });
@@ -828,7 +828,7 @@ fn reserve_unreserve_repatriate_works() {
         let repatriated = <Provider as EntityTokenProvider<u64, u128>>::repatriate_reserved(SHOP_ID, &USER_A, &USER_B, 300).unwrap();
         assert_eq!(repatriated, 300);
         assert_eq!(EntityToken::reserved_tokens(SHOP_ID, &USER_A), 100);
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_B), 300);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_B), 300);
     });
 }
 
@@ -1085,7 +1085,7 @@ fn h1r3_repatriate_reserved_consistent_on_transfer_failure() {
             asset_id, &USER_A, &USER_B, 60,
             frame_support::traits::tokens::Preservation::Preserve,
         ));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 40);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 40);
 
         // repatriate_reserved 50 → transfer 应失败（USER_A 只有 40）
         let result = <EntityToken as EntityTokenProvider<u64, u128>>::repatriate_reserved(
@@ -1123,7 +1123,7 @@ fn h2r3_claim_dividend_succeeds_despite_later_mint() {
         assert_ok!(EntityToken::claim_dividend(
             RuntimeOrigin::signed(USER_A), SHOP_ID,
         ));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 50);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 50);
         assert_eq!(EntityToken::pending_dividends(SHOP_ID, &USER_A), 0);
     });
 }
@@ -1218,7 +1218,7 @@ fn l1r3_unlock_and_claim_still_work_when_inactive() {
         assert_ok!(EntityToken::claim_dividend(
             RuntimeOrigin::signed(USER_A), SHOP_ID,
         ));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 1100); // 1000 + 100 dividend
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 1100); // 1000 + 100 dividend
     });
 }
 
@@ -1461,7 +1461,7 @@ fn p0_admin_can_mint_tokens() {
         assert_ok!(EntityToken::mint_tokens(
             RuntimeOrigin::signed(ADMIN), SHOP_ID, USER_A, 500,
         ));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 500);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 500);
     });
 }
 
@@ -1623,7 +1623,7 @@ fn p0_owner_still_works_without_admin_flag() {
         assert_ok!(EntityToken::mint_tokens(
             RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 100,
         ));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 100);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 100);
     });
 }
 
@@ -1859,13 +1859,13 @@ fn p2_force_burn_works() {
         assert_ok!(EntityToken::mint_tokens(
             RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 1000,
         ));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 1000);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 1000);
 
         assert_ok!(EntityToken::force_burn(
             RuntimeOrigin::root(), SHOP_ID, USER_A, 300,
         ));
 
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 700);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 700);
         System::assert_has_event(RuntimeEvent::EntityToken(Event::TokensForceBurned {
             entity_id: SHOP_ID,
             from: USER_A,
@@ -1885,7 +1885,7 @@ fn p2_force_burn_full_balance() {
         assert_ok!(EntityToken::force_burn(
             RuntimeOrigin::root(), SHOP_ID, USER_A, 500,
         ));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 0);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 0);
     });
 }
 
@@ -2067,7 +2067,7 @@ fn p3_global_unpause_restores_operations() {
         assert_ok!(EntityToken::transfer_tokens(
             RuntimeOrigin::signed(USER_A), SHOP_ID, USER_B, 100,
         ));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_B), 100);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_B), 100);
     });
 }
 
@@ -2111,7 +2111,7 @@ fn burn_tokens_works() {
         assert_ok!(EntityToken::burn_tokens(
             RuntimeOrigin::signed(USER_A), SHOP_ID, 400,
         ));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 600);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 600);
         System::assert_has_event(RuntimeEvent::EntityToken(Event::TokensBurned {
             entity_id: SHOP_ID,
             holder: USER_A,
@@ -2154,7 +2154,7 @@ fn burn_tokens_rejects_insufficient_available() {
         assert_ok!(EntityToken::burn_tokens(
             RuntimeOrigin::signed(USER_A), SHOP_ID, 200,
         ));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 800);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 800);
     });
 }
 
@@ -2263,8 +2263,8 @@ fn force_transfer_works() {
         assert_ok!(EntityToken::force_transfer(
             RuntimeOrigin::root(), SHOP_ID, USER_A, USER_B, 500,
         ));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 500);
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_B), 500);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 500);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_B), 500);
         System::assert_has_event(RuntimeEvent::EntityToken(Event::TokensForceTransferred {
             entity_id: SHOP_ID,
             from: USER_A,
@@ -2356,7 +2356,7 @@ fn force_burn_cleans_up_storage_on_zero_balance() {
         ));
         // 强制销毁全部（包括锁仓的）
         assert_ok!(EntityToken::force_burn(RuntimeOrigin::root(), SHOP_ID, USER_A, 1000));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 0);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 0);
         // 验证锁仓已清理
         assert!(EntityToken::get_lock_entries(SHOP_ID, &USER_A).is_empty());
     });
@@ -2374,7 +2374,7 @@ fn force_burn_partial_does_not_cleanup() {
         ));
         // 部分销毁
         assert_ok!(EntityToken::force_burn(RuntimeOrigin::root(), SHOP_ID, USER_A, 500));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 500);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 500);
         // 锁仓仍然存在
         assert!(!EntityToken::get_lock_entries(SHOP_ID, &USER_A).is_empty());
     });
@@ -2528,7 +2528,7 @@ fn trait_transfer_checks_available_balance() {
         assert!(<EntityToken as EntityTokenProvider<u64, u128>>::transfer(SHOP_ID, &USER_A, &USER_B, 200).is_err());
         // 可用 100，转 100 应成功
         assert_ok!(<EntityToken as EntityTokenProvider<u64, u128>>::transfer(SHOP_ID, &USER_A, &USER_B, 100));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_B), 100);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_B), 100);
     });
 }
 
@@ -2581,7 +2581,7 @@ fn m1_force_transfer_cleans_storage_on_zero_balance() {
         assert_ok!(EntityToken::force_transfer(
             RuntimeOrigin::root(), SHOP_ID, USER_A, USER_B, 1000,
         ));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 0);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 0);
 
         // M1: 锁仓、预留、待领取分红应已清理
         assert!(EntityToken::get_lock_entries(SHOP_ID, &USER_A).is_empty());
@@ -2607,7 +2607,7 @@ fn m1_force_transfer_partial_does_not_cleanup() {
         assert_ok!(EntityToken::force_transfer(
             RuntimeOrigin::root(), SHOP_ID, USER_A, USER_B, 500,
         ));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 500);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 500);
         // 锁仓仍存在
         assert!(!EntityToken::get_lock_entries(SHOP_ID, &USER_A).is_empty());
     });
@@ -2643,7 +2643,7 @@ fn m3_burn_tokens_works_when_entity_inactive() {
         assert_ok!(EntityToken::burn_tokens(
             RuntimeOrigin::signed(USER_A), SHOP_ID, 400,
         ));
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 600);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 600);
     });
 }
 
@@ -2673,7 +2673,7 @@ fn h1r2_repatriate_reserved_works_when_entity_inactive() {
         assert_ok!(&result);
         assert_eq!(result.unwrap(), 300);
         assert_eq!(EntityToken::reserved_tokens(SHOP_ID, &USER_A), 200);
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_B), 300);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_B), 300);
     });
 }
 
@@ -2699,7 +2699,7 @@ fn h1r2_repatriate_reserved_works_when_transfers_frozen() {
         assert_ok!(&result);
         assert_eq!(result.unwrap(), 400);
         assert_eq!(EntityToken::reserved_tokens(SHOP_ID, &USER_A), 100);
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_B), 400);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_B), 400);
     });
 }
 
@@ -2725,7 +2725,7 @@ fn h1r2_repatriate_reserved_works_when_global_paused() {
         assert_ok!(&result);
         assert_eq!(result.unwrap(), 500);
         assert_eq!(EntityToken::reserved_tokens(SHOP_ID, &USER_A), 0);
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_B), 500);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_B), 500);
     });
 }
 
@@ -2749,8 +2749,8 @@ fn h1r2_repatriate_reserved_works_with_full_reserved_balance() {
         assert_ok!(&result);
         assert_eq!(result.unwrap(), 500);
         assert_eq!(EntityToken::reserved_tokens(SHOP_ID, &USER_A), 0);
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_A), 0);
-        assert_eq!(EntityToken::get_balance(SHOP_ID, &USER_B), 500);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 0);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_B), 500);
     });
 }
 
@@ -2804,5 +2804,234 @@ fn l3r3_trait_reserve_rejects_zero_amount() {
             )
         );
         assert_eq!(EntityToken::reserved_tokens(SHOP_ID, &USER_A), 500);
+    });
+}
+
+// ==================== R4 审计新增测试 ====================
+
+#[test]
+fn r4_claim_dividend_blocked_when_token_disabled() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::change_token_type(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, TokenType::Equity,
+        ));
+        assert_ok!(EntityToken::configure_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, true, 0,
+        ));
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 1000,
+        ));
+        assert_ok!(EntityToken::distribute_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 100,
+            vec![(USER_A, 100)],
+        ));
+        assert_eq!(EntityToken::pending_dividends(SHOP_ID, &USER_A), 100);
+
+        // Root 强制禁用代币
+        assert_ok!(EntityToken::force_disable_token(RuntimeOrigin::root(), SHOP_ID));
+
+        // claim 应被拒绝
+        assert_noop!(
+            EntityToken::claim_dividend(RuntimeOrigin::signed(USER_A), SHOP_ID),
+            Error::<Test>::TokenNotEnabled
+        );
+    });
+}
+
+#[test]
+fn r4_transfer_tokens_rejects_self_transfer() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 1000,
+        ));
+        assert_noop!(
+            EntityToken::transfer_tokens(RuntimeOrigin::signed(USER_A), SHOP_ID, USER_A, 100),
+            Error::<Test>::SelfTransfer
+        );
+    });
+}
+
+#[test]
+fn r4_insider_trading_blocked_during_blackout() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 1000,
+        ));
+
+        // 非内幕人员在黑窗口期可以转账
+        set_blackout_period(SHOP_ID);
+        assert_ok!(EntityToken::transfer_tokens(
+            RuntimeOrigin::signed(USER_A), SHOP_ID, USER_B, 100,
+        ));
+
+        // 注册 USER_A 为内幕人员
+        set_insider(SHOP_ID, USER_A);
+
+        // 内幕人员在黑窗口期不能转账
+        assert_noop!(
+            EntityToken::transfer_tokens(RuntimeOrigin::signed(USER_A), SHOP_ID, USER_B, 100),
+            Error::<Test>::InsiderTradingRestricted
+        );
+
+        // 解除黑窗口期后可以转账
+        clear_blackout_period(SHOP_ID);
+        assert_ok!(EntityToken::transfer_tokens(
+            RuntimeOrigin::signed(USER_A), SHOP_ID, USER_B, 100,
+        ));
+    });
+}
+
+#[test]
+fn r4_force_cancel_pending_dividends_works() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::change_token_type(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, TokenType::Equity,
+        ));
+        assert_ok!(EntityToken::configure_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, true, 0,
+        ));
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 1000,
+        ));
+        assert_ok!(EntityToken::distribute_dividend(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 200,
+            vec![(USER_A, 100), (USER_B, 100)],
+        ));
+        assert_eq!(EntityToken::pending_dividends(SHOP_ID, &USER_A), 100);
+        assert_eq!(EntityToken::pending_dividends(SHOP_ID, &USER_B), 100);
+        assert_eq!(EntityToken::total_pending_dividends(SHOP_ID), 200);
+
+        // Root 取消 USER_A 的待领取分红
+        assert_ok!(EntityToken::force_cancel_pending_dividends(
+            RuntimeOrigin::root(), SHOP_ID, vec![USER_A],
+        ));
+        assert_eq!(EntityToken::pending_dividends(SHOP_ID, &USER_A), 0);
+        assert_eq!(EntityToken::pending_dividends(SHOP_ID, &USER_B), 100);
+        assert_eq!(EntityToken::total_pending_dividends(SHOP_ID), 100);
+    });
+}
+
+#[test]
+fn r4_force_cancel_pending_dividends_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_noop!(
+            EntityToken::force_cancel_pending_dividends(
+                RuntimeOrigin::signed(OWNER), SHOP_ID, vec![USER_A],
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn r4_force_cancel_pending_dividends_rejects_nothing_to_cancel() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_noop!(
+            EntityToken::force_cancel_pending_dividends(
+                RuntimeOrigin::root(), SHOP_ID, vec![USER_A],
+            ),
+            Error::<Test>::NoPendingDividendsToCancel
+        );
+    });
+}
+
+#[test]
+fn r4_whitelist_blacklist_query_works() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert!(!EntityToken::is_whitelisted(SHOP_ID, &USER_A));
+        assert!(!EntityToken::is_blacklisted(SHOP_ID, &USER_A));
+
+        assert_ok!(EntityToken::add_to_whitelist(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, vec![USER_A],
+        ));
+        assert!(EntityToken::is_whitelisted(SHOP_ID, &USER_A));
+        assert!(!EntityToken::is_whitelisted(SHOP_ID, &USER_B));
+
+        assert_ok!(EntityToken::add_to_blacklist(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, vec![USER_B],
+        ));
+        assert!(EntityToken::is_blacklisted(SHOP_ID, &USER_B));
+        assert!(!EntityToken::is_blacklisted(SHOP_ID, &USER_A));
+    });
+}
+
+#[test]
+fn r4_approve_and_transfer_from_works() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 1000,
+        ));
+
+        // USER_A 授权 USER_B 使用 500 代币
+        assert_ok!(EntityToken::approve_tokens(
+            RuntimeOrigin::signed(USER_A), SHOP_ID, USER_B, 500,
+        ));
+        assert_eq!(EntityToken::get_allowance(SHOP_ID, &USER_A, &USER_B), 500);
+
+        // USER_B 通过授权将 USER_A 的代币转给 3(USER_B)
+        let user_c: u64 = 4;
+        assert_ok!(EntityToken::transfer_from(
+            RuntimeOrigin::signed(USER_B), SHOP_ID, USER_A, user_c, 200,
+        ));
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &USER_A), 800);
+        assert_eq!(EntityToken::token_balance(SHOP_ID, &user_c), 200);
+        assert_eq!(EntityToken::get_allowance(SHOP_ID, &USER_A, &USER_B), 300);
+    });
+}
+
+#[test]
+fn r4_transfer_from_rejects_insufficient_allowance() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 1000,
+        ));
+        assert_ok!(EntityToken::approve_tokens(
+            RuntimeOrigin::signed(USER_A), SHOP_ID, USER_B, 100,
+        ));
+        assert_noop!(
+            EntityToken::transfer_from(
+                RuntimeOrigin::signed(USER_B), SHOP_ID, USER_A, 4, 200,
+            ),
+            Error::<Test>::InsufficientAllowance
+        );
+    });
+}
+
+#[test]
+fn r4_approve_rejects_self_approval() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_noop!(
+            EntityToken::approve_tokens(RuntimeOrigin::signed(USER_A), SHOP_ID, USER_A, 500),
+            Error::<Test>::SelfTransfer
+        );
+    });
+}
+
+#[test]
+fn r4_transfer_from_rejects_self_transfer() {
+    new_test_ext().execute_with(|| {
+        setup_token();
+        assert_ok!(EntityToken::mint_tokens(
+            RuntimeOrigin::signed(OWNER), SHOP_ID, USER_A, 1000,
+        ));
+        assert_ok!(EntityToken::approve_tokens(
+            RuntimeOrigin::signed(USER_A), SHOP_ID, USER_B, 500,
+        ));
+        assert_noop!(
+            EntityToken::transfer_from(
+                RuntimeOrigin::signed(USER_B), SHOP_ID, USER_A, USER_A, 100,
+            ),
+            Error::<Test>::SelfTransfer
+        );
     });
 }

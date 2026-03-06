@@ -302,6 +302,12 @@ pub mod pallet {
             product_id: u64,
             reason: Option<BoundedVec<u8, T::MaxReasonLength>>,
         },
+        /// 商品被强制删除（Root/治理）
+        ProductForceDeleted {
+            product_id: u64,
+            deposit_refunded: BalanceOf<T>,
+            reason: Option<BoundedVec<u8, T::MaxReasonLength>>,
+        },
         /// 批量操作完成（best-effort 模式，部分失败不回滚）
         BatchCompleted {
             /// 操作类型描述
@@ -312,6 +318,17 @@ pub mod pallet {
             failed: u32,
             /// 失败的商品 ID 列表
             failed_ids: Vec<u64>,
+        },
+        /// 店铺全部商品已移除（店铺关闭时触发）
+        ShopProductsRemoved {
+            shop_id: u64,
+            count: u32,
+            deposits_refunded: BalanceOf<T>,
+        },
+        /// 店铺全部在售商品已下架（店铺封禁时触发）
+        ShopProductsDelisted {
+            shop_id: u64,
+            count: u32,
         },
     }
 
@@ -331,8 +348,6 @@ pub mod pallet {
         ProductNotFound,
         /// 店铺不存在
         ShopNotFound,
-        /// 不是店主
-        NotShopOwner,
         /// 店铺未激活
         ShopNotActive,
         /// 库存不足
@@ -345,8 +360,6 @@ pub mod pallet {
         CidTooLong,
         /// 店铺运营资金不足以支付押金
         InsufficientShopFund,
-        /// 押金记录不存在
-        DepositNotFound,
         /// 价格不可用
         PriceUnavailable,
         /// 算术溢出
@@ -369,6 +382,12 @@ pub mod pallet {
         EntityLocked,
         /// 无效的购买数量限制（max < min）
         InvalidOrderQuantity,
+        /// 暂不支持的商品类别（Subscription/Bundle 尚未完整实现）
+        CategoryNotSupported,
+        /// 未提供任何变更（所有可选参数均为 None）
+        NoChangesProvided,
+        /// 最小购买数量超过库存（有限库存时 min_order_quantity > stock）
+        MinOrderExceedsStock,
     }
 
     // ==================== Extrinsics ====================
@@ -406,6 +425,16 @@ pub mod pallet {
             if max_order_quantity > 0 && min_order_quantity > 0 {
                 ensure!(max_order_quantity >= min_order_quantity, Error::<T>::InvalidOrderQuantity);
             }
+
+            // v1.2-H4: 有限库存时 min_order_quantity 不得超过 stock，否则商品永远无法被购买
+            if stock > 0 && min_order_quantity > 0 {
+                ensure!(stock >= min_order_quantity, Error::<T>::MinOrderExceedsStock);
+            }
+
+            ensure!(
+                !matches!(category, ProductCategory::Subscription | ProductCategory::Bundle),
+                Error::<T>::CategoryNotSupported
+            );
 
             // H2: CID 不能为空
             ensure!(!name_cid.is_empty(), Error::<T>::EmptyCid);
@@ -481,10 +510,11 @@ pub mod pallet {
                 updated_at: now,
             };
 
-            // 提取 CID 引用用于后续 IPFS Pin（product 将被 move）
             let pin_name_cid = product.name_cid.clone();
             let pin_images_cid = product.images_cid.clone();
             let pin_detail_cid = product.detail_cid.clone();
+            let pin_tags_cid = product.tags_cid.clone();
+            let pin_sku_cid = product.sku_cid.clone();
 
             Products::<T>::insert(product_id, product);
             ShopProducts::<T>::try_mutate(shop_id, |ids| ids.try_push(product_id))
@@ -507,10 +537,15 @@ pub mod pallet {
                 stats.total_products = stats.total_products.saturating_add(1);
             });
 
-            // IPFS Pin: 固定商品元数据 CID（best-effort，pin 失败不阻断商品创建）
-            Self::pin_product_cid(&who, product_id, &pin_name_cid);
-            Self::pin_product_cid(&who, product_id, &pin_images_cid);
-            Self::pin_product_cid(&who, product_id, &pin_detail_cid);
+            Self::pin_product_cid(shop_id, product_id, &pin_name_cid);
+            Self::pin_product_cid(shop_id, product_id, &pin_images_cid);
+            Self::pin_product_cid(shop_id, product_id, &pin_detail_cid);
+            if !pin_tags_cid.is_empty() {
+                Self::pin_product_cid(shop_id, product_id, &pin_tags_cid);
+            }
+            if !pin_sku_cid.is_empty() {
+                Self::pin_product_cid(shop_id, product_id, &pin_sku_cid);
+            }
 
             Self::deposit_event(Event::ProductCreated {
                 product_id,
@@ -544,34 +579,59 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
+            let has_any_change = name_cid.is_some() || images_cid.is_some() || detail_cid.is_some()
+                || price.is_some() || usdt_price.is_some() || stock.is_some()
+                || category.is_some() || sort_weight.is_some() || tags_cid.is_some()
+                || sku_cid.is_some() || min_order_quantity.is_some()
+                || max_order_quantity.is_some() || visibility.is_some();
+            ensure!(has_any_change, Error::<T>::NoChangesProvided);
+
+            // H2-fix: 收集 CID 变更，在 try_mutate 成功后执行 pin/unpin（事务安全）
+            let mut to_unpin: Vec<BoundedVec<u8, T::MaxCidLength>> = Vec::new();
+            let mut to_pin: Vec<BoundedVec<u8, T::MaxCidLength>> = Vec::new();
+            let mut resolved_shop_id: u64 = 0;
+
+            // v1.2-H4: 记录是否显式更新了 stock 或 min_order_quantity
+            let needs_stock_min_check = stock.is_some() || min_order_quantity.is_some();
+
             Products::<T>::try_mutate(product_id, |maybe_product| -> DispatchResult {
                 let product = maybe_product.as_mut().ok_or(Error::<T>::ProductNotFound)?;
+                resolved_shop_id = product.shop_id;
 
-                // 权限检查：Owner / Admin / Manager
                 Self::ensure_product_operator(&who, product.shop_id, true)?;
+                // v1.2-H3: 非活跃店铺禁止更新商品（暂停/封禁/关闭时需先恢复店铺）
+                ensure!(T::ShopProvider::is_shop_active(product.shop_id), Error::<T>::ShopNotActive);
 
+                // L2-fix: 同值 CID 跳过无谓 pin/unpin
                 if let Some(c) = name_cid {
-                    // H2: name_cid 不能为空
                     ensure!(!c.is_empty(), Error::<T>::EmptyCid);
-                    let old_cid = product.name_cid.clone();
-                    product.name_cid = c.try_into().map_err(|_| Error::<T>::CidTooLong)?;
-                    // IPFS: unpin old + pin new (best-effort)
-                    Self::unpin_product_cid(&who, &old_cid);
-                    Self::pin_product_cid(&who, product_id, &product.name_cid);
+                    let new_cid: BoundedVec<u8, T::MaxCidLength> =
+                        c.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+                    if new_cid != product.name_cid {
+                        to_unpin.push(product.name_cid.clone());
+                        to_pin.push(new_cid.clone());
+                        product.name_cid = new_cid;
+                    }
                 }
                 if let Some(c) = images_cid {
                     ensure!(!c.is_empty(), Error::<T>::EmptyCid);
-                    let old_cid = product.images_cid.clone();
-                    product.images_cid = c.try_into().map_err(|_| Error::<T>::CidTooLong)?;
-                    Self::unpin_product_cid(&who, &old_cid);
-                    Self::pin_product_cid(&who, product_id, &product.images_cid);
+                    let new_cid: BoundedVec<u8, T::MaxCidLength> =
+                        c.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+                    if new_cid != product.images_cid {
+                        to_unpin.push(product.images_cid.clone());
+                        to_pin.push(new_cid.clone());
+                        product.images_cid = new_cid;
+                    }
                 }
                 if let Some(c) = detail_cid {
                     ensure!(!c.is_empty(), Error::<T>::EmptyCid);
-                    let old_cid = product.detail_cid.clone();
-                    product.detail_cid = c.try_into().map_err(|_| Error::<T>::CidTooLong)?;
-                    Self::unpin_product_cid(&who, &old_cid);
-                    Self::pin_product_cid(&who, product_id, &product.detail_cid);
+                    let new_cid: BoundedVec<u8, T::MaxCidLength> =
+                        c.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+                    if new_cid != product.detail_cid {
+                        to_unpin.push(product.detail_cid.clone());
+                        to_pin.push(new_cid.clone());
+                        product.detail_cid = new_cid;
+                    }
                 }
                 if let Some(p) = price {
                     ensure!(!p.is_zero(), Error::<T>::InvalidPrice);
@@ -581,38 +641,61 @@ pub mod pallet {
                     product.usdt_price = u;
                 }
                 if let Some(s) = stock {
-                    // M1: 在售商品不可将库存设为 0（stock=0 双重语义：创建时=无限，运行时=售罄）
                     ensure!(
                         !(s == 0 && product.status == ProductStatus::OnSale),
                         Error::<T>::CannotClearStockWhileOnSale
                     );
                     product.stock = s;
                     if s > 0 && product.status == ProductStatus::SoldOut {
-                        // H1: 补货恢复上架时检查 Shop 激活状态
                         ensure!(
                             T::ShopProvider::is_shop_active(product.shop_id),
                             Error::<T>::ShopNotActive
                         );
                         product.status = ProductStatus::OnSale;
-                        // M3: 补货恢复在售统计
                         ProductStats::<T>::mutate(|stats| {
                             stats.on_sale_products = stats.on_sale_products.saturating_add(1);
                         });
                     }
                 }
                 if let Some(c) = category {
+                    ensure!(
+                        product.status != ProductStatus::OnSale,
+                        Error::<T>::InvalidProductStatus
+                    );
+                    ensure!(
+                        !matches!(c, ProductCategory::Subscription | ProductCategory::Bundle),
+                        Error::<T>::CategoryNotSupported
+                    );
                     product.category = c;
                 }
                 if let Some(w) = sort_weight {
                     product.sort_weight = w;
                 }
                 if let Some(t) = tags_cid {
-                    // tags_cid 允许为空（清除标签）
-                    product.tags_cid = t.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+                    let new_cid: BoundedVec<u8, T::MaxCidLength> =
+                        t.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+                    if new_cid != product.tags_cid {
+                        if !product.tags_cid.is_empty() {
+                            to_unpin.push(product.tags_cid.clone());
+                        }
+                        if !new_cid.is_empty() {
+                            to_pin.push(new_cid.clone());
+                        }
+                        product.tags_cid = new_cid;
+                    }
                 }
                 if let Some(s) = sku_cid {
-                    // sku_cid 允许为空（清除 SKU）
-                    product.sku_cid = s.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+                    let new_cid: BoundedVec<u8, T::MaxCidLength> =
+                        s.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+                    if new_cid != product.sku_cid {
+                        if !product.sku_cid.is_empty() {
+                            to_unpin.push(product.sku_cid.clone());
+                        }
+                        if !new_cid.is_empty() {
+                            to_pin.push(new_cid.clone());
+                        }
+                        product.sku_cid = new_cid;
+                    }
                 }
                 if let Some(min_q) = min_order_quantity {
                     product.min_order_quantity = min_q;
@@ -620,7 +703,6 @@ pub mod pallet {
                 if let Some(max_q) = max_order_quantity {
                     product.max_order_quantity = max_q;
                 }
-                // 购买数量限制校验（更新后的值）
                 if product.max_order_quantity > 0 && product.min_order_quantity > 0 {
                     ensure!(
                         product.max_order_quantity >= product.min_order_quantity,
@@ -631,9 +713,25 @@ pub mod pallet {
                     product.visibility = v;
                 }
 
+                // v1.2-H4: 更新 stock 或 min_order_quantity 时交叉校验
+                if needs_stock_min_check && product.stock > 0 && product.min_order_quantity > 0 {
+                    ensure!(
+                        product.stock >= product.min_order_quantity,
+                        Error::<T>::MinOrderExceedsStock
+                    );
+                }
+
                 product.updated_at = <frame_system::Pallet<T>>::block_number();
                 Ok(())
             })?;
+
+            // H2-fix: IPFS pin/unpin 在 try_mutate 成功后执行，避免回滚时副作用残留
+            for cid in &to_unpin {
+                Self::unpin_product_cid(resolved_shop_id, cid);
+            }
+            for cid in &to_pin {
+                Self::pin_product_cid(resolved_shop_id, product_id, cid);
+            }
 
             Self::deposit_event(Event::ProductUpdated { product_id });
             Ok(())
@@ -760,16 +858,14 @@ pub mod pallet {
                 Zero::zero()
             };
 
-            // IPFS Unpin: 取消固定商品元数据 CID（best-effort）
-            Self::unpin_product_cid(&who, &product.name_cid);
-            Self::unpin_product_cid(&who, &product.images_cid);
-            Self::unpin_product_cid(&who, &product.detail_cid);
-            // M3: 补充 unpin tags_cid 和 sku_cid（非空时）
+            Self::unpin_product_cid(product.shop_id, &product.name_cid);
+            Self::unpin_product_cid(product.shop_id, &product.images_cid);
+            Self::unpin_product_cid(product.shop_id, &product.detail_cid);
             if !product.tags_cid.is_empty() {
-                Self::unpin_product_cid(&who, &product.tags_cid);
+                Self::unpin_product_cid(product.shop_id, &product.tags_cid);
             }
             if !product.sku_cid.is_empty() {
-                Self::unpin_product_cid(&who, &product.sku_cid);
+                Self::unpin_product_cid(product.shop_id, &product.sku_cid);
             }
 
             // 删除商品
@@ -1017,15 +1113,14 @@ pub mod pallet {
                     Zero::zero()
                 };
 
-                Self::unpin_product_cid(&who, &product.name_cid);
-                Self::unpin_product_cid(&who, &product.images_cid);
-                Self::unpin_product_cid(&who, &product.detail_cid);
-                // M2: 补充 unpin tags_cid 和 sku_cid（非空时）
+                Self::unpin_product_cid(product.shop_id, &product.name_cid);
+                Self::unpin_product_cid(product.shop_id, &product.images_cid);
+                Self::unpin_product_cid(product.shop_id, &product.detail_cid);
                 if !product.tags_cid.is_empty() {
-                    Self::unpin_product_cid(&who, &product.tags_cid);
+                    Self::unpin_product_cid(product.shop_id, &product.tags_cid);
                 }
                 if !product.sku_cid.is_empty() {
-                    Self::unpin_product_cid(&who, &product.sku_cid);
+                    Self::unpin_product_cid(product.shop_id, &product.sku_cid);
                 }
 
                 Products::<T>::remove(pid);
@@ -1049,6 +1144,87 @@ pub mod pallet {
                 succeeded,
                 failed: failed_ids.len() as u32,
                 failed_ids,
+            });
+            Ok(())
+        }
+        /// 强制删除商品（Root/治理）
+        ///
+        /// 平台内容管控：Root 可强制删除任意商品，不受状态限制（可删 OnSale/SoldOut）。
+        /// 删除前 best-effort 退还押金 + IPFS unpin。
+        #[pallet::call_index(9)]
+        #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
+        pub fn force_delete_product(
+            origin: OriginFor<T>,
+            product_id: u64,
+            reason: Option<Vec<u8>>,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            let bounded_reason = match reason {
+                Some(r) => Some(
+                    BoundedVec::<u8, T::MaxReasonLength>::try_from(r)
+                        .map_err(|_| Error::<T>::ReasonTooLong)?
+                ),
+                None => None,
+            };
+
+            let product = Products::<T>::get(product_id).ok_or(Error::<T>::ProductNotFound)?;
+            let was_on_sale = product.status == ProductStatus::OnSale;
+
+            let deposit_refunded = if let Some(deposit_info) = ProductDeposits::<T>::take(product_id) {
+                let pallet_account: T::AccountId = PRODUCT_PALLET_ID.into_account_truncating();
+                match T::Currency::transfer(
+                    &pallet_account,
+                    &deposit_info.source_account,
+                    deposit_info.amount,
+                    ExistenceRequirement::AllowDeath,
+                ) {
+                    Ok(_) => deposit_info.amount,
+                    Err(e) => {
+                        log::warn!(
+                            target: "entity-product",
+                            "Failed to refund deposit for force-deleted product {}: {:?}",
+                            product_id, e
+                        );
+                        Zero::zero()
+                    }
+                }
+            } else {
+                log::warn!(
+                    target: "entity-product",
+                    "No deposit record for force-deleted product {}, proceeding",
+                    product_id
+                );
+                Zero::zero()
+            };
+
+            Self::unpin_product_cid(product.shop_id, &product.name_cid);
+            Self::unpin_product_cid(product.shop_id, &product.images_cid);
+            Self::unpin_product_cid(product.shop_id, &product.detail_cid);
+            if !product.tags_cid.is_empty() {
+                Self::unpin_product_cid(product.shop_id, &product.tags_cid);
+            }
+            if !product.sku_cid.is_empty() {
+                Self::unpin_product_cid(product.shop_id, &product.sku_cid);
+            }
+
+            Products::<T>::remove(product_id);
+            ShopProducts::<T>::mutate(product.shop_id, |ids| {
+                ids.retain(|&id| id != product_id);
+            });
+            let _ = T::ShopProvider::decrement_product_count(product.shop_id);
+
+            ProductStats::<T>::mutate(|stats| {
+                stats.total_products = stats.total_products.saturating_sub(1);
+                if was_on_sale {
+                    stats.on_sale_products = stats.on_sale_products.saturating_sub(1);
+                }
+            });
+
+            Self::deposit_event(Event::ProductForceDeleted {
+                product_id,
+                deposit_refunded,
+                reason: bounded_reason,
             });
             Ok(())
         }
@@ -1123,20 +1299,17 @@ pub mod pallet {
             Ok(final_deposit)
         }
 
-        /// 获取当前押金金额（供前端查询）
-        pub fn get_current_deposit() -> Result<BalanceOf<T>, sp_runtime::DispatchError> {
-            Self::calculate_product_deposit()
-        }
-
         /// IPFS Pin 商品 CID（best-effort：失败仅记录日志，不阻断业务流程）
+        /// H1-fix: 统一使用 shop_owner 作为 pin owner，确保 unpin 时 owner 一致
         fn pin_product_cid(
-            caller: &T::AccountId,
+            shop_id: u64,
             product_id: u64,
             cid: &BoundedVec<u8, T::MaxCidLength>,
         ) {
-            let entity_id = Products::<T>::get(product_id)
-                .and_then(|p| T::ShopProvider::shop_entity_id(p.shop_id));
-            if let Err(e) = T::StoragePin::pin(caller.clone(), b"product", product_id, entity_id, cid.to_vec(), PinTier::Standard) {
+            let owner = T::ShopProvider::shop_owner(shop_id)
+                .unwrap_or_else(|| T::ShopProvider::shop_account(shop_id));
+            let entity_id = T::ShopProvider::shop_entity_id(shop_id);
+            if let Err(e) = T::StoragePin::pin(owner, b"product", product_id, entity_id, cid.to_vec(), cid.len() as u64, PinTier::Standard) {
                 log::warn!(
                     target: "entity-product",
                     "Failed to pin CID for product {}: {:?}",
@@ -1146,11 +1319,14 @@ pub mod pallet {
         }
 
         /// IPFS Unpin 商品 CID（best-effort：失败仅记录日志）
+        /// H1-fix: 统一使用 shop_owner 作为 unpin caller，与 pin 时的 owner 一致
         fn unpin_product_cid(
-            caller: &T::AccountId,
+            shop_id: u64,
             cid: &BoundedVec<u8, T::MaxCidLength>,
         ) {
-            if let Err(e) = T::StoragePin::unpin(caller.clone(), cid.to_vec()) {
+            let owner = T::ShopProvider::shop_owner(shop_id)
+                .unwrap_or_else(|| T::ShopProvider::shop_account(shop_id));
+            if let Err(e) = T::StoragePin::unpin(owner, cid.to_vec()) {
                 log::warn!(
                     target: "entity-product",
                     "Failed to unpin CID: {:?}",
@@ -1264,6 +1440,20 @@ pub mod pallet {
             Products::<T>::get(product_id).map(|p| p.usdt_price)
         }
 
+        fn get_product_info(product_id: u64) -> Option<pallet_entity_common::ProductQueryInfo<BalanceOf<T>>> {
+            Products::<T>::get(product_id).map(|p| pallet_entity_common::ProductQueryInfo {
+                shop_id: p.shop_id,
+                price: p.price,
+                usdt_price: p.usdt_price,
+                stock: p.stock,
+                status: p.status,
+                category: p.category,
+                visibility: p.visibility,
+                min_order_quantity: p.min_order_quantity,
+                max_order_quantity: p.max_order_quantity,
+            })
+        }
+
         fn product_owner(product_id: u64) -> Option<T::AccountId> {
             Products::<T>::get(product_id)
                 .and_then(|p| T::ShopProvider::shop_owner(p.shop_id))
@@ -1274,21 +1464,114 @@ pub mod pallet {
         }
 
         fn force_unpin_shop_products(shop_id: u64) -> Result<(), DispatchError> {
-            let owner = T::ShopProvider::shop_owner(shop_id)
-                .unwrap_or_else(|| T::ShopProvider::shop_account(shop_id));
             for pid in ShopProducts::<T>::get(shop_id).iter() {
                 if let Some(product) = Products::<T>::get(pid) {
-                    Self::unpin_product_cid(&owner, &product.name_cid);
-                    Self::unpin_product_cid(&owner, &product.images_cid);
-                    Self::unpin_product_cid(&owner, &product.detail_cid);
+                    Self::unpin_product_cid(shop_id, &product.name_cid);
+                    Self::unpin_product_cid(shop_id, &product.images_cid);
+                    Self::unpin_product_cid(shop_id, &product.detail_cid);
                     if !product.tags_cid.is_empty() {
-                        Self::unpin_product_cid(&owner, &product.tags_cid);
+                        Self::unpin_product_cid(shop_id, &product.tags_cid);
                     }
                     if !product.sku_cid.is_empty() {
-                        Self::unpin_product_cid(&owner, &product.sku_cid);
+                        Self::unpin_product_cid(shop_id, &product.sku_cid);
                     }
                 }
             }
+            Ok(())
+        }
+
+        /// v1.2-C1: 强制移除某 Shop 下所有商品（店铺关闭时调用）
+        ///
+        /// 删除全部商品存储 + 退还押金 + unpin CID + 清理索引 + 更新统计。
+        fn force_remove_all_shop_products(shop_id: u64) -> Result<(), DispatchError> {
+            let product_ids = ShopProducts::<T>::take(shop_id);
+            if product_ids.is_empty() {
+                return Ok(());
+            }
+
+            let pallet_account: T::AccountId = PRODUCT_PALLET_ID.into_account_truncating();
+            let mut total_refunded: BalanceOf<T> = Zero::zero();
+            let mut removed_count = 0u32;
+            let mut on_sale_removed = 0u64;
+
+            for &pid in product_ids.iter() {
+                if let Some(product) = Products::<T>::take(pid) {
+                    Self::unpin_product_cid(shop_id, &product.name_cid);
+                    Self::unpin_product_cid(shop_id, &product.images_cid);
+                    Self::unpin_product_cid(shop_id, &product.detail_cid);
+                    if !product.tags_cid.is_empty() {
+                        Self::unpin_product_cid(shop_id, &product.tags_cid);
+                    }
+                    if !product.sku_cid.is_empty() {
+                        Self::unpin_product_cid(shop_id, &product.sku_cid);
+                    }
+
+                    if product.status == ProductStatus::OnSale {
+                        on_sale_removed += 1;
+                    }
+
+                    if let Some(deposit_info) = ProductDeposits::<T>::take(pid) {
+                        if T::Currency::transfer(
+                            &pallet_account,
+                            &deposit_info.source_account,
+                            deposit_info.amount,
+                            ExistenceRequirement::AllowDeath,
+                        ).is_ok() {
+                            total_refunded = total_refunded.saturating_add(deposit_info.amount);
+                        }
+                    }
+
+                    let _ = T::ShopProvider::decrement_product_count(shop_id);
+                    removed_count += 1;
+                }
+            }
+
+            if removed_count > 0 {
+                ProductStats::<T>::mutate(|stats| {
+                    stats.total_products = stats.total_products.saturating_sub(removed_count as u64);
+                    stats.on_sale_products = stats.on_sale_products.saturating_sub(on_sale_removed);
+                });
+                Self::deposit_event(Event::ShopProductsRemoved {
+                    shop_id,
+                    count: removed_count,
+                    deposits_refunded: total_refunded,
+                });
+            }
+
+            Ok(())
+        }
+
+        /// v1.2-M1: 强制下架某 Shop 下所有在售/售罄商品（店铺封禁时调用）
+        fn force_delist_all_shop_products(shop_id: u64) -> Result<(), DispatchError> {
+            let product_ids = ShopProducts::<T>::get(shop_id);
+            let mut delisted_count = 0u32;
+
+            for &pid in product_ids.iter() {
+                Products::<T>::mutate(pid, |maybe_product| {
+                    if let Some(product) = maybe_product.as_mut() {
+                        if product.status == ProductStatus::OnSale {
+                            product.status = ProductStatus::OffShelf;
+                            product.updated_at = <frame_system::Pallet<T>>::block_number();
+                            ProductStats::<T>::mutate(|stats| {
+                                stats.on_sale_products = stats.on_sale_products.saturating_sub(1);
+                            });
+                            delisted_count += 1;
+                        } else if product.status == ProductStatus::SoldOut {
+                            product.status = ProductStatus::OffShelf;
+                            product.updated_at = <frame_system::Pallet<T>>::block_number();
+                            delisted_count += 1;
+                        }
+                    }
+                });
+            }
+
+            if delisted_count > 0 {
+                Self::deposit_event(Event::ShopProductsDelisted {
+                    shop_id,
+                    count: delisted_count,
+                });
+            }
+
             Ok(())
         }
 
@@ -1318,21 +1601,31 @@ pub mod pallet {
         }
 
         fn delist_product(product_id: u64) -> Result<(), sp_runtime::DispatchError> {
+            let mut status_changed = false;
             Products::<T>::try_mutate(product_id, |maybe_product| -> Result<(), sp_runtime::DispatchError> {
                 let product = maybe_product.as_mut().ok_or(Error::<T>::ProductNotFound)?;
-                // H2: OnSale 和 SoldOut 均可治理下架（与 force_unpublish_product 一致）
                 if product.status == ProductStatus::OnSale {
                     product.status = ProductStatus::OffShelf;
                     product.updated_at = <frame_system::Pallet<T>>::block_number();
                     ProductStats::<T>::mutate(|stats| {
                         stats.on_sale_products = stats.on_sale_products.saturating_sub(1);
                     });
+                    status_changed = true;
                 } else if product.status == ProductStatus::SoldOut {
                     product.status = ProductStatus::OffShelf;
                     product.updated_at = <frame_system::Pallet<T>>::block_number();
+                    status_changed = true;
                 }
                 Ok(())
-            })
+            })?;
+            // M1-fix: 治理下架发射事件，确保 indexer 可追踪
+            if status_changed {
+                Self::deposit_event(Event::ProductStatusChanged {
+                    product_id,
+                    status: ProductStatus::OffShelf,
+                });
+            }
+            Ok(())
         }
 
         fn set_inventory(product_id: u64, new_inventory: u32) -> Result<(), sp_runtime::DispatchError> {

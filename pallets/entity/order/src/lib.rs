@@ -39,7 +39,7 @@ pub mod pallet {
     use frame_system::pallet_prelude::*;
     use frame_system::ensure_root;
     use pallet_escrow::pallet::Escrow as EscrowTrait;
-    use pallet_entity_common::{OrderStatus, OrderCommissionHandler, OrderMemberHandler, OrderProvider, PaymentAsset, PricingProvider, ProductCategory, ProductProvider, ProductVisibility, EntityTokenProvider, EntityTokenPriceProvider, MemberProvider, ShopProvider, ShoppingBalanceProvider, TokenOrderCommissionHandler};
+    use pallet_entity_common::{OrderStatus, OrderCommissionHandler, OrderMemberHandler, OrderProvider, PaymentAsset, PricingProvider, ProductCategory, ProductProvider, ProductStatus, ProductVisibility, EntityTokenProvider, EntityTokenPriceProvider, MemberProvider, ShopProvider, ShoppingBalanceProvider, TokenOrderCommissionHandler};
     use sp_runtime::{traits::{Saturating, Zero}, SaturatedConversion};
 
     /// 货币余额类型别名
@@ -50,58 +50,40 @@ pub mod pallet {
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     #[scale_info(skip_type_params(MaxCidLen))]
     pub struct Order<AccountId, Balance, BlockNumber, MaxCidLen: Get<u32>> {
-        /// 订单 ID
         pub id: u64,
-        /// 店铺 ID
+        /// 订单所属 Entity ID（创建时快照，避免后续通过 shop 间接查询）
+        pub entity_id: u64,
         pub shop_id: u64,
-        /// 商品 ID
         pub product_id: u64,
-        /// 买家账户
         pub buyer: AccountId,
-        /// 卖家账户
         pub seller: AccountId,
-        /// 购买数量
         pub quantity: u32,
-        /// 单价
         pub unit_price: Balance,
-        /// 总金额
+        /// 实际支付金额（积分/购物余额/会员折扣后）
         pub total_amount: Balance,
-        /// 平台费
         pub platform_fee: Balance,
-        /// 商品类别（决定订单流程）
+        /// 商品类别（决定订单流程，是否需要物流由此推导）
         pub product_category: ProductCategory,
-        /// 是否需要物流
-        pub requires_shipping: bool,
-        /// 收货地址 IPFS CID
         pub shipping_cid: Option<BoundedVec<u8, MaxCidLen>>,
-        /// 物流信息 IPFS CID
         pub tracking_cid: Option<BoundedVec<u8, MaxCidLen>>,
-        /// 订单状态
         pub status: OrderStatus,
-        /// 创建时间
         pub created_at: BlockNumber,
-        /// 支付时间
-        pub paid_at: Option<BlockNumber>,
-        /// 发货时间
         pub shipped_at: Option<BlockNumber>,
-        /// 完成时间
         pub completed_at: Option<BlockNumber>,
-        /// 服务开始时间（服务类订单）
         pub service_started_at: Option<BlockNumber>,
-        /// 服务完成时间（服务类订单，卖家标记）
+        /// 服务完成时间（卖家标记，限设置一次）
         pub service_completed_at: Option<BlockNumber>,
-        /// 托管 ID
-        pub escrow_id: u64,
-        /// 支付资产类型（默认 Native = NEX）
         pub payment_asset: PaymentAsset,
         /// Token 支付金额（仅 EntityToken 时有效，u128 避免泛型膨胀）
         pub token_payment_amount: u128,
         /// 买家是否已延长确认收货期限（限延一次）
         pub confirm_extended: bool,
-        /// 争议超时截止区块（reject_refund 时设置）
+        /// 卖家是否已拒绝退款（限一次，防无限延期）
+        pub dispute_rejected: bool,
         pub dispute_deadline: Option<BlockNumber>,
-        /// 买家备注 IPFS CID
         pub note_cid: Option<BoundedVec<u8, MaxCidLen>>,
+        /// 退款/争议理由 CID（request_refund 时存储）
+        pub refund_reason_cid: Option<BoundedVec<u8, MaxCidLen>>,
     }
 
     /// 订单类型别名
@@ -282,8 +264,6 @@ pub mod pallet {
     pub type OrderStats<T: Config> = StorageValue<_, OrderStatistics<BalanceOf<T>>, ValueQuery>;
 
     /// 过期检查队列：到期区块号 → 待检查订单 ID 列表
-    /// place_order 写入 [now + ShipTimeout]，ship_order 写入 [now + ConfirmTimeout]
-    /// on_idle 仅检查当前区块对应的队列，O(K) 复杂度
     #[pallet::storage]
     pub type ExpiryQueue<T: Config> = StorageMap<
         _,
@@ -293,140 +273,113 @@ pub mod pallet {
         ValueQuery,
     >;
 
+    /// 订单推荐人（place_order 时记录，完成时传递给 MemberHandler::auto_register）
+    #[pallet::storage]
+    pub type OrderReferrer<T: Config> = StorageMap<_, Blake2_128Concat, u64, T::AccountId>;
+
     // ==================== 事件 ====================
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
-        /// 订单已创建
+        /// 订单已创建并支付
         OrderCreated {
             order_id: u64,
+            entity_id: u64,
             buyer: T::AccountId,
             seller: T::AccountId,
             amount: BalanceOf<T>,
             payment_asset: PaymentAsset,
             token_amount: u128,
         },
-        /// 订单已支付
-        OrderPaid { order_id: u64, escrow_id: u64 },
-        /// 订单已发货
         OrderShipped { order_id: u64 },
-        /// 订单已完成
         OrderCompleted {
             order_id: u64,
             seller_received: BalanceOf<T>,
             token_seller_received: u128,
         },
-        /// 订单已取消
         OrderCancelled { order_id: u64, amount: BalanceOf<T>, token_amount: u128 },
-        /// 订单已退款
         OrderRefunded {
             order_id: u64,
             amount: BalanceOf<T>,
             token_amount: u128,
         },
-        /// 订单进入争议
         OrderDisputed { order_id: u64 },
-        /// 订单附属操作失败（主流程已完成，需人工干预）
         OrderOperationFailed { order_id: u64, operation: OrderOperation },
-        /// 服务已开始
         ServiceStarted { order_id: u64 },
-        /// 服务已完成（卖家标记）
         ServiceCompleted { order_id: u64 },
-        /// NEX 平台费率已更新
         PlatformFeeRateUpdated { old_rate: u16, new_rate: u16 },
-        /// 买家订单索引已清理
         BuyerOrdersCleaned { buyer: T::AccountId, removed: u32 },
-        /// 卖家拒绝退款
-        RefundRejected { order_id: u64 },
-        /// 卖家取消订单
-        OrderSellerCancelled { order_id: u64, amount: BalanceOf<T>, token_amount: u128 },
-        /// 管理员强制退款
-        OrderForceRefunded { order_id: u64 },
-        /// 管理员强制完成
-        OrderForceCompleted { order_id: u64 },
-        /// 买家修改收货地址
+        RefundRejected { order_id: u64, reason_cid: Vec<u8> },
+        OrderSellerCancelled { order_id: u64, amount: BalanceOf<T>, token_amount: u128, reason_cid: Vec<u8> },
+        OrderForceRefunded { order_id: u64, reason_cid: Option<Vec<u8>> },
+        OrderForceCompleted { order_id: u64, reason_cid: Option<Vec<u8>> },
         ShippingAddressUpdated { order_id: u64 },
-        /// 买家延长确认收货期限
         ConfirmTimeoutExtended { order_id: u64, new_deadline: BlockNumberFor<T> },
-        /// 店铺订单索引已清理
         ShopOrdersCleaned { shop_id: u64, removed: u32 },
-        /// 卖家更新物流信息
         TrackingInfoUpdated { order_id: u64 },
+        /// 卖家主动退款（Shipped 状态）
+        OrderSellerRefunded { order_id: u64, amount: BalanceOf<T>, token_amount: u128, reason_cid: Vec<u8> },
+        /// 管理员部分退款
+        OrderPartialRefunded { order_id: u64, refund_bps: u16, reason_cid: Option<Vec<u8>> },
+        /// 买家撤回争议
+        DisputeWithdrawn { order_id: u64 },
+        /// 管理员手动处理指定区块的过期订单
+        StaleExpirationsProcessed { target_block: BlockNumberFor<T>, processed: u32 },
     }
 
     // ==================== 错误 ====================
 
     #[pallet::error]
     pub enum Error<T> {
-        /// 订单不存在
         OrderNotFound,
-        /// 商品不存在
         ProductNotFound,
-        /// 店铺不存在
         ShopNotFound,
-        /// 不是订单买家
         NotOrderBuyer,
-        /// 不是订单卖家
         NotOrderSeller,
-        /// 无效的订单状态
         InvalidOrderStatus,
-        /// 无法取消订单
         CannotCancelOrder,
-        /// 不能购买自己店铺的商品
         CannotBuyOwnProduct,
-        /// 商品不在售
         ProductNotOnSale,
-        /// 库存不足
         InsufficientStock,
-        /// CID 过长
         CidTooLong,
-        /// 数值溢出
         Overflow,
-        /// 数字商品不可取消
         DigitalProductCannotCancel,
-        /// 无效数量（不能为 0）
         InvalidQuantity,
-        /// 数字商品不可退款
         DigitalProductCannotRefund,
-        /// 非服务类订单
-        NotServiceOrder,
-        /// 支付金额无效（不能为 0）
+        /// 非服务类/订阅类订单
+        NotServiceLikeOrder,
         InvalidAmount,
-        /// 超时队列已满
         ExpiryQueueFull,
-        /// 实物商品必须提供收货地址
         ShippingCidRequired,
-        /// 服务类订单不可使用发货/收货流程
-        ServiceOrderCannotShip,
-        /// 退款理由 CID 不能为空
+        /// 服务/订阅类订单不可使用发货/收货流程
+        ServiceLikeOrderCannotShip,
         EmptyReasonCid,
-        /// 实体代币未启用
         EntityTokenNotEnabled,
-        /// Token 余额不足
         InsufficientTokenBalance,
-        /// 物流信息 CID 不能为空
         EmptyTrackingCid,
-        /// 平台费率超过上限（最大 1000 bps = 10%）
         PlatformFeeRateTooHigh,
-        /// 无可清理的终态订单
         NothingToClean,
-        /// 不是店铺 Owner
         NotShopOwner,
-        /// 订单已延长过
         AlreadyExtended,
-        /// 订单不在可强制操作的状态
         CannotForceOrder,
-        /// 购买数量低于商品最小限制
         QuantityBelowMinimum,
-        /// 购买数量超过商品最大限制
         QuantityAboveMaximum,
-        /// 商品仅对会员可见
         ProductMembersOnly,
-        /// 会员等级不足
         MemberLevelInsufficient,
-        /// 争议已被拒绝（不可重复拒绝）
         DisputeAlreadyRejected,
+        /// 买家已被该 Entity 封禁
+        BuyerBanned,
+        /// 部分退款比例无效（需 1-9999 bps）
+        InvalidRefundBps,
+        /// Token 订单不支持部分退款
+        PartialRefundNotSupported,
+        /// 推荐人不能是买家或卖家自己
+        InvalidReferrer,
+        /// Subscription 类商品暂不支持下单（与 Service 流程等价，请使用 Service 类别）
+        SubscriptionNotSupported,
+        /// 店铺未激活（存在但处于暂停/关闭状态）
+        ShopInactive,
     }
 
     // ==================== Hooks ====================
@@ -435,15 +388,13 @@ pub mod pallet {
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
         /// 空闲时处理超时订单（基于 ExpiryQueue 精确索引）
         fn on_idle(now: BlockNumberFor<T>, remaining_weight: Weight) -> Weight {
-            // 每个订单处理约 200M weight（读 + 写 + escrow + commission 操作）
             let per_order_weight = Weight::from_parts(200_000_000, 8_000);
-            // 至少能处理 1 个订单才值得进入
             if remaining_weight.ref_time() < per_order_weight.ref_time().saturating_add(50_000_000) {
                 return Weight::zero();
             }
 
             let max_count = (remaining_weight.ref_time() / per_order_weight.ref_time()).min(20) as u32;
-            Self::process_expired_orders(now, max_count)
+            Self::process_expired_orders(now, now, max_count)
         }
     }
 
@@ -452,13 +403,6 @@ pub mod pallet {
     #[pallet::call]
     impl<T: Config> Pallet<T> {
         /// 下单并支付
-        ///
-        /// # 参数
-        /// - `product_id`: 商品 ID
-        /// - `quantity`: 购买数量
-        /// - `shipping_cid`: 收货地址 IPFS CID
-        /// - `use_tokens`: 使用积分抵扣金额（可选）
-        /// - `use_shopping_balance`: 使用购物余额抵扣（可选，NEX 从 Entity 转入买家后锁入托管）
         #[pallet::call_index(0)]
         #[pallet::weight(Weight::from_parts(350_000_000, 16_000))]
         pub fn place_order(
@@ -470,85 +414,92 @@ pub mod pallet {
             use_shopping_balance: Option<BalanceOf<T>>,
             payment_asset: Option<PaymentAsset>,
             note_cid: Option<Vec<u8>>,
+            referrer: Option<T::AccountId>,
         ) -> DispatchResult {
             let buyer = ensure_signed(origin)?;
 
-            // 校验参数
             ensure!(quantity > 0, Error::<T>::InvalidQuantity);
 
-            // 获取商品信息
-            ensure!(T::ProductProvider::product_exists(product_id), Error::<T>::ProductNotFound);
-            ensure!(T::ProductProvider::is_product_on_sale(product_id), Error::<T>::ProductNotOnSale);
-
-            let shop_id = T::ProductProvider::product_shop_id(product_id)
+            // M2-fix: 一次 storage read 获取商品全部下单所需字段（替代 9 次独立查询）
+            let product_info = T::ProductProvider::get_product_info(product_id)
                 .ok_or(Error::<T>::ProductNotFound)?;
-            let price = T::ProductProvider::product_price(product_id)
-                .ok_or(Error::<T>::ProductNotFound)?;
+            ensure!(
+                product_info.status == ProductStatus::OnSale,
+                Error::<T>::ProductNotOnSale
+            );
+            let shop_id = product_info.shop_id;
+            let price = product_info.price;
 
-            // 购买数量限制校验（0 表示不限）
-            if let Some(min_qty) = T::ProductProvider::product_min_order_quantity(product_id) {
-                if min_qty > 0 {
-                    ensure!(quantity >= min_qty, Error::<T>::QuantityBelowMinimum);
-                }
+            if product_info.min_order_quantity > 0 {
+                ensure!(quantity >= product_info.min_order_quantity, Error::<T>::QuantityBelowMinimum);
             }
-            if let Some(max_qty) = T::ProductProvider::product_max_order_quantity(product_id) {
-                if max_qty > 0 {
-                    ensure!(quantity <= max_qty, Error::<T>::QuantityAboveMaximum);
-                }
-            }
-
-            // M1-R9-fix: 复用已解析的 shop_id，避免重复调用 product_shop_id
-            let entity_id_for_visibility = T::ShopProvider::shop_entity_id(shop_id);
-            if let Some(visibility) = T::ProductProvider::product_visibility(product_id) {
-                match visibility {
-                    ProductVisibility::Public => {},
-                    ProductVisibility::MembersOnly => {
-                        if let Some(eid) = entity_id_for_visibility {
-                            ensure!(
-                                T::MemberProvider::is_member(eid, &buyer),
-                                Error::<T>::ProductMembersOnly
-                            );
-                        }
-                    },
-                    ProductVisibility::LevelGated(required_level) => {
-                        if let Some(eid) = entity_id_for_visibility {
-                            ensure!(
-                                T::MemberProvider::is_member(eid, &buyer),
-                                Error::<T>::ProductMembersOnly
-                            );
-                            let buyer_level = T::MemberProvider::get_effective_level(eid, &buyer);
-                            ensure!(
-                                buyer_level >= required_level,
-                                Error::<T>::MemberLevelInsufficient
-                            );
-                        }
-                    },
-                }
+            if product_info.max_order_quantity > 0 {
+                ensure!(quantity <= product_info.max_order_quantity, Error::<T>::QuantityAboveMaximum);
             }
 
-            // 检查库存（None = 无限库存，Some(n) = 有限库存）
-            if let Some(stock) = T::ProductProvider::product_stock(product_id) {
-                ensure!(stock >= quantity, Error::<T>::InsufficientStock);
-            }
-
-            // 获取店铺信息
             ensure!(T::ShopProvider::shop_exists(shop_id), Error::<T>::ShopNotFound);
-            ensure!(T::ShopProvider::is_shop_active(shop_id), Error::<T>::ShopNotFound);
+            ensure!(T::ShopProvider::is_shop_active(shop_id), Error::<T>::ShopInactive);
             let seller = T::ShopProvider::shop_owner(shop_id).ok_or(Error::<T>::ShopNotFound)?;
             ensure!(seller != buyer, Error::<T>::CannotBuyOwnProduct);
 
-            // H3-fix: 计算金额（checked_mul 防溢出）
-            let total_amount = price.checked_mul(&quantity.into())
-                .ok_or(Error::<T>::Overflow)?;
-            
-            // 获取 entity_id 用于积分/token 操作
             let entity_id = T::ShopProvider::shop_entity_id(shop_id)
                 .ok_or(Error::<T>::ShopNotFound)?;
 
+            // M2-R11: referrer 不能是买家自己或卖家
+            if let Some(ref r) = referrer {
+                ensure!(*r != buyer, Error::<T>::InvalidReferrer);
+                ensure!(*r != seller, Error::<T>::InvalidReferrer);
+            }
+
+            // P1: 封禁检查
+            ensure!(
+                !T::MemberProvider::is_banned(entity_id, &buyer),
+                Error::<T>::BuyerBanned
+            );
+
+            // L3-R11: 统一获取 buyer_level，可见性校验和折扣计算复用
+            let buyer_level = T::MemberProvider::get_effective_level(entity_id, &buyer);
+
+            match product_info.visibility {
+                ProductVisibility::Public => {},
+                ProductVisibility::MembersOnly => {
+                    ensure!(
+                        T::MemberProvider::is_member(entity_id, &buyer),
+                        Error::<T>::ProductMembersOnly
+                    );
+                },
+                ProductVisibility::LevelGated(required_level) => {
+                    ensure!(
+                        T::MemberProvider::is_member(entity_id, &buyer),
+                        Error::<T>::ProductMembersOnly
+                    );
+                    ensure!(
+                        buyer_level >= required_level,
+                        Error::<T>::MemberLevelInsufficient
+                    );
+                },
+            }
+
+            // stock == 0 表示无限库存
+            if product_info.stock > 0 {
+                ensure!(product_info.stock >= quantity, Error::<T>::InsufficientStock);
+            }
+
+            let total_amount = price.checked_mul(&quantity.into())
+                .ok_or(Error::<T>::Overflow)?;
+
             let resolved_payment_asset = payment_asset.unwrap_or(PaymentAsset::Native);
 
-            // 积分抵扣（仅 Native 支付时可用）
             let mut final_amount = total_amount;
+            if buyer_level > 0 {
+                let discount_bps: u32 = T::MemberProvider::get_level_discount(entity_id, buyer_level).into();
+                if discount_bps > 0 && discount_bps < 10000 {
+                    let discount = final_amount.saturating_mul(discount_bps.into()) / 10000u32.into();
+                    final_amount = final_amount.saturating_sub(discount);
+                }
+            }
+
+            // 积分/购物余额抵扣（仅 Native）
             if resolved_payment_asset == PaymentAsset::Native {
                 if let Some(tokens) = use_tokens {
                     if !tokens.is_zero() && T::EntityToken::is_token_enabled(entity_id) {
@@ -556,21 +507,17 @@ pub mod pallet {
                         final_amount = final_amount.saturating_sub(discount);
                     }
                 }
-                // 购物余额抵扣（NEX 从 Entity 账户转入买家钱包，随后由 Escrow 锁定）
                 if let Some(shopping_amount) = use_shopping_balance {
                     if !shopping_amount.is_zero() {
                         ensure!(shopping_amount <= final_amount, Error::<T>::InvalidAmount);
                         T::ShoppingBalance::consume_shopping_balance(entity_id, &buyer, shopping_amount)?;
-                        // final_amount 不变：买家钱包已收到 NEX，Escrow 将从中锁定全额
+                        final_amount = final_amount.saturating_sub(shopping_amount);
                     }
                 }
             }
 
-            // C2: 积分抵扣后金额不能为零
             ensure!(!final_amount.is_zero(), Error::<T>::InvalidAmount);
 
-            // 平台费计算（NEX 用全局费率，Token 用 Entity 级费率）
-            // Token 平台费记录在 order.platform_fee 中但以 NEX 单位为 0（实际费用在完成时从 Token 中扣除）
             let platform_fee = match resolved_payment_asset {
                 PaymentAsset::Native => {
                     final_amount
@@ -588,21 +535,15 @@ pub mod pallet {
                 .map(|c| c.try_into().map_err(|_| Error::<T>::CidTooLong))
                 .transpose()?;
 
-            // 获取商品类别
-            let product_category = T::ProductProvider::product_category(product_id)
-                .ok_or(Error::<T>::ProductNotFound)?;
+            let product_category = product_info.category;
 
-            // 根据类别决定是否需要物流
-            let requires_shipping = match product_category {
-                ProductCategory::Digital => false,
-                ProductCategory::Physical => true,
-                ProductCategory::Service => false,
-                ProductCategory::Subscription => false,
-                ProductCategory::Bundle => true,
-                ProductCategory::Other => true,
-            };
+            ensure!(
+                product_category != ProductCategory::Subscription,
+                Error::<T>::SubscriptionNotSupported
+            );
 
-            // M6: 实物商品必须提供收货地址
+            let requires_shipping = Self::category_requires_shipping(&product_category);
+
             if requires_shipping {
                 ensure!(shipping_cid.is_some(), Error::<T>::ShippingCidRequired);
             }
@@ -610,15 +551,12 @@ pub mod pallet {
             let order_id = NextOrderId::<T>::get();
             let now = <frame_system::Pallet<T>>::block_number();
 
-            // 锁定资金：根据支付资产类型选择不同的锁定方式
             let token_payment_amount: u128 = match resolved_payment_asset {
                 PaymentAsset::Native => {
-                    // NEX 支付：锁定 NEX 到托管
                     T::Escrow::lock_from(&buyer, order_id, final_amount)?;
                     0u128
                 },
                 PaymentAsset::EntityToken => {
-                    // Token 支付：验证并锁定 Entity Token
                     ensure!(T::EntityToken::is_token_enabled(entity_id), Error::<T>::EntityTokenNotEnabled);
                     let buyer_token_balance = T::EntityToken::token_balance(entity_id, &buyer);
                     ensure!(buyer_token_balance >= final_amount, Error::<T>::InsufficientTokenBalance);
@@ -627,11 +565,9 @@ pub mod pallet {
                 },
             };
 
-            // 扣减库存
             T::ProductProvider::deduct_stock(product_id, quantity)?;
             T::ProductProvider::add_sold_count(product_id, quantity)?;
 
-            // 数字商品：支付后立即完成
             let initial_status = if product_category == ProductCategory::Digital {
                 OrderStatus::Completed
             } else {
@@ -640,6 +576,7 @@ pub mod pallet {
 
             let order = Order {
                 id: order_id,
+                entity_id,
                 shop_id,
                 product_id,
                 buyer: buyer.clone(),
@@ -649,22 +586,21 @@ pub mod pallet {
                 total_amount: final_amount,
                 platform_fee,
                 product_category,
-                requires_shipping,
                 shipping_cid,
                 tracking_cid: None,
                 status: initial_status,
                 created_at: now,
-                paid_at: Some(now),
                 shipped_at: None,
                 completed_at: if product_category == ProductCategory::Digital { Some(now) } else { None },
                 service_started_at: None,
                 service_completed_at: None,
-                escrow_id: order_id,
                 payment_asset: resolved_payment_asset,
                 token_payment_amount,
                 confirm_extended: false,
+                dispute_rejected: false,
                 dispute_deadline: None,
                 note_cid: bounded_note_cid,
+                refund_reason_cid: None,
             };
 
             Orders::<T>::insert(order_id, &order);
@@ -672,42 +608,35 @@ pub mod pallet {
                 .map_err(|_| Error::<T>::Overflow)?;
             ShopOrders::<T>::try_mutate(shop_id, |ids| ids.try_push(order_id))
                 .map_err(|_| Error::<T>::Overflow)?;
-            // L1-fix: checked_add 防止 u64 溢出导致 ID 覆盖（与 tokensale 一致）
             let next_id = order_id.checked_add(1).ok_or(Error::<T>::Overflow)?;
             NextOrderId::<T>::put(next_id);
 
-            // 写入过期检查队列（非数字商品才需要超时检查）
             if product_category != ProductCategory::Digital {
-                let expiry_block = if requires_shipping {
-                    now.saturating_add(T::ShipTimeout::get())
-                } else {
-                    // 服务类：等待卖家开始服务的超时（复用 ShipTimeout）
-                    now.saturating_add(T::ShipTimeout::get())
-                };
+                let expiry_block = now.saturating_add(T::ShipTimeout::get());
                 ExpiryQueue::<T>::try_mutate(expiry_block, |ids| {
                     ids.try_push(order_id).map_err(|_| Error::<T>::ExpiryQueueFull)
                 })?;
+            }
+
+            // P2: 存储推荐人（完成时用于 auto_register）
+            if let Some(ref r) = referrer {
+                OrderReferrer::<T>::insert(order_id, r);
             }
 
             OrderStats::<T>::mutate(|stats| {
                 stats.total_orders = stats.total_orders.saturating_add(1);
             });
 
-            // L9: 事件金额使用实际支付金额（积分抵扣后）
             Self::deposit_event(Event::OrderCreated {
                 order_id,
+                entity_id,
                 buyer: buyer.clone(),
                 seller: seller.clone(),
                 amount: final_amount,
                 payment_asset: resolved_payment_asset,
                 token_amount: token_payment_amount,
             });
-            Self::deposit_event(Event::OrderPaid {
-                order_id,
-                escrow_id: order_id,
-            });
 
-            // 数字商品：立即完成订单
             if product_category == ProductCategory::Digital {
                 Self::do_complete_order(order_id, &order)?;
             }
@@ -723,45 +652,13 @@ pub mod pallet {
 
             let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
             ensure!(order.buyer == who, Error::<T>::NotOrderBuyer);
-            
-            // 数字商品不可取消
             ensure!(
                 order.product_category != ProductCategory::Digital,
                 Error::<T>::DigitalProductCannotCancel
             );
-            
-            // L1: place_order 直接设为 Paid，移除 Created 死分支
-            ensure!(
-                order.status == OrderStatus::Paid,
-                Error::<T>::CannotCancelOrder
-            );
+            ensure!(order.status == OrderStatus::Paid, Error::<T>::CannotCancelOrder);
 
-            // 退款：根据支付资产类型选择不同的退款方式
-            match order.payment_asset {
-                PaymentAsset::Native => {
-                    T::Escrow::refund_all(order_id, &order.buyer)?;
-                },
-                PaymentAsset::EntityToken => {
-                    // L2-R7-fix: 显式报错而非回退到 shop_id
-                    let entity_id = T::ShopProvider::shop_entity_id(order.shop_id)
-                        .ok_or(Error::<T>::ShopNotFound)?;
-                    T::EntityToken::unreserve(entity_id, &order.buyer, order.total_amount);
-                },
-            }
-
-            // 恢复库存（best-effort，失败发事件）
-            if T::ProductProvider::restore_stock(order.product_id, order.quantity).is_err() {
-                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::StockRestore });
-            }
-
-            // C3: 通知佣金系统订单已取消（best-effort，失败发事件）
-            Self::cancel_commission_by_asset(&order, order_id);
-
-            Orders::<T>::mutate(order_id, |maybe_order| {
-                if let Some(o) = maybe_order {
-                    o.status = OrderStatus::Cancelled;
-                }
-            });
+            Self::do_cancel_or_refund(&order, order_id, OrderStatus::Cancelled)?;
 
             Self::deposit_event(Event::OrderCancelled {
                 order_id,
@@ -771,7 +668,7 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 发货
+        /// 发货（服务/订阅类不可用，须走 start_service）
         #[pallet::call_index(2)]
         #[pallet::weight(Weight::from_parts(200_000_000, 8_000))]
         pub fn ship_order(
@@ -781,13 +678,12 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            Orders::<T>::try_mutate(order_id, |maybe_order| -> DispatchResult {
+            let created_at = Orders::<T>::try_mutate(order_id, |maybe_order| -> Result<BlockNumberFor<T>, DispatchError> {
                 let order = maybe_order.as_mut().ok_or(Error::<T>::OrderNotFound)?;
                 ensure!(order.seller == who, Error::<T>::NotOrderSeller);
-                // C2: 服务类订单必须走 start_service 流程
                 ensure!(
-                    order.product_category != ProductCategory::Service,
-                    Error::<T>::ServiceOrderCannotShip
+                    !Self::is_service_like(&order.product_category),
+                    Error::<T>::ServiceLikeOrderCannotShip
                 );
                 ensure!(order.status == OrderStatus::Paid, Error::<T>::InvalidOrderStatus);
 
@@ -795,12 +691,18 @@ pub mod pallet {
                 order.tracking_cid = Some(
                     tracking_cid.try_into().map_err(|_| Error::<T>::CidTooLong)?
                 );
+                let ca = order.created_at;
                 order.status = OrderStatus::Shipped;
                 order.shipped_at = Some(<frame_system::Pallet<T>>::block_number());
-                Ok(())
+                Ok(ca)
             })?;
 
-            // 写入过期检查队列：发货后 ConfirmTimeout 区块自动确认
+            // H4: 清理 place_order 创建的旧 ShipTimeout 条目
+            let old_expiry = created_at.saturating_add(T::ShipTimeout::get());
+            ExpiryQueue::<T>::mutate(old_expiry, |ids| {
+                ids.retain(|&id| id != order_id);
+            });
+
             let now = <frame_system::Pallet<T>>::block_number();
             let expiry_block = now.saturating_add(T::ConfirmTimeout::get());
             ExpiryQueue::<T>::try_mutate(expiry_block, |ids| {
@@ -819,10 +721,9 @@ pub mod pallet {
 
             let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
             ensure!(order.buyer == who, Error::<T>::NotOrderBuyer);
-            // C2: 服务类订单必须走 confirm_service 流程
             ensure!(
-                order.product_category != ProductCategory::Service,
-                Error::<T>::ServiceOrderCannotShip
+                !Self::is_service_like(&order.product_category),
+                Error::<T>::ServiceLikeOrderCannotShip
             );
             ensure!(order.status == OrderStatus::Shipped, Error::<T>::InvalidOrderStatus);
 
@@ -839,22 +740,18 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // M5: 校验退款理由 CID
-            ensure!(!reason_cid.is_empty(), Error::<T>::EmptyReasonCid);
-            let _bounded_reason: BoundedVec<u8, T::MaxCidLength> =
-                reason_cid.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+            let bounded_reason = Self::validate_reason_cid(reason_cid)?;
 
-            // C1-fix: 捕获 payment_asset 避免额外存储读取
+            let now = <frame_system::Pallet<T>>::block_number();
+            let expiry_block = now.saturating_add(T::DisputeTimeout::get());
+
             let payment_asset = Orders::<T>::try_mutate(order_id, |maybe_order| -> Result<PaymentAsset, DispatchError> {
                 let order = maybe_order.as_mut().ok_or(Error::<T>::OrderNotFound)?;
                 ensure!(order.buyer == who, Error::<T>::NotOrderBuyer);
-                
-                // 数字商品不可退款
                 ensure!(
                     order.product_category != ProductCategory::Digital,
                     Error::<T>::DigitalProductCannotRefund
                 );
-                
                 ensure!(
                     order.status == OrderStatus::Paid || order.status == OrderStatus::Shipped,
                     Error::<T>::InvalidOrderStatus
@@ -862,12 +759,15 @@ pub mod pallet {
 
                 let asset = order.payment_asset.clone();
                 order.status = OrderStatus::Disputed;
+                order.refund_reason_cid = Some(bounded_reason);
+                order.dispute_deadline = Some(expiry_block);
                 Ok(asset)
             })?;
 
-            // C1-fix: 仅 Native 支付才通知 Escrow 进入争议状态
-            // EntityToken 订单未使用 Escrow（资金通过 EntityToken::reserve 锁定），
-            // 调用 set_disputed 会因 NoLock 而失败，导致 Token 订单买家无法申请退款
+            ExpiryQueue::<T>::try_mutate(expiry_block, |ids| {
+                ids.try_push(order_id).map_err(|_| Error::<T>::ExpiryQueueFull)
+            })?;
+
             if payment_asset == PaymentAsset::Native {
                 T::Escrow::set_disputed(order_id)?;
             }
@@ -886,33 +786,11 @@ pub mod pallet {
             ensure!(order.seller == who, Error::<T>::NotOrderSeller);
             ensure!(order.status == OrderStatus::Disputed, Error::<T>::InvalidOrderStatus);
 
-            // 解除争议锁定后退款给买家
-            match order.payment_asset {
-                PaymentAsset::Native => {
-                    T::Escrow::set_resolved(order_id)?;
-                    T::Escrow::refund_all(order_id, &order.buyer)?;
-                },
-                PaymentAsset::EntityToken => {
-                    // L2-R7-fix: 显式报错而非回退到 shop_id
-                    let entity_id = T::ShopProvider::shop_entity_id(order.shop_id)
-                        .ok_or(Error::<T>::ShopNotFound)?;
-                    T::EntityToken::unreserve(entity_id, &order.buyer, order.total_amount);
-                },
+            if order.payment_asset == PaymentAsset::Native {
+                T::Escrow::set_resolved(order_id)?;
             }
 
-            // 恢复库存（best-effort，失败发事件）
-            if T::ProductProvider::restore_stock(order.product_id, order.quantity).is_err() {
-                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::StockRestore });
-            }
-
-            // C3: 通知佣金系统订单已取消（best-effort，失败发事件）
-            Self::cancel_commission_by_asset(&order, order_id);
-
-            Orders::<T>::mutate(order_id, |maybe_order| {
-                if let Some(o) = maybe_order {
-                    o.status = OrderStatus::Refunded;
-                }
-            });
+            Self::do_cancel_or_refund(&order, order_id, OrderStatus::Refunded)?;
 
             Self::deposit_event(Event::OrderRefunded {
                 order_id,
@@ -928,18 +806,24 @@ pub mod pallet {
         pub fn start_service(origin: OriginFor<T>, order_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            Orders::<T>::try_mutate(order_id, |maybe_order| -> DispatchResult {
+            let created_at = Orders::<T>::try_mutate(order_id, |maybe_order| -> Result<BlockNumberFor<T>, DispatchError> {
                 let order = maybe_order.as_mut().ok_or(Error::<T>::OrderNotFound)?;
                 ensure!(order.seller == who, Error::<T>::NotOrderSeller);
-                ensure!(order.product_category == ProductCategory::Service, Error::<T>::NotServiceOrder);
+                ensure!(Self::is_service_like(&order.product_category), Error::<T>::NotServiceLikeOrder);
                 ensure!(order.status == OrderStatus::Paid, Error::<T>::InvalidOrderStatus);
 
-                order.status = OrderStatus::Shipped;  // 复用 Shipped 状态表示服务进行中
+                let ca = order.created_at;
+                order.status = OrderStatus::Shipped;
                 order.service_started_at = Some(<frame_system::Pallet<T>>::block_number());
-                Ok(())
+                Ok(ca)
             })?;
 
-            // H4: 写入过期检查队列，服务开始后 ServiceConfirmTimeout 内未完成则可超时处理
+            // H4: 清理 place_order 创建的旧 ShipTimeout 条目
+            let old_expiry = created_at.saturating_add(T::ShipTimeout::get());
+            ExpiryQueue::<T>::mutate(old_expiry, |ids| {
+                ids.retain(|&id| id != order_id);
+            });
+
             let now = <frame_system::Pallet<T>>::block_number();
             let expiry_block = now.saturating_add(T::ServiceConfirmTimeout::get());
             ExpiryQueue::<T>::try_mutate(expiry_block, |ids| {
@@ -956,19 +840,26 @@ pub mod pallet {
         pub fn complete_service(origin: OriginFor<T>, order_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            Orders::<T>::try_mutate(order_id, |maybe_order| -> DispatchResult {
+            let service_started_at = Orders::<T>::try_mutate(order_id, |maybe_order| -> Result<Option<BlockNumberFor<T>>, DispatchError> {
                 let order = maybe_order.as_mut().ok_or(Error::<T>::OrderNotFound)?;
                 ensure!(order.seller == who, Error::<T>::NotOrderSeller);
-                ensure!(order.product_category == ProductCategory::Service, Error::<T>::NotServiceOrder);
+                ensure!(Self::is_service_like(&order.product_category), Error::<T>::NotServiceLikeOrder);
                 ensure!(order.status == OrderStatus::Shipped, Error::<T>::InvalidOrderStatus);
-                // M1-R6-fix: 防止重复调用 complete_service 填充 ExpiryQueue
                 ensure!(order.service_completed_at.is_none(), Error::<T>::InvalidOrderStatus);
 
+                let sa = order.service_started_at;
                 order.service_completed_at = Some(<frame_system::Pallet<T>>::block_number());
-                Ok(())
+                Ok(sa)
             })?;
 
-            // 写入过期检查队列：服务完成后 ServiceConfirmTimeout 区块自动确认
+            // H4: 清理 start_service 创建的旧 ServiceConfirmTimeout 条目
+            if let Some(sa) = service_started_at {
+                let old_expiry = sa.saturating_add(T::ServiceConfirmTimeout::get());
+                ExpiryQueue::<T>::mutate(old_expiry, |ids| {
+                    ids.retain(|&id| id != order_id);
+                });
+            }
+
             let now = <frame_system::Pallet<T>>::block_number();
             let expiry_block = now.saturating_add(T::ServiceConfirmTimeout::get());
             ExpiryQueue::<T>::try_mutate(expiry_block, |ids| {
@@ -987,7 +878,7 @@ pub mod pallet {
 
             let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
             ensure!(order.buyer == who, Error::<T>::NotOrderBuyer);
-            ensure!(order.product_category == ProductCategory::Service, Error::<T>::NotServiceOrder);
+            ensure!(Self::is_service_like(&order.product_category), Error::<T>::NotServiceLikeOrder);
             ensure!(order.status == OrderStatus::Shipped, Error::<T>::InvalidOrderStatus);
             ensure!(order.service_completed_at.is_some(), Error::<T>::InvalidOrderStatus);
 
@@ -1055,31 +946,36 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            ensure!(!reason_cid.is_empty(), Error::<T>::EmptyReasonCid);
-            let _bounded_reason: BoundedVec<u8, T::MaxCidLength> =
-                reason_cid.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+            let bounded_reason = Self::validate_reason_cid(reason_cid)?;
 
             let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
             ensure!(order.seller == who, Error::<T>::NotOrderSeller);
             ensure!(order.status == OrderStatus::Disputed, Error::<T>::InvalidOrderStatus);
-            // H1-R8: 禁止重复拒绝 — 防止卖家反复调用以无限延长争议超时
-            ensure!(order.dispute_deadline.is_none(), Error::<T>::DisputeAlreadyRejected);
+            ensure!(!order.dispute_rejected, Error::<T>::DisputeAlreadyRejected);
 
-            // 设置争议截止时间并写入超时队列
             let now = <frame_system::Pallet<T>>::block_number();
             let expiry_block = now.saturating_add(T::DisputeTimeout::get());
 
-            Orders::<T>::mutate(order_id, |maybe_order| {
-                if let Some(o) = maybe_order {
-                    o.dispute_deadline = Some(expiry_block);
-                }
-            });
+            // H4: 清理 request_refund 创建的旧超时条目
+            if let Some(old_deadline) = order.dispute_deadline {
+                ExpiryQueue::<T>::mutate(old_deadline, |ids| {
+                    ids.retain(|&id| id != order_id);
+                });
+            }
 
+            // H3-fix: ExpiryQueue 写入先于 Orders 更新，确保队列满时不会产生不一致状态
             ExpiryQueue::<T>::try_mutate(expiry_block, |ids| {
                 ids.try_push(order_id).map_err(|_| Error::<T>::ExpiryQueueFull)
             })?;
 
-            Self::deposit_event(Event::RefundRejected { order_id });
+            Orders::<T>::mutate(order_id, |maybe_order| {
+                if let Some(o) = maybe_order {
+                    o.dispute_rejected = true;
+                    o.dispute_deadline = Some(expiry_block);
+                }
+            });
+
+            Self::deposit_event(Event::RefundRejected { order_id, reason_cid: bounded_reason.into_inner() });
             Ok(())
         }
 
@@ -1093,9 +989,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            ensure!(!reason_cid.is_empty(), Error::<T>::EmptyReasonCid);
-            let _bounded_reason: BoundedVec<u8, T::MaxCidLength> =
-                reason_cid.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+            let bounded_reason = Self::validate_reason_cid(reason_cid)?;
 
             let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
             ensure!(order.seller == who, Error::<T>::NotOrderSeller);
@@ -1105,27 +999,13 @@ pub mod pallet {
             );
             ensure!(order.status == OrderStatus::Paid, Error::<T>::CannotCancelOrder);
 
-            // 退款给买家
-            Self::refund_by_asset(&order, order_id)?;
-
-            // 恢复库存（best-effort）
-            if T::ProductProvider::restore_stock(order.product_id, order.quantity).is_err() {
-                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::StockRestore });
-            }
-
-            // 通知佣金系统
-            Self::cancel_commission_by_asset(&order, order_id);
-
-            Orders::<T>::mutate(order_id, |maybe_order| {
-                if let Some(o) = maybe_order {
-                    o.status = OrderStatus::Cancelled;
-                }
-            });
+            Self::do_cancel_or_refund(&order, order_id, OrderStatus::Cancelled)?;
 
             Self::deposit_event(Event::OrderSellerCancelled {
                 order_id,
                 amount: order.total_amount,
                 token_amount: order.token_payment_amount,
+                reason_cid: bounded_reason.into_inner(),
             });
             Ok(())
         }
@@ -1138,11 +1018,7 @@ pub mod pallet {
         pub fn force_refund(origin: OriginFor<T>, order_id: u64, reason_cid: Option<Vec<u8>>) -> DispatchResult {
             ensure_root(origin)?;
 
-            // 校验 reason_cid（可选，用于审计追踪）
-            if let Some(ref cid) = reason_cid {
-                ensure!(!cid.is_empty(), Error::<T>::EmptyReasonCid);
-                let _: BoundedVec<u8, T::MaxCidLength> = cid.clone().try_into().map_err(|_| Error::<T>::CidTooLong)?;
-            }
+            let reason = Self::validate_optional_reason_cid(&reason_cid)?;
 
             let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
             ensure!(
@@ -1150,26 +1026,14 @@ pub mod pallet {
                 Error::<T>::CannotForceOrder
             );
 
-            // 解除争议锁定（仅 Native + Disputed 需要）
+            // M4-fix: 传播 set_resolved 错误，避免后续 transfer_from_escrow 因 disputed 状态失败
             if order.status == OrderStatus::Disputed && order.payment_asset == PaymentAsset::Native {
-                let _ = T::Escrow::set_resolved(order_id);
+                T::Escrow::set_resolved(order_id)?;
             }
 
-            Self::refund_by_asset(&order, order_id)?;
+            Self::do_cancel_or_refund(&order, order_id, OrderStatus::Refunded)?;
 
-            if T::ProductProvider::restore_stock(order.product_id, order.quantity).is_err() {
-                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::StockRestore });
-            }
-
-            Self::cancel_commission_by_asset(&order, order_id);
-
-            Orders::<T>::mutate(order_id, |maybe_order| {
-                if let Some(o) = maybe_order {
-                    o.status = OrderStatus::Refunded;
-                }
-            });
-
-            Self::deposit_event(Event::OrderForceRefunded { order_id });
+            Self::deposit_event(Event::OrderForceRefunded { order_id, reason_cid: reason });
             Self::deposit_event(Event::OrderRefunded {
                 order_id,
                 amount: order.total_amount,
@@ -1179,18 +1043,12 @@ pub mod pallet {
         }
 
         /// 管理员强制完成订单（Root / 治理）
-        ///
-        /// 可对 Paid / Shipped / Disputed 状态的订单强制完成（资金归卖家）
         #[pallet::call_index(14)]
         #[pallet::weight(Weight::from_parts(350_000_000, 16_000))]
         pub fn force_complete(origin: OriginFor<T>, order_id: u64, reason_cid: Option<Vec<u8>>) -> DispatchResult {
             ensure_root(origin)?;
 
-            // 校验 reason_cid（可选，用于审计追踪）
-            if let Some(ref cid) = reason_cid {
-                ensure!(!cid.is_empty(), Error::<T>::EmptyReasonCid);
-                let _: BoundedVec<u8, T::MaxCidLength> = cid.clone().try_into().map_err(|_| Error::<T>::CidTooLong)?;
-            }
+            let reason = Self::validate_optional_reason_cid(&reason_cid)?;
 
             let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
             ensure!(
@@ -1198,13 +1056,13 @@ pub mod pallet {
                 Error::<T>::CannotForceOrder
             );
 
-            // 解除争议锁定（仅 Native + Disputed 需要）
+            // M4-fix: 传播 set_resolved 错误
             if order.status == OrderStatus::Disputed && order.payment_asset == PaymentAsset::Native {
-                let _ = T::Escrow::set_resolved(order_id);
+                T::Escrow::set_resolved(order_id)?;
             }
 
             Self::do_complete_order(order_id, &order)?;
-            Self::deposit_event(Event::OrderForceCompleted { order_id });
+            Self::deposit_event(Event::OrderForceCompleted { order_id, reason_cid: reason });
             Ok(())
         }
 
@@ -1226,7 +1084,7 @@ pub mod pallet {
                 let order = maybe_order.as_mut().ok_or(Error::<T>::OrderNotFound)?;
                 ensure!(order.buyer == who, Error::<T>::NotOrderBuyer);
                 ensure!(order.status == OrderStatus::Paid, Error::<T>::InvalidOrderStatus);
-                ensure!(order.requires_shipping, Error::<T>::ServiceOrderCannotShip);
+                ensure!(Self::category_requires_shipping(&order.product_category), Error::<T>::ServiceLikeOrderCannotShip);
 
                 order.shipping_cid = Some(bounded_cid);
                 Ok(())
@@ -1247,22 +1105,29 @@ pub mod pallet {
             let now = <frame_system::Pallet<T>>::block_number();
             let new_deadline = now.saturating_add(T::ConfirmExtension::get());
 
-            Orders::<T>::try_mutate(order_id, |maybe_order| -> DispatchResult {
+            let shipped_at = Orders::<T>::try_mutate(order_id, |maybe_order| -> Result<Option<BlockNumberFor<T>>, DispatchError> {
                 let order = maybe_order.as_mut().ok_or(Error::<T>::OrderNotFound)?;
                 ensure!(order.buyer == who, Error::<T>::NotOrderBuyer);
-                // L1-R8: 服务类订单有独立超时流程，不支持延长确认
                 ensure!(
-                    order.product_category != ProductCategory::Service,
-                    Error::<T>::ServiceOrderCannotShip
+                    !Self::is_service_like(&order.product_category),
+                    Error::<T>::ServiceLikeOrderCannotShip
                 );
                 ensure!(order.status == OrderStatus::Shipped, Error::<T>::InvalidOrderStatus);
                 ensure!(!order.confirm_extended, Error::<T>::AlreadyExtended);
 
+                let sa = order.shipped_at;
                 order.confirm_extended = true;
-                Ok(())
+                Ok(sa)
             })?;
 
-            // 写入新的超时队列条目
+            // H4: 清理 ship_order 创建的旧 ConfirmTimeout 条目
+            if let Some(sa) = shipped_at {
+                let old_expiry = sa.saturating_add(T::ConfirmTimeout::get());
+                ExpiryQueue::<T>::mutate(old_expiry, |ids| {
+                    ids.retain(|&id| id != order_id);
+                });
+            }
+
             ExpiryQueue::<T>::try_mutate(new_deadline, |ids| {
                 ids.try_push(order_id).map_err(|_| Error::<T>::ExpiryQueueFull)
             })?;
@@ -1332,20 +1197,216 @@ pub mod pallet {
             Self::deposit_event(Event::TrackingInfoUpdated { order_id });
             Ok(())
         }
+
+        /// 卖家主动退款（Shipped 状态，含发货后发现问题等场景）
+        #[pallet::call_index(19)]
+        #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
+        pub fn seller_refund_order(
+            origin: OriginFor<T>,
+            order_id: u64,
+            reason_cid: Vec<u8>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let bounded_reason = Self::validate_reason_cid(reason_cid)?;
+
+            let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
+            ensure!(order.seller == who, Error::<T>::NotOrderSeller);
+            ensure!(
+                order.product_category != ProductCategory::Digital,
+                Error::<T>::DigitalProductCannotCancel
+            );
+            ensure!(order.status == OrderStatus::Shipped, Error::<T>::InvalidOrderStatus);
+
+            Self::do_cancel_or_refund(&order, order_id, OrderStatus::Refunded)?;
+
+            Self::deposit_event(Event::OrderSellerRefunded {
+                order_id,
+                amount: order.total_amount,
+                token_amount: order.token_payment_amount,
+                reason_cid: bounded_reason.into_inner(),
+            });
+            Ok(())
+        }
+
+        /// 管理员部分退款（Root，仅 NEX 订单）
+        ///
+        /// refund_bps: 退给买家的比例（基点，1-9999），剩余归卖家
+        #[pallet::call_index(20)]
+        #[pallet::weight(Weight::from_parts(300_000_000, 12_000))]
+        pub fn force_partial_refund(
+            origin: OriginFor<T>,
+            order_id: u64,
+            refund_bps: u16,
+            reason_cid: Option<Vec<u8>>,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            ensure!(refund_bps >= 1 && refund_bps <= 9999, Error::<T>::InvalidRefundBps);
+            let reason = Self::validate_optional_reason_cid(&reason_cid)?;
+
+            let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
+            ensure!(
+                order.payment_asset == PaymentAsset::Native,
+                Error::<T>::PartialRefundNotSupported
+            );
+            ensure!(
+                matches!(order.status, OrderStatus::Paid | OrderStatus::Shipped | OrderStatus::Disputed),
+                Error::<T>::CannotForceOrder
+            );
+
+            if order.status == OrderStatus::Disputed {
+                let _ = T::Escrow::set_resolved(order_id);
+            }
+
+            let release_bps = 10000u16.saturating_sub(refund_bps);
+            T::Escrow::split_partial(order_id, &order.seller, &order.buyer, release_bps)?;
+
+            Self::cancel_commission_by_asset(&order, order_id);
+
+            Orders::<T>::mutate(order_id, |maybe_order| {
+                if let Some(o) = maybe_order {
+                    o.status = OrderStatus::Refunded;
+                }
+            });
+
+            OrderReferrer::<T>::remove(order_id);
+
+            Self::deposit_event(Event::OrderPartialRefunded { order_id, refund_bps, reason_cid: reason });
+            Ok(())
+        }
+
+        /// 买家撤回争议（仅卖家尚未拒绝时可用）
+        ///
+        /// 恢复订单到争议前状态（Paid / Shipped），重建相应超时队列
+        #[pallet::call_index(21)]
+        #[pallet::weight(Weight::from_parts(200_000_000, 8_000))]
+        pub fn withdraw_dispute(origin: OriginFor<T>, order_id: u64) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
+            ensure!(order.buyer == who, Error::<T>::NotOrderBuyer);
+            ensure!(order.status == OrderStatus::Disputed, Error::<T>::InvalidOrderStatus);
+            ensure!(!order.dispute_rejected, Error::<T>::DisputeAlreadyRejected);
+
+            let restored_status = if order.shipped_at.is_some() {
+                OrderStatus::Shipped
+            } else {
+                OrderStatus::Paid
+            };
+
+            if order.payment_asset == PaymentAsset::Native {
+                T::Escrow::set_resolved(order_id)?;
+            }
+
+            // 清理争议超时队列条目
+            if let Some(deadline) = order.dispute_deadline {
+                ExpiryQueue::<T>::mutate(deadline, |ids| {
+                    ids.retain(|&id| id != order_id);
+                });
+            }
+
+            let now = <frame_system::Pallet<T>>::block_number();
+            let new_expiry = match restored_status {
+                OrderStatus::Shipped => {
+                    if Self::is_service_like(&order.product_category) {
+                        now.saturating_add(T::ServiceConfirmTimeout::get())
+                    } else {
+                        now.saturating_add(T::ConfirmTimeout::get())
+                    }
+                },
+                _ => now.saturating_add(T::ShipTimeout::get()),
+            };
+
+            ExpiryQueue::<T>::try_mutate(new_expiry, |ids| {
+                ids.try_push(order_id).map_err(|_| Error::<T>::ExpiryQueueFull)
+            })?;
+
+            Orders::<T>::mutate(order_id, |maybe_order| {
+                if let Some(o) = maybe_order {
+                    o.status = restored_status;
+                    o.dispute_deadline = None;
+                    o.dispute_rejected = false;
+                    o.refund_reason_cid = None;
+                }
+            });
+
+            Self::deposit_event(Event::DisputeWithdrawn { order_id });
+            Ok(())
+        }
+
+        /// 管理员手动处理指定区块的过期订单（解决 C1 孤立条目问题）
+        ///
+        /// 当 on_idle weight 不足导致某区块的超时订单未被完全处理时，
+        /// Root 可调用此接口指定区块号进行补偿处理。
+        #[pallet::call_index(22)]
+        #[pallet::weight(Weight::from_parts(500_000_000, 20_000))]
+        pub fn force_process_expirations(
+            origin: OriginFor<T>,
+            target_block: BlockNumberFor<T>,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            let now = <frame_system::Pallet<T>>::block_number();
+            let weight = Self::process_expired_orders(now, target_block, 500);
+            let _ = weight;
+
+            let remaining = ExpiryQueue::<T>::get(target_block).len() as u32;
+
+            Self::deposit_event(Event::StaleExpirationsProcessed {
+                target_block,
+                processed: 500u32.saturating_sub(remaining),
+            });
+            Ok(())
+        }
     }
 
     // ==================== 内部函数 ====================
 
     impl<T: Config> Pallet<T> {
-        /// 完成订单（释放资金）
+        /// 商品类别是否需要物流
+        fn category_requires_shipping(cat: &ProductCategory) -> bool {
+            matches!(cat, ProductCategory::Physical | ProductCategory::Bundle | ProductCategory::Other)
+        }
+
+        /// 是否为服务类/订阅类（共享 start_service/complete_service/confirm_service 流程）
+        fn is_service_like(cat: &ProductCategory) -> bool {
+            matches!(cat, ProductCategory::Service | ProductCategory::Subscription)
+        }
+
+        fn validate_reason_cid(cid: Vec<u8>) -> Result<BoundedVec<u8, T::MaxCidLength>, DispatchError> {
+            ensure!(!cid.is_empty(), Error::<T>::EmptyReasonCid);
+            let bounded: BoundedVec<u8, T::MaxCidLength> = cid.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+            Ok(bounded)
+        }
+
+        fn validate_optional_reason_cid(cid: &Option<Vec<u8>>) -> Result<Option<Vec<u8>>, DispatchError> {
+            if let Some(c) = cid {
+                ensure!(!c.is_empty(), Error::<T>::EmptyReasonCid);
+                let _: BoundedVec<u8, T::MaxCidLength> = c.clone().try_into().map_err(|_| Error::<T>::CidTooLong)?;
+            }
+            Ok(cid.clone())
+        }
+
+        fn do_cancel_or_refund(order: &OrderOf<T>, order_id: u64, final_status: OrderStatus) -> DispatchResult {
+            Self::refund_by_asset(order, order_id)?;
+            if T::ProductProvider::restore_stock(order.product_id, order.quantity).is_err() {
+                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::StockRestore });
+            }
+            Self::cancel_commission_by_asset(order, order_id);
+            Orders::<T>::mutate(order_id, |maybe_order| {
+                if let Some(o) = maybe_order {
+                    o.status = final_status;
+                }
+            });
+            OrderReferrer::<T>::remove(order_id);
+            Ok(())
+        }
+
         fn do_complete_order(order_id: u64, order: &OrderOf<T>) -> DispatchResult {
             let seller_amount = order.total_amount.saturating_sub(order.platform_fee);
+            let entity_id = order.entity_id;
 
-            // L2-R7-fix: 显式报错而非回退到 shop_id
-            let entity_id = T::ShopProvider::shop_entity_id(order.shop_id)
-                .ok_or(Error::<T>::ShopNotFound)?;
-
-            // M2-R7-fix: 预先计算 Token 平台费（消除重复的 token_platform_fee_rate 存储读取）
             let token_platform_fee: u128 = match order.payment_asset {
                 PaymentAsset::Native => 0u128,
                 PaymentAsset::EntityToken => {
@@ -1405,7 +1466,8 @@ pub mod pallet {
             // 自动注册买家为会员 + 更新消费金额（best-effort）
             // auto_register: 首次购买时注册会员（PURCHASE_REQUIRED 策略触发点）
             // update_spent: 更新消费金额 + 激活待激活会员 + 触发等级升级
-            if T::MemberHandler::auto_register(entity_id, &order.buyer, None).is_err() {
+            let referrer = OrderReferrer::<T>::take(order_id);
+            if T::MemberHandler::auto_register(entity_id, &order.buyer, referrer).is_err() {
                 Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::MemberAutoRegister });
             }
             // H1-R5-fix: Token 订单未花费 NEX，不应将 token 数量当作 NEX 做 USDT 转换
@@ -1572,30 +1634,14 @@ pub mod pallet {
                     T::Escrow::refund_all(order_id, &order.buyer)?;
                 },
                 PaymentAsset::EntityToken => {
-                    // L2-R7-fix: 显式报错而非回退到 shop_id
-                    let entity_id = T::ShopProvider::shop_entity_id(order.shop_id)
-                        .ok_or(Error::<T>::ShopNotFound)?;
-                    T::EntityToken::unreserve(entity_id, &order.buyer, order.total_amount);
+                    T::EntityToken::unreserve(order.entity_id, &order.buyer, order.total_amount);
                 },
             }
             Ok(())
         }
 
-        /// L1-R9-fix: 自动退款辅助函数 — 统一 process_expired_orders 中的退款逻辑
-        ///
-        /// 执行：refund_by_asset → restore_stock → cancel_commission → set Refunded → emit event
-        /// 返回 true 表示成功处理，false 表示退款失败（已发 OrderOperationFailed 事件）
         fn do_auto_refund(order: &OrderOf<T>, order_id: u64) -> bool {
-            if Self::refund_by_asset(order, order_id).is_ok() {
-                if T::ProductProvider::restore_stock(order.product_id, order.quantity).is_err() {
-                    Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::StockRestore });
-                }
-                Self::cancel_commission_by_asset(order, order_id);
-                Orders::<T>::mutate(order_id, |o| {
-                    if let Some(ord) = o {
-                        ord.status = OrderStatus::Refunded;
-                    }
-                });
+            if Self::do_cancel_or_refund(order, order_id, OrderStatus::Refunded).is_ok() {
                 Self::deposit_event(Event::OrderRefunded {
                     order_id,
                     amount: order.total_amount,
@@ -1610,10 +1656,11 @@ pub mod pallet {
 
         /// 处理过期订单（基于 ExpiryQueue 精确索引）
         ///
-        /// 仅检查当前区块到期的订单，O(K) 复杂度（K = 到期订单数）
+        /// now: 当前区块号（用于判断 deadline 是否到达）
+        /// target_block: 要处理的 ExpiryQueue key（通常 = now，force 时可指定过去区块）
         /// 二次确认订单状态：可能已被手动确认/取消/退款
-        fn process_expired_orders(now: BlockNumberFor<T>, max_count: u32) -> Weight {
-            let order_ids = ExpiryQueue::<T>::get(now);
+        fn process_expired_orders(now: BlockNumberFor<T>, target_block: BlockNumberFor<T>, max_count: u32) -> Weight {
+            let order_ids = ExpiryQueue::<T>::get(target_block);
             if order_ids.is_empty() {
                 // M2-R9-fix: 仅消耗 1 次 storage read，补充 proof_size
                 return Weight::from_parts(5_000, 64);
@@ -1639,7 +1686,7 @@ pub mod pallet {
                         }
                         // 确认超时：自动确认收货/服务
                         OrderStatus::Shipped => {
-                            if order.product_category == ProductCategory::Service
+                            if Self::is_service_like(&order.product_category)
                                 && order.service_completed_at.is_none()
                             {
                                 // H4+H5: 服务已开始但未完成 — 检查是否超过 ServiceConfirmTimeout
@@ -1682,15 +1729,14 @@ pub mod pallet {
                 }
             }
 
-            // L1-R7-fix: 仅保留 weight 受限未遍历的订单（不再保留服务中订单的孤立条目）
             if iterated >= order_ids.len() {
-                ExpiryQueue::<T>::remove(now);
+                ExpiryQueue::<T>::remove(target_block);
             } else {
                 let remaining: Vec<u64> = order_ids.iter().skip(iterated).copied().collect();
                 let bounded: BoundedVec<u64, ConstU32<500>> = remaining
                     .try_into()
                     .expect("remaining is subset of original bounded vec");
-                ExpiryQueue::<T>::insert(now, bounded);
+                ExpiryQueue::<T>::insert(target_block, bounded);
             }
 
             // M1-R8: 精确报告 weight：读队列 + 每个处理订单读写 + 每个跳过订单读开销
@@ -1744,11 +1790,9 @@ pub mod pallet {
         fn can_dispute(order_id: u64, who: &T::AccountId) -> bool {
             Orders::<T>::get(order_id)
                 .map(|o| {
-                    // 必须是买家或卖家
-                    let is_party = o.buyer == *who || o.seller == *who;
-                    // 订单状态必须是 Paid 或 Shipped（未完成且未争议）
+                    let is_buyer = o.buyer == *who;
                     let status_ok = matches!(o.status, OrderStatus::Paid | OrderStatus::Shipped);
-                    is_party && status_ok
+                    is_buyer && status_ok
                 })
                 .unwrap_or(false)
         }
@@ -1764,6 +1808,38 @@ pub mod pallet {
         fn order_completed_at(order_id: u64) -> Option<u64> {
             Orders::<T>::get(order_id)
                 .and_then(|o| o.completed_at)
+                .map(|b| b.try_into().unwrap_or(u64::MAX))
+        }
+
+        fn order_status(order_id: u64) -> Option<OrderStatus> {
+            Orders::<T>::get(order_id).map(|o| o.status)
+        }
+
+        fn order_entity_id(order_id: u64) -> Option<u64> {
+            Orders::<T>::get(order_id).map(|o| o.entity_id)
+        }
+
+        fn order_product_id(order_id: u64) -> Option<u64> {
+            Orders::<T>::get(order_id).map(|o| o.product_id)
+        }
+
+        fn order_quantity(order_id: u64) -> Option<u32> {
+            Orders::<T>::get(order_id).map(|o| o.quantity)
+        }
+
+        fn order_created_at(order_id: u64) -> Option<u64> {
+            Orders::<T>::get(order_id)
+                .map(|o| o.created_at.try_into().unwrap_or(u64::MAX))
+        }
+
+        fn order_paid_at(order_id: u64) -> Option<u64> {
+            Orders::<T>::get(order_id)
+                .map(|o| o.created_at.try_into().unwrap_or(u64::MAX))
+        }
+
+        fn order_shipped_at(order_id: u64) -> Option<u64> {
+            Orders::<T>::get(order_id)
+                .and_then(|o| o.shipped_at)
                 .map(|b| b.try_into().unwrap_or(u64::MAX))
         }
     }

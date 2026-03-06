@@ -376,6 +376,16 @@ export const USDT_TRADE_STATUS = [
 ] as const;
 export type UsdtTradeStatus = (typeof USDT_TRADE_STATUS)[number];
 
+export const BUYER_DEPOSIT_STATUS = [
+  "None", "Locked", "Released", "Forfeited",
+] as const;
+export type BuyerDepositStatus = (typeof BUYER_DEPOSIT_STATUS)[number];
+
+export const TRADE_DISPUTE_STATUS = [
+  "Open", "ResolvedForBuyer", "ResolvedForSeller",
+] as const;
+export type TradeDisputeStatus = (typeof TRADE_DISPUTE_STATUS)[number];
+
 export const DISPUTE_RESOLUTION = [
   "ReleaseToBuyer",
   "RefundToSeller",
@@ -390,16 +400,34 @@ export const PIN_TIERS = ["Critical", "Standard", "Temporary"] as const;
 export type PinTier = (typeof PIN_TIERS)[number];
 
 export const PIN_STATES = [
-  "Requested",
-  "Pinning",
-  "Pinned",
-  "Degraded",
-  "Failed",
+  "Pending", "Pinned", "Failed", "Restored",
 ] as const;
 export type PinState = (typeof PIN_STATES)[number];
 
 export const OPERATOR_LAYERS = ["Core", "Community", "External"] as const;
 export type OperatorLayer = (typeof OPERATOR_LAYERS)[number];
+
+export const OPERATOR_STATUS_MAP: Record<number, string> = {
+  0: "Registered",
+  1: "Active",
+  2: "Paused",
+  3: "Leaving",
+  4: "Slashed",
+};
+
+export const SUBJECT_TYPES = [
+  "Evidence", "Product", "Entity", "Shop", "General",
+] as const;
+export type SubjectType = (typeof SUBJECT_TYPES)[number];
+
+export const UNPIN_REASONS = [
+  "InsufficientFunds", "ManualRequest", "GovernanceDecision", "OperatorOffline",
+] as const;
+
+export const HEALTH_STATUS_LABELS = ["Healthy", "Degraded", "Critical", "Unknown"] as const;
+
+export const ARCHIVE_LEVELS = ["Active", "ArchivedL1", "ArchivedL2", "Purged"] as const;
+export type ArchiveLevel = (typeof ARCHIVE_LEVELS)[number];
 
 // ============================================================================
 // GroupRobot
@@ -429,65 +457,94 @@ export const SUBSCRIPTION_TIERS = [
 export type SubscriptionTier = (typeof SUBSCRIPTION_TIERS)[number];
 
 export const SUBSCRIPTION_STATUS = [
-  "Active",
-  "PastDue",
-  "Suspended",
-  "Cancelled",
-  "Paused",
+  "Active", "PastDue", "Suspended", "Cancelled", "Paused",
 ] as const;
 export type SubscriptionStatus = (typeof SUBSCRIPTION_STATUS)[number];
+
+export const NODE_STATUS = ["Active", "Suspended", "Exiting"] as const;
+export type NodeStatus = (typeof NODE_STATUS)[number];
+
+export const NODE_REQUIREMENTS = ["Any", "TeeOnly", "TeePreferred", "MinTee"] as const;
+
+export const WARN_ACTIONS = ["Kick", "Ban", "Mute"] as const;
+
+export const ACTION_TYPES = [
+  "Kick", "Ban", "Mute", "Warn", "Unmute", "Unban", "Promote", "Demote", "Welcome", "ConfigUpdate",
+] as const;
+
+export const OPERATOR_STATUS = ["Active", "Suspended", "Deactivated"] as const;
+
+export const CEREMONY_STATUS = ["Active", "Superseded", "Revoked", "Expired"] as const;
+
+export const AD_COMMITMENT_STATUS = ["Active", "Underdelivery", "Cancelled"] as const;
+
+export const COMMUNITY_STATUS = ["Active", "Banned"] as const;
 
 // ============================================================================
 // Dispute (pallet-dispute-arbitration)
 // ============================================================================
 
-export const COMPLAINT_TYPES = [
-  "OtcFraud",
-  "OtcQuality",
-  "OtcDelivery",
-  "LivestreamContent",
-  "LivestreamPayment",
-  "MakerQuality",
-  "MakerDescription",
-  "NftCopyright",
-  "NftAuthenticity",
-  "SwapSettlement",
-  "MemberReputation",
-  "CreditFraud",
-  "Other",
-] as const;
-export type ComplaintType = (typeof COMPLAINT_TYPES)[number];
+export const COMPLAINT_TYPE_CATEGORIES = {
+  "OTC Trading": [
+    "OtcSellerNotDeliver", "OtcBuyerFalseClaim", "OtcTradeFraud", "OtcPriceDispute",
+  ],
+  "Livestream": [
+    "LiveIllegalContent", "LiveFalseAdvertising", "LiveHarassment", "LiveFraud", "LiveGiftRefund", "LiveOther",
+  ],
+  "Market Maker": [
+    "MakerCreditDefault", "MakerMaliciousOperation", "MakerFalseQuote",
+  ],
+  "NFT": [
+    "NftSellerNotDeliver", "NftCounterfeit", "NftTradeFraud", "NftAuctionDispute",
+  ],
+  "Swap": [
+    "SwapMakerNotComplete", "SwapVerificationTimeout", "SwapFraud",
+  ],
+  "Member/Credit": [
+    "MemberBenefitNotProvided", "MemberServiceQuality", "CreditScoreDispute", "CreditPenaltyAppeal",
+  ],
+  "Other": ["Other"],
+} as const;
 
 export const COMPLAINT_STATUS = [
-  "Submitted",
-  "Responded",
-  "Mediating",
-  "Arbitrating",
-  "ResolvedComplainantWin",
-  "ResolvedRespondentWin",
-  "ResolvedSettlement",
-  "Withdrawn",
-  "Expired",
+  "Submitted", "Responded", "Mediating", "Arbitrating",
+  "ResolvedComplainantWin", "ResolvedRespondentWin", "ResolvedSettlement",
+  "Withdrawn", "Expired",
 ] as const;
 export type ComplaintStatus = (typeof COMPLAINT_STATUS)[number];
 
+export const ESCROW_STATE_MAP: Record<number, string> = {
+  0: "Locked", 1: "Released", 2: "Refunded", 3: "Disputed", 4: "Closed",
+};
+
+export const EVIDENCE_STATUS = [
+  "Active", "Withdrawn", "Sealed", "Removed",
+] as const;
+export type EvidenceStatus = (typeof EVIDENCE_STATUS)[number];
+
+export const EVIDENCE_CONTENT_TYPES = [
+  "Image", "Video", "Document", "Mixed", "Text",
+] as const;
+
 // ============================================================================
-// Ads (pallet-ads-core)
+// Ads (pallet-ads-*)
 // ============================================================================
 
 export const CAMPAIGN_STATUS = [
-  "Active",
-  "Paused",
-  "Exhausted",
-  "Expired",
-  "Cancelled",
-  "Suspended",
-  "UnderReview",
+  "Active", "Paused", "Exhausted", "Expired", "Cancelled", "Suspended", "UnderReview",
 ] as const;
 export type CampaignStatus = (typeof CAMPAIGN_STATUS)[number];
 
 export const CAMPAIGN_TYPES = ["Cpm", "Cpc", "Fixed", "Private"] as const;
 export type CampaignType = (typeof CAMPAIGN_TYPES)[number];
+
+export const AD_REVIEW_STATUS = ["Pending", "Approved", "Rejected", "Flagged"] as const;
+export type AdReviewStatus = (typeof AD_REVIEW_STATUS)[number];
+
+export const PLACEMENT_LEVELS = ["Entity", "Shop"] as const;
+export type PlacementLevel = (typeof PLACEMENT_LEVELS)[number];
+
+export const RECEIPT_STATUS = ["Pending", "Confirmed", "Disputed", "AutoConfirmed"] as const;
 
 // ============================================================================
 // Status Colors (shared across UI)
@@ -545,5 +602,19 @@ export const STATUS_COLORS: Record<string, string> = {
   Revoked: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400",
   Rejected: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400",
   Approved: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400",
+  ResolvedComplainantWin: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400",
+  ResolvedRespondentWin: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
+  ResolvedSettlement: "bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-400",
+  Locked: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400",
+  Released: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400",
+  Sealed: "bg-indigo-100 text-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-400",
+  Removed: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400",
+  Flagged: "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400",
+  Confirmed: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400",
+  AutoConfirmed: "bg-teal-100 text-teal-800 dark:bg-teal-900/30 dark:text-teal-400",
+  PastDue: "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400",
+  Exiting: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400",
+  Superseded: "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400",
+  Underdelivery: "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400",
   NotSubmitted: "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400",
 };

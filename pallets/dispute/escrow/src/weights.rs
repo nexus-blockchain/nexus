@@ -28,22 +28,16 @@ pub trait WeightInfo {
     fn release_partial() -> Weight;
     /// 🆕 F8: 清理已关闭托管
     fn cleanup_closed() -> Weight;
-    /// 🆕 F9: Token 托管锁定
-    fn token_lock() -> Weight;
-    /// 🆕 F9: Token 托管释放
-    fn token_release() -> Weight;
-    /// 🆕 F9: Token 托管退款
-    fn token_refund() -> Weight;
 }
 
 /// Substrate 权重实现
 pub struct SubstrateWeight<T>(core::marker::PhantomData<T>);
 impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     fn lock() -> Weight {
-        // L4-R2修复: reads 3→4 (Paused + LockStateOf×2 + Locked)
+        // reads: Paused + LockStateOf(ext+trait) + Locked + PayerOf(contains_key)
         Weight::from_parts(50_000_000, 3_500)
-            .saturating_add(T::DbWeight::get().reads(4))
-            .saturating_add(T::DbWeight::get().writes(3))
+            .saturating_add(T::DbWeight::get().reads(5))
+            .saturating_add(T::DbWeight::get().writes(4))
     }
     fn release() -> Weight {
         // reads: Paused + LockStateOf(extrinsic) + LockStateOf(trait) + Locked + Currency
@@ -57,10 +51,10 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().writes(3))
     }
     fn lock_with_nonce() -> Weight {
-        // reads: Paused + LockNonces + LockStateOf(extrinsic) + LockStateOf(trait) + Locked
+        // reads: Paused + LockNonces + LockStateOf(ext+trait) + Locked + PayerOf
         Weight::from_parts(55_000_000, 4_500)
-            .saturating_add(T::DbWeight::get().reads(5))
-            .saturating_add(T::DbWeight::get().writes(4))
+            .saturating_add(T::DbWeight::get().reads(6))
+            .saturating_add(T::DbWeight::get().writes(5))
     }
     fn release_split() -> Weight {
         Weight::from_parts(100_000_000, 5_000)
@@ -68,34 +62,35 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().writes(10))
     }
     fn dispute() -> Weight {
-        // L3-R2修复: writes 1→3 (LockStateOf + DisputedAt + Event)
-        Weight::from_parts(40_000_000, 2_500)
-            .saturating_add(T::DbWeight::get().reads(2))
-            .saturating_add(T::DbWeight::get().writes(3))
+        // reads: Locked + LockStateOf + ExpiryOf, writes: LockStateOf + DisputedAt + ExpiryOf + ExpiringAt
+        Weight::from_parts(50_000_000, 3_500)
+            .saturating_add(T::DbWeight::get().reads(3))
+            .saturating_add(T::DbWeight::get().writes(4))
     }
     fn apply_decision_release() -> Weight {
-        // M4-R2: +1 write for DisputedAt::remove
-        Weight::from_parts(70_000_000, 4_000)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(5))
+        // R5: +remove_expiry_schedule (ExpiryOf+ExpiringAt)
+        Weight::from_parts(70_000_000, 4_500)
+            .saturating_add(T::DbWeight::get().reads(5))
+            .saturating_add(T::DbWeight::get().writes(7))
     }
     fn apply_decision_refund() -> Weight {
-        Weight::from_parts(70_000_000, 4_000)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(5))
+        Weight::from_parts(70_000_000, 4_500)
+            .saturating_add(T::DbWeight::get().reads(5))
+            .saturating_add(T::DbWeight::get().writes(7))
     }
     fn apply_decision_partial() -> Weight {
-        Weight::from_parts(90_000_000, 5_000)
-            .saturating_add(T::DbWeight::get().reads(4))
-            .saturating_add(T::DbWeight::get().writes(6))
+        Weight::from_parts(90_000_000, 5_500)
+            .saturating_add(T::DbWeight::get().reads(6))
+            .saturating_add(T::DbWeight::get().writes(8))
     }
     fn set_pause() -> Weight {
         Weight::from_parts(10_000_000, 500)
             .saturating_add(T::DbWeight::get().writes(1))
     }
     fn schedule_expiry() -> Weight {
-        Weight::from_parts(50_000_000, 3_500)
-            .saturating_add(T::DbWeight::get().reads(3))
+        // R5: +Locked + LockStateOf existence checks
+        Weight::from_parts(50_000_000, 4_000)
+            .saturating_add(T::DbWeight::get().reads(5))
             .saturating_add(T::DbWeight::get().writes(3))
     }
     fn cancel_expiry() -> Weight {
@@ -130,21 +125,6 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(20))
             .saturating_add(T::DbWeight::get().writes(60))
     }
-    fn token_lock() -> Weight {
-        Weight::from_parts(50_000_000, 3_000)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(2))
-    }
-    fn token_release() -> Weight {
-        Weight::from_parts(60_000_000, 3_500)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(3))
-    }
-    fn token_refund() -> Weight {
-        Weight::from_parts(60_000_000, 3_500)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(3))
-    }
 }
 
 /// 默认权重实现（用于测试）
@@ -154,7 +134,7 @@ impl WeightInfo for () {
     fn refund() -> Weight { Weight::from_parts(60_000_000, 0) }
     fn lock_with_nonce() -> Weight { Weight::from_parts(55_000_000, 0) }
     fn release_split() -> Weight { Weight::from_parts(100_000_000, 0) }
-    fn dispute() -> Weight { Weight::from_parts(40_000_000, 0) }
+    fn dispute() -> Weight { Weight::from_parts(50_000_000, 0) }
     fn apply_decision_release() -> Weight { Weight::from_parts(70_000_000, 0) }
     fn apply_decision_refund() -> Weight { Weight::from_parts(70_000_000, 0) }
     fn apply_decision_partial() -> Weight { Weight::from_parts(90_000_000, 0) }
@@ -166,7 +146,4 @@ impl WeightInfo for () {
     fn refund_partial() -> Weight { Weight::from_parts(60_000_000, 0) }
     fn release_partial() -> Weight { Weight::from_parts(60_000_000, 0) }
     fn cleanup_closed() -> Weight { Weight::from_parts(50_000_000, 0) }
-    fn token_lock() -> Weight { Weight::from_parts(50_000_000, 0) }
-    fn token_release() -> Weight { Weight::from_parts(60_000_000, 0) }
-    fn token_refund() -> Weight { Weight::from_parts(60_000_000, 0) }
 }

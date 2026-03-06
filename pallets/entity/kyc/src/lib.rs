@@ -11,6 +11,7 @@
 //! - Entity 授权的 Provider 或 Entity Owner/Admin 审核
 //! - 每个 (Entity, Account) 对拥有独立的 KYC 记录
 //! - Entity 之间的 KYC 状态互不影响
+//! - 升级申请独立存储在 UpgradeRequests，不覆盖已有 Approved 记录
 //!
 //! ## KYC 级别
 //!
@@ -48,7 +49,6 @@ pub mod pallet {
 
     // ==================== 类型定义 ====================
 
-    /// KYC 级别
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
     pub enum KycLevel {
         #[default]
@@ -59,7 +59,6 @@ pub mod pallet {
         Institutional,
     }
 
-    /// KYC 状态
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
     pub enum KycStatus {
         #[default]
@@ -71,7 +70,6 @@ pub mod pallet {
         Revoked,
     }
 
-    /// 拒绝原因
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     pub enum RejectionReason {
         UnclearDocument,
@@ -81,6 +79,7 @@ pub mod pallet {
         SanctionedEntity,
         HighRiskCountry,
         ForgedDocument,
+        TimedOut,
         Other,
     }
 
@@ -107,38 +106,23 @@ pub mod pallet {
         }
     }
 
-    /// 认证提供者类型
-    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
-    pub enum ProviderType {
-        #[default]
-        Internal,
-        ThirdParty,
-        Government,
-        Financial,
-    }
-
-    /// 认证提供者（全局注册）
+    /// 认证提供者（全局注册，account 由 storage key 提供）
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     #[scale_info(skip_type_params(MaxNameLen))]
-    pub struct KycProvider<AccountId, MaxNameLen: Get<u32>> {
-        pub account: AccountId,
+    pub struct KycProvider<MaxNameLen: Get<u32>> {
         pub name: BoundedVec<u8, MaxNameLen>,
-        pub provider_type: ProviderType,
         pub max_level: KycLevel,
-        pub verifications_count: u64,
         pub suspended: bool,
     }
 
     pub type KycProviderOf<T> = KycProvider<
-        <T as frame_system::Config>::AccountId,
         <T as Config>::MaxProviderNameLength,
     >;
 
-    /// 用户 KYC 记录（per-entity）
+    /// 用户 KYC 记录（per-entity，account 由 storage key 提供）
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     #[scale_info(skip_type_params(MaxCidLen))]
     pub struct KycRecord<AccountId, BlockNumber, MaxCidLen: Get<u32>> {
-        pub account: AccountId,
         pub level: KycLevel,
         pub status: KycStatus,
         pub provider: Option<AccountId>,
@@ -158,7 +142,6 @@ pub mod pallet {
         <T as Config>::MaxCidLength,
     >;
 
-    /// KYC 操作类型（用于历史记录）
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     pub enum KycAction {
         Submitted,
@@ -174,7 +157,6 @@ pub mod pallet {
         TimedOut,
     }
 
-    /// KYC 历史记录条目
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     pub struct KycHistoryEntry<BlockNumber> {
         pub action: KycAction,
@@ -197,7 +179,6 @@ pub mod pallet {
         }
     }
 
-    /// 实体 KYC 要求配置
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
     pub struct EntityKycRequirement {
         pub min_level: KycLevel,
@@ -206,6 +187,21 @@ pub mod pallet {
         pub allow_high_risk_countries: bool,
         pub max_risk_score: u8,
     }
+
+    /// KYC 升级请求（独立于主记录，升级审核期间保留原有 Approved 状态）
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    #[scale_info(skip_type_params(MaxCidLen))]
+    pub struct KycUpgradeRequest<BlockNumber, MaxCidLen: Get<u32>> {
+        pub target_level: KycLevel,
+        pub data_cid: BoundedVec<u8, MaxCidLen>,
+        pub country_code: [u8; 2],
+        pub submitted_at: BlockNumber,
+    }
+
+    pub type KycUpgradeRequestOf<T> = KycUpgradeRequest<
+        BlockNumberFor<T>,
+        <T as Config>::MaxCidLength,
+    >;
 
     // ==================== 配置 ====================
 
@@ -247,7 +243,7 @@ pub mod pallet {
         type OnKycStatusChange: pallet_entity_common::OnKycStatusChange<Self::AccountId>;
     }
 
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(2);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -255,7 +251,6 @@ pub mod pallet {
 
     // ==================== 存储项 ====================
 
-    /// 用户 KYC 记录（per-entity: entity_id × account → record）
     #[pallet::storage]
     pub type KycRecords<T: Config> = StorageDoubleMap<
         _,
@@ -266,7 +261,6 @@ pub mod pallet {
         KycRecordOf<T>,
     >;
 
-    /// 认证提供者列表（全局注册）
     #[pallet::storage]
     #[pallet::getter(fn providers)]
     pub type Providers<T: Config> = StorageMap<
@@ -276,12 +270,10 @@ pub mod pallet {
         KycProviderOf<T>,
     >;
 
-    /// 活跃提供者数量
     #[pallet::storage]
     #[pallet::getter(fn provider_count)]
     pub type ProviderCount<T: Config> = StorageValue<_, u32, ValueQuery>;
 
-    /// Entity 授权的 Provider（entity_id × provider_account → ()）
     #[pallet::storage]
     pub type EntityAuthorizedProviders<T: Config> = StorageDoubleMap<
         _,
@@ -292,7 +284,6 @@ pub mod pallet {
         (),
     >;
 
-    /// 实体 KYC 要求配置
     #[pallet::storage]
     #[pallet::getter(fn entity_requirements)]
     pub type EntityRequirements<T: Config> = StorageMap<
@@ -302,7 +293,6 @@ pub mod pallet {
         EntityKycRequirement,
     >;
 
-    /// 高风险国家列表（全局）
     #[pallet::storage]
     #[pallet::getter(fn high_risk_countries)]
     pub type HighRiskCountries<T: Config> = StorageValue<
@@ -311,7 +301,6 @@ pub mod pallet {
         ValueQuery,
     >;
 
-    /// KYC 认证历史（per-entity: entity_id × account → history）
     #[pallet::storage]
     pub type KycHistory<T: Config> = StorageDoubleMap<
         _,
@@ -323,13 +312,22 @@ pub mod pallet {
         ValueQuery,
     >;
 
-    /// 待审核 KYC 数量（per-entity）
     #[pallet::storage]
     pub type PendingKycCount<T: Config> = StorageMap<_, Blake2_128Concat, u64, u32, ValueQuery>;
 
-    /// 已批准 KYC 数量（per-entity）
     #[pallet::storage]
     pub type ApprovedKycCount<T: Config> = StorageMap<_, Blake2_128Concat, u64, u32, ValueQuery>;
+
+    /// KYC 升级请求（per-entity: entity_id × account → upgrade_request）
+    #[pallet::storage]
+    pub type UpgradeRequests<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        u64,
+        Blake2_128Concat,
+        T::AccountId,
+        KycUpgradeRequestOf<T>,
+    >;
 
     // ==================== 事件 ====================
 
@@ -366,7 +364,6 @@ pub mod pallet {
         ProviderRegistered {
             provider: T::AccountId,
             name: Vec<u8>,
-            provider_type: ProviderType,
         },
         ProviderRemoved {
             provider: T::AccountId,
@@ -430,9 +427,6 @@ pub mod pallet {
             count: u32,
             reason: RejectionReason,
         },
-        ProviderForceRemoved {
-            provider: T::AccountId,
-        },
         ProviderAuthorized {
             entity_id: u64,
             provider: T::AccountId,
@@ -440,6 +434,34 @@ pub mod pallet {
         ProviderDeauthorized {
             entity_id: u64,
             provider: T::AccountId,
+        },
+        KycUpgradeRequested {
+            entity_id: u64,
+            account: T::AccountId,
+            current_level: KycLevel,
+            target_level: KycLevel,
+        },
+        KycUpgradeRejected {
+            entity_id: u64,
+            account: T::AccountId,
+            target_level: KycLevel,
+            reason: RejectionReason,
+        },
+        KycUpgradeCancelled {
+            entity_id: u64,
+            account: T::AccountId,
+            target_level: KycLevel,
+        },
+        KycUpgradeTimedOut {
+            entity_id: u64,
+            account: T::AccountId,
+            target_level: KycLevel,
+        },
+        EntityKycRevoked {
+            entity_id: u64,
+            account: T::AccountId,
+            reason: RejectionReason,
+            revoker: T::AccountId,
         },
     }
 
@@ -477,17 +499,16 @@ pub mod pallet {
         PendingNotTimedOut,
         ProviderMismatch,
         EmptyAccountList,
-        /// Provider 未被该 Entity 授权
         ProviderNotAuthorized,
-        /// Provider 已被该 Entity 授权
         ProviderAlreadyAuthorized,
+        EntityNotActive,
     }
 
     // ==================== Extrinsics ====================
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        /// 向指定 Entity 提交 KYC 认证申请
+        /// 向指定 Entity 提交 KYC 认证申请（或升级请求）
         #[pallet::call_index(0)]
         #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
         pub fn submit_kyc(
@@ -499,64 +520,86 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+            Self::ensure_entity_operable(entity_id)?;
             ensure!(level != KycLevel::None, Error::<T>::InvalidKycLevel);
             ensure!(!data_cid.is_empty(), Error::<T>::EmptyDataCid);
             ensure!(
                 country_code[0].is_ascii_uppercase() && country_code[1].is_ascii_uppercase(),
                 Error::<T>::InvalidCountryCode
             );
-
-            let old_status = if let Some(record) = KycRecords::<T>::get(entity_id, &who) {
-                ensure!(record.status != KycStatus::Pending, Error::<T>::KycAlreadyPending);
-                if record.status == KycStatus::Approved {
-                    if let Some(expires_at) = record.expires_at {
-                        let now = <frame_system::Pallet<T>>::block_number();
-                        if now <= expires_at {
-                            ensure!(level > record.level, Error::<T>::KycAlreadyApproved);
-                        }
-                    } else {
-                        ensure!(level > record.level, Error::<T>::KycAlreadyApproved);
-                    }
-                }
-                record.status
-            } else {
-                KycStatus::NotSubmitted
-            };
+            ensure!(
+                !UpgradeRequests::<T>::contains_key(entity_id, &who),
+                Error::<T>::KycAlreadyPending
+            );
 
             let data_bounded: BoundedVec<u8, T::MaxCidLength> =
                 data_cid.try_into().map_err(|_| Error::<T>::CidTooLong)?;
 
             let now = <frame_system::Pallet<T>>::block_number();
 
-            let record = KycRecord {
-                account: who.clone(),
-                level,
-                status: KycStatus::Pending,
-                provider: None,
-                data_cid: Some(data_bounded),
-                submitted_at: Some(now),
-                verified_at: None,
-                expires_at: None,
-                rejection_reason: None,
-                rejection_details_cid: None,
-                country_code: Some(country_code),
-                risk_score: 0,
+            let (is_upgrade, current_level) = if let Some(record) = KycRecords::<T>::get(entity_id, &who) {
+                ensure!(record.status != KycStatus::Pending, Error::<T>::KycAlreadyPending);
+                if record.status == KycStatus::Approved && !Self::is_past_expiry(&record) {
+                    ensure!(level > record.level, Error::<T>::KycAlreadyApproved);
+                    (true, record.level)
+                } else {
+                    (false, record.level)
+                }
+            } else {
+                (false, KycLevel::None)
             };
 
-            KycRecords::<T>::insert(entity_id, &who, record);
+            if is_upgrade {
 
-            Self::update_status_counts(entity_id, old_status, KycStatus::Pending);
-            Self::record_history(entity_id, &who, KycAction::Submitted, level);
-            T::OnKycStatusChange::on_kyc_status_changed(
-                entity_id, &who, old_status.as_u8(), KycStatus::Pending.as_u8(), level.as_u8(),
-            );
+                let upgrade = KycUpgradeRequest {
+                    target_level: level,
+                    data_cid: data_bounded,
+                    country_code,
+                    submitted_at: now,
+                };
+                UpgradeRequests::<T>::insert(entity_id, &who, upgrade);
+                PendingKycCount::<T>::mutate(entity_id, |c| *c = c.saturating_add(1));
+                Self::record_history(entity_id, &who, KycAction::Submitted, level);
 
-            Self::deposit_event(Event::KycSubmitted {
-                entity_id,
-                account: who,
-                level,
-            });
+                Self::deposit_event(Event::KycUpgradeRequested {
+                    entity_id,
+                    account: who,
+                    current_level,
+                    target_level: level,
+                });
+            } else {
+                let old_status = KycRecords::<T>::get(entity_id, &who)
+                    .map(|r| r.status)
+                    .unwrap_or(KycStatus::NotSubmitted);
+
+                let record = KycRecord {
+                    level,
+                    status: KycStatus::Pending,
+                    provider: None,
+                    data_cid: Some(data_bounded),
+                    submitted_at: Some(now),
+                    verified_at: None,
+                    expires_at: None,
+                    rejection_reason: None,
+                    rejection_details_cid: None,
+                    country_code: Some(country_code),
+                    risk_score: 0,
+                };
+
+                KycRecords::<T>::insert(entity_id, &who, record);
+                Self::update_status_counts(entity_id, old_status, KycStatus::Pending);
+                Self::record_history(entity_id, &who, KycAction::Submitted, level);
+                T::OnKycStatusChange::on_kyc_status_changed(
+                    entity_id, &who, old_status.as_u8(), KycStatus::Pending.as_u8(), level.as_u8(),
+                );
+
+                Self::deposit_event(Event::KycSubmitted {
+                    entity_id,
+                    account: who,
+                    level,
+                });
+            }
+
             Ok(())
         }
 
@@ -573,8 +616,56 @@ pub mod pallet {
 
             ensure!(who != account, Error::<T>::SelfApprovalNotAllowed);
             ensure!(risk_score <= 100, Error::<T>::InvalidRiskScore);
+            Self::ensure_entity_operable(entity_id)?;
 
             let provider_max_level = Self::ensure_can_review(entity_id, &who)?;
+
+            if let Some(upgrade) = UpgradeRequests::<T>::get(entity_id, &account) {
+                if let Some(max_level) = provider_max_level {
+                    ensure!(upgrade.target_level <= max_level, Error::<T>::ProviderLevelNotSupported);
+                }
+
+                let target_level = upgrade.target_level;
+                let upgrade_country = upgrade.country_code;
+                let upgrade_data = upgrade.data_cid;
+
+                KycRecords::<T>::try_mutate(entity_id, &account, |maybe_record| -> DispatchResult {
+                    let record = maybe_record.as_mut().ok_or(Error::<T>::KycNotFound)?;
+
+                    let old_status = record.status;
+                    let now = <frame_system::Pallet<T>>::block_number();
+                    let validity = Self::get_validity_period(target_level);
+                    let expires_at = now.saturating_add(validity);
+
+                    record.level = target_level;
+                    record.status = KycStatus::Approved;
+                    record.provider = Some(who.clone());
+                    record.data_cid = Some(upgrade_data);
+                    record.verified_at = Some(now);
+                    record.expires_at = Some(expires_at);
+                    record.risk_score = risk_score;
+                    record.country_code = Some(upgrade_country);
+
+                    PendingKycCount::<T>::mutate(entity_id, |c| *c = c.saturating_sub(1));
+                    Self::update_status_counts(entity_id, old_status, KycStatus::Approved);
+                    Self::record_history(entity_id, &account, KycAction::Approved, target_level);
+                    T::OnKycStatusChange::on_kyc_status_changed(
+                        entity_id, &account, old_status.as_u8(), KycStatus::Approved.as_u8(), target_level.as_u8(),
+                    );
+
+                    Self::deposit_event(Event::KycApproved {
+                        entity_id,
+                        account: account.clone(),
+                        level: target_level,
+                        provider: who.clone(),
+                        expires_at,
+                    });
+                    Ok(())
+                })?;
+
+                UpgradeRequests::<T>::remove(entity_id, &account);
+                return Ok(());
+            }
 
             KycRecords::<T>::try_mutate(entity_id, &account, |maybe_record| -> DispatchResult {
                 let record = maybe_record.as_mut().ok_or(Error::<T>::KycNotFound)?;
@@ -609,15 +700,7 @@ pub mod pallet {
                     expires_at,
                 });
                 Ok(())
-            })?;
-
-            Providers::<T>::mutate(&who, |maybe_provider| {
-                if let Some(p) = maybe_provider {
-                    p.verifications_count = p.verifications_count.saturating_add(1);
-                }
-            });
-
-            Ok(())
+            })
         }
 
         /// 拒绝 KYC（Entity 授权的 Provider 或 Entity Owner/Admin 调用）
@@ -632,6 +715,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
+            Self::ensure_entity_operable(entity_id)?;
             let provider_max_level = Self::ensure_can_review(entity_id, &who)?;
 
             let details_bounded = details_cid
@@ -640,6 +724,25 @@ pub mod pallet {
                     cid.try_into().map_err(|_| Error::<T>::CidTooLong)
                 })
                 .transpose()?;
+
+            if let Some(upgrade) = UpgradeRequests::<T>::get(entity_id, &account) {
+                if let Some(max_level) = provider_max_level {
+                    ensure!(upgrade.target_level <= max_level, Error::<T>::ProviderLevelNotSupported);
+                }
+
+                let target_level = upgrade.target_level;
+                UpgradeRequests::<T>::remove(entity_id, &account);
+                PendingKycCount::<T>::mutate(entity_id, |c| *c = c.saturating_sub(1));
+                Self::record_history(entity_id, &account, KycAction::Rejected, target_level);
+
+                Self::deposit_event(Event::KycUpgradeRejected {
+                    entity_id,
+                    account: account.clone(),
+                    target_level,
+                    reason,
+                });
+                return Ok(());
+            }
 
             KycRecords::<T>::try_mutate(entity_id, &account, |maybe_record| -> DispatchResult {
                 let record = maybe_record.as_mut().ok_or(Error::<T>::KycNotFound)?;
@@ -671,18 +774,10 @@ pub mod pallet {
                     reason,
                 });
                 Ok(())
-            })?;
-
-            Providers::<T>::mutate(&who, |maybe_provider| {
-                if let Some(p) = maybe_provider {
-                    p.verifications_count = p.verifications_count.saturating_add(1);
-                }
-            });
-
-            Ok(())
+            })
         }
 
-        /// 撤销 KYC（管理员调用）
+        /// 撤销 KYC（全局管理员调用）
         #[pallet::call_index(3)]
         #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
         pub fn revoke_kyc(
@@ -692,6 +787,8 @@ pub mod pallet {
             reason: RejectionReason,
         ) -> DispatchResult {
             T::AdminOrigin::ensure_origin(origin)?;
+
+            Self::cleanup_upgrade_request(entity_id, &account);
 
             KycRecords::<T>::try_mutate(entity_id, &account, |maybe_record| -> DispatchResult {
                 let record = maybe_record.as_mut().ok_or(Error::<T>::KycNotFound)?;
@@ -728,7 +825,6 @@ pub mod pallet {
             origin: OriginFor<T>,
             provider_account: T::AccountId,
             name: Vec<u8>,
-            provider_type: ProviderType,
             max_level: KycLevel,
         ) -> DispatchResult {
             T::AdminOrigin::ensure_origin(origin)?;
@@ -746,11 +842,8 @@ pub mod pallet {
             let name_for_event = name_bounded.to_vec();
 
             let provider = KycProvider {
-                account: provider_account.clone(),
                 name: name_bounded,
-                provider_type,
                 max_level,
-                verifications_count: 0,
                 suspended: false,
             };
 
@@ -760,7 +853,6 @@ pub mod pallet {
             Self::deposit_event(Event::ProviderRegistered {
                 provider: provider_account,
                 name: name_for_event,
-                provider_type,
             });
             Ok(())
         }
@@ -778,6 +870,15 @@ pub mod pallet {
 
             Providers::<T>::remove(&provider_account);
             ProviderCount::<T>::mutate(|count| *count = count.saturating_sub(1));
+
+            let orphaned_entities: Vec<u64> = EntityAuthorizedProviders::<T>::iter()
+                .filter_map(|(eid, prov, ())| {
+                    if prov == provider_account { Some(eid) } else { None }
+                })
+                .collect();
+            for eid in orphaned_entities {
+                EntityAuthorizedProviders::<T>::remove(eid, &provider_account);
+            }
 
             Self::deposit_event(Event::ProviderRemoved {
                 provider: provider_account,
@@ -799,7 +900,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+            Self::ensure_entity_operable(entity_id)?;
             Self::ensure_entity_owner_or_admin(entity_id, &who)?;
             ensure!(max_risk_score <= 100, Error::<T>::InvalidRiskScore);
 
@@ -885,7 +986,7 @@ pub mod pallet {
             })
         }
 
-        /// 取消待审核的 KYC 申请（用户自行撤回）
+        /// 取消待审核的 KYC 申请（用户自行撤回，含升级请求）
         #[pallet::call_index(9)]
         #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
         pub fn cancel_kyc(
@@ -893,6 +994,20 @@ pub mod pallet {
             entity_id: u64,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+
+            if let Some(upgrade) = UpgradeRequests::<T>::get(entity_id, &who) {
+                let target_level = upgrade.target_level;
+                UpgradeRequests::<T>::remove(entity_id, &who);
+                PendingKycCount::<T>::mutate(entity_id, |c| *c = c.saturating_sub(1));
+                Self::record_history(entity_id, &who, KycAction::Cancelled, target_level);
+
+                Self::deposit_event(Event::KycUpgradeCancelled {
+                    entity_id,
+                    account: who,
+                    target_level,
+                });
+                return Ok(());
+            }
 
             KycRecords::<T>::try_mutate(entity_id, &who, |maybe_record| -> DispatchResult {
                 let record = maybe_record.as_mut().ok_or(Error::<T>::KycNotFound)?;
@@ -959,6 +1074,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
+            Self::ensure_entity_operable(entity_id)?;
             Self::ensure_can_review(entity_id, &who)?;
             ensure!(new_score <= 100, Error::<T>::InvalidRiskScore);
 
@@ -1076,6 +1192,8 @@ pub mod pallet {
                 Error::<T>::InvalidCountryCode
             );
 
+            Self::cleanup_upgrade_request(entity_id, &account);
+
             let old_status = KycRecords::<T>::get(entity_id, &account)
                 .map(|r| r.status)
                 .unwrap_or(KycStatus::NotSubmitted);
@@ -1085,7 +1203,6 @@ pub mod pallet {
             let expires_at = now.saturating_add(validity);
 
             let record = KycRecord {
-                account: account.clone(),
                 level,
                 status: KycStatus::Approved,
                 provider: None,
@@ -1127,6 +1244,7 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
 
             ensure!(who != account, Error::<T>::SelfApprovalNotAllowed);
+            Self::ensure_entity_operable(entity_id)?;
             let provider_max_level = Self::ensure_can_review(entity_id, &who)?;
 
             KycRecords::<T>::try_mutate(entity_id, &account, |maybe_record| -> DispatchResult {
@@ -1164,18 +1282,10 @@ pub mod pallet {
                     expires_at,
                 });
                 Ok(())
-            })?;
-
-            Providers::<T>::mutate(&who, |maybe_provider| {
-                if let Some(p) = maybe_provider {
-                    p.verifications_count = p.verifications_count.saturating_add(1);
-                }
-            });
-
-            Ok(())
+            })
         }
 
-        /// 更新待审核 KYC 的数据（用户补充/替换材料）
+        /// 更新待审核 KYC 的数据（用户补充/替换材料，含升级请求）
         #[pallet::call_index(17)]
         #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
         pub fn update_kyc_data(
@@ -1189,6 +1299,22 @@ pub mod pallet {
 
             let data_bounded: BoundedVec<u8, T::MaxCidLength> =
                 new_data_cid.try_into().map_err(|_| Error::<T>::CidTooLong)?;
+
+            if UpgradeRequests::<T>::contains_key(entity_id, &who) {
+                UpgradeRequests::<T>::try_mutate(entity_id, &who, |maybe_upgrade| -> DispatchResult {
+                    let upgrade = maybe_upgrade.as_mut().ok_or(Error::<T>::KycNotFound)?;
+                    upgrade.data_cid = data_bounded;
+
+                    Self::record_history(entity_id, &who, KycAction::DataUpdated, upgrade.target_level);
+
+                    Self::deposit_event(Event::KycDataUpdated {
+                        entity_id,
+                        account: who.clone(),
+                    });
+                    Ok(())
+                })?;
+                return Ok(());
+            }
 
             KycRecords::<T>::try_mutate(entity_id, &who, |maybe_record| -> DispatchResult {
                 let record = maybe_record.as_mut().ok_or(Error::<T>::KycNotFound)?;
@@ -1228,6 +1354,8 @@ pub mod pallet {
 
                 record.data_cid = None;
                 record.rejection_details_cid = None;
+                record.country_code = None;
+                record.risk_score = 0;
 
                 Self::record_history(entity_id, &who, KycAction::DataPurged, record.level);
 
@@ -1248,7 +1376,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+            Self::ensure_entity_operable(entity_id)?;
             Self::ensure_entity_owner_or_admin(entity_id, &who)?;
             ensure!(EntityRequirements::<T>::contains_key(entity_id), Error::<T>::RequirementNotFound);
 
@@ -1258,7 +1386,7 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 超时待审核 KYC（任何人可调用）
+        /// 超时待审核 KYC（任何人可调用，含升级请求）
         #[pallet::call_index(20)]
         #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
         pub fn timeout_pending_kyc(
@@ -1267,6 +1395,24 @@ pub mod pallet {
             account: T::AccountId,
         ) -> DispatchResult {
             ensure_signed(origin)?;
+
+            if let Some(upgrade) = UpgradeRequests::<T>::get(entity_id, &account) {
+                let now = <frame_system::Pallet<T>>::block_number();
+                let timeout = T::PendingKycTimeout::get();
+                ensure!(now > upgrade.submitted_at.saturating_add(timeout), Error::<T>::PendingNotTimedOut);
+
+                let target_level = upgrade.target_level;
+                UpgradeRequests::<T>::remove(entity_id, &account);
+                PendingKycCount::<T>::mutate(entity_id, |c| *c = c.saturating_sub(1));
+                Self::record_history(entity_id, &account, KycAction::TimedOut, target_level);
+
+                Self::deposit_event(Event::KycUpgradeTimedOut {
+                    entity_id,
+                    account: account.clone(),
+                    target_level,
+                });
+                return Ok(());
+            }
 
             KycRecords::<T>::try_mutate(entity_id, &account, |maybe_record| -> DispatchResult {
                 let record = maybe_record.as_mut().ok_or(Error::<T>::KycNotFound)?;
@@ -1279,7 +1425,7 @@ pub mod pallet {
 
                 let old_status = record.status;
                 record.status = KycStatus::Rejected;
-                record.rejection_reason = Some(RejectionReason::Other);
+                record.rejection_reason = Some(RejectionReason::TimedOut);
 
                 Self::update_status_counts(entity_id, old_status, KycStatus::Rejected);
                 Self::record_history(entity_id, &account, KycAction::TimedOut, record.level);
@@ -1316,6 +1462,8 @@ pub mod pallet {
             let mut revoked_count: u32 = 0;
 
             for account in &accounts {
+                Self::cleanup_upgrade_request(entity_id, account);
+
                 KycRecords::<T>::try_mutate(entity_id, account, |maybe_record| -> DispatchResult {
                     let record = maybe_record.as_mut().ok_or(Error::<T>::KycNotFound)?;
 
@@ -1352,25 +1500,7 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 强制移除认证提供者（全局，AdminOrigin）
-        #[pallet::call_index(22)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
-        pub fn force_remove_provider(
-            origin: OriginFor<T>,
-            provider_account: T::AccountId,
-        ) -> DispatchResult {
-            T::AdminOrigin::ensure_origin(origin)?;
-
-            ensure!(Providers::<T>::contains_key(&provider_account), Error::<T>::ProviderNotFound);
-
-            Providers::<T>::remove(&provider_account);
-            ProviderCount::<T>::mutate(|count| *count = count.saturating_sub(1));
-
-            Self::deposit_event(Event::ProviderForceRemoved {
-                provider: provider_account,
-            });
-            Ok(())
-        }
+        // call_index(22) reserved (was force_remove_provider, removed as redundant with remove_provider)
 
         /// 授权 Provider 为指定 Entity 审核 KYC（Entity Owner 或 KYC_MANAGE Admin）
         #[pallet::call_index(23)]
@@ -1382,7 +1512,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+            Self::ensure_entity_operable(entity_id)?;
             Self::ensure_entity_owner_or_admin(entity_id, &who)?;
             ensure!(Providers::<T>::contains_key(&provider_account), Error::<T>::ProviderNotFound);
             ensure!(
@@ -1409,7 +1539,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+            Self::ensure_entity_operable(entity_id)?;
             Self::ensure_entity_owner_or_admin(entity_id, &who)?;
             ensure!(
                 EntityAuthorizedProviders::<T>::contains_key(entity_id, &provider_account),
@@ -1423,6 +1553,57 @@ pub mod pallet {
                 provider: provider_account,
             });
             Ok(())
+        }
+
+        /// Entity Owner/Admin 撤销用户 KYC（per-entity 级别的撤销权限）
+        #[pallet::call_index(25)]
+        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        pub fn entity_revoke_kyc(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            account: T::AccountId,
+            reason: RejectionReason,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            Self::ensure_entity_operable(entity_id)?;
+            let is_owner = T::EntityProvider::entity_owner(entity_id)
+                .map(|owner| owner == who)
+                .unwrap_or(false);
+            let is_admin = T::EntityProvider::is_entity_admin(
+                entity_id, &who, pallet_entity_common::AdminPermission::KYC_MANAGE,
+            );
+            ensure!(is_owner || is_admin, Error::<T>::NotEntityOwnerOrAdmin);
+
+            Self::cleanup_upgrade_request(entity_id, &account);
+
+            KycRecords::<T>::try_mutate(entity_id, &account, |maybe_record| -> DispatchResult {
+                let record = maybe_record.as_mut().ok_or(Error::<T>::KycNotFound)?;
+                ensure!(
+                    record.status == KycStatus::Pending
+                        || record.status == KycStatus::Approved
+                        || record.status == KycStatus::Expired,
+                    Error::<T>::InvalidKycStatus
+                );
+
+                let old_status = record.status;
+                record.status = KycStatus::Revoked;
+                record.rejection_reason = Some(reason);
+
+                Self::update_status_counts(entity_id, old_status, KycStatus::Revoked);
+                Self::record_history(entity_id, &account, KycAction::Revoked, record.level);
+                T::OnKycStatusChange::on_kyc_status_changed(
+                    entity_id, &account, old_status.as_u8(), KycStatus::Revoked.as_u8(), record.level.as_u8(),
+                );
+
+                Self::deposit_event(Event::EntityKycRevoked {
+                    entity_id,
+                    account: account.clone(),
+                    reason,
+                    revoker: who.clone(),
+                });
+                Ok(())
+            })
         }
     }
 
@@ -1439,9 +1620,6 @@ pub mod pallet {
             }
         }
 
-        /// 检查调用者是否有权审核指定 Entity 的 KYC。
-        /// 返回 Ok(Some(max_level)) 如果调用者是 Provider（需检查 level 限制），
-        /// 返回 Ok(None) 如果调用者是 Entity Owner/Admin（无 level 限制）。
         fn ensure_can_review(entity_id: u64, who: &T::AccountId) -> Result<Option<KycLevel>, DispatchError> {
             if let Some(provider) = Providers::<T>::get(who) {
                 ensure!(!provider.suspended, Error::<T>::ProviderIsSuspended);
@@ -1462,7 +1640,6 @@ pub mod pallet {
             Ok(None)
         }
 
-        /// 检查调用者是否为 Entity Owner 或有 KYC_MANAGE 权限的 Admin
         fn ensure_entity_owner_or_admin(entity_id: u64, who: &T::AccountId) -> DispatchResult {
             let is_owner = T::EntityProvider::entity_owner(entity_id)
                 .map(|owner| owner == *who)
@@ -1475,33 +1652,40 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 获取用户在指定 Entity 下的 KYC 级别（含过期检查）
+        fn ensure_entity_operable(entity_id: u64) -> DispatchResult {
+            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+            Ok(())
+        }
+
+        fn is_past_expiry(record: &KycRecordOf<T>) -> bool {
+            record.expires_at
+                .map(|expires_at| <frame_system::Pallet<T>>::block_number() > expires_at)
+                .unwrap_or(false)
+        }
+
+        fn is_record_currently_valid(record: &KycRecordOf<T>) -> bool {
+            record.status == KycStatus::Approved && !Self::is_past_expiry(record)
+        }
+
+        fn cleanup_upgrade_request(entity_id: u64, account: &T::AccountId) {
+            if UpgradeRequests::<T>::contains_key(entity_id, account) {
+                UpgradeRequests::<T>::remove(entity_id, account);
+                PendingKycCount::<T>::mutate(entity_id, |c| *c = c.saturating_sub(1));
+            }
+        }
+
         pub fn get_kyc_level(entity_id: u64, account: &T::AccountId) -> KycLevel {
             KycRecords::<T>::get(entity_id, account)
-                .filter(|r| r.status == KycStatus::Approved)
-                .filter(|r| {
-                    if let Some(expires_at) = r.expires_at {
-                        let now = <frame_system::Pallet<T>>::block_number();
-                        now <= expires_at
-                    } else {
-                        true
-                    }
-                })
+                .filter(|r| Self::is_record_currently_valid(r))
                 .map(|r| r.level)
                 .unwrap_or(KycLevel::None)
         }
 
-        /// 检查用户在指定 Entity 下是否满足 KYC 要求
         pub fn meets_kyc_requirement(entity_id: u64, account: &T::AccountId, min_level: KycLevel) -> bool {
             if let Some(record) = KycRecords::<T>::get(entity_id, account) {
-                if record.status != KycStatus::Approved {
+                if !Self::is_record_currently_valid(&record) {
                     return false;
-                }
-                if let Some(expires_at) = record.expires_at {
-                    let now = <frame_system::Pallet<T>>::block_number();
-                    if now > expires_at {
-                        return false;
-                    }
                 }
                 record.level >= min_level
             } else {
@@ -1509,7 +1693,6 @@ pub mod pallet {
             }
         }
 
-        /// 检查用户在指定 Entity 下是否来自高风险国家
         pub fn is_high_risk_country(entity_id: u64, account: &T::AccountId) -> bool {
             if let Some(record) = KycRecords::<T>::get(entity_id, account) {
                 if let Some(country) = record.country_code {
@@ -1519,7 +1702,6 @@ pub mod pallet {
             false
         }
 
-        /// 检查用户是否可以参与指定 Entity 的活动
         pub fn can_participate_in_entity(account: &T::AccountId, entity_id: u64) -> bool {
             if let Some(requirement) = EntityRequirements::<T>::get(entity_id) {
                 Self::check_account_compliance(entity_id, account, &requirement)
@@ -1528,18 +1710,9 @@ pub mod pallet {
             }
         }
 
-        /// 获取用户在指定 Entity 下的风险评分
         pub fn get_risk_score(entity_id: u64, account: &T::AccountId) -> u8 {
             KycRecords::<T>::get(entity_id, account)
-                .filter(|r| r.status == KycStatus::Approved)
-                .filter(|r| {
-                    if let Some(expires_at) = r.expires_at {
-                        let now = <frame_system::Pallet<T>>::block_number();
-                        now <= expires_at
-                    } else {
-                        true
-                    }
-                })
+                .filter(|r| Self::is_record_currently_valid(r))
                 .map(|r| r.risk_score)
                 .unwrap_or(100)
         }
@@ -1645,16 +1818,8 @@ pub mod pallet {
         fn is_kyc_expired(entity_id: u64, account: &T::AccountId) -> bool {
             KycRecords::<T>::get(entity_id, account)
                 .map(|r| {
-                    if r.status == KycStatus::Expired {
-                        return true;
-                    }
-                    if r.status == KycStatus::Approved {
-                        if let Some(expires_at) = r.expires_at {
-                            let now = <frame_system::Pallet<T>>::block_number();
-                            return now > expires_at;
-                        }
-                    }
-                    false
+                    r.status == KycStatus::Expired ||
+                    (r.status == KycStatus::Approved && Self::is_past_expiry(&r))
                 })
                 .unwrap_or(false)
         }

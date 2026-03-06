@@ -169,15 +169,8 @@ impl<T: Config> Pallet<T> {
 
     /// 撤销关闭申请（Owner，PendingClose → Active/Suspended）
     pub(crate) fn do_cancel_close_request(who: T::AccountId, entity_id: u64) -> sp_runtime::DispatchResult {
-        // 检查资金状况决定恢复目标状态
-        // request_close_entity 允许 Active/Suspended → PendingClose
-        // 恢复时：资金充足 → Active，资金不足 → Suspended
-        let treasury_account = Self::entity_treasury_account(entity_id);
-        let balance = T::Currency::free_balance(&treasury_account);
-        let min_balance = T::MinOperatingBalance::get();
-        let restore_to_active = balance >= min_balance
-            && !GovernanceSuspended::<T>::get(entity_id)
-            && !OwnerPaused::<T>::get(entity_id);
+        // L3 审计修复: 使用共用 helper 消除重复逻辑
+        let restore_to_active = Self::should_restore_to_active(entity_id);
 
         Entities::<T>::try_mutate(entity_id, |maybe_entity| -> sp_runtime::DispatchResult {
             let entity = maybe_entity.as_mut().ok_or(Error::<T>::EntityNotFound)?;
@@ -185,24 +178,11 @@ impl<T: Config> Pallet<T> {
             ensure!(!T::GovernanceProvider::is_governance_locked(entity_id), Error::<T>::EntityLocked);
             ensure!(entity.status == EntityStatus::PendingClose, Error::<T>::InvalidEntityStatus);
 
-            if restore_to_active {
-                entity.status = EntityStatus::Active;
-            } else {
-                entity.status = EntityStatus::Suspended;
-            }
+            entity.status = if restore_to_active { EntityStatus::Active } else { EntityStatus::Suspended };
             Ok(())
         })?;
 
-        // 清理关闭申请记录
-        EntityCloseRequests::<T>::remove(entity_id);
-
-        // request_close_entity 仅在 was_active 时递减 active_entities
-        // 恢复时仅在恢复到 Active 时递增
-        if restore_to_active {
-            EntityStats::<T>::mutate(|stats| {
-                stats.active_entities = stats.active_entities.saturating_add(1);
-            });
-        }
+        Self::finalize_pending_close_restore(entity_id, restore_to_active);
 
         Self::deposit_event(Event::CloseRequestCancelled { entity_id });
         Ok(())

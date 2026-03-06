@@ -25,6 +25,9 @@ mod mock;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarks;
+
 // ============================================================================
 // KYC 检查接口
 // ============================================================================
@@ -50,16 +53,12 @@ pub mod pallet {
     use super::*;
     use frame_support::{
         pallet_prelude::*,
-        traits::{Currency, Get},
+        traits::Get,
         BoundedVec,
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{EntityProvider, ShopProvider, MemberRegistrationPolicy, MemberStatsPolicy, AdminPermission};
+    use pallet_entity_common::{EntityProvider, ShopProvider, MemberRegistrationPolicy, MemberStatsPolicy, AdminPermission, OnMemberRemoved};
     use sp_runtime::traits::{Saturating, Zero};
-
-    /// 货币余额类型别名
-    pub type BalanceOf<T> =
-        <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 
     // ============================================================================
     // 数据结构
@@ -255,6 +254,8 @@ pub mod pallet {
         pub last_active_at: BlockNumber,
         /// 激活状态：首次消费达标后为 true（与封禁独立）
         pub activated: bool,
+        /// 推荐来源标记：注册时是否为有效直推（主动注册/购买=true，复购赠与=false）
+        pub is_qualified_referral: bool,
         /// 封禁状态：None=正常，Some(block)=封禁时间
         pub banned_at: Option<BlockNumber>,
         /// A2: 封禁原因（管理员填写，可选）
@@ -275,9 +276,6 @@ pub mod pallet {
     pub trait Config: frame_system::Config {
         /// 运行时事件类型
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-
-        /// 货币类型
-        type Currency: Currency<Self::AccountId>;
 
         /// 实体查询接口
         type EntityProvider: EntityProvider<Self::AccountId>;
@@ -307,6 +305,9 @@ pub mod pallet {
 
         /// KYC 检查接口（用于 KYC_REQUIRED / KYC_UPGRADE_REQUIRED 策略）
         type KycChecker: KycChecker<Self::AccountId>;
+
+        /// P2-14: 会员移除回调（通知佣金插件清理 per-user 存储）
+        type OnMemberRemoved: pallet_entity_common::OnMemberRemoved<Self::AccountId>;
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
@@ -324,32 +325,34 @@ pub mod pallet {
                 return Weight::zero();
             }
 
-            // 每次最多清理 10 条，避免占用过多区块权重
-            let per_item_weight = Weight::from_parts(50_000_000, 5_000);
-            let max_items = 10u32;
-            let min_weight = per_item_weight.saturating_mul(2); // 至少能清理 2 条才值得执行
+            let per_scan_weight = Weight::from_parts(10_000_000, 1_000);
+            let per_remove_weight = Weight::from_parts(50_000_000, 5_000);
+            let max_scan = 50u32;
+            let max_clean = 10u32;
+            let min_weight = per_scan_weight.saturating_mul(2);
             if remaining_weight.any_lt(min_weight) {
                 return Weight::zero();
             }
 
             let now = <frame_system::Pallet<T>>::block_number();
+            let mut scanned = 0u32;
             let mut cleaned = 0u32;
             let mut weight_used = Weight::zero();
 
-            // 遍历所有 entity 的 PendingMembers（cursor-free, 利用 iter() 的惰性）
             let mut to_remove: alloc::vec::Vec<(u64, T::AccountId)> = alloc::vec::Vec::new();
             for (entity_id, account, (_referrer, applied_at)) in PendingMembers::<T>::iter() {
-                if cleaned >= max_items {
+                scanned += 1;
+                weight_used = weight_used.saturating_add(per_scan_weight);
+                if scanned >= max_scan || cleaned >= max_clean {
                     break;
                 }
-                if remaining_weight.any_lt(weight_used.saturating_add(per_item_weight)) {
+                if remaining_weight.any_lt(weight_used.saturating_add(per_remove_weight)) {
                     break;
                 }
                 if now > applied_at.saturating_add(expiry) {
                     to_remove.push((entity_id, account));
                     cleaned += 1;
                 }
-                weight_used = weight_used.saturating_add(Weight::from_parts(10_000_000, 1_000));
             }
 
             for (entity_id, account) in to_remove.iter() {
@@ -358,7 +361,7 @@ pub mod pallet {
                     entity_id: *entity_id,
                     account: account.clone(),
                 });
-                weight_used = weight_used.saturating_add(per_item_weight);
+                weight_used = weight_used.saturating_add(per_remove_weight);
             }
 
             weight_used
@@ -501,7 +504,7 @@ pub mod pallet {
         /// 会员注册
         MemberRegistered {
             entity_id: u64,
-            shop_id: u64,
+            shop_id: Option<u64>,
             account: T::AccountId,
             referrer: Option<T::AccountId>,
         },
@@ -539,12 +542,6 @@ pub mod pallet {
         /// 自定义等级删除
         CustomLevelRemoved {
             shop_id: u64,
-            level_id: u8,
-        },
-        /// 手动升级会员
-        MemberManuallyUpgraded {
-            shop_id: u64,
-            account: T::AccountId,
             level_id: u8,
         },
         /// 升级规则系统初始化
@@ -699,11 +696,6 @@ pub mod pallet {
             entity_id: u64,
             account: T::AccountId,
         },
-        /// A4: 待审批过期自动清理（on_idle）
-        PendingMembersCleanedUp {
-            entity_id: u64,
-            count: u32,
-        },
         /// G1: 治理路径更新注册策略
         GovernanceMemberPolicyUpdated {
             entity_id: u64,
@@ -742,8 +734,6 @@ pub mod pallet {
         Overflow,
         /// 等级系统未初始化
         LevelSystemNotInitialized,
-        /// 等级已存在
-        LevelAlreadyExists,
         /// 等级不存在
         LevelNotFound,
         /// 等级数量已满
@@ -794,8 +784,6 @@ pub mod pallet {
         RuleIdOverflow,
         /// M6: 待审批记录已过期
         PendingMemberAlreadyExpired,
-        /// M6: 不是待审批申请人
-        NotPendingApplicant,
         /// 会员已被封禁
         MemberAlreadyBanned,
         /// 会员未被封禁
@@ -898,7 +886,7 @@ pub mod pallet {
 
             Self::deposit_event(Event::MemberRegistered {
                 entity_id,
-                shop_id,
+                shop_id: Some(shop_id),
                 account: who,
                 referrer,
             });
@@ -1696,6 +1684,7 @@ pub mod pallet {
             max_clean: u32,
         ) -> DispatchResult {
             let _who = ensure_signed(origin)?;
+            let max_clean = max_clean.min(50);
 
             let expiry = T::PendingMemberExpiry::get();
             // 如果过期时间为 0，不执行清理（永不过期）
@@ -2172,12 +2161,12 @@ pub mod pallet {
                 EntityMembers::<T>::mutate(entity_id, referrer, |maybe_ref| {
                     if let Some(ref mut r) = maybe_ref {
                         r.direct_referrals = r.direct_referrals.saturating_sub(1);
-                        // M1 审计修复: 同步递减 qualified_referrals（与 decrement_team_size_by_entity 对称）
-                        r.qualified_referrals = r.qualified_referrals.saturating_sub(1);
+                        if member.is_qualified_referral {
+                            r.qualified_referrals = r.qualified_referrals.saturating_sub(1);
+                        }
                     }
                 });
-                // 递减推荐链上所有祖先的 team_size
-                Self::decrement_team_size_by_entity(entity_id, referrer);
+                Self::decrement_team_size_by_entity(entity_id, referrer, member.is_qualified_referral);
             }
 
             // 3. 清理关联存储
@@ -2186,6 +2175,9 @@ pub mod pallet {
             MemberLevelExpiry::<T>::remove(entity_id, account);
             MemberUpgradeHistory::<T>::remove(entity_id, account);
             MemberOrderCount::<T>::remove(entity_id, account);
+
+            // P2-14: 通知佣金插件清理 per-user 存储
+            T::OnMemberRemoved::on_member_removed(entity_id, account);
 
             Ok(())
         }
@@ -2199,6 +2191,8 @@ pub mod pallet {
             referrer: Option<T::AccountId>,
             qualified: bool,
         ) -> DispatchResult {
+            ensure!(!EntityMembers::<T>::contains_key(entity_id, account), Error::<T>::AlreadyMember);
+
             let now = <frame_system::Pallet<T>>::block_number();
 
             let member = EntityMember {
@@ -2213,6 +2207,7 @@ pub mod pallet {
                 joined_at: now,
                 last_active_at: now,
                 activated: false,
+                is_qualified_referral: qualified,
                 banned_at: None,
                 ban_reason: None,
             };
@@ -2342,7 +2337,9 @@ pub mod pallet {
         }
 
         /// 递减推荐链上所有祖先的 team_size（remove_member 时使用）
-        fn decrement_team_size_by_entity(entity_id: u64, account: &T::AccountId) {
+        ///
+        /// `qualified`: 被移除会员是否为有效直推（仅 qualified=true 时递减 qualified_indirect_referrals）
+        fn decrement_team_size_by_entity(entity_id: u64, account: &T::AccountId, qualified: bool) {
             use alloc::collections::BTreeSet;
 
             let mut current = Some(account.clone());
@@ -2364,10 +2361,9 @@ pub mod pallet {
                         m.team_size = m.team_size.saturating_sub(1);
                         if depth >= 1 {
                             m.indirect_referrals = m.indirect_referrals.saturating_sub(1);
-                            // S4 修复: 同步递减 qualified_indirect_referrals（与 update_team_size_by_entity 对称）
-                            // 注意: remove_member 仅在无下线时允许，因此此处 qualified 状态不影响
-                            // 但为保证统计一致性，仍进行递减
-                            m.qualified_indirect_referrals = m.qualified_indirect_referrals.saturating_sub(1);
+                            if qualified {
+                                m.qualified_indirect_referrals = m.qualified_indirect_referrals.saturating_sub(1);
+                            }
                         }
                     }
                 });
@@ -2719,9 +2715,15 @@ pub mod pallet {
 
                 // 计算过期时间
                 let expires_at = if stackable {
-                    let current_expiry = MemberLevelExpiry::<T>::get(entity_id, account)
-                        .unwrap_or(now);
-                    duration.map(|d| current_expiry.saturating_add(d))
+                    match MemberLevelExpiry::<T>::get(entity_id, account) {
+                        Some(exp) => duration.map(|d| exp.saturating_add(d)),
+                        None => {
+                            if target_level_id == old_level_id {
+                                return Ok(());
+                            }
+                            duration.map(|d| now.saturating_add(d))
+                        }
+                    }
                 } else {
                     duration.map(|d| now.saturating_add(d))
                 };
@@ -2858,6 +2860,7 @@ pub mod pallet {
 
         /// 启用/禁用自定义等级（治理调用）
         pub fn governance_set_custom_levels_enabled(entity_id: u64, enabled: bool) -> DispatchResult {
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             EntityLevelSystems::<T>::try_mutate(entity_id, |maybe_system| -> DispatchResult {
                 let system = maybe_system.as_mut().ok_or(Error::<T>::LevelSystemNotInitialized)?;
                 system.use_custom = enabled;
@@ -2868,6 +2871,7 @@ pub mod pallet {
         /// 设置升级模式（治理调用）
         /// mode: 0=AutoUpgrade, 1=ManualUpgrade
         pub fn governance_set_upgrade_mode(entity_id: u64, mode: u8) -> DispatchResult {
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             EntityLevelSystems::<T>::try_mutate(entity_id, |maybe_system| -> DispatchResult {
                 let system = maybe_system.as_mut().ok_or(Error::<T>::LevelSystemNotInitialized)?;
                 system.upgrade_mode = match mode {
@@ -2888,6 +2892,7 @@ pub mod pallet {
             discount_rate: u16,
             commission_bonus: u16,
         ) -> DispatchResult {
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             let name: BoundedVec<u8, ConstU32<32>> = name.to_vec().try_into()
                 .map_err(|_| Error::<T>::NameTooLong)?;
             ensure!(!name.is_empty(), Error::<T>::EmptyLevelName);
@@ -2928,6 +2933,7 @@ pub mod pallet {
             discount_rate: Option<u16>,
             commission_bonus: Option<u16>,
         ) -> DispatchResult {
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             EntityLevelSystems::<T>::try_mutate(entity_id, |maybe_system| -> DispatchResult {
                 let system = maybe_system.as_mut().ok_or(Error::<T>::LevelSystemNotInitialized)?;
                 ensure!((level_id as usize) < system.levels.len(), Error::<T>::LevelNotFound);
@@ -2973,6 +2979,7 @@ pub mod pallet {
 
         /// 删除自定义等级（治理调用）
         pub fn governance_remove_custom_level(entity_id: u64, level_id: u8) -> DispatchResult {
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             EntityLevelSystems::<T>::try_mutate(entity_id, |maybe_system| -> DispatchResult {
                 let system = maybe_system.as_mut().ok_or(Error::<T>::LevelSystemNotInitialized)?;
                 ensure!(
@@ -2991,6 +2998,7 @@ pub mod pallet {
 
         /// G1: 设置注册策略（治理调用）
         pub fn governance_set_registration_policy(entity_id: u64, policy_bits: u8) -> DispatchResult {
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             let policy = MemberRegistrationPolicy(policy_bits);
             ensure!(policy.is_valid(), Error::<T>::InvalidPolicyBits);
             EntityMemberPolicy::<T>::insert(entity_id, policy);
@@ -3000,6 +3008,7 @@ pub mod pallet {
 
         /// G1: 设置统计策略（治理调用）
         pub fn governance_set_stats_policy(entity_id: u64, policy_bits: u8) -> DispatchResult {
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             let policy = MemberStatsPolicy(policy_bits);
             ensure!(policy.is_valid(), Error::<T>::InvalidPolicyBits);
             EntityMemberStatsPolicy::<T>::insert(entity_id, policy);
@@ -3179,7 +3188,7 @@ pub mod pallet {
 
             Self::deposit_event(Event::MemberRegistered {
                 entity_id,
-                shop_id,
+                shop_id: Some(shop_id),
                 account: account.clone(),
                 referrer: valid_referrer,
             });
@@ -3244,7 +3253,7 @@ pub mod pallet {
 
             Self::deposit_event(Event::MemberRegistered {
                 entity_id,
-                shop_id: 0,
+                shop_id: None,
                 account: account.clone(),
                 referrer: valid_referrer,
             });
@@ -3550,7 +3559,7 @@ impl<T: pallet::Config> MemberProvider<T::AccountId> for pallet::Pallet<T> {
         Some(MemberLevelInfo {
             level_id: info.id,
             name: info.name.into_inner(),
-            threshold: info.threshold,
+            threshold: info.threshold as u128,
             discount_rate: info.discount_rate,
             commission_bonus: info.commission_bonus,
         })
@@ -3567,6 +3576,16 @@ impl<T: pallet::Config> MemberProvider<T::AccountId> for pallet::Pallet<T> {
     fn get_member_spent_usdt(entity_id: u64, account: &T::AccountId) -> u64 {
         pallet::EntityMembers::<T>::get(entity_id, account)
             .map(|m| m.total_spent)
+            .unwrap_or(0)
+    }
+
+    fn completed_order_count(entity_id: u64, account: &T::AccountId) -> u32 {
+        pallet::MemberOrderCount::<T>::get(entity_id, account)
+    }
+
+    fn referral_registered_at(entity_id: u64, account: &T::AccountId) -> u64 {
+        pallet::EntityMembers::<T>::get(entity_id, account)
+            .map(|m| sp_runtime::SaturatedConversion::saturated_into(m.joined_at))
             .unwrap_or(0)
     }
 
@@ -3601,6 +3620,10 @@ impl<T: pallet::Config> MemberProvider<T::AccountId> for pallet::Pallet<T> {
 
     fn set_stats_policy(entity_id: u64, policy_bits: u8) -> sp_runtime::DispatchResult {
         pallet::Pallet::<T>::governance_set_stats_policy(entity_id, policy_bits)
+    }
+
+    fn get_direct_referral_accounts(entity_id: u64, account: &T::AccountId) -> alloc::vec::Vec<T::AccountId> {
+        pallet::DirectReferrals::<T>::get(entity_id, account).into_inner()
     }
 }
 

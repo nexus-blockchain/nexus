@@ -72,12 +72,15 @@ impl<T: Config> Pallet<T> {
         })
     }
 
-    /// 查询已验证的活跃实体列表（供 Runtime API 使用，带分页）
+    /// 查询已验证的活跃实体列表（供 Runtime API 使用，带分页，按 entity_id 升序）
     pub fn api_get_verified_entities(offset: u32, limit: u32) -> Vec<u64> {
         let max_limit = limit.min(100) as usize;
-        Entities::<T>::iter()
+        let mut ids: Vec<u64> = Entities::<T>::iter()
             .filter(|(_, e)| e.verified && e.status == EntityStatus::Active)
             .map(|(_, e)| e.id)
+            .collect();
+        ids.sort_unstable();
+        ids.into_iter()
             .skip(offset as usize)
             .take(max_limit)
             .collect()
@@ -353,6 +356,28 @@ impl<T: Config> Pallet<T> {
         Ok(())
     }
 
+    // ==================== PendingClose 恢复共用辅助函数 ====================
+
+    /// PendingClose 恢复目标状态判定
+    /// 资金充足 + 无治理暂停 + 无 Owner 暂停 → Active，否则 → Suspended
+    pub(crate) fn should_restore_to_active(entity_id: u64) -> bool {
+        let treasury_account = Self::entity_treasury_account(entity_id);
+        let balance = T::Currency::free_balance(&treasury_account);
+        balance >= T::MinOperatingBalance::get()
+            && !GovernanceSuspended::<T>::get(entity_id)
+            && !OwnerPaused::<T>::get(entity_id)
+    }
+
+    /// 完成 PendingClose 恢复：清理关闭申请 + 更新活跃统计
+    pub(crate) fn finalize_pending_close_restore(entity_id: u64, restored_to_active: bool) {
+        EntityCloseRequests::<T>::remove(entity_id);
+        if restored_to_active {
+            EntityStats::<T>::mutate(|stats| {
+                stats.active_entities = stats.active_entities.saturating_add(1);
+            });
+        }
+    }
+
     // ==================== IPFS Pin/Unpin 辅助函数 ====================
 
     pub(crate) fn pin_cid(
@@ -361,7 +386,7 @@ impl<T: Config> Pallet<T> {
         cid: &BoundedVec<u8, T::MaxCidLength>,
     ) {
         if cid.is_empty() { return; }
-        if let Err(e) = T::StoragePin::pin(caller.clone(), b"entity", entity_id, Some(entity_id), cid.to_vec(), PinTier::Standard) {
+        if let Err(e) = T::StoragePin::pin(caller.clone(), b"entity", entity_id, Some(entity_id), cid.to_vec(), cid.len() as u64, PinTier::Standard) {
             log::warn!(
                 target: "entity-registry",
                 "IPFS Pin failed for entity {}: {:?}", entity_id, e
@@ -457,12 +482,15 @@ impl<T: Config> Pallet<T> {
         ReferrerEntities::<T>::get(account).into_inner()
     }
 
-    /// 按状态查询实体列表（分页）
+    /// 按状态查询实体列表（分页，按 entity_id 升序确保确定性分页）
     pub fn api_get_entities_by_status(status: EntityStatus, offset: u32, limit: u32) -> Vec<u64> {
         let max_limit = limit.min(100) as usize;
-        Entities::<T>::iter()
+        let mut ids: Vec<u64> = Entities::<T>::iter()
             .filter(|(_, e)| e.status == status)
             .map(|(_, e)| e.id)
+            .collect();
+        ids.sort_unstable();
+        ids.into_iter()
             .skip(offset as usize)
             .take(max_limit)
             .collect()

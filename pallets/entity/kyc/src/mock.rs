@@ -26,6 +26,7 @@ thread_local! {
     static ENTITY_OWNERS: RefCell<HashMap<u64, u64>> = RefCell::new(HashMap::new());
     static ENTITY_ADMINS: RefCell<HashMap<(u64, u64), u32>> = RefCell::new(HashMap::new());
     static ENTITY_LOCKED: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
+    static ENTITY_INACTIVE: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
 }
 
 pub struct MockEntityProvider;
@@ -42,13 +43,20 @@ impl MockEntityProvider {
     pub fn set_entity_locked(entity_id: u64) {
         ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id));
     }
+
+    pub fn set_entity_inactive(entity_id: u64) {
+        ENTITY_INACTIVE.with(|l| l.borrow_mut().insert(entity_id));
+    }
 }
 
 impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
     fn entity_exists(entity_id: u64) -> bool {
         ENTITY_OWNERS.with(|m| m.borrow().contains_key(&entity_id))
     }
-    fn is_entity_active(_entity_id: u64) -> bool { true }
+    fn is_entity_active(entity_id: u64) -> bool {
+        Self::entity_exists(entity_id)
+            && ENTITY_INACTIVE.with(|l| !l.borrow().contains(&entity_id))
+    }
     fn entity_status(_entity_id: u64) -> Option<pallet_entity_common::EntityStatus> { None }
     fn entity_owner(entity_id: u64) -> Option<u64> {
         ENTITY_OWNERS.with(|m| m.borrow().get(&entity_id).cloned())
@@ -111,6 +119,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     ENTITY_OWNERS.with(|m| m.borrow_mut().clear());
     ENTITY_ADMINS.with(|m| m.borrow_mut().clear());
     ENTITY_LOCKED.with(|l| l.borrow_mut().clear());
+    ENTITY_INACTIVE.with(|l| l.borrow_mut().clear());
 
     let t = frame_system::GenesisConfig::<Test>::default()
         .build_storage()

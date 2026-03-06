@@ -2,7 +2,7 @@ use crate as pallet_escrow;
 use frame_support::{
     derive_impl,
     parameter_types,
-    traits::ConstU32,
+    traits::{ConstU32, ConstU64},
     PalletId,
 };
 use sp_runtime::{
@@ -49,10 +49,6 @@ impl pallet_escrow::pallet::ExpiryPolicy<u64, u64> for TestExpiryPolicy {
             Ok(pallet_escrow::pallet::ExpiryAction::RefundAll(99))
         }
     }
-
-    fn now() -> u64 {
-        System::block_number()
-    }
 }
 
 impl pallet_escrow::Config for Test {
@@ -66,12 +62,11 @@ impl pallet_escrow::Config for Test {
     type ExpiryPolicy = TestExpiryPolicy;
     /// 🆕 F5: 争议原因最大长度
     type MaxReasonLen = ConstU32<256>;
-    /// 🆕 F9: Token 托管处理器（测试用空实现）
-    type TokenHandler = ();
     /// 🆕 F10: 观察者（测试用空实现）
     type Observer = ();
-    /// 🆕 F8: 每次清理最大条目数
     type MaxCleanupPerCall = ConstU32<50>;
+    /// 争议超时 100800 块 (≈7天 @ 6s/block)，测试中用小值
+    type MaxDisputeDuration = ConstU64<100800>;
     type WeightInfo = ();
 }
 

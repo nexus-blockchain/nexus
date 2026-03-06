@@ -2481,3 +2481,777 @@ fn m2_batch_delete_unpins_tags_and_sku_cids() {
         assert!(unpinned.contains(&b"QmSku".to_vec()));
     });
 }
+
+// ==================== v1.0 审计修复测试 ====================
+
+#[test]
+fn create_product_pins_tags_and_sku_cids() {
+    new_test_ext().execute_with(|| {
+        clear_pin_tracking();
+
+        assert_ok!(EntityProduct::create_product(
+            RuntimeOrigin::signed(1), 1,
+            b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
+            1_000_000_000_000u128, 0, 100, ProductCategory::Physical, 0,
+            b"QmTags".to_vec(),
+            b"QmSku".to_vec(),
+            1, 0, ProductVisibility::Public,
+        ));
+
+        let pinned = get_pinned_cids();
+        assert_eq!(pinned.len(), 5, "should pin name+images+detail+tags+sku");
+        assert!(pinned.iter().any(|(_, c)| c == &b"QmTags".to_vec()));
+        assert!(pinned.iter().any(|(_, c)| c == &b"QmSku".to_vec()));
+    });
+}
+
+#[test]
+fn create_product_empty_tags_sku_no_extra_pin() {
+    new_test_ext().execute_with(|| {
+        clear_pin_tracking();
+
+        create_default_product();
+
+        let pinned = get_pinned_cids();
+        assert_eq!(pinned.len(), 3, "empty tags/sku should not trigger extra pins");
+    });
+}
+
+#[test]
+fn update_product_tags_cid_pins_and_unpins() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityProduct::create_product(
+            RuntimeOrigin::signed(1), 1,
+            b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
+            1_000_000_000_000u128, 0, 100, ProductCategory::Physical, 0,
+            b"QmOldTags".to_vec(),
+            vec![],
+            1, 0, ProductVisibility::Public,
+        ));
+        clear_pin_tracking();
+
+        assert_ok!(EntityProduct::update_product(
+            RuntimeOrigin::signed(1), 0,
+            None, None, None, None, None, None, None, None,
+            Some(b"QmNewTags".to_vec()),
+            None, None, None, None,
+        ));
+
+        let unpinned = get_unpinned_cids();
+        let pinned = get_pinned_cids();
+        assert!(unpinned.contains(&b"QmOldTags".to_vec()), "old tags should be unpinned");
+        assert!(pinned.iter().any(|(_, c)| c == &b"QmNewTags".to_vec()), "new tags should be pinned");
+    });
+}
+
+#[test]
+fn update_product_sku_cid_pins_and_unpins() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityProduct::create_product(
+            RuntimeOrigin::signed(1), 1,
+            b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
+            1_000_000_000_000u128, 0, 100, ProductCategory::Physical, 0,
+            vec![],
+            b"QmOldSku".to_vec(),
+            1, 0, ProductVisibility::Public,
+        ));
+        clear_pin_tracking();
+
+        assert_ok!(EntityProduct::update_product(
+            RuntimeOrigin::signed(1), 0,
+            None, None, None, None, None, None, None, None,
+            None,
+            Some(b"QmNewSku".to_vec()),
+            None, None, None,
+        ));
+
+        let unpinned = get_unpinned_cids();
+        let pinned = get_pinned_cids();
+        assert!(unpinned.contains(&b"QmOldSku".to_vec()), "old sku should be unpinned");
+        assert!(pinned.iter().any(|(_, c)| c == &b"QmNewSku".to_vec()), "new sku should be pinned");
+    });
+}
+
+#[test]
+fn update_product_clear_tags_unpins_only() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityProduct::create_product(
+            RuntimeOrigin::signed(1), 1,
+            b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
+            1_000_000_000_000u128, 0, 100, ProductCategory::Physical, 0,
+            b"QmTags".to_vec(),
+            vec![],
+            1, 0, ProductVisibility::Public,
+        ));
+        clear_pin_tracking();
+
+        assert_ok!(EntityProduct::update_product(
+            RuntimeOrigin::signed(1), 0,
+            None, None, None, None, None, None, None, None,
+            Some(vec![]),
+            None, None, None, None,
+        ));
+
+        let unpinned = get_unpinned_cids();
+        let pinned = get_pinned_cids();
+        assert!(unpinned.contains(&b"QmTags".to_vec()), "old tags should be unpinned");
+        assert!(pinned.is_empty(), "empty new tags should not be pinned");
+        assert!(Products::<Test>::get(0).unwrap().tags_cid.is_empty());
+    });
+}
+
+// ==================== force_delete_product 测试 ====================
+
+#[test]
+fn force_delete_product_works_any_status() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+        assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
+        assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::OnSale);
+        assert_eq!(ProductStats::<Test>::get().on_sale_products, 1);
+
+        assert_ok!(EntityProduct::force_delete_product(
+            RuntimeOrigin::root(), 0, Some(b"illegal content".to_vec()),
+        ));
+
+        assert!(Products::<Test>::get(0).is_none());
+        assert!(ProductDeposits::<Test>::get(0).is_none());
+        assert_eq!(ProductStats::<Test>::get().total_products, 0);
+        assert_eq!(ProductStats::<Test>::get().on_sale_products, 0);
+    });
+}
+
+#[test]
+fn force_delete_product_soldout() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product();
+        assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
+        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::SoldOut);
+
+        assert_ok!(EntityProduct::force_delete_product(
+            RuntimeOrigin::root(), 0, None,
+        ));
+
+        assert!(Products::<Test>::get(0).is_none());
+        assert_eq!(ProductStats::<Test>::get().total_products, 0);
+        assert_eq!(ProductStats::<Test>::get().on_sale_products, 0);
+    });
+}
+
+#[test]
+fn force_delete_product_draft() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+
+        assert_ok!(EntityProduct::force_delete_product(
+            RuntimeOrigin::root(), 0, Some(b"spam".to_vec()),
+        ));
+
+        assert!(Products::<Test>::get(0).is_none());
+        assert_eq!(ProductStats::<Test>::get().total_products, 0);
+    });
+}
+
+#[test]
+fn force_delete_product_fails_not_root() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+
+        assert_noop!(
+            EntityProduct::force_delete_product(
+                RuntimeOrigin::signed(1), 0, None,
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn force_delete_product_fails_not_found() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityProduct::force_delete_product(
+                RuntimeOrigin::root(), 999, None,
+            ),
+            Error::<Test>::ProductNotFound
+        );
+    });
+}
+
+#[test]
+fn force_delete_product_reason_too_long() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+
+        let long_reason = vec![0u8; 257];
+        assert_noop!(
+            EntityProduct::force_delete_product(
+                RuntimeOrigin::root(), 0, Some(long_reason),
+            ),
+            Error::<Test>::ReasonTooLong
+        );
+        assert!(Products::<Test>::get(0).is_some());
+    });
+}
+
+#[test]
+fn force_delete_product_refunds_deposit() {
+    new_test_ext().execute_with(|| {
+        let shop_account = 110u64;
+        let balance_before = pallet_balances::Pallet::<Test>::free_balance(shop_account);
+        create_default_product();
+        let balance_after_create = pallet_balances::Pallet::<Test>::free_balance(shop_account);
+        assert!(balance_after_create < balance_before);
+
+        assert_ok!(EntityProduct::force_delete_product(RuntimeOrigin::root(), 0, None));
+
+        let balance_after_delete = pallet_balances::Pallet::<Test>::free_balance(shop_account);
+        assert_eq!(balance_after_delete, balance_before);
+    });
+}
+
+#[test]
+fn force_delete_product_unpins_all_cids() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityProduct::create_product(
+            RuntimeOrigin::signed(1), 1,
+            b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
+            1_000_000_000_000u128, 0, 100, ProductCategory::Physical, 0,
+            b"QmTags".to_vec(), b"QmSku".to_vec(),
+            1, 0, ProductVisibility::Public,
+        ));
+        clear_pin_tracking();
+
+        assert_ok!(EntityProduct::force_delete_product(RuntimeOrigin::root(), 0, None));
+
+        let unpinned = get_unpinned_cids();
+        assert_eq!(unpinned.len(), 5);
+        assert!(unpinned.contains(&b"QmName".to_vec()));
+        assert!(unpinned.contains(&b"QmImages".to_vec()));
+        assert!(unpinned.contains(&b"QmDetail".to_vec()));
+        assert!(unpinned.contains(&b"QmTags".to_vec()));
+        assert!(unpinned.contains(&b"QmSku".to_vec()));
+    });
+}
+
+// ==================== CategoryNotSupported 测试 ====================
+
+#[test]
+fn create_product_rejects_subscription_category() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityProduct::create_product(
+                RuntimeOrigin::signed(1), 1,
+                b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
+                1_000u128, 0, 100, ProductCategory::Subscription, 0, vec![], vec![],
+                1, 0, ProductVisibility::Public,
+            ),
+            Error::<Test>::CategoryNotSupported
+        );
+    });
+}
+
+#[test]
+fn create_product_rejects_bundle_category() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityProduct::create_product(
+                RuntimeOrigin::signed(1), 1,
+                b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
+                1_000u128, 0, 100, ProductCategory::Bundle, 0, vec![], vec![],
+                1, 0, ProductVisibility::Public,
+            ),
+            Error::<Test>::CategoryNotSupported
+        );
+    });
+}
+
+#[test]
+fn update_product_rejects_subscription_category() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+
+        assert_noop!(
+            EntityProduct::update_product(
+                RuntimeOrigin::signed(1), 0,
+                None, None, None, None, None, None,
+                Some(ProductCategory::Subscription),
+                None, None, None, None, None, None,
+            ),
+            Error::<Test>::CategoryNotSupported
+        );
+    });
+}
+
+// ==================== OnSale category change 测试 ====================
+
+#[test]
+fn update_product_rejects_category_change_on_sale() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+        assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
+
+        assert_noop!(
+            EntityProduct::update_product(
+                RuntimeOrigin::signed(1), 0,
+                None, None, None, None, None, None,
+                Some(ProductCategory::Digital),
+                None, None, None, None, None, None,
+            ),
+            Error::<Test>::InvalidProductStatus
+        );
+        assert_eq!(Products::<Test>::get(0).unwrap().category, ProductCategory::Physical);
+    });
+}
+
+#[test]
+fn update_product_allows_category_change_on_draft() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+
+        assert_ok!(EntityProduct::update_product(
+            RuntimeOrigin::signed(1), 0,
+            None, None, None, None, None, None,
+            Some(ProductCategory::Digital),
+            None, None, None, None, None, None,
+        ));
+        assert_eq!(Products::<Test>::get(0).unwrap().category, ProductCategory::Digital);
+    });
+}
+
+#[test]
+fn update_product_allows_category_change_on_offshelf() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+        assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
+        assert_ok!(EntityProduct::unpublish_product(RuntimeOrigin::signed(1), 0));
+
+        assert_ok!(EntityProduct::update_product(
+            RuntimeOrigin::signed(1), 0,
+            None, None, None, None, None, None,
+            Some(ProductCategory::Service),
+            None, None, None, None, None, None,
+        ));
+        assert_eq!(Products::<Test>::get(0).unwrap().category, ProductCategory::Service);
+    });
+}
+
+// ==================== NoChangesProvided 测试 ====================
+
+#[test]
+fn update_product_rejects_no_changes() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+
+        assert_noop!(
+            EntityProduct::update_product(
+                RuntimeOrigin::signed(1), 0,
+                None, None, None, None, None, None, None, None, None, None,
+                None, None, None,
+            ),
+            Error::<Test>::NoChangesProvided
+        );
+    });
+}
+
+// ==================== get_product_info 测试 ====================
+
+#[test]
+fn product_provider_get_product_info_works() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        assert_ok!(EntityProduct::create_product(
+            RuntimeOrigin::signed(1), 1,
+            b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
+            1_000u128, 500_000, 100, ProductCategory::Physical, 0, vec![], vec![],
+            2, 50,
+            ProductVisibility::LevelGated(3),
+        ));
+        assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
+
+        let info = <EntityProduct as ProductProvider<u64, u128>>::get_product_info(0);
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert_eq!(info.shop_id, 1);
+        assert_eq!(info.price, 1_000u128);
+        assert_eq!(info.usdt_price, 500_000);
+        assert_eq!(info.stock, 100);
+        assert_eq!(info.status, ProductStatus::OnSale);
+        assert_eq!(info.category, ProductCategory::Physical);
+        assert_eq!(info.visibility, ProductVisibility::LevelGated(3));
+        assert_eq!(info.min_order_quantity, 2);
+        assert_eq!(info.max_order_quantity, 50);
+    });
+}
+
+#[test]
+fn product_provider_get_product_info_returns_none_for_nonexistent() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+        assert!(<EntityProduct as ProductProvider<u64, u128>>::get_product_info(999).is_none());
+    });
+}
+
+// ==================== v1.1 审计修复测试 ====================
+
+#[test]
+fn force_delete_product_offshelf() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+        assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
+        assert_ok!(EntityProduct::unpublish_product(RuntimeOrigin::signed(1), 0));
+        assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::OffShelf);
+
+        assert_ok!(EntityProduct::force_delete_product(
+            RuntimeOrigin::root(), 0, Some(b"policy violation".to_vec()),
+        ));
+
+        assert!(Products::<Test>::get(0).is_none());
+        assert!(ProductDeposits::<Test>::get(0).is_none());
+        assert_eq!(ProductStats::<Test>::get().total_products, 0);
+        assert_eq!(ProductStats::<Test>::get().on_sale_products, 0);
+    });
+}
+
+#[test]
+fn delist_product_offshelf_is_noop() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product();
+        assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
+        assert_ok!(EntityProduct::unpublish_product(RuntimeOrigin::signed(1), 0));
+        assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::OffShelf);
+
+        System::reset_events();
+        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::delist_product(0));
+
+        assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::OffShelf);
+        let status_events: Vec<_> = System::events().into_iter().filter(|e| {
+            matches!(e.event, RuntimeEvent::EntityProduct(Event::ProductStatusChanged { .. }))
+        }).collect();
+        assert!(status_events.is_empty(), "OffShelf delist should not emit status event");
+    });
+}
+
+#[test]
+fn m1_delist_product_onsale_emits_status_event() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        create_default_product();
+        assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
+
+        System::reset_events();
+        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::delist_product(0));
+
+        let found = System::events().iter().any(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::EntityProduct(Event::ProductStatusChanged {
+                    product_id: 0,
+                    status: ProductStatus::OffShelf,
+                })
+            )
+        });
+        assert!(found, "delist OnSale product should emit ProductStatusChanged");
+    });
+}
+
+#[test]
+fn l2_update_product_same_cid_no_pin_unpin() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+        clear_pin_tracking();
+
+        // 更新 name_cid 为相同值
+        assert_ok!(EntityProduct::update_product(
+            RuntimeOrigin::signed(1), 0,
+            Some(b"QmName".to_vec()),
+            None, None, None, None, None, None, None, None, None,
+            None, None, None,
+        ));
+
+        assert!(get_pinned_cids().is_empty(), "same-value CID should not trigger pin");
+        assert!(get_unpinned_cids().is_empty(), "same-value CID should not trigger unpin");
+    });
+}
+
+#[test]
+fn h2_update_product_cid_failure_no_orphan_unpin() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+        clear_pin_tracking();
+
+        let long_cid = vec![0u8; 65]; // exceeds MaxCidLength=64
+        // name_cid 有效但 images_cid 过长 → 整体回滚
+        assert_noop!(
+            EntityProduct::update_product(
+                RuntimeOrigin::signed(1), 0,
+                Some(b"QmNewName".to_vec()),
+                Some(long_cid),
+                None, None, None, None, None, None, None, None,
+                None, None, None,
+            ),
+            Error::<Test>::CidTooLong
+        );
+
+        // H2-fix: 回滚时不应有任何 pin/unpin 操作（收集在闭包内，闭包失败不执行）
+        assert!(get_pinned_cids().is_empty(), "rollback should not cause orphan pins");
+        assert!(get_unpinned_cids().is_empty(), "rollback should not cause orphan unpins");
+
+        // 确认商品数据未被修改
+        let product = Products::<Test>::get(0).unwrap();
+        assert_eq!(product.name_cid.to_vec(), b"QmName".to_vec());
+    });
+}
+
+// ==================== v1.2 审计修复测试 ====================
+
+#[test]
+fn v12_update_product_fails_shop_not_active() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+        set_shop_active(1, false);
+
+        assert_noop!(
+            EntityProduct::update_product(
+                RuntimeOrigin::signed(1), 0,
+                None, None, None,
+                Some(2_000u128), // 仅改价格
+                None, None, None, None, None, None,
+                None, None, None,
+            ),
+            Error::<Test>::ShopNotActive
+        );
+    });
+}
+
+#[test]
+fn v12_create_product_fails_min_order_exceeds_stock() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityProduct::create_product(
+                RuntimeOrigin::signed(1), 1,
+                b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
+                1_000u128, 0,
+                5,  // stock = 5
+                ProductCategory::Physical, 0, vec![], vec![],
+                10, // min_order_quantity = 10 > stock
+                0,
+                ProductVisibility::Public,
+            ),
+            Error::<Test>::MinOrderExceedsStock
+        );
+    });
+}
+
+#[test]
+fn v12_create_product_ok_min_order_equals_stock() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityProduct::create_product(
+            RuntimeOrigin::signed(1), 1,
+            b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
+            1_000u128, 0,
+            10,  // stock = 10
+            ProductCategory::Physical, 0, vec![], vec![],
+            10,  // min = 10 == stock
+            0,
+            ProductVisibility::Public,
+        ));
+    });
+}
+
+#[test]
+fn v12_create_product_ok_infinite_stock_with_min() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityProduct::create_product(
+            RuntimeOrigin::signed(1), 1,
+            b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
+            1_000u128, 0,
+            0,   // infinite stock
+            ProductCategory::Physical, 0, vec![], vec![],
+            100, // any min is fine with infinite stock
+            0,
+            ProductVisibility::Public,
+        ));
+    });
+}
+
+#[test]
+fn v12_update_product_fails_min_order_exceeds_stock() {
+    new_test_ext().execute_with(|| {
+        create_default_product(); // stock=100, min=1
+
+        assert_noop!(
+            EntityProduct::update_product(
+                RuntimeOrigin::signed(1), 0,
+                None, None, None, None, None,
+                Some(5), // lower stock to 5
+                None, None, None, None,
+                Some(10), // raise min to 10 > new stock
+                None, None,
+            ),
+            Error::<Test>::MinOrderExceedsStock
+        );
+    });
+}
+
+#[test]
+fn v12_update_product_ok_no_stock_min_change() {
+    new_test_ext().execute_with(|| {
+        create_default_product();
+
+        // Updating only price should not trigger stock/min check
+        assert_ok!(EntityProduct::update_product(
+            RuntimeOrigin::signed(1), 0,
+            None, None, None,
+            Some(2_000u128),
+            None, None, None, None, None, None,
+            None, None, None,
+        ));
+    });
+}
+
+#[test]
+fn v12_force_remove_all_shop_products_works() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        // Create 3 products: 1 Draft, 1 OnSale, 1 OffShelf
+        create_default_product(); // 0: Draft
+        create_default_product(); // 1: Draft
+        create_default_product(); // 2: Draft
+        assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 1));  // 1: OnSale
+        assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 2));  // 2: OnSale
+        assert_ok!(EntityProduct::unpublish_product(RuntimeOrigin::signed(1), 2)); // 2: OffShelf
+
+        assert_eq!(ProductStats::<Test>::get().total_products, 3);
+        assert_eq!(ProductStats::<Test>::get().on_sale_products, 1);
+        assert_eq!(ShopProducts::<Test>::get(1).len(), 3);
+
+        let pallet_balance_before = Balances::free_balance(EntityProduct::pallet_account());
+
+        // Force remove all
+        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::force_remove_all_shop_products(1));
+
+        // All products removed
+        assert!(Products::<Test>::get(0).is_none());
+        assert!(Products::<Test>::get(1).is_none());
+        assert!(Products::<Test>::get(2).is_none());
+
+        // ShopProducts index cleared
+        assert!(ShopProducts::<Test>::get(1).is_empty());
+
+        // Deposits returned
+        assert!(ProductDeposits::<Test>::get(0).is_none());
+        assert!(ProductDeposits::<Test>::get(1).is_none());
+        assert!(ProductDeposits::<Test>::get(2).is_none());
+
+        // Stats updated
+        assert_eq!(ProductStats::<Test>::get().total_products, 0);
+        assert_eq!(ProductStats::<Test>::get().on_sale_products, 0);
+
+        // Pallet balance decreased (deposits refunded)
+        let pallet_balance_after = Balances::free_balance(EntityProduct::pallet_account());
+        assert!(pallet_balance_after < pallet_balance_before);
+
+        // Event emitted
+        let found = System::events().iter().any(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::EntityProduct(Event::ShopProductsRemoved {
+                    shop_id: 1,
+                    count: 3,
+                    ..
+                })
+            )
+        });
+        assert!(found, "ShopProductsRemoved event should be emitted");
+    });
+}
+
+#[test]
+fn v12_force_remove_empty_shop_is_noop() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        // No products in shop 1
+        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::force_remove_all_shop_products(1));
+
+        // No event emitted
+        let found = System::events().iter().any(|record| {
+            matches!(record.event, RuntimeEvent::EntityProduct(Event::ShopProductsRemoved { .. }))
+        });
+        assert!(!found, "empty shop removal should not emit event");
+    });
+}
+
+#[test]
+fn v12_force_delist_all_shop_products_works() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        // Create 3 products with different statuses
+        create_default_product(); // 0: Draft
+        create_default_product(); // 1: Draft → OnSale
+        create_default_product(); // 2: Draft → OnSale → SoldOut via deduct
+
+        assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 1));
+        assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 2));
+        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(2, 100));
+
+        assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::Draft);
+        assert_eq!(Products::<Test>::get(1).unwrap().status, ProductStatus::OnSale);
+        assert_eq!(Products::<Test>::get(2).unwrap().status, ProductStatus::SoldOut);
+        assert_eq!(ProductStats::<Test>::get().on_sale_products, 1);
+
+        // Force delist all
+        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::force_delist_all_shop_products(1));
+
+        // OnSale → OffShelf, SoldOut → OffShelf, Draft unchanged
+        assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::Draft);
+        assert_eq!(Products::<Test>::get(1).unwrap().status, ProductStatus::OffShelf);
+        assert_eq!(Products::<Test>::get(2).unwrap().status, ProductStatus::OffShelf);
+
+        // Stats updated (on_sale went from 1 to 0)
+        assert_eq!(ProductStats::<Test>::get().on_sale_products, 0);
+
+        // Products still exist (not removed, just delisted)
+        assert_eq!(ProductStats::<Test>::get().total_products, 3);
+
+        // Event emitted with count=2 (OnSale + SoldOut)
+        let found = System::events().iter().any(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::EntityProduct(Event::ShopProductsDelisted {
+                    shop_id: 1,
+                    count: 2,
+                })
+            )
+        });
+        assert!(found, "ShopProductsDelisted event should be emitted");
+    });
+}
+
+#[test]
+fn v12_force_delist_all_no_active_products_is_noop() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::ProductProvider;
+
+        // Only a Draft product
+        create_default_product();
+
+        System::reset_events();
+        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::force_delist_all_shop_products(1));
+
+        let found = System::events().iter().any(|record| {
+            matches!(record.event, RuntimeEvent::EntityProduct(Event::ShopProductsDelisted { .. }))
+        });
+        assert!(!found, "no active products should not emit event");
+    });
+}

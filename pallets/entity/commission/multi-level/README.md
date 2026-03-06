@@ -29,8 +29,8 @@ pallet-commission-core (调度中心)
 pub struct MultiLevelTier {
     pub rate: u16,              // 佣金比率（基点制，10000 = 100%），0 = 占位层
     pub required_directs: u32,  // 有效直推人数（最大 10000），0 = 无要求
-    pub required_team_size: u32,// 最低团队规模，0 = 无要求
-    pub required_spent: u128,   // 最低累计消费 USDT（精度 10^6），0 = 无要求
+    pub required_team_size: u32,// 最低团队规模（最大 1_000_000），0 = 无要求
+    pub required_spent: u128,   // 最低累计消费 USDT（精度 10^6，最大 10^18），0 = 无要求
 }
 ```
 
@@ -57,7 +57,7 @@ pub struct MultiLevelConfig<MaxLevels: Get<u32>> {
 |------|------|------|
 | `total_distributed` | `u128` | 累计分发佣金 |
 | `total_orders` | `u32` | 订单总数 |
-| `total_beneficiaries` | `u32` | 受益人次数 |
+| `total_distribution_entries` | `u32` | 累计分发条目数（非去重受益人数） |
 
 ### ActivationProgress — 激活进度
 
@@ -73,13 +73,25 @@ pub struct MultiLevelConfig<MaxLevels: Get<u32>> {
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `who` | `AccountId` | 操作者 |
+| `who` | `AccountId` | 操作者（Root 操作使用 `entity_account`） |
 | `block_number` | `u32` | 区块号 |
 | `change_type` | `ConfigChangeType` | 变更类型 |
 
-### ConfigChangeType — 变更类型枚举（12 个变体）
+### ConfigChangeType — 变更类型枚举（15 个变体）
 
-`SetConfig` · `ClearConfig` · `UpdateParams` · `AddTier { index }` · `RemoveTier { index }` · `ForceSet` · `ForceClear` · `Pause` · `Resume` · `PendingScheduled` · `PendingApplied` · `PendingCancelled`
+| 变体 | 来源 |
+|------|------|
+| `SetConfig` | Owner/Admin 设置 |
+| `ClearConfig` | Owner/Admin 清除 |
+| `UpdateParams` | 部分更新 |
+| `AddTier { index }` | 插入层级 |
+| `RemoveTier { index }` | 移除层级 |
+| `Pause` / `Resume` | Owner/Admin 暂停/恢复 |
+| `ForceSet` / `ForceClear` | Root 强制设置/清除 |
+| `ForcePause` / `ForceResume` | Root 强制暂停/恢复 |
+| `PendingScheduled` / `PendingApplied` / `PendingCancelled` | 延迟配置生命周期 |
+| `PendingAutoApplied` | `on_initialize` 自动应用 |
+| `GovernanceSet` / `GovernanceClear` | PlanWriter 治理路径 |
 
 ### PendingConfigEntry — 待生效配置
 
@@ -95,13 +107,13 @@ pub struct MultiLevelConfig<MaxLevels: Get<u32>> {
 
 `check_tier_activation` 对推荐人执行三维 **AND** 检查，值为 0 的条件自动跳过：
 
-| 条件 | 数据来源 | 精度 |
+| 条件 | 数据来源 | 上界 |
 |------|----------|------|
-| `required_directs` | `MemberProvider::get_member_stats().0` | 有效直推人数 |
-| `required_team_size` | `MemberProvider::get_member_stats().1` | 团队人数 |
-| `required_spent` | `MemberProvider::get_member_spent_usdt()` | USDT × 10^6 |
+| `required_directs` | `MemberProvider::get_member_stats().0` | 10,000 |
+| `required_team_size` | `MemberProvider::get_member_stats().1` | 1,000,000 |
+| `required_spent` | `MemberProvider::get_member_spent_usdt()` | 10^18 |
 
-> **懒加载 (L1-R3):** 仅在需要时读取 `get_member_stats` / `get_member_spent_usdt`，避免不必要的 DB 读取。
+> **懒加载:** 仅在需要时读取 `get_member_stats` / `get_member_spent_usdt`，避免不必要的 DB 读取。
 
 **不满足条件时：** 跳过该层推荐人，遍历继续向上。被跳过的佣金留在 `remaining` 返还 core。
 
@@ -115,19 +127,36 @@ pub struct MultiLevelConfig<MaxLevels: Get<u32>> {
 2. **无推荐人** → 终止
 3. **循环检测**（`BTreeSet<AccountId>` 含 buyer）→ 命中则终止
 4. **非会员** (`is_member` = false) → 跳过，继续下一层
-5. **被封禁或未激活** (`is_banned` / `!is_activated`) → 跳过，继续下一层
+5. **被封禁 / 未激活 / 已冻结** (`is_banned` / `!is_activated` / `!is_member_active`) → 跳过
 6. **激活条件不满足** (`check_tier_activation`) → 跳过，继续下一层
 7. **计算佣金** `commission = order_amount × rate / 10000`，取 `min(commission, remaining)`
 8. **总额上限检查** — 累计超过 `max_total_rate × order_amount / 10000` 时截断最后一笔并终止
-
-> **M1-R6 优化:** `is_member`/`is_banned`（廉价 bool）在 `check_tier_activation`（可能 2 次 DB read）之前执行。
 
 ### 终止 vs 跳过
 
 | 情况 | 行为 |
 |------|------|
-| rate=0 / 非会员 / 被封禁 / 未激活 / 激活条件不满足 | **跳过**，继续 |
+| rate=0 / 非会员 / 被封禁 / 未激活 / 已冻结 / 激活条件不满足 / 佣金精度截断为 0 | **跳过**，继续 |
 | 无推荐人 / 循环检测 / remaining=0 / 超总额上限 | **终止** |
+
+---
+
+## 待生效配置自动应用
+
+`on_initialize` 每区块自动检查 `PendingConfigQueue`，对已到达 `effective_at` 的条目执行应用：
+
+| 参数 | 值 | 说明 |
+|------|------|------|
+| `MAX_AUTO_APPLY` | 5 | 每区块最多检查/应用 5 个条目 |
+| `PendingConfigQueue` 容量 | 100 | `BoundedVec<u64, ConstU32<100>>`，满时返回 `PendingQueueFull` |
+
+**处理逻辑：**
+- 条目就绪 + Entity 未锁定 → 应用配置 + 记录 `PendingAutoApplied` 审计日志
+- 条目就绪 + Entity 已锁定 → 跳过，保留在队列
+- 条目未就绪（`current_block < effective_at`）→ 跳过
+- 孤立条目（`PendingConfigs` 已被手动删除）→ 自动清理
+
+**Weight 计算：** 按 `checked`（读取开销）和 `applied`（写入开销）分别计费，而非固定值。
 
 ---
 
@@ -174,11 +203,13 @@ max_total_rate = 1500 (15%)
 | `EntityProvider` | `EntityProvider<AccountId>` | 实体查询（Owner/Admin/锁定/激活状态） |
 | `MaxMultiLevels` | `Get<u32>`，1 ≤ x ≤ 100 | 最大层级数（默认 15） |
 | `ConfigChangeDelay` | `Get<u32>`，≥ 1 | 配置延迟生效区块数 |
-| `WeightInfo` | `WeightInfo` | 权重接口（10 个函数） |
+| `WeightInfo` | `WeightInfo` | 权重接口（13 个函数） |
 
 `integrity_test` 校验 `MaxMultiLevels ∈ [1, 100]`、`ConfigChangeDelay ≥ 1`。
 
-### Storage（7 项）
+`STORAGE_VERSION = 2`
+
+### Storage（8 项）
 
 | 名称 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -187,10 +218,11 @@ max_total_rate = 1500 (15%)
 | `MemberMultiLevelStats` | `StorageDoubleMap<u64, AccountId, MultiLevelStatsData>` | `Default` | 个人佣金统计 |
 | `EntityMultiLevelStats` | `StorageMap<u64, EntityStatsData>` | `Default` | Entity 级佣金统计 |
 | `ConfigChangeLogCount` | `StorageMap<u64, u32>` | `0` | 审计日志计数 |
-| `ConfigChangeLogs` | `StorageDoubleMap<u64, u32, ConfigChangeEntry<T>>` | `None` | 审计日志条目 |
+| `ConfigChangeLogs` | `StorageDoubleMap<u64, u32, ConfigChangeEntry<T>>` | `None` | 审计日志条目（环形缓冲，MAX=1000） |
 | `PendingConfigs` | `StorageMap<u64, PendingConfigEntry<T>>` | `None` | 待生效配置 |
+| `PendingConfigQueue` | `StorageValue<BoundedVec<u64, ConstU32<100>>>` | `[]` | 待生效配置队列（供 `on_initialize` 遍历） |
 
-### Extrinsics（12 个，call_index 0–11）
+### Extrinsics（15 个，call_index 0–14）
 
 | idx | 名称 | Origin | EntityLocked | 说明 |
 |-----|------|--------|:---:|------|
@@ -202,19 +234,25 @@ max_total_rate = 1500 (15%)
 | 5 | `add_tier` | Owner/Admin | ✅ | 在指定位置插入新层级 |
 | 6 | `remove_tier` | Owner/Admin | ✅ | 移除层级（至少保留 1 层） |
 | 7 | `pause_multi_level` | Owner/Admin | — | 暂停多级分销 |
-| 8 | `resume_multi_level` | Owner/Admin | — | 恢复多级分销 |
-| 9 | `schedule_config_change` | Owner/Admin | ✅ | 调度延迟生效配置 |
-| 10 | `apply_pending_config` | **任何人** | ✅ | 应用已到期的待生效配置（M1-R9） |
+| 8 | `resume_multi_level` | Owner/Admin | — | 恢复多级分销（未暂停时返回 `MultiLevelNotPaused`） |
+| 9 | `schedule_config_change` | Owner/Admin | ✅ | 调度延迟生效配置（加入 `PendingConfigQueue`） |
+| 10 | `apply_pending_config` | **任何人** | ✅ | 手动应用已到期的待生效配置 |
 | 11 | `cancel_pending_config` | Owner/Admin | — | 取消待生效配置 |
+| 12 | `force_pause_multi_level` | Root | — | 强制暂停（紧急响应） |
+| 13 | `force_resume_multi_level` | Root | — | 强制恢复 |
+| 14 | `force_cleanup_entity` | Root | — | 清理 Entity 全部存储（参数 `member_count_hint` 仅影响 weight） |
 
 **权限模型：**
 - **Owner/Admin** — Entity Owner 或持有 `COMMISSION_MANAGE` 权限的 Admin
 - **Root** — `force_*` 系列无视权限和锁定
-- **任何人** — `apply_pending_config` 仅需到达生效区块
+- **任何人** — `apply_pending_config` 仅需到达生效区块 + Entity 未锁定
 
-**校验规则：** levels 非空，每层 `rate ≤ 10000`，`0 < max_total_rate ≤ 10000`。
+**校验规则（`validate_config` + `validate_tier`）：**
+- `levels` 非空，每层 `rate ≤ 10000`
+- `required_directs ≤ 10000`，`required_team_size ≤ 1_000_000`，`required_spent ≤ 10^18`
+- `0 < max_total_rate ≤ 10000`
 
-### Events（13 个）
+### Events（15 个）
 
 | 事件 | 触发点 | 说明 |
 |------|--------|------|
@@ -224,15 +262,17 @@ max_total_rate = 1500 (15%)
 | `MaxTotalRateUpdated` | update_multi_level_params | max_total_rate 已更新 |
 | `TierInserted` | add_tier | 层级已插入 |
 | `TierRemoved` | remove_tier | 层级已移除 |
-| `MultiLevelPaused` | pause_multi_level | 已暂停 |
-| `MultiLevelResumed` | resume_multi_level | 已恢复 |
-| `RatesSumExceedsMax` | set / force_set / apply_pending | rates 总和超过 max_total_rate 警告（rates_sum: u32） |
-| `ConfigDetailedChange` | set / force_set / apply_pending | 新旧配置对比（levels 数/max_rate） |
+| `MultiLevelPaused` | pause / force_pause | 已暂停 |
+| `MultiLevelResumed` | resume / force_resume | 已恢复 |
+| `RatesSumExceedsMax` | set / force_set / apply / PlanWriter | rates 总和超过 max_total_rate 警告（`rates_sum: u32`） |
+| `ConfigDetailedChange` | set / force_set / apply / PlanWriter | 新旧配置对比（levels 数/max_rate） |
 | `PendingConfigScheduled` | schedule_config_change | 待生效配置已调度 |
-| `PendingConfigApplied` | apply_pending_config | 待生效配置已应用 |
+| `PendingConfigApplied` | apply / on_initialize | 待生效配置已应用 |
 | `PendingConfigCancelled` | cancel_pending_config | 待生效配置已取消 |
+| `MultiLevelCommissionDistributed` | update_stats | 佣金分发汇总（`total_amount`, `beneficiary_count`） |
+| `EntityStorageCleaned` | force_cleanup_entity | Entity 存储已清理 |
 
-### Errors（13 个）
+### Errors（16 个）
 
 | 错误 | 触发条件 |
 |------|----------|
@@ -242,13 +282,18 @@ max_total_rate = 1500 (15%)
 | `NotEntityOwnerOrAdmin` | 非 Owner 且无 COMMISSION_MANAGE 权限 |
 | `ConfigNotFound` | 配置不存在（clear/update/add/remove） |
 | `EntityLocked` | 实体已被全局锁定 |
-| `NothingToUpdate` | update 全 None / resume 时未暂停 |
+| `NothingToUpdate` | update 全 None |
 | `TierIndexOutOfBounds` | tier_index 越界 |
 | `TierLimitExceeded` | 添加后超 MaxMultiLevels |
 | `MultiLevelIsPaused` | 已暂停，不可重复暂停 |
+| `MultiLevelNotPaused` | 未暂停，不可恢复 |
 | `PendingConfigExists` | 已有待生效配置 |
 | `NoPendingConfig` | 无待生效配置 |
 | `PendingConfigNotReady` | 当前区块 < effective_at |
+| `InvalidDirects` | required_directs > 10000 |
+| `InvalidTeamSize` | required_team_size > 1_000_000 |
+| `InvalidSpent` | required_spent > 10^18 |
+| `PendingQueueFull` | PendingConfigQueue 已满（容量 100） |
 
 ---
 
@@ -266,19 +311,30 @@ max_total_rate = 1500 (15%)
 |------|------|
 | `set_multi_level(entity_id, rates, max_total_rate)` | 设置仅含 rate 的配置（激活条件全为 0） |
 | `set_multi_level_full(entity_id, tiers, max_total_rate)` | 设置含完整激活条件的配置 |
-| `clear_multi_level_config(entity_id)` | 清除配置 |
+| `clear_multi_level_config(entity_id)` | 清除配置（幂等） |
 
-所有方法均校验参数并 emit 事件。
+所有方法均：
+- 校验 `EntityLocked`
+- 复用 `validate_config` / `validate_tier` 校验参数
+- 触发 `RatesSumExceedsMax` 警告检查
+- 发出 `ConfigDetailedChange` 事件（含新旧 levels 数和 max_rate 对比）
+- 记录 `GovernanceSet` / `GovernanceClear` 审计日志（使用 `entity_account` 标识）
 
-### 查询辅助函数
+### 公开辅助函数
 
 | 函数 | 返回值 | 说明 |
 |------|--------|------|
+| `validate_tier(tier)` | `DispatchResult` | 校验单层 tier 参数上界 |
+| `validate_config(levels, max_total_rate)` | `DispatchResult` | 校验完整配置参数 |
+| `check_rates_sum_warning(entity_id, config)` | — | rates 总和超限时发出警告事件 |
+| `record_change_log(entity_id, who, change_type)` | — | 写入审计日志（环形缓冲） |
+| `update_stats(entity_id, outputs)` | — | 更新个人 + Entity 级统计，发出 `MultiLevelCommissionDistributed` |
 | `get_activation_status(entity_id, account)` | `Vec<bool>` | 各层级激活状态 |
 | `get_activation_progress(entity_id, account)` | `Vec<ActivationProgress>` | 激活进度（含当前值与要求值） |
+| `get_recent_change_logs(entity_id, limit)` | `Vec<ConfigChangeEntry>` | 最近审计日志（逆序，最多 limit 条） |
 | `preview_commission(entity_id, buyer, amount)` | `Vec<(AccountId, u128, u8)>` | 预览佣金分配（不扣款） |
 | `is_paused(entity_id)` | `bool` | 是否暂停 |
-| `update_stats(entity_id, outputs)` | — | 更新个人 + Entity 级统计 |
+| `cleanup_entity_storage(entity_id)` | — | 清理 Entity 全部 7 项存储 + 队列 |
 
 ---
 
@@ -292,14 +348,17 @@ max_total_rate = 1500 (15%)
 | 环形推荐链 | `BTreeSet<AccountId>` visited → break |
 | level_idx > 255 | `.min(255) as u8` |
 | 单层佣金 > remaining | `min(commission, remaining)` |
-| 单层佣金精度截断为 0 | 跳过该层继续（L1-R9），remaining=0 时终止 |
+| 单层佣金精度截断为 0 | 跳过该层继续，remaining=0 时终止 |
 | 累计超 max_total_rate | 截断最后一笔 |
 | NEX / Token 隔离 | 泛型参数 `B`，独立 trait 调用 |
 | 暂停 / Entity 未激活 | `calculate` / `preview_commission` 返空 |
+| 审计日志无限增长 | 环形缓冲（MAX=1000），slot = count % 1000 |
+| PendingConfigQueue 满 | `try_push` 失败 → `PendingQueueFull` |
+| on_initialize 开销可控 | 每区块最多检查 5 个条目 |
 
 ---
 
-## 权重（10 个函数）
+## 权重（13 个函数）
 
 | 函数 | ref_time | proof_size | 备注 |
 |------|----------|------------|------|
@@ -313,12 +372,29 @@ max_total_rate = 1500 (15%)
 | `schedule_config_change(n)` | 40M + 2M×n | 4K | n = levels 数量 |
 | `apply_pending_config` | 45M | 5K | |
 | `cancel_pending_config` | 30M | 3K | |
+| `force_pause_multi_level` | 25M | 2K | |
+| `force_resume_multi_level` | 25M | 2K | |
+| `force_cleanup_entity(m)` | 50M + 1M×m | 5K + 500×m | m = member_count_hint |
 
 ---
 
-## 测试覆盖（119 个）
+## Benchmarking
 
-### Extrinsic 测试（46 个）
+`benchmarking.rs` 使用 `frame_benchmarking::v2` 宏，覆盖 5 个 Root extrinsics：
+
+| Benchmark | 参数 | 说明 |
+|-----------|------|------|
+| `force_set_multi_level_config` | `l: Linear<1, 15>` | 层级数缩放 |
+| `force_clear_multi_level_config` | — | 含前置 seed |
+| `force_pause_multi_level` | — | |
+| `force_resume_multi_level` | — | 含前置暂停 |
+| `force_cleanup_entity` | `m: Linear<0, 1000>` | member_count_hint 缩放 |
+
+---
+
+## 测试覆盖（167 个）
+
+### Extrinsic 测试（56 个）
 
 | 分类 | 数量 | 覆盖内容 |
 |------|:---:|------|
@@ -330,10 +406,11 @@ max_total_rate = 1500 (15%)
 | remove_tier | 3 | 移除中间层、最后一层拒绝、索引越界 |
 | pause / resume | 5 | 暂停/恢复、重复暂停拒绝、未暂停恢复拒绝、Admin 操作 |
 | schedule / apply / cancel | 6 | 调度/应用/取消、重复调度/未到期/无待生效拒绝 |
+| force_pause / force_resume | 6 | Root 操作、非 Root 拒绝、已暂停/未暂停错误 |
+| force_cleanup_entity | 3 | 全部存储清理、非 Root 拒绝、member_count_hint |
 | EntityLocked 回归 | 5 | set/clear/add/remove/update 锁定拒绝 |
-| ConfigNotFound 回归 | 2 | add_tier/remove_tier 无配置拒绝 |
 | is_paused 查询 | 1 | 暂停/恢复/查询状态 |
-| R9 回归 | 2 | apply_pending 锁定拒绝、未锁定正常 |
+| apply_pending 锁定 | 2 | 锁定拒绝、未锁定正常 |
 
 ### 佣金计算测试（26 个）
 
@@ -346,125 +423,90 @@ max_total_rate = 1500 (15%)
 | is_member | 2 | 非会员跳过、全部非会员返空 |
 | Entity 激活 | 2 | 未激活跳过、激活正常 |
 | 暂停跳过 | 1 | calculate 暂停返空 |
-| R5 边界 | 3 | rate=0 占位层、链短于配置、TokenCommissionPlugin |
+| 边界场景 | 3 | rate=0 占位层、链短于配置、TokenCommissionPlugin |
 | apply_pending 事件 | 1 | 应用触发 ConfigDetailedChange + RatesSumExceedsMax |
-| R8 回归 | 3 | 冻结推荐人跳过、正常推荐人不受影响、preview 未激活返空 |
-| R9 回归 | 2 | 小额佣金截断跳过（非终止）、remaining=0 正确终止 |
+| 冻结/未激活 | 3 | 冻结推荐人跳过、正常推荐人不受影响、preview 未激活返空 |
+| 精度边界 | 2 | 小额佣金截断跳过（非终止）、remaining=0 正确终止 |
 
-### PlanWriter 测试（10 个）
+### PlanWriter 测试（18 个）
 
 | 分类 | 数量 | 覆盖内容 |
 |------|:---:|------|
 | set_multi_level | 5 | 创建、rate 校验（multi/level）、层数上限、清除 |
 | set_multi_level_full | 3 | 含激活条件、空 tiers 拒绝、无效 rate 拒绝 |
-| R9 回归 | 2 | clear 无配置不发事件、clear 有配置发事件 |
+| validate_config 复用 | 2 | set 和 full 路径的校验一致性 |
+| 审计日志 | 4 | GovernanceSet（set/full）、GovernanceClear、无配置不写日志 |
+| ConfigDetailedChange | 3 | 新建/覆写/清除事件 |
+| EntityLocked | 3 | set/full/clear 锁定拒绝（含未锁定正常） |
+| 边界 | 2 | 无效 team_size/spent 拒绝（via validate_config） |
+| 幂等 | 2 | clear 无配置不发事件、clear 有配置发事件 |
 
-### 功能测试（24 个）
+### 功能测试（32 个）
 
 | 分类 | 数量 | 覆盖内容 |
 |------|:---:|------|
-| 审计日志 F2 | 5 | set/clear/pause-resume/add-remove/update 审计 |
-| rates 警告 F4 | 2 | 超限事件、未超限无事件 |
-| 激活进度 F5 | 2 | 无配置返空、含数据返回进度 |
-| 佣金统计 F6/F13 | 3 | 统计更新、累加、空输出无操作 |
-| 详细变更 F7 | 2 | 首次设置旧值零、覆写显示旧值 |
-| 预览 F8 | 3 | 正常预览、无配置返空、暂停返空 |
-| 激活状态 F11 | 3 | 无配置/全通过/部分通过 |
-| R2 回归 | 6 | PlanWriter 事件、空 levels/零 rate 拒绝 |
-| R7 回归 | 2 | force_set DetailedChange、cancel_pending 审计 |
-| R9 回归 | 2 | rates_sum u32 不饱和、审计日志环形缓冲 |
+| 审计日志 | 7 | set/clear/pause-resume/add-remove/update/force_set/force_clear 审计 |
+| rates 警告 | 5 | 超限事件、未超限无事件、update/add/remove 警告 |
+| 激活进度 | 2 | 无配置返空、含数据返回进度 |
+| 佣金统计 | 3 | 统计更新、累加、空输出无操作 |
+| 详细变更 | 2 | 首次设置旧值零、覆写显示旧值 |
+| 预览 | 3 | 正常预览、无配置返空、暂停返空 |
+| 激活状态 | 3 | 无配置/全通过/部分通过 |
+| 最近日志 | 3 | 空返回、逆序、limit 限制 |
+| tier 上界校验 | 5 | team_size/spent 越界拒绝（set/add/update/PlanWriter）、合法值通过 |
+| 环形缓冲 | 1 | 日志回绕覆盖正确性 |
+| 统计事件 | 1 | MultiLevelCommissionDistributed 事件 |
+
+### PendingConfigQueue 测试（12 个）
+
+| 分类 | 数量 | 覆盖内容 |
+|------|:---:|------|
+| 队列管理 | 3 | schedule 入队、cancel 出队、manual apply 出队 |
+| on_initialize | 4 | 自动应用、跳过锁定 Entity、多 Entity 同时生效、孤立条目清理 |
+| MAX_AUTO_APPLY | 1 | 8 个条目分两批处理（5+3） |
+| PendingQueueFull | 1 | 101 个条目时报错 |
+| force_cleanup | 3 | 清除队列条目、幂等性、member_count_hint |
 
 ---
 
 ## 审计修复历史
 
-### Round 1
+### Round 1–9（历史）
+
+共 9 轮审计，修复 30+ 个问题，涵盖安全漏洞（USDT 误用、缺权限检查）、设计缺陷（PlanWriter 事件/校验缺失）、边界安全（精度截断、环形缓冲）、权重准确性等。所有发现均已修复。
+
+### Round 10
 
 | ID | 级别 | 描述 |
 |----|------|------|
-| H1 | High | `required_spent` 误用 NEX Balance — 改用 `get_member_spent_usdt()` |
-| H2 | High | PlanWriter 缺 rate 校验 |
-| H3 | High | PlanWriter 超层数静默清空 — 改返回 `TooManyLevels` |
-| M1 | Medium | 硬编码 Weight → WeightInfo trait |
-| M2 | Medium | 激活条件零测试 → +5 回归测试 |
-| L1 | Low | try-runtime feature 缺 sp-runtime |
+| R10-#1 | Medium | `force_set/clear` 缺审计日志 — 补充 `ForceSet`/`ForceClear` + `entity_account` |
+| R10-#2 | Medium | `update/add/remove` 缺 rates_sum 警告 — 补充 `check_rates_sum_warning` |
+| R10-#3 | Medium | tier 参数缺上界校验 — 新增 `validate_tier`（team_size ≤ 1M, spent ≤ 10^18） |
+| R10-#4 | Medium | 缺存储清理机制 — 新增 `force_cleanup_entity` |
+| R10-#6 | Medium | 缺 Root 紧急暂停 — 新增 `force_pause/resume_multi_level` |
+| R10-#7 | Low | `update_stats` 不发事件 — 新增 `MultiLevelCommissionDistributed` |
+| R10-#8 | Low | `total_beneficiaries` 命名误导 — 改为 `total_distribution_entries` |
+| R10-#9 | Low | 缺审计日志查询 — 新增 `get_recent_change_logs` |
+| R10-#10 | Low | PlanWriter 缺 `EntityLocked` 检查 — 补充 |
+| R10-#14 | Medium | 待生效配置无自动应用 — 新增 `on_initialize` + `PendingConfigQueue` |
 
-### Round 2
-
-| ID | 级别 | 描述 |
-|----|------|------|
-| M1-R2 | Medium | PlanWriter `set_multi_level` 不 emit 事件 |
-| M2-R2 | Medium | PlanWriter `clear_multi_level_config` 无事件 |
-| L1-R2 | Low | `set_multi_level_config` 接受空 levels |
-| L2-R2 | Low | `max_total_rate = 0` 静默禁用佣金 |
-
-### Round 3
+### Round 10 复查
 
 | ID | 级别 | 描述 |
 |----|------|------|
-| L1-R3 | Low | `check_tier_activation` 不必要的 DB read — 懒加载优化 |
-| L2-R3 | Low | Extrinsic 文档注释未反映 R2 校验 |
+| A-1 | Bug | `on_initialize` weight 只计 applied 不计 checked — 修复为分别计费 |
+| A-2 | Low | `ConfigChangeType::ForceCleanup` 死代码 — 已移除 |
+| A-3 | Low | `resume_multi_level` 错误类型不一致 — 统一为 `MultiLevelNotPaused` |
 
-### Round 4
-
-| ID | 级别 | 描述 |
-|----|------|------|
-| H1-R4 | High | `process_multi_level` 缺 `is_activated` 检查 |
-| M1-R4 | Medium | Cargo.toml 缺 feature 传播 |
-
-### Round 5
+### Round 11
 
 | ID | 级别 | 描述 |
 |----|------|------|
-| L1-R5 | Low | 死 dev-dependency `pallet-balances` |
-| L2-R5 | Low | `rate=0` 占位层无测试覆盖 |
-| L3-R5 | Low | 链短于配置层数无测试覆盖 |
-| L4-R5 | Low | `TokenCommissionPlugin` 无测试覆盖 |
-
-### Round 6
-
-| ID | 级别 | 描述 |
-|----|------|------|
-| M1-R6 | Medium | `process_multi_level` 检查顺序次优 — 重排 is_member/is_banned 在前 |
-| L1-R6 | Low | 死错误码 `EntityNotActive` 已移除 |
-| L2-R6 | Low | 缺 update/add/remove 专用权重 |
-| L3-R6 | Low | README 过时 |
-| L4-R6 | Low | 缺 EntityLocked 回归测试 |
-| L5-R6 | Low | 缺 ConfigNotFound 回归测试 |
-
-### Round 7
-
-| ID | 级别 | 描述 |
-|----|------|------|
-| M1-R7 | Medium | `force_set` 不发出 `ConfigDetailedChange` 事件 |
-| M2-R7 | Medium | `get_activation_progress` 冗余 DB read — 预加载优化 |
-| M3-R7 | Medium | `cancel_pending_config` 不记录审计日志 — 新增 `PendingCancelled` |
-| L1–L4-R7 | Low | 4 个 extrinsic 使用错误的权重函数 |
-| L5-R7 | Low | README 严重过时 |
-| L6-R7 | Low | Cargo.toml 缺 pallet-commission-common feature 传播 |
-
-所有发现均已修复 ✅
-
-### Round 8
-
-| ID | 级别 | 描述 |
-|----|------|------|
-| M1-R8 | Medium | `process_multi_level` 缺 `is_member_active` 检查 — 冻结/暂停推荐人仍获佣。修复: 添加检查 |
-| M2-R8 | Medium | `preview_commission` 缺 `is_entity_active` 检查 — 与 `calculate()` 行为不一致。修复: 添加检查 |
-| L1-R8 | Low | `sp-std` 依赖未使用（代码使用 `extern crate alloc`）。修复: 已移除 |
-| L2-R8 | Low | `ConfigChangeType::ForceSet`/`ForceClear` 死代码 — `force_*` extrinsic 无 AccountId 无法记录审计日志。记录未修复 |
-
-所有发现均已修复（L2-R8 记录未修复） ✅
-
-### Round 9
-
-| ID | 级别 | 描述 |
-|----|------|------|
-| M1-R9 | Medium | `apply_pending_config` 缺 `EntityLocked` 检查 — 锁定实体可被绕过。修复: 添加检查 |
-| L1-R9 | Low | `process_multi_level` 小额订单 `actual.is_zero() → break` — 精度截断应跳过而非终止。修复: 区分 remaining=0（break）与 commission=0（continue） |
-| L2-R9 | Low | `check_rates_sum_warning` 中 `rates_sum` 为 u16 饱和 — 事件报告值不准确。修复: 改为 u32 |
-| L3-R9 | Low | `PlanWriter::clear_multi_level_config` 对不存在的配置发送 `Cleared` 事件。修复: 仅在配置存在时发事件 |
-| L4-R9 | Low | `ConfigChangeLogs` 无限增长无清理。修复: 环形缓冲（MAX=1000），slot = count % 1000 |
+| B-1 | Medium | `force_cleanup_entity` weight 固定 — 参数化 `member_count_hint` |
+| B-2 | Medium | PlanWriter 重复校验逻辑 — 复用 `validate_config`/`validate_tier` |
+| B-3 | Low | PlanWriter 无审计日志 — 新增 `GovernanceSet`/`GovernanceClear` |
+| B-4 | Low | PlanWriter 缺 `ConfigDetailedChange` 事件 — 补充 |
+| B-5 | Low | `update_stats` 为 `pub(crate)` 不可被外部 crate 调用 — 提升为 `pub` |
 
 所有发现均已修复 ✅
 
@@ -477,6 +519,7 @@ pallet-commission-multi-level
 ├── pallet-commission-common  (CommissionPlugin, MemberProvider, MultiLevelPlanWriter)
 ├── pallet-entity-common      (EntityProvider, AdminPermission)
 ├── frame-support / frame-system / sp-runtime
+├── frame-benchmarking        (optional, runtime-benchmarks)
 └── codec / scale-info
 ```
 

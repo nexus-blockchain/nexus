@@ -92,7 +92,9 @@ pub enum CommissionType {
 pub enum CommissionStatus {
     #[default]
     Pending,
+    /// [已废弃] 保留以维持 SCALE 编码索引稳定，生产代码从未使用此状态
     Distributed,
+    /// 订单已完结，佣金已结算（由 settle_order_commission 设置）
     Withdrawn,
     Cancelled,
 }
@@ -291,6 +293,26 @@ pub trait CommissionProvider<AccountId, Balance> {
 
     /// 设置创建人收益比例（基点，从 Pool B 预算中优先扣除）
     fn set_creator_reward_rate(entity_id: u64, rate: u16) -> Result<(), DispatchError>;
+
+    /// 订单完结时结算佣金记录（Pending → Withdrawn）
+    ///
+    /// 由订单模块在订单完结（确认收货/超时完成）时调用，
+    /// 标记佣金记录为已结算，使其可以被 archive_order_records 归档。
+    fn settle_order_commission(order_id: u64) -> Result<(), DispatchError>;
+
+    // ==================== R10: 治理提案链上执行接口 ====================
+
+    /// 设置最大返佣比率（治理提案执行）
+    fn governance_set_commission_rate(entity_id: u64, rate: u16) -> Result<(), DispatchError> {
+        let _ = (entity_id, rate);
+        Ok(())
+    }
+
+    /// 返佣总开关（治理提案执行）
+    fn governance_toggle_commission(entity_id: u64, enabled: bool) -> Result<(), DispatchError> {
+        let _ = (entity_id, enabled);
+        Ok(())
+    }
 }
 
 /// 空 CommissionProvider 实现
@@ -311,6 +333,7 @@ impl<AccountId, Balance: Default> CommissionProvider<AccountId, Balance> for Nul
     fn use_shopping_balance(_: u64, _: &AccountId, _: Balance) -> Result<(), DispatchError> { Ok(()) }
     fn set_min_repurchase_rate(_: u64, _: u16) -> Result<(), DispatchError> { Ok(()) }
     fn set_creator_reward_rate(_: u64, _: u16) -> Result<(), DispatchError> { Ok(()) }
+    fn settle_order_commission(_: u64) -> Result<(), DispatchError> { Ok(()) }
 }
 
 // ============================================================================
@@ -647,4 +670,121 @@ impl<AccountId, TokenBalance: Default> TokenCommissionProvider<AccountId, TokenB
     fn cancel_token_commission(_: u64) -> Result<(), DispatchError> { Ok(()) }
     fn pending_token_commission(_: u64, _: &AccountId) -> TokenBalance { TokenBalance::default() }
     fn token_platform_fee_rate(_: u64) -> u16 { 0 }
+}
+
+// ============================================================================
+// QueryProvider Traits — 子模块查询接口（供 Runtime API 聚合层使用）
+// ============================================================================
+
+/// 多级分销查询接口
+pub trait MultiLevelQueryProvider<AccountId> {
+    /// 激活进度（每层级的当前值 vs 要求值）
+    fn activation_progress(entity_id: u64, account: &AccountId) -> Vec<MultiLevelActivationInfo>;
+    /// 是否暂停
+    fn is_paused(entity_id: u64) -> bool;
+    /// 会员多级佣金统计
+    fn member_stats(entity_id: u64, account: &AccountId) -> Option<MultiLevelMemberStats>;
+}
+
+/// 激活进度（Runtime API 可编解码版本，不依赖 Config）
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+pub struct MultiLevelActivationInfo {
+    pub level: u8,
+    pub activated: bool,
+    pub directs_current: u32,
+    pub directs_required: u32,
+    pub team_current: u32,
+    pub team_required: u32,
+    pub spent_current: u128,
+    pub spent_required: u128,
+}
+
+/// 多级佣金会员统计
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug, Default)]
+pub struct MultiLevelMemberStats {
+    pub total_earned: u128,
+    pub total_orders: u32,
+    pub last_commission_block: u32,
+}
+
+/// 空 MultiLevelQueryProvider 实现
+impl<AccountId> MultiLevelQueryProvider<AccountId> for () {
+    fn activation_progress(_: u64, _: &AccountId) -> Vec<MultiLevelActivationInfo> { Vec::new() }
+    fn is_paused(_: u64) -> bool { false }
+    fn member_stats(_: u64, _: &AccountId) -> Option<MultiLevelMemberStats> { None }
+}
+
+/// 团队业绩查询接口
+pub trait TeamQueryProvider<AccountId, Balance> {
+    /// 查询会员匹配的阶梯档位
+    /// 返回 (tier_index, rate_bps, next_threshold, next_min_team_size)
+    fn matched_tier(entity_id: u64, account: &AccountId) -> Option<TeamTierInfo<Balance>>;
+    /// 查询团队业绩模块状态 (config_exists, is_enabled)
+    fn status(entity_id: u64) -> (bool, bool);
+}
+
+/// 团队阶梯快照
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+pub struct TeamTierInfo<Balance> {
+    pub tier_index: u8,
+    pub rate: u16,
+    pub next_threshold: Option<Balance>,
+    pub next_min_team_size: Option<u32>,
+}
+
+/// 空 TeamQueryProvider 实现
+impl<AccountId, Balance> TeamQueryProvider<AccountId, Balance> for () {
+    fn matched_tier(_: u64, _: &AccountId) -> Option<TeamTierInfo<Balance>> { None }
+    fn status(_: u64) -> (bool, bool) { (false, false) }
+}
+
+/// 单线收益查询接口
+pub trait SingleLineQueryProvider<AccountId> {
+    /// 全局排位
+    fn position(entity_id: u64, account: &AccountId) -> Option<u32>;
+    /// 有效搜索层数 (upline_levels, downline_levels)
+    fn effective_levels(entity_id: u64, account: &AccountId) -> Option<(u8, u8)>;
+    /// 单线是否启用
+    fn is_enabled(entity_id: u64) -> bool;
+    /// 排队总长度
+    fn queue_length(entity_id: u64) -> u32;
+}
+
+/// 空 SingleLineQueryProvider 实现
+impl<AccountId> SingleLineQueryProvider<AccountId> for () {
+    fn position(_: u64, _: &AccountId) -> Option<u32> { None }
+    fn effective_levels(_: u64, _: &AccountId) -> Option<(u8, u8)> { None }
+    fn is_enabled(_: u64) -> bool { false }
+    fn queue_length(_: u64) -> u32 { 0 }
+}
+
+/// 沉淀池奖励查询接口
+pub trait PoolRewardQueryProvider<AccountId, Balance, TokenBalance> {
+    /// 可领取金额 (nex, token)
+    fn claimable(entity_id: u64, account: &AccountId) -> (Balance, TokenBalance);
+    /// 是否暂停
+    fn is_paused(entity_id: u64) -> bool;
+    /// 当前轮次 ID
+    fn current_round_id(entity_id: u64) -> u64;
+}
+
+/// 空 PoolRewardQueryProvider 实现
+impl<AccountId, Balance: Default, TokenBalance: Default> PoolRewardQueryProvider<AccountId, Balance, TokenBalance> for () {
+    fn claimable(_: u64, _: &AccountId) -> (Balance, TokenBalance) { (Balance::default(), TokenBalance::default()) }
+    fn is_paused(_: u64) -> bool { false }
+    fn current_round_id(_: u64) -> u64 { 0 }
+}
+
+/// 推荐链返佣查询接口
+pub trait ReferralQueryProvider<AccountId, Balance> {
+    /// 推荐人累计获佣
+    fn referrer_total_earned(entity_id: u64, account: &AccountId) -> Balance;
+    /// 返佣上限配置 (max_per_order, max_total_earned)；None 表示未配置
+    fn cap_config(entity_id: u64) -> Option<(Balance, Balance)>;
+}
+
+/// 空 ReferralQueryProvider 实现
+impl<AccountId, Balance: Default> ReferralQueryProvider<AccountId, Balance> for () {
+    fn referrer_total_earned(_: u64, _: &AccountId) -> Balance { Balance::default() }
+    fn cap_config(_: u64) -> Option<(Balance, Balance)> { None }
 }

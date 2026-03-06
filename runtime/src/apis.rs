@@ -43,7 +43,7 @@ use sp_version::RuntimeVersion;
 // Local module imports
 use super::{
 	AccountId, Aura, Balance, Block, Executive, Grandpa, InherentDataExt, Nonce, Runtime,
-	RuntimeCall, RuntimeGenesisConfig, SessionKeys, StorageService, NexMarket, System, TransactionPayment, VERSION,
+	RuntimeCall, RuntimeGenesisConfig, SessionKeys, StorageService, NexMarket, CommissionPoolReward, System, TransactionPayment, VERSION,
 };
 
 impl_runtime_apis! {
@@ -320,6 +320,42 @@ impl_runtime_apis! {
 		}
 	}
 
+	impl pallet_commission_core::runtime_api::CommissionDashboardApi<Block, AccountId, Balance, u128> for Runtime {
+		fn get_member_commission_dashboard(
+			entity_id: u64,
+			account: AccountId,
+		) -> Option<pallet_commission_core::runtime_api::MemberCommissionDashboard<Balance, u128>> {
+			pallet_commission_core::Pallet::<Runtime>::get_member_commission_dashboard(entity_id, &account)
+		}
+
+		fn get_direct_referral_info(
+			entity_id: u64,
+			account: AccountId,
+		) -> pallet_commission_core::runtime_api::DirectReferralInfo<Balance> {
+			pallet_commission_core::Pallet::<Runtime>::get_direct_referral_info(entity_id, &account)
+		}
+
+		fn get_team_performance_info(
+			entity_id: u64,
+			account: AccountId,
+		) -> pallet_commission_core::runtime_api::TeamPerformanceInfo<Balance> {
+			pallet_commission_core::Pallet::<Runtime>::get_team_performance_info(entity_id, &account)
+		}
+
+		fn get_entity_commission_overview(
+			entity_id: u64,
+		) -> pallet_commission_core::runtime_api::EntityCommissionOverview<Balance, u128> {
+			pallet_commission_core::Pallet::<Runtime>::get_entity_commission_overview(entity_id)
+		}
+
+		fn get_direct_referral_details(
+			entity_id: u64,
+			account: AccountId,
+		) -> pallet_commission_core::runtime_api::DirectReferralDetails<AccountId, Balance> {
+			pallet_commission_core::Pallet::<Runtime>::get_direct_referral_details(entity_id, &account)
+		}
+	}
+
 	impl pallet_ads_core::runtime_api::AdsDiscoveryApi<Block, AccountId, Balance> for Runtime {
 		fn available_campaigns_for_placement(
 			placement_id: pallet_ads_primitives::PlacementId,
@@ -371,6 +407,21 @@ impl_runtime_apis! {
 
 		fn get_market_summary() -> pallet_nex_market::runtime_api::MarketSummary {
 			NexMarket::api_get_market_summary()
+		}
+	}
+
+	impl pallet_commission_pool_reward::runtime_api::PoolRewardDetailApi<Block, AccountId, Balance, u128> for Runtime {
+		fn get_pool_reward_member_view(
+			entity_id: u64,
+			account: AccountId,
+		) -> Option<pallet_commission_pool_reward::runtime_api::PoolRewardMemberView<Balance, u128>> {
+			CommissionPoolReward::get_pool_reward_member_view(entity_id, &account)
+		}
+
+		fn get_pool_reward_admin_view(
+			entity_id: u64,
+		) -> Option<pallet_commission_pool_reward::runtime_api::PoolRewardAdminView<Balance, u128>> {
+			CommissionPoolReward::get_pool_reward_admin_view(entity_id)
 		}
 	}
 

@@ -142,7 +142,10 @@ impl pallet_entity_common::ShopProvider<u64> for MockShopProvider {
     }
 
     fn is_shop_active(shop_id: u64) -> bool {
-        shop_id == SHOP_1 || shop_id == SHOP_2
+        SHOP_ACTIVE_MAP.with(|a| {
+            a.borrow().get(&shop_id).copied()
+                .unwrap_or(shop_id == SHOP_1 || shop_id == SHOP_2)
+        })
     }
 
     fn shop_entity_id(shop_id: u64) -> Option<u64> {
@@ -230,14 +233,44 @@ impl pallet_entity_common::ShopProvider<u64> for MockShopProvider {
 
 pub struct MockProductProvider;
 
-use pallet_entity_common::ProductCategory;
+use pallet_entity_common::{ProductCategory, ProductStatus, ProductVisibility};
 
 thread_local! {
     static PRODUCT_STOCK: RefCell<HashMap<u64, u32>> = RefCell::new(HashMap::new());
+    static PRODUCT_VISIBILITY_MAP: RefCell<HashMap<u64, ProductVisibility>> = RefCell::new(HashMap::new());
+    static PRODUCT_MIN_QTY: RefCell<HashMap<u64, u32>> = RefCell::new(HashMap::new());
+    static PRODUCT_MAX_QTY: RefCell<HashMap<u64, u32>> = RefCell::new(HashMap::new());
+    static SHOP_ACTIVE_MAP: RefCell<HashMap<u64, bool>> = RefCell::new(HashMap::new());
+    static REDEEM_DISCOUNT: RefCell<HashMap<(u64, u64), u64>> = RefCell::new(HashMap::new());
 }
 
 pub fn set_product_stock(product_id: u64, stock: u32) {
     PRODUCT_STOCK.with(|s| s.borrow_mut().insert(product_id, stock));
+}
+
+#[allow(dead_code)]
+pub fn set_product_visibility(product_id: u64, vis: ProductVisibility) {
+    PRODUCT_VISIBILITY_MAP.with(|v| v.borrow_mut().insert(product_id, vis));
+}
+
+#[allow(dead_code)]
+pub fn set_product_min_quantity(product_id: u64, min: u32) {
+    PRODUCT_MIN_QTY.with(|q| q.borrow_mut().insert(product_id, min));
+}
+
+#[allow(dead_code)]
+pub fn set_product_max_quantity(product_id: u64, max: u32) {
+    PRODUCT_MAX_QTY.with(|q| q.borrow_mut().insert(product_id, max));
+}
+
+#[allow(dead_code)]
+pub fn set_shop_active(shop_id: u64, active: bool) {
+    SHOP_ACTIVE_MAP.with(|a| a.borrow_mut().insert(shop_id, active));
+}
+
+#[allow(dead_code)]
+pub fn set_redeem_discount(entity_id: u64, account: u64, discount: u64) {
+    REDEEM_DISCOUNT.with(|d| d.borrow_mut().insert((entity_id, account), discount));
 }
 
 /// Product IDs:
@@ -294,16 +327,85 @@ impl pallet_entity_common::ProductProvider<u64, u64> for MockProductProvider {
         }
     }
 
-    fn deduct_stock(_product_id: u64, _quantity: u32) -> Result<(), sp_runtime::DispatchError> {
+    fn deduct_stock(product_id: u64, quantity: u32) -> Result<(), sp_runtime::DispatchError> {
+        PRODUCT_STOCK.with(|s| {
+            let mut map = s.borrow_mut();
+            if let Some(stock) = map.get_mut(&product_id) {
+                if *stock > 0 {
+                    *stock = stock.saturating_sub(quantity);
+                }
+            }
+        });
         Ok(())
     }
 
-    fn restore_stock(_product_id: u64, _quantity: u32) -> Result<(), sp_runtime::DispatchError> {
+    fn restore_stock(product_id: u64, quantity: u32) -> Result<(), sp_runtime::DispatchError> {
+        PRODUCT_STOCK.with(|s| {
+            let mut map = s.borrow_mut();
+            if let Some(stock) = map.get_mut(&product_id) {
+                *stock = stock.saturating_add(quantity);
+            }
+        });
         Ok(())
     }
 
     fn add_sold_count(_product_id: u64, _quantity: u32) -> Result<(), sp_runtime::DispatchError> {
         Ok(())
+    }
+
+    fn product_visibility(product_id: u64) -> Option<pallet_entity_common::ProductVisibility> {
+        Some(PRODUCT_VISIBILITY_MAP.with(|v| {
+            v.borrow().get(&product_id).cloned()
+                .unwrap_or(pallet_entity_common::ProductVisibility::Public)
+        }))
+    }
+
+    fn product_min_order_quantity(product_id: u64) -> Option<u32> {
+        PRODUCT_MIN_QTY.with(|q| q.borrow().get(&product_id).copied())
+    }
+    fn product_max_order_quantity(product_id: u64) -> Option<u32> {
+        PRODUCT_MAX_QTY.with(|q| q.borrow().get(&product_id).copied())
+    }
+
+    fn get_product_info(product_id: u64) -> Option<pallet_entity_common::ProductQueryInfo<u64>> {
+        if product_id < 1 || product_id > 4 { return None; }
+        let default_stock: u32 = match product_id {
+            1 => 10, 2 => 0, 3 => 5, 4 => 20, _ => 0,
+        };
+        let stock = PRODUCT_STOCK.with(|s| {
+            s.borrow().get(&product_id).copied().unwrap_or(default_stock)
+        });
+        let status = if stock == 0 && default_stock > 0 {
+            ProductStatus::SoldOut
+        } else {
+            ProductStatus::OnSale
+        };
+        let visibility = PRODUCT_VISIBILITY_MAP.with(|v| {
+            v.borrow().get(&product_id).cloned().unwrap_or(ProductVisibility::Public)
+        });
+        let min_order_quantity = PRODUCT_MIN_QTY.with(|q| {
+            q.borrow().get(&product_id).copied().unwrap_or(0)
+        });
+        let max_order_quantity = PRODUCT_MAX_QTY.with(|q| {
+            q.borrow().get(&product_id).copied().unwrap_or(0)
+        });
+        Some(pallet_entity_common::ProductQueryInfo {
+            shop_id: match product_id { 1 | 2 | 3 => SHOP_1, 4 => SHOP_2, _ => 0 },
+            price: match product_id { 1 => 100, 2 => 50, 3 => 200, 4 => 150, _ => 0 },
+            usdt_price: 0,
+            stock,
+            status,
+            category: match product_id {
+                1 => ProductCategory::Physical,
+                2 => ProductCategory::Digital,
+                3 => ProductCategory::Service,
+                4 => ProductCategory::Other,
+                _ => ProductCategory::Other,
+            },
+            visibility,
+            min_order_quantity,
+            max_order_quantity,
+        })
     }
 }
 
@@ -352,8 +454,24 @@ impl pallet_entity_common::EntityTokenProvider<u64, u64> for MockEntityToken {
         Ok(0)
     }
 
-    fn redeem_for_discount(_: u64, _: &u64, _: u64) -> Result<u64, sp_runtime::DispatchError> {
-        Ok(0)
+    fn redeem_for_discount(entity_id: u64, who: &u64, tokens: u64) -> Result<u64, sp_runtime::DispatchError> {
+        let discount = REDEEM_DISCOUNT.with(|d| {
+            d.borrow().get(&(entity_id, *who)).copied().unwrap_or(0)
+        });
+        if discount > 0 {
+            TOKEN_BALANCES.with(|b| {
+                let mut map = b.borrow_mut();
+                let bal = map.get(&(entity_id, *who)).copied().unwrap_or(0);
+                if bal < tokens {
+                    return Err(sp_runtime::DispatchError::Other("InsufficientTokenBalance"));
+                }
+                map.insert((entity_id, *who), bal - tokens);
+                Ok(())
+            })?;
+            Ok(discount)
+        } else {
+            Ok(0)
+        }
     }
 
     fn transfer(_: u64, _: &u64, _: &u64, _: u64) -> Result<(), sp_runtime::DispatchError> {
@@ -593,6 +711,21 @@ pub fn set_member_level(entity_id: u64, account: u64, level: u8) {
     MEMBER_LEVELS.with(|l| l.borrow_mut().insert((entity_id, account), level));
 }
 
+thread_local! {
+    static BANNED_SET: RefCell<HashMap<(u64, u64), bool>> = RefCell::new(HashMap::new());
+    static LEVEL_DISCOUNTS: RefCell<HashMap<(u64, u8), u16>> = RefCell::new(HashMap::new());
+}
+
+#[allow(dead_code)]
+pub fn set_banned(entity_id: u64, account: u64, banned: bool) {
+    BANNED_SET.with(|b| b.borrow_mut().insert((entity_id, account), banned));
+}
+
+#[allow(dead_code)]
+pub fn set_level_discount(entity_id: u64, level_id: u8, discount_bps: u16) {
+    LEVEL_DISCOUNTS.with(|d| d.borrow_mut().insert((entity_id, level_id), discount_bps));
+}
+
 impl pallet_entity_common::MemberProvider<u64> for MockMemberProvider {
     fn is_member(entity_id: u64, account: &u64) -> bool {
         MEMBER_SET.with(|m| m.borrow().get(&(entity_id, *account)).copied().unwrap_or(false))
@@ -605,9 +738,18 @@ impl pallet_entity_common::MemberProvider<u64> for MockMemberProvider {
         MEMBER_LEVELS.with(|l| l.borrow().get(&(entity_id, *account)).copied().unwrap_or(0))
     }
 
+    fn get_level_discount(entity_id: u64, level_id: u8) -> u16 {
+        LEVEL_DISCOUNTS.with(|d| d.borrow().get(&(entity_id, level_id)).copied().unwrap_or(0))
+    }
+
     fn get_level_commission_bonus(_entity_id: u64, _level_id: u8) -> u16 { 0 }
     fn uses_custom_levels(_entity_id: u64) -> bool { false }
     fn get_member_stats(_entity_id: u64, _account: &u64) -> (u32, u32, u128) { (0, 0, 0) }
+
+    fn is_banned(entity_id: u64, account: &u64) -> bool {
+        BANNED_SET.with(|b| b.borrow().get(&(entity_id, *account)).copied().unwrap_or(false))
+    }
+
     fn auto_register(_entity_id: u64, _account: &u64, _referrer: Option<u64>) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
     fn update_spent(_entity_id: u64, _account: &u64, _amount_usdt: u64) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
     fn check_order_upgrade_rules(_entity_id: u64, _buyer: &u64, _product_id: u64, _amount_usdt: u64) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
@@ -656,6 +798,7 @@ pub const SELLER: u64 = 10;
 pub const SELLER2: u64 = 20;
 pub const SHOP_1: u64 = 1;
 pub const SHOP_2: u64 = 2;
+pub const ENTITY_1: u64 = 1;
 
 // ==================== Pallet Config ====================
 
@@ -714,6 +857,11 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         ESCROW_BALANCES.with(|b| b.borrow_mut().clear());
         ESCROW_STATES.with(|s| s.borrow_mut().clear());
         PRODUCT_STOCK.with(|s| s.borrow_mut().clear());
+        PRODUCT_VISIBILITY_MAP.with(|v| v.borrow_mut().clear());
+        PRODUCT_MIN_QTY.with(|q| q.borrow_mut().clear());
+        PRODUCT_MAX_QTY.with(|q| q.borrow_mut().clear());
+        SHOP_ACTIVE_MAP.with(|a| a.borrow_mut().clear());
+        REDEEM_DISCOUNT.with(|d| d.borrow_mut().clear());
         CANCELLED_ORDERS.with(|c| c.borrow_mut().clear());
         TOKEN_CANCELLED_ORDERS.with(|c| c.borrow_mut().clear());
         TOKEN_COMPLETED_ORDERS.with(|c| c.borrow_mut().clear());
@@ -725,6 +873,8 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         MEMBER_SPENT.with(|s| s.borrow_mut().clear());
         MEMBER_SET.with(|m| m.borrow_mut().clear());
         MEMBER_LEVELS.with(|l| l.borrow_mut().clear());
+        BANNED_SET.with(|b| b.borrow_mut().clear());
+        LEVEL_DISCOUNTS.with(|d| d.borrow_mut().clear());
         TOKEN_FEE_RATES.with(|r| r.borrow_mut().clear());
         TOKEN_PRICE_NEX.with(|p| p.borrow_mut().clear());
         TOKEN_PRICE_RELIABLE.with(|r| r.borrow_mut().clear());

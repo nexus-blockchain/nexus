@@ -200,7 +200,6 @@ impl crate::KycChecker<u64> for MockKycChecker {
 
 impl pallet_entity_member::Config for Test {
     type RuntimeEvent = RuntimeEvent;
-    type Currency = Balances;
     type EntityProvider = MockEntityProvider;
     type ShopProvider = MockShopProvider;
     type MaxDirectReferrals = ConstU32<50>;
@@ -209,6 +208,7 @@ impl pallet_entity_member::Config for Test {
     type MaxUpgradeHistory = ConstU32<50>;
     type PendingMemberExpiry = ConstU64<100>; // 100 blocks for testing
     type KycChecker = MockKycChecker;
+    type OnMemberRemoved = ();
 }
 
 // ============================================================================

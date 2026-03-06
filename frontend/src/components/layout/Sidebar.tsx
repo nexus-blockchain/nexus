@@ -290,59 +290,91 @@ function NavItem({ item, collapsed, pathname, t }: NavItemProps) {
   );
 }
 
+function SidebarContent({ collapsed, pathname, t, onNavigate }: { collapsed: boolean; pathname: string; t: (key: string) => string; onNavigate?: () => void }) {
+  return (
+    <nav className="flex-1 space-y-1 overflow-y-auto p-3" onClick={onNavigate}>
+      {navSections.map((section, si) => (
+        <div key={si}>
+          {section.sectionKey && !collapsed && (
+            <div className="mb-1 mt-4 border-t pt-3 px-3">
+              <span className="text-[10px] font-bold uppercase tracking-widest text-sidebar-foreground/30">
+                {t(section.sectionKey)}
+              </span>
+            </div>
+          )}
+          {section.sectionKey && collapsed && (
+            <div className="my-2 border-t" />
+          )}
+          {section.items.map((item, ii) => (
+            <NavItem
+              key={ii}
+              item={item}
+              collapsed={collapsed}
+              pathname={pathname}
+              t={t}
+            />
+          ))}
+        </div>
+      ))}
+    </nav>
+  );
+}
+
 export function Sidebar() {
   const pathname = usePathname();
-  const { sidebarCollapsed, toggleSidebar } = useUiStore();
+  const { sidebarCollapsed, toggleSidebar, mobileSidebarOpen, setMobileSidebarOpen } = useUiStore();
   const t = useTranslations("nav");
 
   return (
-    <aside
-      className={cn(
-        "flex h-screen flex-col border-r bg-sidebar transition-all duration-300",
-        sidebarCollapsed ? "w-16" : "w-64"
-      )}
-    >
-      <div className="flex h-14 items-center justify-between border-b px-4">
-        {!sidebarCollapsed && (
-          <span className="text-lg font-bold text-sidebar-primary">NEXUS</span>
+    <>
+      {/* Desktop sidebar */}
+      <aside
+        className={cn(
+          "hidden md:flex h-screen flex-col border-r bg-sidebar transition-all duration-300",
+          sidebarCollapsed ? "w-16" : "w-64"
         )}
-        <button
-          onClick={toggleSidebar}
-          className="rounded-md p-1.5 text-sidebar-foreground/50 hover:bg-sidebar-accent hover:text-sidebar-foreground"
-        >
-          {sidebarCollapsed ? (
-            <ChevronRight className="h-4 w-4" />
-          ) : (
-            <ChevronLeft className="h-4 w-4" />
+      >
+        <div className="flex h-14 items-center justify-between border-b px-4">
+          {!sidebarCollapsed && (
+            <span className="text-lg font-bold text-sidebar-primary">NEXUS</span>
           )}
-        </button>
-      </div>
+          <button
+            onClick={toggleSidebar}
+            className="rounded-md p-1.5 text-sidebar-foreground/50 hover:bg-sidebar-accent hover:text-sidebar-foreground"
+          >
+            {sidebarCollapsed ? (
+              <ChevronRight className="h-4 w-4" />
+            ) : (
+              <ChevronLeft className="h-4 w-4" />
+            )}
+          </button>
+        </div>
+        <SidebarContent collapsed={sidebarCollapsed} pathname={pathname} t={t} />
+      </aside>
 
-      <nav className="flex-1 space-y-1 overflow-y-auto p-3">
-        {navSections.map((section, si) => (
-          <div key={si}>
-            {section.sectionKey && !sidebarCollapsed && (
-              <div className="mb-1 mt-4 border-t pt-3 px-3">
-                <span className="text-[10px] font-bold uppercase tracking-widest text-sidebar-foreground/30">
-                  {t(section.sectionKey)}
-                </span>
-              </div>
-            )}
-            {section.sectionKey && sidebarCollapsed && (
-              <div className="my-2 border-t" />
-            )}
-            {section.items.map((item, ii) => (
-              <NavItem
-                key={ii}
-                item={item}
-                collapsed={sidebarCollapsed}
-                pathname={pathname}
-                t={t}
-              />
-            ))}
-          </div>
-        ))}
-      </nav>
-    </aside>
+      {/* Mobile sidebar overlay */}
+      {mobileSidebarOpen && (
+        <div className="fixed inset-0 z-50 md:hidden">
+          <div className="fixed inset-0 bg-black/50" onClick={() => setMobileSidebarOpen(false)} />
+          <aside className="fixed inset-y-0 left-0 z-50 flex w-72 flex-col bg-sidebar shadow-xl">
+            <div className="flex h-14 items-center justify-between border-b px-4">
+              <span className="text-lg font-bold text-sidebar-primary">NEXUS</span>
+              <button
+                onClick={() => setMobileSidebarOpen(false)}
+                className="rounded-md p-1.5 text-sidebar-foreground/50 hover:bg-sidebar-accent hover:text-sidebar-foreground"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </button>
+            </div>
+            <SidebarContent
+              collapsed={false}
+              pathname={pathname}
+              t={t}
+              onNavigate={() => setMobileSidebarOpen(false)}
+            />
+          </aside>
+        </div>
+      )}
+    </>
   );
 }

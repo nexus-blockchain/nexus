@@ -2267,7 +2267,7 @@ fn resign_admin_works() {
 }
 
 #[test]
-fn resign_admin_works_on_banned_entity() {
+fn resign_admin_blocked_on_banned_entity() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
         assert_ok!(EntityRegistry::add_admin(
@@ -2276,9 +2276,11 @@ fn resign_admin_works_on_banned_entity() {
         // Ban entity
         assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false, None));
 
-        // Admin 仍可辞职（不受 Entity 状态限制）
-        assert_ok!(EntityRegistry::resign_admin(RuntimeOrigin::signed(BOB), id));
-        assert_eq!(Entities::<Test>::get(id).unwrap().admins.len(), 0);
+        // L2 审计修复: 与 remove_admin 保持一致，终态实体不允许操作
+        assert_noop!(
+            EntityRegistry::resign_admin(RuntimeOrigin::signed(BOB), id),
+            Error::<Test>::InvalidEntityStatus
+        );
     });
 }
 
@@ -3319,11 +3321,12 @@ fn m1_approve_does_not_overwrite_taken_name() {
         let id2 = EntityRegistry::next_entity_id() - 1;
         assert_eq!(EntityNameIndex::<Test>::get(&normalized), Some(id2));
 
-        // Unban + approve entity 1 — should NOT overwrite BOB's name index
-        assert_ok!(EntityRegistry::unban_entity(RuntimeOrigin::root(), id1));
-        assert_ok!(EntityRegistry::top_up_fund(RuntimeOrigin::signed(ALICE), id1, EXPECTED_INITIAL_FUND));
-        assert_ok!(EntityRegistry::approve_entity(RuntimeOrigin::root(), id1));
-        // Name index still points to BOB's entity
+        // H1 审计修复: unban 时名称已被占用 → 直接拒绝（更早拦截名称碰撞）
+        assert_noop!(
+            EntityRegistry::unban_entity(RuntimeOrigin::root(), id1),
+            Error::<Test>::NameAlreadyTaken
+        );
+        // BOB's name index unchanged
         assert_eq!(EntityNameIndex::<Test>::get(&normalized), Some(id2));
     });
 }
@@ -3603,28 +3606,13 @@ fn m1_r13_update_entity_name_does_not_corrupt_other_entity_index() {
         let id_b = EntityRegistry::next_entity_id() - 1;
         assert_eq!(EntityNameIndex::<Test>::get(&norm_alpha), Some(id_b));
 
-        // 4. 治理解禁 Entity A → Pending → 审批通过 → Active
-        //    名称 "alpha" 已被 B 占用，A 的名称索引不会恢复
-        assert_ok!(EntityRegistry::unban_entity(RuntimeOrigin::root(), id_a));
-        // 需要重新缴纳押金
-        let fund = crate::mock::EXPECTED_INITIAL_FUND;
-        Balances::make_free_balance_be(&ALICE, fund * 2);
-        assert_ok!(EntityRegistry::top_up_fund(RuntimeOrigin::signed(ALICE), id_a, fund));
-        assert_ok!(EntityRegistry::approve_entity(RuntimeOrigin::root(), id_a));
-        // A 的名称索引未恢复（被 B 占用）
-        assert_eq!(EntityNameIndex::<Test>::get(&norm_alpha), Some(id_b));
+        // 4. H1 审计修复: unban 时名称已被 B 占用 → 直接拒绝（更早拦截名称碰撞）
+        assert_noop!(
+            EntityRegistry::unban_entity(RuntimeOrigin::root(), id_a),
+            Error::<Test>::NameAlreadyTaken
+        );
 
-        // 5. Entity A 更新名称为 "Beta"
-        //    关键：不应移除 B 的 "alpha" 索引条目
-        assert_ok!(EntityRegistry::update_entity(
-            RuntimeOrigin::signed(ALICE), id_a,
-            Some(b"Beta".to_vec()), None, None, None, None,
-        ));
-
-        // 验证：B 的 "alpha" 索引仍然完整
+        // 5. 验证 B 的 "alpha" 索引保持完整
         assert_eq!(EntityNameIndex::<Test>::get(&norm_alpha), Some(id_b));
-        // 验证：A 的新名称 "beta" 已索引
-        let norm_beta = EntityRegistry::normalize_entity_name(b"beta").unwrap();
-        assert_eq!(EntityNameIndex::<Test>::get(&norm_beta), Some(id_a));
     });
 }

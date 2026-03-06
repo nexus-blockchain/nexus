@@ -43,8 +43,6 @@ impl pallet_balances::Config for Test {
     type RuntimeHoldReason = RuntimeHoldReason;
 }
 
-// -- Escrow Config --
-
 pub struct TestExpiryPolicy;
 impl pallet_escrow::pallet::ExpiryPolicy<u64, u64> for TestExpiryPolicy {
     fn on_expire(id: u64) -> Result<pallet_escrow::pallet::ExpiryAction<u64>, sp_runtime::DispatchError> {
@@ -54,9 +52,10 @@ impl pallet_escrow::pallet::ExpiryPolicy<u64, u64> for TestExpiryPolicy {
             Ok(pallet_escrow::pallet::ExpiryAction::RefundAll(99))
         }
     }
-    fn now() -> u64 {
-        System::block_number()
-    }
+}
+
+parameter_types! {
+    pub const MaxDisputeDuration: u64 = 14400;
 }
 
 impl pallet_escrow::Config for Test {
@@ -70,12 +69,12 @@ impl pallet_escrow::Config for Test {
     type ExpiryPolicy = TestExpiryPolicy;
     type WeightInfo = ();
     type MaxReasonLen = ConstU32<128>;
-    type TokenHandler = ();
     type Observer = ();
     type MaxCleanupPerCall = ConstU32<10>;
+    type MaxDisputeDuration = MaxDisputeDuration;
 }
 
-// -- Mock ArbitrationRouter --
+// -- Mock thread-local state --
 
 use core::cell::RefCell;
 
@@ -87,14 +86,17 @@ thread_local! {
     static EVIDENCE_EXISTS: RefCell<bool> = RefCell::new(true);
 }
 
+#[allow(dead_code)]
 pub fn set_can_dispute(val: bool) {
     CAN_DISPUTE.with(|v| *v.borrow_mut() = val);
 }
 
+#[allow(dead_code)]
 pub fn set_counterparty(val: Option<u64>) {
     COUNTERPARTY.with(|v| *v.borrow_mut() = val);
 }
 
+#[allow(dead_code)]
 pub fn set_order_amount(val: Option<Balance>) {
     ORDER_AMOUNT.with(|v| *v.borrow_mut() = val);
 }
@@ -103,12 +105,14 @@ pub fn set_evidence_exists(val: bool) {
     EVIDENCE_EXISTS.with(|v| *v.borrow_mut() = val);
 }
 
+// -- MockRouter (simplified: no ban_account, no get_maker_id) --
+
 pub struct MockRouter;
 impl pallet_arbitration::pallet::ArbitrationRouter<u64, Balance> for MockRouter {
     fn can_dispute(_domain: [u8; 8], _who: &u64, _id: u64) -> bool {
         CAN_DISPUTE.with(|v| *v.borrow())
     }
-    fn apply_decision(_domain: [u8; 8], _id: u64, _decision: pallet_arbitration::pallet::Decision) -> sp_runtime::DispatchResult {
+    fn apply_decision(_domain: [u8; 8], _id: u64, _decision: crate::types::Decision) -> sp_runtime::DispatchResult {
         if APPLY_DECISION_OK.with(|v| *v.borrow()) {
             Ok(())
         } else {
@@ -122,8 +126,6 @@ impl pallet_arbitration::pallet::ArbitrationRouter<u64, Balance> for MockRouter 
         ORDER_AMOUNT.with(|v| v.borrow().ok_or(sp_runtime::DispatchError::Other("no order amount")))
     }
 }
-
-// -- Mock Escrow trait --
 
 pub struct MockEscrow;
 impl pallet_escrow::pallet::Escrow<u64, Balance> for MockEscrow {
@@ -140,8 +142,6 @@ impl pallet_escrow::pallet::Escrow<u64, Balance> for MockEscrow {
     fn release_partial(_id: u64, _to: &u64, _amount: Balance) -> sp_runtime::DispatchResult { Ok(()) }
 }
 
-// -- Mock CidLockManager --
-
 pub struct MockCidLockManager;
 impl pallet_storage_service::CidLockManager<sp_core::H256, u64> for MockCidLockManager {
     fn lock_cid(_cid_hash: sp_core::H256, _reason: Vec<u8>, _until: Option<u64>) -> sp_runtime::DispatchResult { Ok(()) }
@@ -149,17 +149,11 @@ impl pallet_storage_service::CidLockManager<sp_core::H256, u64> for MockCidLockM
     fn is_locked(_cid_hash: &sp_core::H256) -> bool { false }
 }
 
-// -- Mock PricingProvider --
-
 pub struct MockPricing;
 impl pallet_trading_common::PricingProvider<Balance> for MockPricing {
-    // Rate = 10_000_000 means 1 COS = 10 USD => deposit = 1_000_000 * 1_000_000 / 10_000_000 = 100
-    // This equals ComplaintDeposit (min_deposit), so deposit_amount = 100
     fn get_nex_to_usd_rate() -> Option<Balance> { Some(10_000_000) }
     fn report_p2p_trade(_timestamp: u64, _price_usdt: u64, _nex_qty: u128) -> sp_runtime::DispatchResult { Ok(()) }
 }
-
-// -- Mock EvidenceExistenceChecker --
 
 pub struct MockEvidenceChecker;
 impl pallet_arbitration::pallet::EvidenceExistenceChecker for MockEvidenceChecker {
@@ -171,15 +165,19 @@ impl pallet_arbitration::pallet::EvidenceExistenceChecker for MockEvidenceChecke
 // -- Arbitration Config --
 
 parameter_types! {
-    pub const DepositRatioBps: u16 = 1500; // 15%
+    pub const DepositRatioBps: u16 = 1500;
     pub const ResponseDeadline: u64 = 100;
-    pub const RejectedSlashBps: u16 = 3000; // 30%
-    pub const PartialSlashBps: u16 = 5000; // 50%
+    pub const RejectedSlashBps: u16 = 3000;
+    pub const PartialSlashBps: u16 = 5000;
     pub const ComplaintDeposit: Balance = 100;
-    pub const ComplaintDepositUsd: u64 = 1_000_000; // 1 USDT
-    pub const ComplaintSlashBps: u16 = 5000; // 50%
+    pub const ComplaintDepositUsd: u64 = 1_000_000;
+    pub const ComplaintSlashBps: u16 = 5000;
     pub const ArchiveTtlBlocks: u32 = 1000;
     pub const ComplaintArchiveDelayBlocks: u64 = 50;
+    pub const ComplaintMaxLifetimeBlocks: u64 = 500;
+    pub const AppealWindowBlocks: u64 = 50;
+    pub const AutoEscalateBlocks: u64 = 200;
+    pub const MaxActivePerUser: u32 = 50;
 }
 
 impl pallet_arbitration::pallet::Config for Test {
@@ -202,14 +200,16 @@ impl pallet_arbitration::pallet::Config for Test {
     type ComplaintSlashBps = ComplaintSlashBps;
     type TreasuryAccount = TreasuryAccountId;
     type CidLockManager = MockCidLockManager;
-    type CreditUpdater = ();
     type ArchiveTtlBlocks = ArchiveTtlBlocks;
     type ComplaintArchiveDelayBlocks = ComplaintArchiveDelayBlocks;
+    type ComplaintMaxLifetimeBlocks = ComplaintMaxLifetimeBlocks;
     type EvidenceExists = MockEvidenceChecker;
+    type AppealWindowBlocks = AppealWindowBlocks;
+    type AutoEscalateBlocks = AutoEscalateBlocks;
+    type MaxActivePerUser = MaxActivePerUser;
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
-    // Reset thread-local state
     CAN_DISPUTE.with(|v| *v.borrow_mut() = true);
     COUNTERPARTY.with(|v| *v.borrow_mut() = Some(2));
     ORDER_AMOUNT.with(|v| *v.borrow_mut() = Some(10_000));
@@ -225,8 +225,8 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
             (1, 10_000_000),
             (2, 10_000_000),
             (3, 10_000_000),
-            (50, 10_000_000), // escrow account
-            (99, 10_000_000), // treasury
+            (50, 10_000_000),
+            (99, 10_000_000),
         ],
         dev_accounts: None,
     }

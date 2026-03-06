@@ -271,7 +271,9 @@ impl ProductProvider<u64, u128> for MockProductProvider {
     fn is_product_on_sale(product_id: u64) -> bool {
         PRODUCT_STOCKS.with(|p| p.borrow().get(&product_id).copied().unwrap_or(0) > 0)
     }
-    fn product_shop_id(_product_id: u64) -> Option<u64> { Some(SHOP_ID) }
+    fn product_shop_id(product_id: u64) -> Option<u64> {
+        if Self::product_exists(product_id) { Some(SHOP_ID) } else { None }
+    }
     fn product_price(product_id: u64) -> Option<u128> {
         get_product_price(product_id)
     }
@@ -316,6 +318,9 @@ parameter_types! {
     pub const TimeWeightMaxMultiplier: u32 = 30000; // 3x max voting power
     pub const MinVotingPeriod: u64 = 10;  // C3: 最小投票期 10 blocks
     pub const MinExecutionDelay: u64 = 5; // C3: 最小执行延迟 5 blocks
+    pub const MaxVotingPeriod: u64 = 10000;  // S2: 最大投票期
+    pub const MaxExecutionDelay: u64 = 5000; // S2: 最大执行延迟
+    pub const ProposalCooldown: u64 = 0;     // P2: disabled for existing tests
 }
 
 impl pallet_entity_governance::Config for Test {
@@ -336,12 +341,17 @@ impl pallet_entity_governance::Config for Test {
     type MaxDelegatorsPerDelegate = ConstU32<50>;
     type MinVotingPeriod = MinVotingPeriod;
     type MinExecutionDelay = MinExecutionDelay;
+    type MaxVotingPeriod = MaxVotingPeriod;
+    type MaxExecutionDelay = MaxExecutionDelay;
     type TimeWeightFullPeriod = TimeWeightFullPeriod;
     type TimeWeightMaxMultiplier = TimeWeightMaxMultiplier;
     type ProductProvider = MockProductProvider;
     type DisclosureProvider = MockDisclosureProvider;
     type MultiLevelWriter = ();
     type TeamWriter = ();
+    type WeightInfo = ();
+    type ProposalCooldown = ProposalCooldown;
+    type EmergencyOrigin = frame_system::EnsureRoot<u64>;
 }
 
 // ==================== 构建器 ====================
@@ -377,6 +387,9 @@ impl ExtBuilder {
             set_token_balance(SHOP_ID, BOB, 150_000);
             set_token_balance(SHOP_ID, CHARLIE, 50_000);
             set_token_balance(SHOP_ID, OWNER, 100_000);
+            // R11-S1: 默认注册 product_id=1，供 PriceChange/InventoryAdjustment 等测试使用
+            set_product_price(1, 500);
+            set_product_stock(1, 100);
             // C1-audit: 默认设置 FullDAO 模式，大多数测试需要创建提案
             // 测试 None 模式行为的用例需显式覆盖此配置
             pallet_entity_governance::GovernanceConfigs::<Test>::insert(

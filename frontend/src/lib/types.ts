@@ -358,45 +358,63 @@ export interface CommissionConfig {
 // ============================================================================
 
 export interface NexOrder {
-  id: number;
+  orderId: number;
   maker: string;
-  side: "Sell" | "Buy";
+  side: string;
   nexAmount: bigint;
   filledAmount: bigint;
   usdtPrice: number;
   tronAddress: string | null;
   status: string;
   createdAt: number;
-  expiresAt: number | null;
+  expiresAt: number;
   buyerDeposit: bigint;
+  depositWaived: boolean;
 }
 
 export interface UsdtTrade {
-  id: number;
+  tradeId: number;
   orderId: number;
-  buyer: string;
   seller: string;
+  buyer: string;
   nexAmount: bigint;
   usdtAmount: number;
-  tronAddress: string;
-  txHash: string | null;
+  sellerTronAddress: string;
+  buyerTronAddress: string | null;
   status: string;
-  depositStatus: string;
   createdAt: number;
-  completedAt: number | null;
+  timeoutAt: number;
+  buyerDeposit: bigint;
+  depositStatus: string;
+  firstVerifiedAt: number | null;
+  firstActualAmount: number | null;
   underpaidDeadline: number | null;
 }
 
 export interface NexMarketStats {
-  totalVolume: bigint;
-  tradeCount: number;
+  totalOrders: number;
+  totalTrades: number;
+  totalVolumeUsdt: number;
+}
+
+export interface TwapData {
+  currentCumulative: bigint;
+  currentBlock: number;
   lastPrice: number;
+  tradeCount: number;
+  hourSnapshot: { cumulativePrice: bigint; blockNumber: number };
+  daySnapshot: { cumulativePrice: bigint; blockNumber: number };
+  weekSnapshot: { cumulativePrice: bigint; blockNumber: number };
 }
 
 export interface PriceProtectionConfig {
-  maxDeviationBps: number;
+  enabled: boolean;
+  maxPriceDeviation: number;
   circuitBreakerThreshold: number;
-  circuitBreakerDuration: number;
+  minTradesForTwap: number;
+  circuitBreakerActive: boolean;
+  circuitBreakerUntil: number;
+  initialPrice: number | null;
 }
 
 export interface TradeDispute {
@@ -405,6 +423,15 @@ export interface TradeDispute {
   status: string;
   createdAt: number;
   evidenceCid: string;
+}
+
+export interface MarketSummary {
+  bestAsk: number | null;
+  bestBid: number | null;
+  lastTradePrice: number | null;
+  isPaused: boolean;
+  tradingFeeBps: number;
+  pendingTradesCount: number;
 }
 
 // ============================================================================
@@ -416,14 +443,24 @@ export interface StorageOperator {
   peerId: string;
   capacityGib: number;
   endpointHash: string;
+  certFingerprint: string | null;
   status: number;
   registeredAt: number;
   layer: string;
   priority: number;
   bond: bigint;
-  usedBytes: bigint;
+  usedBytes: number;
   pinCount: number;
   rewards: bigint;
+  healthScore: number;
+}
+
+export interface OperatorSlaData {
+  pinnedBytes: number;
+  probeOk: number;
+  probeFail: number;
+  degraded: number;
+  lastUpdate: number;
 }
 
 export interface PinInfo {
@@ -431,7 +468,7 @@ export interface PinInfo {
   cid: string;
   state: string;
   tier: string;
-  sizeBytes: number;
+  size: number;
   replicas: number;
   createdAt: number;
   lastActivity: number;
@@ -439,11 +476,55 @@ export interface PinInfo {
   subjectId: number | null;
 }
 
+export interface BillingParams {
+  pricePerGibWeek: bigint;
+  periodBlocks: number;
+  graceBlocks: number;
+  maxChargePerBlock: number;
+  subjectMinReserve: bigint;
+  paused: boolean;
+}
+
+export interface GlobalHealthStats {
+  totalPins: number;
+  totalSizeBytes: number;
+  healthyCount: number;
+  degradedCount: number;
+  criticalCount: number;
+  lastFullScan: number;
+  totalRepairs: number;
+}
+
 export interface DomainConfig {
   autoPinEnabled: boolean;
   defaultTier: string;
   subjectTypeId: number;
+  ownerPallet: string;
   createdAt: number;
+}
+
+export interface TierConfig {
+  replicas: number;
+  healthCheckInterval: number;
+  feeMultiplier: number;
+  gracePeriodBlocks: number;
+  enabled: boolean;
+}
+
+export interface ArchiveConfig {
+  l1Delay: number;
+  l2Delay: number;
+  purgeDelay: number;
+  purgeEnabled: boolean;
+  maxBatchSize: number;
+}
+
+export interface ArchiveStats {
+  totalL1Archived: number;
+  totalL2Archived: number;
+  totalPurged: number;
+  totalBytesSaved: number;
+  lastArchiveAt: number;
 }
 
 // ============================================================================
@@ -509,6 +590,7 @@ export interface CommunityConfig {
   adsEnabled: boolean;
   activeMembers: number;
   language: string;
+  version: number;
   status: string;
 }
 
@@ -537,6 +619,41 @@ export interface SubscriptionRecord {
   status: string;
 }
 
+export interface AdCommitmentRecord {
+  owner: string;
+  botIdHash: string;
+  communityIdHash: string;
+  committedAdsPerEra: number;
+  effectiveTier: string;
+  underdeliveryEras: number;
+  status: string;
+  startedAt: number;
+}
+
+export interface CeremonyRecord {
+  ceremonyMrenclave: string;
+  k: number;
+  n: number;
+  botPublicKey: string;
+  participantCount: number;
+  participantEnclaves: string[];
+  initiator: string;
+  createdAt: number;
+  status: string;
+  expiresAt: number;
+  isReCeremony: boolean;
+  supersedes: string | null;
+  botIdHash: string;
+}
+
+export interface TierFeatureGate {
+  maxRules: number;
+  logRetentionDays: number;
+  forcedAdsPerDay: number;
+  canDisableAds: boolean;
+  teeAccess: boolean;
+}
+
 export interface EraRewardInfo {
   subscriptionIncome: bigint;
   adsIncome: bigint;
@@ -546,45 +663,70 @@ export interface EraRewardInfo {
   nodeCount: number;
 }
 
+export interface NodeRewardSummary {
+  pending: bigint;
+  totalEarned: bigint;
+}
+
 // ============================================================================
 // Dispute Types (pallet-dispute-*)
 // ============================================================================
 
 export interface ComplaintData {
   id: number;
+  domain: string;
+  objectId: number;
+  complaintType: string;
   complainant: string;
   respondent: string;
-  complaintType: string;
+  detailsCid: string;
+  responseCid: string | null;
+  amount: bigint | null;
   status: string;
-  evidenceIds: number[];
-  objectId: number | null;
   createdAt: number;
-  deposit: bigint;
+  responseDeadline: number;
+  settlementCid: string | null;
+  resolutionCid: string | null;
+  updatedAt: number;
 }
 
 export interface EscrowData {
-  from: string;
-  to: string;
+  id: number;
   amount: bigint;
   state: number;
+  nonce: number;
+  expiresAt: number | null;
   disputedAt: number | null;
 }
 
 export interface EvidenceData {
   id: number;
-  submitter: string;
-  target: string;
-  namespace: string;
+  domain: number;
+  targetId: number;
+  owner: string;
   contentCid: string;
-  imagesCids: string[];
-  videosCids: string[];
-  docsCids: string[];
-  memo: string;
   contentType: string;
-  status: string;
-  sealed: boolean;
   createdAt: number;
-  parentId: number | null;
+  isEncrypted: boolean;
+  commit: string | null;
+  ns: string | null;
+  status: string;
+}
+
+export interface ArbitrationStats {
+  totalDisputes: number;
+  releaseCount: number;
+  refundCount: number;
+  partialCount: number;
+}
+
+export interface DomainStatistics {
+  totalComplaints: number;
+  resolvedCount: number;
+  complainantWins: number;
+  respondentWins: number;
+  settlements: number;
+  expiredCount: number;
 }
 
 // ============================================================================
@@ -602,6 +744,7 @@ export interface AdCampaign {
   dailyBudget: bigint;
   totalBudget: bigint;
   spent: bigint;
+  deliveryTypes: number;
   status: string;
   reviewStatus: string;
   totalDeliveries: number;

@@ -26,6 +26,20 @@ const RELEVANT_SECTIONS = [
   "entityKyc",
   "entityTokensale",
   "commissionCore",
+  "nexMarket",
+  "storageService",
+  "storageLifecycle",
+  "grouprobotRegistry",
+  "grouprobotCommunity",
+  "grouprobotConsensus",
+  "grouprobotSubscription",
+  "grouprobotRewards",
+  "disputeArbitration",
+  "disputeEscrow",
+  "disputeEvidence",
+  "adsCore",
+  "adsEntity",
+  "adsGrouprobot",
 ];
 
 export function useEntityEvents(entityId: number | null, maxEvents = 50) {

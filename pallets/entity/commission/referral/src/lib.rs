@@ -1123,6 +1123,21 @@ impl<T: pallet::Config> pallet_commission_common::ReferralPlanWriter<pallet::Bal
     }
 }
 
+// ============================================================================
+// ReferralQueryProvider 实现
+// ============================================================================
+
+impl<T: pallet::Config> pallet_commission_common::ReferralQueryProvider<T::AccountId, BalanceOf<T>> for pallet::Pallet<T> {
+    fn referrer_total_earned(entity_id: u64, account: &T::AccountId) -> BalanceOf<T> {
+        pallet::ReferrerTotalEarned::<T>::get(entity_id, account)
+    }
+
+    fn cap_config(entity_id: u64) -> Option<(BalanceOf<T>, BalanceOf<T>)> {
+        pallet::CommissionCapConfigs::<T>::get(entity_id)
+            .map(|c| (c.max_per_order, c.max_total_earned))
+    }
+}
+
 #[cfg(test)]
 mod mock;
 #[cfg(test)]

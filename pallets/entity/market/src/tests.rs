@@ -2729,3 +2729,435 @@ fn l1_r9_on_idle_respects_proof_size_limit() {
         assert!(weight.proof_size() <= 100, "consumed proof_size should be minimal");
     });
 }
+
+// ==================== Round 10 审计修复回归测试 ====================
+
+/// H1-R10: IOC 订单应受 min_order_amount 限制
+#[test]
+fn h1_r10_ioc_order_rejects_below_min_amount() {
+    ExtBuilder::build().execute_with(|| {
+        // 配置 min_order_amount = 100
+        assert_ok!(EntityMarket::configure_market(
+            RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
+            true, 100, 1000,
+        ));
+
+        // IOC 订单数量 50 < 100 → 应失败
+        assert_noop!(
+            EntityMarket::place_ioc_order(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID, OrderSide::Buy, 50, 100
+            ),
+            Error::<Test>::OrderAmountBelowMinimum
+        );
+
+        // IOC 订单数量 100 = min → 应成功（预锁定后因无对手盘，部分退还）
+        assert_ok!(EntityMarket::place_ioc_order(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, OrderSide::Buy, 100, 100
+        ));
+    });
+}
+
+/// H1-R10: FOK 订单应受 min_order_amount 限制
+#[test]
+fn h1_r10_fok_order_rejects_below_min_amount() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityMarket::configure_market(
+            RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
+            true, 100, 1000,
+        ));
+
+        assert_noop!(
+            EntityMarket::place_fok_order(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID, OrderSide::Sell, 50, 100
+            ),
+            Error::<Test>::OrderAmountBelowMinimum
+        );
+    });
+}
+
+/// H1-R10: PostOnly 订单应受 min_order_amount 限制
+#[test]
+fn h1_r10_post_only_order_rejects_below_min_amount() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityMarket::configure_market(
+            RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
+            true, 100, 1000,
+        ));
+
+        assert_noop!(
+            EntityMarket::place_post_only_order(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID, OrderSide::Sell, 50, 100
+            ),
+            Error::<Test>::OrderAmountBelowMinimum
+        );
+
+        // 数量 >= min → 应成功
+        assert_ok!(EntityMarket::place_post_only_order(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, OrderSide::Sell, 100, 100
+        ));
+    });
+}
+
+/// H2-R10: configure_market 禁用 nex_enabled 时自动取消所有订单
+#[test]
+fn h2_r10_disable_market_cancels_all_orders() {
+    ExtBuilder::build().execute_with(|| {
+        configure_market_enabled(ENTITY_ID);
+
+        let alice_tokens_before = get_token_balance(ENTITY_ID, ALICE);
+        let bob_balance_before = Balances::free_balance(BOB);
+
+        // Alice 挂卖单，Bob 挂买单
+        assert_ok!(EntityMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 500, 100
+        ));
+        assert_ok!(EntityMarket::place_buy_order(
+            RuntimeOrigin::signed(BOB), ENTITY_ID, 300, 50
+        ));
+
+        // 验证资产已锁定
+        assert!(get_token_reserved(ENTITY_ID, ALICE) > 0);
+        assert!(Balances::reserved_balance(BOB) > 0);
+
+        // 禁用市场
+        assert_ok!(EntityMarket::configure_market(
+            RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
+            false, 1, 1000,
+        ));
+
+        // 所有订单应被取消，资产应退还
+        assert_eq!(get_token_reserved(ENTITY_ID, ALICE), 0);
+        assert_eq!(Balances::reserved_balance(BOB), 0);
+        assert_eq!(get_token_balance(ENTITY_ID, ALICE), alice_tokens_before);
+        assert_eq!(Balances::free_balance(BOB), bob_balance_before);
+
+        // 订单簿应为空
+        assert_eq!(EntitySellOrders::<Test>::get(ENTITY_ID).len(), 0);
+        assert_eq!(EntityBuyOrders::<Test>::get(ENTITY_ID).len(), 0);
+    });
+}
+
+/// H2-R10: 首次配置 nex_enabled=false 不应触发取消（was_enabled=false）
+#[test]
+fn h2_r10_first_configure_disabled_no_cancel() {
+    ExtBuilder::build().execute_with(|| {
+        // 首次配置为 disabled — was_enabled=false, nex_enabled=false → 不触发
+        assert_ok!(EntityMarket::configure_market(
+            RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
+            false, 1, 1000,
+        ));
+        let config = MarketConfigs::<Test>::get(ENTITY_ID).unwrap();
+        assert!(!config.nex_enabled);
+    });
+}
+
+/// H3-R10: governance_configure_price_protection 正常工作
+#[test]
+fn h3_r10_governance_configure_price_protection_works() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityMarket::governance_configure_price_protection(
+            RuntimeOrigin::root(), ENTITY_ID,
+            true, 3000, 800, 6000, 50,
+        ));
+
+        let config = PriceProtection::<Test>::get(ENTITY_ID).expect("config exists");
+        assert!(config.enabled);
+        assert_eq!(config.max_price_deviation, 3000);
+        assert_eq!(config.max_slippage, 800);
+        assert_eq!(config.circuit_breaker_threshold, 6000);
+        assert_eq!(config.min_trades_for_twap, 50);
+    });
+}
+
+/// H3-R10: governance_configure_price_protection 拒绝非 Root
+#[test]
+fn h3_r10_governance_configure_price_protection_rejects_signed() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityMarket::governance_configure_price_protection(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID,
+                true, 3000, 800, 6000, 50,
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+/// H3-R10: governance_configure_price_protection 验证基点参数
+#[test]
+fn h3_r10_governance_configure_price_protection_rejects_invalid_bps() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityMarket::governance_configure_price_protection(
+                RuntimeOrigin::root(), ENTITY_ID,
+                true, 10001, 800, 6000, 50,
+            ),
+            Error::<Test>::InvalidBasisPoints
+        );
+        assert_noop!(
+            EntityMarket::governance_configure_price_protection(
+                RuntimeOrigin::root(), ENTITY_ID,
+                true, 3000, 10001, 6000, 50,
+            ),
+            Error::<Test>::InvalidBasisPoints
+        );
+        assert_noop!(
+            EntityMarket::governance_configure_price_protection(
+                RuntimeOrigin::root(), ENTITY_ID,
+                true, 3000, 800, 10001, 50,
+            ),
+            Error::<Test>::InvalidBasisPoints
+        );
+    });
+}
+
+/// H4-R10: force_lift_circuit_breaker 正常工作
+#[test]
+fn h4_r10_force_lift_circuit_breaker_works() {
+    ExtBuilder::build().execute_with(|| {
+        configure_market_enabled(ENTITY_ID);
+
+        // 先挂卖单（熔断前）
+        assert_ok!(EntityMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100
+        ));
+
+        // 然后手动激活熔断器
+        PriceProtection::<Test>::insert(ENTITY_ID, PriceProtectionConfig {
+            enabled: true,
+            max_price_deviation: 2000,
+            max_slippage: 500,
+            circuit_breaker_threshold: 5000,
+            min_trades_for_twap: 100,
+            circuit_breaker_active: true,
+            circuit_breaker_until: 99999,
+            initial_price: None,
+        });
+
+        // 熔断期间 take_order 应失败
+        assert_noop!(
+            EntityMarket::take_order(RuntimeOrigin::signed(BOB), 0, None),
+            Error::<Test>::MarketCircuitBreakerActive
+        );
+
+        // Root 强制解除熔断
+        assert_ok!(EntityMarket::force_lift_circuit_breaker(RuntimeOrigin::root(), ENTITY_ID));
+
+        // 熔断解除后 take_order 应成功
+        assert_ok!(EntityMarket::take_order(RuntimeOrigin::signed(BOB), 0, None));
+    });
+}
+
+/// H4-R10: force_lift_circuit_breaker 拒绝非 Root
+#[test]
+fn h4_r10_force_lift_circuit_breaker_rejects_signed() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityMarket::force_lift_circuit_breaker(RuntimeOrigin::signed(ALICE), ENTITY_ID),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+/// H4-R10: force_lift_circuit_breaker 未激活时应失败
+#[test]
+fn h4_r10_force_lift_circuit_breaker_rejects_not_active() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityMarket::force_lift_circuit_breaker(RuntimeOrigin::root(), ENTITY_ID),
+            Error::<Test>::CircuitBreakerNotActive
+        );
+    });
+}
+
+/// C2-R10: on_idle 清理过期订单时应发出 ExpiredOrdersAutoCleaned 事件
+#[test]
+fn c2_r10_on_idle_emits_event_on_cleanup() {
+    ExtBuilder::build().execute_with(|| {
+        configure_market_enabled(ENTITY_ID);
+
+        assert_ok!(EntityMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 100, 100
+        ));
+        assert_ok!(EntityMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 100, 200
+        ));
+
+        // 推进到过期后
+        System::set_block_number(20000);
+
+        // 清除之前的事件
+        System::reset_events();
+
+        // 运行 on_idle
+        EntityMarket::on_idle(20000u64, Weight::from_parts(10_000_000, 100_000));
+
+        // 应有 ExpiredOrdersAutoCleaned 事件
+        let events = frame_system::Pallet::<Test>::events();
+        let found = events.iter().any(|e| {
+            matches!(&e.event, RuntimeEvent::EntityMarket(
+                crate::pallet::Event::ExpiredOrdersAutoCleaned { count }
+            ) if *count == 2)
+        });
+        assert!(found, "ExpiredOrdersAutoCleaned event with count=2 not found");
+    });
+}
+
+/// R2-R10: PostOnly 应使用动态计算过滤过期订单
+#[test]
+fn r2_r10_post_only_uses_dynamic_best_price() {
+    ExtBuilder::build().execute_with(|| {
+        configure_market_enabled(ENTITY_ID);
+
+        // Alice 挂卖单 @100
+        assert_ok!(EntityMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100
+        ));
+        assert_eq!(BestAsk::<Test>::get(ENTITY_ID), Some(100u128));
+
+        // Bob 尝试 PostOnly 买单 @100 — 应因会立即撮合被拒绝
+        assert_noop!(
+            EntityMarket::place_post_only_order(
+                RuntimeOrigin::signed(BOB), ENTITY_ID, OrderSide::Buy, 500, 100
+            ),
+            Error::<Test>::PostOnlyWouldMatch
+        );
+
+        // 推进到卖单过期后（但不运行 on_idle，BestAsk 缓存仍为 100）
+        let order = Orders::<Test>::get(0).unwrap();
+        System::set_block_number(order.expires_at + 1);
+
+        // 缓存仍为旧值
+        assert_eq!(BestAsk::<Test>::get(ENTITY_ID), Some(100u128));
+
+        // 修复后: PostOnly 使用动态计算，过期单被过滤 → 应成功
+        assert_ok!(EntityMarket::place_post_only_order(
+            RuntimeOrigin::signed(BOB), ENTITY_ID, OrderSide::Buy, 500, 100
+        ));
+    });
+}
+
+// ==================== Round 11 审计修复回归测试 ====================
+
+/// S1-R11: governance_configure_market 禁用时自动取消订单（与 configure_market 一致）
+#[test]
+fn s1_r11_governance_disable_market_cancels_orders() {
+    ExtBuilder::build().execute_with(|| {
+        configure_market_enabled(ENTITY_ID);
+
+        let alice_tokens_before = get_token_balance(ENTITY_ID, ALICE);
+        let bob_balance_before = Balances::free_balance(BOB);
+
+        assert_ok!(EntityMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 500, 100
+        ));
+        assert_ok!(EntityMarket::place_buy_order(
+            RuntimeOrigin::signed(BOB), ENTITY_ID, 300, 50
+        ));
+
+        assert!(get_token_reserved(ENTITY_ID, ALICE) > 0);
+        assert!(Balances::reserved_balance(BOB) > 0);
+
+        // Root 禁用市场
+        assert_ok!(EntityMarket::governance_configure_market(
+            RuntimeOrigin::root(), ENTITY_ID,
+            false, 1, 1000,
+        ));
+
+        // 资产应全部退还
+        assert_eq!(get_token_reserved(ENTITY_ID, ALICE), 0);
+        assert_eq!(Balances::reserved_balance(BOB), 0);
+        assert_eq!(get_token_balance(ENTITY_ID, ALICE), alice_tokens_before);
+        assert_eq!(Balances::free_balance(BOB), bob_balance_before);
+    });
+}
+
+/// S2-R11: 熔断器到期后自动清理存储（通过 ensure_circuit_breaker_inactive 触发）
+#[test]
+fn s2_r11_circuit_breaker_auto_cleanup_on_expiry() {
+    ExtBuilder::build().execute_with(|| {
+        configure_market_enabled(ENTITY_ID);
+
+        assert_ok!(EntityMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100
+        ));
+
+        // 手动激活熔断器，到期区块 = 500
+        PriceProtection::<Test>::insert(ENTITY_ID, PriceProtectionConfig {
+            enabled: true,
+            max_price_deviation: 2000,
+            max_slippage: 500,
+            circuit_breaker_threshold: 5000,
+            min_trades_for_twap: 100,
+            circuit_breaker_active: true,
+            circuit_breaker_until: 500,
+            initial_price: None,
+        });
+
+        // 区块 100: 熔断中
+        System::set_block_number(100);
+        assert_noop!(
+            EntityMarket::take_order(RuntimeOrigin::signed(BOB), 0, None),
+            Error::<Test>::MarketCircuitBreakerActive
+        );
+
+        // 区块 500: 熔断到期，交易应成功
+        System::set_block_number(500);
+        assert_ok!(EntityMarket::take_order(RuntimeOrigin::signed(BOB), 0, None));
+
+        // 存储应自动清理
+        let config = PriceProtection::<Test>::get(ENTITY_ID).unwrap();
+        assert!(!config.circuit_breaker_active, "circuit_breaker_active should be false after auto-cleanup");
+        assert_eq!(config.circuit_breaker_until, 0, "circuit_breaker_until should be 0 after auto-cleanup");
+    });
+}
+
+/// S3-R11: market_buy 受 min_order_amount 限制
+#[test]
+fn s3_r11_market_buy_rejects_below_min_amount() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityMarket::configure_market(
+            RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
+            true, 100, 1000,
+        ));
+
+        // 先挂卖单
+        assert_ok!(EntityMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100
+        ));
+
+        // market_buy 50 < min_order_amount(100) → 应失败
+        assert_noop!(
+            EntityMarket::market_buy(RuntimeOrigin::signed(BOB), ENTITY_ID, 50, 999999),
+            Error::<Test>::OrderAmountBelowMinimum
+        );
+
+        // market_buy 100 >= min → 应成功
+        assert_ok!(EntityMarket::market_buy(RuntimeOrigin::signed(BOB), ENTITY_ID, 100, 999999));
+    });
+}
+
+/// S3-R11: market_sell 受 min_order_amount 限制
+#[test]
+fn s3_r11_market_sell_rejects_below_min_amount() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityMarket::configure_market(
+            RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
+            true, 100, 1000,
+        ));
+
+        // 先挂买单
+        assert_ok!(EntityMarket::place_buy_order(
+            RuntimeOrigin::signed(BOB), ENTITY_ID, 1000, 100
+        ));
+
+        // market_sell 50 < min_order_amount(100) → 应失败
+        assert_noop!(
+            EntityMarket::market_sell(RuntimeOrigin::signed(ALICE), ENTITY_ID, 50, 0),
+            Error::<Test>::OrderAmountBelowMinimum
+        );
+
+        // market_sell 100 >= min → 应成功
+        assert_ok!(EntityMarket::market_sell(RuntimeOrigin::signed(ALICE), ENTITY_ID, 100, 0));
+    });
+}

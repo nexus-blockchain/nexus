@@ -1001,6 +1001,30 @@ impl<T: pallet::Config> pallet_commission_common::TeamPlanWriter<pallet::Balance
 }
 
 // ============================================================================
+// TeamQueryProvider 实现
+// ============================================================================
+
+impl<T: Config> pallet_commission_common::TeamQueryProvider<T::AccountId, BalanceOf<T>> for Pallet<T>
+where
+    BalanceOf<T>: Into<u128>,
+{
+    fn matched_tier(entity_id: u64, account: &T::AccountId) -> Option<pallet_commission_common::TeamTierInfo<BalanceOf<T>>> {
+        let (tier_index, rate, next_threshold, next_min_team_size) =
+            Self::get_matched_tier_for_account(entity_id, account)?;
+        Some(pallet_commission_common::TeamTierInfo {
+            tier_index,
+            rate,
+            next_threshold,
+            next_min_team_size,
+        })
+    }
+
+    fn status(entity_id: u64) -> (bool, bool) {
+        Self::get_team_performance_status(entity_id)
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

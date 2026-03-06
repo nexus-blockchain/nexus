@@ -1,274 +1,385 @@
 # pallet-commission-single-line
 
-> 单线收益插件 — 基于消费注册顺序的上下线收益
+单线收益插件 — 基于 Entity 级消费注册顺序的上下线返佣。
 
-## 概述
+---
 
-`pallet-commission-single-line` 是返佣系统的**单线收益插件**，基于 Entity 级消费顺序形成一条单链，每个用户都有唯一的上线（在你之前消费的人）和下线（在你之后消费的人）。
+## 核心概念
 
-- **上线收益** (SingleLineUpline) — 向前遍历，从上线的消费中获益
-- **下线收益** (SingleLineDownline) — 向后遍历，从下线的消费中获益
-- **层数动态增长** — 消费越多，可遍历的层数越多
-
-## 单线原理
+每个 Entity 维护一条**消费单链**，用户首次消费时按顺序加入。买家从上线（在其之前加入的人）和下线（在其之后加入的人）的消费中获得返佣。
 
 ```
-消费单链（按首次消费顺序）：
-User1 → User2 → User3 → User4 → User5 → User6 → ...
+消费单链（按首次消费时间排列）：
 
-User4 消费 1000 NEX，配置 upline_rate=10(0.1%), downline_rate=10(0.1%)：
+  ← 上线方向                           下线方向 →
+  User1 ── User2 ── User3 ── User4 ── User5 ── User6
 
-上线收益（向前遍历）：
-├── User3 → 1000 × 0.1% = 1 NEX
-├── User2 → 1000 × 0.1% = 1 NEX
-└── User1 → 1000 × 0.1% = 1 NEX
+  User4 消费 10,000 NEX，upline_rate = 100 (1%), downline_rate = 100 (1%)：
 
-下线收益（向后遍历）：
-├── User5 → 1000 × 0.1% = 1 NEX
-└── User6 → 1000 × 0.1% = 1 NEX
+  上线收益 ──────────────────────────────┐
+    User3  ← 10,000 × 1% = 100 NEX      │ 向前遍历
+    User2  ← 10,000 × 1% = 100 NEX      │ base_upline_levels 层
+    User1  ← 10,000 × 1% = 100 NEX      │
+  ──────────────────────────────────────┘
+
+  下线收益 ──────────────────────────────┐
+    User5  ← 10,000 × 1% = 100 NEX      │ 向后遍历
+    User6  ← 10,000 × 1% = 100 NEX      │ base_downline_levels 层
+  ──────────────────────────────────────┘
 ```
 
-特点：
-- 无需推荐关系，只要消费就自动进入单链
-- 早期消费者拥有更多下线，获得更多被动收益
+**特点：**
+- 无需推荐关系，首次消费自动入链（幂等）
+- 早期消费者拥有更多下线 → 更多被动收益
 - 层数随累计收益动态增长，激励持续消费
+
+---
+
+## 层数计算
+
+```
+base = LevelBasedLevels[买家等级] ?? config.base_*_levels
+extra = total_earned / level_increment_threshold      （封顶 255）
+
+实际上线层数 = min(base + extra, max_upline_levels)
+实际下线层数 = min(base + extra, max_downline_levels)
+```
+
+每层佣金 = `order_amount × rate / 10,000`，受 `remaining` 余额封顶。
+
+---
+
+## 分段存储
+
+单链采用分段存储，每段容量 `MaxSingleLineLength`（推荐 200）。段满自动创建新段，总段数受 `MaxSegmentCount` 限制。
+
+```
+Segment 0: [User0, User1, ..., User199]    ← 200 accounts
+Segment 1: [User200, User201, ..., User399] ← 200 accounts
+Segment 2: [User400, User401, ..., User450] ← 51 accounts (partial)
+
+global_index = segment_id × MaxSingleLineLength + local_position
+```
+
+跨段遍历由 `process_upline` / `process_downline` 自动处理，按需加载段数据。
+
+---
 
 ## 数据结构
 
-### SingleLineConfig — 单线收益配置（可自定义）
+### SingleLineConfig
 
-每个 Entity 可通过 `set_single_line_config` 自定义全部参数，无硬编码默认值约束。
+| 字段 | 类型 | 说明 | 约束 |
+|------|------|------|------|
+| `upline_rate` | `u16` | 上线收益率（基点） | ≤ 1000 (10%) |
+| `downline_rate` | `u16` | 下线收益率（基点） | ≤ 1000 (10%) |
+| `base_upline_levels` | `u8` | 基础上线层数 | ≤ max_upline_levels |
+| `base_downline_levels` | `u8` | 基础下线层数 | ≤ max_downline_levels |
+| `level_increment_threshold` | `Balance` | 每增加此收益额增加 1 层 | 0 = 不动态增长 |
+| `max_upline_levels` | `u8` | 上线层数上限 | — |
+| `max_downline_levels` | `u8` | 下线层数上限 | — |
 
-```rust
-pub struct SingleLineConfig<Balance> {
-    pub upline_rate: u16,              // 上线收益率（基点，10 = 0.1%，上限 1000）
-    pub downline_rate: u16,            // 下线收益率（基点，上限 1000）
-    pub base_upline_levels: u8,        // 基础上线层数（可自定义，建议 10）
-    pub base_downline_levels: u8,      // 基础下线层数（可自定义，建议 15）
-    pub level_increment_threshold: Balance, // 每增加此收益额，增加 1 层（可自定义）
-    pub max_upline_levels: u8,         // 最大上线层数（可自定义，建议 150）
-    pub max_downline_levels: u8,       // 最大下线层数（可自定义，建议 200）
-}
-```
+> **总佣金率约束：** `upline_rate × max_upline_levels + downline_rate × max_downline_levels ≤ MaxTotalRateBps`
 
-### LevelBasedLevels — 按会员等级自定义层数
+### LevelBasedLevels
 
-可通过 `set_level_based_levels` 为不同会员等级设定独立的基础层数，替代 `SingleLineConfig` 中的 `base_upline_levels` / `base_downline_levels`。
+按会员等级自定义层数，覆盖 `base_*_levels`。设置时校验 ≤ 对应 `max_*_levels`。
 
 ```rust
 pub struct LevelBasedLevels {
-    pub upline_levels: u8,   // 该等级的上线层数
-    pub downline_levels: u8, // 该等级的下线层数
+    pub upline_levels: u8,    // 不得超过 config.max_upline_levels
+    pub downline_levels: u8,  // 不得超过 config.max_downline_levels
 }
 ```
 
-优先级：等级覆盖 > config 基础值 > 默认值
+### PendingConfigChange
 
-### 层数动态增长
+延迟生效的配置变更。字段与 `SingleLineConfig` 相同，额外包含 `apply_after: BlockNumber`。
 
-```
-base = LevelBasedLevels(buyer等级) ?? SingleLineConfig.base_*_levels
+### ConfigChangeLogEntry
 
-实际上线层数 = min(base_upline + extra_levels, max_upline_levels)
-实际下线层数 = min(base_downline + extra_levels, max_downline_levels)
+每次配置变更自动追加的审计日志，包含完整配置快照和 `block_number`。
 
-extra_levels = total_earned / level_increment_threshold
-```
+### EntitySingleLineStatsData
 
-## Config
+Entity 级统计（每次佣金计算产生输出时自动更新）。
 
-```rust
-#[pallet::config]
-pub trait Config: frame_system::Config {
-    type RuntimeEvent: From<Event<Self>> + IsType<...>;
-    type Currency: Currency<Self::AccountId>;
-    /// 查询买家累计收益（从 core 的 MemberCommissionStats 读取）
-    type StatsProvider: SingleLineStatsProvider<Self::AccountId, BalanceOf<Self>>;
-    /// 查询买家会员等级 ID（可选，用于按等级自定义层数）
-    type MemberLevelProvider: SingleLineMemberLevelProvider<Self::AccountId>;
-    /// 实体查询接口（权限校验）
-    type EntityProvider: EntityProvider<Self::AccountId>;
-    /// 会员查询接口（is_banned 检查）
-    type MemberProvider: MemberProvider<Self::AccountId>;
-    #[pallet::constant]
-    type MaxSingleLineLength: Get<u32>;
-}
-```
+| 字段 | 说明 |
+|------|------|
+| `total_orders` | 产生过佣金输出的订单数 |
+| `total_upline_payouts` | 上线佣金发放次数 |
+| `total_downline_payouts` | 下线佣金发放次数 |
 
-### SingleLineStatsProvider Trait
+---
 
-```rust
-pub trait SingleLineStatsProvider<AccountId, Balance> {
-    fn get_member_stats(entity_id: u64, account: &AccountId) -> MemberCommissionStatsData<Balance>;
-}
-```
+## Config 常量
 
-由 core pallet 实现，提供会员累计收益数据用于动态层数计算。
+| 常量 | 类型 | 说明 | 推荐值 |
+|------|------|------|--------|
+| `MaxSingleLineLength` | `u32` | 每段最大账户数 | 200 |
+| `ConfigChangeDelay` | `BlockNumber` | 配置变更延迟区块数 | 视出块时间而定 |
+| `MaxSegmentCount` | `u32` | 单个 Entity 最大段数 | 1000 |
+| `MaxTotalRateBps` | `u32` | 总佣金率上限（基点²） | 10000~100000 |
 
-### SingleLineMemberLevelProvider Trait
-
-```rust
-pub trait SingleLineMemberLevelProvider<AccountId> {
-    fn custom_level_id(entity_id: u64, account: &AccountId) -> u8;
-}
-```
-
-返回买家的有效自定义等级 ID（考虑过期回退），用于查找 `SingleLineCustomLevelOverrides`。`()` 空实现返回 `0`（不区分等级）。
+---
 
 ## Storage
 
-| 存储项 | 类型 | 说明 |
-|--------|------|------|
-| `SingleLineConfigs` | `Map<u64, SingleLineConfig>` | 单线收益配置（entity_id → config） |
-| `SingleLineSegments` | `DoubleMap<u64, u32, BoundedVec<AccountId>>` | 分段消费单链（entity_id, segment_id → 按序账户列表） |
-| `SingleLineSegmentCount` | `Map<u64, u32>` | 单链段数（entity_id → 段计数） |
-| `SingleLineIndex` | `DoubleMap<u64, AccountId, u32>` | 用户在单链中的全局位置索引 |
-| `SingleLineCustomLevelOverrides` | `DoubleMap<u64, u8, LevelBasedLevels>` | 按等级自定义层数（entity_id, level_id → 层数） |
-| `SingleLineEnabled` | `Map<u64, bool>` | 单线收益启用状态（默认 true） |
+| 存储项 | 键 | 值 | 说明 |
+|--------|-----|-----|------|
+| `SingleLineConfigs` | `entity_id` | `SingleLineConfig` | 单线配置 |
+| `SingleLineSegments` | `(entity_id, seg_id)` | `BoundedVec<AccountId>` | 分段单链 |
+| `SingleLineSegmentCount` | `entity_id` | `u32` | 段数 |
+| `SingleLineIndex` | `(entity_id, account)` | `u32` | 全局位置索引 |
+| `SingleLineCustomLevelOverrides` | `(entity_id, level_id)` | `LevelBasedLevels` | 等级层数覆盖 |
+| `SingleLineEnabled` | `entity_id` | `bool` | 启用状态（默认 true） |
+| `PendingConfigChanges` | `entity_id` | `PendingConfigChange` | 待生效配置 |
+| `RemovedMembers` | `(entity_id, account)` | `bool` | 逻辑移除标记 |
+| `ConfigChangeLogs` | `(entity_id, idx)` | `ConfigChangeLogEntry` | 审计日志 |
+| `ConfigChangeLogCount` | `entity_id` | `u32` | 日志计数 |
+| `EntitySingleLineStats` | `entity_id` | `EntitySingleLineStatsData` | Entity 统计 |
+
+---
 
 ## Extrinsics
 
-| call_index | 方法 | 权限 | 说明 |
-|------------|------|------|------|
-| 0 | `set_single_line_config` | Owner/Admin | 设置单线收益配置 |
-| 1 | `clear_single_line_config` | Owner/Admin | 清除单线收益配置（级联清理 LevelOverrides） |
-| 2 | `update_single_line_params` | Owner/Admin | 部分更新配置参数 |
-| 3 | `set_level_based_levels` | Owner/Admin | 设置按等级自定义层数 |
-| 4 | `remove_level_based_levels` | Owner/Admin | 移除按等级自定义层数 |
-| 5 | `force_set_single_line_config` | Root | 强制设置单线收益配置（无权限检查） |
-| 6 | `force_clear_single_line_config` | Root | 强制清除单线收益配置（级联清理 LevelOverrides） |
-| 7 | `force_reset_single_line` | Root | 强制重置单链数据（清除所有段和索引） |
-| 8 | `pause_single_line` | Owner/Admin | 暂停单线收益计算 |
-| 9 | `resume_single_line` | Owner/Admin | 恢复单线收益计算 |
+### 配置管理
 
-> `upline_rate` 和 `downline_rate` 上限为 1000 基点（10%），建议设置 5-10 基点（0.05%-0.1%）避免资金压力。
+| idx | 方法 | 权限 | 说明 |
+|-----|------|------|------|
+| 0 | `set_single_line_config` | Owner/Admin | 设置完整配置 + 审计日志 |
+| 1 | `clear_single_line_config` | Owner/Admin | 清除配置，级联清理所有 LevelOverrides |
+| 2 | `update_single_line_params` | Owner/Admin | 部分更新（仅传需改字段），含交叉校验 |
+| 5 | `force_set_single_line_config` | Root | 绕过 Entity 状态检查 |
+| 6 | `force_clear_single_line_config` | Root | 绕过 Entity 状态检查 |
 
-### 权限模型
+### 配置变更延迟
 
-- **Owner/Admin**: Entity 所有者或拥有 `COMMISSION_MANAGE` 权限的管理员可调用 set/clear/update/set_level/remove_level
-- **Root**: `force_set` 和 `force_clear` 仅限 Root 调用，无 entity 权限检查
-- 被封禁会员（`is_banned`）在佣金计算时自动跳过（消耗层数但不发放）
+| idx | 方法 | 权限 | 说明 |
+|-----|------|------|------|
+| 10 | `schedule_config_change` | Owner/Admin | 提交新配置，`ConfigChangeDelay` 区块后可生效 |
+| 11 | `apply_pending_config` | **Anyone** | 过延迟期后任何人可触发生效 |
+| 12 | `cancel_pending_config` | Owner/Admin | 取消待生效配置 |
 
-## 计算逻辑
+流程：`schedule → 等待 N 区块 → apply`（或随时 `cancel`）
+
+### 等级层数管理
+
+| idx | 方法 | 权限 | 说明 |
+|-----|------|------|------|
+| 3 | `set_level_based_levels` | Owner/Admin | 设置等级自定义层数（校验 ≤ max） |
+| 4 | `remove_level_based_levels` | Owner/Admin | 移除指定等级的覆盖 |
+
+### 运维控制
+
+| idx | 方法 | 权限 | 说明 |
+|-----|------|------|------|
+| 8 | `pause_single_line` | Owner/Admin | 暂停佣金计算（不影响链数据） |
+| 9 | `resume_single_line` | Owner/Admin | 恢复佣金计算 |
+| 7 | `force_reset_single_line` | Root | 分批清理单链（`limit` 控制每批段数） |
+| 13 | `force_remove_from_single_line` | Root | 逻辑移除成员（遍历时跳过） |
+| 14 | `force_restore_to_single_line` | Root | 恢复已移除的成员 |
+
+---
+
+## 权限模型
 
 ```
-CommissionPlugin::calculate()
-    ↓ (SINGLE_LINE_UPLINE / SINGLE_LINE_DOWNLINE 位启用时)
-    ├── process_upline(): 从 buyer 位置向前遍历单链
-    ├── process_downline(): 从 buyer 位置向后遍历单链
-    └── 首次消费时自动加入单链（add_to_single_line）
+Owner/Admin（需 COMMISSION_MANAGE 权限）
+├── 配置 CRUD（0, 1, 2）
+├── 等级层数管理（3, 4）
+├── 暂停/恢复（8, 9）
+├── 调度/取消配置变更（10, 12）
+│
+│   全部受 EntityActive + EntityNotLocked 守卫
+
+Root（Sudo/治理）
+├── 强制配置（5, 6）         ← 无 Entity 状态检查
+├── 分批重置（7）
+├── 成员移除/恢复（13, 14）
+
+Anyone
+└── 应用到期配置（11）       ← 仅检查延迟期
 ```
 
-### 加入单链
+---
 
-- 未在链中的用户每次消费都自动尝试加入（`!SingleLineIndex::contains_key`）
-- 已在单链中的用户不会重复加入（幂等）
-- 段满时自动创建新段（`NewSegmentCreated` 事件），无需人工干预
+## 佣金计算流程
 
-## Token 多资产支持
+```
+CommissionPlugin::calculate(entity_id, buyer, order_amount, remaining, modes)
+│
+├── 前置检查
+│   ├── Entity 是否活跃？
+│   ├── 单线是否启用？
+│   └── 配置是否存在？
+│
+├── 预读 buyer_in_chain（避免末尾重复读取）
+│
+├── 计算有效层数
+│   └── effective_base_levels() → 等级覆盖 ?? config.base
+│
+├── SINGLE_LINE_UPLINE 启用时
+│   └── process_upline()
+│       ├── 从 buyer 位置向前遍历
+│       ├── 跳过：banned / unactivated / inactive / removed 成员
+│       ├── 佣金 = order_amount × rate / 10000，受 remaining 封顶
+│       └── 跨段边界时自动加载新段
+│
+├── SINGLE_LINE_DOWNLINE 启用时
+│   └── process_downline()（同理向后遍历）
+│
+├── 更新 EntitySingleLineStats
+│
+└── buyer 未在链中 → 自动加入（幂等）
+    └── 段满 → 创建新段（受 MaxSegmentCount 限制）
+```
 
-`process_upline` / `process_downline` 已泛型化为 `<B: AtLeast32BitUnsigned + Copy>`，NEX 和 Token 共用同一实现：
+---
 
-- `do_calculate<B>` 统一分发，`calculate` / `calculate_token` 各委托一行
-- `extra_levels` 计算仍基于 NEX `total_earned`（通过 `StatsProvider`），不使用 Token 收益
-- 单链维护（`add_to_single_line`）在 NEX 版和 Token 版的 `calculate`/`calculate_token` 中均触发（幂等，不重复加入）
+## 成员过滤
 
-## Trait 实现
+遍历时以下成员被跳过（消耗 depth 但不发佣金）：
 
-- **`CommissionPlugin`** — 由 core 调度引擎调用，配置和单链均按 `entity_id` 查询（跨店共享单链）
-- **`TokenCommissionPlugin`** — Token 多资产返佣计算
-- **`SingleLinePlanWriter`** — 治理集成接口，支持通过提案设置/清除配置
+| 条件 | 来源 |
+|------|------|
+| `is_banned` | MemberProvider |
+| `!is_activated` | MemberProvider |
+| `!is_member_active` | MemberProvider |
+| `RemovedMembers` | 本模块 `force_remove` |
+
+---
+
+## Query 辅助函数
+
+| 函数 | 返回 | 说明 |
+|------|------|------|
+| `single_line_length(entity_id)` | `u32` | 单链总长度 |
+| `single_line_remaining_capacity(entity_id)` | `u32` | 当前段剩余容量 |
+| `user_position(entity_id, account)` | `Option<u32>` | 用户全局位置 |
+| `user_effective_levels(entity_id, account)` | `Option<(u8, u8)>` | 有效上线/下线层数 |
+| `is_single_line_enabled(entity_id)` | `bool` | 是否启用 |
+| `preview_single_line_commission(entity_id, buyer, amount)` | `Vec<CommissionOutput>` | 预览佣金分配（无副作用） |
+
+---
 
 ## Events
 
-| 事件 | 说明 |
-|------|------|
-| `SingleLineConfigUpdated` | 单线收益配置更新 |
-| `SingleLineConfigCleared` | 单线收益配置已清除 |
-| `AddedToSingleLine` | 用户加入单链（entity_id, account, index） |
-| `SingleLineJoinFailed` | 单链加入失败（段满自动扩展后仍失败，理论上不应触发） |
-| `LevelBasedLevelsUpdated` | 按等级自定义层数已更新 |
-| `LevelBasedLevelsRemoved` | 按等级自定义层数已移除 |
-| `SingleLinePaused` | 单线收益已暂停 |
-| `SingleLineResumed` | 单线收益已恢复 |
-| `SingleLineReset` | 单链数据已重置（entity_id, removed_count） |
-| `NewSegmentCreated` | 新段已创建（entity_id, segment_id） |
-| `AllLevelOverridesCleared` | 所有等级层数覆盖已清除 |
+| 事件 | 触发时机 |
+|------|----------|
+| `SingleLineConfigUpdated` | 配置设置/更新/应用 |
+| `SingleLineConfigCleared` | 配置清除 |
+| `AddedToSingleLine` | 用户加入单链 |
+| `SingleLineJoinFailed` | 加入失败（段数达上限） |
+| `LevelBasedLevelsUpdated` | 等级覆盖设置 |
+| `LevelBasedLevelsRemoved` | 等级覆盖移除 |
+| `SingleLinePaused` | 暂停 |
+| `SingleLineResumed` | 恢复 |
+| `SingleLineReset` | 本批次清除完成（含 removed_count） |
+| `SingleLineResetCompleted` | 全部段清除完成 |
+| `NewSegmentCreated` | 新段创建 |
+| `AllLevelOverridesCleared` | 所有等级覆盖被级联清除 |
+| `ConfigChangeScheduled` | 配置变更已调度 |
+| `PendingConfigApplied` | 待生效配置已应用 |
+| `PendingConfigCancelled` | 待生效配置已取消 |
+| `MemberRemovedFromSingleLine` | 成员逻辑移除 |
+| `MemberRestoredToSingleLine` | 成员恢复 |
+
+---
 
 ## Errors
 
-| 错误 | 说明 |
+| 错误 | 触发条件 |
+|------|----------|
+| `InvalidRate` | rate > 1000 |
+| `InvalidLevels` | upline_levels 和 downline_levels 同时为 0 |
+| `BaseLevelsExceedMax` | base > max |
+| `RatesTooHigh` | 总佣金率超 MaxTotalRateBps |
+| `LevelOverrideExceedsMax` | 等级覆盖层数 > config max |
+| `EntityNotFound` | entity_owner 返回 None |
+| `NotEntityOwnerOrAdmin` | 非 Owner 且无 COMMISSION_MANAGE |
+| `ConfigNotFound` | 清除/更新时配置不存在 |
+| `NothingToUpdate` | update_params 所有参数均为 None |
+| `EntityLocked` | Entity 已锁定 |
+| `EntityNotActive` | Entity 未激活 |
+| `SingleLineIsPaused` | 重复暂停 |
+| `SingleLineNotPaused` | 未暂停时恢复 |
+| `PendingConfigAlreadyExists` | 已有待生效配置 |
+| `PendingConfigNotFound` | 无待生效配置 |
+| `PendingConfigNotReady` | 延迟期未到 |
+| `MemberNotInSingleLine` | 移除/恢复时成员不在链中 |
+| `MaxSegmentCountReached` | 段数达上限 |
+
+---
+
+## Trait 实现
+
+| Trait | 说明 |
+|-------|------|
+| `CommissionPlugin<AccountId, Balance>` | NEX 返佣计算入口 |
+| `TokenCommissionPlugin<AccountId, TB>` | Token 多资产返佣计算 |
+| `SingleLinePlanWriter` | 治理集成（复用 `validate_config` 校验） |
+
+---
+
+## 分批重置
+
+`force_reset_single_line(entity_id, limit)` 从末尾段开始逆序清理：
+
+```
+调用 1: limit=1 → 清理 Segment 2 (最后段), 发射 SingleLineReset
+调用 2: limit=1 → 清理 Segment 1, 发射 SingleLineReset
+调用 3: limit=1 → 清理 Segment 0, 发射 SingleLineReset + SingleLineResetCompleted
+```
+
+- 大链分多次调用，不阻塞区块
+- `limit = u32::MAX` 一次性全清（仅适用于小链）
+- 每段清理包括：删除段数据 + 移除所有成员的 `SingleLineIndex`
+
+---
+
+## 安全机制
+
+| 机制 | 说明 |
 |------|------|
-| `InvalidRate` | 收益率超过 1000 基点 |
-| `InvalidLevels` | upline_levels 和 downline_levels 不能同时为 0 |
-| `BaseLevelsExceedMax` | base_upline_levels > max_upline_levels 或 base_downline_levels > max_downline_levels |
-| `EntityNotFound` | 实体不存在 |
-| `NotEntityOwnerOrAdmin` | 调用者非 Entity Owner 或 Admin |
-| `ConfigNotFound` | 配置不存在（clear/update 时） |
-| `NothingToUpdate` | update_single_line_params 无参数待更新 |
-| `EntityLocked` | 实体已锁定，不允许修改 |
-| `EntityNotActive` | 实体未激活 |
-| `SingleLineIsPaused` | 单线收益已暂停（重复暂停时） |
-| `SingleLineNotPaused` | 单线收益未暂停（未暂停时恢复） |
+| **rate 上限** | 单项 ≤ 1000 基点（10%） |
+| **总佣金率上限** | rate × levels 总和 ≤ MaxTotalRateBps |
+| **base ≤ max** | 基础层数不得超过最大层数 |
+| **等级覆盖校验** | set_level_based_levels 时 ≤ config max |
+| **运行时 clamp** | 有效层数 = min(base + extra, max) |
+| **extra_levels 封顶** | .min(255) 防 u8 溢出 |
+| **saturating 算术** | 全部使用饱和运算 |
+| **段数上限** | MaxSegmentCount 防无限存储增长 |
+| **配置变更延迟** | 防止瞬时费率操控 |
+| **成员逻辑移除** | force_remove 不破坏链结构 |
+| **Entity 状态守卫** | 所有管理操作检查 active + not locked |
+| **WeightInfo** | 所有 extrinsic 使用 T::WeightInfo 计算 weight |
+| **StorageVersion** | v2，含 integrity_test |
 
-## 审计记录
-
-| ID | 级别 | 描述 |
-|----|------|------|
-| C2 | Critical | `process_upline`/`process_downline` 佣金计算使用 `beneficiary.total_earned * rate`（累计值，无限增长）。修复: 改为 `order_amount * rate / 10000`，添加 `order_amount` 参数 |
-| H4 | High | `calc_extra_levels` 中 `(earned/threshold) as u8` 可溢出。修复: 添加 `.min(255)` |
-| L1-R2 | Low | README trait 签名/存储名与代码不一致。修复: 同步 |
-| L2-R2 | Low | Cargo.toml 缺 `sp-runtime/runtime-benchmarks` 和 `sp-runtime/try-runtime` feature 传播。修复: 已添加 |
-| L3-R2 | Low | `process_downline`/`process_downline_token` 中 `buyer_index + i` 无限溢出检查。修复: 改用 `saturating_add` |
-| M1-R2 | Medium | `AddedToSingleLine` 事件已定义但 `add_to_single_line` 从未发射。修复: 成功加入后发射事件 |
-| M2-R2 | Medium | `set_single_line_config` 不校验 `base_levels <= max_levels`，允许不合逻辑配置。修复: 添加 `BaseLevelsExceedMax` 校验 |
-| M3-R2 | Medium | `SingleLines` 在启用 upline+downline 时被 `process_upline` 和 `process_downline` 各读取一次（需签名变更）。修复: `calculate`/`calculate_token` 预读取一次，传 `&line` 引用给 process 函数（R3 已实现） |
-| M1-R3 | Medium | 同 M3-R2 的实施轮次: NEX + Token 共 4 个 process 函数签名均增加 `line: &[T::AccountId]` 参数，消除冗余存储读取。R4 改为分段存储后按需加载段 |
-| L5-R3 | Low | Token 版 `_token` 函数与 NEX 版逻辑大量重复（~170 行）。修复: `process_upline`/`process_downline` 泛型化为 `<B: AtLeast32BitUnsigned + Copy>`，删除 `process_upline_token`/`process_downline_token`；新增 `do_calculate<B>` 统一分发，`calculate`/`calculate_token` 各委托一行 |
-| M1-R4 | Medium | `AllLevelOverridesCleared` 事件已定义但 `do_clear_all_level_overrides` 从未发射。修复: 清除后发射事件 |
-| M2-R4 | Medium | `calc_extra_levels` 有死 `else` 分支 — `threshold.is_zero()` 提前返回使 `threshold_u128 > 0` 检查恒为 true。修复: 移除死分支 |
-| M3-R4 | Medium | `pause_single_line`/`resume_single_line` 不检查 `EntityLocked`，与其他 extrinsic 不一致。修复: 添加 EntityLocked 检查 |
-| L1-R4 | Low | mock.rs 中 `NON_MEMBERS`/`set_non_member` 为死代码（随 `join_single_line` 删除）。修复: 已移除 |
-| L2-R4 | Low | README 过时（存储/Extrinsics/Events/Errors 表均不准确）。修复: 全面同步 |
-| L3-R4 | Low | `SingleLineJoinFailed` 事件注释称「需人工干预」但段满自动扩展使其不可达。修复: 更新注释 |
-
-### P0/P1 重构记录
-
-| ID | 级别 | 描述 |
-|----|------|------|
-| P0-权限 | 重构 | 权限下放: set/set_level/remove_level 从 Root 改为 Owner/Admin signed origin，新增 ensure_owner_or_admin 检查 |
-| P0-clear | 新增 | `clear_single_line_config` (Owner/Admin) + `force_clear_single_line_config` (Root) |
-| P0-force | 新增 | `force_set_single_line_config` (Root) — 无权限检查的配置设置 |
-| P0-ban | 新增 | process_upline/process_downline 跳过 is_banned 受益人（消耗层数但不发佣金） |
-| P1-update | 新增 | `update_single_line_params` 部分更新（upline_rate/downline_rate/threshold） |
-| P1-writer | 新增 | `SingleLinePlanWriter` trait 实现，支持治理提案设置/清除配置 |
-
-### Round 5（v0.5.0）— 审计修复
-
-| ID | 级别 | 描述 | 状态 |
-|----|------|------|------|
-| M1-R5 | Medium | `process_upline`/`process_downline` 缺少 `is_member_active` 检查（与 referral/multi-level 不一致） → 已添加 | ✅ 已修复 |
-| L1-R5 | Low | 未使用的 `sp-std` 依赖 → 已移除 | ✅ 已修复 |
-| L2-R5 | Low | 未使用的 `sp-core` dev-dependency → 已移除 | ✅ 已修复 |
-
-### 记录但未修复
-
-| ID | 级别 | 描述 |
-|----|------|------|
-| L4-D | Low | extrinsic 硬编码 Weight，无 WeightInfo trait |
-
-## 测试覆盖
-
-共 **140** 个单元测试。
+---
 
 ## 依赖
 
-```toml
-[dependencies]
-codec = { features = ["derive"] }
-scale-info = { features = ["derive"] }
-frame-support = { workspace = true }
-frame-system = { workspace = true }
-sp-runtime = { workspace = true }
-pallet-entity-common = { path = "../../common" }
-pallet-commission-common = { path = "../common" }
+| Crate | 用途 |
+|-------|------|
+| `frame-support` / `frame-system` | Substrate 框架 |
+| `sp-runtime` | 运行时原语 |
+| `pallet-entity-common` | EntityProvider / AdminPermission |
+| `pallet-commission-common` | CommissionPlugin / MemberProvider / CommissionOutput |
+
+---
+
+## 测试
+
+163 个单元测试，覆盖：
+- 配置 CRUD + 边界值 + 权限拒绝
+- 佣金计算（上线/下线/动态层数/remaining 封顶/跨段遍历）
+- 成员过滤（banned / unactivated / frozen / removed）
+- 配置变更延迟（schedule / apply / cancel / 过早 apply）
+- 分批重置（部分/完整/空链）
+- 成员移除与恢复
+- 等级覆盖（设置/移除/校验超限/运行时 clamp）
+- Plugin 集成（NEX + Token）
+- PlanWriter 集成
+- 审计日志 + Entity 统计
+- 段自动扩展 + 段数上限

@@ -57,6 +57,12 @@ impl<T: Config> Pallet<T> {
         if let Some(ref ref_account) = referrer {
             ensure!(ref_account != &who, Error::<T>::SelfReferral);
             ensure!(Self::has_operable_entity(ref_account), Error::<T>::InvalidReferrer);
+            // M1 审计修复: 预检推荐人容量（避免创建后 try_push 失败导致浪费 gas）
+            let current = ReferrerEntities::<T>::get(ref_account);
+            ensure!(
+                (current.len() as u32) < T::MaxReferralsPerReferrer::get(),
+                Error::<T>::ReferrerIndexFull
+            );
         }
 
         // 计算初始金库资金（50 USDT 等值 NEX）
@@ -104,11 +110,23 @@ impl<T: Config> Pallet<T> {
         NextEntityId::<T>::put(entity_id.saturating_add(1));
 
         // 自动创建 Primary Shop（继承 Entity 名称，默认线上商城）
-        let _primary_shop_id = T::ShopProvider::create_primary_shop(
+        let primary_shop_id = T::ShopProvider::create_primary_shop(
             entity_id,
             entity.name.to_vec(),
             ShopType::OnlineStore,
         )?;
+
+        // M3 审计修复: 防御性设置 primary_shop_id
+        // 正常路径由 ShopProvider → register_shop 回调设置；此处兜底未回调的 ShopProvider 实现
+        if primary_shop_id > 0 {
+            Entities::<T>::mutate(entity_id, |e| {
+                if let Some(e) = e {
+                    if e.primary_shop_id == 0 && EntityShops::<T>::get(entity_id).contains(&primary_shop_id) {
+                        e.primary_shop_id = primary_shop_id;
+                    }
+                }
+            });
+        }
 
         // 更新统计（付费即激活，无需审批）
         EntityStats::<T>::mutate(|stats| {
@@ -320,6 +338,13 @@ impl<T: Config> Pallet<T> {
         EntityShops::<T>::remove(entity_id);
         EntitySales::<T>::remove(entity_id);
 
+        // M2 审计修复: 清理推荐关系（释放推荐人的 MaxReferralsPerReferrer 配额）
+        if let Some(referrer) = EntityReferrer::<T>::take(entity_id) {
+            ReferrerEntities::<T>::mutate(&referrer, |entities| {
+                entities.retain(|&id| id != entity_id);
+            });
+        }
+
         T::OnEntityStatusChange::on_entity_closed(entity_id);
 
         fund_refunded
@@ -332,6 +357,13 @@ impl<T: Config> Pallet<T> {
         ensure!(entity.owner == who, Error::<T>::NotEntityOwner);
         ensure!(!T::GovernanceProvider::is_governance_locked(entity_id), Error::<T>::EntityLocked);
         ensure!(entity.status == EntityStatus::Closed, Error::<T>::InvalidEntityStatus);
+
+        // H1 审计修复: 预占名称索引（防止 Pending 期间名称被抢注）
+        let normalized_name = Self::normalize_entity_name(&entity.name)?;
+        ensure!(
+            !EntityNameIndex::<T>::contains_key(&normalized_name),
+            Error::<T>::NameAlreadyTaken
+        );
 
         // M2 审计修复: 预检查用户容量，避免已满时白付 gas
         let user_entities = UserEntity::<T>::get(&who);
@@ -359,6 +391,9 @@ impl<T: Config> Pallet<T> {
                 e.status = EntityStatus::Pending;
             }
         });
+
+        // H1 审计修复: 写入名称索引预占
+        EntityNameIndex::<T>::insert(&normalized_name, entity_id);
 
         // M2: 清除 OwnerPaused 标记（新生命周期干净起步）
         OwnerPaused::<T>::remove(entity_id);

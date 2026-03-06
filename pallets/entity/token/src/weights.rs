@@ -42,6 +42,9 @@ pub trait WeightInfo {
     fn update_token_metadata() -> Weight;
     fn force_transfer() -> Weight;
     fn force_enable_token() -> Weight;
+    fn force_cancel_pending_dividends(n: u32) -> Weight;
+    fn approve_tokens() -> Weight;
+    fn transfer_from() -> Weight;
 }
 
 /// Weights for `pallet_entity_token` using the Substrate node and recommended hardware.
@@ -241,6 +244,30 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(1))
             .saturating_add(T::DbWeight::get().writes(1))
     }
+
+    /// Storage: EntityTokenConfigs (r:1), PendingDividends (r:n w:n), TotalPendingDividends (r:1 w:1)
+    fn force_cancel_pending_dividends(n: u32) -> Weight {
+        Weight::from_parts(80_000_000, 5_000)
+            .saturating_add(Weight::from_parts(5_000_000, 500).saturating_mul(n.into()))
+            .saturating_add(T::DbWeight::get().reads(2_u64.saturating_add(n.into())))
+            .saturating_add(T::DbWeight::get().writes(1_u64.saturating_add(n.into())))
+    }
+
+    /// Storage: EntityTokenConfigs (r:1), TokenApprovals (w:1)
+    fn approve_tokens() -> Weight {
+        Weight::from_parts(60_000_000, 4_000)
+            .saturating_add(T::DbWeight::get().reads(1))
+            .saturating_add(T::DbWeight::get().writes(1))
+    }
+
+    /// Storage: GlobalTokenPaused (r:1), TransfersFrozen (r:1), EntityTokenConfigs (r:1),
+    ///          TokenApprovals (r:1 w:1), Assets::balance (r:1), LockedTokens (r:1),
+    ///          ReservedTokens (r:1), Assets::transfer (w:2)
+    fn transfer_from() -> Weight {
+        Weight::from_parts(180_000_000, 8_000)
+            .saturating_add(T::DbWeight::get().reads(7))
+            .saturating_add(T::DbWeight::get().writes(3))
+    }
 }
 
 impl WeightInfo for () {
@@ -269,4 +296,7 @@ impl WeightInfo for () {
     fn update_token_metadata() -> Weight { Weight::from_parts(100_000_000, 6_000) }
     fn force_transfer() -> Weight { Weight::from_parts(120_000_000, 6_000) }
     fn force_enable_token() -> Weight { Weight::from_parts(50_000_000, 4_000) }
+    fn force_cancel_pending_dividends(_n: u32) -> Weight { Weight::from_parts(200_000_000, 8_000) }
+    fn approve_tokens() -> Weight { Weight::from_parts(60_000_000, 4_000) }
+    fn transfer_from() -> Weight { Weight::from_parts(180_000_000, 8_000) }
 }

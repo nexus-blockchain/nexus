@@ -8,6 +8,10 @@ fn bounded_name(s: &[u8]) -> BoundedVec<u8, MaxShopNameLength> {
     BoundedVec::try_from(s.to_vec()).unwrap()
 }
 
+fn bounded_cid(s: &[u8]) -> BoundedVec<u8, MaxCidLength> {
+    BoundedVec::try_from(s.to_vec()).unwrap()
+}
+
 /// 完整关闭流程：close_shop → 推进区块过宽限期 → finalize_close_shop
 fn close_and_finalize(who: u64, shop_id: u64) {
     assert_ok!(Shop::close_shop(RuntimeOrigin::signed(who), shop_id));
@@ -122,8 +126,7 @@ fn update_shop_works() {
             RuntimeOrigin::signed(1),
             1,
             Some(new_name.clone()),
-            None,
-            None,
+            None, None, None, None,
         ));
 
         let shop = Shop::shops(1).unwrap();
@@ -148,8 +151,7 @@ fn update_shop_fails_not_manager() {
                 RuntimeOrigin::signed(2),
                 1,
                 Some(bounded_name(b"Hacked Shop")),
-                None,
-                None,
+                None, None, None, None,
             ),
             Error::<Test>::NotAuthorized
         );
@@ -310,12 +312,11 @@ fn create_primary_shop_works() {
 
         assert!(Shop::shops(shop_id).is_some());
         let shop = Shop::shops(shop_id).unwrap();
-        assert!(shop.is_primary);
         assert_eq!(shop.entity_id, 1);
         assert_eq!(shop.status, ShopOperatingStatus::Active);
 
-        // is_primary_shop trait method
         assert!(<Shop as ShopProvider<u64>>::is_primary_shop(shop_id));
+        assert_eq!(Shop::entity_primary_shop(1), Some(shop_id));
     });
 }
 
@@ -346,9 +347,8 @@ fn normal_shop_is_not_primary() {
             1000,
         ));
 
-        let shop = Shop::shops(1).unwrap();
-        assert!(!shop.is_primary);
         assert!(!<Shop as ShopProvider<u64>>::is_primary_shop(1));
+        assert!(Shop::entity_primary_shop(1).is_none() || Shop::entity_primary_shop(1) != Some(1));
     });
 }
 
@@ -753,7 +753,7 @@ fn h2_update_shop_rejects_empty_logo_cid() {
 
         let empty_cid: BoundedVec<u8, MaxCidLength> = BoundedVec::default();
         assert_noop!(
-            Shop::update_shop(RuntimeOrigin::signed(1), 1, None, Some(Some(empty_cid)), None),
+            Shop::update_shop(RuntimeOrigin::signed(1), 1, None, Some(Some(empty_cid)), None, None, None),
             Error::<Test>::EmptyCid
         );
     });
@@ -769,7 +769,7 @@ fn h2_update_shop_rejects_empty_description_cid() {
 
         let empty_cid: BoundedVec<u8, MaxCidLength> = BoundedVec::default();
         assert_noop!(
-            Shop::update_shop(RuntimeOrigin::signed(1), 1, None, None, Some(Some(empty_cid))),
+            Shop::update_shop(RuntimeOrigin::signed(1), 1, None, None, Some(Some(empty_cid)), None, None),
             Error::<Test>::EmptyCid
         );
     });
@@ -785,7 +785,7 @@ fn h2_set_location_rejects_empty_address_cid() {
 
         let empty_cid: BoundedVec<u8, MaxCidLength> = BoundedVec::default();
         assert_noop!(
-            Shop::set_location(RuntimeOrigin::signed(1), 1, None, Some(Some(empty_cid)), None),
+            Shop::set_location(RuntimeOrigin::signed(1), 1, None, Some(Some(empty_cid))),
             Error::<Test>::EmptyCid
         );
     });
@@ -1000,14 +1000,13 @@ fn m3_update_points_config_emits_event() {
             RuntimeOrigin::signed(1), 1, Some(200), Some(300), None,
         ));
 
-        // M3: Should have emitted ShopUpdated event
         let events = System::events();
         assert!(events.iter().any(|e| {
             matches!(
                 e.event,
-                RuntimeEvent::Shop(crate::Event::ShopUpdated { shop_id: 1 })
+                RuntimeEvent::Shop(crate::Event::PointsConfigUpdated { shop_id: 1 })
             )
-        }), "update_points_config should emit ShopUpdated event");
+        }), "update_points_config should emit PointsConfigUpdated event");
 
         // Verify config was actually updated
         let config = Shop::shop_points_config(1).unwrap();
@@ -1085,7 +1084,7 @@ fn l1r3_update_shop_rejects_all_none() {
 
         // L1-R3: All-None update should be rejected
         assert_noop!(
-            Shop::update_shop(RuntimeOrigin::signed(1), 1, None, None, None),
+            Shop::update_shop(RuntimeOrigin::signed(1), 1, None, None, None, None, None),
             Error::<Test>::InvalidConfig
         );
     });
@@ -1110,81 +1109,6 @@ fn l2r3_update_points_config_rejects_all_none() {
             Shop::update_points_config(RuntimeOrigin::signed(1), 1, None, None, None),
             Error::<Test>::InvalidConfig
         );
-    });
-}
-
-// ============================================================================
-// P0: set_customer_service tests
-// ============================================================================
-
-#[test]
-fn p0_set_customer_service_works() {
-    new_test_ext().execute_with(|| {
-        assert_ok!(Shop::create_shop(
-            RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
-        ));
-
-        // Initially None
-        let shop = Shop::shops(1).unwrap();
-        assert!(shop.customer_service.is_none());
-
-        // Set customer service
-        assert_ok!(Shop::set_customer_service(RuntimeOrigin::signed(1), 1, Some(5)));
-        let shop = Shop::shops(1).unwrap();
-        assert_eq!(shop.customer_service, Some(5));
-
-        // Clear customer service
-        assert_ok!(Shop::set_customer_service(RuntimeOrigin::signed(1), 1, None));
-        let shop = Shop::shops(1).unwrap();
-        assert!(shop.customer_service.is_none());
-    });
-}
-
-#[test]
-fn p0_set_customer_service_fails_not_manager() {
-    new_test_ext().execute_with(|| {
-        assert_ok!(Shop::create_shop(
-            RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
-        ));
-
-        assert_noop!(
-            Shop::set_customer_service(RuntimeOrigin::signed(2), 1, Some(5)),
-            Error::<Test>::NotAuthorized
-        );
-    });
-}
-
-#[test]
-fn p0_set_customer_service_fails_closed_shop() {
-    new_test_ext().execute_with(|| {
-        assert_ok!(Shop::create_shop(
-            RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
-        ));
-        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
-
-        assert_noop!(
-            Shop::set_customer_service(RuntimeOrigin::signed(1), 1, Some(5)),
-            Error::<Test>::ShopAlreadyClosed
-        );
-    });
-}
-
-#[test]
-fn p0_set_customer_service_manager_can_set() {
-    new_test_ext().execute_with(|| {
-        assert_ok!(Shop::create_shop(
-            RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
-        ));
-        assert_ok!(Shop::add_manager(RuntimeOrigin::signed(1), 1, 2));
-
-        // Manager can set customer service
-        assert_ok!(Shop::set_customer_service(RuntimeOrigin::signed(2), 1, Some(5)));
-        let shop = Shop::shops(1).unwrap();
-        assert_eq!(shop.customer_service, Some(5));
     });
 }
 
@@ -1513,11 +1437,11 @@ fn update_shop_clear_logo_cid() {
 
         // Set logo_cid
         let cid: BoundedVec<u8, MaxCidLength> = BoundedVec::try_from(b"Qm123".to_vec()).unwrap();
-        assert_ok!(Shop::update_shop(RuntimeOrigin::signed(1), 1, None, Some(Some(cid)), None));
+        assert_ok!(Shop::update_shop(RuntimeOrigin::signed(1), 1, None, Some(Some(cid)), None, None, None));
         assert!(Shop::shops(1).unwrap().logo_cid.is_some());
 
         // Clear logo_cid with Some(None)
-        assert_ok!(Shop::update_shop(RuntimeOrigin::signed(1), 1, None, Some(None), None));
+        assert_ok!(Shop::update_shop(RuntimeOrigin::signed(1), 1, None, Some(None), None, None, None));
         assert!(Shop::shops(1).unwrap().logo_cid.is_none());
     });
 }
@@ -1531,11 +1455,11 @@ fn update_shop_clear_description_cid() {
         ));
 
         let cid: BoundedVec<u8, MaxCidLength> = BoundedVec::try_from(b"Qm456".to_vec()).unwrap();
-        assert_ok!(Shop::update_shop(RuntimeOrigin::signed(1), 1, None, None, Some(Some(cid))));
+        assert_ok!(Shop::update_shop(RuntimeOrigin::signed(1), 1, None, None, Some(Some(cid)), None, None));
         assert!(Shop::shops(1).unwrap().description_cid.is_some());
 
         // Clear with Some(None)
-        assert_ok!(Shop::update_shop(RuntimeOrigin::signed(1), 1, None, None, Some(None)));
+        assert_ok!(Shop::update_shop(RuntimeOrigin::signed(1), 1, None, None, Some(None), None, None));
         assert!(Shop::shops(1).unwrap().description_cid.is_none());
     });
 }
@@ -1549,30 +1473,12 @@ fn set_location_clear_address_cid() {
         ));
 
         let cid: BoundedVec<u8, MaxCidLength> = BoundedVec::try_from(b"QmAddr".to_vec()).unwrap();
-        assert_ok!(Shop::set_location(RuntimeOrigin::signed(1), 1, None, Some(Some(cid)), None));
+        assert_ok!(Shop::set_location(RuntimeOrigin::signed(1), 1, None, Some(Some(cid))));
         assert!(Shop::shops(1).unwrap().address_cid.is_some());
 
         // Clear with Some(None)
-        assert_ok!(Shop::set_location(RuntimeOrigin::signed(1), 1, None, Some(None), None));
+        assert_ok!(Shop::set_location(RuntimeOrigin::signed(1), 1, None, Some(None)));
         assert!(Shop::shops(1).unwrap().address_cid.is_none());
-    });
-}
-
-#[test]
-fn set_location_clear_business_hours_cid() {
-    new_test_ext().execute_with(|| {
-        assert_ok!(Shop::create_shop(
-            RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
-        ));
-
-        let cid: BoundedVec<u8, MaxCidLength> = BoundedVec::try_from(b"QmHrs".to_vec()).unwrap();
-        assert_ok!(Shop::set_location(RuntimeOrigin::signed(1), 1, None, None, Some(Some(cid))));
-        assert!(Shop::shops(1).unwrap().business_hours_cid.is_some());
-
-        // Clear with Some(None)
-        assert_ok!(Shop::set_location(RuntimeOrigin::signed(1), 1, None, None, Some(None)));
-        assert!(Shop::shops(1).unwrap().business_hours_cid.is_none());
     });
 }
 
@@ -1585,12 +1491,12 @@ fn update_shop_none_does_not_change_cid() {
         ));
 
         let cid: BoundedVec<u8, MaxCidLength> = BoundedVec::try_from(b"Qm123".to_vec()).unwrap();
-        assert_ok!(Shop::update_shop(RuntimeOrigin::signed(1), 1, None, Some(Some(cid.clone())), None));
+        assert_ok!(Shop::update_shop(RuntimeOrigin::signed(1), 1, None, Some(Some(cid.clone())), None, None, None));
 
         // None = no change, logo_cid should remain
         assert_ok!(Shop::update_shop(
             RuntimeOrigin::signed(1), 1,
-            Some(bounded_name(b"New Name")), None, None,
+            Some(bounded_name(b"New Name")), None, None, None, None,
         ));
         assert_eq!(Shop::shops(1).unwrap().logo_cid, Some(cid));
     });
@@ -1928,14 +1834,11 @@ fn f4_set_primary_shop_works() {
             bounded_name(b"Secondary"), ShopType::OnlineStore, 500,
         ));
 
-        assert!(Shop::shops(1).unwrap().is_primary);
-        assert!(!Shop::shops(2).unwrap().is_primary);
+        assert_eq!(Shop::entity_primary_shop(1), Some(1));
 
-        // Switch primary to shop 2
         assert_ok!(Shop::set_primary_shop(RuntimeOrigin::signed(1), 1, 2));
 
-        assert!(!Shop::shops(1).unwrap().is_primary);
-        assert!(Shop::shops(2).unwrap().is_primary);
+        assert_eq!(Shop::entity_primary_shop(1), Some(2));
     });
 }
 
@@ -2584,145 +2487,163 @@ fn force_close_shop_cleans_points_max_supply() {
 }
 
 // ============================================================================
-// set_business_hours (call_index 25) tests
+// update_shop: business_hours_cid / policies_cid via update_shop
 // ============================================================================
 
-fn bounded_cid(s: &[u8]) -> BoundedVec<u8, MaxCidLength> {
-    BoundedVec::try_from(s.to_vec()).unwrap()
-}
-
 #[test]
-fn set_business_hours_works() {
+fn update_shop_business_hours_works() {
     new_test_ext().execute_with(|| {
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
             bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
 
-        // Set business hours
         let cid = bounded_cid(b"QmBusinessHours123");
-        assert_ok!(Shop::set_business_hours(RuntimeOrigin::signed(1), 1, Some(cid.clone())));
+        assert_ok!(Shop::update_shop(
+            RuntimeOrigin::signed(1), 1,
+            None, None, None, Some(Some(cid.clone())), None,
+        ));
         assert_eq!(Shop::shops(1).unwrap().business_hours_cid, Some(cid));
 
-        // Clear business hours
-        assert_ok!(Shop::set_business_hours(RuntimeOrigin::signed(1), 1, None));
+        assert_ok!(Shop::update_shop(
+            RuntimeOrigin::signed(1), 1,
+            None, None, None, Some(None), None,
+        ));
         assert_eq!(Shop::shops(1).unwrap().business_hours_cid, None);
     });
 }
 
 #[test]
-fn set_business_hours_manager_can_call() {
-    new_test_ext().execute_with(|| {
-        assert_ok!(Shop::create_shop(
-            RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
-        ));
-        assert_ok!(Shop::add_manager(RuntimeOrigin::signed(1), 1, 4));
-
-        // Manager can set business hours
-        assert_ok!(Shop::set_business_hours(
-            RuntimeOrigin::signed(4), 1, Some(bounded_cid(b"QmHours"))
-        ));
-        assert!(Shop::shops(1).unwrap().business_hours_cid.is_some());
-    });
-}
-
-#[test]
-fn set_business_hours_rejects_empty_cid() {
+fn update_shop_policies_works() {
     new_test_ext().execute_with(|| {
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
             bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
 
-        assert_noop!(
-            Shop::set_business_hours(RuntimeOrigin::signed(1), 1, Some(bounded_cid(b""))),
-            Error::<Test>::EmptyCid
-        );
-    });
-}
-
-#[test]
-fn set_business_hours_rejects_closed_shop() {
-    new_test_ext().execute_with(|| {
-        assert_ok!(Shop::create_shop(
-            RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
-        ));
-        close_and_finalize(1, 1);
-
-        assert_noop!(
-            Shop::set_business_hours(RuntimeOrigin::signed(1), 1, Some(bounded_cid(b"QmHours"))),
-            Error::<Test>::ShopAlreadyClosed
-        );
-    });
-}
-
-#[test]
-fn set_business_hours_rejects_unauthorized() {
-    new_test_ext().execute_with(|| {
-        assert_ok!(Shop::create_shop(
-            RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
-        ));
-
-        assert_noop!(
-            Shop::set_business_hours(RuntimeOrigin::signed(5), 1, Some(bounded_cid(b"QmHours"))),
-            Error::<Test>::NotAuthorized
-        );
-    });
-}
-
-// ============================================================================
-// set_shop_policies (call_index 26) tests
-// ============================================================================
-
-#[test]
-fn set_shop_policies_works() {
-    new_test_ext().execute_with(|| {
-        assert_ok!(Shop::create_shop(
-            RuntimeOrigin::signed(1), 1,
-            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
-        ));
-
-        // Set policies
         let cid = bounded_cid(b"QmReturnPolicy123");
-        assert_ok!(Shop::set_shop_policies(RuntimeOrigin::signed(1), 1, Some(cid.clone())));
+        assert_ok!(Shop::update_shop(
+            RuntimeOrigin::signed(1), 1,
+            None, None, None, None, Some(Some(cid.clone())),
+        ));
         assert_eq!(Shop::shops(1).unwrap().policies_cid, Some(cid));
 
-        // Clear policies
-        assert_ok!(Shop::set_shop_policies(RuntimeOrigin::signed(1), 1, None));
+        assert_ok!(Shop::update_shop(
+            RuntimeOrigin::signed(1), 1,
+            None, None, None, None, Some(None),
+        ));
         assert_eq!(Shop::shops(1).unwrap().policies_cid, None);
     });
 }
 
 #[test]
-fn set_shop_policies_rejects_empty_cid() {
+fn update_shop_rejects_empty_business_hours_cid() {
     new_test_ext().execute_with(|| {
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
             bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
-
         assert_noop!(
-            Shop::set_shop_policies(RuntimeOrigin::signed(1), 1, Some(bounded_cid(b""))),
+            Shop::update_shop(
+                RuntimeOrigin::signed(1), 1,
+                None, None, None, Some(Some(bounded_cid(b""))), None,
+            ),
             Error::<Test>::EmptyCid
         );
     });
 }
 
 #[test]
-fn set_shop_policies_rejects_closed_shop() {
+fn update_shop_rejects_empty_policies_cid() {
     new_test_ext().execute_with(|| {
         assert_ok!(Shop::create_shop(
             RuntimeOrigin::signed(1), 1,
             bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
-        close_and_finalize(1, 1);
-
         assert_noop!(
-            Shop::set_shop_policies(RuntimeOrigin::signed(1), 1, Some(bounded_cid(b"QmPolicy"))),
-            Error::<Test>::ShopAlreadyClosed
+            Shop::update_shop(
+                RuntimeOrigin::signed(1), 1,
+                None, None, None, None, Some(Some(bounded_cid(b""))),
+            ),
+            Error::<Test>::EmptyCid
+        );
+    });
+}
+
+// ============================================================================
+// P0 Security: withdraw_operating_fund ban/closing protection
+// ============================================================================
+
+#[test]
+fn withdraw_operating_fund_rejects_banned() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
+        assert_noop!(
+            Shop::withdraw_operating_fund(RuntimeOrigin::signed(1), 1, 100),
+            Error::<Test>::ShopBanned
+        );
+    });
+}
+
+#[test]
+fn withdraw_operating_fund_rejects_closing() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
+        assert_noop!(
+            Shop::withdraw_operating_fund(RuntimeOrigin::signed(1), 1, 100),
+            Error::<Test>::ShopAlreadyClosing
+        );
+    });
+}
+
+#[test]
+fn transfer_shop_rejects_banned() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
+        assert_noop!(
+            Shop::transfer_shop(RuntimeOrigin::signed(1), 1, 2),
+            Error::<Test>::ShopBanned
+        );
+    });
+}
+
+#[test]
+fn deduct_operating_fund_rejects_banned() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
+        assert_noop!(
+            <Shop as ShopProvider<u64>>::deduct_operating_fund(1, 100),
+            Error::<Test>::ShopBanned
+        );
+    });
+}
+
+#[test]
+fn ban_shop_requires_reason() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        assert_noop!(
+            Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"")),
+            Error::<Test>::EmptyCid
         );
     });
 }
@@ -3117,7 +3038,7 @@ fn entity_locked_rejects_update_shop() {
         assert_noop!(
             Shop::update_shop(
                 RuntimeOrigin::signed(1), 1,
-                Some(bounded_name(b"New Name")), None, None,
+                Some(bounded_name(b"New Name")), None, None, None, None,
             ),
             Error::<Test>::EntityLocked
         );
@@ -3201,7 +3122,7 @@ fn ban_shop_works() {
             RuntimeOrigin::signed(1), 1,
             bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
-        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
         assert_eq!(Shop::shops(1).unwrap().status, ShopOperatingStatus::Banned);
     });
 }
@@ -3214,7 +3135,7 @@ fn ban_shop_rejects_non_root() {
             bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
         assert_noop!(
-            Shop::ban_shop(RuntimeOrigin::signed(1), 1),
+            Shop::ban_shop(RuntimeOrigin::signed(1), 1, bounded_cid(b"violation")),
             sp_runtime::DispatchError::BadOrigin
         );
     });
@@ -3227,9 +3148,9 @@ fn ban_shop_rejects_already_banned() {
             RuntimeOrigin::signed(1), 1,
             bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
-        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
         assert_noop!(
-            Shop::ban_shop(RuntimeOrigin::root(), 1),
+            Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")),
             Error::<Test>::ShopBanned
         );
     });
@@ -3248,7 +3169,7 @@ fn ban_shop_rejects_closed() {
         ));
         close_and_finalize(1, 2);
         assert_noop!(
-            Shop::ban_shop(RuntimeOrigin::root(), 2),
+            Shop::ban_shop(RuntimeOrigin::root(), 2, bounded_cid(b"violation")),
             Error::<Test>::ShopAlreadyClosed
         );
     });
@@ -3265,7 +3186,7 @@ fn unban_shop_restores_previous_status() {
         assert_ok!(Shop::pause_shop(RuntimeOrigin::signed(1), 1));
         assert_eq!(Shop::shops(1).unwrap().status, ShopOperatingStatus::Paused);
 
-        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
         assert_eq!(Shop::shops(1).unwrap().status, ShopOperatingStatus::Banned);
 
         // Unban should restore to Paused
@@ -3295,7 +3216,7 @@ fn resume_shop_rejects_banned() {
             RuntimeOrigin::signed(1), 1,
             bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
-        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
         assert_noop!(
             Shop::resume_shop(RuntimeOrigin::signed(1), 1),
             Error::<Test>::ShopBanned
@@ -3310,11 +3231,11 @@ fn banned_shop_blocks_update() {
             RuntimeOrigin::signed(1), 1,
             bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
-        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
         assert_noop!(
             Shop::update_shop(
                 RuntimeOrigin::signed(1), 1,
-                Some(bounded_name(b"New Name")), None, None,
+                Some(bounded_name(b"New Name")), None, None, None, None,
             ),
             Error::<Test>::ShopAlreadyClosed
         );
@@ -3328,7 +3249,7 @@ fn banned_shop_blocks_fund_operating() {
             RuntimeOrigin::signed(1), 1,
             bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
-        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
         assert_noop!(
             Shop::fund_operating(RuntimeOrigin::signed(1), 1, 500),
             Error::<Test>::ShopBanned
@@ -3343,7 +3264,7 @@ fn force_pause_rejects_banned() {
             RuntimeOrigin::signed(1), 1,
             bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
-        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
         assert_noop!(
             Shop::force_pause_shop(RuntimeOrigin::root(), 1),
             Error::<Test>::ShopBanned
@@ -3360,14 +3281,14 @@ fn entity_not_active_rejects_update_shop() {
             RuntimeOrigin::signed(1), 1,
             bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
         ));
-        // Entity 2 is not active (entity_exists=true but is_entity_active=false for entity 2 in mock)
-        // For entity 1, we use the mock that returns true for is_entity_active(1)
-        // To test entity not active, we need entity 3 which doesn't exist or a suspended entity
-        // The mock returns is_entity_active = entity_exists && status == Active
-        // Entity 1 is always active. Let's test with entity 1 shop but entity becomes inactive.
-        // Actually the mock has hardcoded entity_id == 1 as active. We cannot easily toggle this.
-        // Instead, test that the check IS present by confirming it compiles and works for the positive case.
-        // The entity active check is tested implicitly by the fact that create_shop succeeds for entity 1.
+        set_entity_suspended(1);
+        assert_noop!(
+            Shop::update_shop(
+                RuntimeOrigin::signed(1), 1,
+                Some(bounded_name(b"New Name")), None, None, None, None,
+            ),
+            Error::<Test>::EntityNotActive
+        );
     });
 }
 
@@ -3489,7 +3410,7 @@ fn m1_close_shop_rejects_banned() {
         ));
 
         // Root ban the shop
-        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
 
         // Owner tries to close — should be rejected
         assert_noop!(
@@ -3623,7 +3544,7 @@ fn m4_transfer_points_rejects_banned() {
         assert_ok!(Shop::manager_issue_points(RuntimeOrigin::signed(1), 1, 2, 500));
 
         // Ban the shop
-        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
 
         assert_noop!(
             Shop::transfer_points(RuntimeOrigin::signed(2), 1, 3, 100),
@@ -3649,7 +3570,7 @@ fn m4_redeem_points_rejects_banned() {
         assert_ok!(Shop::manager_issue_points(RuntimeOrigin::signed(1), 1, 4, 1000));
 
         // Ban the shop
-        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
 
         assert_noop!(
             Shop::redeem_points(RuntimeOrigin::signed(4), 1, 100),
@@ -3675,7 +3596,7 @@ fn m4_manager_burn_points_rejects_banned() {
         assert_ok!(Shop::manager_issue_points(RuntimeOrigin::signed(1), 1, 4, 500));
 
         // Ban the shop
-        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
 
         assert_noop!(
             Shop::manager_burn_points(RuntimeOrigin::signed(1), 1, 4, 100),
@@ -3700,7 +3621,7 @@ fn m4_issue_points_helper_rejects_banned() {
         ));
 
         // Ban the shop
-        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
 
         assert_noop!(
             Shop::issue_points(1, &4, 100),
@@ -3726,10 +3647,138 @@ fn m4_burn_points_helper_rejects_banned() {
         assert_ok!(Shop::issue_points(1, &4, 500));
 
         // Ban the shop
-        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
 
         assert_noop!(
             Shop::burn_points(1, &4, 100),
+            Error::<Test>::ShopBanned
+        );
+    });
+}
+
+/// M1: banned shop 不可添加管理员
+#[test]
+fn m1_add_manager_rejects_banned() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
+        assert_noop!(
+            Shop::add_manager(RuntimeOrigin::signed(1), 1, 2),
+            Error::<Test>::ShopAlreadyClosed
+        );
+    });
+}
+
+/// M1: banned shop 不可移除管理员
+#[test]
+fn m1_remove_manager_rejects_banned() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        assert_ok!(Shop::add_manager(RuntimeOrigin::signed(1), 1, 2));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
+        assert_noop!(
+            Shop::remove_manager(RuntimeOrigin::signed(1), 1, 2),
+            Error::<Test>::ShopAlreadyClosed
+        );
+    });
+}
+
+/// M2: banned shop 不可设为主店
+#[test]
+fn m2_set_primary_shop_rejects_banned() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Shop A"), ShopType::OnlineStore, 1000,
+        ));
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Shop B"), ShopType::OnlineStore, 1000,
+        ));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 2, bounded_cid(b"violation")));
+        assert_noop!(
+            Shop::set_primary_shop(RuntimeOrigin::signed(1), 1, 2),
+            Error::<Test>::ShopAlreadyClosed
+        );
+    });
+}
+
+/// M3: entity 非活跃时不可添加管理员
+#[test]
+fn m3_add_manager_rejects_entity_not_active() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        set_entity_suspended(1);
+        assert_noop!(
+            Shop::add_manager(RuntimeOrigin::signed(1), 1, 2),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+/// L1: transfer_points 自转账使用 SameEntity 错误码
+#[test]
+fn l1_transfer_points_self_transfer_error() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        let name: BoundedVec<u8, MaxPointsNameLength> = BoundedVec::try_from(b"Points".to_vec()).unwrap();
+        let symbol: BoundedVec<u8, MaxPointsSymbolLength> = BoundedVec::try_from(b"PTS".to_vec()).unwrap();
+        assert_ok!(Shop::enable_points(
+            RuntimeOrigin::signed(1), 1, name, symbol, 500, 1000, true,
+        ));
+        assert_ok!(Shop::issue_points(1, &4, 500));
+        assert_noop!(
+            Shop::transfer_points(RuntimeOrigin::signed(4), 1, 4, 100),
+            Error::<Test>::SameEntity
+        );
+    });
+}
+
+/// L2: update_shop_rating 拒绝 rating=0 和 rating>5
+#[test]
+fn l2_update_shop_rating_rejects_invalid_rating() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        assert_noop!(
+            <Shop as ShopProvider<u64>>::update_shop_rating(1, 0),
+            Error::<Test>::InvalidRating
+        );
+        assert_noop!(
+            <Shop as ShopProvider<u64>>::update_shop_rating(1, 6),
+            Error::<Test>::InvalidRating
+        );
+        assert_ok!(
+            <Shop as ShopProvider<u64>>::update_shop_rating(1, 5)
+        );
+    });
+}
+
+/// L3: trait resume_shop 对 banned shop 返回 ShopBanned 而非 ShopNotPaused
+#[test]
+fn l3_trait_resume_shop_returns_shop_banned() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
+        assert_noop!(
+            <Shop as ShopProvider<u64>>::resume_shop(1),
             Error::<Test>::ShopBanned
         );
     });

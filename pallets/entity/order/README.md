@@ -4,18 +4,23 @@
 
 ## 概述
 
-`pallet-entity-order` 是 NEXUS Entity 电商体系的核心交易模块，管理订单从下单到结算的完整生命周期。模块经过 9 轮深度审计，覆盖 19 个 extrinsics、7 个存储项、20 个事件、25 个错误码，共 136 个单元测试。
+`pallet-entity-order` 是 NEXUS Entity 电商体系的核心交易模块，管理订单从下单到结算的完整生命周期。覆盖 23 个 extrinsics、8 个存储项、23 个事件、40 个错误码，共 204 个单元测试。
 
 **核心能力：**
 
 - **双资产支付** — 买家可选择 NEX（原生代币）或 EntityToken（实体代币）支付
 - **按类别自动流程** — Digital 即时完成、Physical 需发货确认、Service 有独立服务流程
 - **资金安全托管** — NEX 通过 pallet-escrow 锁定，EntityToken 通过 reserve 冻结
-- **超时自动处理** — 基于 ExpiryQueue 的 O(K) 精确超时，发货/确认/服务/争议均自动兜底
-- **争议机制** — 买家申请退款 → 卖家同意/拒绝 → 超时自动退款（reject 限一次，防无限延期）
-- **会员联动** — 订单完成自动注册会员、更新消费额（NEX→USDT / Token→NEX→USDT 换算）、触发升级规则
-- **佣金联动** — NEX 订单触发 CommissionHandler，Token 订单触发 TokenCommissionHandler
+- **四重超时保护** — 发货 / 确认 / 服务 / 争议均有独立超时，基于 ExpiryQueue O(K) 精确调度
+- **争议机制** — 买家申请退款即设置初始超时 → 卖家可同意/拒绝（限一次） → 超时自动退款
+- **部分退款** — 治理可按比例部分退款（仅 NEX，通过 `Escrow::split_partial`）
+- **买家撤回争议** — 争议期间（卖家拒绝前）买家可主动撤回，恢复原状态
+- **会员联动** — 订单完成自动注册会员（含推荐人传递）、更新消费额、触发升级规则
+- **会员折扣** — 高等级会员自动享受价格折扣
+- **积分 / 购物余额抵扣** — NEX 订单支持用积分换折扣、购物余额直接抵扣
 - **商品可见性** — 支持 Public / MembersOnly / LevelGated 三级访问控制
+- **封禁检查** — 被 Entity 封禁的买家无法下单
+- **佣金联动** — NEX 订单触发 `CommissionHandler`，Token 订单触发 `TokenCommissionHandler`
 
 ## 商品类别与订单流程
 
@@ -24,28 +29,29 @@
 | **Digital** | 否 | 支付 → 自动完成 | 否 | 否 |
 | **Physical** | 是 | 支付 → 发货 → 确认收货 | 发货前 | 是 |
 | **Service** | 否 | 支付 → 开始服务 → 完成服务 → 确认 | 服务前 | 是 |
-| **Subscription** | 否 | 支付 → 超时自动退款 | 发货前 | 是 |
-| **Bundle** | 是 | 支付 → 发货 → 确认收货 | 发货前 | 是 |
-| **Other** | 是 | 支付 → 发货 → 确认收货 | 发货前 | 是 |
+| **Bundle** | 是 | 同 Physical | 发货前 | 是 |
+| **Other** | 是 | 同 Physical | 发货前 | 是 |
+| **Subscription** | — | 暂不支持（返回 `SubscriptionNotSupported`） | — | — |
+
+> `category_requires_shipping` 判定：Physical / Bundle / Other 需物流；`is_service_like` 判定：Service / Subscription 走服务流程。
 
 ## 架构依赖
 
 ```
 pallet-entity-order
-│
-├── pallet-escrow              NEX 资金托管（lock / transfer / refund / dispute）
-├── pallet-entity-common       共享类型（OrderStatus, PaymentAsset, ProductCategory, traits）
-│
-├── ShopProvider               店铺查询（exists, active, owner, entity_id, update_stats）
-├── ProductProvider            商品查询（price, stock, category, visibility, deduct/restore）
-├── EntityTokenProvider        代币操作（reserve, unreserve, repatriate, redeem, reward）
-├── CommissionHandler          NEX 佣金（on_order_completed / on_order_cancelled）
-├── TokenCommissionHandler     Token 佣金（on_token_order_completed / cancelled, fee_rate）
-├── ShoppingBalanceProvider    购物余额抵扣（consume_shopping_balance）
-├── MemberHandler              会员管理（auto_register, update_spent, check_upgrade_rules）
-├── MemberProvider             会员查询（is_member, get_effective_level）
-├── PricingProvider            NEX/USDT 定价（get_nex_usdt_price）
-└── TokenPriceProvider         Token/NEX 定价（get_token_price, is_reliable）
+├── pallet-escrow ────────── NEX 资金托管（lock / transfer / refund / split_partial / disputed / resolved）
+├── pallet-entity-common
+│   ├── ShopProvider ─────── 店铺查询（exists / active / owner / entity_id / stats）
+│   ├── ProductProvider ──── 商品查询（info / stock / deduct / restore）
+│   ├── EntityTokenProvider ─ 实体代币（reserve / unreserve / repatriate / redeem_for_discount）
+│   ├── ShoppingBalanceProvider ─ 购物余额抵扣（consume_shopping_balance）
+│   ├── MemberProvider ───── 会员查询（is_member / level / discount / banned）
+│   ├── OrderCommissionHandler ── NEX 佣金回调（on_order_completed / cancelled）
+│   ├── TokenOrderCommissionHandler ─ Token 佣金回调 + fee_rate + entity_account
+│   ├── OrderMemberHandler ── 会员写入（auto_register / update_spent / check_upgrade_rules）
+│   ├── PricingProvider ──── NEX/USDT 价格（get_nex_usdt_price）
+│   └── EntityTokenPriceProvider ─ Token/NEX 价格 + 可靠性判断
+└── pallet-balances ──────── 原生代币余额
 ```
 
 ## 资金流
@@ -53,75 +59,165 @@ pallet-entity-order
 ### NEX 支付
 
 ```
-下单:   买家钱包 ──lock_from──→ Escrow 托管
-             ↑
-        购物余额 ──consume──→ 买家钱包（先到账再锁入 Escrow）
-        积分抵扣 ──redeem──→ 减少 final_amount
+买家下单
+  ├─ 会员折扣: final_amount = total × (1 - discount_bps/10000)
+  ├─ 积分抵扣: final_amount -= redeem_for_discount(tokens)     [仅 token 启用时]
+  ├─ 购物余额: final_amount -= shopping_amount                 [抵扣后减少]
+  └─ Escrow:   lock_from(buyer, order_id, final_amount)
 
-完成:   Escrow ──transfer──→ 卖家 (total_amount - platform_fee)
-        Escrow ──transfer──→ PlatformAccount (platform_fee)
-        ──→ ShopProvider::update_shop_stats
-        ──→ CommissionHandler::on_order_completed（触发 NEX 返佣）
-        ──→ EntityToken::reward_on_purchase（发放购物积分）
-        ──→ MemberHandler::auto_register + update_spent + check_upgrade_rules（会员联动）
+订单完成
+  ├─ 卖家收入:  transfer_from_escrow(seller, amount - platform_fee)
+  ├─ 平台费:    transfer_from_escrow(platform_account, platform_fee)
+  ├─ 佣金触发:  CommissionHandler::on_order_completed
+  ├─ 购物奖励:  reward_on_purchase(buyer, total_amount)
+  ├─ 会员注册:  auto_register(buyer, referrer)
+  ├─ 消费更新:  update_spent(buyer, amount_usdt)    [NEX→USDT 换算]
+  ├─ 升级规则:  check_order_upgrade_rules
+  └─ 店铺统计:  update_shop_stats(seller_amount)
 
-取消:   Escrow ──refund_all──→ 买家（全额退回）
-        ──→ ProductProvider::restore_stock
-        ──→ CommissionHandler::on_order_cancelled
+取消/退款
+  ├─ Escrow:   refund_all(buyer) 或 split_partial(seller, buyer, bps)
+  ├─ 库存恢复: restore_stock(product_id, quantity)
+  ├─ 佣金取消: on_order_cancelled(order_id)
+  └─ 推荐人清理: OrderReferrer::remove
 ```
 
 ### EntityToken 支付
 
 ```
-下单:   EntityToken::reserve（冻结买家 Token）
+买家下单
+  └─ reserve(entity_id, buyer, final_amount)
 
-完成:   EntityToken::repatriate_reserved ──→ 卖家 (token_amount - token_fee)
-        EntityToken::repatriate_reserved ──→ entity_account (token_fee)
-        ──→ TokenCommissionHandler::on_token_order_completed（触发 Token 返佣）
-        ──→ 其余同 NEX（shop_stats / reward / member）
+订单完成
+  ├─ 卖家收入:  repatriate_reserved(buyer → seller, amount - token_fee)
+  ├─ 平台费:    repatriate_reserved(buyer → entity_account, token_fee)
+  │             [token_fee = amount × token_platform_fee_rate / 10000]
+  ├─ 佣金触发:  TokenCommissionHandler::on_token_order_completed
+  ├─ 消费更新:  Token→NEX→USDT 间接换算（仅 price reliable 时）
+  └─ 其余同 NEX
 
-取消:   EntityToken::unreserve ──→ 买家（解冻 Token）
-        ──→ ProductProvider::restore_stock
-        ──→ TokenCommissionHandler::on_token_order_cancelled
+取消/退款
+  └─ unreserve(entity_id, buyer, total_amount)
 ```
 
-> **平台费计算**：NEX 订单使用全局 `PlatformFeeRate`（StorageValue，默认 100 bps = 1%）；Token 订单使用 Entity 级 `TokenCommissionHandler::token_platform_fee_rate(entity_id)`，上限防御性截断至 10000 bps（100%）。
+## place_order 详细流程
 
-## Config
-
-```rust
-#[pallet::config]
-pub trait Config: frame_system::Config {
-    type RuntimeEvent;
-    type Currency: Currency<Self::AccountId>;
-    type Escrow: EscrowTrait<Self::AccountId, BalanceOf<Self>>;
-    type ShopProvider: ShopProvider<Self::AccountId>;
-    type ProductProvider: ProductProvider<Self::AccountId, BalanceOf<Self>>;
-    type EntityToken: EntityTokenProvider<Self::AccountId, BalanceOf<Self>>;
-    type CommissionHandler: OrderCommissionHandler<Self::AccountId, BalanceOf<Self>>;
-    type TokenCommissionHandler: TokenOrderCommissionHandler<Self::AccountId>;
-    type ShoppingBalance: ShoppingBalanceProvider<Self::AccountId, BalanceOf<Self>>;
-    type MemberHandler: OrderMemberHandler<Self::AccountId>;
-    type PricingProvider: PricingProvider;
-    type TokenPriceProvider: EntityTokenPriceProvider<Balance = BalanceOf<Self>>;
-    type MemberProvider: MemberProvider<Self::AccountId>;
-
-    #[pallet::constant]
-    type PlatformAccount: Get<Self::AccountId>;
-    #[pallet::constant]
-    type ShipTimeout: Get<BlockNumberFor<Self>>;          // 发货超时
-    #[pallet::constant]
-    type ConfirmTimeout: Get<BlockNumberFor<Self>>;       // 确认收货超时
-    #[pallet::constant]
-    type ServiceConfirmTimeout: Get<BlockNumberFor<Self>>; // 服务确认超时
-    #[pallet::constant]
-    type DisputeTimeout: Get<BlockNumberFor<Self>>;       // 争议超时（reject_refund 后自动退款）
-    #[pallet::constant]
-    type ConfirmExtension: Get<BlockNumberFor<Self>>;     // 确认延长时间（限一次）
-    #[pallet::constant]
-    type MaxCidLength: Get<u32>;                          // IPFS CID 最大字节数
-}
 ```
+1. ensure signed(buyer)
+2. ensure quantity > 0
+3. get_product_info(product_id)                    ─ 一次 read 获取全部字段
+4. ensure status == OnSale
+5. ensure quantity ∈ [min_order_quantity, max_order_quantity]  ─ 0 表示不限制
+6. ensure shop_exists(shop_id)
+7. ensure is_shop_active(shop_id)                  ─ ShopInactive 错误
+8. ensure seller ≠ buyer
+9. ensure referrer ≠ buyer && referrer ≠ seller
+10. ensure !is_banned(entity_id, buyer)
+11. get_effective_level → 可见性校验
+    ├─ Public: 通过
+    ├─ MembersOnly: ensure is_member
+    └─ LevelGated(n): ensure is_member && level ≥ n
+12. ensure stock ≥ quantity                        ─ stock=0 表示无限库存
+13. total_amount = price × quantity (checked_mul)
+14. 会员折扣 → 积分抵扣 → 购物余额抵扣（仅 Native）
+15. ensure final_amount > 0
+16. platform_fee = final_amount × PlatformFeeRate / 10000  ─ Token 订单 fee=0
+17. ensure product_category ≠ Subscription
+18. 需物流商品 ensure shipping_cid.is_some()
+19. 资金锁定: NEX→Escrow.lock_from / Token→reserve
+20. deduct_stock + add_sold_count
+21. Digital → 直接 Completed + do_complete_order
+    其他 → Paid + ExpiryQueue(ShipTimeout)
+22. 存储 referrer → OrderReferrer
+23. 更新 OrderStats.total_orders
+24. emit OrderCreated
+```
+
+## 状态机
+
+### Physical / Bundle / Other
+
+```
+[Paid] ──── buyer cancel_order ────→ [Cancelled]
+  │  ├───── seller seller_cancel ──→ [Cancelled]
+  │  ├───── buyer request_refund ──→ [Disputed]
+  │  ├───── Root force_refund ─────→ [Refunded]
+  │  ├───── Root force_complete ───→ [Completed]
+  │  ├───── Root force_partial ────→ [Refunded]
+  │  └───── ShipTimeout 到期 ──────→ [Refunded]  (auto)
+  │
+  └── seller ship_order ──→ [Shipped]
+       │  ├─ buyer confirm_receipt ──→ [Completed]
+       │  ├─ buyer request_refund ───→ [Disputed]
+       │  ├─ seller seller_refund ───→ [Refunded]
+       │  ├─ seller update_tracking
+       │  ├─ buyer extend_confirm
+       │  ├─ Root force_refund ──────→ [Refunded]
+       │  ├─ Root force_complete ────→ [Completed]
+       │  ├─ Root force_partial ─────→ [Refunded]
+       │  └─ ConfirmTimeout 到期 ────→ [Completed]  (auto)
+
+[Disputed]
+  ├─── seller approve_refund ────→ [Refunded]
+  ├─── seller reject_refund ─────→ [Disputed]  (设 deadline, 限一次)
+  ├─── buyer withdraw_dispute ───→ [Paid/Shipped]  (卖家拒绝前可撤回)
+  ├─── Root force_refund ────────→ [Refunded]
+  ├─── Root force_complete ──────→ [Completed]
+  ├─── Root force_partial ───────→ [Refunded]
+  └─── DisputeTimeout 到期 ──────→ [Refunded]  (auto, 含卖家不响应场景)
+```
+
+### Digital
+
+```
+[Completed]  (place_order 时直接完成，不可取消/退款)
+```
+
+### Service
+
+```
+[Paid] ──── buyer cancel_order ────→ [Cancelled]
+  │  ├───── seller seller_cancel ──→ [Cancelled]
+  │  ├───── buyer request_refund ──→ [Disputed]
+  │  ├───── Root force_* ──────────→ [Refunded/Completed]
+  │  └───── ShipTimeout 到期 ──────→ [Refunded]  (auto)
+  │
+  └── seller start_service ──→ [Shipped]
+       │  (service_started_at 记录)
+       │
+       ├── seller complete_service (service_completed_at 记录, 限一次)
+       │    │
+       │    ├── buyer confirm_service ──→ [Completed]
+       │    ├── buyer request_refund ───→ [Disputed]
+       │    └── ServiceConfirmTimeout ──→ [Completed]  (auto)
+       │
+       ├── buyer request_refund ───→ [Disputed]
+       └── ServiceConfirmTimeout ──→ [Refunded]  (服务未完成时 auto)
+```
+
+## 配置项
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `Currency` | trait | 原生代币 |
+| `Escrow` | trait | 托管接口 |
+| `ShopProvider` | trait | 店铺查询 |
+| `ProductProvider` | trait | 商品查询（含 stock / visibility / quantity limits） |
+| `EntityToken` | trait | 实体代币（reserve / unreserve / redeem / reward） |
+| `PlatformAccount` | AccountId | 平台费接收账户 |
+| `ShipTimeout` | BlockNumber | 发货超时（未发货自动退款） |
+| `ConfirmTimeout` | BlockNumber | 确认收货超时（未确认自动完成） |
+| `ServiceConfirmTimeout` | BlockNumber | 服务确认超时 |
+| `DisputeTimeout` | BlockNumber | 争议超时（卖家未响应/拒绝后自动退款） |
+| `ConfirmExtension` | BlockNumber | 确认延长时间（买家可延长一次） |
+| `CommissionHandler` | trait | NEX 佣金回调 |
+| `TokenCommissionHandler` | trait | Token 佣金回调 + fee_rate |
+| `ShoppingBalance` | trait | 购物余额抵扣 |
+| `MemberHandler` | trait | 会员注册 / 消费更新 / 升级规则 |
+| `PricingProvider` | trait | NEX/USDT 价格 |
+| `TokenPriceProvider` | trait | Token/NEX 价格 + 可靠性 |
+| `MemberProvider` | trait | 会员查询（等级/折扣/封禁/可见性） |
+| `MaxCidLength` | u32 | CID 最大长度 |
 
 ## 数据结构
 
@@ -129,290 +225,120 @@ pub trait Config: frame_system::Config {
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `id` | `u64` | 订单 ID（全局自增，checked_add 防溢出） |
+| `id` | `u64` | 订单 ID（自增） |
+| `entity_id` | `u64` | 所属 Entity ID（创建时快照） |
 | `shop_id` | `u64` | 店铺 ID |
 | `product_id` | `u64` | 商品 ID |
-| `buyer` | `AccountId` | 买家账户 |
-| `seller` | `AccountId` | 卖家账户 |
+| `buyer` | `AccountId` | 买家 |
+| `seller` | `AccountId` | 卖家（shop_owner 快照） |
 | `quantity` | `u32` | 购买数量 |
-| `unit_price` | `Balance` | 单价 |
-| `total_amount` | `Balance` | 实际支付金额（积分/购物余额抵扣后，checked_mul 防溢出） |
-| `platform_fee` | `Balance` | NEX 平台费（Token 订单此字段为 0） |
+| `unit_price` | `Balance` | 商品原始标价 |
+| `total_amount` | `Balance` | 实际支付金额（折扣/抵扣后） |
+| `platform_fee` | `Balance` | 平台费（NEX: amount×rate/10000, Token: 0） |
 | `product_category` | `ProductCategory` | 商品类别（决定流程） |
-| `requires_shipping` | `bool` | 是否需要物流 |
-| `shipping_cid` | `Option<BoundedVec<u8, MaxCidLength>>` | 收货地址 IPFS CID |
-| `tracking_cid` | `Option<BoundedVec<u8, MaxCidLength>>` | 物流信息 IPFS CID |
+| `shipping_cid` | `Option<BoundedVec>` | 收货地址 CID（IPFS） |
+| `tracking_cid` | `Option<BoundedVec>` | 物流追踪 CID |
 | `status` | `OrderStatus` | 订单状态 |
 | `created_at` | `BlockNumber` | 创建区块 |
-| `paid_at` | `Option<BlockNumber>` | 支付区块 |
 | `shipped_at` | `Option<BlockNumber>` | 发货区块 |
 | `completed_at` | `Option<BlockNumber>` | 完成区块 |
 | `service_started_at` | `Option<BlockNumber>` | 服务开始区块 |
-| `service_completed_at` | `Option<BlockNumber>` | 服务完成区块（卖家标记，限设置一次） |
-| `escrow_id` | `u64` | Escrow 托管 ID（= order_id） |
-| `payment_asset` | `PaymentAsset` | 支付资产类型：`Native` / `EntityToken` |
-| `token_payment_amount` | `u128` | Token 支付金额（仅 EntityToken 有效，u128 避免泛型膨胀） |
-| `confirm_extended` | `bool` | 买家是否已延长确认期限（限一次） |
-| `dispute_deadline` | `Option<BlockNumber>` | 争议超时截止区块（reject_refund 时设置，限一次） |
-| `note_cid` | `Option<BoundedVec<u8, MaxCidLength>>` | 买家备注 IPFS CID |
-
-### OrderStatus（pallet-entity-common）
-
-| 状态 | 说明 |
-|------|------|
-| `Paid` | 已支付，等待发货/服务 |
-| `Shipped` | 已发货 / 服务进行中 |
-| `Completed` | 已完成，资金已释放 |
-| `Cancelled` | 已取消，资金已退回 |
-| `Refunded` | 已退款 |
-| `Disputed` | 争议中（买家申请退款） |
-
-### PaymentAsset（pallet-entity-common）
-
-| 变体 | 说明 |
-|------|------|
-| `Native` | NEX 原生代币支付（通过 Escrow 托管） |
-| `EntityToken` | 实体代币支付（通过 reserve/unreserve 冻结） |
+| `service_completed_at` | `Option<BlockNumber>` | 服务完成区块（限设一次） |
+| `payment_asset` | `PaymentAsset` | 支付资产（Native / EntityToken） |
+| `token_payment_amount` | `u128` | Token 支付金额（避免泛型膨胀） |
+| `confirm_extended` | `bool` | 是否已延长确认期限（限一次） |
+| `dispute_rejected` | `bool` | 卖家是否已拒绝退款（限一次） |
+| `dispute_deadline` | `Option<BlockNumber>` | 争议截止区块（request_refund 设初始值，reject_refund 重置） |
+| `note_cid` | `Option<BoundedVec>` | 买家备注 CID |
+| `refund_reason_cid` | `Option<BoundedVec>` | 退款理由 CID |
 
 ### OrderStatistics
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `total_orders` | `u64` | 总下单数（含所有状态） |
-| `completed_orders` | `u64` | 已完成订单数 |
-| `total_volume` | `Balance` | NEX 累计交易额 |
-| `total_platform_fees` | `Balance` | NEX 累计平台费 |
-| `total_token_volume` | `u128` | Token 累计交易额 |
-| `total_token_platform_fees` | `u128` | Token 累计平台费 |
+| `total_orders` | `u64` | 总订单数 |
+| `completed_orders` | `u64` | 已完成数 |
+| `total_volume` | `Balance` | NEX 总交易额 |
+| `total_platform_fees` | `Balance` | NEX 总平台费 |
+| `total_token_volume` | `u128` | Token 总交易额 |
+| `total_token_platform_fees` | `u128` | Token 总平台费 |
 
-### OrderOperation（失败追踪枚举）
+### OrderOperation（失败事件追踪）
 
-用于 `OrderOperationFailed` 事件，标识哪个 best-effort 操作失败：
-
-| 变体 | 说明 |
-|------|------|
-| `EscrowRefund` | Escrow 退款失败 |
-| `StockRestore` | 库存恢复失败 |
-| `CommissionCancel` | 佣金取消通知失败 |
-| `CommissionComplete` | 佣金结算通知失败 |
-| `ShopStatsUpdate` | 店铺统计更新失败 |
-| `TokenReward` | 积分奖励发放失败 |
-| `MemberUpdate` | 会员消费更新失败 |
-| `AutoComplete` | 超时自动完成失败 |
-| `UpgradeRuleCheck` | 升级规则检查失败 |
-| `TokenPlatformFee` | Token 平台费分配失败 |
-| `MemberAutoRegister` | 会员自动注册失败 |
+```
+EscrowRefund | StockRestore | CommissionCancel | CommissionComplete
+ShopStatsUpdate | TokenReward | MemberUpdate | AutoComplete
+UpgradeRuleCheck | TokenPlatformFee | MemberAutoRegister
+```
 
 ## 存储项
 
-| 存储 | 类型 | 说明 |
-|------|------|------|
-| `PlatformFeeRate` | `StorageValue<u16>` | NEX 平台费率（基点，默认 100 = 1%，上限 1000 = 10%） |
-| `NextOrderId` | `StorageValue<u64>` | 下一个订单 ID（checked_add 防溢出） |
-| `Orders` | `StorageMap<u64, Order>` | 订单主表 |
-| `BuyerOrders` | `StorageMap<AccountId, BoundedVec<u64, 1000>>` | 买家订单索引（可 cleanup） |
-| `ShopOrders` | `StorageMap<u64, BoundedVec<u64, 10000>>` | 店铺订单索引（可 cleanup） |
-| `OrderStats` | `StorageValue<OrderStatistics>` | 全局统计（NEX + Token 分别追踪） |
-| `ExpiryQueue` | `StorageMap<BlockNumber, BoundedVec<u64, 500>>` | 超时检查队列（per-block 上限 500） |
+| 存储 | Key | Value | 说明 |
+|------|-----|-------|------|
+| `PlatformFeeRate` | — | `u16` (默认 100 bps) | NEX 平台费率，0=关闭 |
+| `NextOrderId` | — | `u64` | 自增订单 ID |
+| `Orders` | `u64` | `Order` | 订单详情 |
+| `BuyerOrders` | `AccountId` | `BoundedVec<u64, 1000>` | 买家订单索引 |
+| `ShopOrders` | `u64` | `BoundedVec<u64, 10000>` | 店铺订单索引 |
+| `OrderStats` | — | `OrderStatistics` | 全局统计 |
+| `ExpiryQueue` | `BlockNumber` | `BoundedVec<u64, 500>` | 到期检查队列 |
+| `OrderReferrer` | `u64` | `AccountId` | 订单推荐人（完成时消费） |
 
 ## Extrinsics
 
-### 买家操作
-
-| # | 调用 | Weight (ref_time / proof_size) | 说明 |
-|---|------|------|------|
-| 0 | `place_order(product_id, quantity, shipping_cid, use_tokens, use_shopping_balance, payment_asset, note_cid)` | 350M / 16K | 下单支付 |
-| 1 | `cancel_order(order_id)` | 250M / 12K | 取消订单（Paid 状态，非 Digital） |
-| 3 | `confirm_receipt(order_id)` | 300M / 12K | 确认收货（Shipped，非 Service） |
-| 4 | `request_refund(order_id, reason_cid)` | 150M / 8K | 申请退款（Paid/Shipped → Disputed） |
-| 8 | `confirm_service(order_id)` | 300M / 12K | 确认服务完成（Service 类，service_completed_at 已设置） |
-| 10 | `cleanup_buyer_orders()` | 100M / 8K | 清理终态订单索引，释放 BoundedVec 容量 |
-| 15 | `update_shipping_address(order_id, new_cid)` | 100M / 4K | 修改收货地址（Paid 状态，需物流） |
-| 16 | `extend_confirm_timeout(order_id)` | 100M / 4K | 延长确认期限（Shipped，非 Service，限一次） |
-
-### 卖家操作
-
-| # | 调用 | Weight (ref_time / proof_size) | 说明 |
-|---|------|------|------|
-| 2 | `ship_order(order_id, tracking_cid)` | 200M / 8K | 发货（Paid → Shipped，写入 ConfirmTimeout） |
-| 5 | `approve_refund(order_id)` | 250M / 12K | 同意退款（Disputed → Refunded） |
-| 6 | `start_service(order_id)` | 150M / 8K | 开始服务（Service 类，Paid → Shipped） |
-| 7 | `complete_service(order_id)` | 175M / 8K | 标记服务完成（Service 类，限一次） |
-| 11 | `reject_refund(order_id, reason_cid)` | 150M / 8K | 拒绝退款（设置 dispute_deadline，限一次） |
-| 12 | `seller_cancel_order(order_id, reason_cid)` | 250M / 12K | 卖家取消（Paid 状态，非 Digital） |
-| 17 | `cleanup_shop_orders(shop_id)` | 150M / 8K | 清理店铺终态订单索引 |
-| 18 | `update_tracking(order_id, tracking_cid)` | 100M / 4K | 更新物流信息（Shipped 状态） |
-
-### 治理操作（Root）
-
-| # | 调用 | Weight (ref_time / proof_size) | 说明 |
-|---|------|------|------|
-| 9 | `set_platform_fee_rate(new_rate)` | 20M / 2K | 设置 NEX 平台费率（≤ 1000 bps） |
-| 13 | `force_refund(order_id, reason_cid?)` | 300M / 12K | 强制退款（Paid/Shipped/Disputed） |
-| 14 | `force_complete(order_id, reason_cid?)` | 350M / 16K | 强制完成（Paid/Shipped/Disputed） |
-
-### place_order 详细流程
-
-```
- 1. quantity > 0
- 2. 商品校验：exists, on_sale, min/max_order_quantity
- 3. 可见性校验：复用已解析 shop_id → entity_id（M1-R9 优化）
-    Public 放行 / MembersOnly 需会员 / LevelGated 需等级
- 4. 库存校验：stock >= quantity（None = 无限）
- 5. 店铺校验：exists, active, buyer ≠ seller
- 6. 金额计算：price × quantity → total_amount（checked_mul 防溢出）
- 7. 积分抵扣（仅 Native）：redeem_for_discount → final_amount
- 8. 购物余额抵扣（仅 Native）：consume → 买家钱包到账 NEX
- 9. final_amount > 0 校验
-10. 平台费：Native = final_amount × PlatformFeeRate / 10000，Token = 0
-11. 资金锁定：Native → Escrow::lock_from / Token → EntityToken::reserve
-12. 扣减库存 + 增加销量
-13. 创建 Order 写入 Orders + BuyerOrders + ShopOrders
-14. NextOrderId checked_add 防溢出
-15. Digital → 直接 do_complete_order
-16. 其他 → ExpiryQueue[now + ShipTimeout]
-```
-
-### do_complete_order 内部流程
-
-```
-1. 资金释放
-   Native:  Escrow → 卖家(total - fee) + 平台(fee)
-   Token:   repatriate_reserved → 卖家(token - token_fee) + entity_account(token_fee)
-            token_fee = token_amount × token_platform_fee_rate / 10000（上限 10000 bps 防御）
-2. 订单标记 Completed + completed_at
-3. MemberHandler::auto_register（首购自动注册会员）
-4. MemberHandler::update_spent（消费额 → USDT 换算追踪）
-   Native:  amount_nex × nex_usdt_price / 10^12
-   Token:   token_amount × token_nex_price × nex_usdt_price / 10^12（需价格可靠）
-5. MemberHandler::check_order_upgrade_rules（升级规则检查）
-6. ShopProvider::update_shop_stats（店铺统计）
-7. CommissionHandler / TokenCommissionHandler（佣金分配）
-8. EntityToken::reward_on_purchase（积分奖励）
-9. OrderStats 更新（NEX / Token 分别追踪）
-```
-
-> 步骤 3-8 均为 best-effort：失败发射 `OrderOperationFailed` 事件，不阻塞主流程。
-
-## 内部辅助函数
-
-| 函数 | 说明 |
-|------|------|
-| `do_complete_order(order_id, &order)` | 完成订单：释放资金 + 会员 + 佣金 + 统计 |
-| `do_auto_refund(&order, order_id) → bool` | 统一自动退款：refund → restore_stock → cancel_commission → set Refunded → emit event |
-| `refund_by_asset(&order, order_id)` | 按支付资产退款：Native → Escrow refund，Token → unreserve |
-| `cancel_commission_by_asset(&order, order_id)` | 按支付资产取消佣金通知（best-effort） |
-
-## 状态机
-
-### Physical / Bundle / Other（需物流）
-
-```
-place_order ──→ [Paid] ──┬── ship_order ──→ [Shipped] ──┬── confirm_receipt ──→ [Completed]
-                         │                              │
-                         │                              ├── 确认超时 ──→ [Completed]
-                         │                              │
-                         │                              └── extend_confirm_timeout（延长一次）
-                         │
-                         ├── cancel_order ──→ [Cancelled]
-                         ├── seller_cancel_order ──→ [Cancelled]
-                         ├── 发货超时 ──→ [Refunded]（do_auto_refund）
-                         │
-                         └── request_refund ──→ [Disputed] ──┬── approve_refund ──→ [Refunded]
-                                                             ├── reject_refund（设 deadline，限一次）
-                                                             │     └── 争议超时 ──→ [Refunded]（do_auto_refund）
-                                                             ├── force_refund ──→ [Refunded]
-                                                             └── force_complete ──→ [Completed]
-```
-
-### Service
-
-```
-place_order ──→ [Paid] ──┬── start_service ──→ [Shipped] ──┬── complete_service（限一次）
-                         │                                  │     └── confirm_service ──→ [Completed]
-                         │                                  │           └── 服务确认超时 ──→ [Completed]
-                         │                                  │
-                         │                                  └── 服务完成超时 ──→ [Refunded]（do_auto_refund）
-                         │
-                         ├── cancel_order ──→ [Cancelled]
-                         ├── 服务开始超时 ──→ [Refunded]（do_auto_refund）
-                         │
-                         └── request_refund ──→ [Disputed] ──┬── approve_refund ──→ [Refunded]
-                                                             └── reject_refund → 争议超时 ──→ [Refunded]
-```
-
-### Digital
-
-```
-place_order ──→ [Completed]（即时完成，不可取消/退款）
-```
-
-## 超时自动处理（on_idle）
-
-`ExpiryQueue` 是以区块号为键的 `StorageMap`，每个区块槽位最多存储 500 个待检查订单 ID。`on_idle` 仅读取当前区块对应的队列，O(K) 复杂度。
-
-| 订单状态 | 触发条件 | 自动处理 |
-|----------|----------|----------|
-| `Paid`（任何非 Digital） | now ≥ created_at + ShipTimeout | `do_auto_refund`（退款 + 恢复库存） |
-| `Shipped` + Service（未完成） | now ≥ started_at + ServiceConfirmTimeout | `do_auto_refund`（卖家超时未完成服务） |
-| `Shipped`（已完成/非 Service） | now ≥ shipped_at + ConfirmTimeout | `do_complete_order`（自动确认） |
-| `Disputed` | now ≥ dispute_deadline | 解除争议锁定 + `do_auto_refund`（争议超时） |
-| 其他终态 | — | 跳过（已手动处理） |
-
-**运行约束：**
-
-- 每次最多处理 **20 个**订单
-- 最小剩余 weight：250M ref_time + 50M 余量
-- 空队列返回：`Weight::from_parts(5_000, 64)`（含 proof_size）
-- 权重精确报告（含 ref_time + proof_size 双维度）：
-  - 基础：50M ref_time + 4K proof_size
-  - 每个已处理订单：+200M ref_time + 8K proof_size
-  - 每个跳过订单：+25M ref_time + 2K proof_size
-
-## OrderProvider Trait
-
-供其他模块（commission、arbitration 等）查询订单信息：
-
-```rust
-impl OrderProvider<AccountId, Balance> for Pallet<T> {
-    fn order_exists(order_id: u64) -> bool;
-    fn order_buyer(order_id: u64) -> Option<AccountId>;
-    fn order_seller(order_id: u64) -> Option<AccountId>;
-    fn order_amount(order_id: u64) -> Option<Balance>;
-    fn order_shop_id(order_id: u64) -> Option<u64>;
-    fn is_order_completed(order_id: u64) -> bool;
-    fn is_order_disputed(order_id: u64) -> bool;
-    fn can_dispute(order_id: u64, who: &AccountId) -> bool;
-    fn order_token_amount(order_id: u64) -> Option<u128>;
-    fn order_payment_asset(order_id: u64) -> Option<PaymentAsset>;
-    fn order_completed_at(order_id: u64) -> Option<u64>;
-}
-```
+| # | 名称 | 调用者 | 说明 |
+|---|------|--------|------|
+| 0 | `place_order` | Buyer | 下单并支付，含可见性/库存/封禁/数量校验 |
+| 1 | `cancel_order` | Buyer | 取消订单（Paid 状态，非 Digital） |
+| 2 | `ship_order` | Seller | 发货（含 tracking_cid，非 Service 类） |
+| 3 | `confirm_receipt` | Buyer | 确认收货（Shipped 状态，非 Service 类） |
+| 4 | `request_refund` | Buyer | 申请退款 → Disputed + 设置 dispute_deadline |
+| 5 | `approve_refund` | Seller | 同意退款（Disputed 状态） |
+| 6 | `start_service` | Seller | 开始服务（Service 类，Paid 状态） |
+| 7 | `complete_service` | Seller | 标记服务完成（限一次） |
+| 8 | `confirm_service` | Buyer | 确认服务完成 |
+| 9 | `set_platform_fee_rate` | Root | 设置 NEX 平台费率（0-1000 bps） |
+| 10 | `cleanup_buyer_orders` | Buyer | 清理终态订单 ID，释放 BoundedVec 容量 |
+| 11 | `reject_refund` | Seller | 拒绝退款（限一次），重置 dispute_deadline |
+| 12 | `seller_cancel_order` | Seller | 卖家主动取消（Paid 状态，含 reason_cid） |
+| 13 | `force_refund` | Root | 强制退款（Paid/Shipped/Disputed） |
+| 14 | `force_complete` | Root | 强制完成（Paid/Shipped/Disputed） |
+| 15 | `update_shipping_address` | Buyer | 修改收货地址（Paid 状态） |
+| 16 | `extend_confirm_timeout` | Buyer | 延长确认期限（Shipped 状态，限一次） |
+| 17 | `cleanup_shop_orders` | ShopOwner | 清理店铺终态订单索引 |
+| 18 | `update_tracking` | Seller | 更新物流信息（Shipped 状态） |
+| 19 | `seller_refund_order` | Seller | 卖家主动退款（Shipped 状态） |
+| 20 | `force_partial_refund` | Root | 部分退款（仅 NEX，1-9999 bps） |
+| 21 | `withdraw_dispute` | Buyer | 撤回争议（卖家拒绝前），恢复原状态 |
+| 22 | `force_process_expirations` | Root | 手动处理指定区块的过期订单 |
 
 ## Events
 
 | 事件 | 字段 | 触发时机 |
-|------|------|----------|
-| `OrderCreated` | order_id, buyer, seller, amount, payment_asset, token_amount | place_order |
-| `OrderPaid` | order_id, escrow_id | place_order |
-| `OrderShipped` | order_id | ship_order |
-| `OrderCompleted` | order_id, seller_received, token_seller_received | confirm_receipt / confirm_service / 超时自动确认 / Digital 自动完成 |
-| `OrderCancelled` | order_id, amount, token_amount | cancel_order |
-| `OrderSellerCancelled` | order_id, amount, token_amount | seller_cancel_order |
-| `OrderRefunded` | order_id, amount, token_amount | approve_refund / force_refund / do_auto_refund |
-| `OrderDisputed` | order_id | request_refund |
-| `RefundRejected` | order_id | reject_refund |
-| `OrderForceRefunded` | order_id | force_refund |
-| `OrderForceCompleted` | order_id | force_complete |
-| `ServiceStarted` | order_id | start_service |
-| `ServiceCompleted` | order_id | complete_service |
-| `PlatformFeeRateUpdated` | old_rate, new_rate | set_platform_fee_rate |
-| `ShippingAddressUpdated` | order_id | update_shipping_address |
-| `TrackingInfoUpdated` | order_id | update_tracking |
-| `ConfirmTimeoutExtended` | order_id, new_deadline | extend_confirm_timeout |
-| `BuyerOrdersCleaned` | buyer, removed | cleanup_buyer_orders |
-| `ShopOrdersCleaned` | shop_id, removed | cleanup_shop_orders |
-| `OrderOperationFailed` | order_id, operation | best-effort 操作失败（需人工干预） |
+|------|------|---------|
+| `OrderCreated` | order_id, entity_id, buyer, seller, amount, payment_asset, token_amount | 下单成功 |
+| `OrderShipped` | order_id | 卖家发货 |
+| `OrderCompleted` | order_id, seller_received, token_seller_received | 订单完成（手动/自动） |
+| `OrderCancelled` | order_id, amount, token_amount | 买家取消 |
+| `OrderRefunded` | order_id, amount, token_amount | 退款完成（approve/auto/force） |
+| `OrderDisputed` | order_id | 买家申请退款 |
+| `OrderOperationFailed` | order_id, operation | best-effort 操作失败 |
+| `ServiceStarted` | order_id | 卖家开始服务 |
+| `ServiceCompleted` | order_id | 卖家标记服务完成 |
+| `PlatformFeeRateUpdated` | old_rate, new_rate | 治理更新费率 |
+| `BuyerOrdersCleaned` | buyer, removed | 买家清理订单索引 |
+| `RefundRejected` | order_id, reason_cid | 卖家拒绝退款 |
+| `OrderSellerCancelled` | order_id, amount, token_amount, reason_cid | 卖家主动取消 |
+| `OrderForceRefunded` | order_id, reason_cid? | 管理员强制退款 |
+| `OrderForceCompleted` | order_id, reason_cid? | 管理员强制完成 |
+| `ShippingAddressUpdated` | order_id | 买家修改收货地址 |
+| `ConfirmTimeoutExtended` | order_id, new_deadline | 买家延长确认期限 |
+| `ShopOrdersCleaned` | shop_id, removed | 店铺清理订单索引 |
+| `TrackingInfoUpdated` | order_id | 卖家更新物流信息 |
+| `OrderSellerRefunded` | order_id, amount, token_amount, reason_cid | 卖家主动退款 |
+| `OrderPartialRefunded` | order_id, refund_bps, reason_cid? | 管理员部分退款 |
+| `DisputeWithdrawn` | order_id | 买家撤回争议 |
+| `StaleExpirationsProcessed` | target_block, processed | 管理员手动处理过期 |
 
 ## Errors
 
@@ -420,56 +346,137 @@ impl OrderProvider<AccountId, Balance> for Pallet<T> {
 |------|------|
 | `OrderNotFound` | 订单不存在 |
 | `ProductNotFound` | 商品不存在 |
-| `ShopNotFound` | 店铺不存在或未激活 |
+| `ShopNotFound` | 店铺不存在 |
+| `ShopInactive` | 店铺存在但未激活（暂停/关闭） |
 | `NotOrderBuyer` | 调用者不是买家 |
 | `NotOrderSeller` | 调用者不是卖家 |
+| `NotShopOwner` | 不是店铺 Owner |
 | `InvalidOrderStatus` | 当前状态不允许此操作 |
 | `CannotCancelOrder` | 已发货 / 非 Paid 状态 |
 | `CannotBuyOwnProduct` | 买家 = 卖家 |
+| `CannotForceOrder` | 订单不在可强制操作的状态 |
 | `ProductNotOnSale` | 商品未上架 |
 | `InsufficientStock` | 库存不足 |
 | `InvalidQuantity` | 数量为 0 |
+| `QuantityBelowMinimum` | 低于最小购买数量 |
+| `QuantityAboveMaximum` | 超过最大购买数量 |
 | `InvalidAmount` | 抵扣后支付金额为 0 |
 | `CidTooLong` | CID 超过 MaxCidLength |
+| `EmptyReasonCid` | 退款理由 CID 为空 |
+| `EmptyTrackingCid` | 物流 CID 为空 |
+| `ShippingCidRequired` | 需物流但未提供收货地址 |
 | `Overflow` | 索引列表 / NextOrderId 溢出 |
+| `ExpiryQueueFull` | 该区块超时队列已满（500 上限） |
 | `DigitalProductCannotCancel` | 数字商品不可取消 |
 | `DigitalProductCannotRefund` | 数字商品不可退款 |
-| `NotServiceOrder` | 非 Service 类调用服务接口 |
-| `ServiceOrderCannotShip` | Service 类不可使用发货/收货/延长确认流程 |
-| `ShippingCidRequired` | 需物流但未提供收货地址 |
-| `EmptyTrackingCid` | 物流 CID 为空 |
-| `EmptyReasonCid` | 退款理由 CID 为空 |
+| `NotServiceLikeOrder` | 非 Service 类调用服务接口 |
+| `ServiceLikeOrderCannotShip` | Service 类不可使用发货/收货流程 |
 | `EntityTokenNotEnabled` | 实体代币未启用 |
 | `InsufficientTokenBalance` | Token 余额不足 |
 | `PlatformFeeRateTooHigh` | 费率超上限（max 1000 bps = 10%） |
-| `ExpiryQueueFull` | 该区块超时队列已满（500 上限） |
 | `NothingToClean` | 无可清理的终态订单 |
-| `NotShopOwner` | 不是店铺 Owner |
 | `AlreadyExtended` | 已延长过确认期限 |
-| `CannotForceOrder` | 订单不在可强制操作的状态 |
-| `QuantityBelowMinimum` | 购买数量 < 商品最小限制 |
-| `QuantityAboveMaximum` | 购买数量 > 商品最大限制 |
 | `ProductMembersOnly` | 商品仅对会员可见 |
 | `MemberLevelInsufficient` | 会员等级不足 |
 | `DisputeAlreadyRejected` | 争议已被拒绝（不可重复） |
+| `BuyerBanned` | 买家已被 Entity 封禁 |
+| `InvalidRefundBps` | 部分退款比例无效（需 1-9999 bps） |
+| `PartialRefundNotSupported` | Token 订单不支持部分退款 |
+| `InvalidReferrer` | 推荐人不能是买家或卖家自己 |
+| `SubscriptionNotSupported` | Subscription 类暂不支持 |
+
+## ExpiryQueue 超时处理
+
+```
+on_idle(now, remaining_weight)
+  │
+  ├─ 每个订单约 200M ref_time / 8KB proof_size
+  ├─ 每区块最多处理 20 个订单
+  │
+  └─ ExpiryQueue::get(now) → 遍历订单
+       │
+       ├─ [Paid]     → do_auto_refund（发货超时）
+       ├─ [Shipped]  → do_complete_order（确认超时自动完成）
+       │   └─ Service 未完成 → do_auto_refund（服务超时）
+       ├─ [Disputed] → 检查 dispute_deadline
+       │   └─ deadline 到达 → set_resolved + do_auto_refund
+       └─ 其他状态   → 跳过（已手动处理）
+```
+
+**队列条目生命周期：**
+
+| 操作 | 清理旧条目 | 写入新条目 |
+|------|-----------|-----------|
+| `place_order` | — | ShipTimeout（非 Digital） |
+| `ship_order` | ShipTimeout | ConfirmTimeout |
+| `start_service` | ShipTimeout | ServiceConfirmTimeout |
+| `complete_service` | ServiceConfirmTimeout | ServiceConfirmTimeout（重新计时） |
+| `extend_confirm_timeout` | ConfirmTimeout | ConfirmExtension |
+| `request_refund` | — | DisputeTimeout |
+| `reject_refund` | 旧 DisputeTimeout | 新 DisputeTimeout |
+| `withdraw_dispute` | DisputeTimeout | Ship/Confirm/ServiceTimeout（恢复） |
+
+## OrderProvider Trait 实现
+
+为外部 pallet 提供 18 个只读查询方法：
+
+```
+order_exists / order_buyer / order_seller / order_amount / order_shop_id
+is_order_completed / is_order_disputed / can_dispute
+order_token_amount / order_payment_asset / order_completed_at / order_status
+order_entity_id / order_product_id / order_quantity
+order_created_at / order_paid_at / order_shipped_at
+```
+
+## 内部函数
+
+| 函数 | 说明 |
+|------|------|
+| `category_requires_shipping` | Physical / Bundle / Other → true |
+| `is_service_like` | Service / Subscription → true |
+| `validate_reason_cid` | 非空 + 长度校验，返回 BoundedVec |
+| `validate_optional_reason_cid` | Option 版 CID 校验 |
+| `do_cancel_or_refund` | 退款 + 恢复库存 + 取消佣金 + 更新状态 + 清理推荐人 |
+| `do_complete_order` | 资金结算 + 会员 + 佣金 + 统计 + 奖励（best-effort） |
+| `cancel_commission_by_asset` | 按支付类型取消佣金 |
+| `refund_by_asset` | NEX→Escrow.refund_all / Token→unreserve |
+| `do_auto_refund` | do_cancel_or_refund + emit OrderRefunded |
+| `process_expired_orders` | ExpiryQueue 遍历 + 状态分支处理 |
 
 ## 安全设计
 
 | 防护 | 说明 |
 |------|------|
-| **溢出保护** | NextOrderId checked_add、total_amount checked_mul、BuyerOrders/ShopOrders try_push |
-| **重入防护** | complete_service 限调一次（service_completed_at guard）、reject_refund 限调一次（dispute_deadline guard） |
-| **自购保护** | buyer ≠ seller 校验 |
-| **空值防护** | tracking_cid / reason_cid 非空校验、CID 长度上界 MaxCidLength |
-| **Token 争议兼容** | Token 订单 request_refund 不调用 Escrow::set_disputed（Token 未使用 Escrow） |
-| **best-effort 模式** | 会员/佣金/统计等附属操作失败仅发事件，不回滚主流程 |
-| **权重精确报告** | on_idle 分 ref_time + proof_size 双维度报告，空队列也报告 proof_size |
+| **溢出保护** | NextOrderId checked_add、total_amount checked_mul、BoundedVec try_push |
+| **重入防护** | complete_service 限一次、reject_refund 限一次（dispute_rejected 标志） |
+| **争议超时保护** | request_refund 即设 dispute_deadline，卖家不响应也自动退款，reject 限一次防无限延期 |
+| **自购保护** | buyer ≠ seller |
+| **推荐人校验** | referrer ≠ buyer && referrer ≠ seller |
+| **封禁保护** | is_banned 校验阻止被封禁买家下单 |
+| **可见性保护** | MembersOnly / LevelGated 在 is_member 校验后才检查等级 |
+| **Token 争议兼容** | Token 订单 request_refund 不调用 Escrow::set_disputed |
+| **best-effort 模式** | 会员/佣金/统计/奖励等附属操作失败仅发事件，不回滚主流程 |
+| **entity_id 快照** | 订单创建时快照 entity_id，后续不再依赖 shop→entity 查询 |
+| **队列一致性** | ExpiryQueue 写入先于 Orders 更新，队列满时事务回滚 |
+| **费率上限** | NEX 平台费率 ≤ 1000 bps (10%)，Token 费率 ≤ 10000 bps (100%) 防御性上限 |
+
+## 已知限制
+
+- **ExpiryQueue 旧条目** — `ship_order` / `complete_service` / `extend_confirm_timeout` 会主动清理旧条目再追加新条目，但 `request_refund` 不清理 ShipTimeout 条目（在 on_idle 中被跳过，25M ref_time 开销）
+- **on_idle 处理上限** — 每区块最多处理 20 个到期订单。极端情况可积压，可通过 `force_process_expirations` 补偿
+- **ExpiryQueue 每区块上限 500** — 同一到期区块超过 500 个订单时 place_order 失败（`ExpiryQueueFull`）
+- **BuyerOrders 上限 1000** — 有 `cleanup_buyer_orders` 清理终态订单释放容量
+- **ShopOrders 上限 10000** — 有 `cleanup_shop_orders` 清理终态订单释放容量
+- **unit_price vs total_amount** — `unit_price` 是商品原始标价，`total_amount` 是实际扣款金额（经折扣/抵扣后），两者可能不同
+- **部分退款佣金处理** — `force_partial_refund` 全额取消佣金（而非按比例），因部分退款发生在完成前，佣金尚未发放。不恢复库存
+- **Subscription 暂不支持** — `place_order` 直接拒绝 Subscription 类别
+- **权重未 benchmark** — 当前使用硬编码估算值，上线前需完成 `frame_benchmarking`
 
 ## 测试
 
 ```bash
 cargo test -p pallet-entity-order
-# 136 tests
+# 204 tests
 ```
 
 ## 版本历史
@@ -477,12 +484,16 @@ cargo test -p pallet-entity-order
 | 版本 | 日期 | 变更 |
 |------|------|------|
 | v0.1.0 | 2026-01-31 | 从 pallet-mall 拆分，初始版本 |
-| v0.1.1 | 2026-02-05 | 重命名为 pallet-entity-order，适配 Entity-Shop 分离架构 |
-| v0.2.0 | 2026-02-09 | 深度审查修复：积分抵扣零额校验、佣金取消通知、DecodeWithMemTracking、ExpiryQueue 溢出保护、Weight 修正、服务类库存恢复 + 29 测试 |
-| v0.3.0 | 2026-03-04 | 深度审计 R4-R5：库存零值校验(H2)、空物流CID(H3)、服务超时保护(H4)、reward entity_id修复(M3)、log/std(M2)、Token消费额安全降级(H1-R5) + 71 测试 |
-| v0.4.0 | 2026-03-05 | 深度审计 R6-R8：complete_service防重复(M1-R6)、entity_id去重(L1-R6)、reject_refund防重复(H1-R8)、on_idle weight含跳过开销(M1-R8)、Token统计分别追踪(M2-R8)、token_fee_rate防御上限(M3-R8)、extend拒绝Service(L1-R8) + 131 测试 |
-| v0.5.0 | 2026-03-05 | 深度审计 R9：复用shop_id避免冗余调用(M1-R9)、空队列proof_size修复(M2-R9)、提取do_auto_refund消除重复代码(L1-R9)、测试注释修正(L2-R9) + 136 测试 |
+| v0.1.1 | 2026-02-05 | 重命名为 pallet-entity-order |
+| v0.2.0 | 2026-02-09 | 深度审查修复 + 29 测试 |
+| v0.3.0 | 2026-03-04 | 审计 R4-R5 + 71 测试 |
+| v0.4.0 | 2026-03-05 | 审计 R6-R8 + 131 测试 |
+| v0.5.0 | 2026-03-05 | 审计 R9 + 136 测试 |
+| v0.6.0 | 2026-03-06 | 审计 R10：entity_id 快照、冗余字段移除、OrderProvider 18 方法、可见性/封禁/折扣、部分退款、卖家退款、推荐人传递 |
+| v0.7.0 | 2026-03-06 | 审计 R11：force_partial_refund 修复、seller_refund 限 Shipped、referrer 校验、OrderReferrer 全路径清理 + 158 测试 |
+| v0.8.0 | 2026-03-06 | 审计 R12：dispute_deadline 初始化防资金锁定、购物余额抵扣修复、reason_cid 事件持久化、do_cancel_or_refund 重构 + 170 测试 |
+| v0.9.0 | 2026-03-06 | 审计 R13：ShopInactive 错误码、Mock 增强（可配置 visibility/quantity/shop_active/stock/redeem）、34 新测试覆盖积分抵扣/可见性/数量/店铺/队列/note_cid/库存跟踪 + 204 测试 |
 
 ## 许可证
 
-MIT License
+Apache-2.0

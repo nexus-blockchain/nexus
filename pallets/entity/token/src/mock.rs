@@ -129,6 +129,10 @@ thread_local! {
     /// P0: (entity_id, account) -> permission_mask
     static ENTITY_ADMINS: RefCell<HashMap<(u64, u64), u32>> = RefCell::new(HashMap::new());
     static ENTITY_LOCKED: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
+    /// R4: (entity_id) -> is_in_blackout
+    static BLACKOUT_PERIODS: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
+    /// R4: (entity_id, account) -> is_insider
+    static INSIDERS: RefCell<HashMap<(u64, u64), bool>> = RefCell::new(HashMap::new());
 }
 
 pub struct MockEntityProvider;
@@ -178,6 +182,28 @@ impl pallet_entity_token::EntityMemberProvider<u64> for MockMemberProvider {
     }
 }
 
+// ==================== Mock DisclosureProvider ====================
+
+pub struct MockDisclosureProvider;
+impl pallet_entity_common::DisclosureProvider<u64> for MockDisclosureProvider {
+    fn is_in_blackout(entity_id: u64) -> bool {
+        BLACKOUT_PERIODS.with(|b| b.borrow().contains(&entity_id))
+    }
+    fn is_insider(entity_id: u64, account: &u64) -> bool {
+        INSIDERS.with(|i| i.borrow().get(&(entity_id, *account)).copied().unwrap_or(false))
+    }
+    fn can_insider_trade(entity_id: u64, account: &u64) -> bool {
+        if !Self::is_insider(entity_id, account) {
+            return true;
+        }
+        !Self::is_in_blackout(entity_id)
+    }
+    fn get_disclosure_level(_entity_id: u64) -> pallet_entity_common::DisclosureLevel {
+        pallet_entity_common::DisclosureLevel::Basic
+    }
+    fn is_disclosure_overdue(_entity_id: u64) -> bool { false }
+}
+
 // ==================== pallet_entity_token ====================
 
 parameter_types! {
@@ -197,7 +223,7 @@ impl pallet_entity_token::Config for Test {
     type MaxDividendRecipients = ConstU32<50>;
     type KycProvider = MockKycProvider;
     type MemberProvider = MockMemberProvider;
-    type DisclosureProvider = pallet_entity_common::NullDisclosureProvider;
+    type DisclosureProvider = MockDisclosureProvider;
     type WeightInfo = ();
 }
 
@@ -246,6 +272,26 @@ pub fn remove_entity_admin(entity_id: u64, who: u64) {
     ENTITY_ADMINS.with(|a| a.borrow_mut().remove(&(entity_id, who)));
 }
 
+/// R4: 设置实体黑窗口期
+pub fn set_blackout_period(entity_id: u64) {
+    BLACKOUT_PERIODS.with(|b| b.borrow_mut().insert(entity_id));
+}
+
+/// R4: 清除黑窗口期
+pub fn clear_blackout_period(entity_id: u64) {
+    BLACKOUT_PERIODS.with(|b| b.borrow_mut().remove(&entity_id));
+}
+
+/// R4: 注册内幕人员
+pub fn set_insider(entity_id: u64, who: u64) {
+    INSIDERS.with(|i| i.borrow_mut().insert((entity_id, who), true));
+}
+
+/// R4: 移除内幕人员
+pub fn remove_insider(entity_id: u64, who: u64) {
+    INSIDERS.with(|i| i.borrow_mut().remove(&(entity_id, who)));
+}
+
 // ==================== Test Externalities Builder ====================
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
@@ -266,6 +312,8 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     MEMBERS.with(|m| m.borrow_mut().clear());
     ENTITY_ADMINS.with(|a| a.borrow_mut().clear());
     ENTITY_LOCKED.with(|l| l.borrow_mut().clear());
+    BLACKOUT_PERIODS.with(|b| b.borrow_mut().clear());
+    INSIDERS.with(|i| i.borrow_mut().clear());
 
     let mut ext = sp_io::TestExternalities::new(storage);
     ext.execute_with(|| {

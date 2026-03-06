@@ -39,10 +39,15 @@ extern crate alloc;
 thread_local! {
     static ENTITY_LOCKED: RefCell<BTreeSet<u64>> = RefCell::new(BTreeSet::new());
     static ENTITY_SHOPS: RefCell<alloc::collections::BTreeMap<u64, alloc::vec::Vec<u64>>> = RefCell::new(alloc::collections::BTreeMap::new());
+    static ENTITY_SUSPENDED: RefCell<BTreeSet<u64>> = RefCell::new(BTreeSet::new());
 }
 
 pub fn set_entity_locked(entity_id: u64) {
     ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id));
+}
+
+pub fn set_entity_suspended(entity_id: u64) {
+    ENTITY_SUSPENDED.with(|s| s.borrow_mut().insert(entity_id));
 }
 
 pub struct MockEntityProvider;
@@ -54,7 +59,9 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
     }
 
     fn is_entity_active(entity_id: u64) -> bool {
-        // Entity 1, 2 are active
+        if ENTITY_SUSPENDED.with(|s| s.borrow().contains(&entity_id)) {
+            return false;
+        }
         entity_id == 1 || entity_id == 2
     }
 

@@ -255,6 +255,11 @@ pub mod pallet {
                 T::MinInitialFundCos::get() <= T::MaxInitialFundCos::get(),
                 "MinInitialFundCos must be <= MaxInitialFundCos"
             );
+            // L1 审计修复: 确保 reopen → approve 路径资金校验不会因配置错误而死锁
+            assert!(
+                T::MinOperatingBalance::get() <= T::MinInitialFundCos::get(),
+                "MinOperatingBalance must be <= MinInitialFundCos"
+            );
             // L1-R13: 超时为 0 时 execute_close_timeout 可绕过治理审批
             assert!(
                 !T::CloseRequestTimeout::get().is_zero(),

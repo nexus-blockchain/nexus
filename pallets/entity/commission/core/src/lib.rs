@@ -21,13 +21,20 @@ pub use pallet_commission_common::{
     TokenCommissionPlugin, TokenCommissionRecord, MemberTokenCommissionStatsData,
     TokenTransferProvider as TokenTransferProviderT,
     ParticipationGuard,
+    MultiLevelQueryProvider, TeamQueryProvider, SingleLineQueryProvider,
+    PoolRewardQueryProvider, ReferralQueryProvider,
 };
-use sp_runtime::traits::Zero;
+use sp_runtime::traits::{Saturating, Zero};
+
+pub mod runtime_api;
 
 #[cfg(test)]
 mod mock;
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
 
 #[frame_support::pallet]
 pub mod pallet {
@@ -266,6 +273,21 @@ pub mod pallet {
         /// F7: 会员佣金关联订单 ID 上限（每个 (entity_id, account) 最多保留的 order_id 数）
         #[pallet::constant]
         type MaxMemberOrderIds: Get<u32>;
+
+        // ====================================================================
+        // 子模块查询接口（供 Runtime API 聚合）
+        // ====================================================================
+
+        /// 多级分销查询
+        type MultiLevelQuery: pallet_commission_common::MultiLevelQueryProvider<Self::AccountId>;
+        /// 团队业绩查询
+        type TeamQuery: pallet_commission_common::TeamQueryProvider<Self::AccountId, BalanceOf<Self>>;
+        /// 单线收益查询
+        type SingleLineQuery: pallet_commission_common::SingleLineQueryProvider<Self::AccountId>;
+        /// 沉淀池奖励查询
+        type PoolRewardQuery: pallet_commission_common::PoolRewardQueryProvider<Self::AccountId, BalanceOf<Self>, TokenBalanceOf<Self>>;
+        /// 推荐链返佣查询
+        type ReferralQuery: pallet_commission_common::ReferralQueryProvider<Self::AccountId, BalanceOf<Self>>;
     }
 
     /// 提现记录
@@ -624,6 +646,22 @@ pub mod pallet {
         ValueQuery,
     >;
 
+    /// 推荐人从每个直推买家获得的佣金累计 (entity_id, referrer, buyer) → Balance
+    ///
+    /// 仅追踪推荐链类型（DirectReward/FirstOrder/RepeatPurchase/FixedAmount）的佣金。
+    /// 在 credit_commission 中同步写入，cancel_commission 中同步扣减。
+    #[pallet::storage]
+    pub type ReferrerEarnedByBuyer<T: Config> = StorageNMap<
+        _,
+        (
+            NMapKey<Blake2_128Concat, u64>,         // entity_id
+            NMapKey<Blake2_128Concat, T::AccountId>, // referrer
+            NMapKey<Blake2_128Concat, T::AccountId>, // buyer
+        ),
+        BalanceOf<T>,
+        ValueQuery,
+    >;
+
     /// F20: 会员 NEX 提现历史 (entity_id, account) → BoundedVec<WithdrawalRecord>
     #[pallet::storage]
     pub type MemberWithdrawalHistory<T: Config> = StorageDoubleMap<
@@ -644,6 +682,38 @@ pub mod pallet {
         ValueQuery,
     >;
 
+    /// MISSING-3: 会员 NEX 最后提现区块 (entity_id, account) → BlockNumber
+    /// 与 MemberLastCredited（入账时间）独立，用于提现频率限制
+    #[pallet::storage]
+    pub type MemberLastWithdrawn<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat, u64,
+        Blake2_128Concat, T::AccountId,
+        BlockNumberFor<T>,
+        ValueQuery,
+    >;
+
+    /// MISSING-3: 会员 Token 最后提现区块
+    #[pallet::storage]
+    pub type MemberTokenLastWithdrawn<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat, u64,
+        Blake2_128Concat, T::AccountId,
+        BlockNumberFor<T>,
+        ValueQuery,
+    >;
+
+    /// MISSING-3: Entity 最小提现间隔（区块数，0 = 无限制）
+    /// 与 withdrawal_cooldown（基于入账时间）独立，本参数基于上次提现时间
+    #[pallet::storage]
+    #[pallet::getter(fn min_withdrawal_interval)]
+    pub type MinWithdrawalInterval<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat, u64,
+        u32,
+        ValueQuery,
+    >;
+
     // ========================================================================
     // Events
     // ========================================================================
@@ -661,6 +731,7 @@ pub mod pallet {
             commission_type: CommissionType,
             level: u8,
         },
+        /// [已废弃] 保留以维持事件索引稳定，新代码使用 TieredWithdrawal
         CommissionWithdrawn {
             entity_id: u64,
             account: T::AccountId,
@@ -738,7 +809,7 @@ pub mod pallet {
             commission_type: CommissionType,
             level: u8,
         },
-        /// Token 佣金提现
+        /// [已废弃] 保留以维持事件索引稳定，新代码使用 TokenTieredWithdrawal
         TokenCommissionWithdrawn {
             entity_id: u64,
             account: T::AccountId,
@@ -822,6 +893,12 @@ pub mod pallet {
         WithdrawalPauseToggled { entity_id: u64, paused: bool },
         /// F21: 订单佣金记录已归档清理
         OrderRecordsArchived { order_id: u64 },
+        /// BUG-1 修复: 订单佣金记录已结算（Pending → Withdrawn）
+        OrderRecordsSettled { order_id: u64 },
+        /// BUG-3 修复: Root 重新启用 Entity 佣金
+        CommissionForceEnabled { entity_id: u64 },
+        /// MISSING-3: 最小提现间隔已更新
+        MinWithdrawalIntervalUpdated { entity_id: u64, interval: u32 },
     }
 
     // ========================================================================
@@ -854,7 +931,7 @@ pub mod pallet {
         DuplicateLevelId,
         /// 复购目标账户未通过审批（APPROVAL_REQUIRED 下待审批状态）
         TargetNotApprovedMember,
-        /// 会员未激活（代注册会员需首次消费后激活）
+        /// [已废弃] 保留以维持 Error 索引稳定
         MemberNotActivated,
         /// H3: 复购目标账户不满足 Entity 的参与要求（如 mandatory KYC）
         TargetParticipationDenied,
@@ -900,6 +977,8 @@ pub mod pallet {
         OrderRecordsNotFound,
         /// F21: 订单佣金记录中存在未完结的记录（Pending/Distributed），不可归档
         OrderRecordsNotFinalized,
+        /// MISSING-3: 提现间隔未满足（距上次提现间隔不足 MinWithdrawalInterval）
+        WithdrawalIntervalNotMet,
     }
 
     // ========================================================================
@@ -927,23 +1006,17 @@ pub mod pallet {
                 .unwrap_or(false);
             let new_has_pool = modes.contains(CommissionModes::POOL_REWARD);
 
-            CommissionConfigs::<T>::mutate(entity_id, |maybe| {
+            // R-11 修复: 合并 mutate 与后续 get，一次 storage 读写获取 enabled 状态
+            let is_enabled = CommissionConfigs::<T>::mutate(entity_id, |maybe| {
                 let config = maybe.get_or_insert_with(CoreCommissionConfig::default);
                 config.enabled_modes = modes;
+                config.enabled
             });
 
-            // 跟踪 POOL_REWARD 开关变化
             if old_has_pool && !new_has_pool {
-                // POOL_REWARD 被关闭 → 记录时间，启动 cooldown
                 let now = <frame_system::Pallet<T>>::block_number();
                 PoolRewardDisabledAt::<T>::insert(entity_id, now);
             } else if !old_has_pool && new_has_pool {
-                // M1-R6 审计修复: 仅当 commission 已启用时才清除 cooldown
-                // 若 enabled=false，添加 POOL_REWARD 模式位不会真正激活沉淀池，
-                // 不应清除合法的 cooldown（否则可通过 toggle 模式位绕过冻结期）
-                let is_enabled = CommissionConfigs::<T>::get(entity_id)
-                    .map(|c| c.enabled)
-                    .unwrap_or(false);
                 if is_enabled {
                     PoolRewardDisabledAt::<T>::remove(entity_id);
                 }
@@ -973,6 +1046,12 @@ pub mod pallet {
             let global_max = GlobalMaxCommissionRate::<T>::get(entity_id);
             if global_max > 0 {
                 ensure!(max_rate <= global_max, Error::<T>::CommissionRateExceedsGlobalMax);
+            }
+
+            // BUG-2 修复: Token 全局佣金率上限校验（NEX/Token 共用 max_commission_rate）
+            let token_global_max = GlobalMaxTokenCommissionRate::<T>::get(entity_id);
+            if token_global_max > 0 {
+                ensure!(max_rate <= token_global_max, Error::<T>::TokenCommissionRateExceedsGlobalMax);
             }
 
             CommissionConfigs::<T>::mutate(entity_id, |maybe| {
@@ -1103,6 +1182,18 @@ pub mod pallet {
                     }
                 }
 
+                // MISSING-3: 提现频率限制检查（基于上次提现时间，与 cooldown 独立）
+                let min_interval = MinWithdrawalInterval::<T>::get(entity_id);
+                if min_interval > 0 {
+                    let now = <frame_system::Pallet<T>>::block_number();
+                    let last_withdrawn = MemberLastWithdrawn::<T>::get(entity_id, &who);
+                    if !last_withdrawn.is_zero() {
+                        let interval: BlockNumberFor<T> = min_interval.into();
+                        ensure!(now >= last_withdrawn.saturating_add(interval),
+                            Error::<T>::WithdrawalIntervalNotMet);
+                    }
+                }
+
                 // 计算提现/复购/奖励分配
                 let split = Self::calc_withdrawal_split(
                     entity_id, &who, total_amount, requested_repurchase_rate,
@@ -1157,8 +1248,11 @@ pub mod pallet {
                     *total = total.saturating_sub(total_amount);
                 });
 
-                // F20: 记录 NEX 提现历史（满则丢弃最旧）
+                // MISSING-3: 记录最后提现时间
                 let now = <frame_system::Pallet<T>>::block_number();
+                MemberLastWithdrawn::<T>::insert(entity_id, &who, now);
+
+                // F20: 记录 NEX 提现历史（满则丢弃最旧）
                 MemberWithdrawalHistory::<T>::mutate(entity_id, &who, |history| {
                     let record = WithdrawalRecord {
                         total_amount,
@@ -1437,6 +1531,18 @@ pub mod pallet {
                     }
                 }
 
+                // MISSING-3: Token 提现频率限制检查
+                let min_interval = MinWithdrawalInterval::<T>::get(entity_id);
+                if min_interval > 0 {
+                    let now = <frame_system::Pallet<T>>::block_number();
+                    let last_withdrawn = MemberTokenLastWithdrawn::<T>::get(entity_id, &who);
+                    if !last_withdrawn.is_zero() {
+                        let interval: BlockNumberFor<T> = min_interval.into();
+                        ensure!(now >= last_withdrawn.saturating_add(interval),
+                            Error::<T>::WithdrawalIntervalNotMet);
+                    }
+                }
+
                 // 计算 Token 提现/复购/奖励分配
                 let split = Self::calc_token_withdrawal_split(
                     entity_id, &who, total_amount, requested_repurchase_rate,
@@ -1494,8 +1600,11 @@ pub mod pallet {
                     *total = total.saturating_sub(total_amount);
                 });
 
-                // F20: 记录 Token 提现历史（满则丢弃最旧）
+                // MISSING-3: 记录最后 Token 提现时间
                 let now = <frame_system::Pallet<T>>::block_number();
+                MemberTokenLastWithdrawn::<T>::insert(entity_id, &who, now);
+
+                // F20: 记录 Token 提现历史（满则丢弃最旧）
                 MemberTokenWithdrawalHistory::<T>::mutate(entity_id, &who, |history| {
                     let record = WithdrawalRecord {
                         total_amount,
@@ -1968,6 +2077,67 @@ pub mod pallet {
             Ok(())
         }
 
+        /// BUG-3 修复: Root 重新启用 Entity 佣金（与 force_disable_entity_commission 对称）
+        ///
+        /// force_disable 将 enabled 设为 false 后，Entity Owner 无法通过
+        /// enable_commission 恢复（该 extrinsic 要求 Owner/Admin 权限，但 force_disable
+        /// 的场景往往需要 Root 介入解除）。本 extrinsic 提供 Root 级恢复路径。
+        #[pallet::call_index(27)]
+        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        pub fn force_enable_entity_commission(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(T::EntityProvider::entity_exists(entity_id), Error::<T>::EntityNotFound);
+
+            CommissionConfigs::<T>::mutate(entity_id, |maybe| {
+                let config = maybe.get_or_insert_with(CoreCommissionConfig::default);
+                config.enabled = true;
+            });
+
+            Self::deposit_event(Event::CommissionForceEnabled { entity_id });
+            Ok(())
+        }
+
+        /// MISSING-2 修复: Root 重试失败的订单退款
+        ///
+        /// 当 cancel_commission 中 Entity 账户余额不足导致部分退款失败时，
+        /// 失败的记录仍保持 Pending 状态。本 extrinsic 允许 Root 在 Entity
+        /// 账户补充资金后重新触发取消流程。
+        ///
+        /// cancel_commission 本身是幂等的（仅处理 Pending 记录），可安全重复调用。
+        #[pallet::call_index(28)]
+        #[pallet::weight(Weight::from_parts(100_000_000, 8_000))]
+        pub fn retry_cancel_commission(
+            origin: OriginFor<T>,
+            order_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            Self::cancel_commission(order_id)
+        }
+
+        /// MISSING-3: 设置最小提现间隔（Entity 级，区块数）
+        ///
+        /// 限制会员连续提现频率。0 = 无限制（默认）。
+        /// 与 withdrawal_cooldown（基于入账时间）独立，本参数基于上次提现时间。
+        #[pallet::call_index(29)]
+        #[pallet::weight(Weight::from_parts(30_000_000, 3_000))]
+        pub fn set_min_withdrawal_interval(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            interval: u32,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::ensure_owner_or_admin(entity_id, &who)?;
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+
+            MinWithdrawalInterval::<T>::insert(entity_id, interval);
+            Self::deposit_event(Event::MinWithdrawalIntervalUpdated { entity_id, interval });
+            Ok(())
+        }
+
     }
 
     // ========================================================================
@@ -2166,6 +2336,30 @@ pub mod pallet {
 
                 Ok(())
             })
+        }
+
+        /// BUG-1 修复: 将订单的所有 Pending 佣金记录结算为 Withdrawn
+        ///
+        /// 由订单模块在订单完结（确认收货/超时完成）时通过
+        /// CommissionProvider::settle_order_commission 调用。
+        /// 标记后记录可被 archive_order_records 归档释放存储。
+        pub fn do_settle_order_records(order_id: u64) -> DispatchResult {
+            OrderCommissionRecords::<T>::mutate(order_id, |records| {
+                for record in records.iter_mut() {
+                    if record.status == CommissionStatus::Pending {
+                        record.status = CommissionStatus::Withdrawn;
+                    }
+                }
+            });
+            OrderTokenCommissionRecords::<T>::mutate(order_id, |records| {
+                for record in records.iter_mut() {
+                    if record.status == CommissionStatus::Pending {
+                        record.status = CommissionStatus::Withdrawn;
+                    }
+                }
+            });
+            Self::deposit_event(Event::OrderRecordsSettled { order_id });
+            Ok(())
         }
 
         /// 计算提现/复购/奖励分配（Entity 级，四种模式）
@@ -2620,6 +2814,19 @@ pub mod pallet {
                 *total = total.saturating_add(amount);
             });
 
+            // 推荐链类型佣金：维护 ReferrerEarnedByBuyer 索引
+            if matches!(commission_type,
+                CommissionType::DirectReward
+                | CommissionType::FirstOrder
+                | CommissionType::RepeatPurchase
+                | CommissionType::FixedAmount
+            ) {
+                ReferrerEarnedByBuyer::<T>::mutate(
+                    (entity_id, beneficiary, buyer),
+                    |earned| { *earned = earned.saturating_add(amount); },
+                );
+            }
+
             // F19: 记录会员佣金关联订单 ID（去重，满则丢弃最旧）
             MemberCommissionOrderIds::<T>::mutate(entity_id, beneficiary, |ids| {
                 if !ids.contains(&order_id) {
@@ -2983,7 +3190,6 @@ pub mod pallet {
                 for record in records.iter_mut() {
                     if record.status == CommissionStatus::Pending {
                         if record.commission_type == CommissionType::PoolReward {
-                            // PoolReward 记录已在上方回池，直接取消
                             MemberCommissionStats::<T>::mutate(record.entity_id, &record.beneficiary, |stats| {
                                 stats.pending = stats.pending.saturating_sub(record.amount);
                                 stats.total_earned = stats.total_earned.saturating_sub(record.amount);
@@ -3002,6 +3208,18 @@ pub mod pallet {
                                 ShopPendingTotal::<T>::mutate(record.entity_id, |total| {
                                     *total = total.saturating_sub(record.amount);
                                 });
+                                // 推荐链类型：同步扣减 ReferrerEarnedByBuyer
+                                if matches!(record.commission_type,
+                                    CommissionType::DirectReward
+                                    | CommissionType::FirstOrder
+                                    | CommissionType::RepeatPurchase
+                                    | CommissionType::FixedAmount
+                                ) {
+                                    ReferrerEarnedByBuyer::<T>::mutate(
+                                        (record.entity_id, &record.beneficiary, &record.buyer),
+                                        |earned| { *earned = earned.saturating_sub(record.amount); },
+                                    );
+                                }
                                 record.status = CommissionStatus::Cancelled;
                             }
                         }
@@ -3319,6 +3537,10 @@ impl<T: pallet::Config> CommissionProvider<T::AccountId, pallet::BalanceOf<T>> f
         });
         Ok(())
     }
+
+    fn settle_order_commission(order_id: u64) -> sp_runtime::DispatchResult {
+        pallet::Pallet::<T>::do_settle_order_records(order_id)
+    }
 }
 
 // ============================================================================
@@ -3390,5 +3612,217 @@ impl<T: pallet::Config> pallet_commission_common::TokenCommissionProvider<T::Acc
 
     fn token_platform_fee_rate(_entity_id: u64) -> u16 {
         pallet::TokenPlatformFeeRate::<T>::get()
+    }
+}
+
+// ============================================================================
+// Runtime API 聚合查询实现
+// ============================================================================
+
+impl<T: pallet::Config> pallet::Pallet<T> {
+    pub fn get_member_commission_dashboard(
+        entity_id: u64,
+        account: &T::AccountId,
+    ) -> Option<runtime_api::MemberCommissionDashboard<pallet::BalanceOf<T>, pallet::TokenBalanceOf<T>>> {
+        use pallet_commission_common::*;
+
+        let nex_raw = pallet::MemberCommissionStats::<T>::get(entity_id, account);
+        let token_raw = pallet::MemberTokenCommissionStats::<T>::get(entity_id, account);
+
+        let has_data = nex_raw.order_count > 0
+            || token_raw.order_count > 0
+            || !nex_raw.total_earned.is_zero()
+            || !token_raw.total_earned.is_zero()
+            || T::MemberProvider::is_member(entity_id, account);
+
+        if !has_data {
+            return None;
+        }
+
+        let nex_stats = runtime_api::NexCommissionStats {
+            total_earned: nex_raw.total_earned,
+            pending: nex_raw.pending,
+            withdrawn: nex_raw.withdrawn,
+            repurchased: nex_raw.repurchased,
+            order_count: nex_raw.order_count,
+        };
+
+        let token_stats = runtime_api::TokenCommissionStats {
+            total_earned: token_raw.total_earned,
+            pending: token_raw.pending,
+            withdrawn: token_raw.withdrawn,
+            repurchased: token_raw.repurchased,
+            order_count: token_raw.order_count,
+        };
+
+        let multi_level_progress = T::MultiLevelQuery::activation_progress(entity_id, account);
+        let multi_level_stats = T::MultiLevelQuery::member_stats(entity_id, account);
+
+        let team_tier = T::TeamQuery::matched_tier(entity_id, account);
+
+        let sl_position = T::SingleLineQuery::position(entity_id, account);
+        let sl_levels = T::SingleLineQuery::effective_levels(entity_id, account);
+        let single_line = runtime_api::SingleLineSnapshot {
+            position: sl_position,
+            upline_levels: sl_levels.map(|(u, _)| u),
+            downline_levels: sl_levels.map(|(_, d)| d),
+            is_enabled: T::SingleLineQuery::is_enabled(entity_id),
+            queue_length: T::SingleLineQuery::queue_length(entity_id),
+        };
+
+        let (claimable_nex, claimable_token) = T::PoolRewardQuery::claimable(entity_id, account);
+        let pool_reward = runtime_api::PoolRewardSnapshot {
+            claimable_nex,
+            claimable_token,
+            is_paused: T::PoolRewardQuery::is_paused(entity_id),
+            current_round_id: T::PoolRewardQuery::current_round_id(entity_id),
+        };
+
+        let referral_earned = T::ReferralQuery::referrer_total_earned(entity_id, account);
+        let cap = T::ReferralQuery::cap_config(entity_id);
+        let referral = runtime_api::ReferralSnapshot {
+            total_earned: referral_earned,
+            cap_max_per_order: cap.map(|(per, _)| per),
+            cap_max_total: cap.map(|(_, total)| total),
+        };
+
+        Some(runtime_api::MemberCommissionDashboard {
+            nex_stats,
+            token_stats,
+            nex_shopping_balance: pallet::MemberShoppingBalance::<T>::get(entity_id, account),
+            token_shopping_balance: pallet::MemberTokenShoppingBalance::<T>::get(entity_id, account),
+            multi_level_progress,
+            multi_level_stats,
+            team_tier,
+            single_line,
+            pool_reward,
+            referral,
+        })
+    }
+
+    pub fn get_direct_referral_info(
+        entity_id: u64,
+        account: &T::AccountId,
+    ) -> runtime_api::DirectReferralInfo<pallet::BalanceOf<T>> {
+        let referral_earned = T::ReferralQuery::referrer_total_earned(entity_id, account);
+        let cap = T::ReferralQuery::cap_config(entity_id);
+
+        let cap_remaining = cap.and_then(|(_, max_total)| {
+            if max_total.is_zero() {
+                None
+            } else {
+                Some(max_total.saturating_sub(referral_earned))
+            }
+        });
+
+        runtime_api::DirectReferralInfo {
+            referral_total_earned: referral_earned,
+            cap_max_per_order: cap.and_then(|(per, _)| if per.is_zero() { None } else { Some(per) }),
+            cap_max_total: cap.and_then(|(_, total)| if total.is_zero() { None } else { Some(total) }),
+            cap_remaining,
+        }
+    }
+
+    pub fn get_team_performance_info(
+        entity_id: u64,
+        account: &T::AccountId,
+    ) -> runtime_api::TeamPerformanceInfo<pallet::BalanceOf<T>> {
+        let (config_exists, is_enabled) = T::TeamQuery::status(entity_id);
+        let current_tier = T::TeamQuery::matched_tier(entity_id, account);
+        let (directs, team_size, total_spent) =
+            T::MemberProvider::get_member_stats(entity_id, account);
+
+        runtime_api::TeamPerformanceInfo {
+            team_size,
+            direct_referrals: directs,
+            total_spent,
+            current_tier,
+            is_enabled,
+            config_exists,
+        }
+    }
+
+    pub fn get_direct_referral_details(
+        entity_id: u64,
+        account: &T::AccountId,
+    ) -> runtime_api::DirectReferralDetails<T::AccountId, pallet::BalanceOf<T>> {
+        let referral_accounts =
+            T::MemberProvider::get_direct_referral_accounts(entity_id, account);
+        let total_count = referral_accounts.len() as u32;
+        let mut total_commission_earned = pallet::BalanceOf::<T>::zero();
+        let mut referrals = alloc::vec::Vec::with_capacity(referral_accounts.len());
+
+        for ref_account in referral_accounts {
+            let (directs, team_size, total_spent) =
+                T::MemberProvider::get_member_stats(entity_id, &ref_account);
+            let level_id = T::MemberProvider::get_effective_level(entity_id, &ref_account);
+            let order_count =
+                T::MemberProvider::completed_order_count(entity_id, &ref_account);
+            let joined_at =
+                T::MemberProvider::referral_registered_at(entity_id, &ref_account);
+            let last_active_at =
+                T::MemberProvider::last_active_at(entity_id, &ref_account);
+            let is_active =
+                T::MemberProvider::is_member_active(entity_id, &ref_account)
+                && T::MemberProvider::is_activated(entity_id, &ref_account);
+
+            let contributed =
+                ReferrerEarnedByBuyer::<T>::get((entity_id, account, &ref_account));
+            total_commission_earned = total_commission_earned.saturating_add(contributed);
+
+            referrals.push(runtime_api::DirectReferralMember {
+                account: ref_account,
+                level_id,
+                total_spent: total_spent as u64,
+                order_count,
+                joined_at,
+                last_active_at,
+                is_active,
+                team_size,
+                direct_referrals: directs,
+                commission_contributed: contributed,
+            });
+        }
+
+        let cap = T::ReferralQuery::cap_config(entity_id);
+        let cap_max_total = cap.and_then(|(_, total)| {
+            if total.is_zero() { None } else { Some(total) }
+        });
+        let referral_earned = T::ReferralQuery::referrer_total_earned(entity_id, account);
+        let cap_remaining = cap_max_total.map(|max| max.saturating_sub(referral_earned));
+
+        runtime_api::DirectReferralDetails {
+            referrals,
+            total_count,
+            total_commission_earned,
+            cap_max_total,
+            cap_remaining,
+        }
+    }
+
+    pub fn get_entity_commission_overview(
+        entity_id: u64,
+    ) -> runtime_api::EntityCommissionOverview<pallet::BalanceOf<T>, pallet::TokenBalanceOf<T>> {
+        let config = pallet::CommissionConfigs::<T>::get(entity_id)
+            .unwrap_or_default();
+
+        let (team_exists, team_enabled) = T::TeamQuery::status(entity_id);
+
+        runtime_api::EntityCommissionOverview {
+            enabled_modes: config.enabled_modes.0,
+            commission_rate: config.max_commission_rate,
+            is_enabled: config.enabled,
+            pending_total_nex: pallet::ShopPendingTotal::<T>::get(entity_id),
+            pending_total_token: pallet::TokenPendingTotal::<T>::get(entity_id),
+            unallocated_pool_nex: pallet::UnallocatedPool::<T>::get(entity_id),
+            unallocated_pool_token: pallet::UnallocatedTokenPool::<T>::get(entity_id),
+            shopping_total_nex: pallet::ShopShoppingTotal::<T>::get(entity_id),
+            shopping_total_token: pallet::TokenShoppingTotal::<T>::get(entity_id),
+            multi_level_paused: T::MultiLevelQuery::is_paused(entity_id),
+            single_line_enabled: T::SingleLineQuery::is_enabled(entity_id),
+            team_status: (team_exists, team_enabled),
+            pool_reward_paused: T::PoolRewardQuery::is_paused(entity_id),
+            withdrawal_paused: pallet::WithdrawalPaused::<T>::get(entity_id),
+        }
     }
 }

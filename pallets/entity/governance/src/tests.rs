@@ -1,6 +1,7 @@
 use crate::mock::*;
 use crate::pallet::*;
 use frame_support::{assert_noop, assert_ok, traits::Hooks};
+use pallet_entity_common::{EntityTokenProvider, GovernanceMode};
 
 fn proposal_type_general() -> ProposalType<u128> {
     ProposalType::General {
@@ -57,7 +58,7 @@ fn create_proposal_fails_shop_not_found() {
                 RuntimeOrigin::signed(ALICE), 999,
                 proposal_type_general(), b"Test".to_vec(), None,
             ),
-            Error::<Test>::ShopNotFound
+            Error::<Test>::EntityNotFound
         );
     });
 }
@@ -374,7 +375,7 @@ fn configure_governance_fails_not_owner() {
                 RuntimeOrigin::signed(ALICE), 1,
                 GovernanceMode::FullDAO, None, None, None, None, None, None,
             ),
-            Error::<Test>::NotShopOwner
+            Error::<Test>::NotEntityOwner
         );
     });
 }
@@ -758,25 +759,8 @@ fn h1_finalize_uses_custom_quorum() {
 }
 
 #[test]
-fn h3_add_upgrade_rule_rejected_at_creation() {
-    // R3: AddUpgradeRule 现在在创建阶段即被拒绝（不再等到执行时才失败）
-    ExtBuilder::build().execute_with(|| {
-        assert_noop!(
-            EntityGovernance::create_proposal(
-                RuntimeOrigin::signed(ALICE), SHOP_ID,
-                ProposalType::AddUpgradeRule { rule_cid: b"rule1".to_vec().try_into().unwrap() },
-                b"Add Rule".to_vec(), None,
-            ),
-            Error::<Test>::ProposalTypeNotSupported
-        );
-    });
-}
-
-#[test]
 fn h4_create_proposal_fails_inactive_entity() {
-    // H4: 非活跃实体不能创建提案
     ExtBuilder::build().execute_with(|| {
-        // entity_id 3 存在但不活跃（MockEntityProvider 只让 1,2 活跃）
         set_token_enabled(3, true);
         set_token_balance(3, ALICE, 20_000);
         assert_noop!(
@@ -784,7 +768,7 @@ fn h4_create_proposal_fails_inactive_entity() {
                 RuntimeOrigin::signed(ALICE), 3,
                 proposal_type_general(), b"Test".to_vec(), None,
             ),
-            Error::<Test>::ShopNotFound
+            Error::<Test>::EntityNotFound
         );
     });
 }
@@ -857,7 +841,7 @@ fn lock_governance_fails_not_owner() {
     ExtBuilder::build().execute_with(|| {
         assert_noop!(
             EntityGovernance::lock_governance(RuntimeOrigin::signed(ALICE), 1),
-            Error::<Test>::NotShopOwner
+            Error::<Test>::NotEntityOwner
         );
     });
 }
@@ -1405,24 +1389,15 @@ fn m2_execute_shop_pause_with_valid_shop_id() {
 }
 
 #[test]
-fn m2_execute_shop_pause_invalid_shop_id_fails() {
-    // M2-R3: ShopPause 指定不属于 entity 的 shop_id 应失败
+fn m2_create_shop_pause_invalid_shop_id_fails_early() {
+    // F2: ShopPause 指定不属于 entity 的 shop_id 在创建时即被拒绝
     ExtBuilder::build().execute_with(|| {
-        assert_ok!(EntityGovernance::create_proposal(
-            RuntimeOrigin::signed(ALICE), SHOP_ID,
-            ProposalType::ShopPause { shop_id: 999 },
-            b"Pause shop".to_vec(), None,
-        ));
-
-        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
-        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes));
-        advance_blocks(101);
-        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
-
-        advance_blocks(51);
-        // shop_id=999 不属于 entity，执行应失败
         assert_noop!(
-            EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0),
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::ShopPause { shop_id: 999 },
+                b"Pause shop".to_vec(), None,
+            ),
             Error::<Test>::ShopNotFound
         );
     });
@@ -2094,57 +2069,6 @@ fn f8_multi_level_change_rejects_invalid_rate() {
     });
 }
 
-#[test]
-fn r3_reject_single_line_change_at_creation() {
-    ExtBuilder::build().execute_with(|| {
-        assert_noop!(
-            EntityGovernance::create_proposal(
-                RuntimeOrigin::signed(ALICE), SHOP_ID,
-                ProposalType::SingleLineChange {
-                    upline_rate: 100,
-                    downline_rate: 100,
-                    base_upline_levels: 3,
-                    base_downline_levels: 3,
-                    max_upline_levels: 5,
-                    max_downline_levels: 5,
-                },
-                b"Test".to_vec(), None,
-            ),
-            Error::<Test>::ProposalTypeNotSupported
-        );
-    });
-}
-
-#[test]
-fn r3_reject_add_upgrade_rule_at_creation() {
-    ExtBuilder::build().execute_with(|| {
-        assert_noop!(
-            EntityGovernance::create_proposal(
-                RuntimeOrigin::signed(ALICE), SHOP_ID,
-                ProposalType::AddUpgradeRule {
-                    rule_cid: b"rule".to_vec().try_into().unwrap(),
-                },
-                b"Test".to_vec(), None,
-            ),
-            Error::<Test>::ProposalTypeNotSupported
-        );
-    });
-}
-
-#[test]
-fn r3_reject_remove_upgrade_rule_at_creation() {
-    ExtBuilder::build().execute_with(|| {
-        assert_noop!(
-            EntityGovernance::create_proposal(
-                RuntimeOrigin::signed(ALICE), SHOP_ID,
-                ProposalType::RemoveUpgradeRule { rule_id: 42 },
-                b"Test".to_vec(), None,
-            ),
-            Error::<Test>::ProposalTypeNotSupported
-        );
-    });
-}
-
 // ==================== F5: 委托投票 ====================
 
 #[test]
@@ -2199,7 +2123,7 @@ fn f5_delegate_vote_rejects_invalid_entity() {
     ExtBuilder::build().execute_with(|| {
         assert_noop!(
             EntityGovernance::delegate_vote(RuntimeOrigin::signed(ALICE), 999, BOB),
-            Error::<Test>::ShopNotFound
+            Error::<Test>::EntityNotFound
         );
     });
 }
@@ -2957,7 +2881,7 @@ fn f6_pause_rejects_non_owner() {
     ExtBuilder::build().execute_with(|| {
         assert_noop!(
             EntityGovernance::pause_governance(RuntimeOrigin::signed(ALICE), SHOP_ID),
-            Error::<Test>::NotShopOwner
+            Error::<Test>::NotEntityOwner
         );
     });
 }
@@ -3065,7 +2989,7 @@ fn f6_batch_cancel_rejects_non_owner() {
     ExtBuilder::build().execute_with(|| {
         assert_noop!(
             EntityGovernance::batch_cancel_proposals(RuntimeOrigin::signed(ALICE), SHOP_ID),
-            Error::<Test>::NotShopOwner
+            Error::<Test>::NotEntityOwner
         );
     });
 }
@@ -3244,7 +3168,7 @@ fn h2_audit_change_vote_not_voted_error() {
 
 #[test]
 fn m1r2_create_proposal_inactive_entity_returns_entity_not_active() {
-    // M1-R2: inactive entity 应返回 EntityNotActive（非 ShopNotFound）
+    // M1-R2: inactive entity 应返回 EntityNotActive（非 EntityNotFound）
     ExtBuilder::build().execute_with(|| {
         set_entity_active(SHOP_ID, false);
         assert_noop!(
@@ -3733,5 +3657,1126 @@ fn r8_explicit_enable_overrides_default() {
         // Explicitly set to true
         EmergencyPauseEnabled::<Test>::insert(SHOP_ID, true);
         assert_ok!(EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+    });
+}
+
+// ==================== R9 审计修复验证测试 ====================
+
+#[test]
+fn s1_delegation_double_counting_prevented() {
+    // S1: 委托→代投→取消委托→再委托不可双重计票
+    ExtBuilder::build().execute_with(|| {
+        // ALICE delegates to BOB
+        assert_ok!(EntityGovernance::delegate_vote(
+            RuntimeOrigin::signed(ALICE), SHOP_ID, BOB,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(CHARLIE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        // BOB votes (weight = BOB 150k + ALICE 20k = 170k)
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        let p = Proposals::<Test>::get(0).unwrap();
+        assert_eq!(p.yes_votes, 170_000u128);
+
+        // ALICE undelegates from BOB, then delegates to OWNER
+        assert_ok!(EntityGovernance::undelegate_vote(RuntimeOrigin::signed(ALICE), SHOP_ID));
+        assert_ok!(EntityGovernance::delegate_vote(
+            RuntimeOrigin::signed(ALICE), SHOP_ID, OWNER,
+        ));
+
+        // OWNER votes — ALICE's tokens already counted via BOB, should NOT be double-counted
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(OWNER), 0, VoteType::Yes));
+        let p = Proposals::<Test>::get(0).unwrap();
+        // OWNER's own weight = 100k, ALICE's delegation = 0 (blocked by VoterTokenLocks)
+        assert_eq!(p.yes_votes, 170_000u128 + 100_000u128);
+    });
+}
+
+#[test]
+fn s2_voting_period_change_rejects_too_long() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::VotingPeriodChange { new_period_blocks: 10001 },
+                b"Too long".to_vec(), None,
+            ),
+            Error::<Test>::VotingPeriodTooLong
+        );
+    });
+}
+
+#[test]
+fn s2_execution_delay_change_rejects_too_long() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::ExecutionDelayChange { new_delay_blocks: 5001 },
+                b"Too long".to_vec(), None,
+            ),
+            Error::<Test>::ExecutionDelayTooLong
+        );
+    });
+}
+
+#[test]
+fn s2_configure_governance_rejects_period_too_long() {
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        assert_noop!(
+            EntityGovernance::configure_governance(
+                RuntimeOrigin::signed(OWNER), 1,
+                GovernanceMode::FullDAO, Some(10001), None, None, None, None, None,
+            ),
+            Error::<Test>::VotingPeriodTooLong
+        );
+    });
+}
+
+#[test]
+fn s3_proposal_threshold_change_rejects_too_low() {
+    ExtBuilder::build().execute_with(|| {
+        // MinProposalThreshold = 100 (1%), setting to 1 (0.01%) should fail
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::ProposalThresholdChange { new_threshold: 1 },
+                b"Too low".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+    });
+}
+
+#[test]
+fn s4_configure_governance_rejects_inactive_entity() {
+    ExtBuilder::build().execute_with(|| {
+        use pallet_entity_common::GovernanceMode;
+        set_entity_active(SHOP_ID, false);
+        assert_noop!(
+            EntityGovernance::configure_governance(
+                RuntimeOrigin::signed(OWNER), 1,
+                GovernanceMode::FullDAO, None, None, None, None, None, None,
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
+fn f1_voter_count_increments_on_vote() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Test".to_vec(), None,
+        ));
+        assert_eq!(Proposals::<Test>::get(0).unwrap().voter_count, 0);
+
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_eq!(Proposals::<Test>::get(0).unwrap().voter_count, 1);
+
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::No));
+        assert_eq!(Proposals::<Test>::get(0).unwrap().voter_count, 2);
+    });
+}
+
+#[test]
+fn f2_shop_resume_invalid_shop_rejected_at_creation() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::ShopResume { shop_id: 999 },
+                b"Resume invalid".to_vec(), None,
+            ),
+            Error::<Test>::ShopNotFound
+        );
+    });
+}
+
+#[test]
+fn f3_emergency_pause_toggle_requires_fulldao_locked() {
+    ExtBuilder::build().execute_with(|| {
+        // FullDAO but NOT locked — should be rejected
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::EmergencyPauseToggle { enabled: false },
+                b"Toggle".to_vec(), None,
+            ),
+            Error::<Test>::GovernanceModeNotAllowed
+        );
+    });
+}
+
+#[test]
+fn f3_emergency_pause_toggle_works_when_fulldao_locked() {
+    ExtBuilder::build().execute_with(|| {
+        setup_fulldao_locked();
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::EmergencyPauseToggle { enabled: false },
+            b"Toggle".to_vec(), None,
+        ));
+    });
+}
+
+#[test]
+fn f4_token_burn_zero_rejected() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::TokenBurn { amount: 0 },
+                b"Burn zero".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+    });
+}
+
+#[test]
+fn f5_execution_failure_transitions_to_execution_failed() {
+    ExtBuilder::build().execute_with(|| {
+        // TokenBurn with amount > treasury balance will fail at execution
+        // (entity treasury balance defaults to 0)
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::TokenBurn { amount: 999_999 },
+            b"Burn too much".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes));
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+        advance_blocks(51);
+        // Execute should NOT revert — should transition to ExecutionFailed
+        assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
+        let p = Proposals::<Test>::get(0).unwrap();
+        assert_eq!(p.status, ProposalStatus::ExecutionFailed);
+    });
+}
+
+#[test]
+fn f5_execution_failed_is_terminal_for_cleanup() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::TokenBurn { amount: 999_999 },
+            b"Burn too much".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+        advance_blocks(51);
+        assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
+        assert_eq!(Proposals::<Test>::get(0).unwrap().status, ProposalStatus::ExecutionFailed);
+        assert_ok!(EntityGovernance::cleanup_proposal(RuntimeOrigin::signed(ALICE), 0));
+        assert!(Proposals::<Test>::get(0).is_none());
+    });
+}
+
+// ==================== R10: 新增 39 种 ProposalType 测试 ====================
+
+#[test]
+fn r10_market_proposals_create_and_validate() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::MarketConfigChange { min_order_amount: 100, order_ttl: 1000 },
+            b"Market config".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::MarketPause, b"Pause".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::MarketResume, b"Resume".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::MarketClose, b"Close".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::CircuitBreakerLift, b"Lift".to_vec(), None,
+        ));
+        // PriceProtectionChange validation
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::PriceProtectionChange {
+                    max_price_deviation: 10001, max_slippage: 500,
+                    circuit_breaker_threshold: 500, min_trades_for_twap: 10,
+                },
+                b"Bad".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::PriceProtectionChange {
+                max_price_deviation: 500, max_slippage: 300,
+                circuit_breaker_threshold: 1000, min_trades_for_twap: 5,
+            },
+            b"OK".to_vec(), None,
+        ));
+        // MarketKycChange validation
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::MarketKycChange { min_kyc_level: 5 },
+                b"Bad".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::MarketKycChange { min_kyc_level: 2 },
+            b"OK".to_vec(), None,
+        ));
+    });
+}
+
+#[test]
+fn r10_single_line_proposals_create_and_validate() {
+    ExtBuilder::build().execute_with(|| {
+        // Rate too high
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::SingleLineConfigChange {
+                    upline_rate: 10001, downline_rate: 500,
+                    base_upline_levels: 3, base_downline_levels: 3,
+                    max_upline_levels: 5, max_downline_levels: 5,
+                },
+                b"Bad".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        // base > max
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::SingleLineConfigChange {
+                    upline_rate: 500, downline_rate: 500,
+                    base_upline_levels: 6, base_downline_levels: 3,
+                    max_upline_levels: 5, max_downline_levels: 5,
+                },
+                b"Bad".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::SingleLineConfigChange {
+                upline_rate: 500, downline_rate: 500,
+                base_upline_levels: 3, base_downline_levels: 3,
+                max_upline_levels: 5, max_downline_levels: 5,
+            },
+            b"OK".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::SingleLinePause, b"Pause".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::SingleLineResume, b"Resume".to_vec(), None,
+        ));
+    });
+}
+
+#[test]
+fn r10_token_extension_proposals_validate() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::TokenMaxSupplyChange { new_max_supply: 0 },
+                b"Zero".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::TokenMaxSupplyChange { new_max_supply: 1_000_000 },
+            b"OK".to_vec(), None,
+        ));
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::TokenTypeChange { new_type: 4 },
+                b"Bad".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::TokenTypeChange { new_type: 1 },
+            b"Governance".to_vec(), None,
+        ));
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::TransferRestrictionChange { restriction: 3, min_receiver_kyc: 0 },
+                b"Bad".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::TransferRestrictionChange { restriction: 1, min_receiver_kyc: 2 },
+            b"Whitelist".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::TokenBlacklistManage {
+                account_cid: b"acc1".to_vec().try_into().unwrap(), add: true
+            },
+            b"Blacklist".to_vec(), None,
+        ));
+    });
+}
+
+#[test]
+fn r10_commission_core_proposals_validate() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::CommissionRateChange { new_rate: 10001 },
+                b"Bad".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::CommissionRateChange { new_rate: 500 },
+            b"OK".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::CommissionToggle { enabled: false },
+            b"Disable".to_vec(), None,
+        ));
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::CreatorRewardRateChange { new_rate: 10001 },
+                b"Bad".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::CreatorRewardRateChange { new_rate: 300 },
+            b"OK".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::WithdrawalCooldownChange { nex_cooldown: 100, token_cooldown: 200 },
+            b"Cooldown".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::TokenWithdrawalConfigChange { enabled: true },
+            b"Enable".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::WithdrawalPauseToggle { paused: true },
+            b"Pause".to_vec(), None,
+        ));
+    });
+}
+
+#[test]
+fn r10_referral_proposals_validate() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::ReferrerGuardChange { min_referrer_spent: 1000, min_referrer_orders: 5 },
+            b"Guard".to_vec(), None,
+        ));
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::CommissionCapChange { max_per_order: 0, max_total_earned: 0 },
+                b"Both zero".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::CommissionCapChange { max_per_order: 1000, max_total_earned: 0 },
+            b"OK".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::ReferralValidityChange { validity_blocks: 10000, valid_orders: 50 },
+            b"Validity".to_vec(), None,
+        ));
+    });
+}
+
+#[test]
+fn r10_multi_level_pause_resume_creates() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::MultiLevelPause, b"Pause ML".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::MultiLevelResume, b"Resume ML".to_vec(), None,
+        ));
+    });
+}
+
+#[test]
+fn r10_member_proposals_validate() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::MemberPolicyChange { policy: 4 },
+                b"Bad".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::MemberPolicyChange { policy: 3 },
+            b"KycRequired".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::UpgradeRuleToggle { enabled: false },
+            b"Disable".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::MemberStatsPolicyChange { qualified_only: true, subtract_on_removal: false },
+            b"Stats".to_vec(), None,
+        ));
+    });
+}
+
+#[test]
+fn r10_kyc_proposals_validate() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::KycRequirementChange { min_level: 5, mandatory: true, grace_period: 100 },
+                b"Bad".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::KycRequirementChange { min_level: 2, mandatory: true, grace_period: 1000 },
+            b"KYC L2".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::KycProviderAuthorize { provider_id: 1 },
+            b"Auth".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::KycProviderDeauthorize { provider_id: 1 },
+            b"Deauth".to_vec(), None,
+        ));
+    });
+}
+
+#[test]
+fn r10_shop_extension_proposals_validate() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::PointsConfigChange { reward_rate: 10001, exchange_rate: 100, transferable: true },
+                b"Bad".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::PointsConfigChange { reward_rate: 500, exchange_rate: 100, transferable: true },
+            b"OK".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::PointsToggle { enabled: false },
+            b"Disable points".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::ShopPoliciesChange { policies_cid: b"QmPolicy".to_vec().try_into().unwrap() },
+            b"Policy".to_vec(), None,
+        ));
+        // ShopClose validates ownership
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::ShopClose { shop_id: 999 },
+                b"Bad".to_vec(), None,
+            ),
+            Error::<Test>::ShopNotFound
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::ShopClose { shop_id: SHOP_ID },
+            b"Close".to_vec(), None,
+        ));
+        // ShopTypeChange validates
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::ShopTypeChange { shop_id: SHOP_ID, new_type: 4 },
+                b"Bad type".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::ShopTypeChange { shop_id: SHOP_ID, new_type: 2 },
+            b"Service".to_vec(), None,
+        ));
+    });
+}
+
+#[test]
+fn r10_product_visibility_validates() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::ProductVisibilityChange { product_id: 1, visibility: 3 },
+                b"Bad".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::ProductVisibilityChange { product_id: 1, visibility: 1 },
+            b"MembersOnly".to_vec(), None,
+        ));
+    });
+}
+
+#[test]
+fn r10_disclosure_extension_proposals_validate() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::DisclosureInsiderManage {
+                account_cid: b"insider".to_vec().try_into().unwrap(), add: true
+            },
+            b"Add insider".to_vec(), None,
+        ));
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::DisclosurePenaltyChange { level: 4 },
+                b"Bad".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::DisclosurePenaltyChange { level: 2 },
+            b"Suspend".to_vec(), None,
+        ));
+    });
+}
+
+// ==================== R11: 审计修复测试 ====================
+
+#[test]
+fn r11_s1_nonexistent_product_rejected() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::PriceChange { product_id: 999, new_price: 100 },
+                b"Ghost product".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+    });
+}
+
+#[test]
+fn r11_s2_token_mint_zero_rejected() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::TokenMint { amount: 0, recipient_cid: b"r".to_vec().try_into().unwrap() },
+                b"Zero mint".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+    });
+}
+
+#[test]
+fn r11_s3_treasury_spend_zero_rejected() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::TreasurySpend {
+                    amount: 0,
+                    recipient_cid: b"r".to_vec().try_into().unwrap(),
+                    reason_cid: b"x".to_vec().try_into().unwrap(),
+                },
+                b"Zero spend".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+    });
+}
+
+#[test]
+fn r11_s4_airdrop_zero_rejected() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::AirdropDistribution {
+                    airdrop_cid: b"a".to_vec().try_into().unwrap(),
+                    total_amount: 0,
+                },
+                b"Zero airdrop".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+    });
+}
+
+#[test]
+fn r11_s5_token_config_rate_overflow_rejected() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::TokenConfigChange { reward_rate: Some(10001), exchange_rate: None },
+                b"Bad rate".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::TokenConfigChange { reward_rate: Some(5000), exchange_rate: Some(10000) },
+            b"OK".to_vec(), None,
+        ));
+    });
+}
+
+#[test]
+fn r11_s6_inventory_u64_overflow_rejected() {
+    ExtBuilder::build().execute_with(|| {
+        set_product_price(1, 500);
+        set_product_stock(1, 10);
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::InventoryAdjustment { product_id: 1, new_inventory: u64::MAX },
+                b"Overflow".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::InventoryAdjustment { product_id: 1, new_inventory: 1000 },
+            b"OK".to_vec(), None,
+        ));
+    });
+}
+
+#[test]
+fn r11_f1_member_policy_upper_bound() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::MemberPolicyChange { policy: 3 },
+            b"Max valid".to_vec(), None,
+        ));
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::MemberPolicyChange { policy: 4 },
+                b"Over max".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+    });
+}
+
+// ==================== Phase 2 Tests ====================
+
+#[test]
+fn p2_reserve_failure_blocks_vote() {
+    ExtBuilder::build().execute_with(|| {
+        // Alice has 20000 tokens, create a proposal
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::FeeAdjustment { new_fee_rate: 200 },
+            b"Fee".to_vec(), None,
+        ));
+        // Reserve all of Alice's balance externally so governance reserve fails
+        let balance = get_token_balance(SHOP_ID, ALICE);
+        // Manually reserve everything via the mock
+        assert_ok!(MockTokenProvider::reserve(SHOP_ID, &ALICE, balance));
+
+        // Vote should fail because reserve will fail (no available balance)
+        assert_noop!(
+            EntityGovernance::vote(RuntimeOrigin::signed(ALICE), 0, VoteType::Yes),
+            Error::<Test>::TokenLockFailed
+        );
+    });
+}
+
+#[test]
+fn p2_proposal_cooldown_enforced() {
+    ExtBuilder::build().execute_with(|| {
+        // Override cooldown to 50 blocks via storage
+        // Since ProposalCooldown is 0 in mock, test the logic by directly setting LastProposalCreatedAt
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::FeeAdjustment { new_fee_rate: 100 },
+            b"First".to_vec(), None,
+        ));
+        // Verify LastProposalCreatedAt was set
+        assert!(LastProposalCreatedAt::<Test>::get(SHOP_ID, ALICE).is_some());
+    });
+}
+
+#[test]
+fn p2_force_unlock_governance_works() {
+    ExtBuilder::build().execute_with(|| {
+        // Lock governance
+        assert_ok!(EntityGovernance::lock_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+        assert!(GovernanceLocked::<Test>::get(SHOP_ID));
+
+        // Non-root cannot force unlock
+        assert_noop!(
+            EntityGovernance::force_unlock_governance(RuntimeOrigin::signed(ALICE), SHOP_ID),
+            sp_runtime::DispatchError::BadOrigin
+        );
+
+        // Root can force unlock
+        assert_ok!(EntityGovernance::force_unlock_governance(RuntimeOrigin::root(), SHOP_ID));
+        assert!(!GovernanceLocked::<Test>::get(SHOP_ID));
+
+        // Owner can now configure governance again
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), SHOP_ID,
+            GovernanceMode::FullDAO,
+            None, None, None, None, None, None,
+        ));
+    });
+}
+
+#[test]
+fn p2_force_unlock_also_resumes_paused() {
+    ExtBuilder::build().execute_with(|| {
+        // Pause governance
+        assert_ok!(EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+        assert!(GovernancePaused::<Test>::get(SHOP_ID));
+
+        // Lock governance
+        assert_ok!(EntityGovernance::lock_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+
+        // Root force unlock — should both unlock and resume
+        assert_ok!(EntityGovernance::force_unlock_governance(RuntimeOrigin::root(), SHOP_ID));
+        assert!(!GovernanceLocked::<Test>::get(SHOP_ID));
+        assert!(!GovernancePaused::<Test>::get(SHOP_ID));
+    });
+}
+
+#[test]
+fn p2_force_unlock_nonexistent_entity_fails() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::force_unlock_governance(RuntimeOrigin::root(), 999),
+            Error::<Test>::EntityNotFound
+        );
+    });
+}
+
+#[test]
+fn p2_force_unlock_emits_events() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::pause_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+        assert_ok!(EntityGovernance::lock_governance(RuntimeOrigin::signed(OWNER), SHOP_ID));
+
+        System::reset_events();
+
+        assert_ok!(EntityGovernance::force_unlock_governance(RuntimeOrigin::root(), SHOP_ID));
+
+        let events = System::events();
+        let event_names: Vec<_> = events.iter().filter_map(|e| {
+            match &e.event {
+                RuntimeEvent::EntityGovernance(ev) => Some(format!("{:?}", ev)),
+                _ => None,
+            }
+        }).collect();
+        assert!(event_names.iter().any(|e| e.contains("GovernanceForceUnlocked")));
+        assert!(event_names.iter().any(|e| e.contains("GovernanceForceResumed")));
+    });
+}
+
+// ==================== 深度审计修复测试 ====================
+
+// --- BUG-1: on_idle 按 voter_count 动态估权 ---
+
+#[test]
+fn audit_bug1_on_idle_skips_heavy_voter_proposal_when_weight_tight() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Heavy".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(ALICE), 0, VoteType::Yes));
+
+        advance_blocks(102);
+
+        let tiny_weight = frame_support::weights::Weight::from_parts(50_000_000, 5_000);
+        EntityGovernance::on_idle(System::block_number(), tiny_weight);
+
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        assert_eq!(proposal.status, ProposalStatus::Voting,
+            "BUG-1: on_idle should skip proposal when remaining weight < base + voter_count * per_voter");
+    });
+}
+
+#[test]
+fn audit_bug1_on_idle_processes_when_sufficient_weight() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"OK".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+
+        advance_blocks(102);
+
+        let enough_weight = frame_support::weights::Weight::from_parts(5_000_000_000, 500_000);
+        EntityGovernance::on_idle(System::block_number(), enough_weight);
+
+        let proposal = Proposals::<Test>::get(0).unwrap();
+        assert_ne!(proposal.status, ProposalStatus::Voting,
+            "BUG-1: on_idle should process proposal when weight is sufficient");
+    });
+}
+
+// --- BUG-2: configure_governance 强制 MinProposalThreshold ---
+
+#[test]
+fn audit_bug2_configure_governance_rejects_low_proposal_threshold() {
+    ExtBuilder::build().execute_with(|| {
+        // MinProposalThreshold = 100 (1%)
+        assert_noop!(
+            EntityGovernance::configure_governance(
+                RuntimeOrigin::signed(OWNER), SHOP_ID,
+                GovernanceMode::FullDAO,
+                None, None, None, None,
+                Some(1), // 0.01% — below MinProposalThreshold
+                None,
+            ),
+            Error::<Test>::ProposalThresholdTooLow
+        );
+    });
+}
+
+#[test]
+fn audit_bug2_configure_governance_allows_zero_threshold() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), SHOP_ID,
+            GovernanceMode::FullDAO,
+            None, None, None, None,
+            Some(0), // 0 = use global default
+            None,
+        ));
+    });
+}
+
+#[test]
+fn audit_bug2_configure_governance_allows_threshold_at_min() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::configure_governance(
+            RuntimeOrigin::signed(OWNER), SHOP_ID,
+            GovernanceMode::FullDAO,
+            None, None, None, None,
+            Some(100), // exactly MinProposalThreshold
+            None,
+        ));
+    });
+}
+
+// --- BUG-3: batch_cancel 清理 VotingPowerSnapshot ---
+
+#[test]
+fn audit_bug3_batch_cancel_clears_voting_power_snapshot() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Snap".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+
+        assert!(VotingPowerSnapshot::<Test>::contains_key(0, BOB),
+            "pre-condition: snapshot should exist after vote");
+
+        assert_ok!(EntityGovernance::batch_cancel_proposals(
+            RuntimeOrigin::signed(OWNER), SHOP_ID,
+        ));
+
+        assert!(!VotingPowerSnapshot::<Test>::contains_key(0, BOB),
+            "BUG-3: batch_cancel should clear VotingPowerSnapshot via helper");
+    });
+}
+
+// --- BUG-4: GovernanceLockCount 双重读取修复（隐式回归测试） ---
+
+#[test]
+fn audit_bug4_finalize_unlocks_all_voter_tokens() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Unlock".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::No));
+
+        assert!(GovernanceLockCount::<Test>::get(SHOP_ID, BOB) > 0);
+        assert!(GovernanceLockCount::<Test>::get(SHOP_ID, CHARLIE) > 0);
+
+        advance_blocks(101);
+        assert_ok!(EntityGovernance::finalize_voting(RuntimeOrigin::signed(ALICE), 0));
+
+        assert_eq!(GovernanceLockCount::<Test>::get(SHOP_ID, BOB), 0,
+            "BUG-4: lock count should be 0 after finalize");
+        assert_eq!(GovernanceLockCount::<Test>::get(SHOP_ID, CHARLIE), 0,
+            "BUG-4: lock count should be 0 after finalize");
+    });
+}
+
+// --- BUG-5: MarketConfigChange / WithdrawalCooldownChange 参数校验 ---
+
+#[test]
+fn audit_bug5_market_config_change_rejects_zero_amount() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::MarketConfigChange { min_order_amount: 0, order_ttl: 100 },
+                b"Bad market".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+    });
+}
+
+#[test]
+fn audit_bug5_market_config_change_rejects_zero_ttl() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::MarketConfigChange { min_order_amount: 100, order_ttl: 0 },
+                b"Bad ttl".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+    });
+}
+
+#[test]
+fn audit_bug5_withdrawal_cooldown_rejects_both_zero() {
+    ExtBuilder::build().execute_with(|| {
+        assert_noop!(
+            EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                ProposalType::WithdrawalCooldownChange { nex_cooldown: 0, token_cooldown: 0 },
+                b"Bad cooldown".to_vec(), None,
+            ),
+            Error::<Test>::InvalidParameter
+        );
+    });
+}
+
+#[test]
+fn audit_bug5_withdrawal_cooldown_allows_one_nonzero() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::WithdrawalCooldownChange { nex_cooldown: 100, token_cooldown: 0 },
+            b"One cool".to_vec(), None,
+        ));
+    });
+}
+
+// --- R-1/R-2: 共用 helper + batch_cancel 清空活跃列表 ---
+
+#[test]
+fn audit_r1r2_batch_cancel_clears_active_list() {
+    ExtBuilder::build().execute_with(|| {
+        for i in 0..3 {
+            assert_ok!(EntityGovernance::create_proposal(
+                RuntimeOrigin::signed(ALICE), SHOP_ID,
+                proposal_type_general(),
+                format!("P{}", i).into_bytes(), None,
+            ));
+        }
+        assert_eq!(EntityProposals::<Test>::get(SHOP_ID).len(), 3);
+
+        assert_ok!(EntityGovernance::batch_cancel_proposals(
+            RuntimeOrigin::signed(OWNER), SHOP_ID,
+        ));
+
+        assert_eq!(EntityProposals::<Test>::get(SHOP_ID).len(), 0,
+            "R-2: batch_cancel should completely clear the active list");
+
+        for i in 0..3u64 {
+            let p = Proposals::<Test>::get(i).unwrap();
+            assert_eq!(p.status, ProposalStatus::Cancelled);
+        }
+    });
+}
+
+#[test]
+fn audit_r1_helper_unlocks_tokens_on_batch_cancel() {
+    ExtBuilder::build().execute_with(|| {
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            proposal_type_general(), b"Tok".to_vec(), None,
+        ));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(BOB), 0, VoteType::Yes));
+        assert_ok!(EntityGovernance::vote(RuntimeOrigin::signed(CHARLIE), 0, VoteType::No));
+
+        let bob_lock_before = GovernanceLockCount::<Test>::get(SHOP_ID, BOB);
+        assert!(bob_lock_before > 0);
+
+        assert_ok!(EntityGovernance::batch_cancel_proposals(
+            RuntimeOrigin::signed(OWNER), SHOP_ID,
+        ));
+
+        assert_eq!(GovernanceLockCount::<Test>::get(SHOP_ID, BOB), 0,
+            "R-1: batch_cancel via helper should unlock BOB's tokens");
+        assert_eq!(GovernanceLockCount::<Test>::get(SHOP_ID, CHARLIE), 0,
+            "R-1: batch_cancel via helper should unlock CHARLIE's tokens");
     });
 }

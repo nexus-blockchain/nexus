@@ -375,17 +375,15 @@ parameter_types! {
 	pub const EscrowPalletId: frame_support::PalletId = frame_support::PalletId(*b"py/escro");
 }
 
-/// 托管过期策略实现
+/// 托管过期策略：默认退款给原始付款人（安全兜底）
 pub struct DefaultExpiryPolicy;
 
 impl pallet_escrow::ExpiryPolicy<AccountId, BlockNumber> for DefaultExpiryPolicy {
-	fn on_expire(_id: u64) -> Result<pallet_escrow::ExpiryAction<AccountId>, sp_runtime::DispatchError> {
-		// 默认策略：过期后不执行任何操作
-		Ok(pallet_escrow::ExpiryAction::Noop)
-	}
-
-	fn now() -> BlockNumber {
-		System::block_number()
+	fn on_expire(id: u64) -> Result<pallet_escrow::ExpiryAction<AccountId>, sp_runtime::DispatchError> {
+		match pallet_escrow::PayerOf::<Runtime>::get(id) {
+			Some(payer) => Ok(pallet_escrow::ExpiryAction::RefundAll(payer)),
+			None => Ok(pallet_escrow::ExpiryAction::Noop),
+		}
 	}
 }
 
@@ -393,19 +391,18 @@ impl pallet_escrow::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type EscrowPalletId = EscrowPalletId;
-	type AuthorizedOrigin = frame_system::EnsureSigned<AccountId>;
+	type AuthorizedOrigin = frame_system::EnsureRoot<AccountId>;
 	type AdminOrigin = frame_system::EnsureRoot<AccountId>;
 	type MaxExpiringPerBlock = ConstU32<100>;
 	type MaxSplitEntries = ConstU32<20>;
 	type ExpiryPolicy = DefaultExpiryPolicy;
 	/// 🆕 F5: 争议原因最大长度（256 字节，可容纳 CID 或简短描述）
 	type MaxReasonLen = ConstU32<256>;
-	/// 🆕 F9: Token 托管处理器（暂用空实现，待 Entity Token 集成后替换）
-	type TokenHandler = ();
 	/// 🆕 F10: 托管状态变更观察者（暂用空实现，待业务模块集成后替换）
 	type Observer = ();
-	/// 🆕 F8: 每次清理调用最大条目数
 	type MaxCleanupPerCall = ConstU32<100>;
+	/// 争议超时 100800 块 (≈7天 @ 6s/block)
+	type MaxDisputeDuration = ConstU32<100800>;
 	type WeightInfo = pallet_escrow::weights::SubstrateWeight<Runtime>;
 }
 
@@ -471,18 +468,23 @@ pub struct AlwaysAuthorizedEvidence;
 
 impl pallet_evidence::pallet::EvidenceAuthorizer<AccountId> for AlwaysAuthorizedEvidence {
 	fn is_authorized(_ns: [u8; 8], _who: &AccountId) -> bool {
-		// 暂时允许所有签名用户提交证据
-		// 后续可以对接更细粒度的权限系统
+		true
+	}
+}
+
+pub struct AlwaysAuthorizedSeal;
+
+impl pallet_evidence::pallet::EvidenceSealAuthorizer<AccountId> for AlwaysAuthorizedSeal {
+	fn can_seal(_ns: [u8; 8], _who: &AccountId) -> bool {
+		// TODO: 对接仲裁委员会权限系统，仅允许仲裁角色密封/解封
 		true
 	}
 }
 
 impl pallet_evidence::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
-	// Phase 1.5 新参数
 	type MaxContentCidLen = ConstU32<64>;
 	type MaxSchemeLen = ConstU32<32>;
-	// 旧版参数（向后兼容）
 	type MaxCidLen = ConstU32<64>;
 	type MaxImg = ConstU32<20>;
 	type MaxVid = ConstU32<10>;
@@ -492,6 +494,7 @@ impl pallet_evidence::Config for Runtime {
 	type MaxKeyLen = ConstU32<512>;
 	type EvidenceNsBytes = EvidenceNsBytes;
 	type Authorizer = AlwaysAuthorizedEvidence;
+	type SealAuthorizer = AlwaysAuthorizedSeal;
 	type MaxPerSubjectTarget = ConstU32<1000>;
 	type MaxPerSubjectNs = ConstU32<1000>;
 	type WindowBlocks = ConstU32<{ 10 * MINUTES }>;
@@ -499,16 +502,15 @@ impl pallet_evidence::Config for Runtime {
 	type EnableGlobalCidDedup = ConstBool<true>;
 	type MaxListLen = ConstU32<100>;
 	type WeightInfo = pallet_evidence::weights::SubstrateWeight<Runtime>;
-	// IPFS 相关
 	type StoragePin = pallet_storage_service::Pallet<Runtime>;
-	type Balance = Balance;
-	type DefaultStoragePrice = ConstU128<{ UNIT / 10 }>;
-	// 🆕 证据修改窗口（2天 ≈ 28800 blocks，按6秒/块）
-	type EvidenceEditWindow = ConstU32<28800>;
-	// 🆕 防膨胀: 归档记录 TTL (180天 ≈ 2_592_000 blocks)
-	type ArchiveTtlBlocks = ConstU32<2_592_000>;
-	// 🆕 M-NEW-5修复: 证据归档延迟 (90天 ≈ 1_296_000 blocks)
-	type ArchiveDelayBlocks = ConstU32<1_296_000>;
+	type Currency = Balances;
+	type EvidenceDeposit = ConstU128<{ UNIT / 100 }>; // 0.01 NEX 押金
+	type CommitRevealDeadline = ConstU32<100_800>; // ~7天 (6s/block)
+	type MaxLinksPerEvidence = ConstU32<100>;
+	type MaxSupplements = ConstU32<100>;
+	type MaxPendingRequestsPerContent = ConstU32<50>;
+	type ArchiveTtlBlocks = ConstU32<2_592_000>; // ~180天
+	type ArchiveDelayBlocks = ConstU32<1_296_000>; // ~90天
 }
 
 // -------------------- Arbitration (仲裁) --------------------
@@ -598,25 +600,6 @@ impl pallet_arbitration::pallet::ArbitrationRouter<AccountId, Balance> for Unifi
 		}
 	}
 
-	/// 获取做市商ID（仅做市商域有效）
-	fn get_maker_id(_domain: [u8; 8], _id: u64) -> Option<u64> {
-		None
-	}
-
-	/// 🆕 F9: 执行永久封禁（由投诉裁决触发，未来可对接具体业务封禁逻辑）
-	fn ban_account(_domain: [u8; 8], _who: &AccountId, _id: u64) -> sp_runtime::DispatchResult {
-		// TODO: 对接具体业务域封禁逻辑（如 entity-member 禁用、nex-market 限制等）
-		Ok(())
-	}
-}
-
-/// 信用分更新器实现（做市商信用系统已移除，空实现）
-pub struct TradingCreditUpdater;
-
-impl pallet_arbitration::pallet::CreditUpdater for TradingCreditUpdater {
-	fn record_maker_dispute_result(_maker_id: u64, _order_id: u64, _maker_win: bool) -> sp_runtime::DispatchResult {
-		Ok(())
-	}
 }
 
 /// 🆕 M-NEW-6修复: 证据存在性检查器（委托给 pallet-evidence 存储）
@@ -647,16 +630,14 @@ impl pallet_arbitration::pallet::Config for Runtime {
 	type Pricing = TradingPricingProvider; // 定价接口
 	type ComplaintSlashBps = ConstU16<5000>; // 投诉败诉罚没50%
 	type TreasuryAccount = TreasuryAccountId;
-	// 🆕 P2: CID 锁定管理器
 	type CidLockManager = pallet_storage_service::Pallet<Runtime>;
-	// 🆕 信用分更新器
-	type CreditUpdater = TradingCreditUpdater;
-	// 🆕 防膨胀: 归档记录 TTL (180天 ≈ 2_592_000 blocks)
 	type ArchiveTtlBlocks = ConstU32<2_592_000>;
-	// 🆕 M-NEW-5修复: 投诉归档延迟 (30天 ≈ 432_000 blocks)
 	type ComplaintArchiveDelayBlocks = ConstU32<432_000>;
-	// 🆕 M-NEW-6修复: 证据存在性检查器
+	type ComplaintMaxLifetimeBlocks = ConstU32<1_296_000>; // 90 days
 	type EvidenceExists = EvidenceExistenceCheckerImpl;
+	type AppealWindowBlocks = ConstU32<{ 3 * DAYS }>; // 3 days appeal window
+	type AutoEscalateBlocks = ConstU32<{ 14 * DAYS }>; // 14 days auto-escalation
+	type MaxActivePerUser = ConstU32<50>;
 }
 
 // ============================================================================
@@ -1303,6 +1284,10 @@ impl pallet_entity_commission::MemberProvider<AccountId> for MemberProviderBridg
 			.map(|m| m.activated)
 			.unwrap_or(false)
 	}
+
+	fn get_direct_referral_accounts(entity_id: u64, account: &AccountId) -> alloc::vec::Vec<AccountId> {
+		pallet_entity_member::DirectReferrals::<Runtime>::get(entity_id, account).into_inner()
+	}
 }
 
 /// 桥接：OrderCommissionHandler → CommissionProvider（供 Transaction 模块调用）
@@ -1425,7 +1410,6 @@ impl pallet_entity_member::KycChecker<AccountId> for MemberKycBridge {
 
 impl pallet_entity_member::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
-	type Currency = Balances;
 	type EntityProvider = EntityRegistry;
 	type ShopProvider = EntityShop;
 	type MaxDirectReferrals = ConstU32<1000>;
@@ -1434,6 +1418,7 @@ impl pallet_entity_member::Config for Runtime {
 	type MaxUpgradeHistory = ConstU32<100>;
 	type PendingMemberExpiry = ConstU32<100800>; // 7 days × 24h × 60min × 60s / 6s = 100800 blocks
 	type KycChecker = MemberKycBridge;
+	type OnMemberRemoved = CommissionPoolReward;
 }
 
 /// 桥接：EntityReferrerProvider → EntityRegistry::entity_referrer()
@@ -1490,6 +1475,12 @@ impl pallet_commission_core::Config for Runtime {
 	type TokenTransferProvider = TokenTransferProviderBridge;
 	type MaxWithdrawalRecords = ConstU32<50>;
 	type MaxMemberOrderIds = ConstU32<100>;
+	// 子模块查询（供 Runtime API 聚合）
+	type MultiLevelQuery = crate::CommissionMultiLevel;
+	type TeamQuery = crate::CommissionTeam;
+	type SingleLineQuery = crate::CommissionSingleLine;
+	type PoolRewardQuery = crate::CommissionPoolReward;
+	type ReferralQuery = crate::CommissionReferral;
 }
 
 impl pallet_commission_referral::Config for Runtime {

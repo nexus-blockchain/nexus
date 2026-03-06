@@ -1,4 +1,4 @@
-//! KYC 模块测试（Per-Entity KYC 模型）
+//! KYC 模块测试（Per-Entity KYC 模型 v2）
 
 use crate::{mock::*, *};
 use frame_support::{assert_noop, assert_ok, traits::ConstU32, BoundedVec};
@@ -18,7 +18,6 @@ fn setup_provider() {
         RuntimeOrigin::root(),
         PROVIDER,
         b"Test Provider".to_vec(),
-        ProviderType::ThirdParty,
         KycLevel::Enhanced,
     ));
 }
@@ -48,7 +47,7 @@ fn submit_and_approve(entity_id: u64, user: u64, level: KycLevel) {
     ));
 }
 
-// ==================== register_provider (全局) ====================
+// ==================== register_provider ====================
 
 #[test]
 fn register_provider_works() {
@@ -67,9 +66,50 @@ fn register_provider_fails_duplicate() {
         assert_noop!(
             EntityKyc::register_provider(
                 RuntimeOrigin::root(), PROVIDER,
-                b"Dup".to_vec(), ProviderType::Internal, KycLevel::Basic,
+                b"Dup".to_vec(), KycLevel::Basic,
             ),
             Error::<Test>::ProviderAlreadyExists
+        );
+    });
+}
+
+#[test]
+fn register_provider_rejects_none_max_level() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityKyc::register_provider(
+                RuntimeOrigin::root(), PROVIDER, b"Test".to_vec(), KycLevel::None,
+            ),
+            Error::<Test>::InvalidKycLevel
+        );
+    });
+}
+
+#[test]
+fn register_provider_rejects_empty_name() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            EntityKyc::register_provider(
+                RuntimeOrigin::root(), PROVIDER, b"".to_vec(), KycLevel::Basic,
+            ),
+            Error::<Test>::EmptyProviderName
+        );
+    });
+}
+
+#[test]
+fn register_provider_fails_max_providers_reached() {
+    new_test_ext().execute_with(|| {
+        for i in 100..120u64 {
+            assert_ok!(EntityKyc::register_provider(
+                RuntimeOrigin::root(), i, format!("Provider{i}").into_bytes(), KycLevel::Basic,
+            ));
+        }
+        assert_noop!(
+            EntityKyc::register_provider(
+                RuntimeOrigin::root(), 200, b"TooMany".to_vec(), KycLevel::Basic,
+            ),
+            Error::<Test>::MaxProvidersReached
         );
     });
 }
@@ -96,31 +136,22 @@ fn remove_provider_fails_not_found() {
     });
 }
 
-// ==================== force_remove_provider ====================
-
 #[test]
-fn force_remove_provider_works() {
+fn remove_provider_cleans_up_authorizations() {
     new_test_ext().execute_with(|| {
         setup_entity();
-        setup_provider_for_entity(ENTITY_1);
+        setup_entity2();
+        setup_provider();
+        assert_ok!(EntityKyc::authorize_provider(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_1, PROVIDER));
+        assert_ok!(EntityKyc::authorize_provider(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_2, PROVIDER));
 
-        assert_ok!(EntityKyc::submit_kyc(
-            RuntimeOrigin::signed(USER), ENTITY_1, KycLevel::Standard, b"QmData".to_vec(), *b"CN",
-        ));
+        assert!(EntityAuthorizedProviders::<Test>::contains_key(ENTITY_1, PROVIDER));
+        assert!(EntityAuthorizedProviders::<Test>::contains_key(ENTITY_2, PROVIDER));
 
-        assert_ok!(EntityKyc::force_remove_provider(RuntimeOrigin::root(), PROVIDER));
-        assert!(Providers::<Test>::get(PROVIDER).is_none());
-        assert_eq!(ProviderCount::<Test>::get(), 0);
-    });
-}
+        assert_ok!(EntityKyc::remove_provider(RuntimeOrigin::root(), PROVIDER));
 
-#[test]
-fn force_remove_provider_fails_not_found() {
-    new_test_ext().execute_with(|| {
-        assert_noop!(
-            EntityKyc::force_remove_provider(RuntimeOrigin::root(), 99),
-            Error::<Test>::ProviderNotFound
-        );
+        assert!(!EntityAuthorizedProviders::<Test>::contains_key(ENTITY_1, PROVIDER));
+        assert!(!EntityAuthorizedProviders::<Test>::contains_key(ENTITY_2, PROVIDER));
     });
 }
 
@@ -173,6 +204,20 @@ fn authorize_provider_fails_provider_not_registered() {
         assert_noop!(
             EntityKyc::authorize_provider(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_1, PROVIDER),
             Error::<Test>::ProviderNotFound
+        );
+    });
+}
+
+#[test]
+fn authorize_provider_fails_entity_not_active() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        setup_provider();
+        MockEntityProvider::set_entity_inactive(ENTITY_1);
+
+        assert_noop!(
+            EntityKyc::authorize_provider(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_1, PROVIDER),
+            Error::<Test>::EntityNotActive
         );
     });
 }
@@ -234,6 +279,21 @@ fn submit_kyc_fails_entity_not_found() {
 }
 
 #[test]
+fn submit_kyc_fails_entity_not_active() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        MockEntityProvider::set_entity_inactive(ENTITY_1);
+
+        assert_noop!(
+            EntityKyc::submit_kyc(
+                RuntimeOrigin::signed(USER), ENTITY_1, KycLevel::Basic, b"QmData".to_vec(), *b"CN",
+            ),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
+#[test]
 fn submit_kyc_fails_already_pending() {
     new_test_ext().execute_with(|| {
         setup_entity();
@@ -263,20 +323,6 @@ fn submit_kyc_fails_already_approved_not_expired() {
             ),
             Error::<Test>::KycAlreadyApproved
         );
-    });
-}
-
-#[test]
-fn submit_kyc_allowed_upgrade_while_approved() {
-    new_test_ext().execute_with(|| {
-        setup_entity();
-        setup_provider_for_entity(ENTITY_1);
-        System::set_block_number(1);
-        submit_and_approve(ENTITY_1, USER, KycLevel::Basic);
-
-        assert_ok!(EntityKyc::submit_kyc(
-            RuntimeOrigin::signed(USER), ENTITY_1, KycLevel::Standard, b"QmUpgrade".to_vec(), *b"CN",
-        ));
     });
 }
 
@@ -363,6 +409,227 @@ fn submit_kyc_fails_cid_too_long() {
             ),
             Error::<Test>::CidTooLong
         );
+    });
+}
+
+// ==================== 升级流程（P0 核心测试）====================
+
+#[test]
+fn upgrade_creates_separate_request() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        setup_provider_for_entity(ENTITY_1);
+        System::set_block_number(1);
+        submit_and_approve(ENTITY_1, USER, KycLevel::Basic);
+
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), ENTITY_1, KycLevel::Standard, b"QmUpgrade".to_vec(), *b"CN",
+        ));
+
+        assert!(UpgradeRequests::<Test>::contains_key(ENTITY_1, USER));
+        let record = KycRecords::<Test>::get(ENTITY_1, USER).unwrap();
+        assert_eq!(record.status, KycStatus::Approved);
+        assert_eq!(record.level, KycLevel::Basic);
+    });
+}
+
+#[test]
+fn upgrade_preserves_permissions_during_review() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        setup_provider_for_entity(ENTITY_1);
+        System::set_block_number(1);
+        submit_and_approve(ENTITY_1, USER, KycLevel::Basic);
+
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), ENTITY_1, KycLevel::Standard, b"QmUpgrade".to_vec(), *b"CN",
+        ));
+
+        assert_eq!(Pallet::<Test>::get_kyc_level(ENTITY_1, &USER), KycLevel::Basic);
+        assert!(Pallet::<Test>::meets_kyc_requirement(ENTITY_1, &USER, KycLevel::Basic));
+    });
+}
+
+#[test]
+fn upgrade_approve_updates_level() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        setup_provider_for_entity(ENTITY_1);
+        System::set_block_number(1);
+        submit_and_approve(ENTITY_1, USER, KycLevel::Basic);
+
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), ENTITY_1, KycLevel::Enhanced, b"QmUpgrade".to_vec(), *b"US",
+        ));
+        assert_ok!(EntityKyc::approve_kyc(
+            RuntimeOrigin::signed(PROVIDER), ENTITY_1, USER, 10,
+        ));
+
+        let record = KycRecords::<Test>::get(ENTITY_1, USER).unwrap();
+        assert_eq!(record.level, KycLevel::Enhanced);
+        assert_eq!(record.status, KycStatus::Approved);
+        assert_eq!(record.risk_score, 10);
+        assert_eq!(record.country_code, Some(*b"US"));
+        assert!(!UpgradeRequests::<Test>::contains_key(ENTITY_1, USER));
+    });
+}
+
+#[test]
+fn upgrade_reject_keeps_original_level() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        setup_provider_for_entity(ENTITY_1);
+        System::set_block_number(1);
+        submit_and_approve(ENTITY_1, USER, KycLevel::Basic);
+
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), ENTITY_1, KycLevel::Standard, b"QmUpgrade".to_vec(), *b"CN",
+        ));
+        assert_ok!(EntityKyc::reject_kyc(
+            RuntimeOrigin::signed(PROVIDER), ENTITY_1, USER, RejectionReason::UnclearDocument, None,
+        ));
+
+        let record = KycRecords::<Test>::get(ENTITY_1, USER).unwrap();
+        assert_eq!(record.level, KycLevel::Basic);
+        assert_eq!(record.status, KycStatus::Approved);
+        assert!(!UpgradeRequests::<Test>::contains_key(ENTITY_1, USER));
+    });
+}
+
+#[test]
+fn upgrade_cancel_keeps_original_level() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        setup_provider_for_entity(ENTITY_1);
+        System::set_block_number(1);
+        submit_and_approve(ENTITY_1, USER, KycLevel::Basic);
+
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), ENTITY_1, KycLevel::Standard, b"QmUpgrade".to_vec(), *b"CN",
+        ));
+        assert_ok!(EntityKyc::cancel_kyc(RuntimeOrigin::signed(USER), ENTITY_1));
+
+        let record = KycRecords::<Test>::get(ENTITY_1, USER).unwrap();
+        assert_eq!(record.level, KycLevel::Basic);
+        assert_eq!(record.status, KycStatus::Approved);
+        assert!(!UpgradeRequests::<Test>::contains_key(ENTITY_1, USER));
+    });
+}
+
+#[test]
+fn upgrade_timeout_keeps_original_level() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        setup_provider_for_entity(ENTITY_1);
+        System::set_block_number(1);
+        submit_and_approve(ENTITY_1, USER, KycLevel::Basic);
+
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), ENTITY_1, KycLevel::Standard, b"QmUpgrade".to_vec(), *b"CN",
+        ));
+
+        System::set_block_number(102);
+        assert_ok!(EntityKyc::timeout_pending_kyc(RuntimeOrigin::signed(USER), ENTITY_1, USER));
+
+        let record = KycRecords::<Test>::get(ENTITY_1, USER).unwrap();
+        assert_eq!(record.level, KycLevel::Basic);
+        assert_eq!(record.status, KycStatus::Approved);
+        assert!(!UpgradeRequests::<Test>::contains_key(ENTITY_1, USER));
+    });
+}
+
+#[test]
+fn upgrade_update_data_works() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        setup_provider_for_entity(ENTITY_1);
+        System::set_block_number(1);
+        submit_and_approve(ENTITY_1, USER, KycLevel::Basic);
+
+        System::set_block_number(10);
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), ENTITY_1, KycLevel::Standard, b"QmOld".to_vec(), *b"CN",
+        ));
+
+        System::set_block_number(50);
+        assert_ok!(EntityKyc::update_kyc_data(
+            RuntimeOrigin::signed(USER), ENTITY_1, b"QmNew".to_vec(),
+        ));
+
+        let upgrade = UpgradeRequests::<Test>::get(ENTITY_1, USER).unwrap();
+        assert_eq!(upgrade.data_cid.to_vec(), b"QmNew".to_vec());
+        assert_eq!(upgrade.submitted_at, 10, "submitted_at must not be reset by update_kyc_data");
+    });
+}
+
+#[test]
+fn upgrade_fails_duplicate_pending() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        setup_provider_for_entity(ENTITY_1);
+        System::set_block_number(1);
+        submit_and_approve(ENTITY_1, USER, KycLevel::Basic);
+
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), ENTITY_1, KycLevel::Standard, b"QmUp1".to_vec(), *b"CN",
+        ));
+        assert_noop!(
+            EntityKyc::submit_kyc(
+                RuntimeOrigin::signed(USER), ENTITY_1, KycLevel::Enhanced, b"QmUp2".to_vec(), *b"CN",
+            ),
+            Error::<Test>::KycAlreadyPending
+        );
+    });
+}
+
+#[test]
+fn upgrade_approve_updates_counts_from_expired() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        setup_provider_for_entity(ENTITY_1);
+        System::set_block_number(1);
+        submit_and_approve(ENTITY_1, USER, KycLevel::Basic);
+        assert_eq!(Pallet::<Test>::get_kyc_stats(ENTITY_1), (0, 1));
+
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), ENTITY_1, KycLevel::Enhanced, b"QmUp".to_vec(), *b"US",
+        ));
+        assert_eq!(Pallet::<Test>::get_kyc_stats(ENTITY_1), (1, 1));
+
+        System::set_block_number(1002);
+        assert_ok!(EntityKyc::expire_kyc(RuntimeOrigin::signed(USER), ENTITY_1, USER));
+        assert_eq!(Pallet::<Test>::get_kyc_stats(ENTITY_1), (1, 0));
+
+        assert_ok!(EntityKyc::approve_kyc(
+            RuntimeOrigin::signed(PROVIDER), ENTITY_1, USER, 5,
+        ));
+        assert_eq!(Pallet::<Test>::get_kyc_stats(ENTITY_1), (0, 1));
+
+        let record = KycRecords::<Test>::get(ENTITY_1, USER).unwrap();
+        assert_eq!(record.level, KycLevel::Enhanced);
+        assert_eq!(record.status, KycStatus::Approved);
+    });
+}
+
+#[test]
+fn upgrade_pending_count_correct() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        setup_provider_for_entity(ENTITY_1);
+        System::set_block_number(1);
+        submit_and_approve(ENTITY_1, USER, KycLevel::Basic);
+
+        assert_eq!(Pallet::<Test>::get_kyc_stats(ENTITY_1), (0, 1));
+
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), ENTITY_1, KycLevel::Standard, b"QmUp".to_vec(), *b"CN",
+        ));
+        assert_eq!(Pallet::<Test>::get_kyc_stats(ENTITY_1), (1, 1));
+
+        assert_ok!(EntityKyc::approve_kyc(
+            RuntimeOrigin::signed(PROVIDER), ENTITY_1, USER, 10,
+        ));
+        assert_eq!(Pallet::<Test>::get_kyc_stats(ENTITY_1), (0, 1));
     });
 }
 
@@ -575,6 +842,24 @@ fn approve_kyc_fails_risk_score_over_100() {
     });
 }
 
+#[test]
+fn approve_kyc_fails_entity_not_active() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        setup_provider_for_entity(ENTITY_1);
+        System::set_block_number(1);
+
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), ENTITY_1, KycLevel::Basic, b"QmData".to_vec(), *b"CN",
+        ));
+        MockEntityProvider::set_entity_inactive(ENTITY_1);
+        assert_noop!(
+            EntityKyc::approve_kyc(RuntimeOrigin::signed(PROVIDER), ENTITY_1, USER, 20),
+            Error::<Test>::EntityNotActive
+        );
+    });
+}
+
 // ==================== reject_kyc ====================
 
 #[test]
@@ -647,6 +932,98 @@ fn revoke_kyc_accepts_pending() {
         assert_ok!(EntityKyc::revoke_kyc(
             RuntimeOrigin::root(), ENTITY_1, USER, RejectionReason::SuspiciousActivity,
         ));
+    });
+}
+
+#[test]
+fn revoke_kyc_cleans_up_pending_upgrade() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        setup_provider_for_entity(ENTITY_1);
+        System::set_block_number(1);
+        submit_and_approve(ENTITY_1, USER, KycLevel::Basic);
+
+        assert_ok!(EntityKyc::submit_kyc(
+            RuntimeOrigin::signed(USER), ENTITY_1, KycLevel::Standard, b"QmUp".to_vec(), *b"CN",
+        ));
+        assert!(UpgradeRequests::<Test>::contains_key(ENTITY_1, USER));
+
+        assert_ok!(EntityKyc::revoke_kyc(
+            RuntimeOrigin::root(), ENTITY_1, USER, RejectionReason::SuspiciousActivity,
+        ));
+        assert!(!UpgradeRequests::<Test>::contains_key(ENTITY_1, USER));
+        assert_eq!(KycRecords::<Test>::get(ENTITY_1, USER).unwrap().status, KycStatus::Revoked);
+    });
+}
+
+// ==================== entity_revoke_kyc (P1) ====================
+
+#[test]
+fn entity_revoke_kyc_by_owner_works() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        setup_provider_for_entity(ENTITY_1);
+        System::set_block_number(1);
+        submit_and_approve(ENTITY_1, USER, KycLevel::Standard);
+
+        assert_ok!(EntityKyc::entity_revoke_kyc(
+            RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_1, USER, RejectionReason::SuspiciousActivity,
+        ));
+
+        let record = KycRecords::<Test>::get(ENTITY_1, USER).unwrap();
+        assert_eq!(record.status, KycStatus::Revoked);
+    });
+}
+
+#[test]
+fn entity_revoke_kyc_by_admin_works() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        setup_provider_for_entity(ENTITY_1);
+        MockEntityProvider::set_entity_admin(ENTITY_1, ENTITY_ADMIN_USER, pallet_entity_common::AdminPermission::KYC_MANAGE);
+        System::set_block_number(1);
+        submit_and_approve(ENTITY_1, USER, KycLevel::Standard);
+
+        assert_ok!(EntityKyc::entity_revoke_kyc(
+            RuntimeOrigin::signed(ENTITY_ADMIN_USER), ENTITY_1, USER, RejectionReason::ForgedDocument,
+        ));
+
+        assert_eq!(KycRecords::<Test>::get(ENTITY_1, USER).unwrap().status, KycStatus::Revoked);
+    });
+}
+
+#[test]
+fn entity_revoke_kyc_fails_not_owner() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        setup_provider_for_entity(ENTITY_1);
+        System::set_block_number(1);
+        submit_and_approve(ENTITY_1, USER, KycLevel::Standard);
+
+        assert_noop!(
+            EntityKyc::entity_revoke_kyc(
+                RuntimeOrigin::signed(USER2), ENTITY_1, USER, RejectionReason::Other,
+            ),
+            Error::<Test>::NotEntityOwnerOrAdmin
+        );
+    });
+}
+
+#[test]
+fn entity_revoke_kyc_fails_entity_not_active() {
+    new_test_ext().execute_with(|| {
+        setup_entity();
+        setup_provider_for_entity(ENTITY_1);
+        System::set_block_number(1);
+        submit_and_approve(ENTITY_1, USER, KycLevel::Standard);
+
+        MockEntityProvider::set_entity_inactive(ENTITY_1);
+        assert_noop!(
+            EntityKyc::entity_revoke_kyc(
+                RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_1, USER, RejectionReason::Other,
+            ),
+            Error::<Test>::EntityNotActive
+        );
     });
 }
 
@@ -924,7 +1301,7 @@ fn update_kyc_data_fails_not_pending() {
     });
 }
 
-// ==================== purge_kyc_data ====================
+// ==================== purge_kyc_data (P2: GDPR) ====================
 
 #[test]
 fn purge_kyc_data_works_for_rejected() {
@@ -945,6 +1322,8 @@ fn purge_kyc_data_works_for_rejected() {
         let record = KycRecords::<Test>::get(ENTITY_1, USER).unwrap();
         assert!(record.data_cid.is_none());
         assert!(record.rejection_details_cid.is_none());
+        assert!(record.country_code.is_none());
+        assert_eq!(record.risk_score, 0);
     });
 }
 
@@ -993,7 +1372,7 @@ fn remove_entity_requirement_fails_not_owner() {
     });
 }
 
-// ==================== timeout_pending_kyc ====================
+// ==================== timeout_pending_kyc (P2: TimedOut) ====================
 
 #[test]
 fn timeout_pending_kyc_works() {
@@ -1010,6 +1389,7 @@ fn timeout_pending_kyc_works() {
 
         let record = KycRecords::<Test>::get(ENTITY_1, USER).unwrap();
         assert_eq!(record.status, KycStatus::Rejected);
+        assert_eq!(record.rejection_reason, Some(RejectionReason::TimedOut));
     });
 }
 
@@ -1122,7 +1502,7 @@ fn update_risk_score_fails_not_authorized() {
     });
 }
 
-// ==================== update/suspend/resume_provider (全局) ====================
+// ==================== update/suspend/resume_provider ====================
 
 #[test]
 fn update_provider_works() {
@@ -1525,28 +1905,6 @@ fn force_set_entity_requirement_works_without_entity() {
     });
 }
 
-// ==================== Provider 验证计数 ====================
-
-#[test]
-fn provider_verification_count_increments() {
-    new_test_ext().execute_with(|| {
-        setup_entity();
-        setup_provider_for_entity(ENTITY_1);
-        System::set_block_number(1);
-        submit_and_approve(ENTITY_1, USER, KycLevel::Basic);
-
-        assert_eq!(Providers::<Test>::get(PROVIDER).unwrap().verifications_count, 1);
-
-        assert_ok!(EntityKyc::submit_kyc(
-            RuntimeOrigin::signed(USER2), ENTITY_1, KycLevel::Basic, b"QmData".to_vec(), *b"US",
-        ));
-        assert_ok!(EntityKyc::reject_kyc(
-            RuntimeOrigin::signed(PROVIDER), ENTITY_1, USER2, RejectionReason::Other, None,
-        ));
-        assert_eq!(Providers::<Test>::get(PROVIDER).unwrap().verifications_count, 2);
-    });
-}
-
 // ==================== Institutional 有效期 ====================
 
 #[test]
@@ -1563,48 +1921,5 @@ fn institutional_has_own_validity() {
 
         let record = KycRecords::<Test>::get(ENTITY_1, USER).unwrap();
         assert_eq!(record.expires_at.unwrap(), 3001);
-    });
-}
-
-// ==================== register_provider 边界检查 ====================
-
-#[test]
-fn register_provider_rejects_none_max_level() {
-    new_test_ext().execute_with(|| {
-        assert_noop!(
-            EntityKyc::register_provider(
-                RuntimeOrigin::root(), PROVIDER, b"Test".to_vec(), ProviderType::Internal, KycLevel::None,
-            ),
-            Error::<Test>::InvalidKycLevel
-        );
-    });
-}
-
-#[test]
-fn register_provider_rejects_empty_name() {
-    new_test_ext().execute_with(|| {
-        assert_noop!(
-            EntityKyc::register_provider(
-                RuntimeOrigin::root(), PROVIDER, b"".to_vec(), ProviderType::Internal, KycLevel::Basic,
-            ),
-            Error::<Test>::EmptyProviderName
-        );
-    });
-}
-
-#[test]
-fn register_provider_fails_max_providers_reached() {
-    new_test_ext().execute_with(|| {
-        for i in 100..120u64 {
-            assert_ok!(EntityKyc::register_provider(
-                RuntimeOrigin::root(), i, format!("Provider{i}").into_bytes(), ProviderType::Internal, KycLevel::Basic,
-            ));
-        }
-        assert_noop!(
-            EntityKyc::register_provider(
-                RuntimeOrigin::root(), 200, b"TooMany".to_vec(), ProviderType::Internal, KycLevel::Basic,
-            ),
-            Error::<Test>::MaxProvidersReached
-        );
     });
 }

@@ -11,6 +11,7 @@
 //! - 总佣金上限（`max_total_rate` 基点制截断）
 //! - 循环检测（`BTreeSet<AccountId>` 防止环形推荐链）
 //! - 泛型佣金计算，NEX 和 EntityToken 共用 `process_multi_level`
+//! - 待生效配置自动应用（`on_initialize` + `PendingConfigQueue`）
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -50,9 +51,9 @@ pub mod pallet {
         pub rate: u16,
         /// 有效直推人数（不含复购赠与），最大 10000，0 = 无要求
         pub required_directs: u32,
-        /// 最低团队规模，0 = 无要求
+        /// 最低团队规模，最大 1_000_000，0 = 无要求
         pub required_team_size: u32,
-        /// 最低累计消费 USDT（精度 10^6），0 = 无要求
+        /// 最低累计消费 USDT（精度 10^6），最大 10^18，0 = 无要求
         pub required_spent: u128,
     }
 
@@ -109,11 +110,12 @@ pub mod pallet {
     }
 
     // F13: Entity 级多级佣金统计数据
+    // R10-#8: total_beneficiaries → total_distribution_entries（实际为累计分发条目数，非去重受益人数）
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
     pub struct EntityStatsData {
         pub total_distributed: u128,
         pub total_orders: u32,
-        pub total_beneficiaries: u32,
+        pub total_distribution_entries: u32,
     }
 
     // F5: 激活进度
@@ -145,19 +147,25 @@ pub mod pallet {
         UpdateParams,
         AddTier { index: u32 },
         RemoveTier { index: u32 },
+        // R10-#1: Root 强制操作审计日志
         ForceSet,
         ForceClear,
         Pause,
         Resume,
         PendingScheduled,
         PendingApplied,
-        // M3-R7: 取消待生效配置审计日志
         PendingCancelled,
+        // R10-#14: on_initialize 自动应用
+        PendingAutoApplied,
+        // R10-#6: Root 强制暂停/恢复
+        ForcePause,
+        ForceResume,
+        // R11-B3: 治理路径审计日志
+        GovernanceSet,
+        GovernanceClear,
     }
 
     // F1: 待生效配置条目
-    //
-    // 手动实现 Clone/PartialEq/Eq 以避免 MaxMultiLevels 类型参数的不必要 trait bound。
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, TypeInfo, MaxEncodedLen)]
     #[scale_info(skip_type_params(T))]  
     pub struct PendingConfigEntry<T: Config> {
@@ -220,15 +228,19 @@ pub mod pallet {
         type WeightInfo: WeightInfo;
     }
 
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(2);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
-    // F9: integrity_test — MaxMultiLevels 校验
+    // R10-#14: on_initialize 自动应用待生效配置 + integrity_test
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        fn on_initialize(n: BlockNumberFor<T>) -> Weight {
+            Self::auto_apply_pending_configs(n)
+        }
+
         fn integrity_test() {
             assert!(
                 T::MaxMultiLevels::get() >= 1,
@@ -309,6 +321,14 @@ pub mod pallet {
         PendingConfigEntry<T>,
     >;
 
+    // R10-#14: 待生效配置自动应用队列（entity_id 列表，供 on_initialize 遍历）
+    #[pallet::storage]
+    pub type PendingConfigQueue<T: Config> = StorageValue<
+        _,
+        BoundedVec<u64, ConstU32<100>>,
+        ValueQuery,
+    >;
+
     // ========================================================================
     // Events
     // ========================================================================
@@ -340,6 +360,10 @@ pub mod pallet {
         PendingConfigApplied { entity_id: u64 },
         // F1: 待生效配置已取消
         PendingConfigCancelled { entity_id: u64 },
+        // R10-#7: 佣金分发统计更新
+        MultiLevelCommissionDistributed { entity_id: u64, total_amount: u128, beneficiary_count: u32 },
+        // R10-#4: Entity 存储已清理
+        EntityStorageCleaned { entity_id: u64 },
     }
 
     // ========================================================================
@@ -376,6 +400,14 @@ pub mod pallet {
         PendingConfigNotReady,
         /// required_directs 超过 10000
         InvalidDirects,
+        // R10-#3: required_team_size 超过 1_000_000
+        InvalidTeamSize,
+        // R10-#3: required_spent 超过 10^18
+        InvalidSpent,
+        // R10-#14: 待生效配置队列已满
+        PendingQueueFull,
+        // R10-#6: 多级分销未暂停（force_resume 时）
+        MultiLevelNotPaused,
     }
 
     // ========================================================================
@@ -446,6 +478,7 @@ pub mod pallet {
         }
 
         /// [Root] 强制设置 Entity 多级分销配置
+        // R10-#1: 补充审计日志（使用 entity_account 标识 Root 操作）
         #[pallet::call_index(2)]
         #[pallet::weight(T::WeightInfo::set_multi_level_config(levels.len() as u32))]
         pub fn force_set_multi_level_config(
@@ -457,7 +490,6 @@ pub mod pallet {
             ensure_root(origin)?;
             Self::validate_config(&levels, max_total_rate)?;
 
-            // M1-R7: 记录旧配置用于 ConfigDetailedChange 事件
             let old_config = MultiLevelConfigs::<T>::get(entity_id);
             let (old_levels_count, old_max_rate) = old_config
                 .as_ref()
@@ -477,10 +509,13 @@ pub mod pallet {
                 old_max_rate,
                 new_max_rate: max_total_rate,
             });
+            let root_who = T::EntityProvider::entity_account(entity_id);
+            Self::record_change_log(entity_id, &root_who, ConfigChangeType::ForceSet);
             Ok(())
         }
 
         /// [Root] 强制清除 Entity 多级分销配置（幂等，配置不存在时静默成功）
+        // R10-#1: 补充审计日志
         #[pallet::call_index(3)]
         #[pallet::weight(T::WeightInfo::clear_multi_level_config())]
         pub fn force_clear_multi_level_config(
@@ -491,6 +526,8 @@ pub mod pallet {
             if MultiLevelConfigs::<T>::contains_key(entity_id) {
                 MultiLevelConfigs::<T>::remove(entity_id);
                 Self::deposit_event(Event::MultiLevelConfigCleared { entity_id });
+                let root_who = T::EntityProvider::entity_account(entity_id);
+                Self::record_change_log(entity_id, &root_who, ConfigChangeType::ForceClear);
             }
             Ok(())
         }
@@ -499,6 +536,8 @@ pub mod pallet {
         ///
         /// 支持单独更新 `max_total_rate` 和/或指定层的配置，无需重提整个 levels 数组。
         /// 全部 None 返回 `NothingToUpdate`。
+        // R10-#2: 变更后触发 rates_sum 警告检查
+        // R10-#3: 补充 team_size / spent 上界校验
         #[pallet::call_index(4)]
         #[pallet::weight(T::WeightInfo::update_multi_level_params())]
         pub fn update_multi_level_params(
@@ -528,13 +567,12 @@ pub mod pallet {
                 if let (Some(idx), Some(tier)) = (tier_index, tier_update) {
                     let idx = idx as usize;
                     ensure!(idx < config.levels.len(), Error::<T>::TierIndexOutOfBounds);
-                    ensure!(tier.rate <= 10000, Error::<T>::InvalidRate);
-                    ensure!(tier.required_directs <= 10000, Error::<T>::InvalidDirects);
+                    Self::validate_tier(&tier)?;
                     config.levels[idx] = tier;
                     Self::deposit_event(Event::TierUpdated { entity_id, tier_index: idx as u32 });
                 }
 
-                // F2: 审计日志
+                Self::check_rates_sum_warning(entity_id, config);
                 Self::record_change_log(entity_id, &who, ConfigChangeType::UpdateParams);
                 Ok(())
             })
@@ -544,6 +582,8 @@ pub mod pallet {
         ///
         /// `index` 为插入位置（0-indexed），现有层级从 index 开始后移。
         /// index = levels.len() 表示追加到末尾。
+        // R10-#2: 插入后触发 rates_sum 警告检查
+        // R10-#3: 补充 team_size / spent 上界校验
         #[pallet::call_index(5)]
         #[pallet::weight(T::WeightInfo::add_tier())]
         pub fn add_tier(
@@ -555,21 +595,19 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             Self::ensure_owner_or_admin(entity_id, &who)?;
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
-            ensure!(tier.rate <= 10000, Error::<T>::InvalidRate);
-            ensure!(tier.required_directs <= 10000, Error::<T>::InvalidDirects);
+            Self::validate_tier(&tier)?;
 
             MultiLevelConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
                 let config = maybe_config.as_mut().ok_or(Error::<T>::ConfigNotFound)?;
                 let idx = index as usize;
                 ensure!(idx <= config.levels.len(), Error::<T>::TierIndexOutOfBounds);
 
-                // 构建新 Vec 并插入
                 let mut v = config.levels.to_vec();
                 v.insert(idx, tier);
                 config.levels = v.try_into().map_err(|_| Error::<T>::TierLimitExceeded)?;
 
+                Self::check_rates_sum_warning(entity_id, config);
                 Self::deposit_event(Event::TierInserted { entity_id, tier_index: index });
-                // F2: 审计日志
                 Self::record_change_log(entity_id, &who, ConfigChangeType::AddTier { index });
                 Ok(())
             })
@@ -578,6 +616,7 @@ pub mod pallet {
         /// F4: 移除指定位置的层级（Owner/Admin）
         ///
         /// 移除后 levels 不可为空（至少保留 1 层，否则应使用 clear）。
+        // R10-#2: 移除后触发 rates_sum 警告检查
         #[pallet::call_index(6)]
         #[pallet::weight(T::WeightInfo::remove_tier())]
         pub fn remove_tier(
@@ -599,8 +638,8 @@ pub mod pallet {
                 v.remove(idx);
                 config.levels = v.try_into().map_err(|_| Error::<T>::TierLimitExceeded)?;
 
+                Self::check_rates_sum_warning(entity_id, config);
                 Self::deposit_event(Event::TierRemoved { entity_id, tier_index: index });
-                // F2: 审计日志
                 Self::record_change_log(entity_id, &who, ConfigChangeType::RemoveTier { index });
                 Ok(())
             })
@@ -608,7 +647,6 @@ pub mod pallet {
 
         /// F10: 暂停 Entity 多级分销（Owner/Admin）
         #[pallet::call_index(7)]
-        // L1-R7: 使用专用权重函数
         #[pallet::weight(T::WeightInfo::pause_multi_level())]
         pub fn pause_multi_level(
             origin: OriginFor<T>,
@@ -626,7 +664,6 @@ pub mod pallet {
 
         /// F10: 恢复 Entity 多级分销（Owner/Admin）
         #[pallet::call_index(8)]
-        // L1-R7: 使用专用权重函数
         #[pallet::weight(T::WeightInfo::resume_multi_level())]
         pub fn resume_multi_level(
             origin: OriginFor<T>,
@@ -634,7 +671,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::ensure_owner_or_admin(entity_id, &who)?;
-            ensure!(GlobalPaused::<T>::get(entity_id), Error::<T>::NothingToUpdate);
+            ensure!(GlobalPaused::<T>::get(entity_id), Error::<T>::MultiLevelNotPaused);
 
             GlobalPaused::<T>::remove(entity_id);
             Self::deposit_event(Event::MultiLevelResumed { entity_id });
@@ -645,9 +682,9 @@ pub mod pallet {
         /// F1: 调度延迟生效的配置变更（Owner/Admin）
         ///
         /// 配置将在 current_block + ConfigChangeDelay 后生效。
-        /// 需调用 apply_pending_config 来最终应用。
+        /// 到达生效区块后由 on_initialize 自动应用，或手动调用 apply_pending_config。
+        // R10-#14: 同时加入 PendingConfigQueue 供 on_initialize 自动应用
         #[pallet::call_index(9)]
-        // L2-R7: 使用专用权重函数
         #[pallet::weight(T::WeightInfo::schedule_config_change(levels.len() as u32))]
         pub fn schedule_config_change(
             origin: OriginFor<T>,
@@ -670,55 +707,40 @@ pub mod pallet {
                 scheduled_by: who.clone(),
             });
 
+            PendingConfigQueue::<T>::try_mutate(|q| -> DispatchResult {
+                q.try_push(entity_id).map_err(|_| Error::<T>::PendingQueueFull)?;
+                Ok(())
+            })?;
+
             Self::deposit_event(Event::PendingConfigScheduled { entity_id, effective_at });
             Self::record_change_log(entity_id, &who, ConfigChangeType::PendingScheduled);
             Ok(())
         }
 
         /// F1: 应用待生效的配置变更（任何人可调用，但必须到达生效区块且实体未锁定）
+        // R10-#14: 手动应用时也从 PendingConfigQueue 移除
         #[pallet::call_index(10)]
-        // L3-R7: 使用专用权重函数
         #[pallet::weight(T::WeightInfo::apply_pending_config())]
         pub fn apply_pending_config(
             origin: OriginFor<T>,
             entity_id: u64,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            // M1-R9: 锁定的实体不允许应用待生效配置，防止绕过锁定保护
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             let pending = PendingConfigs::<T>::get(entity_id).ok_or(Error::<T>::NoPendingConfig)?;
 
             let current_block: u32 = <frame_system::Pallet<T>>::block_number().try_into().unwrap_or(0u32);
             ensure!(current_block >= pending.effective_at, Error::<T>::PendingConfigNotReady);
 
-            // F7: 记录详细变更
-            let old_config = MultiLevelConfigs::<T>::get(entity_id);
-            let (old_levels_count, old_max_rate) = old_config
-                .as_ref()
-                .map(|c| (c.levels.len() as u32, c.max_total_rate))
-                .unwrap_or((0, 0));
-
-            MultiLevelConfigs::<T>::insert(entity_id, pending.config.clone());
-            PendingConfigs::<T>::remove(entity_id);
-
-            // F4: rates 总和 vs max_total_rate 警告
-            Self::check_rates_sum_warning(entity_id, &pending.config);
-
-            Self::deposit_event(Event::PendingConfigApplied { entity_id });
-            Self::deposit_event(Event::ConfigDetailedChange {
-                entity_id,
-                old_levels_count,
-                new_levels_count: pending.config.levels.len() as u32,
-                old_max_rate,
-                new_max_rate: pending.config.max_total_rate,
-            });
+            Self::do_apply_pending(entity_id, &pending)?;
+            Self::remove_from_pending_queue(entity_id);
             Self::record_change_log(entity_id, &who, ConfigChangeType::PendingApplied);
             Ok(())
         }
 
         /// F1: 取消待生效的配置变更（Owner/Admin）
+        // R10-#14: 同时从 PendingConfigQueue 移除
         #[pallet::call_index(11)]
-        // L4-R7: 使用专用权重函数
         #[pallet::weight(T::WeightInfo::cancel_pending_config())]
         pub fn cancel_pending_config(
             origin: OriginFor<T>,
@@ -729,9 +751,63 @@ pub mod pallet {
             ensure!(PendingConfigs::<T>::contains_key(entity_id), Error::<T>::NoPendingConfig);
 
             PendingConfigs::<T>::remove(entity_id);
+            Self::remove_from_pending_queue(entity_id);
             Self::deposit_event(Event::PendingConfigCancelled { entity_id });
-            // M3-R7: 审计日志
             Self::record_change_log(entity_id, &who, ConfigChangeType::PendingCancelled);
+            Ok(())
+        }
+
+        /// R10-#6: [Root] 强制暂停 Entity 多级分销
+        ///
+        /// 用于紧急安全响应，不受 EntityLocked 限制。
+        #[pallet::call_index(12)]
+        #[pallet::weight(T::WeightInfo::force_pause_multi_level())]
+        pub fn force_pause_multi_level(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(!GlobalPaused::<T>::get(entity_id), Error::<T>::MultiLevelIsPaused);
+
+            GlobalPaused::<T>::insert(entity_id, true);
+            Self::deposit_event(Event::MultiLevelPaused { entity_id });
+            let root_who = T::EntityProvider::entity_account(entity_id);
+            Self::record_change_log(entity_id, &root_who, ConfigChangeType::ForcePause);
+            Ok(())
+        }
+
+        /// R10-#6: [Root] 强制恢复 Entity 多级分销
+        #[pallet::call_index(13)]
+        #[pallet::weight(T::WeightInfo::force_resume_multi_level())]
+        pub fn force_resume_multi_level(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(GlobalPaused::<T>::get(entity_id), Error::<T>::MultiLevelNotPaused);
+
+            GlobalPaused::<T>::remove(entity_id);
+            Self::deposit_event(Event::MultiLevelResumed { entity_id });
+            let root_who = T::EntityProvider::entity_account(entity_id);
+            Self::record_change_log(entity_id, &root_who, ConfigChangeType::ForceResume);
+            Ok(())
+        }
+
+        /// R10-#4: [Root] 清理 Entity 下所有多级分销存储
+        ///
+        /// 用于 Entity 被删除后回收存储。清除配置、统计、审计日志、待生效配置等。
+        /// `member_count_hint` 为预估成员数，用于准确计费；不影响实际清理范围。
+        // R11-B1: weight 参数化，按 member_count_hint 缩放
+        #[pallet::call_index(14)]
+        #[pallet::weight(T::WeightInfo::force_cleanup_entity(*member_count_hint))]
+        pub fn force_cleanup_entity(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            member_count_hint: u32,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            Self::cleanup_entity_storage(entity_id);
+            Self::deposit_event(Event::EntityStorageCleaned { entity_id });
             Ok(())
         }
     }
@@ -755,15 +831,23 @@ pub mod pallet {
             Ok(())
         }
 
+        // R10-#3: 单层 tier 参数校验（rate + directs + team_size + spent 上界）
+        pub fn validate_tier(tier: &MultiLevelTier) -> DispatchResult {
+            ensure!(tier.rate <= 10000, Error::<T>::InvalidRate);
+            ensure!(tier.required_directs <= 10000, Error::<T>::InvalidDirects);
+            ensure!(tier.required_team_size <= 1_000_000, Error::<T>::InvalidTeamSize);
+            ensure!(tier.required_spent <= 1_000_000_000_000_000_000u128, Error::<T>::InvalidSpent);
+            Ok(())
+        }
+
         /// 校验 levels + max_total_rate 参数合法性
-        fn validate_config(
+        pub fn validate_config(
             levels: &BoundedVec<MultiLevelTier, T::MaxMultiLevels>,
             max_total_rate: u16,
         ) -> DispatchResult {
             ensure!(!levels.is_empty(), Error::<T>::EmptyLevels);
             for tier in levels.iter() {
-                ensure!(tier.rate <= 10000, Error::<T>::InvalidRate);
-                ensure!(tier.required_directs <= 10000, Error::<T>::InvalidDirects);
+                Self::validate_tier(tier)?;
             }
             ensure!(max_total_rate > 0 && max_total_rate <= 10000, Error::<T>::InvalidRate);
             Ok(())
@@ -814,15 +898,11 @@ pub mod pallet {
                 if visited.contains(referrer) { break; }
                 visited.insert(referrer.clone());
 
-                // F10: 跳过非会员（已退出/未注册的推荐人不应获得佣金）
-                // M1-R4: is_member/is_banned 廉价检查提前，避免 check_tier_activation 的多余 DB read
                 if !T::MemberProvider::is_member(entity_id, referrer) {
                     current_referrer = T::MemberProvider::get_referrer(entity_id, referrer);
                     continue;
                 }
 
-                // F9: 跳过被封禁、未激活或冻结/暂停的推荐人
-                // M1-R8: 补充 is_member_active 检查（覆盖 frozen/suspended 状态）
                 if T::MemberProvider::is_banned(entity_id, referrer)
                     || !T::MemberProvider::is_activated(entity_id, referrer)
                     || !T::MemberProvider::is_member_active(entity_id, referrer)
@@ -837,7 +917,6 @@ pub mod pallet {
                 }
 
                 let commission = order_amount.saturating_mul(B::from(tier.rate as u32)) / B::from(10000u32);
-                // L1-R9: 区分 remaining=0（预算耗尽→终止）与 commission=0（精度截断→跳过）
                 if remaining.is_zero() { break; }
                 let actual = commission.min(*remaining);
                 if actual.is_zero() {
@@ -876,12 +955,6 @@ pub mod pallet {
         }
 
         /// 三维激活条件检查（AND 逻辑，值为 0 自动跳过）
-        ///
-        /// | 条件 | 数据来源 | 精度 |
-        /// |------|----------|------|
-        /// | `required_directs` | `MemberProvider::get_member_stats().0` | 有效直推人数（不含复购赠与） |
-        /// | `required_team_size` | `MemberProvider::get_member_stats().1` | 人数 |
-        /// | `required_spent` | `MemberProvider::get_member_spent_usdt()` | USDT × 10^6 |
         pub fn check_tier_activation(
             entity_id: u64,
             account: &T::AccountId,
@@ -890,7 +963,6 @@ pub mod pallet {
             if tier.required_directs == 0 && tier.required_team_size == 0 && tier.required_spent == 0 {
                 return true;
             }
-            // L1-R3: 仅在需要时读取 get_member_stats，避免 required_spent-only 场景的多余 DB read
             if tier.required_directs > 0 || tier.required_team_size > 0 {
                 let (direct_referrals, team_size, _) = T::MemberProvider::get_member_stats(entity_id, account);
                 if tier.required_directs > 0 && direct_referrals < tier.required_directs { return false; }
@@ -904,9 +976,6 @@ pub mod pallet {
         }
 
         /// F11: 查询指定账户在各层级的激活状态
-        ///
-        /// 返回 `Vec<bool>`，长度 = levels.len()，true = 该层已激活。
-        /// 配置不存在时返回空 Vec。
         pub fn get_activation_status(entity_id: u64, account: &T::AccountId) -> alloc::vec::Vec<bool> {
             let config = match MultiLevelConfigs::<T>::get(entity_id) {
                 Some(c) => c,
@@ -915,12 +984,9 @@ pub mod pallet {
             config.levels.iter().map(|tier| Self::check_tier_activation(entity_id, account, tier)).collect()
         }
 
-        // L4-R9: 审计日志上限（环形缓冲，超过后覆盖最旧条目）
         const MAX_CONFIG_CHANGE_LOGS: u32 = 1000;
 
-        // F2: 记录配置变更审计日志
-        // L4-R9: 使用环形缓冲防止无限增长，slot = count % MAX，count 持续递增保留总计数
-        pub(crate) fn record_change_log(entity_id: u64, who: &T::AccountId, change_type: ConfigChangeType) {
+        pub fn record_change_log(entity_id: u64, who: &T::AccountId, change_type: ConfigChangeType) {
             let count = ConfigChangeLogCount::<T>::get(entity_id);
             let slot = count % Self::MAX_CONFIG_CHANGE_LOGS;
             let block_number: u32 = <frame_system::Pallet<T>>::block_number().try_into().unwrap_or(0u32);
@@ -932,9 +998,7 @@ pub mod pallet {
             ConfigChangeLogCount::<T>::insert(entity_id, count.saturating_add(1));
         }
 
-        // F4: rates 总和 vs max_total_rate 警告事件
-        // L2-R9: rates_sum 使用 u32 避免饱和
-        fn check_rates_sum_warning(entity_id: u64, config: &MultiLevelConfigOf<T>) {
+        pub fn check_rates_sum_warning(entity_id: u64, config: &MultiLevelConfigOf<T>) {
             let rates_sum: u32 = config.levels.iter().map(|t| t.rate as u32).sum();
             if rates_sum > config.max_total_rate as u32 {
                 Self::deposit_event(Event::RatesSumExceedsMax {
@@ -952,12 +1016,10 @@ pub mod pallet {
                 None => return Vec::new(),
             };
 
-            // M2-R7: 预加载一次，避免 check_tier_activation 每层重复 DB read
             let (directs, team_size, _) = T::MemberProvider::get_member_stats(entity_id, account);
             let spent_usdt: u128 = T::MemberProvider::get_member_spent_usdt(entity_id, account).into();
 
             config.levels.iter().enumerate().map(|(idx, tier)| {
-                // 使用预加载的值内联检查，替代 check_tier_activation
                 let activated = {
                     let directs_ok = tier.required_directs == 0 || directs >= tier.required_directs;
                     let team_ok = tier.required_team_size == 0 || team_size >= tier.required_team_size;
@@ -981,7 +1043,6 @@ pub mod pallet {
         pub fn preview_commission(entity_id: u64, buyer: &T::AccountId, order_amount: u128) -> Vec<(T::AccountId, u128, u8)>
         where T::AccountId: Ord
         {
-            // M2-R8: 与 calculate() 一致，未激活实体返空
             if !T::EntityProvider::is_entity_active(entity_id) {
                 return Vec::new();
             }
@@ -999,15 +1060,16 @@ pub mod pallet {
             outputs.into_iter().map(|o| (o.beneficiary, o.amount, o.level)).collect()
         }
 
-        // F6/F13: 更新佣金统计（在 process_multi_level 输出后调用）
-        pub(crate) fn update_stats(entity_id: u64, outputs: &[CommissionOutput<T::AccountId, u128>]) {
+        // R10-#7: 更新佣金统计 + 发出 MultiLevelCommissionDistributed 事件
+        // R10-#8: 字段重命名 total_beneficiaries → total_distribution_entries
+        // R11-B5: 提升为 pub，允许 pallet-commission-core 调用
+        pub fn update_stats(entity_id: u64, outputs: &[CommissionOutput<T::AccountId, u128>]) {
             if outputs.is_empty() { return; }
 
             let block: u32 = <frame_system::Pallet<T>>::block_number().try_into().unwrap_or(0u32);
             let mut total_distributed: u128 = 0;
 
             for output in outputs.iter() {
-                // F6: 个人统计
                 MemberMultiLevelStats::<T>::mutate(entity_id, &output.beneficiary, |stats| {
                     stats.total_earned = stats.total_earned.saturating_add(output.amount);
                     stats.total_orders = stats.total_orders.saturating_add(1);
@@ -1016,17 +1078,140 @@ pub mod pallet {
                 total_distributed = total_distributed.saturating_add(output.amount);
             }
 
-            // F13: Entity 级统计
             EntityMultiLevelStats::<T>::mutate(entity_id, |stats| {
                 stats.total_distributed = stats.total_distributed.saturating_add(total_distributed);
                 stats.total_orders = stats.total_orders.saturating_add(1);
-                stats.total_beneficiaries = stats.total_beneficiaries.saturating_add(outputs.len() as u32);
+                stats.total_distribution_entries = stats.total_distribution_entries.saturating_add(outputs.len() as u32);
+            });
+
+            Self::deposit_event(Event::MultiLevelCommissionDistributed {
+                entity_id,
+                total_amount: total_distributed,
+                beneficiary_count: outputs.len() as u32,
             });
         }
 
         /// F10: 查询多级分销是否暂停
         pub fn is_paused(entity_id: u64) -> bool {
             GlobalPaused::<T>::get(entity_id)
+        }
+
+        // R10-#9: 查询最近的配置变更审计日志（按时间逆序，最多 limit 条）
+        pub fn get_recent_change_logs(entity_id: u64, limit: u32) -> Vec<ConfigChangeEntry<T>> {
+            let total_count = ConfigChangeLogCount::<T>::get(entity_id);
+            if total_count == 0 { return Vec::new(); }
+
+            let effective_count = total_count.min(Self::MAX_CONFIG_CHANGE_LOGS);
+            let fetch_count = limit.min(effective_count);
+            let mut result = Vec::with_capacity(fetch_count as usize);
+
+            for i in 0..fetch_count {
+                let idx = total_count.saturating_sub(1).saturating_sub(i);
+                let slot = idx % Self::MAX_CONFIG_CHANGE_LOGS;
+                if let Some(entry) = ConfigChangeLogs::<T>::get(entity_id, slot) {
+                    result.push(entry);
+                }
+            }
+
+            result
+        }
+
+        // R10-#4: 清理 Entity 下所有多级分销相关存储
+        pub fn cleanup_entity_storage(entity_id: u64) {
+            MultiLevelConfigs::<T>::remove(entity_id);
+            GlobalPaused::<T>::remove(entity_id);
+            EntityMultiLevelStats::<T>::remove(entity_id);
+            ConfigChangeLogCount::<T>::remove(entity_id);
+            PendingConfigs::<T>::remove(entity_id);
+            let _ = MemberMultiLevelStats::<T>::clear_prefix(entity_id, u32::MAX, None);
+            let _ = ConfigChangeLogs::<T>::clear_prefix(entity_id, u32::MAX, None);
+            Self::remove_from_pending_queue(entity_id);
+        }
+
+        // R10-#14: 从待生效配置队列移除指定 entity_id
+        fn remove_from_pending_queue(entity_id: u64) {
+            PendingConfigQueue::<T>::mutate(|q| {
+                q.retain(|id| *id != entity_id);
+            });
+        }
+
+        // R10-#14: 应用待生效配置的内部逻辑（extrinsic 和 on_initialize 共用）
+        fn do_apply_pending(entity_id: u64, pending: &PendingConfigEntry<T>) -> DispatchResult {
+            let old_config = MultiLevelConfigs::<T>::get(entity_id);
+            let (old_levels_count, old_max_rate) = old_config
+                .as_ref()
+                .map(|c| (c.levels.len() as u32, c.max_total_rate))
+                .unwrap_or((0, 0));
+
+            MultiLevelConfigs::<T>::insert(entity_id, pending.config.clone());
+            PendingConfigs::<T>::remove(entity_id);
+            Self::check_rates_sum_warning(entity_id, &pending.config);
+
+            Self::deposit_event(Event::PendingConfigApplied { entity_id });
+            Self::deposit_event(Event::ConfigDetailedChange {
+                entity_id,
+                old_levels_count,
+                new_levels_count: pending.config.levels.len() as u32,
+                old_max_rate,
+                new_max_rate: pending.config.max_total_rate,
+            });
+
+            Ok(())
+        }
+
+        // R10-#14: on_initialize — 自动应用已到达生效区块的待生效配置
+        // 每区块最多检查 MAX_AUTO_APPLY 个条目，避免无限遍历。
+        fn auto_apply_pending_configs(n: BlockNumberFor<T>) -> Weight {
+            const MAX_AUTO_APPLY: u32 = 5;
+            let current_block: u32 = n.try_into().unwrap_or(0u32);
+            let queue = PendingConfigQueue::<T>::get();
+            if queue.is_empty() {
+                return Weight::from_parts(5_000_000, 1_000);
+            }
+
+            let mut applied_ids = Vec::new();
+            let mut checked = 0u32;
+            let mut applied = 0u32;
+
+            for &entity_id in queue.iter() {
+                if checked >= MAX_AUTO_APPLY { break; }
+                checked += 1;
+
+                if let Some(pending) = PendingConfigs::<T>::get(entity_id) {
+                    if current_block >= pending.effective_at
+                        && !T::EntityProvider::is_entity_locked(entity_id)
+                    {
+                        if Self::do_apply_pending(entity_id, &pending).is_ok() {
+                            let auto_who = T::EntityProvider::entity_account(entity_id);
+                            Self::record_change_log(entity_id, &auto_who, ConfigChangeType::PendingAutoApplied);
+                            applied_ids.push(entity_id);
+                            applied += 1;
+                        }
+                    }
+                } else {
+                    applied_ids.push(entity_id);
+                }
+            }
+
+            if !applied_ids.is_empty() {
+                PendingConfigQueue::<T>::mutate(|q| {
+                    q.retain(|id| !applied_ids.contains(id));
+                });
+            }
+
+            // weight = queue read + per-checked (PendingConfigs read + EntityProvider read)
+            //        + per-applied (config read/write + pending remove + audit log write)
+            //        + queue write (if any applied)
+            let write_overhead = if applied_ids.is_empty() { 0u64 } else { 10_000_000u64 };
+            Weight::from_parts(
+                5_000_000u64
+                    .saturating_add(10_000_000u64.saturating_mul(checked as u64))
+                    .saturating_add(40_000_000u64.saturating_mul(applied as u64))
+                    .saturating_add(write_overhead),
+                1_000u64
+                    .saturating_add(2_000u64.saturating_mul(checked as u64))
+                    .saturating_add(5_000u64.saturating_mul(applied as u64)),
+            )
         }
     }
 }
@@ -1055,12 +1240,10 @@ where
             return (alloc::vec::Vec::new(), remaining);
         }
 
-        // F12: Entity 未激活时跳过佣金计算
         if !T::EntityProvider::is_entity_active(entity_id) {
             return (alloc::vec::Vec::new(), remaining);
         }
 
-        // F10: 全局暂停检查
         if pallet::GlobalPaused::<T>::get(entity_id) {
             return (alloc::vec::Vec::new(), remaining);
         }
@@ -1106,12 +1289,10 @@ where
             return (alloc::vec::Vec::new(), remaining);
         }
 
-        // F12: Entity 未激活时跳过佣金计算
         if !T::EntityProvider::is_entity_active(entity_id) {
             return (alloc::vec::Vec::new(), remaining);
         }
 
-        // F10: 全局暂停检查
         if pallet::GlobalPaused::<T>::get(entity_id) {
             return (alloc::vec::Vec::new(), remaining);
         }
@@ -1135,26 +1316,44 @@ where
 // ============================================================================
 // MultiLevelPlanWriter — 治理路径
 //
-// PlanWriter 校验 rate / max_total_rate / 层数上限。
-// 限制：PlanWriter 创建的 tiers 激活条件全为 0，需通过 Root extrinsic 配置完整条件。
+// R10-#10: PlanWriter 路径补充 EntityLocked 检查
+// R10-#3: 补充 team_size / spent 上界校验
+// R11-B2: 复用 validate_config / validate_tier
+// R11-B3: 补充 GovernanceSet / GovernanceClear 审计日志
+// R11-B4: 补充 ConfigDetailedChange 事件
 // ============================================================================
 
 impl<T: pallet::Config> pallet_commission_common::MultiLevelPlanWriter for pallet::Pallet<T> {
     fn set_multi_level(entity_id: u64, level_rates: alloc::vec::Vec<u16>, max_total_rate: u16) -> Result<(), sp_runtime::DispatchError> {
-        frame_support::ensure!(!level_rates.is_empty(), sp_runtime::DispatchError::Other("EmptyLevels"));
-        frame_support::ensure!(max_total_rate > 0 && max_total_rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
-        for &rate in level_rates.iter() {
-            frame_support::ensure!(rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
-        }
+        frame_support::ensure!(
+            !T::EntityProvider::is_entity_locked(entity_id),
+            sp_runtime::DispatchError::Other("EntityLocked")
+        );
         let bounded: frame_support::BoundedVec<pallet::MultiLevelTier, T::MaxMultiLevels> = level_rates
             .into_iter()
             .map(|rate| pallet::MultiLevelTier { rate, required_directs: 0, required_team_size: 0, required_spent: 0 })
             .collect::<alloc::vec::Vec<_>>()
             .try_into()
             .map_err(|_| sp_runtime::DispatchError::Other("TooManyLevels"))?;
-        pallet::MultiLevelConfigs::<T>::insert(entity_id, pallet::MultiLevelConfig { levels: bounded, max_total_rate });
-        // M1-R2 审计修复: PlanWriter 路径也需 emit 事件，供 off-chain indexer 感知
+        Self::validate_config(&bounded, max_total_rate)?;
+
+        let old_config = pallet::MultiLevelConfigs::<T>::get(entity_id);
+        let (old_levels_count, old_max_rate) = old_config
+            .as_ref()
+            .map(|c| (c.levels.len() as u32, c.max_total_rate))
+            .unwrap_or((0, 0));
+        let new_levels_count = bounded.len() as u32;
+
+        let new_config = pallet::MultiLevelConfig { levels: bounded, max_total_rate };
+        Self::check_rates_sum_warning(entity_id, &new_config);
+        pallet::MultiLevelConfigs::<T>::insert(entity_id, new_config);
+
         Self::deposit_event(pallet::Event::MultiLevelConfigUpdated { entity_id });
+        Self::deposit_event(pallet::Event::ConfigDetailedChange {
+            entity_id, old_levels_count, new_levels_count, old_max_rate, new_max_rate: max_total_rate,
+        });
+        let gov_who = T::EntityProvider::entity_account(entity_id);
+        Self::record_change_log(entity_id, &gov_who, pallet::ConfigChangeType::GovernanceSet);
         Ok(())
     }
 
@@ -1163,12 +1362,10 @@ impl<T: pallet::Config> pallet_commission_common::MultiLevelPlanWriter for palle
         tiers: alloc::vec::Vec<(u16, u32, u32, u128)>,
         max_total_rate: u16,
     ) -> Result<(), sp_runtime::DispatchError> {
-        frame_support::ensure!(!tiers.is_empty(), sp_runtime::DispatchError::Other("EmptyLevels"));
-        frame_support::ensure!(max_total_rate > 0 && max_total_rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
-        for &(rate, required_directs, _, _) in tiers.iter() {
-            frame_support::ensure!(rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
-            frame_support::ensure!(required_directs <= 10000, sp_runtime::DispatchError::Other("InvalidDirects"));
-        }
+        frame_support::ensure!(
+            !T::EntityProvider::is_entity_locked(entity_id),
+            sp_runtime::DispatchError::Other("EntityLocked")
+        );
         let bounded: frame_support::BoundedVec<pallet::MultiLevelTier, T::MaxMultiLevels> = tiers
             .into_iter()
             .map(|(rate, required_directs, required_team_size, required_spent)| {
@@ -1177,21 +1374,95 @@ impl<T: pallet::Config> pallet_commission_common::MultiLevelPlanWriter for palle
             .collect::<alloc::vec::Vec<_>>()
             .try_into()
             .map_err(|_| sp_runtime::DispatchError::Other("TooManyLevels"))?;
-        pallet::MultiLevelConfigs::<T>::insert(entity_id, pallet::MultiLevelConfig { levels: bounded, max_total_rate });
+        Self::validate_config(&bounded, max_total_rate)?;
+
+        let old_config = pallet::MultiLevelConfigs::<T>::get(entity_id);
+        let (old_levels_count, old_max_rate) = old_config
+            .as_ref()
+            .map(|c| (c.levels.len() as u32, c.max_total_rate))
+            .unwrap_or((0, 0));
+        let new_levels_count = bounded.len() as u32;
+
+        let new_config = pallet::MultiLevelConfig { levels: bounded, max_total_rate };
+        Self::check_rates_sum_warning(entity_id, &new_config);
+        pallet::MultiLevelConfigs::<T>::insert(entity_id, new_config);
+
         Self::deposit_event(pallet::Event::MultiLevelConfigUpdated { entity_id });
+        Self::deposit_event(pallet::Event::ConfigDetailedChange {
+            entity_id, old_levels_count, new_levels_count, old_max_rate, new_max_rate: max_total_rate,
+        });
+        let gov_who = T::EntityProvider::entity_account(entity_id);
+        Self::record_change_log(entity_id, &gov_who, pallet::ConfigChangeType::GovernanceSet);
         Ok(())
     }
 
     fn clear_multi_level_config(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
-        // L3-R9: 仅在配置存在时发送 Cleared 事件，避免误导 off-chain indexer
+        frame_support::ensure!(
+            !T::EntityProvider::is_entity_locked(entity_id),
+            sp_runtime::DispatchError::Other("EntityLocked")
+        );
         if pallet::MultiLevelConfigs::<T>::contains_key(entity_id) {
+            let old_config = pallet::MultiLevelConfigs::<T>::get(entity_id);
+            let (old_levels_count, old_max_rate) = old_config
+                .as_ref()
+                .map(|c| (c.levels.len() as u32, c.max_total_rate))
+                .unwrap_or((0, 0));
+
             pallet::MultiLevelConfigs::<T>::remove(entity_id);
             Self::deposit_event(pallet::Event::MultiLevelConfigCleared { entity_id });
+            Self::deposit_event(pallet::Event::ConfigDetailedChange {
+                entity_id, old_levels_count, new_levels_count: 0, old_max_rate, new_max_rate: 0,
+            });
+            let gov_who = T::EntityProvider::entity_account(entity_id);
+            Self::record_change_log(entity_id, &gov_who, pallet::ConfigChangeType::GovernanceClear);
         }
         Ok(())
     }
 }
 
+// ============================================================================
+// MultiLevelQueryProvider 实现
+// ============================================================================
+
+impl<T: Config> pallet_commission_common::MultiLevelQueryProvider<T::AccountId> for Pallet<T>
+where
+    T::AccountId: Ord,
+{
+    fn activation_progress(entity_id: u64, account: &T::AccountId) -> alloc::vec::Vec<pallet_commission_common::MultiLevelActivationInfo> {
+        Self::get_activation_progress(entity_id, account)
+            .into_iter()
+            .map(|p| pallet_commission_common::MultiLevelActivationInfo {
+                level: p.level,
+                activated: p.activated,
+                directs_current: p.directs_current,
+                directs_required: p.directs_required,
+                team_current: p.team_current,
+                team_required: p.team_required,
+                spent_current: p.spent_current,
+                spent_required: p.spent_required,
+            })
+            .collect()
+    }
+
+    fn is_paused(entity_id: u64) -> bool {
+        Self::is_paused(entity_id)
+    }
+
+    fn member_stats(entity_id: u64, account: &T::AccountId) -> Option<pallet_commission_common::MultiLevelMemberStats> {
+        let stats = MemberMultiLevelStats::<T>::get(entity_id, account);
+        if stats.total_earned == 0 && stats.total_orders == 0 {
+            return None;
+        }
+        Some(pallet_commission_common::MultiLevelMemberStats {
+            total_earned: stats.total_earned,
+            total_orders: stats.total_orders,
+            last_commission_block: stats.last_commission_block,
+        })
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
 #[cfg(test)]
 mod mock;
 #[cfg(test)]
