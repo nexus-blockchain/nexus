@@ -347,12 +347,12 @@ cargo test -p pallet-commission-referral
 | L1-R2 | Low | Cargo.toml 缺 `sp-runtime` feature 传播。修复: 已添加 |
 | L1-R3 | Low | `sp-std` 依赖未使用。修复: 已移除 |
 | L1-R4 | Low | README 类型标注错误 (`validity_blocks: u64` → `u32`)。修复: 已更正 |
+| L-weight | Low | Extrinsic 硬编码 Weight，无 WeightInfo trait。修复: 添加 `WeightInfo` trait + `weights.rs` + `benchmarking.rs`（v2 宏） |
 
 ### 记录但未修复
 
 | ID | 级别 | 描述 |
 |----|------|------|
-| L-weight | Low | Extrinsic 硬编码 Weight，无 WeightInfo trait（需 benchmark 框架） |
 | L-dup | Low | Token 版 `_token` 函数与 NEX 版逻辑大量重复（维护风险） |
 
 ## 版本历史
@@ -367,3 +367,4 @@ cargo test -p pallet-commission-referral
 | v0.6.0 | 审计 R3: H1(clear 清理附属存储) + M1(thread-local 清理) + L1(sp-std 移除) — 88 tests |
 | v0.7.0 | 审计 R4: M1-R4(clear 清理 ReferrerTotalEarned) + L1-R4(README 类型修正) — 89 tests |
 | v0.8.0 | 审计 R5: M1-R5(is_member 检查) + M2-R5(F8 裁剪修正 ReferrerTotalEarned) + L1-R5(Cargo features) — 94 tests |
+| v0.9.0 | WeightInfo trait + benchmarking 框架 + 移除硬编码 Weight — 108 tests (含 14 benchmark tests) |

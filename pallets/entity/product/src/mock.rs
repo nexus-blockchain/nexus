@@ -252,6 +252,7 @@ impl StoragePin<u64> for MockStoragePin {
         subject_id: u64,
         _entity_id: Option<u64>,
         cid: Vec<u8>,
+        _size_bytes: u64,
         _tier: PinTier,
     ) -> Result<(), DispatchError> {
         if PIN_SHOULD_FAIL.with(|f| *f.borrow()) {
@@ -290,6 +291,7 @@ impl pallet_entity_product::Config for Test {
     type StoragePin = MockStoragePin;
     type MaxBatchSize = ConstU32<20>;
     type MaxReasonLength = ConstU32<256>;
+    type WeightInfo = ();
 }
 
 // ==================== Test Externalities ====================

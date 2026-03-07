@@ -221,6 +221,10 @@ runtime-benchmarks = [
 	# Arbitration pallet benchmarks
 	"pallet-dispute-arbitration/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",
+	# Entity pallets benchmarks
+	"pallet-entity-product/runtime-benchmarks",
+	# Commission pallets benchmarks
+	"pallet-commission-common/runtime-benchmarks",
 ]
 
 try-runtime = [
@@ -246,6 +250,8 @@ try-runtime = [
 	# Arbitration pallet try-runtime
 	# Note: pallet-dispute-arbitration does not have try-runtime feature
 	"sp-runtime/try-runtime",
+	# Commission pallets try-runtime
+	"pallet-commission-common/try-runtime",
 ]
 
 # Enable the metadata hash generation.

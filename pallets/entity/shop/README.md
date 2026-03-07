@@ -408,6 +408,5 @@ impl<T: Config> Pallet<T> {
 
 | 项目 | 说明 |
 |------|------|
-| Weight | 所有 extrinsic 使用硬编码占位值，需 benchmarking |
-| clear_prefix | `disable_points` 和 `do_close_shop_cleanup` 使用 `u32::MAX` 清理积分数据，大量用户时可能超出区块权重 |
-| unregister_shop 错误忽略 | `do_close_shop_cleanup` 中使用 `let _` 忽略 `unregister_shop` 返回值 |
+| Weight | 使用基于 DB 读写次数的保守估计权重，待实际 benchmark 运行后替换为精确值 |
+| clear_prefix | `disable_points` 和 `do_close_shop_cleanup` 使用 `POINTS_CLEANUP_LIMIT`（500）限制单次清理条目数，超过此数量的积分用户需多次调用 |

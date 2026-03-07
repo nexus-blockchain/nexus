@@ -74,22 +74,6 @@ mod benchmarks {
     }
 
     #[benchmark]
-    fn lock_with_nonce() {
-        let payer: T::AccountId = account("payer", 1, SEED);
-        let amount: BalanceOf<T> = 1000u32.into();
-        let _ = T::Currency::make_free_balance_be(&payer, amount.saturating_mul(10u32.into()));
-        fund_escrow_account::<T>(amount);
-        let id: u64 = 1;
-        let nonce: u64 = 1;
-
-        #[extrinsic_call]
-        _(RawOrigin::Root, id, payer, amount, nonce);
-
-        assert!(Locked::<T>::get(id) > BalanceOf::<T>::from(0u32));
-        assert_eq!(LockNonces::<T>::get(id), 1u64);
-    }
-
-    #[benchmark]
     fn release_split() {
         let id: u64 = 1;
         let amount: BalanceOf<T> = 1000u32.into();
@@ -240,34 +224,6 @@ mod benchmarks {
         _(RawOrigin::Root, id, to);
 
         assert_eq!(LockStateOf::<T>::get(id), 3u8);
-    }
-
-    #[benchmark]
-    fn refund_partial() {
-        let id: u64 = 1;
-        let amount: BalanceOf<T> = 1000u32.into();
-        setup_locked::<T>(id, amount);
-        let to: T::AccountId = account("refundee", 1, SEED);
-        let partial: BalanceOf<T> = 500u32.into();
-
-        #[extrinsic_call]
-        _(RawOrigin::Root, id, to, partial);
-
-        assert_eq!(Locked::<T>::get(id), 500u32.into());
-    }
-
-    #[benchmark]
-    fn release_partial() {
-        let id: u64 = 1;
-        let amount: BalanceOf<T> = 1000u32.into();
-        setup_locked::<T>(id, amount);
-        let to: T::AccountId = account("receiver", 1, SEED);
-        let partial: BalanceOf<T> = 500u32.into();
-
-        #[extrinsic_call]
-        _(RawOrigin::Root, id, to, partial);
-
-        assert_eq!(Locked::<T>::get(id), 500u32.into());
     }
 
     #[benchmark]

@@ -3,9 +3,9 @@
 //! 存储生命周期管理模块，提供分级归档框架
 //!
 //! ## 功能
-//! - 定义 `ArchivableData` trait 用于数据生命周期管理
 //! - 支持三级存储：活跃 → L1归档 → L2归档 → 清除
 //! - 在 `on_idle` 中自动处理归档任务
+//! - 通过 `StorageArchiver` trait 桥接具体存储模块
 //!
 //! ## 归档策略
 //! - L1归档：保留核心字段，压缩存储（~50-80%节省）
@@ -15,8 +15,12 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 pub use pallet::*;
+pub mod weights;
 
 pub mod runtime_api;
+
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
 
 #[cfg(test)]
 mod mock;
@@ -28,45 +32,6 @@ use frame_support::pallet_prelude::*;
 use frame_system::pallet_prelude::OriginFor;
 use frame_system::ensure_root;
 use sp_std::marker::PhantomData;
-
-/// 可归档数据 Trait
-///
-/// 所有需要生命周期管理的数据类型都应实现此 Trait
-pub trait ArchivableData: Encode + Decode + Clone {
-    /// 一级归档类型（精简摘要，~50-80%压缩）
-    type ArchivedL1: Encode + Decode + Clone + MaxEncodedLen;
-    /// 二级归档类型（最小摘要，~90%+压缩）
-    type ArchivedL2: Encode + Decode + Clone + MaxEncodedLen;
-    /// 永久统计类型
-    type PermanentStats: Encode + Decode + Clone + MaxEncodedLen + Default;
-
-    /// 获取数据ID
-    fn get_id(&self) -> u64;
-
-    /// 判断是否可以归档到 L1
-    /// 
-    /// # Arguments
-    /// * `now` - 当前区块号
-    /// * `l1_delay` - L1归档延迟（区块数）
-    fn can_archive_l1(&self, now: u64, l1_delay: u64) -> bool;
-
-    /// 转换为一级归档
-    fn to_archived_l1(&self) -> Self::ArchivedL1;
-
-    /// 判断L1归档是否可以转为L2
-    /// 
-    /// # Arguments
-    /// * `archived` - L1归档数据
-    /// * `now` - 当前区块号
-    /// * `l2_delay` - L2归档延迟（区块数）
-    fn can_archive_l2(archived: &Self::ArchivedL1, now: u64, l2_delay: u64) -> bool;
-
-    /// 从一级归档转换为二级归档
-    fn l1_to_l2(archived: &Self::ArchivedL1) -> Self::ArchivedL2;
-
-    /// 更新永久统计
-    fn update_stats(stats: &mut Self::PermanentStats, archived: &Self::ArchivedL1);
-}
 
 /// 归档状态
 #[derive(Encode, Decode, DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
@@ -181,6 +146,22 @@ impl OnArchiveHandler for () {
     fn on_archived(_: &[u8], _: u64, _: ArchiveLevel, _: ArchiveLevel) {}
 }
 
+/// 数据所有权查询 Trait（用户权限分层）
+///
+/// 用于 `extend_active_period` 和 `restore_from_archive` 的签名用户鉴权。
+/// 当用户（非 Root）调用时，需验证其是否为数据所有者。
+pub trait DataOwnerProvider<AccountId> {
+    /// 检查 `who` 是否为 `data_type` + `data_id` 的所有者
+    fn is_owner(who: &AccountId, data_type: &[u8], data_id: u64) -> bool;
+}
+
+/// 空实现：拒绝所有非 Root 用户（向后兼容）
+impl<AccountId> DataOwnerProvider<AccountId> for () {
+    fn is_owner(_who: &AccountId, _data_type: &[u8], _data_id: u64) -> bool {
+        false
+    }
+}
+
 /// 归档全局配置 (G1: 运行时可调)
 #[derive(Encode, Decode, DecodeWithMemTracking, Clone, PartialEq, Eq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub struct ArchiveConfig {
@@ -213,19 +194,8 @@ pub trait WeightInfo {
     fn restore_from_archive() -> Weight;
 }
 
-/// 默认权重实现
-pub struct SubstrateWeight;
-impl WeightInfo for SubstrateWeight {
-    fn set_archive_config() -> Weight { Weight::from_parts(10_000_000, 1_000) }
-    fn pause_archival() -> Weight { Weight::from_parts(5_000_000, 500) }
-    fn resume_archival() -> Weight { Weight::from_parts(5_000_000, 500) }
-    fn set_archive_policy() -> Weight { Weight::from_parts(10_000_000, 1_000) }
-    fn force_archive() -> Weight { Weight::from_parts(50_000_000, 5_000) }
-    fn protect_from_purge() -> Weight { Weight::from_parts(10_000_000, 1_000) }
-    fn remove_purge_protection() -> Weight { Weight::from_parts(10_000_000, 1_000) }
-    fn extend_active_period() -> Weight { Weight::from_parts(10_000_000, 1_000) }
-    fn restore_from_archive() -> Weight { Weight::from_parts(50_000_000, 5_000) }
-}
+/// 默认权重实现（re-export from weights module）
+pub use weights::SubstrateWeight;
 
 /// 归档批次信息
 #[derive(Encode, Decode, DecodeWithMemTracking, Clone, PartialEq, Eq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
@@ -248,8 +218,10 @@ pub struct ArchiveBatch {
 pub mod pallet {
     use super::*;
     
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
 
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     #[pallet::config]
@@ -282,6 +254,10 @@ pub mod pallet {
 
         /// 归档回调处理器 (D3)
         type OnArchive: OnArchiveHandler;
+
+        /// 数据所有权查询（用户权限分层）
+        /// 用于 extend_active_period / restore_from_archive 的签名用户鉴权
+        type DataOwnerProvider: DataOwnerProvider<Self::AccountId>;
 
         /// 权重信息 (O4)
         type WeightInfo: WeightInfo;
@@ -463,6 +439,16 @@ pub mod pallet {
             // H1-R2: 确保不超过 remaining_weight（Substrate on_idle 契约）
             // M1-R3: budget_used 已在循环中精确跟踪
             budget_used.min(remaining_weight)
+        }
+
+        fn integrity_test() {
+            assert!(T::L1ArchiveDelay::get() > 0, "L1ArchiveDelay must be > 0");
+            assert!(T::L2ArchiveDelay::get() > 0, "L2ArchiveDelay must be > 0");
+            assert!(T::MaxBatchSize::get() > 0, "MaxBatchSize must be > 0");
+            assert!(
+                T::L1ArchiveDelay::get() <= T::L2ArchiveDelay::get(),
+                "L1ArchiveDelay must be <= L2ArchiveDelay"
+            );
         }
     }
 
@@ -801,7 +787,7 @@ pub mod pallet {
             Ok(())
         }
 
-        /// U3: 延长数据 Active 期
+        /// U3: 延长数据 Active 期（Root 或数据所有者）
         #[pallet::call_index(7)]
         #[pallet::weight(T::WeightInfo::extend_active_period())]
         pub fn extend_active_period(
@@ -810,7 +796,19 @@ pub mod pallet {
             data_id: u64,
             extend_blocks: u64,
         ) -> DispatchResult {
-            ensure_root(origin)?;
+            // 支持 Root 和签名用户（所有者）
+            let maybe_who = match ensure_root(origin.clone()) {
+                Ok(()) => None,
+                Err(_) => {
+                    let who = frame_system::ensure_signed(origin)?;
+                    ensure!(
+                        T::DataOwnerProvider::is_owner(&who, &data_type, data_id),
+                        Error::<T>::InvalidArchiveState
+                    );
+                    Some(who)
+                }
+            };
+            let _ = maybe_who; // 仅用于鉴权
             ensure!(extend_blocks >= 100, Error::<T>::ExtensionTooShort);
             let current_level = DataArchiveStatus::<T>::get(&data_type, data_id);
             ensure!(matches!(current_level, ArchiveLevel::Active), Error::<T>::InvalidArchiveState);
@@ -825,7 +823,7 @@ pub mod pallet {
             Ok(())
         }
 
-        /// U4: 从归档恢复数据（仅支持 L1 → Active）
+        /// U4: 从归档恢复数据（仅支持 L1 → Active）（Root 或数据所有者）
         #[pallet::call_index(8)]
         #[pallet::weight(T::WeightInfo::restore_from_archive())]
         pub fn restore_from_archive(
@@ -833,7 +831,19 @@ pub mod pallet {
             data_type: BoundedVec<u8, ConstU32<32>>,
             data_id: u64,
         ) -> DispatchResult {
-            ensure_root(origin)?;
+            // 支持 Root 和签名用户（所有者）
+            let maybe_who = match ensure_root(origin.clone()) {
+                Ok(()) => None,
+                Err(_) => {
+                    let who = frame_system::ensure_signed(origin)?;
+                    ensure!(
+                        T::DataOwnerProvider::is_owner(&who, &data_type, data_id),
+                        Error::<T>::InvalidArchiveState
+                    );
+                    Some(who)
+                }
+            };
+            let _ = maybe_who; // 仅用于鉴权
             let current_level = DataArchiveStatus::<T>::get(&data_type, data_id);
             ensure!(matches!(current_level, ArchiveLevel::ArchivedL1), Error::<T>::CannotRestoreFromLevel);
             let success = T::StorageArchiver::restore_record(&data_type, data_id, current_level);

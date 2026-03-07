@@ -37,28 +37,28 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     }
 
     /// remove_review: 3 reads (Reviews::take, order_shop_id, UserReviews)
-    /// + 8 writes (Reviews, ReviewCount, ShopReviewCount, UserReviews, ProductReviews, ProductReviewCount, ProductRatingSum, ReviewReplies)
+    /// + 9 writes (Reviews, ReviewCount, ShopReviewCount, revert_shop_rating, UserReviews, ProductReviews, ProductReviewCount, ProductRatingSum, ReviewReplies)
     fn remove_review() -> Weight {
-        Weight::from_parts(45_000_000, 7_000)
+        Weight::from_parts(50_000_000, 8_000)
             .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(8))
+            .saturating_add(T::DbWeight::get().writes(9))
     }
 
-    /// reply_to_review: 6 reads (Reviews::contains_key, ReviewReplies::contains_key,
-    ///                           order_shop_id, shop_entity_id, is_entity_active, is_entity_admin)
+    /// reply_to_review: 7 reads (Reviews::contains_key, ReviewReplies::contains_key,
+    ///                           order_shop_id, shop_entity_id, is_entity_active, is_entity_locked, is_entity_admin)
     /// + 1 write (ReviewReplies)
     fn reply_to_review() -> Weight {
-        Weight::from_parts(35_000_000, 5_000)
-            .saturating_add(T::DbWeight::get().reads(6))
+        Weight::from_parts(38_000_000, 5_500)
+            .saturating_add(T::DbWeight::get().reads(7))
             .saturating_add(T::DbWeight::get().writes(1))
     }
 
-    /// edit_review: 5 reads (Reviews::get, order_shop_id, shop_entity_id, EntityReviewDisabled, order_product_id)
-    /// + 2 writes (Reviews, ProductRatingSum)
+    /// edit_review: 6 reads (Reviews::get, order_shop_id, shop_entity_id, EntityReviewDisabled, order_product_id, revert_shop_rating)
+    /// + 3 writes (Reviews, ProductRatingSum, revert_shop_rating)
     fn edit_review() -> Weight {
-        Weight::from_parts(40_000_000, 6_000)
-            .saturating_add(T::DbWeight::get().reads(5))
-            .saturating_add(T::DbWeight::get().writes(2))
+        Weight::from_parts(45_000_000, 7_000)
+            .saturating_add(T::DbWeight::get().reads(6))
+            .saturating_add(T::DbWeight::get().writes(3))
     }
 }
 
@@ -73,14 +73,14 @@ impl WeightInfo for () {
     }
 
     fn remove_review() -> Weight {
-        Weight::from_parts(45_000_000, 7_000)
+        Weight::from_parts(50_000_000, 8_000)
     }
 
     fn reply_to_review() -> Weight {
-        Weight::from_parts(35_000_000, 5_000)
+        Weight::from_parts(38_000_000, 5_500)
     }
 
     fn edit_review() -> Weight {
-        Weight::from_parts(40_000_000, 6_000)
+        Weight::from_parts(45_000_000, 7_000)
     }
 }

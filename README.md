@@ -291,6 +291,25 @@ cosmos/
 | 161 | AdsGroupRobot | 广告 |
 | 162 | AdsEntity | 广告 |
 
+## 忽略文件 (.gitignore)
+
+项目 `.gitignore` 涵盖以下类别，确保构建产物、敏感数据与本地配置不被提交：
+
+| 类别 | 说明 |
+|------|------|
+| **Rust / Cargo** | `target/`、增量编译、Cargo 缓存、`*.rs.bk` |
+| **Substrate** | 链数据 `chains/`、`node-data/`、WASM 产物、创世/链规格、keystore |
+| **Node.js** | `node_modules/`、锁文件、`.npm/`、`.yarn/` |
+| **前端** | `frontend/.next/`、`website/.next/`、`.vercel`、`.tsbuildinfo` |
+| **IDE / AI** | `.idea/`、`.vscode/`、`.cursor/`、`.claude/` 等 |
+| **环境与密钥** | `.env`、`*.pem`、`*.key`、`secrets/` |
+| **构建与缓存** | `build/`、`out/`、`dist/`、`coverage/` |
+| **脚本与测试** | `scripts/test-accounts.json`、`scripts/e2e-reports/` |
+| **基础设施** | `*.tfstate`、`.terraform/`、`kubeconfig` |
+| **其他** | `telegram/`、`my-chain-state/`、`grouprobot/.env`、`media-utils/output/` |
+
+> `Cargo.lock` 已保留，用于可重现构建。`runtime/src/**/*.wasm` 为源码中的 WASM 例外保留。
+
 ## 快速开始
 
 ### 环境要求

@@ -24,6 +24,12 @@
 
 pub use pallet::*;
 pub use pallet_entity_common::{ProductCategory, ProductStatus};
+pub use weights::{WeightInfo, SubstrateWeight};
+
+pub mod weights;
+
+#[cfg(feature = "runtime-benchmarks")]
+pub mod benchmarking;
 
 #[cfg(test)]
 mod mock;
@@ -167,6 +173,9 @@ pub mod pallet {
         /// 强制下架原因最大长度
         #[pallet::constant]
         type MaxReasonLength: Get<u32>;
+
+        /// 权重信息（由 benchmark 生成，或使用默认占位值）
+        type WeightInfo: WeightInfo;
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
@@ -398,7 +407,7 @@ pub mod pallet {
         ///
         /// 权限：Owner / Admin(SHOP_MANAGE) / Manager
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::create_product())]
         pub fn create_product(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -559,7 +568,7 @@ pub mod pallet {
         ///
         /// 权限：Owner / Admin(SHOP_MANAGE) / Manager
         #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::update_product())]
         pub fn update_product(
             origin: OriginFor<T>,
             product_id: u64,
@@ -741,7 +750,7 @@ pub mod pallet {
         ///
         /// 权限：Owner / Admin(SHOP_MANAGE) / Manager
         #[pallet::call_index(2)]
-        #[pallet::weight(Weight::from_parts(120_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::publish_product())]
         pub fn publish_product(origin: OriginFor<T>, product_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -776,7 +785,7 @@ pub mod pallet {
         ///
         /// 权限：Owner / Admin(SHOP_MANAGE) / Manager
         #[pallet::call_index(3)]
-        #[pallet::weight(Weight::from_parts(120_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::unpublish_product())]
         pub fn unpublish_product(origin: OriginFor<T>, product_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -815,7 +824,7 @@ pub mod pallet {
         /// 权限：Owner / Admin(SHOP_MANAGE)（Manager 不可删除，涉及押金退还）
         /// 前置条件：商品状态必须为 Draft 或 OffShelf
         #[pallet::call_index(4)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        #[pallet::weight(T::WeightInfo::delete_product())]
         pub fn delete_product(origin: OriginFor<T>, product_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -895,7 +904,7 @@ pub mod pallet {
         ///
         /// 平台内容管控：Root 可强制下架任意在售商品
         #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(120_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::force_unpublish_product())]
         pub fn force_unpublish_product(
             origin: OriginFor<T>,
             product_id: u64,
@@ -942,7 +951,7 @@ pub mod pallet {
         ///
         /// 权限：Owner / Admin(SHOP_MANAGE) / Manager
         #[pallet::call_index(6)]
-        #[pallet::weight(Weight::from_parts(120_000_000u64.saturating_mul(product_ids.len() as u64), 6_000u64.saturating_mul(product_ids.len() as u64)))]
+        #[pallet::weight(T::WeightInfo::batch_publish_products(product_ids.len() as u32))]
         pub fn batch_publish_products(
             origin: OriginFor<T>,
             product_ids: Vec<u64>,
@@ -1004,7 +1013,7 @@ pub mod pallet {
         ///
         /// 权限：Owner / Admin(SHOP_MANAGE) / Manager
         #[pallet::call_index(7)]
-        #[pallet::weight(Weight::from_parts(120_000_000u64.saturating_mul(product_ids.len() as u64), 6_000u64.saturating_mul(product_ids.len() as u64)))]
+        #[pallet::weight(T::WeightInfo::batch_unpublish_products(product_ids.len() as u32))]
         pub fn batch_unpublish_products(
             origin: OriginFor<T>,
             product_ids: Vec<u64>,
@@ -1068,7 +1077,7 @@ pub mod pallet {
         ///
         /// 权限：Owner / Admin(SHOP_MANAGE)（Manager 不可删除）
         #[pallet::call_index(8)]
-        #[pallet::weight(Weight::from_parts(200_000_000u64.saturating_mul(product_ids.len() as u64), 10_000u64.saturating_mul(product_ids.len() as u64)))]
+        #[pallet::weight(T::WeightInfo::batch_delete_products(product_ids.len() as u32))]
         pub fn batch_delete_products(
             origin: OriginFor<T>,
             product_ids: Vec<u64>,
@@ -1152,7 +1161,7 @@ pub mod pallet {
         /// 平台内容管控：Root 可强制删除任意商品，不受状态限制（可删 OnSale/SoldOut）。
         /// 删除前 best-effort 退还押金 + IPFS unpin。
         #[pallet::call_index(9)]
-        #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::force_delete_product())]
         pub fn force_delete_product(
             origin: OriginFor<T>,
             product_id: u64,

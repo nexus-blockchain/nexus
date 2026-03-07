@@ -369,7 +369,7 @@ sp-io = { workspace = true, features = ["std"] }
 
 | 编号 | 级别 | 说明 |
 |------|------|------|
-| L1 | Low | extrinsic 硬编码 Weight，未接入 WeightInfo benchmark 框架 |
+| L1 | ~~Low~~ | ~~extrinsic 硬编码 Weight，未接入 WeightInfo benchmark 框架~~ **已修复：已接入 WeightInfo trait + benchmarking 框架** |
 | L2 | Low | `set_team_performance_config` 覆盖配置时无条件重新启用（若需保留暂停状态仅更新档位，应使用 `add_tier` / `update_tier` / `remove_tier`） |
 | L3 | Low | `force_set` (Root) 不检查实体是否存在，可为不存在的 entity_id 创建配置 |
 

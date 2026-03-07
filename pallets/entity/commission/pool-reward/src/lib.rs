@@ -878,10 +878,7 @@ pub mod pallet {
         /// [Root] 修正 Token 池账本差额（回滚失败导致的已转出未扣减部分）
         /// 同时从 Token 池余额中扣减对应金额，使链上余额与实际一致。
         #[pallet::call_index(17)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 3_000)
-            .saturating_add(frame_support::weights::constants::RocksDbWeight::get().reads(2))
-            .saturating_add(frame_support::weights::constants::RocksDbWeight::get().writes(2))
-        )]
+        #[pallet::weight(T::WeightInfo::correct_token_pool_deficit())]
         pub fn correct_token_pool_deficit(
             origin: OriginFor<T>,
             entity_id: u64,

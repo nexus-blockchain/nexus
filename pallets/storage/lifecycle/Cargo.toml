@@ -1,6 +1,6 @@
 [package]
 name = "pallet-storage-lifecycle"
-version = "0.2.4"
+version = "0.3.0"
 description = "Storage lifecycle management with tiered archival support"
 authors = ["Nexus Team"]
 edition = "2021"

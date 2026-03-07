@@ -53,9 +53,9 @@
 | ER-009 | 非 Owner/Admin 无法更新 | R20 | 权限 | P1 |
 | ER-010 | request_close_entity(2)：Owner 申请关闭→PendingClose | R2 | 正向 | P1 |
 | ER-011 | top_up_fund(3)：任何人充值金库 | R20 | 正向 | P1 |
-| ER-012 | approve_entity(4)：治理审批 Pending→Active | R1 | 正向 | P0 |
-| ER-013 | 非治理 Origin 无法审批 | R20 | 权限 | P0 |
-| ER-014 | approve_close_entity(5)：治理审批关闭→退还余额 | R1 | 正向 | P1 |
+| ER-012 | ~~approve_entity(4)~~：已移除，付费即激活 | - | - | - |
+| ER-013 | ~~非治理 Origin 无法审批~~：已移除 | - | - | - |
+| ER-014 | ~~approve_close_entity(5)~~：已移除，关闭统一走超时机制 | - | - | - |
 | ER-015 | suspend_entity(6)：治理暂停+原因记录 | R1 | 正向 | P1 |
 | ER-016 | resume_entity(7)：治理恢复（需资金充足） | R1 | 正向 | P1 |
 | ER-017 | ban_entity(8)：封禁（confiscate_fund=true 没收到国库 / false 保留） | R1 | 正向 | P1 |
@@ -64,10 +64,10 @@
 | ER-020 | transfer_ownership(11)：转移所有权（SameOwner 被拒绝） | R2 | 正向+负向 | P1 |
 | ER-021 | upgrade_entity_type(12)：升级实体类型 | R1 | 正向 | P2 |
 | ER-022 | verify_entity(14) / unverify_entity(19)：验证/取消验证 | R1 | 正向 | P2 |
-| ER-023 | reopen_entity(15)：Owner 重开已关闭→Pending→需 approve | R2 | 正向 | P2 |
+| ER-023 | reopen_entity(15)：Owner 重开已关闭→直接 Active（付费即激活） | R2 | 正向 | P2 |
 | ER-024 | bind_entity_referrer(16)：绑定推荐人（SelfReferral/已绑定拒绝） | R2 | 正向+负向 | P2 |
 | ER-025 | update_admin_permissions(17)：更新管理员权限 | R2 | 正向 | P1 |
-| ER-026 | **unban_entity(18)：解除封禁** | R1 | 正向 | P1 |
+| ER-026 | **unban_entity(18)：解除封禁→直接 Active（需资金充足）** | R1 | 正向 | P1 |
 | ER-027 | **cancel_close_request(20)：取消关闭请求** | R2 | 正向 | P1 |
 | ER-028 | **resign_admin(21)：管理员主动辞职** | R3 | 正向 | P1 |
 | ER-029 | **set_primary_shop(22)：设置主店铺** | R2 | 正向 | P1 |

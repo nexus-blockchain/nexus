@@ -5113,8 +5113,6 @@ fn bug1_settle_token_records_works() {
 #[test]
 fn bug1_trait_settle_order_commission_works() {
     new_test_ext().execute_with(|| {
-        use pallet_commission_common::CommissionProvider;
-
         OrderCommissionRecords::<Test>::mutate(7005u64, |records| {
             let _ = records.try_push(crate::pallet::CommissionRecordOf::<Test> {
                 entity_id: ENTITY_ID,

@@ -285,7 +285,7 @@ pub struct MemberCommissionStatsData<Balance> {
 
 ---
 
-## 7. Storage（38 项）
+## 7. Storage（39 项）
 
 ### NEX 存储（13 项）
 
@@ -323,10 +323,11 @@ pub struct MemberCommissionStatsData<Balance> {
 | `GlobalMinTokenRepurchaseRate` | `StorageMap` | `entity_id` | `u16` | ValueQuery |
 | `EntityTokenAccountedBalance` | `StorageMap` | `entity_id` | `TokenBalance` | OptionQuery |
 
-### 治理 / 控制存储（12 项）
+### 治理 / 控制存储（13 项）
 
 | 存储项 | 类型 | Key | Value | Query |
 |--------|------|-----|-------|-------|
+| `ReferrerEarnedByBuyer` | `StorageNMap` | `(entity_id, referrer, buyer)` | `Balance` | ValueQuery |
 | `PoolRewardDisabledAt` | `StorageMap` | `entity_id` | `BlockNumber` | OptionQuery |
 | `GlobalMaxCommissionRate` | `StorageMap` | `entity_id` | `u16` | ValueQuery |
 | `GlobalMaxTokenCommissionRate` | `StorageMap` | `entity_id` | `u16` | ValueQuery |

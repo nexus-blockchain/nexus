@@ -3,11 +3,11 @@
 //! ## 概述
 //!
 //! 本模块负责实体的生命周期管理，包括：
-//! - 实体创建（转入运营资金到派生账户）
+//! - 实体创建（转入运营资金到派生账户，付费即激活）
 //! - 实体信息更新
 //! - 运营资金管理（充值、消费、健康监控）
 //! - 实体状态管理（暂停、恢复、申请关闭）
-//! - 治理审核（批准、封禁、审批关闭）
+//! - 治理操作（封禁、解禁、暂停、恢复、认证）
 //!
 //! ## 运营资金机制
 //!
@@ -28,8 +28,10 @@ extern crate alloc;
 
 pub use pallet::*;
 pub use pallet_entity_common::{EntityStatus, EntityType, GovernanceMode};
+pub use weights::{WeightInfo, SubstrateWeight};
 
 pub mod runtime_api;
+pub mod weights;
 
 #[cfg(feature = "runtime-benchmarks")]
 pub mod benchmarking;
@@ -151,10 +153,7 @@ pub mod pallet {
     }
 
     #[pallet::config]
-    pub trait Config: frame_system::Config {
-        /// 运行时事件类型
-        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-
+    pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
         /// 货币类型
         type Currency: Currency<Self::AccountId>;
 
@@ -231,6 +230,9 @@ pub mod pallet {
 
         /// Entity 状态变更级联通知（暂停/封禁/关闭/恢复时通知下游模块）
         type OnEntityStatusChange: pallet_entity_common::OnEntityStatusChange;
+
+        /// 权重信息（由 benchmark 生成，或使用默认占位值）
+        type WeightInfo: WeightInfo;
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
@@ -258,7 +260,7 @@ pub mod pallet {
                 T::MinInitialFundCos::get() <= T::MaxInitialFundCos::get(),
                 "MinInitialFundCos must be <= MaxInitialFundCos"
             );
-            // L1 审计修复: 确保 reopen → approve 路径资金校验不会因配置错误而死锁
+            // L1 审计修复: 确保 reopen 路径资金校验不会因配置错误而死锁
             assert!(
                 T::MinOperatingBalance::get() <= T::MinInitialFundCos::get(),
                 "MinOperatingBalance must be <= MinInitialFundCos"
@@ -307,7 +309,8 @@ pub mod pallet {
 
     /// Entity ID 起始值（从 1 开始，避免 0 与 primary_shop_id 哨兵值冲突）
     #[pallet::type_value]
-    pub fn DefaultNextEntityId() -> u64 { 1 }
+    #[pallet::type_value]
+    pub fn DefaultNextEntityId() -> u64 { 100_000 }
 
     /// 下一个 Entity ID
     #[pallet::storage]
@@ -505,7 +508,7 @@ pub mod pallet {
         EntityVerified {
             entity_id: u64,
         },
-        /// 实体重新开业申请（Closed → Pending，等待治理审批）
+        /// 实体重新开业（Closed → Active，付费即激活）
         EntityReopened {
             entity_id: u64,
             owner: T::AccountId,
@@ -537,7 +540,7 @@ pub mod pallet {
             entity_id: u64,
             shop_id: u64,
         },
-        /// 实体已解除封禁（Banned → Pending，需治理重新审批）
+        /// 实体已解除封禁（Banned → Active，直接激活）
         EntityUnbanned {
             entity_id: u64,
         },
@@ -691,7 +694,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// 创建 Entity（组织身份）— 付费即激活
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        #[pallet::weight(T::WeightInfo::create_entity())]
         pub fn create_entity(
             origin: OriginFor<T>,
             name: Vec<u8>,
@@ -705,7 +708,7 @@ pub mod pallet {
 
         /// 更新实体信息
         #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::update_entity())]
         pub fn update_entity(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -719,9 +722,9 @@ pub mod pallet {
             Self::do_update_entity(who, entity_id, name, logo_cid, description_cid, metadata_uri, contact_cid)
         }
 
-        /// 申请关闭实体（需治理审批）
+        /// 申请关闭实体（超时后自动关闭）
         #[pallet::call_index(2)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::request_close_entity())]
         pub fn request_close_entity(origin: OriginFor<T>, entity_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::do_request_close_entity(who, entity_id)
@@ -729,7 +732,7 @@ pub mod pallet {
 
         /// 充值金库资金
         #[pallet::call_index(3)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::top_up_fund())]
         pub fn top_up_fund(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -739,25 +742,12 @@ pub mod pallet {
             Self::do_top_up_fund(who, entity_id, amount)
         }
 
-        /// 审核通过实体（治理：激活 Pending 状态的实体）
-        #[pallet::call_index(4)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 5_000))]
-        pub fn approve_entity(origin: OriginFor<T>, entity_id: u64) -> DispatchResult {
-            T::GovernanceOrigin::ensure_origin(origin)?;
-            Self::do_approve_entity(entity_id)
-        }
-
-        /// 审批关闭实体（治理，退还全部余额）
-        #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
-        pub fn approve_close_entity(origin: OriginFor<T>, entity_id: u64) -> DispatchResult {
-            T::GovernanceOrigin::ensure_origin(origin)?;
-            Self::do_approve_close_entity(entity_id)
-        }
+        // call_index(4) 已移除: approve_entity（付费即激活，reopen/unban 直接 Active）
+        // call_index(5) 已移除: approve_close_entity（关闭统一走超时机制 execute_close_timeout）
 
         /// 暂停实体（治理，可附原因）
         #[pallet::call_index(6)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::suspend_entity())]
         pub fn suspend_entity(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -769,7 +759,7 @@ pub mod pallet {
 
         /// 恢复实体（治理，需资金充足）
         #[pallet::call_index(7)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::resume_entity())]
         pub fn resume_entity(origin: OriginFor<T>, entity_id: u64) -> DispatchResult {
             T::GovernanceOrigin::ensure_origin(origin)?;
             Self::do_resume_entity(entity_id)
@@ -777,7 +767,7 @@ pub mod pallet {
 
         /// 封禁实体（治理，可选没收资金，可附原因）
         #[pallet::call_index(8)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::ban_entity())]
         pub fn ban_entity(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -790,7 +780,7 @@ pub mod pallet {
 
         /// 添加管理员（指定权限位掩码）
         #[pallet::call_index(9)]
-        #[pallet::weight(Weight::from_parts(60_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::add_admin())]
         pub fn add_admin(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -803,7 +793,7 @@ pub mod pallet {
 
         /// 移除管理员
         #[pallet::call_index(10)]
-        #[pallet::weight(Weight::from_parts(60_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::remove_admin())]
         pub fn remove_admin(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -815,7 +805,7 @@ pub mod pallet {
 
         /// 转移所有权
         #[pallet::call_index(11)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::transfer_ownership())]
         pub fn transfer_ownership(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -827,7 +817,7 @@ pub mod pallet {
 
         /// 升级实体类型（需治理批准或满足条件）
         #[pallet::call_index(12)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::upgrade_entity_type())]
         pub fn upgrade_entity_type(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -849,15 +839,15 @@ pub mod pallet {
 
         /// 验证实体（治理）
         #[pallet::call_index(14)]
-        #[pallet::weight(Weight::from_parts(60_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::verify_entity())]
         pub fn verify_entity(origin: OriginFor<T>, entity_id: u64) -> DispatchResult {
             T::GovernanceOrigin::ensure_origin(origin)?;
             Self::do_verify_entity(entity_id)
         }
 
-        /// 重新开业（owner 申请，Closed → Pending，需重新缴纳押金）
+        /// 重新开业（owner 申请，Closed → Active，需重新缴纳押金，付费即激活）
         #[pallet::call_index(15)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        #[pallet::weight(T::WeightInfo::reopen_entity())]
         pub fn reopen_entity(origin: OriginFor<T>, entity_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::do_reopen_entity(who, entity_id)
@@ -865,7 +855,7 @@ pub mod pallet {
 
         /// 补绑 Entity 推荐人（仅限创建时未填的，一次性操作）
         #[pallet::call_index(16)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::bind_entity_referrer())]
         pub fn bind_entity_referrer(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -877,7 +867,7 @@ pub mod pallet {
 
         /// 更新管理员权限
         #[pallet::call_index(17)]
-        #[pallet::weight(Weight::from_parts(60_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::update_admin_permissions())]
         pub fn update_admin_permissions(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -888,9 +878,9 @@ pub mod pallet {
             Self::do_update_admin_permissions(who, entity_id, admin, new_permissions)
         }
 
-        /// 解除封禁（治理，Banned → Pending）
+        /// 解除封禁（治理，Banned → Active，需资金充足）
         #[pallet::call_index(18)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::unban_entity())]
         pub fn unban_entity(origin: OriginFor<T>, entity_id: u64) -> DispatchResult {
             T::GovernanceOrigin::ensure_origin(origin)?;
             Self::do_unban_entity(entity_id)
@@ -898,7 +888,7 @@ pub mod pallet {
 
         /// 撤销认证（治理）
         #[pallet::call_index(19)]
-        #[pallet::weight(Weight::from_parts(60_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::unverify_entity())]
         pub fn unverify_entity(origin: OriginFor<T>, entity_id: u64) -> DispatchResult {
             T::GovernanceOrigin::ensure_origin(origin)?;
             Self::do_unverify_entity(entity_id)
@@ -906,7 +896,7 @@ pub mod pallet {
 
         /// 撤销关闭申请（Owner，PendingClose → Active/Suspended）
         #[pallet::call_index(20)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::cancel_close_request())]
         pub fn cancel_close_request(origin: OriginFor<T>, entity_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::do_cancel_close_request(who, entity_id)
@@ -914,7 +904,7 @@ pub mod pallet {
 
         /// 管理员主动辞职
         #[pallet::call_index(21)]
-        #[pallet::weight(Weight::from_parts(60_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::resign_admin())]
         pub fn resign_admin(origin: OriginFor<T>, entity_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::do_resign_admin(who, entity_id)
@@ -922,7 +912,7 @@ pub mod pallet {
 
         /// 设置 Primary Shop（owner 或 ENTITY_MANAGE admin）
         #[pallet::call_index(22)]
-        #[pallet::weight(Weight::from_parts(60_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_primary_shop())]
         pub fn set_primary_shop(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -934,7 +924,7 @@ pub mod pallet {
 
         /// Owner 主动暂停实体
         #[pallet::call_index(23)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::self_pause_entity())]
         pub fn self_pause_entity(origin: OriginFor<T>, entity_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::do_self_pause_entity(who, entity_id)
@@ -942,7 +932,7 @@ pub mod pallet {
 
         /// Owner 恢复主动暂停的实体
         #[pallet::call_index(24)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::self_resume_entity())]
         pub fn self_resume_entity(origin: OriginFor<T>, entity_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
             Self::do_self_resume_entity(who, entity_id)
@@ -950,7 +940,7 @@ pub mod pallet {
 
         /// 治理强制转移所有权
         #[pallet::call_index(25)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::force_transfer_ownership())]
         pub fn force_transfer_ownership(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -962,7 +952,7 @@ pub mod pallet {
 
         /// 治理拒绝关闭申请（PendingClose → Active/Suspended）
         #[pallet::call_index(26)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::reject_close_request())]
         pub fn reject_close_request(origin: OriginFor<T>, entity_id: u64) -> DispatchResult {
             T::GovernanceOrigin::ensure_origin(origin)?;
             Self::do_reject_close_request(entity_id)
@@ -970,7 +960,7 @@ pub mod pallet {
 
         /// 执行超时关闭申请（任何人可调用）
         #[pallet::call_index(27)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::execute_close_timeout())]
         pub fn execute_close_timeout(origin: OriginFor<T>, entity_id: u64) -> DispatchResult {
             ensure_signed(origin)?;
             Self::do_execute_close_timeout(entity_id)

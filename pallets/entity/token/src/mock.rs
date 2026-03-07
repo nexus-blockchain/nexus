@@ -109,7 +109,6 @@ impl pallet_assets::Config for Test {
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = ();
 }
-
 // ==================== Mock EntityProvider ====================
 
 use pallet_entity_common::{

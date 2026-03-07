@@ -13,58 +13,7 @@ use pallet_entity_common::{EntityStatus, OnEntityStatusChange, ShopProvider};
 use sp_runtime::traits::{ConstU32, Zero};
 
 impl<T: Config> Pallet<T> {
-    /// 审核通过实体（治理：激活 Pending 状态的实体）
-    pub(crate) fn do_approve_entity(entity_id: u64) -> sp_runtime::DispatchResult {
-        let entity = Entities::<T>::get(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-        ensure!(entity.status == EntityStatus::Pending, Error::<T>::InvalidEntityStatus);
-
-        // P1: unban 路径 (Banned→Pending→approve→Active) 中资金可能已被没收，
-        // 检查金库余额防止零资金激活（owner 需先 top_up_fund）
-        let treasury_account = Self::entity_treasury_account(entity_id);
-        let balance = T::Currency::free_balance(&treasury_account);
-        ensure!(balance >= T::MinOperatingBalance::get(), Error::<T>::InsufficientOperatingFund);
-
-        Entities::<T>::mutate(entity_id, |s| {
-            if let Some(e) = s {
-                e.status = EntityStatus::Active;
-            }
-        });
-
-        EntityStats::<T>::mutate(|stats| {
-            stats.active_entities = stats.active_entities.saturating_add(1);
-        });
-
-        // H2: 清除前世遗留的治理暂停标记，防止新生命周期中
-        // 资金耗尽 → auto-suspend 后 top_up_fund 无法自动恢复
-        GovernanceSuspended::<T>::remove(entity_id);
-        // M2: 清除 OwnerPaused 标记（防止前世残留阻塞 self_pause）
-        OwnerPaused::<T>::remove(entity_id);
-        // F7: 清除暂停原因
-        SuspensionReasons::<T>::remove(entity_id);
-
-        // M1: 恢复名称唯一性索引（ban/close 时已移除，unban/reopen → approve 需恢复）
-        if let Ok(normalized) = Self::normalize_entity_name(&entity.name) {
-            if !EntityNameIndex::<T>::contains_key(&normalized) {
-                EntityNameIndex::<T>::insert(&normalized, entity_id);
-            }
-        }
-
-        // reopen_entity 恢复路径：Shop 之前被 force_close（终态写入），
-        // 需要显式恢复为 Active（遍历所有关联 Shop）
-        for sid in EntityShops::<T>::get(entity_id).iter() {
-            if T::ShopProvider::resume_shop(*sid).is_err() {
-                Self::deposit_event(Event::ShopCascadeFailed { entity_id, shop_id: *sid });
-            }
-        }
-
-        T::OnEntityStatusChange::on_entity_resumed(entity_id);
-
-        Self::deposit_event(Event::EntityStatusChanged {
-            entity_id,
-            status: EntityStatus::Active,
-        });
-        Ok(())
-    }
+    // do_approve_entity 已移除：付费即激活，reopen/unban 直接 Active
 
     /// 暂停实体（治理，可附原因）
     pub(crate) fn do_suspend_entity(entity_id: u64, reason: Option<Vec<u8>>) -> sp_runtime::DispatchResult {
@@ -234,13 +183,12 @@ impl<T: Config> Pallet<T> {
         }
 
         // 级联关闭所有 Shop（绕过 is_primary 保护）
+        // 注意: 保留 EntityShops 关联列表，以便 unban_entity 恢复时可 resume_shop
         for sid in EntityShops::<T>::get(entity_id).iter() {
             if T::ShopProvider::force_close_shop(*sid).is_err() {
                 Self::deposit_event(Event::ShopCascadeFailed { entity_id, shop_id: *sid });
             }
         }
-        // L1-R12: 清理 Shop 列表存储（级联关闭后条目已无效）
-        EntityShops::<T>::remove(entity_id);
 
         T::OnEntityStatusChange::on_entity_banned(entity_id);
 
@@ -258,25 +206,32 @@ impl<T: Config> Pallet<T> {
         Ok(())
     }
 
-    /// 解除封禁（治理，Banned → Pending，需重新审批激活）
+    /// 解除封禁（治理，Banned → Active，需资金充足，直接激活）
     pub(crate) fn do_unban_entity(entity_id: u64) -> sp_runtime::DispatchResult {
         let owner = Entities::<T>::try_mutate(entity_id, |maybe_entity| -> Result<T::AccountId, sp_runtime::DispatchError> {
             let entity = maybe_entity.as_mut().ok_or(Error::<T>::EntityNotFound)?;
             ensure!(entity.status == EntityStatus::Banned, Error::<T>::InvalidEntityStatus);
 
-            // H1 审计修复: 预占名称索引（防止 Pending 期间名称被抢注）
+            // 名称索引恢复（先检查名称可用性，再检查资金）
             let normalized = Self::normalize_entity_name(&entity.name)?;
             ensure!(
                 !EntityNameIndex::<T>::contains_key(&normalized),
                 Error::<T>::NameAlreadyTaken
             );
+
+            // 资金校验：ban 时可能已没收，需 owner 先 top_up_fund
+            let treasury_account = Self::entity_treasury_account(entity_id);
+            let balance = T::Currency::free_balance(&treasury_account);
+            ensure!(balance >= T::MinOperatingBalance::get(), Error::<T>::InsufficientOperatingFund);
+
             EntityNameIndex::<T>::insert(&normalized, entity_id);
 
-            entity.status = EntityStatus::Pending;
+            // 直接激活（不再经过 Pending → approve 流程）
+            entity.status = EntityStatus::Active;
             Ok(entity.owner.clone())
         })?;
 
-        // H1: 恢复 UserEntity 索引（ban_entity 时已移除）
+        // 恢复 UserEntity 索引（ban_entity 时已移除）
         UserEntity::<T>::try_mutate(&owner, |entities| -> sp_runtime::DispatchResult {
             if !entities.contains(&entity_id) {
                 entities.try_push(entity_id).map_err(|_| Error::<T>::MaxEntitiesReached)?;
@@ -284,12 +239,30 @@ impl<T: Config> Pallet<T> {
             Ok(())
         })?;
 
-        // 清除残留的治理暂停标记（防御性，ban_entity 已清除，但 unban 后确保干净）
+        // 清除遗留标记
         GovernanceSuspended::<T>::remove(entity_id);
-        // M2: 清除 OwnerPaused 标记
         OwnerPaused::<T>::remove(entity_id);
+        SuspensionReasons::<T>::remove(entity_id);
+
+        // 更新统计
+        EntityStats::<T>::mutate(|stats| {
+            stats.active_entities = stats.active_entities.saturating_add(1);
+        });
+
+        // 恢复关联 Shop
+        for sid in EntityShops::<T>::get(entity_id).iter() {
+            if T::ShopProvider::resume_shop(*sid).is_err() {
+                Self::deposit_event(Event::ShopCascadeFailed { entity_id, shop_id: *sid });
+            }
+        }
+
+        T::OnEntityStatusChange::on_entity_resumed(entity_id);
 
         Self::deposit_event(Event::EntityUnbanned { entity_id });
+        Self::deposit_event(Event::EntityStatusChanged {
+            entity_id,
+            status: EntityStatus::Active,
+        });
         Ok(())
     }
 

@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 pub type Balance = u128;
+#[allow(dead_code)]
 pub type AccountId = u64;
 
 pub const PLATFORM: u64 = 99;
@@ -49,6 +50,14 @@ pub fn setup_default() {
 
 pub fn set_entity_owner(entity_id: u64, owner: u64) {
     ENTITY_OWNERS.with(|m| m.borrow_mut().insert(entity_id, owner));
+}
+
+pub fn set_shop_entity(shop_id: u64, entity_id: u64) {
+    SHOP_ENTITY.with(|m| m.borrow_mut().insert(shop_id, entity_id));
+}
+
+pub fn set_shop_owner(shop_id: u64, owner: u64) {
+    SHOP_OWNERS.with(|m| m.borrow_mut().insert(shop_id, owner));
 }
 
 pub fn set_entity_referrer(entity_id: u64, referrer: u64) {
@@ -281,6 +290,7 @@ parameter_types! {
 impl pallet_commission_core::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
+    type WeightInfo = ();
     type ShopProvider = MockShopProvider;
     type EntityProvider = MockEntityProvider;
     type GovernanceProvider = MockGovernanceProvider;

@@ -30,6 +30,9 @@ pub use weights::WeightInfo;
 
 pub mod migration;
 
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+
 #[cfg(test)]
 mod mock;
 
@@ -2916,9 +2919,18 @@ pub mod pallet {
                 ProposalType::ReferralValidityChange { .. } => Self::emit_offchain_note(proposal.id, "ReferralValidityChange approved"),
                 ProposalType::MultiLevelPause => Self::emit_offchain_note(proposal.id, "MultiLevelPause approved"),
                 ProposalType::MultiLevelResume => Self::emit_offchain_note(proposal.id, "MultiLevelResume approved"),
-                ProposalType::MemberPolicyChange { .. } => Self::emit_offchain_note(proposal.id, "MemberPolicyChange approved"),
-                ProposalType::UpgradeRuleToggle { .. } => Self::emit_offchain_note(proposal.id, "UpgradeRuleToggle approved"),
-                ProposalType::MemberStatsPolicyChange { .. } => Self::emit_offchain_note(proposal.id, "MemberStatsPolicyChange approved"),
+                ProposalType::MemberPolicyChange { policy } => {
+                    T::MemberProvider::set_registration_policy(entity_id, *policy)
+                },
+                ProposalType::UpgradeRuleToggle { enabled } => {
+                    T::MemberProvider::set_upgrade_rule_system_enabled(entity_id, *enabled)
+                },
+                ProposalType::MemberStatsPolicyChange { qualified_only, .. } => {
+                    // qualified_only=true → 排除复购赠与 (bits=0)
+                    // qualified_only=false → 包含复购赠与 (bits=0b11)
+                    let policy_bits: u8 = if *qualified_only { 0 } else { 0b0000_0011 };
+                    T::MemberProvider::set_stats_policy(entity_id, policy_bits)
+                },
                 ProposalType::KycRequirementChange { .. } => Self::emit_offchain_note(proposal.id, "KycRequirementChange approved"),
                 ProposalType::KycProviderAuthorize { .. } => Self::emit_offchain_note(proposal.id, "KycProviderAuthorize approved"),
                 ProposalType::KycProviderDeauthorize { .. } => Self::emit_offchain_note(proposal.id, "KycProviderDeauthorize approved"),

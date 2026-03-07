@@ -189,6 +189,33 @@ mod benches {
         _(RawOrigin::Root, 0);
     }
 
+    #[benchmark]
+    fn appeal() {
+        // Seed a resolved complaint (RespondentWin so complainant can appeal)
+        seed_complaint::<T>(0, ComplaintStatus::ResolvedRespondentWin);
+        // Remove the deposit record so appeal guard passes
+        ComplaintDeposits::<T>::remove(0);
+        let complainant: T::AccountId = frame_benchmarking::account("complainant", 0, 0);
+        let cid = BoundedVec::truncate_from(b"appeal_reason".to_vec());
+        #[extrinsic_call]
+        _(RawOrigin::Signed(complainant), 0, cid);
+    }
+
+    #[benchmark]
+    fn resolve_appeal() {
+        seed_complaint::<T>(0, ComplaintStatus::Appealed);
+        let cid = BoundedVec::truncate_from(b"appeal_resolution".to_vec());
+        // Set appellant
+        Complaints::<T>::mutate(0, |maybe| {
+            if let Some(c) = maybe.as_mut() {
+                let complainant: T::AccountId = frame_benchmarking::account("complainant", 0, 0);
+                c.appellant = Some(complainant);
+            }
+        });
+        #[extrinsic_call]
+        _(RawOrigin::Root, 0, 0u8, cid);
+    }
+
     impl_benchmark_test_suite!(
         Pallet,
         crate::mock::new_test_ext(),

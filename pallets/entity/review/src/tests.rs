@@ -2031,10 +2031,9 @@ fn h1r10_edit_review_does_not_corrupt_shop_rating() {
             1, 5, None,
         ));
 
-        // H1-R10: 店铺评分不应被修改（update_shop_rating 是追加模式，无法减去旧值）
-        // 仍然是 sum=3, count=1（不是 sum=3+5=8, count=2）
+        // P1: revert_shop_rating 精确修正店铺评分（减去旧评分 3，加上新评分 5）
         let (sum_after, count_after) = get_shop_rating(100).unwrap();
-        assert_eq!(sum_after, 3, "shop rating sum should be unchanged after edit");
+        assert_eq!(sum_after, 5, "shop rating sum should reflect new rating after edit");
         assert_eq!(count_after, 1, "shop rating count should be unchanged after edit");
     });
 }
@@ -2173,5 +2172,197 @@ fn m2r10_reply_works_with_active_entity() {
             1, b"QmReply".to_vec(),
         ));
         assert!(ReviewReplies::<Test>::get(1).is_some());
+    });
+}
+
+// ==================== P1: revert_shop_rating tests ====================
+
+#[test]
+fn p1_remove_review_reverts_shop_rating() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+        add_order(2, BUYER, 100, true);
+
+        // 提交两条评价
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(), 1, 4, None,
+        ));
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(), 2, 2, None,
+        ));
+
+        // 店铺评分: sum=6, count=2
+        let (sum, count) = get_shop_rating(100).unwrap();
+        assert_eq!(sum, 6);
+        assert_eq!(count, 2);
+
+        // Root 删除第一条评价（rating=4）
+        assert_ok!(EntityReview::remove_review(RawOrigin::Root.into(), 1));
+
+        // 店铺评分应回退: sum=2, count=1
+        let (sum_after, count_after) = get_shop_rating(100).unwrap();
+        assert_eq!(sum_after, 2, "shop rating sum should subtract removed review rating");
+        assert_eq!(count_after, 1, "shop rating count should decrement on remove");
+    });
+}
+
+#[test]
+fn p1_remove_all_reviews_resets_shop_rating() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(), 1, 5, None,
+        ));
+
+        let (sum, count) = get_shop_rating(100).unwrap();
+        assert_eq!(sum, 5);
+        assert_eq!(count, 1);
+
+        assert_ok!(EntityReview::remove_review(RawOrigin::Root.into(), 1));
+
+        // 删除唯一评价后: sum=0, count=0
+        let (sum_after, count_after) = get_shop_rating(100).unwrap();
+        assert_eq!(sum_after, 0);
+        assert_eq!(count_after, 0);
+    });
+}
+
+#[test]
+fn p1_edit_review_updates_shop_rating_precisely() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+        add_order(2, BUYER, 100, true);
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(), 1, 2, None,
+        ));
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(), 2, 4, None,
+        ));
+
+        // sum=6, count=2
+        let (sum, count) = get_shop_rating(100).unwrap();
+        assert_eq!(sum, 6);
+        assert_eq!(count, 2);
+
+        // 修改第一条评价 2→5
+        assert_ok!(EntityReview::edit_review(
+            RawOrigin::Signed(BUYER).into(), 1, 5, None,
+        ));
+
+        // sum = 6 - 2 + 5 = 9, count = 2
+        let (sum_after, count_after) = get_shop_rating(100).unwrap();
+        assert_eq!(sum_after, 9, "shop rating sum should reflect precise edit");
+        assert_eq!(count_after, 2, "shop rating count unchanged on edit");
+    });
+}
+
+#[test]
+fn p1_edit_same_rating_no_shop_rating_change() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(), 1, 3, None,
+        ));
+
+        let (sum, count) = get_shop_rating(100).unwrap();
+        assert_eq!(sum, 3);
+        assert_eq!(count, 1);
+
+        // 修改评分 3→3（相同评分）
+        assert_ok!(EntityReview::edit_review(
+            RawOrigin::Signed(BUYER).into(), 1, 3, Some(b"QmNewCid".to_vec()),
+        ));
+
+        // 评分相同时不调用 revert_shop_rating
+        let (sum_after, count_after) = get_shop_rating(100).unwrap();
+        assert_eq!(sum_after, 3);
+        assert_eq!(count_after, 1);
+    });
+}
+
+#[test]
+fn p1_remove_review_shop_rating_revert_best_effort() {
+    new_test_ext().execute_with(|| {
+        add_shop(100);
+        add_order(1, BUYER, 100, true);
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(), 1, 4, None,
+        ));
+
+        // 设置 shop rating 操作失败
+        set_shop_rating_fail(true);
+
+        // 删除评价仍应成功（best-effort）
+        assert_ok!(EntityReview::remove_review(RawOrigin::Root.into(), 1));
+        assert!(Reviews::<Test>::get(1).is_none());
+    });
+}
+
+// ==================== P2: reply_to_review entity locked check ====================
+
+#[test]
+fn p2_reply_rejects_locked_entity() {
+    new_test_ext().execute_with(|| {
+        add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
+        add_shop(100);
+        set_shop_entity(100, ENTITY_1);
+        add_order(1, BUYER, 100, true);
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(), 1, 4, None,
+        ));
+
+        // 锁定 Entity
+        set_entity_locked(ENTITY_1);
+
+        // 回复应被拒绝
+        assert_noop!(
+            EntityReview::reply_to_review(
+                RawOrigin::Signed(ENTITY_OWNER).into(),
+                1, b"QmReply".to_vec(),
+            ),
+            Error::<Test>::EntityLocked
+        );
+    });
+}
+
+#[test]
+fn p2_reply_works_when_entity_not_locked() {
+    new_test_ext().execute_with(|| {
+        add_entity(ENTITY_1, ENTITY_OWNER, true, vec![]);
+        add_shop(100);
+        set_shop_entity(100, ENTITY_1);
+        add_order(1, BUYER, 100, true);
+
+        assert_ok!(EntityReview::submit_review(
+            RawOrigin::Signed(BUYER).into(), 1, 4, None,
+        ));
+
+        // Entity 未锁定 → 回复应成功
+        assert_ok!(EntityReview::reply_to_review(
+            RawOrigin::Signed(ENTITY_OWNER).into(),
+            1, b"QmReply".to_vec(),
+        ));
+        assert!(ReviewReplies::<Test>::get(1).is_some());
+    });
+}
+
+// ==================== P3: StorageVersion ====================
+
+#[test]
+fn p3_pallet_storage_version_is_1() {
+    use frame_support::traits::{GetStorageVersion, StorageVersion};
+    new_test_ext().execute_with(|| {
+        // 验证 pallet 声明的 storage version 为 1
+        let version = <EntityReview as GetStorageVersion>::in_code_storage_version();
+        assert_eq!(version, StorageVersion::new(1));
     });
 }

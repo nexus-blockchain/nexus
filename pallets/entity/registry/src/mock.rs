@@ -113,6 +113,7 @@ impl StoragePin<u64> for MockStoragePin {
         _subject_id: u64,
         _entity_id: Option<u64>,
         _cid: sp_std::vec::Vec<u8>,
+        _size_bytes: u64,
         _tier: PinTier,
     ) -> Result<(), sp_runtime::DispatchError> {
         Ok(())
@@ -129,7 +130,6 @@ parameter_types! {
 }
 
 impl pallet_entity_registry::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type MaxEntityNameLength = ConstU32<64>;
     type MaxCidLength = ConstU32<64>;
@@ -150,6 +150,7 @@ impl pallet_entity_registry::Config for Test {
     type MaxReferralsPerReferrer = ConstU32<100>;
     type StoragePin = MockStoragePin;
     type OnEntityStatusChange = ();
+    type WeightInfo = ();
 }
 
 // ==================== Test Externalities Builder ====================

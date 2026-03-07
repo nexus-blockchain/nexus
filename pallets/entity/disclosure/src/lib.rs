@@ -25,11 +25,17 @@ extern crate alloc;
 
 pub use pallet::*;
 
+pub mod weights;
+pub use weights::WeightInfo;
+
 #[cfg(test)]
 mod mock;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
 
 #[frame_support::pallet]
 pub mod pallet {
@@ -476,6 +482,9 @@ pub mod pallet {
 
         /// v0.6: 披露违规回调（通知下游模块处罚升级）
         type OnDisclosureViolation: OnDisclosureViolation;
+
+        /// Weight information for extrinsics in this pallet
+        type WeightInfo: crate::weights::WeightInfo;
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -1206,7 +1215,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// 配置实体披露设置
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 3_000))]
+        #[pallet::weight(T::WeightInfo::configure_disclosure())]
         pub fn configure_disclosure(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1264,7 +1273,7 @@ pub mod pallet {
 
         /// 发布披露
         #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::publish_disclosure())]
         pub fn publish_disclosure(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1358,7 +1367,7 @@ pub mod pallet {
 
         /// P2-a2: 创建草稿披露（不触发黑窗口期，不更新配置）
         #[pallet::call_index(18)]
-        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+        #[pallet::weight(T::WeightInfo::create_draft_disclosure())]
         pub fn create_draft_disclosure(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1419,8 +1428,7 @@ pub mod pallet {
 
         /// P2-a2: 更新草稿披露内容
         #[pallet::call_index(19)]
-        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
-        pub fn update_draft(
+        #[pallet::weight(T::WeightInfo::update_draft())]
             origin: OriginFor<T>,
             disclosure_id: u64,
             content_cid: Vec<u8>,
@@ -1458,7 +1466,7 @@ pub mod pallet {
 
         /// P2-a2: 删除草稿披露
         #[pallet::call_index(20)]
-        #[pallet::weight(Weight::from_parts(15_000_000, 2_000))]
+        #[pallet::weight(T::WeightInfo::delete_draft())]
         pub fn delete_draft(
             origin: OriginFor<T>,
             disclosure_id: u64,
@@ -1486,8 +1494,7 @@ pub mod pallet {
 
         /// P2-a2: 发布草稿（Draft → Published，触发黑窗口期 + 配置更新）
         #[pallet::call_index(21)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
-        pub fn publish_draft(
+        #[pallet::weight(T::WeightInfo::publish_draft())]
             origin: OriginFor<T>,
             disclosure_id: u64,
         ) -> DispatchResult {
@@ -1565,8 +1572,7 @@ pub mod pallet {
 
         /// 撤回披露
         #[pallet::call_index(2)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
-        pub fn withdraw_disclosure(
+        #[pallet::weight(T::WeightInfo::withdraw_disclosure())]
             origin: OriginFor<T>,
             disclosure_id: u64,
         ) -> DispatchResult {
@@ -1600,7 +1606,7 @@ pub mod pallet {
 
         /// 更正披露（发布新版本）
         #[pallet::call_index(3)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::correct_disclosure())]
         pub fn correct_disclosure(
             origin: OriginFor<T>,
             old_disclosure_id: u64,
@@ -1704,8 +1710,7 @@ pub mod pallet {
 
         /// 添加内幕人员
         #[pallet::call_index(4)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 3_000))]
-        pub fn add_insider(
+        #[pallet::weight(T::WeightInfo::add_insider())]
             origin: OriginFor<T>,
             entity_id: u64,
             account: T::AccountId,
@@ -1761,8 +1766,7 @@ pub mod pallet {
 
         /// P2-a3: 更新内幕人员角色
         #[pallet::call_index(22)]
-        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
-        pub fn update_insider_role(
+        #[pallet::weight(T::WeightInfo::update_insider_role())]
             origin: OriginFor<T>,
             entity_id: u64,
             account: T::AccountId,
@@ -1810,8 +1814,7 @@ pub mod pallet {
 
         /// 移除内幕人员
         #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 3_000))]
-        pub fn remove_insider(
+        #[pallet::weight(T::WeightInfo::remove_insider())]
             origin: OriginFor<T>,
             entity_id: u64,
             account: T::AccountId,
@@ -1856,8 +1859,7 @@ pub mod pallet {
 
         /// 手动开始黑窗口期
         #[pallet::call_index(6)]
-        #[pallet::weight(Weight::from_parts(20_000_000, 2_000))]
-        pub fn start_blackout(
+        #[pallet::weight(T::WeightInfo::start_blackout())]
             origin: OriginFor<T>,
             entity_id: u64,
             duration: BlockNumberFor<T>,
@@ -1899,8 +1901,7 @@ pub mod pallet {
 
         /// 结束黑窗口期
         #[pallet::call_index(7)]
-        #[pallet::weight(Weight::from_parts(20_000_000, 2_000))]
-        pub fn end_blackout(
+        #[pallet::weight(T::WeightInfo::end_blackout())]
             origin: OriginFor<T>,
             entity_id: u64,
         ) -> DispatchResult {
@@ -1927,7 +1928,7 @@ pub mod pallet {
 
         /// 发布公告
         #[pallet::call_index(8)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::publish_announcement())]
         pub fn publish_announcement(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -2003,7 +2004,7 @@ pub mod pallet {
 
         /// 更新公告（标题、内容、分类、过期时间）
         #[pallet::call_index(9)]
-        #[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::update_announcement())]
         pub fn update_announcement(
             origin: OriginFor<T>,
             announcement_id: u64,
@@ -2074,8 +2075,7 @@ pub mod pallet {
 
         /// 撤回公告
         #[pallet::call_index(10)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
-        pub fn withdraw_announcement(
+        #[pallet::weight(T::WeightInfo::withdraw_announcement())]
             origin: OriginFor<T>,
             announcement_id: u64,
         ) -> DispatchResult {
@@ -2120,8 +2120,7 @@ pub mod pallet {
         ///
         /// 将指定公告添加到置顶列表。如果已置顶则忽略。
         #[pallet::call_index(11)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
-        pub fn pin_announcement(
+        #[pallet::weight(T::WeightInfo::pin_announcement())]
             origin: OriginFor<T>,
             entity_id: u64,
             announcement_id: u64,
@@ -2166,8 +2165,7 @@ pub mod pallet {
 
         /// P2-a14: 取消置顶公告
         #[pallet::call_index(23)]
-        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
-        pub fn unpin_announcement(
+        #[pallet::weight(T::WeightInfo::unpin_announcement())]
             origin: OriginFor<T>,
             entity_id: u64,
             announcement_id: u64,
@@ -2205,8 +2203,7 @@ pub mod pallet {
         /// 将 `expires_at <= now` 且状态为 Active 的公告标记为 `Expired`。
         /// 如果该公告是置顶公告，自动清除置顶。
         #[pallet::call_index(12)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
-        pub fn expire_announcement(
+        #[pallet::weight(T::WeightInfo::expire_announcement())]
             origin: OriginFor<T>,
             announcement_id: u64,
         ) -> DispatchResult {
@@ -2246,8 +2243,7 @@ pub mod pallet {
         /// 仅 Root 可调用。可降级披露级别、强制开启内幕交易控制等。
         /// 保留已有 violation_count 和 last_disclosure。
         #[pallet::call_index(16)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 3_000))]
-        pub fn force_configure_disclosure(
+        #[pallet::weight(T::WeightInfo::force_configure_disclosure())]
             origin: OriginFor<T>,
             entity_id: u64,
             level: DisclosureLevel,
@@ -2291,8 +2287,7 @@ pub mod pallet {
         /// 检查实体披露是否逾期，若逾期则递增 violation_count 并发出事件。
         /// 同一逾期周期内不可重复举报（通过 ViolationRecords 去重）。
         #[pallet::call_index(15)]
-        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
-        pub fn report_disclosure_violation(
+        #[pallet::weight(T::WeightInfo::report_disclosure_violation())]
             origin: OriginFor<T>,
             entity_id: u64,
             violation_type: ViolationType,
@@ -2359,8 +2354,7 @@ pub mod pallet {
         /// 从 `EntityDisclosures` 移除 Withdrawn 或 Corrected 状态的披露 ID，
         /// 释放 BoundedVec 容量供新披露使用。披露记录本身保留供审计。
         #[pallet::call_index(13)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
-        pub fn cleanup_disclosure_history(
+        #[pallet::weight(T::WeightInfo::cleanup_disclosure_history())]
             origin: OriginFor<T>,
             entity_id: u64,
             disclosure_id: u64,
@@ -2393,8 +2387,7 @@ pub mod pallet {
         /// 从 `EntityAnnouncements` 移除 Withdrawn 或 Expired 状态的公告 ID，
         /// 释放 BoundedVec 容量供新公告使用。公告记录本身保留供审计。
         #[pallet::call_index(14)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
-        pub fn cleanup_announcement_history(
+        #[pallet::weight(T::WeightInfo::cleanup_announcement_history())]
             origin: OriginFor<T>,
             entity_id: u64,
             announcement_id: u64,
@@ -2428,7 +2421,7 @@ pub mod pallet {
         /// EntityAnnouncements, PinnedAnnouncements, ViolationRecords, InsiderRoleHistory。
         /// 披露/公告记录本身保留供审计。
         #[pallet::call_index(17)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 10_000))]
+        #[pallet::weight(T::WeightInfo::cleanup_entity_disclosure())]
         pub fn cleanup_entity_disclosure(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -2469,11 +2462,11 @@ pub mod pallet {
 
         /// F1: 批量添加内幕人员
         #[pallet::call_index(24)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::batch_add_insiders(insiders_list.len() as u32))]
         pub fn batch_add_insiders(
             origin: OriginFor<T>,
             entity_id: u64,
-            insiders_list: Vec<(T::AccountId, InsiderRole)>,
+            insiders_list: BoundedVec<(T::AccountId, InsiderRole), T::MaxInsiders>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -2526,11 +2519,11 @@ pub mod pallet {
 
         /// F1: 批量移除内幕人员
         #[pallet::call_index(25)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::batch_remove_insiders(accounts.len() as u32))]
         pub fn batch_remove_insiders(
             origin: OriginFor<T>,
             entity_id: u64,
-            accounts: Vec<T::AccountId>,
+            accounts: BoundedVec<T::AccountId, T::MaxInsiders>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -2570,8 +2563,7 @@ pub mod pallet {
 
         /// F8: 重置违规次数（仅 Root 可调用）
         #[pallet::call_index(26)]
-        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
-        pub fn reset_violation_count(
+        #[pallet::weight(T::WeightInfo::reset_violation_count())]
             origin: OriginFor<T>,
             entity_id: u64,
         ) -> DispatchResult {
@@ -2594,8 +2586,7 @@ pub mod pallet {
 
         /// F9: 清理已过期的黑窗口期存储（任何人可调用）
         #[pallet::call_index(27)]
-        #[pallet::weight(Weight::from_parts(15_000_000, 2_000))]
-        pub fn expire_blackout(
+        #[pallet::weight(T::WeightInfo::expire_blackout())]
             origin: OriginFor<T>,
             entity_id: u64,
         ) -> DispatchResult {
@@ -2617,8 +2608,7 @@ pub mod pallet {
 
         /// v0.6: 配置审批要求（多方签核才能发布草稿）
         #[pallet::call_index(28)]
-        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
-        pub fn configure_approval_requirements(
+        #[pallet::weight(T::WeightInfo::configure_approval_requirements())]
             origin: OriginFor<T>,
             entity_id: u64,
             required_approvals: u32,
@@ -2656,8 +2646,7 @@ pub mod pallet {
 
         /// v0.6: 审批披露草稿（多方签核）
         #[pallet::call_index(29)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
-        pub fn approve_disclosure(
+        #[pallet::weight(T::WeightInfo::approve_disclosure())]
             origin: OriginFor<T>,
             disclosure_id: u64,
         ) -> DispatchResult {
@@ -2957,11 +2946,15 @@ pub mod pallet {
         }
 
         /// v0.6: 清理已过期的冷静期记录（任何人可调用）
+        ///
+        /// `max_count` 限制每次最多清理的记录数，防止无界迭代。
         #[pallet::call_index(36)]
-        #[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+        #[pallet::weight(Weight::from_parts(15_000_000u64.saturating_add(
+            5_000_000u64.saturating_mul(*max_count as u64)), 3_000))]
         pub fn cleanup_expired_cooldowns(
             origin: OriginFor<T>,
             entity_id: u64,
+            max_count: u32,
         ) -> DispatchResult {
             ensure_signed(origin)?;
 
@@ -2970,14 +2963,17 @@ pub mod pallet {
 
             let mut to_remove = Vec::new();
             for (account, until) in RemovedInsiders::<T>::iter_prefix(entity_id) {
+                if cleaned >= max_count {
+                    break;
+                }
                 if now > until {
                     to_remove.push(account);
+                    cleaned += 1;
                 }
             }
 
             for account in to_remove.iter() {
                 RemovedInsiders::<T>::remove(entity_id, account);
-                cleaned += 1;
             }
 
             Self::deposit_event(Event::CooldownsCleaned {

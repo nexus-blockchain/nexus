@@ -2,7 +2,7 @@
 
 > 订单评价模块 — 买家评分 · 商家回复 · 商品评价索引
 
-**pallet_index** `123` · **version** `0.10.0` · **tests** `95`
+**pallet_index** `123` · **version** `0.11.0` · **tests** `103` · **benchmarks** `5`
 
 ---
 
@@ -15,7 +15,7 @@
 | 商家回复 | Entity owner/admin 对评价发表一次回复 |
 | 评价移除 | Root 可删除违规评价，买家可重新评价 |
 | Entity 开关 | Entity 管理员可关闭/开启旗下所有 Shop 的评价功能 |
-| 店铺评分联动 | 提交评价时 best-effort 更新 `ShopProvider` 评分，失败不回滚 |
+| 店铺评分联动 | 提交/修改/删除评价时精确更新 `ShopProvider` 评分（`revert_shop_rating`），失败不回滚 |
 | 商品评价索引 | 按 `product_id` 维护评价列表、计数、评分总和，支持商品平均分查询 |
 | 用户评价索引 | 按账户维护已评价 order_id 列表，支持"我的评价"查询 |
 
@@ -221,11 +221,11 @@ Root 移除违规评价。
 |-----------|----------|------------|-------|--------|
 | `submit_review` | 55M | 8K | 10 | 5 |
 | `set_review_enabled` | 25M | 4K | 4 | 1 |
-| `remove_review` | 45M | 7K | 3 | 8 |
-| `reply_to_review` | 35M | 5K | 6 | 1 |
-| `edit_review` | 40M | 6K | 5 | 2 |
+| `remove_review` | 50M | 8K | 3 | 9 |
+| `reply_to_review` | 38M | 5.5K | 7 | 1 |
+| `edit_review` | 45M | 7K | 6 | 3 |
 
-> 预估值（pre-benchmark），实际权重将由 `frame-benchmarking` 生成。
+> 预估值（pre-benchmark），实际权重将由 `frame-benchmarking` 生成。`benchmarking.rs` 已就绪。
 
 ---
 
@@ -251,6 +251,7 @@ Root 移除违规评价。
 | 方法 | 说明 |
 |------|------|
 | `update_shop_rating(shop_id, rating)` | 追加模式更新店铺评分（sum += rating, count += 1） |
+| `revert_shop_rating(shop_id, old_rating, new_rating)` | 精确回退/替换店铺评分（删除评价传 None，修改评价传 Some(new)） |
 | `shop_entity_id(shop_id)` | 获取店铺所属 Entity ID |
 
 ### EntityProvider (pallet-entity-common → pallet-entity-registry)
@@ -268,13 +269,14 @@ Root 移除违规评价。
 
 ```
 pallets/entity/review/
-├── Cargo.toml          # v0.10.0
+├── Cargo.toml          # v0.11.0
 ├── README.md
 └── src/
-    ├── lib.rs           # 645 行 — Config · Storage · Events · Errors · 5 Extrinsics
-    ├── weights.rs       # 87 行 — WeightInfo trait + SubstrateWeight 预估
+    ├── lib.rs           # Config · Storage · Events · Errors · 5 Extrinsics
+    ├── benchmarking.rs  # 5 benchmarks (frame-benchmarking v2)
+    ├── weights.rs       # WeightInfo trait + SubstrateWeight 预估
     ├── mock.rs          # Mock runtime (EntityProvider / OrderProvider / ShopProvider)
-    └── tests.rs         # 95 tests (93 #[test] + 2 auto-generated)
+    └── tests.rs         # 103 tests
 ```
 
 ---
@@ -368,5 +370,17 @@ pallets/entity/review/
 | Low | L1–L2 | weights.rs 注释/reads/writes 不一致 | 修正 3 个函数 |
 | Low | L3 | Cargo.toml 缺 feature 传播 | 添加 `pallet-entity-common` flags |
 | Low | L4 | README 严重过时 | 全面同步 |
+
+</details>
+
+<details>
+<summary>v0.11.0 — Round 11: 上线就绪（4 项修复，103 tests + 5 benchmarks）</summary>
+
+| 级别 | ID | 问题 | 修复 |
+|------|-----|------|------|
+| Critical | P0 | 缺少 `benchmarking.rs`，权重全部手动预估 | 新建 `benchmarking.rs`，5 个 extrinsic 全覆盖（frame-benchmarking v2） |
+| High | P1 | `remove_review`/`edit_review` 无法回退店铺评分（`ShopProvider` 仅有追加模式） | `ShopProvider` trait 新增 `revert_shop_rating`，shop pallet 实现精确回退 |
+| Medium | P2 | `reply_to_review` 不检查 Entity 锁定状态 | 添加 `is_entity_locked` 校验 |
+| Low | P3 | `StorageVersion` 为 0，无 migration 策略 | 升级至 `StorageVersion(1)`（无存储结构变更，仅标记版本） |
 
 </details>

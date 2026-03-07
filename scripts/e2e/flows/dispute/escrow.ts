@@ -10,17 +10,16 @@
  * 流程:
  *   1. Bob 锁定资金到托管
  *   2. 验证托管已创建
- *   3. Bob 使用 nonce 幂等锁定 (lock_with_nonce)
- *   4. 释放资金给 Charlie
- *   5. Bob 再次锁定 → 退款
- *   6. Bob 锁定 → 分账释放 (release_split)
- *   7. Bob 锁定 → 进入争议 → 仲裁全额释放
- *   8. Bob 锁定 → 进入争议 → 仲裁全额退款
- *   9. Bob 锁定 → 进入争议 → 仲裁部分释放 (bps)
- *  10. Alice 设置全局暂停 → 验证交易被拒绝 → 取消暂停
- *  11. 安排到期 → 取消到期
- *  12. [错误路径] Dave 释放他人托管
- *  13. [错误路径] 争议状态下释放被拒绝
+ *   3. 释放资金给 Charlie
+ *   4. Bob 再次锁定 → 退款
+ *   5. Bob 锁定 → 分账释放 (release_split)
+ *   6. Bob 锁定 → 进入争议 → 仲裁全额释放
+ *   7. Bob 锁定 → 进入争议 → 仲裁全额退款
+ *   8. Bob 锁定 → 进入争议 → 仲裁部分释放 (bps)
+ *   9. Alice 设置全局暂停 → 验证交易被拒绝 → 取消暂停
+ *  10. 安排到期 → 取消到期
+ *  11. [错误路径] Dave 释放他人托管
+ *  12. [错误路径] 争议状态下释放被拒绝
  */
 
 import { FlowDef, FlowContext } from '../../core/test-runner.js';
@@ -80,25 +79,7 @@ async function escrowLifecycle(ctx: FlowContext): Promise<void> {
     }
   });
 
-  // ─── Step 3: Nonce 幂等锁定 ───────────────────────────────
-
-  const escrowId2 = 2;
-  const lockNonceTx = (api.tx as any).escrow.lockWithNonce(
-    escrowId2,
-    bob.address,          // payer
-    nex(30).toString(),
-    1,   // nonce
-  );
-  const lockNonceResult = await ctx.send(lockNonceTx, bob, 'Bob nonce 锁定 (nonce=1)', 'bob');
-  assertTxSuccess(lockNonceResult, 'nonce 锁定');
-
-  // 重复 nonce 应被忽略
-  const dupNonceTx = (api.tx as any).escrow.lockWithNonce(escrowId2, bob.address, nex(30).toString(), 1);
-  const dupNonceResult = await ctx.send(dupNonceTx, bob, 'Bob 重复 nonce 锁定', 'bob');
-  // 重复 nonce 可能成功(忽略)或失败，取决于实现
-  console.log(`    重复 nonce 结果: ${dupNonceResult.success ? '忽略(成功)' : dupNonceResult.error}`);
-
-  // ─── Step 4: 释放资金给 Charlie ───────────────────────────
+  // ─── Step 3: 释放资金给 Charlie ───────────────────────────
 
   const charlieBalBefore = await getFreeBalance(api, charlie.address);
 
@@ -286,7 +267,7 @@ async function escrowLifecycle(ctx: FlowContext): Promise<void> {
 
   // ─── 汇总 ─────────────────────────────────────────────────
   await ctx.check('托管汇总', 'system', () => {
-    console.log(`    ✓ 锁定: 普通锁定 → nonce 幂等锁定`);
+    console.log(`    ✓ 锁定: 普通锁定`);
     console.log(`    ✓ 释放: 全额释放 → 退款 → 分账释放`);
     console.log(`    ✓ 争议: 全额释放 → 全额退款 → 部分释放 (bps)`);
     console.log(`    ✓ 管理: 暂停/恢复 → 安排到期/取消到期`);

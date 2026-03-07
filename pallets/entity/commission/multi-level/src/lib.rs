@@ -803,7 +803,7 @@ pub mod pallet {
         pub fn force_cleanup_entity(
             origin: OriginFor<T>,
             entity_id: u64,
-            member_count_hint: u32,
+            _member_count_hint: u32,
         ) -> DispatchResult {
             ensure_root(origin)?;
             Self::cleanup_entity_storage(entity_id);

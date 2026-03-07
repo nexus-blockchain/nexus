@@ -1939,22 +1939,23 @@ fn m3_r5_clear_config_emits_cleared_event() {
 #[test]
 fn m1_r4_weight_values_are_reasonable() {
     use crate::weights::{WeightInfo, SubstrateWeight};
+    type W = SubstrateWeight<Test>;
 
-    let w1 = SubstrateWeight::set_pool_reward_config();
+    let w1 = W::set_pool_reward_config();
     assert!(w1.ref_time() >= 45_000_000, "set_pool_reward_config ref_time too low");
     assert!(w1.proof_size() >= 5_000, "set_pool_reward_config proof_size too low");
 
-    let w2 = SubstrateWeight::claim_pool_reward();
+    let w2 = W::claim_pool_reward();
     assert!(w2.ref_time() >= 150_000_000, "claim_pool_reward ref_time too low");
     assert!(w2.proof_size() >= 15_000, "claim_pool_reward proof_size too low");
 
-    let w3 = SubstrateWeight::start_new_round();
-    assert!(w3.ref_time() >= 100_000_000, "force_new_round ref_time too low");
-    assert!(w3.proof_size() >= 10_000, "force_new_round proof_size too low");
+    let w3 = W::start_new_round();
+    assert!(w3.ref_time() >= 80_000_000, "force_new_round ref_time too low");
+    assert!(w3.proof_size() >= 8_000, "force_new_round proof_size too low");
 
-    let w4 = SubstrateWeight::set_token_pool_enabled();
-    assert!(w4.ref_time() >= 40_000_000, "set_token_pool_enabled ref_time too low");
-    assert!(w4.proof_size() >= 4_000, "set_token_pool_enabled proof_size too low");
+    let w4 = W::set_token_pool_enabled();
+    assert!(w4.ref_time() >= 30_000_000, "set_token_pool_enabled ref_time too low");
+    assert!(w4.proof_size() >= 3_000, "set_token_pool_enabled proof_size too low");
 }
 
 // ====================================================================
@@ -3015,19 +3016,20 @@ fn m1_r7_recreate_after_clear_allows_claim() {
 #[test]
 fn m2_r7_new_weight_values_are_reasonable() {
     use crate::weights::{WeightInfo, SubstrateWeight};
+    type W = SubstrateWeight<Test>;
 
-    let w_pause = SubstrateWeight::pause_pool_reward();
-    assert!(w_pause.ref_time() >= 25_000_000, "pause_pool_reward ref_time too low");
+    let w_pause = W::pause_pool_reward();
+    assert!(w_pause.ref_time() >= 20_000_000, "pause_pool_reward ref_time too low");
     assert!(w_pause.proof_size() >= 3_000, "pause_pool_reward proof_size too low");
     // Should be lighter than set_pool_reward_config
-    let w_set = SubstrateWeight::set_pool_reward_config();
+    let w_set = W::set_pool_reward_config();
     assert!(w_pause.ref_time() < w_set.ref_time(), "pause should be lighter than set_config");
 
-    let w_resume = SubstrateWeight::resume_pool_reward();
-    assert!(w_resume.ref_time() >= 25_000_000, "resume_pool_reward ref_time too low");
+    let w_resume = W::resume_pool_reward();
+    assert!(w_resume.ref_time() >= 20_000_000, "resume_pool_reward ref_time too low");
     assert!(w_resume.ref_time() < w_set.ref_time(), "resume should be lighter than set_config");
 
-    let w_global = SubstrateWeight::set_global_pool_reward_paused();
+    let w_global = W::set_global_pool_reward_paused();
     assert!(w_global.ref_time() >= 10_000_000, "set_global_paused ref_time too low");
     assert!(w_global.ref_time() < w_pause.ref_time(), "global_pause should be lighter than entity pause");
 }

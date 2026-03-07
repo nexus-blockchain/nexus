@@ -17,7 +17,15 @@
 
 extern crate alloc;
 
+pub mod weights;
 pub use pallet::*;
+pub use weights::WeightInfo;
+
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+
+#[cfg(test)]
+mod mock;
 
 #[frame_support::pallet]
 pub mod pallet {
@@ -110,6 +118,9 @@ pub mod pallet {
         /// 最大阶梯档位数
         #[pallet::constant]
         type MaxTeamTiers: Get<u32>;
+
+        /// 权重
+        type WeightInfo: WeightInfo;
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -245,7 +256,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// 设置团队业绩返佣配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(45_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_team_performance_config(tiers.len() as u32))]
         pub fn set_team_performance_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -278,7 +289,7 @@ pub mod pallet {
 
         /// 清除团队业绩返佣配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
         #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::clear_team_performance_config())]
         pub fn clear_team_performance_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -297,7 +308,7 @@ pub mod pallet {
 
         /// 部分更新团队业绩参数（不重提 tiers）
         #[pallet::call_index(2)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::update_team_performance_params())]
         pub fn update_team_performance_params(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -343,7 +354,7 @@ pub mod pallet {
 
         /// [Root] 强制设置团队业绩返佣配置
         #[pallet::call_index(3)]
-        #[pallet::weight(Weight::from_parts(45_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::force_set_team_performance_config(tiers.len() as u32))]
         pub fn force_set_team_performance_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -372,7 +383,7 @@ pub mod pallet {
 
         /// [Root] 强制清除团队业绩返佣配置
         #[pallet::call_index(4)]
-        #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::force_clear_team_performance_config())]
         pub fn force_clear_team_performance_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -392,7 +403,7 @@ pub mod pallet {
 
         /// F2: 暂停团队业绩返佣（保留配置不删除）
         #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 3_000))]
+        #[pallet::weight(T::WeightInfo::pause_team_performance())]
         pub fn pause_team_performance(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -411,7 +422,7 @@ pub mod pallet {
 
         /// F2: 恢复团队业绩返佣
         #[pallet::call_index(6)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 3_000))]
+        #[pallet::weight(T::WeightInfo::resume_team_performance())]
         pub fn resume_team_performance(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -434,7 +445,7 @@ pub mod pallet {
 
         /// F3: 添加新档位（插入到正确位置以保持 sales_threshold 升序）
         #[pallet::call_index(7)]
-        #[pallet::weight(Weight::from_parts(45_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::add_tier())]
         pub fn add_tier(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -465,7 +476,7 @@ pub mod pallet {
 
         /// F3: 更新指定索引的档位
         #[pallet::call_index(8)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::update_tier())]
         pub fn update_tier(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -514,7 +525,7 @@ pub mod pallet {
 
         /// F3: 移除指定索引的档位
         #[pallet::call_index(9)]
-        #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::remove_tier())]
         pub fn remove_tier(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1156,6 +1167,7 @@ mod tests {
         type MemberProvider = MockMemberProvider;
         type EntityProvider = MockEntityProvider;
         type MaxTeamTiers = ConstU32<10>;
+        type WeightInfo = ();
     }
 
     fn new_test_ext() -> sp_io::TestExternalities {

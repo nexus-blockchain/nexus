@@ -27,6 +27,12 @@ extern crate alloc;
 pub use pallet::*;
 pub use pallet_entity_common::{ShopOperatingStatus, ShopType};
 
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+
+pub mod weights;
+pub use weights::WeightInfo;
+
 #[cfg(test)]
 mod mock;
 
@@ -51,10 +57,15 @@ pub mod pallet {
         traits::{AccountIdConversion, Saturating, Zero},
         DispatchError, SaturatedConversion,
     };
-    use frame_support::weights::Weight;
+
+    use crate::WeightInfo;
 
     /// Shop 派生账户 PalletId
     const SHOP_PALLET_ID: PalletId = PalletId(*b"et/shop_");
+
+    /// 单次 clear_prefix 最大清理条目数，防止超出区块权重
+    /// 500 条足以覆盖绝大多数 Shop 的积分用户数，同时保证不超出区块限制
+    const POINTS_CLEANUP_LIMIT: u32 = 500;
 
     /// 货币余额类型别名
     pub type BalanceOf<T> =
@@ -191,6 +202,9 @@ pub mod pallet {
 
         /// Product 提供者（用于 Shop 关闭时级联 unpin Product CID）
         type ProductProvider: ProductProvider<Self::AccountId, BalanceOf<Self>>;
+
+        /// Weight 信息（由 benchmark 生成）
+        type WeightInfo: WeightInfo;
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -498,7 +512,7 @@ pub mod pallet {
         /// - `shop_type`: Shop 类型
         /// - `initial_fund`: 初始运营资金
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::create_shop())]
         pub fn create_shop(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -540,7 +554,7 @@ pub mod pallet {
 
         /// 更新 Shop 信息
         #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::update_shop())]
         pub fn update_shop(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -595,7 +609,7 @@ pub mod pallet {
 
         /// 添加 Shop 管理员
         #[pallet::call_index(2)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::add_manager())]
         pub fn add_manager(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -628,7 +642,7 @@ pub mod pallet {
 
         /// 移除 Shop 管理员
         #[pallet::call_index(3)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::remove_manager())]
         pub fn remove_manager(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -659,7 +673,7 @@ pub mod pallet {
 
         /// 充值运营资金
         #[pallet::call_index(4)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::fund_operating())]
         pub fn fund_operating(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -699,7 +713,7 @@ pub mod pallet {
 
         /// 暂停 Shop
         #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::pause_shop())]
         pub fn pause_shop(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -725,7 +739,7 @@ pub mod pallet {
 
         /// 恢复 Shop
         #[pallet::call_index(6)]
-        #[pallet::weight(Weight::from_parts(175_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::resume_shop())]
         pub fn resume_shop(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -758,7 +772,7 @@ pub mod pallet {
 
         /// 设置 Shop 位置信息
         #[pallet::call_index(7)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::set_location())]
         pub fn set_location(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -797,7 +811,7 @@ pub mod pallet {
 
         /// 启用 Shop 积分
         #[pallet::call_index(8)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::enable_points())]
         pub fn enable_points(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -847,7 +861,7 @@ pub mod pallet {
         /// 宽限期内：不可接新单/上新品，已有订单可完成，积分可转移。
         /// 宽限期满后调用 `finalize_close_shop` 完成清理。
         #[pallet::call_index(9)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::close_shop())]
         pub fn close_shop(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -891,7 +905,7 @@ pub mod pallet {
         /// 任何人可调用。检查宽限期已过，然后执行清理：
         /// 注销 Entity 关联、清积分数据、退还剩余资金。
         #[pallet::call_index(15)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::finalize_close_shop())]
         pub fn finalize_close_shop(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -918,7 +932,7 @@ pub mod pallet {
 
         /// 禁用 Shop 积分
         #[pallet::call_index(10)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::disable_points())]
         pub fn disable_points(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -935,11 +949,12 @@ pub mod pallet {
 
             ShopPointsConfigs::<T>::remove(shop_id);
             // H2: 清理积分余额和总供应量，避免残留数据
-            let _ = ShopPointsBalances::<T>::clear_prefix(shop_id, u32::MAX, None);
+            // 使用有界限制防止单次调用超出区块权重
+            let _ = ShopPointsBalances::<T>::clear_prefix(shop_id, POINTS_CLEANUP_LIMIT, None);
             ShopPointsTotalSupply::<T>::remove(shop_id);
             // M1: 清理 TTL 相关存储
             ShopPointsTtl::<T>::remove(shop_id);
-            let _ = ShopPointsExpiresAt::<T>::clear_prefix(shop_id, u32::MAX, None);
+            let _ = ShopPointsExpiresAt::<T>::clear_prefix(shop_id, POINTS_CLEANUP_LIMIT, None);
             // 清理积分总量上限
             ShopPointsMaxSupply::<T>::remove(shop_id);
 
@@ -949,7 +964,7 @@ pub mod pallet {
 
         /// 更新积分配置
         #[pallet::call_index(11)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::update_points_config())]
         pub fn update_points_config(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -993,7 +1008,7 @@ pub mod pallet {
 
         /// 转移 Shop 积分（用户之间）
         #[pallet::call_index(12)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::transfer_points())]
         pub fn transfer_points(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1042,7 +1057,7 @@ pub mod pallet {
         /// - 已关闭 Shop: 无最低余额限制，可全额提取
         /// - 佣金保护: 不得侵占已承诺的佣金资金 (pending + shopping)
         #[pallet::call_index(13)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::withdraw_operating_fund())]
         pub fn withdraw_operating_fund(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1099,7 +1114,7 @@ pub mod pallet {
 
         /// Manager 直接发放积分
         #[pallet::call_index(16)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::manager_issue_points())]
         pub fn manager_issue_points(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1130,7 +1145,7 @@ pub mod pallet {
 
         /// Manager 直接销毁积分
         #[pallet::call_index(17)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::manager_burn_points())]
         pub fn manager_burn_points(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1167,7 +1182,7 @@ pub mod pallet {
         /// 按 exchange_rate（基点）计算：payout = amount * exchange_rate / 10000
         /// 货币从 Shop 运营资金账户支出。
         #[pallet::call_index(18)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::redeem_points())]
         pub fn redeem_points(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1220,7 +1235,7 @@ pub mod pallet {
         /// 仅 Entity owner 可调用。主 Shop 不可转让。
         /// Shop 运营资金随 Shop 账户自动转移。
         #[pallet::call_index(19)]
-        #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::transfer_shop())]
         pub fn transfer_shop(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1274,7 +1289,7 @@ pub mod pallet {
         ///
         /// 仅 Entity owner 可调用。新主 Shop 必须属于同一 Entity 且处于活跃状态。
         #[pallet::call_index(20)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::set_primary_shop())]
         pub fn set_primary_shop(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1310,7 +1325,7 @@ pub mod pallet {
         ///
         /// 可被 owner/manager 通过 resume_shop 恢复。
         #[pallet::call_index(21)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::force_pause_shop())]
         pub fn force_pause_shop(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1335,7 +1350,7 @@ pub mod pallet {
         /// ttl_blocks = 0 表示永不过期（移除 TTL 限制）。
         /// 新 TTL 仅影响后续发放的积分。
         #[pallet::call_index(22)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::set_points_ttl())]
         pub fn set_points_ttl(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1364,7 +1379,7 @@ pub mod pallet {
         ///
         /// 任何人可调用。仅当积分确实已过期时才执行清除。
         #[pallet::call_index(23)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::expire_points())]
         pub fn expire_points(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1398,7 +1413,7 @@ pub mod pallet {
         ///
         /// 跳过宽限期，立即关闭并清理。委托给 ShopProvider::force_close_shop。
         #[pallet::call_index(24)]
-        #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::force_close_shop())]
         pub fn force_close_shop(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1416,7 +1431,7 @@ pub mod pallet {
         ///
         /// 仅 Entity owner 可调用。已关闭/关闭中的 Shop 不可变更。
         #[pallet::call_index(27)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::set_shop_type())]
         pub fn set_shop_type(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1449,7 +1464,7 @@ pub mod pallet {
         /// 仅 Entity owner 可调用。Shop 必须处于 Closing 状态。
         /// 撤回后恢复为 Active（如果运营资金充足）或 FundDepleted。
         #[pallet::call_index(28)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::cancel_close_shop())]
         pub fn cancel_close_shop(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1487,7 +1502,7 @@ pub mod pallet {
         ///
         /// max_supply = 0 表示无上限。已有供应量超过新上限时拒绝。
         #[pallet::call_index(29)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::set_points_max_supply())]
         pub fn set_points_max_supply(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1523,7 +1538,7 @@ pub mod pallet {
         /// 允许 Shop Manager 主动从管理员列表中移除自己。
         /// Entity Owner 和 Entity Admin 不受此影响（他们的权限来自 Entity 层）。
         #[pallet::call_index(30)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::resign_manager())]
         pub fn resign_manager(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1548,7 +1563,7 @@ pub mod pallet {
         /// 将 Shop 设为 Banned 状态，owner/manager 无法 resume。
         /// 仅 Root 可通过 unban_shop 解封。
         #[pallet::call_index(31)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::ban_shop())]
         pub fn ban_shop(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1567,7 +1582,13 @@ pub mod pallet {
                 shop.status = ShopOperatingStatus::Banned;
 
                 // v1.2-C2: 封禁时下架全部在售商品，防止封禁期间商品仍可被购买
-                let _ = T::ProductProvider::force_delist_all_shop_products(shop_id);
+                if let Err(e) = T::ProductProvider::force_delist_all_shop_products(shop_id) {
+                    log::error!(
+                        target: "entity-shop",
+                        "force_delist_all_shop_products failed for shop {}: {:?}",
+                        shop_id, e
+                    );
+                }
 
                 Self::deposit_event(Event::ShopBannedByRoot { shop_id, reason });
                 Ok(())
@@ -1578,7 +1599,7 @@ pub mod pallet {
         ///
         /// 恢复为封禁前的状态（Active/Paused/FundDepleted）。
         #[pallet::call_index(32)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::unban_shop())]
         pub fn unban_shop(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1648,12 +1669,24 @@ pub mod pallet {
                 Self::ipfs_unpin_all_shop_cids(shop, &owner);
             }
             // v1.2-C1: 店铺关闭时移除全部商品（退还押金 + unpin CID + 清理存储 + 更新统计）
-            let _ = T::ProductProvider::force_remove_all_shop_products(shop_id);
+            if let Err(e) = T::ProductProvider::force_remove_all_shop_products(shop_id) {
+                log::error!(
+                    target: "entity-shop",
+                    "force_remove_all_shop_products failed for shop {}: {:?}",
+                    shop_id, e
+                );
+            }
 
             shop.status = ShopOperatingStatus::Closed;
 
             ShopClosingAt::<T>::remove(shop_id);
-            let _ = T::EntityProvider::unregister_shop(shop.entity_id, shop_id);
+            if let Err(e) = T::EntityProvider::unregister_shop(shop.entity_id, shop_id) {
+                log::error!(
+                    target: "entity-shop",
+                    "unregister_shop failed for entity {} shop {}: {:?}",
+                    shop.entity_id, shop_id, e
+                );
+            }
             ShopEntity::<T>::remove(shop_id);
 
             if EntityPrimaryShop::<T>::get(shop.entity_id) == Some(shop_id) {
@@ -1664,10 +1697,10 @@ pub mod pallet {
             ShopBanReason::<T>::remove(shop_id);
 
             ShopPointsConfigs::<T>::remove(shop_id);
-            let _ = ShopPointsBalances::<T>::clear_prefix(shop_id, u32::MAX, None);
+            let _ = ShopPointsBalances::<T>::clear_prefix(shop_id, POINTS_CLEANUP_LIMIT, None);
             ShopPointsTotalSupply::<T>::remove(shop_id);
             ShopPointsTtl::<T>::remove(shop_id);
-            let _ = ShopPointsExpiresAt::<T>::clear_prefix(shop_id, u32::MAX, None);
+            let _ = ShopPointsExpiresAt::<T>::clear_prefix(shop_id, POINTS_CLEANUP_LIMIT, None);
             ShopPointsMaxSupply::<T>::remove(shop_id);
 
             let shop_account = Self::shop_account_id(shop_id);
@@ -2058,6 +2091,38 @@ pub mod pallet {
                 shop.rating_total = shop.rating_total.saturating_add(r.saturating_mul(100));
                 shop.rating_count = shop.rating_count.saturating_add(1);
                 shop.rating = (shop.rating_total / shop.rating_count as u64).min(500) as u16;
+                Ok(())
+            })
+        }
+
+        fn revert_shop_rating(shop_id: u64, old_rating: u8, new_rating: Option<u8>) -> Result<(), DispatchError> {
+            ensure!(old_rating >= 1 && old_rating <= 5, Error::<T>::InvalidRating);
+            if let Some(nr) = new_rating {
+                ensure!(nr >= 1 && nr <= 5, Error::<T>::InvalidRating);
+            }
+            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> Result<(), DispatchError> {
+                let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+                let old_r = old_rating as u64;
+                // 减去旧评分
+                shop.rating_total = shop.rating_total.saturating_sub(old_r.saturating_mul(100));
+                match new_rating {
+                    Some(nr) => {
+                        // 修改评价：替换评分，count 不变
+                        let new_r = nr as u64;
+                        shop.rating_total = shop.rating_total.saturating_add(new_r.saturating_mul(100));
+                    },
+                    None => {
+                        // 删除评价：减少 count
+                        shop.rating_count = shop.rating_count.saturating_sub(1);
+                    },
+                }
+                // 重新计算平均分
+                if shop.rating_count > 0 {
+                    shop.rating = (shop.rating_total / shop.rating_count as u64).min(500) as u16;
+                } else {
+                    shop.rating = 0;
+                    shop.rating_total = 0;
+                }
                 Ok(())
             })
         }

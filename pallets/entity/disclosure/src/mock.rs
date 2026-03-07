@@ -25,6 +25,7 @@ thread_local! {
     static ADMINS: RefCell<BTreeSet<(u64, u64)>> = RefCell::new(BTreeSet::new());
     static ENTITY_STATUSES: RefCell<std::collections::BTreeMap<u64, EntityStatus>> = RefCell::new(std::collections::BTreeMap::new());
     static ENTITY_LOCKED: RefCell<BTreeSet<u64>> = RefCell::new(BTreeSet::new());
+    static ENTITY_OWNERS: RefCell<std::collections::BTreeMap<u64, u64>> = RefCell::new(std::collections::BTreeMap::new());
 }
 
 pub fn set_admin(entity_id: u64, account: u64) {
@@ -37,6 +38,10 @@ pub fn set_entity_status(entity_id: u64, status: EntityStatus) {
 
 pub fn set_entity_locked(entity_id: u64) {
     ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id));
+}
+
+pub fn set_entity_owner(entity_id: u64, owner: u64) {
+    ENTITY_OWNERS.with(|m| m.borrow_mut().insert(entity_id, owner));
 }
 
 frame_support::construct_runtime!(
@@ -61,14 +66,17 @@ parameter_types! {
 pub struct MockEntityProvider;
 impl EntityProvider<u64> for MockEntityProvider {
     fn entity_exists(entity_id: u64) -> bool {
-        entity_id == ENTITY_ID || entity_id == ENTITY_ID_2
+        // 动态覆盖的 entity 也视为存在
+        let dynamic = ENTITY_OWNERS.with(|m| m.borrow().contains_key(&entity_id));
+        dynamic || entity_id == ENTITY_ID || entity_id == ENTITY_ID_2
     }
     fn is_entity_active(entity_id: u64) -> bool {
         let override_status = ENTITY_STATUSES.with(|s| s.borrow().get(&entity_id).cloned());
         if let Some(status) = override_status {
             return status == EntityStatus::Active;
         }
-        entity_id == ENTITY_ID || entity_id == ENTITY_ID_2
+        let dynamic = ENTITY_OWNERS.with(|m| m.borrow().contains_key(&entity_id));
+        dynamic || entity_id == ENTITY_ID || entity_id == ENTITY_ID_2
     }
     fn entity_status(entity_id: u64) -> Option<EntityStatus> {
         // 优先使用覆盖状态
@@ -76,9 +84,15 @@ impl EntityProvider<u64> for MockEntityProvider {
         if let Some(status) = override_status {
             return Some(status);
         }
-        if entity_id <= 2 { Some(EntityStatus::Active) } else { None }
+        let dynamic = ENTITY_OWNERS.with(|m| m.borrow().contains_key(&entity_id));
+        if dynamic || entity_id <= 2 { Some(EntityStatus::Active) } else { None }
     }
     fn entity_owner(entity_id: u64) -> Option<u64> {
+        // 优先使用动态覆盖（benchmark 需要）
+        let dynamic = ENTITY_OWNERS.with(|m| m.borrow().get(&entity_id).cloned());
+        if dynamic.is_some() {
+            return dynamic;
+        }
         match entity_id {
             ENTITY_ID => Some(OWNER),
             ENTITY_ID_2 => Some(OWNER_2),
@@ -136,6 +150,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     ADMINS.with(|a| a.borrow_mut().clear());
     ENTITY_STATUSES.with(|s| s.borrow_mut().clear());
     ENTITY_LOCKED.with(|l| l.borrow_mut().clear());
+    ENTITY_OWNERS.with(|m| m.borrow_mut().clear());
 
     let t = frame_system::GenesisConfig::<Test>::default()
         .build_storage()

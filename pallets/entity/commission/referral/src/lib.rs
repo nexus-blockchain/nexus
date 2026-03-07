@@ -12,7 +12,9 @@
 
 extern crate alloc;
 
+pub mod weights;
 pub use pallet::*;
+pub use weights::WeightInfo;
 
 #[frame_support::pallet]
 pub mod pallet {
@@ -157,6 +159,8 @@ pub mod pallet {
         /// F8: 全局推荐返佣率上限（基点，如 5000 = 50%，10000 = 无限制）
         #[pallet::constant]
         type MaxTotalReferralRate: Get<u16>;
+        /// 权重
+        type WeightInfo: WeightInfo;
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -261,7 +265,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// 设置直推奖励配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_direct_reward_config())]
         pub fn set_direct_reward_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -284,7 +288,7 @@ pub mod pallet {
 
         /// 设置固定金额配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
         #[pallet::call_index(2)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_fixed_amount_config())]
         pub fn set_fixed_amount_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -306,7 +310,7 @@ pub mod pallet {
 
         /// 设置首单奖励配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
         #[pallet::call_index(3)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_first_order_config())]
         pub fn set_first_order_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -331,7 +335,7 @@ pub mod pallet {
 
         /// 设置复购奖励配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
         #[pallet::call_index(4)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_repeat_purchase_config())]
         pub fn set_repeat_purchase_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -355,7 +359,7 @@ pub mod pallet {
 
         /// 清除推荐链返佣配置（Entity Owner 或持有 COMMISSION_MANAGE 权限的 Admin）
         #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::clear_referral_config())]
         pub fn clear_referral_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -375,7 +379,7 @@ pub mod pallet {
 
         /// [Root] 强制设置直推奖励配置
         #[pallet::call_index(6)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::force_set_direct_reward_config())]
         pub fn force_set_direct_reward_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -395,7 +399,7 @@ pub mod pallet {
 
         /// [Root] 强制设置固定金额配置
         #[pallet::call_index(7)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::force_set_fixed_amount_config())]
         pub fn force_set_fixed_amount_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -414,7 +418,7 @@ pub mod pallet {
 
         /// [Root] 强制设置首单奖励配置
         #[pallet::call_index(8)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::force_set_first_order_config())]
         pub fn force_set_first_order_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -436,7 +440,7 @@ pub mod pallet {
 
         /// [Root] 强制设置复购奖励配置
         #[pallet::call_index(9)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::force_set_repeat_purchase_config())]
         pub fn force_set_repeat_purchase_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -457,7 +461,7 @@ pub mod pallet {
 
         /// [Root] 强制清除推荐链返佣配置
         #[pallet::call_index(10)]
-        #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::force_clear_referral_config())]
         pub fn force_clear_referral_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -475,7 +479,7 @@ pub mod pallet {
 
         /// F1: 设置推荐人激活条件
         #[pallet::call_index(11)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_referrer_guard_config())]
         pub fn set_referrer_guard_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -498,7 +502,7 @@ pub mod pallet {
 
         /// F2: 设置返佣上限配置
         #[pallet::call_index(12)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_commission_cap_config())]
         pub fn set_commission_cap_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -521,7 +525,7 @@ pub mod pallet {
 
         /// F5: 设置推荐关系有效期配置
         #[pallet::call_index(13)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_referral_validity_config())]
         pub fn set_referral_validity_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -544,7 +548,7 @@ pub mod pallet {
 
         /// F3: 设置配置生效时间
         #[pallet::call_index(14)]
-        #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_config_effective_after())]
         pub fn set_config_effective_after(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1138,6 +1142,8 @@ impl<T: pallet::Config> pallet_commission_common::ReferralQueryProvider<T::Accou
     }
 }
 
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
 #[cfg(test)]
 mod mock;
 #[cfg(test)]

@@ -1,6 +1,6 @@
 //! 实体生命周期管理
 //!
-//! 包含创建、更新、关闭申请、审批关闭、重开、超时关闭等操作。
+//! 包含创建、更新、关闭申请、重开、超时关闭等操作。
 
 use crate::pallet::*;
 use alloc::vec::Vec;
@@ -273,21 +273,11 @@ impl<T: Config> Pallet<T> {
         Ok(())
     }
 
-    /// 审批关闭实体（治理，退还全部余额）
-    pub(crate) fn do_approve_close_entity(entity_id: u64) -> sp_runtime::DispatchResult {
-        let entity = Entities::<T>::get(entity_id).ok_or(Error::<T>::EntityNotFound)?;
-        ensure!(entity.status == EntityStatus::PendingClose, Error::<T>::InvalidEntityStatus);
+    /// 审批关闭实体的核心逻辑已移除（统一走超时机制 execute_close_timeout）
 
-        let fund_refunded = Self::do_finalize_close(entity_id, entity);
-
-        Self::deposit_event(Event::EntityClosed { entity_id, fund_refunded });
-        Ok(())
-    }
-
-    /// 关闭实体的核心逻辑（审批关闭 / 超时关闭共用）
+    /// 关闭实体的核心逻辑（超时关闭使用）
     ///
     /// 前置条件：调用方已验证实体状态为 PendingClose（及超时条件）。
-    /// 返回实际退还的资金金额。
     fn do_finalize_close(entity_id: u64, entity: EntityOf<T>) -> BalanceOf<T> {
         Self::unpin_all_entity_cids(&entity);
 
@@ -330,12 +320,12 @@ impl<T: Config> Pallet<T> {
             entities.retain(|&id| id != entity_id);
         });
 
+        // 级联关闭所有 Shop，但保留 EntityShops 关联列表以便 reopen_entity 恢复
         for sid in EntityShops::<T>::get(entity_id).iter() {
             if T::ShopProvider::force_close_shop(*sid).is_err() {
                 Self::deposit_event(Event::ShopCascadeFailed { entity_id, shop_id: *sid });
             }
         }
-        EntityShops::<T>::remove(entity_id);
         EntitySales::<T>::remove(entity_id);
 
         // M2 审计修复: 清理推荐关系（释放推荐人的 MaxReferralsPerReferrer 配额）
@@ -350,7 +340,7 @@ impl<T: Config> Pallet<T> {
         fund_refunded
     }
 
-    /// 重新开业（owner 申请，Closed → Pending，需重新缴纳押金，等待治理审批）
+    /// 重新开业（owner 申请，Closed → Active，需重新缴纳押金，付费即激活）
     pub(crate) fn do_reopen_entity(who: T::AccountId, entity_id: u64) -> sp_runtime::DispatchResult {
         // 验证实体存在且处于 Closed 状态
         let entity = Entities::<T>::get(entity_id).ok_or(Error::<T>::EntityNotFound)?;
@@ -358,7 +348,7 @@ impl<T: Config> Pallet<T> {
         ensure!(!T::GovernanceProvider::is_governance_locked(entity_id), Error::<T>::EntityLocked);
         ensure!(entity.status == EntityStatus::Closed, Error::<T>::InvalidEntityStatus);
 
-        // H1 审计修复: 预占名称索引（防止 Pending 期间名称被抢注）
+        // H1 审计修复: 预占名称索引（防止名称被抢注）
         let normalized_name = Self::normalize_entity_name(&entity.name)?;
         ensure!(
             !EntityNameIndex::<T>::contains_key(&normalized_name),
@@ -385,26 +375,42 @@ impl<T: Config> Pallet<T> {
             ExistenceRequirement::KeepAlive,
         )?;
 
-        // 更新状态为 Pending，等待治理审批
+        // 付费即激活：直接设为 Active（不再经过 Pending → approve 流程）
         Entities::<T>::mutate(entity_id, |s| {
             if let Some(e) = s {
-                e.status = EntityStatus::Pending;
+                e.status = EntityStatus::Active;
             }
         });
 
-        // H1 审计修复: 写入名称索引预占
+        // 写入名称索引
         EntityNameIndex::<T>::insert(&normalized_name, entity_id);
 
-        // M2: 清除 OwnerPaused 标记（新生命周期干净起步）
+        // 清除前世遗留标记
+        GovernanceSuspended::<T>::remove(entity_id);
         OwnerPaused::<T>::remove(entity_id);
+        SuspensionReasons::<T>::remove(entity_id);
 
-        // 恢复 UserEntity 索引（防御性去重：避免异常路径导致重复索引）
+        // 恢复 UserEntity 索引（防御性去重）
         UserEntity::<T>::try_mutate(&who, |entities| -> sp_runtime::DispatchResult {
             if !entities.contains(&entity_id) {
                 entities.try_push(entity_id).map_err(|_| Error::<T>::MaxEntitiesReached)?;
             }
             Ok(())
         })?;
+
+        // 更新统计
+        EntityStats::<T>::mutate(|stats| {
+            stats.active_entities = stats.active_entities.saturating_add(1);
+        });
+
+        // 恢复关联 Shop（close 时被 force_close，需恢复为 Active）
+        for sid in EntityShops::<T>::get(entity_id).iter() {
+            if T::ShopProvider::resume_shop(*sid).is_err() {
+                Self::deposit_event(Event::ShopCascadeFailed { entity_id, shop_id: *sid });
+            }
+        }
+
+        T::OnEntityStatusChange::on_entity_resumed(entity_id);
 
         Self::deposit_event(Event::EntityReopened {
             entity_id,

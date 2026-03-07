@@ -27,8 +27,10 @@ pub use pallet_commission_common::{
 use sp_runtime::traits::{Saturating, Zero};
 
 pub mod runtime_api;
+pub mod weights;
+pub use weights::WeightInfo;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "runtime-benchmarks"))]
 mod mock;
 #[cfg(test)]
 mod tests;
@@ -158,6 +160,9 @@ pub mod pallet {
     pub trait Config: frame_system::Config {
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
         type Currency: Currency<Self::AccountId>;
+
+        /// 权重信息
+        type WeightInfo: crate::WeightInfo;
 
         /// Shop 查询接口
         type ShopProvider: ShopProvider<Self::AccountId>;
@@ -989,7 +994,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// 设置启用的返佣模式（Entity 级）
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_commission_modes())]
         pub fn set_commission_modes(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1030,7 +1035,7 @@ pub mod pallet {
         ///
         /// 仅 Entity Owner 可调用
         #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_commission_rate())]
         pub fn set_commission_rate(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1065,7 +1070,7 @@ pub mod pallet {
 
         /// 启用/禁用返佣（Entity 级）
         #[pallet::call_index(2)]
-        #[pallet::weight(Weight::from_parts(35_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::enable_commission())]
         pub fn enable_commission(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1110,7 +1115,7 @@ pub mod pallet {
         ///   - 目标为非会员：自动注册，推荐人 = 出资人
         ///   - 目标为已有会员：推荐人必须是出资人，否则拒绝
         #[pallet::call_index(3)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::withdraw_commission())]
         pub fn withdraw_commission(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1285,7 +1290,7 @@ pub mod pallet {
 
         /// 设置提现配置（Entity 级，四种模式 + 自愿复购奖励）
         #[pallet::call_index(4)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::set_withdrawal_config())]
         pub fn set_withdrawal_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1347,7 +1352,7 @@ pub mod pallet {
         ///
         /// 保留 call_index(6) 以维持链上 call index 稳定。
         #[pallet::call_index(6)]
-        #[pallet::weight(Weight::from_parts(10_000_000, 1_000))]
+        #[pallet::weight(T::WeightInfo::init_commission_plan())]
         pub fn init_commission_plan(
             origin: OriginFor<T>,
             _entity_id: u64,
@@ -1360,7 +1365,7 @@ pub mod pallet {
         ///
         /// 保留 call_index(5) 以维持链上 call index 稳定。
         #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(10_000_000, 1_000))]
+        #[pallet::weight(T::WeightInfo::use_shopping_balance())]
         pub fn use_shopping_balance(
             origin: OriginFor<T>,
             _entity_id: u64,
@@ -1374,7 +1379,7 @@ pub mod pallet {
         ///
         /// 与 NEX set_withdrawal_config 完全对称，配置独立存储在 TokenWithdrawalConfigs
         #[pallet::call_index(10)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::set_token_withdrawal_config())]
         pub fn set_token_withdrawal_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1437,7 +1442,7 @@ pub mod pallet {
         ///
         /// Token 提现时实际复购比例 = max(entity 分层配置, 此底线)
         #[pallet::call_index(11)]
-        #[pallet::weight(Weight::from_parts(30_000_000, 3_000))]
+        #[pallet::weight(T::WeightInfo::set_global_min_token_repurchase_rate())]
         pub fn set_global_min_token_repurchase_rate(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1459,7 +1464,7 @@ pub mod pallet {
         ///   - 目标为非会员：自动注册，推荐人 = 出资人
         ///   - 目标为已有会员：推荐人必须是出资人，否则拒绝
         #[pallet::call_index(8)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::withdraw_token_commission())]
         pub fn withdraw_token_commission(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1638,7 +1643,7 @@ pub mod pallet {
         ///
         /// 提取后 entity_balance 必须 ≥ PendingTotal + ShoppingTotal + UnallocatedPool
         #[pallet::call_index(12)]
-        #[pallet::weight(Weight::from_parts(60_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::withdraw_entity_funds())]
         pub fn withdraw_entity_funds(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1700,7 +1705,7 @@ pub mod pallet {
         ///
         /// 提取后 entity_token_balance 必须 ≥ TokenPendingTotal + TokenShoppingTotal + UnallocatedTokenPool
         #[pallet::call_index(13)]
-        #[pallet::weight(Weight::from_parts(60_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::withdraw_entity_token_funds())]
         pub fn withdraw_entity_token_funds(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1766,7 +1771,7 @@ pub mod pallet {
         /// R8: 无币实体（None 模式）锁定后，仍允许单调递减（只减不增）。
         /// FullDAO 锁定的实体需通过 DAO 提案修改。
         #[pallet::call_index(14)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_creator_reward_rate())]
         pub fn set_creator_reward_rate(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1801,7 +1806,7 @@ pub mod pallet {
         ///
         /// rate 为基点，0 = 关闭 Token 平台费，上限 1000 bps（10%）
         #[pallet::call_index(15)]
-        #[pallet::weight(Weight::from_parts(20_000_000, 2_000))]
+        #[pallet::weight(T::WeightInfo::set_token_platform_fee_rate())]
         pub fn set_token_platform_fee_rate(
             origin: OriginFor<T>,
             new_rate: u16,
@@ -1818,7 +1823,7 @@ pub mod pallet {
         ///
         /// 与 Token 版 set_global_min_token_repurchase_rate (call_index 11) 对称
         #[pallet::call_index(16)]
-        #[pallet::weight(Weight::from_parts(30_000_000, 3_000))]
+        #[pallet::weight(T::WeightInfo::set_global_min_repurchase_rate())]
         pub fn set_global_min_repurchase_rate(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1833,7 +1838,7 @@ pub mod pallet {
 
         /// F2: 设置提现冻结期（Entity 级，NEX 和 Token 独立配置）
         #[pallet::call_index(17)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_withdrawal_cooldown())]
         pub fn set_withdrawal_cooldown(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1861,7 +1866,7 @@ pub mod pallet {
 
         /// F14: Root 紧急禁用 Entity 佣金（不可逆，需 Root 重新启用）
         #[pallet::call_index(18)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::force_disable_entity_commission())]
         pub fn force_disable_entity_commission(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1891,7 +1896,7 @@ pub mod pallet {
         ///
         /// Entity Owner 的 max_commission_rate 不得超过此值。0 = 无限制。
         #[pallet::call_index(19)]
-        #[pallet::weight(Weight::from_parts(30_000_000, 3_000))]
+        #[pallet::weight(T::WeightInfo::set_global_max_commission_rate())]
         pub fn set_global_max_commission_rate(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1906,7 +1911,7 @@ pub mod pallet {
 
         /// F4: 清除佣金配置（恢复默认值）
         #[pallet::call_index(20)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::clear_commission_config())]
         pub fn clear_commission_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1934,7 +1939,7 @@ pub mod pallet {
 
         /// F4: 清除 NEX 提现配置
         #[pallet::call_index(21)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::clear_withdrawal_config())]
         pub fn clear_withdrawal_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1951,7 +1956,7 @@ pub mod pallet {
 
         /// F4: 清除 Token 提现配置
         #[pallet::call_index(22)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::clear_token_withdrawal_config())]
         pub fn clear_token_withdrawal_config(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1970,7 +1975,7 @@ pub mod pallet {
         ///
         /// Entity Owner 的 Token max_commission_rate 不得超过此值。0 = 无限制。
         #[pallet::call_index(23)]
-        #[pallet::weight(Weight::from_parts(30_000_000, 3_000))]
+        #[pallet::weight(T::WeightInfo::set_global_max_token_commission_rate())]
         pub fn set_global_max_token_commission_rate(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1987,7 +1992,7 @@ pub mod pallet {
         ///
         /// 暂停后所有 Entity 的 process_commission、withdraw_commission 均被阻止
         #[pallet::call_index(24)]
-        #[pallet::weight(Weight::from_parts(20_000_000, 2_000))]
+        #[pallet::weight(T::WeightInfo::force_global_pause())]
         pub fn force_global_pause(
             origin: OriginFor<T>,
             paused: bool,
@@ -2002,7 +2007,7 @@ pub mod pallet {
         ///
         /// 轻量级开关，不影响 WithdrawalConfig 本身
         #[pallet::call_index(25)]
-        #[pallet::weight(Weight::from_parts(30_000_000, 3_000))]
+        #[pallet::weight(T::WeightInfo::pause_withdrawals())]
         pub fn pause_withdrawals(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -2022,7 +2027,7 @@ pub mod pallet {
         /// 仅允许 Entity Owner/Admin 调用。订单所有 NEX 和 Token 佣金记录
         /// 状态必须为 Withdrawn 或 Cancelled 才可归档。
         #[pallet::call_index(26)]
-        #[pallet::weight(Weight::from_parts(60_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::archive_order_records())]
         pub fn archive_order_records(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -2083,7 +2088,7 @@ pub mod pallet {
         /// enable_commission 恢复（该 extrinsic 要求 Owner/Admin 权限，但 force_disable
         /// 的场景往往需要 Root 介入解除）。本 extrinsic 提供 Root 级恢复路径。
         #[pallet::call_index(27)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::force_enable_entity_commission())]
         pub fn force_enable_entity_commission(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -2108,7 +2113,7 @@ pub mod pallet {
         ///
         /// cancel_commission 本身是幂等的（仅处理 Pending 记录），可安全重复调用。
         #[pallet::call_index(28)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::retry_cancel_commission())]
         pub fn retry_cancel_commission(
             origin: OriginFor<T>,
             order_id: u64,
@@ -2122,7 +2127,7 @@ pub mod pallet {
         /// 限制会员连续提现频率。0 = 无限制（默认）。
         /// 与 withdrawal_cooldown（基于入账时间）独立，本参数基于上次提现时间。
         #[pallet::call_index(29)]
-        #[pallet::weight(Weight::from_parts(30_000_000, 3_000))]
+        #[pallet::weight(T::WeightInfo::set_min_withdrawal_interval())]
         pub fn set_min_withdrawal_interval(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -3377,8 +3382,136 @@ pub mod pallet {
 
         #[cfg(feature = "try-runtime")]
         fn try_state(_n: BlockNumberFor<T>) -> Result<(), sp_runtime::TryRuntimeError> {
-            // 验证 GlobalCommissionPaused 布尔一致性（总是 valid，占位检查）
+            use frame_support::ensure;
+
+            // INV-1: 每个 entity 的 MemberCommissionStats.pending 之和 = ShopPendingTotal
+            // INV-2: 每个 entity 的 MemberShoppingBalance 之和 = ShopShoppingTotal
+            // INV-3: Token 侧对称不变量
+            //
+            // 注意: 遍历 DoubleMap 在 try-runtime 中是可接受的（仅在升级检查时运行）
+
+            // 收集所有 entity_id（从 ShopPendingTotal 和 ShopShoppingTotal 的 key）
+            let mut entity_ids = alloc::collections::BTreeSet::new();
+            for (eid, _) in ShopPendingTotal::<T>::iter() {
+                entity_ids.insert(eid);
+            }
+            for (eid, _) in ShopShoppingTotal::<T>::iter() {
+                entity_ids.insert(eid);
+            }
+            for (eid, _) in TokenPendingTotal::<T>::iter() {
+                entity_ids.insert(eid);
+            }
+            for (eid, _) in TokenShoppingTotal::<T>::iter() {
+                entity_ids.insert(eid);
+            }
+
+            for entity_id in &entity_ids {
+                // INV-1: NEX pending 一致性
+                let stored_pending = ShopPendingTotal::<T>::get(entity_id);
+                let mut sum_pending = BalanceOf::<T>::zero();
+                for (_, stats) in MemberCommissionStats::<T>::iter_prefix(entity_id) {
+                    sum_pending = sum_pending.saturating_add(stats.pending);
+                }
+                ensure!(
+                    sum_pending == stored_pending,
+                    sp_runtime::TryRuntimeError::Other(
+                        "INV-1: sum(MemberCommissionStats.pending) != ShopPendingTotal"
+                    )
+                );
+
+                // INV-2: NEX shopping 一致性
+                let stored_shopping = ShopShoppingTotal::<T>::get(entity_id);
+                let mut sum_shopping = BalanceOf::<T>::zero();
+                for (_, bal) in MemberShoppingBalance::<T>::iter_prefix(entity_id) {
+                    sum_shopping = sum_shopping.saturating_add(bal);
+                }
+                ensure!(
+                    sum_shopping == stored_shopping,
+                    sp_runtime::TryRuntimeError::Other(
+                        "INV-2: sum(MemberShoppingBalance) != ShopShoppingTotal"
+                    )
+                );
+
+                // INV-3: Token pending 一致性
+                let stored_token_pending = TokenPendingTotal::<T>::get(entity_id);
+                let mut sum_token_pending = TokenBalanceOf::<T>::zero();
+                for (_, stats) in MemberTokenCommissionStats::<T>::iter_prefix(entity_id) {
+                    sum_token_pending = sum_token_pending.saturating_add(stats.pending);
+                }
+                ensure!(
+                    sum_token_pending == stored_token_pending,
+                    sp_runtime::TryRuntimeError::Other(
+                        "INV-3: sum(MemberTokenCommissionStats.pending) != TokenPendingTotal"
+                    )
+                );
+
+                // INV-4: Token shopping 一致性
+                let stored_token_shopping = TokenShoppingTotal::<T>::get(entity_id);
+                let mut sum_token_shopping = TokenBalanceOf::<T>::zero();
+                for (_, bal) in MemberTokenShoppingBalance::<T>::iter_prefix(entity_id) {
+                    sum_token_shopping = sum_token_shopping.saturating_add(bal);
+                }
+                ensure!(
+                    sum_token_shopping == stored_token_shopping,
+                    sp_runtime::TryRuntimeError::Other(
+                        "INV-4: sum(MemberTokenShoppingBalance) != TokenShoppingTotal"
+                    )
+                );
+            }
+
+            // INV-5: GlobalCommissionPaused 布尔一致性（总是 valid）
             let _ = GlobalCommissionPaused::<T>::get();
+
+            // INV-6: 所有 WithdrawalConfig 的 tier 比率之和 = 10000
+            for (_, wc) in WithdrawalConfigs::<T>::iter() {
+                ensure!(
+                    wc.default_tier.withdrawal_rate.saturating_add(wc.default_tier.repurchase_rate) == 10000,
+                    sp_runtime::TryRuntimeError::Other(
+                        "INV-6: WithdrawalConfig default_tier rates don't sum to 10000"
+                    )
+                );
+                for (_, tier) in wc.level_overrides.iter() {
+                    ensure!(
+                        tier.withdrawal_rate.saturating_add(tier.repurchase_rate) == 10000,
+                        sp_runtime::TryRuntimeError::Other(
+                            "INV-6: WithdrawalConfig level_override rates don't sum to 10000"
+                        )
+                    );
+                }
+            }
+            for (_, wc) in TokenWithdrawalConfigs::<T>::iter() {
+                ensure!(
+                    wc.default_tier.withdrawal_rate.saturating_add(wc.default_tier.repurchase_rate) == 10000,
+                    sp_runtime::TryRuntimeError::Other(
+                        "INV-6: TokenWithdrawalConfig default_tier rates don't sum to 10000"
+                    )
+                );
+                for (_, tier) in wc.level_overrides.iter() {
+                    ensure!(
+                        tier.withdrawal_rate.saturating_add(tier.repurchase_rate) == 10000,
+                        sp_runtime::TryRuntimeError::Other(
+                            "INV-6: TokenWithdrawalConfig level_override rates don't sum to 10000"
+                        )
+                    );
+                }
+            }
+
+            // INV-7: CommissionConfig 的 max_commission_rate ≤ 10000
+            for (_, config) in CommissionConfigs::<T>::iter() {
+                ensure!(
+                    config.max_commission_rate <= 10000,
+                    sp_runtime::TryRuntimeError::Other(
+                        "INV-7: max_commission_rate > 10000"
+                    )
+                );
+                ensure!(
+                    config.creator_reward_rate <= 5000,
+                    sp_runtime::TryRuntimeError::Other(
+                        "INV-7: creator_reward_rate > 5000"
+                    )
+                );
+            }
+
             Ok(())
         }
 

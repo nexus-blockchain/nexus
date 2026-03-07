@@ -17,6 +17,15 @@ fn create_default_entity(who: u64) -> u64 {
     EntityRegistry::next_entity_id() - 1
 }
 
+/// 关闭实体的辅助函数（request_close + 超时 + execute_close_timeout）
+fn close_entity_via_timeout(who: u64, entity_id: u64) {
+    assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(who), entity_id));
+    // CloseRequestTimeout = 100, 推进到超时后
+    let current = System::block_number();
+    System::set_block_number(current + 101);
+    assert_ok!(EntityRegistry::execute_close_timeout(RuntimeOrigin::signed(who), entity_id));
+}
+
 // ==================== create_entity ====================
 
 #[test]
@@ -223,8 +232,7 @@ fn request_close_entity_fails_not_owner() {
 fn request_close_entity_fails_already_closed() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
-        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        close_entity_via_timeout(ALICE, id);
         // Now closed
         assert_noop!(
             EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id),
@@ -296,57 +304,31 @@ fn top_up_fund_restores_suspended_entity() {
     });
 }
 
-// ==================== approve_entity ====================
+// ==================== reopen_entity 直接激活 ====================
 
 #[test]
-fn approve_entity_works_after_reopen() {
+fn reopen_entity_directly_activates() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
         // Close workflow
-        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        close_entity_via_timeout(ALICE, id);
         assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Closed);
-        // Reopen → Pending
+        // Reopen → Active（付费即激活，不再经过 Pending）
         assert_ok!(EntityRegistry::reopen_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Pending);
-        // Approve → Active
-        assert_ok!(EntityRegistry::approve_entity(RuntimeOrigin::root(), id));
         assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Active);
+        // 统计应恢复
+        assert_eq!(EntityStats::<Test>::get().active_entities, 1);
     });
 }
 
-#[test]
-fn approve_entity_fails_not_pending() {
-    new_test_ext().execute_with(|| {
-        let id = create_default_entity(ALICE);
-        // Active, not Pending
-        assert_noop!(
-            EntityRegistry::approve_entity(RuntimeOrigin::root(), id),
-            Error::<Test>::InvalidEntityStatus
-        );
-    });
-}
+// ==================== execute_close_timeout 替代 approve_close ====================
 
 #[test]
-fn approve_entity_fails_not_governance() {
-    new_test_ext().execute_with(|| {
-        let id = create_default_entity(ALICE);
-        assert_noop!(
-            EntityRegistry::approve_entity(RuntimeOrigin::signed(ALICE), id),
-            sp_runtime::DispatchError::BadOrigin
-        );
-    });
-}
-
-// ==================== approve_close_entity ====================
-
-#[test]
-fn approve_close_entity_works() {
+fn close_via_timeout_works() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
         let alice_before = Balances::free_balance(ALICE);
-        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        close_entity_via_timeout(ALICE, id);
 
         let entity = Entities::<Test>::get(id).unwrap();
         assert_eq!(entity.status, EntityStatus::Closed);
@@ -355,17 +337,6 @@ fn approve_close_entity_works() {
         assert!(alice_after > alice_before - EXPECTED_INITIAL_FUND);
         // UserEntity cleared
         assert!(!UserEntity::<Test>::get(ALICE).contains(&id));
-    });
-}
-
-#[test]
-fn approve_close_entity_fails_not_pending_close() {
-    new_test_ext().execute_with(|| {
-        let id = create_default_entity(ALICE);
-        assert_noop!(
-            EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id),
-            Error::<Test>::InvalidEntityStatus
-        );
     });
 }
 
@@ -597,8 +568,7 @@ fn remove_admin_fails_closed_entity() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
         assert_ok!(EntityRegistry::add_admin(RuntimeOrigin::signed(ALICE), id, BOB, AdminPermission::ALL_DEFINED));
-        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        close_entity_via_timeout(ALICE, id);
         assert_noop!(
             EntityRegistry::remove_admin(RuntimeOrigin::signed(ALICE), id, BOB),
             Error::<Test>::InvalidEntityStatus
@@ -787,11 +757,10 @@ fn reopen_entity_works() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
         // Close workflow
-        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
-        // Reopen
+        close_entity_via_timeout(ALICE, id);
+        // Reopen → Active（付费即激活）
         assert_ok!(EntityRegistry::reopen_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Pending);
+        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Active);
         // UserEntity restored
         assert!(UserEntity::<Test>::get(ALICE).contains(&id));
     });
@@ -825,8 +794,7 @@ fn reopen_entity_fails_banned() {
 fn reopen_entity_fails_not_owner() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
-        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        close_entity_via_timeout(ALICE, id);
         assert_noop!(
             EntityRegistry::reopen_entity(RuntimeOrigin::signed(BOB), id),
             Error::<Test>::NotEntityOwner
@@ -1113,8 +1081,7 @@ fn h4_deduct_fee_fails_banned_entity() {
 fn h4_deduct_fee_fails_closed_entity() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
-        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        close_entity_via_timeout(ALICE, id);
         // Closed entity — deduct should fail
         assert_noop!(
             EntityRegistry::deduct_operating_fee(id, 1_000_000_000_000u128, FeeType::Other),
@@ -1178,14 +1145,15 @@ fn h2_ban_entity_refund_failure_does_not_block_ban() {
     });
 }
 
-// H3: approve_close_entity 退还失败不阻止关闭
+// H3: execute_close_timeout 退还失败不阻止关闭
 #[test]
-fn h3_approve_close_refund_failure_does_not_block_close() {
+fn h3_timeout_close_refund_failure_does_not_block_close() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
         assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
         // Close should always succeed even if refund has issues
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        System::set_block_number(101);
+        assert_ok!(EntityRegistry::execute_close_timeout(RuntimeOrigin::signed(ALICE), id));
         assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Closed);
     });
 }
@@ -1298,8 +1266,7 @@ fn l2_update_stats_fails_banned_entity() {
 fn l2_update_stats_fails_closed_entity() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
-        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        close_entity_via_timeout(ALICE, id);
         assert_noop!(
             <EntityRegistry as EntityProvider<u64>>::update_entity_stats(id, 1000, 1),
             Error::<Test>::EntityNotActive
@@ -1661,25 +1628,22 @@ fn h1_create_entity_rejects_at_max_entity_id() {
 }
 
 #[test]
-fn h2_approve_entity_clears_governance_suspended() {
+fn h2_reopen_clears_governance_suspended() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
 
-        // 治理暂停 → 申请关闭 → 审批关闭 → 重开 → 审批通过
+        // 治理暂停 → 申请关闭 → 超时关闭 → 重开（直接激活）
         assert_ok!(EntityRegistry::suspend_entity(RuntimeOrigin::root(), id, None));
         assert!(GovernanceSuspended::<Test>::get(id));
 
         assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
-        // L2: approve_close_entity 也应清理
+        System::set_block_number(101);
+        assert_ok!(EntityRegistry::execute_close_timeout(RuntimeOrigin::signed(ALICE), id));
+        // 关闭时应清理
         assert!(!GovernanceSuspended::<Test>::get(id));
 
         assert_ok!(EntityRegistry::reopen_entity(RuntimeOrigin::signed(ALICE), id));
-        // reopen 不清理（Pending 状态，治理标记无语义），但 approve_close 已清理
-        assert!(!GovernanceSuspended::<Test>::get(id));
-
-        assert_ok!(EntityRegistry::approve_entity(RuntimeOrigin::root(), id));
-        // H2: approve_entity 也主动清理，确保新生命周期干净
+        // reopen 直接激活，GovernanceSuspended 已清理
         assert!(!GovernanceSuspended::<Test>::get(id));
 
         let entity = Entities::<Test>::get(id).unwrap();
@@ -1692,12 +1656,12 @@ fn h2_stale_governance_flag_no_longer_blocks_auto_resume() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
 
-        // 模拟前世治理暂停 → 关闭 → 重开 → 审批
+        // 模拟前世治理暂停 → 关闭 → 重开（直接激活）
         assert_ok!(EntityRegistry::suspend_entity(RuntimeOrigin::root(), id, None));
         assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        System::set_block_number(101);
+        assert_ok!(EntityRegistry::execute_close_timeout(RuntimeOrigin::signed(ALICE), id));
         assert_ok!(EntityRegistry::reopen_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_entity(RuntimeOrigin::root(), id));
 
         // 新生命周期：资金耗尽 → auto-suspend → top_up 应自动恢复
         // 先耗尽资金至触发暂停
@@ -1721,7 +1685,7 @@ fn h2_stale_governance_flag_no_longer_blocks_auto_resume() {
         let entity = Entities::<Test>::get(id).unwrap();
         assert_eq!(entity.status, EntityStatus::Suspended);
 
-        // top_up 应自动恢复（GovernanceSuspended 已在 approve_entity 中清理）
+        // top_up 应自动恢复（GovernanceSuspended 已在 reopen_entity 中清理）
         assert_ok!(EntityRegistry::top_up_fund(
             RuntimeOrigin::signed(ALICE),
             id,
@@ -1789,8 +1753,7 @@ fn m2_set_governance_mode_rejects_closed_entity() {
         let id = create_default_entity(ALICE);
 
         // close entity
-        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        close_entity_via_timeout(ALICE, id);
         let entity = Entities::<Test>::get(id).unwrap();
         assert_eq!(entity.status, EntityStatus::Closed);
 
@@ -1822,8 +1785,7 @@ fn m1_register_shop_rejects_banned_entity() {
 fn m1_register_shop_rejects_closed_entity() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
-        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        close_entity_via_timeout(ALICE, id);
 
         assert_noop!(
             <EntityRegistry as EntityProvider<u64>>::register_shop(id, 999),
@@ -1855,8 +1817,7 @@ fn m2_reopen_entity_fails_when_owner_at_capacity() {
     new_test_ext().execute_with(|| {
         // ALICE 创建并关闭一个实体
         let id1 = create_default_entity(ALICE);
-        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id1));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id1));
+        close_entity_via_timeout(ALICE, id1);
         assert_eq!(Entities::<Test>::get(id1).unwrap().status, EntityStatus::Closed);
 
         // ALICE 创建 3 个新实体（MaxEntitiesPerUser = 3）
@@ -2063,35 +2024,36 @@ fn unban_entity_works() {
         assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false, None));
         assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Banned);
 
+        // ban with refund: funds returned to owner. Treasury is empty.
+        // unban 现在直接激活，需要先向 treasury 充值（top_up_fund 不允许 Banned 状态）
+        let treasury = EntityRegistry::entity_treasury_account(id);
+        let _ = Balances::deposit_creating(&treasury, EXPECTED_INITIAL_FUND);
+
         assert_ok!(EntityRegistry::unban_entity(RuntimeOrigin::root(), id));
-        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Pending);
+        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Active);
         // GovernanceSuspended 应被清除
         assert!(!GovernanceSuspended::<Test>::get(id));
+        // 统计应恢复
+        assert_eq!(EntityStats::<Test>::get().active_entities, 1);
     });
 }
 
 #[test]
-fn unban_entity_then_approve_works() {
+fn unban_entity_directly_activates() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
         assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false, None));
 
-        // Unban → Pending
-        assert_ok!(EntityRegistry::unban_entity(RuntimeOrigin::root(), id));
-        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Pending);
-
-        // 需要 owner 补充资金（ban 时已退还），然后治理审批
         // ban with refund: funds returned to owner. Treasury is empty.
-        // approve_entity requires sufficient funds — top up first
+        // 向 treasury 直接充值
         let treasury = EntityRegistry::entity_treasury_account(id);
-        // Owner tops up
-        assert_ok!(EntityRegistry::top_up_fund(
-            RuntimeOrigin::signed(ALICE), id, EXPECTED_INITIAL_FUND,
-        ));
+        let _ = Balances::deposit_creating(&treasury, EXPECTED_INITIAL_FUND);
 
-        // Now approve
-        assert_ok!(EntityRegistry::approve_entity(RuntimeOrigin::root(), id));
+        // Unban → Active（直接激活，不再经过 Pending）
+        assert_ok!(EntityRegistry::unban_entity(RuntimeOrigin::root(), id));
         assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Active);
+        assert!(UserEntity::<Test>::get(ALICE).contains(&id));
+        assert!(EntityRegistry::has_active_entity(&ALICE));
     });
 }
 
@@ -2125,6 +2087,20 @@ fn unban_entity_fails_not_found() {
         assert_noop!(
             EntityRegistry::unban_entity(RuntimeOrigin::root(), 999),
             Error::<Test>::EntityNotFound
+        );
+    });
+}
+
+#[test]
+fn unban_entity_fails_insufficient_fund() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        // ban with refund: treasury is empty
+        assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false, None));
+        // unban without funding treasury should fail
+        assert_noop!(
+            EntityRegistry::unban_entity(RuntimeOrigin::root(), id),
+            Error::<Test>::InsufficientOperatingFund
         );
     });
 }
@@ -2828,8 +2804,7 @@ fn f1_close_frees_name() {
             None, None, None,
         ));
         let id = EntityRegistry::next_entity_id() - 1;
-        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        close_entity_via_timeout(ALICE, id);
         // Name should be freed
         assert_ok!(EntityRegistry::create_entity(
             RuntimeOrigin::signed(BOB),
@@ -3071,23 +3046,22 @@ fn m2_ban_clears_owner_paused() {
     });
 }
 
-// M2: approve_close_entity 清理 OwnerPaused
+// M2: close 清理 OwnerPaused
 #[test]
-fn m2_approve_close_clears_owner_paused() {
+fn m2_close_clears_owner_paused() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
         assert_ok!(EntityRegistry::self_pause_entity(RuntimeOrigin::signed(ALICE), id));
         assert!(OwnerPaused::<Test>::get(id));
-        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
-        // approve_close 应清除 OwnerPaused
+        close_entity_via_timeout(ALICE, id);
+        // close 应清除 OwnerPaused
         assert!(!OwnerPaused::<Test>::get(id));
     });
 }
 
-// M2: unban → approve 生命周期中 OwnerPaused 不残留
+// M2: unban 生命周期中 OwnerPaused 不残留
 #[test]
-fn m2_unban_approve_lifecycle_owner_paused_clean() {
+fn m2_unban_lifecycle_owner_paused_clean() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
         assert_ok!(EntityRegistry::self_pause_entity(RuntimeOrigin::signed(ALICE), id));
@@ -3097,15 +3071,10 @@ fn m2_unban_approve_lifecycle_owner_paused_clean() {
         assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false, None));
         assert!(!OwnerPaused::<Test>::get(id));
 
-        // unban → Pending
+        // 向 treasury 直接充值 + unban → Active（直接激活）
+        let treasury = EntityRegistry::entity_treasury_account(id);
+        let _ = Balances::deposit_creating(&treasury, EXPECTED_INITIAL_FUND);
         assert_ok!(EntityRegistry::unban_entity(RuntimeOrigin::root(), id));
-        assert!(!OwnerPaused::<Test>::get(id));
-
-        // top up + approve
-        assert_ok!(EntityRegistry::top_up_fund(
-            RuntimeOrigin::signed(ALICE), id, EXPECTED_INITIAL_FUND,
-        ));
-        assert_ok!(EntityRegistry::approve_entity(RuntimeOrigin::root(), id));
         assert!(!OwnerPaused::<Test>::get(id));
         assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Active);
 
@@ -3181,8 +3150,7 @@ fn m2_reopen_clears_owner_paused() {
         assert_ok!(EntityRegistry::self_pause_entity(RuntimeOrigin::signed(ALICE), id));
         assert!(OwnerPaused::<Test>::get(id));
 
-        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        close_entity_via_timeout(ALICE, id);
         assert!(!OwnerPaused::<Test>::get(id));
 
         assert_ok!(EntityRegistry::reopen_entity(RuntimeOrigin::signed(ALICE), id));
@@ -3219,22 +3187,24 @@ fn h1_unban_restores_user_entity_index() {
         assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false, None));
         assert!(!UserEntity::<Test>::get(ALICE).contains(&id));
 
-        // Unban should restore UserEntity
+        // Unban should restore UserEntity（需要先充值 treasury）
+        let treasury = EntityRegistry::entity_treasury_account(id);
+        let _ = Balances::deposit_creating(&treasury, EXPECTED_INITIAL_FUND);
         assert_ok!(EntityRegistry::unban_entity(RuntimeOrigin::root(), id));
         assert!(UserEntity::<Test>::get(ALICE).contains(&id));
     });
 }
 
-// H1: unban → approve 全流程 UserEntity 正确
+// H1: unban 全流程 UserEntity 正确
 #[test]
-fn h1_unban_approve_user_entity_consistent() {
+fn h1_unban_user_entity_consistent() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
 
         assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false, None));
+        let treasury = EntityRegistry::entity_treasury_account(id);
+        let _ = Balances::deposit_creating(&treasury, EXPECTED_INITIAL_FUND);
         assert_ok!(EntityRegistry::unban_entity(RuntimeOrigin::root(), id));
-        assert_ok!(EntityRegistry::top_up_fund(RuntimeOrigin::signed(ALICE), id, EXPECTED_INITIAL_FUND));
-        assert_ok!(EntityRegistry::approve_entity(RuntimeOrigin::root(), id));
 
         // Entity is Active and in UserEntity
         assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Active);
@@ -3245,9 +3215,9 @@ fn h1_unban_approve_user_entity_consistent() {
     });
 }
 
-// M1: approve_entity 恢复 EntityNameIndex（ban→unban→approve 流程）
+// M1: unban 恢复 EntityNameIndex（ban→unban 流程）
 #[test]
-fn m1_approve_restores_name_index_after_unban() {
+fn m1_unban_restores_name_index() {
     new_test_ext().execute_with(|| {
         assert_ok!(EntityRegistry::create_entity(
             RuntimeOrigin::signed(ALICE),
@@ -3262,18 +3232,18 @@ fn m1_approve_restores_name_index_after_unban() {
         assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false, None));
         assert!(!EntityNameIndex::<Test>::contains_key(&normalized));
 
-        // Unban + approve should restore name index
+        // 向 treasury 直接充值 + unban should restore name index（直接激活）
+        let treasury = EntityRegistry::entity_treasury_account(id);
+        let _ = Balances::deposit_creating(&treasury, EXPECTED_INITIAL_FUND);
         assert_ok!(EntityRegistry::unban_entity(RuntimeOrigin::root(), id));
-        assert_ok!(EntityRegistry::top_up_fund(RuntimeOrigin::signed(ALICE), id, EXPECTED_INITIAL_FUND));
-        assert_ok!(EntityRegistry::approve_entity(RuntimeOrigin::root(), id));
         assert!(EntityNameIndex::<Test>::contains_key(&normalized));
         assert_eq!(EntityNameIndex::<Test>::get(&normalized), Some(id));
     });
 }
 
-// M1: approve_entity 恢复 EntityNameIndex（close→reopen→approve 流程）
+// M1: reopen 恢复 EntityNameIndex（close→reopen 流程）
 #[test]
-fn m1_approve_restores_name_index_after_reopen() {
+fn m1_reopen_restores_name_index() {
     new_test_ext().execute_with(|| {
         assert_ok!(EntityRegistry::create_entity(
             RuntimeOrigin::signed(ALICE),
@@ -3285,13 +3255,11 @@ fn m1_approve_restores_name_index_after_reopen() {
         assert!(EntityNameIndex::<Test>::contains_key(&normalized));
 
         // Close removes name index
-        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        close_entity_via_timeout(ALICE, id);
         assert!(!EntityNameIndex::<Test>::contains_key(&normalized));
 
-        // Reopen + approve should restore name index
+        // Reopen should restore name index（直接激活）
         assert_ok!(EntityRegistry::reopen_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_entity(RuntimeOrigin::root(), id));
         assert!(EntityNameIndex::<Test>::contains_key(&normalized));
         assert_eq!(EntityNameIndex::<Test>::get(&normalized), Some(id));
     });
@@ -3508,27 +3476,28 @@ fn m2_r12_ban_entity_cleans_sales_and_shops() {
         // 治理封禁
         assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false, None));
 
-        // 验证清理
-        assert!(EntityShops::<Test>::get(id).is_empty());
+        // 验证: Shop 关联保留（以便 unban 恢复），销售数据清理
+        assert!(!EntityShops::<Test>::get(id).is_empty(), "EntityShops should be preserved for unban recovery");
+        assert!(EntityShops::<Test>::get(id).contains(&100));
         assert_eq!(EntitySales::<Test>::get(id).total_orders, 0);
         assert_eq!(EntitySales::<Test>::get(id).total_sales, 0u128);
     });
 }
 
-// L1-R12: approve_close_entity 清理 EntitySales 和 EntityShops
+// L1-R12: close 清理 EntitySales 和 EntityShops
 #[test]
-fn l1_r12_approve_close_cleans_sales_and_shops() {
+fn l1_r12_close_cleans_sales_and_shops() {
     new_test_ext().execute_with(|| {
         let id = create_default_entity(ALICE);
         assert_ok!(<EntityRegistry as EntityProvider<u64>>::register_shop(id, 100));
         assert_ok!(<EntityRegistry as EntityProvider<u64>>::update_entity_stats(id, 3000, 5));
 
-        // 申请关闭 → 审批关闭
-        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
-        assert_ok!(EntityRegistry::approve_close_entity(RuntimeOrigin::root(), id));
+        // 关闭
+        close_entity_via_timeout(ALICE, id);
 
-        // 验证存储已清理
-        assert!(EntityShops::<Test>::get(id).is_empty());
+        // 验证: Shop 关联保留（以便 reopen 恢复），销售数据清理
+        assert!(!EntityShops::<Test>::get(id).is_empty(), "EntityShops should be preserved for reopen recovery");
+        assert!(EntityShops::<Test>::get(id).contains(&100));
         assert_eq!(EntitySales::<Test>::get(id).total_orders, 0);
     });
 }
@@ -3550,13 +3519,61 @@ fn l1_r12_execute_close_timeout_cleans_sales_and_shops() {
         // 任何人执行超时关闭
         assert_ok!(EntityRegistry::execute_close_timeout(RuntimeOrigin::signed(BOB), id));
 
-        // 验证存储已清理
-        assert!(EntityShops::<Test>::get(id).is_empty());
+        // 验证: Shop 关联保留（以便 reopen 恢复），销售数据清理
+        assert!(!EntityShops::<Test>::get(id).is_empty(), "EntityShops should be preserved for reopen recovery");
+        assert!(EntityShops::<Test>::get(id).contains(&200));
         assert_eq!(EntitySales::<Test>::get(id).total_orders, 0);
     });
 }
 
 // H1: 推荐人可以被多于 MaxEntitiesPerUser 个实体引用
+
+// P0: ban 保留 EntityShops，unban 可恢复 Shop
+#[test]
+fn p0_ban_preserves_shops_for_unban_recovery() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        assert_ok!(<EntityRegistry as EntityProvider<u64>>::register_shop(id, 100));
+        assert_ok!(<EntityRegistry as EntityProvider<u64>>::register_shop(id, 200));
+        assert_eq!(EntityShops::<Test>::get(id).len(), 2);
+
+        // ban: Shop 被 force_close 但关联保留
+        assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false, None));
+        assert_eq!(EntityShops::<Test>::get(id).len(), 2);
+
+        // 向 treasury 充值以满足 unban 资金要求
+        let treasury = EntityRegistry::entity_treasury_account(id);
+        let _ = Balances::deposit_creating(&treasury, EXPECTED_INITIAL_FUND);
+
+        // unban: Shop 关联仍在，resume_shop 被调用
+        assert_ok!(EntityRegistry::unban_entity(RuntimeOrigin::root(), id));
+        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Active);
+        assert_eq!(EntityShops::<Test>::get(id).len(), 2);
+        assert!(EntityShops::<Test>::get(id).contains(&100));
+        assert!(EntityShops::<Test>::get(id).contains(&200));
+    });
+}
+
+// P0: close 保留 EntityShops，reopen 可恢复 Shop
+#[test]
+fn p0_close_preserves_shops_for_reopen_recovery() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        assert_ok!(<EntityRegistry as EntityProvider<u64>>::register_shop(id, 100));
+        assert_eq!(EntityShops::<Test>::get(id).len(), 1);
+
+        // close: Shop 被 force_close 但关联保留
+        close_entity_via_timeout(ALICE, id);
+        assert_eq!(EntityShops::<Test>::get(id).len(), 1);
+
+        // reopen: Shop 关联仍在，resume_shop 被调用
+        assert_ok!(EntityRegistry::reopen_entity(RuntimeOrigin::signed(ALICE), id));
+        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Active);
+        assert_eq!(EntityShops::<Test>::get(id).len(), 1);
+        assert!(EntityShops::<Test>::get(id).contains(&100));
+    });
+}
+
 #[test]
 fn h1_referrer_can_have_many_referrals() {
     new_test_ext().execute_with(|| {

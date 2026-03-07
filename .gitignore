@@ -221,7 +221,6 @@ network/
 # =========================
 docker-compose.override.yml
 .docker/
-*.dockerignore
 
 # =========================
 # Terraform / Infrastructure

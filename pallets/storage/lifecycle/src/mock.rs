@@ -203,7 +203,8 @@ impl pallet_storage_lifecycle::pallet::Config for Test {
     type MaxBatchSize = MaxBatchSize;
     type StorageArchiver = MockStorageArchiver;
     type OnArchive = MockOnArchiveHandler;
-    type WeightInfo = pallet_storage_lifecycle::SubstrateWeight;
+    type DataOwnerProvider = ();
+    type WeightInfo = pallet_storage_lifecycle::SubstrateWeight<Test>;
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

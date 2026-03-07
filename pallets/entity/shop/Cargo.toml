@@ -19,8 +19,10 @@ sp-std = { workspace = true }
 pallet-entity-common = { path = "../common", default-features = false }
 pallet-storage-service = { path = "../../storage/service", default-features = false }
 log = { workspace = true }
+frame-benchmarking = { workspace = true, optional = true }
 
 [dev-dependencies]
+frame-benchmarking = { workspace = true, default-features = true }
 sp-core = { workspace = true, default-features = true }
 sp-io = { workspace = true, default-features = true }
 pallet-balances = { workspace = true, default-features = true }
@@ -32,6 +34,7 @@ std = [
     "scale-info/std",
     "frame-support/std",
     "frame-system/std",
+    "frame-benchmarking?/std",
     "sp-runtime/std",
     "sp-std/std",
     "pallet-entity-common/std",
@@ -39,6 +42,7 @@ std = [
     "log/std",
 ]
 runtime-benchmarks = [
+    "frame-benchmarking/runtime-benchmarks",
     "frame-support/runtime-benchmarks",
     "frame-system/runtime-benchmarks",
     "sp-runtime/runtime-benchmarks",

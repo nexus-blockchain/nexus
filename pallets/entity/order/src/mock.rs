@@ -828,6 +828,7 @@ impl pallet_entity_order::Config for Test {
     type TokenPriceProvider = MockTokenPriceProvider;
     type MemberProvider = MockMemberProvider;
     type MaxCidLength = ConstU32<64>;
+    type WeightInfo = ();
 }
 
 // ==================== Test Helpers ====================

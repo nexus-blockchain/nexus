@@ -27,6 +27,12 @@ mod mock;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+
+pub mod weights;
+pub use weights::WeightInfo;
+
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
@@ -207,6 +213,9 @@ pub mod pallet {
         /// CID 最大长度
         #[pallet::constant]
         type MaxCidLength: Get<u32>;
+
+        /// 权重信息
+        type WeightInfo: WeightInfo;
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -404,7 +413,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// 下单并支付
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(350_000_000, 16_000))]
+        #[pallet::weight(T::WeightInfo::place_order())]
         pub fn place_order(
             origin: OriginFor<T>,
             product_id: u64,
@@ -646,7 +655,7 @@ pub mod pallet {
 
         /// 取消订单（数字商品不可取消）
         #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::cancel_order())]
         pub fn cancel_order(origin: OriginFor<T>, order_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -670,7 +679,7 @@ pub mod pallet {
 
         /// 发货（服务/订阅类不可用，须走 start_service）
         #[pallet::call_index(2)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::ship_order())]
         pub fn ship_order(
             origin: OriginFor<T>,
             order_id: u64,
@@ -715,7 +724,7 @@ pub mod pallet {
 
         /// 确认收货
         #[pallet::call_index(3)]
-        #[pallet::weight(Weight::from_parts(300_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::confirm_receipt())]
         pub fn confirm_receipt(origin: OriginFor<T>, order_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -732,7 +741,7 @@ pub mod pallet {
 
         /// 申请退款（数字商品不可退款）
         #[pallet::call_index(4)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::request_refund())]
         pub fn request_refund(
             origin: OriginFor<T>,
             order_id: u64,
@@ -778,7 +787,7 @@ pub mod pallet {
 
         /// 同意退款（卖家）
         #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::approve_refund())]
         pub fn approve_refund(origin: OriginFor<T>, order_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -802,7 +811,7 @@ pub mod pallet {
 
         /// 开始服务（卖家，服务类订单）
         #[pallet::call_index(6)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::start_service())]
         pub fn start_service(origin: OriginFor<T>, order_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -836,7 +845,7 @@ pub mod pallet {
 
         /// 标记服务完成（卖家，服务类订单）
         #[pallet::call_index(7)]
-        #[pallet::weight(Weight::from_parts(175_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::complete_service())]
         pub fn complete_service(origin: OriginFor<T>, order_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -872,7 +881,7 @@ pub mod pallet {
 
         /// 确认服务完成（买家，服务类订单）
         #[pallet::call_index(8)]
-        #[pallet::weight(Weight::from_parts(300_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::confirm_service())]
         pub fn confirm_service(origin: OriginFor<T>, order_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -889,7 +898,7 @@ pub mod pallet {
         ///
         /// rate 为基点，0 = 关闭平台费，上限 1000 bps（10%）
         #[pallet::call_index(9)]
-        #[pallet::weight(Weight::from_parts(20_000_000, 2_000))]
+        #[pallet::weight(T::WeightInfo::set_platform_fee_rate())]
         pub fn set_platform_fee_rate(
             origin: OriginFor<T>,
             new_rate: u16,
@@ -906,7 +915,7 @@ pub mod pallet {
         ///
         /// 终态 = Completed / Cancelled / Refunded
         #[pallet::call_index(10)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::cleanup_buyer_orders())]
         pub fn cleanup_buyer_orders(origin: OriginFor<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -938,7 +947,7 @@ pub mod pallet {
         /// 卖家拒绝后，争议进入 DisputeTimeout 倒计时。
         /// 超时未仲裁则自动退款给买家。
         #[pallet::call_index(11)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::reject_refund())]
         pub fn reject_refund(
             origin: OriginFor<T>,
             order_id: u64,
@@ -981,7 +990,7 @@ pub mod pallet {
 
         /// 卖家主动取消订单（仅 Paid 状态，非数字商品）
         #[pallet::call_index(12)]
-        #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::seller_cancel_order())]
         pub fn seller_cancel_order(
             origin: OriginFor<T>,
             order_id: u64,
@@ -1014,7 +1023,7 @@ pub mod pallet {
         ///
         /// 可对 Paid / Shipped / Disputed 状态的订单强制退款
         #[pallet::call_index(13)]
-        #[pallet::weight(Weight::from_parts(300_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::force_refund())]
         pub fn force_refund(origin: OriginFor<T>, order_id: u64, reason_cid: Option<Vec<u8>>) -> DispatchResult {
             ensure_root(origin)?;
 
@@ -1044,7 +1053,7 @@ pub mod pallet {
 
         /// 管理员强制完成订单（Root / 治理）
         #[pallet::call_index(14)]
-        #[pallet::weight(Weight::from_parts(350_000_000, 16_000))]
+        #[pallet::weight(T::WeightInfo::force_complete())]
         pub fn force_complete(origin: OriginFor<T>, order_id: u64, reason_cid: Option<Vec<u8>>) -> DispatchResult {
             ensure_root(origin)?;
 
@@ -1068,7 +1077,7 @@ pub mod pallet {
 
         /// 买家修改收货地址（仅 Paid 状态，发货前）
         #[pallet::call_index(15)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::update_shipping_address())]
         pub fn update_shipping_address(
             origin: OriginFor<T>,
             order_id: u64,
@@ -1098,7 +1107,7 @@ pub mod pallet {
         ///
         /// 在 ExpiryQueue 中追加一条新的超时条目
         #[pallet::call_index(16)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::extend_confirm_timeout())]
         pub fn extend_confirm_timeout(origin: OriginFor<T>, order_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -1140,7 +1149,7 @@ pub mod pallet {
         ///
         /// 仅店铺 owner 可调用
         #[pallet::call_index(17)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::cleanup_shop_orders())]
         pub fn cleanup_shop_orders(origin: OriginFor<T>, shop_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -1173,7 +1182,7 @@ pub mod pallet {
         ///
         /// 允许卖家在发货后修改/更新物流追踪 CID（如更换快递单号）
         #[pallet::call_index(18)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::update_tracking())]
         pub fn update_tracking(
             origin: OriginFor<T>,
             order_id: u64,
@@ -1200,7 +1209,7 @@ pub mod pallet {
 
         /// 卖家主动退款（Shipped 状态，含发货后发现问题等场景）
         #[pallet::call_index(19)]
-        #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::seller_refund_order())]
         pub fn seller_refund_order(
             origin: OriginFor<T>,
             order_id: u64,
@@ -1233,7 +1242,7 @@ pub mod pallet {
         ///
         /// refund_bps: 退给买家的比例（基点，1-9999），剩余归卖家
         #[pallet::call_index(20)]
-        #[pallet::weight(Weight::from_parts(300_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::force_partial_refund())]
         pub fn force_partial_refund(
             origin: OriginFor<T>,
             order_id: u64,
@@ -1280,7 +1289,7 @@ pub mod pallet {
         ///
         /// 恢复订单到争议前状态（Paid / Shipped），重建相应超时队列
         #[pallet::call_index(21)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::withdraw_dispute())]
         pub fn withdraw_dispute(origin: OriginFor<T>, order_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -1340,7 +1349,7 @@ pub mod pallet {
         /// 当 on_idle weight 不足导致某区块的超时订单未被完全处理时，
         /// Root 可调用此接口指定区块号进行补偿处理。
         #[pallet::call_index(22)]
-        #[pallet::weight(Weight::from_parts(500_000_000, 20_000))]
+        #[pallet::weight(T::WeightInfo::force_process_expirations())]
         pub fn force_process_expirations(
             origin: OriginFor<T>,
             target_block: BlockNumberFor<T>,

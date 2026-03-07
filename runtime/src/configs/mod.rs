@@ -327,7 +327,7 @@ parameter_types! {
 
 impl pallet_nex_market::Config for Runtime {
 	type Currency = Balances;
-	type WeightInfo = ();
+	type WeightInfo = pallet_nex_market::weights::SubstrateWeight<Runtime>;
 	type DefaultOrderTTL = ConstU32<{ 24 * HOURS }>;
 	type MaxActiveOrdersPerUser = ConstU32<100>;
 	type UsdtTimeout = ConstU32<{ 12 * HOURS }>;
@@ -363,6 +363,10 @@ impl pallet_nex_market::Config for Runtime {
 	type MaxTradesPerUser = ConstU32<500>;
 	type MaxOrderTrades = ConstU32<100>;
 	type QueueFullThresholdBps = ConstU16<8000>;             // 80% 自动暂停
+	type DisputeWindowBlocks = ConstU32<{ 7 * DAYS }>;      // 争议窗口 ~7 天
+	type MaxOrderNexAmount = ConstU128<{ 10_000 * UNIT }>;   // 单笔最大 10,000 NEX
+	type MaxSellOrders = ConstU32<1000>;                     // 卖单簿最大容量
+	type MaxBuyOrders = ConstU32<1000>;                      // 买单簿最大容量
 }
 
 // ============================================================================
@@ -526,13 +530,14 @@ pub struct UnifiedArbitrationRouter;
 
 impl pallet_dispute_arbitration::pallet::ArbitrationRouter<AccountId, Balance> for UnifiedArbitrationRouter {
 	/// 校验是否允许发起争议
+	/// MVP 阶段仅开放 ENTITY_ORDER 域，其他域待对应 Pallet 上线后逐步开放
 	fn can_dispute(domain: [u8; 8], who: &AccountId, id: u64) -> bool {
 		use pallet_entity_common::OrderProvider;
 		if domain == DOMAIN_ENTITY_ORDER {
 			<EntityTransaction as OrderProvider<AccountId, Balance>>::can_dispute(id, who)
 		} else {
-			// 其他域暂时允许（未来扩展 nex-market 等）
-			true
+			// MVP: 非 ENTITY_ORDER 域暂不开放，待 nex-market/ads 等模块集成后逐步启用
+			false
 		}
 	}
 
@@ -631,6 +636,7 @@ impl pallet_dispute_arbitration::pallet::Config for Runtime {
 	type ComplaintSlashBps = ConstU16<5000>; // 投诉败诉罚没50%
 	type TreasuryAccount = TreasuryAccountId;
 	type CidLockManager = pallet_storage_service::Pallet<Runtime>;
+	type StoragePin = pallet_storage_service::Pallet<Runtime>;
 	type ArchiveTtlBlocks = ConstU32<2_592_000>;
 	type ComplaintArchiveDelayBlocks = ConstU32<432_000>;
 	type ComplaintMaxLifetimeBlocks = ConstU32<1_296_000>; // 90 days
@@ -826,6 +832,166 @@ impl pallet_collective_membership::Config<ContentMembershipInstance> for Runtime
 // Storage Lifecycle Pallet Configuration
 // ============================================================================
 
+/// StorageService 归档器适配器
+///
+/// 桥接 pallet-storage-lifecycle 的 StorageArchiver trait 与 pallet-storage-service 的存储。
+/// 通过 CidArchiveIndex (u64 → Hash) 映射 lifecycle 的 data_id 到 service 的 cid_hash。
+pub struct StorageServiceArchiver;
+
+impl pallet_storage_lifecycle::StorageArchiver for StorageServiceArchiver {
+	fn scan_archivable(_delay: u64, _max_count: u32) -> alloc::vec::Vec<u64> {
+		// 由 scan_for_level 替代
+		alloc::vec::Vec::new()
+	}
+
+	fn archive_records(_ids: &[u64]) {
+		// 由 archive_to_level 替代
+	}
+
+	fn scan_for_level(
+		_data_type: &[u8],
+		target_level: pallet_storage_lifecycle::ArchiveLevel,
+		delay: u64,
+		max_count: u32,
+	) -> alloc::vec::Vec<u64> {
+		use pallet_storage_lifecycle::ArchiveLevel;
+
+		// 仅处理 pin_storage 数据类型
+		let current_block: u64 = <frame_system::Pallet<Runtime>>::block_number()
+			.try_into().unwrap_or(0u64);
+		let dt = frame_support::BoundedVec::<u8, frame_support::traits::ConstU32<32>>::truncate_from(
+			b"pin_storage".to_vec()
+		);
+		let mut result = alloc::vec::Vec::new();
+
+		// 遍历 CidArchiveIndex 查找符合条件的记录
+		let next_id = pallet_storage_service::NextCidArchiveId::<Runtime>::get();
+		for archive_id in 0..next_id {
+			if result.len() >= max_count as usize {
+				break;
+			}
+			let Some(cid_hash) = pallet_storage_service::CidArchiveIndex::<Runtime>::get(archive_id) else {
+				continue; // 已被清理的索引
+			};
+
+			// 检查当前归档级别
+			let current_level = pallet_storage_lifecycle::pallet::DataArchiveStatus::<Runtime>::get(&dt, archive_id);
+
+			match target_level {
+				ArchiveLevel::ArchivedL1 => {
+					// 扫描 Active 数据，检查 last_activity 是否超过 delay
+					if !matches!(current_level, ArchiveLevel::Active) { continue; }
+					if let Some(meta) = pallet_storage_service::PinMeta::<Runtime>::get(cid_hash) {
+						let last: u64 = meta.last_activity.try_into().unwrap_or(0u64);
+						if current_block.saturating_sub(last) >= delay {
+							result.push(archive_id);
+						}
+					}
+				}
+				ArchiveLevel::ArchivedL2 => {
+					// 扫描 L1 数据，检查归档时间是否超过 delay
+					if !matches!(current_level, ArchiveLevel::ArchivedL1) { continue; }
+					// L1 归档后的时间由 ArchiveStats.last_archive_at 近似
+					// 简化：使用 PinMeta.last_activity 作为 L1 归档时间戳
+					if let Some(meta) = pallet_storage_service::PinMeta::<Runtime>::get(cid_hash) {
+						let last: u64 = meta.last_activity.try_into().unwrap_or(0u64);
+						if current_block.saturating_sub(last) >= delay {
+							result.push(archive_id);
+						}
+					} else {
+						// PinMeta 已被 L1 归档清理，直接符合条件
+						result.push(archive_id);
+					}
+				}
+				ArchiveLevel::Purged => {
+					// 扫描 L2 数据
+					if !matches!(current_level, ArchiveLevel::ArchivedL2) { continue; }
+					// L2 数据已无 PinMeta，直接按 delay 判断
+					result.push(archive_id);
+				}
+				_ => {}
+			}
+		}
+		result
+	}
+
+	fn archive_to_level(
+		_data_type: &[u8],
+		ids: &[u64],
+		target_level: pallet_storage_lifecycle::ArchiveLevel,
+	) {
+		use pallet_storage_lifecycle::ArchiveLevel;
+
+		for &archive_id in ids {
+			let Some(cid_hash) = pallet_storage_service::CidArchiveIndex::<Runtime>::get(archive_id) else {
+				continue;
+			};
+			match target_level {
+				ArchiveLevel::ArchivedL1 => {
+					// L1 归档：保留 PinMeta（精简），清理计费和健康检查
+					pallet_storage_service::PinBilling::<Runtime>::remove(cid_hash);
+				}
+				ArchiveLevel::ArchivedL2 => {
+					// L2 归档：清理 PinMeta，仅保留索引
+					pallet_storage_service::PinMeta::<Runtime>::remove(cid_hash);
+					pallet_storage_service::PinStateOf::<Runtime>::remove(cid_hash);
+				}
+				ArchiveLevel::Purged => {
+					// 完全清除：调用 do_cleanup_single_cid
+					pallet_storage_service::Pallet::<Runtime>::do_cleanup_single_cid(&cid_hash);
+				}
+				_ => {}
+			}
+		}
+	}
+
+	fn registered_data_types() -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+		alloc::vec![b"pin_storage".to_vec()]
+	}
+
+	fn query_archive_level(
+		data_type: &[u8],
+		data_id: u64,
+	) -> pallet_storage_lifecycle::ArchiveLevel {
+		let dt = frame_support::BoundedVec::truncate_from(data_type.to_vec());
+		pallet_storage_lifecycle::pallet::DataArchiveStatus::<Runtime>::get(&dt, data_id)
+	}
+
+	fn restore_record(
+		_data_type: &[u8],
+		data_id: u64,
+		from_level: pallet_storage_lifecycle::ArchiveLevel,
+	) -> bool {
+		use pallet_storage_lifecycle::ArchiveLevel;
+		// 仅支持 L1 → Active 恢复（L1 阶段 PinMeta 仍存在）
+		if !matches!(from_level, ArchiveLevel::ArchivedL1) {
+			return false;
+		}
+		let Some(cid_hash) = pallet_storage_service::CidArchiveIndex::<Runtime>::get(data_id) else {
+			return false;
+		};
+		// 验证 PinMeta 仍存在（L1 阶段保留）
+		pallet_storage_service::PinMeta::<Runtime>::contains_key(cid_hash)
+	}
+}
+
+/// StorageService 数据所有权查询适配器
+///
+/// 通过 CidArchiveIndex + PinSubjectOf 查询 CID 所有者。
+pub struct StorageServiceOwnerProvider;
+
+impl pallet_storage_lifecycle::DataOwnerProvider<AccountId> for StorageServiceOwnerProvider {
+	fn is_owner(who: &AccountId, _data_type: &[u8], data_id: u64) -> bool {
+		let Some(cid_hash) = pallet_storage_service::CidArchiveIndex::<Runtime>::get(data_id) else {
+			return false;
+		};
+		match pallet_storage_service::PinSubjectOf::<Runtime>::get(cid_hash) {
+			Some((owner, _)) => &owner == who,
+			None => false,
+		}
+	}
+}
+
 impl pallet_storage_lifecycle::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type L1ArchiveDelay = ConstU32<{ 30 * DAYS }>;  // 30天后归档到L1
@@ -833,9 +999,10 @@ impl pallet_storage_lifecycle::Config for Runtime {
 	type PurgeDelay = ConstU32<{ 180 * DAYS }>;     // L2后180天可清除
 	type EnablePurge = ConstBool<false>;             // 默认不启用清除
 	type MaxBatchSize = ConstU32<100>;               // 每次最多处理100条
-	type StorageArchiver = ();                       // 空实现（P0 on_finalize 已处理清理）
-	type OnArchive = ();                             // 空回调（无下游 pallet 需要通知）
-	type WeightInfo = pallet_storage_lifecycle::SubstrateWeight;
+	type StorageArchiver = StorageServiceArchiver;
+	type OnArchive = ();
+	type DataOwnerProvider = StorageServiceOwnerProvider;
+	type WeightInfo = pallet_storage_lifecycle::weights::SubstrateWeight<Runtime>;
 }
 
 // ============================================================================
@@ -1017,7 +1184,6 @@ impl frame_support::traits::Get<AccountId> for EntityPlatformAccount {
 }
 
 impl pallet_entity_registry::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type MaxEntityNameLength = ConstU32<64>;
 	type MaxCidLength = ConstU32<64>;
@@ -1037,6 +1203,8 @@ impl pallet_entity_registry::Config for Runtime {
 	type CloseRequestTimeout = ConstU32<{ 7 * DAYS }>;  // 7 天
 	type MaxReferralsPerReferrer = ConstU32<1000>;
 	type StoragePin = pallet_storage_service::Pallet<Runtime>;
+	type OnEntityStatusChange = (EntityDisclosure,);
+	type WeightInfo = pallet_entity_registry::SubstrateWeight;
 }
 
 impl pallet_entity_shop::Config for Runtime {
@@ -1055,6 +1223,7 @@ impl pallet_entity_shop::Config for Runtime {
 	type MaxShopsPerEntity = ConstU32<16>;
 	type StoragePin = pallet_storage_service::Pallet<Runtime>;
 	type ProductProvider = EntityProduct;
+	type WeightInfo = pallet_entity_shop::weights::SubstrateWeight<Runtime>;
 }
 
 impl pallet_entity_product::Config for Runtime {
@@ -1071,6 +1240,7 @@ impl pallet_entity_product::Config for Runtime {
 	type StoragePin = pallet_storage_service::Pallet<Runtime>;
 	type MaxBatchSize = ConstU32<50>;
 	type MaxReasonLength = ConstU32<256>;
+	type WeightInfo = pallet_entity_product::weights::SubstrateWeight<Runtime>;
 }
 
 impl pallet_entity_order::Config for Runtime {
@@ -1528,6 +1698,7 @@ impl pallet_commission_level_diff::Config for Runtime {
 	type MemberProvider = EntityMemberProvider;
 	type EntityProvider = EntityRegistry;
 	type MaxCustomLevels = ConstU32<10>;
+	type WeightInfo = ();
 }
 
 /// 桥接：CommissionCore 的 MemberCommissionStats 作为 SingleLine 的 StatsProvider
@@ -1554,6 +1725,7 @@ impl pallet_commission_team::Config for Runtime {
 	type MemberProvider = EntityMemberProvider;
 	type EntityProvider = EntityRegistry;
 	type MaxTeamTiers = ConstU32<10>;
+	type WeightInfo = ();
 }
 
 impl pallet_commission_single_line::Config for Runtime {
@@ -1667,6 +1839,7 @@ impl pallet_entity_tokensale::Config for Runtime {
 	type MaxActiveRounds = ConstU32<20>;
 	type RefundGracePeriod = ConstU32<{ 7 * DAYS }>;
 	type MaxBatchRefund = ConstU32<100>;
+	type WeightInfo = pallet_entity_tokensale::weights::SubstrateWeight<Runtime>;
 }
 
 // ============================================================================

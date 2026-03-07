@@ -19,6 +19,9 @@ pub use pallet::*;
 
 pub mod weights;
 
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+
 #[cfg(test)]
 mod mock;
 
@@ -120,7 +123,7 @@ pub mod pallet {
         type WeightInfo: WeightInfo;
     }
 
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -448,6 +451,13 @@ pub mod pallet {
             let shop_id = T::OrderProvider::order_shop_id(order_id);
             if let Some(sid) = shop_id {
                 ShopReviewCount::<T>::mutate(sid, |c| *c = c.saturating_sub(1));
+                // 回退店铺评分（best-effort）
+                if let Err(e) = T::ShopProvider::revert_shop_rating(sid, review.rating, None) {
+                    log::warn!(
+                        "revert_shop_rating failed for shop {} order {}: {:?}",
+                        sid, order_id, e
+                    );
+                }
             }
 
             // 从用户索引中移除
@@ -534,6 +544,8 @@ pub mod pallet {
                 .ok_or(Error::<T>::NotShopEntityAdmin)?;
             // M2-R10: Entity 必须处于激活状态
             ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
+            // P2: Entity 不能处于锁定状态
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             ensure!(
                 T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::REVIEW_MANAGE),
                 Error::<T>::NotShopEntityAdmin
@@ -618,9 +630,19 @@ pub mod pallet {
 
             Reviews::<T>::insert(order_id, review);
 
-            // H1-R10: 更新商品评分差值（ShopProvider::update_shop_rating 是追加模式，
-            // 无法减去旧评分，故 edit 不更新店铺评分，仅更新商品评分）
+            // H1-R10: 更新商品评分差值（ShopProvider::revert_shop_rating 可精确修正店铺评分）
             if old_rating != new_rating {
+                // 更新店铺评分（best-effort）
+                let shop_id = T::OrderProvider::order_shop_id(order_id);
+                if let Some(sid) = shop_id {
+                    if let Err(e) = T::ShopProvider::revert_shop_rating(sid, old_rating, Some(new_rating)) {
+                        log::warn!(
+                            "revert_shop_rating failed for shop {} order {}: {:?}",
+                            sid, order_id, e
+                        );
+                    }
+                }
+
                 // F3: 更新商品评分（ProductRatingSum 是模块自管理的，可精确修正）
                 let product_id = T::OrderProvider::order_product_id(order_id);
                 if let Some(pid) = product_id {

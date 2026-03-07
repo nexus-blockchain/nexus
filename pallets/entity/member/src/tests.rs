@@ -1,6 +1,8 @@
+extern crate alloc;
+
 use crate::mock::*;
 use crate::pallet::*;
-use frame_support::{assert_noop, assert_ok, BoundedVec};
+use frame_support::{assert_noop, assert_ok, traits::Hooks, BoundedVec};
 
 // ============================================================================
 // P0: 会员注册
@@ -3579,5 +3581,173 @@ fn m1_leave_entity_decrements_qualified_referrals() {
 
         let alice = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
         assert_eq!(alice.qualified_referrals, 0, "M1: leave_entity also decrements qualified_referrals");
+    });
+}
+
+// ============================================================================
+// 方案 D: 有界递归 + 溢出异步补偿 测试
+// ============================================================================
+
+/// 辅助函数：构建深度为 depth 的推荐链
+/// 返回所有账户 ID（从根到叶）
+/// 账户 ID 从 base_id 开始递增
+fn build_referral_chain(depth: u32, base_id: u64) -> alloc::vec::Vec<u64> {
+    let accounts: alloc::vec::Vec<u64> = (0..depth).map(|i| base_id + i as u64).collect();
+
+    // 注册根节点（无推荐人）
+    assert_ok!(MemberPallet::register_member(
+        RuntimeOrigin::signed(accounts[0]),
+        SHOP_1,
+        None,
+    ));
+
+    // 依次注册后续节点，推荐人为前一个
+    for i in 1..accounts.len() {
+        assert_ok!(MemberPallet::register_member(
+            RuntimeOrigin::signed(accounts[i]),
+            SHOP_1,
+            Some(accounts[i - 1]),
+        ));
+    }
+
+    accounts
+}
+
+#[test]
+fn d1_shallow_chain_no_overflow() {
+    new_test_ext().execute_with(|| {
+        // 10 层链（< MAX_SYNC_DEPTH=15），不应产生异步补偿记录
+        let accounts = build_referral_chain(10, 100);
+
+        // 无 pending 记录
+        assert_eq!(NextPendingUpdateId::<Test>::get(), 0);
+        assert_eq!(ProcessedPendingUpdateId::<Test>::get(), 0);
+
+        // 验证 team_size 正确
+        let root = MemberPallet::get_member_by_shop(SHOP_1, &accounts[0]).unwrap();
+        assert_eq!(root.team_size, 9); // 9 个后代
+        let mid = MemberPallet::get_member_by_shop(SHOP_1, &accounts[4]).unwrap();
+        assert_eq!(mid.team_size, 5); // 5 个后代
+        let leaf = MemberPallet::get_member_by_shop(SHOP_1, &accounts[9]).unwrap();
+        assert_eq!(leaf.team_size, 0);
+    });
+}
+
+#[test]
+fn d2_deep_chain_creates_overflow_record() {
+    new_test_ext().execute_with(|| {
+        // 构建 20 层链（> MAX_SYNC_DEPTH=15）
+        // 注册第 20 个节点时，从其推荐人向上递归 15 层后溢出
+        let accounts = build_referral_chain(20, 100);
+
+        // 应有 pending 记录（最后几次注册会溢出）
+        let next_id = NextPendingUpdateId::<Test>::get();
+        assert!(next_id > 0, "深链应产生异步补偿记录");
+
+        // 前 15 层的祖先 team_size 应已同步更新
+        // 第 20 个节点（accounts[19]）注册时，其推荐人是 accounts[18]
+        // 同步更新 accounts[18]..accounts[4]（15 层），accounts[3]..accounts[0] 需异步补偿
+        let leaf_parent = MemberPallet::get_member_by_shop(SHOP_1, &accounts[18]).unwrap();
+        assert_eq!(leaf_parent.team_size, 1); // 只有 leaf
+
+        // 验证 pending 记录存在
+        assert!(PendingTeamSizeUpdates::<Test>::get(0).is_some());
+    });
+}
+
+#[test]
+fn d3_on_idle_processes_pending_updates() {
+    new_test_ext().execute_with(|| {
+        // 构建 20 层链
+        let accounts = build_referral_chain(20, 100);
+
+        let next_id = NextPendingUpdateId::<Test>::get();
+        assert!(next_id > 0);
+
+        // 记录 root 当前 team_size（同步阶段可能未完全更新）
+        let root_before = MemberPallet::get_member_by_shop(SHOP_1, &accounts[0]).unwrap();
+
+        // 运行 on_idle 多次直到所有 pending 处理完毕
+        let big_weight = frame_support::weights::Weight::from_parts(1_000_000_000_000, 1_000_000);
+        for block in 2..20u64 {
+            System::set_block_number(block);
+            MemberPallet::on_idle(block.into(), big_weight);
+        }
+
+        // 所有 pending 应已处理
+        assert_eq!(
+            ProcessedPendingUpdateId::<Test>::get(),
+            NextPendingUpdateId::<Test>::get(),
+            "所有 pending 记录应已处理完毕"
+        );
+
+        // root 的 team_size 应为 19（所有后代）
+        let root_after = MemberPallet::get_member_by_shop(SHOP_1, &accounts[0]).unwrap();
+        assert_eq!(root_after.team_size, 19, "异步补偿后 root team_size 应为 19");
+        assert!(root_after.team_size >= root_before.team_size);
+    });
+}
+
+#[test]
+fn d4_decrement_overflow_processed_by_on_idle() {
+    new_test_ext().execute_with(|| {
+        // 构建 20 层链
+        let accounts = build_referral_chain(20, 100);
+
+        // 先处理所有注册产生的 pending
+        let big_weight = frame_support::weights::Weight::from_parts(1_000_000_000_000, 1_000_000);
+        for block in 2..30u64 {
+            System::set_block_number(block);
+            MemberPallet::on_idle(block.into(), big_weight);
+        }
+
+        let root_before = MemberPallet::get_member_by_shop(SHOP_1, &accounts[0]).unwrap();
+        assert_eq!(root_before.team_size, 19);
+
+        // 移除叶子节点
+        System::set_block_number(50);
+        assert_ok!(MemberPallet::remove_member(
+            RuntimeOrigin::signed(OWNER), SHOP_1, accounts[19],
+        ));
+
+        // 移除也可能产生 pending（如果链深度 > 15）
+        let next_id = NextPendingUpdateId::<Test>::get();
+        let processed_id = ProcessedPendingUpdateId::<Test>::get();
+
+        // 处理 pending
+        for block in 51..70u64 {
+            System::set_block_number(block);
+            MemberPallet::on_idle(block.into(), big_weight);
+        }
+
+        assert_eq!(
+            ProcessedPendingUpdateId::<Test>::get(),
+            NextPendingUpdateId::<Test>::get(),
+        );
+
+        // root team_size 应减 1
+        let root_after = MemberPallet::get_member_by_shop(SHOP_1, &accounts[0]).unwrap();
+        assert_eq!(root_after.team_size, 18, "移除后 root team_size 应为 18");
+    });
+}
+
+#[test]
+fn d5_weight_limit_pauses_processing() {
+    new_test_ext().execute_with(|| {
+        // 构建 20 层链
+        let _accounts = build_referral_chain(20, 100);
+
+        let next_id = NextPendingUpdateId::<Test>::get();
+        assert!(next_id > 0);
+
+        // 给极小的 weight，不够处理任何 pending
+        let tiny_weight = frame_support::weights::Weight::from_parts(1_000, 100);
+        System::set_block_number(2);
+        MemberPallet::on_idle(2u64.into(), tiny_weight);
+
+        // pending 应未被处理（或只处理了很少）
+        // 至少第一个 pending 应该还在
+        let processed = ProcessedPendingUpdateId::<Test>::get();
+        assert!(processed < next_id, "weight 不足时不应处理完所有 pending");
     });
 }

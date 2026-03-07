@@ -7,6 +7,8 @@ pub use pallet::*;
 pub mod weights;
 pub use weights::WeightInfo;
 
+pub mod migrations;
+
 #[cfg(test)]
 mod mock;
 
@@ -136,7 +138,7 @@ pub mod pallet {
         type WeightInfo: crate::weights::WeightInfo;
     }
 
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(2);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -157,9 +159,7 @@ pub mod pallet {
     #[pallet::storage]
     pub type LockStateOf<T: Config> = StorageMap<_, Blake2_128Concat, u64, u8, ValueQuery>;
 
-    /// 函数级中文注释：幂等 nonce：记录每个 id 的最新 nonce，避免重复 lock 被重放。
-    #[pallet::storage]
-    pub type LockNonces<T: Config> = StorageMap<_, Blake2_128Concat, u64, u64, ValueQuery>;
+    // LockNonces 已在 v2 migration 中移除（lock_with_nonce extrinsic 已删除）
 
     /// 函数级中文注释：到期块存储：id -> at（仅当启用到期策略时写入）。
     #[pallet::storage]
@@ -617,26 +617,9 @@ pub mod pallet {
             <Self as Escrow<T::AccountId, BalanceOf<T>>>::refund_all(id, &to)
         }
 
-        /// 函数级详细中文注释：幂等锁定（带 nonce）。相同 id 下 nonce 必须严格递增；否则忽略以防重放。
-        #[pallet::call_index(3)]
-        #[pallet::weight(T::WeightInfo::lock_with_nonce())]
-        pub fn lock_with_nonce(
-            origin: OriginFor<T>,
-            id: u64,
-            payer: T::AccountId,
-            amount: BalanceOf<T>,
-            nonce: u64,
-        ) -> DispatchResult {
-            Self::ensure_auth(origin)?;
-            Self::ensure_not_paused()?;
-            let last = LockNonces::<T>::get(id);
-            if nonce <= last {
-                log::debug!(target: "escrow", "Nonce replay ignored: id={}, nonce={}, last={}", id, nonce, last);
-                return Ok(());
-            }
-            LockNonces::<T>::insert(id, nonce);
-            <Self as Escrow<T::AccountId, BalanceOf<T>>>::lock_from(&payer, id, amount)
-        }
+        // ⚠️ call_index(3) 已移除：lock_with_nonce extrinsic 已删除。
+        // nonce 幂等逻辑应由调用方（上游 pallet）自行实现。
+        // trait 方法 lock_from 仍可用。
 
         /// 函数级详细中文注释：分账释放（原子）。校验合计不超过托管余额，逐笔转账，剩余为 0 则清键。
         #[pallet::call_index(4)]
@@ -771,6 +754,7 @@ pub mod pallet {
             Ok(())
         }
 
+        /// ⚠️ 运维后门：手动调度到期（正常业务流程不经此入口，由 do_set_disputed / on_initialize 内部调度）
         #[pallet::call_index(10)]
         #[pallet::weight(T::WeightInfo::schedule_expiry())]
         pub fn schedule_expiry(
@@ -795,6 +779,7 @@ pub mod pallet {
             Ok(())
         }
 
+        /// ⚠️ 运维后门：手动取消到期（正常业务流程不经此入口，由关闭操作内部清理）
         #[pallet::call_index(11)]
         #[pallet::weight(T::WeightInfo::cancel_expiry())]
         pub fn cancel_expiry(origin: OriginFor<T>, id: u64) -> DispatchResult {
@@ -847,31 +832,11 @@ pub mod pallet {
             Ok(())
         }
 
-        #[pallet::call_index(14)]
-        #[pallet::weight(T::WeightInfo::refund_partial())]
-        pub fn refund_partial(
-            origin: OriginFor<T>,
-            id: u64,
-            to: T::AccountId,
-            amount: BalanceOf<T>,
-        ) -> DispatchResult {
-            Self::ensure_auth(origin)?;
-            Self::ensure_not_paused()?;
-            <Self as Escrow<T::AccountId, BalanceOf<T>>>::refund_partial(id, &to, amount)
-        }
+        // ⚠️ call_index(14) 已移除：refund_partial extrinsic 已删除。
+        // trait 方法 Escrow::refund_partial 仍可用，等待上游 pallet 接入。
 
-        #[pallet::call_index(15)]
-        #[pallet::weight(T::WeightInfo::release_partial())]
-        pub fn release_partial(
-            origin: OriginFor<T>,
-            id: u64,
-            to: T::AccountId,
-            amount: BalanceOf<T>,
-        ) -> DispatchResult {
-            Self::ensure_auth(origin)?;
-            Self::ensure_not_paused()?;
-            <Self as Escrow<T::AccountId, BalanceOf<T>>>::release_partial(id, &to, amount)
-        }
+        // ⚠️ call_index(15) 已移除：release_partial extrinsic 已删除。
+        // trait 方法 Escrow::release_partial 仍可用，等待上游 pallet 接入。
 
         /// 🆕 F8: 清理已关闭的托管记录（任何人可调用）
         #[pallet::call_index(16)]
@@ -892,7 +857,6 @@ pub mod pallet {
                 Self::remove_expiry_schedule(*id);
                 Locked::<T>::remove(id);
                 LockStateOf::<T>::remove(id);
-                LockNonces::<T>::remove(id);
                 DisputedAt::<T>::remove(id);
                 PayerOf::<T>::remove(id);
                 cleaned.push(*id);

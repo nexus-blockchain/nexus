@@ -31,6 +31,7 @@ pub mod pallet {
     use frame_system::pallet_prelude::*;
     use pallet_dispute_escrow::pallet::Escrow as EscrowTrait;
     use pallet_trading_common::PricingProvider;
+    use pallet_storage_service::StoragePin;
     use sp_runtime::{Saturating, SaturatedConversion};
 
     // ==================== Complaint struct (depends on T) ====================
@@ -110,6 +111,9 @@ pub mod pallet {
         type TreasuryAccount: Get<Self::AccountId>;
 
         type CidLockManager: pallet_storage_service::CidLockManager<Self::Hash, BlockNumberFor<Self>>;
+
+        /// IPFS Pin 管理接口（用于仲裁文书 CID 持久化：details_cid, response_cid, settlement_cid, resolution_cid）
+        type StoragePin: pallet_storage_service::StoragePin<Self::AccountId>;
 
         #[pallet::constant]
         type ArchiveTtlBlocks: Get<u32>;
@@ -672,6 +676,16 @@ pub mod pallet {
             Complaints::<T>::insert(complaint_id, &complaint);
             ActiveComplaintCount::<T>::mutate(&complainant, |c| *c = c.saturating_add(1));
 
+            // Pin details_cid to IPFS (best-effort: failure logged, not blocking)
+            let cid_vec: alloc::vec::Vec<u8> = complaint.details_cid.clone().into_inner();
+            let cid_size = cid_vec.len() as u64;
+            if let Err(e) = T::StoragePin::pin(
+                complainant.clone(), b"arbitration", complaint_id, None, cid_vec, cid_size,
+                pallet_storage_service::PinTier::Critical,
+            ) {
+                log::warn!(target: "pallet-dispute-arbitration", "pin details_cid failed for complaint {}: {:?}", complaint_id, e);
+            }
+
             DomainStats::<T>::mutate(domain, |stats| {
                 stats.total_complaints = stats.total_complaints.saturating_add(1);
             });
@@ -704,9 +718,19 @@ pub mod pallet {
                 let now = frame_system::Pallet::<T>::block_number();
                 ensure!(now <= complaint.response_deadline, Error::<T>::ResponseDeadlinePassed);
 
-                complaint.response_cid = Some(response_cid);
+                complaint.response_cid = Some(response_cid.clone());
                 complaint.status = ComplaintStatus::Responded;
                 complaint.updated_at = now;
+
+                // Pin response_cid to IPFS (best-effort)
+                let cid_vec: alloc::vec::Vec<u8> = response_cid.into_inner();
+                let cid_size = cid_vec.len() as u64;
+                if let Err(e) = T::StoragePin::pin(
+                    respondent.clone(), b"arbitration", complaint_id, None, cid_vec, cid_size,
+                    pallet_storage_service::PinTier::Critical,
+                ) {
+                    log::warn!(target: "pallet-dispute-arbitration", "pin response_cid failed for complaint {}: {:?}", complaint_id, e);
+                }
 
                 Self::deposit_event(Event::ComplaintResponded { complaint_id, respondent });
                 Ok(())
@@ -763,9 +787,19 @@ pub mod pallet {
                 );
 
                 let now = frame_system::Pallet::<T>::block_number();
-                complaint.settlement_cid = Some(settlement_cid);
+                complaint.settlement_cid = Some(settlement_cid.clone());
                 complaint.status = ComplaintStatus::ResolvedSettlement;
                 complaint.updated_at = now;
+
+                // Pin settlement_cid to IPFS (best-effort)
+                let cid_vec: alloc::vec::Vec<u8> = settlement_cid.into_inner();
+                let cid_size = cid_vec.len() as u64;
+                if let Err(e) = T::StoragePin::pin(
+                    who.clone(), b"arbitration", complaint_id, None, cid_vec, cid_size,
+                    pallet_storage_service::PinTier::Critical,
+                ) {
+                    log::warn!(target: "pallet-dispute-arbitration", "pin settlement_cid failed for complaint {}: {:?}", complaint_id, e);
+                }
 
                 Self::refund_complaint_deposit(complaint_id, &complaint.complainant);
                 Self::decrement_active_count(&complaint.complainant);
@@ -852,7 +886,18 @@ pub mod pallet {
                 T::Router::apply_decision(complaint.domain, complaint.object_id, router_decision)?;
 
                 let now = frame_system::Pallet::<T>::block_number();
-                complaint.resolution_cid = Some(reason_cid);
+                complaint.resolution_cid = Some(reason_cid.clone());
+
+                // Pin resolution_cid to IPFS (best-effort, legal-grade data)
+                let cid_vec: alloc::vec::Vec<u8> = reason_cid.into_inner();
+                let cid_size = cid_vec.len() as u64;
+                if let Err(e) = T::StoragePin::pin(
+                    complaint.complainant.clone(), b"arbitration", complaint_id, None, cid_vec, cid_size,
+                    pallet_storage_service::PinTier::Critical,
+                ) {
+                    log::warn!(target: "pallet-dispute-arbitration", "pin resolution_cid failed for complaint {}: {:?}", complaint_id, e);
+                }
+
                 // decision: 0=ComplainantWin, 1=RespondentWin, >=2=Partial (mapped to ComplainantWin
                 // because partial rulings favor the complainant for deposit/appeal purposes)
                 complaint.status = match decision {
@@ -1211,7 +1256,7 @@ pub mod pallet {
 
         /// Appeal a resolved complaint (losing party only, within window)
         #[pallet::call_index(31)]
-        #[pallet::weight(<T as Config>::WeightInfo::arbitrate())]
+        #[pallet::weight(<T as Config>::WeightInfo::appeal())]
         pub fn appeal(
             origin: OriginFor<T>,
             complaint_id: u64,
@@ -1272,9 +1317,19 @@ pub mod pallet {
                 ComplaintDeposits::<T>::insert(complaint_id, appeal_deposit);
 
                 complaint.status = ComplaintStatus::Appealed;
-                complaint.appeal_cid = Some(appeal_cid);
+                complaint.appeal_cid = Some(appeal_cid.clone());
                 complaint.appellant = Some(who.clone());
                 complaint.updated_at = now;
+
+                // Pin appeal_cid to IPFS (best-effort)
+                let cid_vec: alloc::vec::Vec<u8> = appeal_cid.into_inner();
+                let cid_size = cid_vec.len() as u64;
+                if let Err(e) = T::StoragePin::pin(
+                    who.clone(), b"arbitration", complaint_id, None, cid_vec, cid_size,
+                    pallet_storage_service::PinTier::Critical,
+                ) {
+                    log::warn!(target: "pallet-dispute-arbitration", "pin appeal_cid failed for complaint {}: {:?}", complaint_id, e);
+                }
 
                 // Re-activate: appeal brings complaint back to active state
                 ActiveComplaintCount::<T>::mutate(&complaint.complainant, |c| *c = c.saturating_add(1));
@@ -1288,7 +1343,7 @@ pub mod pallet {
 
         /// Resolve an appeal (governance only, final decision)
         #[pallet::call_index(32)]
-        #[pallet::weight(<T as Config>::WeightInfo::arbitrate())]
+        #[pallet::weight(<T as Config>::WeightInfo::resolve_appeal())]
         pub fn resolve_appeal(
             origin: OriginFor<T>,
             complaint_id: u64,
@@ -1305,7 +1360,17 @@ pub mod pallet {
                     .ok_or(Error::<T>::InvalidState)?;
 
                 let now = frame_system::Pallet::<T>::block_number();
-                complaint.resolution_cid = Some(reason_cid);
+                complaint.resolution_cid = Some(reason_cid.clone());
+
+                // Pin appeal resolution_cid to IPFS (best-effort, legal-grade data)
+                let cid_vec: alloc::vec::Vec<u8> = reason_cid.into_inner();
+                let cid_size = cid_vec.len() as u64;
+                if let Err(e) = T::StoragePin::pin(
+                    complaint.complainant.clone(), b"arbitration", complaint_id, None, cid_vec, cid_size,
+                    pallet_storage_service::PinTier::Critical,
+                ) {
+                    log::warn!(target: "pallet-dispute-arbitration", "pin appeal resolution_cid failed for complaint {}: {:?}", complaint_id, e);
+                }
 
                 let appellant_is_respondent = appellant == complaint.respondent;
 

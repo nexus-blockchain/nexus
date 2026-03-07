@@ -23,6 +23,7 @@ sp-core = { workspace = true }
 sp-api = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true, optional = true }
+frame-benchmarking = { workspace = true, optional = true }
 pallet-trading-trc20-verifier = { workspace = true }
 pallet-trading-common = { workspace = true }
 
@@ -45,11 +46,13 @@ std = [
 	"sp-api/std",
 	"log/std",
 	"serde/std",
+	"frame-benchmarking?/std",
 	"pallet-trading-trc20-verifier/std",
 	"pallet-trading-common/std",
 	"pallet-balances/std",
 ]
 runtime-benchmarks = [
+	"frame-benchmarking/runtime-benchmarks",
 	"frame-support/runtime-benchmarks",
 	"frame-system/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",

@@ -120,7 +120,7 @@ pub struct CommissionRecord<AccountId, Balance, BlockNumber> {
 
 /// 会员返佣统计
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
-pub struct MemberCommissionStatsData<Balance: Default> {
+pub struct MemberCommissionStatsData<Balance> {
     pub total_earned: Balance,
     pub pending: Balance,
     pub withdrawn: Balance,
@@ -159,9 +159,10 @@ impl WithdrawalTierConfig {
 ///
 /// 决定佣金提现时复购比率的确定方式。
 /// 无论选择哪种模式，Governance 设定的全局最低复购比率始终生效。
-#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
 pub enum WithdrawalMode {
     /// 全额提现：不强制复购（Governance 底线仍生效）
+    #[default]
     FullWithdrawal,
     /// 固定比率：所有会员统一复购比率
     FixedRate { repurchase_rate: u16 },
@@ -169,12 +170,6 @@ pub enum WithdrawalMode {
     LevelBased,
     /// 会员自选：会员提现时指定复购比率，不低于 min_repurchase_rate
     MemberChoice { min_repurchase_rate: u16 },
-}
-
-impl Default for WithdrawalMode {
-    fn default() -> Self {
-        WithdrawalMode::FullWithdrawal
-    }
 }
 
 // ============================================================================
@@ -447,6 +442,7 @@ pub trait SingleLinePlanWriter {
     /// base_levels: (base_upline, base_downline)
     /// max_levels: (max_upline, max_downline)
     /// level_increment_threshold: u128 encoded threshold
+    #[allow(clippy::too_many_arguments)]
     fn set_single_line_config(
         entity_id: u64,
         upline_rate: u16,
@@ -567,7 +563,7 @@ pub struct TokenCommissionRecord<AccountId, TokenBalance, BlockNumber> {
 
 /// Token 佣金统计（含复购分流统计）
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
-pub struct MemberTokenCommissionStatsData<TokenBalance: Default> {
+pub struct MemberTokenCommissionStatsData<TokenBalance> {
     pub total_earned: TokenBalance,
     pub pending: TokenBalance,
     pub withdrawn: TokenBalance,
@@ -787,4 +783,209 @@ pub trait ReferralQueryProvider<AccountId, Balance> {
 impl<AccountId, Balance: Default> ReferralQueryProvider<AccountId, Balance> for () {
     fn referrer_total_earned(_: u64, _: &AccountId) -> Balance { Balance::default() }
     fn cap_config(_: u64) -> Option<(Balance, Balance)> { None }
+}
+
+// ============================================================================
+// 单元测试
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- CommissionModes ----
+
+    #[test]
+    fn modes_default_is_none() {
+        let m = CommissionModes::default();
+        assert_eq!(m.0, CommissionModes::NONE);
+        assert!(m.is_valid());
+    }
+
+    #[test]
+    fn modes_single_flag() {
+        let m = CommissionModes(CommissionModes::DIRECT_REWARD);
+        assert!(m.contains(CommissionModes::DIRECT_REWARD));
+        assert!(!m.contains(CommissionModes::MULTI_LEVEL));
+        assert!(m.is_valid());
+    }
+
+    #[test]
+    fn modes_combined_flags() {
+        let m = CommissionModes(
+            CommissionModes::DIRECT_REWARD
+                | CommissionModes::POOL_REWARD
+                | CommissionModes::CREATOR_REWARD,
+        );
+        assert!(m.contains(CommissionModes::DIRECT_REWARD));
+        assert!(m.contains(CommissionModes::POOL_REWARD));
+        assert!(m.contains(CommissionModes::CREATOR_REWARD));
+        assert!(!m.contains(CommissionModes::TEAM_PERFORMANCE));
+        assert!(m.is_valid());
+    }
+
+    #[test]
+    fn modes_all_valid_bits() {
+        let m = CommissionModes(CommissionModes::ALL_VALID);
+        assert!(m.is_valid());
+        // 11 个模式位全部包含
+        assert!(m.contains(CommissionModes::DIRECT_REWARD));
+        assert!(m.contains(CommissionModes::MULTI_LEVEL));
+        assert!(m.contains(CommissionModes::TEAM_PERFORMANCE));
+        assert!(m.contains(CommissionModes::LEVEL_DIFF));
+        assert!(m.contains(CommissionModes::FIXED_AMOUNT));
+        assert!(m.contains(CommissionModes::FIRST_ORDER));
+        assert!(m.contains(CommissionModes::REPEAT_PURCHASE));
+        assert!(m.contains(CommissionModes::SINGLE_LINE_UPLINE));
+        assert!(m.contains(CommissionModes::SINGLE_LINE_DOWNLINE));
+        assert!(m.contains(CommissionModes::POOL_REWARD));
+        assert!(m.contains(CommissionModes::CREATOR_REWARD));
+    }
+
+    #[test]
+    fn modes_invalid_high_bit() {
+        // 设置一个未定义的高位
+        let m = CommissionModes(0b1000_0000_0000);
+        assert!(!m.is_valid());
+    }
+
+    #[test]
+    fn modes_mixed_valid_and_invalid() {
+        let m = CommissionModes(CommissionModes::DIRECT_REWARD | 0b1000_0000_0000);
+        assert!(!m.is_valid());
+    }
+
+    #[test]
+    fn modes_insert_and_remove() {
+        let mut m = CommissionModes::default();
+        assert!(!m.contains(CommissionModes::MULTI_LEVEL));
+
+        m.insert(CommissionModes::MULTI_LEVEL);
+        assert!(m.contains(CommissionModes::MULTI_LEVEL));
+
+        m.insert(CommissionModes::FIRST_ORDER);
+        assert!(m.contains(CommissionModes::FIRST_ORDER));
+        assert!(m.contains(CommissionModes::MULTI_LEVEL));
+
+        m.remove(CommissionModes::MULTI_LEVEL);
+        assert!(!m.contains(CommissionModes::MULTI_LEVEL));
+        assert!(m.contains(CommissionModes::FIRST_ORDER));
+        assert!(m.is_valid());
+    }
+
+    // ---- WithdrawalTierConfig ----
+
+    #[test]
+    fn withdrawal_tier_default_is_valid() {
+        let tier = WithdrawalTierConfig::default();
+        assert_eq!(tier.withdrawal_rate, 10000);
+        assert_eq!(tier.repurchase_rate, 0);
+        assert!(tier.is_valid());
+    }
+
+    #[test]
+    fn withdrawal_tier_valid_split() {
+        let tier = WithdrawalTierConfig {
+            withdrawal_rate: 7000,
+            repurchase_rate: 3000,
+        };
+        assert!(tier.is_valid());
+    }
+
+    #[test]
+    fn withdrawal_tier_invalid_sum() {
+        let tier = WithdrawalTierConfig {
+            withdrawal_rate: 5000,
+            repurchase_rate: 4000,
+        };
+        assert!(!tier.is_valid());
+    }
+
+    #[test]
+    fn withdrawal_tier_overflow_saturates() {
+        // u16::MAX + u16::MAX 会 saturate 到 u16::MAX，不等于 10000
+        let tier = WithdrawalTierConfig {
+            withdrawal_rate: u16::MAX,
+            repurchase_rate: u16::MAX,
+        };
+        assert!(!tier.is_valid());
+    }
+
+    // ---- CommissionStatus default ----
+
+    #[test]
+    fn commission_status_default_is_pending() {
+        assert_eq!(CommissionStatus::default(), CommissionStatus::Pending);
+    }
+
+    // ---- WithdrawalMode default ----
+
+    #[test]
+    fn withdrawal_mode_default_is_full() {
+        assert_eq!(WithdrawalMode::default(), WithdrawalMode::FullWithdrawal);
+    }
+
+    // ---- 空实现 ----
+
+    #[test]
+    fn null_commission_plugin_returns_empty() {
+        let (outputs, remaining) =
+            <() as CommissionPlugin<u64, u128>>::calculate(1, &42, 1000, 500, CommissionModes::default(), false, 0);
+        assert!(outputs.is_empty());
+        assert_eq!(remaining, 500);
+    }
+
+    #[test]
+    fn null_token_commission_plugin_returns_empty() {
+        let (outputs, remaining) =
+            <() as TokenCommissionPlugin<u64, u128>>::calculate_token(1, &42, 1000, 500, CommissionModes::default(), false, 0);
+        assert!(outputs.is_empty());
+        assert_eq!(remaining, 500);
+    }
+
+    #[test]
+    fn null_commission_provider_noop() {
+        type P = NullCommissionProvider;
+        assert!(<P as CommissionProvider<u64, u128>>::process_commission(1, 1, 1, &42, 100, 50, 10).is_ok());
+        assert!(<P as CommissionProvider<u64, u128>>::cancel_commission(1).is_ok());
+        assert_eq!(<P as CommissionProvider<u64, u128>>::pending_commission(1, &42), 0u128);
+        assert_eq!(<P as CommissionProvider<u64, u128>>::shopping_balance(1, &42), 0u128);
+        assert!(<P as CommissionProvider<u64, u128>>::settle_order_commission(1).is_ok());
+    }
+
+    #[test]
+    fn null_entity_referrer_provider() {
+        assert_eq!(<() as EntityReferrerProvider<u64>>::entity_referrer(1), None);
+    }
+
+    #[test]
+    fn null_participation_guard_allows_all() {
+        assert!(<() as ParticipationGuard<u64>>::can_participate(1, &42));
+    }
+
+    #[test]
+    fn null_pool_balance_provider() {
+        assert_eq!(<() as PoolBalanceProvider<u128>>::pool_balance(1), 0);
+        assert!(<() as PoolBalanceProvider<u128>>::deduct_pool(1, 100).is_ok());
+    }
+
+    #[test]
+    fn null_token_pool_balance_provider() {
+        assert_eq!(<() as TokenPoolBalanceProvider<u128>>::token_pool_balance(1), 0);
+        assert!(<() as TokenPoolBalanceProvider<u128>>::deduct_token_pool(1, 100).is_ok());
+    }
+
+    #[test]
+    fn null_token_transfer_provider() {
+        assert_eq!(<() as TokenTransferProvider<u64, u128>>::token_balance_of(1, &42), 0);
+        assert!(<() as TokenTransferProvider<u64, u128>>::token_transfer(1, &42, &43, 100).is_ok());
+    }
+
+    #[test]
+    fn null_token_commission_provider() {
+        assert!(<NullTokenCommissionProvider as TokenCommissionProvider<u64, u128>>::process_token_commission(1, 1, 1, &42, 100, 50, 10).is_ok());
+        assert!(<NullTokenCommissionProvider as TokenCommissionProvider<u64, u128>>::cancel_token_commission(1).is_ok());
+        assert_eq!(<NullTokenCommissionProvider as TokenCommissionProvider<u64, u128>>::pending_token_commission(1, &42), 0u128);
+        assert_eq!(<NullTokenCommissionProvider as TokenCommissionProvider<u64, u128>>::token_platform_fee_rate(1), 0);
+    }
 }

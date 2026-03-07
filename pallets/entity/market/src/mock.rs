@@ -92,6 +92,10 @@ impl EntityProvider<u64> for MockEntityProvider {
         }
     }
     fn entity_owner(entity_id: u64) -> Option<u64> {
+        // 优先使用动态设置的 owner（benchmark 需要）
+        if let Some(owner) = ENTITY_OWNERS.with(|o| o.borrow().get(&entity_id).copied()) {
+            return Some(owner);
+        }
         match entity_id {
             1 => Some(ENTITY_OWNER),
             2 => Some(ENTITY_OWNER_2),
@@ -120,6 +124,7 @@ thread_local! {
     static TOKEN_ENABLED: RefCell<HashMap<u64, bool>> = RefCell::new(HashMap::new());
     static ENTITY_ACTIVE: RefCell<HashMap<u64, bool>> = RefCell::new(HashMap::new());
     static ENTITY_LOCKED: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
+    static ENTITY_OWNERS: RefCell<HashMap<u64, u64>> = RefCell::new(HashMap::new());
 }
 
 pub fn set_entity_active(entity_id: u64, active: bool) {
@@ -128,6 +133,10 @@ pub fn set_entity_active(entity_id: u64, active: bool) {
 
 pub fn set_entity_locked(entity_id: u64) {
     ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id));
+}
+
+pub fn set_entity_owner(entity_id: u64, owner: u64) {
+    ENTITY_OWNERS.with(|o| o.borrow_mut().insert(entity_id, owner));
 }
 
 pub fn set_token_balance(entity_id: u64, who: u64, amount: u128) {
@@ -271,6 +280,7 @@ impl pallet_entity_market::Config for Test {
     type MaxTradeHistoryPerUser = MaxTradeHistoryPerUser;
     type MaxOrderHistoryPerUser = MaxOrderHistoryPerUser;
     type PricingProvider = MockPricingProvider;
+    type WeightInfo = ();
 }
 
 // ==================== Mock PricingProvider ====================

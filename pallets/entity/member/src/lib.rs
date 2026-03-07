@@ -310,58 +310,167 @@ pub mod pallet {
         type OnMemberRemoved: pallet_entity_common::OnMemberRemoved<Self::AccountId>;
     }
 
+    /// 同步递归更新 team_size 的最大深度。
+    /// 超过此深度的祖先通过 on_idle 异步补偿。
+    const MAX_SYNC_DEPTH: u32 = 15;
+
+    /// team_size 异步补偿记录
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    pub struct TeamSizeUpdate<AccountId> {
+        /// 实体 ID
+        pub entity_id: u64,
+        /// 从此账户继续向上递归（此账户本身已更新，从其 referrer 开始）
+        pub start_account: AccountId,
+        /// +1（注册）或 -1（移除）
+        pub delta: i8,
+        /// 是否为有效直推
+        pub qualified: bool,
+        /// 已完成的同步深度（用于 indirect_referrals 判断）
+        pub completed_depth: u32,
+    }
+
+    /// team_size 异步补偿记录类型别名
+    pub type TeamSizeUpdateOf<T> = TeamSizeUpdate<<T as frame_system::Config>::AccountId>;
+
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
-    /// A4: on_idle 自动清理过期待审批会员
+    /// A4: on_idle 自动清理过期待审批会员 + 方案 D team_size 异步补偿
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
         fn on_idle(_n: BlockNumberFor<T>, remaining_weight: Weight) -> Weight {
-            let expiry = T::PendingMemberExpiry::get();
-            if expiry.is_zero() {
-                return Weight::zero();
-            }
-
-            let per_scan_weight = Weight::from_parts(10_000_000, 1_000);
-            let per_remove_weight = Weight::from_parts(50_000_000, 5_000);
-            let max_scan = 50u32;
-            let max_clean = 10u32;
-            let min_weight = per_scan_weight.saturating_mul(2);
-            if remaining_weight.any_lt(min_weight) {
-                return Weight::zero();
-            }
-
-            let now = <frame_system::Pallet<T>>::block_number();
-            let mut scanned = 0u32;
-            let mut cleaned = 0u32;
             let mut weight_used = Weight::zero();
 
-            let mut to_remove: alloc::vec::Vec<(u64, T::AccountId)> = alloc::vec::Vec::new();
-            for (entity_id, account, (_referrer, applied_at)) in PendingMembers::<T>::iter() {
-                scanned += 1;
-                weight_used = weight_used.saturating_add(per_scan_weight);
-                if scanned >= max_scan || cleaned >= max_clean {
-                    break;
-                }
-                if remaining_weight.any_lt(weight_used.saturating_add(per_remove_weight)) {
-                    break;
-                }
-                if now > applied_at.saturating_add(expiry) {
-                    to_remove.push((entity_id, account));
-                    cleaned += 1;
+            // ── Phase 1: 过期待审批会员清理 ──
+            let expiry = T::PendingMemberExpiry::get();
+            if !expiry.is_zero() {
+                let per_scan_weight = Weight::from_parts(10_000_000, 1_000);
+                let per_remove_weight = Weight::from_parts(50_000_000, 5_000);
+                let max_scan = 50u32;
+                let max_clean = 10u32;
+                let min_weight = per_scan_weight.saturating_mul(2);
+
+                if !remaining_weight.any_lt(min_weight) {
+                    let now = <frame_system::Pallet<T>>::block_number();
+                    let mut scanned = 0u32;
+                    let mut cleaned = 0u32;
+
+                    let mut to_remove: alloc::vec::Vec<(u64, T::AccountId)> = alloc::vec::Vec::new();
+                    for (entity_id, account, (_referrer, applied_at)) in PendingMembers::<T>::iter() {
+                        scanned += 1;
+                        weight_used = weight_used.saturating_add(per_scan_weight);
+                        if scanned >= max_scan || cleaned >= max_clean {
+                            break;
+                        }
+                        if remaining_weight.any_lt(weight_used.saturating_add(per_remove_weight)) {
+                            break;
+                        }
+                        if now > applied_at.saturating_add(expiry) {
+                            to_remove.push((entity_id, account));
+                            cleaned += 1;
+                        }
+                    }
+
+                    for (entity_id, account) in to_remove.iter() {
+                        PendingMembers::<T>::remove(entity_id, account);
+                        Self::deposit_event(Event::PendingMemberExpired {
+                            entity_id: *entity_id,
+                            account: account.clone(),
+                        });
+                        weight_used = weight_used.saturating_add(per_remove_weight);
+                    }
                 }
             }
 
-            for (entity_id, account) in to_remove.iter() {
-                PendingMembers::<T>::remove(entity_id, account);
-                Self::deposit_event(Event::PendingMemberExpired {
-                    entity_id: *entity_id,
-                    account: account.clone(),
-                });
-                weight_used = weight_used.saturating_add(per_remove_weight);
+            // ── Phase 2: team_size 异步补偿（方案 D）──
+            // 每步：1 次 storage read + 1 次 storage write
+            let per_step_weight = Weight::from_parts(30_000_000, 3_000);
+            // 读取游标 + 读取记录 + 可能写回/删除
+            let overhead_weight = Weight::from_parts(20_000_000, 2_000);
+
+            let processed_id = ProcessedPendingUpdateId::<T>::get();
+            let next_id = NextPendingUpdateId::<T>::get();
+
+            if processed_id < next_id {
+                weight_used = weight_used.saturating_add(overhead_weight);
+                if !remaining_weight.any_lt(weight_used) {
+                    if let Some(mut update) = PendingTeamSizeUpdates::<T>::get(processed_id) {
+                        use alloc::collections::BTreeSet;
+                        let mut visited = BTreeSet::new();
+                        // 从 start_account 的 referrer 开始（start_account 本身已在同步阶段处理）
+                        let mut current = EntityMembers::<T>::get(update.entity_id, &update.start_account)
+                            .and_then(|m| m.referrer);
+                        let mut depth = update.completed_depth;
+                        let batch_limit = depth.saturating_add(MAX_SYNC_DEPTH);
+                        let mut last_account = update.start_account.clone();
+
+                        while let Some(ref curr_account) = current {
+                            if depth >= batch_limit {
+                                break;
+                            }
+                            if visited.contains(curr_account) {
+                                // 循环检测，终止
+                                current = None;
+                                break;
+                            }
+                            let step_total = weight_used.saturating_add(per_step_weight);
+                            if remaining_weight.any_lt(step_total) {
+                                break;
+                            }
+                            visited.insert(curr_account.clone());
+                            last_account = curr_account.clone();
+
+                            EntityMembers::<T>::mutate(update.entity_id, curr_account, |maybe_member| {
+                                if let Some(ref mut m) = maybe_member {
+                                    if update.delta > 0 {
+                                        m.team_size = m.team_size.saturating_add(1);
+                                    } else {
+                                        m.team_size = m.team_size.saturating_sub(1);
+                                    }
+                                    // depth >= 1 始终成立（异步阶段 depth 从 completed_depth 开始，>= MAX_SYNC_DEPTH >= 15）
+                                    if update.delta > 0 {
+                                        m.indirect_referrals = m.indirect_referrals.saturating_add(1);
+                                        if update.qualified {
+                                            m.qualified_indirect_referrals = m.qualified_indirect_referrals.saturating_add(1);
+                                        }
+                                    } else {
+                                        m.indirect_referrals = m.indirect_referrals.saturating_sub(1);
+                                        if update.qualified {
+                                            m.qualified_indirect_referrals = m.qualified_indirect_referrals.saturating_sub(1);
+                                        }
+                                    }
+                                }
+                            });
+
+                            weight_used = weight_used.saturating_add(per_step_weight);
+                            current = EntityMembers::<T>::get(update.entity_id, curr_account)
+                                .and_then(|m| m.referrer);
+                            depth += 1;
+                        }
+
+                        if current.is_none() {
+                            // 完成：无更多祖先或循环终止
+                            PendingTeamSizeUpdates::<T>::remove(processed_id);
+                            ProcessedPendingUpdateId::<T>::put(processed_id.saturating_add(1));
+                            Self::deposit_event(Event::TeamSizeAsyncCompensationCompleted {
+                                update_id: processed_id,
+                                entity_id: update.entity_id,
+                                total_depth: depth,
+                            });
+                        } else {
+                            // 未完成：更新游标，下个 block 继续
+                            update.start_account = last_account;
+                            update.completed_depth = depth;
+                            PendingTeamSizeUpdates::<T>::insert(processed_id, update);
+                        }
+                    } else {
+                        // 记录不存在（不应发生），跳过
+                        ProcessedPendingUpdateId::<T>::put(processed_id.saturating_add(1));
+                    }
+                }
             }
 
             weight_used
@@ -492,6 +601,24 @@ pub mod pallet {
     /// S6: 封禁会员计数器 entity_id -> count
     #[pallet::storage]
     pub type BannedMemberCount<T: Config> = StorageMap<_, Blake2_128Concat, u64, u32, ValueQuery>;
+
+    // ============================================================================
+    // team_size 异步补偿存储（方案 D: 有界递归 + 溢出异步补偿）
+    // ============================================================================
+
+    /// 待处理的 team_size 异步补偿记录 update_id -> TeamSizeUpdate
+    #[pallet::storage]
+    pub type PendingTeamSizeUpdates<T: Config> = StorageMap<
+        _, Blake2_128Concat, u32, TeamSizeUpdateOf<T>,
+    >;
+
+    /// 下一个待分配的异步补偿 ID（自增）
+    #[pallet::storage]
+    pub type NextPendingUpdateId<T: Config> = StorageValue<_, u32, ValueQuery>;
+
+    /// 已处理到的异步补偿 ID 游标
+    #[pallet::storage]
+    pub type ProcessedPendingUpdateId<T: Config> = StorageValue<_, u32, ValueQuery>;
 
 
     // ============================================================================
@@ -705,6 +832,17 @@ pub mod pallet {
         GovernanceStatsPolicyUpdated {
             entity_id: u64,
             policy: MemberStatsPolicy,
+        },
+        /// G1: 治理路径切换升级规则系统开关
+        GovernanceUpgradeRuleSystemToggled {
+            entity_id: u64,
+            enabled: bool,
+        },
+        /// 方案 D: team_size 异步补偿完成
+        TeamSizeAsyncCompensationCompleted {
+            update_id: u32,
+            entity_id: u64,
+            total_depth: u32,
         },
     }
 
@@ -2296,6 +2434,7 @@ pub mod pallet {
 
         /// 更新团队人数 + 间接推荐人数（递归向上更新，entity 级别）
         /// H1 审计修复: 添加 visited 集合防止循环引用导致重复 +1
+        /// 方案 D: 有界递归（MAX_SYNC_DEPTH=15），溢出部分异步补偿
         ///
         /// depth=0 是直接推荐人（team_size++，直推已在 mutate_member_referral 中单独处理）
         /// depth>=1 是间接推荐人（team_size++ 且 indirect_referrals++）
@@ -2305,10 +2444,10 @@ pub mod pallet {
             let mut current = Some(account.clone());
             let mut depth = 0u32;
             let mut visited = BTreeSet::new();
-            const MAX_DEPTH: u32 = 100;
+            let mut last_account = account.clone();
 
             while let Some(ref curr_account) = current {
-                if depth >= MAX_DEPTH {
+                if depth >= MAX_SYNC_DEPTH {
                     break;
                 }
 
@@ -2316,11 +2455,11 @@ pub mod pallet {
                     break;
                 }
                 visited.insert(curr_account.clone());
+                last_account = curr_account.clone();
 
                 EntityMembers::<T>::mutate(entity_id, curr_account, |maybe_member| {
                     if let Some(ref mut m) = maybe_member {
                         m.team_size = m.team_size.saturating_add(1);
-                        // depth >= 1: 间接推荐人（depth=0 是直接推荐人，已单独计数）
                         if depth >= 1 {
                             m.indirect_referrals = m.indirect_referrals.saturating_add(1);
                             if qualified {
@@ -2334,9 +2473,23 @@ pub mod pallet {
                     .and_then(|m| m.referrer);
                 depth += 1;
             }
+
+            // 溢出：链深度超过 MAX_SYNC_DEPTH，入队异步补偿
+            if depth >= MAX_SYNC_DEPTH && current.is_some() {
+                let update_id = NextPendingUpdateId::<T>::get();
+                PendingTeamSizeUpdates::<T>::insert(update_id, TeamSizeUpdate {
+                    entity_id,
+                    start_account: last_account,
+                    delta: 1,
+                    qualified,
+                    completed_depth: depth,
+                });
+                NextPendingUpdateId::<T>::put(update_id.saturating_add(1));
+            }
         }
 
         /// 递减推荐链上所有祖先的 team_size（remove_member 时使用）
+        /// 方案 D: 有界递归（MAX_SYNC_DEPTH=15），溢出部分异步补偿
         ///
         /// `qualified`: 被移除会员是否为有效直推（仅 qualified=true 时递减 qualified_indirect_referrals）
         fn decrement_team_size_by_entity(entity_id: u64, account: &T::AccountId, qualified: bool) {
@@ -2344,17 +2497,18 @@ pub mod pallet {
 
             let mut current = Some(account.clone());
             let mut visited = BTreeSet::new();
-            const MAX_DEPTH: u32 = 100;
             let mut depth = 0u32;
+            let mut last_account = account.clone();
 
             while let Some(ref curr_account) = current {
-                if depth >= MAX_DEPTH {
+                if depth >= MAX_SYNC_DEPTH {
                     break;
                 }
                 if visited.contains(curr_account) {
                     break;
                 }
                 visited.insert(curr_account.clone());
+                last_account = curr_account.clone();
 
                 EntityMembers::<T>::mutate(entity_id, curr_account, |maybe_member| {
                     if let Some(ref mut m) = maybe_member {
@@ -2371,6 +2525,19 @@ pub mod pallet {
                 current = EntityMembers::<T>::get(entity_id, curr_account)
                     .and_then(|m| m.referrer);
                 depth += 1;
+            }
+
+            // 溢出：链深度超过 MAX_SYNC_DEPTH，入队异步补偿
+            if depth >= MAX_SYNC_DEPTH && current.is_some() {
+                let update_id = NextPendingUpdateId::<T>::get();
+                PendingTeamSizeUpdates::<T>::insert(update_id, TeamSizeUpdate {
+                    entity_id,
+                    start_account: last_account,
+                    delta: -1,
+                    qualified,
+                    completed_depth: depth,
+                });
+                NextPendingUpdateId::<T>::put(update_id.saturating_add(1));
             }
         }
 
@@ -3016,6 +3183,17 @@ pub mod pallet {
             Ok(())
         }
 
+        /// G1: 设置升级规则系统开关（治理调用）
+        pub fn governance_set_upgrade_rule_system_enabled(entity_id: u64, enabled: bool) -> DispatchResult {
+            ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
+            EntityUpgradeRules::<T>::try_mutate(entity_id, |maybe_system| -> DispatchResult {
+                let system = maybe_system.as_mut().ok_or(Error::<T>::UpgradeRuleSystemNotInitialized)?;
+                system.enabled = enabled;
+                Self::deposit_event(Event::GovernanceUpgradeRuleSystemToggled { entity_id, enabled });
+                Ok(())
+            })
+        }
+
         /// 获取自定义等级数量
         pub fn custom_level_count(shop_id: u64) -> u8 {
             let entity_id = match Self::resolve_entity_id(shop_id) {
@@ -3620,6 +3798,10 @@ impl<T: pallet::Config> MemberProvider<T::AccountId> for pallet::Pallet<T> {
 
     fn set_stats_policy(entity_id: u64, policy_bits: u8) -> sp_runtime::DispatchResult {
         pallet::Pallet::<T>::governance_set_stats_policy(entity_id, policy_bits)
+    }
+
+    fn set_upgrade_rule_system_enabled(entity_id: u64, enabled: bool) -> sp_runtime::DispatchResult {
+        pallet::Pallet::<T>::governance_set_upgrade_rule_system_enabled(entity_id, enabled)
     }
 
     fn get_direct_referral_accounts(entity_id: u64, account: &T::AccountId) -> alloc::vec::Vec<T::AccountId> {

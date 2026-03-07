@@ -201,6 +201,26 @@ impl ShopProvider<u64> for MockShopProvider {
         Ok(())
     }
 
+    fn revert_shop_rating(shop_id: u64, old_rating: u8, new_rating: Option<u8>) -> Result<(), DispatchError> {
+        if SHOP_RATING_FAIL.with(|f| *f.borrow()) {
+            return Err(DispatchError::Other("shop rating revert failed"));
+        }
+        SHOP_RATINGS.with(|r| {
+            let mut map = r.borrow_mut();
+            let entry = map.entry(shop_id).or_insert((0, 0));
+            entry.0 = entry.0.saturating_sub(old_rating as u64);
+            match new_rating {
+                Some(nr) => {
+                    entry.0 += nr as u64;
+                },
+                None => {
+                    entry.1 = entry.1.saturating_sub(1);
+                },
+            }
+        });
+        Ok(())
+    }
+
     fn deduct_operating_fund(_shop_id: u64, _amount: u128) -> Result<(), DispatchError> { Ok(()) }
     fn operating_balance(_shop_id: u64) -> u128 { 0 }
 }

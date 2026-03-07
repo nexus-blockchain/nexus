@@ -193,12 +193,12 @@ impl EntityType {
     /// 检查治理模式是否与实体类型匹配（仅为建议，不强制）
     /// 返回 true 表示推荐组合，false 表示不常见组合但仍允许
     pub fn suggests_governance(&self, mode: &GovernanceMode) -> bool {
-        match (self, mode) {
-            (Self::DAO, GovernanceMode::None) => false,
-            (Self::Fund, GovernanceMode::FullDAO) => false,
-            (Self::Enterprise, GovernanceMode::FullDAO) => false,
-            _ => true,
-        }
+        !matches!(
+            (self, mode),
+            (Self::DAO, GovernanceMode::None)
+                | (Self::Fund, GovernanceMode::FullDAO)
+                | (Self::Enterprise, GovernanceMode::FullDAO)
+        )
     }
     
     /// 默认转账限制模式
@@ -525,7 +525,7 @@ impl Default for MemberRegistrationPolicy {
 ///
 /// - 默认值 `0b00` = 使用有效推荐人数（排除复购赠与注册）
 /// - 置位对应标记 = 将复购赠与注册的账户也计入推荐人数
-#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
 pub struct MemberStatsPolicy(pub u8);
 
 impl MemberStatsPolicy {
@@ -549,12 +549,6 @@ impl MemberStatsPolicy {
     /// 间接推荐人数是否包含复购赠与
     pub fn include_repurchase_indirect(&self) -> bool {
         self.0 & Self::INCLUDE_REPURCHASE_INDIRECT != 0
-    }
-}
-
-impl Default for MemberStatsPolicy {
-    fn default() -> Self {
-        Self(0) // 默认：排除复购（安全默认值）
     }
 }
 
@@ -1172,7 +1166,15 @@ pub trait ShopProvider<AccountId> {
     
     /// 更新 Shop 评分（0-100 分制，与 `ReviewProvider::shop_average_rating` 同刻度）
     fn update_shop_rating(shop_id: u64, rating: u8) -> Result<(), DispatchError>;
-    
+
+    /// 回退 Shop 评分（评价删除/修改时调用，减去旧评分并可选追加新评分）
+    /// `old_rating`: 需要回退的旧评分 (1-5)
+    /// `new_rating`: 如果是修改评价，传入新评分；如果是删除评价，传 None
+    fn revert_shop_rating(shop_id: u64, old_rating: u8, new_rating: Option<u8>) -> Result<(), DispatchError> {
+        let _ = (shop_id, old_rating, new_rating);
+        Ok(())
+    }
+
     // ==================== 商品统计 ====================
     
     /// 增加 Shop 商品计数（创建商品时调用）
@@ -1599,6 +1601,7 @@ impl<AccountId: Default> ShopProvider<AccountId> for NullShopProvider {
     fn effective_status(_shop_id: u64) -> Option<EffectiveShopStatus> { None }
     fn update_shop_stats(_shop_id: u64, _sales_amount: u128, _order_count: u32) -> Result<(), DispatchError> { Ok(()) }
     fn update_shop_rating(_shop_id: u64, _rating: u8) -> Result<(), DispatchError> { Ok(()) }
+    fn revert_shop_rating(_shop_id: u64, _old_rating: u8, _new_rating: Option<u8>) -> Result<(), DispatchError> { Ok(()) }
     fn deduct_operating_fund(_shop_id: u64, _amount: u128) -> Result<(), DispatchError> { Ok(()) }
     fn operating_balance(_shop_id: u64) -> u128 { 0 }
 }
@@ -2654,6 +2657,12 @@ pub trait MemberProvider<AccountId> {
         Ok(())
     }
 
+    /// G1: 设置升级规则系统开关（治理调用）
+    fn set_upgrade_rule_system_enabled(entity_id: u64, enabled: bool) -> Result<(), DispatchError> {
+        let _ = (entity_id, enabled);
+        Ok(())
+    }
+
     // ==================== #6 补充: 治理封禁/移除接口 ====================
 
     /// 封禁会员（治理调用，禁止参与实体活动）
@@ -2697,6 +2706,7 @@ impl<AccountId> MemberProvider<AccountId> for NullMemberProvider {
     fn remove_custom_level(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
     fn set_registration_policy(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
     fn set_stats_policy(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
+    fn set_upgrade_rule_system_enabled(_: u64, _: bool) -> Result<(), DispatchError> { Ok(()) }
 }
 
 // ============================================================================
@@ -2764,6 +2774,9 @@ pub trait MemberWriteProvider<AccountId> {
     }
     fn set_stats_policy(entity_id: u64, policy_bits: u8) -> Result<(), DispatchError> {
         let _ = (entity_id, policy_bits); Ok(())
+    }
+    fn set_upgrade_rule_system_enabled(entity_id: u64, enabled: bool) -> Result<(), DispatchError> {
+        let _ = (entity_id, enabled); Ok(())
     }
     fn ban_member(entity_id: u64, account: &AccountId) -> Result<(), DispatchError> {
         let _ = (entity_id, account); Ok(())
@@ -2887,6 +2900,9 @@ impl<AccountId, T: MemberProvider<AccountId>> MemberWriteProvider<AccountId> for
     }
     fn set_stats_policy(entity_id: u64, policy_bits: u8) -> Result<(), DispatchError> {
         <T as MemberProvider<AccountId>>::set_stats_policy(entity_id, policy_bits)
+    }
+    fn set_upgrade_rule_system_enabled(entity_id: u64, enabled: bool) -> Result<(), DispatchError> {
+        <T as MemberProvider<AccountId>>::set_upgrade_rule_system_enabled(entity_id, enabled)
     }
     fn ban_member(entity_id: u64, account: &AccountId) -> Result<(), DispatchError> {
         <T as MemberProvider<AccountId>>::ban_member(entity_id, account)

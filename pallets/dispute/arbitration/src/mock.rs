@@ -155,6 +155,24 @@ impl pallet_trading_common::PricingProvider<Balance> for MockPricing {
     fn report_p2p_trade(_timestamp: u64, _price_usdt: u64, _nex_qty: u128) -> sp_runtime::DispatchResult { Ok(()) }
 }
 
+pub struct MockStoragePin;
+impl pallet_storage_service::StoragePin<u64> for MockStoragePin {
+    fn pin(
+        _owner: u64,
+        _domain: &[u8],
+        _subject_id: u64,
+        _entity_id: Option<u64>,
+        _cid: Vec<u8>,
+        _size_bytes: u64,
+        _tier: pallet_storage_service::PinTier,
+    ) -> sp_runtime::DispatchResult {
+        Ok(())
+    }
+    fn unpin(_owner: u64, _cid: Vec<u8>) -> sp_runtime::DispatchResult {
+        Ok(())
+    }
+}
+
 pub struct MockEvidenceChecker;
 impl pallet_dispute_arbitration::pallet::EvidenceExistenceChecker for MockEvidenceChecker {
     fn evidence_exists(_id: u64) -> bool {
@@ -200,6 +218,7 @@ impl pallet_dispute_arbitration::pallet::Config for Test {
     type ComplaintSlashBps = ComplaintSlashBps;
     type TreasuryAccount = TreasuryAccountId;
     type CidLockManager = MockCidLockManager;
+    type StoragePin = MockStoragePin;
     type ArchiveTtlBlocks = ArchiveTtlBlocks;
     type ComplaintArchiveDelayBlocks = ComplaintArchiveDelayBlocks;
     type ComplaintMaxLifetimeBlocks = ComplaintMaxLifetimeBlocks;

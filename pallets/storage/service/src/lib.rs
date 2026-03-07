@@ -284,7 +284,7 @@ pub mod pallet {
     type EntityFunding: crate::types::EntityFunding<Self::AccountId, BalanceOf<Self>>;
 }
 
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(2);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -424,6 +424,36 @@ pub mod pallet {
         BoundedVec<T::Hash, ConstU32<1000>>,
         ValueQuery,
     >;
+
+    /// CID 归档索引：u64 → T::Hash 映射
+    ///
+    /// 供 pallet-storage-lifecycle 的 StorageArchiver 使用。
+    /// lifecycle pallet 使用 u64 作为 data_id，此索引桥接到 T::Hash。
+    /// 在 do_request_pin 中写入，在 do_cleanup_single_cid 中移除。
+    #[pallet::storage]
+    pub type CidArchiveIndex<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,
+        T::Hash,
+        OptionQuery,
+    >;
+
+    /// CID 归档反向索引：T::Hash → u64
+    ///
+    /// 用于从 cid_hash 快速查找 archive_id。
+    #[pallet::storage]
+    pub type CidArchiveReverseIndex<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        T::Hash,
+        u64,
+        OptionQuery,
+    >;
+
+    /// 下一个 CID 归档 ID（自增计数器）
+    #[pallet::storage]
+    pub type NextCidArchiveId<T: Config> = StorageValue<_, u64, ValueQuery>;
 
     /// 函数级详细中文注释：活跃运营者索引（有界） ✅ P0-16新增
     /// 
@@ -1067,13 +1097,8 @@ pub mod pallet {
     // 公共IPFS网络简化管理存储（无隐私约束版本）
     // ============================================================================
 
-    /// 函数级详细中文注释：简化的节点统计信息（用于公共IPFS网络）
-    /// 
-    /// 记录每个Substrate节点的PIN统计和健康状态，用于智能PIN分配：
-    /// - total_pins：该节点当前Pin的CID总数
-    /// - capacity_gib：节点存储容量（GB）
-    /// - health_score：健康评分（0-100）
-    /// - last_check：最后一次健康检查的区块号
+    /// ⚠️ DEPRECATED (P2): 使用 OperatorPinStats 替代。保留用于存储迁移兼容。
+    /// 简化的节点统计信息（用于公共IPFS网络）
     #[pallet::storage]
     #[pallet::getter(fn simple_node_stats)]
     pub type SimpleNodeStatsMap<T: Config> = StorageMap<
@@ -1084,12 +1109,8 @@ pub mod pallet {
         ValueQuery,
     >;
 
-    /// 函数级详细中文注释：简化的PIN分配记录（公共IPFS网络）
-    /// 
-    /// 记录每个CID分配到哪些Substrate节点：
-    /// - Critical数据：3副本（3个节点）
-    /// - Standard数据：2副本（2个节点）
-    /// - Temporary数据：1副本（1个节点）
+    /// ⚠️ DEPRECATED (P2): 使用 PinAssignments + LayeredPinAssignments 替代。保留用于存储迁移兼容。
+    /// 简化的PIN分配记录（公共IPFS网络）
     #[pallet::storage]
     #[pallet::getter(fn simple_pin_assignments)]
     pub type SimplePinAssignments<T: Config> = StorageMap<
@@ -2036,6 +2057,12 @@ pub mod pallet {
             OwnerPinIndex::<T>::mutate(&caller, |cids| {
                 let _ = cids.try_push(cid_hash);
             });
+
+            // 写入 CID 归档索引（供 pallet-storage-lifecycle 使用）
+            let archive_id = NextCidArchiveId::<T>::get();
+            CidArchiveIndex::<T>::insert(archive_id, cid_hash);
+            CidArchiveReverseIndex::<T>::insert(cid_hash, archive_id);
+            NextCidArchiveId::<T>::put(archive_id.saturating_add(1));
 
             Self::deposit_event(Event::PinRequested(
                 cid_hash,
@@ -3058,7 +3085,19 @@ pub mod pallet {
         /// 
         /// 从PinAssignments存储中读取分配给该CID的运营者列表
         pub fn get_pin_operators(cid_hash: &T::Hash) -> Result<BoundedVec<T::AccountId, ConstU32<16>>, Error<T>> {
-            PinAssignments::<T>::get(cid_hash).ok_or(Error::<T>::NoOperatorsAssigned)
+            Self::get_cid_operators(cid_hash).ok_or(Error::<T>::NoOperatorsAssigned)
+        }
+
+        /// ✅ P2统一入口：优先从 LayeredPinAssignments 读取并展平，回退到 PinAssignments。
+        /// 所有需要获取 CID 运营者列表的地方都应使用此函数。
+        pub(crate) fn get_cid_operators(cid_hash: &T::Hash) -> Option<BoundedVec<T::AccountId, ConstU32<16>>> {
+            if let Some(layered) = LayeredPinAssignments::<T>::get(cid_hash) {
+                let mut all: alloc::vec::Vec<T::AccountId> = layered.core_operators.to_vec();
+                all.extend(layered.community_operators.to_vec());
+                BoundedVec::try_from(all).ok()
+            } else {
+                PinAssignments::<T>::get(cid_hash)
+            }
         }
         
         /// 函数级详细中文注释：健康巡检（检查Pin状态）
@@ -3244,7 +3283,7 @@ pub mod pallet {
 
         /// 用户从自己的存储资金账户提取资金。
         #[pallet::call_index(53)]
-        #[pallet::weight(T::WeightInfo::fund_user_account())]
+        #[pallet::weight(T::WeightInfo::withdraw_user_funding())]
         pub fn withdraw_user_funding(
             origin: OriginFor<T>,
             amount: BalanceOf<T>,
@@ -3277,7 +3316,7 @@ pub mod pallet {
         /// 降低 CID 的 Pin Tier（只允许向下降级：Critical→Standard→Temporary）。
         /// 降级后费率降低，差额不退还（避免套利）。
         #[pallet::call_index(54)]
-        #[pallet::weight(T::WeightInfo::request_pin())]
+        #[pallet::weight(T::WeightInfo::downgrade_pin_tier())]
         pub fn downgrade_pin_tier(
             origin: OriginFor<T>,
             cid: Vec<u8>,
@@ -3335,7 +3374,7 @@ pub mod pallet {
 
         /// 运营者对 slash 发起争议，记录链上供治理审查。
         #[pallet::call_index(55)]
-        #[pallet::weight(T::WeightInfo::report_probe())]
+        #[pallet::weight(T::WeightInfo::dispute_slash())]
         pub fn dispute_slash(
             origin: OriginFor<T>,
             amount: BalanceOf<T>,
@@ -4633,7 +4672,7 @@ pub mod pallet {
 
         /// OCW 上报 Pin 成功（unsigned，替代直写 PinStateOf）
         #[pallet::call_index(40)]
-        #[pallet::weight(T::WeightInfo::mark_pinned())]
+        #[pallet::weight(T::WeightInfo::ocw_mark_pinned())]
         pub fn ocw_mark_pinned(
             origin: OriginFor<T>,
             operator: T::AccountId,
@@ -4685,7 +4724,7 @@ pub mod pallet {
 
         /// OCW 上报 Pin 失败（unsigned）
         #[pallet::call_index(41)]
-        #[pallet::weight(T::WeightInfo::mark_pin_failed())]
+        #[pallet::weight(T::WeightInfo::ocw_mark_pin_failed())]
         pub fn ocw_mark_pin_failed(
             origin: OriginFor<T>,
             operator: T::AccountId,
@@ -4714,7 +4753,7 @@ pub mod pallet {
 
         /// OCW 提交分层Pin分配（unsigned，替代直写 LayeredPinAssignments/PinAssignments）
         #[pallet::call_index(42)]
-        #[pallet::weight(T::WeightInfo::mark_pinned())]
+        #[pallet::weight(T::WeightInfo::ocw_submit_assignments())]
         pub fn ocw_submit_assignments(
             origin: OriginFor<T>,
             cid_hash: T::Hash,
@@ -4768,7 +4807,7 @@ pub mod pallet {
 
         /// OCW 上报健康巡检结果（unsigned，替代直写 PinSuccess/OperatorPinStats）
         #[pallet::call_index(43)]
-        #[pallet::weight(T::WeightInfo::report_probe())]
+        #[pallet::weight(T::WeightInfo::ocw_report_health())]
         pub fn ocw_report_health(
             origin: OriginFor<T>,
             cid_hash: T::Hash,
@@ -4857,7 +4896,7 @@ pub mod pallet {
         /// - cid_hash: CID哈希
         /// - periods: 续期周期数（1-52）
         #[pallet::call_index(45)]
-        #[pallet::weight(T::WeightInfo::request_pin())]
+        #[pallet::weight(T::WeightInfo::renew_pin())]
         pub fn renew_pin(
             origin: OriginFor<T>,
             cid_hash: T::Hash,
@@ -4936,7 +4975,7 @@ pub mod pallet {
         /// - cid_hash: CID哈希
         /// - new_tier: 新的分层等级
         #[pallet::call_index(46)]
-        #[pallet::weight(T::WeightInfo::request_pin())]
+        #[pallet::weight(T::WeightInfo::upgrade_pin_tier())]
         pub fn upgrade_pin_tier(
             origin: OriginFor<T>,
             cid_hash: T::Hash,
@@ -5028,7 +5067,7 @@ pub mod pallet {
         /// 
         /// 允许运营者追加保证金以提高信誉或恢复被slash后的保证金水平。
         #[pallet::call_index(49)]
-        #[pallet::weight(T::WeightInfo::join_operator())]
+        #[pallet::weight(T::WeightInfo::top_up_bond())]
         pub fn top_up_bond(
             origin: OriginFor<T>,
             amount: BalanceOf<T>,
@@ -5056,7 +5095,7 @@ pub mod pallet {
         /// 
         /// 允许运营者取回多余保证金，但不能低于最低保证金要求。
         #[pallet::call_index(50)]
-        #[pallet::weight(T::WeightInfo::leave_operator())]
+        #[pallet::weight(T::WeightInfo::reduce_bond())]
         pub fn reduce_bond(
             origin: OriginFor<T>,
             amount: BalanceOf<T>,
@@ -5092,7 +5131,7 @@ pub mod pallet {
         /// - 每个CID独立处理，失败的跳过不影响其他
         /// - 最多一次处理20个CID
         #[pallet::call_index(48)]
-        #[pallet::weight(T::WeightInfo::request_unpin().saturating_mul(cids.len() as u64))]
+        #[pallet::weight(T::WeightInfo::batch_unpin())]
         pub fn batch_unpin(
             origin: OriginFor<T>,
             cids: Vec<Vec<u8>>,
@@ -5134,7 +5173,7 @@ pub mod pallet {
         /// 任何人可调用，每次最多清理 max_count 个过期锁。
         /// 覆盖 CID 仍存活但锁已过期的场景（CID 被删除时由 cleanup 路径自动清理）。
         #[pallet::call_index(51)]
-        #[pallet::weight(T::WeightInfo::request_unpin().saturating_mul(*max_count as u64))]
+        #[pallet::weight(T::WeightInfo::cleanup_expired_locks())]
         pub fn cleanup_expired_locks(
             origin: OriginFor<T>,
             max_count: u32,
@@ -5196,7 +5235,7 @@ pub mod pallet {
         /// - 每次最多迁移 max_pins 个CID（避免区块超重）
         /// - `to` 运营者必须为Active状态
         #[pallet::call_index(47)]
-        #[pallet::weight(T::WeightInfo::distribute_to_operators())]
+        #[pallet::weight(T::WeightInfo::migrate_operator_pins())]
         pub fn migrate_operator_pins(
             origin: OriginFor<T>,
             from: T::AccountId,
@@ -5292,7 +5331,7 @@ pub mod pallet {
         /// 任何签名账户都可以向 IpfsPoolAccount 转账充值。
         /// 如果充值后余额仍低于阈值（100 NEX），发出余额预警事件。
         #[pallet::call_index(44)]
-        #[pallet::weight(T::WeightInfo::fund_user_account())]
+        #[pallet::weight(T::WeightInfo::fund_ipfs_pool())]
         pub fn fund_ipfs_pool(
             origin: OriginFor<T>,
             amount: BalanceOf<T>,
@@ -5623,7 +5662,7 @@ pub mod pallet {
                 // 检查节点负载，发出告警
                 let capacity_usage = Self::calculate_simple_capacity_usage(&local_node_account);
                 if capacity_usage > 80 {
-                    let stats = SimpleNodeStatsMap::<T>::get(&local_node_account);
+                    let stats = OperatorPinStats::<T>::get(&local_node_account);
                     Self::deposit_event(Event::SimpleNodeLoadWarning {
                         node: local_node_account.clone(),
                         capacity_usage: capacity_usage as u8,
@@ -6470,6 +6509,10 @@ pub mod pallet {
             Self::cleanup_domain_pins(cid_hash);
             let _ = PinSuccess::<T>::clear_prefix(cid_hash, u32::MAX, None);
             CidLocks::<T>::remove(cid_hash);
+            // 清理 CID 归档索引
+            if let Some(archive_id) = CidArchiveReverseIndex::<T>::take(cid_hash) {
+                CidArchiveIndex::<T>::remove(archive_id);
+            }
 
             let reason = CidUnpinReason::<T>::take(cid_hash)
                 .unwrap_or(UnpinReason::InsufficientFunds);
@@ -6837,8 +6880,15 @@ impl<T: Config> Pallet<T> {
             estimated_size,
         )?;
         
-        // 4. 记录分配
-        SimplePinAssignments::<T>::insert(&cid_hash, selected_nodes.clone());
+        // 4. 记录分配 ✅ P2统一：写入 PinAssignments + LayeredPinAssignments，不再写 SimplePinAssignments
+        let ops_16: BoundedVec<T::AccountId, ConstU32<16>> = BoundedVec::truncate_from(selected_nodes.to_vec());
+        PinAssignments::<T>::insert(&cid_hash, ops_16);
+        // 所有节点归入 community（简化分配不区分 core/community）
+        let empty_core: BoundedVec<T::AccountId, ConstU32<8>> = BoundedVec::default();
+        LayeredPinAssignments::<T>::insert(&cid_hash, LayeredPinAssignment {
+            core_operators: empty_core,
+            community_operators: selected_nodes.clone(),
+        });
         
         // 5. 更新节点统计（增加PIN计数）
         for node in selected_nodes.iter() {
@@ -6874,19 +6924,7 @@ impl<T: Config> Pallet<T> {
     
     /// 函数级详细中文注释：选择最优IPFS节点（简化评分）
     /// 
-    /// 评分算法：
-    /// score = capacity_usage(50%) + (100 - health_score)(50%)
-    /// 
-    /// 容量检查：
-    /// - 容量使用率 > 90% 的节点自动跳过
-    /// 
-    /// 参数：
-    /// - nodes: 候选节点列表
-    /// - count: 需要选择的节点数
-    /// - estimated_size: 估算的文件大小
-    /// 
-    /// 返回：
-    /// - 选中的节点列表（BoundedVec）
+    /// ✅ P2统一：使用 OperatorPinStats 替代 SimpleNodeStatsMap
     fn select_best_ipfs_nodes(
         nodes: &alloc::vec::Vec<T::AccountId>,
         count: u32,
@@ -6895,7 +6933,7 @@ impl<T: Config> Pallet<T> {
         let mut node_scores: alloc::vec::Vec<(T::AccountId, u32)> = alloc::vec::Vec::new();
         
         for node in nodes {
-            let stats = SimpleNodeStatsMap::<T>::get(node);
+            let stats = OperatorPinStats::<T>::get(node);
             
             // 计算容量使用率（简化估算）
             let capacity_usage = Self::calculate_simple_capacity_usage(node);
@@ -6963,21 +7001,14 @@ impl<T: Config> Pallet<T> {
     
     /// 函数级详细中文注释：获取分配给本节点的CID列表（OCW使用）
     /// 
-    /// OCW在健康检查时调用，获取需要检查的CID列表
-    /// 
-    /// 参数：
-    /// - node: 本节点账户
-    /// - limit: 最多返回多少个CID
-    /// 
-    /// 返回：
-    /// - (cid_hash, plaintext_cid) 列表
+    /// ✅ P2统一：使用 PinAssignments 替代 SimplePinAssignments
     pub fn get_my_assigned_cids(
         node: &T::AccountId,
         limit: u32,
     ) -> alloc::vec::Vec<(T::Hash, alloc::vec::Vec<u8>)> {
         let mut result = alloc::vec::Vec::new();
         
-        for (cid_hash, assigned_nodes) in SimplePinAssignments::<T>::iter() {
+        for (cid_hash, assigned_nodes) in PinAssignments::<T>::iter() {
             if assigned_nodes.contains(node) {
                 if let Some(cid) = CidRegistry::<T>::get(&cid_hash) {
                     result.push((cid_hash, cid.to_vec()));

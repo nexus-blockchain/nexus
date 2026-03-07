@@ -31,4 +31,6 @@ frame_benchmarking::define_benchmarks!(
 	[pallet_timestamp, Timestamp]
 	[pallet_sudo, Sudo]
 	[pallet_template, Template]
+	[pallet_entity_product, EntityProduct]
+	[pallet_nex_market, NexMarket]
 );

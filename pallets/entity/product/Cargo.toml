@@ -17,6 +17,7 @@ frame-system = { workspace = true }
 sp-runtime = { workspace = true }
 sp-std = { workspace = true }
 log = { workspace = true }
+frame-benchmarking = { workspace = true, optional = true }
 
 # 内部依赖
 pallet-entity-common = { path = "../common", default-features = false }
@@ -39,8 +40,10 @@ std = [
     "pallet-entity-common/std",
     "pallet-storage-service/std",
     "log/std",
+    "frame-benchmarking?/std",
 ]
 runtime-benchmarks = [
+    "frame-benchmarking/runtime-benchmarks",
     "frame-support/runtime-benchmarks",
     "frame-system/runtime-benchmarks",
     "sp-runtime/runtime-benchmarks",

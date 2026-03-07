@@ -136,7 +136,7 @@ impl pallet_entity_common::ProductProvider<u64, u64> for MockProductProvider {
 
 pub struct MockStoragePin;
 impl StoragePin<u64> for MockStoragePin {
-    fn pin(_owner: u64, _domain: &[u8], _subject_id: u64, _entity_id: Option<u64>, _cid: Vec<u8>, _tier: PinTier) -> Result<(), sp_runtime::DispatchError> {
+    fn pin(_owner: u64, _domain: &[u8], _subject_id: u64, _entity_id: Option<u64>, _cid: Vec<u8>, _size_bytes: u64, _tier: PinTier) -> Result<(), sp_runtime::DispatchError> {
         Ok(())
     }
     fn unpin(_owner: u64, _cid: Vec<u8>) -> Result<(), sp_runtime::DispatchError> {
@@ -172,6 +172,7 @@ impl pallet_entity_shop::Config for Test {
     type MaxShopsPerEntity = MaxShopsPerEntity;
     type StoragePin = MockStoragePin;
     type ProductProvider = MockProductProvider;
+    type WeightInfo = ();
 }
 
 // Build genesis storage according to the mock runtime.

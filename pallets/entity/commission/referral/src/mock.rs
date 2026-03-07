@@ -224,6 +224,7 @@ impl pallet_commission_referral::Config for Test {
     type MemberProvider = MockMemberProvider;
     type EntityProvider = MockEntityProvider;
     type MaxTotalReferralRate = MaxTotalReferralRate;
+    type WeightInfo = ();
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

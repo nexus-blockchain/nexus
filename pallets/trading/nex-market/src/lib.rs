@@ -32,6 +32,9 @@ mod tests;
 pub mod weights;
 pub mod runtime_api;
 
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
@@ -454,7 +457,12 @@ pub mod pallet {
         type MaxBuyOrders: Get<u32>;
     }
 
+    /// 当前存储版本
+    const STORAGE_VERSION: frame_support::traits::StorageVersion =
+        frame_support::traits::StorageVersion::new(1);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     // ==================== Genesis ====================

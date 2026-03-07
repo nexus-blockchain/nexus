@@ -23,6 +23,12 @@ use alloc::vec::Vec;
 
 pub use pallet::*;
 
+pub mod weights;
+pub use weights::WeightInfo;
+
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+
 #[cfg(test)]
 mod mock;
 
@@ -421,6 +427,9 @@ pub mod pallet {
 
         /// NEX/USDT 定价接口（用于 Token→NEX→USDT 间接换算）
         type PricingProvider: PricingProvider;
+
+        /// Weight information for extrinsics in this pallet
+        type WeightInfo: crate::weights::WeightInfo;
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -520,6 +529,46 @@ pub mod pallet {
 
             // 审计修复 M1-R9: 返回实际消耗的权重（包含所有扫描 + 清理的开销）
             consumed_weight
+        }
+
+        /// 存储迁移框架 — 检查版本并执行必要的迁移
+        ///
+        /// 当前版本: v0 (初始版本)
+        /// 未来升级时在此添加 v0→v1, v1→v2 等迁移逻辑
+        fn on_runtime_upgrade() -> Weight {
+            let on_chain = Pallet::<T>::on_chain_storage_version();
+            let current = Pallet::<T>::in_code_storage_version();
+
+            if on_chain == current {
+                // 版本一致，无需迁移
+                return Weight::zero();
+            }
+
+            log::info!(
+                target: "pallet-entity-market",
+                "Running storage migration from {:?} to {:?}",
+                on_chain,
+                current,
+            );
+
+            let mut weight = T::DbWeight::get().reads(1); // on_chain_storage_version read
+
+            // === 未来迁移占位 ===
+            // if on_chain < 1 {
+            //     weight = weight.saturating_add(migrations::v1::migrate::<T>());
+            // }
+
+            // 更新链上版本号
+            current.put::<Pallet<T>>();
+            weight = weight.saturating_add(T::DbWeight::get().writes(1));
+
+            log::info!(
+                target: "pallet-entity-market",
+                "Storage migration completed to version {:?}",
+                current,
+            );
+
+            weight
         }
 
         /// P6: Config 常量合理性校验
@@ -950,7 +999,7 @@ pub mod pallet {
         /// - `token_amount`: 出售的 Token 数量
         /// - `price`: 每个 Token 的 NEX 价格
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::place_sell_order())]
         pub fn place_sell_order(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1031,7 +1080,7 @@ pub mod pallet {
         /// - `token_amount`: 想购买的 Token 数量
         /// - `price`: 每个 Token 愿意支付的 NEX 价格
         #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::place_buy_order())]
         pub fn place_buy_order(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1123,7 +1172,7 @@ pub mod pallet {
         /// - `order_id`: 要吃的订单 ID
         /// - `amount`: 成交数量（None = 全部）
         #[pallet::call_index(2)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::take_order())]
         pub fn take_order(
             origin: OriginFor<T>,
             order_id: u64,
@@ -1260,7 +1309,7 @@ pub mod pallet {
 
         /// 取消订单
         #[pallet::call_index(3)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::cancel_order())]
         pub fn cancel_order(origin: OriginFor<T>, order_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -1320,7 +1369,7 @@ pub mod pallet {
 
         /// 配置实体市场
         #[pallet::call_index(4)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 3_000))]
+        #[pallet::weight(T::WeightInfo::configure_market())]
         pub fn configure_market(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1373,7 +1422,7 @@ pub mod pallet {
         /// - `circuit_breaker_threshold`: 熔断阈值（基点，5000 = 50%）
         /// - `min_trades_for_twap`: 启用 TWAP 的最小成交数
         #[pallet::call_index(15)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 3_000))]
+        #[pallet::weight(T::WeightInfo::configure_price_protection())]
         pub fn configure_price_protection(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1418,7 +1467,7 @@ pub mod pallet {
 
         /// 手动解除熔断（实体所有者调用，仅在熔断时间到期后）
         #[pallet::call_index(16)]
-        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+        #[pallet::weight(T::WeightInfo::lift_circuit_breaker())]
         pub fn lift_circuit_breaker(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1462,7 +1511,7 @@ pub mod pallet {
         /// 一旦成交量达到 `min_trades_for_twap`，将自动切换到 TWAP 价格。
         /// 仅在市场无真实成交时可调用（一次性设置），防止覆盖真实价格数据。
         #[pallet::call_index(17)]
-        #[pallet::weight(Weight::from_parts(30_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_initial_price())]
         pub fn set_initial_price(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1536,7 +1585,7 @@ pub mod pallet {
         /// - `token_amount`: 想购买的 Token 数量
         /// - `max_cost`: 最大愿意支付的 NEX 总额（滑点保护）
         #[pallet::call_index(12)]
-        #[pallet::weight(Weight::from_parts(120_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::market_buy())]
         pub fn market_buy(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1602,7 +1651,7 @@ pub mod pallet {
         /// - `token_amount`: 想出售的 Token 数量
         /// - `min_receive`: 最低愿意收到的 NEX 总额（滑点保护）
         #[pallet::call_index(13)]
-        #[pallet::weight(Weight::from_parts(120_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::market_sell())]
         pub fn market_sell(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1671,7 +1720,7 @@ pub mod pallet {
 
         /// Root 强制取消订单
         #[pallet::call_index(23)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::force_cancel_order())]
         pub fn force_cancel_order(
             origin: OriginFor<T>,
             order_id: u64,
@@ -1724,7 +1773,7 @@ pub mod pallet {
 
         /// 暂停实体市场（实体所有者）
         #[pallet::call_index(26)]
-        #[pallet::weight(Weight::from_parts(15_000_000, 2_000))]
+        #[pallet::weight(T::WeightInfo::pause_market())]
         pub fn pause_market(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1748,7 +1797,7 @@ pub mod pallet {
 
         /// 恢复实体市场（实体所有者）
         #[pallet::call_index(27)]
-        #[pallet::weight(Weight::from_parts(15_000_000, 2_000))]
+        #[pallet::weight(T::WeightInfo::resume_market())]
         pub fn resume_market(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1774,7 +1823,7 @@ pub mod pallet {
         /// 批量取消用户自己的订单
         // 审计修复 M3-R9: 使用 BoundedVec 在解码阶段即限制长度
         #[pallet::call_index(28)]
-        #[pallet::weight(Weight::from_parts(30_000_000u64.saturating_mul(order_ids.len() as u64), 5_000))]
+        #[pallet::weight(T::WeightInfo::batch_cancel_orders(order_ids.len() as u32))]
         pub fn batch_cancel_orders(
             origin: OriginFor<T>,
             order_ids: BoundedVec<u64, ConstU32<50>>,
@@ -1845,7 +1894,7 @@ pub mod pallet {
 
         /// 清理过期订单（带激励，任何人可调用）
         #[pallet::call_index(29)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 10_000))]
+        #[pallet::weight(T::WeightInfo::cleanup_expired_orders())]
         pub fn cleanup_expired_orders(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1926,7 +1975,7 @@ pub mod pallet {
 
         /// 修改挂单价格/数量（仅限 Open 状态）
         #[pallet::call_index(30)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::modify_order())]
         pub fn modify_order(
             origin: OriginFor<T>,
             order_id: u64,
@@ -2008,7 +2057,7 @@ pub mod pallet {
 
         /// Root 切换全局市场暂停
         #[pallet::call_index(32)]
-        #[pallet::weight(Weight::from_parts(10_000_000, 1_000))]
+        #[pallet::weight(T::WeightInfo::global_market_pause())]
         pub fn global_market_pause(
             origin: OriginFor<T>,
             paused: bool,
@@ -2021,7 +2070,7 @@ pub mod pallet {
 
         /// P4: 设置实体市场 KYC 要求
         #[pallet::call_index(33)]
-        #[pallet::weight(Weight::from_parts(15_000_000, 2_000))]
+        #[pallet::weight(T::WeightInfo::set_kyc_requirement())]
         pub fn set_kyc_requirement(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -2040,7 +2089,7 @@ pub mod pallet {
 
         /// P6: 关闭市场（永久关闭，强制取消所有订单并退还资产）
         #[pallet::call_index(34)]
-        #[pallet::weight(Weight::from_parts(500_000_000, 50_000))]
+        #[pallet::weight(T::WeightInfo::close_market())]
         pub fn close_market(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -2062,7 +2111,7 @@ pub mod pallet {
 
         /// P7: 取消用户在指定实体的所有订单
         #[pallet::call_index(35)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 20_000))]
+        #[pallet::weight(T::WeightInfo::cancel_all_entity_orders())]
         pub fn cancel_all_entity_orders(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -2125,7 +2174,7 @@ pub mod pallet {
 
         /// P8: 治理配置市场（Root 或治理调用）
         #[pallet::call_index(36)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 3_000))]
+        #[pallet::weight(T::WeightInfo::governance_configure_market())]
         pub fn governance_configure_market(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -2160,7 +2209,7 @@ pub mod pallet {
 
         /// P10: Root 强制关闭实体市场（取消所有订单）
         #[pallet::call_index(37)]
-        #[pallet::weight(Weight::from_parts(500_000_000, 50_000))]
+        #[pallet::weight(T::WeightInfo::force_close_market())]
         pub fn force_close_market(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -2178,7 +2227,7 @@ pub mod pallet {
 
         /// P15: IOC 订单（立即成交或取消）
         #[pallet::call_index(38)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::place_ioc_order())]
         pub fn place_ioc_order(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -2254,7 +2303,7 @@ pub mod pallet {
 
         /// P15: FOK 订单（全部成交或全部取消）
         #[pallet::call_index(39)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::place_fok_order())]
         pub fn place_fok_order(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -2333,7 +2382,7 @@ pub mod pallet {
 
         /// P15: Post-Only 订单（仅挂单，不立即撮合）
         #[pallet::call_index(40)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::place_post_only_order())]
         pub fn place_post_only_order(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -2412,7 +2461,7 @@ pub mod pallet {
 
         /// 审计修复 H3-R10: 治理级价格保护配置（Root 调用，绕过 owner 检查）
         #[pallet::call_index(41)]
-        #[pallet::weight(Weight::from_parts(25_000_000, 3_000))]
+        #[pallet::weight(T::WeightInfo::governance_configure_price_protection())]
         pub fn governance_configure_price_protection(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -2449,7 +2498,7 @@ pub mod pallet {
 
         /// 审计修复 H4-R10: Root 强制解除熔断（无需等待到期）
         #[pallet::call_index(42)]
-        #[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+        #[pallet::weight(T::WeightInfo::force_lift_circuit_breaker())]
         pub fn force_lift_circuit_breaker(
             origin: OriginFor<T>,
             entity_id: u64,

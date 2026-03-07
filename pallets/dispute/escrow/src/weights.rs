@@ -9,7 +9,7 @@ pub trait WeightInfo {
     fn lock() -> Weight;
     fn release() -> Weight;
     fn refund() -> Weight;
-    fn lock_with_nonce() -> Weight;
+    // lock_with_nonce 已移除（call_index 3 删除）
     fn release_split() -> Weight;
     fn dispute() -> Weight;
     fn apply_decision_release() -> Weight;
@@ -22,10 +22,8 @@ pub trait WeightInfo {
     fn force_release() -> Weight;
     /// 🆕 F6: 管理员应急强制退款
     fn force_refund() -> Weight;
-    /// 🆕 F1: 部分退款
-    fn refund_partial() -> Weight;
-    /// 🆕 F3: 部分释放
-    fn release_partial() -> Weight;
+    // refund_partial 已移除（call_index 14 删除）
+    // release_partial 已移除（call_index 15 删除）
     /// 🆕 F8: 清理已关闭托管
     fn cleanup_closed() -> Weight;
 }
@@ -49,12 +47,6 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
         Weight::from_parts(60_000_000, 4_000)
             .saturating_add(T::DbWeight::get().reads(4))
             .saturating_add(T::DbWeight::get().writes(3))
-    }
-    fn lock_with_nonce() -> Weight {
-        // reads: Paused + LockNonces + LockStateOf(ext+trait) + Locked + PayerOf
-        Weight::from_parts(55_000_000, 4_500)
-            .saturating_add(T::DbWeight::get().reads(6))
-            .saturating_add(T::DbWeight::get().writes(5))
     }
     fn release_split() -> Weight {
         Weight::from_parts(100_000_000, 5_000)
@@ -108,17 +100,6 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(3))
             .saturating_add(T::DbWeight::get().writes(4))
     }
-    fn refund_partial() -> Weight {
-        // reads: Paused + LockStateOf(extrinsic) + LockStateOf(trait) + Locked + Currency
-        Weight::from_parts(60_000_000, 4_000)
-            .saturating_add(T::DbWeight::get().reads(4))
-            .saturating_add(T::DbWeight::get().writes(3))
-    }
-    fn release_partial() -> Weight {
-        Weight::from_parts(60_000_000, 4_000)
-            .saturating_add(T::DbWeight::get().reads(4))
-            .saturating_add(T::DbWeight::get().writes(3))
-    }
     fn cleanup_closed() -> Weight {
         // M2-R2: +reads/writes for ExpiringAt cleanup
         Weight::from_parts(50_000_000, 8_000)
@@ -132,7 +113,6 @@ impl WeightInfo for () {
     fn lock() -> Weight { Weight::from_parts(50_000_000, 0) }
     fn release() -> Weight { Weight::from_parts(60_000_000, 0) }
     fn refund() -> Weight { Weight::from_parts(60_000_000, 0) }
-    fn lock_with_nonce() -> Weight { Weight::from_parts(55_000_000, 0) }
     fn release_split() -> Weight { Weight::from_parts(100_000_000, 0) }
     fn dispute() -> Weight { Weight::from_parts(50_000_000, 0) }
     fn apply_decision_release() -> Weight { Weight::from_parts(70_000_000, 0) }
@@ -143,7 +123,5 @@ impl WeightInfo for () {
     fn cancel_expiry() -> Weight { Weight::from_parts(40_000_000, 0) }
     fn force_release() -> Weight { Weight::from_parts(70_000_000, 0) }
     fn force_refund() -> Weight { Weight::from_parts(70_000_000, 0) }
-    fn refund_partial() -> Weight { Weight::from_parts(60_000_000, 0) }
-    fn release_partial() -> Weight { Weight::from_parts(60_000_000, 0) }
     fn cleanup_closed() -> Weight { Weight::from_parts(50_000_000, 0) }
 }

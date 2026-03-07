@@ -33,6 +33,9 @@ mod mock;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
@@ -240,6 +243,10 @@ pub mod pallet {
         #[pallet::constant]
         type PendingKycTimeout: Get<BlockNumberFor<Self>>;
 
+        /// 单个 Provider 最多可被授权的 Entity 数量
+        #[pallet::constant]
+        type MaxAuthorizedEntities: Get<u32>;
+
         type OnKycStatusChange: pallet_entity_common::OnKycStatusChange<Self::AccountId>;
     }
 
@@ -327,6 +334,16 @@ pub mod pallet {
         Blake2_128Concat,
         T::AccountId,
         KycUpgradeRequestOf<T>,
+    >;
+
+    /// Provider 被授权的 Entity 列表（反向索引，用于 remove_provider 有界清理）
+    #[pallet::storage]
+    pub type ProviderAuthorizedEntities<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        T::AccountId,
+        BoundedVec<u64, T::MaxAuthorizedEntities>,
+        ValueQuery,
     >;
 
     // ==================== 事件 ====================
@@ -871,12 +888,9 @@ pub mod pallet {
             Providers::<T>::remove(&provider_account);
             ProviderCount::<T>::mutate(|count| *count = count.saturating_sub(1));
 
-            let orphaned_entities: Vec<u64> = EntityAuthorizedProviders::<T>::iter()
-                .filter_map(|(eid, prov, ())| {
-                    if prov == provider_account { Some(eid) } else { None }
-                })
-                .collect();
-            for eid in orphaned_entities {
+            // 使用反向索引有界清理，避免全表扫描
+            let entities = ProviderAuthorizedEntities::<T>::take(&provider_account);
+            for eid in entities.iter() {
                 EntityAuthorizedProviders::<T>::remove(eid, &provider_account);
             }
 
@@ -1321,7 +1335,7 @@ pub mod pallet {
                 ensure!(record.status == KycStatus::Pending, Error::<T>::InvalidKycStatus);
 
                 record.data_cid = Some(data_bounded);
-                record.submitted_at = Some(<frame_system::Pallet<T>>::block_number());
+                // 不重置 submitted_at，防止用户通过反复更新数据逃避 PendingKycTimeout
 
                 Self::record_history(entity_id, &who, KycAction::DataUpdated, record.level);
 
@@ -1522,6 +1536,12 @@ pub mod pallet {
 
             EntityAuthorizedProviders::<T>::insert(entity_id, &provider_account, ());
 
+            // 维护反向索引
+            ProviderAuthorizedEntities::<T>::try_mutate(&provider_account, |entities| -> DispatchResult {
+                entities.try_push(entity_id).map_err(|_| Error::<T>::MaxProvidersReached)?;
+                Ok(())
+            })?;
+
             Self::deposit_event(Event::ProviderAuthorized {
                 entity_id,
                 provider: provider_account,
@@ -1547,6 +1567,11 @@ pub mod pallet {
             );
 
             EntityAuthorizedProviders::<T>::remove(entity_id, &provider_account);
+
+            // 维护反向索引
+            ProviderAuthorizedEntities::<T>::mutate(&provider_account, |entities| {
+                entities.retain(|&eid| eid != entity_id);
+            });
 
             Self::deposit_event(Event::ProviderDeauthorized {
                 entity_id,

@@ -1,6 +1,6 @@
 # pallet-dispute-arbitration
 
-> 路径：`pallets/dispute/arbitration/` · Crate: `pallet-dispute-arbitration v0.2.0` · StorageVersion: 1
+> 路径：`pallets/dispute/arbitration/` · Crate: `pallet-dispute-arbitration v0.2.1` · StorageVersion: 1
 
 仲裁与投诉统一处理系统。内含两大子系统：**仲裁系统**（资金争议、双向押金、裁决分账）与**投诉系统**（行为投诉、押金防滥用、申诉机制、自动升级、冷却期、证据链上追踪）。支持 9 个业务域（26 种投诉类型），通过 `ArbitrationRouter` trait 实现域路由解耦。
 

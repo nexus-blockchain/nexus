@@ -6615,6 +6615,7 @@ dependencies = [
 name = "pallet-commission-level-diff"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "pallet-balances",
@@ -6663,6 +6664,7 @@ dependencies = [
 name = "pallet-commission-referral"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "pallet-balances",
@@ -6678,6 +6680,7 @@ dependencies = [
 name = "pallet-commission-single-line"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "pallet-balances",
@@ -6693,6 +6696,7 @@ dependencies = [
 name = "pallet-commission-team"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "pallet-balances",
@@ -6774,7 +6778,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-dispute-arbitration"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -6845,7 +6849,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-entity-common"
-version = "0.1.0"
+version = "0.9.1"
 dependencies = [
  "frame-support",
  "frame-system",
@@ -6859,6 +6863,7 @@ dependencies = [
 name = "pallet-entity-disclosure"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "pallet-entity-common",
@@ -6873,6 +6878,7 @@ dependencies = [
 name = "pallet-entity-governance"
 version = "0.2.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "pallet-balances",
@@ -6890,6 +6896,7 @@ dependencies = [
 name = "pallet-entity-kyc"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "pallet-entity-common",
@@ -6904,8 +6911,10 @@ dependencies = [
 name = "pallet-entity-market"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
+ "log",
  "pallet-balances",
  "pallet-entity-common",
  "parity-scale-codec",
@@ -6939,6 +6948,7 @@ dependencies = [
 name = "pallet-entity-order"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -6957,6 +6967,7 @@ dependencies = [
 name = "pallet-entity-product"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -6993,8 +7004,9 @@ dependencies = [
 
 [[package]]
 name = "pallet-entity-review"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -7011,6 +7023,7 @@ dependencies = [
 name = "pallet-entity-shop"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -7027,8 +7040,9 @@ dependencies = [
 
 [[package]]
 name = "pallet-entity-token"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -7047,6 +7061,7 @@ dependencies = [
 name = "pallet-entity-tokensale"
 version = "0.5.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -7236,6 +7251,7 @@ dependencies = [
 name = "pallet-nex-market"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -7300,7 +7316,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-storage-lifecycle"
-version = "0.2.4"
+version = "0.3.0"
 dependencies = [
  "frame-benchmarking",
  "frame-support",

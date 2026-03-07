@@ -1,6 +1,6 @@
 [package]
 name = "pallet-entity-common"
-version = "0.1.0"
+version = "0.9.1"
 description = "NEXUS Entity 公共类型和 Trait 定义"
 authors = ["NEXUS Team"]
 edition = "2021"

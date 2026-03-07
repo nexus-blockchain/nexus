@@ -70,8 +70,8 @@
 | `force_archive(data_type, ids, level)` | Root | G4: 强制归档指定数据 |
 | `protect_from_purge(data_type, data_id)` | Root | G4: 标记清除保护 |
 | `remove_purge_protection(data_type, data_id)` | Root | G4: 移除清除保护 |
-| `extend_active_period(data_type, data_id, blocks)` | Root | U3: 延长活跃期 |
-| `restore_from_archive(data_type, data_id)` | Root | U4: 从 L1 恢复到 Active |
+| `extend_active_period(data_type, data_id, blocks)` | Root 或数据所有者 | U3: 延长活跃期 |
+| `restore_from_archive(data_type, data_id)` | Root 或数据所有者 | U4: 从 L1 恢复到 Active |
 
 ## 存储项
 
@@ -132,6 +132,7 @@
 | `MaxBatchSize` | `u32` | 每次 on_idle 最大处理数 | `100` |
 | `StorageArchiver` | `impl StorageArchiver` | 归档器实现 | - |
 | `OnArchive` | `impl OnArchiveHandler` | 归档回调处理器 | - |
+| `DataOwnerProvider` | `impl DataOwnerProvider` | 数据所有权查询（用户权限分层） | `()` |
 | `WeightInfo` | `impl WeightInfo` | 权重函数 | `SubstrateWeight` |
 
 ## 核心 Trait
@@ -208,6 +209,7 @@ impl pallet_storage_lifecycle::Config for Runtime {
     type MaxBatchSize = MaxBatchSize;
     type StorageArchiver = MyArchiver;
     type OnArchive = MyArchiveHandler;
+    type DataOwnerProvider = MyOwnerProvider;
     type WeightInfo = pallet_storage_lifecycle::SubstrateWeight;
 }
 ```
@@ -255,6 +257,7 @@ impl pallet_storage_lifecycle::Config for Runtime {
 | v0.2.2 | 深度审计 Round 2：H1(权重不超过remaining_weight), M1(回调读取实际from_level), M2(积压告警回归), M3(force_archive存储清理), L1(死BatchCompleted), L2(死ArchiveRecord), L4(Cargo版本) — 61 个测试 |
 | v0.2.3 | 深度审计 Round 3：H1(force_archive拒绝后退转换), M1(on_idle中途预算中止), M2(延迟顺序校验l1≤l2≤purge), L1(移除死new()) — 71 个测试 |
 | v0.2.4 | 深度审计 Round 4：M1(restore_from_archive触发OnArchive回调), M2(DataForceArchived事件仅含forward_ids), M3(force_archive缓存from_level避免二次读取) — 76 个测试 |
+| v0.3.0 | 上线准备：(1) benchmarking.rs + weights.rs 基于 DB 访问分析的权重框架, (2) StorageServiceArchiver 真实归档器适配器接入 runtime, (3) DataOwnerProvider 用户权限分层 — extend_active_period/restore_from_archive 支持签名用户调用, (4) `#[pallet::storage_version(1)]` 版本声明, (5) `integrity_test` 校验 Config 常量 (L1≤L2, >0), (6) weights.rs 头部注释修正为真实描述, (7) 移除未使用的 `ArchivableData` trait |
 
 ## 许可证
 

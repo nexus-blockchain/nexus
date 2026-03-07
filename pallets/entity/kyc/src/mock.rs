@@ -112,6 +112,7 @@ impl pallet_entity_kyc::Config for Test {
     type EntityProvider = MockEntityProvider;
     type MaxHistoryEntries = ConstU32<50>;
     type PendingKycTimeout = PendingKycTimeout;
+    type MaxAuthorizedEntities = ConstU32<100>;
     type OnKycStatusChange = ();
 }
 

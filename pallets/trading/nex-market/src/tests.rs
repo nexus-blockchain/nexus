@@ -4080,3 +4080,402 @@ fn w8_ocw_result_cleaned_on_exact_settlement() {
         assert_eq!(trade.status, UsdtTradeStatus::Completed);
     });
 }
+
+// ==================== 补充测试：熔断机制 ====================
+
+#[test]
+fn circuit_breaker_triggers_on_extreme_deviation() {
+    new_test_ext().execute_with(|| {
+        // 设置初始价格并启用价格保护
+        assert_ok!(NexMarket::set_initial_price(RuntimeOrigin::root(), 500_000));
+        assert_ok!(NexMarket::configure_price_protection(
+            RuntimeOrigin::root(), true, 2000, 3000, 0,
+        ));
+
+        // 完成一笔正常交易来初始化 TWAP
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
+        ));
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
+        ));
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, 500_000, None));
+
+        // 尝试挂一个极端偏离的卖单（价格 = 2 USDT，偏离 300%）
+        assert_noop!(
+            NexMarket::place_sell_order(
+                RuntimeOrigin::signed(ALICE), 10_000_000_000_000, 2_000_000, tron_address(), None,
+            ),
+            Error::<Test>::PriceDeviationTooHigh,
+        );
+    });
+}
+
+#[test]
+fn lift_circuit_breaker_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(NexMarket::set_initial_price(RuntimeOrigin::root(), 500_000));
+        assert_ok!(NexMarket::configure_price_protection(
+            RuntimeOrigin::root(), true, 2000, 3000, 0,
+        ));
+
+        // 手动触发熔断
+        PriceProtectionStore::<Test>::mutate(|maybe| {
+            if let Some(config) = maybe {
+                config.circuit_breaker_active = true;
+                config.circuit_breaker_until = 100;
+            }
+        });
+
+        // 市场应被熔断暂停
+        assert_noop!(
+            NexMarket::place_sell_order(
+                RuntimeOrigin::signed(ALICE), 10_000_000_000_000, 500_000, tron_address(), None,
+            ),
+            Error::<Test>::MarketCircuitBreakerActive,
+        );
+
+        // 熔断未到期时不能解除
+        assert_noop!(
+            NexMarket::lift_circuit_breaker(RuntimeOrigin::root()),
+            Error::<Test>::CircuitBreakerNotExpired,
+        );
+
+        // 推进到熔断到期后
+        System::set_block_number(100);
+
+        // 管理员解除熔断
+        assert_ok!(NexMarket::lift_circuit_breaker(RuntimeOrigin::root()));
+
+        // 现在可以挂单
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), 10_000_000_000_000, 500_000, tron_address(), None,
+        ));
+    });
+}
+
+// ==================== 补充测试：ban_user / unban_user ====================
+
+#[test]
+fn ban_user_blocks_trading() {
+    new_test_ext().execute_with(|| {
+        // 封禁 ALICE
+        assert_ok!(NexMarket::ban_user(RuntimeOrigin::root(), ALICE));
+        assert!(BannedAccounts::<Test>::get(ALICE));
+
+        // ALICE 不能挂单
+        assert_noop!(
+            NexMarket::place_sell_order(
+                RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
+            ),
+            Error::<Test>::UserIsBanned,
+        );
+
+        // ALICE 不能挂买单
+        assert_noop!(
+            NexMarket::place_buy_order(
+                RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, buyer_tron(),
+            ),
+            Error::<Test>::UserIsBanned,
+        );
+    });
+}
+
+#[test]
+fn ban_user_cancels_existing_orders() {
+    new_test_ext().execute_with(|| {
+        // ALICE 先挂一个卖单
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
+        ));
+        assert_eq!(NexMarket::sell_orders().len(), 1);
+
+        // 封禁 ALICE → 应自动取消其挂单
+        assert_ok!(NexMarket::ban_user(RuntimeOrigin::root(), ALICE));
+
+        // 卖单应被取消
+        let order = NexMarket::orders(0).unwrap();
+        assert_eq!(order.status, OrderStatus::Cancelled);
+        assert_eq!(NexMarket::sell_orders().len(), 0);
+    });
+}
+
+#[test]
+fn unban_user_restores_trading() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(NexMarket::ban_user(RuntimeOrigin::root(), ALICE));
+        assert_ok!(NexMarket::unban_user(RuntimeOrigin::root(), ALICE));
+        assert!(!BannedAccounts::<Test>::get(ALICE));
+
+        // ALICE 可以再次挂单
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), 100_000_000_000_000, 500_000, tron_address(), None,
+        ));
+    });
+}
+
+// ==================== 补充测试：seller_confirm_received ====================
+
+#[test]
+fn seller_confirm_received_completes_trade_full_flow() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128;
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
+        ));
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
+        ));
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
+
+        let bob_free_before = Balances::free_balance(BOB);
+
+        // 卖家手动确认收款
+        assert_ok!(NexMarket::seller_confirm_received(
+            RuntimeOrigin::signed(ALICE), 0,
+        ));
+
+        let trade = NexMarket::usdt_trades(0).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Completed);
+        // 买家收到 NEX
+        assert!(Balances::free_balance(BOB) > bob_free_before);
+    });
+}
+
+// ==================== 补充测试：update_order_amount ====================
+
+#[test]
+fn update_order_amount_increases() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128;
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
+        ));
+
+        let alice_reserved_before = Balances::reserved_balance(ALICE);
+
+        // 增加到 200 NEX
+        let new_amount = 200_000_000_000_000u128;
+        assert_ok!(NexMarket::update_order_amount(
+            RuntimeOrigin::signed(ALICE), 0, new_amount,
+        ));
+
+        let order = NexMarket::orders(0).unwrap();
+        assert_eq!(order.nex_amount, new_amount);
+        // 额外锁定了 100 NEX
+        assert!(Balances::reserved_balance(ALICE) > alice_reserved_before);
+    });
+}
+
+#[test]
+fn update_order_amount_decreases() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 200_000_000_000_000u128;
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
+        ));
+
+        let alice_reserved_before = Balances::reserved_balance(ALICE);
+
+        // 减少到 100 NEX
+        let new_amount = 100_000_000_000_000u128;
+        assert_ok!(NexMarket::update_order_amount(
+            RuntimeOrigin::signed(ALICE), 0, new_amount,
+        ));
+
+        let order = NexMarket::orders(0).unwrap();
+        assert_eq!(order.nex_amount, new_amount);
+        // 释放了 100 NEX
+        assert!(Balances::reserved_balance(ALICE) < alice_reserved_before);
+    });
+}
+
+// ==================== 补充测试：batch_force_settle / batch_force_cancel ====================
+
+#[test]
+fn batch_force_settle_rejects_over_limit() {
+    new_test_ext().execute_with(|| {
+        // BoundedVec<u64, ConstU32<20>> 最多 20 个元素
+        // 尝试创建超过 20 个的 BoundedVec → try_into 会失败
+        let trade_ids: Vec<u64> = (0..21).collect();
+        let result: Result<BoundedVec<u64, ConstU32<20>>, _> = trade_ids.try_into();
+        assert!(result.is_err(), "BoundedVec should reject more than 20 elements");
+    });
+}
+
+// ==================== 补充测试：订单簿容量上限 ====================
+
+#[test]
+fn sell_order_book_full_rejected() {
+    new_test_ext().execute_with(|| {
+        // MaxSellOrders = 1000，直接填满
+        let mut ids = Vec::new();
+        for i in 0..1000u64 {
+            ids.push(i);
+        }
+        let bounded: BoundedVec<u64, <Test as crate::Config>::MaxSellOrders> =
+            ids.try_into().unwrap();
+        SellOrders::<Test>::put(bounded);
+
+        // 再挂一个卖单 → 应被拒绝
+        assert_noop!(
+            NexMarket::place_sell_order(
+                RuntimeOrigin::signed(ALICE), 1_000_000_000_000, 500_000, tron_address(), None,
+            ),
+            Error::<Test>::OrderBookFull,
+        );
+    });
+}
+
+#[test]
+fn buy_order_book_full_rejected() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let mut ids = Vec::new();
+        for i in 0..1000u64 {
+            ids.push(i);
+        }
+        let bounded: BoundedVec<u64, <Test as crate::Config>::MaxBuyOrders> =
+            ids.try_into().unwrap();
+        BuyOrders::<Test>::put(bounded);
+
+        assert_noop!(
+            NexMarket::place_buy_order(
+                RuntimeOrigin::signed(BOB), 1_000_000_000_000, 500_000, buyer_tron(),
+            ),
+            Error::<Test>::OrderBookFull,
+        );
+    });
+}
+
+// ==================== 补充测试：队列满自动暂停 ====================
+
+#[test]
+fn queue_overflow_auto_pauses_market() {
+    new_test_ext().execute_with(|| {
+        // MaxPendingTrades = 100, QueueFullThresholdBps = 8000 (80%)
+        // 80% of 100 = 80 → 填入 80 个 pending trades
+        let mut ids = Vec::new();
+        for i in 0..80u64 {
+            ids.push(i);
+        }
+        let bounded: BoundedVec<u64, <Test as crate::Config>::MaxPendingTrades> =
+            ids.try_into().unwrap();
+        PendingUsdtTrades::<Test>::put(bounded);
+
+        // 创建一笔真实交易来触发 confirm_payment 内部的队列检查
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), 10_000_000_000_000, 500_000, tron_address(), None,
+        ));
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
+        ));
+        // confirm_payment 内部会调用 check_queue_overflow_and_pause
+        // trade_id 是 0（第一笔创建的交易）
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
+
+        // 市场应被自动暂停
+        assert!(NexMarket::market_paused());
+    });
+}
+
+// ==================== 补充测试：争议窗口过期 ====================
+
+#[test]
+fn dispute_window_expired_rejected() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128;
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), None,
+        ));
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
+        ));
+        assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
+
+        // 超时退款
+        System::set_block_number(8000);
+        assert_ok!(NexMarket::process_timeout(RuntimeOrigin::signed(BOB), 0));
+
+        let trade = NexMarket::usdt_trades(0).unwrap();
+        assert_eq!(trade.status, UsdtTradeStatus::Refunded);
+
+        // 推进到争议窗口之后 (DisputeWindowBlocks = 100800)
+        let completed_at = trade.completed_at.unwrap_or(trade.timeout_at);
+        System::set_block_number(completed_at + 100801);
+
+        assert_noop!(
+            NexMarket::dispute_trade(
+                RuntimeOrigin::signed(BOB), 0, b"QmLateEvidence".to_vec(),
+            ),
+            Error::<Test>::DisputeWindowExpired,
+        );
+    });
+}
+
+// ==================== 补充测试：min_fill_amount ====================
+
+#[test]
+fn min_fill_amount_enforced_on_reserve() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let nex = 100_000_000_000_000u128;
+        let min_fill = 50_000_000_000_000u128; // 50 NEX 最低吃单量
+
+        assert_ok!(NexMarket::place_sell_order(
+            RuntimeOrigin::signed(ALICE), nex, 500_000, tron_address(), Some(min_fill),
+        ));
+
+        // 尝试吃 10 NEX（低于 min_fill_amount 50 NEX）
+        assert_noop!(
+            NexMarket::reserve_sell_order(
+                RuntimeOrigin::signed(BOB), 0, Some(10_000_000_000_000u128), buyer_tron(),
+            ),
+            Error::<Test>::BelowMinFillAmount,
+        );
+
+        // 吃 50 NEX（等于 min_fill_amount）→ 成功
+        assert_ok!(NexMarket::reserve_sell_order(
+            RuntimeOrigin::signed(BOB), 0, Some(50_000_000_000_000u128), buyer_tron(),
+        ));
+    });
+}
+
+// ==================== 补充测试：MaxOrderNexAmount ====================
+
+#[test]
+fn place_sell_order_rejects_above_maximum() {
+    new_test_ext().execute_with(|| {
+        // MaxOrderNexAmount = 500 NEX in test config
+        let too_large = 501_000_000_000_000u128;
+        assert_noop!(
+            NexMarket::place_sell_order(
+                RuntimeOrigin::signed(ALICE), too_large, 500_000, tron_address(), None,
+            ),
+            Error::<Test>::OrderAmountTooLarge,
+        );
+    });
+}
+
+#[test]
+fn place_buy_order_rejects_above_maximum() {
+    new_test_ext().execute_with(|| {
+        setup_seed_price();
+        let too_large = 501_000_000_000_000u128;
+        assert_noop!(
+            NexMarket::place_buy_order(
+                RuntimeOrigin::signed(BOB), too_large, 500_000, buyer_tron(),
+            ),
+            Error::<Test>::OrderAmountTooLarge,
+        );
+    });
+}

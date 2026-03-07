@@ -1,7 +1,7 @@
 //! 财务披露模块测试
 
 use crate::{mock::*, pallet::*};
-use frame_support::{assert_noop, assert_ok, weights::Weight};
+use frame_support::{assert_noop, assert_ok, weights::Weight, BoundedVec};
 use pallet_entity_common::EntityStatus;
 
 // ==================== configure_disclosure ====================
@@ -3083,10 +3083,10 @@ fn entity_locked_allows_cleanup_disclosure_history() {
 #[test]
 fn f1_batch_add_insiders_works() {
     new_test_ext().execute_with(|| {
-        let batch = vec![
+        let batch: BoundedVec<_, <Test as crate::Config>::MaxInsiders> = vec![
             (ALICE, InsiderRole::Admin),
             (BOB, InsiderRole::Auditor),
-        ];
+        ].try_into().unwrap();
         assert_ok!(EntityDisclosure::batch_add_insiders(
             RuntimeOrigin::signed(OWNER), ENTITY_ID, batch,
         ));
@@ -3109,9 +3109,11 @@ fn f1_batch_add_insiders_works() {
 #[test]
 fn f1_batch_add_insiders_rejects_empty() {
     new_test_ext().execute_with(|| {
+        let empty: BoundedVec<(u64, InsiderRole), <Test as crate::Config>::MaxInsiders> =
+            BoundedVec::default();
         assert_noop!(
             EntityDisclosure::batch_add_insiders(
-                RuntimeOrigin::signed(OWNER), ENTITY_ID, vec![],
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, empty,
             ),
             Error::<Test>::EmptyBatch
         );
@@ -3127,7 +3129,7 @@ fn f1_batch_add_insiders_rejects_duplicate() {
         assert_noop!(
             EntityDisclosure::batch_add_insiders(
                 RuntimeOrigin::signed(OWNER), ENTITY_ID,
-                vec![(ALICE, InsiderRole::Auditor)],
+                vec![(ALICE, InsiderRole::Auditor)].try_into().unwrap(),
             ),
             Error::<Test>::InsiderExists
         );
@@ -3146,7 +3148,7 @@ fn f1_batch_add_insiders_rejects_full() {
         assert_noop!(
             EntityDisclosure::batch_add_insiders(
                 RuntimeOrigin::signed(OWNER), ENTITY_ID,
-                vec![(20, InsiderRole::Admin)],
+                vec![(20, InsiderRole::Admin)].try_into().unwrap(),
             ),
             Error::<Test>::InsidersFull
         );
@@ -3158,12 +3160,12 @@ fn f1_batch_remove_insiders_works() {
     new_test_ext().execute_with(|| {
         assert_ok!(EntityDisclosure::batch_add_insiders(
             RuntimeOrigin::signed(OWNER), ENTITY_ID,
-            vec![(ALICE, InsiderRole::Admin), (BOB, InsiderRole::Auditor)],
+            vec![(ALICE, InsiderRole::Admin), (BOB, InsiderRole::Auditor)].try_into().unwrap(),
         ));
 
         assert_ok!(EntityDisclosure::batch_remove_insiders(
             RuntimeOrigin::signed(OWNER), ENTITY_ID,
-            vec![ALICE, BOB],
+            vec![ALICE, BOB].try_into().unwrap(),
         ));
 
         assert!(Insiders::<Test>::get(ENTITY_ID).is_empty());
@@ -3177,9 +3179,11 @@ fn f1_batch_remove_insiders_works() {
 #[test]
 fn f1_batch_remove_insiders_rejects_empty() {
     new_test_ext().execute_with(|| {
+        let empty: BoundedVec<u64, <Test as crate::Config>::MaxInsiders> =
+            BoundedVec::default();
         assert_noop!(
             EntityDisclosure::batch_remove_insiders(
-                RuntimeOrigin::signed(OWNER), ENTITY_ID, vec![],
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, empty,
             ),
             Error::<Test>::EmptyBatch
         );
@@ -3192,7 +3196,7 @@ fn f1_batch_remove_insiders_rejects_not_found() {
         assert_noop!(
             EntityDisclosure::batch_remove_insiders(
                 RuntimeOrigin::signed(OWNER), ENTITY_ID,
-                vec![ALICE],
+                vec![ALICE].try_into().unwrap(),
             ),
             Error::<Test>::InsiderNotFound
         );
@@ -3283,7 +3287,7 @@ fn f2_entity_not_active_rejects_batch_add() {
         assert_noop!(
             EntityDisclosure::batch_add_insiders(
                 RuntimeOrigin::signed(OWNER), ENTITY_ID,
-                vec![(ALICE, InsiderRole::Admin)],
+                vec![(ALICE, InsiderRole::Admin)].try_into().unwrap(),
             ),
             Error::<Test>::EntityNotActive
         );
@@ -3496,11 +3500,11 @@ fn f4_batch_remove_records_cooldown() {
     new_test_ext().execute_with(|| {
         assert_ok!(EntityDisclosure::batch_add_insiders(
             RuntimeOrigin::signed(OWNER), ENTITY_ID,
-            vec![(ALICE, InsiderRole::Admin), (BOB, InsiderRole::Auditor)],
+            vec![(ALICE, InsiderRole::Admin), (BOB, InsiderRole::Auditor)].try_into().unwrap(),
         ));
         assert_ok!(EntityDisclosure::batch_remove_insiders(
             RuntimeOrigin::signed(OWNER), ENTITY_ID,
-            vec![ALICE, BOB],
+            vec![ALICE, BOB].try_into().unwrap(),
         ));
 
         assert!(RemovedInsiders::<Test>::get(ENTITY_ID, ALICE).is_some());
@@ -4617,7 +4621,7 @@ fn v06_cleanup_expired_cooldowns_works() {
         advance_blocks(100); // InsiderCooldownPeriod = 50
 
         assert_ok!(EntityDisclosure::cleanup_expired_cooldowns(
-            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 100,
         ));
 
         assert!(!RemovedInsiders::<Test>::contains_key(ENTITY_ID, &ALICE));
@@ -4638,7 +4642,7 @@ fn v06_cleanup_cooldowns_not_yet_expired() {
         advance_blocks(10); // < 50
 
         assert_ok!(EntityDisclosure::cleanup_expired_cooldowns(
-            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            RuntimeOrigin::signed(ALICE), ENTITY_ID, 100,
         ));
 
         // 尚未过期，不应清理

@@ -1,6 +1,7 @@
 use crate::mock::*;
 use crate::pallet::{self, DisputedAt, Error, ExpiringAt, ExpiryOf, Locked, LockStateOf, PayerOf};
 use frame_support::{assert_noop, assert_ok, traits::Hooks, BoundedVec};
+use pallet::Escrow;
 
 /// 辅助函数：创建空的争议详情
 fn empty_detail() -> BoundedVec<u8, <Test as crate::Config>::MaxReasonLen> {
@@ -207,25 +208,8 @@ fn release_split_fails_exceeding_balance() {
     });
 }
 
-// ============================================================================
-// 幂等 nonce 锁定
-// ============================================================================
-
-#[test]
-fn lock_with_nonce_idempotent() {
-    new_test_ext().execute_with(|| {
-        assert_ok!(EscrowPallet::lock_with_nonce(RuntimeOrigin::signed(1), 100, 1, 500, 1));
-        assert_eq!(Locked::<Test>::get(100), 500);
-
-        // 重复 nonce 应被忽略
-        assert_ok!(EscrowPallet::lock_with_nonce(RuntimeOrigin::signed(1), 100, 1, 500, 1));
-        assert_eq!(Locked::<Test>::get(100), 500);
-
-        // 递增 nonce 成功
-        assert_ok!(EscrowPallet::lock_with_nonce(RuntimeOrigin::signed(1), 100, 1, 200, 2));
-        assert_eq!(Locked::<Test>::get(100), 700);
-    });
-}
+// lock_with_nonce extrinsic 已删除（call_index 3），相关测试已移除。
+// lock_from trait 方法的争议/关闭检查由 lock_from_blocked_after_close、lock_blocked_during_dispute 等测试覆盖。
 
 // ============================================================================
 // 争议流程
@@ -343,20 +327,7 @@ fn lock_rejects_closed_id() {
     });
 }
 
-#[test]
-fn lock_with_nonce_rejects_closed_id() {
-    new_test_ext().execute_with(|| {
-        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
-        assert_ok!(EscrowPallet::release(RuntimeOrigin::signed(1), 100, 2));
-        assert_eq!(LockStateOf::<Test>::get(100), 3u8);
-
-        // 尝试通过 nonce 重新打开已关闭的 id 应失败
-        assert_noop!(
-            EscrowPallet::lock_with_nonce(RuntimeOrigin::signed(1), 100, 1, 200, 99),
-            Error::<Test>::AlreadyClosed
-        );
-    });
-}
+// lock_with_nonce_rejects_closed_id 已移除（extrinsic 删除，lock_from_blocked_after_close 已覆盖）
 
 // ============================================================================
 // 🆕 EM2: release/refund 在争议中返回 DisputeActive
@@ -404,19 +375,7 @@ fn lock_blocked_during_dispute() {
     });
 }
 
-// 🆕 E4修复测试: 争议中禁止通过 lock_with_nonce 追加锁定
-#[test]
-fn lock_with_nonce_blocked_during_dispute() {
-    new_test_ext().execute_with(|| {
-        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
-        assert_ok!(EscrowPallet::dispute(RuntimeOrigin::signed(1), 100, 1, empty_detail()));
-
-        assert_noop!(
-            EscrowPallet::lock_with_nonce(RuntimeOrigin::signed(1), 100, 2, 200, 1),
-            Error::<Test>::DisputeActive
-        );
-    });
-}
+// lock_with_nonce_blocked_during_dispute 已移除（extrinsic 删除，m1_r2_lock_from_trait_blocked_during_dispute 已覆盖）
 
 #[test]
 fn release_split_returns_dispute_active() {
@@ -435,7 +394,7 @@ fn release_split_returns_dispute_active() {
 }
 
 // ============================================================================
-// 🆕 F1: 部分退款
+// 🆕 F1: 部分退款（通过 trait 调用，extrinsic 已删除）
 // ============================================================================
 
 #[test]
@@ -443,14 +402,14 @@ fn f1_refund_partial_works() {
     new_test_ext().execute_with(|| {
         assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 1000));
 
-        // 部分退款 300
-        assert_ok!(EscrowPallet::refund_partial(RuntimeOrigin::signed(1), 100, 1, 300));
+        // 部分退款 300（trait 调用）
+        assert_ok!(<EscrowTrait as Escrow<u64, u128>>::refund_partial(100, &1, 300));
         assert_eq!(Locked::<Test>::get(100), 700);
         // 状态仍为 Locked
         assert_eq!(LockStateOf::<Test>::get(100), 0u8);
 
         // 退款剩余 700 → 自动关闭
-        assert_ok!(EscrowPallet::refund_partial(RuntimeOrigin::signed(1), 100, 1, 700));
+        assert_ok!(<EscrowTrait as Escrow<u64, u128>>::refund_partial(100, &1, 700));
         assert_eq!(Locked::<Test>::get(100), 0);
         assert_eq!(LockStateOf::<Test>::get(100), 3u8);
     });
@@ -462,7 +421,7 @@ fn f1_refund_partial_exceeds_balance() {
         assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
 
         assert_noop!(
-            EscrowPallet::refund_partial(RuntimeOrigin::signed(1), 100, 1, 600),
+            <EscrowTrait as Escrow<u64, u128>>::refund_partial(100, &1, 600),
             Error::<Test>::Insufficient
         );
     });
@@ -475,14 +434,14 @@ fn f1_refund_partial_blocked_during_dispute() {
         assert_ok!(EscrowPallet::dispute(RuntimeOrigin::signed(1), 100, 1, empty_detail()));
 
         assert_noop!(
-            EscrowPallet::refund_partial(RuntimeOrigin::signed(1), 100, 1, 200),
+            <EscrowTrait as Escrow<u64, u128>>::refund_partial(100, &1, 200),
             Error::<Test>::DisputeActive
         );
     });
 }
 
 // ============================================================================
-// 🆕 F3: 部分释放（里程碑式）
+// 🆕 F3: 部分释放（里程碑式，通过 trait 调用，extrinsic 已删除）
 // ============================================================================
 
 #[test]
@@ -490,13 +449,13 @@ fn f3_release_partial_works() {
     new_test_ext().execute_with(|| {
         assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 1000));
 
-        // 释放 400（里程碑 1）
-        assert_ok!(EscrowPallet::release_partial(RuntimeOrigin::signed(1), 100, 2, 400));
+        // 释放 400（里程碑 1，trait 调用）
+        assert_ok!(<EscrowTrait as Escrow<u64, u128>>::release_partial(100, &2, 400));
         assert_eq!(Locked::<Test>::get(100), 600);
         assert_eq!(LockStateOf::<Test>::get(100), 0u8);
 
         // 释放 600（里程碑 2）→ 自动关闭
-        assert_ok!(EscrowPallet::release_partial(RuntimeOrigin::signed(1), 100, 2, 600));
+        assert_ok!(<EscrowTrait as Escrow<u64, u128>>::release_partial(100, &2, 600));
         assert_eq!(Locked::<Test>::get(100), 0);
         assert_eq!(LockStateOf::<Test>::get(100), 3u8);
     });
@@ -509,7 +468,7 @@ fn f3_release_partial_blocked_during_dispute() {
         assert_ok!(EscrowPallet::dispute(RuntimeOrigin::signed(1), 100, 1, empty_detail()));
 
         assert_noop!(
-            EscrowPallet::release_partial(RuntimeOrigin::signed(1), 100, 2, 200),
+            <EscrowTrait as Escrow<u64, u128>>::release_partial(100, &2, 200),
             Error::<Test>::DisputeActive
         );
     });
@@ -995,7 +954,7 @@ fn m1_r3_refund_partial_rejects_zero_amount() {
         assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
         // 零金额部分退款应被拒绝
         assert_noop!(
-            EscrowPallet::refund_partial(RuntimeOrigin::signed(1), 100, 1, 0),
+            <EscrowTrait as Escrow<u64, u128>>::refund_partial(100, &1, 0),
             Error::<Test>::Insufficient
         );
         // 余额未变
@@ -1009,7 +968,7 @@ fn m1_r3_release_partial_rejects_zero_amount() {
         assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
         // 零金额部分释放应被拒绝
         assert_noop!(
-            EscrowPallet::release_partial(RuntimeOrigin::signed(1), 100, 2, 0),
+            <EscrowTrait as Escrow<u64, u128>>::release_partial(100, &2, 0),
             Error::<Test>::Insufficient
         );
         assert_eq!(Locked::<Test>::get(100), 500);
@@ -1365,8 +1324,8 @@ fn r6_refund_partial_cleans_expiry_on_close() {
         assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
         assert_ok!(EscrowPallet::schedule_expiry(RuntimeOrigin::signed(1), 100, 50));
 
-        // Partial refund that drains the balance
-        assert_ok!(EscrowPallet::refund_partial(RuntimeOrigin::signed(1), 100, 1, 500));
+        // Partial refund that drains the balance (trait call)
+        assert_ok!(<EscrowTrait as Escrow<u64, u128>>::refund_partial(100, &1, 500));
 
         assert_eq!(LockStateOf::<Test>::get(100), 3u8);
         assert_eq!(ExpiryOf::<Test>::get(100), None);
@@ -1380,7 +1339,7 @@ fn r6_release_partial_cleans_expiry_on_close() {
         assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
         assert_ok!(EscrowPallet::schedule_expiry(RuntimeOrigin::signed(1), 100, 50));
 
-        assert_ok!(EscrowPallet::release_partial(RuntimeOrigin::signed(1), 100, 2, 500));
+        assert_ok!(<EscrowTrait as Escrow<u64, u128>>::release_partial(100, &2, 500));
 
         assert_eq!(LockStateOf::<Test>::get(100), 3u8);
         assert_eq!(ExpiryOf::<Test>::get(100), None);

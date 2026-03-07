@@ -31,11 +31,17 @@ extern crate alloc;
 
 pub use pallet::*;
 
+pub mod weights;
+pub use weights::WeightInfo;
+
 #[cfg(test)]
 mod mock;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
 
 /// KYC 检查接口（per-entity: 用户在指定 Entity 下的 KYC 级别）
 pub trait KycChecker<AccountId> {
@@ -300,6 +306,9 @@ pub mod pallet {
         /// F9: 批量强制退款最大数量
         #[pallet::constant]
         type MaxBatchRefund: Get<u32>;
+
+        /// Weight information for extrinsics in this pallet
+        type WeightInfo: crate::weights::WeightInfo;
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -731,7 +740,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// 创建发售轮次（需 Entity owner/admin 权限）
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        #[pallet::weight(T::WeightInfo::create_sale_round())]
         pub fn create_sale_round(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -817,7 +826,7 @@ pub mod pallet {
         ///
         /// DutchAuction 模式下 price 可为 0（实际价格由荷兰公式决定）。
         #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(120_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::add_payment_option())]
         pub fn add_payment_option(
             origin: OriginFor<T>,
             round_id: u64,
@@ -872,7 +881,7 @@ pub mod pallet {
 
         /// 设置锁仓配置（仅 NotStarted 状态）
         #[pallet::call_index(2)]
-        #[pallet::weight(Weight::from_parts(120_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::set_vesting_config())]
         pub fn set_vesting_config(
             origin: OriginFor<T>,
             round_id: u64,
@@ -910,7 +919,7 @@ pub mod pallet {
 
         /// 配置荷兰拍卖（仅 NotStarted 状态 + DutchAuction 模式）
         #[pallet::call_index(3)]
-        #[pallet::weight(Weight::from_parts(120_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::configure_dutch_auction())]
         pub fn configure_dutch_auction(
             origin: OriginFor<T>,
             round_id: u64,
@@ -942,7 +951,7 @@ pub mod pallet {
         /// F5: 添加白名单（仅 NotStarted 状态，支持个人额度）
         /// allocations: 每个账户的个人额度，None = 使用默认限额，Some(amount) = 个人上限
         #[pallet::call_index(4)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::add_to_whitelist())]
         pub fn add_to_whitelist(
             origin: OriginFor<T>,
             round_id: u64,
@@ -976,7 +985,7 @@ pub mod pallet {
         ///
         /// DutchAuction 模式还需提前调用 configure_dutch_auction 设置价格曲线。
         #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::start_sale())]
         pub fn start_sale(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1019,7 +1028,7 @@ pub mod pallet {
 
         /// 认购（扣除 NEX 到托管账户）
         #[pallet::call_index(6)]
-        #[pallet::weight(Weight::from_parts(300_000_000, 14_000))]
+        #[pallet::weight(T::WeightInfo::subscribe())]
         pub fn subscribe(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1145,7 +1154,7 @@ pub mod pallet {
         ///
         /// 要求 `now >= end_block` 或已售罄（remaining == 0），防止创建者提前截止。
         #[pallet::call_index(7)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        #[pallet::weight(T::WeightInfo::end_sale())]
         pub fn end_sale(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1224,7 +1233,7 @@ pub mod pallet {
 
         /// 领取代币（初始解锁部分，Entity 代币从 reserve 转给用户）
         #[pallet::call_index(8)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        #[pallet::weight(T::WeightInfo::claim_tokens())]
         pub fn claim_tokens(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1272,7 +1281,7 @@ pub mod pallet {
 
         /// 解锁代币（锁仓期后，Entity 代币从 reserve 转给用户）
         #[pallet::call_index(9)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        #[pallet::weight(T::WeightInfo::unlock_tokens())]
         pub fn unlock_tokens(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1324,7 +1333,7 @@ pub mod pallet {
 
         /// 取消发售（释放未售 Entity 代币，已认购者需调用 claim_refund 退款）
         #[pallet::call_index(10)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        #[pallet::weight(T::WeightInfo::cancel_sale())]
         pub fn cancel_sale(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1367,7 +1376,7 @@ pub mod pallet {
 
         /// 认购者领取退款（仅 Cancelled 状态，释放对应 Entity 代币 + 退还 NEX）
         #[pallet::call_index(11)]
-        #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::claim_refund())]
         pub fn claim_refund(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1418,7 +1427,7 @@ pub mod pallet {
         ///
         /// 防止未领取退款导致 Entity 代币永久锁定。
         #[pallet::call_index(13)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        #[pallet::weight(T::WeightInfo::reclaim_unclaimed_tokens())]
         pub fn reclaim_unclaimed_tokens(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1479,7 +1488,7 @@ pub mod pallet {
 
         /// 提取募集资金（NEX → Entity 派生账户，仅 Ended/Completed）
         #[pallet::call_index(12)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        #[pallet::weight(T::WeightInfo::withdraw_funds())]
         pub fn withdraw_funds(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1526,7 +1535,7 @@ pub mod pallet {
 
         /// Root 强制取消发售（治理干预违规/欺诈发售）
         #[pallet::call_index(14)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        #[pallet::weight(T::WeightInfo::force_cancel_sale())]
         pub fn force_cancel_sale(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1563,7 +1572,7 @@ pub mod pallet {
 
         /// Root 强制结束发售（紧急停止认购）
         #[pallet::call_index(15)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        #[pallet::weight(T::WeightInfo::force_end_sale())]
         pub fn force_end_sale(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1605,7 +1614,7 @@ pub mod pallet {
 
         /// Root 强制为特定认购者退款（争议仲裁后）
         #[pallet::call_index(16)]
-        #[pallet::weight(Weight::from_parts(250_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::force_refund())]
         pub fn force_refund(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1652,7 +1661,7 @@ pub mod pallet {
 
         /// Root 强制提取募集资金到 Entity 账户（创建者失联时）
         #[pallet::call_index(17)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        #[pallet::weight(T::WeightInfo::force_withdraw_funds())]
         pub fn force_withdraw_funds(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1695,7 +1704,7 @@ pub mod pallet {
 
         /// 更新轮次参数（仅 NotStarted 状态，可选更新各字段）
         #[pallet::call_index(18)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 10_000))]
+        #[pallet::weight(T::WeightInfo::update_sale_round())]
         pub fn update_sale_round(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1754,7 +1763,7 @@ pub mod pallet {
 
         /// 追加认购量（已认购用户在 Active 状态下增加购买量）
         #[pallet::call_index(19)]
-        #[pallet::weight(Weight::from_parts(300_000_000, 14_000))]
+        #[pallet::weight(T::WeightInfo::increase_subscription())]
         pub fn increase_subscription(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1847,7 +1856,7 @@ pub mod pallet {
 
         /// 从白名单移除地址（仅 NotStarted 状态）
         #[pallet::call_index(20)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::remove_from_whitelist())]
         pub fn remove_from_whitelist(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1882,7 +1891,7 @@ pub mod pallet {
 
         /// 移除支付选项（仅 NotStarted 状态，按索引移除）
         #[pallet::call_index(21)]
-        #[pallet::weight(Weight::from_parts(120_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::remove_payment_option())]
         pub fn remove_payment_option(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1912,7 +1921,7 @@ pub mod pallet {
 
         /// 延长发售时间（Active 状态，仅可延长不可缩短）
         #[pallet::call_index(22)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::extend_sale())]
         pub fn extend_sale(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1941,7 +1950,7 @@ pub mod pallet {
 
         /// 暂停发售（Active → Paused，暂停认购但不取消）
         #[pallet::call_index(23)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::pause_sale())]
         pub fn pause_sale(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1963,7 +1972,7 @@ pub mod pallet {
 
         /// 恢复发售（Paused → Active）
         #[pallet::call_index(24)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::resume_sale())]
         pub fn resume_sale(
             origin: OriginFor<T>,
             round_id: u64,
@@ -1988,7 +1997,7 @@ pub mod pallet {
         /// 清理已结束/已完成轮次的存储（认购记录、参与者列表、白名单、支付选项等）
         /// 前提：轮次处于 Ended/Completed 状态 且 funds_withdrawn=true
         #[pallet::call_index(25)]
-        #[pallet::weight(Weight::from_parts(500_000_000, 20_000))]
+        #[pallet::weight(T::WeightInfo::cleanup_round())]
         pub fn cleanup_round(
             origin: OriginFor<T>,
             round_id: u64,
@@ -2036,7 +2045,7 @@ pub mod pallet {
 
         /// 治理批量强制退款（仅 root，取消状态下批量退款）
         #[pallet::call_index(26)]
-        #[pallet::weight(Weight::from_parts(500_000_000, 20_000))]
+        #[pallet::weight(T::WeightInfo::force_batch_refund(subscribers.len() as u32))]
         pub fn force_batch_refund(
             origin: OriginFor<T>,
             round_id: u64,

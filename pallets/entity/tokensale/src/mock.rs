@@ -50,14 +50,17 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
         Some(pallet_entity_common::EntityStatus::Active)
     }
     fn entity_owner(entity_id: u64) -> Option<u64> {
-        if entity_id == ENTITY_ID { Some(CREATOR) } else { None }
+        if entity_id == ENTITY_ID {
+            Some(ENTITY_OWNER_OVERRIDE.with(|o| o.borrow().unwrap_or(CREATOR)))
+        } else { None }
     }
     fn entity_account(entity_id: u64) -> u64 {
         if entity_id == ENTITY_ID { ENTITY_ACCOUNT } else { 0 }
     }
     fn update_entity_stats(_: u64, _: u128, _: u32) -> Result<(), DispatchError> { Ok(()) }
     fn is_entity_admin(entity_id: u64, account: &u64, _required_permission: u32) -> bool {
-        entity_id == ENTITY_ID && *account == CREATOR
+        let owner = ENTITY_OWNER_OVERRIDE.with(|o| o.borrow().unwrap_or(CREATOR));
+        entity_id == ENTITY_ID && *account == owner
     }
     fn is_entity_locked(entity_id: u64) -> bool {
         ENTITY_LOCKED.with(|l| l.borrow().contains(&entity_id))
@@ -66,6 +69,11 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
 
 pub fn set_entity_locked(entity_id: u64) {
     ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id));
+}
+
+pub fn set_entity_owner(entity_id: u64, owner: u64) {
+    let _ = entity_id; // 当前仅支持 ENTITY_ID
+    ENTITY_OWNER_OVERRIDE.with(|o| *o.borrow_mut() = Some(owner));
 }
 
 // ==================== Mock TokenProvider ====================
@@ -79,6 +87,7 @@ thread_local! {
     static TOKEN_BALANCES: RefCell<BTreeMap<(u64, u64), u128>> = RefCell::new(BTreeMap::new());
     static TOKEN_RESERVED: RefCell<BTreeMap<(u64, u64), u128>> = RefCell::new(BTreeMap::new());
     static ENTITY_LOCKED: RefCell<alloc::collections::BTreeSet<u64>> = RefCell::new(alloc::collections::BTreeSet::new());
+    static ENTITY_OWNER_OVERRIDE: RefCell<Option<u64>> = RefCell::new(None);
 }
 
 pub struct MockTokenProvider;
@@ -226,6 +235,7 @@ impl pallet_entity_tokensale::Config for Test {
     type MaxActiveRounds = ConstU32<10>;
     type RefundGracePeriod = RefundGracePeriod;
     type MaxBatchRefund = ConstU32<50>;
+    type WeightInfo = ();
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
@@ -251,6 +261,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         TOKEN_BALANCES.with(|b| b.borrow_mut().clear());
         TOKEN_RESERVED.with(|r| r.borrow_mut().clear());
         ENTITY_LOCKED.with(|l| l.borrow_mut().clear());
+        ENTITY_OWNER_OVERRIDE.with(|o| *o.borrow_mut() = None);
         KYC_LEVELS.with(|k| k.borrow_mut().clear());
         INSIDER_BLOCKED.with(|s| s.borrow_mut().clear());
 
