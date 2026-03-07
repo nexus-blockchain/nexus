@@ -729,6 +729,33 @@ export interface DomainStatistics {
   expiredCount: number;
 }
 
+export interface TwoWayDepositRecord {
+  initiator: string;
+  initiatorDeposit: bigint;
+  respondent: string;
+  respondentDeposit: bigint | null;
+  responseDeadline: number;
+  hasResponded: boolean;
+}
+
+export interface ArchivedDispute {
+  domain: string;
+  objectId: number;
+  decision: number;
+  partialBps: number;
+  completedAt: number;
+  yearMonth: number;
+}
+
+export interface ArchivedComplaint {
+  id: number;
+  domain: string;
+  objectId: number;
+  decision: number;
+  resolvedAt: number;
+  yearMonth: number;
+}
+
 // ============================================================================
 // Ads Types (pallet-ads-*)
 // ============================================================================

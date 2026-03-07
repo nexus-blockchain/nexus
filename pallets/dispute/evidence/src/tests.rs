@@ -239,6 +239,176 @@ fn store_test_private_content() -> u64 {
     content_id
 }
 
+// ==================== store_private_content extrinsic tests (call_index 7) ====================
+
+fn make_enc_cid() -> BoundedVec<u8, <Test as Config>::MaxCidLen> {
+    BoundedVec::truncate_from(b"enc-bafkreiaaaaaaaaaa000099".to_vec())
+}
+
+fn make_encrypted_keys(creator: u64) -> BoundedVec<
+    (u64, BoundedVec<u8, <Test as Config>::MaxKeyLen>),
+    <Test as Config>::MaxAuthorizedUsers,
+> {
+    BoundedVec::truncate_from(vec![
+        (creator, BoundedVec::truncate_from(vec![0xFFu8; 32])),
+    ])
+}
+
+#[test]
+fn store_private_content_works() {
+    new_test_ext().execute_with(|| {
+        register_key(1);
+        let cid = make_enc_cid();
+        let keys = make_encrypted_keys(1);
+        assert_ok!(EvidencePallet::store_private_content(
+            RuntimeOrigin::signed(1), NS, 500, cid.clone(),
+            sp_core::H256::repeat_byte(0x11),
+            pallet_crypto_common::EncryptionMethod::Aes256Gcm,
+            pallet_crypto_common::AccessPolicy::OwnerOnly,
+            keys,
+        ));
+        let content = PrivateContents::<Test>::get(0).expect("content stored");
+        assert_eq!(content.creator, 1u64);
+        assert_eq!(content.ns, NS);
+        assert_eq!(content.subject_id, 500);
+        assert_eq!(content.cid, cid);
+        assert!(PrivateContentByCid::<Test>::get(&cid).is_some());
+        assert!(PrivateContentBySubject::<Test>::contains_key((NS, 500u64), 0u64));
+        assert!(PrivateContentDeposits::<Test>::get(0).is_some());
+    });
+}
+
+#[test]
+fn store_private_content_rejects_not_authorized() {
+    new_test_ext().execute_with(|| {
+        set_authorized(false);
+        register_key(1);
+        assert_noop!(
+            EvidencePallet::store_private_content(
+                RuntimeOrigin::signed(1), NS, 500, make_enc_cid(),
+                sp_core::H256::repeat_byte(0x11),
+                pallet_crypto_common::EncryptionMethod::Aes256Gcm,
+                pallet_crypto_common::AccessPolicy::OwnerOnly,
+                make_encrypted_keys(1),
+            ),
+            Error::<Test>::NotAuthorized
+        );
+    });
+}
+
+#[test]
+fn store_private_content_rejects_insufficient_balance() {
+    new_test_ext().execute_with(|| {
+        // Account 99 has zero balance (not funded in genesis)
+        register_key(99);
+        assert_noop!(
+            EvidencePallet::store_private_content(
+                RuntimeOrigin::signed(99), NS, 500, make_enc_cid(),
+                sp_core::H256::repeat_byte(0x11),
+                pallet_crypto_common::EncryptionMethod::Aes256Gcm,
+                pallet_crypto_common::AccessPolicy::OwnerOnly,
+                make_encrypted_keys(99),
+            ),
+            Error::<Test>::InsufficientDeposit
+        );
+    });
+}
+
+#[test]
+fn store_private_content_rejects_non_encrypted_cid() {
+    new_test_ext().execute_with(|| {
+        register_key(1);
+        let plain_cid: BoundedVec<u8, <Test as Config>::MaxCidLen> =
+            BoundedVec::truncate_from(b"bafkreiaaaaaaaaaa000001".to_vec());
+        assert_noop!(
+            EvidencePallet::store_private_content(
+                RuntimeOrigin::signed(1), NS, 500, plain_cid,
+                sp_core::H256::repeat_byte(0x11),
+                pallet_crypto_common::EncryptionMethod::Aes256Gcm,
+                pallet_crypto_common::AccessPolicy::OwnerOnly,
+                make_encrypted_keys(1),
+            ),
+            Error::<Test>::InvalidCidFormat
+        );
+    });
+}
+
+#[test]
+fn store_private_content_rejects_duplicate_cid() {
+    new_test_ext().execute_with(|| {
+        register_key(1);
+        let cid = make_enc_cid();
+        let keys = make_encrypted_keys(1);
+        assert_ok!(EvidencePallet::store_private_content(
+            RuntimeOrigin::signed(1), NS, 500, cid.clone(),
+            sp_core::H256::repeat_byte(0x11),
+            pallet_crypto_common::EncryptionMethod::Aes256Gcm,
+            pallet_crypto_common::AccessPolicy::OwnerOnly,
+            keys.clone(),
+        ));
+        assert_noop!(
+            EvidencePallet::store_private_content(
+                RuntimeOrigin::signed(1), NS, 501, cid,
+                sp_core::H256::repeat_byte(0x22),
+                pallet_crypto_common::EncryptionMethod::Aes256Gcm,
+                pallet_crypto_common::AccessPolicy::OwnerOnly,
+                keys,
+            ),
+            Error::<Test>::CidAlreadyExists
+        );
+    });
+}
+
+#[test]
+fn store_private_content_rejects_missing_creator_key() {
+    new_test_ext().execute_with(|| {
+        register_key(1);
+        register_key(2);
+        // encrypted_keys contains account 2 but not account 1 (the caller)
+        let wrong_keys: BoundedVec<
+            (u64, BoundedVec<u8, <Test as Config>::MaxKeyLen>),
+            <Test as Config>::MaxAuthorizedUsers,
+        > = BoundedVec::truncate_from(vec![
+            (2u64, BoundedVec::truncate_from(vec![0xFFu8; 32])),
+        ]);
+        assert_noop!(
+            EvidencePallet::store_private_content(
+                RuntimeOrigin::signed(1), NS, 500, make_enc_cid(),
+                sp_core::H256::repeat_byte(0x11),
+                pallet_crypto_common::EncryptionMethod::Aes256Gcm,
+                pallet_crypto_common::AccessPolicy::OwnerOnly,
+                wrong_keys,
+            ),
+            Error::<Test>::InvalidEncryptedKey
+        );
+    });
+}
+
+#[test]
+fn store_private_content_rejects_unregistered_user_key() {
+    new_test_ext().execute_with(|| {
+        register_key(1);
+        // include account 3 who has no registered public key
+        let keys: BoundedVec<
+            (u64, BoundedVec<u8, <Test as Config>::MaxKeyLen>),
+            <Test as Config>::MaxAuthorizedUsers,
+        > = BoundedVec::truncate_from(vec![
+            (1u64, BoundedVec::truncate_from(vec![0xFFu8; 32])),
+            (3u64, BoundedVec::truncate_from(vec![0xAAu8; 32])),
+        ]);
+        assert_noop!(
+            EvidencePallet::store_private_content(
+                RuntimeOrigin::signed(1), NS, 500, make_enc_cid(),
+                sp_core::H256::repeat_byte(0x11),
+                pallet_crypto_common::EncryptionMethod::Aes256Gcm,
+                pallet_crypto_common::AccessPolicy::OwnerOnly,
+                keys,
+            ),
+            Error::<Test>::PublicKeyNotRegistered
+        );
+    });
+}
+
 // ==================== request_access (call_index 13) ====================
 
 #[test]
@@ -672,7 +842,8 @@ fn link_rejects_withdrawn_evidence() {
     new_test_ext().execute_with(|| {
         assert_ok!(EvidencePallet::commit(RuntimeOrigin::signed(1), NS, 1, 100, imgs_n(&[1]), empty_vids(), empty_docs(), None));
         assert_ok!(EvidencePallet::withdraw_evidence(RuntimeOrigin::signed(1), 0));
-        assert_noop!(EvidencePallet::link(RuntimeOrigin::signed(1), 2, 200, 0), Error::<Test>::InvalidEvidenceStatus);
+        // P0修复后 withdraw 会删除 Evidences 记录，link 返回 NotFound
+        assert_noop!(EvidencePallet::link(RuntimeOrigin::signed(1), 2, 200, 0), Error::<Test>::NotFound);
     });
 }
 
@@ -1145,8 +1316,162 @@ fn append_evidence_creates_ns_index() {
     new_test_ext().execute_with(|| {
         assert_ok!(EvidencePallet::commit(RuntimeOrigin::signed(1), NS, 1, 100, imgs_n(&[1]), empty_vids(), empty_docs(), None));
         assert_ok!(EvidencePallet::append_evidence(RuntimeOrigin::signed(1), 0, imgs_n(&[2]), empty_vids(), empty_docs(), None));
-        // Child evidence (id=1) should be indexed in EvidenceByNs
         assert!(EvidenceByNs::<Test>::contains_key((NS, 100), 1));
         assert_eq!(EvidenceCountByNs::<Test>::get((NS, 100)), 2);
+    });
+}
+
+// ==================== P1-3: grant_access 补充测试 ====================
+
+#[test]
+fn grant_access_rejects_non_creator() {
+    new_test_ext().execute_with(|| {
+        let content_id = store_test_private_content();
+        register_key(2);
+        let enc_key: BoundedVec<u8, frame_support::traits::ConstU32<512>> =
+            BoundedVec::truncate_from(vec![0xCCu8; 32]);
+        assert_noop!(
+            EvidencePallet::grant_access(RuntimeOrigin::signed(2), content_id, 2, enc_key),
+            Error::<Test>::AccessDenied
+        );
+    });
+}
+
+#[test]
+fn grant_access_rejects_unregistered_grantee() {
+    new_test_ext().execute_with(|| {
+        let content_id = store_test_private_content();
+        let enc_key: BoundedVec<u8, frame_support::traits::ConstU32<512>> =
+            BoundedVec::truncate_from(vec![0xCCu8; 32]);
+        assert_noop!(
+            EvidencePallet::grant_access(RuntimeOrigin::signed(1), content_id, 2, enc_key),
+            Error::<Test>::PublicKeyNotRegistered
+        );
+    });
+}
+
+#[test]
+fn grant_access_updates_existing_key() {
+    new_test_ext().execute_with(|| {
+        let content_id = store_test_private_content();
+        register_key(2);
+        let key_v1: BoundedVec<u8, frame_support::traits::ConstU32<512>> =
+            BoundedVec::truncate_from(vec![0xAAu8; 32]);
+        assert_ok!(EvidencePallet::grant_access(RuntimeOrigin::signed(1), content_id, 2, key_v1));
+        let key_v2: BoundedVec<u8, frame_support::traits::ConstU32<512>> =
+            BoundedVec::truncate_from(vec![0xBBu8; 32]);
+        assert_ok!(EvidencePallet::grant_access(RuntimeOrigin::signed(1), content_id, 2, key_v2.clone()));
+        let content = PrivateContents::<Test>::get(content_id).unwrap();
+        let user_key = content.encrypted_keys.iter().find(|(u, _)| *u == 2).unwrap();
+        assert_eq!(user_key.1.as_slice(), &[0xBBu8; 32]);
+    });
+}
+
+#[test]
+fn grant_access_rejects_nonexistent_content() {
+    new_test_ext().execute_with(|| {
+        register_key(2);
+        let enc_key: BoundedVec<u8, frame_support::traits::ConstU32<512>> =
+            BoundedVec::truncate_from(vec![0xCCu8; 32]);
+        assert_noop!(
+            EvidencePallet::grant_access(RuntimeOrigin::signed(1), 999, 2, enc_key),
+            Error::<Test>::PrivateContentNotFound
+        );
+    });
+}
+
+// ==================== P1-3: reveal_commitment 补充测试 ====================
+
+#[test]
+fn reveal_rejects_wrong_hash() {
+    new_test_ext().execute_with(|| {
+        let cid: BoundedVec<u8, <Test as Config>::MaxCidLen> =
+            BoundedVec::truncate_from(b"bafkreiaaaaaaaaaa000077".to_vec());
+        let salt: BoundedVec<u8, <Test as Config>::MaxMemoLen> =
+            BoundedVec::truncate_from(b"salt123".to_vec());
+        let version = 1u32;
+        let commit_hash = EvidencePallet::compute_evidence_commitment(&NS, 200, cid.as_slice(), salt.as_slice(), version);
+        let memo: BoundedVec<u8, <Test as Config>::MaxMemoLen> =
+            BoundedVec::truncate_from(b"bafkreiaaaaaaaaaa000088".to_vec());
+        assert_ok!(EvidencePallet::commit_hash(RuntimeOrigin::signed(1), NS, 200, commit_hash, Some(memo)));
+        let wrong_cid: BoundedVec<u8, <Test as Config>::MaxCidLen> =
+            BoundedVec::truncate_from(b"bafkreiaaaaaaaaaa999999".to_vec());
+        assert_noop!(
+            EvidencePallet::reveal_commitment(RuntimeOrigin::signed(1), 0, wrong_cid, salt, version),
+            Error::<Test>::CommitMismatch
+        );
+    });
+}
+
+#[test]
+fn reveal_rejects_sealed_evidence() {
+    new_test_ext().execute_with(|| {
+        let cid: BoundedVec<u8, <Test as Config>::MaxCidLen> =
+            BoundedVec::truncate_from(b"bafkreiaaaaaaaaaa000077".to_vec());
+        let salt: BoundedVec<u8, <Test as Config>::MaxMemoLen> =
+            BoundedVec::truncate_from(b"salt123".to_vec());
+        let version = 1u32;
+        let commit_hash = EvidencePallet::compute_evidence_commitment(&NS, 200, cid.as_slice(), salt.as_slice(), version);
+        let memo: BoundedVec<u8, <Test as Config>::MaxMemoLen> =
+            BoundedVec::truncate_from(b"bafkreiaaaaaaaaaa000088".to_vec());
+        assert_ok!(EvidencePallet::commit_hash(RuntimeOrigin::signed(1), NS, 200, commit_hash, Some(memo)));
+        assert_ok!(EvidencePallet::seal_evidence(RuntimeOrigin::signed(1), 0, None));
+        assert_noop!(
+            EvidencePallet::reveal_commitment(RuntimeOrigin::signed(1), 0, cid, salt, version),
+            Error::<Test>::EvidenceSealed
+        );
+    });
+}
+
+#[test]
+fn reveal_rejects_non_owner() {
+    new_test_ext().execute_with(|| {
+        let cid: BoundedVec<u8, <Test as Config>::MaxCidLen> =
+            BoundedVec::truncate_from(b"bafkreiaaaaaaaaaa000077".to_vec());
+        let salt: BoundedVec<u8, <Test as Config>::MaxMemoLen> =
+            BoundedVec::truncate_from(b"salt123".to_vec());
+        let version = 1u32;
+        let commit_hash = EvidencePallet::compute_evidence_commitment(&NS, 200, cid.as_slice(), salt.as_slice(), version);
+        let memo: BoundedVec<u8, <Test as Config>::MaxMemoLen> =
+            BoundedVec::truncate_from(b"bafkreiaaaaaaaaaa000088".to_vec());
+        assert_ok!(EvidencePallet::commit_hash(RuntimeOrigin::signed(1), NS, 200, commit_hash, Some(memo)));
+        assert_noop!(
+            EvidencePallet::reveal_commitment(RuntimeOrigin::signed(2), 0, cid, salt, version),
+            Error::<Test>::NotAuthorized
+        );
+    });
+}
+
+// ==================== P1-3: register_public_key 补充测试 ====================
+
+#[test]
+fn register_public_key_rejects_invalid_key_length() {
+    new_test_ext().execute_with(|| {
+        let bad_key: BoundedVec<u8, <Test as Config>::MaxKeyLen> =
+            BoundedVec::truncate_from(vec![0xABu8; 5]);
+        assert_noop!(
+            EvidencePallet::register_public_key(
+                RuntimeOrigin::signed(1), bad_key, pallet_crypto_common::KeyType::Ed25519,
+            ),
+            Error::<Test>::InvalidEncryptedKey
+        );
+    });
+}
+
+#[test]
+fn register_public_key_overwrites_existing() {
+    new_test_ext().execute_with(|| {
+        let key1: BoundedVec<u8, <Test as Config>::MaxKeyLen> =
+            BoundedVec::truncate_from(vec![0xAAu8; 32]);
+        assert_ok!(EvidencePallet::register_public_key(
+            RuntimeOrigin::signed(1), key1, pallet_crypto_common::KeyType::Ed25519,
+        ));
+        let key2: BoundedVec<u8, <Test as Config>::MaxKeyLen> =
+            BoundedVec::truncate_from(vec![0xBBu8; 32]);
+        assert_ok!(EvidencePallet::register_public_key(
+            RuntimeOrigin::signed(1), key2.clone(), pallet_crypto_common::KeyType::Ed25519,
+        ));
+        let pk = UserPublicKeys::<Test>::get(1).unwrap();
+        assert_eq!(pk.key_data.as_slice(), &[0xBBu8; 32]);
     });
 }

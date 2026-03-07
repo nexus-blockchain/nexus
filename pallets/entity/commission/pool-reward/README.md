@@ -97,6 +97,19 @@ per_member_reward = pool_balance × ratio / (10000 × member_count)
 
 Token 转账成功但记账扣减失败时，尝试反向转账回滚。若回滚也失败，累加到 `TokenPoolDeficit`，发出 `TokenTransferRollbackFailed` 事件，由 Root 通过 `correct_token_pool_deficit` 修正。
 
+### 前端集成：Token 转账失败事件
+
+前端/Indexer **必须**监听以下两个事件以正确展示 Token 领取状态：
+
+| 事件 | 含义 | 前端处理建议 |
+|------|------|-------------|
+| `TokenClaimTransferFailed` | Token 初始转账失败，用户**未收到** Token 部分（NEX 已正常发放） | 显示"Token 领取失败，NEX 已到账"提示；不影响 claim 状态 |
+| `TokenTransferRollbackFailed` | Token 已转出但链上扣减失败，回滚也失败；产生 `TokenPoolDeficit` | 显示"Token 已到账，池账本异常待管理员修正"；标记该 Entity 需关注 |
+
+两个事件均包含 `entity_id`、`account`、`amount` 字段。`claim_pool_reward` 交易本身仍返回 `Ok`（NEX 部分成功），因此前端不能仅依赖 extrinsic 成功/失败来判断 Token 状态，**必须解析事件**。
+
+`correct_token_pool_deficit` 修正后会发出 `TokenPoolDeficitCorrected` 事件，前端可据此清除告警。
+
 ## 权限模型
 
 ```

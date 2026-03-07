@@ -1,5 +1,5 @@
 [package]
-name = "pallet-arbitration"
+name = "pallet-dispute-arbitration"
 version = "0.1.0"
 license = "MIT-0"
 edition.workspace = true
@@ -13,10 +13,13 @@ codec = { workspace = true, features = ["derive"] }
 scale-info = { workspace = true, features = ["derive"], default-features = false }
 frame-support = { workspace = true }
 frame-system = { workspace = true }
+sp-api = { workspace = true }
 sp-runtime = { workspace = true }
+log = { workspace = true }
 sp-core = { workspace = true }
+frame-benchmarking = { workspace = true, optional = true }
 sp-arithmetic = { workspace = true }
-pallet-escrow = { path = "../escrow", default-features = false }
+pallet-dispute-escrow = { path = "../escrow", default-features = false }
 pallet-storage-service = { workspace = true }
 pallet-storage-lifecycle = { workspace = true }
 pallet-trading-common = { workspace = true }
@@ -33,15 +36,19 @@ std = [
     "scale-info/std",
     "frame-support/std",
     "frame-system/std",
+    "sp-api/std",
     "sp-runtime/std",
+    "log/std",
     "sp-core/std",
+    "frame-benchmarking?/std",
     "sp-arithmetic/std",
-    "pallet-escrow/std",
+    "pallet-dispute-escrow/std",
     "pallet-storage-service/std",
     "pallet-storage-lifecycle/std",
     "pallet-trading-common/std",
 ]
 runtime-benchmarks = [
+    "frame-benchmarking/runtime-benchmarks",
     "frame-support/runtime-benchmarks",
     "frame-system/runtime-benchmarks",
     "sp-runtime/runtime-benchmarks",

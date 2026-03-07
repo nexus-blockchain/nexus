@@ -1,4 +1,4 @@
-use crate as pallet_arbitration;
+use crate as pallet_dispute_arbitration;
 use frame_support::{
     derive_impl, parameter_types,
     traits::ConstU32,
@@ -16,8 +16,8 @@ frame_support::construct_runtime!(
     pub enum Test {
         System: frame_system,
         Balances: pallet_balances,
-        Escrow: pallet_escrow,
-        Arbitration: pallet_arbitration,
+        Escrow: pallet_dispute_escrow,
+        Arbitration: pallet_dispute_arbitration,
     }
 );
 
@@ -44,12 +44,12 @@ impl pallet_balances::Config for Test {
 }
 
 pub struct TestExpiryPolicy;
-impl pallet_escrow::pallet::ExpiryPolicy<u64, u64> for TestExpiryPolicy {
-    fn on_expire(id: u64) -> Result<pallet_escrow::pallet::ExpiryAction<u64>, sp_runtime::DispatchError> {
+impl pallet_dispute_escrow::pallet::ExpiryPolicy<u64, u64> for TestExpiryPolicy {
+    fn on_expire(id: u64) -> Result<pallet_dispute_escrow::pallet::ExpiryAction<u64>, sp_runtime::DispatchError> {
         if id % 2 == 0 {
-            Ok(pallet_escrow::pallet::ExpiryAction::ReleaseAll(99))
+            Ok(pallet_dispute_escrow::pallet::ExpiryAction::ReleaseAll(99))
         } else {
-            Ok(pallet_escrow::pallet::ExpiryAction::RefundAll(99))
+            Ok(pallet_dispute_escrow::pallet::ExpiryAction::RefundAll(99))
         }
     }
 }
@@ -58,7 +58,7 @@ parameter_types! {
     pub const MaxDisputeDuration: u64 = 14400;
 }
 
-impl pallet_escrow::Config for Test {
+impl pallet_dispute_escrow::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type EscrowPalletId = EscrowPalletId;
@@ -108,7 +108,7 @@ pub fn set_evidence_exists(val: bool) {
 // -- MockRouter (simplified: no ban_account, no get_maker_id) --
 
 pub struct MockRouter;
-impl pallet_arbitration::pallet::ArbitrationRouter<u64, Balance> for MockRouter {
+impl pallet_dispute_arbitration::pallet::ArbitrationRouter<u64, Balance> for MockRouter {
     fn can_dispute(_domain: [u8; 8], _who: &u64, _id: u64) -> bool {
         CAN_DISPUTE.with(|v| *v.borrow())
     }
@@ -128,7 +128,7 @@ impl pallet_arbitration::pallet::ArbitrationRouter<u64, Balance> for MockRouter 
 }
 
 pub struct MockEscrow;
-impl pallet_escrow::pallet::Escrow<u64, Balance> for MockEscrow {
+impl pallet_dispute_escrow::pallet::Escrow<u64, Balance> for MockEscrow {
     fn escrow_account() -> u64 { 50 }
     fn lock_from(_payer: &u64, _id: u64, _amount: Balance) -> sp_runtime::DispatchResult { Ok(()) }
     fn transfer_from_escrow(_id: u64, _to: &u64, _amount: Balance) -> sp_runtime::DispatchResult { Ok(()) }
@@ -156,7 +156,7 @@ impl pallet_trading_common::PricingProvider<Balance> for MockPricing {
 }
 
 pub struct MockEvidenceChecker;
-impl pallet_arbitration::pallet::EvidenceExistenceChecker for MockEvidenceChecker {
+impl pallet_dispute_arbitration::pallet::EvidenceExistenceChecker for MockEvidenceChecker {
     fn evidence_exists(_id: u64) -> bool {
         EVIDENCE_EXISTS.with(|v| *v.borrow())
     }
@@ -180,7 +180,7 @@ parameter_types! {
     pub const MaxActivePerUser: u32 = 50;
 }
 
-impl pallet_arbitration::pallet::Config for Test {
+impl pallet_dispute_arbitration::pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type MaxEvidence = ConstU32<10>;
     type MaxCidLen = ConstU32<64>;

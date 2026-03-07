@@ -199,7 +199,7 @@ fn file_complaint_invalid_type_for_domain() {
         assert_noop!(
             Arbitration::file_complaint(
                 RuntimeOrigin::signed(1), DOMAIN, 1,
-                ComplaintType::LiveIllegalContent, cid(b"details"), None,
+                ComplaintType::AdsReceiptDispute, cid(b"details"), None,
             ),
             Error::<Test>::InvalidComplaintType
         );
@@ -429,9 +429,10 @@ fn escalate_wrong_status() {
             RuntimeOrigin::signed(1), DOMAIN, 1,
             ComplaintType::OtcSellerNotDeliver, cid(b"details"), None,
         ));
+        // Submitted -> Arbitrating is now allowed, but only after response deadline
         assert_noop!(
             Arbitration::escalate_to_arbitration(RuntimeOrigin::signed(1), 0),
-            Error::<Test>::InvalidState
+            Error::<Test>::ResponseDeadlineNotReached
         );
     });
 }
@@ -587,13 +588,52 @@ fn archive_old_complaints_works() {
     });
 }
 
+// ==================== archive cleanup: ComplaintEvidenceCids + ComplaintCooldown ====================
+
+#[test]
+fn archive_cleans_evidence_cids_and_cooldown() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver, cid(b"details"), None,
+        ));
+        assert_ok!(Arbitration::supplement_complaint_evidence(
+            RuntimeOrigin::signed(1), 0, cid(b"extra"),
+        ));
+        assert_eq!(ComplaintEvidenceCids::<Test>::get(0).len(), 1);
+
+        assert_ok!(Arbitration::respond_to_complaint(
+            RuntimeOrigin::signed(2), 0, cid(b"response"),
+        ));
+        assert_ok!(Arbitration::settle_complaint(
+            RuntimeOrigin::signed(1), 0, cid(b"settlement"),
+        ));
+
+        // Cooldown should be set
+        assert!(ComplaintCooldown::<Test>::get(DOMAIN, 1).is_some());
+
+        // Advance past archive delay and appeal window
+        System::set_block_number(200);
+        let archived = Arbitration::archive_old_complaints(10);
+        assert_eq!(archived, 1);
+        assert!(Complaints::<Test>::get(0).is_none());
+        assert!(ArchivedComplaints::<Test>::get(0).is_some());
+
+        // Storage cleaned up
+        assert_eq!(ComplaintEvidenceCids::<Test>::get(0).len(), 0);
+        assert!(ComplaintCooldown::<Test>::get(DOMAIN, 1).is_none());
+    });
+}
+
 // ==================== ComplaintType domain matching ====================
 
 #[test]
 fn complaint_type_domain_mapping() {
+    assert_eq!(ComplaintType::EntityOrderNotDeliver.domain(), *b"entorder");
     assert_eq!(ComplaintType::OtcSellerNotDeliver.domain(), *b"otc_ord_");
-    assert_eq!(ComplaintType::LiveIllegalContent.domain(), *b"livstrm_");
     assert_eq!(ComplaintType::MakerCreditDefault.domain(), *b"maker___");
+    assert_eq!(ComplaintType::AdsReceiptDispute.domain(), *b"ads_____");
+    assert_eq!(ComplaintType::TokenSaleNotDeliver.domain(), *b"toknsale");
     assert_eq!(ComplaintType::Other.domain(), *b"other___");
 }
 
@@ -731,13 +771,65 @@ fn resolve_appeal_works() {
             RawOrigin::Root.into(), 0, 0, cid(b"reason"), None,
         ));
 
+        // After resolve_complaint, ActiveComplaintCount should be 0
+        assert_eq!(ActiveComplaintCount::<Test>::get(1), 0);
+
         assert_ok!(Arbitration::appeal(RuntimeOrigin::signed(2), 0, cid(b"appeal")));
+
+        // Appeal re-increments ActiveComplaintCount
+        assert_eq!(ActiveComplaintCount::<Test>::get(1), 1);
+
+        // Verify appellant is recorded
+        let complaint = Complaints::<Test>::get(0).unwrap();
+        assert_eq!(complaint.appellant, Some(2));
+
         assert_ok!(Arbitration::resolve_appeal(
             RawOrigin::Root.into(), 0, 1, cid(b"appeal_reason"),
         ));
 
         let complaint = Complaints::<Test>::get(0).unwrap();
         assert_eq!(complaint.status, ComplaintStatus::ResolvedRespondentWin);
+
+        // ActiveComplaintCount decremented again after appeal resolution
+        assert_eq!(ActiveComplaintCount::<Test>::get(1), 0);
+
+        // DomainStats updated by resolve_appeal
+        let stats = DomainStats::<Test>::get(DOMAIN);
+        assert!(stats.resolved_count >= 2);
+        assert!(stats.respondent_wins >= 1);
+    });
+}
+
+#[test]
+fn resolve_appeal_complainant_as_appellant() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver, cid(b"details"), None,
+        ));
+        assert_ok!(Arbitration::respond_to_complaint(
+            RuntimeOrigin::signed(2), 0, cid(b"response"),
+        ));
+        assert_ok!(Arbitration::escalate_to_arbitration(RuntimeOrigin::signed(1), 0));
+        // Respondent wins -> complainant is the loser
+        assert_ok!(Arbitration::resolve_complaint(
+            RawOrigin::Root.into(), 0, 1, cid(b"reason"), None,
+        ));
+
+        let complaint = Complaints::<Test>::get(0).unwrap();
+        assert_eq!(complaint.status, ComplaintStatus::ResolvedRespondentWin);
+
+        // Complainant (loser) appeals
+        assert_ok!(Arbitration::appeal(RuntimeOrigin::signed(1), 0, cid(b"appeal")));
+        let complaint = Complaints::<Test>::get(0).unwrap();
+        assert_eq!(complaint.appellant, Some(1));
+
+        // Appeal overturns: complainant wins
+        assert_ok!(Arbitration::resolve_appeal(
+            RawOrigin::Root.into(), 0, 0, cid(b"appeal_reason"),
+        ));
+        let complaint = Complaints::<Test>::get(0).unwrap();
+        assert_eq!(complaint.status, ComplaintStatus::ResolvedComplainantWin);
     });
 }
 
@@ -869,5 +961,230 @@ fn dismiss_complaint_slashes_and_cleans() {
         assert_eq!(ActiveComplaintCount::<Test>::get(1), 0);
         let stats = DomainStats::<Test>::get(DOMAIN);
         assert_eq!(stats.respondent_wins, 1);
+    });
+}
+
+// ==================== respond_to_dispute ====================
+
+#[test]
+fn respond_to_dispute_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::dispute_with_two_way_deposit(
+            RuntimeOrigin::signed(1), DOMAIN, 1, 42,
+        ));
+        let record = TwoWayDeposits::<Test>::get(DOMAIN, 1).unwrap();
+        assert!(!record.has_responded);
+
+        assert_ok!(Arbitration::respond_to_dispute(
+            RuntimeOrigin::signed(2), DOMAIN, 1, 43,
+        ));
+        let record = TwoWayDeposits::<Test>::get(DOMAIN, 1).unwrap();
+        assert!(record.has_responded);
+        assert!(record.respondent_deposit.is_some());
+        assert_eq!(EvidenceIds::<Test>::get(DOMAIN, 1).len(), 2);
+    });
+}
+
+#[test]
+fn respond_to_dispute_wrong_respondent() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::dispute_with_two_way_deposit(
+            RuntimeOrigin::signed(1), DOMAIN, 1, 42,
+        ));
+        assert_noop!(
+            Arbitration::respond_to_dispute(RuntimeOrigin::signed(3), DOMAIN, 1, 43),
+            Error::<Test>::NotDisputed
+        );
+    });
+}
+
+#[test]
+fn respond_to_dispute_after_deadline() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::dispute_with_two_way_deposit(
+            RuntimeOrigin::signed(1), DOMAIN, 1, 42,
+        ));
+        System::set_block_number(200);
+        assert_noop!(
+            Arbitration::respond_to_dispute(RuntimeOrigin::signed(2), DOMAIN, 1, 43),
+            Error::<Test>::ResponseDeadlinePassed
+        );
+    });
+}
+
+// ==================== settle_dispute ====================
+
+#[test]
+fn settle_dispute_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::dispute_with_two_way_deposit(
+            RuntimeOrigin::signed(1), DOMAIN, 1, 42,
+        ));
+        assert_ok!(Arbitration::respond_to_dispute(
+            RuntimeOrigin::signed(2), DOMAIN, 1, 43,
+        ));
+        assert_ok!(Arbitration::settle_dispute(RuntimeOrigin::signed(1), DOMAIN, 1));
+        assert!(Disputed::<Test>::get(DOMAIN, 1).is_none());
+        assert!(TwoWayDeposits::<Test>::get(DOMAIN, 1).is_none());
+    });
+}
+
+#[test]
+fn settle_dispute_requires_response() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::dispute_with_two_way_deposit(
+            RuntimeOrigin::signed(1), DOMAIN, 1, 42,
+        ));
+        assert_noop!(
+            Arbitration::settle_dispute(RuntimeOrigin::signed(1), DOMAIN, 1),
+            Error::<Test>::SettlementNotConfirmed
+        );
+    });
+}
+
+// ==================== dismiss_dispute ====================
+
+#[test]
+fn dismiss_dispute_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::dispute_with_two_way_deposit(
+            RuntimeOrigin::signed(1), DOMAIN, 1, 42,
+        ));
+        assert_ok!(Arbitration::dismiss_dispute(RawOrigin::Root.into(), DOMAIN, 1));
+        assert!(Disputed::<Test>::get(DOMAIN, 1).is_none());
+    });
+}
+
+// ==================== request_default_judgment ====================
+
+#[test]
+fn request_default_judgment_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::dispute_with_two_way_deposit(
+            RuntimeOrigin::signed(1), DOMAIN, 1, 42,
+        ));
+        System::set_block_number(200);
+        assert_ok!(Arbitration::request_default_judgment(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+        ));
+        assert!(Disputed::<Test>::get(DOMAIN, 1).is_none());
+    });
+}
+
+#[test]
+fn request_default_judgment_before_deadline() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::dispute_with_two_way_deposit(
+            RuntimeOrigin::signed(1), DOMAIN, 1, 42,
+        ));
+        assert_noop!(
+            Arbitration::request_default_judgment(RuntimeOrigin::signed(1), DOMAIN, 1),
+            Error::<Test>::ResponseDeadlineNotReached
+        );
+    });
+}
+
+// ==================== force_close_dispute ====================
+
+#[test]
+fn force_close_dispute_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::dispute_with_two_way_deposit(
+            RuntimeOrigin::signed(1), DOMAIN, 1, 42,
+        ));
+        assert_ok!(Arbitration::respond_to_dispute(
+            RuntimeOrigin::signed(2), DOMAIN, 1, 43,
+        ));
+        assert_ok!(Arbitration::force_close_dispute(RawOrigin::Root.into(), DOMAIN, 1));
+        assert!(Disputed::<Test>::get(DOMAIN, 1).is_none());
+        assert!(TwoWayDeposits::<Test>::get(DOMAIN, 1).is_none());
+    });
+}
+
+// ==================== start_mediation ====================
+
+#[test]
+fn start_mediation_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver, cid(b"details"), None,
+        ));
+        assert_ok!(Arbitration::respond_to_complaint(
+            RuntimeOrigin::signed(2), 0, cid(b"response"),
+        ));
+        assert_ok!(Arbitration::start_mediation(RawOrigin::Root.into(), 0));
+        let c = Complaints::<Test>::get(0).unwrap();
+        assert_eq!(c.status, ComplaintStatus::Mediating);
+    });
+}
+
+#[test]
+fn start_mediation_invalid_state() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver, cid(b"details"), None,
+        ));
+        assert_noop!(
+            Arbitration::start_mediation(RawOrigin::Root.into(), 0),
+            Error::<Test>::InvalidState
+        );
+    });
+}
+
+// ==================== arbitrate invalid decision_code ====================
+
+#[test]
+fn arbitrate_invalid_decision_code_rejected() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::dispute_with_two_way_deposit(
+            RuntimeOrigin::signed(1), DOMAIN, 1, 42,
+        ));
+        assert_noop!(
+            Arbitration::arbitrate(RawOrigin::Root.into(), DOMAIN, 1, 5, None),
+            Error::<Test>::InvalidDecisionCode
+        );
+    });
+}
+
+#[test]
+fn arbitrate_partial_without_bps_uses_default() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::dispute_with_two_way_deposit(
+            RuntimeOrigin::signed(1), DOMAIN, 1, 42,
+        ));
+        assert_ok!(Arbitration::arbitrate(RawOrigin::Root.into(), DOMAIN, 1, 2, None));
+        assert!(Disputed::<Test>::get(DOMAIN, 1).is_none());
+    });
+}
+
+// ==================== Submitted -> Arbitrating escalation ====================
+
+#[test]
+fn escalate_submitted_after_deadline() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver, cid(b"details"), None,
+        ));
+        System::set_block_number(200);
+        assert_ok!(Arbitration::escalate_to_arbitration(RuntimeOrigin::signed(1), 0));
+        let c = Complaints::<Test>::get(0).unwrap();
+        assert_eq!(c.status, ComplaintStatus::Arbitrating);
+    });
+}
+
+#[test]
+fn escalate_submitted_before_deadline_rejected() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::file_complaint(
+            RuntimeOrigin::signed(1), DOMAIN, 1,
+            ComplaintType::OtcSellerNotDeliver, cid(b"details"), None,
+        ));
+        assert_noop!(
+            Arbitration::escalate_to_arbitration(RuntimeOrigin::signed(1), 0),
+            Error::<Test>::ResponseDeadlineNotReached
+        );
     });
 }

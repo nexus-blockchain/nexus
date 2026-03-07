@@ -49,7 +49,7 @@ pallet-nex-market
   └── 实现 PriceOracle trait（TWAP + LastTradePrice + 陈旧检测）
 
 pallet-trading-common（被外部模块使用）
-  ├── pallet-arbitration      → PricingProvider (投诉押金换算)
+  ├── pallet-dispute-arbitration      → PricingProvider (投诉押金换算)
   ├── pallet-storage-service  → PricingProvider + DepositCalculator (保证金)
   ├── pallet-entity-registry  → PricingProvider (开店初始资金)
   ├── pallet-entity-market    → PricingProvider (商品押金)

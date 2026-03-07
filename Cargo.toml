@@ -68,15 +68,15 @@ pallet-trading-common = { path = "./pallets/trading/common", default-features = 
 pallet-trading-trc20-verifier = { path = "./pallets/trading/trc20-verifier", default-features = false }
 pallet-nex-market = { path = "./pallets/trading/nex-market", default-features = false }
 # Escrow, Referral, IPFS pallets
-pallet-escrow = { path = "./pallets/dispute/escrow", default-features = false }
+pallet-dispute-escrow = { path = "./pallets/dispute/escrow", default-features = false }
 pallet-storage-service = { path = "./pallets/storage/service", default-features = false }
 # Common libraries (共享工具库，非 pallet)
 pallet-crypto-common = { path = "./common/crypto", default-features = false }
 media-utils = { path = "./common/media", default-features = false }
 # Evidence pallet
-pallet-evidence = { path = "./pallets/dispute/evidence", default-features = false }
+pallet-dispute-evidence = { path = "./pallets/dispute/evidence", default-features = false }
 # Arbitration pallet
-pallet-arbitration = { path = "./pallets/dispute/arbitration", default-features = false }
+pallet-dispute-arbitration = { path = "./pallets/dispute/arbitration", default-features = false }
 # Storage lifecycle pallet
 pallet-storage-lifecycle = { path = "./pallets/storage/lifecycle", default-features = false }
 # Entity pallets (原 ShareMall，已重构为子模块)

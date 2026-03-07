@@ -1,7 +1,7 @@
 //! 加密内容类型 — 基于 pallet-crypto-common 的类型别名层
 //!
 //! 核心 struct/enum 定义已迁移至 `pallet-crypto-common`（原始泛型版本），
-//! 本模块通过 type alias 将 `pallet-evidence::Config` 的关联类型映射到泛型参数，
+//! 本模块通过 type alias 将 `pallet-dispute-evidence::Config` 的关联类型映射到泛型参数，
 //! 保持与旧代码 100% 兼容的 API 和 SCALE 编码。
 //!
 //! 其他 pallet（kyc、arbitration、order）可直接依赖 `pallet-crypto-common`，

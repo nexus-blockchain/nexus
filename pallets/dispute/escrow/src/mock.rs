@@ -1,4 +1,4 @@
-use crate as pallet_escrow;
+use crate as pallet_dispute_escrow;
 use frame_support::{
     derive_impl,
     parameter_types,
@@ -16,7 +16,7 @@ frame_support::construct_runtime!(
     pub enum Test {
         System: frame_system,
         Balances: pallet_balances,
-        Escrow: pallet_escrow,
+        Escrow: pallet_dispute_escrow,
     }
 );
 
@@ -41,17 +41,17 @@ impl pallet_balances::Config for Test {
 }
 
 pub struct TestExpiryPolicy;
-impl pallet_escrow::pallet::ExpiryPolicy<u64, u64> for TestExpiryPolicy {
-    fn on_expire(id: u64) -> Result<pallet_escrow::pallet::ExpiryAction<u64>, sp_runtime::DispatchError> {
+impl pallet_dispute_escrow::pallet::ExpiryPolicy<u64, u64> for TestExpiryPolicy {
+    fn on_expire(id: u64) -> Result<pallet_dispute_escrow::pallet::ExpiryAction<u64>, sp_runtime::DispatchError> {
         if id % 2 == 0 {
-            Ok(pallet_escrow::pallet::ExpiryAction::ReleaseAll(99))
+            Ok(pallet_dispute_escrow::pallet::ExpiryAction::ReleaseAll(99))
         } else {
-            Ok(pallet_escrow::pallet::ExpiryAction::RefundAll(99))
+            Ok(pallet_dispute_escrow::pallet::ExpiryAction::RefundAll(99))
         }
     }
 }
 
-impl pallet_escrow::Config for Test {
+impl pallet_dispute_escrow::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type EscrowPalletId = EscrowPalletId;

@@ -103,33 +103,6 @@ pub mod pallet {
         fn on_force_action(_id: u64, _action: u8) {}
     }
 
-    /// 🆕 F9: Token 托管处理器接口
-    /// 函数级详细中文注释：由 runtime 实现，处理 Entity Token 类型的托管操作
-    pub trait TokenEscrowHandler<AccountId> {
-        /// 从付款人锁定 token 到托管
-        fn lock_token(payer: &AccountId, entity_id: u64, escrow_id: u64, amount: u128) -> DispatchResult;
-        /// 从托管释放 token 给收款人
-        fn release_token(entity_id: u64, escrow_id: u64, to: &AccountId, amount: u128) -> DispatchResult;
-        /// 从托管退款 token 给付款人
-        fn refund_token(entity_id: u64, escrow_id: u64, to: &AccountId, amount: u128) -> DispatchResult;
-        /// 查询 token 托管余额
-        fn token_amount(entity_id: u64, escrow_id: u64) -> u128;
-    }
-
-    /// 空实现：不支持 Token 托管时使用
-    impl<AccountId> TokenEscrowHandler<AccountId> for () {
-        fn lock_token(_payer: &AccountId, _entity_id: u64, _escrow_id: u64, _amount: u128) -> DispatchResult {
-            Err(DispatchError::Other("TokenEscrow not supported"))
-        }
-        fn release_token(_entity_id: u64, _escrow_id: u64, _to: &AccountId, _amount: u128) -> DispatchResult {
-            Err(DispatchError::Other("TokenEscrow not supported"))
-        }
-        fn refund_token(_entity_id: u64, _escrow_id: u64, _to: &AccountId, _amount: u128) -> DispatchResult {
-            Err(DispatchError::Other("TokenEscrow not supported"))
-        }
-        fn token_amount(_entity_id: u64, _escrow_id: u64) -> u128 { 0 }
-    }
-
     #[pallet::config]
     pub trait Config: frame_system::Config {
         #[allow(deprecated)]

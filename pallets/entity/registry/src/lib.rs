@@ -31,6 +31,9 @@ pub use pallet_entity_common::{EntityStatus, EntityType, GovernanceMode};
 
 pub mod runtime_api;
 
+#[cfg(feature = "runtime-benchmarks")]
+pub mod benchmarking;
+
 mod helpers;
 mod traits;
 mod lifecycle;
@@ -39,7 +42,7 @@ mod admin;
 mod owner_ops;
 
 #[cfg(test)]
-mod mock;
+pub mod mock;
 
 #[cfg(test)]
 mod tests;

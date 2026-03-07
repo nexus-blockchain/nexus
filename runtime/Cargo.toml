@@ -38,12 +38,12 @@ pallet-contracts = { version = "45.0.1", workspace = true }
 pallet-trading-common = { workspace = true }
 pallet-nex-market = { workspace = true }
 # Escrow, Referral, IPFS pallets
-pallet-escrow = { workspace = true }
+pallet-dispute-escrow = { workspace = true }
 pallet-storage-service = { workspace = true }
 # Evidence pallet
-pallet-evidence = { workspace = true }
+pallet-dispute-evidence = { workspace = true }
 # Arbitration pallet
-pallet-arbitration = { workspace = true }
+pallet-dispute-arbitration = { workspace = true }
 # Storage lifecycle pallet
 pallet-storage-lifecycle = { workspace = true }
 # Assets pallet
@@ -133,12 +133,12 @@ std = [
 	"pallet-trading-common/std",
 	"pallet-nex-market/std",
 	# Escrow, Referral, IPFS pallets std
-	"pallet-escrow/std",
+	"pallet-dispute-escrow/std",
 	"pallet-storage-service/std",
 	# Evidence pallet std
-	"pallet-evidence/std",
+	"pallet-dispute-evidence/std",
 	# Arbitration pallet std
-	"pallet-arbitration/std",
+	"pallet-dispute-arbitration/std",
 	# Storage lifecycle pallet std
 	"pallet-storage-lifecycle/std",
 	# Assets pallet std
@@ -217,9 +217,9 @@ runtime-benchmarks = [
 	"pallet-nex-market/runtime-benchmarks",
 	# Escrow, Referral pallets benchmarks
 	# Evidence pallet benchmarks
-	"pallet-evidence/runtime-benchmarks",
+	"pallet-dispute-evidence/runtime-benchmarks",
 	# Arbitration pallet benchmarks
-	"pallet-arbitration/runtime-benchmarks",
+	"pallet-dispute-arbitration/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",
 ]
 
@@ -242,9 +242,9 @@ try-runtime = [
 	"pallet-nex-market/try-runtime",
 	# Escrow, Referral pallets try-runtime
 	# Evidence pallet try-runtime
-	"pallet-evidence/try-runtime",
+	"pallet-dispute-evidence/try-runtime",
 	# Arbitration pallet try-runtime
-	# Note: pallet-arbitration does not have try-runtime feature
+	# Note: pallet-dispute-arbitration does not have try-runtime feature
 	"sp-runtime/try-runtime",
 ]
 

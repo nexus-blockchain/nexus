@@ -42,8 +42,8 @@ use sp_version::RuntimeVersion;
 
 // Local module imports
 use super::{
-	AccountId, Aura, Balance, Block, Executive, Grandpa, InherentDataExt, Nonce, Runtime,
-	RuntimeCall, RuntimeGenesisConfig, SessionKeys, StorageService, NexMarket, CommissionPoolReward, System, TransactionPayment, VERSION,
+	AccountId, Aura, Balance, Block, Evidence, Executive, Grandpa, InherentDataExt, Nonce, Runtime,
+	RuntimeCall, RuntimeGenesisConfig, SessionKeys, StorageService, NexMarket, CommissionPoolReward, EntityRegistry, Arbitration, System, TransactionPayment, VERSION,
 };
 
 impl_runtime_apis! {
@@ -440,7 +440,6 @@ impl_runtime_apis! {
 		}
 
 		fn get_user_all_usage(user: AccountId) -> Vec<(u8, u64, Balance)> {
-			// 遍历 SubjectUsage 存储，筛选出该用户的所有记录
 			pallet_storage_service::SubjectUsage::<Runtime>::iter()
 				.filter_map(|((u, domain, subject_id), amount)| {
 					if u == user {
@@ -450,6 +449,114 @@ impl_runtime_apis! {
 					}
 				})
 				.collect()
+		}
+	}
+
+	impl pallet_entity_registry::runtime_api::EntityRegistryApi<Block, AccountId, Balance> for Runtime {
+		fn get_entity(entity_id: u64) -> Option<pallet_entity_registry::runtime_api::EntityInfo<AccountId, Balance>> {
+			EntityRegistry::api_get_entity(entity_id)
+		}
+
+		fn get_entities_by_owner(account: AccountId) -> Vec<u64> {
+			EntityRegistry::api_get_entities_by_owner(&account)
+		}
+
+		fn get_entity_fund_info(entity_id: u64) -> Option<pallet_entity_registry::runtime_api::EntityFundInfo<Balance>> {
+			EntityRegistry::api_get_entity_fund_info(entity_id)
+		}
+
+		fn get_verified_entities(offset: u32, limit: u32) -> Vec<u64> {
+			EntityRegistry::api_get_verified_entities(offset, limit)
+		}
+
+		fn get_entity_by_name(name: Vec<u8>) -> Option<u64> {
+			EntityRegistry::api_get_entity_by_name(name)
+		}
+
+		fn get_entity_admins(entity_id: u64) -> Vec<(AccountId, u32)> {
+			EntityRegistry::api_get_entity_admins(entity_id)
+		}
+
+		fn get_entity_suspension_reason(entity_id: u64) -> Option<Vec<u8>> {
+			EntityRegistry::api_get_entity_suspension_reason(entity_id)
+		}
+
+		fn get_entity_sales(entity_id: u64) -> Option<(Balance, u64)> {
+			EntityRegistry::api_get_entity_sales(entity_id)
+		}
+
+		fn get_entity_referrer(entity_id: u64) -> Option<AccountId> {
+			EntityRegistry::api_get_entity_referrer(entity_id)
+		}
+
+		fn get_referrer_entities(account: AccountId) -> Vec<u64> {
+			EntityRegistry::api_get_referrer_entities(&account)
+		}
+
+		fn get_entities_by_status(status: pallet_entity_common::EntityStatus, offset: u32, limit: u32) -> Vec<u64> {
+			EntityRegistry::api_get_entities_by_status(status, offset, limit)
+		}
+
+		fn check_admin_permission(entity_id: u64, account: AccountId) -> Option<u32> {
+			EntityRegistry::api_check_admin_permission(entity_id, &account)
+		}
+	}
+
+	impl pallet_dispute_arbitration::runtime_api::ArbitrationApi<Block, AccountId, Balance> for Runtime {
+		fn get_complaints_by_status(
+			status: pallet_dispute_arbitration::types::ComplaintStatus,
+			offset: u32,
+			limit: u32,
+		) -> Vec<pallet_dispute_arbitration::runtime_api::ComplaintSummary<AccountId, Balance>> {
+			Arbitration::api_get_complaints_by_status(status, offset, limit)
+		}
+
+		fn get_user_complaints(account: AccountId) -> Vec<u64> {
+			Arbitration::api_get_user_complaints(&account)
+		}
+
+		fn get_complaint_detail(
+			complaint_id: u64,
+		) -> Option<pallet_dispute_arbitration::runtime_api::ComplaintDetail<AccountId, Balance>> {
+			Arbitration::api_get_complaint_detail(complaint_id)
+		}
+	}
+
+	impl pallet_dispute_evidence::runtime_api::EvidenceApi<Block, AccountId, Balance> for Runtime {
+		fn get_evidence_detail(id: u64) -> Option<pallet_dispute_evidence::runtime_api::EvidenceDetail<AccountId, Balance>> {
+			Evidence::api_get_evidence_detail(id)
+		}
+
+		fn get_evidences_by_target(domain: u8, target_id: u64, offset: u32, limit: u32) -> pallet_dispute_evidence::runtime_api::EvidencePage<AccountId> {
+			Evidence::api_get_evidences_by_target(domain, target_id, offset, limit)
+		}
+
+		fn get_evidences_by_ns(ns: [u8; 8], subject_id: u64, offset: u32, limit: u32) -> pallet_dispute_evidence::runtime_api::EvidencePage<AccountId> {
+			Evidence::api_get_evidences_by_ns(ns, subject_id, offset, limit)
+		}
+
+		fn get_user_evidences(account: AccountId, offset: u32, limit: u32) -> pallet_dispute_evidence::runtime_api::EvidencePage<AccountId> {
+			Evidence::api_get_user_evidences(&account, offset, limit)
+		}
+
+		fn get_private_content_meta(content_id: u64) -> Option<pallet_dispute_evidence::runtime_api::PrivateContentMeta<AccountId>> {
+			Evidence::api_get_private_content_meta(content_id)
+		}
+
+		fn get_decryption_package(content_id: u64, viewer: AccountId) -> Option<pallet_dispute_evidence::runtime_api::DecryptionPackage> {
+			Evidence::api_get_decryption_package(content_id, &viewer)
+		}
+
+		fn get_private_contents_by_subject(ns: [u8; 8], subject_id: u64, offset: u32, limit: u32) -> Vec<u64> {
+			Evidence::api_get_private_contents_by_subject(ns, subject_id, offset, limit)
+		}
+
+		fn get_access_requests(content_id: u64, offset: u32, limit: u32) -> Vec<pallet_dispute_evidence::runtime_api::AccessRequestEntry<AccountId>> {
+			Evidence::api_get_access_requests(content_id, offset, limit)
+		}
+
+		fn get_user_public_key(account: AccountId) -> Option<pallet_dispute_evidence::runtime_api::PublicKeyInfo> {
+			Evidence::api_get_user_public_key(&account)
 		}
 	}
 }

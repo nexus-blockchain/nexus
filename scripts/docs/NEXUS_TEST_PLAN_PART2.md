@@ -273,7 +273,7 @@
 
 ## 14. Escrow — 托管模块
 
-> Pallet: `pallet-escrow` | Extrinsics: 20 (call_index 0-19)
+> Pallet: `pallet-dispute-escrow` | Extrinsics: 20 (call_index 0-19)
 > 新增: refund_partial, release_partial, cleanup_closed, token_lock/release/refund,
 > force_release, force_refund
 
@@ -296,7 +296,7 @@
 
 ## 15. Evidence — 证据模块
 
-> Pallet: `pallet-evidence` | Extrinsics: 24 (call_index 0-23)
+> Pallet: `pallet-dispute-evidence` | Extrinsics: 24 (call_index 0-23)
 > 新增: append_evidence, update_evidence_manifest, request_access, update_access_policy,
 > reveal_commitment, seal/unseal_evidence, force_remove, withdraw_evidence,
 > delete_private_content, force_archive, revoke_public_key, cancel_access_request

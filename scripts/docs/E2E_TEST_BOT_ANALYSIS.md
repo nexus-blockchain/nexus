@@ -801,7 +801,7 @@ npx tsx scripts/e2e/nexus-test-agent.ts --group entity grouprobot
 npx tsx scripts/e2e/nexus-test-agent.ts --flow E1 E2 D1
 
 # 指定 pallet (--pallet, 空格分隔)
-npx tsx scripts/e2e/nexus-test-agent.ts --pallet pallet-escrow pallet-entity-token
+npx tsx scripts/e2e/nexus-test-agent.ts --pallet pallet-dispute-escrow pallet-entity-token
 
 # 按优先级过滤覆盖率报告
 npx tsx scripts/e2e/nexus-test-agent.ts --priority P0

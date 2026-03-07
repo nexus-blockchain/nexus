@@ -3,9 +3,12 @@
 import { useState, useEffect, useCallback } from "react";
 import { getApi } from "./useApi";
 import { useTx } from "./useTx";
-import type { ComplaintData, ArbitrationStats, DomainStatistics } from "@/lib/types";
+import type {
+  ComplaintData, ArbitrationStats, DomainStatistics,
+  TwoWayDepositRecord, ArchivedDispute, ArchivedComplaint,
+} from "@/lib/types";
 
-export function useComplaints(status?: string) {
+export function useComplaints(status?: string, offset = 0, limit = 50) {
   const [complaints, setComplaints] = useState<ComplaintData[]>([]);
   const [nextId, setNextId] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
@@ -19,18 +22,31 @@ export function useComplaints(status?: string) {
       const nextIdRaw = await q.arbitration.nextComplaintId();
       setNextId((nextIdRaw.toJSON() ?? 0) as number);
 
-      const entries = await q.arbitration.complaints.entries();
-      const all = entries
-        .map(([_k, v]: [unknown, { toJSON: () => ComplaintData }]) => v.toJSON())
-        .filter(Boolean) as ComplaintData[];
-
-      setComplaints(status ? all.filter((c) => c.status === status) : all);
+      if (status) {
+        const runtimeApi = (api as any).call?.arbitrationApi;
+        if (runtimeApi?.getComplaintsByStatus) {
+          const raw = await runtimeApi.getComplaintsByStatus(status, offset, limit);
+          setComplaints((raw.toJSON() ?? []) as ComplaintData[]);
+        } else {
+          const entries = await q.arbitration.complaints.entries();
+          const all = entries
+            .map(([_k, v]: [unknown, { toJSON: () => ComplaintData }]) => v.toJSON())
+            .filter(Boolean) as ComplaintData[];
+          setComplaints(all.filter((c) => c.status === status));
+        }
+      } else {
+        const entries = await q.arbitration.complaints.entries();
+        const all = entries
+          .map(([_k, v]: [unknown, { toJSON: () => ComplaintData }]) => v.toJSON())
+          .filter(Boolean) as ComplaintData[];
+        setComplaints(all);
+      }
     } catch {
       /* ignore */
     } finally {
       setIsLoading(false);
     }
-  }, [status]);
+  }, [status, offset, limit]);
 
   useEffect(() => { fetch(); }, [fetch]);
   return { complaints, nextId, isLoading, refetch: fetch };
@@ -67,9 +83,13 @@ export function useUserComplaints(address: string | null) {
     setIsLoading(true);
     try {
       const api = await getApi();
-      const q = api.query as any;
-      const raw = await q.arbitration.userActiveComplaints(address);
-      setIds((raw.toJSON() || []) as number[]);
+      const runtimeApi = (api as any).call?.arbitrationApi;
+      if (runtimeApi?.getUserComplaints) {
+        const raw = await runtimeApi.getUserComplaints(address);
+        setIds((raw.toJSON() || []) as number[]);
+      } else {
+        setIds([]);
+      }
     } catch {
       /* ignore */
     } finally {
@@ -79,6 +99,34 @@ export function useUserComplaints(address: string | null) {
 
   useEffect(() => { fetch(); }, [fetch]);
   return { ids, isLoading, refetch: fetch };
+}
+
+export function useComplaintDetail(complaintId: number | null) {
+  const [detail, setDetail] = useState<ComplaintData | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const fetch = useCallback(async () => {
+    if (complaintId === null) return;
+    setIsLoading(true);
+    try {
+      const api = await getApi();
+      const runtimeApi = (api as any).call?.arbitrationApi;
+      if (runtimeApi?.getComplaintDetail) {
+        const raw = await runtimeApi.getComplaintDetail(complaintId);
+        setDetail(raw.isNone ? null : (raw.toJSON() as ComplaintData));
+      } else {
+        const raw = await (api.query as any).arbitration.complaints(complaintId);
+        setDetail(raw.isNone ? null : (raw.toJSON() as ComplaintData));
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setIsLoading(false);
+    }
+  }, [complaintId]);
+
+  useEffect(() => { fetch(); }, [fetch]);
+  return { detail, isLoading, refetch: fetch };
 }
 
 export function useArbitrationStats() {
@@ -136,6 +184,218 @@ export function useArbitrationPaused() {
   useEffect(() => { fetch(); }, [fetch]);
   return { paused, refetch: fetch };
 }
+
+// ==================== Dispute detail hooks ====================
+
+export function useEvidenceIds(domain: string | null, id: number | null) {
+  const [evidenceIds, setEvidenceIds] = useState<number[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const fetch = useCallback(async () => {
+    if (!domain || id === null) return;
+    setIsLoading(true);
+    try {
+      const api = await getApi();
+      const raw = await (api.query as any).arbitration.evidenceIds(domain, id);
+      setEvidenceIds((raw.toJSON() ?? []) as number[]);
+    } catch {
+      /* ignore */
+    } finally {
+      setIsLoading(false);
+    }
+  }, [domain, id]);
+
+  useEffect(() => { fetch(); }, [fetch]);
+  return { evidenceIds, isLoading, refetch: fetch };
+}
+
+export function useLockedCidHashes(domain: string | null, id: number | null) {
+  const [hashes, setHashes] = useState<string[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const fetch = useCallback(async () => {
+    if (!domain || id === null) return;
+    setIsLoading(true);
+    try {
+      const api = await getApi();
+      const raw = await (api.query as any).arbitration.lockedCidHashes(domain, id);
+      setHashes((raw.toJSON() ?? []) as string[]);
+    } catch {
+      /* ignore */
+    } finally {
+      setIsLoading(false);
+    }
+  }, [domain, id]);
+
+  useEffect(() => { fetch(); }, [fetch]);
+  return { hashes, isLoading, refetch: fetch };
+}
+
+export function useTwoWayDeposit(domain: string | null, id: number | null) {
+  const [deposit, setDeposit] = useState<TwoWayDepositRecord | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const fetch = useCallback(async () => {
+    if (!domain || id === null) return;
+    setIsLoading(true);
+    try {
+      const api = await getApi();
+      const raw = await (api.query as any).arbitration.twoWayDeposits(domain, id);
+      setDeposit(raw.isNone ? null : (raw.toJSON() as TwoWayDepositRecord));
+    } catch {
+      /* ignore */
+    } finally {
+      setIsLoading(false);
+    }
+  }, [domain, id]);
+
+  useEffect(() => { fetch(); }, [fetch]);
+  return { deposit, isLoading, refetch: fetch };
+}
+
+// ==================== Archive hooks ====================
+
+export function useArchivedDispute(archivedId: number | null) {
+  const [dispute, setDispute] = useState<ArchivedDispute | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const fetch = useCallback(async () => {
+    if (archivedId === null) return;
+    setIsLoading(true);
+    try {
+      const api = await getApi();
+      const raw = await (api.query as any).arbitration.archivedDisputes(archivedId);
+      setDispute(raw.isNone ? null : (raw.toJSON() as ArchivedDispute));
+    } catch {
+      /* ignore */
+    } finally {
+      setIsLoading(false);
+    }
+  }, [archivedId]);
+
+  useEffect(() => { fetch(); }, [fetch]);
+  return { dispute, isLoading, refetch: fetch };
+}
+
+export function useArchivedComplaint(complaintId: number | null) {
+  const [archived, setArchived] = useState<ArchivedComplaint | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const fetch = useCallback(async () => {
+    if (complaintId === null) return;
+    setIsLoading(true);
+    try {
+      const api = await getApi();
+      const raw = await (api.query as any).arbitration.archivedComplaints(complaintId);
+      setArchived(raw.isNone ? null : (raw.toJSON() as ArchivedComplaint));
+    } catch {
+      /* ignore */
+    } finally {
+      setIsLoading(false);
+    }
+  }, [complaintId]);
+
+  useEffect(() => { fetch(); }, [fetch]);
+  return { archived, isLoading, refetch: fetch };
+}
+
+// ==================== Admin hooks ====================
+
+export function usePendingArbitrationDisputes() {
+  const [disputes, setDisputes] = useState<Array<{ domain: string; id: number }>>([]);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const fetch = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const api = await getApi();
+      const entries = await (api.query as any).arbitration.pendingArbitrationDisputes.entries();
+      const items = entries.map(([key]: [{ args: [unknown, unknown] }]) => {
+        const args = key.args;
+        return {
+          domain: String(args[0]),
+          id: Number(args[1]),
+        };
+      });
+      setDisputes(items);
+    } catch {
+      /* ignore */
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { fetch(); }, [fetch]);
+  return { disputes, isLoading, refetch: fetch };
+}
+
+export function usePendingArbitrationComplaints() {
+  const [complaintIds, setComplaintIds] = useState<number[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const fetch = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const api = await getApi();
+      const entries = await (api.query as any).arbitration.pendingArbitrationComplaints.entries();
+      const ids = entries.map(([key]: [{ args: [unknown] }]) => Number(key.args[0]));
+      setComplaintIds(ids);
+    } catch {
+      /* ignore */
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { fetch(); }, [fetch]);
+  return { complaintIds, isLoading, refetch: fetch };
+}
+
+export function useComplaintCooldown(domain: string | null, objectId: number | null) {
+  const [cooldownUntil, setCooldownUntil] = useState<number | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const fetch = useCallback(async () => {
+    if (!domain || objectId === null) return;
+    setIsLoading(true);
+    try {
+      const api = await getApi();
+      const raw = await (api.query as any).arbitration.complaintCooldown(domain, objectId);
+      setCooldownUntil(raw.isNone ? null : (raw.toJSON() as number));
+    } catch {
+      /* ignore */
+    } finally {
+      setIsLoading(false);
+    }
+  }, [domain, objectId]);
+
+  useEffect(() => { fetch(); }, [fetch]);
+  return { cooldownUntil, isLoading, refetch: fetch };
+}
+
+export function useDomainPenaltyRate(domain: string | null) {
+  const [rateBps, setRateBps] = useState<number | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const fetch = useCallback(async () => {
+    if (!domain) return;
+    setIsLoading(true);
+    try {
+      const api = await getApi();
+      const raw = await (api.query as any).arbitration.domainPenaltyRates(domain);
+      setRateBps(raw.isNone ? null : (raw.toJSON() as number));
+    } catch {
+      /* ignore */
+    } finally {
+      setIsLoading(false);
+    }
+  }, [domain]);
+
+  useEffect(() => { fetch(); }, [fetch]);
+  return { rateBps, isLoading, refetch: fetch };
+}
+
+// ==================== Actions ====================
 
 export function useArbitrationActions() {
   const { submit, state, reset } = useTx();

@@ -1,4 +1,4 @@
-# pallet-escrow
+# pallet-dispute-escrow
 
 > 路径：`pallets/dispute/escrow/` · Runtime Index: 60 · 版本：v0.6.0
 
@@ -229,11 +229,10 @@ pub enum ExpiryAction<AccountId> {
 | `MaxSplitEntries` | `u32` | `release_split` 最大分账条目数 |
 | `ExpiryPolicy` | `ExpiryPolicy` | 到期策略（runtime 注入，默认 `RefundAll(payer)` 兜底） |
 | `MaxReasonLen` | `u32` | 争议原因最大长度（BoundedVec 上限） |
-| `TokenHandler` | `TokenEscrowHandler` | Entity Token 托管处理器 |
 | `Observer` | `EscrowObserver` | 托管状态变更观察者 |
 | `MaxCleanupPerCall` | `u32` | `cleanup_closed` 每次最大清理条目数 |
 | `MaxDisputeDuration` | `BlockNumber` | 争议最大持续时间，超时后自动通过 ExpiryPolicy 处理（默认 100800 ≈ 7天） |
-| `WeightInfo` | `WeightInfo` | 权重信息（覆盖全部 20 个 extrinsic） |
+| `WeightInfo` | `WeightInfo` | 权重信息（覆盖全部 17 个 extrinsic） |
 
 ## 集成示例
 
@@ -275,7 +274,7 @@ impl<T: Config> Pallet<T> {
 
 ## 安全审计记录
 
-经过 4 轮深度审计，已修复全部发现问题：
+经过 6 轮深度审计，已修复全部发现问题：
 
 | 轮次 | 发现 | 修复 | 关键修复 |
 |------|------|------|---------|
@@ -284,19 +283,20 @@ impl<T: Config> Pallet<T> {
 | R3 | 4M + 3L | 全部 | M1(零金额防护) · M2(force清理到期索引) · M3(split Observer通知) · M4(partial_bps Observer) · L1(release_split Closed检查) · L2(重调度失败清理ExpiryOf) · L3(benchmarking重写) |
 | R4 | 3H + 2M + 2L | 全部 | H1(StorageVersion) · H2(争议超时安全网) · H3(Benchmark precondition) · M1(Event拼写) · M2(Resolved幽灵态) · L1(ExpiryPolicy::now废弃) · L2(前端canForce逻辑) |
 | R5 | 3H + 4M + 3L | 全部 | H1(AuthorizedOrigin→EnsureRoot) · H2(Observer::on_expired) · H3(apply_decision 清理expiry) · M1(PayerOf+ExpiryPolicy退款兜底) · M3(Token死代码标注) · M4(前端ValueQuery检测) · L1(NotClosed移除) · L2(Resolved注释) · L3(schedule_expiry验证) |
+| R6 | 2H + 3M + 3L | 全部 | H1(Token子系统移除) · H2(关闭路径自动清理ExpiryOf/ExpiringAt) · M1(apply_decision_partial_bps复用split_partial) · M2(extrinsic层去重复状态检查) · M3(do_set_disputed共享逻辑) · L1(STATE_LOCKED/DISPUTED/CLOSED常量) · L2(lock_with_nonce nonce重放log) · L3(EscrowObserver移除BlockNumber泛型) |
 
 ## 测试
 
 ```bash
-cargo test -p pallet-escrow    # 84 个单元测试
+cargo test -p pallet-dispute-escrow    # 90 个单元测试
 ```
 
-**覆盖范围**（84 个测试）：
+**覆盖范围**（90 个测试）：
 
 - **基础操作**：锁定/释放/退款、零金额拒绝、AllowDeath 小额安全
-- **幂等 nonce**：重复 nonce 静默忽略、递增 nonce 累加
+- **幂等 nonce**：重复 nonce 静默忽略（含 log::debug）、递增 nonce 累加
 - **争议流程**：争议阻断 release/refund/lock/release_split、重复 dispute 防护、set_disputed/set_resolved trait 调用
-- **仲裁裁决**：apply_decision_* 要求 Disputed 状态、全额释放/退款/按比例分账、DisputedAt 清理
+- **仲裁裁决**：apply_decision_* 要求 Disputed 状态、全额释放/退款/按比例分账（复用 split_partial）、DisputedAt 清理
 - **已关闭保护**：lock/lock_with_nonce/release_split 拒绝 Closed 托管、double release 拒绝
 - **部分操作**：refund_partial/release_partial 正常流程 + 争议阻断 + 零金额拒绝 + 余额归零自动关闭
 - **强制操作**：force_release/force_refund 绕过争议 + 需要 Admin Origin + 清理到期索引
@@ -307,6 +307,7 @@ cargo test -p pallet-escrow    # 84 个单元测试
 - **Observer 通知**：split_partial 双向通知、apply_decision_partial_bps 释放通知、release_split 逐笔通知
 - **争议超时**：自动调度 expiry、保留已有 expiry、trait 层自动调度、超时强制执行 ExpiryPolicy、未超时重调度
 - **R5 修复**：apply_decision_* 清理 expiry 索引、PayerOf 记录/不覆盖/cleanup 清理、schedule_expiry 拒绝不存在/已关闭
+- **R6 到期自清理**：release_all/refund_all/refund_partial/release_partial/release_split/split_partial 关闭时自动清理 ExpiryOf + ExpiringAt
 
 ## 相关模块
 
@@ -323,3 +324,4 @@ cargo test -p pallet-escrow    # 84 个单元测试
 | v0.3.0 | R3 审计修复（零金额防护 · force 清理到期索引 · split/partial Observer 通知 · release_split Closed 检查 · 重调度失败清理 · benchmarking 完全重写覆盖 20 extrinsic） |
 | v0.4.0 | R4 上线审计（StorageVersion · 争议超时安全网 MaxDisputeDuration · Benchmark precondition 重写 · Event::Transferred 拼写修正 · Resolved(2) 幽灵态清理 · ExpiryPolicy::now/is_noop 废弃代码移除 · 前端 canForce 修复） |
 | v0.5.0 | R5 安全加固（AuthorizedOrigin→EnsureRoot 堵死公开调用 · PayerOf 存储+DefaultExpiryPolicy 退款兜底 · Observer::on_expired 补全 · apply_decision 裁决清理 expiry 残留 · remove_expiry_schedule 提取消重复 · schedule_expiry 验证存在性 · NotClosed 死代码移除 · Token 死代码标注 · 前端 ValueQuery 检测修复） |
+| v0.6.0 | R6 上线精简（移除不完整 Token 子系统 · 所有关闭路径自动清理到期调度 · apply_decision_partial_bps 复用 split_partial · extrinsic 层消除重复状态检查 · dispute/set_disputed 共享 do_set_disputed 逻辑 · STATE_LOCKED/DISPUTED/CLOSED 常量替代魔数 · lock_with_nonce nonce 重放日志 · EscrowObserver 移除未使用 BlockNumber 泛型） |

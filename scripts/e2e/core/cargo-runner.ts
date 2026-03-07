@@ -40,9 +40,9 @@ export const ALL_PALLETS = [
   // Trading 模块群
   'pallet-nex-market',
   // Dispute 模块群
-  'pallet-escrow',
-  'pallet-evidence',
-  'pallet-arbitration',
+  'pallet-dispute-escrow',
+  'pallet-dispute-evidence',
+  'pallet-dispute-arbitration',
   // Storage 模块群
   'pallet-storage-service',
   // GroupRobot 模块群
@@ -62,7 +62,7 @@ export const PALLET_GROUPS: Record<string, readonly PalletName[]> = {
   entity: ALL_PALLETS.filter(p => p.startsWith('pallet-entity-')),
   commission: ALL_PALLETS.filter(p => p.startsWith('pallet-commission-')),
   trading: ['pallet-nex-market'],
-  dispute: ['pallet-escrow', 'pallet-evidence', 'pallet-arbitration'],
+  dispute: ['pallet-dispute-escrow', 'pallet-dispute-evidence', 'pallet-dispute-arbitration'],
   storage: ['pallet-storage-service'],
   grouprobot: ALL_PALLETS.filter(p => p.startsWith('pallet-grouprobot-')),
 };

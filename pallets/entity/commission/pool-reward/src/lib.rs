@@ -18,6 +18,8 @@
 extern crate alloc;
 
 pub mod runtime_api;
+#[cfg(feature = "runtime-benchmarks")]
+pub mod benchmarking;
 pub mod weights;
 pub use pallet::*;
 pub use weights::WeightInfo;
@@ -374,6 +376,8 @@ pub mod pallet {
         PendingPoolRewardConfigCancelled { entity_id: u64 },
         /// Token 池差额已被 Root 修正
         TokenPoolDeficitCorrected { entity_id: u64, amount: TokenBalanceOf<T> },
+        /// force_clear 用户记录未完全清理，需再次调用
+        ClearIncomplete { entity_id: u64, remaining: u32 },
     }
 
     #[pallet::error]
@@ -695,17 +699,19 @@ pub mod pallet {
             Ok(())
         }
 
-        /// P0-3: [Root] 强制清除 — 完整清理全部存储（含用户记录）
-        /// P2-11 修复: 无配置时返回错误（避免静默 no-op）
+        /// [Root] 强制清除 — 完整清理全部存储（含用户记录）
+        /// `max_users`: 每次最多清理的用户记录数（控制单次权重）。
+        /// 如果用户记录未完全清理，发出 `ClearIncomplete` 事件，需再次调用。
         #[pallet::call_index(8)]
         #[pallet::weight(T::WeightInfo::force_clear_pool_reward_config())]
         pub fn force_clear_pool_reward_config(
             origin: OriginFor<T>,
             entity_id: u64,
+            max_users: u32,
         ) -> DispatchResult {
             ensure_root(origin)?;
             ensure!(PoolRewardConfigs::<T>::contains_key(entity_id), Error::<T>::ConfigNotFound);
-            Self::do_full_clear_pool_reward(entity_id);
+            Self::do_full_clear_pool_reward(entity_id, max_users);
             Ok(())
         }
 
@@ -870,10 +876,11 @@ pub mod pallet {
         }
 
         /// [Root] 修正 Token 池账本差额（回滚失败导致的已转出未扣减部分）
+        /// 同时从 Token 池余额中扣减对应金额，使链上余额与实际一致。
         #[pallet::call_index(17)]
         #[pallet::weight(Weight::from_parts(25_000_000, 3_000)
-            .saturating_add(frame_support::weights::constants::RocksDbWeight::get().reads(1))
-            .saturating_add(frame_support::weights::constants::RocksDbWeight::get().writes(1))
+            .saturating_add(frame_support::weights::constants::RocksDbWeight::get().reads(2))
+            .saturating_add(frame_support::weights::constants::RocksDbWeight::get().writes(2))
         )]
         pub fn correct_token_pool_deficit(
             origin: OriginFor<T>,
@@ -882,6 +889,11 @@ pub mod pallet {
             ensure_root(origin)?;
             let deficit = TokenPoolDeficit::<T>::take(entity_id);
             ensure!(!deficit.is_zero(), Error::<T>::NoDeficit);
+            if let Err(e) = T::TokenPoolBalanceProvider::deduct_token_pool(entity_id, deficit) {
+                frame_support::defensive!("pool-reward: deduct_token_pool failed during deficit correction");
+                TokenPoolDeficit::<T>::insert(entity_id, deficit);
+                return Err(e);
+            }
             Self::deposit_event(Event::TokenPoolDeficitCorrected { entity_id, amount: deficit });
             Ok(())
         }
@@ -1001,18 +1013,29 @@ pub mod pallet {
             Self::deposit_event(Event::PoolRewardConfigCleared { entity_id });
         }
 
-        /// P0-3: 完整清理（Root / PlanWriter 级别：含全部用户记录）
-        pub(crate) fn do_full_clear_pool_reward(entity_id: u64) {
+        /// 完整清理（Root / PlanWriter 级别：含全部用户记录）
+        /// `max_users`: 每次 clear_prefix 的上限。如果未完全清理，发出 ClearIncomplete。
+        pub(crate) fn do_full_clear_pool_reward(entity_id: u64, max_users: u32) {
             PoolRewardConfigs::<T>::remove(entity_id);
             CurrentRound::<T>::remove(entity_id);
             LastRoundId::<T>::remove(entity_id);
-            let _ = LastClaimedRound::<T>::clear_prefix(entity_id, u32::MAX, None);
-            let _ = ClaimRecords::<T>::clear_prefix(entity_id, u32::MAX, None);
+
+            let limit = max_users.max(1);
+            let r1 = LastClaimedRound::<T>::clear_prefix(entity_id, limit, None);
+            let r2 = ClaimRecords::<T>::clear_prefix(entity_id, limit, None);
+
+            let has_remaining = r1.maybe_cursor.is_some() || r2.maybe_cursor.is_some();
+
             PoolRewardPaused::<T>::remove(entity_id);
             PendingPoolRewardConfig::<T>::remove(entity_id);
             RoundHistory::<T>::remove(entity_id);
             DistributionStatistics::<T>::remove(entity_id);
             TokenPoolDeficit::<T>::remove(entity_id);
+
+            if has_remaining {
+                let remaining = r1.loops.saturating_add(r2.loops);
+                Self::deposit_event(Event::ClearIncomplete { entity_id, remaining });
+            }
             Self::deposit_event(Event::PoolRewardConfigCleared { entity_id });
         }
 
@@ -1025,22 +1048,7 @@ pub mod pallet {
         {
             let mut snapshots = BoundedVec::default();
             for &(level_id, ratio, count) in level_counts.iter() {
-                let per_member = if count > 0 && !pool_balance.is_zero() {
-                    let ratio_balance: B = (ratio as u32).into();
-                    let count_balance: B = count.into();
-                    // P2-9 修复: 合并除法减少精度损失
-                    let divisor: B = B::from(10000u32).saturating_mul(count_balance);
-                    let product = match pool_balance.checked_mul(&ratio_balance) {
-                        Some(p) => p,
-                        None => {
-                            frame_support::defensive!("pool-reward: pool_balance * ratio overflow in build_level_snapshots");
-                            pool_balance.saturating_mul(ratio_balance)
-                        }
-                    };
-                    product / divisor
-                } else {
-                    Zero::zero()
-                };
+                let per_member = Self::safe_per_member_reward(pool_balance, ratio, count);
                 if snapshots.try_push(LevelSnapshot {
                     level_id,
                     member_count: count,
@@ -1236,6 +1244,28 @@ pub mod pallet {
             (nex_reward, token_reward)
         }
 
+        /// Safe per-member reward calculation with overflow protection.
+        /// Shared by `build_level_snapshots` and `simulate_claimable`.
+        fn safe_per_member_reward<B>(pool_balance: B, ratio: u16, count: u32) -> B
+        where
+            B: sp_runtime::traits::AtLeast32BitUnsigned + Copy,
+        {
+            if count == 0 || pool_balance.is_zero() {
+                return B::zero();
+            }
+            let ratio_b: B = (ratio as u32).into();
+            let count_b: B = count.into();
+            let divisor: B = B::from(10000u32).saturating_mul(count_b);
+            let product = match pool_balance.checked_mul(&ratio_b) {
+                Some(p) => p,
+                None => {
+                    frame_support::defensive!("pool-reward: pool_balance * ratio overflow in per_member_reward");
+                    pool_balance.saturating_mul(ratio_b)
+                }
+            };
+            product / divisor
+        }
+
         fn simulate_claimable(
             entity_id: u64,
             config: &PoolRewardConfigOf<T>,
@@ -1258,16 +1288,7 @@ pub mod pallet {
 
             let nex_reward = level_counts.iter()
                 .find(|(id, _, _)| *id == effective_level)
-                .map(|&(_, ratio, count)| {
-                    if count > 0 {
-                        let ratio_b: BalanceOf<T> = (ratio as u32).into();
-                        let count_b: BalanceOf<T> = count.into();
-                        let divisor = BalanceOf::<T>::from(10000u32).saturating_mul(count_b);
-                        pool_balance.saturating_mul(ratio_b) / divisor
-                    } else {
-                        zero_nex
-                    }
-                })
+                .map(|&(_, ratio, count)| Self::safe_per_member_reward(pool_balance, ratio, count))
                 .unwrap_or(zero_nex);
 
             let token_reward = if config.token_pool_enabled {
@@ -1277,16 +1298,7 @@ pub mod pallet {
                 } else {
                     level_counts.iter()
                         .find(|(id, _, _)| *id == effective_level)
-                        .map(|&(_, ratio, count)| {
-                            if count > 0 {
-                                let ratio_b: TokenBalanceOf<T> = (ratio as u32).into();
-                                let count_b: TokenBalanceOf<T> = count.into();
-                                let divisor = TokenBalanceOf::<T>::from(10000u32).saturating_mul(count_b);
-                                token_balance.saturating_mul(ratio_b) / divisor
-                            } else {
-                                zero_token
-                            }
-                        })
+                        .map(|&(_, ratio, count)| Self::safe_per_member_reward(token_balance, ratio, count))
                         .unwrap_or(zero_token)
                 }
             } else {
@@ -1523,7 +1535,7 @@ impl<T: pallet::Config> pallet_commission_common::PoolRewardPlanWriter for palle
     }
 
     fn clear_config(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
-        pallet::Pallet::<T>::do_full_clear_pool_reward(entity_id);
+        pallet::Pallet::<T>::do_full_clear_pool_reward(entity_id, u32::MAX);
         Ok(())
     }
 

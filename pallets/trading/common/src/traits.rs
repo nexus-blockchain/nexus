@@ -14,7 +14,7 @@
 ///
 /// ## 使用者
 /// - `pallet-nex-market`: 订单金额计算、上报成交价
-/// - `pallet-arbitration`: 投诉押金换算
+/// - `pallet-dispute-arbitration`: 投诉押金换算
 /// - `pallet-storage-service`: 运营者保证金计算
 ///
 /// ## 实现者
@@ -69,7 +69,7 @@ impl<Balance> PricingProvider<Balance> for () {
 ///
 /// ## 使用者
 /// - `pallet-storage-service`: 运营者保证金
-/// - `pallet-arbitration`: 投诉押金
+/// - `pallet-dispute-arbitration`: 投诉押金
 ///
 /// ## 实现者
 /// - 各模块通过 `DepositCalculatorImpl` 实现

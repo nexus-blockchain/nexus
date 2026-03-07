@@ -10,7 +10,7 @@
 
 - **双资产支付** — 买家可选择 NEX（原生代币）或 EntityToken（实体代币）支付
 - **按类别自动流程** — Digital 即时完成、Physical 需发货确认、Service 有独立服务流程
-- **资金安全托管** — NEX 通过 pallet-escrow 锁定，EntityToken 通过 reserve 冻结
+- **资金安全托管** — NEX 通过 pallet-dispute-escrow 锁定，EntityToken 通过 reserve 冻结
 - **四重超时保护** — 发货 / 确认 / 服务 / 争议均有独立超时，基于 ExpiryQueue O(K) 精确调度
 - **争议机制** — 买家申请退款即设置初始超时 → 卖家可同意/拒绝（限一次） → 超时自动退款
 - **部分退款** — 治理可按比例部分退款（仅 NEX，通过 `Escrow::split_partial`）
@@ -39,7 +39,7 @@
 
 ```
 pallet-entity-order
-├── pallet-escrow ────────── NEX 资金托管（lock / transfer / refund / split_partial / disputed / resolved）
+├── pallet-dispute-escrow ────────── NEX 资金托管（lock / transfer / refund / split_partial / disputed / resolved）
 ├── pallet-entity-common
 │   ├── ShopProvider ─────── 店铺查询（exists / active / owner / entity_id / stats）
 │   ├── ProductProvider ──── 商品查询（info / stock / deduct / restore）

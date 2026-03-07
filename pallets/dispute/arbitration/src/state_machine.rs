@@ -8,6 +8,7 @@ pub fn can_transition(from: &ComplaintStatus, to: &ComplaintStatus) -> bool {
         (Submitted, Responded)
         | (Submitted, Withdrawn)
         | (Submitted, Expired)
+        | (Submitted, Arbitrating) // escalate after response deadline passed
         // Responded -> (includes Withdrawn for voluntary withdrawal)
         | (Responded, Withdrawn)
         // Responded ->
@@ -55,7 +56,7 @@ mod tests {
 
     #[test]
     fn invalid_transitions_rejected() {
-        assert!(!can_transition(&Submitted, &Arbitrating));
+        assert!(can_transition(&Submitted, &Arbitrating)); // now allowed (after deadline)
         assert!(!can_transition(&Submitted, &ResolvedComplainantWin));
         assert!(can_transition(&Responded, &Withdrawn));
         assert!(!can_transition(&Arbitrating, &Responded));

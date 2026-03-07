@@ -2952,7 +2952,7 @@ impl<AccountId, Balance: Default> EntityTokenProvider<AccountId, Balance> for Nu
 /// 争议查询接口
 ///
 /// 供 order/commission/review 等模块查询争议状态，
-/// 无需直接依赖 pallet-arbitration。
+/// 无需直接依赖 pallet-dispute-arbitration。
 pub trait DisputeQueryProvider<AccountId> {
     /// 获取订单的争议状态
     fn order_dispute_status(order_id: u64) -> DisputeStatus;

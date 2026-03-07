@@ -14,7 +14,7 @@
 //! 不依赖任何特定 pallet 的 Config trait。各 pallet 通过 type alias 映射自身 Config：
 //!
 //! ```rust,ignore
-//! // 在 pallet-evidence 的 private_content.rs 中：
+//! // 在 pallet-dispute-evidence 的 private_content.rs 中：
 //! pub type PrivateContentOf<T> = pallet_crypto_common::PrivateContent<
 //!     <T as frame_system::Config>::AccountId,
 //!     BlockNumberFor<T>,
@@ -67,7 +67,7 @@ impl Default for EncryptionMethod {
 }
 
 impl EncryptionMethod {
-    /// 从原始 u8 转换（兼容旧 pallet-evidence 存储）
+    /// 从原始 u8 转换（兼容旧 pallet-dispute-evidence 存储）
     pub fn from_u8(v: u8) -> Self {
         match v {
             0 => Self::None,
@@ -372,7 +372,7 @@ pub struct KeyRotationRecord<AccountId, BlockNumber> {
 /// 加密内容写入管理接口
 ///
 /// 供业务 pallet 通过 trait 间接操作加密内容，
-/// 无需直接依赖 pallet-evidence 的存储。
+/// 无需直接依赖 pallet-dispute-evidence 的存储。
 pub trait PrivateContentManager<AccountId> {
     /// 存储加密内容，返回 content_id
     fn store_private_content(

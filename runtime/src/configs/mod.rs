@@ -378,16 +378,16 @@ parameter_types! {
 /// 托管过期策略：默认退款给原始付款人（安全兜底）
 pub struct DefaultExpiryPolicy;
 
-impl pallet_escrow::ExpiryPolicy<AccountId, BlockNumber> for DefaultExpiryPolicy {
-	fn on_expire(id: u64) -> Result<pallet_escrow::ExpiryAction<AccountId>, sp_runtime::DispatchError> {
-		match pallet_escrow::PayerOf::<Runtime>::get(id) {
-			Some(payer) => Ok(pallet_escrow::ExpiryAction::RefundAll(payer)),
-			None => Ok(pallet_escrow::ExpiryAction::Noop),
+impl pallet_dispute_escrow::ExpiryPolicy<AccountId, BlockNumber> for DefaultExpiryPolicy {
+	fn on_expire(id: u64) -> Result<pallet_dispute_escrow::ExpiryAction<AccountId>, sp_runtime::DispatchError> {
+		match pallet_dispute_escrow::PayerOf::<Runtime>::get(id) {
+			Some(payer) => Ok(pallet_dispute_escrow::ExpiryAction::RefundAll(payer)),
+			None => Ok(pallet_dispute_escrow::ExpiryAction::Noop),
 		}
 	}
 }
 
-impl pallet_escrow::Config for Runtime {
+impl pallet_dispute_escrow::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type EscrowPalletId = EscrowPalletId;
@@ -403,7 +403,7 @@ impl pallet_escrow::Config for Runtime {
 	type MaxCleanupPerCall = ConstU32<100>;
 	/// 争议超时 100800 块 (≈7天 @ 6s/block)
 	type MaxDisputeDuration = ConstU32<100800>;
-	type WeightInfo = pallet_escrow::weights::SubstrateWeight<Runtime>;
+	type WeightInfo = pallet_dispute_escrow::weights::SubstrateWeight<Runtime>;
 }
 
 // -------------------- Storage Service (存储服务) --------------------
@@ -466,7 +466,7 @@ parameter_types! {
 /// 证据授权适配器 - 暂时允许所有签名用户
 pub struct AlwaysAuthorizedEvidence;
 
-impl pallet_evidence::pallet::EvidenceAuthorizer<AccountId> for AlwaysAuthorizedEvidence {
+impl pallet_dispute_evidence::pallet::EvidenceAuthorizer<AccountId> for AlwaysAuthorizedEvidence {
 	fn is_authorized(_ns: [u8; 8], _who: &AccountId) -> bool {
 		true
 	}
@@ -474,14 +474,14 @@ impl pallet_evidence::pallet::EvidenceAuthorizer<AccountId> for AlwaysAuthorized
 
 pub struct AlwaysAuthorizedSeal;
 
-impl pallet_evidence::pallet::EvidenceSealAuthorizer<AccountId> for AlwaysAuthorizedSeal {
+impl pallet_dispute_evidence::pallet::EvidenceSealAuthorizer<AccountId> for AlwaysAuthorizedSeal {
 	fn can_seal(_ns: [u8; 8], _who: &AccountId) -> bool {
 		// TODO: 对接仲裁委员会权限系统，仅允许仲裁角色密封/解封
 		true
 	}
 }
 
-impl pallet_evidence::Config for Runtime {
+impl pallet_dispute_evidence::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type MaxContentCidLen = ConstU32<64>;
 	type MaxSchemeLen = ConstU32<32>;
@@ -501,7 +501,7 @@ impl pallet_evidence::Config for Runtime {
 	type MaxPerWindow = ConstU32<100>;
 	type EnableGlobalCidDedup = ConstBool<true>;
 	type MaxListLen = ConstU32<100>;
-	type WeightInfo = pallet_evidence::weights::SubstrateWeight<Runtime>;
+	type WeightInfo = pallet_dispute_evidence::weights::SubstrateWeight<Runtime>;
 	type StoragePin = pallet_storage_service::Pallet<Runtime>;
 	type Currency = Balances;
 	type EvidenceDeposit = ConstU128<{ UNIT / 100 }>; // 0.01 NEX 押金
@@ -524,7 +524,7 @@ const DOMAIN_ENTITY_ORDER: [u8; 8] = *b"entorder";
 /// 当前支持：entorder（商城订单），其余域保留默认行为
 pub struct UnifiedArbitrationRouter;
 
-impl pallet_arbitration::pallet::ArbitrationRouter<AccountId, Balance> for UnifiedArbitrationRouter {
+impl pallet_dispute_arbitration::pallet::ArbitrationRouter<AccountId, Balance> for UnifiedArbitrationRouter {
 	/// 校验是否允许发起争议
 	fn can_dispute(domain: [u8; 8], who: &AccountId, id: u64) -> bool {
 		use pallet_entity_common::OrderProvider;
@@ -537,8 +537,8 @@ impl pallet_arbitration::pallet::ArbitrationRouter<AccountId, Balance> for Unifi
 	}
 
 	/// 应用裁决（放款/退款/部分分账）
-	fn apply_decision(domain: [u8; 8], id: u64, decision: pallet_arbitration::pallet::Decision) -> sp_runtime::DispatchResult {
-		use pallet_escrow::pallet::Escrow as EscrowTrait;
+	fn apply_decision(domain: [u8; 8], id: u64, decision: pallet_dispute_arbitration::pallet::Decision) -> sp_runtime::DispatchResult {
+		use pallet_dispute_escrow::pallet::Escrow as EscrowTrait;
 		if domain == DOMAIN_ENTITY_ORDER {
 			use pallet_entity_common::OrderProvider;
 			let buyer = <EntityTransaction as OrderProvider<AccountId, Balance>>::order_buyer(id)
@@ -550,15 +550,15 @@ impl pallet_arbitration::pallet::ArbitrationRouter<AccountId, Balance> for Unifi
 			let _ = <Escrow as EscrowTrait<AccountId, Balance>>::set_resolved(id);
 
 			match decision {
-				pallet_arbitration::pallet::Decision::Release => {
+				pallet_dispute_arbitration::pallet::Decision::Release => {
 					// 卖家胜诉：释放给卖家
 					<Escrow as EscrowTrait<AccountId, Balance>>::release_all(id, &seller)
 				},
-				pallet_arbitration::pallet::Decision::Refund => {
+				pallet_dispute_arbitration::pallet::Decision::Refund => {
 					// 买家胜诉：退款给买家
 					<Escrow as EscrowTrait<AccountId, Balance>>::refund_all(id, &buyer)
 				},
-				pallet_arbitration::pallet::Decision::Partial(bps) => {
+				pallet_dispute_arbitration::pallet::Decision::Partial(bps) => {
 					// 部分裁决：按比例分账（bps/10000 给卖家，剩余退买家）
 					<Escrow as EscrowTrait<AccountId, Balance>>::split_partial(id, &seller, &buyer, bps)
 				},
@@ -602,21 +602,21 @@ impl pallet_arbitration::pallet::ArbitrationRouter<AccountId, Balance> for Unifi
 
 }
 
-/// 🆕 M-NEW-6修复: 证据存在性检查器（委托给 pallet-evidence 存储）
+/// 🆕 M-NEW-6修复: 证据存在性检查器（委托给 pallet-dispute-evidence 存储）
 pub struct EvidenceExistenceCheckerImpl;
 
-impl pallet_arbitration::pallet::EvidenceExistenceChecker for EvidenceExistenceCheckerImpl {
+impl pallet_dispute_arbitration::pallet::EvidenceExistenceChecker for EvidenceExistenceCheckerImpl {
 	fn evidence_exists(id: u64) -> bool {
-		pallet_evidence::pallet::Evidences::<Runtime>::contains_key(id)
+		pallet_dispute_evidence::pallet::Evidences::<Runtime>::contains_key(id)
 	}
 }
 
-impl pallet_arbitration::pallet::Config for Runtime {
+impl pallet_dispute_arbitration::pallet::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type MaxEvidence = ConstU32<20>;
 	type MaxCidLen = ConstU32<64>;
-	type Escrow = pallet_escrow::Pallet<Runtime>;
-	type WeightInfo = pallet_arbitration::weights::SubstrateWeight<Runtime>;
+	type Escrow = pallet_dispute_escrow::Pallet<Runtime>;
+	type WeightInfo = pallet_dispute_arbitration::weights::SubstrateWeight<Runtime>;
 	type Router = UnifiedArbitrationRouter;
 	type DecisionOrigin = pallet_collective::EnsureProportionAtLeast<AccountId, ArbitrationCollectiveInstance, 2, 3>;
 	type Fungible = Balances;

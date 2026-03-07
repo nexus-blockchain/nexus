@@ -284,7 +284,7 @@ fn campaign_details(campaign_id: u64) -> Option<CampaignDetail>;
 
 **目标:** 广告主可对投放收据发起争议，引入确认窗口。
 
-**改动范围:** `pallet-ads-core` + 可选集成 `pallet-arbitration`
+**改动范围:** `pallet-ads-core` + 可选集成 `pallet-dispute-arbitration`
 
 #### 5.1 方案: 收据确认窗口
 

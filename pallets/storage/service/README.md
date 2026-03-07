@@ -86,7 +86,7 @@ pub struct StorageLayerConfig {
 
 | SubjectType | 域名 | 典型调用方 |
 |-------------|------|-----------|
-| Evidence | `"evidence"` | pallet-evidence |
+| Evidence | `"evidence"` | pallet-dispute-evidence |
 | Product | `"product"` | pallet-entity-product |
 | Entity | `"entity"` | pallet-entity-registry |
 | Shop | `"shop"` | pallet-entity-shop |

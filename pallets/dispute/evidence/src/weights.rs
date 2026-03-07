@@ -12,8 +12,8 @@ pub trait WeightInfo {
     fn link_by_ns() -> Weight;
     fn unlink() -> Weight;
     fn unlink_by_ns() -> Weight;
-    fn seal_evidence() -> Weight;
-    fn unseal_evidence() -> Weight;
+    fn seal_evidence(n_children: u32) -> Weight;
+    fn unseal_evidence(n_children: u32) -> Weight;
     fn withdraw_evidence() -> Weight;
     fn reveal_commitment() -> Weight;
     fn register_public_key() -> Weight;
@@ -26,6 +26,9 @@ pub trait WeightInfo {
     fn force_remove_evidence() -> Weight;
     fn force_archive_evidence() -> Weight;
     fn delete_private_content() -> Weight;
+    fn revoke_public_key() -> Weight;
+    fn cancel_access_request() -> Weight;
+    fn append_evidence(n_imgs: u32, n_vids: u32, n_docs: u32) -> Weight;
 }
 
 pub struct SubstrateWeight<T>(PhantomData<T>);
@@ -68,15 +71,19 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(2_u64))
             .saturating_add(T::DbWeight::get().writes(1_u64))
     }
-    fn seal_evidence() -> Weight {
+    fn seal_evidence(n_children: u32) -> Weight {
         Weight::from_parts(30_000_000, 3_000)
-            .saturating_add(T::DbWeight::get().reads(2_u64))
+            .saturating_add(T::DbWeight::get().reads(3_u64))
             .saturating_add(T::DbWeight::get().writes(1_u64))
+            .saturating_add(T::DbWeight::get().reads(n_children as u64))
+            .saturating_add(T::DbWeight::get().writes(n_children as u64))
     }
-    fn unseal_evidence() -> Weight {
+    fn unseal_evidence(n_children: u32) -> Weight {
         Weight::from_parts(30_000_000, 3_000)
-            .saturating_add(T::DbWeight::get().reads(2_u64))
+            .saturating_add(T::DbWeight::get().reads(3_u64))
             .saturating_add(T::DbWeight::get().writes(1_u64))
+            .saturating_add(T::DbWeight::get().reads(n_children as u64))
+            .saturating_add(T::DbWeight::get().writes(n_children as u64))
     }
     fn withdraw_evidence() -> Weight {
         // reads: Evidences, EvidenceStatuses; writes: indexes cleanup + status + deposit
@@ -138,6 +145,24 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(2_u64))
             .saturating_add(T::DbWeight::get().writes(5_u64))
     }
+    fn revoke_public_key() -> Weight {
+        Weight::from_parts(35_000_000, 3_000)
+            .saturating_add(T::DbWeight::get().reads(1_u64))
+            .saturating_add(T::DbWeight::get().writes(1_u64))
+    }
+    fn cancel_access_request() -> Weight {
+        Weight::from_parts(30_000_000, 3_000)
+            .saturating_add(T::DbWeight::get().reads(1_u64))
+            .saturating_add(T::DbWeight::get().writes(2_u64))
+    }
+    fn append_evidence(n_imgs: u32, n_vids: u32, n_docs: u32) -> Weight {
+        let per_cid_cost = 2_000_000u64;
+        let n_total = n_imgs.saturating_add(n_vids).saturating_add(n_docs);
+        Weight::from_parts(15_000_000, 5_000)
+            .saturating_add(Weight::from_parts(per_cid_cost, 0).saturating_mul(n_total as u64))
+            .saturating_add(T::DbWeight::get().reads(7_u64.saturating_add(n_total as u64)))
+            .saturating_add(T::DbWeight::get().writes(11_u64.saturating_add(n_total as u64)))
+    }
 }
 
 impl WeightInfo for () {
@@ -179,15 +204,19 @@ impl WeightInfo for () {
             .saturating_add(RocksDbWeight::get().reads(2_u64))
             .saturating_add(RocksDbWeight::get().writes(1_u64))
     }
-    fn seal_evidence() -> Weight {
+    fn seal_evidence(n_children: u32) -> Weight {
         Weight::from_parts(30_000_000, 3_000)
-            .saturating_add(RocksDbWeight::get().reads(2_u64))
+            .saturating_add(RocksDbWeight::get().reads(3_u64))
             .saturating_add(RocksDbWeight::get().writes(1_u64))
+            .saturating_add(RocksDbWeight::get().reads(n_children as u64))
+            .saturating_add(RocksDbWeight::get().writes(n_children as u64))
     }
-    fn unseal_evidence() -> Weight {
+    fn unseal_evidence(n_children: u32) -> Weight {
         Weight::from_parts(30_000_000, 3_000)
-            .saturating_add(RocksDbWeight::get().reads(2_u64))
+            .saturating_add(RocksDbWeight::get().reads(3_u64))
             .saturating_add(RocksDbWeight::get().writes(1_u64))
+            .saturating_add(RocksDbWeight::get().reads(n_children as u64))
+            .saturating_add(RocksDbWeight::get().writes(n_children as u64))
     }
     fn withdraw_evidence() -> Weight {
         Weight::from_parts(40_000_000, 4_000)
@@ -247,5 +276,23 @@ impl WeightInfo for () {
         Weight::from_parts(60_000_000, 5_000)
             .saturating_add(RocksDbWeight::get().reads(2_u64))
             .saturating_add(RocksDbWeight::get().writes(5_u64))
+    }
+    fn revoke_public_key() -> Weight {
+        Weight::from_parts(35_000_000, 3_000)
+            .saturating_add(RocksDbWeight::get().reads(1_u64))
+            .saturating_add(RocksDbWeight::get().writes(1_u64))
+    }
+    fn cancel_access_request() -> Weight {
+        Weight::from_parts(30_000_000, 3_000)
+            .saturating_add(RocksDbWeight::get().reads(1_u64))
+            .saturating_add(RocksDbWeight::get().writes(2_u64))
+    }
+    fn append_evidence(n_imgs: u32, n_vids: u32, n_docs: u32) -> Weight {
+        let per_cid_cost = 2_000_000u64;
+        let n_total = n_imgs as u64 + n_vids as u64 + n_docs as u64;
+        Weight::from_parts(15_000_000, 5_000)
+            .saturating_add(Weight::from_parts(per_cid_cost, 0).saturating_mul(n_total))
+            .saturating_add(RocksDbWeight::get().reads(7_u64.saturating_add(n_total)))
+            .saturating_add(RocksDbWeight::get().writes(11_u64.saturating_add(n_total)))
     }
 }

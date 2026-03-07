@@ -59,8 +59,8 @@ pub type PrivateContentOf<T> = pallet_crypto_common::PrivateContent<
 
 | Pallet | 用途 |
 |--------|------|
-| `pallet-evidence` | 证据加密存储、访问控制、密钥轮换 |
-| `pallet-arbitration` | （规划中）仲裁加密证据 |
+| `pallet-dispute-evidence` | 证据加密存储、访问控制、密钥轮换 |
+| `pallet-dispute-arbitration` | （规划中）仲裁加密证据 |
 | `pallet-kyc` | （规划中）KYC 加密文档 |
 
 ## 单元测试

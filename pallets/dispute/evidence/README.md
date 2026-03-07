@@ -1,4 +1,4 @@
-# pallet-evidence
+# pallet-dispute-evidence
 
 链上证据管理模块。支持 CID 化存储、双模式提交（Plain / Commit-Reveal）、IPFS 自动 Pin、加密内容管理、
 证据追加链、密封冻结（仲裁隔离）、速率限制、全局 CID 去重、押金机制、自动归档与清理。
@@ -22,11 +22,12 @@
 ## 架构
 
 ```
-┌─────────────────── pallet-evidence ───────────────────┐
+┌─────────────────── pallet-dispute-evidence ───────────────────┐
 │                                                        │
-│  Extrinsics (18)                                       │
+│  Extrinsics (24)                                       │
 │  ├── commit (Plain 提交, 自定义 ns)                     │
 │  ├── commit_hash (Commit-Reveal 提交)                   │
+│  ├── commit_v2 (单一 manifest CID 模式)                 │
 │  ├── link / link_by_ns (链接到目标)                      │
 │  ├── unlink / unlink_by_ns (取消链接)                    │
 │  ├── append_evidence (所有者追加补充材料)                  │
@@ -35,12 +36,13 @@
 │  ├── withdraw_evidence (撤回+退押金+清索引)               │
 │  ├── force_remove_evidence (Root 强制移除+没收押金)        │
 │  ├── force_archive_evidence (Root 强制归档+退押金)         │
-│  └── 加密内容管理 (7个)                                   │
+│  └── 加密内容管理 (9个, 含 revoke_public_key/cancel_req) │
 │                                                         │
 │  on_idle                                                │
 │  ├── archive_old_evidences (游标归档+unpin+退押金)         │
 │  ├── cleanup_old_archives (清理过期归档)                   │
-│  └── cleanup_unrevealed_commitments (清理超时承诺)         │
+│  ├── cleanup_unrevealed_commitments (清理超时承诺)         │
+│  └── cleanup_expired_access_requests (游标清理过期请求)    │
 │                                                         │
 │  Traits (输出)                                           │
 │  ├── EvidenceProvider<AccountId>                         │
@@ -64,6 +66,7 @@
 |---|------|------|------|
 | 0 | `commit` | signed | Plain 模式提交。需传入 `ns`。自动推断 content_type。预留押金。同步写 Target 和 Ns 索引。 |
 | 1 | `commit_hash` | signed | Commit-Reveal 模式。先提交哈希承诺，后续 reveal 揭示。预留押金。content_type 默认 Document。 |
+| 24 | `commit_v2` | signed | 单一 manifest CID 模式。直接传入 IPFS manifest CID 和内容类型，替代旧版 commit。 |
 | 11 | `append_evidence` | signed | 向已有证据追加补充材料。仅原始所有者可调用。预留押金。受 `MaxSupplements` 限制。 |
 | 15 | `reveal_commitment` | signed | 揭示之前的 commit_hash 承诺内容。 |
 
@@ -127,7 +130,10 @@
 | `ArchiveCleanupCursor` | `u64` | 归档清理游标 |
 | `CommitCleanupCursor` | `u64` | 承诺超时清理游标（独立于归档游标） |
 | `AccessRequestCount` | `Map<u64, u32>` | 每个内容的待处理请求计数 |
-| 加密内容存储 (7项) | — | PrivateContents, UserPublicKeys, AccessRequests 等 |
+| `AccessRequestCleanupCursor` | `u64` | 访问请求清理游标 |
+| `EvidenceByOwner` | `DoubleMap<AccountId, u64, ()>` | 按所有者索引证据 |
+| `PrivateContentDeposits` | `Map<u64, Balance>` | 私密内容押金记录 |
+| 加密内容存储 (5项) | — | PrivateContents, UserPublicKeys, AccessRequests, PrivateContentByCid, PrivateContentBySubject |
 
 ---
 
@@ -152,6 +158,9 @@
 | `MaxPerWindow` | `u32` | 滑窗内最大提交数 |
 | `EnableGlobalCidDedup` | `bool` | 是否启用全局 CID 去重 |
 | `StoragePin` | trait | IPFS Pin/Unpin 接口 |
+| `PrivateContentDeposit` | `Balance` | 私密内容押金金额 |
+| `AccessRequestTtlBlocks` | `BlockNumber` | 访问请求 TTL（过期后 on_idle 自动清理） |
+| `MaxReasonLen` | `u32` | 密封/强制操作原因最大长度 |
 | `ArchiveTtlBlocks` | `u32` | 归档记录 TTL |
 | `ArchiveDelayBlocks` | `u32` | 证据归档延迟 |
 
@@ -181,11 +190,12 @@
 
 ## on_idle Hook
 
-每个空闲区块最多执行三个清理任务（受剩余权重限制）：
+每个空闲区块最多执行四个清理任务（受剩余权重限制）：
 
 1. **archive_old_evidences** — 游标遍历，归档过期证据，unpin CID，退还押金
 2. **cleanup_old_archives** — 清理超过 `ArchiveTtlBlocks` 的归档记录
 3. **cleanup_unrevealed_commitments** — 独立游标 (`CommitCleanupCursor`) 清理超过 `CommitRevealDeadline` 的未揭示承诺，同步清理 Target/Ns 索引
+4. **cleanup_expired_access_requests** — 游标式 (`AccessRequestCleanupCursor`) 清理超过 `AccessRequestTtlBlocks` 的过期访问请求
 
 ---
 
@@ -217,8 +227,8 @@
 
 ### 消费方
 
-- `pallet-arbitration` — 通过 `EvidenceExistenceChecker` 验证证据存在性
-- `pallet-escrow` — 争议流程中引用证据
+- `pallet-dispute-arbitration` — 通过 `EvidenceExistenceChecker` 验证证据存在性
+- `pallet-dispute-escrow` — 争议流程中引用证据
 
 ### 依赖
 
@@ -231,5 +241,7 @@
 
 ## 权重
 
-所有 18 个 extrinsic 均有对应的 `WeightInfo` 实现。手写权重位于 `weights.rs`，
-基准测试位于 `benchmarking.rs`（v2 宏）。生产环境应使用 `frame-benchmarking` 自动生成。
+全部 24 个 extrinsic 均有对应的 `WeightInfo` 实现和专属 benchmark。
+手写权重位于 `weights.rs`，基准测试位于 `benchmarking.rs`（v2 宏）。
+`seal_evidence` / `unseal_evidence` 权重参数化，包含子级级联开销。
+生产环境应使用 `frame-benchmarking` 自动生成。

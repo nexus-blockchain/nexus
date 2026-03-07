@@ -116,6 +116,10 @@ impl<T: Config> Pallet<T> {
                     ArchivedComplaints::<T>::insert(cursor, archived);
                     Complaints::<T>::remove(cursor);
 
+                    // Clean up associated storage to prevent state bloat
+                    ComplaintEvidenceCids::<T>::remove(cursor);
+                    ComplaintCooldown::<T>::remove(complaint.domain, complaint.object_id);
+
                     archived_count = archived_count.saturating_add(1);
                     Self::deposit_event(Event::ComplaintArchived { complaint_id: cursor });
                 }
@@ -146,7 +150,8 @@ impl<T: Config> Pallet<T> {
             cursor = cursor.saturating_add(1);
         }
 
-        ArchiveDisputeCleanupCursor::<T>::put(cursor);
+        let final_cursor = if cursor >= max_id && max_id > 0 { 0 } else { cursor };
+        ArchiveDisputeCleanupCursor::<T>::put(final_cursor);
         cleaned
     }
 
@@ -168,7 +173,8 @@ impl<T: Config> Pallet<T> {
             cursor = cursor.saturating_add(1);
         }
 
-        ArchiveComplaintCleanupCursor::<T>::put(cursor);
+        let final_cursor = if cursor >= next_complaint && next_complaint > 0 { 0 } else { cursor };
+        ArchiveComplaintCleanupCursor::<T>::put(final_cursor);
         cleaned
     }
 }

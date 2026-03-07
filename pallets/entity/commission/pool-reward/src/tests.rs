@@ -285,7 +285,7 @@ const ENTITY_ACCOUNT: u64 = 9001; // entity_id=1
 /// Entity owner (mock returns 999 for all entities)
 const OWNER: u64 = 999;
 
-fn new_test_ext() -> sp_io::TestExternalities {
+pub fn new_test_ext() -> sp_io::TestExternalities {
     clear_mocks();
     let t = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
     let mut ext = sp_io::TestExternalities::new(t);
@@ -2288,7 +2288,7 @@ fn p2_root_force_clear_bypasses_lock() {
         setup_config(1);
         set_entity_locked(1);
         assert_ok!(CommissionPoolReward::force_clear_pool_reward_config(
-            RuntimeOrigin::root(), 1,
+            RuntimeOrigin::root(), 1, u32::MAX,
         ));
         assert!(CommissionPoolReward::pool_reward_config(1).is_none());
     });
@@ -2299,7 +2299,7 @@ fn p2_root_force_clear_bypasses_lock() {
 fn p2_root_force_clear_no_config_returns_error() {
     new_test_ext().execute_with(|| {
         assert_noop!(
-            CommissionPoolReward::force_clear_pool_reward_config(RuntimeOrigin::root(), 1),
+            CommissionPoolReward::force_clear_pool_reward_config(RuntimeOrigin::root(), 1, u32::MAX),
             crate::pallet::Error::<Test>::ConfigNotFound
         );
     });
@@ -2311,7 +2311,7 @@ fn p2_force_clear_rejects_non_root() {
     new_test_ext().execute_with(|| {
         setup_config(1);
         assert_noop!(
-            CommissionPoolReward::force_clear_pool_reward_config(RuntimeOrigin::signed(OWNER), 1),
+            CommissionPoolReward::force_clear_pool_reward_config(RuntimeOrigin::signed(OWNER), 1, u32::MAX),
             sp_runtime::DispatchError::BadOrigin
         );
     });
@@ -2978,7 +2978,7 @@ fn m1_r7_force_clear_config_cleans_paused_state() {
         assert!(pallet::PoolRewardPaused::<Test>::get(entity_id));
 
         // Force clear config — should also clear paused state
-        assert_ok!(CommissionPoolReward::force_clear_pool_reward_config(RuntimeOrigin::root(), entity_id));
+        assert_ok!(CommissionPoolReward::force_clear_pool_reward_config(RuntimeOrigin::root(), entity_id, u32::MAX));
         assert!(!pallet::PoolRewardPaused::<Test>::contains_key(entity_id));
     });
 }
@@ -3487,7 +3487,7 @@ fn force_clear_does_full_cleanup() {
 
         // Root force clear
         assert_ok!(CommissionPoolReward::force_clear_pool_reward_config(
-            RuntimeOrigin::root(), entity_id,
+            RuntimeOrigin::root(), entity_id, u32::MAX,
         ));
 
         // Verify ALL storage is cleaned
@@ -3795,7 +3795,7 @@ fn audit_p2_10_start_new_round_rejects_when_not_expired() {
 fn audit_p2_11_force_clear_errors_on_missing_config() {
     new_test_ext().execute_with(|| {
         assert_noop!(
-            CommissionPoolReward::force_clear_pool_reward_config(RuntimeOrigin::root(), 999),
+            CommissionPoolReward::force_clear_pool_reward_config(RuntimeOrigin::root(), 999, u32::MAX),
             pallet::Error::<Test>::ConfigNotFound
         );
     });
@@ -3899,12 +3899,14 @@ fn audit_p0_2_token_deficit_recorded_on_rollback_failure() {
 fn audit_p0_2_correct_deficit_works() {
     new_test_ext().execute_with(|| {
         let entity_id = 1u64;
-        // Manually insert a deficit
+        // Set up token pool balance to cover the deficit deduction
+        set_token_pool_balance(entity_id, 1000);
         pallet::TokenPoolDeficit::<Test>::insert(entity_id, 500u128);
         assert_eq!(pallet::TokenPoolDeficit::<Test>::get(entity_id), 500);
 
         assert_ok!(CommissionPoolReward::correct_token_pool_deficit(RuntimeOrigin::root(), entity_id));
         assert_eq!(pallet::TokenPoolDeficit::<Test>::get(entity_id), 0);
+        assert_eq!(get_token_pool_balance(entity_id), 500);
 
         System::assert_has_event(RuntimeEvent::CommissionPoolReward(
             pallet::Event::TokenPoolDeficitCorrected { entity_id, amount: 500 }
@@ -3940,7 +3942,7 @@ fn audit_p0_2_full_clear_cleans_deficit() {
         setup_config(entity_id);
         pallet::TokenPoolDeficit::<Test>::insert(entity_id, 999u128);
 
-        assert_ok!(CommissionPoolReward::force_clear_pool_reward_config(RuntimeOrigin::root(), entity_id));
+        assert_ok!(CommissionPoolReward::force_clear_pool_reward_config(RuntimeOrigin::root(), entity_id, u32::MAX));
         assert_eq!(pallet::TokenPoolDeficit::<Test>::get(entity_id), 0);
     });
 }

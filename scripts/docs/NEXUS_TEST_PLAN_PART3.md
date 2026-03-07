@@ -7,7 +7,7 @@
 
 ## 16. Arbitration — 仲裁模块
 
-> Pallet: `pallet-arbitration` | Extrinsics: 31 (call_index 0-5, 10-15, 20-30)
+> Pallet: `pallet-dispute-arbitration` | Extrinsics: 31 (call_index 0-5, 10-15, 20-30)
 > 新增: request_default_judgment, supplement_complaint/response_evidence,
 > settle_dispute, start_mediation, dismiss_dispute/complaint, set_paused,
 > force_close_dispute/complaint, set_domain_penalty_rate

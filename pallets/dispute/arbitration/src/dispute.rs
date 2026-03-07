@@ -8,7 +8,7 @@ use frame_support::{
         fungible::MutateHold as FungibleMutateHold,
     },
 };
-use pallet_escrow::pallet::Escrow as EscrowTrait;
+use pallet_dispute_escrow::pallet::Escrow as EscrowTrait;
 use pallet_storage_service::CidLockManager;
 use sp_runtime::{traits::Zero, Saturating, SaturatedConversion, DispatchError};
 

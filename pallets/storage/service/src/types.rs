@@ -152,7 +152,7 @@ pub struct SubjectInfo {
 ///     auto_pin_enabled: true,        // 启用自动PIN
 ///     default_tier: PinTier::Standard, // 默认标准等级
 ///     subject_type_id: 10,           // 自定义类型ID
-///     owner_pallet: b"pallet-evidence",  // 所属pallet
+///     owner_pallet: b"pallet-dispute-evidence",  // 所属pallet
 ///     created_at: 12345,             // 注册时间
 /// }
 /// ```

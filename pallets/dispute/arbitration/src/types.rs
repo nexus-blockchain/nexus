@@ -9,48 +9,59 @@ pub enum Decision {
 }
 
 pub mod domains {
+    pub const ENTITY_ORDER: [u8; 8] = *b"entorder";
     pub const OTC_ORDER: [u8; 8] = *b"otc_ord_";
-    pub const LIVESTREAM: [u8; 8] = *b"livstrm_";
     pub const MAKER: [u8; 8] = *b"maker___";
     pub const NFT_TRADE: [u8; 8] = *b"nft_trd_";
     pub const SWAP: [u8; 8] = *b"swap____";
     pub const MEMBER: [u8; 8] = *b"member__";
-    pub const CREDIT: [u8; 8] = *b"credit__";
+    pub const ADS: [u8; 8] = *b"ads_____";
+    pub const TOKNSALE: [u8; 8] = *b"toknsale";
     pub const OTHER: [u8; 8] = *b"other___";
 }
 
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
 pub enum ComplaintType {
+    // entity/order — 商城订单争议
+    EntityOrderNotDeliver,
+    EntityOrderFalseClaim,
+    EntityOrderFraud,
+    EntityOrderQuality,
+
+    // trading/nex-market — OTC 法币交易
     OtcSellerNotDeliver,
     OtcBuyerFalseClaim,
     OtcTradeFraud,
     OtcPriceDispute,
 
-    LiveIllegalContent,
-    LiveFalseAdvertising,
-    LiveHarassment,
-    LiveFraud,
-    LiveGiftRefund,
-    LiveOther,
-
+    // trading/nex-market — 做市商
     MakerCreditDefault,
     MakerMaliciousOperation,
     MakerFalseQuote,
 
+    // trading/nex-market — NFT 交易（预留）
     NftSellerNotDeliver,
     NftCounterfeit,
     NftTradeFraud,
     NftAuctionDispute,
 
+    // trading/nex-market — Swap 交换（预留）
     SwapMakerNotComplete,
     SwapVerificationTimeout,
     SwapFraud,
 
+    // entity/member — 会员
     MemberBenefitNotProvided,
     MemberServiceQuality,
 
-    CreditScoreDispute,
-    CreditPenaltyAppeal,
+    // ads/core — 广告
+    AdsReceiptDispute,
+    AdsFraudClick,
+    AdsSettlementDispute,
+
+    // entity/tokensale — 代币发售
+    TokenSaleNotDeliver,
+    TokenSaleTermsViolation,
 
     Other,
 }
@@ -58,12 +69,11 @@ pub enum ComplaintType {
 impl ComplaintType {
     pub fn domain(&self) -> [u8; 8] {
         match self {
+            Self::EntityOrderNotDeliver | Self::EntityOrderFalseClaim |
+            Self::EntityOrderFraud | Self::EntityOrderQuality => domains::ENTITY_ORDER,
+
             Self::OtcSellerNotDeliver | Self::OtcBuyerFalseClaim |
             Self::OtcTradeFraud | Self::OtcPriceDispute => domains::OTC_ORDER,
-
-            Self::LiveIllegalContent | Self::LiveFalseAdvertising |
-            Self::LiveHarassment | Self::LiveFraud |
-            Self::LiveGiftRefund | Self::LiveOther => domains::LIVESTREAM,
 
             Self::MakerCreditDefault | Self::MakerMaliciousOperation |
             Self::MakerFalseQuote => domains::MAKER,
@@ -76,7 +86,10 @@ impl ComplaintType {
 
             Self::MemberBenefitNotProvided | Self::MemberServiceQuality => domains::MEMBER,
 
-            Self::CreditScoreDispute | Self::CreditPenaltyAppeal => domains::CREDIT,
+            Self::AdsReceiptDispute | Self::AdsFraudClick |
+            Self::AdsSettlementDispute => domains::ADS,
+
+            Self::TokenSaleNotDeliver | Self::TokenSaleTermsViolation => domains::TOKNSALE,
 
             Self::Other => domains::OTHER,
         }
@@ -84,15 +97,14 @@ impl ComplaintType {
 
     pub fn penalty_rate(&self) -> u16 {
         match self {
-            Self::OtcTradeFraud => 8000,
-            Self::LiveIllegalContent |
-            Self::MakerMaliciousOperation => 5000,
+            Self::OtcTradeFraud | Self::EntityOrderFraud => 8000,
+            Self::MakerMaliciousOperation | Self::AdsFraudClick => 5000,
             _ => 3000,
         }
     }
 
     pub fn triggers_permanent_ban(&self) -> bool {
-        matches!(self, Self::OtcTradeFraud)
+        matches!(self, Self::OtcTradeFraud | Self::EntityOrderFraud)
     }
 }
 

@@ -41,7 +41,7 @@ thread_local! {
     static ESCROW_STATES: RefCell<HashMap<u64, u8>> = RefCell::new(HashMap::new());
 }
 
-impl pallet_escrow::pallet::Escrow<u64, u64> for MockEscrow {
+impl pallet_dispute_escrow::pallet::Escrow<u64, u64> for MockEscrow {
     fn escrow_account() -> u64 {
         999
     }

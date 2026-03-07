@@ -1,4 +1,4 @@
-use crate as pallet_evidence;
+use crate as pallet_dispute_evidence;
 use frame_support::{
     derive_impl, parameter_types,
     traits::{ConstU32, ConstU64, ConstU128},
@@ -15,7 +15,7 @@ frame_support::construct_runtime!(
     pub enum Test {
         System: frame_system,
         Balances: pallet_balances,
-        EvidencePallet: pallet_evidence,
+        EvidencePallet: pallet_dispute_evidence,
     }
 );
 
@@ -62,14 +62,14 @@ pub fn set_seal_authorized(val: bool) {
 }
 
 pub struct MockAuthorizer;
-impl pallet_evidence::pallet::EvidenceAuthorizer<u64> for MockAuthorizer {
+impl pallet_dispute_evidence::pallet::EvidenceAuthorizer<u64> for MockAuthorizer {
     fn is_authorized(_ns: [u8; 8], _who: &u64) -> bool {
         AUTHORIZED.with(|v| *v.borrow())
     }
 }
 
 pub struct MockSealAuthorizer;
-impl pallet_evidence::pallet::EvidenceSealAuthorizer<u64> for MockSealAuthorizer {
+impl pallet_dispute_evidence::pallet::EvidenceSealAuthorizer<u64> for MockSealAuthorizer {
     fn can_seal(_ns: [u8; 8], _who: &u64) -> bool {
         SEAL_AUTHORIZED.with(|v| *v.borrow())
     }
@@ -105,7 +105,7 @@ parameter_types! {
     pub const CommitRevealDeadline: u64 = 500;
 }
 
-impl pallet_evidence::pallet::Config for Test {
+impl pallet_dispute_evidence::pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type MaxContentCidLen = ConstU32<64>;
     type MaxSchemeLen = ConstU32<32>;

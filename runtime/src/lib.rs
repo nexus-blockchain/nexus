@@ -266,16 +266,16 @@ mod runtime {
 	// ============================================================================
 
 	#[runtime::pallet_index(60)]
-	pub type Escrow = pallet_escrow;
+	pub type Escrow = pallet_dispute_escrow;
 
 	#[runtime::pallet_index(62)]
 	pub type StorageService = pallet_storage_service;
 
 	#[runtime::pallet_index(63)]
-	pub type Evidence = pallet_evidence;
+	pub type Evidence = pallet_dispute_evidence;
 
 	#[runtime::pallet_index(64)]
-	pub type Arbitration = pallet_arbitration;
+	pub type Arbitration = pallet_dispute_arbitration;
 
 	#[runtime::pallet_index(65)]
 	pub type StorageLifecycle = pallet_storage_lifecycle;

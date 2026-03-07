@@ -13,7 +13,7 @@
  *   npx tsx e2e/nexus-test-agent.ts --group grouprobot     # 仅 grouprobot 模块群
  *   npx tsx e2e/nexus-test-agent.ts --priority P0          # 仅 P0 优先级
  *   npx tsx e2e/nexus-test-agent.ts --flow E1 E2 E3        # 仅指定 E2E 流程
- *   npx tsx e2e/nexus-test-agent.ts --pallet pallet-escrow # 仅指定 pallet
+ *   npx tsx e2e/nexus-test-agent.ts --pallet pallet-dispute-escrow # 仅指定 pallet
  */
 
 import * as path from 'path';

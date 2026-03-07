@@ -23,8 +23,8 @@ extern crate pallet_crypto_common;
 #[cfg(feature = "runtime-benchmarks")]
 pub mod benchmarking;
 pub mod private_content;
+pub mod runtime_api;
 pub mod weights;
-// L-4修复：CID加密验证模块
 pub mod cid_validator;
 
 #[allow(deprecated)]
@@ -1236,6 +1236,20 @@ pub mod pallet {
             PrivateContentBySubject::<T>::insert((ns, subject_id), content_id, ());
             PrivateContentDeposits::<T>::insert(content_id, pc_deposit);
 
+            let cid_vec: Vec<u8> = cid.clone().into_inner();
+            let cid_size = cid_vec.len() as u64;
+            if let Err(e) = T::StoragePin::pin(
+                who.clone(),
+                b"evidence_private",
+                content_id,
+                None,
+                cid_vec,
+                cid_size,
+                pallet_storage_service::PinTier::Critical,
+            ) {
+                log::warn!(target: "evidence", "pin failed on store_private_content {}: {:?}", content_id, e);
+            }
+
             Self::deposit_event(Event::PrivateContentDepositReserved {
                 content_id, who: who.clone(), amount: pc_deposit,
             });
@@ -1427,7 +1441,7 @@ pub mod pallet {
         /// - `memo`: 补充说明（可选）
         #[pallet::call_index(11)]
         #[allow(deprecated)]
-        #[pallet::weight(T::WeightInfo::commit(imgs.len() as u32, vids.len() as u32, docs.len() as u32))]
+        #[pallet::weight(T::WeightInfo::append_evidence(imgs.len() as u32, vids.len() as u32, docs.len() as u32))]
         pub fn append_evidence(
             origin: OriginFor<T>,
             parent_id: u64,
@@ -1769,7 +1783,7 @@ pub mod pallet {
         /// 被密封的证据不可修改、撤回、取消链接。
         /// 级联密封所有子证据（补充证据），防止仲裁期间补充材料被篡改。
         #[pallet::call_index(16)]
-        #[pallet::weight(T::WeightInfo::seal_evidence())]
+        #[pallet::weight(T::WeightInfo::seal_evidence(T::MaxSupplements::get()))]
         pub fn seal_evidence(
             origin: OriginFor<T>,
             evidence_id: u64,
@@ -1807,7 +1821,7 @@ pub mod pallet {
         ///
         /// 级联解封所有子证据。
         #[pallet::call_index(17)]
-        #[pallet::weight(T::WeightInfo::unseal_evidence())]
+        #[pallet::weight(T::WeightInfo::unseal_evidence(T::MaxSupplements::get()))]
         pub fn unseal_evidence(
             origin: OriginFor<T>,
             evidence_id: u64,
@@ -2122,7 +2136,7 @@ pub mod pallet {
         ///
         /// 密钥泄露时用户可作废旧公钥。撤销后需重新注册才能接收新的加密内容。
         #[pallet::call_index(22)]
-        #[pallet::weight(T::WeightInfo::register_public_key())]
+        #[pallet::weight(T::WeightInfo::revoke_public_key())]
         pub fn revoke_public_key(
             origin: OriginFor<T>,
         ) -> DispatchResult {
@@ -2145,7 +2159,7 @@ pub mod pallet {
         ///
         /// 用户取消自己对某加密内容的待处理访问请求。
         #[pallet::call_index(23)]
-        #[pallet::weight(T::WeightInfo::request_access())]
+        #[pallet::weight(T::WeightInfo::cancel_access_request())]
         pub fn cancel_access_request(
             origin: OriginFor<T>,
             content_id: u64,
@@ -2778,29 +2792,41 @@ pub mod pallet {
             cleaned
         }
 
-        /// P1修复: 清理过期的访问请求
+        /// 游标式清理过期访问请求
         ///
-        /// 游标式扫描 AccessRequests，删除超过 AccessRequestTtlBlocks 的过期请求。
+        /// 利用 AccessRequestCleanupCursor（content_id 游标）避免全表扫描。
+        /// 每次从游标位置开始，扫描 max_per_call 个 content_id 的请求。
         fn cleanup_expired_access_requests(now: BlockNumberFor<T>, max_per_call: u32) -> u32 {
             let ttl = T::AccessRequestTtlBlocks::get();
+            let mut cursor = AccessRequestCleanupCursor::<T>::get();
+            let max_content_id = NextPrivateContentId::<T>::get();
             let mut cleaned = 0u32;
-            let mut to_remove: Vec<(u64, T::AccountId)> = Vec::new();
+            let mut scanned = 0u32;
+            let scan_limit = max_per_call.saturating_mul(3);
 
-            // 收集过期请求（避免迭代中修改）
-            for (content_id, requester, requested_at) in AccessRequests::<T>::iter() {
-                if cleaned >= max_per_call { break; }
-                if now > requested_at.saturating_add(ttl) {
-                    to_remove.push((content_id, requester));
-                    cleaned += 1;
+            while cursor < max_content_id && cleaned < max_per_call && scanned < scan_limit {
+                scanned += 1;
+                let mut to_remove: Vec<T::AccountId> = Vec::new();
+                for (requester, requested_at) in AccessRequests::<T>::iter_prefix(cursor) {
+                    if now > requested_at.saturating_add(ttl) {
+                        to_remove.push(requester);
+                    }
                 }
+                for requester in to_remove {
+                    AccessRequests::<T>::remove(cursor, &requester);
+                    AccessRequestCount::<T>::mutate(cursor, |c| { *c = c.saturating_sub(1); });
+                    Self::deposit_event(Event::AccessRequestExpired { content_id: cursor, requester });
+                    cleaned += 1;
+                    if cleaned >= max_per_call { break; }
+                }
+                cursor = cursor.saturating_add(1);
             }
 
-            for (content_id, requester) in to_remove {
-                AccessRequests::<T>::remove(content_id, &requester);
-                AccessRequestCount::<T>::mutate(content_id, |c| { *c = c.saturating_sub(1); });
-                Self::deposit_event(Event::AccessRequestExpired { content_id, requester });
+            if cursor >= max_content_id {
+                AccessRequestCleanupCursor::<T>::put(0u64);
+            } else {
+                AccessRequestCleanupCursor::<T>::put(cursor);
             }
-
             cleaned
         }
 
@@ -2962,5 +2988,212 @@ impl<T: pallet::Config> Pallet<T> {
             }
         }
         out
+    }
+
+    // ===== Runtime API 实现方法 =====
+
+    fn build_summary(ev: &pallet::Evidence<T::AccountId, frame_system::pallet_prelude::BlockNumberFor<T>, T::MaxContentCidLen, T::MaxSchemeLen>, id: u64) -> runtime_api::EvidenceSummary<T::AccountId> {
+        use sp_runtime::traits::SaturatedConversion;
+        let status = pallet::EvidenceStatuses::<T>::get(id);
+        let status_u8 = match status {
+            pallet::EvidenceStatus::Active => 0u8,
+            pallet::EvidenceStatus::Sealed => 1,
+            pallet::EvidenceStatus::Withdrawn => 2,
+            pallet::EvidenceStatus::Removed => 3,
+        };
+        let ct = match ev.content_type {
+            pallet::ContentType::Image => 0u8,
+            pallet::ContentType::Video => 1,
+            pallet::ContentType::Document => 2,
+            pallet::ContentType::Mixed => 3,
+            pallet::ContentType::Text => 4,
+        };
+        let children = pallet::EvidenceChildren::<T>::get(id);
+        runtime_api::EvidenceSummary {
+            id,
+            domain: ev.domain,
+            target_id: ev.target_id,
+            owner: ev.owner.clone(),
+            content_cid: ev.content_cid.clone().into_inner(),
+            content_type: ct,
+            status: status_u8,
+            is_encrypted: ev.is_encrypted,
+            created_at: ev.created_at.saturated_into::<u64>(),
+            link_count: pallet::EvidenceLinkCount::<T>::get(id),
+            child_count: children.len() as u32,
+            has_commit: ev.commit.is_some(),
+        }
+    }
+
+    fn collect_page(
+        ids: alloc::vec::Vec<u64>,
+        total: u32,
+    ) -> runtime_api::EvidencePage<T::AccountId> {
+        let items: alloc::vec::Vec<_> = ids.iter().filter_map(|id| {
+            pallet::Evidences::<T>::get(id).map(|ev| Self::build_summary(&ev, *id))
+        }).collect();
+        runtime_api::EvidencePage { items, total }
+    }
+
+    pub fn api_get_evidence_detail(id: u64) -> Option<runtime_api::EvidenceDetail<T::AccountId, pallet::BalanceOf<T>>> {
+        let ev = pallet::Evidences::<T>::get(id)?;
+        let summary = Self::build_summary(&ev, id);
+        let parent_id = pallet::EvidenceParent::<T>::get(id);
+        let children = pallet::EvidenceChildren::<T>::get(id);
+        let deposit = pallet::EvidenceDeposits::<T>::get(id).unwrap_or_default();
+        Some(runtime_api::EvidenceDetail {
+            summary,
+            ns: ev.ns,
+            parent_id,
+            children_ids: children.into_inner(),
+            deposit,
+        })
+    }
+
+    pub fn api_get_evidences_by_target(domain: u8, target_id: u64, offset: u32, limit: u32) -> runtime_api::EvidencePage<T::AccountId> {
+        let total = Self::count_by_target(domain, target_id);
+        let cap = core::cmp::min(limit, 50);
+        let mut ids: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        let mut skipped = 0u32;
+        let mut collected = 0u32;
+        for id in pallet::EvidenceByTarget::<T>::iter_key_prefix((domain, target_id)) {
+            if skipped < offset { skipped += 1; continue; }
+            ids.push(id);
+            collected += 1;
+            if collected >= cap { break; }
+        }
+        Self::collect_page(ids, total)
+    }
+
+    pub fn api_get_evidences_by_ns(ns: [u8; 8], subject_id: u64, offset: u32, limit: u32) -> runtime_api::EvidencePage<T::AccountId> {
+        let total = Self::count_by_ns(ns, subject_id);
+        let cap = core::cmp::min(limit, 50);
+        let mut ids: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        let mut skipped = 0u32;
+        let mut collected = 0u32;
+        for id in pallet::EvidenceByNs::<T>::iter_key_prefix((ns, subject_id)) {
+            if skipped < offset { skipped += 1; continue; }
+            ids.push(id);
+            collected += 1;
+            if collected >= cap { break; }
+        }
+        Self::collect_page(ids, total)
+    }
+
+    pub fn api_get_user_evidences(account: &T::AccountId, offset: u32, limit: u32) -> runtime_api::EvidencePage<T::AccountId> {
+        let cap = core::cmp::min(limit, 50);
+        let mut ids: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        let mut skipped = 0u32;
+        let mut collected = 0u32;
+        let mut total = 0u32;
+        for id in pallet::EvidenceByOwner::<T>::iter_key_prefix(account) {
+            total += 1;
+            if skipped < offset { skipped += 1; continue; }
+            if collected < cap {
+                ids.push(id);
+                collected += 1;
+            }
+        }
+        Self::collect_page(ids, total)
+    }
+
+    pub fn api_get_private_content_meta(content_id: u64) -> Option<runtime_api::PrivateContentMeta<T::AccountId>> {
+        use sp_runtime::traits::SaturatedConversion;
+        let c = pallet::PrivateContents::<T>::get(content_id)?;
+        let enc_u8 = match c.encryption_method {
+            pallet_crypto_common::EncryptionMethod::None => 0u8,
+            pallet_crypto_common::EncryptionMethod::Aes256Gcm => 1,
+            pallet_crypto_common::EncryptionMethod::ChaCha20Poly1305 => 2,
+            pallet_crypto_common::EncryptionMethod::XChaCha20Poly1305 => 3,
+        };
+        let policy_u8 = match &c.access_policy {
+            pallet_crypto_common::AccessPolicy::OwnerOnly => 0u8,
+            pallet_crypto_common::AccessPolicy::SharedWith(_) => 1,
+            pallet_crypto_common::AccessPolicy::TimeboxedAccess { .. } => 2,
+            pallet_crypto_common::AccessPolicy::GovernanceControlled => 3,
+            pallet_crypto_common::AccessPolicy::RoleBased(_) => 4,
+        };
+        let pending = pallet::AccessRequestCount::<T>::get(content_id);
+        Some(runtime_api::PrivateContentMeta {
+            content_id: c.id,
+            ns: c.ns,
+            subject_id: c.subject_id,
+            cid: c.cid.into_inner(),
+            encryption_method: enc_u8,
+            creator: c.creator,
+            access_policy: policy_u8,
+            authorized_count: c.encrypted_keys.len() as u32,
+            pending_requests: pending,
+            created_at: c.created_at.saturated_into::<u64>(),
+        })
+    }
+
+    pub fn api_get_decryption_package(content_id: u64, viewer: &T::AccountId) -> Option<runtime_api::DecryptionPackage> {
+        let content = pallet::PrivateContents::<T>::get(content_id)?;
+        if !Self::can_access_private_content(content_id, viewer) {
+            return None;
+        }
+        let encrypted_key = content
+            .encrypted_keys
+            .iter()
+            .find(|(u, _)| u == viewer)
+            .map(|(_, k)| k.clone().into_inner())?;
+        let enc_u8 = match content.encryption_method {
+            pallet_crypto_common::EncryptionMethod::None => 0u8,
+            pallet_crypto_common::EncryptionMethod::Aes256Gcm => 1,
+            pallet_crypto_common::EncryptionMethod::ChaCha20Poly1305 => 2,
+            pallet_crypto_common::EncryptionMethod::XChaCha20Poly1305 => 3,
+        };
+        Some(runtime_api::DecryptionPackage {
+            cid: content.cid.into_inner(),
+            content_hash: content.content_hash.0,
+            encryption_method: enc_u8,
+            encrypted_key,
+        })
+    }
+
+    pub fn api_get_private_contents_by_subject(ns: [u8; 8], subject_id: u64, offset: u32, limit: u32) -> alloc::vec::Vec<u64> {
+        let cap = core::cmp::min(limit, 50);
+        let mut out: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+        let mut skipped = 0u32;
+        let mut collected = 0u32;
+        for (content_id, _) in pallet::PrivateContentBySubject::<T>::iter_prefix((ns, subject_id)) {
+            if skipped < offset { skipped += 1; continue; }
+            out.push(content_id);
+            collected += 1;
+            if collected >= cap { break; }
+        }
+        out
+    }
+
+    pub fn api_get_access_requests(content_id: u64, offset: u32, limit: u32) -> alloc::vec::Vec<runtime_api::AccessRequestEntry<T::AccountId>> {
+        use sp_runtime::traits::SaturatedConversion;
+        let cap = core::cmp::min(limit, 50);
+        let mut out: alloc::vec::Vec<runtime_api::AccessRequestEntry<T::AccountId>> = alloc::vec::Vec::new();
+        let mut skipped = 0u32;
+        let mut collected = 0u32;
+        for (requester, block) in pallet::AccessRequests::<T>::iter_prefix(content_id) {
+            if skipped < offset { skipped += 1; continue; }
+            out.push(runtime_api::AccessRequestEntry {
+                requester,
+                requested_at: block.saturated_into::<u64>(),
+            });
+            collected += 1;
+            if collected >= cap { break; }
+        }
+        out
+    }
+
+    pub fn api_get_user_public_key(account: &T::AccountId) -> Option<runtime_api::PublicKeyInfo> {
+        let pk = pallet::UserPublicKeys::<T>::get(account)?;
+        let kt = match pk.key_type {
+            pallet_crypto_common::KeyType::Rsa2048 => 0u8,
+            pallet_crypto_common::KeyType::Ed25519 => 1,
+            pallet_crypto_common::KeyType::EcdsaP256 => 2,
+        };
+        Some(runtime_api::PublicKeyInfo {
+            key_data: pk.key_data.into_inner(),
+            key_type: kt,
+        })
     }
 }

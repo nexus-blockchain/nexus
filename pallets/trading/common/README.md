@@ -33,7 +33,7 @@
 | 消费方 | 使用的 API |
 |--------|-----------|
 | **pallet-nex-market** | `is_valid_tron_address`, `compute_payment_ratio_bps`, `calculate_payment_verification_result`, `calculate_deposit_forfeit_rate`, `PaymentVerificationResult`; 实现 `PriceOracle` |
-| **pallet-arbitration** | `PricingProvider`（Config 关联类型） |
+| **pallet-dispute-arbitration** | `PricingProvider`（Config 关联类型） |
 | **pallet-storage-service** | `DepositCalculator`（Config 关联类型） |
 | **runtime/configs** | 实现 `TradingPricingProvider`（`PricingProvider`）、`NexExchangeRateProvider`（`ExchangeRateProvider`）、`EntityPricingProvider`（组合 `PricingProvider` + `PriceOracle`） |
 

@@ -7,13 +7,17 @@ pub use pallet::*;
 pub mod weights;
 pub mod types;
 pub mod state_machine;
+pub mod runtime_api;
+
+#[cfg(feature = "runtime-benchmarks")]
+pub mod benchmarking;
 
 mod dispute;
 mod complaint;
 mod cleanup;
 
 #[cfg(test)]
-mod mock;
+pub mod mock;
 #[cfg(test)]
 mod tests;
 
@@ -25,7 +29,7 @@ pub mod pallet {
     use frame_support::traits::{EnsureOrigin, fungible::{Inspect as FungibleInspect, Mutate as FungibleMutate, MutateHold as FungibleMutateHold}};
     use frame_support::{pallet_prelude::*, BoundedVec};
     use frame_system::pallet_prelude::*;
-    use pallet_escrow::pallet::Escrow as EscrowTrait;
+    use pallet_dispute_escrow::pallet::Escrow as EscrowTrait;
     use pallet_trading_common::PricingProvider;
     use sp_runtime::{Saturating, SaturatedConversion};
 
@@ -49,6 +53,8 @@ pub mod pallet {
         pub settlement_cid: Option<BoundedVec<u8, T::MaxCidLen>>,
         pub resolution_cid: Option<BoundedVec<u8, T::MaxCidLen>>,
         pub appeal_cid: Option<BoundedVec<u8, T::MaxCidLen>>,
+        /// Who filed the appeal (None until appeal is filed)
+        pub appellant: Option<T::AccountId>,
         pub updated_at: BlockNumberFor<T>,
     }
 
@@ -68,12 +74,12 @@ pub mod pallet {
     // ==================== Config ====================
 
     pub type BalanceOf<T> =
-        <<T as pallet_escrow::pallet::Config>::Currency as frame_support::traits::Currency<
+        <<T as pallet_dispute_escrow::pallet::Config>::Currency as frame_support::traits::Currency<
             <T as frame_system::Config>::AccountId,
         >>::Balance;
 
     #[pallet::config]
-    pub trait Config: frame_system::Config + pallet_escrow::pallet::Config {
+    pub trait Config: frame_system::Config + pallet_dispute_escrow::pallet::Config {
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
         type MaxEvidence: Get<u32>;
         type MaxCidLen: Get<u32>;
@@ -136,7 +142,10 @@ pub mod pallet {
         ComplaintDeposit,
     }
 
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     // ==================== Storage: Dispute subsystem ====================
@@ -315,6 +324,8 @@ pub mod pallet {
         AppealFiled { complaint_id: u64, appellant: T::AccountId },
         AppealResolved { complaint_id: u64, decision: u8 },
         AccountBanRequested { domain: [u8; 8], object_id: u64, account: T::AccountId },
+        /// Deposit operation failed — funds may remain held
+        DepositOperationFailed { complaint_id: u64, operation: u8, amount: BalanceOf<T> },
     }
 
     // ==================== Errors ====================
@@ -345,6 +356,8 @@ pub mod pallet {
         AppealWindowClosed,
         /// Cannot appeal this complaint (wrong status or party)
         CannotAppeal,
+        /// Invalid decision code (must be 0=Release, 1=Refund, 2=Partial)
+        InvalidDecisionCode,
     }
 
     // ==================== Extrinsics ====================
@@ -383,8 +396,9 @@ pub mod pallet {
             let decision = match (decision_code, bps) {
                 (0, _) => Decision::Release,
                 (1, _) => Decision::Refund,
-                (2, Some(p)) => Decision::Partial(p),
-                _ => Decision::Refund,
+                (2, Some(p)) => Decision::Partial(p.min(10_000)),
+                (2, None) => Decision::Partial(T::PartialSlashBps::get().min(10_000)),
+                _ => return Err(Error::<T>::InvalidDecisionCode.into()),
             };
             T::Router::apply_decision(domain, id, decision.clone())?;
             Self::handle_deposits_on_arbitration(domain, id, &decision)?;
@@ -651,6 +665,7 @@ pub mod pallet {
                 settlement_cid: None,
                 resolution_cid: None,
                 appeal_cid: None,
+                appellant: None,
                 updated_at: now,
             };
 
@@ -792,7 +807,12 @@ pub mod pallet {
                     Error::<T>::InvalidState
                 );
 
+                // Submitted -> Arbitrating requires response deadline to have passed
                 let now = frame_system::Pallet::<T>::block_number();
+                if complaint.status == ComplaintStatus::Submitted {
+                    ensure!(now > complaint.response_deadline, Error::<T>::ResponseDeadlineNotReached);
+                }
+
                 complaint.status = ComplaintStatus::Arbitrating;
                 complaint.updated_at = now;
                 PendingArbitrationComplaints::<T>::insert(complaint_id, ());
@@ -833,10 +853,11 @@ pub mod pallet {
 
                 let now = frame_system::Pallet::<T>::block_number();
                 complaint.resolution_cid = Some(reason_cid);
+                // decision: 0=ComplainantWin, 1=RespondentWin, >=2=Partial (mapped to ComplainantWin
+                // because partial rulings favor the complainant for deposit/appeal purposes)
                 complaint.status = match decision {
-                    0 => ComplaintStatus::ResolvedComplainantWin,
+                    0 | 2.. => ComplaintStatus::ResolvedComplainantWin,
                     1 => ComplaintStatus::ResolvedRespondentWin,
-                    _ => ComplaintStatus::ResolvedComplainantWin,
                 };
                 complaint.updated_at = now;
 
@@ -1222,9 +1243,26 @@ pub mod pallet {
                     Error::<T>::AppealWindowClosed
                 );
 
-                // Appeal deposit: 2x the original complaint deposit
-                let original_deposit = T::ComplaintDeposit::get();
-                let appeal_deposit = original_deposit.saturating_mul(2u32.into());
+                // Appeal deposit: 2x the current market-rate deposit (same pricing as file_complaint)
+                // Original deposit was already refunded/slashed during resolve_complaint.
+                // Guard against stale record (should be None after resolve).
+                ensure!(
+                    ComplaintDeposits::<T>::get(complaint_id).is_none(),
+                    Error::<T>::InvalidState
+                );
+
+                let min_deposit = T::ComplaintDeposit::get();
+                let base_deposit = if let Some(price) = T::Pricing::get_nex_to_usd_rate() {
+                    let price_u128: u128 = price.saturated_into();
+                    if price_u128 > 0u128 {
+                        let deposit_usd = T::ComplaintDepositUsd::get();
+                        let required_u128 = (deposit_usd as u128).saturating_mul(1_000_000u128) / price_u128;
+                        let required: BalanceOf<T> = required_u128.saturated_into();
+                        if required > min_deposit { required } else { min_deposit }
+                    } else { min_deposit }
+                } else { min_deposit };
+                let appeal_deposit = base_deposit.saturating_mul(2u32.into());
+
                 T::Fungible::hold(
                     &T::RuntimeHoldReason::from(HoldReason::ComplaintDeposit),
                     &who,
@@ -1235,7 +1273,11 @@ pub mod pallet {
 
                 complaint.status = ComplaintStatus::Appealed;
                 complaint.appeal_cid = Some(appeal_cid);
+                complaint.appellant = Some(who.clone());
                 complaint.updated_at = now;
+
+                // Re-activate: appeal brings complaint back to active state
+                ActiveComplaintCount::<T>::mutate(&complaint.complainant, |c| *c = c.saturating_add(1));
 
                 PendingArbitrationComplaints::<T>::insert(complaint_id, ());
 
@@ -1259,11 +1301,13 @@ pub mod pallet {
                 let complaint = maybe_complaint.as_mut().ok_or(Error::<T>::ComplaintNotFound)?;
                 ensure!(complaint.status == ComplaintStatus::Appealed, Error::<T>::InvalidState);
 
+                let appellant = complaint.appellant.clone()
+                    .ok_or(Error::<T>::InvalidState)?;
+
                 let now = frame_system::Pallet::<T>::block_number();
                 complaint.resolution_cid = Some(reason_cid);
 
-                // Determine who the appellant is (the one who lost the original ruling)
-                let appellant_is_respondent = complaint.appeal_cid.is_some();
+                let appellant_is_respondent = appellant == complaint.respondent;
 
                 complaint.status = match decision {
                     0 => ComplaintStatus::ResolvedComplainantWin,
@@ -1271,33 +1315,36 @@ pub mod pallet {
                 };
                 complaint.updated_at = now;
 
-                // Handle appeal deposit: refund if appeal succeeds, slash if fails
                 let appeal_succeeded = match (decision, appellant_is_respondent) {
                     (0, false) => true,   // Complainant appealed, complainant wins
-                    (1, true) => true,    // Respondent appealed, respondent wins (decision=1)
+                    (1, true) => true,    // Respondent appealed, respondent wins
                     _ => false,
                 };
 
                 if appeal_succeeded {
-                    Self::refund_complaint_deposit(complaint_id, if appellant_is_respondent {
-                        &complaint.respondent
-                    } else {
-                        &complaint.complainant
-                    });
+                    Self::refund_complaint_deposit(complaint_id, &appellant);
                 } else {
-                    // Slash appeal deposit to the other party
-                    let (appellant, beneficiary) = if appellant_is_respondent {
-                        (&complaint.respondent, &complaint.complainant)
+                    let beneficiary = if appellant_is_respondent {
+                        &complaint.complainant
                     } else {
-                        (&complaint.complainant, &complaint.respondent)
+                        &complaint.respondent
                     };
                     Self::slash_complaint_deposit(
-                        complaint_id, appellant, beneficiary,
+                        complaint_id, &appellant, beneficiary,
                         complaint.domain, &complaint.complaint_type,
                     );
                 }
 
                 PendingArbitrationComplaints::<T>::remove(complaint_id);
+                Self::decrement_active_count(&complaint.complainant);
+
+                DomainStats::<T>::mutate(complaint.domain, |stats| {
+                    stats.resolved_count = stats.resolved_count.saturating_add(1);
+                    match decision {
+                        0 | 2.. => stats.complainant_wins = stats.complainant_wins.saturating_add(1),
+                        1 => stats.respondent_wins = stats.respondent_wins.saturating_add(1),
+                    }
+                });
 
                 Self::deposit_event(Event::AppealResolved { complaint_id, decision });
                 Ok(())
@@ -1309,57 +1356,191 @@ pub mod pallet {
 
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        fn on_runtime_upgrade() -> Weight {
+            let on_chain = Pallet::<T>::on_chain_storage_version();
+            if on_chain < STORAGE_VERSION {
+                log::info!(
+                    target: "pallet-dispute-arbitration",
+                    "Migrating storage to v{:?}", STORAGE_VERSION,
+                );
+                STORAGE_VERSION.put::<Pallet<T>>();
+                T::DbWeight::get().reads_writes(1, 1)
+            } else {
+                T::DbWeight::get().reads(1)
+            }
+        }
+
         fn on_idle(now: BlockNumberFor<T>, remaining_weight: Weight) -> Weight {
             let mut weight_used = Weight::zero();
-            let base_weight = Weight::from_parts(25_000_000, 2_000);
-            let read_overhead = Weight::from_parts(10_000_000, 1_000);
+            let per_item_write = Weight::from_parts(25_000_000, 2_000);
+            let per_item_read = Weight::from_parts(10_000_000, 1_000);
+            let cursor_overhead = Weight::from_parts(5_000_000, 500);
 
-            // Stage 1: Expire old complaints
-            if remaining_weight.ref_time() > base_weight.ref_time() * 5 {
+            // Each stage: cursor read/write + N reads (scanning) + M writes (processing)
+            // batch_weight(scan, process) = cursor_overhead + scan * per_item_read + process * per_item_write
+
+            // Stage 1: Expire old complaints (scan up to 5, process up to 5)
+            let stage_budget = cursor_overhead
+                .saturating_add(per_item_read.saturating_mul(5))
+                .saturating_add(per_item_write.saturating_mul(5));
+            if remaining_weight.ref_time() > stage_budget.ref_time() {
                 let expired = Self::expire_old_complaints(5);
                 weight_used = weight_used.saturating_add(
-                    read_overhead.saturating_add(base_weight.saturating_mul(expired as u64))
+                    cursor_overhead
+                        .saturating_add(per_item_read.saturating_mul(5))
+                        .saturating_add(per_item_write.saturating_mul(expired as u64))
                 );
             }
 
             // Stage 2: Auto-escalate stale Responded complaints
             let remaining = remaining_weight.saturating_sub(weight_used);
-            if remaining.ref_time() > base_weight.ref_time() * 3 {
+            let stage_budget = cursor_overhead
+                .saturating_add(per_item_read.saturating_mul(3))
+                .saturating_add(per_item_write.saturating_mul(3));
+            if remaining.ref_time() > stage_budget.ref_time() {
                 let escalated = Self::auto_escalate_stale_complaints(3);
                 weight_used = weight_used.saturating_add(
-                    read_overhead.saturating_add(base_weight.saturating_mul(escalated as u64))
+                    cursor_overhead
+                        .saturating_add(per_item_read.saturating_mul(3))
+                        .saturating_add(per_item_write.saturating_mul(escalated as u64))
                 );
             }
 
             // Stage 3: Archive resolved complaints
             let remaining = remaining_weight.saturating_sub(weight_used);
-            if remaining.ref_time() > base_weight.ref_time() * 10 {
+            let stage_budget = cursor_overhead
+                .saturating_add(per_item_read.saturating_mul(10))
+                .saturating_add(per_item_write.saturating_mul(10));
+            if remaining.ref_time() > stage_budget.ref_time() {
                 let archived = Self::archive_old_complaints(10);
                 weight_used = weight_used.saturating_add(
-                    read_overhead.saturating_add(base_weight.saturating_mul(archived as u64))
+                    cursor_overhead
+                        .saturating_add(per_item_read.saturating_mul(10))
+                        .saturating_add(per_item_write.saturating_mul(archived as u64))
                 );
             }
 
             // Stage 4: Cleanup old archived disputes
             let current_block: u64 = now.saturated_into();
             let remaining = remaining_weight.saturating_sub(weight_used);
-            if remaining.ref_time() > base_weight.ref_time() * 5 {
+            let stage_budget = cursor_overhead
+                .saturating_add(per_item_read.saturating_mul(5))
+                .saturating_add(per_item_write.saturating_mul(5));
+            if remaining.ref_time() > stage_budget.ref_time() {
                 let cleaned = Self::cleanup_old_archived_disputes(current_block, 5);
                 weight_used = weight_used.saturating_add(
-                    read_overhead.saturating_add(base_weight.saturating_mul(cleaned as u64))
+                    cursor_overhead
+                        .saturating_add(per_item_read.saturating_mul(5))
+                        .saturating_add(per_item_write.saturating_mul(cleaned as u64))
                 );
             }
 
             // Stage 5: Cleanup old archived complaints
             let remaining = remaining_weight.saturating_sub(weight_used);
-            if remaining.ref_time() > base_weight.ref_time() * 5 {
+            let stage_budget = cursor_overhead
+                .saturating_add(per_item_read.saturating_mul(5))
+                .saturating_add(per_item_write.saturating_mul(5));
+            if remaining.ref_time() > stage_budget.ref_time() {
                 let cleaned = Self::cleanup_old_archived_complaints(current_block, 5);
                 weight_used = weight_used.saturating_add(
-                    read_overhead.saturating_add(base_weight.saturating_mul(cleaned as u64))
+                    cursor_overhead
+                        .saturating_add(per_item_read.saturating_mul(5))
+                        .saturating_add(per_item_write.saturating_mul(cleaned as u64))
                 );
             }
 
             weight_used
+        }
+    }
+
+    // ==================== Runtime API helpers ====================
+
+    impl<T: Config> Pallet<T> {
+        const MAX_API_SCAN: u64 = 10_000;
+
+        pub fn api_get_complaints_by_status(
+            status: ComplaintStatus,
+            offset: u32,
+            limit: u32,
+        ) -> alloc::vec::Vec<crate::runtime_api::ComplaintSummary<T::AccountId, BalanceOf<T>>> {
+            let limit = limit.min(100) as usize;
+            let mut skipped = 0u32;
+            let mut results = alloc::vec::Vec::new();
+            let max_id = NextComplaintId::<T>::get();
+            let scan_end = max_id.min(Self::MAX_API_SCAN);
+
+            for id in 0..scan_end {
+                if results.len() >= limit { break; }
+                if let Some(c) = Complaints::<T>::get(id) {
+                    if c.status == status {
+                        if skipped < offset {
+                            skipped += 1;
+                            continue;
+                        }
+                        results.push(crate::runtime_api::ComplaintSummary {
+                            id: c.id,
+                            domain: c.domain,
+                            object_id: c.object_id,
+                            complaint_type: c.complaint_type,
+                            complainant: c.complainant,
+                            respondent: c.respondent,
+                            amount: c.amount,
+                            status: c.status,
+                            created_at: c.created_at.saturated_into(),
+                            updated_at: c.updated_at.saturated_into(),
+                        });
+                    }
+                }
+            }
+            results
+        }
+
+        pub fn api_get_user_complaints(account: &T::AccountId) -> alloc::vec::Vec<u64> {
+            let max_id = NextComplaintId::<T>::get();
+            let scan_end = max_id.min(Self::MAX_API_SCAN);
+            let mut ids = alloc::vec::Vec::new();
+            for id in 0..scan_end {
+                if let Some(c) = Complaints::<T>::get(id) {
+                    if c.status.is_active() && (c.complainant == *account || c.respondent == *account) {
+                        ids.push(id);
+                    }
+                }
+            }
+            ids
+        }
+
+        pub fn api_get_complaint_detail(
+            complaint_id: u64,
+        ) -> Option<crate::runtime_api::ComplaintDetail<T::AccountId, BalanceOf<T>>> {
+            let c = Complaints::<T>::get(complaint_id)?;
+            let deposit = ComplaintDeposits::<T>::get(complaint_id);
+            let evidence_cids: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+                ComplaintEvidenceCids::<T>::get(complaint_id)
+                    .into_iter()
+                    .map(|bv| bv.into_inner())
+                    .collect();
+
+            Some(crate::runtime_api::ComplaintDetail {
+                id: c.id,
+                domain: c.domain,
+                object_id: c.object_id,
+                complaint_type: c.complaint_type,
+                complainant: c.complainant,
+                respondent: c.respondent,
+                details_cid: c.details_cid.into_inner(),
+                response_cid: c.response_cid.map(|v| v.into_inner()),
+                amount: c.amount,
+                status: c.status,
+                created_at: c.created_at.saturated_into(),
+                response_deadline: c.response_deadline.saturated_into(),
+                settlement_cid: c.settlement_cid.map(|v| v.into_inner()),
+                resolution_cid: c.resolution_cid.map(|v| v.into_inner()),
+                appeal_cid: c.appeal_cid.map(|v| v.into_inner()),
+                appellant: c.appellant,
+                updated_at: c.updated_at.saturated_into(),
+                deposit,
+                evidence_cids,
+            })
         }
     }
 }
