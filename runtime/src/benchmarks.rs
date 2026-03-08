@@ -33,4 +33,5 @@ frame_benchmarking::define_benchmarks!(
 	[pallet_template, Template]
 	[pallet_entity_product, EntityProduct]
 	[pallet_nex_market, NexMarket]
+	[pallet_grouprobot_consensus, GroupRobotConsensus]
 );

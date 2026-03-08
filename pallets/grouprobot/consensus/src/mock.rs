@@ -28,19 +28,38 @@ impl pallet_balances::Config for Test {
 }
 
 // Mock BotRegistryProvider
+// Benchmark 模式下支持通过 thread_local 动态注册 bot
+#[cfg(feature = "runtime-benchmarks")]
+thread_local! {
+	static BENCH_BOT_OWNERS: RefCell<alloc::collections::BTreeMap<u8, u64>> = RefCell::new(alloc::collections::BTreeMap::new());
+	static BENCH_PAID_BOTS: RefCell<alloc::collections::BTreeSet<u8>> = RefCell::new(alloc::collections::BTreeSet::new());
+}
+
 pub struct MockBotRegistry;
 impl BotRegistryProvider<u64> for MockBotRegistry {
 	fn is_bot_active(bot_id_hash: &BotIdHash) -> bool {
-		matches!(bot_id_hash[0], 1 | 2 | 10 | 11)
+		if matches!(bot_id_hash[0], 1 | 2 | 10 | 11) { return true; }
+		#[cfg(feature = "runtime-benchmarks")]
+		{ return BENCH_BOT_OWNERS.with(|m| m.borrow().contains_key(&bot_id_hash[0])); }
+		#[cfg(not(feature = "runtime-benchmarks"))]
+		false
 	}
 	fn is_tee_node(bot_id_hash: &BotIdHash) -> bool {
-		matches!(bot_id_hash[0], 10 | 11)
+		if matches!(bot_id_hash[0], 10 | 11) { return true; }
+		#[cfg(feature = "runtime-benchmarks")]
+		{ return BENCH_BOT_OWNERS.with(|m| m.borrow().contains_key(&bot_id_hash[0])); }
+		#[cfg(not(feature = "runtime-benchmarks"))]
+		false
 	}
 	fn has_dual_attestation(bot_id_hash: &BotIdHash) -> bool {
 		bot_id_hash[0] == 10
 	}
 	fn is_attestation_fresh(bot_id_hash: &BotIdHash) -> bool {
-		matches!(bot_id_hash[0], 10 | 11)
+		if matches!(bot_id_hash[0], 10 | 11) { return true; }
+		#[cfg(feature = "runtime-benchmarks")]
+		{ return BENCH_BOT_OWNERS.with(|m| m.borrow().contains_key(&bot_id_hash[0])); }
+		#[cfg(not(feature = "runtime-benchmarks"))]
+		false
 	}
 	fn bot_owner(bot_id_hash: &BotIdHash) -> Option<u64> {
 		match bot_id_hash[0] {
@@ -48,7 +67,12 @@ impl BotRegistryProvider<u64> for MockBotRegistry {
 			2 => Some(OWNER2),
 			10 => Some(OPERATOR),
 			11 => Some(OPERATOR2),
-			_ => None,
+			_ => {
+				#[cfg(feature = "runtime-benchmarks")]
+				{ return BENCH_BOT_OWNERS.with(|m| m.borrow().get(&bot_id_hash[0]).copied()); }
+				#[cfg(not(feature = "runtime-benchmarks"))]
+				None
+			}
 		}
 	}
 	fn bot_public_key(_: &BotIdHash) -> Option<[u8; 32]> { None }
@@ -59,25 +83,45 @@ impl BotRegistryProvider<u64> for MockBotRegistry {
 			2 => Some(OPERATOR2),
 			10 => Some(OPERATOR),
 			11 => Some(OPERATOR2),
-			_ => None,
+			_ => {
+				#[cfg(feature = "runtime-benchmarks")]
+				{ return BENCH_BOT_OWNERS.with(|m| m.borrow().get(&bot_id_hash[0]).copied()); }
+				#[cfg(not(feature = "runtime-benchmarks"))]
+				None
+			}
 		}
 	}
 	fn bot_status(bot_id_hash: &BotIdHash) -> Option<BotStatus> {
-		if matches!(bot_id_hash[0], 1 | 2 | 10 | 11) { Some(BotStatus::Active) } else { None }
+		if matches!(bot_id_hash[0], 1 | 2 | 10 | 11) { return Some(BotStatus::Active); }
+		#[cfg(feature = "runtime-benchmarks")]
+		{
+			if BENCH_BOT_OWNERS.with(|m| m.borrow().contains_key(&bot_id_hash[0])) {
+				return Some(BotStatus::Active);
+			}
+		}
+		None
 	}
 	fn attestation_level(_: &BotIdHash) -> u8 { 0 }
 	fn tee_type(_: &BotIdHash) -> Option<TeeType> { None }
 }
 
 // Mock SubscriptionProvider: bot_hash(1)=Basic, bot_hash(2)=Basic, bot_hash(10/11)=Pro, others=Free
+// Benchmark 模式下支持通过 BENCH_PAID_BOTS thread_local 动态注册 paid bot
 pub struct MockSubscription;
 impl SubscriptionProvider for MockSubscription {
 	fn effective_tier(bot_id_hash: &BotIdHash) -> SubscriptionTier {
 		match bot_id_hash[0] {
-			1 | 2 => SubscriptionTier::Basic,
-			10 | 11 => SubscriptionTier::Pro,
-			_ => SubscriptionTier::Free,
+			1 | 2 => return SubscriptionTier::Basic,
+			10 | 11 => return SubscriptionTier::Pro,
+			_ => {}
 		}
+		#[cfg(feature = "runtime-benchmarks")]
+		{
+			if BENCH_PAID_BOTS.with(|s| s.borrow().contains(&bot_id_hash[0])) {
+				return SubscriptionTier::Basic;
+			}
+		}
+		SubscriptionTier::Free
 	}
 	fn effective_feature_gate(bot_id_hash: &BotIdHash) -> TierFeatureGate {
 		MockSubscription::effective_tier(bot_id_hash).feature_gate()
@@ -202,8 +246,8 @@ parameter_types! {
 }
 
 impl pallet_grouprobot_consensus::Config for Test {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
+	type WeightInfo = ();
 	type MaxActiveNodes = frame_support::traits::ConstU32<10>;
 	type MinStake = MinStake;
 	type ExitCooldownPeriod = ExitCooldown;
@@ -218,6 +262,8 @@ impl pallet_grouprobot_consensus::Config for Test {
 	type Subscription = MockSubscription;
 	type PeerUptimeRecorder = MockPeerUptimeRecorder;
 	type OrphanRewardClaimer = MockOrphanRewardClaimer;
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = ();
 }
 
 pub const OWNER: u64 = 1;
@@ -280,5 +326,31 @@ pub fn advance_to(n: u64) {
 		let next = System::block_number() + 1;
 		System::set_block_number(next);
 		GroupRobotConsensus::on_initialize(next);
+	}
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+impl crate::BenchmarkHelper<Test> for () {
+	fn fund_account(who: &u64, amount: u128) {
+		use frame_support::traits::Currency;
+		let _ = <Balances as Currency<u64>>::make_free_balance_be(who, amount);
+	}
+	fn setup_tee_bot(bot_id_hash: &pallet_grouprobot_primitives::BotIdHash, owner: &u64) {
+		BENCH_BOT_OWNERS.with(|m| m.borrow_mut().insert(bot_id_hash[0], *owner));
+	}
+	fn setup_active_bot(bot_id_hash: &pallet_grouprobot_primitives::BotIdHash, owner: &u64) {
+		BENCH_BOT_OWNERS.with(|m| m.borrow_mut().insert(bot_id_hash[0], *owner));
+	}
+	fn setup_paid_subscription(bot_id_hash: &pallet_grouprobot_primitives::BotIdHash) {
+		BENCH_PAID_BOTS.with(|s| s.borrow_mut().insert(bot_id_hash[0]));
+	}
+	fn node_id(seed: u32) -> pallet_grouprobot_primitives::NodeId {
+		node_id(seed as u8)
+	}
+	fn bot_id_hash(seed: u32) -> pallet_grouprobot_primitives::BotIdHash {
+		bot_hash(seed as u8)
+	}
+	fn sign_message(node_seed: u32, msg: &[u8]) -> ([u8; 32], [u8; 64]) {
+		sign_msg(node_seed as u8, msg)
 	}
 }

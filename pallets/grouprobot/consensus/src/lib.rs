@@ -15,6 +15,11 @@
 extern crate alloc;
 
 pub use pallet::*;
+pub mod weights;
+pub use weights::WeightInfo;
+
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
 
 #[cfg(test)]
 mod mock;
@@ -32,6 +37,25 @@ use sp_runtime::traits::{Saturating, UniqueSaturatedInto};
 
 /// P6: 所有节点使用相同的基础权重 (替代废弃的 reputation 字段)
 const BASE_NODE_WEIGHT: u128 = 500_000;
+
+/// Benchmark 辅助 trait: 运行时实现, 用于在 benchmark 中设置外部依赖状态
+#[cfg(feature = "runtime-benchmarks")]
+pub trait BenchmarkHelper<T: Config> {
+	/// 给账户充值足够余额
+	fn fund_account(who: &T::AccountId, amount: BalanceOf<T>);
+	/// 设置 BotRegistry 使 bot_id_hash 对 owner 可用 (active + TEE + fresh attestation)
+	fn setup_tee_bot(bot_id_hash: &BotIdHash, owner: &T::AccountId);
+	/// 设置 BotRegistry 使 bot_id_hash 对 owner 可用 (active, 非 TEE)
+	fn setup_active_bot(bot_id_hash: &BotIdHash, owner: &T::AccountId);
+	/// 设置 Subscription 使 bot_id_hash 为 paid tier
+	fn setup_paid_subscription(bot_id_hash: &BotIdHash);
+	/// 生成一个确定性的 NodeId (ed25519 公钥)
+	fn node_id(seed: u32) -> NodeId;
+	/// 生成一个确定性的 BotIdHash
+	fn bot_id_hash(seed: u32) -> BotIdHash;
+	/// 用指定 node 的密钥签名消息, 返回 (msg_hash, signature)
+	fn sign_message(node_seed: u32, msg: &[u8]) -> ([u8; 32], [u8; 64]);
+}
 
 /// 节点信息
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, RuntimeDebug, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
@@ -73,8 +97,9 @@ pub mod pallet {
 
 	#[pallet::config]
 	pub trait Config: frame_system::Config {
-		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
 		type Currency: ReservableCurrency<Self::AccountId>;
+		/// Weight 信息
+		type WeightInfo: WeightInfo;
 		/// 最大活跃节点数
 		#[pallet::constant]
 		type MaxActiveNodes: Get<u32>;
@@ -111,6 +136,10 @@ pub mod pallet {
 		type PeerUptimeRecorder: PeerUptimeRecorder;
 		/// H3-fix: 节点退出时领取残留奖励
 		type OrphanRewardClaimer: OrphanRewardClaimer<Self::AccountId>;
+
+		/// Benchmark 辅助: 运行时实现, 用于在 benchmark 中设置外部依赖状态
+		#[cfg(feature = "runtime-benchmarks")]
+		type BenchmarkHelper: BenchmarkHelper<Self>;
 	}
 
 	// ========================================================================
@@ -353,7 +382,7 @@ pub mod pallet {
 	impl<T: Config> Pallet<T> {
 		/// 注册节点 + 质押
 		#[pallet::call_index(0)]
-		#[pallet::weight(Weight::from_parts(60_000_000, 10_000))]
+		#[pallet::weight(T::WeightInfo::register_node())]
 		pub fn register_node(
 			origin: OriginFor<T>,
 			node_id: NodeId,
@@ -390,7 +419,7 @@ pub mod pallet {
 
 		/// 申请退出 (冷却期)
 		#[pallet::call_index(1)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::request_exit())]
 		pub fn request_exit(origin: OriginFor<T>, node_id: NodeId) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 			Nodes::<T>::try_mutate(&node_id, |maybe_node| -> DispatchResult {
@@ -419,7 +448,7 @@ pub mod pallet {
 
 		/// 完成退出 + 退还质押
 		#[pallet::call_index(2)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::finalize_exit())]
 		pub fn finalize_exit(origin: OriginFor<T>, node_id: NodeId) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 			let node = Nodes::<T>::get(&node_id).ok_or(Error::<T>::NodeNotFound)?;
@@ -453,7 +482,7 @@ pub mod pallet {
 		///
 		/// P14: 链上 ed25519 签名验证 — NodeId 作为公钥, 验证两组签名均为该节点所签
 		#[pallet::call_index(3)]
-		#[pallet::weight(Weight::from_parts(100_000_000, 10_000))]
+		#[pallet::weight(T::WeightInfo::report_equivocation())]
 		pub fn report_equivocation(
 			origin: OriginFor<T>,
 			node_id: NodeId,
@@ -506,7 +535,7 @@ pub mod pallet {
 
 		/// 执行 Slash (root) — P5: 含举报者奖励 + P9: 使用运行时可调百分比
 		#[pallet::call_index(4)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::slash_equivocation())]
 		pub fn slash_equivocation(
 			origin: OriginFor<T>,
 			node_id: NodeId,
@@ -560,7 +589,7 @@ pub mod pallet {
 
 		/// 标记消息序列已处理 (去重)
 		#[pallet::call_index(10)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::mark_sequence_processed())]
 		pub fn mark_sequence_processed(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -598,7 +627,7 @@ pub mod pallet {
 		/// 节点操作者必须同时是 Bot 所有者, 且 Bot 必须有有效的 TEE 证明。
 		/// 不接受自我声明, 仅信任 Registry 的证明记录。
 		#[pallet::call_index(11)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::verify_node_tee())]
 		pub fn verify_node_tee(
 			origin: OriginFor<T>,
 			node_id: NodeId,
@@ -637,7 +666,7 @@ pub mod pallet {
 		///
 		/// 仅允许清理 `resolved=true` 的记录, 释放链上存储。
 		#[pallet::call_index(13)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::cleanup_resolved_equivocation())]
 		pub fn cleanup_resolved_equivocation(
 			origin: OriginFor<T>,
 			node_id: NodeId,
@@ -656,7 +685,7 @@ pub mod pallet {
 		/// - `tee_multiplier`: TEE 节点奖励倍数 (basis points, 10000=1.0x, 15000=1.5x, 0=使用默认 1.0x)
 		/// - `sgx_bonus`: SGX 双证明额外奖励 (basis points, 叠加到 TEE 倍数上, 例如 2000=+0.2x)
 		#[pallet::call_index(12)]
-		#[pallet::weight(Weight::from_parts(10_000_000, 2_000))]
+		#[pallet::weight(T::WeightInfo::set_tee_reward_params())]
 		pub fn set_tee_reward_params(
 			origin: OriginFor<T>,
 			tee_multiplier: u32,
@@ -677,7 +706,7 @@ pub mod pallet {
 
 		/// 增加节点质押 (运营者调用)
 		#[pallet::call_index(14)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::increase_stake())]
 		pub fn increase_stake(
 			origin: OriginFor<T>,
 			node_id: NodeId,
@@ -708,7 +737,7 @@ pub mod pallet {
 		///
 		/// 前提: 质押 ≥ MinStake, 状态必须为 Suspended
 		#[pallet::call_index(15)]
-		#[pallet::weight(Weight::from_parts(45_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::reinstate_node())]
 		pub fn reinstate_node(
 			origin: OriginFor<T>,
 			node_id: NodeId,
@@ -738,7 +767,7 @@ pub mod pallet {
 
 		/// 治理暂停节点 (root)
 		#[pallet::call_index(16)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::force_suspend_node())]
 		pub fn force_suspend_node(
 			origin: OriginFor<T>,
 			node_id: NodeId,
@@ -767,7 +796,7 @@ pub mod pallet {
 
 		/// 治理强制移除节点并 Slash 全部质押 (root)
 		#[pallet::call_index(17)]
-		#[pallet::weight(Weight::from_parts(60_000_000, 10_000))]
+		#[pallet::weight(T::WeightInfo::force_remove_node())]
 		pub fn force_remove_node(
 			origin: OriginFor<T>,
 			node_id: NodeId,
@@ -798,7 +827,7 @@ pub mod pallet {
 
 		/// 解除节点的 Bot 绑定 (运营者调用), 同时重置 TEE 状态
 		#[pallet::call_index(18)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::unbind_bot())]
 		pub fn unbind_bot(
 			origin: OriginFor<T>,
 			node_id: NodeId,
@@ -829,7 +858,7 @@ pub mod pallet {
 		/// 质押保留在原操作者账户不变 (新操作者需通过 increase_stake 补充)
 		/// 实际上质押需要先 unreserve 再 reserve 到新操作者
 		#[pallet::call_index(19)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::replace_operator())]
 		pub fn replace_operator(
 			origin: OriginFor<T>,
 			node_id: NodeId,
@@ -846,10 +875,11 @@ pub mod pallet {
 					Error::<T>::NodeNotActive
 				);
 
-				// 转移质押: unreserve 旧操作者 → reserve 新操作者
+				// 安全转移质押: 先 reserve 新操作者, 成功后再 unreserve 旧操作者
+				// 避免 unreserve 先执行导致的资金安全问题
 				let stake = node.stake;
-				T::Currency::unreserve(&who, stake);
 				T::Currency::reserve(&new_operator, stake)?;
+				T::Currency::unreserve(&who, stake);
 
 				node.operator = new_operator.clone();
 				// 重置 TEE 状态 (新操作者需重新验证)
@@ -877,7 +907,7 @@ pub mod pallet {
 		///
 		/// - `new_pct`: 新的百分比 (1-100, 0=使用 Config 默认值)
 		#[pallet::call_index(20)]
-		#[pallet::weight(Weight::from_parts(10_000_000, 2_000))]
+		#[pallet::weight(T::WeightInfo::set_slash_percentage())]
 		pub fn set_slash_percentage(
 			origin: OriginFor<T>,
 			new_pct: u32,
@@ -902,7 +932,7 @@ pub mod pallet {
 		///
 		/// - `pct`: basis points (0-5000, 即 0-50%, 0=关闭举报奖励)
 		#[pallet::call_index(21)]
-		#[pallet::weight(Weight::from_parts(10_000_000, 2_000))]
+		#[pallet::weight(T::WeightInfo::set_reporter_reward_pct())]
 		pub fn set_reporter_reward_pct(
 			origin: OriginFor<T>,
 			pct: u32,
@@ -922,7 +952,7 @@ pub mod pallet {
 		///
 		/// 无需质押校验, 治理有权直接恢复误 Slash 的节点
 		#[pallet::call_index(22)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::force_reinstate_node())]
 		pub fn force_reinstate_node(
 			origin: OriginFor<T>,
 			node_id: NodeId,
@@ -950,7 +980,7 @@ pub mod pallet {
 
 		/// 批量清理已解决的 Equivocation 记录 (任何人可调用)
 		#[pallet::call_index(23)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::batch_cleanup_equivocations())]
 		pub fn batch_cleanup_equivocations(
 			origin: OriginFor<T>,
 			items: BoundedVec<(NodeId, u64), T::MaxActiveNodes>,
@@ -975,7 +1005,7 @@ pub mod pallet {
 
 		/// 治理手动触发 Era 结束 (root)
 		#[pallet::call_index(24)]
-		#[pallet::weight(Weight::from_parts(80_000_000, 15_000))]
+		#[pallet::weight(T::WeightInfo::force_era_end())]
 		pub fn force_era_end(
 			origin: OriginFor<T>,
 		) -> DispatchResult {

@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Nexus Team"]
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/memoio/nexus"
+repository = "https://github.com/nexus-blockchain/nexus.git"
 description = "GroupRobot Consensus — 节点质押 + TEE 加权奖励 + 消息去重 + 订阅管理 + Equivocation"
 
 [package.metadata.docs.rs]
@@ -18,6 +18,7 @@ pallet-grouprobot-primitives = { path = "../primitives", default-features = fals
 # Substrate
 frame-support = { workspace = true }
 frame-system = { workspace = true }
+frame-benchmarking = { workspace = true, optional = true }
 sp-runtime = { workspace = true }
 sp-io = { workspace = true }
 sp-core = { workspace = true }
@@ -33,6 +34,7 @@ std = [
 	"pallet-grouprobot-primitives/std",
 	"frame-support/std",
 	"frame-system/std",
+	"frame-benchmarking?/std",
 	"sp-runtime/std",
 	"sp-io/std",
 	"sp-core/std",
@@ -43,7 +45,9 @@ try-runtime = [
 	"sp-runtime/try-runtime",
 ]
 runtime-benchmarks = [
+	"frame-benchmarking/runtime-benchmarks",
 	"frame-support/runtime-benchmarks",
 	"frame-system/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",
+	"pallet-grouprobot-primitives/runtime-benchmarks",
 ]

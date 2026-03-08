@@ -1936,8 +1936,8 @@ parameter_types! {
 }
 
 impl pallet_grouprobot_consensus::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
+	type WeightInfo = pallet_grouprobot_consensus::weights::SubstrateWeight<Runtime>;
 	type MaxActiveNodes = ConstU32<100>;
 	type MinStake = GrMinNodeStake;
 	type ExitCooldownPeriod = GrExitCooldown;
@@ -1952,6 +1952,106 @@ impl pallet_grouprobot_consensus::Config for Runtime {
 	type Subscription = pallet_grouprobot_subscription::Pallet<Runtime>;
 	type PeerUptimeRecorder = pallet_grouprobot_registry::Pallet<Runtime>;
 	type OrphanRewardClaimer = pallet_grouprobot_rewards::Pallet<Runtime>;
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = GrConsensusBenchHelper;
+}
+
+/// Benchmark helper: 直接写入 registry/subscription 存储, 绕过 extrinsic 前置检查
+#[cfg(feature = "runtime-benchmarks")]
+pub struct GrConsensusBenchHelper;
+
+#[cfg(feature = "runtime-benchmarks")]
+impl pallet_grouprobot_consensus::BenchmarkHelper<Runtime> for GrConsensusBenchHelper {
+	fn fund_account(who: &AccountId, amount: Balance) {
+		use frame_support::traits::Currency;
+		let _ = Balances::make_free_balance_be(who, amount);
+	}
+
+	fn setup_tee_bot(bot_id_hash: &pallet_grouprobot_primitives::BotIdHash, owner: &AccountId) {
+		use pallet_grouprobot_primitives::{BotStatus, NodeType, TeeType};
+		let now = frame_system::Pallet::<Runtime>::block_number();
+		// 写入 BotInfo
+		pallet_grouprobot_registry::Bots::<Runtime>::insert(bot_id_hash, pallet_grouprobot_registry::BotInfo::<Runtime> {
+			owner: owner.clone(),
+			bot_id_hash: *bot_id_hash,
+			public_key: [0u8; 32],
+			status: BotStatus::Active,
+			registered_at: now,
+			node_type: NodeType::TdxNode,
+			community_count: 0,
+		});
+		// 写入 AttestationRecordV2 (TEE 证明)
+		pallet_grouprobot_registry::AttestationsV2::<Runtime>::insert(bot_id_hash, pallet_grouprobot_registry::AttestationRecordV2::<Runtime> {
+			bot_id_hash: *bot_id_hash,
+			primary_quote_hash: [0u8; 32],
+			secondary_quote_hash: None,
+			primary_measurement: [0u8; 48],
+			mrenclave: None,
+			tee_type: TeeType::Tdx,
+			attester: owner.clone(),
+			attested_at: now,
+			expires_at: now + 100_000u32.into(),
+			is_dual_attestation: false,
+			quote_verified: true,
+			dcap_level: 3,
+			api_server_mrtd: None,
+			api_server_quote_hash: None,
+		});
+	}
+
+	fn setup_active_bot(bot_id_hash: &pallet_grouprobot_primitives::BotIdHash, owner: &AccountId) {
+		use pallet_grouprobot_primitives::{BotStatus, NodeType};
+		let now = frame_system::Pallet::<Runtime>::block_number();
+		pallet_grouprobot_registry::Bots::<Runtime>::insert(bot_id_hash, pallet_grouprobot_registry::BotInfo::<Runtime> {
+			owner: owner.clone(),
+			bot_id_hash: *bot_id_hash,
+			public_key: [0u8; 32],
+			status: BotStatus::Active,
+			registered_at: now,
+			node_type: NodeType::StandardNode,
+			community_count: 0,
+		});
+		// 同时设置 BotOperator 使 bot_operator() 返回 owner
+		pallet_grouprobot_registry::BotOperator::<Runtime>::insert(
+			bot_id_hash,
+			(owner.clone(), pallet_grouprobot_primitives::Platform::Telegram),
+		);
+	}
+
+	fn setup_paid_subscription(bot_id_hash: &pallet_grouprobot_primitives::BotIdHash) {
+		use pallet_grouprobot_primitives::{SubscriptionTier, SubscriptionStatus};
+		let now = frame_system::Pallet::<Runtime>::block_number();
+		pallet_grouprobot_subscription::Subscriptions::<Runtime>::insert(bot_id_hash, pallet_grouprobot_subscription::SubscriptionRecord::<Runtime> {
+			owner: sp_runtime::AccountId32::new([0u8; 32]),
+			bot_id_hash: *bot_id_hash,
+			tier: SubscriptionTier::Basic,
+			fee_per_era: 0u128,
+			started_at: now,
+			status: SubscriptionStatus::Active,
+		});
+	}
+
+	fn node_id(seed: u32) -> pallet_grouprobot_primitives::NodeId {
+		use sp_core::Pair as _;
+		let s = alloc::format!("//Node{}", seed);
+		let pair = sp_core::ed25519::Pair::from_string(&s, None).expect("valid seed");
+		pair.public().0
+	}
+
+	fn bot_id_hash(seed: u32) -> pallet_grouprobot_primitives::BotIdHash {
+		let mut h = [0u8; 32];
+		h[0] = seed as u8;
+		h
+	}
+
+	fn sign_message(node_seed: u32, msg: &[u8]) -> ([u8; 32], [u8; 64]) {
+		use sp_core::Pair as _;
+		let s = alloc::format!("//Node{}", node_seed);
+		let pair = sp_core::ed25519::Pair::from_string(&s, None).expect("valid seed");
+		let msg_hash = sp_core::blake2_256(msg);
+		let sig = pair.sign(&msg_hash);
+		(msg_hash, sig.0)
+	}
 }
 
 /// 订阅 EraStartBlock 提供者: 从 consensus 读取

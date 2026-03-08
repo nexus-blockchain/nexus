@@ -94,6 +94,7 @@ parameter_types! {
 impl pallet_grouprobot_subscription::Config for Test {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
+	type WeightInfo = ();
 	type BotRegistry = MockBotRegistry;
 	type BasicFeePerEra = BasicFee;
 	type ProFeePerEra = ProFee;

@@ -1,5 +1,5 @@
 use crate::{mock::*, *};
-use frame_support::{assert_noop, assert_ok};
+use frame_support::{assert_noop, assert_ok, traits::Currency as CurrencyT};
 use pallet_grouprobot_primitives::*;
 
 /// P14: 生成有效的 equivocation 证据 (两组不同消息 + 同一节点的真实签名)
@@ -1291,5 +1291,211 @@ fn p14_report_equivocation_rejects_one_bad_signature() {
 			),
 			Error::<Test>::InvalidEquivocationEvidence
 		);
+	});
+}
+
+// ============================================================================
+// Boundary tests: MaxActiveNodes limit
+// ============================================================================
+
+#[test]
+fn register_node_fails_when_max_nodes_reached() {
+	new_test_ext().execute_with(|| {
+		// MaxActiveNodes = 10 in mock
+		// We need 10 different operators and node IDs
+		let accounts: Vec<u64> = (100..110).collect();
+		for (i, &acct) in accounts.iter().enumerate() {
+			// Fund each account
+			let _ = <Balances as CurrencyT<u64>>::make_free_balance_be(&acct, 100_000);
+			assert_ok!(GroupRobotConsensus::register_node(
+				RuntimeOrigin::signed(acct), node_id(20 + i as u8), 200
+			));
+		}
+		assert_eq!(ActiveNodeList::<Test>::get().len(), 10);
+
+		// 11th registration should fail
+		let extra = 120u64;
+		let _ = <Balances as CurrencyT<u64>>::make_free_balance_be(&extra, 100_000);
+		assert_noop!(
+			GroupRobotConsensus::register_node(RuntimeOrigin::signed(extra), node_id(50), 200),
+			Error::<Test>::MaxNodesReached
+		);
+	});
+}
+
+#[test]
+fn reinstate_node_fails_when_max_nodes_reached() {
+	new_test_ext().execute_with(|| {
+		// Fill up to MaxActiveNodes
+		let accounts: Vec<u64> = (100..110).collect();
+		for (i, &acct) in accounts.iter().enumerate() {
+			let _ = <Balances as CurrencyT<u64>>::make_free_balance_be(&acct, 100_000);
+			assert_ok!(GroupRobotConsensus::register_node(
+				RuntimeOrigin::signed(acct), node_id(20 + i as u8), 200
+			));
+		}
+
+		// Suspend one node, then fill the slot with a new registration
+		assert_ok!(GroupRobotConsensus::force_suspend_node(RuntimeOrigin::root(), node_id(20)));
+		assert_eq!(ActiveNodeList::<Test>::get().len(), 9);
+
+		let extra = 120u64;
+		let _ = <Balances as CurrencyT<u64>>::make_free_balance_be(&extra, 100_000);
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(extra), node_id(50), 200));
+		assert_eq!(ActiveNodeList::<Test>::get().len(), 10);
+
+		// Now reinstate the suspended node — should fail, list is full
+		assert_noop!(
+			GroupRobotConsensus::reinstate_node(RuntimeOrigin::signed(100), node_id(20)),
+			Error::<Test>::MaxNodesReached
+		);
+	});
+}
+
+#[test]
+fn force_reinstate_node_fails_when_max_nodes_reached() {
+	new_test_ext().execute_with(|| {
+		let accounts: Vec<u64> = (100..110).collect();
+		for (i, &acct) in accounts.iter().enumerate() {
+			let _ = <Balances as CurrencyT<u64>>::make_free_balance_be(&acct, 100_000);
+			assert_ok!(GroupRobotConsensus::register_node(
+				RuntimeOrigin::signed(acct), node_id(20 + i as u8), 200
+			));
+		}
+
+		assert_ok!(GroupRobotConsensus::force_suspend_node(RuntimeOrigin::root(), node_id(20)));
+
+		let extra = 120u64;
+		let _ = <Balances as CurrencyT<u64>>::make_free_balance_be(&extra, 100_000);
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(extra), node_id(50), 200));
+
+		assert_noop!(
+			GroupRobotConsensus::force_reinstate_node(RuntimeOrigin::root(), node_id(20)),
+			Error::<Test>::MaxNodesReached
+		);
+	});
+}
+
+// ============================================================================
+// Boundary tests: replace_operator new operator insufficient balance
+// ============================================================================
+
+#[test]
+fn replace_operator_fails_new_operator_insufficient_balance() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 500));
+
+		// Create a new account with very little balance
+		let poor_account = 999u64;
+		let _ = <Balances as CurrencyT<u64>>::make_free_balance_be(&poor_account, 10); // way less than 500
+
+		assert_noop!(
+			GroupRobotConsensus::replace_operator(
+				RuntimeOrigin::signed(OPERATOR), node_id(1), poor_account
+			),
+			pallet_balances::Error::<Test>::InsufficientBalance
+		);
+
+		// Verify original operator's stake is still intact (not unreserved)
+		let node = Nodes::<Test>::get(node_id(1)).unwrap();
+		assert_eq!(node.operator, OPERATOR);
+		assert_eq!(node.stake, 500);
+		assert_eq!(Balances::reserved_balance(OPERATOR), 500);
+	});
+}
+
+// ============================================================================
+// Boundary tests: multi-era consecutive settlement
+// ============================================================================
+
+#[test]
+fn multiple_consecutive_eras_settle_correctly() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_ok!(GroupRobotConsensus::verify_node_tee(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), bot_hash(10)
+		));
+		set_mock_settle_income(100);
+		clear_distributed_rewards();
+
+		// Era 0 → 1
+		advance_to(52);
+		assert_eq!(GroupRobotConsensus::current_era(), 1);
+
+		// Era 1 → 2
+		advance_to(102);
+		assert_eq!(GroupRobotConsensus::current_era(), 2);
+
+		// Era 2 → 3
+		advance_to(152);
+		assert_eq!(GroupRobotConsensus::current_era(), 3);
+
+		// Rewards should have been distributed 3 times
+		let rewards = get_distributed_rewards();
+		assert_eq!(rewards.len(), 3);
+
+		// Uptime should have been recorded 3 times
+		let uptime_eras = get_recorded_uptime_eras();
+		assert!(uptime_eras.len() >= 3);
+	});
+}
+
+// ============================================================================
+// Boundary tests: force_era_end then natural era end
+// ============================================================================
+
+#[test]
+fn force_era_end_then_natural_era_end() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_ok!(GroupRobotConsensus::verify_node_tee(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), bot_hash(10)
+		));
+		set_mock_settle_income(0);
+		clear_distributed_rewards();
+
+		// Advance a bit, then force era end at block 20
+		advance_to(20);
+		let era_before = GroupRobotConsensus::current_era();
+		assert_ok!(GroupRobotConsensus::force_era_end(RuntimeOrigin::root()));
+		assert_eq!(GroupRobotConsensus::current_era(), era_before + 1);
+
+		// EraStartBlock should be reset to current block (20)
+		// Next natural era end should be at block 20 + EraLength(50) = 70
+		clear_distributed_rewards();
+		advance_to(71);
+		assert_eq!(GroupRobotConsensus::current_era(), era_before + 2);
+
+		let rewards = get_distributed_rewards();
+		assert!(!rewards.is_empty(), "Natural era end after force should still distribute");
+	});
+}
+
+// ============================================================================
+// Boundary tests: replace_operator stake verification
+// ============================================================================
+
+#[test]
+fn replace_operator_preserves_stake_on_success() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 500));
+
+		let op_free_before = Balances::free_balance(OPERATOR);
+		let owner_free_before = Balances::free_balance(OWNER);
+
+		assert_ok!(GroupRobotConsensus::replace_operator(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), OWNER
+		));
+
+		// Old operator: stake unreserved → free balance increased by 500
+		assert_eq!(Balances::reserved_balance(OPERATOR), 0);
+		assert_eq!(Balances::free_balance(OPERATOR), op_free_before + 500);
+
+		// New operator: stake reserved → free balance decreased by 500
+		assert_eq!(Balances::reserved_balance(OWNER), 500);
+		assert_eq!(Balances::free_balance(OWNER), owner_free_before - 500);
+
+		// Node stake unchanged
+		assert_eq!(Nodes::<Test>::get(node_id(1)).unwrap().stake, 500);
 	});
 }

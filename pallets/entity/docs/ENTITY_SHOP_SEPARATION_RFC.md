@@ -1085,7 +1085,7 @@ Week 1                    Week 2                    Week 3-4                 Wee
 
 ### 10.2 参考资料
 
-- [Substrate Storage](https://docs.substrate.io/build/runtime-storage/)
+- [Polkadot SDK Runtime Storage](https://paritytech.github.io/polkadot-sdk/master/frame_support/storage/index.html)
 - [Multi-tenant SaaS Architecture](https://docs.microsoft.com/en-us/azure/architecture/guide/multitenant/overview)
 - [DAO Organizational Structures](https://ethereum.org/en/dao/)
 

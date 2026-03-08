@@ -1,8 +1,8 @@
 [workspace.package]
 license = "MIT-0"
 authors = ["Nexus Team"]
-homepage = "https://nexus.app/"
-repository = "https://github.com/memoio/nexus.git"
+homepage = "https://nexuschain.network/"
+repository = "https://github.com/nexus-blockchain/nexus.git"
 edition = "2021"
 
 [workspace]

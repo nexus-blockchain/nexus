@@ -316,7 +316,11 @@ pub fn parse_quote(raw: &[u8]) -> Result<ParsedQuote<'_>, DcapError> {
 		raw[SIG_DATA_LEN_OFFSET + 2],
 		raw[SIG_DATA_LEN_OFFSET + 3],
 	]) as usize;
-	if raw.len() < HEADER_PLUS_BODY + 4 + sig_data_len {
+	// S1-fix: checked_add 防止 usize 溢出 (恶意 sig_data_len 接近 u32::MAX)
+	let expected_total = (HEADER_PLUS_BODY + 4)
+		.checked_add(sig_data_len)
+		.ok_or(DcapError::InvalidSigDataLen)?;
+	if raw.len() < expected_total {
 		return Err(DcapError::InvalidSigDataLen);
 	}
 
@@ -330,7 +334,10 @@ pub fn parse_quote(raw: &[u8]) -> Result<ParsedQuote<'_>, DcapError> {
 	// ── QE Auth Data ──
 	let qe_auth_len =
 		u16::from_le_bytes([raw[QE_AUTH_LEN_OFFSET], raw[QE_AUTH_LEN_OFFSET + 1]]) as usize;
-	let qe_auth_end = QE_AUTH_LEN_OFFSET + 2 + qe_auth_len;
+	// S1-fix: checked_add 防止溢出
+	let qe_auth_end = (QE_AUTH_LEN_OFFSET + 2)
+		.checked_add(qe_auth_len)
+		.ok_or(DcapError::QuoteTooShort)?;
 	if raw.len() < qe_auth_end {
 		return Err(DcapError::QuoteTooShort);
 	}
@@ -492,6 +499,8 @@ pub fn verify_quote_level3(
 /// 读取 DER 元素: 返回 (tag, content_start_offset, content_length)
 ///
 /// content_start_offset 是相对于 data 起始的偏移 (包含 tag + length 字节)
+///
+/// S2-fix: 所有算术使用 checked_add, 防止恶意长度字段导致溢出
 fn der_read_element(data: &[u8]) -> Result<(u8, usize, usize), DcapError> {
 	if data.is_empty() {
 		return Err(DcapError::CertParsingFailed);
@@ -513,16 +522,29 @@ fn der_read_element(data: &[u8]) -> Result<(u8, usize, usize), DcapError> {
 		}
 		(((data[2] as usize) << 8) | (data[3] as usize), 3)
 	} else {
+		// S2-fix: 拒绝 0x83+ 长度编码 (>64KB 的 DER 元素不合理)
 		return Err(DcapError::CertParsingFailed);
 	};
-	Ok((tag, 1 + len_bytes, len))
+	let content_start = 1usize.checked_add(len_bytes).ok_or(DcapError::CertParsingFailed)?;
+	// S2-fix: 验证 content_start + len 不超过 data 长度
+	let content_end = content_start.checked_add(len).ok_or(DcapError::CertParsingFailed)?;
+	if content_end > data.len() {
+		return Err(DcapError::CertParsingFailed);
+	}
+	Ok((tag, content_start, len))
 }
 
 /// 从 DER 证书中提取 TBS (to-be-signed) 原始字节
 ///
 /// TBS 是 Certificate SEQUENCE 内的第一个 SEQUENCE 元素 (含 tag + length)。
 /// 签名验证时需要对 TBS 原始字节进行哈希。
+///
+/// S5-fix: 限制证书最大长度
 pub fn extract_tbs_from_cert(cert: &[u8]) -> Result<&[u8], DcapError> {
+	// S5-fix: 拒绝超大证书
+	if cert.len() > 16_384 {
+		return Err(DcapError::CertParsingFailed);
+	}
 	// 外层 SEQUENCE (Certificate)
 	let (tag, content_start, _) = der_read_element(cert)?;
 	if tag != 0x30 {
@@ -548,7 +570,13 @@ pub fn extract_tbs_from_cert(cert: &[u8]) -> Result<&[u8], DcapError> {
 /// 从 DER 证书中提取 ECDSA P-256 公钥 (64 bytes, x || y)
 ///
 /// 通过搜索 P-256 OID 定位 SubjectPublicKeyInfo，然后读取 BIT STRING 中的公钥。
+///
+/// S5-fix: 限制证书最大长度 (16KB), 防止恶意超大输入消耗过多计算
 pub fn extract_p256_pubkey_from_cert(cert: &[u8]) -> Result<[u8; 64], DcapError> {
+	// S5-fix: 拒绝超大证书 (正常 PCK 证书 < 2KB)
+	if cert.len() > 16_384 {
+		return Err(DcapError::CertParsingFailed);
+	}
 	// 搜索 P-256 OID: 06 08 2a 86 48 ce 3d 03 01 07
 	let oid_pos = cert
 		.windows(OID_PRIME256V1.len())
@@ -587,7 +615,13 @@ pub fn extract_p256_pubkey_from_cert(cert: &[u8]) -> Result<[u8; 64], DcapError>
 /// 从 DER 证书中提取 ECDSA 签名并转换为 raw (r || s) 格式 (64 bytes)
 ///
 /// 导航: outer SEQUENCE > skip TBS > skip sigAlg > BIT STRING (签名)
+///
+/// S5-fix: 限制证书最大长度
 pub fn extract_ecdsa_sig_from_cert(cert: &[u8]) -> Result<[u8; 64], DcapError> {
+	// S5-fix: 拒绝超大证书
+	if cert.len() > 16_384 {
+		return Err(DcapError::CertParsingFailed);
+	}
 	let (outer_tag, outer_start, _) = der_read_element(cert)?;
 	if outer_tag != 0x30 {
 		return Err(DcapError::CertParsingFailed);
@@ -633,29 +667,48 @@ pub fn extract_ecdsa_sig_from_cert(cert: &[u8]) -> Result<[u8; 64], DcapError> {
 
 /// 将 DER 编码的 ECDSA 签名 (SEQUENCE { INTEGER r, INTEGER s }) 转换为 raw (r || s)
 fn decode_ecdsa_der_sig(der: &[u8]) -> Result<[u8; 64], DcapError> {
-	let (seq_tag, seq_hdr, _) = der_read_element(der)?;
+	let (seq_tag, seq_hdr, seq_len) = der_read_element(der)?;
 	if seq_tag != 0x30 {
+		return Err(DcapError::CertParsingFailed);
+	}
+	// S4-fix: 验证 SEQUENCE 内容不超出 der 边界
+	let seq_end = seq_hdr.checked_add(seq_len).ok_or(DcapError::CertParsingFailed)?;
+	if seq_end > der.len() {
 		return Err(DcapError::CertParsingFailed);
 	}
 
 	let mut pos = seq_hdr;
 
 	// INTEGER r
+	if pos >= der.len() { return Err(DcapError::CertParsingFailed); }
 	let (r_tag, r_hdr, r_len) = der_read_element(&der[pos..])?;
 	if r_tag != 0x02 {
 		return Err(DcapError::CertParsingFailed);
 	}
-	let r_start = pos + r_hdr;
-	let r_bytes = &der[r_start..r_start + r_len];
-	pos = r_start + r_len;
+	// S4-fix: 拒绝超长 INTEGER (P-256 最多 33 bytes: 前导零 + 32 bytes)
+	if r_len > 33 {
+		return Err(DcapError::CertParsingFailed);
+	}
+	let r_start = pos.checked_add(r_hdr).ok_or(DcapError::CertParsingFailed)?;
+	let r_end = r_start.checked_add(r_len).ok_or(DcapError::CertParsingFailed)?;
+	if r_end > der.len() { return Err(DcapError::CertParsingFailed); }
+	let r_bytes = &der[r_start..r_end];
+	pos = r_end;
 
 	// INTEGER s
+	if pos >= der.len() { return Err(DcapError::CertParsingFailed); }
 	let (s_tag, s_hdr, s_len) = der_read_element(&der[pos..])?;
 	if s_tag != 0x02 {
 		return Err(DcapError::CertParsingFailed);
 	}
-	let s_start = pos + s_hdr;
-	let s_bytes = &der[s_start..s_start + s_len];
+	// S4-fix: 拒绝超长 INTEGER
+	if s_len > 33 {
+		return Err(DcapError::CertParsingFailed);
+	}
+	let s_start = pos.checked_add(s_hdr).ok_or(DcapError::CertParsingFailed)?;
+	let s_end = s_start.checked_add(s_len).ok_or(DcapError::CertParsingFailed)?;
+	if s_end > der.len() { return Err(DcapError::CertParsingFailed); }
+	let s_bytes = &der[s_start..s_end];
 
 	let mut result = [0u8; 64];
 	copy_der_integer_to_fixed(&mut result[0..32], r_bytes);
@@ -664,11 +717,14 @@ fn decode_ecdsa_der_sig(der: &[u8]) -> Result<[u8; 64], DcapError> {
 }
 
 /// 将 DER INTEGER 字节拷贝到固定大小缓冲区 (去除前导零，右对齐)
+///
+/// S3-fix: 验证 src 长度不超过 33 bytes (32 + 可选前导零), 防止恶意超长 INTEGER
 fn copy_der_integer_to_fixed(dest: &mut [u8], src: &[u8]) {
 	// DER INTEGER 可能有一个前导 0x00 (表示正数)
 	let src = if src.len() > 32 && src[0] == 0x00 { &src[1..] } else { src };
-	let start = dest.len().saturating_sub(src.len());
+	// S3-fix: 截断到 dest 长度, 防止越界
 	let copy_len = src.len().min(dest.len());
+	let start = dest.len().saturating_sub(copy_len);
 	dest[start..start + copy_len].copy_from_slice(&src[..copy_len]);
 }
 
@@ -859,7 +915,11 @@ pub fn parse_sgx_quote(raw: &[u8]) -> Result<ParsedSgxQuote<'_>, DcapError> {
 		raw[SGX_SIG_DATA_LEN_OFFSET + 2],
 		raw[SGX_SIG_DATA_LEN_OFFSET + 3],
 	]) as usize;
-	if raw.len() < SGX_HEADER_PLUS_BODY + 4 + sig_data_len {
+	// S1-fix: checked_add 防止 usize 溢出
+	let expected_total = (SGX_HEADER_PLUS_BODY + 4)
+		.checked_add(sig_data_len)
+		.ok_or(DcapError::InvalidSigDataLen)?;
+	if raw.len() < expected_total {
 		return Err(DcapError::InvalidSigDataLen);
 	}
 
@@ -876,7 +936,10 @@ pub fn parse_sgx_quote(raw: &[u8]) -> Result<ParsedSgxQuote<'_>, DcapError> {
 	// ── QE Auth Data ──
 	let qe_auth_len =
 		u16::from_le_bytes([raw[SGX_QE_AUTH_LEN_OFFSET], raw[SGX_QE_AUTH_LEN_OFFSET + 1]]) as usize;
-	let qe_auth_end = SGX_QE_AUTH_LEN_OFFSET + 2 + qe_auth_len;
+	// S1-fix: checked_add 防止溢出
+	let qe_auth_end = (SGX_QE_AUTH_LEN_OFFSET + 2)
+		.checked_add(qe_auth_len)
+		.ok_or(DcapError::QuoteTooShort)?;
 	if raw.len() < qe_auth_end {
 		return Err(DcapError::QuoteTooShort);
 	}
@@ -1892,5 +1955,69 @@ mod tests {
 		quote[SGX_QE_REPORT_OFFSET + QE_MRSIGNER_OFFSET] = 0xFF;
 		let err = verify_sgx_quote_level3(&quote, &pck_key).unwrap_err();
 		assert_eq!(err, DcapError::QeReportSignatureInvalid);
+	}
+
+	// ── S1-fix: 溢出保护测试 ──
+
+	#[test]
+	fn tdx_rejects_malicious_sig_data_len() {
+		let builder = TestQuoteBuilder::new(1);
+		let mut quote = builder.build();
+		// 设置 sig_data_len 为 u32::MAX, 触发 checked_add 溢出保护
+		quote[SIG_DATA_LEN_OFFSET] = 0xFF;
+		quote[SIG_DATA_LEN_OFFSET + 1] = 0xFF;
+		quote[SIG_DATA_LEN_OFFSET + 2] = 0xFF;
+		quote[SIG_DATA_LEN_OFFSET + 3] = 0xFF;
+		assert_eq!(parse_quote(&quote).unwrap_err(), DcapError::InvalidSigDataLen);
+	}
+
+	#[test]
+	fn sgx_rejects_malicious_sig_data_len() {
+		use test_utils::TestSgxQuoteBuilder;
+		let builder = TestSgxQuoteBuilder::new(1);
+		let mut quote = builder.build();
+		// 设置 sig_data_len 为 u32::MAX
+		quote[SGX_SIG_DATA_LEN_OFFSET] = 0xFF;
+		quote[SGX_SIG_DATA_LEN_OFFSET + 1] = 0xFF;
+		quote[SGX_SIG_DATA_LEN_OFFSET + 2] = 0xFF;
+		quote[SGX_SIG_DATA_LEN_OFFSET + 3] = 0xFF;
+		assert_eq!(parse_sgx_quote(&quote).unwrap_err(), DcapError::InvalidSigDataLen);
+	}
+
+	// ── S4-fix: DER INTEGER 长度限制测试 ──
+
+	#[test]
+	fn der_rejects_oversized_integer_in_sig() {
+		// 构造一个 SEQUENCE { INTEGER r(34 bytes), INTEGER s(32 bytes) }
+		// r 长度 34 > 33 上限, 应被拒绝
+		let mut der = Vec::new();
+		der.push(0x30); // SEQUENCE
+		der.push(0x48); // length = 72
+		der.push(0x02); // INTEGER tag
+		der.push(34);   // r length = 34 (超过 33 上限)
+		der.extend_from_slice(&[0u8; 34]); // r value
+		der.push(0x02); // INTEGER tag
+		der.push(32);   // s length
+		der.extend_from_slice(&[0u8; 32]); // s value
+		assert_eq!(decode_ecdsa_der_sig(&der).unwrap_err(), DcapError::CertParsingFailed);
+	}
+
+	// ── S5-fix: 证书大小限制测试 ──
+
+	#[test]
+	fn cert_rejects_oversized_input() {
+		let huge = vec![0u8; 16_385]; // > 16KB
+		assert_eq!(extract_tbs_from_cert(&huge).unwrap_err(), DcapError::CertParsingFailed);
+		assert_eq!(extract_p256_pubkey_from_cert(&huge).unwrap_err(), DcapError::CertParsingFailed);
+		assert_eq!(extract_ecdsa_sig_from_cert(&huge).unwrap_err(), DcapError::CertParsingFailed);
+	}
+
+	// ── S2-fix: DER 元素边界验证测试 ──
+
+	#[test]
+	fn der_rejects_length_exceeding_data() {
+		// tag=0x30, length=0xFF (255), 但实际数据只有 4 bytes
+		let data = [0x30, 0x81, 0xFF, 0x00];
+		assert_eq!(der_read_element(&data).unwrap_err(), DcapError::CertParsingFailed);
 	}
 }

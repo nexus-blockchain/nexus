@@ -9,6 +9,11 @@
 //! - 实现 SubscriptionProvider + SubscriptionSettler trait
 
 pub use pallet::*;
+pub mod weights;
+pub use weights::WeightInfo;
+
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
 
 #[cfg(test)]
 mod mock;
@@ -58,15 +63,21 @@ type BalanceOf<T> =
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
-	use frame_support::traits::{Currency, ReservableCurrency, ExistenceRequirement};
+	use frame_support::traits::{Currency, ReservableCurrency, ExistenceRequirement, StorageVersion};
+
+	/// Current storage version.
+	const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
 
 	#[pallet::pallet]
+	#[pallet::storage_version(STORAGE_VERSION)]
 	pub struct Pallet<T>(_);
 
 	#[pallet::config]
 	pub trait Config: frame_system::Config {
 		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
 		type Currency: ReservableCurrency<Self::AccountId>;
+		/// Weight 信息
+		type WeightInfo: WeightInfo;
 		/// Bot 注册查询
 		type BotRegistry: BotRegistryProvider<Self::AccountId>;
 		/// Basic 层级每 Era 费用
@@ -280,7 +291,7 @@ pub mod pallet {
 	impl<T: Config> Pallet<T> {
 		/// 订阅 Bot 服务
 		#[pallet::call_index(0)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::subscribe())]
 		pub fn subscribe(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -320,7 +331,7 @@ pub mod pallet {
 
 		/// 充值订阅
 		#[pallet::call_index(1)]
-		#[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::deposit_subscription())]
 		pub fn deposit_subscription(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -355,7 +366,7 @@ pub mod pallet {
 
 		/// 取消订阅
 		#[pallet::call_index(2)]
-		#[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::cancel_subscription())]
 		pub fn cancel_subscription(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -411,7 +422,7 @@ pub mod pallet {
 
 		/// 变更订阅层级
 		#[pallet::call_index(3)]
-		#[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::change_tier())]
 		pub fn change_tier(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -456,7 +467,7 @@ pub mod pallet {
 		/// 成本的补偿。阈值参数 (AdBasicThreshold/AdProThreshold/AdEnterpriseThreshold)
 		/// 由治理设定, 需确保承诺门槛高于纯收益换算值, 以维持付费订阅的吸引力。
 		#[pallet::call_index(4)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::commit_ads())]
 		pub fn commit_ads(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -500,7 +511,7 @@ pub mod pallet {
 
 		/// 取消广告承诺订阅
 		#[pallet::call_index(5)]
-		#[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::cancel_ad_commitment())]
 		pub fn cancel_ad_commitment(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -519,7 +530,7 @@ pub mod pallet {
 
 		/// M2-R3: 清理已取消的付费订阅记录 (任何人可调用)
 		#[pallet::call_index(6)]
-		#[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::cleanup_subscription())]
 		pub fn cleanup_subscription(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -536,7 +547,7 @@ pub mod pallet {
 
 		/// M2-R3: 清理已取消的广告承诺记录 (任何人可调用)
 		#[pallet::call_index(7)]
-		#[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::cleanup_ad_commitment())]
 		pub fn cleanup_ad_commitment(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -554,7 +565,7 @@ pub mod pallet {
 		/// 允许治理调整各层级的 max_rules / log_retention_days /
 		/// forced_ads_per_day / can_disable_ads / tee_access 参数.
 		#[pallet::call_index(8)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+		#[pallet::weight(T::WeightInfo::update_tier_feature_gate())]
 		pub fn update_tier_feature_gate(
 			origin: OriginFor<T>,
 			tier: SubscriptionTier,
@@ -570,7 +581,7 @@ pub mod pallet {
 		///
 		/// Escrow 没收至国库, 订阅状态设为 Cancelled.
 		#[pallet::call_index(9)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::force_cancel_subscription())]
 		pub fn force_cancel_subscription(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -605,7 +616,7 @@ pub mod pallet {
 		///
 		/// 提取后 Escrow 余额必须 >= fee_per_era (至少覆盖 1 Era).
 		#[pallet::call_index(10)]
-		#[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::withdraw_escrow())]
 		pub fn withdraw_escrow(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -632,7 +643,7 @@ pub mod pallet {
 
 		/// 原子性修改广告承诺 (避免 cancel + commit 的降级窗口)
 		#[pallet::call_index(11)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::update_ad_commitment())]
 		pub fn update_ad_commitment(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -681,7 +692,7 @@ pub mod pallet {
 
 		/// Root 强制暂停订阅 (调查期)
 		#[pallet::call_index(12)]
-		#[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::force_suspend_subscription())]
 		pub fn force_suspend_subscription(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -699,7 +710,7 @@ pub mod pallet {
 
 		/// Operator 为 Bot 充值 Escrow (激励对齐: Operator 拿 90% 分成)
 		#[pallet::call_index(13)]
-		#[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::operator_deposit_subscription())]
 		pub fn operator_deposit_subscription(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -737,7 +748,7 @@ pub mod pallet {
 
 		/// Root 恢复层级功能限制为硬编码默认值
 		#[pallet::call_index(14)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+		#[pallet::weight(T::WeightInfo::reset_tier_feature_gate())]
 		pub fn reset_tier_feature_gate(
 			origin: OriginFor<T>,
 			tier: SubscriptionTier,
@@ -750,7 +761,7 @@ pub mod pallet {
 
 		/// Root 强制变更 Bot 订阅层级
 		#[pallet::call_index(15)]
-		#[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::force_change_tier())]
 		pub fn force_change_tier(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -771,7 +782,7 @@ pub mod pallet {
 
 		/// Bot Owner 主动暂停订阅 (不扣费, 不享受层级权益)
 		#[pallet::call_index(16)]
-		#[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::pause_subscription())]
 		pub fn pause_subscription(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -790,7 +801,7 @@ pub mod pallet {
 
 		/// Bot Owner 恢复已暂停的订阅
 		#[pallet::call_index(17)]
-		#[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::resume_subscription())]
 		pub fn resume_subscription(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -814,7 +825,7 @@ pub mod pallet {
 
 		/// 批量清理已取消的订阅和广告承诺记录
 		#[pallet::call_index(18)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 10_000))]
+		#[pallet::weight(T::WeightInfo::batch_cleanup())]
 		pub fn batch_cleanup(
 			origin: OriginFor<T>,
 			subscription_ids: sp_runtime::BoundedVec<BotIdHash, frame_support::traits::ConstU32<50>>,
@@ -859,7 +870,7 @@ pub mod pallet {
 		/// 新费率在下一次 Era 结算时生效.
 		/// 已有订阅的 fee_per_era 不自动更新 (需 Owner change_tier 或下次新建时生效).
 		#[pallet::call_index(19)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+		#[pallet::weight(T::WeightInfo::update_tier_fee())]
 		pub fn update_tier_fee(
 			origin: OriginFor<T>,
 			tier: SubscriptionTier,
@@ -874,7 +885,7 @@ pub mod pallet {
 
 		/// Root 强制取消广告承诺
 		#[pallet::call_index(20)]
-		#[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::force_cancel_ad_commitment())]
 		pub fn force_cancel_ad_commitment(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,

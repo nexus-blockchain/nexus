@@ -37,11 +37,7 @@ pnpm-lock.yaml
 # =========================
 # Frontend (Next.js)
 # =========================
-frontend/.next/
-frontend/dist/
-frontend/out/
-frontend/.cache/
-
+frontend/
 # =========================
 # IDE / Editor
 # =========================
@@ -128,10 +124,7 @@ media-utils/temp/
 # =========================
 # GroupRobot Bot (standalone binary)
 # =========================
-grouprobot/.env
-grouprobot/target/
-grouprobot/*.log
-grouprobot/data/
+grouprobot/
 
 # =========================
 # Chain State (Local Dev)
@@ -151,13 +144,7 @@ scripts/*.log
 # =========================
 # Website (Next.js)
 # =========================
-website/.next/
-website/dist/
-website/out/
-website/.cache/
-website/*.tsbuildinfo
-website/.eslintcache
-website/.vercel
+website/
 
 # =========================
 # Frontend (Next.js) - 额外规则
@@ -169,7 +156,7 @@ frontend/.vercel
 # =========================
 # Telegram (Bot 测试数据)
 # =========================
-/telegram/
+telegram/
 
 # =========================
 # Misc
@@ -277,3 +264,9 @@ releases/
 *.deb
 *.rpm
 *.AppImage
+
+website/
+
+nexus-entity-dapp/
+
+my-chain-state/
