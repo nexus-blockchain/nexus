@@ -11,6 +11,12 @@
 
 extern crate alloc;
 
+pub mod weights;
+pub use weights::{WeightInfo, SubstrateWeight};
+
+#[cfg(feature = "runtime-benchmarks")]
+pub mod benchmarking;
+
 pub use pallet::*;
 
 #[cfg(test)]
@@ -52,12 +58,14 @@ pub mod pallet {
 	use super::*;
 	use frame_support::traits::{Currency, ExistenceRequirement};
 
+	const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
 	#[pallet::pallet]
+	#[pallet::storage_version(STORAGE_VERSION)]
 	pub struct Pallet<T>(_);
 
 	#[pallet::config]
-	pub trait Config: frame_system::Config {
-		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+	pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
 		type Currency: frame_support::traits::Currency<Self::AccountId>;
 		/// 节点共识查询 (验证 claim 时的 operator 身份)
 		type NodeConsensus: NodeConsensusProvider<Self::AccountId>;
@@ -71,6 +79,8 @@ pub mod pallet {
 		/// 单次 batch_claim 最大节点数
 		#[pallet::constant]
 		type MaxBatchClaim: Get<u32>;
+		/// 权重信息（由 benchmark 生成，或使用默认占位值）
+		type WeightInfo: crate::weights::WeightInfo;
 	}
 
 	// ========================================================================
@@ -211,24 +221,27 @@ pub mod pallet {
 		}
 	}
 
+	/// force_prune_era_rewards 单次最大清理条数
+	pub const MAX_FORCE_PRUNE: u64 = 100;
+
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
 		/// 领取节点奖励
 		#[pallet::call_index(0)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::claim_rewards())]
 		pub fn claim_rewards(origin: OriginFor<T>, node_id: NodeId) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 			let operator = T::NodeConsensus::node_operator(&node_id)
 				.ok_or(Error::<T>::NodeNotFound)?;
 			ensure!(operator == who, Error::<T>::NotOperator);
 
-			let recipient = RewardRecipient::<T>::get(&node_id).unwrap_or(who);
+			let recipient = RewardRecipient::<T>::get(node_id).unwrap_or(who);
 			Self::do_claim_rewards(&node_id, &recipient)
 		}
 
 		/// M2-R2: Root 救援滞留奖励 (节点已退出, orphan claim 失败后的恢复手段)
 		#[pallet::call_index(1)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::rescue_stranded_rewards())]
 		pub fn rescue_stranded_rewards(
 			origin: OriginFor<T>,
 			node_id: NodeId,
@@ -244,7 +257,7 @@ pub mod pallet {
 
 		/// P0: 批量领取多节点奖励
 		#[pallet::call_index(2)]
-		#[pallet::weight(Weight::from_parts(40_000_000u64.saturating_mul(node_ids.len() as u64), 6_000u64.saturating_mul(node_ids.len() as u64)))]
+		#[pallet::weight(T::WeightInfo::batch_claim_rewards(node_ids.len() as u32))]
 		pub fn batch_claim_rewards(
 			origin: OriginFor<T>,
 			node_ids: alloc::vec::Vec<NodeId>,
@@ -284,7 +297,7 @@ pub mod pallet {
 
 		/// P0: 设置自定义收款地址
 		#[pallet::call_index(3)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::set_reward_recipient())]
 		pub fn set_reward_recipient(
 			origin: OriginFor<T>,
 			node_id: NodeId,
@@ -297,11 +310,11 @@ pub mod pallet {
 
 			match recipient {
 				Some(r) => {
-					RewardRecipient::<T>::insert(&node_id, &r);
+					RewardRecipient::<T>::insert(node_id, &r);
 					Self::deposit_event(Event::RewardRecipientSet { node_id, recipient: r });
 				}
 				None => {
-					RewardRecipient::<T>::remove(&node_id);
+					RewardRecipient::<T>::remove(node_id);
 					Self::deposit_event(Event::RewardRecipientCleared { node_id });
 				}
 			}
@@ -310,16 +323,16 @@ pub mod pallet {
 
 		/// P0: Root Slash 节点待领取奖励
 		#[pallet::call_index(4)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::force_slash_pending_rewards())]
 		pub fn force_slash_pending_rewards(
 			origin: OriginFor<T>,
 			node_id: NodeId,
 			amount: BalanceOf<T>,
 		) -> DispatchResult {
 			ensure_root(origin)?;
-			let pending = NodePendingRewards::<T>::get(&node_id);
+			let pending = NodePendingRewards::<T>::get(node_id);
 			ensure!(pending >= amount, Error::<T>::SlashExceedsPending);
-			NodePendingRewards::<T>::mutate(&node_id, |p| {
+			NodePendingRewards::<T>::mutate(node_id, |p| {
 				*p = p.saturating_sub(amount);
 			});
 			Self::deposit_event(Event::PendingRewardsSlashed { node_id, amount });
@@ -328,7 +341,7 @@ pub mod pallet {
 
 		/// P1: Bot Owner 设置奖励分成比例
 		#[pallet::call_index(5)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::set_reward_split())]
 		pub fn set_reward_split(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -340,14 +353,14 @@ pub mod pallet {
 			ensure!(owner == who, Error::<T>::NotBotOwner);
 			ensure!(owner_bps <= 5000, Error::<T>::InvalidSplitBps);
 
-			RewardSplitBps::<T>::insert(&bot_id_hash, owner_bps);
+			RewardSplitBps::<T>::insert(bot_id_hash, owner_bps);
 			Self::deposit_event(Event::RewardSplitSet { bot_id_hash, owner_bps });
 			Ok(())
 		}
 
 		/// P1: Bot Owner 领取分成奖励
 		#[pallet::call_index(6)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::claim_owner_rewards())]
 		pub fn claim_owner_rewards(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -357,7 +370,7 @@ pub mod pallet {
 				.ok_or(Error::<T>::NotBotOwner)?;
 			ensure!(owner == who, Error::<T>::NotBotOwner);
 
-			let pending = OwnerPendingRewards::<T>::get(&bot_id_hash);
+			let pending = OwnerPendingRewards::<T>::get(bot_id_hash);
 			ensure!(!pending.is_zero(), Error::<T>::NoOwnerPendingRewards);
 
 			let reward_pool = T::RewardPoolAccount::get();
@@ -368,8 +381,8 @@ pub mod pallet {
 				ExistenceRequirement::AllowDeath,
 			).map_err(|_| Error::<T>::RewardPoolInsufficient)?;
 
-			OwnerPendingRewards::<T>::remove(&bot_id_hash);
-			OwnerTotalEarned::<T>::mutate(&bot_id_hash, |t| {
+			OwnerPendingRewards::<T>::remove(bot_id_hash);
+			OwnerTotalEarned::<T>::mutate(bot_id_hash, |t| {
 				*t = t.saturating_add(pending);
 			});
 
@@ -383,7 +396,7 @@ pub mod pallet {
 
 		/// P1: Root 暂停奖励分配
 		#[pallet::call_index(7)]
-		#[pallet::weight(Weight::from_parts(10_000_000, 2_000))]
+		#[pallet::weight(T::WeightInfo::pause_distribution())]
 		pub fn pause_distribution(origin: OriginFor<T>) -> DispatchResult {
 			ensure_root(origin)?;
 			ensure!(!DistributionPaused::<T>::get(), Error::<T>::DistributionIsPaused);
@@ -394,7 +407,7 @@ pub mod pallet {
 
 		/// P1: Root 恢复奖励分配
 		#[pallet::call_index(8)]
-		#[pallet::weight(Weight::from_parts(10_000_000, 2_000))]
+		#[pallet::weight(T::WeightInfo::resume_distribution())]
 		pub fn resume_distribution(origin: OriginFor<T>) -> DispatchResult {
 			ensure_root(origin)?;
 			ensure!(DistributionPaused::<T>::get(), Error::<T>::DistributionNotPaused);
@@ -405,15 +418,15 @@ pub mod pallet {
 
 		/// P1: Root 强制设置节点待领取奖励
 		#[pallet::call_index(9)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::force_set_pending_rewards())]
 		pub fn force_set_pending_rewards(
 			origin: OriginFor<T>,
 			node_id: NodeId,
 			amount: BalanceOf<T>,
 		) -> DispatchResult {
 			ensure_root(origin)?;
-			let old = NodePendingRewards::<T>::get(&node_id);
-			NodePendingRewards::<T>::insert(&node_id, amount);
+			let old = NodePendingRewards::<T>::get(node_id);
+			NodePendingRewards::<T>::insert(node_id, amount);
 			Self::deposit_event(Event::PendingRewardsForceSet {
 				node_id,
 				old_amount: old,
@@ -422,9 +435,11 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// P2: Root 强制清理过期 Era 记录 (不受 MAX_PRUNE_PER_CALL 限制)
+		/// P2: Root 强制清理过期 Era 记录 (每次最多 MAX_FORCE_PRUNE 条)
 		#[pallet::call_index(10)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::force_prune_era_rewards(
+			target_era.saturating_sub(EraCleanupCursor::<T>::get()).min(MAX_FORCE_PRUNE) as u32
+		))]
 		pub fn force_prune_era_rewards(
 			origin: OriginFor<T>,
 			target_era: u64,
@@ -433,7 +448,9 @@ pub mod pallet {
 			let mut cursor = EraCleanupCursor::<T>::get();
 			ensure!(cursor < target_era, Error::<T>::NothingToPrune);
 			let from = cursor;
-			while cursor < target_era {
+			let cap = cursor.saturating_add(MAX_FORCE_PRUNE);
+			let effective_target = target_era.min(cap);
+			while cursor < effective_target {
 				EraRewards::<T>::remove(cursor);
 				cursor = cursor.saturating_add(1);
 			}
@@ -515,6 +532,7 @@ pub mod pallet {
 		}
 
 		/// 向节点分配奖励并记录 Era 信息
+		#[allow(clippy::too_many_arguments)]
 		pub fn distribute_and_record_era(
 			era: u64,
 			total_pool: BalanceOf<T>,
@@ -582,13 +600,9 @@ pub mod pallet {
 
 		/// 带 Owner 分成的奖励累加
 		fn accrue_with_split(node_id: &NodeId, amount: BalanceOf<T>) {
-			// 查找节点绑定的 bot_id_hash 以确定分成比例
-			// 通过 NodeConsensus 无法直接获取 bot_id_hash,
-			// 因此 owner split 仅在 accrue_node_reward (ads 路径) 中通过外部传入 bot_id_hash 生效。
-			// Era 分配路径: 分成由 NodeBotSplitBinding 存储支持
 			let split = NodeBotSplitBinding::<T>::get(node_id)
 				.and_then(|bot_hash| {
-					let bps = RewardSplitBps::<T>::get(&bot_hash);
+					let bps = RewardSplitBps::<T>::get(bot_hash);
 					if bps > 0 { Some((bot_hash, bps)) } else { None }
 				});
 
@@ -599,7 +613,7 @@ pub mod pallet {
 				let operator_share = amount.saturating_sub(owner_share);
 
 				if !owner_share.is_zero() {
-					OwnerPendingRewards::<T>::mutate(&bot_hash, |p| {
+					OwnerPendingRewards::<T>::mutate(bot_hash, |p| {
 						*p = p.saturating_add(owner_share);
 					});
 				}

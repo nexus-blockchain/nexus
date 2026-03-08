@@ -173,7 +173,7 @@ parameter_types! {
 }
 
 impl pallet_ads_entity::Config for Test {
-	type RuntimeEvent = RuntimeEvent;
+	type WeightInfo = ();
 	type Currency = Balances;
 	type EntityProvider = MockEntityProvider;
 	type ShopProvider = MockShopProvider;

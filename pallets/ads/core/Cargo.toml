@@ -19,6 +19,7 @@ pallet-ads-primitives = { path = "../primitives", default-features = false }
 # Substrate
 frame-support = { workspace = true }
 frame-system = { workspace = true }
+frame-benchmarking = { workspace = true, optional = true }
 sp-api = { workspace = true }
 sp-runtime = { workspace = true }
 
@@ -36,6 +37,7 @@ std = [
 	"pallet-ads-primitives/std",
 	"frame-support/std",
 	"frame-system/std",
+	"frame-benchmarking?/std",
 	"sp-api/std",
 	"sp-runtime/std",
 ]
@@ -47,5 +49,6 @@ try-runtime = [
 runtime-benchmarks = [
 	"frame-support/runtime-benchmarks",
 	"frame-system/runtime-benchmarks",
+	"frame-benchmarking/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",
 ]

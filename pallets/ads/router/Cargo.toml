@@ -20,6 +20,15 @@ frame-support = { workspace = true }
 frame-system = { workspace = true }
 sp-runtime = { workspace = true }
 
+[dev-dependencies]
+sp-io = { workspace = true }
+sp-core = { workspace = true }
+codec = { workspace = true, features = ["derive"] }
+scale-info = { workspace = true, features = ["derive"] }
+pallet-balances = { workspace = true, features = ["std"] }
+pallet-entity-common = { path = "../../entity/common", features = ["std"] }
+pallet-grouprobot-primitives = { path = "../../grouprobot/primitives", features = ["std"] }
+
 [features]
 default = ["std"]
 std = [

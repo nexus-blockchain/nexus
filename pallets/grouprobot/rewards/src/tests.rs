@@ -1,4 +1,4 @@
-use crate::{mock::*, *};
+use crate::{mock::*, pallet::MAX_FORCE_PRUNE, *};
 use frame_support::{assert_noop, assert_ok};
 use pallet_grouprobot_primitives::*;
 
@@ -899,6 +899,35 @@ fn force_prune_nothing_fails() {
 			Rewards::force_prune_era_rewards(RuntimeOrigin::root(), 3),
 			Error::<Test>::NothingToPrune
 		);
+	});
+}
+
+#[test]
+fn force_prune_capped_at_max() {
+	new_test_ext().execute_with(|| {
+		System::set_block_number(1);
+		let total = MAX_FORCE_PRUNE + 50;
+		for era in 0..total {
+			let info = EraRewardInfo {
+				subscription_income: 100u128,
+				ads_income: 0u128,
+				inflation_mint: 50u128,
+				total_distributed: 150u128,
+				treasury_share: 10u128,
+				node_count: 1,
+			};
+			EraRewards::<Test>::insert(era, info);
+		}
+		// Request pruning beyond the cap
+		assert_ok!(Rewards::force_prune_era_rewards(RuntimeOrigin::root(), total));
+		// Should only prune MAX_FORCE_PRUNE eras
+		assert_eq!(EraCleanupCursor::<Test>::get(), MAX_FORCE_PRUNE);
+		assert!(EraRewards::<Test>::get(MAX_FORCE_PRUNE - 1).is_none());
+		assert!(EraRewards::<Test>::get(MAX_FORCE_PRUNE).is_some());
+
+		// Second call prunes the rest
+		assert_ok!(Rewards::force_prune_era_rewards(RuntimeOrigin::root(), total));
+		assert_eq!(EraCleanupCursor::<Test>::get(), total);
 	});
 }
 

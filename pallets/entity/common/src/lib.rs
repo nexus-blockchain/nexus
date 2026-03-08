@@ -2421,31 +2421,6 @@ impl<AccountId, Balance: Default> ShoppingBalanceProvider<AccountId, Balance> fo
     fn consume_shopping_balance(_: u64, _: &AccountId, _: Balance) -> Result<(), DispatchError> { Ok(()) }
 }
 
-/// 订单会员处理接口
-///
-/// **已废弃**: 此 trait 是 `MemberProvider` 的子集，方法签名完全相同。
-/// 新代码应直接使用 `MemberProvider::auto_register` / `update_spent` / `check_order_upgrade_rules`。
-///
-/// 供 Transaction 模块在订单完成时：
-/// 1. 自动注册买家为会员（如果尚未注册）
-/// 2. 更新消费金额（触发等级升级）
-#[deprecated(note = "OrderMemberHandler 是 MemberProvider 的子集，请迁移到 MemberProvider")]
-pub trait OrderMemberHandler<AccountId> {
-    /// 自动注册会员（首次下单时，推荐人可选）
-    fn auto_register(entity_id: u64, account: &AccountId, referrer: Option<AccountId>) -> Result<(), DispatchError>;
-    /// 更新消费金额（USDT 精度 10^6）
-    fn update_spent(entity_id: u64, account: &AccountId, amount_usdt: u64) -> Result<(), DispatchError>;
-    /// 检查订单完成时的升级规则（amount_usdt: USDT 精度 10^6）
-    fn check_order_upgrade_rules(entity_id: u64, buyer: &AccountId, product_id: u64, amount_usdt: u64) -> Result<(), DispatchError>;
-}
-
-/// 空会员处理（无会员系统时使用）
-#[allow(deprecated)]
-impl<AccountId> OrderMemberHandler<AccountId> for () {
-    fn auto_register(_: u64, _: &AccountId, _: Option<AccountId>) -> Result<(), DispatchError> { Ok(()) }
-    fn update_spent(_: u64, _: &AccountId, _: u64) -> Result<(), DispatchError> { Ok(()) }
-    fn check_order_upgrade_rules(_: u64, _: &AccountId, _: u64, _: u64) -> Result<(), DispatchError> { Ok(()) }
-}
 
 // ============================================================================
 // 会员服务接口（统一定义）

@@ -309,7 +309,6 @@ pub mod pallet {
 
     /// Entity ID 起始值（从 1 开始，避免 0 与 primary_shop_id 哨兵值冲突）
     #[pallet::type_value]
-    #[pallet::type_value]
     pub fn DefaultNextEntityId() -> u64 { 100_000 }
 
     /// 下一个 Entity ID

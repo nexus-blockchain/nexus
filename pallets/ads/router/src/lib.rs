@@ -18,6 +18,15 @@ use frame_support::traits::Currency;
 use pallet_ads_primitives::*;
 use sp_runtime::DispatchError;
 
+#[cfg(test)]
+mod mock;
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod benchmarking;
+
 /// Entity 适配层的 Balance 类型
 type BalanceOf<T> = <<T as pallet_ads_entity::Config>::Currency as Currency<
 	<T as frame_system::Config>::AccountId,
@@ -76,8 +85,7 @@ where
 				who, placement_id, click_count, verified_clicks,
 			)
 		} else {
-			// GroupRobot 暂不支持 CPC, 拒绝点击收据提交
-			Err(DispatchError::Other("CPC not supported for GroupRobot placements"))
+			Err(AdsRouterError::CpcNotSupportedForPath.into())
 		}
 	}
 }

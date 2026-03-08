@@ -105,6 +105,7 @@ impl pallet_grouprobot_ceremony::Config for Test {
 	type MaxProcessPerBlock = MaxProcessPerBlock;
 	type BotRegistry = MockBotRegistry;
 	type Subscription = MockSubscription;
+	type WeightInfo = ();
 }
 
 pub const OWNER: u64 = 1;

@@ -70,6 +70,7 @@ impl pallet_grouprobot_community::Config for Test {
 	type MaxReputationDelta = frame_support::traits::ConstU32<100>;
 	type MaxBatchSize = frame_support::traits::ConstU32<50>;
 	type BlocksPerDay = frame_support::traits::ConstU32<14_400>;
+	type WeightInfo = ();
 	type BotRegistry = MockBotRegistry;
 	type Subscription = MockSubscription;
 }

@@ -207,9 +207,7 @@ pub mod pallet {
     // ========================================================================
 
     #[pallet::config]
-    pub trait Config: frame_system::Config {
-        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-
+    pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
         /// 推荐链 + 统计 + USDT 消费数据
         type MemberProvider: MemberProvider<Self::AccountId>;
 
@@ -800,10 +798,11 @@ pub mod pallet {
         // R11-B1: weight 参数化，按 member_count_hint 缩放
         #[pallet::call_index(14)]
         #[pallet::weight(T::WeightInfo::force_cleanup_entity(*member_count_hint))]
+        #[allow(unused_variables)]
         pub fn force_cleanup_entity(
             origin: OriginFor<T>,
             entity_id: u64,
-            _member_count_hint: u32,
+            member_count_hint: u32,
         ) -> DispatchResult {
             ensure_root(origin)?;
             Self::cleanup_entity_storage(entity_id);

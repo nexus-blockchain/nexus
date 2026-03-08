@@ -74,6 +74,7 @@ impl pallet_grouprobot_rewards::Config for Test {
 	type RewardPoolAccount = RewardPoolAcct;
 	type MaxEraHistory = MaxEraHist;
 	type MaxBatchClaim = MaxBatch;
+	type WeightInfo = ();
 }
 
 pub const OPERATOR: u64 = 10;

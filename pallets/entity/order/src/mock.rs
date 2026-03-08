@@ -750,14 +750,18 @@ impl pallet_entity_common::MemberProvider<u64> for MockMemberProvider {
         BANNED_SET.with(|b| b.borrow().get(&(entity_id, *account)).copied().unwrap_or(false))
     }
 
-    fn auto_register(_entity_id: u64, _account: &u64, _referrer: Option<u64>) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
-    fn update_spent(_entity_id: u64, _account: &u64, _amount_usdt: u64) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
-    fn check_order_upgrade_rules(_entity_id: u64, _buyer: &u64, _product_id: u64, _amount_usdt: u64) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+    fn auto_register(entity_id: u64, account: &u64, _referrer: Option<u64>) -> Result<(), sp_runtime::DispatchError> {
+        MEMBER_REGISTERED.with(|r| r.borrow_mut().push((entity_id, *account)));
+        Ok(())
+    }
+    fn update_spent(entity_id: u64, account: &u64, amount_usdt: u64) -> Result<(), sp_runtime::DispatchError> {
+        MEMBER_SPENT.with(|s| s.borrow_mut().push((entity_id, *account, amount_usdt)));
+        Ok(())
+    }
+    fn check_order_upgrade_rules(_entity_id: u64, _buyer: &u64, _product_id: u64, _amount_usdt: u64) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
 }
-
-// ==================== Mock MemberHandler ====================
-
-pub struct MockMemberHandler;
 
 thread_local! {
     static MEMBER_REGISTERED: RefCell<Vec<(u64, u64)>> = RefCell::new(Vec::new());
@@ -772,22 +776,6 @@ pub fn get_member_registered() -> Vec<(u64, u64)> {
 #[allow(dead_code)]
 pub fn get_member_spent() -> Vec<(u64, u64, u64)> {
     MEMBER_SPENT.with(|s| s.borrow().clone())
-}
-
-impl pallet_entity_common::OrderMemberHandler<u64> for MockMemberHandler {
-    fn auto_register(entity_id: u64, account: &u64, _referrer: Option<u64>) -> Result<(), sp_runtime::DispatchError> {
-        MEMBER_REGISTERED.with(|r| r.borrow_mut().push((entity_id, *account)));
-        Ok(())
-    }
-
-    fn update_spent(entity_id: u64, account: &u64, amount_usdt: u64) -> Result<(), sp_runtime::DispatchError> {
-        MEMBER_SPENT.with(|s| s.borrow_mut().push((entity_id, *account, amount_usdt)));
-        Ok(())
-    }
-
-    fn check_order_upgrade_rules(_entity_id: u64, _buyer: &u64, _product_id: u64, _amount_usdt: u64) -> Result<(), sp_runtime::DispatchError> {
-        Ok(())
-    }
 }
 
 // ==================== Test Constants ====================
@@ -823,11 +811,13 @@ impl pallet_entity_order::Config for Test {
     type CommissionHandler = MockCommissionHandler;
     type TokenCommissionHandler = MockTokenCommissionHandler;
     type ShoppingBalance = MockShoppingBalanceProvider;
-    type MemberHandler = MockMemberHandler;
     type PricingProvider = MockPricingProvider;
     type TokenPriceProvider = MockTokenPriceProvider;
     type MemberProvider = MockMemberProvider;
     type MaxCidLength = ConstU32<64>;
+    type MaxBuyerOrders = ConstU32<1000>;
+    type MaxShopOrders = ConstU32<10000>;
+    type MaxExpiryQueueSize = ConstU32<500>;
     type WeightInfo = ();
 }
 

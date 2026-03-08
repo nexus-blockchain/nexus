@@ -45,7 +45,7 @@ pub mod pallet {
     use frame_system::pallet_prelude::*;
     use frame_system::ensure_root;
     use pallet_dispute_escrow::pallet::Escrow as EscrowTrait;
-    use pallet_entity_common::{OrderStatus, OrderCommissionHandler, OrderMemberHandler, OrderProvider, PaymentAsset, PricingProvider, ProductCategory, ProductProvider, ProductStatus, ProductVisibility, EntityTokenProvider, EntityTokenPriceProvider, MemberProvider, ShopProvider, ShoppingBalanceProvider, TokenOrderCommissionHandler};
+    use pallet_entity_common::{OrderStatus, OrderCommissionHandler, OrderProvider, PaymentAsset, PricingProvider, ProductCategory, ProductProvider, ProductStatus, ProductVisibility, EntityTokenProvider, EntityTokenPriceProvider, MemberProvider, ShopProvider, ShoppingBalanceProvider, TokenOrderCommissionHandler};
     use sp_runtime::{traits::{Saturating, Zero}, SaturatedConversion};
 
     /// 货币余额类型别名
@@ -145,10 +145,7 @@ pub mod pallet {
     }
 
     #[pallet::config]
-    pub trait Config: frame_system::Config {
-        /// 运行时事件类型
-        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-
+    pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
         /// 货币类型
         type Currency: Currency<Self::AccountId>;
 
@@ -198,9 +195,6 @@ pub mod pallet {
         /// Token 佣金处理接口（Entity Token 订单完成时触发 Token 返佣）
         type TokenCommissionHandler: TokenOrderCommissionHandler<Self::AccountId>;
 
-        /// 会员处理接口（订单完成时自动注册 + 更新消费金额）
-        type MemberHandler: OrderMemberHandler<Self::AccountId>;
-
         /// NEX/USDT 定价接口（用于将 NEX 金额转换为 USDT 以更新会员消费统计）
         type PricingProvider: PricingProvider;
 
@@ -213,6 +207,18 @@ pub mod pallet {
         /// CID 最大长度
         #[pallet::constant]
         type MaxCidLength: Get<u32>;
+
+        /// 每买家最大订单索引数
+        #[pallet::constant]
+        type MaxBuyerOrders: Get<u32>;
+
+        /// 每店铺最大订单索引数
+        #[pallet::constant]
+        type MaxShopOrders: Get<u32>;
+
+        /// 每区块过期队列最大订单数
+        #[pallet::constant]
+        type MaxExpiryQueueSize: Get<u32>;
 
         /// 权重信息
         type WeightInfo: WeightInfo;
@@ -252,7 +258,7 @@ pub mod pallet {
         _,
         Blake2_128Concat,
         T::AccountId,
-        BoundedVec<u64, ConstU32<1000>>,
+        BoundedVec<u64, T::MaxBuyerOrders>,
         ValueQuery,
     >;
 
@@ -263,7 +269,7 @@ pub mod pallet {
         _,
         Blake2_128Concat,
         u64,
-        BoundedVec<u64, ConstU32<10000>>,
+        BoundedVec<u64, T::MaxShopOrders>,
         ValueQuery,
     >;
 
@@ -278,7 +284,7 @@ pub mod pallet {
         _,
         Blake2_128Concat,
         BlockNumberFor<T>,
-        BoundedVec<u64, ConstU32<500>>,
+        BoundedVec<u64, T::MaxExpiryQueueSize>,
         ValueQuery,
     >;
 
@@ -933,7 +939,7 @@ pub mod pallet {
             let removed = before.saturating_sub(after);
             ensure!(removed > 0, Error::<T>::NothingToClean);
 
-            let bounded: BoundedVec<u64, ConstU32<1000>> = retained
+            let bounded: BoundedVec<u64, T::MaxBuyerOrders> = retained
                 .try_into()
                 .expect("retained is subset of original bounded vec");
             BuyerOrders::<T>::insert(&who, bounded);
@@ -1169,7 +1175,7 @@ pub mod pallet {
             let removed = before.saturating_sub(after);
             ensure!(removed > 0, Error::<T>::NothingToClean);
 
-            let bounded: BoundedVec<u64, ConstU32<10000>> = retained
+            let bounded: BoundedVec<u64, T::MaxShopOrders> = retained
                 .try_into()
                 .expect("retained is subset of original bounded vec");
             ShopOrders::<T>::insert(shop_id, bounded);
@@ -1476,7 +1482,7 @@ pub mod pallet {
             // auto_register: 首次购买时注册会员（PURCHASE_REQUIRED 策略触发点）
             // update_spent: 更新消费金额 + 激活待激活会员 + 触发等级升级
             let referrer = OrderReferrer::<T>::take(order_id);
-            if T::MemberHandler::auto_register(entity_id, &order.buyer, referrer).is_err() {
+            if T::MemberProvider::auto_register(entity_id, &order.buyer, referrer).is_err() {
                 Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::MemberAutoRegister });
             }
             // H1-R5-fix: Token 订单未花费 NEX，不应将 token 数量当作 NEX 做 USDT 转换
@@ -1512,7 +1518,7 @@ pub mod pallet {
                     }
                 },
             };
-            if T::MemberHandler::update_spent(
+            if T::MemberProvider::update_spent(
                 entity_id,
                 &order.buyer,
                 amount_usdt,
@@ -1522,7 +1528,7 @@ pub mod pallet {
 
             // 触发升级规则引擎（best-effort，失败发事件）
             // update_spent 先执行，确保 total_spent 已含本单；规则引擎读取最新 member 快照
-            if T::MemberHandler::check_order_upgrade_rules(
+            if T::MemberProvider::check_order_upgrade_rules(
                 entity_id,
                 &order.buyer,
                 order.product_id,
@@ -1742,7 +1748,7 @@ pub mod pallet {
                 ExpiryQueue::<T>::remove(target_block);
             } else {
                 let remaining: Vec<u64> = order_ids.iter().skip(iterated).copied().collect();
-                let bounded: BoundedVec<u64, ConstU32<500>> = remaining
+                let bounded: BoundedVec<u64, T::MaxExpiryQueueSize> = remaining
                     .try_into()
                     .expect("remaining is subset of original bounded vec");
                 ExpiryQueue::<T>::insert(target_block, bounded);

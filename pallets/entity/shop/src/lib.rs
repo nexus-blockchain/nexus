@@ -148,10 +148,7 @@ pub mod pallet {
     >;
 
     #[pallet::config]
-    pub trait Config: frame_system::Config {
-        /// 运行时事件类型
-        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-
+    pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
         /// 货币类型
         type Currency: Currency<Self::AccountId> + ReservableCurrency<Self::AccountId>;
 
@@ -1935,7 +1932,7 @@ pub mod pallet {
             if is_primary {
                 EntityPrimaryShop::<T>::insert(entity_id, shop_id);
             }
-            NextShopId::<T>::put(shop_id + 1);
+            NextShopId::<T>::put(shop_id.checked_add(1).ok_or(Error::<T>::ShopIdOverflow)?);
 
             // 回写 Entity 的 shop_ids（维护双向一致性）
             T::EntityProvider::register_shop(entity_id, shop_id)?;

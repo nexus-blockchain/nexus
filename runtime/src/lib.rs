@@ -224,6 +224,18 @@ mod runtime {
 	#[runtime::pallet_index(6)]
 	pub type Sudo = pallet_sudo;
 
+	#[runtime::pallet_index(7)]
+	pub type Authorship = pallet_authorship;
+
+	#[runtime::pallet_index(8)]
+	pub type Session = pallet_session;
+
+	#[runtime::pallet_index(9)]
+	pub type Historical = pallet_session::historical;
+
+	#[runtime::pallet_index(10)]
+	pub type Offences = pallet_offences;
+
 	// ============================================================================
 	// Governance: Committees (Collective + Membership)
 	// ============================================================================

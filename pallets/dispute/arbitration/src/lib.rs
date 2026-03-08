@@ -1076,6 +1076,14 @@ pub mod pallet {
             EvidenceIds::<T>::remove(domain, id);
             TwoWayDeposits::<T>::remove(domain, id);
 
+            if let Err(e) = T::Router::apply_decision(domain, id, Decision::Release) {
+                log::warn!(
+                    target: "pallet-dispute-arbitration",
+                    "settle_dispute: apply_decision(Release) failed for ({:?}, {}): {:?}",
+                    domain, id, e,
+                );
+            }
+
             Self::deposit_event(Event::DisputeSettled { domain, id });
             Ok(())
         }
@@ -1186,15 +1194,27 @@ pub mod pallet {
 
             if let Some(deposit_record) = TwoWayDeposits::<T>::take(domain, id) {
                 let escrow_account = Self::get_escrow_account();
-                let _ = Self::release_deposit(
+                if Self::release_deposit(
                     &escrow_account, deposit_record.initiator_deposit,
                     &HoldReason::DisputeInitiator, domain, id,
-                );
+                ).is_err() {
+                    Self::deposit_event(Event::DepositOperationFailed {
+                        complaint_id: id,
+                        operation: 0,
+                        amount: deposit_record.initiator_deposit,
+                    });
+                }
                 if let Some(respondent_deposit) = deposit_record.respondent_deposit {
-                    let _ = Self::release_deposit(
+                    if Self::release_deposit(
                         &escrow_account, respondent_deposit,
                         &HoldReason::DisputeRespondent, domain, id,
-                    );
+                    ).is_err() {
+                        Self::deposit_event(Event::DepositOperationFailed {
+                            complaint_id: id,
+                            operation: 1,
+                            amount: respondent_deposit,
+                        });
+                    }
                 }
             }
 

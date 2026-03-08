@@ -21,6 +21,9 @@
 
 pub use pallet::*;
 
+pub mod weights;
+pub use weights::WeightInfo;
+
 #[cfg(test)]
 mod mock;
 
@@ -105,12 +108,15 @@ pub mod pallet {
 	use super::*;
 	use frame_support::traits::ReservableCurrency;
 
+	const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
 	#[pallet::pallet]
+	#[pallet::storage_version(STORAGE_VERSION)]
 	pub struct Pallet<T>(_);
 
 	#[pallet::config]
-	pub trait Config: frame_system::Config {
-		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+	pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
+		type WeightInfo: WeightInfo;
 		type Currency: ReservableCurrency<Self::AccountId>;
 
 		/// Entity 查询 (活跃状态 + 所有者 + 管理员)
@@ -318,7 +324,7 @@ pub mod pallet {
 
 		/// 注册 Entity 级广告位 (Entity Owner / Admin)
 		#[pallet::call_index(0)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::register_entity_placement())]
 		pub fn register_entity_placement(
 			origin: OriginFor<T>,
 			entity_id: u64,
@@ -383,7 +389,7 @@ pub mod pallet {
 
 		/// 注册 Shop 级广告位 (Entity Owner / Shop Manager)
 		#[pallet::call_index(1)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::register_shop_placement())]
 		pub fn register_shop_placement(
 			origin: OriginFor<T>,
 			entity_id: u64,
@@ -454,7 +460,7 @@ pub mod pallet {
 
 		/// 注销广告位并退还保证金
 		#[pallet::call_index(2)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::deregister_placement())]
 		pub fn deregister_placement(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -501,7 +507,7 @@ pub mod pallet {
 
 		/// 激活/禁用广告位
 		#[pallet::call_index(3)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::set_placement_active())]
 		pub fn set_placement_active(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -534,7 +540,7 @@ pub mod pallet {
 
 		/// 设置广告位每日展示量上限
 		#[pallet::call_index(4)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::set_impression_cap())]
 		pub fn set_impression_cap(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -567,7 +573,7 @@ pub mod pallet {
 
 		/// 设置 Entity 自定义广告分成比例 (Entity Owner, 基点)
 		#[pallet::call_index(5)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::set_entity_ad_share())]
 		pub fn set_entity_ad_share(
 			origin: OriginFor<T>,
 			entity_id: u64,
@@ -597,7 +603,7 @@ pub mod pallet {
 
 		/// 禁止 Entity 参与广告 (Root)
 		#[pallet::call_index(6)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::ban_entity())]
 		pub fn ban_entity(
 			origin: OriginFor<T>,
 			entity_id: u64,
@@ -612,7 +618,7 @@ pub mod pallet {
 
 		/// 解除 Entity 广告禁令 (Root)
 		#[pallet::call_index(7)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::unban_entity())]
 		pub fn unban_entity(
 			origin: OriginFor<T>,
 			entity_id: u64,
@@ -627,7 +633,7 @@ pub mod pallet {
 
 		/// 设置广告位每日点击量上限 (CPC)
 		#[pallet::call_index(8)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::set_click_cap())]
 		pub fn set_click_cap(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,

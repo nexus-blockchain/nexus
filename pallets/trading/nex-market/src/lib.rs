@@ -3409,7 +3409,6 @@ pub mod pallet {
                         if was_filled {
                             let now = <frame_system::Pallet<T>>::block_number();
                             if now > order.expires_at {
-                                // 订单已过期，标记为 Expired，不加回订单簿
                                 order.status = OrderStatus::Expired;
                                 log::info!(target: "nex-market",
                                     "Order {} rollback: order expired, marking as Expired", order_id);
@@ -3428,21 +3427,56 @@ pub mod pallet {
                                     }).is_ok()
                                 }
                             };
+
                             if !book_ok {
+                                let unfilled = order.nex_amount.saturating_sub(order.filled_amount);
+                                match order.side {
+                                    OrderSide::Sell => {
+                                        if !unfilled.is_zero() {
+                                            T::Currency::unreserve(&order.maker, unfilled);
+                                        }
+                                    }
+                                    OrderSide::Buy => {
+                                        if !order.buyer_deposit.is_zero() {
+                                            T::Currency::unreserve(&order.maker, order.buyer_deposit);
+                                            order.buyer_deposit = Zero::zero();
+                                        }
+                                    }
+                                }
+                                order.status = OrderStatus::Cancelled;
                                 log::warn!(target: "nex-market",
-                                    "Order {} rollback: order book full, order is a ghost record", order_id);
+                                    "Order {} rollback: order book full, cancelled and refunded maker",
+                                    order_id);
+                                return;
                             }
+
                             let user_ok = UserOrders::<T>::try_mutate(&order.maker, |orders| {
                                 orders.try_push(order_id)
                             }).is_ok();
                             if !user_ok {
+                                Self::remove_from_order_book(order_id, order.side);
+                                let unfilled = order.nex_amount.saturating_sub(order.filled_amount);
+                                match order.side {
+                                    OrderSide::Sell => {
+                                        if !unfilled.is_zero() {
+                                            T::Currency::unreserve(&order.maker, unfilled);
+                                        }
+                                    }
+                                    OrderSide::Buy => {
+                                        if !order.buyer_deposit.is_zero() {
+                                            T::Currency::unreserve(&order.maker, order.buyer_deposit);
+                                            order.buyer_deposit = Zero::zero();
+                                        }
+                                    }
+                                }
+                                order.status = OrderStatus::Cancelled;
                                 log::warn!(target: "nex-market",
-                                    "Order {} rollback: user orders full for {:?}", order_id, order.maker);
+                                    "Order {} rollback: user orders full for {:?}, cancelled and refunded maker",
+                                    order_id, order.maker);
+                                return;
                             }
-                            // 🆕 M2-R2修复: 重新入簿后刷新最优价格
-                            if book_ok {
-                                Self::update_best_price_on_new_order(order.usdt_price, order.side);
-                            }
+
+                            Self::update_best_price_on_new_order(order.usdt_price, order.side);
                         }
                     }
                 }

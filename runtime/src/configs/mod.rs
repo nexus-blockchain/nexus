@@ -25,7 +25,7 @@
 
 // Substrate and Polkadot dependencies
 use sp_runtime::{traits::AccountIdConversion, generic};
-use crate::{UncheckedExtrinsic, EntityMember, EntityGovernance, EntityMarket};
+use crate::{UncheckedExtrinsic, EntityGovernance, EntityMarket, SessionKeys};
 use frame_support::{
 	derive_impl, parameter_types,
 	traits::{ConstBool, ConstU128, ConstU16, ConstU32, ConstU64, ConstU8, VariantCountOf},
@@ -35,16 +35,17 @@ use frame_support::{
 	},
 };
 use frame_system::{limits::{BlockLength, BlockWeights}, EnsureRoot};
-use pallet_transaction_payment::{ConstFeeMultiplier, FungibleAdapter, Multiplier};
+use pallet_transaction_payment::{FungibleAdapter, Multiplier, TargetedFeeAdjustment};
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
-use sp_runtime::{traits::One, Perbill};
+use sp_runtime::{Perbill, FixedPointNumber};
 use sp_version::RuntimeVersion;
 
 // Local module imports
 use super::{
 	AccountId, Aura, Balance, Balances, Block, BlockNumber, Hash, Nonce, PalletInfo, Runtime,
 	RuntimeCall, RuntimeEvent, RuntimeFreezeReason, RuntimeHoldReason, RuntimeOrigin, RuntimeTask,
-	System, Timestamp, EXISTENTIAL_DEPOSIT, SLOT_DURATION, VERSION, UNIT, MINUTES, HOURS, DAYS,
+	System, Timestamp, Session, Historical, Offences,
+	EXISTENTIAL_DEPOSIT, SLOT_DURATION, VERSION, UNIT, MINUTES, HOURS, DAYS,
 	TechnicalCommittee, ArbitrationCommittee, TreasuryCouncil, ContentCommittee,
 	// Entity types (原 ShareMall)
 	Assets, Escrow, EntityRegistry, EntityShop, EntityProduct, EntityTransaction, EntityToken, EntityKyc, EntityDisclosure,
@@ -62,7 +63,7 @@ parameter_types! {
 		NORMAL_DISPATCH_RATIO,
 	);
 	pub RuntimeBlockLength: BlockLength = BlockLength::max_with_normal_ratio(5 * 1024 * 1024, NORMAL_DISPATCH_RATIO);
-	pub const SS58Prefix: u8 = 42;
+	pub const SS58Prefix: u16 = 412;
 }
 
 /// The default types are being injected by [`derive_impl`](`frame_support::derive_impl`) from
@@ -97,10 +98,72 @@ impl frame_system::Config for Runtime {
 
 impl pallet_aura::Config for Runtime {
 	type AuthorityId = AuraId;
-	type DisabledValidators = ();
+	type DisabledValidators = Session;
 	type MaxAuthorities = ConstU32<32>;
 	type AllowMultipleBlocksPerSlot = ConstBool<false>;
 	type SlotDuration = pallet_aura::MinimumPeriodTimesTwo<Runtime>;
+}
+
+parameter_types! {
+	pub const SessionPeriod: BlockNumber = 4 * HOURS;
+	pub const SessionOffset: BlockNumber = 0;
+	pub const MaxSetIdSessionEntries: u64 = 168;
+}
+
+impl pallet_authorship::Config for Runtime {
+	type FindAuthor = pallet_session::FindAccountFromAuthorIndex<Self, Aura>;
+	type EventHandler = ();
+}
+
+pub struct NexusSessionManager;
+impl pallet_session::SessionManager<AccountId> for NexusSessionManager {
+	fn new_session(_new_index: u32) -> Option<alloc::vec::Vec<AccountId>> {
+		None
+	}
+	fn end_session(_end_index: u32) {}
+	fn start_session(_start_index: u32) {}
+}
+
+impl pallet_session::historical::SessionManager<AccountId, ()> for NexusSessionManager {
+	fn new_session(_new_index: u32) -> Option<alloc::vec::Vec<(AccountId, ())>> {
+		None
+	}
+	fn end_session(_end_index: u32) {}
+	fn start_session(_start_index: u32) {}
+}
+
+pub struct FullIdentificationOfImpl;
+impl sp_runtime::traits::Convert<AccountId, Option<()>> for FullIdentificationOfImpl {
+	fn convert(_: AccountId) -> Option<()> {
+		Some(())
+	}
+}
+
+impl pallet_session::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type ValidatorId = <Self as frame_system::Config>::AccountId;
+	type ValidatorIdOf = sp_runtime::traits::ConvertInto;
+	type ShouldEndSession = pallet_session::PeriodicSessions<SessionPeriod, SessionOffset>;
+	type NextSessionRotation = pallet_session::PeriodicSessions<SessionPeriod, SessionOffset>;
+	type SessionManager = pallet_session::historical::NoteHistoricalRoot<Self, NexusSessionManager>;
+	type SessionHandler = <SessionKeys as sp_runtime::traits::OpaqueKeys>::KeyTypeIdProviders;
+	type Keys = SessionKeys;
+	type DisablingStrategy = pallet_session::disabling::UpToLimitDisablingStrategy;
+	type WeightInfo = pallet_session::weights::SubstrateWeight<Runtime>;
+	type Currency = Balances;
+	type KeyDeposit = ();
+}
+
+impl pallet_session::historical::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type FullIdentification = ();
+	type FullIdentificationOf = FullIdentificationOfImpl;
+}
+
+impl pallet_offences::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type IdentificationTuple = pallet_session::historical::IdentificationTuple<Runtime>;
+	type OnOffenceHandler = ();
 }
 
 impl pallet_grandpa::Config for Runtime {
@@ -109,10 +172,11 @@ impl pallet_grandpa::Config for Runtime {
 	type WeightInfo = ();
 	type MaxAuthorities = ConstU32<32>;
 	type MaxNominators = ConstU32<0>;
-	type MaxSetIdSessionEntries = ConstU64<0>;
+	type MaxSetIdSessionEntries = MaxSetIdSessionEntries;
 
-	type KeyOwnerProof = sp_core::Void;
-	type EquivocationReportSystem = ();
+	type KeyOwnerProof = sp_session::MembershipProof;
+	type EquivocationReportSystem =
+		pallet_grandpa::EquivocationReportSystem<Self, Offences, Historical, ConstU64<{ 6 * HOURS as u64 }>>;
 }
 
 impl pallet_timestamp::Config for Runtime {
@@ -125,13 +189,13 @@ impl pallet_timestamp::Config for Runtime {
 
 impl pallet_balances::Config for Runtime {
 	type MaxLocks = ConstU32<50>;
-	type MaxReserves = ();
+	type MaxReserves = ConstU32<50>;
 	type ReserveIdentifier = [u8; 8];
 	/// The type for recording an account's balance.
 	type Balance = Balance;
 	/// The ubiquitous event type.
 	type RuntimeEvent = RuntimeEvent;
-	type DustRemoval = ();
+	type DustRemoval = DustRemovalAdapter;
 	type ExistentialDeposit = ConstU128<EXISTENTIAL_DEPOSIT>;
 	type AccountStore = System;
 	type WeightInfo = pallet_balances::weights::SubstrateWeight<Runtime>;
@@ -143,16 +207,32 @@ impl pallet_balances::Config for Runtime {
 }
 
 parameter_types! {
-	pub FeeMultiplier: Multiplier = Multiplier::one();
+	pub const TargetBlockFullness: sp_runtime::Perquintill = sp_runtime::Perquintill::from_percent(25);
+	pub AdjustmentVariable: Multiplier = Multiplier::saturating_from_rational(3, 100_000);
+	pub MinimumMultiplier: Multiplier = Multiplier::saturating_from_rational(1, 1_000_000u128);
+	pub MaximumMultiplier: Multiplier = Multiplier::saturating_from_integer(10);
+}
+
+pub type SlowAdjustingFeeUpdate<R> = TargetedFeeAdjustment<
+	R, TargetBlockFullness, AdjustmentVariable, MinimumMultiplier, MaximumMultiplier,
+>;
+
+/// Dust removal handler — route dust to treasury instead of destroying it
+pub struct DustRemovalAdapter;
+impl frame_support::traits::OnUnbalanced<pallet_balances::CreditOf<Runtime, ()>> for DustRemovalAdapter {
+	fn on_nonzero_unbalanced(amount: pallet_balances::CreditOf<Runtime, ()>) {
+		use frame_support::traits::fungible::Balanced;
+		let _ = <Balances as Balanced<AccountId>>::resolve(&TreasuryAccountId::get(), amount);
+	}
 }
 
 impl pallet_transaction_payment::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
-	type OnChargeTransaction = FungibleAdapter<Balances, ()>;
+	type OnChargeTransaction = FungibleAdapter<Balances, DustRemovalAdapter>; // tips → treasury via DustRemovalAdapter
 	type OperationalFeeMultiplier = ConstU8<5>;
 	type WeightToFee = IdentityFee<Balance>;
 	type LengthToFee = IdentityFee<Balance>;
-	type FeeMultiplierUpdate = ConstFeeMultiplier<FeeMultiplier>;
+	type FeeMultiplierUpdate = SlowAdjustingFeeUpdate<Runtime>;
 	type WeightInfo = pallet_transaction_payment::weights::SubstrateWeight<Runtime>;
 }
 
@@ -161,6 +241,15 @@ impl pallet_sudo::Config for Runtime {
 	type RuntimeCall = RuntimeCall;
 	type WeightInfo = pallet_sudo::weights::SubstrateWeight<Runtime>;
 }
+
+/// Governance origin type aliases for replacing EnsureRoot post-Sudo removal
+///
+/// TechnicalCommittee 2/3 supermajority for system-level operations
+pub type TechnicalMajority = pallet_collective::EnsureProportionAtLeast<AccountId, TechnicalCollectiveInstance, 2, 3>;
+/// TechnicalCommittee simple majority for lower-risk admin operations
+pub type TechnicalSimpleMajority = pallet_collective::EnsureProportionAtLeast<AccountId, TechnicalCollectiveInstance, 1, 2>;
+/// Either Root (during Sudo transition) or Technical Committee 2/3
+pub type RootOrTechnicalMajority = frame_support::traits::EitherOf<EnsureRoot<AccountId>, TechnicalMajority>;
 
 // -------------------- 全局系统账户（简化方案：4 个核心账户）--------------------
 
@@ -395,8 +484,8 @@ impl pallet_dispute_escrow::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type EscrowPalletId = EscrowPalletId;
-	type AuthorizedOrigin = frame_system::EnsureRoot<AccountId>;
-	type AdminOrigin = frame_system::EnsureRoot<AccountId>;
+	type AuthorizedOrigin = RootOrTechnicalMajority;
+	type AdminOrigin = RootOrTechnicalMajority;
 	type MaxExpiringPerBlock = ConstU32<100>;
 	type MaxSplitEntries = ConstU32<20>;
 	type ExpiryPolicy = DefaultExpiryPolicy;
@@ -428,6 +517,17 @@ impl frame_system::offchain::CreateTransactionBase<pallet_storage_service::Call<
 }
 
 impl frame_system::offchain::CreateBare<pallet_storage_service::Call<Runtime>> for Runtime {
+	fn create_bare(call: Self::RuntimeCall) -> Self::Extrinsic {
+		generic::UncheckedExtrinsic::new_bare(call)
+	}
+}
+
+impl frame_system::offchain::CreateTransactionBase<pallet_grandpa::Call<Runtime>> for Runtime {
+	type Extrinsic = UncheckedExtrinsic;
+	type RuntimeCall = RuntimeCall;
+}
+
+impl frame_system::offchain::CreateBare<pallet_grandpa::Call<Runtime>> for Runtime {
 	fn create_bare(call: Self::RuntimeCall) -> Self::Extrinsic {
 		generic::UncheckedExtrinsic::new_bare(call)
 	}
@@ -467,21 +567,26 @@ parameter_types! {
 	pub const EvidenceNsBytes: [u8; 8] = *b"evidence";
 }
 
-/// 证据授权适配器 - 暂时允许所有签名用户
-pub struct AlwaysAuthorizedEvidence;
+/// 证据授权适配器 — 争议当事人可提交证据
+pub struct DisputePartyAuthorizedEvidence;
 
-impl pallet_dispute_evidence::pallet::EvidenceAuthorizer<AccountId> for AlwaysAuthorizedEvidence {
-	fn is_authorized(_ns: [u8; 8], _who: &AccountId) -> bool {
-		true
+impl pallet_dispute_evidence::pallet::EvidenceAuthorizer<AccountId> for DisputePartyAuthorizedEvidence {
+	fn is_authorized(_ns: [u8; 8], who: &AccountId) -> bool {
+		for (_key, complaint) in pallet_dispute_arbitration::pallet::Complaints::<Runtime>::iter() {
+			if &complaint.complainant == who || &complaint.respondent == who {
+				return true;
+			}
+		}
+		pallet_collective::Members::<Runtime, ArbitrationCollectiveInstance>::get().contains(who)
 	}
 }
 
-pub struct AlwaysAuthorizedSeal;
+/// 证据密封授权 — 仅限仲裁委员会成员
+pub struct ArbitrationCommitteeSealAuthorizer;
 
-impl pallet_dispute_evidence::pallet::EvidenceSealAuthorizer<AccountId> for AlwaysAuthorizedSeal {
-	fn can_seal(_ns: [u8; 8], _who: &AccountId) -> bool {
-		// TODO: 对接仲裁委员会权限系统，仅允许仲裁角色密封/解封
-		true
+impl pallet_dispute_evidence::pallet::EvidenceSealAuthorizer<AccountId> for ArbitrationCommitteeSealAuthorizer {
+	fn can_seal(_ns: [u8; 8], who: &AccountId) -> bool {
+		pallet_collective::Members::<Runtime, ArbitrationCollectiveInstance>::get().contains(who)
 	}
 }
 
@@ -497,8 +602,8 @@ impl pallet_dispute_evidence::Config for Runtime {
 	type MaxAuthorizedUsers = ConstU32<50>;
 	type MaxKeyLen = ConstU32<512>;
 	type EvidenceNsBytes = EvidenceNsBytes;
-	type Authorizer = AlwaysAuthorizedEvidence;
-	type SealAuthorizer = AlwaysAuthorizedSeal;
+	type Authorizer = DisputePartyAuthorizedEvidence;
+	type SealAuthorizer = ArbitrationCommitteeSealAuthorizer;
 	type MaxPerSubjectTarget = ConstU32<1000>;
 	type MaxPerSubjectNs = ConstU32<1000>;
 	type WindowBlocks = ConstU32<{ 10 * MINUTES }>;
@@ -515,6 +620,9 @@ impl pallet_dispute_evidence::Config for Runtime {
 	type MaxPendingRequestsPerContent = ConstU32<50>;
 	type ArchiveTtlBlocks = ConstU32<2_592_000>; // ~180天
 	type ArchiveDelayBlocks = ConstU32<1_296_000>; // ~90天
+	type PrivateContentDeposit = ConstU128<{ UNIT / 100 }>; // 0.01 NEX
+	type AccessRequestTtlBlocks = ConstU32<201_600>; // ~14天 (6s/block)
+	type MaxReasonLen = ConstU32<256>;
 }
 
 // -------------------- Arbitration (仲裁) --------------------
@@ -671,10 +779,10 @@ impl pallet_collective::Config<TechnicalCollectiveInstance> for Runtime {
 	type MaxMembers = TechnicalMaxMembers;
 	type DefaultVote = pallet_collective::PrimeDefaultVote;
 	type WeightInfo = pallet_collective::weights::SubstrateWeight<Runtime>;
-	type SetMembersOrigin = frame_system::EnsureRoot<AccountId>;
+	type SetMembersOrigin = RootOrTechnicalMajority;
 	type MaxProposalWeight = MaxTechnicalProposalWeight;
-	type DisapproveOrigin = frame_system::EnsureRoot<AccountId>;
-	type KillOrigin = frame_system::EnsureRoot<AccountId>;
+	type DisapproveOrigin = RootOrTechnicalMajority;
+	type KillOrigin = RootOrTechnicalMajority;
 	type Consideration = ();
 }
 
@@ -699,10 +807,10 @@ impl pallet_collective::Config<ArbitrationCollectiveInstance> for Runtime {
 	type MaxMembers = ArbitrationMaxMembers;
 	type DefaultVote = pallet_collective::PrimeDefaultVote;
 	type WeightInfo = pallet_collective::weights::SubstrateWeight<Runtime>;
-	type SetMembersOrigin = frame_system::EnsureRoot<AccountId>;
+	type SetMembersOrigin = RootOrTechnicalMajority;
 	type MaxProposalWeight = MaxArbitrationProposalWeight;
-	type DisapproveOrigin = frame_system::EnsureRoot<AccountId>;
-	type KillOrigin = frame_system::EnsureRoot<AccountId>;
+	type DisapproveOrigin = RootOrTechnicalMajority;
+	type KillOrigin = RootOrTechnicalMajority;
 	type Consideration = ();
 }
 
@@ -727,10 +835,10 @@ impl pallet_collective::Config<TreasuryCollectiveInstance> for Runtime {
 	type MaxMembers = TreasuryMaxMembers;
 	type DefaultVote = pallet_collective::PrimeDefaultVote;
 	type WeightInfo = pallet_collective::weights::SubstrateWeight<Runtime>;
-	type SetMembersOrigin = frame_system::EnsureRoot<AccountId>;
+	type SetMembersOrigin = RootOrTechnicalMajority;
 	type MaxProposalWeight = MaxTreasuryProposalWeight;
-	type DisapproveOrigin = frame_system::EnsureRoot<AccountId>;
-	type KillOrigin = frame_system::EnsureRoot<AccountId>;
+	type DisapproveOrigin = RootOrTechnicalMajority;
+	type KillOrigin = RootOrTechnicalMajority;
 	type Consideration = ();
 }
 
@@ -755,10 +863,10 @@ impl pallet_collective::Config<ContentCollectiveInstance> for Runtime {
 	type MaxMembers = ContentMaxMembers;
 	type DefaultVote = pallet_collective::PrimeDefaultVote;
 	type WeightInfo = pallet_collective::weights::SubstrateWeight<Runtime>;
-	type SetMembersOrigin = frame_system::EnsureRoot<AccountId>;
+	type SetMembersOrigin = RootOrTechnicalMajority;
 	type MaxProposalWeight = MaxContentProposalWeight;
-	type DisapproveOrigin = frame_system::EnsureRoot<AccountId>;
-	type KillOrigin = frame_system::EnsureRoot<AccountId>;
+	type DisapproveOrigin = RootOrTechnicalMajority;
+	type KillOrigin = RootOrTechnicalMajority;
 	type Consideration = ();
 }
 
@@ -769,11 +877,11 @@ pub type TechnicalMembershipInstance = pallet_collective_membership::Instance1;
 
 impl pallet_collective_membership::Config<TechnicalMembershipInstance> for Runtime {
 	type RuntimeEvent = RuntimeEvent;
-	type AddOrigin = frame_system::EnsureRoot<AccountId>;
-	type RemoveOrigin = frame_system::EnsureRoot<AccountId>;
-	type SwapOrigin = frame_system::EnsureRoot<AccountId>;
-	type ResetOrigin = frame_system::EnsureRoot<AccountId>;
-	type PrimeOrigin = frame_system::EnsureRoot<AccountId>;
+	type AddOrigin = RootOrTechnicalMajority;
+	type RemoveOrigin = RootOrTechnicalMajority;
+	type SwapOrigin = RootOrTechnicalMajority;
+	type ResetOrigin = RootOrTechnicalMajority;
+	type PrimeOrigin = RootOrTechnicalMajority;
 	type MembershipInitialized = TechnicalCommittee;
 	type MembershipChanged = TechnicalCommittee;
 	type MaxMembers = TechnicalMaxMembers;
@@ -785,11 +893,11 @@ pub type ArbitrationMembershipInstance = pallet_collective_membership::Instance2
 
 impl pallet_collective_membership::Config<ArbitrationMembershipInstance> for Runtime {
 	type RuntimeEvent = RuntimeEvent;
-	type AddOrigin = frame_system::EnsureRoot<AccountId>;
-	type RemoveOrigin = frame_system::EnsureRoot<AccountId>;
-	type SwapOrigin = frame_system::EnsureRoot<AccountId>;
-	type ResetOrigin = frame_system::EnsureRoot<AccountId>;
-	type PrimeOrigin = frame_system::EnsureRoot<AccountId>;
+	type AddOrigin = RootOrTechnicalMajority;
+	type RemoveOrigin = RootOrTechnicalMajority;
+	type SwapOrigin = RootOrTechnicalMajority;
+	type ResetOrigin = RootOrTechnicalMajority;
+	type PrimeOrigin = RootOrTechnicalMajority;
 	type MembershipInitialized = ArbitrationCommittee;
 	type MembershipChanged = ArbitrationCommittee;
 	type MaxMembers = ArbitrationMaxMembers;
@@ -801,11 +909,11 @@ pub type TreasuryMembershipInstance = pallet_collective_membership::Instance3;
 
 impl pallet_collective_membership::Config<TreasuryMembershipInstance> for Runtime {
 	type RuntimeEvent = RuntimeEvent;
-	type AddOrigin = frame_system::EnsureRoot<AccountId>;
-	type RemoveOrigin = frame_system::EnsureRoot<AccountId>;
-	type SwapOrigin = frame_system::EnsureRoot<AccountId>;
-	type ResetOrigin = frame_system::EnsureRoot<AccountId>;
-	type PrimeOrigin = frame_system::EnsureRoot<AccountId>;
+	type AddOrigin = RootOrTechnicalMajority;
+	type RemoveOrigin = RootOrTechnicalMajority;
+	type SwapOrigin = RootOrTechnicalMajority;
+	type ResetOrigin = RootOrTechnicalMajority;
+	type PrimeOrigin = RootOrTechnicalMajority;
 	type MembershipInitialized = TreasuryCouncil;
 	type MembershipChanged = TreasuryCouncil;
 	type MaxMembers = TreasuryMaxMembers;
@@ -817,11 +925,11 @@ pub type ContentMembershipInstance = pallet_collective_membership::Instance4;
 
 impl pallet_collective_membership::Config<ContentMembershipInstance> for Runtime {
 	type RuntimeEvent = RuntimeEvent;
-	type AddOrigin = frame_system::EnsureRoot<AccountId>;
-	type RemoveOrigin = frame_system::EnsureRoot<AccountId>;
-	type SwapOrigin = frame_system::EnsureRoot<AccountId>;
-	type ResetOrigin = frame_system::EnsureRoot<AccountId>;
-	type PrimeOrigin = frame_system::EnsureRoot<AccountId>;
+	type AddOrigin = RootOrTechnicalMajority;
+	type RemoveOrigin = RootOrTechnicalMajority;
+	type SwapOrigin = RootOrTechnicalMajority;
+	type ResetOrigin = RootOrTechnicalMajority;
+	type PrimeOrigin = RootOrTechnicalMajority;
 	type MembershipInitialized = ContentCommittee;
 	type MembershipChanged = ContentCommittee;
 	type MaxMembers = ContentMaxMembers;
@@ -993,7 +1101,6 @@ impl pallet_storage_lifecycle::DataOwnerProvider<AccountId> for StorageServiceOw
 }
 
 impl pallet_storage_lifecycle::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type L1ArchiveDelay = ConstU32<{ 30 * DAYS }>;  // 30天后归档到L1
 	type L2ArchiveDelay = ConstU32<{ 90 * DAYS }>;  // L1后90天归档到L2
 	type PurgeDelay = ConstU32<{ 180 * DAYS }>;     // L2后180天可清除
@@ -1187,7 +1294,7 @@ impl pallet_entity_registry::Config for Runtime {
 	type Currency = Balances;
 	type MaxEntityNameLength = ConstU32<64>;
 	type MaxCidLength = ConstU32<64>;
-	type GovernanceOrigin = EnsureRoot<AccountId>;
+	type GovernanceOrigin = RootOrTechnicalMajority;
 	type PricingProvider = EntityPricingProvider;
 	type InitialFundUsdt = ConstU64<50_000_000>;  // 50 USDT
 	type MinInitialFundCos = EntityMinDeposit;
@@ -1203,12 +1310,11 @@ impl pallet_entity_registry::Config for Runtime {
 	type CloseRequestTimeout = ConstU32<{ 7 * DAYS }>;  // 7 天
 	type MaxReferralsPerReferrer = ConstU32<1000>;
 	type StoragePin = pallet_storage_service::Pallet<Runtime>;
-	type OnEntityStatusChange = (EntityDisclosure,);
+	type OnEntityStatusChange = EntityDisclosure;
 	type WeightInfo = pallet_entity_registry::SubstrateWeight;
 }
 
 impl pallet_entity_shop::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type EntityProvider = EntityRegistry;
 	type MaxShopNameLength = ConstU32<64>;
@@ -1227,7 +1333,6 @@ impl pallet_entity_shop::Config for Runtime {
 }
 
 impl pallet_entity_product::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type EntityProvider = EntityRegistry;
 	type ShopProvider = EntityShop;
@@ -1244,7 +1349,6 @@ impl pallet_entity_product::Config for Runtime {
 }
 
 impl pallet_entity_order::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type Escrow = Escrow;
 	type ShopProvider = EntityShop;
@@ -1259,11 +1363,14 @@ impl pallet_entity_order::Config for Runtime {
 	type CommissionHandler = OrderCommissionBridge;
 	type TokenCommissionHandler = TokenOrderCommissionBridge;
 	type ShoppingBalance = ShoppingBalanceBridge;
-	type MemberHandler = EntityMember;
 	type MemberProvider = EntityMemberProvider;
 	type PricingProvider = EntityPricingProvider;
 	type TokenPriceProvider = EntityMarket;
 	type MaxCidLength = ConstU32<64>;
+	type MaxBuyerOrders = ConstU32<1000>;
+	type MaxShopOrders = ConstU32<10000>;
+	type MaxExpiryQueueSize = ConstU32<500>;
+	type WeightInfo = pallet_entity_order::weights::SubstrateWeight<Runtime>;
 }
 
 impl pallet_entity_review::Config for Runtime {
@@ -1291,7 +1398,6 @@ impl pallet_entity_token::pallet::KycLevelProvider<AccountId> for TokenKycBridge
 pub type TokenMemberProvider = pallet_entity_token::pallet::NullMemberProvider;
 
 impl pallet_entity_token::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type AssetId = u64;
 	type AssetBalance = Balance;
 	type Assets = Assets;
@@ -1567,6 +1673,11 @@ impl pallet_entity_governance::Config for Runtime {
 	type TeamWriter = pallet_commission_team::Pallet<Runtime>;
 	type ProductProvider = pallet_entity_product::Pallet<Runtime>;
 	type DisclosureProvider = pallet_entity_disclosure::Pallet<Runtime>;
+	type ProposalCooldown = ConstU32<{ 1 * DAYS }>; // 1天冷却期
+	type EmergencyOrigin = RootOrTechnicalMajority;
+	type MaxVotingPeriod = ConstU32<{ 30 * DAYS }>; // 最大投票期30天
+	type MaxExecutionDelay = ConstU32<{ 14 * DAYS }>;
+	type WeightInfo = pallet_entity_governance::weights::SubstrateWeight<Runtime>;
 }
 
 /// 桥接：KycChecker → pallet-entity-kyc::can_participate_in_entity
@@ -1579,7 +1690,6 @@ impl pallet_entity_member::KycChecker<AccountId> for MemberKycBridge {
 }
 
 impl pallet_entity_member::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type EntityProvider = EntityRegistry;
 	type ShopProvider = EntityShop;
 	type MaxDirectReferrals = ConstU32<1000>;
@@ -1588,7 +1698,8 @@ impl pallet_entity_member::Config for Runtime {
 	type MaxUpgradeHistory = ConstU32<100>;
 	type PendingMemberExpiry = ConstU32<100800>; // 7 days × 24h × 60min × 60s / 6s = 100800 blocks
 	type KycChecker = MemberKycBridge;
-	type OnMemberRemoved = CommissionPoolReward;
+	type OnMemberRemoved = pallet_commission_pool_reward::Pallet<Runtime>;
+	type WeightInfo = pallet_entity_member::weights::SubstrateWeight<Runtime>;
 }
 
 /// 桥接：EntityReferrerProvider → EntityRegistry::entity_referrer()
@@ -1611,7 +1722,6 @@ impl pallet_commission_core::ParticipationGuard<AccountId> for KycParticipationG
 }
 
 impl pallet_commission_core::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type ShopProvider = EntityShop;
 	type EntityProvider = EntityRegistry;
@@ -1651,18 +1761,19 @@ impl pallet_commission_core::Config for Runtime {
 	type SingleLineQuery = crate::CommissionSingleLine;
 	type PoolRewardQuery = crate::CommissionPoolReward;
 	type ReferralQuery = crate::CommissionReferral;
+	type WeightInfo = pallet_commission_core::weights::SubstrateWeight<Runtime>;
+	type GovernanceProvider = EntityGovernance;
 }
 
 impl pallet_commission_referral::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type MemberProvider = EntityMemberProvider;
 	type EntityProvider = EntityRegistry;
-	type MaxTotalReferralRate = ConstU16<10000>;  // 100% = 无限制
+	type MaxTotalReferralRate = ConstU16<10000>;
+	type WeightInfo = pallet_commission_referral::weights::SubstrateWeight<Runtime>;
 }
 
 impl pallet_commission_multi_level::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type MemberProvider = EntityMemberProvider;
 	type EntityProvider = EntityRegistry;
 	type MaxMultiLevels = ConstU32<15>;
@@ -1671,7 +1782,6 @@ impl pallet_commission_multi_level::Config for Runtime {
 }
 
 impl pallet_commission_pool_reward::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type MemberProvider = EntityMemberProvider;
 	type EntityProvider = EntityRegistry;
@@ -1683,22 +1793,22 @@ impl pallet_commission_pool_reward::Config for Runtime {
 	type TokenPoolBalanceProvider = pallet_commission_core::Pallet<Runtime>;
 	type TokenTransferProvider = TokenTransferProviderBridge;
 	type ParticipationGuard = KycParticipationGuard;
-	type WeightInfo = pallet_commission_pool_reward::weights::SubstrateWeight;
+	type WeightInfo = pallet_commission_pool_reward::weights::SubstrateWeight<Runtime>;
 	// F4: 最小轮次间隔 ~1 天 @6s/block
 	type MinRoundDuration = ConstU32<14400>;
 	// F10: 每个 Entity 保留最近 20 轮历史
 	type MaxRoundHistory = ConstU32<20>;
 	// F12: 池奖励领取回调（暂用空实现）
 	type ClaimCallback = ();
+	type ConfigChangeDelay = ConstU32<14400>; // ~1天 @6s/block
 }
 
 impl pallet_commission_level_diff::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type MemberProvider = EntityMemberProvider;
 	type EntityProvider = EntityRegistry;
 	type MaxCustomLevels = ConstU32<10>;
-	type WeightInfo = ();
+	type WeightInfo = pallet_commission_level_diff::weights::SubstrateWeight<Runtime>;
 }
 
 /// 桥接：CommissionCore 的 MemberCommissionStats 作为 SingleLine 的 StatsProvider
@@ -1720,26 +1830,28 @@ impl pallet_commission_single_line::pallet::SingleLineMemberLevelProvider<Accoun
 }
 
 impl pallet_commission_team::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type MemberProvider = EntityMemberProvider;
 	type EntityProvider = EntityRegistry;
 	type MaxTeamTiers = ConstU32<10>;
-	type WeightInfo = ();
+	type WeightInfo = pallet_commission_team::weights::SubstrateWeight<Runtime>;
 }
 
 impl pallet_commission_single_line::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type StatsProvider = SingleLineStatsFromCore;
 	type MemberLevelProvider = SingleLineLevelFromMember;
 	type EntityProvider = EntityRegistry;
 	type MemberProvider = EntityMemberProvider;
 	type MaxSingleLineLength = ConstU32<50>;
+	type WeightInfo = pallet_commission_single_line::weights::SubstrateWeight<Runtime>;
+	type ConfigChangeDelay = ConstU32<100>;
+	type MaxSegmentCount = ConstU32<20>;
+	type MaxTotalRateBps = ConstU32<10000>; // 100%
+	type MaxConfigChangeLogs = ConstU32<100>;
 }
 
 impl pallet_entity_market::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type Balance = Balance;
 	type TokenBalance = Balance;
@@ -1756,6 +1868,8 @@ impl pallet_entity_market::Config for Runtime {
 	type MaxTradeHistoryPerUser = ConstU32<200>;
 	type MaxOrderHistoryPerUser = ConstU32<200>;
 	type PricingProvider = EntityPricingProvider;
+	type MaxOrderBookSize = ConstU32<1000>;
+	type WeightInfo = pallet_entity_market::weights::SubstrateWeight<Runtime>;
 }
 
 // ============================================================================
@@ -1798,10 +1912,10 @@ impl pallet_entity_disclosure::Config for Runtime {
 	type MaxInsiderTransactionHistory = ConstU32<50>;
 	type EmergencyBlackoutMultiplier = ConstU32<3>;
 	type OnDisclosureViolation = ();
+	type WeightInfo = pallet_entity_disclosure::weights::SubstrateWeight<Runtime>;
 }
 
 impl pallet_entity_kyc::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type MaxCidLength = ConstU32<64>;
 	type MaxProviderNameLength = ConstU32<64>;
 	type MaxProviders = ConstU32<20>;
@@ -1809,11 +1923,13 @@ impl pallet_entity_kyc::Config for Runtime {
 	type StandardKycValidity = StandardKycValidity;
 	type EnhancedKycValidity = EnhancedKycValidity;
 	type InstitutionalKycValidity = InstitutionalKycValidity;
-	type AdminOrigin = EnsureRoot<AccountId>;
+	type AdminOrigin = RootOrTechnicalMajority;
 	type EntityProvider = EntityRegistry;
 	type MaxHistoryEntries = ConstU32<50>;
 	type PendingKycTimeout = ConstU32<{ 14400 * 7 }>; // ~7 天 (14400 blocks/天)
 	type OnKycStatusChange = ();
+	type MaxAuthorizedEntities = ConstU32<100>;
+	type WeightInfo = pallet_entity_kyc::weights::SubstrateWeight<Runtime>;
 }
 
 /// TokenSale KYC 适配器（桥接 pallet-entity-kyc → KycChecker trait）
@@ -1825,7 +1941,6 @@ impl pallet_entity_tokensale::KycChecker<AccountId> for TokenSaleKycBridge {
 }
 
 impl pallet_entity_tokensale::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type AssetId = u64;
 	type EntityProvider = EntityRegistry;
@@ -1874,7 +1989,6 @@ parameter_types! {
 }
 
 impl pallet_grouprobot_registry::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type MaxBotsPerOwner = ConstU32<20>;
 	type MaxPlatformsPerCommunity = ConstU32<5>;
 	type MaxPlatformBindingsPerUser = ConstU32<5>;
@@ -1889,6 +2003,7 @@ impl pallet_grouprobot_registry::Config for Runtime {
 	type MaxOperatorContactLen = ConstU32<128>;
 	type MaxBotsPerOperator = ConstU32<50>;
 	type MaxUptimeEraHistory = ConstU32<365>;
+	type WeightInfo = pallet_grouprobot_registry::weights::SubstrateWeight<Runtime>;
 }
 
 /// GroupRobot BotRegistry Bridge: 将 pallet-grouprobot-registry 桥接到 BotRegistryProvider trait
@@ -2071,7 +2186,6 @@ impl frame_support::traits::Get<u64> for GrCurrentEraProvider {
 }
 
 impl pallet_grouprobot_subscription::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type BotRegistry = GrBotRegistryBridge;
 	type BasicFeePerEra = GrBasicFeePerEra;
@@ -2088,6 +2202,7 @@ impl pallet_grouprobot_subscription::Config for Runtime {
 	type AdProThreshold = ConstU32<6>;
 	type AdEnterpriseThreshold = ConstU32<11>;
 	type MaxUnderdeliveryEras = ConstU8<3>;
+	type WeightInfo = pallet_grouprobot_subscription::weights::SubstrateWeight<Runtime>;
 }
 
 /// NodeConsensus Bridge: 从 consensus pallet 读取节点信息
@@ -2105,28 +2220,27 @@ impl pallet_grouprobot_primitives::NodeConsensusProvider<AccountId> for GrNodeCo
 }
 
 impl pallet_grouprobot_rewards::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type NodeConsensus = GrNodeConsensusBridge;
 	type BotRegistry = GrBotRegistryBridge;
 	type RewardPoolAccount = RewardPoolAccountId;
 	type MaxEraHistory = GrMaxEraHistory;
 	type MaxBatchClaim = ConstU32<20>;
+	type WeightInfo = pallet_grouprobot_rewards::weights::SubstrateWeight;
 }
 
 impl pallet_grouprobot_community::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type MaxLogsPerCommunity = ConstU32<10000>;
 	type ReputationCooldown = ConstU32<100>;
 	type MaxReputationDelta = ConstU32<1000>;
 	type MaxBatchSize = ConstU32<50>;
 	type BlocksPerDay = ConstU32<14_400>;
+	type WeightInfo = pallet_grouprobot_community::weights::SubstrateWeight<Runtime>;
 	type BotRegistry = GrBotRegistryBridge;
 	type Subscription = pallet_grouprobot_subscription::Pallet<Runtime>;
 }
 
 impl pallet_grouprobot_ceremony::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type MaxParticipants = ConstU32<20>;
 	type MaxCeremonyHistory = ConstU32<10>;
 	type CeremonyValidityBlocks = GrCeremonyValidityBlocks;
@@ -2134,6 +2248,7 @@ impl pallet_grouprobot_ceremony::Config for Runtime {
 	type MaxProcessPerBlock = ConstU32<50>;
 	type BotRegistry = GrBotRegistryBridge;
 	type Subscription = pallet_grouprobot_subscription::Pallet<Runtime>;
+	type WeightInfo = pallet_grouprobot_ceremony::weights::SubstrateWeight;
 }
 
 // ============================================================================
@@ -2165,7 +2280,6 @@ parameter_types! {
 }
 
 impl pallet_ads_core::pallet::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type MaxAdTextLength = ConstU32<256>;
 	type MaxAdUrlLength = ConstU32<512>;
@@ -2191,10 +2305,13 @@ impl pallet_ads_core::pallet::Config for Runtime {
 	type ReceiptConfirmationWindow = ConstU32<7200>; // ≈ 12h @ 6s/block
 	type AdvertiserReferralRate = ConstU32<500>; // 5% of platform share
 	type MaxReferredAdvertisers = ConstU32<100>;
+	type WeightInfo = pallet_ads_core::weights::SubstrateWeight;
+	type MaxActiveApprovedCampaigns = ConstU32<1000>;
+	type MaxCampaignsByDeliveryType = ConstU32<500>;
+	type MaxCampaignsForPlacement = ConstU32<100>;
 }
 
 impl pallet_ads_grouprobot::pallet::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type NodeConsensus = GrNodeConsensusBridge;
 	type Subscription = pallet_grouprobot_subscription::Pallet<Runtime>;
@@ -2207,10 +2324,12 @@ impl pallet_ads_grouprobot::pallet::Config for Runtime {
 	type AdSlashPercentage = ConstU32<30>;             // 30% slash
 	type UnbondingPeriod = ConstU32<14_400>;           // ~24h @ 6s/block
 	type StakerRewardPct = ConstU32<10>;               // 质押者分成 10%
+	type MaxStakersPerCommunity = ConstU32<200>;
+	type WeightInfo = pallet_ads_grouprobot::weights::SubstrateWeight;
 }
 
 impl pallet_ads_entity::pallet::Config for Runtime {
-	type RuntimeEvent = RuntimeEvent;
+	type WeightInfo = pallet_ads_entity::weights::SubstrateWeight<Runtime>;
 	type Currency = Balances;
 	type EntityProvider = pallet_entity_registry::Pallet<Runtime>;
 	type ShopProvider = pallet_entity_shop::Pallet<Runtime>;

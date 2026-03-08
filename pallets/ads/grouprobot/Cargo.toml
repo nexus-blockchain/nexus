@@ -1,6 +1,6 @@
 [package]
 name = "pallet-ads-grouprobot"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Nexus Team"]
 edition = "2021"
 license = "Apache-2.0"
@@ -21,6 +21,7 @@ pallet-grouprobot-primitives = { path = "../../grouprobot/primitives", default-f
 frame-support = { workspace = true }
 frame-system = { workspace = true }
 sp-runtime = { workspace = true }
+frame-benchmarking = { workspace = true, optional = true }
 
 [dev-dependencies]
 sp-io = { workspace = true }
@@ -37,6 +38,7 @@ std = [
 	"frame-support/std",
 	"frame-system/std",
 	"sp-runtime/std",
+	"frame-benchmarking?/std",
 ]
 try-runtime = [
 	"frame-support/try-runtime",
@@ -47,4 +49,5 @@ runtime-benchmarks = [
 	"frame-support/runtime-benchmarks",
 	"frame-system/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",
+	"frame-benchmarking/runtime-benchmarks",
 ]

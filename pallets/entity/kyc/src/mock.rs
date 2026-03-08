@@ -100,7 +100,6 @@ parameter_types! {
 }
 
 impl pallet_entity_kyc::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type MaxCidLength = ConstU32<64>;
     type MaxProviderNameLength = ConstU32<64>;
     type MaxProviders = ConstU32<20>;
@@ -114,6 +113,7 @@ impl pallet_entity_kyc::Config for Test {
     type PendingKycTimeout = PendingKycTimeout;
     type MaxAuthorizedEntities = ConstU32<100>;
     type OnKycStatusChange = ();
+    type WeightInfo = ();
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

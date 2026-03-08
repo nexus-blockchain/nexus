@@ -14,6 +14,9 @@
 extern crate alloc;
 
 pub use pallet::*;
+pub use weights::WeightInfo;
+
+pub mod weights;
 
 #[cfg(test)]
 mod mock;
@@ -121,13 +124,16 @@ pub struct ActionLog<T: Config> {
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
+	use frame_support::BoundedVec;
+
+	const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
 
 	#[pallet::pallet]
+	#[pallet::storage_version(STORAGE_VERSION)]
 	pub struct Pallet<T>(_);
 
 	#[pallet::config]
-	pub trait Config: frame_system::Config {
-		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+	pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
 		/// 每个社区最大日志数
 		#[pallet::constant]
 		type MaxLogsPerCommunity: Get<u32>;
@@ -143,6 +149,8 @@ pub mod pallet {
 		/// M3-R3: 每日区块数 (用于日志保留期计算, 6s/block = 14400)
 		#[pallet::constant]
 		type BlocksPerDay: Get<u32>;
+		/// 权重信息
+		type WeightInfo: WeightInfo;
 		/// Bot 注册查询
 		type BotRegistry: BotRegistryProvider<Self::AccountId>;
 		/// 订阅层级查询 (tier gate)
@@ -354,7 +362,7 @@ pub mod pallet {
 		/// P2-fix: 链上验证 Ed25519 签名,确保日志由持有 Bot private key 的 TEE 节点产生。
 		/// 签名消息格式: community_id_hash(32) || action_type(u8) || target_hash(32) || sequence(u64 LE) || message_hash(32)
 		#[pallet::call_index(0)]
-		#[pallet::weight(Weight::from_parts(55_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::submit_action_log())]
 		pub fn submit_action_log(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -415,14 +423,14 @@ pub mod pallet {
 
 		/// 设置社区节点准入策略
 		#[pallet::call_index(1)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::set_node_requirement())]
 		pub fn set_node_requirement(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
 			requirement: NodeRequirement,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
-			Self::ensure_bot_owner(&who, &community_id_hash)?;
+			Self::ensure_active_bot_owner(&who, &community_id_hash)?;
 			Self::ensure_not_banned(&community_id_hash)?;
 
 			CommunityConfigs::<T>::try_mutate(&community_id_hash, |maybe_config| {
@@ -438,7 +446,7 @@ pub mod pallet {
 
 		/// 更新社区群规则配置 (CAS 乐观锁)
 		#[pallet::call_index(2)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::update_community_config())]
 		pub fn update_community_config(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -501,14 +509,11 @@ pub mod pallet {
 		/// P2-fix: 每条日志独立验证 Ed25519 签名。
 		/// H1-fix: weight 按日志数量线性缩放。
 		#[pallet::call_index(3)]
-		#[pallet::weight(Weight::from_parts(
-			30_000_000u64.saturating_add(55_000_000u64.saturating_mul(logs.len() as u64)),
-			5_000u64.saturating_add(500u64.saturating_mul(logs.len() as u64)),
-		))]
+		#[pallet::weight(T::WeightInfo::batch_submit_logs(logs.len() as u32))]
 		pub fn batch_submit_logs(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
-			logs: alloc::vec::Vec<(ActionType, [u8; 32], u64, [u8; 32], [u8; 64])>,
+			logs: BoundedVec<(ActionType, [u8; 32], u64, [u8; 32], [u8; 64]), T::MaxBatchSize>,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 			Self::ensure_active_bot_owner(&who, &community_id_hash)?;
@@ -520,8 +525,6 @@ pub mod pallet {
 			);
 
 			ensure!(!logs.is_empty(), Error::<T>::EmptyBatch);
-			// M2-R3: 使用可配置的 MaxBatchSize 替代硬编码 50
-			ensure!(logs.len() <= T::MaxBatchSize::get() as usize, Error::<T>::BatchTooLarge);
 
 			// M4-fix: 批量日志内 sequence 须严格递增，且首条须大于链上最后 sequence
 			let mut prev_seq = LastSequence::<T>::get(&community_id_hash);
@@ -576,7 +579,7 @@ pub mod pallet {
 		/// P4-fix: 仅该社区绑定的 Bot owner 可操作。
 		/// L1-R2: 委托到 do_modify_reputation 共享 helper。
 		#[pallet::call_index(5)]
-		#[pallet::weight(Weight::from_parts(35_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::award_reputation())]
 		pub fn award_reputation(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -592,7 +595,7 @@ pub mod pallet {
 		/// P4-fix: 仅该社区绑定的 Bot owner 可操作。
 		/// L1-R2: 委托到 do_modify_reputation 共享 helper。
 		#[pallet::call_index(6)]
-		#[pallet::weight(Weight::from_parts(35_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::deduct_reputation())]
 		pub fn deduct_reputation(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -607,7 +610,7 @@ pub mod pallet {
 		///
 		/// P4-fix: 仅该社区绑定的 Bot owner 可操作。
 		#[pallet::call_index(7)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::reset_reputation())]
 		pub fn reset_reputation(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -629,7 +632,7 @@ pub mod pallet {
 		///
 		/// active_members 由 Bot 统计 (7天内有效发言人数), 独立于 update_community_config。
 		#[pallet::call_index(8)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::update_active_members())]
 		pub fn update_active_members(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -657,7 +660,7 @@ pub mod pallet {
 		/// CM1-fix: max_age_blocks 不能为 0, 防止任意用户一次擦除全部日志。
 		/// 使用 `<=` 比较确保恰好等于 max_age 的日志不会被误删。
 		#[pallet::call_index(4)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 10_000))]
+		#[pallet::weight(T::WeightInfo::clear_expired_logs())]
 		pub fn clear_expired_logs(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -699,7 +702,7 @@ pub mod pallet {
 		/// 任何人可调用。检查指定 (operator, community, user) 的冷却是否已过期,
 		/// 若已过期则删除该条目。
 		#[pallet::call_index(9)]
-		#[pallet::weight(Weight::from_parts(15_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::cleanup_expired_cooldowns())]
 		pub fn cleanup_expired_cooldowns(
 			origin: OriginFor<T>,
 			operator: T::AccountId,
@@ -728,9 +731,9 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// Bot Owner 删除社区配置 (清理孤儿数据)
+		/// Bot Owner 删除社区配置 (清理全部关联数据)
 		#[pallet::call_index(10)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::delete_community_config())]
 		pub fn delete_community_config(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -745,6 +748,9 @@ pub mod pallet {
 			CommunityConfigs::<T>::remove(&community_id_hash);
 			ActionLogs::<T>::remove(&community_id_hash);
 			LastSequence::<T>::remove(&community_id_hash);
+			let _ = MemberReputation::<T>::clear_prefix(&community_id_hash, u32::MAX, None);
+			// ReputationCooldowns NMap key order is (AccountId, CommunityIdHash, [u8;32]),
+			// cannot clear_prefix by second key; entries expire naturally via cleanup_expired_cooldowns.
 
 			Self::deposit_event(Event::CommunityConfigDeleted { community_id_hash });
 			Ok(())
@@ -752,7 +758,7 @@ pub mod pallet {
 
 		/// Root 强制删除社区 (清除全部数据)
 		#[pallet::call_index(11)]
-		#[pallet::weight(Weight::from_parts(80_000_000, 15_000))]
+		#[pallet::weight(T::WeightInfo::force_remove_community())]
 		pub fn force_remove_community(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -763,6 +769,8 @@ pub mod pallet {
 			ActionLogs::<T>::remove(&community_id_hash);
 			LastSequence::<T>::remove(&community_id_hash);
 			let _ = MemberReputation::<T>::clear_prefix(&community_id_hash, u32::MAX, None);
+			// ReputationCooldowns NMap key order is (AccountId, CommunityIdHash, [u8;32]),
+			// cannot clear_prefix by second key; entries expire naturally via cleanup_expired_cooldowns.
 
 			Self::deposit_event(Event::CommunityForceRemoved { community_id_hash });
 			Ok(())
@@ -770,7 +778,7 @@ pub mod pallet {
 
 		/// Root 封禁社区
 		#[pallet::call_index(12)]
-		#[pallet::weight(Weight::from_parts(25_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::ban_community())]
 		pub fn ban_community(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -790,7 +798,7 @@ pub mod pallet {
 
 		/// Root 解封社区
 		#[pallet::call_index(13)]
-		#[pallet::weight(Weight::from_parts(25_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::unban_community())]
 		pub fn unban_community(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -810,7 +818,7 @@ pub mod pallet {
 
 		/// Root 强制更新社区配置 (绕过 Bot Owner 检查)
 		#[pallet::call_index(14)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::force_update_community_config())]
 		pub fn force_update_community_config(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -860,7 +868,7 @@ pub mod pallet {
 
 		/// Root 强制重置社区全部声誉
 		#[pallet::call_index(15)]
-		#[pallet::weight(Weight::from_parts(100_000_000, 20_000))]
+		#[pallet::weight(T::WeightInfo::force_reset_community_reputation())]
 		pub fn force_reset_community_reputation(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,

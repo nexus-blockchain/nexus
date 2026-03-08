@@ -27,6 +27,9 @@ extern crate alloc;
 
 pub use pallet::*;
 
+pub mod weights;
+pub use weights::WeightInfo;
+
 #[cfg(test)]
 mod mock;
 
@@ -209,9 +212,7 @@ pub mod pallet {
     // ==================== 配置 ====================
 
     #[pallet::config]
-    pub trait Config: frame_system::Config {
-        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-
+    pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
         #[pallet::constant]
         type MaxCidLength: Get<u32>;
 
@@ -248,6 +249,8 @@ pub mod pallet {
         type MaxAuthorizedEntities: Get<u32>;
 
         type OnKycStatusChange: pallet_entity_common::OnKycStatusChange<Self::AccountId>;
+
+        type WeightInfo: WeightInfo;
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(2);
@@ -527,7 +530,7 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// 向指定 Entity 提交 KYC 认证申请（或升级请求）
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::submit_kyc())]
         pub fn submit_kyc(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -622,7 +625,7 @@ pub mod pallet {
 
         /// 批准 KYC（Entity 授权的 Provider 或 Entity Owner/Admin 调用）
         #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(80_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::approve_kyc())]
         pub fn approve_kyc(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -722,7 +725,7 @@ pub mod pallet {
 
         /// 拒绝 KYC（Entity 授权的 Provider 或 Entity Owner/Admin 调用）
         #[pallet::call_index(2)]
-        #[pallet::weight(Weight::from_parts(60_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::reject_kyc())]
         pub fn reject_kyc(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -796,7 +799,7 @@ pub mod pallet {
 
         /// 撤销 KYC（全局管理员调用）
         #[pallet::call_index(3)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::revoke_kyc())]
         pub fn revoke_kyc(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -837,7 +840,7 @@ pub mod pallet {
 
         /// 注册认证提供者（全局，AdminOrigin）
         #[pallet::call_index(4)]
-        #[pallet::weight(Weight::from_parts(60_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::register_provider())]
         pub fn register_provider(
             origin: OriginFor<T>,
             provider_account: T::AccountId,
@@ -876,7 +879,7 @@ pub mod pallet {
 
         /// 移除认证提供者（全局，AdminOrigin）
         #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::remove_provider())]
         pub fn remove_provider(
             origin: OriginFor<T>,
             provider_account: T::AccountId,
@@ -902,7 +905,7 @@ pub mod pallet {
 
         /// 设置实体 KYC 要求（Entity Owner 或有 KYC_MANAGE 权限的管理员可调用）
         #[pallet::call_index(6)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::set_entity_requirement())]
         pub fn set_entity_requirement(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -937,7 +940,7 @@ pub mod pallet {
 
         /// 更新高风险国家列表（全局，AdminOrigin）
         #[pallet::call_index(7)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::update_high_risk_countries())]
         pub fn update_high_risk_countries(
             origin: OriginFor<T>,
             countries: BoundedVec<[u8; 2], ConstU32<50>>,
@@ -967,7 +970,7 @@ pub mod pallet {
 
         /// 标记已过期的 KYC 记录（任何人可调用）
         #[pallet::call_index(8)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::expire_kyc())]
         pub fn expire_kyc(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1002,7 +1005,7 @@ pub mod pallet {
 
         /// 取消待审核的 KYC 申请（用户自行撤回，含升级请求）
         #[pallet::call_index(9)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::cancel_kyc())]
         pub fn cancel_kyc(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1046,7 +1049,7 @@ pub mod pallet {
 
         /// 强制设置实体 KYC 要求（AdminOrigin，跳过 Entity 存在性检查）
         #[pallet::call_index(10)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::force_set_entity_requirement())]
         pub fn force_set_entity_requirement(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1079,7 +1082,7 @@ pub mod pallet {
 
         /// 更新已批准用户的风险评分（Entity 授权的 Provider 或 Entity Owner/Admin 调用）
         #[pallet::call_index(11)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::update_risk_score())]
         pub fn update_risk_score(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1111,7 +1114,7 @@ pub mod pallet {
 
         /// 更新认证提供者信息（全局，AdminOrigin）
         #[pallet::call_index(12)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::update_provider())]
         pub fn update_provider(
             origin: OriginFor<T>,
             provider_account: T::AccountId,
@@ -1146,7 +1149,7 @@ pub mod pallet {
 
         /// 暂停认证提供者（全局，AdminOrigin）
         #[pallet::call_index(13)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::suspend_provider())]
         pub fn suspend_provider(
             origin: OriginFor<T>,
             provider_account: T::AccountId,
@@ -1167,7 +1170,7 @@ pub mod pallet {
 
         /// 恢复认证提供者（全局，AdminOrigin）
         #[pallet::call_index(14)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::resume_provider())]
         pub fn resume_provider(
             origin: OriginFor<T>,
             provider_account: T::AccountId,
@@ -1188,7 +1191,7 @@ pub mod pallet {
 
         /// 强制批准 KYC（AdminOrigin，用于数据迁移/特殊豁免）
         #[pallet::call_index(15)]
-        #[pallet::weight(Weight::from_parts(60_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::force_approve_kyc())]
         pub fn force_approve_kyc(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1249,7 +1252,7 @@ pub mod pallet {
 
         /// 续期 KYC（Entity 授权的 Provider 或 Entity Owner/Admin 调用）
         #[pallet::call_index(16)]
-        #[pallet::weight(Weight::from_parts(60_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::renew_kyc())]
         pub fn renew_kyc(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1301,7 +1304,7 @@ pub mod pallet {
 
         /// 更新待审核 KYC 的数据（用户补充/替换材料，含升级请求）
         #[pallet::call_index(17)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::update_kyc_data())]
         pub fn update_kyc_data(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1349,7 +1352,7 @@ pub mod pallet {
 
         /// 清除 KYC 数据（GDPR 数据删除权，仅限终态记录）
         #[pallet::call_index(18)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::purge_kyc_data())]
         pub fn purge_kyc_data(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1383,7 +1386,7 @@ pub mod pallet {
 
         /// 移除实体 KYC 要求（Entity Owner 或有 KYC_MANAGE 权限的管理员可调用）
         #[pallet::call_index(19)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::remove_entity_requirement())]
         pub fn remove_entity_requirement(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1402,7 +1405,7 @@ pub mod pallet {
 
         /// 超时待审核 KYC（任何人可调用，含升级请求）
         #[pallet::call_index(20)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::timeout_pending_kyc())]
         pub fn timeout_pending_kyc(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1457,10 +1460,7 @@ pub mod pallet {
 
         /// 批量撤销指定 Provider 在指定 Entity 中批准的 KYC
         #[pallet::call_index(21)]
-        #[pallet::weight(Weight::from_parts(
-            50_000_000u64.saturating_add(50_000_000u64.saturating_mul(accounts.len() as u64)),
-            5_000u64.saturating_add(5_000u64.saturating_mul(accounts.len() as u64)),
-        ))]
+        #[pallet::weight(T::WeightInfo::batch_revoke_by_provider(accounts.len() as u32))]
         pub fn batch_revoke_by_provider(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1518,7 +1518,7 @@ pub mod pallet {
 
         /// 授权 Provider 为指定 Entity 审核 KYC（Entity Owner 或 KYC_MANAGE Admin）
         #[pallet::call_index(23)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::authorize_provider())]
         pub fn authorize_provider(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1551,7 +1551,7 @@ pub mod pallet {
 
         /// 撤销 Provider 对指定 Entity 的审核授权（Entity Owner 或 KYC_MANAGE Admin）
         #[pallet::call_index(24)]
-        #[pallet::weight(Weight::from_parts(40_000_000, 4_000))]
+        #[pallet::weight(T::WeightInfo::deauthorize_provider())]
         pub fn deauthorize_provider(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1582,7 +1582,7 @@ pub mod pallet {
 
         /// Entity Owner/Admin 撤销用户 KYC（per-entity 级别的撤销权限）
         #[pallet::call_index(25)]
-        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        #[pallet::weight(T::WeightInfo::entity_revoke_kyc())]
         pub fn entity_revoke_kyc(
             origin: OriginFor<T>,
             entity_id: u64,

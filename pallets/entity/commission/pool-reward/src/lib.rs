@@ -163,8 +163,7 @@ pub mod pallet {
     // ========================================================================
 
     #[pallet::config]
-    pub trait Config: frame_system::Config {
-        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+    pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
         type Currency: Currency<Self::AccountId>;
         type MemberProvider: MemberProvider<Self::AccountId>;
         type EntityProvider: EntityProvider<Self::AccountId>;
@@ -212,6 +211,37 @@ pub mod pallet {
 
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        fn on_idle(_n: BlockNumberFor<T>, remaining_weight: Weight) -> Weight {
+            let base_weight = T::DbWeight::get().reads_writes(1, 1);
+            let mut consumed = Weight::zero();
+            let mut processed = 0u32;
+            const MAX_PER_BLOCK: u32 = 5;
+
+            let mut iter = TokenPoolDeficit::<T>::iter();
+            while processed < MAX_PER_BLOCK {
+                if consumed.saturating_add(base_weight).any_gt(remaining_weight) {
+                    break;
+                }
+                let Some((entity_id, deficit)) = iter.next() else { break };
+                if deficit.is_zero() {
+                    TokenPoolDeficit::<T>::remove(entity_id);
+                    consumed = consumed.saturating_add(base_weight);
+                    processed += 1;
+                    continue;
+                }
+                if T::TokenPoolBalanceProvider::deduct_token_pool(entity_id, deficit).is_ok() {
+                    TokenPoolDeficit::<T>::remove(entity_id);
+                    Self::deposit_event(Event::TokenPoolDeficitCorrected {
+                        entity_id,
+                        amount: deficit,
+                    });
+                }
+                consumed = consumed.saturating_add(base_weight);
+                processed += 1;
+            }
+            consumed
+        }
+
         #[cfg(feature = "std")]
         fn integrity_test() {
             assert!(

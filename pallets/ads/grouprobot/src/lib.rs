@@ -5,7 +5,7 @@
 //! ## 功能
 //! - TEE 节点投放验证 (实现 `DeliveryVerifier`)
 //! - 社区管理员映射 (实现 `PlacementAdminProvider`)
-//! - 三方收入分配: 社区/国库/节点 (实现 `RevenueDistributor`)
+//! - 四方收入分配: 社区/质押者/国库/节点 (实现 `RevenueDistributor`)
 //! - 社区质押 → audience_cap
 //! - 反作弊: audience 突增检测 + 多节点交叉验证
 //! - TEE/社区分成百分比治理
@@ -25,6 +25,12 @@ mod mock;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+
+pub mod weights;
+pub use weights::WeightInfo;
+
 use frame_support::pallet_prelude::*;
 use frame_system::pallet_prelude::*;
 use pallet_ads_primitives::*;
@@ -39,17 +45,22 @@ use frame_support::traits::ExistenceRequirement;
 type BalanceOf<T> =
 	<<T as Config>::Currency as frame_support::traits::Currency<<T as frame_system::Config>::AccountId>>::Balance;
 
+/// 最大并行解锁请求数
+const MAX_UNBONDING_REQUESTS: u32 = 8;
+
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
 	use frame_support::traits::{Currency, ReservableCurrency};
 
+	const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
 	#[pallet::pallet]
+	#[pallet::storage_version(STORAGE_VERSION)]
 	pub struct Pallet<T>(_);
 
 	#[pallet::config]
-	pub trait Config: frame_system::Config {
-		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+	pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
 		type Currency: ReservableCurrency<Self::AccountId>;
 
 		/// 节点共识查询 (用于验证节点状态 + TEE 状态)
@@ -86,9 +97,16 @@ pub mod pallet {
 		#[pallet::constant]
 		type UnbondingPeriod: Get<BlockNumberFor<Self>>;
 
-		/// 质押者从社区广告份额中的分成百分比 (e.g. 10 = 社区份额中 10% 归质押者池)
+		/// 质押者从社区广告份额中的分成百分比 (e.g. 10 = 社区份额中 10% 归质押者池, 必须 ≤ 100)
 		#[pallet::constant]
 		type StakerRewardPct: Get<u32>;
+
+		/// 每个社区最大质押者数量 (用于限制 O(n) 遍历的上界)
+		#[pallet::constant]
+		type MaxStakersPerCommunity: Get<u32>;
+
+		/// Benchmark weight info
+		type WeightInfo: WeightInfo;
 	}
 
 	// ========================================================================
@@ -114,6 +132,11 @@ pub mod pallet {
 		BalanceOf<T>,
 		ValueQuery,
 	>;
+
+	/// 社区当前质押者计数
+	#[pallet::storage]
+	pub type CommunityStakerCount<T: Config> =
+		StorageMap<_, Blake2_128Concat, CommunityIdHash, u32, ValueQuery>;
 
 	/// 社区管理员 (首个质押者自动成为管理员)
 	#[pallet::storage]
@@ -150,13 +173,14 @@ pub mod pallet {
 		ValueQuery,
 	>;
 
-	/// 解锁请求: (社区, 质押者) → (金额, 可提取区块)
+	/// 解锁请求队列: (社区, 质押者) → BoundedVec<(金额, 可提取区块)>
 	#[pallet::storage]
 	pub type UnbondingRequests<T: Config> = StorageDoubleMap<
 		_,
 		Blake2_128Concat, CommunityIdHash,
 		Blake2_128Concat, T::AccountId,
-		(BalanceOf<T>, BlockNumberFor<T>),
+		BoundedVec<(BalanceOf<T>, BlockNumberFor<T>), ConstU32<MAX_UNBONDING_REQUESTS>>,
+		ValueQuery,
 	>;
 
 	/// 社区管理员主动暂停广告
@@ -369,10 +393,12 @@ pub mod pallet {
 		NoClaimableReward,
 		/// 社区无质押
 		NoStakeInCommunity,
-		/// 已有解锁请求待处理
-		UnbondingAlreadyPending,
+		/// 解锁请求队列已满
+		UnbondingQueueFull,
 		/// 不是 Bot Owner
 		NotBotOwner,
+		/// 社区质押者数量已达上限
+		MaxStakersReached,
 	}
 
 	// ========================================================================
@@ -384,7 +410,7 @@ pub mod pallet {
 
 		/// 为社区质押以接入广告
 		#[pallet::call_index(0)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::stake_for_ads())]
 		pub fn stake_for_ads(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -392,6 +418,13 @@ pub mod pallet {
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 			ensure!(!amount.is_zero(), Error::<T>::ZeroStakeAmount);
+
+			let existing = CommunityStakers::<T>::get(&community_id_hash, &who);
+			if existing.is_zero() {
+				let count = CommunityStakerCount::<T>::get(&community_id_hash);
+				ensure!(count < T::MaxStakersPerCommunity::get(), Error::<T>::MaxStakersReached);
+				CommunityStakerCount::<T>::insert(&community_id_hash, count.saturating_add(1));
+			}
 
 			T::Currency::reserve(&who, amount)?;
 
@@ -402,7 +435,6 @@ pub mod pallet {
 				*s = s.saturating_add(amount);
 			});
 
-			// 首个质押者自动成为管理员
 			if !CommunityAdmin::<T>::contains_key(&community_id_hash) {
 				CommunityAdmin::<T>::insert(&community_id_hash, who.clone());
 				Self::deposit_event(Event::CommunityAdminUpdated {
@@ -423,9 +455,9 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// 取消社区质押 (若 UnbondingPeriod > 0 则进入冷却期)
+		/// 取消社区质押 (若 UnbondingPeriod > 0 则进入冷却期, 支持多个并行解锁请求)
 		#[pallet::call_index(1)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::unstake_for_ads())]
 		pub fn unstake_for_ads(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -436,15 +468,13 @@ pub mod pallet {
 
 			let staked = CommunityStakers::<T>::get(&community_id_hash, &who);
 			ensure!(staked >= amount, Error::<T>::InsufficientStake);
-			ensure!(
-				!UnbondingRequests::<T>::contains_key(&community_id_hash, &who),
-				Error::<T>::UnbondingAlreadyPending
-			);
 
-			// 更新质押者余额 + 总质押 + cap (立即生效)
 			let new_staker_balance = staked.saturating_sub(amount);
 			if new_staker_balance.is_zero() {
 				CommunityStakers::<T>::remove(&community_id_hash, &who);
+				CommunityStakerCount::<T>::mutate(&community_id_hash, |c| {
+					*c = c.saturating_sub(1);
+				});
 			} else {
 				CommunityStakers::<T>::insert(&community_id_hash, &who, new_staker_balance);
 			}
@@ -461,14 +491,15 @@ pub mod pallet {
 				CommunityAdmin::<T>::remove(&community_id_hash);
 			}
 
-			// 冷却期: 资金保持 reserved 直到 withdraw_unbonded
 			let unbonding_period = T::UnbondingPeriod::get();
 			if unbonding_period.is_zero() {
 				T::Currency::unreserve(&who, amount);
 			} else {
 				let now = <frame_system::Pallet<T>>::block_number();
 				let unlock_at = now.saturating_add(unbonding_period);
-				UnbondingRequests::<T>::insert(&community_id_hash, &who, (amount, unlock_at));
+				UnbondingRequests::<T>::try_mutate(&community_id_hash, &who, |queue| {
+					queue.try_push((amount, unlock_at)).map_err(|_| Error::<T>::UnbondingQueueFull)
+				})?;
 				Self::deposit_event(Event::UnbondingStarted {
 					community_id_hash,
 					who: who.clone(),
@@ -487,7 +518,7 @@ pub mod pallet {
 		/// 设置 TEE 节点广告分成百分比 (Root)
 		/// None = 恢复默认 15%, Some(x) = 设为 x% (允许 0)
 		#[pallet::call_index(2)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::set_tee_ad_pct())]
 		pub fn set_tee_ad_pct(
 			origin: OriginFor<T>,
 			tee_pct: Option<u32>,
@@ -510,7 +541,7 @@ pub mod pallet {
 		/// 设置社区广告分成百分比 (Root)
 		/// None = 恢复默认 80%, Some(x) = 设为 x% (允许 0)
 		#[pallet::call_index(3)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::set_community_ad_pct())]
 		pub fn set_community_ad_pct(
 			origin: OriginFor<T>,
 			community_pct: Option<u32>,
@@ -532,7 +563,7 @@ pub mod pallet {
 
 		/// 设置社区管理员 (仅当前管理员 / Bot Owner)
 		#[pallet::call_index(4)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::set_community_admin())]
 		pub fn set_community_admin(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -558,7 +589,7 @@ pub mod pallet {
 
 		/// 上报节点 audience (L5 交叉验证)
 		#[pallet::call_index(5)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::report_node_audience())]
 		pub fn report_node_audience(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -573,8 +604,6 @@ pub mod pallet {
 				Error::<T>::NodeOperatorMismatch
 			);
 
-			// M2 审计修复: 同一 node prefix 更新而非追加,避免单节点消耗全部槽位
-			// L-GR4: 使用前 4 字节而非仅首字节,降低碰撞概率
 			NodeAudienceReports::<T>::try_mutate(&community_id_hash, |reports| {
 				let prefix = u32::from_le_bytes([node_id[0], node_id[1], node_id[2], node_id[3]]);
 				if let Some(existing) = reports.iter_mut().find(|(p, _)| *p == prefix) {
@@ -596,7 +625,7 @@ pub mod pallet {
 
 		/// 检测 audience 突增 (L3, 仅 Root/DAO 可触发)
 		#[pallet::call_index(6)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::check_audience_surge())]
 		pub fn check_audience_surge(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -624,9 +653,9 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// H3 审计修复: 恢复因 audience 突增被暂停的社区广告投放 (Root)
+		/// 恢复因 audience 突增被暂停的社区广告投放 (Root)
 		#[pallet::call_index(7)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::resume_audience_surge())]
 		pub fn resume_audience_surge(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -641,12 +670,10 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// M3 审计修复: L5 多节点交叉验证 (Root)
-		/// 调用 validate_node_reports,偏差过大时发射 NodeDeviationRejected 事件。
-		/// 注意: 始终返回 Ok,因为 Substrate 的事务层会在 Err 时回滚所有存储变更(含事件),
-		/// 使 NodeDeviationRejected 无法上链。调用者通过事件判断偏差检测结果。
+		/// L5 多节点交叉验证 (Root)
+		/// 偏差过大时发射 NodeDeviationRejected 事件。始终返回 Ok。
 		#[pallet::call_index(8)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::cross_validate_nodes())]
 		pub fn cross_validate_nodes(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -661,15 +688,13 @@ pub mod pallet {
 				});
 			}
 
-			// 无论结果如何都清理报告
 			NodeAudienceReports::<T>::remove(&community_id_hash);
 			Ok(())
 		}
 
-		/// M3+L2 审计修复: Slash 社区质押 (Root)
-		/// 使用 AdSlashPercentage 计算 slash 金额,从管理员 reserved 中释放并转入国库。
+		/// Slash 社区质押 (Root)
 		#[pallet::call_index(9)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::slash_community(T::MaxStakersPerCommunity::get()))]
 		pub fn slash_community(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -686,7 +711,6 @@ pub mod pallet {
 				return Ok(());
 			}
 
-			// 按比例从各质押者扣除
 			let mut total_slashed: BalanceOf<T> = Zero::zero();
 			let mut slash_count: u32 = 0;
 
@@ -697,13 +721,11 @@ pub mod pallet {
 				if staker_balance.is_zero() {
 					continue;
 				}
-				// 按比例: staker_slash = slash_amount * staker_balance / total_stake
 				let staker_slash = Self::percent_of(staker_balance, slash_pct);
 				if staker_slash.is_zero() {
 					continue;
 				}
 
-				// unreserve 并计算实际释放
 				let remaining = T::Currency::unreserve(&staker, staker_slash);
 				let actual = staker_slash.saturating_sub(remaining);
 
@@ -718,13 +740,15 @@ pub mod pallet {
 						let new_balance = staker_balance.saturating_sub(actual);
 						if new_balance.is_zero() {
 							CommunityStakers::<T>::remove(&community_id_hash, &staker);
+							CommunityStakerCount::<T>::mutate(&community_id_hash, |c| {
+								*c = c.saturating_sub(1);
+							});
 						} else {
 							CommunityStakers::<T>::insert(&community_id_hash, &staker, new_balance);
 						}
 						total_slashed = total_slashed.saturating_add(actual);
 						slash_count = slash_count.saturating_add(1);
 					} else {
-						// 转账失败: 重新 reserve 回退释放的资金
 						let _ = T::Currency::reserve(&staker, actual);
 						Self::deposit_event(Event::SlashTransferFailed {
 							community_id_hash,
@@ -736,7 +760,6 @@ pub mod pallet {
 			}
 
 			if !total_slashed.is_zero() {
-				// 更新总质押 + audience_cap
 				CommunityAdStake::<T>::mutate(&community_id_hash, |s| {
 					*s = s.saturating_sub(total_slashed);
 				});
@@ -748,7 +771,6 @@ pub mod pallet {
 					CommunityAdmin::<T>::remove(&community_id_hash);
 				}
 
-				// 累计 slash 次数
 				CommunitySlashCount::<T>::mutate(&community_id_hash, |c| {
 					*c = c.saturating_add(1);
 				});
@@ -764,12 +786,12 @@ pub mod pallet {
 		}
 
 		// ====================================================================
-		// 新增 Extrinsics (call_index 10-19)
+		// Extrinsics (call_index 10-19)
 		// ====================================================================
 
 		/// 社区管理员暂停广告
 		#[pallet::call_index(10)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::admin_pause_ads())]
 		pub fn admin_pause_ads(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -784,7 +806,7 @@ pub mod pallet {
 
 		/// 社区管理员恢复广告
 		#[pallet::call_index(11)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::admin_resume_ads())]
 		pub fn admin_resume_ads(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -799,7 +821,7 @@ pub mod pallet {
 
 		/// 社区管理员辞职 (回退到 Bot Owner, 若无则清空)
 		#[pallet::call_index(12)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::resign_community_admin())]
 		pub fn resign_community_admin(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -826,33 +848,49 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// 提取解锁到期的质押
+		/// 提取所有到期的解锁质押
 		#[pallet::call_index(13)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::withdraw_unbonded())]
 		pub fn withdraw_unbonded(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
-			let (amount, unlock_at) = UnbondingRequests::<T>::get(&community_id_hash, &who)
-				.ok_or(Error::<T>::NothingToWithdraw)?;
-			let now = <frame_system::Pallet<T>>::block_number();
-			ensure!(now >= unlock_at, Error::<T>::UnbondingNotReady);
+			let mut queue = UnbondingRequests::<T>::get(&community_id_hash, &who);
+			ensure!(!queue.is_empty(), Error::<T>::NothingToWithdraw);
 
-			T::Currency::unreserve(&who, amount);
-			UnbondingRequests::<T>::remove(&community_id_hash, &who);
+			let now = <frame_system::Pallet<T>>::block_number();
+			let mut total_withdrawn: BalanceOf<T> = Zero::zero();
+
+			queue.retain(|&(amount, unlock_at)| {
+				if now >= unlock_at {
+					T::Currency::unreserve(&who, amount);
+					total_withdrawn = total_withdrawn.saturating_add(amount);
+					false
+				} else {
+					true
+				}
+			});
+
+			ensure!(!total_withdrawn.is_zero(), Error::<T>::UnbondingNotReady);
+
+			if queue.is_empty() {
+				UnbondingRequests::<T>::remove(&community_id_hash, &who);
+			} else {
+				UnbondingRequests::<T>::insert(&community_id_hash, &who, queue);
+			}
 
 			Self::deposit_event(Event::UnbondedWithdrawn {
 				community_id_hash,
 				who,
-				amount,
+				amount: total_withdrawn,
 			});
 			Ok(())
 		}
 
 		/// 设置质押阶梯 (Root), 按 threshold 降序
 		#[pallet::call_index(14)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::set_stake_tiers())]
 		pub fn set_stake_tiers(
 			origin: OriginFor<T>,
 			tiers: BoundedVec<(u128, u32), ConstU32<10>>,
@@ -870,7 +908,7 @@ pub mod pallet {
 
 		/// Root 强制设置社区管理员
 		#[pallet::call_index(15)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::force_set_community_admin())]
 		pub fn force_set_community_admin(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -884,7 +922,7 @@ pub mod pallet {
 
 		/// 全局广告暂停开关 (Root)
 		#[pallet::call_index(16)]
-		#[pallet::weight(Weight::from_parts(10_000_000, 2_000))]
+		#[pallet::weight(T::WeightInfo::set_global_ads_pause())]
 		pub fn set_global_ads_pause(
 			origin: OriginFor<T>,
 			paused: bool,
@@ -897,7 +935,7 @@ pub mod pallet {
 
 		/// Bot Owner 禁用/启用广告
 		#[pallet::call_index(17)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::set_bot_ads_enabled())]
 		pub fn set_bot_ads_enabled(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -919,7 +957,7 @@ pub mod pallet {
 
 		/// 质押者提取广告分成
 		#[pallet::call_index(18)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::claim_staker_reward())]
 		pub fn claim_staker_reward(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -947,7 +985,7 @@ pub mod pallet {
 
 		/// Root 强制解除社区全部质押
 		#[pallet::call_index(19)]
-		#[pallet::weight(Weight::from_parts(100_000_000, 20_000))]
+		#[pallet::weight(T::WeightInfo::force_unstake(T::MaxStakersPerCommunity::get()))]
 		pub fn force_unstake(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -973,6 +1011,7 @@ pub mod pallet {
 			CommunityAdStake::<T>::remove(&community_id_hash);
 			CommunityAudienceCap::<T>::remove(&community_id_hash);
 			CommunityAdmin::<T>::remove(&community_id_hash);
+			CommunityStakerCount::<T>::remove(&community_id_hash);
 			let _ = UnbondingRequests::<T>::clear_prefix(&community_id_hash, u32::MAX, None);
 
 			Self::deposit_event(Event::ForceUnstaked {
@@ -989,11 +1028,9 @@ pub mod pallet {
 	// ========================================================================
 
 	impl<T: Config> Pallet<T> {
-		/// 根据质押额计算 audience_cap (阶梯函数, 优先使用可配置 StakeTiers)
 		pub fn compute_audience_cap(stake: BalanceOf<T>) -> u32 {
 			let stake_u128: u128 = stake.try_into().unwrap_or(0u128);
 
-			// 若有自定义阶梯, 使用自定义; 否则使用硬编码默认
 			if let Some(tiers) = StakeTiers::<T>::get() {
 				for &(threshold, cap) in tiers.iter() {
 					if stake_u128 >= threshold {
@@ -1017,14 +1054,12 @@ pub mod pallet {
 			}
 		}
 
-		/// 百分比计算
 		pub fn percent_of(amount: BalanceOf<T>, pct: u32) -> BalanceOf<T> {
 			let pct_balance: BalanceOf<T> = pct.into();
 			let hundred: BalanceOf<T> = 100u32.into();
 			amount.saturating_mul(pct_balance) / hundred
 		}
 
-		/// 验证节点报告偏差 (L5)
 		pub fn validate_node_reports(community_id_hash: &CommunityIdHash) -> Result<(), (u32, u32)> {
 			let reports = NodeAudienceReports::<T>::get(community_id_hash);
 			if reports.len() < 2 {
@@ -1046,17 +1081,14 @@ pub mod pallet {
 			}
 		}
 
-		/// 获取 community_pct (None=默认80)
 		pub fn effective_community_pct() -> u32 {
 			CommunityAdPct::<T>::get().unwrap_or(80)
 		}
 
-		/// 获取 tee_pct (None=默认15)
 		pub fn effective_tee_pct() -> u32 {
 			TeeNodeAdPct::<T>::get().unwrap_or(15)
 		}
 
-		/// 确认调用者是社区管理员或 Bot Owner
 		pub fn ensure_admin_or_bot_owner(
 			who: &T::AccountId,
 			community_id_hash: &CommunityIdHash,
@@ -1072,7 +1104,7 @@ pub mod pallet {
 	}
 
 	// ========================================================================
-	// DeliveryVerifier 实现 — TEE 节点验证 + 订阅门控 + audience_cap 裁切
+	// DeliveryVerifier 实现
 	// ========================================================================
 
 	impl<T: Config> DeliveryVerifier<T::AccountId> for Pallet<T> {
@@ -1082,22 +1114,18 @@ pub mod pallet {
 			audience_size: u32,
 			_node_id: Option<[u8; 32]>,
 		) -> Result<u32, sp_runtime::DispatchError> {
-			// 0. 全局暂停检查
 			if GlobalAdsPaused::<T>::get() {
 				return Err(Error::<T>::GlobalAdsPausedErr.into());
 			}
 
-			// 0b. Bot Owner 禁用检查
 			if BotAdsDisabled::<T>::get(placement_id) {
 				return Err(Error::<T>::BotAdsDisabledErr.into());
 			}
 
-			// 0c. 管理员暂停检查
 			if AdminPausedAds::<T>::get(placement_id) {
 				return Err(Error::<T>::AdsPausedByAdmin.into());
 			}
 
-			// 1. 订阅层级检查
 			let gate = T::Subscription::effective_feature_gate(placement_id);
 			if !gate.tee_access {
 				return Err(Error::<T>::TeeNotAvailableForTier.into());
@@ -1110,17 +1138,14 @@ pub mod pallet {
 				}
 			}
 
-			// 2. TEE 节点验证 — 调用者必须是 TEE 节点运营者
 			if !T::NodeConsensus::is_tee_node_by_operator(who) {
 				return Err(Error::<T>::NodeNotTee.into());
 			}
 
-			// 3. 突增暂停检查
 			if AudienceSurgePaused::<T>::get(placement_id) != 0 {
 				return Err(Error::<T>::CommunityAdsPaused.into());
 			}
 
-			// 4. audience_cap 裁切
 			let cap = CommunityAudienceCap::<T>::get(placement_id);
 			let effective = if cap > 0 {
 				core::cmp::min(audience_size, cap)
@@ -1143,8 +1168,6 @@ pub mod pallet {
 		}
 
 		fn is_placement_banned(_placement_id: &PlacementId) -> bool {
-			// 委托给 ads-core 的 BannedPlacements (通过 runtime 配置)
-			// 此处也可检查 GroupRobot 特有的 ban 逻辑
 			false
 		}
 
@@ -1155,7 +1178,12 @@ pub mod pallet {
 			if BotAdsDisabled::<T>::get(placement_id) {
 				return PlacementStatus::Paused;
 			}
-			// 有管理员或 bot owner → 存在
+			if AdminPausedAds::<T>::get(placement_id) {
+				return PlacementStatus::Paused;
+			}
+			if AudienceSurgePaused::<T>::get(placement_id) != 0 {
+				return PlacementStatus::Paused;
+			}
 			if Self::placement_admin(placement_id).is_some() {
 				PlacementStatus::Active
 			} else {
@@ -1165,40 +1193,30 @@ pub mod pallet {
 	}
 
 	// ========================================================================
-	// RevenueDistributor 实现 — 三方分成
+	// RevenueDistributor 实现 — 四方分成
 	// ========================================================================
 
-	/// H1 审计修复: distribute 实际执行三方分成 — 社区/国库/节点
-	/// ads-core settle_era_ads 已将资金从广告主转入国库。
-	/// 此处从国库转出节点份额到 RewardPoolAccount 并 accrue_node_reward。
-	/// 社区份额通过返回值记入 PlacementClaimable (由 ads-core 管理)。
-	/// 国库保留剩余 (100% - community% - tee%)。
-	/// 质押者从社区份额中按 StakerRewardPct 分成。
 	impl<T: Config> RevenueDistributor<T::AccountId, BalanceOf<T>> for Pallet<T> {
 		fn distribute(
 			placement_id: &PlacementId,
 			total_cost: BalanceOf<T>,
 			_advertiser: &T::AccountId,
 		) -> Result<RevenueBreakdown<BalanceOf<T>>, sp_runtime::DispatchError> {
-			// 全局暂停检查
 			frame_support::ensure!(
 				!GlobalAdsPaused::<T>::get(),
 				Error::<T>::GlobalAdsPausedErr
 			);
 
-			// Bot Owner 禁用检查
 			frame_support::ensure!(
 				!BotAdsDisabled::<T>::get(placement_id),
 				Error::<T>::BotAdsDisabledErr
 			);
 
-			// 管理员暂停检查
 			frame_support::ensure!(
 				!AdminPausedAds::<T>::get(placement_id),
 				Error::<T>::AdsPausedByAdmin
 			);
 
-			// M4 审计修复: 被暂停的社区不应获得收入分配
 			frame_support::ensure!(
 				AudienceSurgePaused::<T>::get(placement_id) == 0,
 				Error::<T>::CommunityAdsPaused
@@ -1210,6 +1228,7 @@ pub mod pallet {
 			let node_share = Self::percent_of(total_cost, tee_pct);
 
 			// 节点份额: 国库 → RewardPoolAccount + accrue
+			// node_id 使用 placement_id (CommunityIdHash) 作为奖励池的分配键
 			if !node_share.is_zero() {
 				let treasury = T::TreasuryAccount::get();
 				let reward_pool = T::RewardPoolAccount::get();
@@ -1219,12 +1238,12 @@ pub mod pallet {
 					node_share,
 					ExistenceRequirement::AllowDeath,
 				).is_ok() {
-					let node_id: pallet_grouprobot_primitives::NodeId = *placement_id;
+					let reward_key: pallet_grouprobot_primitives::NodeId = *placement_id;
 					let node_share_u128: u128 = node_share.try_into().unwrap_or(0u128);
-					T::RewardPool::accrue_node_reward(&node_id, node_share_u128);
+					T::RewardPool::accrue_node_reward(&reward_key, node_share_u128);
 
 					Self::deposit_event(Event::NodeAdRewardAccrued {
-						node_id,
+						node_id: reward_key,
 						amount: node_share,
 					});
 				} else {
@@ -1235,8 +1254,7 @@ pub mod pallet {
 				}
 			}
 
-			// 质押者分成: 从社区份额中按 StakerRewardPct 比例分配给各质押者
-			let staker_pct = T::StakerRewardPct::get();
+			let staker_pct = T::StakerRewardPct::get().min(100);
 			let staker_pool = Self::percent_of(community_share, staker_pct);
 			if !staker_pool.is_zero() {
 				let total_stake = CommunityAdStake::<T>::get(placement_id);
@@ -1247,7 +1265,6 @@ pub mod pallet {
 						if staker_balance.is_zero() {
 							continue;
 						}
-						// staker_reward = staker_pool * staker_balance / total_stake
 						let staker_reward = staker_pool
 							.saturating_mul(staker_balance) / total_stake;
 						if !staker_reward.is_zero() {
@@ -1259,8 +1276,6 @@ pub mod pallet {
 				}
 			}
 
-			// 社区份额返回给 ads-core 记入 PlacementClaimable (扣除质押者份额)
-			// 国库保留剩余 (total_cost - community_share - node_share)
 			let net_community_share = community_share.saturating_sub(staker_pool);
 			let platform_share = total_cost
 				.saturating_sub(community_share)

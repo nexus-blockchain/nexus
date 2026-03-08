@@ -13,6 +13,12 @@
 
 extern crate alloc;
 
+pub mod weights;
+pub use weights::{WeightInfo, SubstrateWeight};
+
+#[cfg(feature = "runtime-benchmarks")]
+pub mod benchmarking;
+
 pub use pallet::*;
 
 #[cfg(test)]
@@ -62,12 +68,14 @@ pub struct CeremonyEnclaveInfo {
 pub mod pallet {
 	use super::*;
 
+	const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
 	#[pallet::pallet]
+	#[pallet::storage_version(STORAGE_VERSION)]
 	pub struct Pallet<T>(_);
 
 	#[pallet::config]
-	pub trait Config: frame_system::Config {
-		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+	pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
 		/// 最大参与节点数
 		#[pallet::constant]
 		type MaxParticipants: Get<u32>;
@@ -87,6 +95,8 @@ pub mod pallet {
 		type BotRegistry: BotRegistryProvider<Self::AccountId>;
 		/// 订阅层级查询 (tier gate)
 		type Subscription: SubscriptionProvider;
+		/// 权重信息（由 benchmark 生成，或使用默认占位值）
+		type WeightInfo: crate::weights::WeightInfo;
 	}
 
 	// ========================================================================
@@ -382,7 +392,7 @@ pub mod pallet {
 	impl<T: Config> Pallet<T> {
 		/// 记录仪式 (验证 Enclave 白名单 + Shamir 参数 + 调用者身份)
 		#[pallet::call_index(0)]
-		#[pallet::weight(Weight::from_parts(60_000_000, 12_000))]
+		#[pallet::weight(T::WeightInfo::record_ceremony(participant_enclaves.len() as u32))]
 		pub fn record_ceremony(
 			origin: OriginFor<T>,
 			ceremony_hash: [u8; 32],
@@ -514,7 +524,7 @@ pub mod pallet {
 
 		/// 撤销仪式 (root)
 		#[pallet::call_index(1)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::revoke_ceremony())]
 		pub fn revoke_ceremony(
 			origin: OriginFor<T>,
 			ceremony_hash: [u8; 32],
@@ -528,7 +538,7 @@ pub mod pallet {
 
 		/// 添加 Ceremony Enclave 到白名单
 		#[pallet::call_index(2)]
-		#[pallet::weight(Weight::from_parts(25_000_000, 4_000))]
+		#[pallet::weight(T::WeightInfo::approve_ceremony_enclave())]
 		pub fn approve_ceremony_enclave(
 			origin: OriginFor<T>,
 			mrenclave: [u8; 32],
@@ -560,7 +570,7 @@ pub mod pallet {
 
 		/// 移除 Ceremony Enclave
 		#[pallet::call_index(3)]
-		#[pallet::weight(Weight::from_parts(20_000_000, 3_000))]
+		#[pallet::weight(T::WeightInfo::remove_ceremony_enclave())]
 		pub fn remove_ceremony_enclave(
 			origin: OriginFor<T>,
 			mrenclave: [u8; 32],
@@ -577,7 +587,7 @@ pub mod pallet {
 
 		/// 强制触发 re-ceremony (安全事件)
 		#[pallet::call_index(4)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::force_re_ceremony())]
 		pub fn force_re_ceremony(
 			origin: OriginFor<T>,
 			ceremony_hash: [u8; 32],
@@ -592,7 +602,7 @@ pub mod pallet {
 		/// M3-R6: 清理终态仪式记录 (任何人可调用)
 		/// 仅清理 Expired / Revoked / Superseded 状态的仪式
 		#[pallet::call_index(5)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::cleanup_ceremony())]
 		pub fn cleanup_ceremony(
 			origin: OriginFor<T>,
 			ceremony_hash: [u8; 32],
@@ -616,7 +626,7 @@ pub mod pallet {
 
 		/// F1: Bot Owner 主动撤销自己 Bot 的活跃仪式
 		#[pallet::call_index(6)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::owner_revoke_ceremony())]
 		pub fn owner_revoke_ceremony(
 			origin: OriginFor<T>,
 			ceremony_hash: [u8; 32],
@@ -639,7 +649,7 @@ pub mod pallet {
 		/// F7: 按 mrenclave 批量撤销所有使用该 Enclave 的活跃仪式（漏洞响应）
 		/// 受 MaxProcessPerBlock 上限约束，超出部分需再次调用
 		#[pallet::call_index(7)]
-		#[pallet::weight(Weight::from_parts(100_000_000, 20_000))]
+		#[pallet::weight(T::WeightInfo::revoke_by_mrenclave())]
 		pub fn revoke_by_mrenclave(
 			origin: OriginFor<T>,
 			mrenclave: [u8; 32],
@@ -674,7 +684,7 @@ pub mod pallet {
 		/// F12: 手动触发仪式过期（任何人可调用）
 		/// 用于在 on_initialize 检查间隔内及时标记已过期的仪式
 		#[pallet::call_index(8)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::trigger_expiry())]
 		pub fn trigger_expiry(
 			origin: OriginFor<T>,
 			ceremony_hash: [u8; 32],
@@ -709,7 +719,7 @@ pub mod pallet {
 		/// F11: 批量清理终态仪式记录（任何人可调用）
 		/// 上限为 MaxProcessPerBlock 条
 		#[pallet::call_index(9)]
-		#[pallet::weight(Weight::from_parts(60_000_000, 12_000))]
+		#[pallet::weight(T::WeightInfo::batch_cleanup_ceremonies(ceremony_hashes.len() as u32))]
 		pub fn batch_cleanup_ceremonies(
 			origin: OriginFor<T>,
 			ceremony_hashes: alloc::vec::Vec<[u8; 32]>,
@@ -745,7 +755,7 @@ pub mod pallet {
 		/// F2: 轻量仪式续期（仅延长 expires_at，不重走 Shamir 分割）
 		/// Bot Owner 调用，验证 Bot 激活 + Tier gate
 		#[pallet::call_index(10)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::renew_ceremony())]
 		pub fn renew_ceremony(
 			origin: OriginFor<T>,
 			ceremony_hash: [u8; 32],

@@ -107,7 +107,7 @@ impl<T: Config> Pallet<T> {
         UserEntity::<T>::try_mutate(&who, |entities| {
             entities.try_push(entity_id).map_err(|_| Error::<T>::MaxEntitiesReached)
         })?;
-        NextEntityId::<T>::put(entity_id.saturating_add(1));
+        NextEntityId::<T>::put(entity_id.checked_add(1).ok_or(Error::<T>::ArithmeticOverflow)?);
 
         // 自动创建 Primary Shop（继承 Entity 名称，默认线上商城）
         let primary_shop_id = T::ShopProvider::create_primary_shop(

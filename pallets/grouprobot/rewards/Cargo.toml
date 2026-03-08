@@ -20,6 +20,7 @@ pallet-grouprobot-primitives = { path = "../primitives", default-features = fals
 frame-support = { workspace = true }
 frame-system = { workspace = true }
 sp-runtime = { workspace = true }
+frame-benchmarking = { workspace = true, optional = true }
 
 [dev-dependencies]
 sp-io = { workspace = true }
@@ -35,6 +36,7 @@ std = [
 	"frame-support/std",
 	"frame-system/std",
 	"sp-runtime/std",
+	"frame-benchmarking?/std",
 ]
 try-runtime = [
 	"frame-support/try-runtime",
@@ -42,6 +44,7 @@ try-runtime = [
 	"sp-runtime/try-runtime",
 ]
 runtime-benchmarks = [
+	"frame-benchmarking/runtime-benchmarks",
 	"frame-support/runtime-benchmarks",
 	"frame-system/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",

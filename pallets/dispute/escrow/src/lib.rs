@@ -553,7 +553,12 @@ pub mod pallet {
             let refund_amount = total.saturating_sub(release_amount);
             
             if !release_amount.is_zero() && !refund_amount.is_zero() {
-                T::Currency::transfer(&escrow, release_to, release_amount, ExistenceRequirement::KeepAlive)
+                let first_existence = if refund_amount.is_zero() {
+                    ExistenceRequirement::AllowDeath
+                } else {
+                    ExistenceRequirement::KeepAlive
+                };
+                T::Currency::transfer(&escrow, release_to, release_amount, first_existence)
                     .map_err(|_| Error::<T>::Insufficient)?;
                 T::Currency::transfer(&escrow, refund_to, refund_amount, ExistenceRequirement::AllowDeath)
                     .map_err(|_| Error::<T>::Insufficient)?;

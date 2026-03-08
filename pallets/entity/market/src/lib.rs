@@ -344,10 +344,7 @@ pub mod pallet {
     // ==================== Config ====================
 
     #[pallet::config]
-    pub trait Config: frame_system::Config {
-        /// 运行时事件类型
-        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-
+    pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
         /// 原生货币（NEX）
         type Currency: Currency<Self::AccountId, Balance = Self::Balance> + ReservableCurrency<Self::AccountId>;
 
@@ -427,6 +424,10 @@ pub mod pallet {
 
         /// NEX/USDT 定价接口（用于 Token→NEX→USDT 间接换算）
         type PricingProvider: PricingProvider;
+
+        /// 每实体订单簿最大订单数
+        #[pallet::constant]
+        type MaxOrderBookSize: Get<u32>;
 
         /// Weight information for extrinsics in this pallet
         type WeightInfo: crate::weights::WeightInfo;
@@ -601,7 +602,7 @@ pub mod pallet {
         _,
         Blake2_128Concat,
         u64, // entity_id
-        BoundedVec<u64, ConstU32<1000>>,
+        BoundedVec<u64, T::MaxOrderBookSize>,
         ValueQuery,
     >;
 
@@ -612,7 +613,7 @@ pub mod pallet {
         _,
         Blake2_128Concat,
         u64, // entity_id
-        BoundedVec<u64, ConstU32<1000>>,
+        BoundedVec<u64, T::MaxOrderBookSize>,
         ValueQuery,
     >;
 

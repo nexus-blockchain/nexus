@@ -135,22 +135,26 @@ impl pallet_ads_core::Config for Test {
 	type MaxAdvertiserWhitelist = ConstU32<20>;
 	type MaxPlacementBlacklist = ConstU32<50>;
 	type MaxPlacementWhitelist = ConstU32<10>;
-	type MinBidPerMille = ConstU128<100_000_000_000>; // 0.1 UNIT
+	type MinBidPerMille = ConstU128<100_000_000_000>;
 	type MinAudienceSize = ConstU32<20>;
 	type AdSlashPercentage = ConstU32<30>;
 	type TreasuryAccount = TreasuryAccountId;
 	type DeliveryVerifier = MockDeliveryVerifier;
 	type ClickVerifier = MockClickVerifier;
-	type MinBidPerClick = ConstU128<50_000_000_000>; // 0.05 UNIT
+	type MinBidPerClick = ConstU128<50_000_000_000>;
 	type PlacementAdmin = MockPlacementAdmin;
 	type RevenueDistributor = MockRevenueDistributor;
-	type PrivateAdRegistrationFee = ConstU128<1_000_000_000_000>; // 1 UNIT
-	type SettlementIncentiveBps = ConstU32<10>; // 0.1%
+	type PrivateAdRegistrationFee = ConstU128<1_000_000_000_000>;
+	type SettlementIncentiveBps = ConstU32<10>;
 	type MaxCampaignsPerAdvertiser = ConstU32<100>;
 	type MaxTargetsPerCampaign = ConstU32<20>;
 	type ReceiptConfirmationWindow = ConstU64<100>;
-	type AdvertiserReferralRate = ConstU32<500>; // 5% of platform share
+	type AdvertiserReferralRate = ConstU32<500>;
 	type MaxReferredAdvertisers = ConstU32<100>;
+	type WeightInfo = ();
+	type MaxActiveApprovedCampaigns = ConstU32<500>;
+	type MaxCampaignsByDeliveryType = ConstU32<200>;
+	type MaxCampaignsForPlacement = ConstU32<100>;
 }
 
 pub const ADVERTISER: u64 = 1;

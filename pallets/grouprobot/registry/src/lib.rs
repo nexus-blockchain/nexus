@@ -16,6 +16,8 @@
 extern crate alloc;
 
 pub use pallet::*;
+pub mod weights;
+pub use weights::WeightInfo;
 
 pub mod dcap;
 
@@ -161,12 +163,14 @@ pub struct OperatorInfo<T: Config> {
 pub mod pallet {
 	use super::*;
 
+	const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
 	#[pallet::pallet]
+	#[pallet::storage_version(STORAGE_VERSION)]
 	pub struct Pallet<T>(_);
 
 	#[pallet::config]
-	pub trait Config: frame_system::Config {
-		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+	pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
 		/// 单个所有者最大 Bot 数
 		#[pallet::constant]
 		type MaxBotsPerOwner: Get<u32>;
@@ -208,6 +212,8 @@ pub mod pallet {
 		/// Peer Uptime 历史保留 Era 数
 		#[pallet::constant]
 		type MaxUptimeEraHistory: Get<u32>;
+		/// Weight 信息 (由 benchmark 生成)
+		type WeightInfo: WeightInfo;
 	}
 
 	// ========================================================================
@@ -533,6 +539,8 @@ pub mod pallet {
 		OperatorNotSuspended,
 		/// Bot 未处于停用状态 (清理时)
 		BotNotDeactivated,
+		/// 此 extrinsic 已弃用, 请使用 submit_tee_attestation
+		Deprecated,
 	}
 
 	// ========================================================================
@@ -624,7 +632,7 @@ pub mod pallet {
 	impl<T: Config> Pallet<T> {
 		/// 注册 Bot
 		#[pallet::call_index(0)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 10_000))]
+		#[pallet::weight(T::WeightInfo::register_bot())]
 		pub fn register_bot(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -657,7 +665,7 @@ pub mod pallet {
 
 		/// 更换 Bot 公钥 (密钥轮换)
 		#[pallet::call_index(1)]
-		#[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::update_public_key())]
 		pub fn update_public_key(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -684,7 +692,7 @@ pub mod pallet {
 
 		/// 停用 Bot
 		#[pallet::call_index(2)]
-		#[pallet::weight(Weight::from_parts(35_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::deactivate_bot())]
 		pub fn deactivate_bot(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -726,7 +734,7 @@ pub mod pallet {
 
 		/// 绑定社区到 Bot
 		#[pallet::call_index(3)]
-		#[pallet::weight(Weight::from_parts(45_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::bind_community())]
 		pub fn bind_community(
 			origin: OriginFor<T>,
 			bot_id_hash: BotIdHash,
@@ -778,7 +786,7 @@ pub mod pallet {
 
 		/// 解绑社区
 		#[pallet::call_index(4)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::unbind_community())]
 		pub fn unbind_community(
 			origin: OriginFor<T>,
 			community_id_hash: CommunityIdHash,
@@ -804,7 +812,7 @@ pub mod pallet {
 
 		/// 用户绑定平台身份
 		#[pallet::call_index(5)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::bind_user_platform())]
 		pub fn bind_user_platform(
 			origin: OriginFor<T>,
 			platform: Platform,
@@ -825,66 +833,19 @@ pub mod pallet {
 		/// 生产环境应使用 `submit_tee_attestation` (call_index 21) 统一入口。
 		/// 此 extrinsic 仅保留用于测试网兼容性。
 		#[pallet::call_index(6)]
-		#[pallet::weight(Weight::from_parts(60_000_000, 12_000))]
+		#[pallet::weight(T::WeightInfo::submit_attestation())]
 		pub fn submit_attestation(
 			origin: OriginFor<T>,
-			bot_id_hash: BotIdHash,
-			tdx_quote_hash: [u8; 32],
-			sgx_quote_hash: Option<[u8; 32]>,
-			mrtd: [u8; 48],
-			mrenclave: Option<[u8; 32]>,
+			_bot_id_hash: BotIdHash,
+			_tdx_quote_hash: [u8; 32],
+			_sgx_quote_hash: Option<[u8; 32]>,
+			_mrtd: [u8; 48],
+			_mrenclave: Option<[u8; 32]>,
 		) -> DispatchResult {
-			let who = ensure_signed(origin)?;
-			let mut bot = Bots::<T>::get(&bot_id_hash).ok_or(Error::<T>::BotNotFound)?;
-			ensure!(bot.owner == who, Error::<T>::NotBotOwner);
-			ensure!(bot.status == BotStatus::Active, Error::<T>::BotNotActive);
-
-			// 检查 MRTD 白名单
-			ensure!(ApprovedMrtd::<T>::contains_key(&mrtd), Error::<T>::MrtdNotApproved);
-
-			// 如果提供了 MRENCLAVE，检查白名单
-			if let Some(ref mre) = mrenclave {
-				ensure!(ApprovedMrenclave::<T>::contains_key(mre), Error::<T>::MrenclaveNotApproved);
-			}
-
-			let now = frame_system::Pallet::<T>::block_number();
-			let expires_at = now.saturating_add(T::AttestationValidityBlocks::get());
-			let is_dual = sgx_quote_hash.is_some() && mrenclave.is_some();
-
-			let record = AttestationRecord::<T> {
-				bot_id_hash,
-				tdx_quote_hash,
-				sgx_quote_hash,
-				mrtd,
-				mrenclave,
-				attester: who,
-				attested_at: now,
-				expires_at,
-				is_dual_attestation: is_dual,
-				quote_verified: false,
-				dcap_level: 0,
-				api_server_mrtd: None,
-				api_server_quote_hash: None,
-			};
-
-			Attestations::<T>::insert(&bot_id_hash, record);
-			Self::enqueue_attestation_expiry(expires_at, bot_id_hash, false)?;
-
-			// 更新 BotInfo 的 node_type
-			let now_u64: u64 = now.unique_saturated_into();
-			let expires_u64: u64 = expires_at.unique_saturated_into();
-			let sgx_attested_at = if is_dual { Some(now_u64) } else { None };
-			bot.node_type = NodeType::TeeNode {
-				mrtd,
-				mrenclave,
-				tdx_attested_at: now_u64,
-				sgx_attested_at,
-				expires_at: expires_u64,
-			};
-			Bots::<T>::insert(&bot_id_hash, bot);
-
-			Self::deposit_event(Event::AttestationSubmitted { bot_id_hash, is_dual });
-			Ok(())
+			ensure_signed(origin)?;
+			// 此 extrinsic 已弃用, Level 0 无签名验证, 生产环境禁止使用。
+			// 请使用 submit_tee_attestation (call_index 21)。
+			Err(Error::<T>::Deprecated.into())
 		}
 
 		/// 刷新 TEE 证明 (24h 周期)

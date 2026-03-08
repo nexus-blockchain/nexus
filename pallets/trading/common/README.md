@@ -377,8 +377,8 @@ cargo test -p pallet-trading-common    # 54 个单元测试
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
-| v0.8.1 | 2026-03-05 | R2 审计: 过时文档修正, cos→nex 变量名, mask_birthday 冗余清理, 校验和切片比较, +10 边界测试 (54 total) |
-| v0.8.0 | 2026-03-04 | R1 审计: get_cos_to_usd_rate→get_nex_to_usd_rate, mask panic 防护, TwapWindow SCALE derives, +4 回归测试 (44 total) |
+| v0.8.1 | 2026-03-08 | R2 收尾: mask_id_card 字符级掩码, doc-tests 可运行, 版本号统一, +10 边界测试 (54 total) |
+| v0.8.0 | 2026-03-04 | R1 审计: get_cos_to_usd_rate→get_nex_to_usd_rate, mask panic 防护, TwapWindow SCALE derives, cos→nex 变量名, 校验和切片比较, +4 回归测试 (44 total) |
 | v0.7.0 | 2026-02-26 | ExchangeRateProvider（置信度接口） |
 | v0.6.0 | 2026-02-23 | PriceOracle + TwapWindow; 共享枚举 + 多档判定 + 梯度没收函数 |
 | v0.5.0 | 2026-02-08 | report_swap_order→report_p2p_trade; define_balance_of! 宏; M7 精度修复 |

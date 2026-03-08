@@ -195,6 +195,22 @@ pub trait ClickVerifier<AccountId> {
 	) -> Result<u32, sp_runtime::DispatchError>;
 }
 
+/// 路由层错误 — 适配层不支持的操作
+#[derive(RuntimeDebug, Clone, PartialEq, Eq)]
+pub enum AdsRouterError {
+	/// 该广告位路径不支持 CPC (点击计费) 模式
+	CpcNotSupportedForPath,
+}
+
+impl From<AdsRouterError> for sp_runtime::DispatchError {
+	fn from(e: AdsRouterError) -> sp_runtime::DispatchError {
+		match e {
+			AdsRouterError::CpcNotSupportedForPath =>
+				sp_runtime::DispatchError::Other("CPC not supported for this placement path"),
+		}
+	}
+}
+
 /// ClickVerifier 空实现 (直通, 用于测试)
 impl<AccountId> ClickVerifier<AccountId> for () {
 	fn verify_and_cap_clicks(
@@ -336,4 +352,210 @@ impl PlacementConfigProvider for () {
 	fn daily_impression_cap(_: &PlacementId) -> u32 { 0 }
 	fn revenue_share_bps(_: &PlacementId) -> u32 { 0 }
 	fn supports_private_ads(_: &PlacementId) -> bool { false }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use codec::{Decode, Encode};
+
+	fn roundtrip<T: Encode + Decode + PartialEq + core::fmt::Debug>(val: T) {
+		let encoded = val.encode();
+		let decoded = T::decode(&mut &encoded[..]).expect("decode failed");
+		assert_eq!(val, decoded);
+	}
+
+	#[test]
+	fn campaign_status_codec_roundtrip() {
+		let variants = [
+			CampaignStatus::Active,
+			CampaignStatus::Paused,
+			CampaignStatus::Exhausted,
+			CampaignStatus::Expired,
+			CampaignStatus::Cancelled,
+			CampaignStatus::Suspended,
+			CampaignStatus::UnderReview,
+		];
+		for v in variants {
+			roundtrip(v);
+		}
+	}
+
+	#[test]
+	fn campaign_status_default_is_active() {
+		assert_eq!(CampaignStatus::default(), CampaignStatus::Active);
+	}
+
+	#[test]
+	fn ad_review_status_codec_roundtrip() {
+		let variants = [
+			AdReviewStatus::Pending,
+			AdReviewStatus::Approved,
+			AdReviewStatus::Rejected,
+			AdReviewStatus::Flagged,
+		];
+		for v in variants {
+			roundtrip(v);
+		}
+	}
+
+	#[test]
+	fn ad_review_status_default_is_pending() {
+		assert_eq!(AdReviewStatus::default(), AdReviewStatus::Pending);
+	}
+
+	#[test]
+	fn campaign_type_codec_roundtrip() {
+		let variants = [
+			CampaignType::Cpm,
+			CampaignType::Cpc,
+			CampaignType::Fixed,
+			CampaignType::Private,
+		];
+		for v in variants {
+			roundtrip(v);
+		}
+	}
+
+	#[test]
+	fn campaign_type_default_is_cpm() {
+		assert_eq!(CampaignType::default(), CampaignType::Cpm);
+	}
+
+	#[test]
+	fn placement_status_codec_roundtrip() {
+		let variants = [
+			PlacementStatus::Active,
+			PlacementStatus::Paused,
+			PlacementStatus::Banned,
+			PlacementStatus::Unknown,
+		];
+		for v in variants {
+			roundtrip(v);
+		}
+	}
+
+	#[test]
+	fn placement_status_default_is_unknown() {
+		assert_eq!(PlacementStatus::default(), PlacementStatus::Unknown);
+	}
+
+	#[test]
+	fn click_attestation_codec_roundtrip() {
+		let att = ClickAttestation::<u64> {
+			clicker: 1u64,
+			proxy: 2u64,
+			campaign_id: 42,
+			placement_id: [0xAB; 32],
+			clicked_at: 100,
+		};
+		roundtrip(att);
+	}
+
+	#[test]
+	fn enum_discriminant_stability() {
+		assert_eq!(CampaignStatus::Active.encode(), [0]);
+		assert_eq!(CampaignStatus::Paused.encode(), [1]);
+		assert_eq!(CampaignStatus::Exhausted.encode(), [2]);
+		assert_eq!(CampaignStatus::Expired.encode(), [3]);
+		assert_eq!(CampaignStatus::Cancelled.encode(), [4]);
+		assert_eq!(CampaignStatus::Suspended.encode(), [5]);
+		assert_eq!(CampaignStatus::UnderReview.encode(), [6]);
+
+		assert_eq!(AdReviewStatus::Pending.encode(), [0]);
+		assert_eq!(AdReviewStatus::Approved.encode(), [1]);
+		assert_eq!(AdReviewStatus::Rejected.encode(), [2]);
+		assert_eq!(AdReviewStatus::Flagged.encode(), [3]);
+
+		assert_eq!(CampaignType::Cpm.encode(), [0]);
+		assert_eq!(CampaignType::Cpc.encode(), [1]);
+		assert_eq!(CampaignType::Fixed.encode(), [2]);
+		assert_eq!(CampaignType::Private.encode(), [3]);
+
+		assert_eq!(PlacementStatus::Active.encode(), [0]);
+		assert_eq!(PlacementStatus::Paused.encode(), [1]);
+		assert_eq!(PlacementStatus::Banned.encode(), [2]);
+		assert_eq!(PlacementStatus::Unknown.encode(), [3]);
+	}
+
+	#[test]
+	fn invalid_discriminant_decode_fails() {
+		assert!(CampaignStatus::decode(&mut &[7u8][..]).is_err());
+		assert!(AdReviewStatus::decode(&mut &[4u8][..]).is_err());
+		assert!(CampaignType::decode(&mut &[4u8][..]).is_err());
+		assert!(PlacementStatus::decode(&mut &[4u8][..]).is_err());
+	}
+
+	#[test]
+	fn unit_delivery_verifier_passthrough() {
+		let result = <() as DeliveryVerifier<u64>>::verify_and_cap_audience(
+			&1u64, &[0u8; 32], 500, None,
+		);
+		assert_eq!(result.unwrap(), 500);
+	}
+
+	#[test]
+	fn unit_click_verifier_passthrough() {
+		let result = <() as ClickVerifier<u64>>::verify_and_cap_clicks(
+			&1u64, &[0u8; 32], 100, 80,
+		);
+		assert_eq!(result.unwrap(), 100);
+	}
+
+	#[test]
+	fn unit_placement_admin_provider_defaults() {
+		assert_eq!(<() as PlacementAdminProvider<u64>>::placement_admin(&[0u8; 32]), None);
+		assert!(!<() as PlacementAdminProvider<u64>>::is_placement_banned(&[0u8; 32]));
+		assert_eq!(
+			<() as PlacementAdminProvider<u64>>::placement_status(&[0u8; 32]),
+			PlacementStatus::Unknown,
+		);
+	}
+
+	#[test]
+	fn unit_revenue_distributor_all_to_platform() {
+		let result = <() as RevenueDistributor<u64, u128>>::distribute(
+			&[0u8; 32], 1000u128, &1u64,
+		).unwrap();
+		assert_eq!(result.placement_share, 0);
+		assert_eq!(result.node_share, 0);
+		assert_eq!(result.platform_share, 1000);
+	}
+
+	#[test]
+	fn unit_ad_schedule_provider_defaults() {
+		assert!(!<() as AdScheduleProvider>::is_ads_enabled(&[0u8; 32]));
+		assert_eq!(<() as AdScheduleProvider>::placement_ad_revenue(&[0u8; 32]), 0);
+		assert_eq!(<() as AdScheduleProvider>::placement_era_revenue(&[0u8; 32]), 0);
+	}
+
+	#[test]
+	fn unit_ad_delivery_count_provider_defaults() {
+		assert_eq!(<() as AdDeliveryCountProvider>::era_delivery_count(&[0u8; 32]), 0);
+		<() as AdDeliveryCountProvider>::reset_era_deliveries(&[0u8; 32]);
+	}
+
+	#[test]
+	fn unit_ad_policy_provider_defaults() {
+		assert_eq!(<() as AdPolicyProvider>::max_campaigns_per_placement(&[0u8; 32]), 0);
+		assert_eq!(<() as AdPolicyProvider>::min_campaign_budget(&[0u8; 32]), 0);
+		assert!(!<() as AdPolicyProvider>::requires_review(&[0u8; 32]));
+	}
+
+	#[test]
+	fn unit_placement_config_provider_defaults() {
+		assert_eq!(<() as PlacementConfigProvider>::daily_impression_cap(&[0u8; 32]), 0);
+		assert_eq!(<() as PlacementConfigProvider>::revenue_share_bps(&[0u8; 32]), 0);
+		assert!(!<() as PlacementConfigProvider>::supports_private_ads(&[0u8; 32]));
+	}
+
+	#[test]
+	fn ads_router_error_into_dispatch_error() {
+		let err: sp_runtime::DispatchError = AdsRouterError::CpcNotSupportedForPath.into();
+		assert_eq!(err, sp_runtime::DispatchError::Other("CPC not supported for this placement path"));
+	}
 }

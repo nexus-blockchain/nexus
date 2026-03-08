@@ -110,6 +110,7 @@ ads-core `settle_era_ads` 将广告费从广告主转入国库后, 调用 `distr
 | `AdSlashPercentage` | `u32` | Slash 百分比 (e.g. 30 = 30%) |
 | `UnbondingPeriod` | `BlockNumber` | 取消质押后的解锁冷却区块数 (e.g. 14400 ≈ 24h) |
 | `StakerRewardPct` | `u32` | 社区份额中分给质押者的百分比 (e.g. 10 = 10%) |
+| `MaxStakersPerCommunity` | `u32` | 每个社区最大质押者数量 (限制 O(n) 遍历上界) |
 
 ---
 
@@ -120,13 +121,14 @@ ads-core `settle_era_ads` 将广告费从广告主转入国库后, 调用 `distr
 | `CommunityAdStake` | `StorageMap<CommunityIdHash, Balance>` | 社区广告质押总额 |
 | `CommunityAudienceCap` | `StorageMap<CommunityIdHash, u32>` | 社区 audience 上限 (由质押决定) |
 | `CommunityStakers` | `StorageDoubleMap<CommunityIdHash, AccountId, Balance>` | 每个质押者在每个社区的质押额 |
+| `CommunityStakerCount` | `StorageMap<CommunityIdHash, u32>` | 社区当前质押者计数 |
 | `CommunityAdmin` | `StorageMap<CommunityIdHash, AccountId>` | 社区管理员 (首个质押者自动成为) |
 | `TeeNodeAdPct` | `StorageValue<Option<u32>>` | TEE 节点广告分成百分比 (None=默认15%) |
 | `CommunityAdPct` | `StorageValue<Option<u32>>` | 社区广告分成百分比 (None=默认80%) |
 | `PreviousEraAudience` | `StorageMap<CommunityIdHash, u32>` | 上一 Era 社区活跃人数 (L3 突增检测) |
 | `AudienceSurgePaused` | `StorageMap<CommunityIdHash, u32>` | 社区因突增被暂停 (非零=暂停中) |
 | `NodeAudienceReports` | `StorageMap<CommunityIdHash, BoundedVec<(u32, u32), 10>>` | 多节点 audience 上报 |
-| `UnbondingRequests` | `StorageDoubleMap<CommunityIdHash, AccountId, (Balance, BlockNumber)>` | 解锁冷却中的请求 (金额, 到期区块) |
+| `UnbondingRequests` | `StorageDoubleMap<CommunityIdHash, AccountId, BoundedVec<(Balance, BlockNumber), 8>>` | 解锁冷却队列 (最多 8 个并行请求) |
 | `AdminPausedAds` | `StorageMap<CommunityIdHash, bool>` | 管理员暂停标志 |
 | `StakeTiers` | `StorageValue<Option<BoundedVec<(u128, u32), 10>>>` | 可配置质押阶梯 (threshold 降序) |
 | `GlobalAdsPaused` | `StorageValue<bool>` | 全局广告暂停开关 |
@@ -218,8 +220,9 @@ ads-core `settle_era_ads` 将广告费从广告主转入国库后, 调用 `distr
 | `BotAdsDisabledErr` | Bot 广告已被 Owner 禁用 |
 | `NoClaimableReward` | 无可提取的质押者分成 |
 | `NoStakeInCommunity` | 社区无质押 (force_unstake 前置检查) |
-| `UnbondingAlreadyPending` | 已有待处理的解锁请求 |
+| `UnbondingQueueFull` | 解锁请求队列已满 (上限 8 个并行请求) |
 | `NotBotOwner` | 调用者非 Bot Owner |
+| `MaxStakersReached` | 社区质押者数量已达上限 (`MaxStakersPerCommunity`) |
 
 ---
 
@@ -250,6 +253,17 @@ pallet-ads-grouprobot (本 crate)
 ```
 
 ## 版本历史
+
+### v0.3.0
+
+- **新增**: `weights.rs` — `WeightInfo` trait 定义 + `SubstrateWeight` 保守估计实现 + `()` 空实现
+- **新增**: `benchmarking.rs` — cfg-gated 空 stub (生产前需填充)
+- **新增**: `MaxStakersPerCommunity` 常量 — 限制每个社区质押者数量上界
+- **新增**: `CommunityStakerCount` 存储 — 追踪社区当前质押者数量
+- **新增**: `MaxStakersReached` 错误 — 新质押者超出上限时返回
+- **变更**: `UnbondingRequests` 从 `(Balance, BlockNumber)` 改为 `BoundedVec<(Balance, BlockNumber), 8>` — 支持多个并行解锁请求
+- **变更**: `UnbondingAlreadyPending` 错误替换为 `UnbondingQueueFull` — 队列满 (8 个) 时才拒绝
+- **修复**: 移除 deprecated `RuntimeEvent` associated type (迁移至 `Config` supertrait bound)
 
 ### v0.2.0
 

@@ -62,9 +62,9 @@ pub fn mask_name(full_name: &str) -> Vec<u8> {
 pub fn mask_id_card(id_card: &str) -> Vec<u8> {
     let len = id_card.len();
 
-    // M2修复: 非 ASCII 输入直接全部替换为星号，防止字节切片 panic
     if !id_card.is_ascii() || len < 8 {
-        let masked: String = (0..len).map(|_| '*').collect();
+        let char_count = id_card.chars().count();
+        let masked: String = (0..char_count).map(|_| '*').collect();
         return masked.as_bytes().to_vec();
     }
 
@@ -137,9 +137,9 @@ mod tests {
 
     #[test]
     fn m2_mask_id_card_non_ascii_no_panic() {
-        // 多字节 UTF-8 字符不应导致 panic
-        let result = mask_id_card("中文身份证号码测试输入");
-        // 非 ASCII 输入走全掩码路径
+        let input = "中文身份证号码测试输入";
+        let result = mask_id_card(input);
+        assert_eq!(result.len(), input.chars().count());
         assert!(result.iter().all(|&b| b == b'*'));
     }
 
@@ -152,6 +152,8 @@ mod tests {
     #[test]
     fn m2_mask_id_card_emoji_no_panic() {
         let result = mask_id_card("🎉🎊🎈🎁🎂🎄🎅🎆🎇🧨");
+        // 10 个 emoji 字符 → 10 个 '*'（而非 40 个字节的 '*'）
+        assert_eq!(result.len(), 10);
         assert!(result.iter().all(|&b| b == b'*'));
     }
 

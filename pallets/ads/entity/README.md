@@ -1,6 +1,6 @@
 # pallet-ads-entity
 
-> **Entity DApp 广告适配层 — 展示量验证 · Entity/Shop 级广告位管理 · 二方收入分成 · 保证金机制**
+> **Entity DApp 广告适配层 — 展示量/点击量验证 · Entity/Shop 级广告位管理 · 二方收入分成 · 保证金机制**
 
 ## 概述
 
@@ -12,6 +12,7 @@
 pallet-ads-core (核心引擎)
     │
     ├── DeliveryVerifier       ← pallet-ads-entity 实现 (注册/激活/Entity 状态/展示量上限)
+    ├── ClickVerifier          ← pallet-ads-entity 实现 (注册/激活/Entity 状态/点击量上限)
     ├── PlacementAdminProvider ← pallet-ads-entity 实现 (Entity Owner / Shop Owner)
     └── RevenueDistributor     ← pallet-ads-entity 实现 (二方分成: Entity Owner / 平台)
 ```
@@ -40,6 +41,7 @@ Entity 需主动注册广告位才能接入广告系统:
 - 注册时需缴纳保证金 (`AdPlacementDeposit`), 注销时退还给注册者
 - 每个 Entity 最多注册 `MaxPlacementsPerEntity` 个广告位
 - 被禁止的 Entity (`BannedEntities`) 无法注册新广告位
+- 被全局锁定的 Entity (`EntityProvider::is_entity_locked`) 无法执行任何写操作
 
 ### 3. 展示量验证 (DeliveryVerifier)
 
@@ -51,7 +53,17 @@ Entity 需主动注册广告位才能接入广告系统:
 4. **每日展示量上限** — 自动按 `BlocksPerDay` 周期重置, 剩余配额为 `cap - current`, 超限则拒绝; cap=0 表示无限制
 5. **展示量计数更新** — 递增 `DailyImpressions` 和 `TotalImpressions`
 
-### 4. 二方收入分成 (RevenueDistributor)
+### 4. 点击量验证 (ClickVerifier)
+
+`verify_and_cap_clicks` 的验证流程:
+
+1. **广告位注册与激活检查** — 必须已注册且 `active = true`
+2. **Entity 状态检查** — Entity 必须活跃且未被禁止 (`BannedEntities`)
+3. **调用者权限验证** — Entity Owner / Admin (`ADS_MANAGE`) / Shop Manager (Shop 级)
+4. **每日点击量上限** — 自动按 `BlocksPerDay` 周期重置, 剩余配额为 `cap - current`, 超限则拒绝; cap=0 表示无限制
+5. **点击量计数更新** — 递增 `DailyClicks` 和 `TotalClicks`
+
+### 5. 二方收入分成 (RevenueDistributor)
 
 ads-core `settle_era_ads` 将广告费转入国库后, 调用 `distribute`:
 
@@ -64,7 +76,7 @@ ads-core `settle_era_ads` 将广告费转入国库后, 调用 `distribute`:
 - 自定义值为 0 时使用默认比例
 - Entity Owner 份额返回给 ads-core 记入 `PlacementClaimable`
 
-### 5. 广告位管理员映射 (PlacementAdminProvider)
+### 6. 广告位管理员映射 (PlacementAdminProvider)
 
 管理员解析逻辑:
 - **Shop 级** — 优先 `ShopProvider::shop_owner`, 回退到 `EntityProvider::entity_owner`
@@ -86,6 +98,7 @@ ads-core `settle_era_ads` 将广告费转入国库后, 调用 `distribute`:
 | `shop_id` | `u64` | 所属 Shop ID (0 = Entity 级) |
 | `level` | `PlacementLevel` | `Entity` / `Shop` |
 | `daily_impression_cap` | `u32` | 每日展示量上限 (0 = 无限制) |
+| `daily_click_cap` | `u32` | 每日点击量上限 (0 = 无限制, CPC) |
 | `registered_by` | `AccountId` | 注册者 |
 | `registered_at` | `BlockNumber` | 注册区块号 |
 | `active` | `bool` | 是否活跃 |
@@ -130,10 +143,13 @@ ads-core `settle_era_ads` 将广告费转入国库后, 调用 `distribute`:
 | `EntityPlacementIds` | `StorageMap<u64, BoundedVec<PlacementId, MaxPlacementsPerEntity>>` | Entity 下注册的广告位 ID 列表 |
 | `DailyImpressions` | `StorageMap<PlacementId, u32>` | 广告位今日展示量计数 |
 | `TotalImpressions` | `StorageMap<PlacementId, u64>` | 广告位累计展示量 |
+| `ImpressionResetBlock` | `StorageMap<PlacementId, BlockNumber>` | 展示量计数器最后重置区块 |
+| `DailyClicks` | `StorageMap<PlacementId, u32>` | 广告位今日点击量计数 (CPC) |
+| `TotalClicks` | `StorageMap<PlacementId, u64>` | 广告位累计点击量 (CPC) |
+| `ClickResetBlock` | `StorageMap<PlacementId, BlockNumber>` | 点击量计数器最后重置区块 |
 | `PlacementDeposits` | `StorageMap<PlacementId, Balance>` | 广告位保证金存入额 |
 | `EntityAdShareBps` | `StorageMap<u64, u16>` | Entity 自定义分成比例 (基点, 0 = 使用默认) |
 | `BannedEntities` | `StorageMap<u64, bool>` | 被禁止投放广告的 Entity |
-| `ImpressionResetBlock` | `StorageMap<PlacementId, BlockNumber>` | 展示量计数器最后重置区块 |
 
 ---
 
@@ -149,6 +165,9 @@ ads-core `settle_era_ads` 将广告费转入国库后, 调用 `distribute`:
 | 5 | `set_entity_ad_share` | Signed (entity owner) | 设置 Entity 自定义广告分成比例 (≤ 10000 - PlatformAdShareBps) |
 | 6 | `ban_entity` | Root | 禁止 Entity 参与广告, 已禁止则报错 |
 | 7 | `unban_entity` | Root | 解除 Entity 广告禁令, 未禁止则报错 |
+| 8 | `set_click_cap` | Signed (entity owner/admin/registrar) | 设置广告位每日点击量上限 (CPC), 值未变则报错 |
+
+> **注**: 所有 Signed extrinsic (call_index 0–5, 8) 均检查 `EntityProvider::is_entity_locked`, 被全局锁定的 Entity 无法执行写操作。
 
 ---
 
@@ -160,6 +179,7 @@ ads-core `settle_era_ads` 将广告费转入国库后, 调用 `distribute`:
 | `PlacementDeregistered` | placement_id, deposit_returned | 广告位注销 |
 | `PlacementStatusUpdated` | placement_id, active | 广告位激活/禁用 |
 | `ImpressionCapUpdated` | placement_id, daily_cap | 每日展示量上限更新 |
+| `ClickCapUpdated` | placement_id, daily_cap | 每日点击量上限更新 (CPC) |
 | `EntityShareUpdated` | entity_id, share_bps | Entity 分成比例更新 |
 | `EntityBanned` | entity_id | Entity 被禁止广告 |
 | `EntityUnbanned` | entity_id | Entity 禁令解除 |
@@ -188,6 +208,9 @@ ads-core `settle_era_ads` 将广告费转入国库后, 调用 `distribute`:
 | `EntityNotBanned` | Entity 未被禁止 (无需解禁) |
 | `PlacementStatusUnchanged` | 广告位激活状态未变更 |
 | `ImpressionCapUnchanged` | 每日展示量上限未变更 |
+| `DailyClickCapReached` | 每日点击量已达上限 (CPC, 剩余配额为零) |
+| `ClickCapUnchanged` | 每日点击量上限未变更 |
+| `EntityLocked` | Entity 已被全局锁定, 无法执行写操作 |
 
 ---
 
@@ -200,6 +223,7 @@ ads-core `settle_era_ads` 将广告费转入国库后, 调用 `distribute`:
 | `bps_of(amount, bps)` | 基点百分比计算: `amount × bps / 10000` |
 | `effective_entity_share_bps(entity_id)` | Entity 有效分成比例 (自定义 > 0 则使用, 否则 10000 - PlatformAdShareBps) |
 | `check_and_reset_daily(placement_id)` | 检查并重置每日展示量计数器 (按 BlocksPerDay 周期) |
+| `check_and_reset_daily_clicks(placement_id)` | 检查并重置每日点击量计数器 (按 BlocksPerDay 周期) |
 | `placement_entity_id(placement_id)` | 查找 PlacementId 对应的 entity_id |
 
 ---

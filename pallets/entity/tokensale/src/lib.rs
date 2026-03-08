@@ -251,10 +251,7 @@ pub mod pallet {
     // ==================== 配置 ====================
 
     #[pallet::config]
-    pub trait Config: frame_system::Config {
-        /// 运行时事件类型
-        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-
+    pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
         /// NEX 货币类型（用于认购支付和退款）
         type Currency: Currency<Self::AccountId>;
 

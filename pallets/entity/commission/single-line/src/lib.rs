@@ -100,8 +100,7 @@ pub mod pallet {
     // ========================================================================
 
     #[pallet::config]
-    pub trait Config: frame_system::Config {
-        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+    pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
         type Currency: Currency<Self::AccountId>;
 
         type StatsProvider: SingleLineStatsProvider<Self::AccountId, BalanceOf<Self>>;
@@ -122,6 +121,10 @@ pub mod pallet {
         /// upline_rate × max_upline_levels + downline_rate × max_downline_levels 的上限
         #[pallet::constant]
         type MaxTotalRateBps: Get<u32>;
+
+        /// 每实体配置变更日志最大条数（循环覆写）
+        #[pallet::constant]
+        type MaxConfigChangeLogs: Get<u32>;
     }
 
     pub trait SingleLineStatsProvider<AccountId, Balance: Default> {
@@ -865,15 +868,17 @@ pub mod pallet {
         }
 
         pub(crate) fn record_change_log(entity_id: u64, config: &SingleLineConfig<BalanceOf<T>>) {
-            let idx = ConfigChangeLogCount::<T>::get(entity_id);
-            ConfigChangeLogs::<T>::insert(entity_id, idx, ConfigChangeLogEntry {
+            let count = ConfigChangeLogCount::<T>::get(entity_id);
+            let max = T::MaxConfigChangeLogs::get();
+            let slot = if max > 0 { count % max } else { 0 };
+            ConfigChangeLogs::<T>::insert(entity_id, slot, ConfigChangeLogEntry {
                 block_number: <frame_system::Pallet<T>>::block_number(),
                 upline_rate: config.upline_rate, downline_rate: config.downline_rate,
                 base_upline_levels: config.base_upline_levels, base_downline_levels: config.base_downline_levels,
                 max_upline_levels: config.max_upline_levels, max_downline_levels: config.max_downline_levels,
                 level_increment_threshold: config.level_increment_threshold,
             });
-            ConfigChangeLogCount::<T>::insert(entity_id, idx.saturating_add(1));
+            ConfigChangeLogCount::<T>::insert(entity_id, count.saturating_add(1));
         }
 
         // ====================================================================

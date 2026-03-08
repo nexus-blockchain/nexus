@@ -1,5 +1,5 @@
 use crate::{mock::*, pallet::{TransferWhitelist, TransferBlacklist}, Error, Event};
-use frame_support::{assert_noop, assert_ok};
+use frame_support::{assert_noop, assert_ok, BoundedVec};
 use pallet_entity_common::{TokenType, TransferRestrictionMode};
 
 const SHOP_ID: u64 = 1;
@@ -346,7 +346,8 @@ fn distribute_dividend_works() {
         assert_ok!(EntityToken::configure_dividend(
             RuntimeOrigin::signed(OWNER), SHOP_ID, true, 5,
         ));
-        let recipients = vec![(USER_A, 100u128), (USER_B, 200u128)];
+        let recipients: BoundedVec<_, <Test as crate::Config>::MaxDividendRecipients> =
+            BoundedVec::try_from(vec![(USER_A, 100u128), (USER_B, 200u128)]).unwrap();
         assert_ok!(EntityToken::distribute_dividend(
             RuntimeOrigin::signed(OWNER), SHOP_ID, 300, recipients,
         ));
@@ -368,7 +369,8 @@ fn distribute_dividend_fails_amount_mismatch() {
         assert_ok!(EntityToken::configure_dividend(
             RuntimeOrigin::signed(OWNER), SHOP_ID, true, 5,
         ));
-        let recipients = vec![(USER_A, 100u128), (USER_B, 200u128)];
+        let recipients: BoundedVec<_, <Test as crate::Config>::MaxDividendRecipients> =
+            BoundedVec::try_from(vec![(USER_A, 100u128), (USER_B, 200u128)]).unwrap();
         assert_noop!(
             EntityToken::distribute_dividend(
                 RuntimeOrigin::signed(OWNER), SHOP_ID, 999, recipients,
@@ -388,14 +390,9 @@ fn distribute_dividend_fails_too_many_recipients() {
         assert_ok!(EntityToken::configure_dividend(
             RuntimeOrigin::signed(OWNER), SHOP_ID, true, 5,
         ));
-        // MaxDividendRecipients = 50, 创建 51 个
+        // MaxDividendRecipients = 50, 创建 51 个 → BoundedVec::try_from fails
         let recipients: Vec<(u64, u128)> = (0..51).map(|i| (i + 10, 1u128)).collect();
-        assert_noop!(
-            EntityToken::distribute_dividend(
-                RuntimeOrigin::signed(OWNER), SHOP_ID, 51, recipients,
-            ),
-            Error::<Test>::TooManyRecipients
-        );
+        assert!(BoundedVec::<_, <Test as crate::Config>::MaxDividendRecipients>::try_from(recipients).is_err());
     });
 }
 
@@ -417,7 +414,7 @@ fn distribute_dividend_fails_token_type_not_supported() {
         // distribute 应失败
         assert_noop!(
             EntityToken::distribute_dividend(
-                RuntimeOrigin::signed(OWNER), SHOP_ID, 100, vec![(USER_A, 100)],
+                RuntimeOrigin::signed(OWNER), SHOP_ID, 100, BoundedVec::try_from(vec![(USER_A, 100)]).unwrap(),
             ),
             Error::<Test>::TokenTypeNotSupported
         );
@@ -437,7 +434,7 @@ fn claim_dividend_works() {
             RuntimeOrigin::signed(OWNER), SHOP_ID, true, 5,
         ));
         assert_ok!(EntityToken::distribute_dividend(
-            RuntimeOrigin::signed(OWNER), SHOP_ID, 100, vec![(USER_A, 100)],
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 100, BoundedVec::try_from(vec![(USER_A, 100)]).unwrap(),
         ));
         assert_ok!(EntityToken::claim_dividend(
             RuntimeOrigin::signed(USER_A), SHOP_ID,
@@ -464,7 +461,7 @@ fn h2r3_distribute_dividend_rejects_exceeding_max_supply() {
         // H2-R3: distribute 时即检查 max_supply，100 > 50 容量 → 拒绝
         assert_noop!(
             EntityToken::distribute_dividend(
-                RuntimeOrigin::signed(OWNER), SHOP_ID, 100, vec![(USER_A, 100)],
+                RuntimeOrigin::signed(OWNER), SHOP_ID, 100, BoundedVec::try_from(vec![(USER_A, 100)]).unwrap(),
             ),
             Error::<Test>::ExceedsMaxSupply
         );
@@ -949,7 +946,7 @@ fn h1_distribute_dividend_rejects_when_token_disabled() {
         // 分红应失败：代币已禁用
         assert_noop!(
             EntityToken::distribute_dividend(
-                RuntimeOrigin::signed(OWNER), SHOP_ID, 100, vec![(USER_A, 100)],
+                RuntimeOrigin::signed(OWNER), SHOP_ID, 100, BoundedVec::try_from(vec![(USER_A, 100)]).unwrap(),
             ),
             Error::<Test>::TokenNotEnabled
         );
@@ -1014,7 +1011,7 @@ fn m2_distribute_dividend_rejects_zero_total() {
         // 零总额分红应失败
         assert_noop!(
             EntityToken::distribute_dividend(
-                RuntimeOrigin::signed(OWNER), SHOP_ID, 0, vec![],
+                RuntimeOrigin::signed(OWNER), SHOP_ID, 0, BoundedVec::try_from(vec![]).unwrap(),
             ),
             Error::<Test>::ZeroDividendAmount
         );
@@ -1113,7 +1110,7 @@ fn h2r3_claim_dividend_succeeds_despite_later_mint() {
         ));
         // distribute 50（max_supply=200, current=0, 容量足够）
         assert_ok!(EntityToken::distribute_dividend(
-            RuntimeOrigin::signed(OWNER), SHOP_ID, 50, vec![(USER_A, 50)],
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 50, BoundedVec::try_from(vec![(USER_A, 50)]).unwrap(),
         ));
         // M1-R6: mint 现在计入 pending，最多铸 150（0+50+150=200）
         assert_ok!(EntityToken::mint_tokens(
@@ -1143,7 +1140,7 @@ fn m1r3_distribute_dividend_rejects_inactive_entity() {
         // M1-R3: 被停用的 Entity 不应能分发分红
         assert_noop!(
             EntityToken::distribute_dividend(
-                RuntimeOrigin::signed(OWNER), SHOP_ID, 100, vec![(USER_A, 100)],
+                RuntimeOrigin::signed(OWNER), SHOP_ID, 100, BoundedVec::try_from(vec![(USER_A, 100)]).unwrap(),
             ),
             Error::<Test>::EntityNotActive
         );
@@ -1204,7 +1201,7 @@ fn l1r3_unlock_and_claim_still_work_when_inactive() {
             RuntimeOrigin::signed(OWNER), SHOP_ID, true, 5,
         ));
         assert_ok!(EntityToken::distribute_dividend(
-            RuntimeOrigin::signed(OWNER), SHOP_ID, 100, vec![(USER_A, 100)],
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 100, BoundedVec::try_from(vec![(USER_A, 100)]).unwrap(),
         ));
 
         // 停用 Entity
@@ -1239,21 +1236,21 @@ fn m1r4_distribute_multiple_times_respects_max_supply_with_pending() {
 
         // 第一次分发 150，成功（0 + 0 + 150 <= 200）
         assert_ok!(EntityToken::distribute_dividend(
-            RuntimeOrigin::signed(OWNER), SHOP_ID, 150, vec![(USER_A, 150)],
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 150, BoundedVec::try_from(vec![(USER_A, 150)]).unwrap(),
         ));
         assert_eq!(EntityToken::total_pending_dividends(SHOP_ID), 150);
 
         // 第二次分发 60，应拒绝（0 + 150 + 60 > 200）
         assert_noop!(
             EntityToken::distribute_dividend(
-                RuntimeOrigin::signed(OWNER), SHOP_ID, 60, vec![(USER_B, 60)],
+                RuntimeOrigin::signed(OWNER), SHOP_ID, 60, BoundedVec::try_from(vec![(USER_B, 60)]).unwrap(),
             ),
             Error::<Test>::ExceedsMaxSupply
         );
 
         // 第二次分发 50，成功（0 + 150 + 50 <= 200）
         assert_ok!(EntityToken::distribute_dividend(
-            RuntimeOrigin::signed(OWNER), SHOP_ID, 50, vec![(USER_B, 50)],
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 50, BoundedVec::try_from(vec![(USER_B, 50)]).unwrap(),
         ));
         assert_eq!(EntityToken::total_pending_dividends(SHOP_ID), 200);
     });
@@ -1275,7 +1272,7 @@ fn m1r4_claim_reduces_total_pending_dividends() {
 
         // 分发 150
         assert_ok!(EntityToken::distribute_dividend(
-            RuntimeOrigin::signed(OWNER), SHOP_ID, 150, vec![(USER_A, 100), (USER_B, 50)],
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 150, BoundedVec::try_from(vec![(USER_A, 100), (USER_B, 50)]).unwrap(),
         ));
         assert_eq!(EntityToken::total_pending_dividends(SHOP_ID), 150);
 
@@ -1288,12 +1285,12 @@ fn m1r4_claim_reduces_total_pending_dividends() {
         // 此时可再分发 150（supply=100 + pending=50 + 150 = 300? 不对，supply=100, pending=50, max=200）
         // supply=100 + pending=50 + new=50 = 200 ≤ 200 → OK
         assert_ok!(EntityToken::distribute_dividend(
-            RuntimeOrigin::signed(OWNER), SHOP_ID, 50, vec![(USER_A, 50)],
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 50, BoundedVec::try_from(vec![(USER_A, 50)]).unwrap(),
         ));
         // supply=100 + pending=100 + new=1 = 201 > 200 → FAIL
         assert_noop!(
             EntityToken::distribute_dividend(
-                RuntimeOrigin::signed(OWNER), SHOP_ID, 1, vec![(USER_A, 1)],
+                RuntimeOrigin::signed(OWNER), SHOP_ID, 1, BoundedVec::try_from(vec![(USER_A, 1)]).unwrap(),
             ),
             Error::<Test>::ExceedsMaxSupply
         );
@@ -1316,7 +1313,7 @@ fn m1r4_set_max_supply_accounts_for_pending_dividends() {
         ));
         // 分发 50 分红（pending=50）
         assert_ok!(EntityToken::distribute_dividend(
-            RuntimeOrigin::signed(OWNER), SHOP_ID, 50, vec![(USER_A, 50)],
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 50, BoundedVec::try_from(vec![(USER_A, 50)]).unwrap(),
         ));
         // 尝试设 max_supply=140: supply(100) + pending(50) = 150 > 140 → 应拒绝
         assert_noop!(
@@ -1351,7 +1348,7 @@ fn m1r6_mint_tokens_respects_pending_dividends_in_max_supply() {
         // 分发 800 分红（pending=800）
         assert_ok!(EntityToken::distribute_dividend(
             RuntimeOrigin::signed(OWNER), SHOP_ID, 800,
-            vec![(USER_A, 400), (USER_B, 400)],
+            BoundedVec::try_from(vec![(USER_A, 400), (USER_B, 400)]).unwrap(),
         ));
         assert_eq!(EntityToken::total_pending_dividends(SHOP_ID), 800);
 
@@ -1398,7 +1395,7 @@ fn m1r6_reward_on_purchase_skips_when_pending_fills_capacity() {
 
         // 分发 95 分红（pending=95）
         assert_ok!(EntityToken::distribute_dividend(
-            RuntimeOrigin::signed(OWNER), SHOP_ID, 95, vec![(USER_A, 95)],
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 95, BoundedVec::try_from(vec![(USER_A, 95)]).unwrap(),
         ));
 
         // reward_on_purchase: 5% of 200 = 10, supply=0+pending=95+10=105 > 100 → skip
@@ -1491,7 +1488,7 @@ fn p0_admin_can_distribute_dividend() {
             RuntimeOrigin::signed(OWNER), SHOP_ID, true, 0,
         ));
         assert_ok!(EntityToken::distribute_dividend(
-            RuntimeOrigin::signed(ADMIN), SHOP_ID, 100, vec![(USER_A, 100)],
+            RuntimeOrigin::signed(ADMIN), SHOP_ID, 100, BoundedVec::try_from(vec![(USER_A, 100)]).unwrap(),
         ));
         assert_eq!(EntityToken::pending_dividends(SHOP_ID, &USER_A), 100);
     });
@@ -1751,7 +1748,7 @@ fn p1_force_freeze_transfers_allows_claim_dividend() {
             RuntimeOrigin::signed(OWNER), SHOP_ID, true, 0,
         ));
         assert_ok!(EntityToken::distribute_dividend(
-            RuntimeOrigin::signed(OWNER), SHOP_ID, 500, vec![(USER_A, 500)],
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 500, BoundedVec::try_from(vec![(USER_A, 500)]).unwrap(),
         ));
 
         // 冻结转账
@@ -2034,7 +2031,7 @@ fn p3_global_pause_blocks_claim_dividend() {
             RuntimeOrigin::signed(OWNER), SHOP_ID, true, 0,
         ));
         assert_ok!(EntityToken::distribute_dividend(
-            RuntimeOrigin::signed(OWNER), SHOP_ID, 500, vec![(USER_A, 500)],
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 500, BoundedVec::try_from(vec![(USER_A, 500)]).unwrap(),
         ));
 
         assert_ok!(EntityToken::set_global_token_pause(RuntimeOrigin::root(), true));
@@ -2573,7 +2570,7 @@ fn m1_force_transfer_cleans_storage_on_zero_balance() {
             RuntimeOrigin::signed(OWNER), SHOP_ID, true, 0,
         ));
         assert_ok!(EntityToken::distribute_dividend(
-            RuntimeOrigin::signed(OWNER), SHOP_ID, 50, vec![(USER_A, 50)],
+            RuntimeOrigin::signed(OWNER), SHOP_ID, 50, BoundedVec::try_from(vec![(USER_A, 50)]).unwrap(),
         ));
         assert_eq!(EntityToken::total_pending_dividends(SHOP_ID), 50);
 
@@ -2824,7 +2821,7 @@ fn r4_claim_dividend_blocked_when_token_disabled() {
         ));
         assert_ok!(EntityToken::distribute_dividend(
             RuntimeOrigin::signed(OWNER), SHOP_ID, 100,
-            vec![(USER_A, 100)],
+            BoundedVec::try_from(vec![(USER_A, 100)]).unwrap(),
         ));
         assert_eq!(EntityToken::pending_dividends(SHOP_ID, &USER_A), 100);
 
@@ -2899,7 +2896,7 @@ fn r4_force_cancel_pending_dividends_works() {
         ));
         assert_ok!(EntityToken::distribute_dividend(
             RuntimeOrigin::signed(OWNER), SHOP_ID, 200,
-            vec![(USER_A, 100), (USER_B, 100)],
+            BoundedVec::try_from(vec![(USER_A, 100), (USER_B, 100)]).unwrap(),
         ));
         assert_eq!(EntityToken::pending_dividends(SHOP_ID, &USER_A), 100);
         assert_eq!(EntityToken::pending_dividends(SHOP_ID, &USER_B), 100);

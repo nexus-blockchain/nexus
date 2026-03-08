@@ -15,25 +15,28 @@ targets = ["x86_64-unknown-linux-gnu"]
 [dependencies]
 codec = { features = ["derive"], workspace = true }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
-frame-benchmarking = { version = "45.0.0", optional = true, workspace = true }
-frame-executive = { version = "45.0.0", workspace = true }
-frame-metadata-hash-extension = { version = "0.13.0", workspace = true }
-frame-support = { version = "45.0.0", features = ["experimental", "tuples-96"], workspace = true }
-frame-system-benchmarking = { version = "45.0.0", optional = true, workspace = true }
-frame-system-rpc-runtime-api = { version = "40.0.0", workspace = true }
-frame-system = { version = "45.0.0", workspace = true }
-frame-try-runtime = { version = "0.51.0", optional = true, workspace = true }
-pallet-aura = { version = "44.0.0", workspace = true }
-pallet-balances = { version = "46.0.0", workspace = true }
-pallet-grandpa = { version = "45.0.0", workspace = true }
-pallet-sudo = { version = "45.0.0", workspace = true }
-pallet-collective = { version = "45.0.0", workspace = true }
+frame-benchmarking = { optional = true, workspace = true }
+frame-executive = { workspace = true }
+frame-metadata-hash-extension = { workspace = true }
+frame-support = { features = ["experimental", "tuples-96"], workspace = true }
+frame-system-benchmarking = { optional = true, workspace = true }
+frame-system-rpc-runtime-api = { workspace = true }
+frame-system = { workspace = true }
+frame-try-runtime = { optional = true, workspace = true }
+pallet-aura = { workspace = true }
+pallet-balances = { workspace = true }
+pallet-grandpa = { workspace = true }
+pallet-session = { workspace = true }
+pallet-offences = { workspace = true }
+pallet-authorship = { workspace = true }
+pallet-sudo = { workspace = true }
+pallet-collective = { workspace = true }
 pallet-collective-membership = { workspace = true }
-pallet-timestamp = { version = "44.0.0", workspace = true }
-pallet-transaction-payment-rpc-runtime-api = { version = "45.0.0", workspace = true }
-pallet-transaction-payment = { version = "45.0.0", workspace = true }
+pallet-timestamp = { workspace = true }
+pallet-transaction-payment-rpc-runtime-api = { workspace = true }
+pallet-transaction-payment = { workspace = true }
 # Contracts pallet
-pallet-contracts = { version = "45.0.1", workspace = true }
+pallet-contracts = { workspace = true }
 # Trading pallets
 pallet-trading-common = { workspace = true }
 pallet-nex-market = { workspace = true }
@@ -87,23 +90,24 @@ pallet-ads-entity = { workspace = true }
 pallet-ads-router = { workspace = true }
 scale-info = { features = ["derive", "serde"], workspace = true }
 serde_json = { workspace = true, default-features = false, features = ["alloc"] }
-sp-api = { version = "40.0.0", workspace = true }
-sp-block-builder = { version = "40.0.0", workspace = true }
-sp-consensus-aura = { version = "0.46.0", features = ["serde"], workspace = true }
-sp-consensus-grandpa = { version = "27.0.0", features = ["serde"], workspace = true }
-sp-core = { version = "39.0.0", features = ["serde"], workspace = true }
-sp-genesis-builder = { version = "0.21.0", workspace = true }
-sp-inherents = { version = "40.0.0", workspace = true }
-sp-keyring = { version = "45.0.0", workspace = true }
-sp-offchain = { version = "40.0.0", workspace = true }
-sp-runtime = { version = "45.0.0", features = ["serde"], workspace = true }
-sp-session = { version = "42.0.0", workspace = true }
-sp-storage = { version = "22.0.0", workspace = true }
-sp-transaction-pool = { version = "40.0.0", workspace = true }
-sp-version = { version = "43.0.0", features = ["serde"], workspace = true }
+sp-api = { workspace = true }
+sp-block-builder = { workspace = true }
+sp-consensus-aura = { features = ["serde"], workspace = true }
+sp-consensus-grandpa = { features = ["serde"], workspace = true }
+sp-core = { features = ["serde"], workspace = true }
+sp-genesis-builder = { workspace = true }
+sp-inherents = { workspace = true }
+sp-keyring = { workspace = true }
+sp-offchain = { workspace = true }
+sp-runtime = { features = ["serde"], workspace = true }
+sp-session = { workspace = true }
+sp-staking = { workspace = true }
+sp-storage = { workspace = true }
+sp-transaction-pool = { workspace = true }
+sp-version = { features = ["serde"], workspace = true }
 
 [build-dependencies]
-substrate-wasm-builder = { version = "31.0.0", optional = true, workspace = true, default-features = true }
+substrate-wasm-builder = { optional = true, workspace = true, default-features = true }
 
 [features]
 default = ["std"]
@@ -121,6 +125,9 @@ std = [
 	"pallet-aura/std",
 	"pallet-balances/std",
 	"pallet-grandpa/std",
+	"pallet-session/std",
+	"pallet-offences/std",
+	"pallet-authorship/std",
 	"pallet-sudo/std",
 	"pallet-collective/std",
 	"pallet-collective-membership/std",
@@ -193,6 +200,7 @@ std = [
 	"sp-offchain/std",
 	"sp-runtime/std",
 	"sp-session/std",
+	"sp-staking/std",
 	"sp-storage/std",
 	"sp-transaction-pool/std",
 	"sp-version/std",
@@ -206,6 +214,8 @@ runtime-benchmarks = [
 	"frame-system/runtime-benchmarks",
 	"pallet-balances/runtime-benchmarks",
 	"pallet-grandpa/runtime-benchmarks",
+	"pallet-session/runtime-benchmarks",
+	"pallet-offences/runtime-benchmarks",
 	"pallet-sudo/runtime-benchmarks",
 	"pallet-collective/runtime-benchmarks",
 	"pallet-collective-membership/runtime-benchmarks",
@@ -235,6 +245,9 @@ try-runtime = [
 	"pallet-aura/try-runtime",
 	"pallet-balances/try-runtime",
 	"pallet-grandpa/try-runtime",
+	"pallet-session/try-runtime",
+	"pallet-offences/try-runtime",
+	"pallet-authorship/try-runtime",
 	"pallet-sudo/try-runtime",
 	"pallet-collective/try-runtime",
 	"pallet-collective-membership/try-runtime",

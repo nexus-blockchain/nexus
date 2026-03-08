@@ -16,42 +16,42 @@ targets = ["x86_64-unknown-linux-gnu"]
 
 [dependencies]
 clap = { features = ["derive"], workspace = true }
-frame-benchmarking-cli = { version = "53.0.0", default-features = true, workspace = true }
-frame-metadata-hash-extension = { version = "0.13.0", default-features = true, workspace = true }
-frame-system = { version = "45.0.0", default-features = true, workspace = true }
+frame-benchmarking-cli = { default-features = true, workspace = true }
+frame-metadata-hash-extension = { default-features = true, workspace = true }
+frame-system = { default-features = true, workspace = true }
 futures = { features = ["thread-pool"], workspace = true }
 jsonrpsee = { features = ["server"], workspace = true }
-pallet-transaction-payment-rpc = { version = "48.0.0", default-features = true, workspace = true }
-pallet-transaction-payment = { version = "45.0.0", default-features = true, workspace = true }
-sc-basic-authorship = { version = "0.53.0", default-features = true, workspace = true }
-sc-cli = { version = "0.57.0", default-features = true, workspace = true }
-sc-client-api = { version = "44.0.0", default-features = true, workspace = true }
-sc-consensus-aura = { version = "0.55.0", default-features = true, workspace = true }
-sc-consensus-grandpa = { version = "0.40.0", default-features = true, workspace = true }
-sc-consensus = { version = "0.54.0", default-features = true, workspace = true }
-sc-executor = { version = "0.47.0", default-features = true, workspace = true }
-sc-network = { version = "0.55.0", default-features = true, workspace = true }
-sc-offchain = { version = "50.0.0", default-features = true, workspace = true }
-sc-service = { version = "0.56.0", default-features = true, workspace = true }
-sc-telemetry = { version = "30.0.0", default-features = true, workspace = true }
-sc-transaction-pool-api = { version = "43.0.0", default-features = true, workspace = true }
-sc-transaction-pool = { version = "44.0.0", default-features = true, workspace = true }
-nexus-runtime = { version = "0.1.0", workspace = true }
-sp-api = { version = "40.0.0", default-features = true, workspace = true }
-sp-block-builder = { version = "40.0.0", default-features = true, workspace = true }
-sp-blockchain = { version = "43.0.0", default-features = true, workspace = true }
-sp-consensus-aura = { version = "0.46.0", default-features = true, workspace = true }
-sp-core = { version = "39.0.0", default-features = true, workspace = true }
-sp-genesis-builder = { version = "0.21.0", default-features = true, workspace = true }
-sp-inherents = { version = "40.0.0", default-features = true, workspace = true }
-sp-io = { version = "44.0.0", default-features = true, workspace = true }
-sp-keyring = { version = "45.0.0", default-features = true, workspace = true }
-sp-runtime = { version = "45.0.0", default-features = true, workspace = true }
-sp-timestamp = { version = "40.0.0", default-features = true, workspace = true }
-substrate-frame-rpc-system = { version = "49.0.0", default-features = true, workspace = true }
+pallet-transaction-payment-rpc = { default-features = true, workspace = true }
+pallet-transaction-payment = { default-features = true, workspace = true }
+sc-basic-authorship = { default-features = true, workspace = true }
+sc-cli = { default-features = true, workspace = true }
+sc-client-api = { default-features = true, workspace = true }
+sc-consensus-aura = { default-features = true, workspace = true }
+sc-consensus-grandpa = { default-features = true, workspace = true }
+sc-consensus = { default-features = true, workspace = true }
+sc-executor = { default-features = true, workspace = true }
+sc-network = { default-features = true, workspace = true }
+sc-offchain = { default-features = true, workspace = true }
+sc-service = { default-features = true, workspace = true }
+sc-telemetry = { default-features = true, workspace = true }
+sc-transaction-pool-api = { default-features = true, workspace = true }
+sc-transaction-pool = { default-features = true, workspace = true }
+nexus-runtime = { workspace = true }
+sp-api = { default-features = true, workspace = true }
+sp-block-builder = { default-features = true, workspace = true }
+sp-blockchain = { default-features = true, workspace = true }
+sp-consensus-aura = { default-features = true, workspace = true }
+sp-core = { default-features = true, workspace = true }
+sp-genesis-builder = { default-features = true, workspace = true }
+sp-inherents = { default-features = true, workspace = true }
+sp-io = { default-features = true, workspace = true }
+sp-keyring = { default-features = true, workspace = true }
+sp-runtime = { default-features = true, workspace = true }
+sp-timestamp = { default-features = true, workspace = true }
+substrate-frame-rpc-system = { default-features = true, workspace = true }
 
 [build-dependencies]
-substrate-build-script-utils = { version = "11.0.0", default-features = true, workspace = true }
+substrate-build-script-utils = { default-features = true, workspace = true }
 
 [features]
 default = ["std"]

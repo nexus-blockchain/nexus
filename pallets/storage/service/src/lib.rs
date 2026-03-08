@@ -1752,6 +1752,18 @@ pub mod pallet {
             amount: BalanceOf<T>,
             reason: BoundedVec<u8, ConstU32<256>>,
         },
+
+        /// 运营者奖励分配失败（扣费已完成但分配环节出错）
+        DistributionFailed {
+            cid_hash: T::Hash,
+            amount: BalanceOf<T>,
+        },
+
+        /// CID 清理退款失败（cleanup 正常继续，仅记录退款失败）
+        RefundFailed {
+            owner: T::AccountId,
+            amount: BalanceOf<T>,
+        },
         
     }
 
@@ -1861,6 +1873,9 @@ pub mod pallet {
         /// 触发场景：
         /// - 尝试分配超过BoundedVec限制的节点数
         TooManyNodes,
+        
+        /// 活跃运营者索引已满（ActiveOperatorIndex 达到上限 256）
+        ActiveOperatorIndexFull,
         
         // ============================================================================
         // 新pallet域自动PIN机制相关Errors
@@ -2787,7 +2802,12 @@ pub mod pallet {
                     let pool_balance = T::Currency::free_balance(&pool_account);
                     
                     if pool_balance >= amount {
-                        let _ = Self::distribute_to_pin_operators(cid_hash, amount);
+                        if let Err(_) = Self::distribute_to_pin_operators(cid_hash, amount) {
+                            Self::deposit_event(Event::DistributionFailed {
+                                cid_hash: *cid_hash,
+                                amount,
+                            });
+                        }
                         TotalChargedFromPool::<T>::mutate(|total| *total = total.saturating_add(amount));
                         
                         Self::deposit_event(Event::ChargedFromIpfsPool {
@@ -2808,7 +2828,12 @@ pub mod pallet {
             if let Some(eid) = CidEntityOf::<T>::get(cid_hash) {
                 match T::EntityFunding::try_charge_entity(eid, amount, &pool_account) {
                     Ok(true) => {
-                        let _ = Self::distribute_to_pin_operators(cid_hash, amount);
+                        if let Err(_) = Self::distribute_to_pin_operators(cid_hash, amount) {
+                            Self::deposit_event(Event::DistributionFailed {
+                                cid_hash: *cid_hash,
+                                amount,
+                            });
+                        }
                         Self::deposit_event(Event::ChargedFromEntityTreasury {
                             entity_id: eid,
                             amount,
@@ -2835,7 +2860,12 @@ pub mod pallet {
                         ExistenceRequirement::KeepAlive,
                     ).map_err(|_| Error::<T>::SubjectFundingInsufficientBalance)?;
                     
-                    let _ = Self::distribute_to_pin_operators(cid_hash, amount);
+                    if let Err(_) = Self::distribute_to_pin_operators(cid_hash, amount) {
+                        Self::deposit_event(Event::DistributionFailed {
+                            cid_hash: *cid_hash,
+                            amount,
+                        });
+                    }
                     TotalChargedFromSubject::<T>::mutate(|total| *total = total.saturating_add(amount));
                     
                     for subject_info in subjects.iter() {
@@ -2860,7 +2890,12 @@ pub mod pallet {
             // ===== 第4层：IpfsPool 兜底（公共池补贴）=====
             let pool_balance = T::Currency::free_balance(&pool_account);
             if pool_balance >= amount {
-                let _ = Self::distribute_to_pin_operators(cid_hash, amount);
+                if let Err(_) = Self::distribute_to_pin_operators(cid_hash, amount) {
+                    Self::deposit_event(Event::DistributionFailed {
+                        cid_hash: *cid_hash,
+                        amount,
+                    });
+                }
                 TotalChargedFromPool::<T>::mutate(|total| *total = total.saturating_add(amount));
                 
                 Self::deposit_event(Event::IpfsPoolLowBalanceWarning {
@@ -3044,14 +3079,21 @@ pub mod pallet {
                 return Err(Error::<T>::NoOperatorsAssigned.into());
             }
             
+            // Cap distribution to available (reservable) balance to prevent silent failure
+            let pool_free = T::Currency::free_balance(&pool_account);
+            let effective_amount = core::cmp::min(total_amount, pool_free);
+            if effective_amount.is_zero() {
+                return Ok(());
+            }
+
             let mut total_distributed = BalanceOf::<T>::zero();
             let last_idx = weights.len().saturating_sub(1);
             
             for (i, (operator, weight)) in weights.iter().enumerate() {
                 let share = if i == last_idx {
-                    total_amount.saturating_sub(total_distributed)
+                    effective_amount.saturating_sub(total_distributed)
                 } else {
-                    let amt_u128: u128 = total_amount.saturated_into();
+                    let amt_u128: u128 = effective_amount.saturated_into();
                     let s = amt_u128.saturating_mul(*weight) / total_weight;
                     s.saturated_into()
                 };
@@ -3069,8 +3111,9 @@ pub mod pallet {
                 });
             }
             
-            // 锁定 Pool 资金，防止 OperatorRewards 超过 Pool 实际余额
-            let _ = T::Currency::reserve(&pool_account, total_distributed);
+            // Lock pool funds — propagate error if reserve fails after capping
+            T::Currency::reserve(&pool_account, total_distributed)
+                .map_err(|_| Error::<T>::InsufficientEscrowBalance)?;
             
             Self::deposit_event(Event::RewardDistributed {
                 total_amount: total_distributed,
@@ -3796,9 +3839,10 @@ pub mod pallet {
             Operators::<T>::insert(&who, info);
             
             // ✅ P0-16：维护活跃运营者索引
-            ActiveOperatorIndex::<T>::mutate(|index| {
-                let _ = index.try_push(who.clone());
-            });
+            ActiveOperatorIndex::<T>::try_mutate(|index| -> DispatchResult {
+                index.try_push(who.clone()).map_err(|_| Error::<T>::ActiveOperatorIndexFull)?;
+                Ok(())
+            })?;
             
             Self::deposit_event(Event::OperatorJoined(who));
             Ok(())
@@ -5535,7 +5579,7 @@ pub mod pallet {
                                         
                                         // ⭐ P2: 通过 unsigned extrinsic 提交补充分配
                                         if added_count > 0 {
-                                            let new_core: Vec<T::AccountId> = new_candidates.iter()
+                                            let _new_core: Vec<T::AccountId> = new_candidates.iter()
                                                 .filter(|op| !current_operators.contains(op))
                                                 .take(added_count as usize)
                                                 .cloned()
@@ -5683,294 +5727,294 @@ pub mod pallet {
         /// - 每块最多处理20个扣费任务
         /// - 每块最多处理10个巡检任务
         /// - 防止区块拥堵
-        fn on_finalize(n: BlockNumberFor<T>) {
-            let current_block = n;
-            
-            // ======== 任务1：自动周期扣费（cursor 分页）========
-            // H3修复：BillingPaused 仅跳过扣费任务，不阻塞健康检查/运营者注销/过期清理
-            let billing_paused = BillingPaused::<T>::get();
-            if !billing_paused {
-            let max_charges_per_block = 20u32;
-            let mut charged = 0u32;
-            
-            // cursor 记录上次处理到的 due_block，本次从 cursor+1 开始
-            let billing_cursor = BillingSettleCursor::<T>::get();
-            let scan_start = if billing_cursor == Zero::zero() {
-                Zero::zero()
-            } else {
-                billing_cursor.saturating_add(1u32.into())
-            };
-            
-            let mut tasks_to_process: alloc::vec::Vec<(BlockNumberFor<T>, T::Hash, BillingTask<BlockNumberFor<T>, BalanceOf<T>>)> 
-                = alloc::vec::Vec::new();
-            
-            // 逐块 prefix 扫描（scan_start..=current_block），替代全表 iter()
-            let mut scan_block = scan_start;
-            let mut last_fully_scanned = billing_cursor;
-            'billing_scan: while scan_block <= current_block {
-                for (cid_hash, task) in BillingQueue::<T>::iter_prefix(scan_block) {
-                    if charged < max_charges_per_block {
-                        tasks_to_process.push((scan_block, cid_hash, task));
-                        charged += 1;
-                    } else {
-                        // 本块未处理完，不推进 cursor
-                        break 'billing_scan;
-                    }
-                }
-                // 本块全部收集完毕，推进 cursor
-                last_fully_scanned = scan_block;
-                scan_block = scan_block.saturating_add(1u32.into());
-            }
-            BillingSettleCursor::<T>::put(last_fully_scanned);
-            
-            // 处理收集到的任务
-            for (due_block, cid_hash, mut task) in tasks_to_process {
-                // 执行四层回退扣费
-                match Self::four_layer_charge(&cid_hash, &mut task) {
-                    Ok(ChargeResult::Success { layer }) => {
-                        let next_billing = current_block.saturating_add(task.billing_period.into());
-                        task.last_charge = current_block;
-                        task.charge_layer = layer;
-                        task.grace_status = GraceStatus::Normal;
-                        BillingQueue::<T>::insert(next_billing, &cid_hash, task);
-                        BillingQueue::<T>::remove(due_block, &cid_hash);
-                        CidBillingDueBlock::<T>::insert(&cid_hash, next_billing);
-                    },
-                    Ok(ChargeResult::EnterGrace { expires_at }) => {
-                        // 指数退避：从1h逐步延长到24h，降低链上开销
-                        let retry_count = match &task.grace_status {
-                            GraceStatus::InGrace { retry_count, .. } => retry_count.saturating_add(1),
-                            _ => 0u32,
-                        };
-                        task.grace_status = GraceStatus::InGrace {
-                            entered_at: current_block,
-                            expires_at,
-                            retry_count,
-                        };
-                        let shift = core::cmp::min(retry_count, 5);
-                        let backoff = core::cmp::min(
-                            1200u32.saturating_mul(1u32 << shift),
-                            28800u32, // cap at 24h
-                        );
-                        let next_billing = current_block.saturating_add(backoff.into());
-                        BillingQueue::<T>::insert(next_billing, &cid_hash, task);
-                        BillingQueue::<T>::remove(due_block, &cid_hash);
-                        CidBillingDueBlock::<T>::insert(&cid_hash, next_billing);
-                        
-                        Self::deposit_event(Event::GracePeriodStarted {
-                            cid_hash: cid_hash.clone(),
-                            expires_at,
-                        });
-                    },
-                    Err(_) => {
-                        task.grace_status = GraceStatus::Expired;
-                        BillingQueue::<T>::remove(due_block, &cid_hash);
-                        CidBillingDueBlock::<T>::remove(&cid_hash);
-                        
-                        if let Some((_, unit_price, _)) = PinBilling::<T>::get(&cid_hash) {
-                            PinBilling::<T>::insert(&cid_hash, (current_block, unit_price, 2u8));
-                            ExpiredCidPending::<T>::put(true);
-                            ExpiredCidQueue::<T>::mutate(|q| { let _ = q.try_push(cid_hash.clone()); });
-                        }
-                        
-                        Self::deposit_event(Event::MarkedForUnpin {
-                            cid_hash: cid_hash.clone(),
-                            reason: UnpinReason::InsufficientFunds,
-                        });
-                    },
-                }
-            }
-            } // end if !billing_paused
-            
-            // ======== 任务2：自动健康巡检（cursor 分页）========
-            let max_checks_per_block = 10u32;
-            let mut checked = 0u32;
-            
-            let hc_cursor = HealthCheckSettleCursor::<T>::get();
-            let hc_start = if hc_cursor == Zero::zero() {
-                Zero::zero()
-            } else {
-                hc_cursor.saturating_add(1u32.into())
-            };
-            
-            let mut checks_to_process: alloc::vec::Vec<(BlockNumberFor<T>, T::Hash, HealthCheckTask<BlockNumberFor<T>>)> 
-                = alloc::vec::Vec::new();
-            
-            let mut hc_scan = hc_start;
-            let mut hc_last_fully = hc_cursor;
-            'hc_scan: while hc_scan <= current_block {
-                for (cid_hash, task) in HealthCheckQueue::<T>::iter_prefix(hc_scan) {
-                    if checked < max_checks_per_block {
-                        checks_to_process.push((hc_scan, cid_hash, task));
-                        checked += 1;
-                    } else {
-                        break 'hc_scan;
-                    }
-                }
-                hc_last_fully = hc_scan;
-                hc_scan = hc_scan.saturating_add(1u32.into());
-            }
-            HealthCheckSettleCursor::<T>::put(hc_last_fully);
-            
-            // 处理巡检任务
-            for (check_block, cid_hash, mut task) in checks_to_process {
-                // 幽灵条目：CID 已被清理，跳过并不再重新入队
-                if !PinMeta::<T>::contains_key(&cid_hash) {
-                    HealthCheckQueue::<T>::remove(check_block, &cid_hash);
-                    continue;
-                }
+        fn on_finalize(_n: BlockNumberFor<T>) {
+            // All work migrated to on_idle with weight accounting.
+        }
 
-                let status = Self::check_pin_health(&cid_hash);
-                
-                // 获取分层配置
-                let tier_config = Self::get_tier_config(&task.tier).unwrap_or_default();
-                
-                // 根据状态决定下一步
-                match status {
-                    HealthStatus::Healthy { .. } => {
-                        // 健康：重新入队，正常间隔
-                        let next_check = current_block.saturating_add(tier_config.health_check_interval.into());
-                        task.last_check = current_block;
-                        task.last_status = status.clone();
-                        task.consecutive_failures = 0;
-                        HealthCheckQueue::<T>::insert(next_check, &cid_hash, task);
-                    },
-                    HealthStatus::Degraded { current_replicas, target } => {
-                        // 降级：缩短巡检间隔（降级期间更频繁检查）
-                        let urgent_interval = tier_config.health_check_interval / 4;
-                        let next_check = current_block.saturating_add(urgent_interval.into());
-                        task.last_check = current_block;
-                        task.last_status = status.clone();
-                        task.consecutive_failures = task.consecutive_failures.saturating_add(1);
-                        HealthCheckQueue::<T>::insert(next_check, &cid_hash, task);
-                        
-                        // 自动修复：尝试补充运营者
-                        Self::try_auto_repair(&cid_hash, current_replicas, target);
-                        
-                        // 发送告警事件
-                        Self::deposit_event(Event::HealthDegraded {
-                            cid_hash: cid_hash.clone(),
-                            current_replicas,
-                            target,
-                        });
-                    },
-                    HealthStatus::Critical { current_replicas } => {
-                        // 危险：极短巡检间隔（每小时检查一次）
-                        let critical_interval = 1200u32; // ~1小时
-                        let next_check = current_block.saturating_add(critical_interval.into());
-                        task.last_check = current_block;
-                        task.last_status = status.clone();
-                        task.consecutive_failures = task.consecutive_failures.saturating_add(1);
-                        HealthCheckQueue::<T>::insert(next_check, &cid_hash, task);
-                        
-                        // 自动修复：使用PinMeta中记录的目标副本数
-                        let target_replicas = PinMeta::<T>::get(&cid_hash)
-                            .map(|m| m.replicas)
-                            .unwrap_or(2);
-                        Self::try_auto_repair(&cid_hash, current_replicas, target_replicas);
-                        
-                        // 发送紧急告警
-                        Self::deposit_event(Event::HealthCritical {
-                            cid_hash: cid_hash.clone(),
-                            current_replicas,
-                        });
-                    },
-                    HealthStatus::Unknown => {
-                        // 未知：可能是网络问题，稍后重试
-                        let retry_interval = 600u32; // ~30分钟后重试
-                        let next_check = current_block.saturating_add(retry_interval.into());
-                        task.last_check = current_block;
-                        task.last_status = status.clone();
-                        task.consecutive_failures = task.consecutive_failures.saturating_add(1);
-                        
-                        // 连续失败5次，发送告警
-                        if task.consecutive_failures >= 5 {
-                            Self::deposit_event(Event::HealthCheckFailed {
-                                cid_hash: cid_hash.clone(),
-                                failures: task.consecutive_failures,
-                            });
+        fn on_idle(n: BlockNumberFor<T>, remaining_weight: Weight) -> Weight {
+            let current_block = n;
+
+            let w_overhead  = Weight::from_parts(10_000, 500);
+            let w_billing   = Weight::from_parts(200_000, 4_000);
+            let w_health    = Weight::from_parts(150_000, 3_000);
+            let w_unreg     = Weight::from_parts(100_000, 2_000);
+            let w_cleanup   = Weight::from_parts(120_000, 2_500);
+            let w_domain    = Weight::from_parts(500_000, 10_000);
+            let w_orphan    = Weight::from_parts(50_000, 1_000);
+
+            let mut budget = remaining_weight;
+            let mut consumed = w_overhead;
+
+            if !budget.all_gte(w_overhead) {
+                return Weight::zero();
+            }
+            budget = budget.saturating_sub(w_overhead);
+
+            // ======== Task 1: Billing settlement (cursor-paged) ========
+            let billing_paused = BillingPaused::<T>::get();
+            if !billing_paused && budget.all_gte(w_billing) {
+                let billing_cursor = BillingSettleCursor::<T>::get();
+                let scan_start = if billing_cursor == Zero::zero() {
+                    Zero::zero()
+                } else {
+                    billing_cursor.saturating_add(1u32.into())
+                };
+
+                let mut tasks_to_process: alloc::vec::Vec<(
+                    BlockNumberFor<T>, T::Hash,
+                    BillingTask<BlockNumberFor<T>, BalanceOf<T>>,
+                )> = alloc::vec::Vec::new();
+
+                let mut scan_block = scan_start;
+                let mut last_fully_scanned = billing_cursor;
+                'billing_scan: while scan_block <= current_block {
+                    for (cid_hash, task) in BillingQueue::<T>::iter_prefix(scan_block) {
+                        if budget.all_gte(w_billing) {
+                            tasks_to_process.push((scan_block, cid_hash, task));
+                            budget = budget.saturating_sub(w_billing);
+                            consumed = consumed.saturating_add(w_billing);
+                        } else {
+                            break 'billing_scan;
                         }
-                        
-                        HealthCheckQueue::<T>::insert(next_check, &cid_hash, task);
-                    },
+                    }
+                    last_fully_scanned = scan_block;
+                    scan_block = scan_block.saturating_add(1u32.into());
                 }
-                
-                // 移除旧的队列项
-                HealthCheckQueue::<T>::remove(check_block, &cid_hash);
+                BillingSettleCursor::<T>::put(last_fully_scanned);
+
+                for (due_block, cid_hash, mut task) in tasks_to_process {
+                    match Self::four_layer_charge(&cid_hash, &mut task) {
+                        Ok(ChargeResult::Success { layer }) => {
+                            let next_billing = current_block.saturating_add(task.billing_period.into());
+                            task.last_charge = current_block;
+                            task.charge_layer = layer;
+                            task.grace_status = GraceStatus::Normal;
+                            BillingQueue::<T>::insert(next_billing, &cid_hash, task);
+                            BillingQueue::<T>::remove(due_block, &cid_hash);
+                            CidBillingDueBlock::<T>::insert(&cid_hash, next_billing);
+                        },
+                        Ok(ChargeResult::EnterGrace { expires_at }) => {
+                            let retry_count = match &task.grace_status {
+                                GraceStatus::InGrace { retry_count, .. } => retry_count.saturating_add(1),
+                                _ => 0u32,
+                            };
+                            task.grace_status = GraceStatus::InGrace {
+                                entered_at: current_block,
+                                expires_at,
+                                retry_count,
+                            };
+                            let shift = core::cmp::min(retry_count, 5);
+                            let backoff = core::cmp::min(
+                                1200u32.saturating_mul(1u32 << shift),
+                                28800u32,
+                            );
+                            let next_billing = current_block.saturating_add(backoff.into());
+                            BillingQueue::<T>::insert(next_billing, &cid_hash, task);
+                            BillingQueue::<T>::remove(due_block, &cid_hash);
+                            CidBillingDueBlock::<T>::insert(&cid_hash, next_billing);
+
+                            Self::deposit_event(Event::GracePeriodStarted {
+                                cid_hash: cid_hash.clone(),
+                                expires_at,
+                            });
+                        },
+                        Err(_) => {
+                            task.grace_status = GraceStatus::Expired;
+                            BillingQueue::<T>::remove(due_block, &cid_hash);
+                            CidBillingDueBlock::<T>::remove(&cid_hash);
+
+                            if let Some((_, unit_price, _)) = PinBilling::<T>::get(&cid_hash) {
+                                PinBilling::<T>::insert(&cid_hash, (current_block, unit_price, 2u8));
+                                ExpiredCidPending::<T>::put(true);
+                                ExpiredCidQueue::<T>::mutate(|q| { let _ = q.try_push(cid_hash.clone()); });
+                            }
+
+                            Self::deposit_event(Event::MarkedForUnpin {
+                                cid_hash: cid_hash.clone(),
+                                reason: UnpinReason::InsufficientFunds,
+                            });
+                        },
+                    }
+                }
             }
-            
-            // ======== 任务3：过期运营者宽限期自动处理 ========
-            let max_unreg_per_block = 5u32;
-            let mut unreg_count = 0u32;
-            let mut expired_ops: alloc::vec::Vec<T::AccountId> = alloc::vec::Vec::new();
-            for (operator, expires_at) in PendingUnregistrations::<T>::iter() {
-                if expires_at <= current_block && unreg_count < max_unreg_per_block {
-                    expired_ops.push(operator);
-                    unreg_count += 1;
+
+            // ======== Task 2: Health-check settlement (cursor-paged) ========
+            if budget.all_gte(w_health) {
+                let hc_cursor = HealthCheckSettleCursor::<T>::get();
+                let hc_start = if hc_cursor == Zero::zero() {
+                    Zero::zero()
+                } else {
+                    hc_cursor.saturating_add(1u32.into())
+                };
+
+                let mut checks_to_process: alloc::vec::Vec<(
+                    BlockNumberFor<T>, T::Hash,
+                    HealthCheckTask<BlockNumberFor<T>>,
+                )> = alloc::vec::Vec::new();
+
+                let mut hc_scan = hc_start;
+                let mut hc_last_fully = hc_cursor;
+                'hc_scan: while hc_scan <= current_block {
+                    for (cid_hash, task) in HealthCheckQueue::<T>::iter_prefix(hc_scan) {
+                        if budget.all_gte(w_health) {
+                            checks_to_process.push((hc_scan, cid_hash, task));
+                            budget = budget.saturating_sub(w_health);
+                            consumed = consumed.saturating_add(w_health);
+                        } else {
+                            break 'hc_scan;
+                        }
+                    }
+                    hc_last_fully = hc_scan;
+                    hc_scan = hc_scan.saturating_add(1u32.into());
                 }
-                if unreg_count >= max_unreg_per_block {
-                    break;
+                HealthCheckSettleCursor::<T>::put(hc_last_fully);
+
+                for (check_block, cid_hash, mut task) in checks_to_process {
+                    if !PinMeta::<T>::contains_key(&cid_hash) {
+                        HealthCheckQueue::<T>::remove(check_block, &cid_hash);
+                        continue;
+                    }
+
+                    let status = Self::check_pin_health(&cid_hash);
+                    let tier_config = Self::get_tier_config(&task.tier).unwrap_or_default();
+
+                    match status {
+                        HealthStatus::Healthy { .. } => {
+                            let next_check = current_block.saturating_add(tier_config.health_check_interval.into());
+                            task.last_check = current_block;
+                            task.last_status = status.clone();
+                            task.consecutive_failures = 0;
+                            HealthCheckQueue::<T>::insert(next_check, &cid_hash, task);
+                        },
+                        HealthStatus::Degraded { current_replicas, target } => {
+                            let urgent_interval = tier_config.health_check_interval / 4;
+                            let next_check = current_block.saturating_add(urgent_interval.into());
+                            task.last_check = current_block;
+                            task.last_status = status.clone();
+                            task.consecutive_failures = task.consecutive_failures.saturating_add(1);
+                            HealthCheckQueue::<T>::insert(next_check, &cid_hash, task);
+
+                            Self::try_auto_repair(&cid_hash, current_replicas, target);
+
+                            Self::deposit_event(Event::HealthDegraded {
+                                cid_hash: cid_hash.clone(),
+                                current_replicas,
+                                target,
+                            });
+                        },
+                        HealthStatus::Critical { current_replicas } => {
+                            let critical_interval = 1200u32;
+                            let next_check = current_block.saturating_add(critical_interval.into());
+                            task.last_check = current_block;
+                            task.last_status = status.clone();
+                            task.consecutive_failures = task.consecutive_failures.saturating_add(1);
+                            HealthCheckQueue::<T>::insert(next_check, &cid_hash, task);
+
+                            let target_replicas = PinMeta::<T>::get(&cid_hash)
+                                .map(|m| m.replicas)
+                                .unwrap_or(2);
+                            Self::try_auto_repair(&cid_hash, current_replicas, target_replicas);
+
+                            Self::deposit_event(Event::HealthCritical {
+                                cid_hash: cid_hash.clone(),
+                                current_replicas,
+                            });
+                        },
+                        HealthStatus::Unknown => {
+                            let retry_interval = 600u32;
+                            let next_check = current_block.saturating_add(retry_interval.into());
+                            task.last_check = current_block;
+                            task.last_status = status.clone();
+                            task.consecutive_failures = task.consecutive_failures.saturating_add(1);
+
+                            if task.consecutive_failures >= 5 {
+                                Self::deposit_event(Event::HealthCheckFailed {
+                                    cid_hash: cid_hash.clone(),
+                                    failures: task.consecutive_failures,
+                                });
+                            }
+
+                            HealthCheckQueue::<T>::insert(next_check, &cid_hash, task);
+                        },
+                    }
+
+                    HealthCheckQueue::<T>::remove(check_block, &cid_hash);
                 }
             }
-            for operator in expired_ops {
-                let remaining = Self::count_operator_pins(&operator);
-                if remaining == 0 {
-                    let _ = Self::finalize_operator_unregistration(&operator);
+
+            // ======== Task 3: Expired operator grace-period processing ========
+            if budget.all_gte(w_unreg) {
+                let mut expired_ops: alloc::vec::Vec<T::AccountId> = alloc::vec::Vec::new();
+                for (operator, expires_at) in PendingUnregistrations::<T>::iter() {
+                    if !budget.all_gte(w_unreg) {
+                        break;
+                    }
+                    if expires_at <= current_block {
+                        expired_ops.push(operator);
+                        budget = budget.saturating_sub(w_unreg);
+                        consumed = consumed.saturating_add(w_unreg);
+                    }
                 }
-                // 即使仍有 pin，也移除宽限期记录（已超时，治理可介入 slash）
-                PendingUnregistrations::<T>::remove(&operator);
+                for operator in expired_ops {
+                    let remaining = Self::count_operator_pins(&operator);
+                    if remaining == 0 {
+                        let _ = Self::finalize_operator_unregistration(&operator);
+                    }
+                    PendingUnregistrations::<T>::remove(&operator);
+                }
             }
-            
-            // ======== 任务3.5：过期CID链上存储清理（共识路径，绕过C1）========
-            // H1-R4优化：使用 ExpiredCidQueue 替代 PinBilling::iter() 全表扫描
-            if ExpiredCidPending::<T>::get() {
-                let max_cleanup_per_block = 5u32;
+
+            // ======== Task 3.5: Expired CID on-chain storage cleanup ========
+            if ExpiredCidPending::<T>::get() && budget.all_gte(w_cleanup) {
+                let max_cleanup = budget
+                    .ref_time()
+                    .checked_div(w_cleanup.ref_time())
+                    .unwrap_or(0) as u32;
                 let mut cleaned = 0u32;
                 let mut to_clean: alloc::vec::Vec<T::Hash> = alloc::vec::Vec::new();
-                
-                // 从队列头部取出待清理的CID（O(1) 而非 O(N) 扫描）
+
                 ExpiredCidQueue::<T>::mutate(|queue| {
-                    while cleaned < max_cleanup_per_block && !queue.is_empty() {
+                    while cleaned < max_cleanup && !queue.is_empty() {
                         to_clean.push(queue.remove(0));
                         cleaned += 1;
                     }
                 });
-                
+
+                let cleanup_cost = w_cleanup.saturating_mul(cleaned as u64);
+                budget = budget.saturating_sub(cleanup_cost);
+                consumed = consumed.saturating_add(cleanup_cost);
+
                 for cid_hash in to_clean.iter() {
                     Self::do_cleanup_single_cid(cid_hash);
                 }
-                
-                // H1-R4：队列为空时重置标志
+
                 if ExpiredCidQueue::<T>::get().is_empty() {
                     ExpiredCidPending::<T>::put(false);
                 }
             }
-            
-            // ======== 任务4：域统计更新（每24小时一次）========
-            // ⭐ 使用域级统计替代全局统计，自动汇总全局数据
-            if current_block % 7200u32.into() == Zero::zero() {
+
+            // ======== Task 4: Domain stats update (every ~24h) ========
+            if current_block % 7200u32.into() == Zero::zero() && budget.all_gte(w_domain) {
                 Self::update_domain_health_stats_impl();
-            }
-        }
-
-        fn on_idle(_n: BlockNumberFor<T>, remaining_weight: Weight) -> Weight {
-            let per_item = Weight::from_parts(50_000, 1_000);
-            let overhead = Weight::from_parts(10_000, 500);
-            if !remaining_weight.all_gte(overhead.saturating_add(per_item)) {
-                return Weight::zero();
-            }
-            let max_items = remaining_weight
-                .saturating_sub(overhead)
-                .ref_time()
-                .checked_div(per_item.ref_time())
-                .unwrap_or(0)
-                .min(10) as u32;
-            if max_items == 0 {
-                return overhead;
+                budget = budget.saturating_sub(w_domain);
+                consumed = consumed.saturating_add(w_domain);
             }
 
-            let consumed = Self::sweep_orphan_cids(max_items);
-            overhead.saturating_add(per_item.saturating_mul(consumed as u64))
+            // ======== Task 5: Orphan CID sweep ========
+            if budget.all_gte(w_orphan) {
+                let max_orphan_items = budget
+                    .ref_time()
+                    .checked_div(w_orphan.ref_time())
+                    .unwrap_or(0)
+                    .min(10) as u32;
+                if max_orphan_items > 0 {
+                    let swept = Self::sweep_orphan_cids(max_orphan_items);
+                    let orphan_cost = w_orphan.saturating_mul(swept as u64);
+                    consumed = consumed.saturating_add(orphan_cost);
+                }
+            }
+
+            consumed
         }
     }
 
@@ -6413,17 +6457,26 @@ pub mod pallet {
                                 let pool_balance = <T as Config>::Currency::free_balance(&pool);
                                 let actual_refund = refund.min(pool_balance);
                                 if !actual_refund.is_zero() {
-                                    let _ = <T as Config>::Currency::transfer(
+                                    match <T as Config>::Currency::transfer(
                                         &pool,
                                         owner,
                                         actual_refund,
                                         frame_support::traits::ExistenceRequirement::KeepAlive,
-                                    );
-                                    Self::deposit_event(Event::UnpinRefund {
-                                        cid_hash: *cid_hash,
-                                        owner: owner.clone(),
-                                        refund: actual_refund,
-                                    });
+                                    ) {
+                                        Ok(_) => {
+                                            Self::deposit_event(Event::UnpinRefund {
+                                                cid_hash: *cid_hash,
+                                                owner: owner.clone(),
+                                                refund: actual_refund,
+                                            });
+                                        },
+                                        Err(_) => {
+                                            Self::deposit_event(Event::RefundFailed {
+                                                owner: owner.clone(),
+                                                amount: actual_refund,
+                                            });
+                                        },
+                                    }
                                     refunded = true;
                                 }
                             }
@@ -6455,17 +6508,26 @@ pub mod pallet {
                         let pool_balance = <T as Config>::Currency::free_balance(&pool);
                         let actual_refund = refund.min(pool_balance);
                         if !actual_refund.is_zero() {
-                            let _ = <T as Config>::Currency::transfer(
+                            match <T as Config>::Currency::transfer(
                                 &pool,
                                 owner,
                                 actual_refund,
                                 frame_support::traits::ExistenceRequirement::KeepAlive,
-                            );
-                            Self::deposit_event(Event::UnpinRefund {
-                                cid_hash: *cid_hash,
-                                owner: owner.clone(),
-                                refund: actual_refund,
-                            });
+                            ) {
+                                Ok(_) => {
+                                    Self::deposit_event(Event::UnpinRefund {
+                                        cid_hash: *cid_hash,
+                                        owner: owner.clone(),
+                                        refund: actual_refund,
+                                    });
+                                },
+                                Err(_) => {
+                                    Self::deposit_event(Event::RefundFailed {
+                                        owner: owner.clone(),
+                                        amount: actual_refund,
+                                    });
+                                },
+                            }
                         }
                     }
                 }
@@ -6478,7 +6540,7 @@ pub mod pallet {
         /// 遍历硬编码域 `b"subject"` 和所有已注册域，移除该 CID 的索引。
         /// 防止过期/删除的 CID 在域统计中持续膨胀。
         /// 清理单个 CID 的所有链上存储（供 cleanup_expired_cids 和 on_finalize 复用）。
-        pub(crate) fn do_cleanup_single_cid(cid_hash: &T::Hash) {
+        pub fn do_cleanup_single_cid(cid_hash: &T::Hash) {
             let cid_size = PinMeta::<T>::get(cid_hash).map(|m| m.size).unwrap_or(0);
 
             if let Some(assignments) = PinAssignments::<T>::get(cid_hash) {

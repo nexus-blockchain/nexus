@@ -20,6 +20,9 @@ pub use pallet::*;
 pub mod runtime_api;
 pub use runtime_api::*;
 
+pub mod weights;
+pub use weights::WeightInfo;
+
 #[cfg(test)]
 mod mock;
 #[cfg(test)]
@@ -273,10 +276,7 @@ pub mod pallet {
     // ============================================================================
 
     #[pallet::config]
-    pub trait Config: frame_system::Config {
-        /// 运行时事件类型
-        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-
+    pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
         /// 实体查询接口
         type EntityProvider: EntityProvider<Self::AccountId>;
 
@@ -308,6 +308,9 @@ pub mod pallet {
 
         /// P2-14: 会员移除回调（通知佣金插件清理 per-user 存储）
         type OnMemberRemoved: pallet_entity_common::OnMemberRemoved<Self::AccountId>;
+
+        /// Weight information for extrinsics
+        type WeightInfo: WeightInfo;
     }
 
     /// 同步递归更新 team_size 的最大深度。
@@ -960,7 +963,7 @@ pub mod pallet {
         /// - `shop_id`: 店铺 ID
         /// - `referrer`: 推荐人（可选）
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(375_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::register_member())]
         pub fn register_member(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1038,7 +1041,7 @@ pub mod pallet {
         /// - `shop_id`: 店铺 ID
         /// - `referrer`: 推荐人账户
         #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(400_000_000, 16_000))]
+        #[pallet::weight(T::WeightInfo::bind_referrer())]
         pub fn bind_referrer(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1099,7 +1102,7 @@ pub mod pallet {
         /// - `use_custom`: 是否使用自定义等级
         /// - `upgrade_mode`: 等级升级方式
         #[pallet::call_index(4)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::init_level_system())]
         pub fn init_level_system(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1142,7 +1145,7 @@ pub mod pallet {
         /// - `discount_rate`: 折扣率（基点）
         /// - `commission_bonus`: 返佣加成（基点）
         #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::add_custom_level())]
         pub fn add_custom_level(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1200,7 +1203,7 @@ pub mod pallet {
         /// - `discount_rate`: 新折扣率（可选）
         /// - `commission_bonus`: 新返佣加成（可选）
         #[pallet::call_index(6)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::update_custom_level())]
         pub fn update_custom_level(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1268,7 +1271,7 @@ pub mod pallet {
         /// - `shop_id`: 店铺 ID
         /// - `level_id`: 等级 ID
         #[pallet::call_index(7)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::remove_custom_level())]
         pub fn remove_custom_level(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1310,7 +1313,7 @@ pub mod pallet {
         ///
         /// 支持升级和降级。手动设置为永久等级，清除规则升级残留的过期时间。
         #[pallet::call_index(8)]
-        #[pallet::weight(Weight::from_parts(175_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::manual_set_member_level())]
         pub fn manual_set_member_level(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1375,7 +1378,7 @@ pub mod pallet {
         /// - `shop_id`: 店铺 ID
         /// - `use_custom`: 是否使用自定义等级
         #[pallet::call_index(9)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::set_use_custom_levels())]
         pub fn set_use_custom_levels(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1401,7 +1404,7 @@ pub mod pallet {
         /// - `shop_id`: 店铺 ID
         /// - `upgrade_mode`: 升级模式
         #[pallet::call_index(10)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::set_upgrade_mode())]
         pub fn set_upgrade_mode(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1431,7 +1434,7 @@ pub mod pallet {
         /// - `shop_id`: 店铺 ID
         /// - `conflict_strategy`: 规则冲突处理策略
         #[pallet::call_index(11)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::init_upgrade_rule_system())]
         pub fn init_upgrade_rule_system(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1476,7 +1479,7 @@ pub mod pallet {
         /// - `stackable`: 是否可叠加
         /// - `max_triggers`: 最大触发次数
         #[pallet::call_index(12)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::add_upgrade_rule())]
         pub fn add_upgrade_rule(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1544,7 +1547,7 @@ pub mod pallet {
         /// - `enabled`: 是否启用
         /// - `priority`: 优先级
         #[pallet::call_index(13)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::update_upgrade_rule())]
         pub fn update_upgrade_rule(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1583,7 +1586,7 @@ pub mod pallet {
         /// - `shop_id`: 店铺 ID
         /// - `rule_id`: 规则 ID
         #[pallet::call_index(14)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::remove_upgrade_rule())]
         pub fn remove_upgrade_rule(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1614,7 +1617,7 @@ pub mod pallet {
         /// - `shop_id`: 店铺 ID
         /// - `enabled`: 是否启用
         #[pallet::call_index(15)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::set_upgrade_rule_system_enabled())]
         pub fn set_upgrade_rule_system_enabled(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1640,7 +1643,7 @@ pub mod pallet {
         /// - `shop_id`: 店铺 ID
         /// - `conflict_strategy`: 冲突策略
         #[pallet::call_index(16)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::set_conflict_strategy())]
         pub fn set_conflict_strategy(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1666,7 +1669,7 @@ pub mod pallet {
         /// - `shop_id`: 任意关联 Shop（用于定位 Entity 和权限校验）
         /// - `policy_bits`: 策略位标记（0=开放, 1=需购买, 2=需推荐人, 4=需审批，可组合）
         #[pallet::call_index(17)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::set_member_policy())]
         pub fn set_member_policy(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1702,7 +1705,7 @@ pub mod pallet {
         /// - `shop_id`: 关联 Shop
         /// - `account`: 待审批账户
         #[pallet::call_index(18)]
-        #[pallet::weight(Weight::from_parts(375_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::approve_member())]
         pub fn approve_member(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1753,7 +1756,7 @@ pub mod pallet {
         /// - `shop_id`: 关联 Shop
         /// - `account`: 待审批账户
         #[pallet::call_index(19)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::reject_member())]
         pub fn reject_member(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1789,7 +1792,7 @@ pub mod pallet {
 
         /// M6: 申请人撤回自己的待审批记录
         #[pallet::call_index(21)]
-        #[pallet::weight(Weight::from_parts(100_000_000, 6_000))]
+        #[pallet::weight(T::WeightInfo::cancel_pending_member())]
         pub fn cancel_pending_member(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1815,7 +1818,7 @@ pub mod pallet {
 
         /// M6: 清理过期的待审批记录（任人可调用，按 entity 清理）
         #[pallet::call_index(22)]
-        #[pallet::weight(Weight::from_parts(500_000_000, 20_000))]
+        #[pallet::weight(T::WeightInfo::cleanup_expired_pending())]
         pub fn cleanup_expired_pending(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -1863,7 +1866,7 @@ pub mod pallet {
         /// - `shop_id`: 任意关联 Shop（用于定位 Entity 和权限校验）
         /// - `policy_bits`: 统计策略位标记（0=排除复购, 1=直推含复购, 2=间推含复购，可组合）
         #[pallet::call_index(20)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::set_member_stats_policy())]
         pub fn set_member_stats_policy(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1899,7 +1902,7 @@ pub mod pallet {
         /// - `shop_id`: 关联 Shop
         /// - `accounts`: 待审批账户列表
         #[pallet::call_index(23)]
-        #[pallet::weight(Weight::from_parts(500_000_000, 30_000))]
+        #[pallet::weight(T::WeightInfo::batch_approve_members())]
         pub fn batch_approve_members(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1946,7 +1949,7 @@ pub mod pallet {
         /// - `shop_id`: 关联 Shop
         /// - `accounts`: 待拒绝账户列表
         #[pallet::call_index(24)]
-        #[pallet::weight(Weight::from_parts(500_000_000, 30_000))]
+        #[pallet::weight(T::WeightInfo::batch_reject_members())]
         pub fn batch_reject_members(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -1985,7 +1988,7 @@ pub mod pallet {
         /// - `account`: 要封禁的会员账户
         /// - `reason`: A2: 封禁原因（可选，最长 128 字节）
         #[pallet::call_index(25)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::ban_member())]
         pub fn ban_member(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -2024,7 +2027,7 @@ pub mod pallet {
         /// - `shop_id`: 关联 Shop
         /// - `account`: 要解封的会员账户
         #[pallet::call_index(26)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::unban_member())]
         pub fn unban_member(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -2062,7 +2065,7 @@ pub mod pallet {
         /// - `shop_id`: 关联 Shop
         /// - `account`: 要移除的会员账户
         #[pallet::call_index(27)]
-        #[pallet::weight(Weight::from_parts(500_000_000, 20_000))]
+        #[pallet::weight(T::WeightInfo::remove_member())]
         pub fn remove_member(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -2089,7 +2092,7 @@ pub mod pallet {
         /// # 参数
         /// - `shop_id`: 关联 Shop
         #[pallet::call_index(28)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::reset_level_system())]
         pub fn reset_level_system(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -2126,7 +2129,7 @@ pub mod pallet {
         /// # 参数
         /// - `shop_id`: 关联 Shop
         #[pallet::call_index(29)]
-        #[pallet::weight(Weight::from_parts(200_000_000, 12_000))]
+        #[pallet::weight(T::WeightInfo::reset_upgrade_rule_system())]
         pub fn reset_upgrade_rule_system(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -2155,7 +2158,7 @@ pub mod pallet {
         /// # 参数
         /// - `entity_id`: 实体 ID
         #[pallet::call_index(30)]
-        #[pallet::weight(Weight::from_parts(500_000_000, 20_000))]
+        #[pallet::weight(T::WeightInfo::leave_entity())]
         pub fn leave_entity(
             origin: OriginFor<T>,
             entity_id: u64,
@@ -2187,7 +2190,7 @@ pub mod pallet {
         /// - `shop_id`: 关联 Shop
         /// - `account`: 要激活的会员账户
         #[pallet::call_index(31)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::activate_member())]
         pub fn activate_member(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -2221,7 +2224,7 @@ pub mod pallet {
         /// - `shop_id`: 关联 Shop
         /// - `account`: 要取消激活的会员账户
         #[pallet::call_index(32)]
-        #[pallet::weight(Weight::from_parts(150_000_000, 8_000))]
+        #[pallet::weight(T::WeightInfo::deactivate_member())]
         pub fn deactivate_member(
             origin: OriginFor<T>,
             shop_id: u64,
@@ -3806,21 +3809,6 @@ impl<T: pallet::Config> MemberProvider<T::AccountId> for pallet::Pallet<T> {
 
     fn get_direct_referral_accounts(entity_id: u64, account: &T::AccountId) -> alloc::vec::Vec<T::AccountId> {
         pallet::DirectReferrals::<T>::get(entity_id, account).into_inner()
-    }
-}
-
-/// OrderMemberHandler 实现（供 Transaction 模块调用，统一使用 entity_id）
-impl<T: pallet::Config> pallet_entity_common::OrderMemberHandler<T::AccountId> for pallet::Pallet<T> {
-    fn auto_register(entity_id: u64, account: &T::AccountId, referrer: Option<T::AccountId>) -> sp_runtime::DispatchResult {
-        pallet::Pallet::<T>::auto_register_by_entity(entity_id, account, referrer, true)
-    }
-
-    fn update_spent(entity_id: u64, account: &T::AccountId, amount_usdt: u64) -> sp_runtime::DispatchResult {
-        pallet::Pallet::<T>::update_spent_by_entity(entity_id, account, amount_usdt)
-    }
-
-    fn check_order_upgrade_rules(entity_id: u64, buyer: &T::AccountId, product_id: u64, amount_usdt: u64) -> sp_runtime::DispatchResult {
-        pallet::Pallet::<T>::check_order_upgrade_rules_by_entity(entity_id, buyer, product_id, amount_usdt)
     }
 }
 

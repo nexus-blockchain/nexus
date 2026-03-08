@@ -90,9 +90,12 @@ type BalanceOf<T> =
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
-	use frame_support::traits::{Currency as CurrencyT, ReservableCurrency};
+	use frame_support::traits::{Currency as CurrencyT, Imbalance, ReservableCurrency};
+
+	const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
 
 	#[pallet::pallet]
+	#[pallet::storage_version(STORAGE_VERSION)]
 	pub struct Pallet<T>(_);
 
 	#[pallet::config]
@@ -367,10 +370,10 @@ pub mod pallet {
 
 			if n.saturating_sub(era_start) >= era_length {
 				Self::on_era_end(n);
-				weight.saturating_add(Weight::from_parts(100_000_000, 20_000))
-			} else {
-				weight
+				weight = weight.saturating_add(Weight::from_parts(100_000_000, 20_000));
 			}
+
+			weight
 		}
 	}
 
@@ -562,9 +565,10 @@ pub mod pallet {
 				if reporter_pct > 0 && actual_slashed > BalanceOf::<T>::default() {
 					let reward = actual_slashed * reporter_pct.into() / 10_000u32.into();
 					if reward > BalanceOf::<T>::default() {
-						// best-effort: 从国库/铸币奖励 reporter (使用 deposit_creating)
-						let _ = T::Currency::deposit_into_existing(&reporter, reward);
+					let imbalance = T::Currency::deposit_creating(&reporter, reward);
+					if imbalance.peek() > BalanceOf::<T>::default() {
 						Self::deposit_event(Event::ReporterRewarded { reporter, amount: reward });
+					}
 					}
 				}
 

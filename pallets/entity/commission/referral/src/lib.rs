@@ -150,8 +150,7 @@ pub mod pallet {
     // ========================================================================
 
     #[pallet::config]
-    pub trait Config: frame_system::Config {
-        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+    pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
         type Currency: Currency<Self::AccountId>;
         type MemberProvider: MemberProvider<Self::AccountId>;
         /// 实体查询接口（权限校验、Owner/Admin 判断）

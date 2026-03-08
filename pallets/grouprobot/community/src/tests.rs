@@ -1,5 +1,5 @@
 use crate::{mock::*, *};
-use frame_support::{assert_noop, assert_ok};
+use frame_support::{assert_noop, assert_ok, BoundedVec};
 use pallet_grouprobot_primitives::*;
 
 // ============================================================================
@@ -172,10 +172,10 @@ fn batch_submit_logs_works() {
 	new_test_ext().execute_with(|| {
 		let sig1 = test_sign(&community_hash(1), &ActionType::Ban, &[1u8; 32], 1, &[2u8; 32]);
 		let sig2 = test_sign(&community_hash(1), &ActionType::Kick, &[4u8; 32], 2, &[5u8; 32]);
-		let logs = vec![
+		let logs: BoundedVec<_, <Test as crate::Config>::MaxBatchSize> = BoundedVec::try_from(vec![
 			(ActionType::Ban, [1u8; 32], 1u64, [2u8; 32], sig1),
 			(ActionType::Kick, [4u8; 32], 2u64, [5u8; 32], sig2),
-		];
+		]).unwrap();
 		assert_ok!(GroupRobotCommunity::batch_submit_logs(
 			RuntimeOrigin::signed(OWNER),
 			community_hash(1),
@@ -192,7 +192,7 @@ fn batch_submit_logs_fails_empty() {
 			GroupRobotCommunity::batch_submit_logs(
 				RuntimeOrigin::signed(OWNER),
 				community_hash(1),
-				vec![],
+				BoundedVec::try_from(vec![]).unwrap(),
 			),
 			Error::<Test>::EmptyBatch
 		);
@@ -622,7 +622,7 @@ fn batch_submit_logs_fails_free_tier() {
 			GroupRobotCommunity::batch_submit_logs(
 				RuntimeOrigin::signed(OWNER),
 				community_hash(4),
-				vec![(ActionType::Ban, [1u8; 32], 1, [2u8; 32], sig)],
+				BoundedVec::try_from(vec![(ActionType::Ban, [1u8; 32], 1, [2u8; 32], sig)]).unwrap(),
 			),
 			Error::<Test>::FreeTierNotAllowed
 		);
@@ -815,7 +815,7 @@ fn m3_batch_submit_logs_rejects_non_owner() {
 			GroupRobotCommunity::batch_submit_logs(
 				RuntimeOrigin::signed(OTHER),
 				community_hash(1),
-				vec![(ActionType::Ban, [1u8; 32], 1, [2u8; 32], sig)],
+				BoundedVec::try_from(vec![(ActionType::Ban, [1u8; 32], 1, [2u8; 32], sig)]).unwrap(),
 			),
 			Error::<Test>::NotBotOwner
 		);
@@ -882,10 +882,10 @@ fn m4_batch_submit_logs_rejects_non_monotonic_within_batch() {
 			GroupRobotCommunity::batch_submit_logs(
 				RuntimeOrigin::signed(OWNER),
 				community_hash(1),
-				vec![
+				BoundedVec::try_from(vec![
 					(ActionType::Ban, [1u8; 32], 5, [2u8; 32], sig1),
 					(ActionType::Kick, [3u8; 32], 3, [4u8; 32], sig2), // 3 < 5
-				],
+				]).unwrap(),
 			),
 			Error::<Test>::SequenceNotMonotonic
 		);
@@ -909,7 +909,7 @@ fn m4_batch_submit_logs_rejects_stale_first_sequence() {
 			GroupRobotCommunity::batch_submit_logs(
 				RuntimeOrigin::signed(OWNER),
 				community_hash(1),
-				vec![(ActionType::Kick, [3u8; 32], 5, [4u8; 32], sig1)],
+				BoundedVec::try_from(vec![(ActionType::Kick, [3u8; 32], 5, [4u8; 32], sig1)]).unwrap(),
 			),
 			Error::<Test>::SequenceNotMonotonic
 		);
@@ -924,10 +924,10 @@ fn m4_batch_submit_logs_updates_last_sequence() {
 		assert_ok!(GroupRobotCommunity::batch_submit_logs(
 			RuntimeOrigin::signed(OWNER),
 			community_hash(1),
-			vec![
+			BoundedVec::try_from(vec![
 				(ActionType::Ban, [1u8; 32], 10, [2u8; 32], sig1),
 				(ActionType::Kick, [3u8; 32], 20, [4u8; 32], sig2),
-			],
+			]).unwrap(),
 		));
 		assert_eq!(LastSequence::<Test>::get(community_hash(1)), Some(20));
 	});
@@ -961,7 +961,7 @@ fn m1_r2_batch_submit_logs_rejects_inactive_bot() {
 			GroupRobotCommunity::batch_submit_logs(
 				RuntimeOrigin::signed(OWNER),
 				community_hash(3),
-				vec![(ActionType::Ban, [1u8; 32], 1, [2u8; 32], sig)],
+				BoundedVec::try_from(vec![(ActionType::Ban, [1u8; 32], 1, [2u8; 32], sig)]).unwrap(),
 			),
 			Error::<Test>::BotNotActive
 		);
@@ -1025,15 +1025,18 @@ fn m1_r2_update_active_members_rejects_inactive_bot() {
 #[test]
 fn m1_r2_config_operations_allow_inactive_bot() {
 	new_test_ext().execute_with(|| {
-		// update_community_config should work for inactive bots
+		// update_community_config should work for inactive bots (uses ensure_bot_owner only)
 		assert_ok!(GroupRobotCommunity::update_community_config(
 			RuntimeOrigin::signed(OWNER),
 			community_hash(3), 0, true, 10, 3, WarnAction::Kick, false, false, *b"en",
 		));
-		// set_node_requirement needs config to exist first
-		assert_ok!(GroupRobotCommunity::set_node_requirement(
-			RuntimeOrigin::signed(OWNER), community_hash(3), NodeRequirement::Any,
-		));
+		// set_node_requirement now requires active bot (ensure_active_bot_owner)
+		assert_noop!(
+			GroupRobotCommunity::set_node_requirement(
+				RuntimeOrigin::signed(OWNER), community_hash(3), NodeRequirement::Any,
+			),
+			Error::<Test>::BotNotActive
+		);
 	});
 }
 
@@ -1169,27 +1172,23 @@ fn m2_r3_batch_respects_configurable_max_size() {
 		let action = ActionType::Kick;
 		let target = [0u8; 32];
 		let msg_hash = [0u8; 32];
-		let logs: Vec<(ActionType, [u8; 32], u64, [u8; 32], [u8; 64])> = (1..=51u64).map(|seq| {
+		let logs_vec: Vec<(ActionType, [u8; 32], u64, [u8; 32], [u8; 64])> = (1..=51u64).map(|seq| {
 			let sig = test_sign(&community_hash(1), &action, &target, seq, &msg_hash);
 			(action.clone(), target, seq, msg_hash, sig)
 		}).collect();
 
-		assert_noop!(
-			GroupRobotCommunity::batch_submit_logs(
-				RuntimeOrigin::signed(OWNER),
-				community_hash(1),
-				logs,
-			),
-			Error::<Test>::BatchTooLarge
-		);
+		// 51 > MaxBatchSize(50), try_from should fail
+		assert!(BoundedVec::<_, <Test as crate::Config>::MaxBatchSize>::try_from(logs_vec).is_err());
 
 		// Exactly MaxBatchSize (50) should still be valid (if space permits in ActionLogs)
 		// But ActionLogs MaxLogsPerCommunity=10, so 50 would hit LogsFull.
 		// Test with 2 logs to confirm non-too-large passes
-		let small_logs: Vec<_> = (1..=2u64).map(|seq| {
-			let sig = test_sign(&community_hash(1), &action, &target, seq, &msg_hash);
-			(action.clone(), target, seq, msg_hash, sig)
-		}).collect();
+		let small_logs: BoundedVec<_, <Test as crate::Config>::MaxBatchSize> = BoundedVec::try_from(
+			(1..=2u64).map(|seq| {
+				let sig = test_sign(&community_hash(1), &action, &target, seq, &msg_hash);
+				(action.clone(), target, seq, msg_hash, sig)
+			}).collect::<Vec<_>>()
+		).unwrap();
 		assert_ok!(GroupRobotCommunity::batch_submit_logs(
 			RuntimeOrigin::signed(OWNER),
 			community_hash(1),
@@ -1304,6 +1303,12 @@ fn delete_community_config_works() {
 			community_hash(1), ActionType::Ban, [1u8; 32], 1, [2u8; 32], sig,
 		));
 
+		// Award reputation so we have reputation data to clean
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 10,
+		));
+		assert_eq!(MemberReputation::<Test>::get(community_hash(1), user_hash(1)).score, 10);
+
 		// Delete config
 		assert_ok!(GroupRobotCommunity::delete_community_config(
 			RuntimeOrigin::signed(OWNER),
@@ -1313,6 +1318,7 @@ fn delete_community_config_works() {
 		assert!(!CommunityConfigs::<Test>::contains_key(community_hash(1)));
 		assert!(ActionLogs::<Test>::get(community_hash(1)).is_empty());
 		assert_eq!(LastSequence::<Test>::get(community_hash(1)), None);
+		assert_eq!(MemberReputation::<Test>::get(community_hash(1), user_hash(1)).score, 0);
 	});
 }
 
@@ -1731,6 +1737,91 @@ fn deduct_reputation_fails_free_tier() {
 			),
 			Error::<Test>::FreeTierNotAllowed
 		);
+	});
+}
+
+// ============================================================================
+// S4-fix: set_node_requirement requires active bot
+// ============================================================================
+
+#[test]
+fn s4_set_node_requirement_rejects_inactive_bot() {
+	new_test_ext().execute_with(|| {
+		// community_hash(3) → owner=OWNER, is_bot_active=false
+		assert_ok!(GroupRobotCommunity::update_community_config(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(3), 0, true, 10, 3, WarnAction::Kick, false, false, *b"en",
+		));
+		assert_noop!(
+			GroupRobotCommunity::set_node_requirement(
+				RuntimeOrigin::signed(OWNER), community_hash(3), NodeRequirement::Any,
+			),
+			Error::<Test>::BotNotActive
+		);
+	});
+}
+
+// ============================================================================
+// S3-fix: delete_community_config cleans MemberReputation
+// ============================================================================
+
+#[test]
+fn s3_delete_community_config_cleans_reputation() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotCommunity::update_community_config(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1),
+			0, true, 10, 3, WarnAction::Kick, false, false, *b"en",
+		));
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 10,
+		));
+		System::set_block_number(10);
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(2), 20,
+		));
+
+		assert_eq!(MemberReputation::<Test>::get(community_hash(1), user_hash(1)).score, 10);
+		assert_eq!(MemberReputation::<Test>::get(community_hash(1), user_hash(2)).score, 20);
+
+		assert_ok!(GroupRobotCommunity::delete_community_config(
+			RuntimeOrigin::signed(OWNER), community_hash(1),
+		));
+
+		assert_eq!(MemberReputation::<Test>::get(community_hash(1), user_hash(1)).score, 0);
+		assert_eq!(MemberReputation::<Test>::get(community_hash(1), user_hash(2)).score, 0);
+	});
+}
+
+#[test]
+fn s3_delete_does_not_affect_other_community() {
+	new_test_ext().execute_with(|| {
+		// Setup both communities
+		assert_ok!(GroupRobotCommunity::update_community_config(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(1),
+			0, true, 10, 3, WarnAction::Kick, false, false, *b"en",
+		));
+		assert_ok!(GroupRobotCommunity::update_community_config(
+			RuntimeOrigin::signed(OWNER),
+			community_hash(2),
+			0, true, 10, 3, WarnAction::Kick, false, false, *b"en",
+		));
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(1), user_hash(1), 10,
+		));
+		assert_ok!(GroupRobotCommunity::award_reputation(
+			RuntimeOrigin::signed(OWNER), community_hash(2), user_hash(1), 20,
+		));
+
+		// Delete community 1 only
+		assert_ok!(GroupRobotCommunity::delete_community_config(
+			RuntimeOrigin::signed(OWNER), community_hash(1),
+		));
+
+		// Community 1 cleaned, community 2 intact
+		assert_eq!(MemberReputation::<Test>::get(community_hash(1), user_hash(1)).score, 0);
+		assert_eq!(MemberReputation::<Test>::get(community_hash(2), user_hash(1)).score, 20);
 	});
 }
 

@@ -217,7 +217,7 @@ rewards ──owner_split──► BotRegistry (验证 bot_owner)
 
 ## 测试
 
-共 59 个用户测试 (61 total, 含 2 auto-gen):
+共 60 个用户测试 (62 total, 含 2 auto-gen):
 
 ### 基础功能
 - `claim_rewards_works` — 正常领取
@@ -289,6 +289,7 @@ rewards ──owner_split──► BotRegistry (验证 bot_owner)
 ### P2: 强制修剪
 - `force_prune_era_rewards_works` — 强制修剪
 - `force_prune_nothing_fails` — 无可修剪拒绝
+- `force_prune_capped_at_max` — 单次上限 MAX_FORCE_PRUNE=100 验证
 
 ### P1: 查询辅助
 - `query_helpers_work` — pending_rewards / node_reward_summary / reward_pool_balance / owner_pending
@@ -324,13 +325,15 @@ rewards ──owner_split──► BotRegistry (验证 bot_owner)
 | Round 4 | P2 | 强制修剪 `force_prune_era_rewards` (call_index 10) |
 | Round 4 | P2 | `RewardsClaimed` 新增 `total_earned_after`, `EraCompleted` 新增 `era_info` |
 | Round 4 | P2 | `NodeBotSplitBinding` + `bind/unbind_node_bot_split` 辅助函数 |
+| Round 5 | L3-fix | 新增 `WeightInfo` trait + `weights.rs` + `benchmarking.rs`, 替换全部硬编码 Weight |
+| Round 5 | L4-fix | `force_prune_era_rewards` 新增 `MAX_FORCE_PRUNE=100` 上界, 防止无界循环 |
+| Round 5 | L5-fix | Clippy 清理: 修复 14 个 `needless_borrows_for_generic_args` + 1 个 `too_many_arguments` |
 
 ### 记录但未修复
 
 | ID | 严重级别 | 说明 |
 |----|---------|------|
 | M3-R2 | Medium | `NodeTotalEarned` 无清理机制 — 退出节点历史统计永久保留 (设计决策, 48 bytes/node) |
-| L3 | Low | 硬编码 Weight, 无 WeightInfo trait |
 | L3-R2 | Low | `distribute_and_record_era` 整数除法截断灰尘滞留 RewardPool (数学特性) |
 
 ## License

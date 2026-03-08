@@ -190,11 +190,11 @@ Active → Expired                     (on_initialize 自动过期)
 | M3-R6 | Medium | `cleanup_ceremony` | 新增终态仪式清理 extrinsic，解决存储无界增长（call_index 5） |
 | L1-R6 | Low | `revoke_ceremony`/`force_re_ceremony` | 提取 `do_revoke` 共享 helper，消除代码重复 |
 
-## 记录但未修复
+## 已解决的遗留项
 
-| 编号 | 级别 | 说明 |
-|------|------|------|
-| L3 | Low | 所有 extrinsic 硬编码 Weight（与代码库一致，需项目级 benchmark 框架） |
+| 编号 | 级别 | 修复 | 说明 |
+|------|------|------|------|
+| L3 | Low | `weights.rs` + `benchmarking.rs` | 所有 extrinsic 已接入 `WeightInfo` trait，`record_ceremony(p)` 和 `batch_cleanup_ceremonies(n)` 按参数线性缩放 |
 
 ## 测试覆盖
 

@@ -105,6 +105,7 @@ pub struct TierFeatureGate {
 ```rust
 pub enum SubscriptionStatus {
     Active, PastDue, Suspended, Cancelled,
+    Paused,      // Owner 主动暂停 (不扣费, 不享受层级)
 }
 ```
 
@@ -197,6 +198,8 @@ pub trait NodeConsensusProvider<AccountId> {
 pub trait SubscriptionProvider {
     fn effective_tier(bot_id_hash: &BotIdHash) -> SubscriptionTier;
     fn effective_feature_gate(bot_id_hash: &BotIdHash) -> TierFeatureGate;
+    fn is_subscription_active(bot_id_hash: &BotIdHash) -> bool;
+    fn subscription_status(bot_id_hash: &BotIdHash) -> Option<SubscriptionStatus>;
 }
 ```
 
@@ -241,7 +244,7 @@ pub trait CommunityProvider {
     fn is_community_banned(community_id_hash: &CommunityIdHash) -> bool;
     fn is_ads_enabled(community_id_hash: &CommunityIdHash) -> bool;
     fn active_members(community_id_hash: &CommunityIdHash) -> u32;
-    fn language(community_id_hash: &CommunityIdHash) -> Option<[u8; 2]>;
+    fn language(community_id_hash: &CommunityIdHash) -> [u8; 2];
 }
 ```
 
@@ -281,7 +284,11 @@ pub trait OrphanRewardClaimer<AccountId> {
 
 ```rust
 pub trait EraRewardDistributor {
-    fn distribute_and_record(era, total_pool, subscription_income, inflation, treasury_share, node_weights, node_count) -> u128;
+    fn distribute_and_record(
+        era: u64, total_pool: u128, subscription_income: u128,
+        ads_income: u128, inflation: u128, treasury_share: u128,
+        node_weights: &[(NodeId, u128)], node_count: u32,
+    ) -> u128;
     fn prune_old_eras(current_era: u64);
 }
 ```
@@ -294,13 +301,10 @@ pub trait EraRewardDistributor {
 |----------|------|------|
 | `CampaignStatus` | 同名 | enum |
 | `AdReviewStatus` | 同名 | enum |
-| `AdPreference` | 同名 | enum |
 | `PlacementId` | 同名 | type alias |
 | `DeliveryVerifier` | 同名 | trait |
 | `PlacementAdminProvider` | 同名 | trait |
 | `RevenueDistributor` | 同名 | trait |
-| `PlacementStakeProvider` | 同名 | trait |
-| `DeliveryMethod` | 同名 | trait |
 
 ## 依赖关系
 
@@ -326,6 +330,7 @@ pub trait EraRewardDistributor {
 | R1 | 2026-03-03 | L1, L2, L3 | 移除死 `extern crate alloc`; Cargo.toml 补充 try-runtime/runtime-benchmarks features; README 全面同步 |
 | R1.1 | 2026-03-03 | L4, L5/M1 | 移除死别名 GenericAdScheduleProvider/GenericAdDeliveryCountProvider; 移除死 AdScheduleProvider trait (grouprobot 版, 零消费者), 消除与 ads-primitives 同名冲突 |
 | R2 | 2026-03-04 | 多项 | 删除死类型 SuspendReason/AdDeliveryType/AdTargetTag; BotRegistryProvider +bot_status/attestation_level/tee_type; SubscriptionTier +PartialOrd/Ord; EraSettlementResult +node_share; TierFeatureGate 可配置化 (subscription pallet TierFeatureGateOverrides 存储) |
+| R3 | 2026-03-08 | L6–L10 | README 同步: SubscriptionStatus +Paused; SubscriptionProvider +is_subscription_active/subscription_status; CommunityProvider::language 返回类型 Option→裸值; EraRewardDistributor +ads_income 参数; 移除 3 个不存在的 re-export (AdPreference/PlacementStakeProvider/DeliveryMethod); M2 备注修正为实际 6 个死 re-export |
 
 **记录但未修复:**
-- M2: 5 个 ads-primitives 重导出 (CampaignStatus, AdReviewStatus, AdPreference, PlacementId, DeliveryMethod) 无下游消费者通过 grouprobot-primitives 路径引用 (保留向后兼容)
+- M2: 6 个 ads-primitives 重导出 (CampaignStatus, AdReviewStatus, PlacementId, DeliveryVerifier, PlacementAdminProvider, RevenueDistributor) 无下游消费者通过 grouprobot-primitives 路径引用 (保留向后兼容)

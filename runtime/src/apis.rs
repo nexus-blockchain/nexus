@@ -27,6 +27,7 @@
 use alloc::vec::Vec;
 use frame_support::{
 	genesis_builder_helper::{build_state, get_preset},
+	traits::KeyOwnerProofSystem,
 	weights::Weight,
 };
 use pallet_grandpa::AuthorityId as GrandpaId;
@@ -42,7 +43,7 @@ use sp_version::RuntimeVersion;
 
 // Local module imports
 use super::{
-	AccountId, Aura, Balance, Block, Evidence, Executive, Grandpa, InherentDataExt, Nonce, Runtime,
+	AccountId, Aura, Balance, Block, Evidence, Executive, Grandpa, Historical, InherentDataExt, Nonce, Runtime,
 	RuntimeCall, RuntimeGenesisConfig, SessionKeys, StorageService, NexMarket, CommissionPoolReward, EntityRegistry, Arbitration, System, TransactionPayment, VERSION,
 };
 
@@ -150,23 +151,27 @@ impl_runtime_apis! {
 		}
 
 		fn submit_report_equivocation_unsigned_extrinsic(
-			_equivocation_proof: sp_consensus_grandpa::EquivocationProof<
+			equivocation_proof: sp_consensus_grandpa::EquivocationProof<
 				<Block as BlockT>::Hash,
 				NumberFor<Block>,
 			>,
-			_key_owner_proof: sp_consensus_grandpa::OpaqueKeyOwnershipProof,
+			key_owner_proof: sp_consensus_grandpa::OpaqueKeyOwnershipProof,
 		) -> Option<()> {
-			None
+			let key_owner_proof = key_owner_proof.decode()?;
+			Grandpa::submit_unsigned_equivocation_report(
+				equivocation_proof,
+				key_owner_proof,
+			)
 		}
 
 		fn generate_key_ownership_proof(
 			_set_id: sp_consensus_grandpa::SetId,
-			_authority_id: GrandpaId,
+			authority_id: GrandpaId,
 		) -> Option<sp_consensus_grandpa::OpaqueKeyOwnershipProof> {
-			// NOTE: this is the only implementation possible since we've
-			// defined our key owner proof type as a bottom type (i.e. a type
-			// with no values).
-			None
+			use codec::Encode;
+			Historical::prove((sp_consensus_grandpa::KEY_TYPE, authority_id))
+				.map(|p| p.encode())
+				.map(sp_consensus_grandpa::OpaqueKeyOwnershipProof::new)
 		}
 	}
 
@@ -370,20 +375,20 @@ impl_runtime_apis! {
 	}
 
 	impl pallet_nex_market::runtime_api::NexMarketApi<Block, AccountId, Balance> for Runtime {
-		fn get_sell_orders() -> Vec<pallet_nex_market::runtime_api::OrderInfo<AccountId, Balance>> {
-			NexMarket::api_get_sell_orders()
+		fn get_sell_orders(offset: u32, limit: u32) -> Vec<pallet_nex_market::runtime_api::OrderInfo<AccountId, Balance>> {
+			NexMarket::api_get_sell_orders(offset, limit)
 		}
 
-		fn get_buy_orders() -> Vec<pallet_nex_market::runtime_api::OrderInfo<AccountId, Balance>> {
-			NexMarket::api_get_buy_orders()
+		fn get_buy_orders(offset: u32, limit: u32) -> Vec<pallet_nex_market::runtime_api::OrderInfo<AccountId, Balance>> {
+			NexMarket::api_get_buy_orders(offset, limit)
 		}
 
 		fn get_user_orders(user: AccountId) -> Vec<pallet_nex_market::runtime_api::OrderInfo<AccountId, Balance>> {
 			NexMarket::api_get_user_orders(&user)
 		}
 
-		fn get_user_trades(user: AccountId) -> Vec<pallet_nex_market::runtime_api::TradeInfo<AccountId, Balance>> {
-			NexMarket::api_get_user_trades(&user)
+		fn get_user_trades(user: AccountId, offset: u32, limit: u32) -> Vec<pallet_nex_market::runtime_api::TradeInfo<AccountId, Balance>> {
+			NexMarket::api_get_user_trades(&user, offset, limit)
 		}
 
 		fn get_order_trades(order_id: u64) -> Vec<pallet_nex_market::runtime_api::TradeInfo<AccountId, Balance>> {
@@ -407,6 +412,14 @@ impl_runtime_apis! {
 
 		fn get_market_summary() -> pallet_nex_market::runtime_api::MarketSummary {
 			NexMarket::api_get_market_summary()
+		}
+
+		fn get_order_by_id(order_id: u64) -> Option<pallet_nex_market::runtime_api::OrderInfo<AccountId, Balance>> {
+			NexMarket::api_get_order_by_id(order_id)
+		}
+
+		fn get_trade_by_id(trade_id: u64) -> Option<pallet_nex_market::runtime_api::TradeInfo<AccountId, Balance>> {
+			NexMarket::api_get_trade_by_id(trade_id)
 		}
 	}
 

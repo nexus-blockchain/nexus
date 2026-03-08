@@ -21,6 +21,11 @@
 pub use pallet::*;
 pub mod runtime_api;
 pub use runtime_api::*;
+pub mod weights;
+pub use weights::WeightInfo;
+
+#[cfg(feature = "runtime-benchmarks")]
+pub mod benchmarking;
 
 #[cfg(test)]
 mod mock;
@@ -121,12 +126,14 @@ pub mod pallet {
 	use super::*;
 	use frame_support::traits::{Currency, ReservableCurrency, ExistenceRequirement};
 
+	const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+
 	#[pallet::pallet]
+	#[pallet::storage_version(STORAGE_VERSION)]
 	pub struct Pallet<T>(_);
 
 	#[pallet::config]
-	pub trait Config: frame_system::Config {
-		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+	pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
 		type Currency: ReservableCurrency<Self::AccountId>;
 
 		/// 广告文本最大长度
@@ -215,6 +222,21 @@ pub mod pallet {
 		/// 每人最多推荐广告主数
 		#[pallet::constant]
 		type MaxReferredAdvertisers: Get<u32>;
+
+		/// 权重信息
+		type WeightInfo: WeightInfo;
+
+		/// 全局 Active+Approved Campaign 索引上限
+		#[pallet::constant]
+		type MaxActiveApprovedCampaigns: Get<u32>;
+
+		/// 按投放类型的 Campaign 索引上限
+		#[pallet::constant]
+		type MaxCampaignsByDeliveryType: Get<u32>;
+
+		/// 每广告位定向 Campaign 索引上限
+		#[pallet::constant]
+		type MaxCampaignsForPlacement: Get<u32>;
 	}
 
 	// ========================================================================
@@ -397,21 +419,21 @@ pub mod pallet {
 	/// 发现索引: Active + Approved 的 Campaign ID 列表
 	#[pallet::storage]
 	pub type ActiveApprovedCampaigns<T: Config> = StorageValue<
-		_, BoundedVec<u64, ConstU32<10000>>, ValueQuery,
+		_, BoundedVec<u64, T::MaxActiveApprovedCampaigns>, ValueQuery,
 	>;
 
 	/// 发现索引: 按投放类型 → Campaign ID 列表
 	#[pallet::storage]
 	pub type CampaignsByDeliveryType<T: Config> = StorageMap<
 		_, Blake2_128Concat, u8,
-		BoundedVec<u64, ConstU32<5000>>, ValueQuery,
+		BoundedVec<u64, T::MaxCampaignsByDeliveryType>, ValueQuery,
 	>;
 
 	/// 发现索引: 广告位 → 定向到该广告位的 Campaign ID 列表
 	#[pallet::storage]
 	pub type CampaignsForPlacement<T: Config> = StorageMap<
 		_, Blake2_128Concat, PlacementId,
-		BoundedVec<u64, ConstU32<1000>>, ValueQuery,
+		BoundedVec<u64, T::MaxCampaignsForPlacement>, ValueQuery,
 	>;
 
 	/// 收据确认状态 (campaign_id, placement_id, receipt_index) → ReceiptStatus
@@ -485,6 +507,11 @@ pub mod pallet {
 		_, Blake2_128Concat, T::AccountId,
 		BoundedVec<T::AccountId, T::MaxReferredAdvertisers>, ValueQuery,
 	>;
+
+	/// 平台 (Treasury) 累计净留存份额 (统计/审计用)
+	#[pallet::storage]
+	pub type TreasuryShareAccumulator<T: Config> =
+		StorageValue<_, BalanceOf<T>, ValueQuery>;
 
 	// ========================================================================
 	// Events
@@ -636,6 +663,8 @@ pub mod pallet {
 		CampaignCleaned { campaign_id: u64 },
 		/// 结算激励已发放
 		SettlementIncentivePaid { settler: T::AccountId, amount: BalanceOf<T> },
+		/// 平台份额已记账 (treasury 净留存)
+		PlatformShareCredited { campaign_id: u64, amount: BalanceOf<T> },
 		/// Campaign 定向广告位已设置
 		CampaignTargetsSet { campaign_id: u64, count: u32 },
 		/// Campaign 定向已清除 (恢复全网投放)
@@ -810,7 +839,7 @@ pub mod pallet {
 
 		/// 创建广告活动, 锁定预算
 		#[pallet::call_index(0)]
-		#[pallet::weight(Weight::from_parts(60_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::create_campaign())]
 		pub fn create_campaign(
 			origin: OriginFor<T>,
 			text: BoundedVec<u8, T::MaxAdTextLength>,
@@ -898,7 +927,7 @@ pub mod pallet {
 
 		/// 追加预算
 		#[pallet::call_index(1)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::fund_campaign())]
 		pub fn fund_campaign(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -938,7 +967,7 @@ pub mod pallet {
 
 		/// 暂停广告活动
 		#[pallet::call_index(2)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::pause_campaign())]
 		pub fn pause_campaign(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -959,7 +988,7 @@ pub mod pallet {
 
 		/// 取消广告活动, 退还剩余预算
 		#[pallet::call_index(3)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::cancel_campaign())]
 		pub fn cancel_campaign(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -990,7 +1019,7 @@ pub mod pallet {
 
 		/// 审核广告内容 (Root/DAO)
 		#[pallet::call_index(4)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::review_campaign())]
 		pub fn review_campaign(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -1035,7 +1064,7 @@ pub mod pallet {
 		/// 3. 委托 DeliveryVerifier 做领域验证 + audience 裁切
 		/// 4. 存储收据
 		#[pallet::call_index(5)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::submit_delivery_receipt())]
 		pub fn submit_delivery_receipt(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -1172,7 +1201,7 @@ pub mod pallet {
 		/// 3. 委托 ClickVerifier 做领域验证 + 每日上限裁切
 		/// 4. 存储收据 (与 CPM 收据共用 DeliveryReceipts 存储)
 		#[pallet::call_index(49)]
-		#[pallet::weight(Weight::from_parts(60_000_000, 10_000))]
+		#[pallet::weight(T::WeightInfo::submit_click_receipt())]
 		pub fn submit_click_receipt(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -1306,230 +1335,19 @@ pub mod pallet {
 		}
 
 		/// 结算某广告位的 Era 广告 (任何人可触发)
-		///
-		/// 核心引擎负责:
-		/// 1. 遍历收据计算 CPM 费用
-		/// 2. unreserve + 转入国库
-		/// 3. 委托 RevenueDistributor 分配收入
-		/// 4. 记录可提取份额
 		#[pallet::call_index(6)]
-		#[pallet::weight(Weight::from_parts(100_000_000, 15_000))]
+		#[pallet::weight(T::WeightInfo::settle_era_ads())]
 		pub fn settle_era_ads(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
 		) -> DispatchResult {
 			let settler = ensure_signed(origin)?;
-
-			let treasury = T::TreasuryAccount::get();
-			let mut total_cost = BalanceOf::<T>::zero();
-			let mut placement_share_total = BalanceOf::<T>::zero();
-
-			// 收集待结算收据数据
-			let receipts_snapshot = DeliveryReceipts::<T>::get(&placement_id);
-			let mut settle_items: sp_runtime::Vec<(u64, BalanceOf<T>, T::AccountId)> = sp_runtime::Vec::new();
-
-			for (idx, receipt) in receipts_snapshot.iter().enumerate() {
-				if receipt.settled {
-					continue;
-				}
-				// Phase 5: 仅结算 Confirmed / AutoConfirmed 的收据
-				let confirmation = ReceiptConfirmation::<T>::get((
-					receipt.campaign_id, receipt.placement_id, idx as u32,
-				));
-				match confirmation {
-					Some(ReceiptStatus::Confirmed) | Some(ReceiptStatus::AutoConfirmed) => {},
-					_ => continue, // Pending / Disputed / None → 跳过
-				}
-				// M3: 对无法结算的收据记录警告，避免静默丢弃
-				if let Some(campaign) = Campaigns::<T>::get(receipt.campaign_id) {
-					// 根据 campaign_type 计算费用
-					let cost = match campaign.campaign_type {
-						CampaignType::Cpc => Self::compute_cpc_cost(
-							campaign.bid_per_click,
-							receipt.click_count,
-							receipt.cpm_multiplier_bps,
-						),
-						_ => Self::compute_cpm_cost(
-							campaign.bid_per_mille,
-							receipt.audience_size,
-							receipt.cpm_multiplier_bps,
-						),
-					};
-					let escrow = CampaignEscrow::<T>::get(receipt.campaign_id);
-					// daily_budget 执行: 计算当日剩余预算
-					let daily_remaining = if !campaign.daily_budget.is_zero() {
-						let now = frame_system::Pallet::<T>::block_number();
-						let day_index: u32 = Self::block_to_day_index(now, campaign.created_at);
-						let day_spent = CampaignDailySpent::<T>::get(receipt.campaign_id, day_index);
-						campaign.daily_budget.saturating_sub(day_spent)
-					} else {
-						escrow // 无每日限制
-					};
-					let actual_cost = core::cmp::min(core::cmp::min(cost, escrow), daily_remaining);
-					if !actual_cost.is_zero() {
-						settle_items.push((
-							receipt.campaign_id,
-							actual_cost,
-							campaign.advertiser.clone(),
-						));
-					} else {
-						log::warn!(
-							"[ads-core] settle: campaign {} escrow exhausted, receipt skipped",
-							receipt.campaign_id,
-						);
-					}
-				} else {
-					log::warn!(
-						"[ads-core] settle: campaign {} not found, receipt skipped",
-						receipt.campaign_id,
-					);
-				}
-			}
-
-			// 执行转账
-			for (campaign_id, _snapshot_cost, advertiser) in settle_items.iter() {
-				let current_escrow = CampaignEscrow::<T>::get(campaign_id);
-				let adjusted_cost = core::cmp::min(*_snapshot_cost, current_escrow);
-				if adjusted_cost.is_zero() {
-					continue;
-				}
-
-				// C1 审计修复: 检查 unreserve 返回值，仅转移实际解锁的金额
-				let deficit = T::Currency::unreserve(advertiser, adjusted_cost);
-				let actually_unreserved = adjusted_cost.saturating_sub(deficit);
-				if actually_unreserved.is_zero() {
-					log::warn!(
-						"[ads-core] settle: campaign {} unreserve returned zero, skipping",
-						campaign_id,
-					);
-					continue;
-				}
-
-				// H1 审计修复: transfer 失败 skip 而非 abort，避免单个 campaign 阻塞整体结算
-				if T::Currency::transfer(
-					advertiser,
-					&treasury,
-					actually_unreserved,
-					ExistenceRequirement::AllowDeath,
-				).is_err() {
-					log::warn!(
-						"[ads-core] settle: campaign {} transfer failed, skipping",
-						campaign_id,
-					);
-					// 重新 reserve 已解锁的金额，避免资金泄露
-					let _ = T::Currency::reserve(advertiser, actually_unreserved);
-					continue;
-				}
-				let adjusted_cost = actually_unreserved;
-
-				// 委托适配层分配收入 (从国库分配给各方, 使用实际转入金额)
-				let breakdown = T::RevenueDistributor::distribute(
-					&placement_id,
-					adjusted_cost,
-					advertiser,
-				).unwrap_or(RevenueBreakdown {
-					placement_share: Zero::zero(),
-					node_share: Zero::zero(),
-					platform_share: adjusted_cost,
-				});
-
-				// 广告位可提取份额记账
-				PlacementClaimable::<T>::mutate(&placement_id, |c| {
-					*c = c.saturating_add(breakdown.placement_share);
-				});
-
-				// Phase 6: 推荐佣金 — 从平台份额中抽取
-				let referral_rate = T::AdvertiserReferralRate::get();
-				if referral_rate > 0 {
-					if let Some(ref referrer) = AdvertiserReferrer::<T>::get(advertiser) {
-						let bps_divisor: BalanceOf<T> = 10_000u32.into();
-						let rate_bal: BalanceOf<T> = referral_rate.into();
-						let referral_commission = breakdown.platform_share
-							.saturating_mul(rate_bal) / bps_divisor;
-						if !referral_commission.is_zero() {
-							ReferrerClaimable::<T>::mutate(referrer, |c| {
-								*c = c.saturating_add(referral_commission);
-							});
-							ReferrerTotalEarnings::<T>::mutate(referrer, |e| {
-								*e = e.saturating_add(referral_commission);
-							});
-							Self::deposit_event(Event::ReferralCommissionCredited {
-								referrer: referrer.clone(),
-								advertiser: advertiser.clone(),
-								amount: referral_commission,
-							});
-						}
-					}
-				}
-
-				// 更新 escrow
-				CampaignEscrow::<T>::mutate(campaign_id, |e| {
-					*e = e.saturating_sub(adjusted_cost);
-				});
-
-				// 更新 campaign spent + daily spent
-				Campaigns::<T>::mutate(campaign_id, |maybe| {
-					if let Some(c) = maybe {
-						c.spent = c.spent.saturating_add(adjusted_cost);
-						if CampaignEscrow::<T>::get(*campaign_id).is_zero() {
-							c.status = CampaignStatus::Exhausted;
-						}
-						// daily_budget 记账
-						if !c.daily_budget.is_zero() {
-							let now = frame_system::Pallet::<T>::block_number();
-							let day_index = Self::block_to_day_index(now, c.created_at);
-							CampaignDailySpent::<T>::mutate(campaign_id, day_index, |d| {
-								*d = d.saturating_add(adjusted_cost);
-							});
-						}
-					}
-				});
-
-				total_cost = total_cost.saturating_add(adjusted_cost);
-				placement_share_total = placement_share_total.saturating_add(breakdown.placement_share);
-			}
-
-			// 清空本 Era 收据
-			DeliveryReceipts::<T>::remove(&placement_id);
-
-			// 更新收入统计
-			if !total_cost.is_zero() {
-				EraAdRevenue::<T>::insert(&placement_id, total_cost);
-				PlacementTotalRevenue::<T>::mutate(&placement_id, |r| *r = r.saturating_add(total_cost));
-
-				// 结算激励: 从国库分配小比例给触发者
-				let incentive_bps = T::SettlementIncentiveBps::get();
-				if incentive_bps > 0 {
-					let bps_divisor: BalanceOf<T> = 10_000u32.into();
-					let incentive_bps_bal: BalanceOf<T> = incentive_bps.into();
-					let incentive = total_cost.saturating_mul(incentive_bps_bal) / bps_divisor;
-					if !incentive.is_zero() {
-						let _ = T::Currency::transfer(
-							&treasury,
-							&settler,
-							incentive,
-							ExistenceRequirement::AllowDeath,
-						);
-						Self::deposit_event(Event::SettlementIncentivePaid {
-							settler: settler.clone(),
-							amount: incentive,
-						});
-					}
-				}
-
-				Self::deposit_event(Event::EraAdsSettled {
-					placement_id,
-					total_cost,
-					placement_share: placement_share_total,
-				});
-			}
-
-			Ok(())
+			Self::do_settle_era_ads(placement_id, Some(settler))
 		}
 
 		/// 举报广告
 		#[pallet::call_index(7)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::flag_campaign())]
 		pub fn flag_campaign(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -1555,7 +1373,7 @@ pub mod pallet {
 
 		/// 广告位管理员提取广告收入 (支持部分提取, amount=0 表示全部提取)
 		#[pallet::call_index(8)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::claim_ad_revenue())]
 		pub fn claim_ad_revenue(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -1600,7 +1418,7 @@ pub mod pallet {
 
 		/// 广告主拉黑广告位
 		#[pallet::call_index(9)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::advertiser_block_placement())]
 		pub fn advertiser_block_placement(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -1622,7 +1440,7 @@ pub mod pallet {
 
 		/// 广告主取消拉黑广告位
 		#[pallet::call_index(10)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::advertiser_unblock_placement())]
 		pub fn advertiser_unblock_placement(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -1645,7 +1463,7 @@ pub mod pallet {
 
 		/// 广告主指定广告位 (白名单)
 		#[pallet::call_index(11)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::advertiser_prefer_placement())]
 		pub fn advertiser_prefer_placement(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -1667,7 +1485,7 @@ pub mod pallet {
 
 		/// 广告主取消指定广告位 (移除白名单)
 		#[pallet::call_index(12)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::advertiser_unprefer_placement())]
 		pub fn advertiser_unprefer_placement(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -1690,7 +1508,7 @@ pub mod pallet {
 
 		/// 广告位拉黑广告主 (仅管理员)
 		#[pallet::call_index(13)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::placement_block_advertiser())]
 		pub fn placement_block_advertiser(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -1716,7 +1534,7 @@ pub mod pallet {
 
 		/// 广告位取消拉黑广告主 (仅管理员)
 		#[pallet::call_index(14)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::placement_unblock_advertiser())]
 		pub fn placement_unblock_advertiser(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -1743,7 +1561,7 @@ pub mod pallet {
 
 		/// 广告位指定广告主 (白名单, 仅管理员)
 		#[pallet::call_index(15)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::placement_prefer_advertiser())]
 		pub fn placement_prefer_advertiser(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -1769,7 +1587,7 @@ pub mod pallet {
 
 		/// 广告位取消指定广告主 (移除白名单, 仅管理员)
 		#[pallet::call_index(16)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::placement_unprefer_advertiser())]
 		pub fn placement_unprefer_advertiser(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -1796,7 +1614,7 @@ pub mod pallet {
 
 		/// 举报广告位 (任何人)
 		#[pallet::call_index(17)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::flag_placement())]
 		pub fn flag_placement(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -1823,7 +1641,7 @@ pub mod pallet {
 
 		/// Slash 广告位 (Root/DAO) — 扣除 PlacementClaimable 的 AdSlashPercentage%
 		#[pallet::call_index(18)]
-		#[pallet::weight(Weight::from_parts(60_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::slash_placement())]
 		pub fn slash_placement(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -1863,7 +1681,7 @@ pub mod pallet {
 
 		/// M1-R2: 恢复已暂停的广告活动
 		#[pallet::call_index(20)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::resume_campaign())]
 		pub fn resume_campaign(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -1889,7 +1707,7 @@ pub mod pallet {
 
 		/// L-CORE4: 标记已过期的广告活动, 退还剩余预算 (任何人可调用)
 		#[pallet::call_index(21)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::expire_campaign())]
 		pub fn expire_campaign(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -1928,7 +1746,7 @@ pub mod pallet {
 
 		/// 私域广告自助登记
 		#[pallet::call_index(19)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::register_private_ad())]
 		pub fn register_private_ad(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -1970,7 +1788,7 @@ pub mod pallet {
 
 		/// 广告主更新 Campaign (Active/Paused 状态, 重置审核为 Pending)
 		#[pallet::call_index(22)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::update_campaign())]
 		pub fn update_campaign(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -2027,7 +1845,7 @@ pub mod pallet {
 
 		/// 广告主延长 Campaign 过期时间
 		#[pallet::call_index(23)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::extend_campaign_expiry())]
 		pub fn extend_campaign_expiry(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -2057,7 +1875,7 @@ pub mod pallet {
 
 		/// Root 强制取消 Campaign (退还剩余预算给广告主)
 		#[pallet::call_index(24)]
-		#[pallet::weight(Weight::from_parts(60_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::force_cancel_campaign())]
 		pub fn force_cancel_campaign(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -2089,7 +1907,7 @@ pub mod pallet {
 
 		/// Root 解除广告位封禁
 		#[pallet::call_index(25)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::unban_placement())]
 		pub fn unban_placement(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -2107,7 +1925,7 @@ pub mod pallet {
 
 		/// Root 重置广告位 Slash 计数
 		#[pallet::call_index(26)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::reset_slash_count())]
 		pub fn reset_slash_count(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -2120,7 +1938,7 @@ pub mod pallet {
 
 		/// Root 清除广告位举报记录
 		#[pallet::call_index(27)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::clear_placement_flags())]
 		pub fn clear_placement_flags(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -2134,7 +1952,7 @@ pub mod pallet {
 
 		/// Root 暂停 Campaign (可恢复)
 		#[pallet::call_index(28)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::suspend_campaign())]
 		pub fn suspend_campaign(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -2155,7 +1973,7 @@ pub mod pallet {
 
 		/// Root 解除 Campaign 暂停
 		#[pallet::call_index(29)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::unsuspend_campaign())]
 		pub fn unsuspend_campaign(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -2178,7 +1996,7 @@ pub mod pallet {
 
 		/// 举报已审核通过的 Campaign (独立于 flag_campaign)
 		#[pallet::call_index(30)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::report_approved_campaign())]
 		pub fn report_approved_campaign(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -2208,7 +2026,7 @@ pub mod pallet {
 
 		/// 广告主重新提交被拒绝的 Campaign (修改内容 + 重置审核状态)
 		#[pallet::call_index(31)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::resubmit_campaign())]
 		pub fn resubmit_campaign(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -2253,7 +2071,7 @@ pub mod pallet {
 
 		/// 广告位管理员设置接受的投放类型 (0 = 接受所有)
 		#[pallet::call_index(32)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::set_placement_delivery_types())]
 		pub fn set_placement_delivery_types(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -2277,7 +2095,7 @@ pub mod pallet {
 
 		/// 私域广告注销
 		#[pallet::call_index(33)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::unregister_private_ad())]
 		pub fn unregister_private_ad(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -2298,7 +2116,7 @@ pub mod pallet {
 
 		/// 清理已终结 Campaign 存储 (Cancelled/Expired, 任何人可调用)
 		#[pallet::call_index(34)]
-		#[pallet::weight(Weight::from_parts(50_000_000, 8_000))]
+		#[pallet::weight(T::WeightInfo::cleanup_campaign())]
 		pub fn cleanup_campaign(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -2341,152 +2159,20 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// Root 强制结算 Era 广告
+		/// Root 强制结算 Era 广告 (无需 settler 签名)
 		#[pallet::call_index(35)]
-		#[pallet::weight(Weight::from_parts(100_000_000, 15_000))]
+		#[pallet::weight(T::WeightInfo::force_settle_era_ads())]
 		pub fn force_settle_era_ads(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
 		) -> DispatchResult {
 			ensure_root(origin)?;
-			// 复用结算逻辑 — 创建一个合成的 signed origin 效果
-			// 直接内联结算核心逻辑
-			let treasury = T::TreasuryAccount::get();
-			let mut total_cost = BalanceOf::<T>::zero();
-			let mut placement_share_total = BalanceOf::<T>::zero();
-
-			let receipts_snapshot = DeliveryReceipts::<T>::get(&placement_id);
-			let mut settle_items: sp_runtime::Vec<(u64, BalanceOf<T>, T::AccountId)> = sp_runtime::Vec::new();
-
-			for (idx, receipt) in receipts_snapshot.iter().enumerate() {
-				if receipt.settled { continue; }
-				// Phase 5: 仅结算 Confirmed / AutoConfirmed 的收据
-				let confirmation = ReceiptConfirmation::<T>::get((
-					receipt.campaign_id, receipt.placement_id, idx as u32,
-				));
-				match confirmation {
-					Some(ReceiptStatus::Confirmed) | Some(ReceiptStatus::AutoConfirmed) => {},
-					_ => continue,
-				}
-				if let Some(campaign) = Campaigns::<T>::get(receipt.campaign_id) {
-					// 根据 campaign_type 计算费用
-					let cost = match campaign.campaign_type {
-						CampaignType::Cpc => Self::compute_cpc_cost(
-							campaign.bid_per_click,
-							receipt.click_count,
-							receipt.cpm_multiplier_bps,
-						),
-						_ => Self::compute_cpm_cost(
-							campaign.bid_per_mille,
-							receipt.audience_size,
-							receipt.cpm_multiplier_bps,
-						),
-					};
-					let escrow = CampaignEscrow::<T>::get(receipt.campaign_id);
-					let daily_remaining = if !campaign.daily_budget.is_zero() {
-						let now = frame_system::Pallet::<T>::block_number();
-						let day_index = Self::block_to_day_index(now, campaign.created_at);
-						let day_spent = CampaignDailySpent::<T>::get(receipt.campaign_id, day_index);
-						campaign.daily_budget.saturating_sub(day_spent)
-					} else {
-						escrow
-					};
-					let actual_cost = core::cmp::min(core::cmp::min(cost, escrow), daily_remaining);
-					if !actual_cost.is_zero() {
-						settle_items.push((receipt.campaign_id, actual_cost, campaign.advertiser.clone()));
-					}
-				}
-			}
-
-			for (campaign_id, snapshot_cost, advertiser) in settle_items.iter() {
-				let current_escrow = CampaignEscrow::<T>::get(campaign_id);
-				let adjusted_cost = core::cmp::min(*snapshot_cost, current_escrow);
-				if adjusted_cost.is_zero() { continue; }
-
-				let deficit = T::Currency::unreserve(advertiser, adjusted_cost);
-				let actually_unreserved = adjusted_cost.saturating_sub(deficit);
-				if actually_unreserved.is_zero() { continue; }
-
-				if T::Currency::transfer(
-					advertiser, &treasury, actually_unreserved, ExistenceRequirement::AllowDeath,
-				).is_err() {
-					let _ = T::Currency::reserve(advertiser, actually_unreserved);
-					continue;
-				}
-				let adjusted_cost = actually_unreserved;
-
-				let breakdown = T::RevenueDistributor::distribute(
-					&placement_id, adjusted_cost, advertiser,
-				).unwrap_or(RevenueBreakdown {
-					placement_share: Zero::zero(),
-					node_share: Zero::zero(),
-					platform_share: adjusted_cost,
-				});
-
-				PlacementClaimable::<T>::mutate(&placement_id, |c| *c = c.saturating_add(breakdown.placement_share));
-
-				// Phase 6: 推荐佣金 — 从平台份额中抽取
-				let referral_rate = T::AdvertiserReferralRate::get();
-				if referral_rate > 0 {
-					if let Some(ref referrer) = AdvertiserReferrer::<T>::get(advertiser) {
-						let bps_divisor: BalanceOf<T> = 10_000u32.into();
-						let rate_bal: BalanceOf<T> = referral_rate.into();
-						let referral_commission = breakdown.platform_share
-							.saturating_mul(rate_bal) / bps_divisor;
-						if !referral_commission.is_zero() {
-							ReferrerClaimable::<T>::mutate(referrer, |c| {
-								*c = c.saturating_add(referral_commission);
-							});
-							ReferrerTotalEarnings::<T>::mutate(referrer, |e| {
-								*e = e.saturating_add(referral_commission);
-							});
-							Self::deposit_event(Event::ReferralCommissionCredited {
-								referrer: referrer.clone(),
-								advertiser: advertiser.clone(),
-								amount: referral_commission,
-							});
-						}
-					}
-				}
-
-				CampaignEscrow::<T>::mutate(campaign_id, |e| *e = e.saturating_sub(adjusted_cost));
-
-				Campaigns::<T>::mutate(campaign_id, |maybe| {
-					if let Some(c) = maybe {
-						c.spent = c.spent.saturating_add(adjusted_cost);
-						if CampaignEscrow::<T>::get(*campaign_id).is_zero() {
-							c.status = CampaignStatus::Exhausted;
-						}
-						if !c.daily_budget.is_zero() {
-							let now = frame_system::Pallet::<T>::block_number();
-							let day_index = Self::block_to_day_index(now, c.created_at);
-							CampaignDailySpent::<T>::mutate(campaign_id, day_index, |d| {
-								*d = d.saturating_add(adjusted_cost);
-							});
-						}
-					}
-				});
-
-				total_cost = total_cost.saturating_add(adjusted_cost);
-				placement_share_total = placement_share_total.saturating_add(breakdown.placement_share);
-			}
-
-			DeliveryReceipts::<T>::remove(&placement_id);
-
-			if !total_cost.is_zero() {
-				EraAdRevenue::<T>::insert(&placement_id, total_cost);
-				PlacementTotalRevenue::<T>::mutate(&placement_id, |r| *r = r.saturating_add(total_cost));
-				Self::deposit_event(Event::EraAdsSettled {
-					placement_id, total_cost, placement_share: placement_share_total,
-				});
-			}
-
-			Ok(())
+			Self::do_settle_era_ads(placement_id, None)
 		}
 
 		/// 广告主设置 Campaign 定向广告位列表
 		#[pallet::call_index(36)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::set_campaign_targets())]
 		pub fn set_campaign_targets(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -2518,7 +2204,7 @@ pub mod pallet {
 
 		/// 广告主清除 Campaign 定向 (恢复全网投放)
 		#[pallet::call_index(37)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::clear_campaign_targets())]
 		pub fn clear_campaign_targets(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -2546,7 +2232,7 @@ pub mod pallet {
 
 		/// 广告主设置 Campaign 级 CPM 倍率 (基点, 100 = 1x; 0 = 清除)
 		#[pallet::call_index(38)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::set_campaign_multiplier())]
 		pub fn set_campaign_multiplier(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -2571,7 +2257,7 @@ pub mod pallet {
 
 		/// 广告位管理员设置广告位级 CPM 倍率 (基点, 100 = 1x; 0 = 清除)
 		#[pallet::call_index(39)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::set_placement_multiplier())]
 		pub fn set_placement_multiplier(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -2596,7 +2282,7 @@ pub mod pallet {
 
 		/// 广告位管理员设置是否要求 Campaign 级审核
 		#[pallet::call_index(40)]
-		#[pallet::weight(Weight::from_parts(25_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::set_placement_approval_required())]
 		pub fn set_placement_approval_required(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -2616,7 +2302,7 @@ pub mod pallet {
 
 		/// 广告位管理员批准 Campaign 在该广告位投放
 		#[pallet::call_index(41)]
-		#[pallet::weight(Weight::from_parts(25_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::approve_campaign_for_placement())]
 		pub fn approve_campaign_for_placement(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -2638,7 +2324,7 @@ pub mod pallet {
 
 		/// 广告位管理员拒绝/撤销 Campaign 在该广告位的投放权限
 		#[pallet::call_index(42)]
-		#[pallet::weight(Weight::from_parts(25_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::reject_campaign_for_placement())]
 		pub fn reject_campaign_for_placement(
 			origin: OriginFor<T>,
 			placement_id: PlacementId,
@@ -2658,7 +2344,7 @@ pub mod pallet {
 
 		/// 广告主确认收据 (确认窗口内)
 		#[pallet::call_index(43)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::confirm_receipt())]
 		pub fn confirm_receipt(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -2686,7 +2372,7 @@ pub mod pallet {
 
 		/// 广告主争议收据 (确认窗口内)
 		#[pallet::call_index(44)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::dispute_receipt())]
 		pub fn dispute_receipt(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -2714,7 +2400,7 @@ pub mod pallet {
 
 		/// 自动确认超时收据 (任何人可调用)
 		#[pallet::call_index(45)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::auto_confirm_receipt())]
 		pub fn auto_confirm_receipt(
 			origin: OriginFor<T>,
 			campaign_id: u64,
@@ -2748,7 +2434,7 @@ pub mod pallet {
 
 		/// 注册成为广告主 (必须有推荐人, 推荐人必须是已注册广告主)
 		#[pallet::call_index(46)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::register_advertiser())]
 		pub fn register_advertiser(
 			origin: OriginFor<T>,
 			referrer: T::AccountId,
@@ -2773,7 +2459,7 @@ pub mod pallet {
 
 		/// Root 注册种子广告主 (无需推荐人, 冷启动用)
 		#[pallet::call_index(47)]
-		#[pallet::weight(Weight::from_parts(30_000_000, 5_000))]
+		#[pallet::weight(T::WeightInfo::force_register_advertiser())]
 		pub fn force_register_advertiser(
 			origin: OriginFor<T>,
 			advertiser: T::AccountId,
@@ -2791,7 +2477,7 @@ pub mod pallet {
 
 		/// 推荐人提取累计推荐佣金
 		#[pallet::call_index(48)]
-		#[pallet::weight(Weight::from_parts(40_000_000, 6_000))]
+		#[pallet::weight(T::WeightInfo::claim_referral_earnings())]
 		pub fn claim_referral_earnings(
 			origin: OriginFor<T>,
 		) -> DispatchResult {
@@ -2820,6 +2506,228 @@ pub mod pallet {
 	// ========================================================================
 
 	impl<T: Config> Pallet<T> {
+		/// 结算核心逻辑 — settle_era_ads 和 force_settle_era_ads 共用
+		///
+		/// `settler` 为 Some 时发放结算激励; 为 None 时跳过 (root 强制结算场景)
+		fn do_settle_era_ads(
+			placement_id: PlacementId,
+			settler: Option<T::AccountId>,
+		) -> DispatchResult {
+			let treasury = T::TreasuryAccount::get();
+			let mut total_cost = BalanceOf::<T>::zero();
+			let mut placement_share_total = BalanceOf::<T>::zero();
+
+			let receipts_snapshot = DeliveryReceipts::<T>::get(&placement_id);
+			let mut settle_items: sp_runtime::Vec<(u64, BalanceOf<T>, T::AccountId)> =
+				sp_runtime::Vec::new();
+
+			for (idx, receipt) in receipts_snapshot.iter().enumerate() {
+				if receipt.settled {
+					continue;
+				}
+				let confirmation = ReceiptConfirmation::<T>::get((
+					receipt.campaign_id, receipt.placement_id, idx as u32,
+				));
+				match confirmation {
+					Some(ReceiptStatus::Confirmed) | Some(ReceiptStatus::AutoConfirmed) => {},
+					_ => continue,
+				}
+				if let Some(campaign) = Campaigns::<T>::get(receipt.campaign_id) {
+					let cost = match campaign.campaign_type {
+						CampaignType::Cpc => Self::compute_cpc_cost(
+							campaign.bid_per_click,
+							receipt.click_count,
+							receipt.cpm_multiplier_bps,
+						),
+						_ => Self::compute_cpm_cost(
+							campaign.bid_per_mille,
+							receipt.audience_size,
+							receipt.cpm_multiplier_bps,
+						),
+					};
+					let escrow = CampaignEscrow::<T>::get(receipt.campaign_id);
+					let daily_remaining = if !campaign.daily_budget.is_zero() {
+						let now = frame_system::Pallet::<T>::block_number();
+						let day_index: u32 = Self::block_to_day_index(now, campaign.created_at);
+						let day_spent = CampaignDailySpent::<T>::get(receipt.campaign_id, day_index);
+						campaign.daily_budget.saturating_sub(day_spent)
+					} else {
+						escrow
+					};
+					let actual_cost = core::cmp::min(core::cmp::min(cost, escrow), daily_remaining);
+					if !actual_cost.is_zero() {
+						settle_items.push((
+							receipt.campaign_id,
+							actual_cost,
+							campaign.advertiser.clone(),
+						));
+					} else {
+						log::warn!(
+							"[ads-core] settle: campaign {} escrow exhausted, receipt skipped",
+							receipt.campaign_id,
+						);
+					}
+				} else {
+					log::warn!(
+						"[ads-core] settle: campaign {} not found, receipt skipped",
+						receipt.campaign_id,
+					);
+				}
+			}
+
+			for (campaign_id, snapshot_cost, advertiser) in settle_items.iter() {
+				let current_escrow = CampaignEscrow::<T>::get(campaign_id);
+				let adjusted_cost = core::cmp::min(*snapshot_cost, current_escrow);
+				if adjusted_cost.is_zero() {
+					continue;
+				}
+
+				let deficit = T::Currency::unreserve(advertiser, adjusted_cost);
+				let actually_unreserved = adjusted_cost.saturating_sub(deficit);
+				if actually_unreserved.is_zero() {
+					log::warn!(
+						"[ads-core] settle: campaign {} unreserve returned zero, skipping",
+						campaign_id,
+					);
+					continue;
+				}
+
+				if T::Currency::transfer(
+					advertiser,
+					&treasury,
+					actually_unreserved,
+					ExistenceRequirement::AllowDeath,
+				).is_err() {
+					log::warn!(
+						"[ads-core] settle: campaign {} transfer failed, skipping",
+						campaign_id,
+					);
+					let _ = T::Currency::reserve(advertiser, actually_unreserved);
+					continue;
+				}
+				let adjusted_cost = actually_unreserved;
+
+				let breakdown = T::RevenueDistributor::distribute(
+					&placement_id,
+					adjusted_cost,
+					advertiser,
+				).unwrap_or(RevenueBreakdown {
+					placement_share: Zero::zero(),
+					node_share: Zero::zero(),
+					platform_share: adjusted_cost,
+				});
+
+				// Deduct referral commission from platform_share BEFORE crediting,
+				// so treasury's net retained = platform_share - referral_commission.
+				let mut net_platform_share = breakdown.platform_share;
+				let referral_rate = T::AdvertiserReferralRate::get();
+				if referral_rate > 0 {
+					if let Some(ref referrer) = AdvertiserReferrer::<T>::get(advertiser) {
+						let bps_divisor: BalanceOf<T> = 10_000u32.into();
+						let rate_bal: BalanceOf<T> = referral_rate.into();
+						let referral_commission = breakdown.platform_share
+							.saturating_mul(rate_bal) / bps_divisor;
+						if !referral_commission.is_zero() {
+							net_platform_share = net_platform_share.saturating_sub(referral_commission);
+							ReferrerClaimable::<T>::mutate(referrer, |c| {
+								*c = c.saturating_add(referral_commission);
+							});
+							ReferrerTotalEarnings::<T>::mutate(referrer, |e| {
+								*e = e.saturating_add(referral_commission);
+							});
+							Self::deposit_event(Event::ReferralCommissionCredited {
+								referrer: referrer.clone(),
+								advertiser: advertiser.clone(),
+								amount: referral_commission,
+							});
+						}
+					}
+				}
+				if !net_platform_share.is_zero() {
+					TreasuryShareAccumulator::<T>::mutate(|acc| {
+						*acc = acc.saturating_add(net_platform_share);
+					});
+					Self::deposit_event(Event::PlatformShareCredited {
+						campaign_id: *campaign_id,
+						amount: net_platform_share,
+					});
+				}
+
+				PlacementClaimable::<T>::mutate(&placement_id, |c| {
+					*c = c.saturating_add(breakdown.placement_share);
+				});
+
+				CampaignEscrow::<T>::mutate(campaign_id, |e| {
+					*e = e.saturating_sub(adjusted_cost);
+				});
+
+				Campaigns::<T>::mutate(campaign_id, |maybe| {
+					if let Some(c) = maybe {
+						c.spent = c.spent.saturating_add(adjusted_cost);
+						if CampaignEscrow::<T>::get(*campaign_id).is_zero() {
+							c.status = CampaignStatus::Exhausted;
+						}
+						if !c.daily_budget.is_zero() {
+							let now = frame_system::Pallet::<T>::block_number();
+							let day_index = Self::block_to_day_index(now, c.created_at);
+							CampaignDailySpent::<T>::mutate(campaign_id, day_index, |d| {
+								*d = d.saturating_add(adjusted_cost);
+							});
+						}
+					}
+				});
+
+				total_cost = total_cost.saturating_add(adjusted_cost);
+				placement_share_total = placement_share_total.saturating_add(breakdown.placement_share);
+			}
+
+			// 清空本 Era 收据, 同时清理关联的 ReceiptConfirmation 和 ReceiptSubmittedAt
+			for (idx, receipt) in receipts_snapshot.iter().enumerate() {
+				ReceiptConfirmation::<T>::remove((
+					receipt.campaign_id, receipt.placement_id, idx as u32,
+				));
+				ReceiptSubmittedAt::<T>::remove((
+					receipt.campaign_id, receipt.placement_id, idx as u32,
+				));
+			}
+			DeliveryReceipts::<T>::remove(&placement_id);
+
+			if !total_cost.is_zero() {
+				EraAdRevenue::<T>::insert(&placement_id, total_cost);
+				PlacementTotalRevenue::<T>::mutate(&placement_id, |r| *r = r.saturating_add(total_cost));
+
+				if let Some(ref settler) = settler {
+					let incentive_bps = T::SettlementIncentiveBps::get();
+					if incentive_bps > 0 {
+						let bps_divisor: BalanceOf<T> = 10_000u32.into();
+						let incentive_bps_bal: BalanceOf<T> = incentive_bps.into();
+						let incentive = total_cost.saturating_mul(incentive_bps_bal) / bps_divisor;
+						if !incentive.is_zero() {
+							if T::Currency::transfer(
+								&treasury,
+								settler,
+								incentive,
+								ExistenceRequirement::AllowDeath,
+							).is_ok() {
+								Self::deposit_event(Event::SettlementIncentivePaid {
+									settler: settler.clone(),
+									amount: incentive,
+								});
+							}
+						}
+					}
+				}
+
+				Self::deposit_event(Event::EraAdsSettled {
+					placement_id,
+					total_cost,
+					placement_share: placement_share_total,
+				});
+			}
+
+			Ok(())
+		}
+
 		/// 计算 CPM 费用: bid_per_mille * audience / 1000 * multiplier / 100
 		pub fn compute_cpm_cost(bid_per_mille: BalanceOf<T>, audience: u32, multiplier_bps: u32) -> BalanceOf<T> {
 			let audience_balance: BalanceOf<T> = audience.into();
@@ -2847,16 +2755,25 @@ pub mod pallet {
 			day.try_into().unwrap_or(u32::MAX)
 		}
 
-		/// 将 Campaign 加入发现索引 (ActiveApprovedCampaigns + CampaignsByDeliveryType)
 		fn index_add_active(campaign_id: u64, delivery_types: u8) {
 			ActiveApprovedCampaigns::<T>::mutate(|list| {
 				if !list.contains(&campaign_id) {
-					let _ = list.try_push(campaign_id);
+					if list.try_push(campaign_id).is_err() {
+						log::warn!(
+							"[ads-core] ActiveApprovedCampaigns full, campaign {} not indexed",
+							campaign_id,
+						);
+					}
 				}
 			});
 			CampaignsByDeliveryType::<T>::mutate(delivery_types, |list| {
 				if !list.contains(&campaign_id) {
-					let _ = list.try_push(campaign_id);
+					if list.try_push(campaign_id).is_err() {
+						log::warn!(
+							"[ads-core] CampaignsByDeliveryType({}) full, campaign {} not indexed",
+							delivery_types, campaign_id,
+						);
+					}
 				}
 			});
 		}
@@ -2996,12 +2913,16 @@ pub mod pallet {
 					});
 				}
 			}
-			// 写入新索引
 			if let Some(new) = new_targets {
 				for pid in new {
 					CampaignsForPlacement::<T>::mutate(pid, |list| {
 						if !list.contains(&campaign_id) {
-							let _ = list.try_push(campaign_id);
+							if list.try_push(campaign_id).is_err() {
+								log::warn!(
+									"[ads-core] CampaignsForPlacement full, campaign {} not indexed for placement",
+									campaign_id,
+								);
+							}
 						}
 					});
 				}
@@ -3015,6 +2936,32 @@ pub mod pallet {
 
 	#[pallet::hooks]
 	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+		fn on_idle(_n: BlockNumberFor<T>, remaining_weight: Weight) -> Weight {
+			let base_weight = T::DbWeight::get().reads_writes(2, 1);
+			let mut consumed = Weight::zero();
+			let mut removed = 0u32;
+			const MAX_GC_PER_BLOCK: u32 = 10;
+			const RETENTION_DAYS: u32 = 7;
+
+			let now = frame_system::Pallet::<T>::block_number();
+			let mut iter = CampaignDailySpent::<T>::iter();
+			while removed < MAX_GC_PER_BLOCK {
+				if consumed.saturating_add(base_weight).any_gt(remaining_weight) {
+					break;
+				}
+				let Some((campaign_id, day_index, _amount)) = iter.next() else { break };
+				if let Some(campaign) = Campaigns::<T>::get(campaign_id) {
+					let current_day = Self::block_to_day_index(now, campaign.created_at);
+					if day_index.saturating_add(RETENTION_DAYS) < current_day {
+						CampaignDailySpent::<T>::remove(campaign_id, day_index);
+						removed += 1;
+					}
+				}
+				consumed = consumed.saturating_add(base_weight);
+			}
+			consumed
+		}
+
 		#[cfg(feature = "std")]
 		fn integrity_test() {
 			assert!(

@@ -223,6 +223,7 @@ impl pallet_commission_single_line::Config for Test {
     type ConfigChangeDelay = ConfigChangeDelay;
     type MaxSegmentCount = MaxSegmentCount;
     type MaxTotalRateBps = MaxTotalRateBps;
+    type MaxConfigChangeLogs = ConstU32<100>;
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

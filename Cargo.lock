@@ -5996,6 +5996,7 @@ dependencies = [
  "pallet-ads-router",
  "pallet-assets",
  "pallet-aura",
+ "pallet-authorship",
  "pallet-balances",
  "pallet-collective",
  "pallet-commission-common",
@@ -6034,6 +6035,8 @@ dependencies = [
  "pallet-grouprobot-subscription",
  "pallet-membership",
  "pallet-nex-market",
+ "pallet-offences",
+ "pallet-session",
  "pallet-storage-lifecycle",
  "pallet-storage-service",
  "pallet-sudo",
@@ -6055,6 +6058,7 @@ dependencies = [
  "sp-offchain",
  "sp-runtime",
  "sp-session",
+ "sp-staking",
  "sp-storage",
  "sp-transaction-pool",
  "sp-version",
@@ -6354,6 +6358,7 @@ dependencies = [
 name = "pallet-ads-core"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -6385,8 +6390,9 @@ dependencies = [
 
 [[package]]
 name = "pallet-ads-grouprobot"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -6418,6 +6424,13 @@ dependencies = [
  "pallet-ads-entity",
  "pallet-ads-grouprobot",
  "pallet-ads-primitives",
+ "pallet-balances",
+ "pallet-entity-common",
+ "pallet-grouprobot-primitives",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-io",
  "sp-runtime",
 ]
 
@@ -7101,6 +7114,7 @@ dependencies = [
 name = "pallet-grouprobot-ceremony"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "pallet-grouprobot-primitives",
@@ -7172,6 +7186,7 @@ dependencies = [
 name = "pallet-grouprobot-rewards"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -7268,6 +7283,22 @@ dependencies = [
  "sp-io",
  "sp-runtime",
  "sp-std",
+]
+
+[[package]]
+name = "pallet-offences"
+version = "44.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb7029dda1eb76c25cad8323b217b24021fdd103bdb10d66bd2376008ac95a1f"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "log",
+ "parity-scale-codec",
+ "scale-info",
+ "serde",
+ "sp-runtime",
+ "sp-staking",
 ]
 
 [[package]]
@@ -7392,7 +7423,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-trading-common"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "frame-support",
  "parity-scale-codec",

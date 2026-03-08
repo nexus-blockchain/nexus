@@ -1429,6 +1429,7 @@ pub mod pallet {
         /// P2-a2: 更新草稿披露内容
         #[pallet::call_index(19)]
         #[pallet::weight(T::WeightInfo::update_draft())]
+        pub fn update_draft(
             origin: OriginFor<T>,
             disclosure_id: u64,
             content_cid: Vec<u8>,
@@ -1495,6 +1496,7 @@ pub mod pallet {
         /// P2-a2: 发布草稿（Draft → Published，触发黑窗口期 + 配置更新）
         #[pallet::call_index(21)]
         #[pallet::weight(T::WeightInfo::publish_draft())]
+        pub fn publish_draft(
             origin: OriginFor<T>,
             disclosure_id: u64,
         ) -> DispatchResult {
@@ -1573,6 +1575,7 @@ pub mod pallet {
         /// 撤回披露
         #[pallet::call_index(2)]
         #[pallet::weight(T::WeightInfo::withdraw_disclosure())]
+        pub fn withdraw_disclosure(
             origin: OriginFor<T>,
             disclosure_id: u64,
         ) -> DispatchResult {
@@ -1711,6 +1714,7 @@ pub mod pallet {
         /// 添加内幕人员
         #[pallet::call_index(4)]
         #[pallet::weight(T::WeightInfo::add_insider())]
+        pub fn add_insider(
             origin: OriginFor<T>,
             entity_id: u64,
             account: T::AccountId,
@@ -1767,6 +1771,7 @@ pub mod pallet {
         /// P2-a3: 更新内幕人员角色
         #[pallet::call_index(22)]
         #[pallet::weight(T::WeightInfo::update_insider_role())]
+        pub fn update_insider_role(
             origin: OriginFor<T>,
             entity_id: u64,
             account: T::AccountId,
@@ -1815,6 +1820,7 @@ pub mod pallet {
         /// 移除内幕人员
         #[pallet::call_index(5)]
         #[pallet::weight(T::WeightInfo::remove_insider())]
+        pub fn remove_insider(
             origin: OriginFor<T>,
             entity_id: u64,
             account: T::AccountId,
@@ -1860,6 +1866,7 @@ pub mod pallet {
         /// 手动开始黑窗口期
         #[pallet::call_index(6)]
         #[pallet::weight(T::WeightInfo::start_blackout())]
+        pub fn start_blackout(
             origin: OriginFor<T>,
             entity_id: u64,
             duration: BlockNumberFor<T>,
@@ -1902,6 +1909,7 @@ pub mod pallet {
         /// 结束黑窗口期
         #[pallet::call_index(7)]
         #[pallet::weight(T::WeightInfo::end_blackout())]
+        pub fn end_blackout(
             origin: OriginFor<T>,
             entity_id: u64,
         ) -> DispatchResult {
@@ -2076,6 +2084,7 @@ pub mod pallet {
         /// 撤回公告
         #[pallet::call_index(10)]
         #[pallet::weight(T::WeightInfo::withdraw_announcement())]
+        pub fn withdraw_announcement(
             origin: OriginFor<T>,
             announcement_id: u64,
         ) -> DispatchResult {
@@ -2121,6 +2130,7 @@ pub mod pallet {
         /// 将指定公告添加到置顶列表。如果已置顶则忽略。
         #[pallet::call_index(11)]
         #[pallet::weight(T::WeightInfo::pin_announcement())]
+        pub fn pin_announcement(
             origin: OriginFor<T>,
             entity_id: u64,
             announcement_id: u64,
@@ -2166,6 +2176,7 @@ pub mod pallet {
         /// P2-a14: 取消置顶公告
         #[pallet::call_index(23)]
         #[pallet::weight(T::WeightInfo::unpin_announcement())]
+        pub fn unpin_announcement(
             origin: OriginFor<T>,
             entity_id: u64,
             announcement_id: u64,
@@ -2204,6 +2215,7 @@ pub mod pallet {
         /// 如果该公告是置顶公告，自动清除置顶。
         #[pallet::call_index(12)]
         #[pallet::weight(T::WeightInfo::expire_announcement())]
+        pub fn expire_announcement(
             origin: OriginFor<T>,
             announcement_id: u64,
         ) -> DispatchResult {
@@ -2244,6 +2256,7 @@ pub mod pallet {
         /// 保留已有 violation_count 和 last_disclosure。
         #[pallet::call_index(16)]
         #[pallet::weight(T::WeightInfo::force_configure_disclosure())]
+        pub fn force_configure_disclosure(
             origin: OriginFor<T>,
             entity_id: u64,
             level: DisclosureLevel,
@@ -2288,6 +2301,7 @@ pub mod pallet {
         /// 同一逾期周期内不可重复举报（通过 ViolationRecords 去重）。
         #[pallet::call_index(15)]
         #[pallet::weight(T::WeightInfo::report_disclosure_violation())]
+        pub fn report_disclosure_violation(
             origin: OriginFor<T>,
             entity_id: u64,
             violation_type: ViolationType,
@@ -2355,6 +2369,7 @@ pub mod pallet {
         /// 释放 BoundedVec 容量供新披露使用。披露记录本身保留供审计。
         #[pallet::call_index(13)]
         #[pallet::weight(T::WeightInfo::cleanup_disclosure_history())]
+        pub fn cleanup_disclosure_history(
             origin: OriginFor<T>,
             entity_id: u64,
             disclosure_id: u64,
@@ -2388,6 +2403,7 @@ pub mod pallet {
         /// 释放 BoundedVec 容量供新公告使用。公告记录本身保留供审计。
         #[pallet::call_index(14)]
         #[pallet::weight(T::WeightInfo::cleanup_announcement_history())]
+        pub fn cleanup_announcement_history(
             origin: OriginFor<T>,
             entity_id: u64,
             announcement_id: u64,
@@ -2564,6 +2580,7 @@ pub mod pallet {
         /// F8: 重置违规次数（仅 Root 可调用）
         #[pallet::call_index(26)]
         #[pallet::weight(T::WeightInfo::reset_violation_count())]
+        pub fn reset_violation_count(
             origin: OriginFor<T>,
             entity_id: u64,
         ) -> DispatchResult {
@@ -2587,6 +2604,7 @@ pub mod pallet {
         /// F9: 清理已过期的黑窗口期存储（任何人可调用）
         #[pallet::call_index(27)]
         #[pallet::weight(T::WeightInfo::expire_blackout())]
+        pub fn expire_blackout(
             origin: OriginFor<T>,
             entity_id: u64,
         ) -> DispatchResult {
@@ -2609,6 +2627,7 @@ pub mod pallet {
         /// v0.6: 配置审批要求（多方签核才能发布草稿）
         #[pallet::call_index(28)]
         #[pallet::weight(T::WeightInfo::configure_approval_requirements())]
+        pub fn configure_approval_requirements(
             origin: OriginFor<T>,
             entity_id: u64,
             required_approvals: u32,
@@ -2647,6 +2666,7 @@ pub mod pallet {
         /// v0.6: 审批披露草稿（多方签核）
         #[pallet::call_index(29)]
         #[pallet::weight(T::WeightInfo::approve_disclosure())]
+        pub fn approve_disclosure(
             origin: OriginFor<T>,
             disclosure_id: u64,
         ) -> DispatchResult {

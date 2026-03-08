@@ -16,7 +16,7 @@
 // limitations under the License.
 
 use crate::{
-	AccountId, BalancesConfig, RuntimeGenesisConfig, SudoConfig, UNIT,
+	AccountId, BalancesConfig, RuntimeGenesisConfig, SessionConfig, SessionKeys, SudoConfig, UNIT,
 	TechnicalCommitteeConfig, ArbitrationCommitteeConfig, TreasuryCouncilConfig, ContentCommitteeConfig,
 	TechnicalMembershipConfig, ArbitrationMembershipConfig, TreasuryMembershipConfig, ContentMembershipConfig,
 	NexMarketConfig,
@@ -53,9 +53,9 @@ const INITIAL_SUPPLY: u128 = 100_000_000_000 * UNIT;
 
 // Returns the genesis config presets populated with given parameters.
 fn testnet_genesis(
-	initial_authorities: Vec<(AuraId, GrandpaId)>,
+	initial_authorities: Vec<(AccountId, AuraId, GrandpaId)>,
 	endowed_accounts: Vec<AccountId>,
-	_prime: Option<AccountId>,  // Prime member (需启动后通过 set_prime extrinsic 设置)
+	_prime: Option<AccountId>,
 	root: AccountId,
 	technical_members: Vec<AccountId>,
 	arbitration_members: Vec<AccountId>,
@@ -71,11 +71,18 @@ fn testnet_genesis(
 				.map(|k| (k, balance_per_account))
 				.collect::<Vec<_>>(),
 		},
-		aura: pallet_aura::GenesisConfig {
-			authorities: initial_authorities.iter().map(|x| x.0.clone()).collect::<Vec<_>>(),
-		},
-		grandpa: pallet_grandpa::GenesisConfig {
-			authorities: initial_authorities.iter().map(|x| (x.1.clone(), 1)).collect::<Vec<_>>(),
+		session: SessionConfig {
+			keys: initial_authorities
+				.iter()
+				.map(|x| {
+					(
+						x.0.clone(),
+						x.0.clone(),
+						SessionKeys { aura: x.1.clone(), grandpa: x.2.clone() },
+					)
+				})
+				.collect::<Vec<_>>(),
+			..Default::default()
 		},
 		sudo: SudoConfig { key: Some(root) },
 		// 委员会初始成员配置
@@ -129,6 +136,7 @@ pub fn development_config_genesis() -> Value {
 
 	testnet_genesis(
 		vec![(
+			Sr25519Keyring::Alice.to_account_id(),
 			sp_keyring::Sr25519Keyring::Alice.public().into(),
 			sp_keyring::Ed25519Keyring::Alice.public().into(),
 		)],
@@ -141,15 +149,11 @@ pub fn development_config_genesis() -> Value {
 			member2.clone(),
 			member3.clone(),
 		],
-		Some(member1),  // Prime for all committees
+		Some(member1),
 		sp_keyring::Sr25519Keyring::Alice.to_account_id(),
-		// 技术委员会: 3 members
 		all_members.clone(),
-		// 仲裁委员会: 3 members
 		all_members.clone(),
-		// 财务委员会: 3 members
 		all_members.clone(),
-		// 内容委员会: 3 members
 		all_members,
 	)
 }
@@ -172,24 +176,22 @@ pub fn local_config_genesis() -> Value {
 	testnet_genesis(
 		vec![
 			(
+				Sr25519Keyring::Alice.to_account_id(),
 				sp_keyring::Sr25519Keyring::Alice.public().into(),
 				sp_keyring::Ed25519Keyring::Alice.public().into(),
 			),
 			(
+				Sr25519Keyring::Bob.to_account_id(),
 				sp_keyring::Sr25519Keyring::Bob.public().into(),
 				sp_keyring::Ed25519Keyring::Bob.public().into(),
 			),
 		],
 		endowed,
-		Some(member1),  // Prime for all committees
+		Some(member1),
 		Sr25519Keyring::Alice.to_account_id(),
-		// 技术委员会: 3 members
 		all_members.clone(),
-		// 仲裁委员会: 3 members
 		all_members.clone(),
-		// 财务委员会: 3 members
 		all_members.clone(),
-		// 内容委员会: 3 members
 		all_members,
 	)
 }

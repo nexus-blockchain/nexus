@@ -73,8 +73,7 @@ pub mod pallet {
 	pub struct Pallet<T>(_);
 
 	#[pallet::config]
-	pub trait Config: frame_system::Config {
-		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+	pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
 		type Currency: ReservableCurrency<Self::AccountId>;
 		/// Weight 信息
 		type WeightInfo: WeightInfo;
@@ -223,6 +222,8 @@ pub mod pallet {
 		EscrowLow { bot_id_hash: BotIdHash, remaining: BalanceOf<T>, fee_per_era: BalanceOf<T> },
 		/// settle 跳过非活跃 Bot
 		SettleSkippedInactiveBot { bot_id_hash: BotIdHash },
+		/// 押金操作失败（例如 re-reserve）
+		DepositOperationFailed { bot_id_hash: BotIdHash, amount: BalanceOf<T> },
 	}
 
 	// ========================================================================
@@ -595,12 +596,12 @@ pub mod pallet {
 			if !escrow.is_zero() {
 				T::Currency::unreserve(&sub.owner, escrow);
 				let treasury = T::TreasuryAccount::get();
-				let _ = T::Currency::transfer(
+				T::Currency::transfer(
 					&sub.owner,
 					&treasury,
 					escrow,
 					ExistenceRequirement::AllowDeath,
-				);
+				).map_err(|_| Error::<T>::SubscriptionFeeTransferFailed)?;
 			}
 
 			Subscriptions::<T>::mutate(&bot_id_hash, |maybe| {
@@ -1065,7 +1066,12 @@ pub mod pallet {
 							.saturating_add(if treasury_ok { treasury_share } else { BalanceOf::<T>::zero() });
 						let to_re_reserve = sub.fee_per_era.saturating_sub(paid);
 						if !to_re_reserve.is_zero() {
-							let _ = T::Currency::reserve(&sub.owner, to_re_reserve);
+							if T::Currency::reserve(&sub.owner, to_re_reserve).is_err() {
+								Self::deposit_event(Event::DepositOperationFailed {
+									bot_id_hash: sub.bot_id_hash,
+									amount: to_re_reserve,
+								});
+							}
 						}
 						if !paid.is_zero() {
 							SubscriptionEscrow::<T>::mutate(&sub.bot_id_hash, |e| {

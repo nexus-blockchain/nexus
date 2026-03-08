@@ -2,18 +2,20 @@
 
 > 路径：`pallets/grouprobot/community/`
 
-社区管理系统，提供群规则配置、节点准入策略、动作日志存证、成员声誉管理功能。
+社区管理系统，提供群规则配置、节点准入策略、动作日志存证、成员声誉管理、社区封禁/治理功能。
 
 ## 设计理念
 
 - **CAS 乐观锁**：`update_community_config` 使用版本号冲突检测，防止并发覆盖
-- **双层声誉**：社区本地声誉（`MemberReputation`）+ 全局聚合声誉（`GlobalReputation`）
+- **社区本地声誉**：`MemberReputation` 按社区隔离，`reset_reputation` 仅影响指定社区
 - **冷却机制**：同一操作者对同一目标的声誉变更受 `ReputationCooldown` 限制
-- **批量日志**：`batch_submit_logs` 支持一次提交最多 50 条日志，降低交易成本
+- **批量日志**：`batch_submit_logs` 支持一次提交最多 `MaxBatchSize` 条日志，降低交易成本
 - **日志清理**：`clear_expired_logs` 按年龄释放存储空间
 - **Ed25519 签名验证**：动作日志提交需 Bot TEE 节点的 Ed25519 签名
 - **Sequence 单调递增**：日志 sequence 严格递增，防止重放攻击
-- **Tier 订阅门控**：日志提交和清理受订阅层级限制
+- **Tier 订阅门控**：日志提交、声誉操作受订阅层级限制
+- **社区状态管理**：Active/Banned 状态，封禁社区禁止所有写操作
+- **Root 治理**：封禁/解封、强制删除、强制更新配置、强制重置声誉
 
 ## Extrinsics
 
@@ -27,9 +29,10 @@
 ### 社区配置
 | call_index | 方法 | 说明 |
 |:---:|------|------|
-| 1 | `set_node_requirement` | 设置节点准入策略（Any/TeeOnly/TeePreferred/MinTee） |
+| 1 | `set_node_requirement` | 设置节点准入策略（Any/TeeOnly/TeePreferred/MinTee，需 Bot 激活） |
 | 2 | `update_community_config` | 更新群规则（CAS 乐观锁，language 须 ISO 639-1 小写） |
 | 8 | `update_active_members` | Bot 更新社区活跃成员数（供广告 CPM 计费） |
+| 10 | `delete_community_config` | Bot Owner 删除社区配置（清理 Config/Logs/Reputation 全部关联数据） |
 
 ### 存储清理
 | call_index | 方法 | 说明 |
@@ -39,24 +42,38 @@
 ### 声誉管理
 | call_index | 方法 | 说明 |
 |:---:|------|------|
-| 5 | `award_reputation` | 奖励声誉（+delta，受冷却限制） |
-| 6 | `deduct_reputation` | 扣除声誉（-delta，受冷却限制） |
-| 7 | `reset_reputation` | 重置用户声誉（清除本地记录，更新全局） |
+| 5 | `award_reputation` | 奖励声誉（+delta，受冷却限制，需付费层级） |
+| 6 | `deduct_reputation` | 扣除声誉（-delta，受冷却限制，需付费层级） |
+| 7 | `reset_reputation` | 重置用户声誉（清除本地记录） |
+
+### Root 治理
+| call_index | 方法 | 说明 |
+|:---:|------|------|
+| 11 | `force_remove_community` | Root 强制删除社区（清除 Config/Logs/Reputation 全部数据） |
+| 12 | `ban_community` | Root 封禁社区（阻止所有写操作） |
+| 13 | `unban_community` | Root 解封社区 |
+| 14 | `force_update_community_config` | Root 强制更新社区配置（绕过 Bot Owner 检查和 CAS） |
+| 15 | `force_reset_community_reputation` | Root 强制重置社区全部声誉 |
 
 ## 存储
 
 | 存储项 | 类型 | 说明 |
 |--------|------|------|
-| `CommunityConfigs` | `Map<CommunityIdHash, CommunityConfig>` | 社区群规则配置 |
-| `CommunityNodeRequirement` | `Map<CommunityIdHash, NodeRequirement>` | 节点准入策略（快速查询） |
+| `CommunityConfigs` | `Map<CommunityIdHash, CommunityConfig>` | 社区群规则配置（含 node_requirement、status） |
 | `ActionLogs` | `Map<CommunityIdHash, BoundedVec<ActionLog>>` | 动作日志 |
-| `LogCount` | `u64` | 日志总数 |
-| `LastSequence` | `Map<CommunityIdHash, Option<u64>>` | 社区最后提交的日志 sequence |
+| `LastSequence` | `Map<CommunityIdHash, u64>` | 社区最后提交的日志 sequence |
 | `MemberReputation` | `DoubleMap<CommunityIdHash, [u8;32], ReputationRecord>` | 社区内用户声誉 |
-| `GlobalReputation` | `Map<[u8;32], i64>` | 全局用户声誉（所有社区之和） |
 | `ReputationCooldowns` | `NMap<(AccountId, CommunityIdHash, [u8;32]), BlockNumber>` | 声誉变更冷却 |
 
 ## 主要类型
+
+### CommunityStatus（社区状态）
+```rust
+pub enum CommunityStatus {
+    Active,   // 正常运行
+    Banned,   // 被封禁 (Root 操作)
+}
+```
 
 ### CommunityConfig（群规则配置）
 ```rust
@@ -71,6 +88,7 @@ pub struct CommunityConfig {
     pub active_members: u32,                // 活跃成员数（Bot 定期更新）
     pub language: [u8; 2],                  // 社区语言（ISO 639-1 小写）
     pub version: u32,                       // CAS 版本号
+    pub status: CommunityStatus,            // 社区状态
 }
 ```
 
@@ -107,7 +125,7 @@ pub struct ActionLog<T: Config> {
 | `ConfigVersionConflict` | CAS 版本冲突 |
 | `NoLogsToClear` | 无可清理日志 |
 | `EmptyBatch` | 批量日志为空 |
-| `BatchTooLarge` | 批量日志超过 50 条 |
+| `BatchTooLarge` | 批量日志超过 MaxBatchSize |
 | `ReputationOnCooldown` | 声誉变更冷却中 |
 | `ReputationDeltaTooLarge` | 变更值超过 MaxReputationDelta |
 | `InvalidMaxAge` | max_age_blocks 不能为零 |
@@ -123,6 +141,9 @@ pub struct ActionLog<T: Config> {
 | `BotNotActive` | Bot 未激活（停用/banned） |
 | `CooldownNotExpired` | 冷却条目尚未过期 |
 | `CooldownNotFound` | 冷却条目不存在 |
+| `CommunityBanned` | 社区已被封禁 |
+| `CommunityNotBanned` | 社区未被封禁（解封时） |
+| `CommunityAlreadyInStatus` | 社区已处于该状态 |
 
 ## 事件
 
@@ -138,6 +159,12 @@ pub struct ActionLog<T: Config> {
 | `ReputationReset` | 声誉已重置（含 community_id_hash, user_hash, old_score） |
 | `ActiveMembersUpdated` | 活跃成员数已更新（含 community_id_hash, active_members） |
 | `CooldownCleaned` | 过期冷却条目已清理（含 community_id_hash, user_hash, operator） |
+| `CommunityConfigDeleted` | Bot Owner 删除社区配置（含 community_id_hash） |
+| `CommunityForceRemoved` | Root 强制删除社区（含 community_id_hash） |
+| `CommunityBanned` | Root 封禁社区（含 community_id_hash） |
+| `CommunityUnbanned` | Root 解封社区（含 community_id_hash） |
+| `CommunityConfigForceUpdated` | Root 强制更新社区配置（含 community_id_hash, version） |
+| `CommunityReputationForceReset` | Root 强制重置社区全部声誉（含 community_id_hash） |
 
 ## 配置参数
 
@@ -146,33 +173,50 @@ pub struct ActionLog<T: Config> {
 | `MaxLogsPerCommunity` | 每个社区最大日志数 |
 | `ReputationCooldown` | 声誉变更冷却区块数 |
 | `MaxReputationDelta` | 单次声誉变更最大绝对值 |
-| `BotRegistry` | Bot 注册查询（`BotRegistryProvider`） |
 | `MaxBatchSize` | 批量提交日志最大条数 |
 | `BlocksPerDay` | 每日区块数（用于日志保留期计算，6s/block = 14400） |
+| `BotRegistry` | Bot 注册查询（`BotRegistryProvider`） |
 | `Subscription` | 订阅层级查询（`SubscriptionProvider`） |
 
 ## 公共查询方法
 
 - `get_node_requirement(community_id_hash)` — 获取节点准入策略
 - `is_community_configured(community_id_hash)` — 社区是否已配置
+- `is_community_banned(community_id_hash)` — 社区是否被封禁
 - `log_count_for(community_id_hash)` — 获取社区日志数
 
 ## 内部 Helper 函数
 
 - `verify_action_log_signature(...)` — 重建签名消息并验证 Ed25519 签名
 - `ensure_bot_owner(who, community_id_hash)` — 检查调用者是否为社区绑定 Bot 的 owner
+- `ensure_active_bot_owner(who, community_id_hash)` — ensure_bot_owner + is_bot_active 组合检查
+- `ensure_not_banned(community_id_hash)` — 确保社区未被封禁
 - `check_cooldown(operator, community_id_hash, user_hash)` — 检查声誉变更冷却
 - `set_cooldown(operator, community_id_hash, user_hash)` — 设置冷却时间戳
 - `ensure_sequence_monotonic(community_id_hash, sequence)` — 确保 sequence 严格递增
-- `ensure_active_bot_owner(who, community_id_hash)` — ensure_bot_owner + is_bot_active 组合检查
 - `do_modify_reputation(who, community_id_hash, user_hash, delta, is_award)` — award/deduct 共享逻辑
+
+## CommunityProvider Trait 实现
+
+本 pallet 实现 `CommunityProvider` trait，供其他 pallet 跨模块查询：
+
+- `is_community_configured(community_id_hash)` — 社区是否已配置
+- `is_community_banned(community_id_hash)` — 社区是否被封禁
+- `is_ads_enabled(community_id_hash)` — 广告是否启用（封禁时返回 false）
+- `active_members(community_id_hash)` — 活跃成员数
+- `language(community_id_hash)` — 社区语言（默认 "en"）
 
 ## 相关模块
 
-- [primitives/](../primitives/) — ActionType、ConfigUpdateAction、NodeRequirement、WarnAction、SubscriptionTier、TierFeatureGate
+- [primitives/](../primitives/) — ActionType、ConfigUpdateAction、NodeRequirement、WarnAction、SubscriptionTier、TierFeatureGate、CommunityProvider
 - [registry/](../registry/) — Bot 注册（BotRegistryProvider 实现，查询 bot_owner/bot_public_key）
 - [subscription/](../subscription/) — 订阅管理（SubscriptionProvider 实现，tier gate 查询）
 - [consensus/](../consensus/) — 节点共识（查询社区准入策略）
+
+## 已知限制
+
+- **Weight 硬编码**：所有 extrinsic weight 为硬编码估算值，无 benchmark 框架和 WeightInfo trait。上线前需完成 benchmark 集成。
+- **ReputationCooldowns 清理**：NMap key 顺序为 `(AccountId, CommunityIdHash, [u8;32])`，无法按 CommunityIdHash 前缀批量清理。`delete_community_config` 和 `force_remove_community` 不清理冷却条目，依赖自然过期 + `cleanup_expired_cooldowns`。
 
 ## 审计历史
 
@@ -237,3 +281,33 @@ pub struct ActionLog<T: Config> {
 - L2-R2: 所有 extrinsic weight 硬编码，无 WeightInfo trait（需完整 benchmark 框架）
 
 **测试:** 59 → 64 tests, cargo test 64/64 ✅
+
+### Round 4 (2026-03)
+
+**发现 4 项，修复 4 项:**
+
+| ID | 级别 | 描述 | 状态 |
+|:---:|:---:|------|:---:|
+| S2-R4 | Medium | `force_remove_community` 不清理 `ReputationCooldowns` — NMap key 顺序限制 | ✅ 记录（自然过期） |
+| S3-R4 | Medium | `delete_community_config` 不清理 `MemberReputation` — 声誉数据成孤儿 | ✅ 修复 |
+| S4-R4 | Low | `set_node_requirement` 不检查 Bot 激活状态 — 与其他操作不一致 | ✅ 修复 |
+| DOC-R4 | Medium | README 与代码严重不一致 — 3 个不存在的存储项、6 个未记录的 extrinsic | ✅ 修复 |
+
+**代码变更:**
+- `delete_community_config`: 新增 `MemberReputation::clear_prefix` 清理声誉数据
+- `set_node_requirement`: `ensure_bot_owner` → `ensure_active_bot_owner`
+- `delete_community_config` weight 调整: `(40M, 8K)` → `(60M, 12K)`
+
+**README 修正:**
+- 移除不存在的存储项: `GlobalReputation`, `LogCount`, `CommunityNodeRequirement`
+- 新增 6 个 extrinsic 文档: `delete_community_config`, `force_remove_community`, `ban_community`, `unban_community`, `force_update_community_config`, `force_reset_community_reputation`
+- 新增 `CommunityStatus` 类型文档
+- 新增 6 个事件文档
+- 新增 3 个错误码文档: `CommunityBanned`, `CommunityNotBanned`, `CommunityAlreadyInStatus`
+- 新增 `CommunityProvider` trait 实现文档
+- 新增「已知限制」章节
+
+**记录未修复:**
+- L2-R2: 所有 extrinsic weight 硬编码，无 WeightInfo trait（需完整 benchmark 框架）
+
+**测试:** 64 → 69 tests, cargo test 69/69 ✅

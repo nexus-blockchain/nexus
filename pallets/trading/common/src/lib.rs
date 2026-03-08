@@ -26,7 +26,8 @@
 //! - v0.5.0 (2026-02-08): report_swap_order → report_p2p_trade; define_balance_of! 宏; M7/M9 精度修复
 //! - v0.6.0 (2026-02-23): PriceOracle + TwapWindow; 共享枚举 + 多档判定函数
 //! - v0.7.0 (2026-02-26): ExchangeRateProvider（带置信度的统一兑换比率接口）
-//! - v0.8.0 (2026-03-10): 深度审计 — M1 cos→nex 重命名; M2 mask panic 防护; M3 TwapWindow SCALE derives
+//! - v0.8.0 (2026-03-04): 深度审计 R1 — M1 cos→nex 重命名; M2 mask panic 防护; M3 TwapWindow SCALE derives
+//! - v0.8.1 (2026-03-08): 审计 R2 + 收尾 — 过时文档修正, mask_id_card 字符级掩码, doc-tests 可运行, +10 边界测试 (54 total)
 
 pub mod types;
 pub mod traits;

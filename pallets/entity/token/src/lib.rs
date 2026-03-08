@@ -102,10 +102,7 @@ pub mod pallet {
     >;
 
     #[pallet::config]
-    pub trait Config: frame_system::Config {
-        /// 运行时事件类型
-        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-
+    pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
         /// 资产 ID 类型
         type AssetId: Member + Parameter + Copy + MaxEncodedLen + From<u64> + Into<u64>;
 
@@ -932,7 +929,7 @@ pub mod pallet {
             origin: OriginFor<T>,
             entity_id: u64,
             total_amount: T::AssetBalance,
-            recipients: Vec<(T::AccountId, T::AssetBalance)>,
+            recipients: BoundedVec<(T::AccountId, T::AssetBalance), T::MaxDividendRecipients>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -941,12 +938,6 @@ pub mod pallet {
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
             // M1-R3: 分发分红创建铸造义务，需 Entity 处于活跃状态
             ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
-
-            // H5: 限制接收人数量
-            ensure!(
-                recipients.len() <= T::MaxDividendRecipients::get() as usize,
-                Error::<T>::TooManyRecipients
-            );
 
             // 检查分红配置
             let config = EntityTokenConfigs::<T>::get(entity_id).ok_or(Error::<T>::TokenNotEnabled)?;

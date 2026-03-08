@@ -135,7 +135,6 @@ parameter_types! {
 }
 
 impl pallet_ads_grouprobot::Config for Test {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type NodeConsensus = MockNodeConsensus;
 	type Subscription = MockSubscription;
@@ -148,6 +147,8 @@ impl pallet_ads_grouprobot::Config for Test {
 	type AdSlashPercentage = ConstU32<30>;
 	type UnbondingPeriod = UnbondingPeriodBlocks;
 	type StakerRewardPct = ConstU32<10>;
+	type MaxStakersPerCommunity = ConstU32<50>;
+	type WeightInfo = ();
 }
 
 pub const STAKER: u64 = 1;

@@ -280,6 +280,7 @@ impl pallet_entity_market::Config for Test {
     type MaxTradeHistoryPerUser = MaxTradeHistoryPerUser;
     type MaxOrderHistoryPerUser = MaxOrderHistoryPerUser;
     type PricingProvider = MockPricingProvider;
+    type MaxOrderBookSize = ConstU32<1000>;
     type WeightInfo = ();
 }
 

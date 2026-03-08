@@ -1,6 +1,6 @@
 [package]
 name = "pallet-trading-common"
-version = "0.8.0"
+version = "0.8.1"
 description = "交易公共工具库 - Trading Common Utilities"
 authors = ["Nexus Team"]
 edition = "2021"

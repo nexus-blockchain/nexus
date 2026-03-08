@@ -14,24 +14,21 @@
 //!
 //! ## 使用示例
 //!
-//! ```rust,ignore
+//! ```rust
 //! use pallet_trading_common::time::*;
 //!
 //! // 区块号转秒数
-//! let seconds = blocks_to_seconds(100); // 600 秒
+//! assert_eq!(blocks_to_seconds(100), 600);
 //!
 //! // 秒数转区块数
-//! let blocks = seconds_to_blocks(3600); // 600 块（1小时）
+//! assert_eq!(seconds_to_blocks(3600), 600);
 //!
 //! // 预估未来区块的时间戳
-//! let future_ts = estimate_timestamp_from_block(
-//!     12345,      // 目标区块
-//!     12000,      // 当前区块
-//!     1705500000, // 当前时间戳
-//! );
+//! let future_ts = estimate_timestamp_from_block(12345, 12000, 1705500000);
+//! assert_eq!(future_ts, 1705502070);
 //!
 //! // 计算剩余时间
-//! let remaining = estimate_remaining_seconds(12345, 12000); // 2070 秒
+//! assert_eq!(estimate_remaining_seconds(12345, 12000), 2070);
 //! ```
 
 use sp_std::vec::Vec;
@@ -49,8 +46,8 @@ pub const DEFAULT_BLOCK_TIME_SECS: u64 = 6;
 /// - `u64`: 对应的秒数
 ///
 /// ## 示例
-/// ```rust,ignore
-/// let seconds = blocks_to_seconds(100); // 600 秒 = 10 分钟
+/// ```rust
+/// assert_eq!(pallet_trading_common::blocks_to_seconds(100), 600);
 /// ```
 #[inline]
 pub fn blocks_to_seconds(blocks: u64) -> u64 {
@@ -66,8 +63,8 @@ pub fn blocks_to_seconds(blocks: u64) -> u64 {
 /// - `u64`: 对应的区块数（向上取整）
 ///
 /// ## 示例
-/// ```rust,ignore
-/// let blocks = seconds_to_blocks(3600); // 600 块 = 1 小时
+/// ```rust
+/// assert_eq!(pallet_trading_common::seconds_to_blocks(3600), 600);
 /// ```
 #[inline]
 pub fn seconds_to_blocks(seconds: u64) -> u64 {
