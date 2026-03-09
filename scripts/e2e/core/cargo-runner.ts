@@ -19,6 +19,7 @@ export interface CargoTestResult {
 /** 所有可测试的 pallet 包名 */
 export const ALL_PALLETS = [
   // Entity 模块群
+  'pallet-entity-common',
   'pallet-entity-registry',
   'pallet-entity-shop',
   'pallet-entity-product',
@@ -35,8 +36,10 @@ export const ALL_PALLETS = [
   'pallet-commission-common',
   'pallet-commission-core',
   'pallet-commission-referral',
+  'pallet-commission-multi-level',
   'pallet-commission-level-diff',
   'pallet-commission-single-line',
+  'pallet-commission-pool-reward',
   // Trading 模块群
   'pallet-nex-market',
   // Dispute 模块群
@@ -45,6 +48,7 @@ export const ALL_PALLETS = [
   'pallet-dispute-arbitration',
   // Storage 模块群
   'pallet-storage-service',
+  'pallet-storage-lifecycle',
   // GroupRobot 模块群
   'pallet-grouprobot-registry',
   'pallet-grouprobot-consensus',
@@ -52,7 +56,11 @@ export const ALL_PALLETS = [
   'pallet-grouprobot-community',
   'pallet-grouprobot-ceremony',
   'pallet-grouprobot-rewards',
-  'pallet-grouprobot-ads',
+  // Ads 模块群
+  'pallet-ads-core',
+  'pallet-ads-entity',
+  'pallet-ads-grouprobot',
+  'pallet-ads-router',
 ] as const;
 
 export type PalletName = typeof ALL_PALLETS[number];
@@ -63,8 +71,9 @@ export const PALLET_GROUPS: Record<string, readonly PalletName[]> = {
   commission: ALL_PALLETS.filter(p => p.startsWith('pallet-commission-')),
   trading: ['pallet-nex-market'],
   dispute: ['pallet-dispute-escrow', 'pallet-dispute-evidence', 'pallet-dispute-arbitration'],
-  storage: ['pallet-storage-service'],
+  storage: ['pallet-storage-service', 'pallet-storage-lifecycle'],
   grouprobot: ALL_PALLETS.filter(p => p.startsWith('pallet-grouprobot-')),
+  ads: ALL_PALLETS.filter(p => p.startsWith('pallet-ads-')),
 };
 
 /**

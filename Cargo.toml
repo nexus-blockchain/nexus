@@ -57,6 +57,8 @@ members = [
     "pallets/grouprobot/ceremony",
     "pallets/grouprobot/subscription",
     "pallets/grouprobot/rewards",
+# Inscription pallet (创世铭文)
+    "pallets/inscription",
 ]
 resolver = "2"
 exclude = ["grouprobot"]
@@ -116,6 +118,8 @@ pallet-grouprobot-community = { path = "./pallets/grouprobot/community", default
 pallet-grouprobot-ceremony = { path = "./pallets/grouprobot/ceremony", default-features = false }
 pallet-grouprobot-subscription = { path = "./pallets/grouprobot/subscription", default-features = false }
 pallet-grouprobot-rewards = { path = "./pallets/grouprobot/rewards", default-features = false }
+# Inscription pallet (创世铭文)
+pallet-inscription = { path = "./pallets/inscription", default-features = false }
 # Additional dependencies
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 sp-application-crypto = { version = "44.0.0", default-features = false }

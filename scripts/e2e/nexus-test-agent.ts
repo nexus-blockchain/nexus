@@ -47,12 +47,15 @@ import {
 import { makerLifecycleFlow } from './flows/trading/maker-lifecycle.js';
 import { p2pBuyFlow } from './flows/trading/p2p-buy.js';
 import { p2pSellFlow } from './flows/trading/p2p-sell.js';
+import { nexMarketAdminFlow } from './flows/trading/nex-market-admin.js';
 import { entityShopFlow } from './flows/entity/entity-shop.js';
 // Phase A 新流程
 import { orderLifecycleFlow } from './flows/entity/order-lifecycle.js';
+import { orderAdminFlow } from './flows/entity/order-admin.js';
 import { memberReferralFlow } from './flows/entity/member-referral.js';
 import { commissionFlow } from './flows/entity/commission.js';
 import { tokenGovernanceFlow } from './flows/entity/token-governance.js';
+import { tokenGovernanceAdminFlow } from './flows/entity/token-governance-admin.js';
 import { kycFlow } from './flows/entity/kyc.js';
 import { tokenSaleFlow } from './flows/entity/token-sale.js';
 import { entityMarketFlow } from './flows/entity/entity-market.js';
@@ -60,14 +63,17 @@ import { entityDisclosureFlow } from './flows/entity/entity-disclosure.js';
 import { nexMarketFlow } from './flows/trading/nex-market.js';
 import { disputeFlow } from './flows/dispute/dispute-resolution.js';
 import { escrowFlow } from './flows/dispute/escrow.js';
+import { arbitrationAppealFlow } from './flows/dispute/arbitration-appeal.js';
 import { botLifecycleFlow } from './flows/grouprobot/bot-lifecycle.js';
 import { nodeConsensusFlow } from './flows/grouprobot/node-consensus.js';
 import { adCampaignFlow } from './flows/grouprobot/ad-campaign.js';
+import { adsCorePreferencesFlow } from './flows/grouprobot/ads-core-preferences.js';
 import { subscriptionFlow } from './flows/grouprobot/subscription.js';
 import { communityFlow } from './flows/grouprobot/community.js';
 import { ceremonyFlow } from './flows/grouprobot/ceremony.js';
 import { rewardsFlow } from './flows/grouprobot/rewards.js';
 import { storageServiceFlow } from './flows/storage/storage-service.js';
+import { storageBillingDisputeFlow } from './flows/storage/storage-billing-dispute.js';
 
 /** 全部已注册流程 */
 const FLOW_REGISTRY: Record<string, FlowDef> = {
@@ -75,6 +81,7 @@ const FLOW_REGISTRY: Record<string, FlowDef> = {
   T2: p2pBuyFlow,
   T3: p2pSellFlow,
   T4: nexMarketFlow,
+  T5: nexMarketAdminFlow,
   E1: entityShopFlow,
   E2: orderLifecycleFlow,
   E3: memberReferralFlow,
@@ -84,8 +91,11 @@ const FLOW_REGISTRY: Record<string, FlowDef> = {
   E7: tokenSaleFlow,
   E8: entityMarketFlow,
   E9: entityDisclosureFlow,
+  E10: orderAdminFlow,
+  E11: tokenGovernanceAdminFlow,
   D1: disputeFlow,
   D2: escrowFlow,
+  D3: arbitrationAppealFlow,
   G1: botLifecycleFlow,
   G2: nodeConsensusFlow,
   G3: adCampaignFlow,
@@ -93,7 +103,9 @@ const FLOW_REGISTRY: Record<string, FlowDef> = {
   G5: communityFlow,
   G6: ceremonyFlow,
   G7: rewardsFlow,
+  A1: adsCorePreferencesFlow,
   S1: storageServiceFlow,
+  S2: storageBillingDisputeFlow,
 };
 
 /** Flow 分组 */
@@ -103,6 +115,7 @@ const FLOW_GROUPS: Record<string, string[]> = {
   dispute: ['D1', 'D2'],
   grouprobot: ['G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7'],
   storage: ['S1'],
+  wave1: ['T5', 'E10', 'E11', 'D3', 'A1', 'S2'],
 };
 
 /** Flow → 覆盖的测试计划用例 ID */
@@ -111,13 +124,13 @@ const COVERAGE_MAP: CoverageMap = {
     'ER-001', 'ER-007', 'ER-009', 'ER-011', 'ER-012', 'ER-015', 'ER-016',
     'ER-013', 'ER-014', 'SH-001',
   ],
-  'Flow-T1: 做市商生命周期': [
-    'NM-001',
+  'Flow-T1: 种子资金+流动性': [
+    'NM-001', 'NM-024', 'NM-029',
   ],
-  'Flow-T2: P2P Buy': [
+  'Flow-T2: NEX 卖单流程': [
     'NM-007', 'NM-008', 'NM-009', 'NM-010',
   ],
-  'Flow-T3: P2P Sell': [
+  'Flow-T3: NEX 买单流程': [
     'NM-001', 'NM-002', 'NM-003', 'NM-005', 'NM-006',
   ],
   'Flow-E2: 订单生命周期': [

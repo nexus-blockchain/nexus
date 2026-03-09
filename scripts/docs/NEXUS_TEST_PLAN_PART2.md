@@ -1,7 +1,7 @@
 # Nexus 测试计划 — Part 2
 
 > 续 [NEXUS_TEST_PLAN.md](./NEXUS_TEST_PLAN.md)
-> 更新日期: 2026-03-06
+> 更新日期: 2026-03-08
 
 ---
 
@@ -201,7 +201,8 @@
 
 ### 13A. NEX Market — P2P NEX/USDT 交易所
 
-> Pallet: `pallet-trading-nex-market` | Extrinsics: 27 (call_index 0-26)
+> Pallet: `pallet-nex-market` | Extrinsics: 27 (call_index 0-26)
+> 说明: Runtime 仅包含 pallet-nex-market，无 TradingMaker/TradingP2p（已于 2026-02-23 废弃）
 > 新增: force_pause/resume_market, force_settle/cancel_trade, dispute_trade,
 > resolve_dispute, set_trading_fee, update_order_price, update_deposit_exchange_rate
 

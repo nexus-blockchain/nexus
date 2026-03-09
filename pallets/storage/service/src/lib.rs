@@ -5819,7 +5819,6 @@ pub mod pallet {
                             });
                         },
                         Err(_) => {
-                            task.grace_status = GraceStatus::Expired;
                             BillingQueue::<T>::remove(due_block, &cid_hash);
                             CidBillingDueBlock::<T>::remove(&cid_hash);
 

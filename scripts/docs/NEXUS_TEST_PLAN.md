@@ -1,7 +1,7 @@
 # Nexus 项目全面测试计划
 
 > 基于最新代码的全量接口深度分析，覆盖所有 Pallet 的全部 extrinsic
-> 更新日期: 2026-03-06 | 覆盖: 42 链上 Pallet + GroupRobot 链下模块
+> 更新日期: 2026-03-08 | 覆盖: 42 链上 Pallet + GroupRobot 链下模块
 > 总计 extrinsics: ~700+ | 测试用例: ~920+
 
 ---

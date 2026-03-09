@@ -63,7 +63,7 @@ parameter_types! {
 		NORMAL_DISPATCH_RATIO,
 	);
 	pub RuntimeBlockLength: BlockLength = BlockLength::max_with_normal_ratio(5 * 1024 * 1024, NORMAL_DISPATCH_RATIO);
-	pub const SS58Prefix: u16 = 412;
+	pub const SS58Prefix: u16 = 273;
 }
 
 /// The default types are being injected by [`derive_impl`](`frame_support::derive_impl`) from
@@ -2340,3 +2340,9 @@ impl pallet_ads_entity::pallet::Config for Runtime {
 	type DefaultDailyImpressionCap = ConstU32<10_000>;
 	type BlocksPerDay = ConstU32<14_400>;             // 24h @ 6s/block
 }
+
+// ============================================================================
+// Inscription Pallet (创世铭文 — 只读，无 extrinsic)
+// ============================================================================
+
+impl pallet_inscription::Config for Runtime {}

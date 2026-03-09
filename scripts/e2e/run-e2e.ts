@@ -22,6 +22,7 @@ import { makerLifecycleFlow } from './flows/trading/maker-lifecycle.js';
 import { p2pBuyFlow } from './flows/trading/p2p-buy.js';
 import { p2pSellFlow } from './flows/trading/p2p-sell.js';
 import { nexMarketFlow } from './flows/trading/nex-market.js';
+import { nexMarketAdminFlow } from './flows/trading/nex-market-admin.js';
 
 // ── Entity flows ─────────────────────────────────────────────
 import { entityShopFlow } from './flows/entity/entity-shop.js';
@@ -33,15 +34,19 @@ import { kycFlow } from './flows/entity/kyc.js';
 import { tokenSaleFlow } from './flows/entity/token-sale.js';
 import { entityMarketFlow } from './flows/entity/entity-market.js';
 import { entityDisclosureFlow } from './flows/entity/entity-disclosure.js';
+import { orderAdminFlow } from './flows/entity/order-admin.js';
+import { tokenGovernanceAdminFlow } from './flows/entity/token-governance-admin.js';
 
 // ── Dispute flows ────────────────────────────────────────────
 import { disputeFlow } from './flows/dispute/dispute-resolution.js';
 import { escrowFlow } from './flows/dispute/escrow.js';
+import { arbitrationAppealFlow } from './flows/dispute/arbitration-appeal.js';
 
 // ── GroupRobot flows ─────────────────────────────────────────
 import { botLifecycleFlow } from './flows/grouprobot/bot-lifecycle.js';
 import { nodeConsensusFlow } from './flows/grouprobot/node-consensus.js';
 import { adCampaignFlow } from './flows/grouprobot/ad-campaign.js';
+import { adsCorePreferencesFlow } from './flows/grouprobot/ads-core-preferences.js';
 import { subscriptionFlow } from './flows/grouprobot/subscription.js';
 import { communityFlow } from './flows/grouprobot/community.js';
 import { ceremonyFlow } from './flows/grouprobot/ceremony.js';
@@ -49,6 +54,7 @@ import { rewardsFlow } from './flows/grouprobot/rewards.js';
 
 // ── Storage flows ────────────────────────────────────────────
 import { storageServiceFlow } from './flows/storage/storage-service.js';
+import { storageBillingDisputeFlow } from './flows/storage/storage-billing-dispute.js';
 
 // ═════════════════════════════════════════════════════════════
 // Phase 分组
@@ -107,6 +113,7 @@ const FLOW_MAP: Record<string, FlowDef> = {
   T2: p2pBuyFlow,
   T3: p2pSellFlow,
   T4: nexMarketFlow,
+  T5: nexMarketAdminFlow,
   E1: entityShopFlow,
   E2: orderLifecycleFlow,
   E3: memberReferralFlow,
@@ -116,8 +123,11 @@ const FLOW_MAP: Record<string, FlowDef> = {
   E7: tokenSaleFlow,
   E8: entityMarketFlow,
   E9: entityDisclosureFlow,
+  E10: orderAdminFlow,
+  E11: tokenGovernanceAdminFlow,
   D1: disputeFlow,
   D2: escrowFlow,
+  D3: arbitrationAppealFlow,
   G1: botLifecycleFlow,
   G2: nodeConsensusFlow,
   G3: adCampaignFlow,
@@ -125,7 +135,9 @@ const FLOW_MAP: Record<string, FlowDef> = {
   G5: communityFlow,
   G6: ceremonyFlow,
   G7: rewardsFlow,
+  A1: adsCorePreferencesFlow,
   S1: storageServiceFlow,
+  S2: storageBillingDisputeFlow,
 };
 
 function parseArgs(): { flows: FlowDef[]; label: string } {

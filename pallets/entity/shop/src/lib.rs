@@ -41,7 +41,6 @@ mod tests;
 
 #[frame_support::pallet]
 pub mod pallet {
-    use super::*;
     use frame_support::{
         pallet_prelude::*,
         traits::{Currency, ExistenceRequirement, Get, ReservableCurrency},

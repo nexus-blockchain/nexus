@@ -88,6 +88,8 @@ pallet-ads-core = { workspace = true }
 pallet-ads-grouprobot = { workspace = true }
 pallet-ads-entity = { workspace = true }
 pallet-ads-router = { workspace = true }
+# Inscription pallet (创世铭文)
+pallet-inscription = { workspace = true }
 scale-info = { features = ["derive", "serde"], workspace = true }
 serde_json = { workspace = true, default-features = false, features = ["alloc"] }
 sp-api = { workspace = true }
@@ -187,6 +189,8 @@ std = [
 	"pallet-ads-grouprobot/std",
 	"pallet-ads-entity/std",
 	"pallet-ads-router/std",
+	# Inscription pallet std
+	"pallet-inscription/std",
 	"scale-info/std",
 	"serde_json/std",
 	"sp-api/std",

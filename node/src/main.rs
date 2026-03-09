@@ -1,4 +1,4 @@
-//! Substrate Node Template CLI library.
+//! Nexus Node CLI library.
 #![warn(missing_docs)]
 
 mod benchmarking;

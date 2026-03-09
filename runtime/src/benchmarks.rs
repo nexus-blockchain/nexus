@@ -30,7 +30,7 @@ frame_benchmarking::define_benchmarks!(
 	[pallet_balances, Balances]
 	[pallet_timestamp, Timestamp]
 	[pallet_sudo, Sudo]
-	[pallet_template, Template]
+
 	[pallet_entity_product, EntityProduct]
 	[pallet_nex_market, NexMarket]
 	[pallet_grouprobot_consensus, GroupRobotConsensus]

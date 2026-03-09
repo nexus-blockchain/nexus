@@ -63,7 +63,7 @@ impl_opaque_keys! {
 #[sp_version::runtime_version]
 pub const VERSION: RuntimeVersion = RuntimeVersion {
 	spec_name: alloc::borrow::Cow::Borrowed("nexus"),
-	impl_name: alloc::borrow::Cow::Borrowed("nexus"),
+	impl_name: alloc::borrow::Cow::Borrowed("nexus-node"),
 	authoring_version: 1,
 	// The version of the runtime specification. A full node will not attempt to use its native
 	//   runtime in substitute for the on-chain Wasm runtime unless all of `spec_name`,
@@ -99,13 +99,18 @@ pub const DAYS: BlockNumber = HOURS * 24;
 
 pub const BLOCK_HASH_COUNT: BlockNumber = 2400;
 
-// Unit = the base number of indivisible units for balances
-pub const UNIT: Balance = 1_000_000_000_000;
-pub const MILLI_UNIT: Balance = 1_000_000_000;
-pub const MICRO_UNIT: Balance = 1_000_000;
+// NEX token units (1 NEX = 10^12 indivisible units)
+pub const NEX: Balance = 1_000_000_000_000;
+pub const MILLI_NEX: Balance = 1_000_000_000;
+pub const MICRO_NEX: Balance = 1_000_000;
+
+// Backward-compatible aliases
+pub const UNIT: Balance = NEX;
+pub const MILLI_UNIT: Balance = MILLI_NEX;
+pub const MICRO_UNIT: Balance = MICRO_NEX;
 
 /// Existential deposit.
-pub const EXISTENTIAL_DEPOSIT: Balance = MILLI_UNIT;
+pub const EXISTENTIAL_DEPOSIT: Balance = MILLI_NEX;
 
 /// The version information used to identify this runtime when compiled natively.
 #[cfg(feature = "std")]
@@ -235,6 +240,9 @@ mod runtime {
 
 	#[runtime::pallet_index(10)]
 	pub type Offences = pallet_offences;
+
+	#[runtime::pallet_index(11)]
+	pub type Inscription = pallet_inscription;
 
 	// ============================================================================
 	// Governance: Committees (Collective + Membership)

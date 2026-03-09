@@ -14,12 +14,14 @@
     "e2e:grouprobot": "tsx e2e/run-e2e.ts --flow G1 G2 G3 G4 G5 G6 G7",
     "e2e:storage": "tsx e2e/run-e2e.ts --flow S1",
     "coverage": "tsx e2e/test-coverage-check.ts",
+    "inventory": "node --import tsx e2e/generate-extrinsic-inventory.ts",
     "agent": "tsx e2e/nexus-test-agent.ts",
     "agent:cargo": "tsx e2e/nexus-test-agent.ts --mode cargo",
     "agent:e2e": "tsx e2e/nexus-test-agent.ts --mode e2e",
     "agent:coverage": "tsx e2e/nexus-test-agent.ts --mode coverage",
     "agent:entity": "tsx e2e/nexus-test-agent.ts --group entity",
     "agent:grouprobot": "tsx e2e/nexus-test-agent.ts --group grouprobot",
+    "agent:wave1": "node --import tsx e2e/nexus-test-agent.ts --mode e2e --flow T5 E10 E11 D3 A1 S2",
     "agent:p0": "tsx e2e/nexus-test-agent.ts --mode coverage --priority P0"
   },
   "dependencies": {
