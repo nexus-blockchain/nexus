@@ -45,7 +45,8 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
   traceE10('after_service_order', `orderId=${serviceOrderId}`);
   if (await maybeStopAfter(ctx, 'after_service_order')) return;
   traceE10('before_start_service', `orderId=${serviceOrderId}`);
-  const startServiceResult = await ctx.send(
+  const startServiceResult = await sendE10(
+    ctx,
     (api.tx as any).entityTransaction.startService(serviceOrderId),
     eve,
     '服务单开始服务',
@@ -55,17 +56,22 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
   traceE10('after_start_service', `orderId=${serviceOrderId}`);
   if (await maybeStopAfter(ctx, 'after_start_service')) return;
   traceE10('before_complete_service', `orderId=${serviceOrderId}`);
-  const completeServiceResult = await ctx.send(
+  await logOrderStateSnapshot(ctx, serviceOrderId, 'before_complete_service');
+  const completeServiceResult = await sendE10(
+    ctx,
     (api.tx as any).entityTransaction.completeService(serviceOrderId),
     eve,
     '服务单完成服务',
     'eve',
   );
   assertTxSuccess(completeServiceResult, '完成服务');
+  await logOrderStateSnapshot(ctx, serviceOrderId, 'after_complete_service');
   traceE10('after_complete_service', `orderId=${serviceOrderId}`);
   if (await maybeStopAfter(ctx, 'after_complete_service')) return;
   traceE10('before_confirm_service', `orderId=${serviceOrderId}`);
-  const confirmServiceResult = await ctx.send(
+  await logOrderStateSnapshot(ctx, serviceOrderId, 'before_confirm_service');
+  const confirmServiceResult = await sendE10(
+    ctx,
     (api.tx as any).entityTransaction.confirmService(serviceOrderId),
     bob,
     '买家确认服务完成',
@@ -75,6 +81,7 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
   await ctx.check('服务确认事件', 'bob', () => {
     assertEventEmitted(confirmServiceResult, 'entityTransaction', 'OrderCompleted', 'confirm_service');
   });
+  await logOrderStateSnapshot(ctx, serviceOrderId, 'after_confirm_service');
   traceE10('after_confirm_service', `orderId=${serviceOrderId}`);
   if (await maybeStopAfter(ctx, 'after_confirm_service')) return;
 
@@ -89,7 +96,8 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
   traceE10('after_withdraw_dispute_order', `orderId=${shippedOrderId}`);
   if (await maybeStopAfter(ctx, 'after_withdraw_dispute_order')) return;
   traceE10('before_ship_withdraw_dispute_order', `orderId=${shippedOrderId}`);
-  const shipResult = await ctx.send(
+  const shipResult = await sendE10(
+    ctx,
     (api.tx as any).entityTransaction.shipOrder(shippedOrderId, 'tracking_e10_a'),
     eve,
     '卖家发货 (争议撤回)',
@@ -99,7 +107,8 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
   traceE10('after_ship_withdraw_dispute_order', `orderId=${shippedOrderId}`);
   if (await maybeStopAfter(ctx, 'after_ship_withdraw_dispute_order')) return;
   traceE10('before_request_refund', `orderId=${shippedOrderId}`);
-  const refundRequestResult = await ctx.send(
+  const refundRequestResult = await sendE10(
+    ctx,
     (api.tx as any).entityTransaction.requestRefund(shippedOrderId, 'reason_withdraw_dispute'),
     bob,
     '买家申请退款(待撤回争议)',
@@ -109,7 +118,8 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
   traceE10('after_request_refund', `orderId=${shippedOrderId}`);
   if (await maybeStopAfter(ctx, 'after_request_refund')) return;
   traceE10('before_withdraw_dispute', `orderId=${shippedOrderId}`);
-  const withdrawDisputeResult = await ctx.send(
+  const withdrawDisputeResult = await sendE10(
+    ctx,
     (api.tx as any).entityTransaction.withdrawDispute(shippedOrderId),
     bob,
     '买家撤回争议',
@@ -133,7 +143,8 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
   traceE10('after_seller_refund_order', `orderId=${sellerRefundOrderId}`);
   if (await maybeStopAfter(ctx, 'after_seller_refund_order')) return;
   traceE10('before_ship_seller_refund_order', `orderId=${sellerRefundOrderId}`);
-  const shipRefundOrderResult = await ctx.send(
+  const shipRefundOrderResult = await sendE10(
+    ctx,
     (api.tx as any).entityTransaction.shipOrder(sellerRefundOrderId, 'tracking_e10_b'),
     eve,
     '卖家发货 (卖家退款)',
@@ -143,7 +154,8 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
   traceE10('after_ship_seller_refund_order', `orderId=${sellerRefundOrderId}`);
   if (await maybeStopAfter(ctx, 'after_ship_seller_refund_order')) return;
   traceE10('before_seller_refund', `orderId=${sellerRefundOrderId}`);
-  const sellerRefundResult = await ctx.send(
+  const sellerRefundResult = await sendE10(
+    ctx,
     (api.tx as any).entityTransaction.sellerRefundOrder(sellerRefundOrderId, 'seller_refund_reason'),
     eve,
     '卖家主动退款',
@@ -167,7 +179,8 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
   traceE10('after_force_refund_order', `orderId=${forceRefundOrderId}`);
   if (await maybeStopAfter(ctx, 'after_force_refund_order')) return;
   traceE10('before_force_partial_refund', `orderId=${forceRefundOrderId}`);
-  const forcePartialRefundResult = await ctx.sudo(
+  const forcePartialRefundResult = await sudoE10(
+    ctx,
     (api.tx as any).entityTransaction.forcePartialRefund(forceRefundOrderId, 5000, null),
     '管理员强制部分退款',
   );
@@ -179,7 +192,8 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
   if (await maybeStopAfter(ctx, 'after_force_partial_refund')) return;
 
   traceE10('before_cleanup_buyer_orders');
-  const cleanupBuyerResult = await ctx.send(
+  const cleanupBuyerResult = await sendE10(
+    ctx,
     (api.tx as any).entityTransaction.cleanupBuyerOrders(),
     bob,
     '清理买家订单索引',
@@ -193,7 +207,8 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
   if (await maybeStopAfter(ctx, 'after_cleanup_buyer_orders')) return;
 
   traceE10('before_cleanup_shop_orders', `shopId=${shopId}`);
-  const cleanupShopResult = await ctx.send(
+  const cleanupShopResult = await sendE10(
+    ctx,
     (api.tx as any).entityTransaction.cleanupShopOrders(shopId),
     eve,
     '清理店铺订单索引',
@@ -208,7 +223,8 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
 
   const currentBlock = (await api.rpc.chain.getHeader()).number.toNumber();
   traceE10('before_force_process_expirations', `block=${currentBlock}`);
-  const processExpirationsResult = await ctx.sudo(
+  const processExpirationsResult = await sudoE10(
+    ctx,
     (api.tx as any).entityTransaction.forceProcessExpirations(currentBlock),
     '管理员补偿处理过期订单',
   );
@@ -228,6 +244,69 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
 
 function traceE10(marker: string, detail?: string): void {
   console.log(`    [E10] ${marker}${detail ? ` :: ${detail}` : ''}`);
+}
+
+async function sendE10(
+  ctx: FlowContext,
+  tx: any,
+  signer: any,
+  stepName: string,
+  actorName?: string,
+): Promise<any> {
+  const headBefore = (await ctx.api.rpc.chain.getHeader()).number.toNumber();
+  const signerStateBefore = await getSignerState(ctx, signer);
+  traceE10(
+    'tx_send_begin',
+    `${stepName}, actor=${actorName ?? 'unknown'}, signer=${signer.address}, head=${headBefore}, nonce=${signerStateBefore.nonce}, nextIndex=${signerStateBefore.nextIndex}`,
+  );
+  const result = await ctx.send(tx, signer, stepName, actorName);
+  const headAfter = (await ctx.api.rpc.chain.getHeader()).number.toNumber();
+  const signerStateAfter = await getSignerState(ctx, signer);
+  traceE10(
+    'tx_send_end',
+    `${stepName}, success=${result.success}, head=${headAfter}, nonce=${signerStateAfter.nonce}, nextIndex=${signerStateAfter.nextIndex}, blockHash=${result.blockHash ?? 'n/a'}, events=${formatE10Events(result)}, error=${result.error ?? 'none'}`,
+  );
+  return result;
+}
+
+async function sudoE10(
+  ctx: FlowContext,
+  tx: any,
+  stepName: string,
+): Promise<any> {
+  const headBefore = (await ctx.api.rpc.chain.getHeader()).number.toNumber();
+  traceE10('tx_sudo_begin', `${stepName}, head=${headBefore}`);
+  const result = await ctx.sudo(tx, stepName);
+  const headAfter = (await ctx.api.rpc.chain.getHeader()).number.toNumber();
+  traceE10(
+    'tx_sudo_end',
+    `${stepName}, success=${result.success}, head=${headAfter}, blockHash=${result.blockHash ?? 'n/a'}, events=${formatE10Events(result)}, error=${result.error ?? 'none'}`,
+  );
+  return result;
+}
+
+function formatE10Events(result: any): string {
+  if (!Array.isArray(result.events) || result.events.length === 0) return 'none';
+  return result.events.map((e: any) => `${e.section}.${e.method}`).join(',');
+}
+
+async function getSignerState(
+  ctx: FlowContext,
+  signer: any,
+): Promise<{ nonce: string; nextIndex: string }> {
+  const account = await ctx.api.query.system.account(signer.address);
+  let nextIndexValue = 'rpc_unavailable';
+  try {
+    const publicKeyHex = `0x${Buffer.from(signer.publicKey).toString('hex')}`;
+    const nextIndex = await ctx.api.rpc.system.accountNextIndex(publicKeyHex);
+    nextIndexValue = nextIndex.toString();
+  } catch (error: any) {
+    nextIndexValue = `rpc_error:${error.message}`;
+  }
+  return {
+    nonce: (account as any).nonce.toString(),
+    nextIndex: nextIndexValue,
+  };
 }
 
 async function maybeStopAfter(ctx: FlowContext, marker: string): Promise<boolean> {
@@ -259,7 +338,8 @@ async function ensureEntityAndShop(ctx: FlowContext, ownerAddress: string): Prom
 
   const eve = ctx.actor('eve');
   const nextEntityId = (await (api.query as any).entityRegistry.nextEntityId()).toNumber();
-  const createEntityResult = await ctx.send(
+  const createEntityResult = await sendE10(
+    ctx,
     (api.tx as any).entityRegistry.createEntity(
       `E10 Entity ${nextEntityId}`,
       null,
@@ -286,7 +366,8 @@ async function ensureShopOperatingFund(
   const { api } = ctx;
   const eve = ctx.actor('eve');
   traceE10('before_fund_shop', `shopId=${shopId}`);
-  const fundResult = await ctx.send(
+  const fundResult = await sendE10(
+    ctx,
     (api.tx as any).entityShop.fundOperating(shopId, amount),
     eve,
     `为店铺 #${shopId} 充值运营资金`,
@@ -313,7 +394,8 @@ async function createProduct(
   const { api } = ctx;
   const productId = (await (api.query as any).entityProduct.nextProductId()).toNumber();
   traceE10('before_create_product', `category=${category}, productId=${productId}`);
-  const createResult = await ctx.send(
+  const createResult = await sendE10(
+    ctx,
     (api.tx as any).entityProduct.createProduct(
       shopId,
       `E10-${category}-name-${productId}`,
@@ -338,7 +420,8 @@ async function createProduct(
   traceE10('after_create_product', `category=${category}, productId=${productId}`);
 
   traceE10('before_publish_product', `category=${category}, productId=${productId}`);
-  const publishResult = await ctx.send(
+  const publishResult = await sendE10(
+    ctx,
     (api.tx as any).entityProduct.publishProduct(productId),
     signer,
     `上架${category}商品 #${productId}`,
@@ -358,7 +441,11 @@ async function placeOrder(
 ): Promise<number> {
   const { api } = ctx;
   traceE10('before_place_order', `${stepName}, productId=${productId}`);
-  const placeOrderResult = await ctx.send(
+  if (stepName.includes('卖家退款')) {
+    await logOrderPlacementSnapshot(ctx, signer.address, productId, `${stepName}:before`);
+  }
+  const placeOrderResult = await sendE10(
+    ctx,
     (api.tx as any).entityTransaction.placeOrder(
       productId,
       1,
@@ -373,6 +460,13 @@ async function placeOrder(
     stepName,
     'bob',
   );
+  if (stepName.includes('卖家退款')) {
+    await logOrderPlacementSnapshot(ctx, signer.address, productId, `${stepName}:after`);
+    traceE10(
+      'seller_refund_order_tx_result',
+      `success=${placeOrderResult.success}, error=${placeOrderResult.error ?? 'none'}`,
+    );
+  }
   assertTxSuccess(placeOrderResult, stepName);
   traceE10('after_place_order', `${stepName}, productId=${productId}`);
   const orderEvent = placeOrderResult.events.find(
@@ -380,4 +474,40 @@ async function placeOrder(
   );
   assertTrue(!!orderEvent, '应产生 OrderCreated');
   return Number(orderEvent?.data?.order_id ?? orderEvent?.data?.orderId ?? orderEvent?.data?.[0]);
+}
+
+async function logOrderPlacementSnapshot(
+  ctx: FlowContext,
+  buyerAddress: string,
+  productId: number,
+  label: string,
+): Promise<void> {
+  const { api } = ctx;
+  await ctx.check(`E10 下单快照 @ ${label}`, 'system', async () => {
+    const product = await (api.query as any).entityProduct.products(productId);
+    const productHuman = product.toHuman() as Record<string, unknown>;
+    const nextOrderId = (await (api.query as any).entityTransaction.nextOrderId()).toString();
+    const buyerOrders = await (api.query as any).entityTransaction.buyerOrders(buyerAddress);
+    const bobAccount = await api.query.system.account(buyerAddress);
+    const bobFree = (bobAccount as any).data.free.toString();
+
+    traceE10(
+      'order_snapshot',
+      `${label}, nextOrderId=${nextOrderId}, bobFree=${bobFree}, buyerOrders=${JSON.stringify(buyerOrders.toHuman())}`,
+    );
+    traceE10('order_snapshot_product', `${label}, product=${JSON.stringify(productHuman)}`);
+  });
+}
+
+async function logOrderStateSnapshot(
+  ctx: FlowContext,
+  orderId: number,
+  label: string,
+): Promise<void> {
+  const { api } = ctx;
+  await ctx.check(`E10 订单快照 @ ${label}`, 'system', async () => {
+    const order = await (api.query as any).entityTransaction.orders(orderId);
+    const orderHuman = order.toHuman();
+    traceE10('service_order_snapshot', `${label}, order=${JSON.stringify(orderHuman)}`);
+  });
 }

@@ -456,6 +456,7 @@ impl pallet_nex_market::Config for Runtime {
 	type MaxOrderNexAmount = ConstU128<{ 10_000 * UNIT }>;   // 单笔最大 10,000 NEX
 	type MaxSellOrders = ConstU32<1000>;                     // 卖单簿最大容量
 	type MaxBuyOrders = ConstU32<1000>;                      // 买单簿最大容量
+	type AuthorityId = pallet_nex_market::crypto::Public;    // OCW 签名验证公钥
 }
 
 // ============================================================================
@@ -1809,6 +1810,8 @@ impl pallet_commission_level_diff::Config for Runtime {
 	type EntityProvider = EntityRegistry;
 	type MaxCustomLevels = ConstU32<10>;
 	type WeightInfo = pallet_commission_level_diff::weights::SubstrateWeight<Runtime>;
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = ();
 }
 
 /// 桥接：CommissionCore 的 MemberCommissionStats 作为 SingleLine 的 StatsProvider
@@ -1835,6 +1838,8 @@ impl pallet_commission_team::Config for Runtime {
 	type EntityProvider = EntityRegistry;
 	type MaxTeamTiers = ConstU32<10>;
 	type WeightInfo = pallet_commission_team::weights::SubstrateWeight<Runtime>;
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = ();
 }
 
 impl pallet_commission_single_line::Config for Runtime {
@@ -2339,6 +2344,8 @@ impl pallet_ads_entity::pallet::Config for Runtime {
 	type MaxPlacementsPerEntity = ConstU32<20>;
 	type DefaultDailyImpressionCap = ConstU32<10_000>;
 	type BlocksPerDay = ConstU32<14_400>;             // 24h @ 6s/block
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = ();
 }
 
 // ============================================================================

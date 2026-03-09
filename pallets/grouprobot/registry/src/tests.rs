@@ -32,6 +32,59 @@ fn pk(n: u8) -> [u8; 32] {
 	k
 }
 
+/// 直接向存储写入 V1 AttestationRecord, 模拟原 submit_attestation (已弃用) 的行为。
+/// 用于测试中需要预置 V1 证明记录的场景。
+fn setup_v1_attestation(
+	owner: u64,
+	bot: BotIdHash,
+	tdx_quote_hash: [u8; 32],
+	sgx_quote_hash: Option<[u8; 32]>,
+	mrtd_val: [u8; 48],
+	mrenclave_val: Option<[u8; 32]>,
+) {
+	let now = frame_system::Pallet::<Test>::block_number();
+	let expires_at = now + 100; // AttestationValidityBlocks = 100
+	let is_dual = sgx_quote_hash.is_some() && mrenclave_val.is_some();
+
+	let record = AttestationRecord::<Test> {
+		bot_id_hash: bot,
+		tdx_quote_hash,
+		sgx_quote_hash,
+		mrtd: mrtd_val,
+		mrenclave: mrenclave_val,
+		attester: owner,
+		attested_at: now,
+		expires_at,
+		is_dual_attestation: is_dual,
+		quote_verified: false,
+		dcap_level: 0,
+		api_server_mrtd: None,
+		api_server_quote_hash: None,
+	};
+	Attestations::<Test>::insert(&bot, record);
+
+	// Enqueue expiry
+	AttestationExpiryQueue::<Test>::mutate(|queue| {
+		let _ = queue.try_push((expires_at, bot, false));
+	});
+
+	// Update node_type
+	let now_u64: u64 = now;
+	let expires_u64: u64 = expires_at;
+	let sgx_attested_at = if is_dual { Some(now_u64) } else { None };
+	Bots::<Test>::mutate(&bot, |maybe_bot| {
+		if let Some(bot_info) = maybe_bot {
+			bot_info.node_type = NodeType::TeeNode {
+				mrtd: mrtd_val,
+				mrenclave: mrenclave_val,
+				tdx_attested_at: now_u64,
+				sgx_attested_at,
+				expires_at: expires_u64,
+			};
+		}
+	});
+}
+
 // ============================================================================
 // register_bot
 // ============================================================================
@@ -259,21 +312,32 @@ fn p6_l1_bind_user_platform_overwrite_emits_updated_event() {
 // ============================================================================
 
 #[test]
-fn submit_attestation_works() {
+fn submit_attestation_returns_deprecated() {
 	new_test_ext().execute_with(|| {
-		// Setup whitelist
+		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
+		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
+		assert_noop!(
+			GroupRobotRegistry::submit_attestation(
+				RuntimeOrigin::signed(OWNER),
+				bot_hash(1),
+				[1u8; 32],
+				Some([2u8; 32]),
+				mrtd(1),
+				Some(mrenclave(1)),
+			),
+			Error::<Test>::Deprecated
+		);
+	});
+}
+
+#[test]
+fn setup_v1_attestation_works() {
+	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::approve_mrenclave(RuntimeOrigin::root(), mrenclave(1), 1));
 
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER),
-			bot_hash(1),
-			[1u8; 32], // tdx_quote_hash
-			Some([2u8; 32]), // sgx_quote_hash
-			mrtd(1),
-			Some(mrenclave(1)),
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], Some([2u8; 32]), mrtd(1), Some(mrenclave(1)));
 
 		let record = Attestations::<Test>::get(bot_hash(1)).unwrap();
 		assert!(record.is_dual_attestation);
@@ -285,7 +349,7 @@ fn submit_attestation_works() {
 }
 
 #[test]
-fn submit_attestation_fails_mrtd_not_approved() {
+fn submit_attestation_deprecated_regardless_of_mrtd() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
 		assert_noop!(
@@ -293,13 +357,13 @@ fn submit_attestation_fails_mrtd_not_approved() {
 				RuntimeOrigin::signed(OWNER), bot_hash(1),
 				[1u8; 32], None, mrtd(1), None,
 			),
-			Error::<Test>::MrtdNotApproved
+			Error::<Test>::Deprecated
 		);
 	});
 }
 
 #[test]
-fn submit_attestation_fails_mrenclave_not_approved() {
+fn submit_attestation_deprecated_regardless_of_mrenclave() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
@@ -308,7 +372,7 @@ fn submit_attestation_fails_mrenclave_not_approved() {
 				RuntimeOrigin::signed(OWNER), bot_hash(1),
 				[1u8; 32], Some([2u8; 32]), mrtd(1), Some(mrenclave(99)),
 			),
-			Error::<Test>::MrenclaveNotApproved
+			Error::<Test>::Deprecated
 		);
 	});
 }
@@ -318,10 +382,7 @@ fn refresh_attestation_works() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], None, mrtd(1), None,
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], None, mrtd(1), None);
 		// Advance and refresh
 		System::set_block_number(50);
 		assert_ok!(GroupRobotRegistry::refresh_attestation(
@@ -553,16 +614,13 @@ fn nonce_consumed_after_use() {
 }
 
 #[test]
-fn old_submit_attestation_sets_quote_verified_false() {
+fn v1_attestation_has_quote_verified_false() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], None, mrtd(1), None,
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], None, mrtd(1), None);
 		let record = Attestations::<Test>::get(bot_hash(1)).unwrap();
-		assert!(!record.quote_verified, "old extrinsic must set quote_verified=false");
+		assert!(!record.quote_verified, "V1 attestation must set quote_verified=false");
 	});
 }
 
@@ -628,10 +686,7 @@ fn helper_is_tee_node() {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
 		assert!(!GroupRobotRegistry::is_tee_node(&bot_hash(1)));
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], None, mrtd(1), None,
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], None, mrtd(1), None);
 		assert!(GroupRobotRegistry::is_tee_node(&bot_hash(1)));
 	});
 }
@@ -644,17 +699,11 @@ fn helper_has_dual_attestation() {
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
 
 		// Single attestation
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], None, mrtd(1), None,
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], None, mrtd(1), None);
 		assert!(!GroupRobotRegistry::has_dual_attestation(&bot_hash(1)));
 
 		// Dual attestation
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], Some([2u8; 32]), mrtd(1), Some(mrenclave(1)),
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], Some([2u8; 32]), mrtd(1), Some(mrenclave(1)));
 		assert!(GroupRobotRegistry::has_dual_attestation(&bot_hash(1)));
 	});
 }
@@ -664,10 +713,7 @@ fn helper_is_attestation_fresh() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], None, mrtd(1), None,
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], None, mrtd(1), None);
 		assert!(GroupRobotRegistry::is_attestation_fresh(&bot_hash(1)));
 
 		// Advance past expiry
@@ -685,10 +731,7 @@ fn attestation_expires_on_initialize() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], None, mrtd(1), None,
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], None, mrtd(1), None);
 		assert!(GroupRobotRegistry::is_tee_node(&bot_hash(1)));
 
 		// expires_at = 1 + 100 = 101. Advance to block 110 (interval=10, so check at 110)
@@ -706,10 +749,7 @@ fn attestation_not_expired_before_time() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], None, mrtd(1), None,
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], None, mrtd(1), None);
 
 		// Advance to block 50 (interval=10 checks at 10,20,30,40,50)
 		advance_to(50);
@@ -1581,14 +1621,11 @@ fn build_sgx_quote(
 #[test]
 fn sgx_attestation_works() {
 	new_test_ext().execute_with(|| {
-		// Setup: approve MRTD + MRENCLAVE, register bot, submit TDX attestation
+		// Setup: approve MRTD + MRENCLAVE, register bot, setup V1 TDX attestation
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::approve_mrenclave(RuntimeOrigin::root(), mrenclave(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], None, mrtd(1), None,
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], None, mrtd(1), None);
 
 		// Verify: no dual attestation yet
 		assert!(!GroupRobotRegistry::has_dual_attestation(&bot_hash(1)));
@@ -1650,10 +1687,7 @@ fn sgx_attestation_fails_mrenclave_not_approved() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], None, mrtd(1), None,
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], None, mrtd(1), None);
 
 		// M1-fix: request nonce so we reach MRENCLAVE check
 		let nonce = request_nonce(OWNER, bot_hash(1));
@@ -1677,10 +1711,7 @@ fn sgx_attestation_fails_report_data_mismatch() {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::approve_mrenclave(RuntimeOrigin::root(), mrenclave(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], None, mrtd(1), None,
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], None, mrtd(1), None);
 
 		// Build SGX quote with WRONG public key → report_data mismatch
 		let (sgx_quote, _pck) = build_sgx_quote(&mrenclave(1), &pk(99));
@@ -1703,10 +1734,7 @@ fn sgx_level3_attestation_works() {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::approve_mrenclave(RuntimeOrigin::root(), mrenclave(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], None, mrtd(1), None,
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], None, mrtd(1), None);
 
 		// M1-fix: request nonce before SGX attestation
 		let nonce = request_nonce(OWNER, bot_hash(1));
@@ -1741,10 +1769,7 @@ fn sgx_attestation_tampered_quote_rejected() {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::approve_mrenclave(RuntimeOrigin::root(), mrenclave(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], None, mrtd(1), None,
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], None, mrtd(1), None);
 
 		let (mut sgx_quote, _pck) = build_sgx_quote(&mrenclave(1), &pk(1));
 		// Tamper with MRENCLAVE after signing → ECDSA sig invalid
@@ -2762,10 +2787,7 @@ fn m1_sgx_attestation_fails_without_nonce() {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::approve_mrenclave(RuntimeOrigin::root(), mrenclave(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], None, mrtd(1), None,
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], None, mrtd(1), None);
 
 		// 不请求 nonce, 直接提交 → NonceMissing
 		let (sgx_quote, _pck) = build_sgx_quote(&mrenclave(1), &pk(1));
@@ -2857,11 +2879,8 @@ fn p6_h1_refresh_attestation_still_works_with_v1() {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
 
-		// 通过 submit_attestation 写入 V1
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[0x11; 32], None, mrtd(1), None,
-		));
+		// 通过 setup_v1_attestation 写入 V1
+		setup_v1_attestation(OWNER, bot_hash(1), [0x11; 32], None, mrtd(1), None);
 		assert!(Attestations::<Test>::get(bot_hash(1)).is_some());
 
 		// refresh 应该成功
@@ -2930,11 +2949,8 @@ fn p6_h3_deactivate_bot_clears_attestations_and_peers() {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
 
-		// 提交 V1 证明
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[0x11; 32], None, mrtd(1), None,
-		));
+		// 写入 V1 证明
+		setup_v1_attestation(OWNER, bot_hash(1), [0x11; 32], None, mrtd(1), None);
 		assert!(Attestations::<Test>::get(bot_hash(1)).is_some());
 
 		// 请求 nonce
@@ -3320,10 +3336,7 @@ fn force_deactivate_bot_clears_all_state() {
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
 
 		// Setup attestation + peer + operator
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], None, mrtd(1), None,
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], None, mrtd(1), None);
 		assert_ok!(GroupRobotRegistry::register_peer(
 			RuntimeOrigin::signed(OWNER), bot_hash(1), pk(10), endpoint("https://n1:8443"),
 		));
@@ -3644,10 +3657,7 @@ fn force_expire_attestation_v1_works() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], None, mrtd(1), None,
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], None, mrtd(1), None);
 		assert!(GroupRobotRegistry::is_tee_node(&bot_hash(1)));
 
 		assert_ok!(GroupRobotRegistry::force_expire_attestation(RuntimeOrigin::root(), bot_hash(1)));
@@ -3699,10 +3709,7 @@ fn force_expire_attestation_fails_not_root() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], None, mrtd(1), None,
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], None, mrtd(1), None);
 		assert_noop!(
 			GroupRobotRegistry::force_expire_attestation(RuntimeOrigin::signed(OWNER), bot_hash(1)),
 			sp_runtime::DispatchError::BadOrigin
@@ -3869,10 +3876,7 @@ fn query_tee_type_v1_tee_node() {
 	new_test_ext().execute_with(|| {
 		assert_ok!(GroupRobotRegistry::approve_mrtd(RuntimeOrigin::root(), mrtd(1), 1));
 		assert_ok!(GroupRobotRegistry::register_bot(RuntimeOrigin::signed(OWNER), bot_hash(1), pk(1)));
-		assert_ok!(GroupRobotRegistry::submit_attestation(
-			RuntimeOrigin::signed(OWNER), bot_hash(1),
-			[1u8; 32], None, mrtd(1), None,
-		));
+		setup_v1_attestation(OWNER, bot_hash(1), [1u8; 32], None, mrtd(1), None);
 		// V1 TeeNode maps to TeeType::Tdx
 		assert_eq!(GroupRobotRegistry::get_tee_type(&bot_hash(1)), Some(TeeType::Tdx));
 	});

@@ -68,7 +68,7 @@ const PHASE1_FLOWS: FlowDef[] = [
   entityShopFlow,      // E1: 实体→店铺 (无依赖)
 ];
 
-/** Phase 2: 实体扩展 + 争议 + 托管 */
+/** Phase 2: 实体扩展 + 交易/治理/争议增量 + 托管 */
 const PHASE2_FLOWS: FlowDef[] = [
   orderLifecycleFlow,     // E2: 订单生命周期
   memberReferralFlow,     // E3: 会员推荐
@@ -78,21 +78,27 @@ const PHASE2_FLOWS: FlowDef[] = [
   tokenSaleFlow,          // E7: 代币发售
   entityMarketFlow,       // E8: 实体市场
   entityDisclosureFlow,   // E9: 信息披露
+  orderAdminFlow,         // E10: 订单治理/维护
+  tokenGovernanceAdminFlow, // E11: Token/Governance 管理
   nexMarketFlow,          // T4: NEX 市场 (DEX)
+  nexMarketAdminFlow,     // T5: NEX Market 管理/争议
   disputeFlow,            // D1: 争议解决
   escrowFlow,             // D2: 托管
+  arbitrationAppealFlow,  // D3: 仲裁申诉
 ];
 
-/** Phase 3: GroupRobot + 存储 */
+/** Phase 3: GroupRobot/Ads + 存储 */
 const PHASE3_FLOWS: FlowDef[] = [
   botLifecycleFlow,    // G1: Bot 生命周期
   nodeConsensusFlow,   // G2: 节点共识
   adCampaignFlow,      // G3: 广告活动
+  adsCorePreferencesFlow, // A1: Ads Core 偏好/确认
   subscriptionFlow,    // G4: 订阅服务
   communityFlow,       // G5: 社区管理
   ceremonyFlow,        // G6: 仪式验证
   rewardsFlow,         // G7: 奖励分配
   storageServiceFlow,  // S1: 存储服务
+  storageBillingDisputeFlow, // S2: 存储计费/Slash 争议
 ];
 
 /** 全部流程 */

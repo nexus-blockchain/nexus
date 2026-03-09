@@ -17,7 +17,17 @@ use frame_support::{
 };
 use sp_runtime::traits::{Bounded, Zero, Saturating};
 use sp_runtime::SaturatedConversion;
+use sp_runtime::app_crypto::RuntimeAppPublic;
 use frame_system::pallet_prelude::BlockNumberFor;
+
+/// Dummy OCW authority + signature for benchmarks.
+/// OcwAuthorities list is empty by default, so verify_ocw_signature() skips validation.
+fn dummy_authority_and_sig<T: Config>() -> (T::AuthorityId, <T::AuthorityId as RuntimeAppPublic>::Signature) {
+    let authority = T::AuthorityId::generate_pair(Some(b"bench_ocw".to_vec()));
+    // Sign an empty payload — signature content doesn't matter since authority list is empty
+    let signature = authority.sign(&[0u8; 32]).expect("signing should work");
+    (authority, signature)
+}
 
 /// 创建一个有足够余额的账户
 fn funded_account<T: Config>(name: &'static str, index: u32) -> T::AccountId {
@@ -381,9 +391,10 @@ mod benches {
     fn submit_ocw_result() {
         setup_initial_price::<T>();
         let (_seller, _buyer, trade_id, usdt_amount) = seed_trade_awaiting_verification::<T>();
+        let (authority, signature) = dummy_authority_and_sig::<T>();
 
         #[extrinsic_call]
-        _(RawOrigin::None, trade_id, usdt_amount, None);
+        _(RawOrigin::None, trade_id, usdt_amount, None, authority, signature);
 
         let trade = UsdtTrades::<T>::get(trade_id).unwrap();
         assert_eq!(trade.status, UsdtTradeStatus::Completed);
@@ -471,9 +482,10 @@ mod benches {
         setup_initial_price::<T>();
         let (_seller, _buyer, trade_id) = seed_trade_awaiting_payment::<T>();
         let trade = UsdtTrades::<T>::get(trade_id).unwrap();
+        let (authority, signature) = dummy_authority_and_sig::<T>();
 
         #[extrinsic_call]
-        _(RawOrigin::None, trade_id, trade.usdt_amount, None);
+        _(RawOrigin::None, trade_id, trade.usdt_amount, None, authority, signature);
     }
 
     // ==================== call_index(16): submit_underpaid_update ====================
@@ -482,9 +494,10 @@ mod benches {
         setup_initial_price::<T>();
         let (_seller, _buyer, trade_id, usdt_amount) = seed_trade_underpaid::<T>();
         let new_amount = usdt_amount * 90 / 100;
+        let (authority, signature) = dummy_authority_and_sig::<T>();
 
         #[extrinsic_call]
-        _(RawOrigin::None, trade_id, new_amount);
+        _(RawOrigin::None, trade_id, new_amount, authority, signature);
     }
 
     // ==================== call_index(17): finalize_underpaid ====================

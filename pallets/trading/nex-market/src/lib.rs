@@ -20,6 +20,20 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use sp_core::crypto::KeyTypeId;
+
+/// OCW 专用签名 KeyType（nex-market OCW）
+pub const KEY_TYPE: KeyTypeId = KeyTypeId(*b"nocw");
+
+/// OCW 签名用 sr25519 应用密钥
+pub mod crypto {
+    use super::KEY_TYPE;
+    use sp_application_crypto::{app_crypto, sr25519};
+    app_crypto!(sr25519, KEY_TYPE);
+}
+
+/// OCW 授权节点公钥类型
+pub type AuthorityId = crypto::Public;
 
 pub use pallet::*;
 
@@ -47,6 +61,8 @@ pub mod pallet {
     use frame_system::pallet_prelude::*;
     use sp_runtime::traits::{CheckedAdd, CheckedSub, Saturating, Zero};
     use sp_runtime::SaturatedConversion;
+    use sp_runtime::RuntimeAppPublic;
+    use codec::Encode;
     use sp_runtime::transaction_validity::{
         InvalidTransaction, TransactionSource, TransactionValidity, ValidTransaction,
     };
@@ -455,6 +471,9 @@ pub mod pallet {
         /// 买单订单簿最大容量（可 runtime 治理调整）
         #[pallet::constant]
         type MaxBuyOrders: Get<u32>;
+
+        /// OCW 授权节点身份类型（用于签名验证）
+        type AuthorityId: Member + Parameter + RuntimeAppPublic + MaybeSerializeDeserialize + MaxEncodedLen;
     }
 
     /// 当前存储版本
@@ -886,6 +905,13 @@ pub mod pallet {
     #[pallet::getter(fn deposit_exchange_rate)]
     pub type DepositExchangeRate<T> = StorageValue<_, u64>;
 
+    /// OCW 授权节点列表（最多 32 个授权公钥）
+    #[pallet::storage]
+    #[pallet::getter(fn ocw_authorities)]
+    pub type OcwAuthorities<T: Config> = StorageValue<
+        _, BoundedVec<T::AuthorityId, ConstU32<32>>, ValueQuery,
+    >;
+
     // ==================== Events ====================
 
     #[pallet::event]
@@ -1129,6 +1155,10 @@ pub mod pallet {
             cancelled_count: u32,
             failed_count: u32,
         },
+        /// OCW 授权节点列表已更新
+        OcwAuthoritiesUpdated {
+            count: u32,
+        },
     }
 
     // ==================== Errors ====================
@@ -1245,6 +1275,12 @@ pub mod pallet {
         CounterEvidenceAlreadySubmitted,
         /// 买家从未确认付款，不可争议
         PaymentNotConfirmed,
+        /// OCW 授权节点不在列表中
+        OcwAuthorityNotAuthorized,
+        /// OCW 签名无效
+        OcwInvalidSignature,
+        /// OCW 授权列表过长（最多 32）
+        TooManyAuthorities,
     }
 
     // ==================== Extrinsics ====================
@@ -1804,8 +1840,16 @@ pub mod pallet {
             trade_id: u64,
             actual_amount: u64,
             tx_hash: Option<TxHash>,
+            authority: T::AuthorityId,
+            signature: <T::AuthorityId as RuntimeAppPublic>::Signature,
         ) -> DispatchResult {
             ensure_none(origin)?;
+
+            // 验证 OCW 授权签名
+            Self::verify_ocw_signature(
+                &authority, &signature,
+                &(trade_id, actual_amount, tx_hash.clone()).encode(),
+            )?;
 
             let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
             ensure!(trade.status == UsdtTradeStatus::AwaitingVerification, Error::<T>::InvalidTradeStatus);
@@ -2090,8 +2134,16 @@ pub mod pallet {
             trade_id: u64,
             actual_amount: u64,
             tx_hash: Option<TxHash>,
+            authority: T::AuthorityId,
+            signature: <T::AuthorityId as RuntimeAppPublic>::Signature,
         ) -> DispatchResult {
             ensure_none(origin)?;
+
+            // 验证 OCW 授权签名
+            Self::verify_ocw_signature(
+                &authority, &signature,
+                &(trade_id, actual_amount, tx_hash.clone()).encode(),
+            )?;
 
             let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
             ensure!(trade.status == UsdtTradeStatus::AwaitingPayment, Error::<T>::InvalidTradeStatus);
@@ -2177,8 +2229,16 @@ pub mod pallet {
             origin: OriginFor<T>,
             trade_id: u64,
             new_actual_amount: u64,
+            authority: T::AuthorityId,
+            signature: <T::AuthorityId as RuntimeAppPublic>::Signature,
         ) -> DispatchResult {
             ensure_none(origin)?;
+
+            // 验证 OCW 授权签名
+            Self::verify_ocw_signature(
+                &authority, &signature,
+                &(trade_id, new_actual_amount).encode(),
+            )?;
 
             let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
             ensure!(trade.status == UsdtTradeStatus::UnderpaidPending, Error::<T>::NotUnderpaidPending);
@@ -2826,6 +2886,25 @@ pub mod pallet {
             Self::deposit_event(Event::BatchForceCancelled { cancelled_count: cancelled, failed_count: failed });
             Ok(())
         }
+
+        /// 设置 OCW 授权节点列表（MarketAdmin 权限）
+        ///
+        /// 只有在列表中的节点公钥签名的 OCW 结果才会被接受。
+        #[pallet::call_index(34)]
+        #[pallet::weight(Weight::from_parts(50_000_000, 5_000))]
+        pub fn set_ocw_authorities(
+            origin: OriginFor<T>,
+            authorities: Vec<T::AuthorityId>,
+        ) -> DispatchResult {
+            T::MarketAdminOrigin::ensure_origin(origin)?;
+            let bounded: BoundedVec<T::AuthorityId, ConstU32<32>> = authorities
+                .try_into()
+                .map_err(|_| Error::<T>::TooManyAuthorities)?;
+            let count = bounded.len() as u32;
+            OcwAuthorities::<T>::put(bounded);
+            Self::deposit_event(Event::OcwAuthoritiesUpdated { count });
+            Ok(())
+        }
     }
 
     // ==================== ValidateUnsigned ====================
@@ -2836,7 +2915,7 @@ pub mod pallet {
 
         fn validate_unsigned(source: TransactionSource, call: &Self::Call) -> TransactionValidity {
             match call {
-                Call::submit_ocw_result { trade_id, actual_amount, tx_hash } => {
+                Call::submit_ocw_result { trade_id, actual_amount, tx_hash, authority, signature } => {
                     let trade = match UsdtTrades::<T>::get(trade_id) {
                         Some(t) => t,
                         None => return InvalidTransaction::Custom(10).into(),
@@ -2863,6 +2942,19 @@ pub mod pallet {
                     if matches!(source, TransactionSource::External) {
                         return InvalidTransaction::BadSigner.into();
                     }
+                    // OCW 签名验证（在 ValidateUnsigned 阶段即拒绝无效签名）
+                    {
+                        let authorities = OcwAuthorities::<T>::get();
+                        if !authorities.is_empty() {
+                            if !authorities.contains(authority) {
+                                return InvalidTransaction::Custom(15).into();
+                            }
+                            let payload = (trade_id, actual_amount, tx_hash.clone()).encode();
+                            if !authority.verify(&payload, signature) {
+                                return InvalidTransaction::Custom(16).into();
+                            }
+                        }
+                    }
                     let priority = match source {
                         TransactionSource::Local => 100,
                         TransactionSource::InBlock => 80,
@@ -2876,7 +2968,7 @@ pub mod pallet {
                         .propagate(false)
                         .build()
                 },
-                Call::auto_confirm_payment { trade_id, actual_amount, tx_hash } => {
+                Call::auto_confirm_payment { trade_id, actual_amount, tx_hash, authority, signature } => {
                     let trade = match UsdtTrades::<T>::get(trade_id) {
                         Some(t) => t,
                         None => return InvalidTransaction::Custom(20).into(),
@@ -2902,6 +2994,19 @@ pub mod pallet {
                     if matches!(source, TransactionSource::External) {
                         return InvalidTransaction::BadSigner.into();
                     }
+                    // OCW 签名验证
+                    {
+                        let authorities = OcwAuthorities::<T>::get();
+                        if !authorities.is_empty() {
+                            if !authorities.contains(authority) {
+                                return InvalidTransaction::Custom(25).into();
+                            }
+                            let payload = (trade_id, actual_amount, tx_hash.clone()).encode();
+                            if !authority.verify(&payload, signature) {
+                                return InvalidTransaction::Custom(26).into();
+                            }
+                        }
+                    }
                     let priority = match source {
                         TransactionSource::Local => 90,
                         TransactionSource::InBlock => 70,
@@ -2915,7 +3020,7 @@ pub mod pallet {
                         .propagate(false)
                         .build()
                 },
-                Call::submit_underpaid_update { trade_id, new_actual_amount } => {
+                Call::submit_underpaid_update { trade_id, new_actual_amount, authority, signature } => {
                     let trade = match UsdtTrades::<T>::get(trade_id) {
                         Some(t) => t,
                         None => return InvalidTransaction::Custom(30).into(),
@@ -2938,6 +3043,19 @@ pub mod pallet {
                     if matches!(source, TransactionSource::External) {
                         return InvalidTransaction::BadSigner.into();
                     }
+                    // OCW 签名验证
+                    {
+                        let authorities = OcwAuthorities::<T>::get();
+                        if !authorities.is_empty() {
+                            if !authorities.contains(authority) {
+                                return InvalidTransaction::Custom(34).into();
+                            }
+                            let payload = (trade_id, new_actual_amount).encode();
+                            if !authority.verify(&payload, signature) {
+                                return InvalidTransaction::Custom(35).into();
+                            }
+                        }
+                    }
                     let priority = match source {
                         TransactionSource::Local => 80,
                         TransactionSource::InBlock => 60,
@@ -2959,6 +3077,28 @@ pub mod pallet {
     // ==================== 内部函数 ====================
 
     impl<T: Config> Pallet<T> {
+        /// 验证 OCW 授权节点签名
+        ///
+        /// 检查：
+        /// 1. authority 在 OcwAuthorities 列表中
+        /// 2. signature 对 payload 有效
+        ///
+        /// 如果 OcwAuthorities 为空（未配置），则跳过验证（向后兼容测试网）。
+        fn verify_ocw_signature(
+            authority: &T::AuthorityId,
+            signature: &<T::AuthorityId as RuntimeAppPublic>::Signature,
+            payload: &[u8],
+        ) -> DispatchResult {
+            let authorities = OcwAuthorities::<T>::get();
+            // 空列表 = 未配置，跳过验证（测试网兼容）
+            if authorities.is_empty() {
+                return Ok(());
+            }
+            ensure!(authorities.contains(authority), Error::<T>::OcwAuthorityNotAuthorized);
+            let payload_vec = alloc::vec::Vec::from(payload);
+            ensure!(authority.verify(&payload_vec, signature), Error::<T>::OcwInvalidSignature);
+            Ok(())
+        }
         /// 创建订单
         fn do_create_order(
             maker: T::AccountId,

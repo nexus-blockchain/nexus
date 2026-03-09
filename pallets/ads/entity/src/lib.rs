@@ -30,6 +30,9 @@ mod mock;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+
 use frame_support::pallet_prelude::*;
 use frame_system::pallet_prelude::*;
 use pallet_ads_primitives::*;
@@ -127,6 +130,10 @@ pub mod pallet {
 
 		/// 平台国库账户
 		type TreasuryAccount: Get<Self::AccountId>;
+
+		/// Benchmark helper for setting up external state.
+		#[cfg(feature = "runtime-benchmarks")]
+		type BenchmarkHelper: crate::benchmarking::BenchmarkHelper<Self::AccountId>;
 
 		/// 平台广告分成 (基点, 默认 2000 = 20%)
 		#[pallet::constant]

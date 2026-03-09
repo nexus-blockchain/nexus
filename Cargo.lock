@@ -6377,6 +6377,7 @@ dependencies = [
 name = "pallet-ads-entity"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "pallet-ads-primitives",
@@ -7170,6 +7171,7 @@ dependencies = [
 name = "pallet-grouprobot-registry"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -7293,6 +7295,7 @@ dependencies = [
  "scale-info",
  "serde",
  "sp-api",
+ "sp-application-crypto",
  "sp-core",
  "sp-io",
  "sp-runtime",

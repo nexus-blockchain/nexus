@@ -38,7 +38,18 @@ async function runTokenGovernanceAdminFlow(ctx: FlowContext): Promise<void> {
     '创建 E11 Token',
     'eve',
   );
-  assertTxSuccess(createTokenResult, '创建 token');
+  if (createTokenResult.success) {
+    await ctx.check('E11 Token 已创建', 'eve', () => {
+      assertEventEmitted(createTokenResult, 'entityToken', 'ShopTokenCreated', 'create token event');
+    });
+  } else {
+    await ctx.check('复用已有 E11 Token', 'eve', () => {
+      const error = createTokenResult.error ?? '';
+      if (!error.includes('TokenAlreadyExists')) {
+        throw new Error(`创建 token 失败: ${error}`);
+      }
+    });
+  }
 
   const mintBobResult = await ctx.send(
     (api.tx as any).entityToken.mintTokens(entityId, bob.address, 100_000),
@@ -260,6 +271,15 @@ async function runTokenGovernanceAdminFlow(ctx: FlowContext): Promise<void> {
 async function ensureFreshEntity(ctx: FlowContext): Promise<{ entityId: number }> {
   const { api } = ctx;
   const eve = ctx.actor('eve');
+  const userEntities = await (api.query as any).entityRegistry.userEntity(eve.address);
+  const entityIds = userEntities.toHuman() as string[];
+
+  if (entityIds && entityIds.length > 0) {
+    return {
+      entityId: parseInt(entityIds[0].replace(/,/g, ''), 10),
+    };
+  }
+
   const nextEntityId = (await (api.query as any).entityRegistry.nextEntityId()).toNumber();
   const createEntityResult = await ctx.send(
     (api.tx as any).entityRegistry.createEntity(

@@ -183,6 +183,8 @@ impl pallet_ads_entity::Config for Test {
 	type MaxPlacementsPerEntity = ConstU32<10>;
 	type DefaultDailyImpressionCap = ConstU32<1000>;
 	type BlocksPerDay = ConstU32<14400>;
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = ();
 }
 
 // ============================================================================

@@ -72,6 +72,10 @@ pub mod pallet {
 
         /// 权重
         type WeightInfo: WeightInfo;
+
+        /// Benchmark helper for setting up external state.
+        #[cfg(feature = "runtime-benchmarks")]
+        type BenchmarkHelper: crate::benchmarking::BenchmarkHelper<Self::AccountId>;
     }
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);

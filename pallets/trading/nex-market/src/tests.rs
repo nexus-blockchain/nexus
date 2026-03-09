@@ -1,7 +1,17 @@
 use crate::{mock::*, pallet::*};
 use frame_support::{assert_noop, assert_ok, traits::{Currency, Hooks}, weights::Weight, BoundedVec, traits::ConstU32};
+use sp_runtime::testing::{UintAuthorityId, TestSignature};
 use sp_runtime::traits::{ValidateUnsigned, Zero};
 use sp_runtime::transaction_validity::TransactionSource;
+
+/// Dummy OCW authority for tests. OcwAuthorities list is empty by default,
+/// so verify_ocw_signature() skips validation — any value works.
+fn dummy_authority() -> UintAuthorityId {
+    UintAuthorityId(0)
+}
+fn dummy_signature() -> TestSignature {
+    TestSignature(0, Vec::new())
+}
 
 fn tron_address() -> Vec<u8> {
     b"T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb".to_vec()
@@ -348,6 +358,7 @@ fn full_trade_flow_exact_payment() {
         let bob_before = Balances::free_balance(BOB);
         assert_ok!(NexMarket::submit_ocw_result(
             RuntimeOrigin::none(), 0, usdt_amount, None,
+            dummy_authority(), dummy_signature(),
         ));
 
         // R1: submit_ocw_result 已自动结算，OCW 结果已清理
@@ -389,6 +400,7 @@ fn underpaid_enters_pending_then_finalize() {
         let actual = expected * 70 / 100;
         assert_ok!(NexMarket::submit_ocw_result(
             RuntimeOrigin::none(), 0, actual, None,
+            dummy_authority(), dummy_signature(),
         ));
 
         let trade = NexMarket::usdt_trades(0).unwrap();
@@ -452,6 +464,7 @@ fn severely_underpaid_auto_process() {
         let actual = expected * 10 / 100;
         assert_ok!(NexMarket::submit_ocw_result(
             RuntimeOrigin::none(), 0, actual, None,
+            dummy_authority(), dummy_signature(),
         ));
 
         // R1: 自动结算后 OCW 结果已清理
@@ -481,13 +494,13 @@ fn underpaid_topup_upgrades_to_exact() {
 
         // 少付 80% → UnderpaidPending
         let actual_80 = expected * 80 / 100;
-        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_80, None));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_80, None, dummy_authority(), dummy_signature()));
 
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_eq!(trade.status, UsdtTradeStatus::UnderpaidPending);
 
         // 补付窗口内 OCW 检测到买家补齐了 → R1: 自动结算
-        assert_ok!(NexMarket::submit_underpaid_update(RuntimeOrigin::none(), 0, expected));
+        assert_ok!(NexMarket::submit_underpaid_update(RuntimeOrigin::none(), 0, expected, dummy_authority(), dummy_signature()));
 
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_eq!(trade.status, UsdtTradeStatus::Completed);
@@ -514,10 +527,10 @@ fn underpaid_update_rejects_decrease() {
         assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
 
         let actual_80 = expected * 80 / 100;
-        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_80, None));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_80, None, dummy_authority(), dummy_signature()));
 
         // 尝试提交更低的金额 → 应该是 no-op（不会更新）
-        assert_ok!(NexMarket::submit_underpaid_update(RuntimeOrigin::none(), 0, actual_80 - 1));
+        assert_ok!(NexMarket::submit_underpaid_update(RuntimeOrigin::none(), 0, actual_80 - 1, dummy_authority(), dummy_signature()));
 
         let (_, stored_amount) = NexMarket::ocw_verification_results(0).unwrap();
         assert_eq!(stored_amount, actual_80); // 金额未变
@@ -544,7 +557,7 @@ fn graduated_deposit_forfeit_light_underpay() {
 
         // 少付 97%（轻微少付 → forfeit 20%）
         let actual_97 = expected * 97 / 100;
-        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_97, None));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_97, None, dummy_authority(), dummy_signature()));
 
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_eq!(trade.status, UsdtTradeStatus::UnderpaidPending);
@@ -587,11 +600,11 @@ fn finalize_underpaid_full_topup_in_window() {
 
         // 少付 60% → UnderpaidPending
         let actual_60 = expected * 60 / 100;
-        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_60, None));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_60, None, dummy_authority(), dummy_signature()));
         assert_eq!(NexMarket::usdt_trades(0).unwrap().status, UsdtTradeStatus::UnderpaidPending);
 
         // R1: 窗口内补齐到 100% → 自动结算
-        assert_ok!(NexMarket::submit_underpaid_update(RuntimeOrigin::none(), 0, expected));
+        assert_ok!(NexMarket::submit_underpaid_update(RuntimeOrigin::none(), 0, expected, dummy_authority(), dummy_signature()));
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_eq!(trade.status, UsdtTradeStatus::Completed);
         assert_eq!(trade.deposit_status, BuyerDepositStatus::Released);
@@ -613,7 +626,7 @@ fn submit_underpaid_update_rejects_wrong_status() {
 
         // 还在 AwaitingVerification，不是 UnderpaidPending
         assert_noop!(
-            NexMarket::submit_underpaid_update(RuntimeOrigin::none(), 0, 50_000_000),
+            NexMarket::submit_underpaid_update(RuntimeOrigin::none(), 0, 50_000_000, dummy_authority(), dummy_signature()),
             Error::<Test>::NotUnderpaidPending
         );
     });
@@ -638,7 +651,7 @@ fn process_timeout_handles_underpaid_pending() {
 
         // 少付 90% → UnderpaidPending
         let actual_90 = expected * 90 / 100;
-        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_90, None));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_90, None, dummy_authority(), dummy_signature()));
         assert_eq!(NexMarket::usdt_trades(0).unwrap().status, UsdtTradeStatus::UnderpaidPending);
 
         let trade = NexMarket::usdt_trades(0).unwrap();
@@ -677,7 +690,7 @@ fn auto_confirm_underpaid_routes_to_pending() {
 
         // auto_confirm with 80% → 应该进入 UnderpaidPending（而非 AwaitingVerification）
         let actual_80 = expected * 80 / 100;
-        assert_ok!(NexMarket::auto_confirm_payment(RuntimeOrigin::none(), 0, actual_80, None));
+        assert_ok!(NexMarket::auto_confirm_payment(RuntimeOrigin::none(), 0, actual_80, None, dummy_authority(), dummy_signature()));
 
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_eq!(trade.status, UsdtTradeStatus::UnderpaidPending);
@@ -706,7 +719,7 @@ fn auto_confirm_exact_routes_to_verification() {
         let expected = trade.usdt_amount;
 
         // R1: auto_confirm exact → 直接结算
-        assert_ok!(NexMarket::auto_confirm_payment(RuntimeOrigin::none(), 0, expected, None));
+        assert_ok!(NexMarket::auto_confirm_payment(RuntimeOrigin::none(), 0, expected, None, dummy_authority(), dummy_signature()));
 
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_eq!(trade.status, UsdtTradeStatus::Completed);
@@ -824,7 +837,7 @@ fn process_timeout_awaiting_verification_settles_if_ocw_result_exists() {
 
         // R1: submit_ocw_result Exact → 自动结算
         let bob_before = Balances::free_balance(BOB);
-        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, 50_000_000, None));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, 50_000_000, None, dummy_authority(), dummy_signature()));
 
         // 交易已在 submit_ocw_result 中自动完成
         let trade = NexMarket::usdt_trades(0).unwrap();
@@ -882,7 +895,7 @@ fn auto_confirm_payment_works() {
         assert!(NexMarket::awaiting_payment_trades().contains(&0));
 
         // OCW 检测到 USDT 已到账 → sidecar 调用 auto_confirm_payment
-        assert_ok!(NexMarket::auto_confirm_payment(RuntimeOrigin::none(), 0, 50_000_000, None));
+        assert_ok!(NexMarket::auto_confirm_payment(RuntimeOrigin::none(), 0, 50_000_000, None, dummy_authority(), dummy_signature()));
 
         // R1: auto_confirm_payment Exact → 直接结算
         let trade = NexMarket::usdt_trades(0).unwrap();
@@ -907,7 +920,7 @@ fn auto_confirm_payment_rejects_non_awaiting_payment() {
 
         // auto_confirm_payment 应失败（已不是 AwaitingPayment）
         assert_noop!(
-            NexMarket::auto_confirm_payment(RuntimeOrigin::none(), 0, 50_000_000, None),
+            NexMarket::auto_confirm_payment(RuntimeOrigin::none(), 0, 50_000_000, None, dummy_authority(), dummy_signature()),
             Error::<Test>::InvalidTradeStatus
         );
     });
@@ -927,7 +940,7 @@ fn auto_confirm_payment_rejects_signed_origin() {
 
         // signed origin 应失败（只允许 unsigned）
         assert_noop!(
-            NexMarket::auto_confirm_payment(RuntimeOrigin::signed(CHARLIE), 0, 50_000_000, None),
+            NexMarket::auto_confirm_payment(RuntimeOrigin::signed(CHARLIE), 0, 50_000_000, None, dummy_authority(), dummy_signature()),
             sp_runtime::DispatchError::BadOrigin
         );
     });
@@ -1088,7 +1101,7 @@ fn payment_verification_result_categories() {
         ));
 
         // R1: Exact → 自动结算
-        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None, dummy_authority(), dummy_signature()));
         // R1: 自动结算后 OCW 结果已清理
         assert!(NexMarket::ocw_verification_results(0).is_none());
         let trade = NexMarket::usdt_trades(0).unwrap();
@@ -1340,6 +1353,7 @@ fn waived_deposit_l3_completed_buyer_blocked() {
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_ok!(NexMarket::submit_ocw_result(
             RuntimeOrigin::none(), 0, trade.usdt_amount, None,
+            dummy_authority(), dummy_signature(),
         ));
 
         // L3: BOB 已标记为 CompletedBuyer
@@ -1410,7 +1424,7 @@ fn on_idle_advances_twap_snapshots() {
             RuntimeOrigin::signed(BOB), 0,
         ));
         let trade = NexMarket::usdt_trades(0).unwrap();
-        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None, dummy_authority(), dummy_signature()));
 
         // 交易完成后，记录当前 TWAP 累积器状态
         let acc_before = NexMarket::twap_accumulator().unwrap();
@@ -1471,7 +1485,7 @@ fn m2_reward_paid_event_tracks_success() {
         ));
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
-        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None, dummy_authority(), dummy_signature()));
 
         // R1: submit_ocw_result 自动结算，不再需要 claim，验证交易已完成
         let trade = NexMarket::usdt_trades(0).unwrap();
@@ -1493,7 +1507,7 @@ fn m2_reward_paid_false_when_source_empty() {
         ));
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
-        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None, dummy_authority(), dummy_signature()));
 
         // R1: 自动结算，验证交易已完成
         let trade = NexMarket::usdt_trades(0).unwrap();
@@ -1585,6 +1599,7 @@ fn c3_submit_ocw_result_records_tx_hash() {
 
         assert_ok!(NexMarket::submit_ocw_result(
             RuntimeOrigin::none(), trade_id, usdt_amount, Some(tx_hash.clone()),
+            dummy_authority(), dummy_signature(),
         ));
 
         // tx_hash 已记录，映射到 (trade_id, block_number)
@@ -1610,6 +1625,7 @@ fn c3_submit_ocw_result_rejects_replay() {
         assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
         assert_ok!(NexMarket::submit_ocw_result(
             RuntimeOrigin::none(), 0, trade.usdt_amount, Some(tx_hash.clone()),
+            dummy_authority(), dummy_signature(),
         ));
 
         // 第二笔交易：尝试用同一 tx_hash
@@ -1626,6 +1642,7 @@ fn c3_submit_ocw_result_rejects_replay() {
         assert_noop!(
             NexMarket::submit_ocw_result(
                 RuntimeOrigin::none(), 1, trade2.usdt_amount, Some(tx_hash),
+                dummy_authority(), dummy_signature(),
             ),
             Error::<Test>::TxHashAlreadyUsed
         );
@@ -1648,6 +1665,7 @@ fn c3_submit_ocw_result_none_tx_hash_always_accepted() {
         assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
         assert_ok!(NexMarket::submit_ocw_result(
             RuntimeOrigin::none(), 0, trade.usdt_amount, None,
+            dummy_authority(), dummy_signature(),
         ));
 
         assert_ok!(NexMarket::place_sell_order(
@@ -1660,6 +1678,7 @@ fn c3_submit_ocw_result_none_tx_hash_always_accepted() {
         assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 1));
         assert_ok!(NexMarket::submit_ocw_result(
             RuntimeOrigin::none(), 1, trade2.usdt_amount, None,
+            dummy_authority(), dummy_signature(),
         ));
     });
 }
@@ -1681,6 +1700,7 @@ fn c3_different_tx_hash_accepted() {
         assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
         assert_ok!(NexMarket::submit_ocw_result(
             RuntimeOrigin::none(), 0, t1.usdt_amount, Some(hash1.clone()),
+            dummy_authority(), dummy_signature(),
         ));
 
         assert_ok!(NexMarket::place_sell_order(
@@ -1695,6 +1715,7 @@ fn c3_different_tx_hash_accepted() {
         // 不同 tx_hash → 正常通过
         assert_ok!(NexMarket::submit_ocw_result(
             RuntimeOrigin::none(), 1, t2.usdt_amount, Some(hash2.clone()),
+            dummy_authority(), dummy_signature(),
         ));
 
         assert_eq!(NexMarket::used_tx_hashes(&hash1).unwrap().0, 0);
@@ -1717,8 +1738,7 @@ fn c3_auto_confirm_payment_rejects_replay() {
         ));
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_ok!(NexMarket::auto_confirm_payment(
-            RuntimeOrigin::none(), 0, trade.usdt_amount, Some(tx_hash.clone()),
-        ));
+            RuntimeOrigin::none(), 0, trade.usdt_amount, Some(tx_hash.clone()), dummy_authority(), dummy_signature()));
 
         // 第二笔：尝试重放同一 tx_hash → 失败
         assert_ok!(NexMarket::place_sell_order(
@@ -1729,8 +1749,7 @@ fn c3_auto_confirm_payment_rejects_replay() {
         ));
         assert_noop!(
             NexMarket::auto_confirm_payment(
-                RuntimeOrigin::none(), 1, trade.usdt_amount, Some(tx_hash),
-            ),
+                RuntimeOrigin::none(), 1, trade.usdt_amount, Some(tx_hash), dummy_authority(), dummy_signature()),
             Error::<Test>::TxHashAlreadyUsed
         );
     });
@@ -1751,8 +1770,7 @@ fn c3_cross_extrinsic_replay_blocked() {
         ));
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_ok!(NexMarket::auto_confirm_payment(
-            RuntimeOrigin::none(), 0, trade.usdt_amount, Some(tx_hash.clone()),
-        ));
+            RuntimeOrigin::none(), 0, trade.usdt_amount, Some(tx_hash.clone()), dummy_authority(), dummy_signature()));
 
         // submit_ocw_result 尝试用同一 tx_hash → 也被拒绝
         assert_ok!(NexMarket::place_sell_order(
@@ -1766,6 +1784,7 @@ fn c3_cross_extrinsic_replay_blocked() {
         assert_noop!(
             NexMarket::submit_ocw_result(
                 RuntimeOrigin::none(), 1, trade.usdt_amount, Some(tx_hash),
+                dummy_authority(), dummy_signature(),
             ),
             Error::<Test>::TxHashAlreadyUsed
         );
@@ -1783,6 +1802,8 @@ fn c4_submit_ocw_result_rejects_excessive_amount() {
         let excessive = usdt_amount * 10 + 1;
         let call = crate::Call::<Test>::submit_ocw_result {
             trade_id, actual_amount: excessive, tx_hash: None,
+            authority: dummy_authority(),
+            signature: dummy_signature(),
         };
         let result = <NexMarket as ValidateUnsigned>::validate_unsigned(
             TransactionSource::Local, &call,
@@ -1793,6 +1814,8 @@ fn c4_submit_ocw_result_rejects_excessive_amount() {
         let at_cap = usdt_amount * 10;
         let call_ok = crate::Call::<Test>::submit_ocw_result {
             trade_id, actual_amount: at_cap, tx_hash: None,
+            authority: dummy_authority(),
+            signature: dummy_signature(),
         };
         let result_ok = <NexMarket as ValidateUnsigned>::validate_unsigned(
             TransactionSource::Local, &call_ok,
@@ -1816,6 +1839,8 @@ fn c4_auto_confirm_rejects_excessive_amount() {
         let excessive = trade.usdt_amount * 10 + 1;
         let call = crate::Call::<Test>::auto_confirm_payment {
             trade_id: 0, actual_amount: excessive, tx_hash: None,
+            authority: dummy_authority(),
+            signature: dummy_signature(),
         };
         let result = <NexMarket as ValidateUnsigned>::validate_unsigned(
             TransactionSource::Local, &call,
@@ -1840,12 +1865,14 @@ fn c4_underpaid_update_rejects_excessive_amount() {
 
         // 少付 → UnderpaidPending
         let actual_80 = expected * 80 / 100;
-        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_80, None));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_80, None, dummy_authority(), dummy_signature()));
 
         // 超过 10x → validate_unsigned 拒绝
         let excessive = expected * 10 + 1;
         let call = crate::Call::<Test>::submit_underpaid_update {
             trade_id: 0, new_actual_amount: excessive,
+            authority: dummy_authority(),
+            signature: dummy_signature(),
         };
         let result = <NexMarket as ValidateUnsigned>::validate_unsigned(
             TransactionSource::Local, &call,
@@ -1869,11 +1896,13 @@ fn c4_underpaid_update_rejects_non_increasing_amount() {
         assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
 
         let actual_80 = expected * 80 / 100;
-        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_80, None));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, actual_80, None, dummy_authority(), dummy_signature()));
 
         // 同金额 → validate_unsigned 拒绝 (Custom(33))
         let call_same = crate::Call::<Test>::submit_underpaid_update {
             trade_id: 0, new_actual_amount: actual_80,
+            authority: dummy_authority(),
+            signature: dummy_signature(),
         };
         assert!(<NexMarket as ValidateUnsigned>::validate_unsigned(
             TransactionSource::Local, &call_same,
@@ -1882,6 +1911,8 @@ fn c4_underpaid_update_rejects_non_increasing_amount() {
         // 更低金额 → 同样拒绝
         let call_lower = crate::Call::<Test>::submit_underpaid_update {
             trade_id: 0, new_actual_amount: actual_80 - 1,
+            authority: dummy_authority(),
+            signature: dummy_signature(),
         };
         assert!(<NexMarket as ValidateUnsigned>::validate_unsigned(
             TransactionSource::Local, &call_lower,
@@ -1890,6 +1921,8 @@ fn c4_underpaid_update_rejects_non_increasing_amount() {
         // 更高金额 → 通过
         let call_higher = crate::Call::<Test>::submit_underpaid_update {
             trade_id: 0, new_actual_amount: actual_80 + 1,
+            authority: dummy_authority(),
+            signature: dummy_signature(),
         };
         assert!(<NexMarket as ValidateUnsigned>::validate_unsigned(
             TransactionSource::Local, &call_higher,
@@ -1905,6 +1938,8 @@ fn m3_validate_unsigned_rejects_external_source() {
         // submit_ocw_result from External → rejected
         let call1 = crate::Call::<Test>::submit_ocw_result {
             trade_id, actual_amount: usdt_amount, tx_hash: None,
+            authority: dummy_authority(),
+            signature: dummy_signature(),
         };
         assert!(<NexMarket as ValidateUnsigned>::validate_unsigned(
             TransactionSource::External, &call1,
@@ -3039,6 +3074,7 @@ fn m1r2_fee_actually_charged_equals_nex_deducted() {
         // 模拟 OCW 提交验证结果（Exact）
         assert_ok!(NexMarket::submit_ocw_result(
             RuntimeOrigin::none(), 0, 50_000_000, None,
+            dummy_authority(), dummy_signature(),
         ));
 
         let bob_free_after = Balances::free_balance(BOB);
@@ -3411,7 +3447,7 @@ fn update_order_amount_rejects_below_filled() {
         // 完成交易释放 filled_amount
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
-        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None, dummy_authority(), dummy_signature()));
 
         // 尝试减少到低于已成交量
         assert_noop!(
@@ -3595,7 +3631,7 @@ fn min_fill_amount_tail_fill_exempt() {
         // 完成交易
         let trade = NexMarket::usdt_trades(0).unwrap();
         assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
-        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None, dummy_authority(), dummy_signature()));
 
         // 剩余 10 NEX < min_fill(50 NEX) → 尾单豁免
         assert_ok!(NexMarket::reserve_sell_order(
@@ -3758,7 +3794,7 @@ fn resolve_dispute_completed_trade_no_double_payment() {
         ));
         assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
         let trade = NexMarket::usdt_trades(0).unwrap();
-        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, trade.usdt_amount, None, dummy_authority(), dummy_signature()));
 
         // Completed 状态
         let trade = NexMarket::usdt_trades(0).unwrap();
@@ -4052,6 +4088,7 @@ fn w8_ocw_result_stored_before_settlement() {
         // 70% = 35_000_000 → Underpaid（5000~9950 bps）→ 进入 UnderpaidPending
         assert_ok!(NexMarket::submit_ocw_result(
             RuntimeOrigin::none(), trade_id, 35_000_000, None,
+            dummy_authority(), dummy_signature(),
         ));
 
         let trade = NexMarket::usdt_trades(trade_id).unwrap();
@@ -4070,6 +4107,7 @@ fn w8_ocw_result_cleaned_on_exact_settlement() {
 
         assert_ok!(NexMarket::submit_ocw_result(
             RuntimeOrigin::none(), trade_id, 500_000, None,
+            dummy_authority(), dummy_signature(),
         ));
 
         // Exact 结算成功 → OCW 结果已清理
@@ -4100,7 +4138,7 @@ fn circuit_breaker_triggers_on_extreme_deviation() {
             RuntimeOrigin::signed(BOB), 0, None, buyer_tron(),
         ));
         assert_ok!(NexMarket::confirm_payment(RuntimeOrigin::signed(BOB), 0));
-        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, 500_000, None));
+        assert_ok!(NexMarket::submit_ocw_result(RuntimeOrigin::none(), 0, 500_000, None, dummy_authority(), dummy_signature()));
 
         // 尝试挂一个极端偏离的卖单（价格 = 2 USDT，偏离 300%）
         assert_noop!(

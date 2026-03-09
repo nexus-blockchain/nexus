@@ -8,6 +8,9 @@ import { SubmittableExtrinsic } from '@polkadot/api/types';
 import { defaultConfig } from './config.js';
 
 let apiInstance: ApiPromise | null = null;
+const EVENT_FETCH_TIMEOUT_MS = Number(process.env.E2E_EVENT_FETCH_TIMEOUT_MS ?? 15_000);
+const TRACE_TX_ENABLED = process.env.E2E_TRACE_TX === '1';
+const TRACE_TX_FILTER = process.env.E2E_TRACE_TX_FILTER ?? '';
 
 export interface TxResult {
   success: boolean;
@@ -21,6 +24,16 @@ export interface TxEvent {
   section: string;
   method: string;
   data: any;
+}
+
+function shouldTraceTx(description?: string): boolean {
+  if (!TRACE_TX_ENABLED) return false;
+  if (!TRACE_TX_FILTER) return true;
+  return (description ?? '').includes(TRACE_TX_FILTER);
+}
+
+function traceTx(description: string | undefined, message: string): void {
+  console.log(`[tx-trace] ${description ?? 'unknown'} :: ${message}`);
 }
 
 /** 获取或创建 API 连接 */
@@ -47,38 +60,97 @@ export async function signAndSend(
   signer: KeyringPair,
   description?: string,
 ): Promise<TxResult> {
+  return signAndSendWithRetry(api, tx, signer, description, 0);
+}
+
+async function signAndSendWithRetry(
+  api: ApiPromise,
+  tx: SubmittableExtrinsic<'promise'>,
+  signer: KeyringPair,
+  description: string | undefined,
+  attempt: number,
+): Promise<TxResult> {
   const txHash = tx.hash.toHex();
+  const traceEnabled = shouldTraceTx(description);
+  const submitStartedAt = Date.now();
+
+  if (traceEnabled) {
+    traceTx(
+      description,
+      `submit_start attempt=${attempt} signer=${signer.address} txHash=${txHash}`,
+    );
+  }
 
   // Phase 1: synchronous callback — only captures blockHash + txIndex
   const inclusion = await new Promise<{ blockHash: string; txIndex?: number } | { error: string }>((resolve) => {
     const timeout = setTimeout(() => {
+      if (traceEnabled) {
+        traceTx(description, `submit_timeout afterMs=${Date.now() - submitStartedAt}`);
+      }
       resolve({ error: `Timeout: ${description}` });
     }, defaultConfig.txTimeout);
 
     tx.signAndSend(signer, ({ status, txIndex }) => {
+      if (traceEnabled) {
+        traceTx(
+          description,
+          `callback status=${status.type} txIndex=${txIndex ?? 'n/a'} afterMs=${Date.now() - submitStartedAt}`,
+        );
+      }
       if (!status.isFinalized) return;
       clearTimeout(timeout);
       resolve({ blockHash: status.asFinalized.toHex(), txIndex });
     }).catch((error: Error) => {
       clearTimeout(timeout);
+      if (traceEnabled) {
+        traceTx(description, `submit_error afterMs=${Date.now() - submitStartedAt} error=${error.message}`);
+      }
       resolve({ error: error.message });
     });
   });
 
   if ('error' in inclusion) {
+    if (traceEnabled) {
+      traceTx(description, `submit_result error=${inclusion.error}`);
+    }
+    if (attempt < 2 && inclusion.error.includes('Priority is too low')) {
+      if (traceEnabled) {
+        traceTx(description, `retry_after_priority_low nextAttempt=${attempt + 1}`);
+      }
+      await waitBlocks(api, 1);
+      return signAndSendWithRetry(api, tx, signer, description, attempt + 1);
+    }
     return { success: false, events: [], error: inclusion.error };
   }
 
   const { blockHash, txIndex } = inclusion;
 
+  if (traceEnabled) {
+    traceTx(
+      description,
+      `submit_finalized blockHash=${blockHash} txIndex=${txIndex ?? 'n/a'} afterMs=${Date.now() - submitStartedAt}`,
+    );
+  }
+
   // Phase 2: async event fetching from the finalized block
   // (Polkadot.js v12 callback returns empty events for extrinsic v5 runtimes)
   try {
-    const apiAt = await api.at(blockHash);
-    const allEvents: any = await apiAt.query.system.events();
+    if (traceEnabled) {
+      traceTx(description, `event_fetch_start timeoutMs=${EVENT_FETCH_TIMEOUT_MS}`);
+    }
+    const allEvents = await withTimeout(
+      getEventsAtBlock(api, blockHash),
+      EVENT_FETCH_TIMEOUT_MS,
+      `Timeout while fetching finalized events for ${description ?? txHash}`,
+    );
+
+    if (traceEnabled) {
+      traceTx(description, `event_fetch_done totalEvents=${allEvents.length}`);
+    }
 
     // Determine our extrinsic index
     let extIdx: number | undefined = txIndex;
+    let extIdxSource = 'callback';
     if (extIdx === undefined || extIdx === null) {
       // Heuristic: highest extrinsic index = our user tx (inherents have lower indices)
       let maxIdx = -1;
@@ -89,6 +161,11 @@ export async function signAndSend(
         }
       }
       extIdx = maxIdx >= 0 ? maxIdx : undefined;
+      extIdxSource = 'heuristic';
+    }
+
+    if (traceEnabled) {
+      traceTx(description, `event_fetch_ext_idx selected=${extIdx ?? 'n/a'} source=${extIdxSource}`);
     }
 
     // Collect events for our extrinsic
@@ -96,6 +173,10 @@ export async function signAndSend(
       ? allEvents.filter((r: any) =>
           r.phase.isApplyExtrinsic && r.phase.asApplyExtrinsic.eq(extIdx))
       : [];
+
+    if (traceEnabled) {
+      traceTx(description, `event_fetch_records matched=${ourRecords.length}`);
+    }
 
     // Check for ExtrinsicFailed
     const failedRecord = ourRecords.find(
@@ -113,6 +194,9 @@ export async function signAndSend(
           errorMessage = errData.toHuman ? JSON.stringify(errData.toHuman()) : errData.toString();
         }
       } catch { /* keep fallback message */ }
+      if (traceEnabled) {
+        traceTx(description, `event_fetch_failed error=${errorMessage}`);
+      }
       return { success: false, blockHash, txHash, events: [], error: errorMessage };
     }
 
@@ -127,8 +211,18 @@ export async function signAndSend(
         data: r.event.data.toHuman(),
       }));
 
+    if (traceEnabled) {
+      traceTx(
+        description,
+        `event_fetch_success eventCount=${txEvents.length} events=${txEvents.map((e) => `${e.section}.${e.method}`).join(',') || 'none'}`,
+      );
+    }
+
     return { success: true, blockHash, txHash, events: txEvents };
   } catch (fetchErr: any) {
+    if (traceEnabled) {
+      traceTx(description, `event_fetch_error error=${fetchErr.message}`);
+    }
     return {
       success: true,
       blockHash,
@@ -137,6 +231,35 @@ export async function signAndSend(
       error: `[warn] cannot fetch block events: ${fetchErr.message}`,
     };
   }
+}
+
+async function getEventsAtBlock(api: ApiPromise, blockHash: string): Promise<any[]> {
+  const eventsQuery = (api.query as any)?.system?.events;
+  if (eventsQuery?.at) {
+    return await eventsQuery.at(blockHash);
+  }
+
+  const apiAt = await api.at(blockHash);
+  return await apiAt.query.system.events();
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(message));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
 }
 
 /** 通过 Sudo 发送交易，检查 Sudid 事件确认内部调用结果 */

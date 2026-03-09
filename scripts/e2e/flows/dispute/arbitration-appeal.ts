@@ -67,7 +67,7 @@ async function runArbitrationAppealFlow(ctx: FlowContext): Promise<void> {
 
   const resolveComplaintResult = await ctx.sudo(
     (api.tx as any).arbitration.resolveComplaint(complaintId, 0, 'QmD3ResolutionCid', null),
-    'Root 尝试仲裁裁决',
+    '[错误路径] Root 尝试仲裁裁决',
   );
   await ctx.check('Root 无法替代仲裁委员会裁决', 'sudo(alice)', () => {
     assertTxFailed(resolveComplaintResult, 'BadOrigin', 'resolve_complaint');

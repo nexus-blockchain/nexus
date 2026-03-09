@@ -24,13 +24,13 @@ async function runNexMarketAdminFlow(ctx: FlowContext): Promise<void> {
   const tronAddr = 'T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb';
 
   const protectTx = (api.tx as any).nexMarket.configurePriceProtection(true, 500, 5000, 5);
-  const protectResult = await ctx.sudo(protectTx, 'Root 尝试配置价格保护 (T5)');
+  const protectResult = await ctx.sudo(protectTx, '[错误路径] Root 尝试配置价格保护 (T5)');
   await ctx.check('Root 无法调用 MarketAdminOrigin: configure_price_protection', 'sudo(alice)', () => {
     assertTxFailed(protectResult, 'BadOrigin', 'configure_price_protection');
   });
 
   const setPriceTx = (api.tx as any).nexMarket.setInitialPrice(1_000_000);
-  const setPriceResult = await ctx.sudo(setPriceTx, 'Root 尝试设置初始价格 (T5)');
+  const setPriceResult = await ctx.sudo(setPriceTx, '[错误路径] Root 尝试设置初始价格 (T5)');
   await ctx.check('Root 无法调用 MarketAdminOrigin: set_initial_price', 'sudo(alice)', () => {
     assertTxFailed(setPriceResult, 'BadOrigin', 'set_initial_price');
   });
@@ -45,9 +45,9 @@ async function runNexMarketAdminFlow(ctx: FlowContext): Promise<void> {
   assertTxSuccess(placeSellResult, '挂卖单');
 
   const orderEvent = placeSellResult.events.find(
-    e => e.section === 'nexMarket' && e.method === 'OrderPlaced',
+    e => e.section === 'nexMarket' && e.method === 'OrderCreated',
   );
-  assertTrue(!!orderEvent, '应产生 OrderPlaced');
+  assertTrue(!!orderEvent, '应产生 OrderCreated');
   const orderId = orderEvent?.data?.orderId ?? orderEvent?.data?.[0];
 
   const updateAmountTx = (api.tx as any).nexMarket.updateOrderAmount(
@@ -61,13 +61,13 @@ async function runNexMarketAdminFlow(ctx: FlowContext): Promise<void> {
   });
 
   const banTx = (api.tx as any).nexMarket.banUser(bob.address);
-  const banResult = await ctx.sudo(banTx, 'Root 尝试封禁 Bob');
+  const banResult = await ctx.sudo(banTx, '[错误路径] Root 尝试封禁 Bob');
   await ctx.check('Root 无法调用 MarketAdminOrigin: ban_user', 'sudo(alice)', () => {
     assertTxFailed(banResult, 'BadOrigin', 'ban_user');
   });
 
   const unbanTx = (api.tx as any).nexMarket.unbanUser(bob.address);
-  const unbanResult = await ctx.sudo(unbanTx, 'Root 尝试解封 Bob');
+  const unbanResult = await ctx.sudo(unbanTx, '[错误路径] Root 尝试解封 Bob');
   await ctx.check('Root 无法调用 MarketAdminOrigin: unban_user', 'sudo(alice)', () => {
     assertTxFailed(unbanResult, 'BadOrigin', 'unban_user');
   });
@@ -103,13 +103,13 @@ async function runNexMarketAdminFlow(ctx: FlowContext): Promise<void> {
     1_000_000,
     'ReleaseToBuyer',
   );
-  const batchForceSettleResult = await ctx.sudo(batchForceSettleTx, 'Root 尝试批量强制结算');
+  const batchForceSettleResult = await ctx.sudo(batchForceSettleTx, '[错误路径] Root 尝试批量强制结算');
   await ctx.check('Root 无法调用 MarketAdminOrigin: batch_force_settle', 'sudo(alice)', () => {
     assertTxFailed(batchForceSettleResult, 'BadOrigin', 'batch_force_settle');
   });
 
   const batchForceCancelTx = (api.tx as any).nexMarket.batchForceCancel([fakeTradeId]);
-  const batchForceCancelResult = await ctx.sudo(batchForceCancelTx, 'Root 尝试批量强制取消');
+  const batchForceCancelResult = await ctx.sudo(batchForceCancelTx, '[错误路径] Root 尝试批量强制取消');
   await ctx.check('Root 无法调用 MarketAdminOrigin: batch_force_cancel', 'sudo(alice)', () => {
     assertTxFailed(batchForceCancelResult, 'BadOrigin', 'batch_force_cancel');
   });

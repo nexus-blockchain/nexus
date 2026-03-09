@@ -41,7 +41,6 @@ impl SubscriptionProvider for MockSubscription {
 }
 
 impl pallet_grouprobot_registry::Config for Test {
-	type RuntimeEvent = RuntimeEvent;
 	type MaxBotsPerOwner = frame_support::traits::ConstU32<5>;
 	type MaxPlatformsPerCommunity = frame_support::traits::ConstU32<3>;
 	type MaxPlatformBindingsPerUser = frame_support::traits::ConstU32<5>;
@@ -56,6 +55,7 @@ impl pallet_grouprobot_registry::Config for Test {
 	type MaxOperatorContactLen = frame_support::traits::ConstU32<128>;
 	type MaxBotsPerOperator = frame_support::traits::ConstU32<10>;
 	type MaxUptimeEraHistory = frame_support::traits::ConstU32<10>;
+	type WeightInfo = ();
 }
 
 pub const OWNER: u64 = 1;

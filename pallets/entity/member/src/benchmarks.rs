@@ -301,5 +301,349 @@ mod bench {
         leave_entity(RawOrigin::Signed(caller), BENCH_ENTITY);
     }
 
+    // ========================================================================
+    // 以下为补齐的 18 个缺失 benchmark
+    // ========================================================================
+
+    #[benchmark]
+    fn update_custom_level() {
+        let owner: T::AccountId = BENCH_OWNER.into();
+
+        let mut levels: BoundedVec<CustomLevel, <T as Config>::MaxCustomLevels> = BoundedVec::default();
+        let _ = levels.try_push(CustomLevel {
+            id: 0,
+            name: b"VIP1".to_vec().try_into().unwrap_or_default(),
+            threshold: 100u64,
+            discount_rate: 500,
+            commission_bonus: 100,
+        });
+        let _ = levels.try_push(CustomLevel {
+            id: 1,
+            name: b"VIP2".to_vec().try_into().unwrap_or_default(),
+            threshold: 1000u64,
+            discount_rate: 800,
+            commission_bonus: 200,
+        });
+        EntityLevelSystems::<T>::insert(BENCH_ENTITY, EntityLevelSystem {
+            use_custom: true,
+            upgrade_mode: LevelUpgradeMode::AutoUpgrade,
+            levels,
+        });
+
+        let new_name: BoundedVec<u8, ConstU32<32>> = b"SVIP1".to_vec().try_into().unwrap();
+
+        #[extrinsic_call]
+        update_custom_level(RawOrigin::Signed(owner), BENCH_SHOP, 0u8, Some(new_name), Some(200u64), Some(600u16), Some(150u16));
+    }
+
+    #[benchmark]
+    fn remove_custom_level() {
+        let owner: T::AccountId = BENCH_OWNER.into();
+
+        let mut levels: BoundedVec<CustomLevel, <T as Config>::MaxCustomLevels> = BoundedVec::default();
+        let _ = levels.try_push(CustomLevel {
+            id: 0,
+            name: b"VIP1".to_vec().try_into().unwrap_or_default(),
+            threshold: 100u64,
+            discount_rate: 0,
+            commission_bonus: 0,
+        });
+        EntityLevelSystems::<T>::insert(BENCH_ENTITY, EntityLevelSystem {
+            use_custom: true,
+            upgrade_mode: LevelUpgradeMode::AutoUpgrade,
+            levels,
+        });
+        // 确保该等级无会员
+        LevelMemberCount::<T>::insert(BENCH_ENTITY, 0u8, 0u32);
+
+        #[extrinsic_call]
+        remove_custom_level(RawOrigin::Signed(owner), BENCH_SHOP, 0u8);
+    }
+
+    #[benchmark]
+    fn set_use_custom_levels() {
+        let owner: T::AccountId = BENCH_OWNER.into();
+
+        EntityLevelSystems::<T>::insert(BENCH_ENTITY, EntityLevelSystem::<<T as Config>::MaxCustomLevels> {
+            use_custom: false,
+            upgrade_mode: LevelUpgradeMode::AutoUpgrade,
+            levels: BoundedVec::default(),
+        });
+
+        #[extrinsic_call]
+        set_use_custom_levels(RawOrigin::Signed(owner), BENCH_SHOP, true);
+    }
+
+    #[benchmark]
+    fn set_upgrade_mode() {
+        let owner: T::AccountId = BENCH_OWNER.into();
+
+        EntityLevelSystems::<T>::insert(BENCH_ENTITY, EntityLevelSystem::<<T as Config>::MaxCustomLevels> {
+            use_custom: true,
+            upgrade_mode: LevelUpgradeMode::AutoUpgrade,
+            levels: BoundedVec::default(),
+        });
+
+        #[extrinsic_call]
+        set_upgrade_mode(RawOrigin::Signed(owner), BENCH_SHOP, LevelUpgradeMode::ManualUpgrade);
+    }
+
+    #[benchmark]
+    fn init_upgrade_rule_system() {
+        let owner: T::AccountId = BENCH_OWNER.into();
+
+        #[extrinsic_call]
+        init_upgrade_rule_system(RawOrigin::Signed(owner), BENCH_SHOP, ConflictStrategy::HighestLevel);
+    }
+
+    #[benchmark]
+    fn update_upgrade_rule() {
+        let owner: T::AccountId = BENCH_OWNER.into();
+
+        let mut levels: BoundedVec<CustomLevel, <T as Config>::MaxCustomLevels> = BoundedVec::default();
+        let _ = levels.try_push(CustomLevel {
+            id: 0,
+            name: b"VIP1".to_vec().try_into().unwrap_or_default(),
+            threshold: 100u64,
+            discount_rate: 0,
+            commission_bonus: 0,
+        });
+        EntityLevelSystems::<T>::insert(BENCH_ENTITY, EntityLevelSystem {
+            use_custom: true,
+            upgrade_mode: LevelUpgradeMode::AutoUpgrade,
+            levels,
+        });
+
+        let mut rules: BoundedVec<UpgradeRuleOf<T>, <T as Config>::MaxUpgradeRules> = BoundedVec::default();
+        let _ = rules.try_push(UpgradeRule {
+            id: 0,
+            name: b"Rule1".to_vec().try_into().unwrap_or_default(),
+            trigger: UpgradeTrigger::TotalSpent { threshold: 1_000_000 },
+            target_level_id: 0,
+            duration: None,
+            enabled: true,
+            priority: 0,
+            stackable: false,
+            max_triggers: None,
+            trigger_count: 0,
+        });
+        EntityUpgradeRules::<T>::insert(BENCH_ENTITY, EntityUpgradeRuleSystem {
+            enabled: true,
+            conflict_strategy: ConflictStrategy::HighestLevel,
+            rules,
+            next_rule_id: 1,
+        });
+
+        #[extrinsic_call]
+        update_upgrade_rule(RawOrigin::Signed(owner), BENCH_SHOP, 0u32, Some(false), Some(5u8));
+    }
+
+    #[benchmark]
+    fn remove_upgrade_rule() {
+        let owner: T::AccountId = BENCH_OWNER.into();
+
+        let mut levels: BoundedVec<CustomLevel, <T as Config>::MaxCustomLevels> = BoundedVec::default();
+        let _ = levels.try_push(CustomLevel {
+            id: 0,
+            name: b"VIP1".to_vec().try_into().unwrap_or_default(),
+            threshold: 100u64,
+            discount_rate: 0,
+            commission_bonus: 0,
+        });
+        EntityLevelSystems::<T>::insert(BENCH_ENTITY, EntityLevelSystem {
+            use_custom: true,
+            upgrade_mode: LevelUpgradeMode::AutoUpgrade,
+            levels,
+        });
+
+        let mut rules: BoundedVec<UpgradeRuleOf<T>, <T as Config>::MaxUpgradeRules> = BoundedVec::default();
+        let _ = rules.try_push(UpgradeRule {
+            id: 0,
+            name: b"Rule1".to_vec().try_into().unwrap_or_default(),
+            trigger: UpgradeTrigger::TotalSpent { threshold: 1_000_000 },
+            target_level_id: 0,
+            duration: None,
+            enabled: true,
+            priority: 0,
+            stackable: false,
+            max_triggers: None,
+            trigger_count: 0,
+        });
+        EntityUpgradeRules::<T>::insert(BENCH_ENTITY, EntityUpgradeRuleSystem {
+            enabled: true,
+            conflict_strategy: ConflictStrategy::HighestLevel,
+            rules,
+            next_rule_id: 1,
+        });
+
+        #[extrinsic_call]
+        remove_upgrade_rule(RawOrigin::Signed(owner), BENCH_SHOP, 0u32);
+    }
+
+    #[benchmark]
+    fn set_upgrade_rule_system_enabled() {
+        let owner: T::AccountId = BENCH_OWNER.into();
+
+        EntityUpgradeRules::<T>::insert(BENCH_ENTITY, EntityUpgradeRuleSystem::<frame_system::pallet_prelude::BlockNumberFor<T>, <T as Config>::MaxUpgradeRules> {
+            enabled: true,
+            conflict_strategy: ConflictStrategy::HighestLevel,
+            rules: BoundedVec::default(),
+            next_rule_id: 0,
+        });
+
+        #[extrinsic_call]
+        set_upgrade_rule_system_enabled(RawOrigin::Signed(owner), BENCH_SHOP, false);
+    }
+
+    #[benchmark]
+    fn set_conflict_strategy() {
+        let owner: T::AccountId = BENCH_OWNER.into();
+
+        EntityUpgradeRules::<T>::insert(BENCH_ENTITY, EntityUpgradeRuleSystem::<frame_system::pallet_prelude::BlockNumberFor<T>, <T as Config>::MaxUpgradeRules> {
+            enabled: true,
+            conflict_strategy: ConflictStrategy::HighestLevel,
+            rules: BoundedVec::default(),
+            next_rule_id: 0,
+        });
+
+        #[extrinsic_call]
+        set_conflict_strategy(RawOrigin::Signed(owner), BENCH_SHOP, ConflictStrategy::HighestPriority);
+    }
+
+    #[benchmark]
+    fn reject_member() {
+        let owner: T::AccountId = BENCH_OWNER.into();
+        let pending = account_id::<T>(406);
+
+        let now = frame_system::Pallet::<T>::block_number();
+        PendingMembers::<T>::insert(BENCH_ENTITY, &pending, (None::<T::AccountId>, now));
+
+        #[extrinsic_call]
+        reject_member(RawOrigin::Signed(owner), BENCH_SHOP, pending);
+    }
+
+    #[benchmark]
+    fn set_member_stats_policy() {
+        let owner: T::AccountId = BENCH_OWNER.into();
+
+        #[extrinsic_call]
+        set_member_stats_policy(RawOrigin::Signed(owner), BENCH_SHOP, 0b0000_0011u8);
+    }
+
+    #[benchmark]
+    fn cancel_pending_member() {
+        let caller = account_id::<T>(407);
+
+        let now = frame_system::Pallet::<T>::block_number();
+        // 使用 entity_id 作为 key（cancel_pending_member 内部通过 shop_id 解析 entity_id）
+        PendingMembers::<T>::insert(BENCH_ENTITY, &caller, (None::<T::AccountId>, now));
+
+        #[extrinsic_call]
+        cancel_pending_member(RawOrigin::Signed(caller), BENCH_SHOP);
+    }
+
+    #[benchmark]
+    fn batch_reject_members() {
+        let owner: T::AccountId = BENCH_OWNER.into();
+
+        let now = frame_system::Pallet::<T>::block_number();
+        let mut accounts = alloc::vec::Vec::new();
+        for i in 0..50u32 {
+            let acc = account_id::<T>(i + 600);
+            PendingMembers::<T>::insert(BENCH_ENTITY, &acc, (None::<T::AccountId>, now));
+            accounts.push(acc);
+        }
+
+        #[extrinsic_call]
+        batch_reject_members(RawOrigin::Signed(owner), BENCH_SHOP, accounts);
+    }
+
+    #[benchmark]
+    fn unban_member() {
+        let owner: T::AccountId = BENCH_OWNER.into();
+        let target = account_id::<T>(408);
+
+        seed_member::<T>(BENCH_ENTITY, &target, None);
+        // 手动设置封禁状态
+        let now = frame_system::Pallet::<T>::block_number();
+        EntityMembers::<T>::mutate(BENCH_ENTITY, &target, |maybe| {
+            if let Some(ref mut m) = maybe {
+                m.banned_at = Some(now);
+            }
+        });
+        BannedMemberCount::<T>::insert(BENCH_ENTITY, 1u32);
+
+        #[extrinsic_call]
+        unban_member(RawOrigin::Signed(owner), BENCH_SHOP, target);
+    }
+
+    #[benchmark]
+    fn reset_level_system() {
+        let owner: T::AccountId = BENCH_OWNER.into();
+
+        let mut levels: BoundedVec<CustomLevel, <T as Config>::MaxCustomLevels> = BoundedVec::default();
+        let _ = levels.try_push(CustomLevel {
+            id: 0,
+            name: b"VIP1".to_vec().try_into().unwrap_or_default(),
+            threshold: 100u64,
+            discount_rate: 0,
+            commission_bonus: 0,
+        });
+        EntityLevelSystems::<T>::insert(BENCH_ENTITY, EntityLevelSystem {
+            use_custom: true,
+            upgrade_mode: LevelUpgradeMode::AutoUpgrade,
+            levels,
+        });
+        // 确保所有非零等级会员数为 0
+        LevelMemberCount::<T>::insert(BENCH_ENTITY, 0u8, 5u32);
+
+        #[extrinsic_call]
+        reset_level_system(RawOrigin::Signed(owner), BENCH_SHOP);
+    }
+
+    #[benchmark]
+    fn reset_upgrade_rule_system() {
+        let owner: T::AccountId = BENCH_OWNER.into();
+
+        EntityUpgradeRules::<T>::insert(BENCH_ENTITY, EntityUpgradeRuleSystem::<frame_system::pallet_prelude::BlockNumberFor<T>, <T as Config>::MaxUpgradeRules> {
+            enabled: true,
+            conflict_strategy: ConflictStrategy::HighestLevel,
+            rules: BoundedVec::default(),
+            next_rule_id: 0,
+        });
+
+        #[extrinsic_call]
+        reset_upgrade_rule_system(RawOrigin::Signed(owner), BENCH_SHOP);
+    }
+
+    #[benchmark]
+    fn activate_member() {
+        let owner: T::AccountId = BENCH_OWNER.into();
+        let target = account_id::<T>(409);
+
+        seed_member::<T>(BENCH_ENTITY, &target, None);
+        // seed_member 默认 activated = false，符合前置条件
+
+        #[extrinsic_call]
+        activate_member(RawOrigin::Signed(owner), BENCH_SHOP, target);
+    }
+
+    #[benchmark]
+    fn deactivate_member() {
+        let owner: T::AccountId = BENCH_OWNER.into();
+        let target = account_id::<T>(410);
+
+        seed_member::<T>(BENCH_ENTITY, &target, None);
+        // 先手动激活
+        EntityMembers::<T>::mutate(BENCH_ENTITY, &target, |maybe| {
+            if let Some(ref mut m) = maybe {
+                m.activated = true;
+            }
+        });
+
+        #[extrinsic_call]
+        deactivate_member(RawOrigin::Signed(owner), BENCH_SHOP, target);
+    }
+
     impl_benchmark_test_suite!(Pallet, crate::mock::new_test_ext(), crate::mock::Test);
 }

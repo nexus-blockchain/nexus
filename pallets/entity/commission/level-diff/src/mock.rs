@@ -199,6 +199,8 @@ impl pallet_commission_level_diff::Config for Test {
     type EntityProvider = MockEntityProvider;
     type MaxCustomLevels = MaxCustomLevels;
     type WeightInfo = ();
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = ();
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

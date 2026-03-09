@@ -110,11 +110,11 @@ const FLOW_REGISTRY: Record<string, FlowDef> = {
 
 /** Flow 分组 */
 const FLOW_GROUPS: Record<string, string[]> = {
-  trading: ['T1', 'T2', 'T3', 'T4'],
-  entity: ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7', 'E8', 'E9'],
-  dispute: ['D1', 'D2'],
-  grouprobot: ['G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7'],
-  storage: ['S1'],
+  trading: ['T1', 'T2', 'T3', 'T4', 'T5'],
+  entity: ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7', 'E8', 'E9', 'E10', 'E11'],
+  dispute: ['D1', 'D2', 'D3'],
+  grouprobot: ['G1', 'G2', 'G3', 'A1', 'G4', 'G5', 'G6', 'G7'],
+  storage: ['S1', 'S2'],
   wave1: ['T5', 'E10', 'E11', 'D3', 'A1', 'S2'],
 };
 
@@ -189,9 +189,20 @@ const COVERAGE_MAP: CoverageMap = {
     'NM-001', 'NM-002', 'NM-003', 'NM-005', 'NM-006', 'NM-007',
     'NM-008', 'NM-011', 'NM-013', 'NM-014', 'NM-024', 'NM-029',
   ],
+  // 这批增量流主要覆盖 2026-03-09 新增接口，其中一部分在旧测试计划里还没有 case id。
+  'Flow-T5: NEX Market 管理/争议': [],
+  'Flow-E10: 订单治理/维护': [
+    'OD-008', 'OD-010', 'OD-017',
+  ],
+  'Flow-E11: Token/Governance 管理': [
+    'TK-003',
+  ],
   'Flow-D2: 托管': [
     'ES-001', 'ES-002', 'ES-003', 'ES-004', 'ES-005', 'ES-007',
     'ES-008', 'ES-009', 'ES-010', 'ES-011',
+  ],
+  'Flow-D3: 仲裁申诉': [
+    'AR-007', 'AR-008', 'AR-011', 'AR-024',
   ],
   'Flow-G4: 订阅服务': [
     'SB-001', 'SB-002', 'SB-003', 'SB-004', 'SB-007', 'SB-008',
@@ -206,6 +217,13 @@ const COVERAGE_MAP: CoverageMap = {
   ],
   'Flow-G7: 奖励分配': [
     'RW-001', 'RW-002',
+  ],
+  'Flow-A1: Ads Core 偏好/确认': [
+    'AC-001', 'AC-005', 'AC-022', 'AC-023', 'AC-026',
+    'AC-027', 'AC-029', 'AC-032', 'AG-001', 'AG-012',
+  ],
+  'Flow-S2: 存储计费/Slash 争议': [
+    'SS-001', 'SS-002', 'SS-012',
   ],
 };
 

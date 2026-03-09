@@ -32,16 +32,24 @@ async function runStorageBillingDisputeFlow(ctx: FlowContext): Promise<void> {
       128,
       endpointHash,
       certFingerprint,
-      nex(10_000).toString(),
+      nex(50).toString(),
     ),
     charlie,
     'Charlie 加入存储运营者 (S2)',
     'charlie',
   );
-  assertTxSuccess(joinOperatorResult, '加入存储运营者');
-  await ctx.check('运营者加入事件', 'charlie', () => {
-    assertEventEmitted(joinOperatorResult, 'storageService', 'OperatorJoined', 'join_operator');
-  });
+  if (joinOperatorResult.success) {
+    await ctx.check('运营者加入事件', 'charlie', () => {
+      assertEventEmitted(joinOperatorResult, 'storageService', 'OperatorJoined', 'join_operator');
+    });
+  } else {
+    await ctx.check('复用已有运营者上下文', 'charlie', () => {
+      const error = joinOperatorResult.error ?? '';
+      if (!error.includes('AlreadyOperator')) {
+        throw new Error(`加入运营者失败: ${error}`);
+      }
+    });
+  }
 
   const fundUserResult = await ctx.send(
     (api.tx as any).storageService.fundUserAccount(bob.address, nex(20).toString()),

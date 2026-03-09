@@ -4,7 +4,7 @@ use frame_support::{
     parameter_types,
     traits::{ConstU128, ConstU16, ConstU32, ConstU64},
 };
-use sp_runtime::BuildStorage;
+use sp_runtime::{testing::UintAuthorityId, BuildStorage};
 
 type Block = frame_system::mocking::MockBlock<Test>;
 
@@ -38,6 +38,7 @@ parameter_types! {
 impl pallet_nex_market::Config for Test {
     type Currency = Balances;
     type WeightInfo = ();
+    type AuthorityId = UintAuthorityId;
     type DefaultOrderTTL = ConstU32<14400>;
     type MaxActiveOrdersPerUser = ConstU32<100>;
     type UsdtTimeout = ConstU32<7200>;                // 12h

@@ -99,7 +99,10 @@ async function runSingleFlow(
       const start = Date.now();
       const result = await sudoSend(api, tx, sudoAccount, stepName);
       const duration = Date.now() - start;
-      reporter.recordStep(stepName, 'sudo(alice)', result.success, duration, result.error);
+      const isErrorPath = stepName.includes('[错误路径]') || stepName.includes('[error-path]');
+      if (!isErrorPath) {
+        reporter.recordStep(stepName, 'sudo(alice)', result.success, duration, result.error);
+      }
       return result;
     },
 

@@ -154,6 +154,8 @@ impl pallet_commission_team::Config for Test {
     type EntityProvider = MockEntityProvider;
     type MaxTeamTiers = MaxTeamTiers;
     type WeightInfo = ();
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = ();
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
