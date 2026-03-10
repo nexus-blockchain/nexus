@@ -72,6 +72,157 @@ jobs:
         shell: bash
         timeout-minutes: 5
 
+  e2e:
+    runs-on: ubuntu-latest
+    needs: []
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/free-disk-space
+      - uses: ./.github/actions/ubuntu-dependencies
+
+      - name: Build node in release mode
+        run: cargo build --package nexus-node --release
+        timeout-minutes: 90
+
+      - name: Start dev node
+        run: |
+          ./target/release/nexus-node --dev 2>&1 | tee node.log &
+          echo "NODE_PID=$!" >> "$GITHUB_ENV"
+          until curl -s '127.0.0.1:9944'; do sleep 3; done
+          echo "Node is up and accepting connections"
+        shell: bash
+        timeout-minutes: 5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install E2E dependencies
+        run: npm install
+        working-directory: scripts
+
+      - name: Run E2E tests (Phase 1)
+        run: npx tsx e2e/run-e2e.ts --phase 1
+        working-directory: scripts
+        env:
+          WS_URL: ws://127.0.0.1:9944
+        timeout-minutes: 15
+
+      - name: Stop dev node
+        if: always()
+        run: |
+          if [ -n "$NODE_PID" ]; then
+            kill "$NODE_PID" 2>/dev/null || true
+          fi
+
+      - name: Upload E2E report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report
+          path: scripts/e2e-report-*.json
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Upload node log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-log
+          path: node.log
+          retention-days: 7
+
+  benchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/free-disk-space
+      - uses: ./.github/actions/ubuntu-dependencies
+
+      - name: Build with runtime-benchmarks
+        run: cargo build --package nexus-node --release --features runtime-benchmarks
+        timeout-minutes: 90
+
+      - name: Run pallet benchmarks
+        run: |
+          PALLETS=(
+            frame_system
+            pallet_balances
+            pallet_timestamp
+            pallet_sudo
+            # Trading
+            pallet_nex_market
+            # Storage
+            pallet_storage_lifecycle
+            # Entity
+            pallet_entity_registry
+            pallet_entity_shop
+            pallet_entity_order
+            pallet_entity_review
+            pallet_entity_market
+            # GroupRobot
+            pallet_grouprobot_registry
+            pallet_grouprobot_consensus
+            pallet_grouprobot_ceremony
+            pallet_grouprobot_rewards
+          )
+          mkdir -p benchmark-results
+          for pallet in "${PALLETS[@]}"; do
+            echo "=== Benchmarking $pallet ==="
+            ./target/release/nexus-node benchmark pallet \
+              --chain dev \
+              --pallet "$pallet" \
+              --extrinsic "*" \
+              --steps 20 \
+              --repeat 10 \
+              --output "benchmark-results/${pallet}.txt" \
+              2>&1 | tail -20 || echo "WARN: $pallet benchmark failed"
+          done
+        timeout-minutes: 30
+
+      - name: Run machine benchmark
+        run: ./target/release/nexus-node benchmark machine --chain dev
+        timeout-minutes: 5
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-results/
+          retention-days: 30
+          if-no-files-found: ignore
+
+  try-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/free-disk-space
+      - uses: ./.github/actions/ubuntu-dependencies
+
+      - name: Build runtime with try-runtime
+        run: cargo build --package nexus-runtime --features try-runtime
+        timeout-minutes: 90
+
+      - name: Run tests with try-runtime feature
+        run: |
+          SKIP_WASM_BUILD=1 cargo test --workspace --features try-runtime \
+            2>&1 | tee try-runtime.log
+        timeout-minutes: 20
+
+      - name: Upload try-runtime log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: try-runtime-log
+          path: try-runtime.log
+          retention-days: 14
+          if-no-files-found: ignore
+
   build-docker:
     runs-on: ubuntu-latest
     steps:

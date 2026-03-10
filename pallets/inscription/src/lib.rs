@@ -32,12 +32,20 @@ pub mod pallet {
 	pub type InscriptionHash<T: Config> = StorageValue<_, H256, ValueQuery>;
 
 	#[pallet::genesis_config]
-	#[derive(frame_support::DefaultNoBound)]
 	pub struct GenesisConfig<T: Config> {
 		/// Raw inscription bytes (UTF-8 text).
 		pub inscription: Vec<u8>,
 		#[serde(skip)]
 		pub _phantom: core::marker::PhantomData<T>,
+	}
+
+	impl<T: Config> Default for GenesisConfig<T> {
+		fn default() -> Self {
+			Self {
+				inscription: b"NEXUS".to_vec(),
+				_phantom: Default::default(),
+			}
+		}
 	}
 
 	#[pallet::genesis_build]

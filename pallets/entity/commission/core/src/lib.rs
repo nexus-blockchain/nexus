@@ -30,7 +30,7 @@ pub mod runtime_api;
 pub mod weights;
 pub use weights::WeightInfo;
 
-#[cfg(any(test, feature = "runtime-benchmarks"))]
+#[cfg(test)]
 mod mock;
 #[cfg(test)]
 mod tests;

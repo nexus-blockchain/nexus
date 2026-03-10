@@ -52,6 +52,7 @@ mod benchmarking;
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
+    use pallet_trading_common::DepositCalculator;
     use alloc::vec::Vec;
     use frame_support::{
         pallet_prelude::*,
@@ -62,7 +63,7 @@ pub mod pallet {
     use sp_runtime::traits::{CheckedAdd, CheckedSub, Saturating, Zero};
     use sp_runtime::SaturatedConversion;
     use sp_runtime::RuntimeAppPublic;
-    use codec::Encode;
+    use codec::{Decode, Encode};
     use sp_runtime::transaction_validity::{
         InvalidTransaction, TransactionSource, TransactionValidity, ValidTransaction,
     };
@@ -362,9 +363,16 @@ pub mod pallet {
         #[pallet::constant]
         type BuyerDepositRate: Get<u16>;
 
-        /// 最低保证金（NEX）
+        /// 最低保证金（NEX 兜底值）
         #[pallet::constant]
         type MinBuyerDeposit: Get<BalanceOf<Self>>;
+
+        /// 最低保证金 USDT 目标值（精度 10^6，如 1_000_000 = 1 USDT）
+        #[pallet::constant]
+        type MinBuyerDepositUsd: Get<u64>;
+
+        /// 动态 USDT→NEX 换算器
+        type DepositCalculator: pallet_trading_common::DepositCalculator<BalanceOf<Self>>;
 
         /// 保证金没收比例（bps, 10000=100%）
         #[pallet::constant]
@@ -692,6 +700,10 @@ pub mod pallet {
                     "Processing {} pending USDT trades at block {:?}", pending.len(), block_number);
 
                 for trade_id in pending.iter() {
+                    // 防重复：每笔交易每 3 个区块才调用一次 TronGrid API
+                    if Self::ocw_recently_checked(b"nex-verify", *trade_id, block_number, 3u32.into()) {
+                        continue;
+                    }
                     if let Some(trade) = UsdtTrades::<T>::get(trade_id) {
                         if trade.status == UsdtTradeStatus::AwaitingVerification {
                             if let Some(ref buyer_tron) = trade.buyer_tron_address {
@@ -700,6 +712,7 @@ pub mod pallet {
                                     buyer_tron.as_slice(),
                                     trade.seller_tron_address.as_slice(),
                                 );
+                                Self::ocw_mark_checked(b"nex-verify", *trade_id, block_number);
                             }
                         }
                     }
@@ -710,6 +723,10 @@ pub mod pallet {
             let underpaid = PendingUnderpaidTrades::<T>::get();
             if !underpaid.is_empty() {
                 for trade_id in underpaid.iter() {
+                    // 防重复：每笔交易每 5 个区块才调用一次
+                    if Self::ocw_recently_checked(b"nex-underpaid", *trade_id, block_number, 5u32.into()) {
+                        continue;
+                    }
                     if let Some(trade) = UsdtTrades::<T>::get(trade_id) {
                         if trade.status == UsdtTradeStatus::UnderpaidPending {
                             if let Some(ref buyer_tron) = trade.buyer_tron_address {
@@ -718,6 +735,7 @@ pub mod pallet {
                                     buyer_tron.as_slice(),
                                     trade.seller_tron_address.as_slice(),
                                 );
+                                Self::ocw_mark_checked(b"nex-underpaid", *trade_id, block_number);
                             }
                         }
                     }
@@ -731,6 +749,10 @@ pub mod pallet {
             }
 
             for trade_id in awaiting.iter() {
+                // 防重复：每笔交易每 5 个区块才调用一次
+                if Self::ocw_recently_checked(b"nex-await", *trade_id, block_number, 5u32.into()) {
+                    continue;
+                }
                 if let Some(trade) = UsdtTrades::<T>::get(trade_id) {
                     if trade.status != UsdtTradeStatus::AwaitingPayment {
                         continue;
@@ -747,6 +769,7 @@ pub mod pallet {
                             buyer_tron.as_slice(),
                             trade.seller_tron_address.as_slice(),
                         );
+                        Self::ocw_mark_checked(b"nex-await", *trade_id, block_number);
                     }
                 }
             }
@@ -911,6 +934,11 @@ pub mod pallet {
     pub type OcwAuthorities<T: Config> = StorageValue<
         _, BoundedVec<T::AuthorityId, ConstU32<32>>, ValueQuery,
     >;
+
+    /// 种子 Tron 收款地址（链上可治理修改，未设置时回退到 Config 默认值）
+    #[pallet::storage]
+    #[pallet::getter(fn seed_tron_address)]
+    pub type SeedTronAddressStore<T: Config> = StorageValue<_, TronAddress>;
 
     // ==================== Events ====================
 
@@ -1159,6 +1187,10 @@ pub mod pallet {
         OcwAuthoritiesUpdated {
             count: u32,
         },
+        /// 种子 Tron 收款地址已更新
+        SeedTronAddressUpdated {
+            new_address: TronAddress,
+        },
     }
 
     // ==================== Errors ====================
@@ -1281,6 +1313,10 @@ pub mod pallet {
         OcwInvalidSignature,
         /// OCW 授权列表过长（最多 32）
         TooManyAuthorities,
+        /// OCW 授权节点列表为空，无法验证签名
+        OcwAuthoritiesNotConfigured,
+        /// tx_hash 为必填项，不能为空
+        TxHashRequired,
     }
 
     // ==================== Extrinsics ====================
@@ -1854,10 +1890,9 @@ pub mod pallet {
             let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
             ensure!(trade.status == UsdtTradeStatus::AwaitingVerification, Error::<T>::InvalidTradeStatus);
 
-            // 🆕 C3: 检查 tx_hash 是否已被使用
-            if let Some(ref hash) = tx_hash {
-                ensure!(!UsedTxHashes::<T>::contains_key(hash), Error::<T>::TxHashAlreadyUsed);
-            }
+            // C3: tx_hash 必填，防止绕过重放保护
+            let hash = tx_hash.ok_or(Error::<T>::TxHashRequired)?;
+            ensure!(!UsedTxHashes::<T>::contains_key(&hash), Error::<T>::TxHashAlreadyUsed);
 
             let verification_result = Self::calculate_payment_verification_result(
                 trade.usdt_amount, actual_amount,
@@ -1913,7 +1948,7 @@ pub mod pallet {
                 }
             }
 
-            if let Some(hash) = tx_hash {
+            {
                 let now = <frame_system::Pallet<T>>::block_number();
                 UsedTxHashes::<T>::insert(hash, (trade_id, now));
             }
@@ -2070,8 +2105,9 @@ pub mod pallet {
             ensure!(order_count <= T::MaxWaivedSeedOrders::get(), Error::<T>::TooManySeedOrders);
 
             let seed_account = T::SeedLiquidityAccount::get();
-            let tron_addr: TronAddress = T::SeedTronAddress::get().to_vec()
-                .try_into().map_err(|_| Error::<T>::InvalidTronAddress)?;
+            let tron_addr: TronAddress = SeedTronAddressStore::<T>::get()
+                .unwrap_or_else(|| T::SeedTronAddress::get().to_vec()
+                    .try_into().expect("Config SeedTronAddress must be valid"));
 
             // 瀑布式基准价 + 溢价
             let ref_price = Self::get_seed_reference_price()
@@ -2149,10 +2185,9 @@ pub mod pallet {
             ensure!(trade.status == UsdtTradeStatus::AwaitingPayment, Error::<T>::InvalidTradeStatus);
             ensure!(trade.buyer_tron_address.is_some(), Error::<T>::InvalidTronAddress);
 
-            // 🆕 C3: 检查 tx_hash 是否已被使用
-            if let Some(ref hash) = tx_hash {
-                ensure!(!UsedTxHashes::<T>::contains_key(hash), Error::<T>::TxHashAlreadyUsed);
-            }
+            // C3: tx_hash 必填，防止绕过重放保护
+            let hash = tx_hash.ok_or(Error::<T>::TxHashRequired)?;
+            ensure!(!UsedTxHashes::<T>::contains_key(&hash), Error::<T>::TxHashAlreadyUsed);
 
             let verification_result = Self::calculate_payment_verification_result(
                 trade.usdt_amount, actual_amount,
@@ -2209,9 +2244,9 @@ pub mod pallet {
                 }
             }
 
-            // 🆕 C3: 记录已使用的 tx_hash（防重放）
-            // 🆕 M7: 同时记录插入区块号，用于 TTL 清理
-            if let Some(hash) = tx_hash {
+            // C3: 记录已使用的 tx_hash（防重放）
+            // M7: 同时记录插入区块号，用于 TTL 清理
+            {
                 let now = <frame_system::Pallet<T>>::block_number();
                 UsedTxHashes::<T>::insert(hash, (trade_id, now));
             }
@@ -2807,15 +2842,17 @@ pub mod pallet {
             } else {
                 // C1: 买单修改数量 → 重算保证金差额
                 let nex_u128_old: u128 = old_amount.saturated_into();
-                let old_usdt = (nex_u128_old
+                let old_usdt = u64::try_from(nex_u128_old
                     .saturating_mul(order.usdt_price as u128)
-                    .saturating_div(1_000_000_000_000u128)) as u64;
+                    .saturating_div(1_000_000_000_000u128))
+                    .map_err(|_| Error::<T>::ArithmeticOverflow)?;
                 let old_deposit = Self::calculate_buyer_deposit(old_usdt);
 
                 let nex_u128_new: u128 = new_amount.saturated_into();
-                let new_usdt = (nex_u128_new
+                let new_usdt = u64::try_from(nex_u128_new
                     .saturating_mul(order.usdt_price as u128)
-                    .saturating_div(1_000_000_000_000u128)) as u64;
+                    .saturating_div(1_000_000_000_000u128))
+                    .map_err(|_| Error::<T>::ArithmeticOverflow)?;
                 let new_deposit = Self::calculate_buyer_deposit(new_usdt);
 
                 if new_deposit > old_deposit {
@@ -2905,6 +2942,27 @@ pub mod pallet {
             Self::deposit_event(Event::OcwAuthoritiesUpdated { count });
             Ok(())
         }
+
+        /// 设置种子 Tron 收款地址（MarketAdmin 权限）
+        ///
+        /// 链上可治理修改 seed_liquidity 使用的 Tron 收款地址。
+        /// 未设置时回退到 Config 中编译时默认值。
+        #[pallet::call_index(35)]
+        #[pallet::weight(Weight::from_parts(30_000_000, 4_000))]
+        pub fn set_seed_tron_address(
+            origin: OriginFor<T>,
+            new_address: Vec<u8>,
+        ) -> DispatchResult {
+            T::MarketAdminOrigin::ensure_origin(origin)?;
+            ensure!(new_address.len() == 34, Error::<T>::InvalidTronAddress);
+            ensure!(new_address[0] == b'T', Error::<T>::InvalidTronAddress);
+            let bounded: TronAddress = new_address
+                .try_into()
+                .map_err(|_| Error::<T>::InvalidTronAddress)?;
+            SeedTronAddressStore::<T>::put(bounded.clone());
+            Self::deposit_event(Event::SeedTronAddressUpdated { new_address: bounded });
+            Ok(())
+        }
     }
 
     // ==================== ValidateUnsigned ====================
@@ -2926,11 +2984,13 @@ pub mod pallet {
                     if OcwVerificationResults::<T>::contains_key(trade_id) {
                         return InvalidTransaction::Custom(12).into();
                     }
-                    // 🆕 C3: 在验证阶段即检查 tx_hash 重放
-                    if let Some(ref hash) = tx_hash {
-                        if UsedTxHashes::<T>::contains_key(hash) {
+                    // C3: tx_hash 必填 + 重放检查
+                    match tx_hash {
+                        None => return InvalidTransaction::Custom(13).into(),
+                        Some(ref hash) if UsedTxHashes::<T>::contains_key(hash) => {
                             return InvalidTransaction::Custom(13).into();
                         }
+                        _ => {}
                     }
                     // 🆕 C4: actual_amount 安全边界检查
                     // 拒绝明显伪造的金额（超过预期 10 倍）防止恶意强制 Overpaid
@@ -2945,14 +3005,15 @@ pub mod pallet {
                     // OCW 签名验证（在 ValidateUnsigned 阶段即拒绝无效签名）
                     {
                         let authorities = OcwAuthorities::<T>::get();
-                        if !authorities.is_empty() {
-                            if !authorities.contains(authority) {
-                                return InvalidTransaction::Custom(15).into();
-                            }
-                            let payload = (trade_id, actual_amount, tx_hash.clone()).encode();
-                            if !authority.verify(&payload, signature) {
-                                return InvalidTransaction::Custom(16).into();
-                            }
+                        if authorities.is_empty() {
+                            return InvalidTransaction::Custom(17).into();
+                        }
+                        if !authorities.contains(authority) {
+                            return InvalidTransaction::Custom(15).into();
+                        }
+                        let payload = (trade_id, actual_amount, tx_hash.clone()).encode();
+                        if !authority.verify(&payload, signature) {
+                            return InvalidTransaction::Custom(16).into();
                         }
                     }
                     let priority = match source {
@@ -2979,11 +3040,13 @@ pub mod pallet {
                     if trade.buyer_tron_address.is_none() {
                         return InvalidTransaction::Custom(22).into();
                     }
-                    // 🆕 C3: 在验证阶段即检查 tx_hash 重放
-                    if let Some(ref hash) = tx_hash {
-                        if UsedTxHashes::<T>::contains_key(hash) {
+                    // C3: tx_hash 必填 + 重放检查
+                    match tx_hash {
+                        None => return InvalidTransaction::Custom(23).into(),
+                        Some(ref hash) if UsedTxHashes::<T>::contains_key(hash) => {
                             return InvalidTransaction::Custom(23).into();
                         }
+                        _ => {}
                     }
                     // 🆕 C4: actual_amount 安全边界检查
                     let amount_cap = trade.usdt_amount.saturating_mul(10);
@@ -2997,14 +3060,15 @@ pub mod pallet {
                     // OCW 签名验证
                     {
                         let authorities = OcwAuthorities::<T>::get();
-                        if !authorities.is_empty() {
-                            if !authorities.contains(authority) {
-                                return InvalidTransaction::Custom(25).into();
-                            }
-                            let payload = (trade_id, actual_amount, tx_hash.clone()).encode();
-                            if !authority.verify(&payload, signature) {
-                                return InvalidTransaction::Custom(26).into();
-                            }
+                        if authorities.is_empty() {
+                            return InvalidTransaction::Custom(27).into();
+                        }
+                        if !authorities.contains(authority) {
+                            return InvalidTransaction::Custom(25).into();
+                        }
+                        let payload = (trade_id, actual_amount, tx_hash.clone()).encode();
+                        if !authority.verify(&payload, signature) {
+                            return InvalidTransaction::Custom(26).into();
                         }
                     }
                     let priority = match source {
@@ -3046,14 +3110,15 @@ pub mod pallet {
                     // OCW 签名验证
                     {
                         let authorities = OcwAuthorities::<T>::get();
-                        if !authorities.is_empty() {
-                            if !authorities.contains(authority) {
-                                return InvalidTransaction::Custom(34).into();
-                            }
-                            let payload = (trade_id, new_actual_amount).encode();
-                            if !authority.verify(&payload, signature) {
-                                return InvalidTransaction::Custom(35).into();
-                            }
+                        if authorities.is_empty() {
+                            return InvalidTransaction::Custom(36).into();
+                        }
+                        if !authorities.contains(authority) {
+                            return InvalidTransaction::Custom(34).into();
+                        }
+                        let payload = (trade_id, new_actual_amount).encode();
+                        if !authority.verify(&payload, signature) {
+                            return InvalidTransaction::Custom(35).into();
                         }
                     }
                     let priority = match source {
@@ -3090,10 +3155,7 @@ pub mod pallet {
             payload: &[u8],
         ) -> DispatchResult {
             let authorities = OcwAuthorities::<T>::get();
-            // 空列表 = 未配置，跳过验证（测试网兼容）
-            if authorities.is_empty() {
-                return Ok(());
-            }
+            ensure!(!authorities.is_empty(), Error::<T>::OcwAuthoritiesNotConfigured);
             ensure!(authorities.contains(authority), Error::<T>::OcwAuthorityNotAuthorized);
             let payload_vec = alloc::vec::Vec::from(payload);
             ensure!(authority.verify(&payload_vec, signature), Error::<T>::OcwInvalidSignature);
@@ -3259,7 +3321,12 @@ pub mod pallet {
                 .saturating_mul(usdt_to_nex as u128)
                 .saturating_div(1_000_000);
             let calculated: BalanceOf<T> = deposit_u128.saturated_into();
-            let min_deposit = T::MinBuyerDeposit::get();
+
+            // 动态计算最低保证金（USDT 目标 → NEX）
+            let min_deposit = T::DepositCalculator::calculate_deposit(
+                T::MinBuyerDepositUsd::get(),
+                T::MinBuyerDeposit::get(),
+            );
 
             if calculated > min_deposit { calculated } else { min_deposit }
         }
@@ -3918,7 +3985,7 @@ pub mod pallet {
             }
 
             let cumulative_diff = current_cumulative.saturating_sub(snapshot.cumulative_price);
-            Some((cumulative_diff / (block_diff as u128)) as u64)
+            u64::try_from(cumulative_diff / (block_diff as u128)).ok()
         }
 
         fn is_twap_data_sufficient(
@@ -4044,6 +4111,46 @@ pub mod pallet {
             let mut key = b"nex_market_ocw::".to_vec();
             key.extend_from_slice(&trade_id.to_le_bytes());
             key
+        }
+
+        // ========================= OCW 防重复调用辅助函数 =========================
+
+        /// 检查某笔交易是否在最近 `cooldown` 个区块内已被 OCW 检查过。
+        /// 避免每个区块都调用外部 API（TronGrid），节省配额。
+        fn ocw_recently_checked(
+            prefix: &[u8],
+            trade_id: u64,
+            current_block: BlockNumberFor<T>,
+            cooldown: BlockNumberFor<T>,
+        ) -> bool {
+            let mut key = prefix.to_vec();
+            key.extend_from_slice(b"::");
+            key.extend_from_slice(&trade_id.to_le_bytes());
+            if let Some(bytes) = sp_io::offchain::local_storage_get(
+                sp_core::offchain::StorageKind::PERSISTENT,
+                &key,
+            ) {
+                if let Ok(last_block) = <BlockNumberFor<T> as codec::Decode>::decode(&mut &bytes[..]) {
+                    return current_block.saturating_sub(last_block) < cooldown;
+                }
+            }
+            false
+        }
+
+        /// 记录某笔交易被 OCW 检查的区块号。
+        fn ocw_mark_checked(
+            prefix: &[u8],
+            trade_id: u64,
+            current_block: BlockNumberFor<T>,
+        ) {
+            let mut key = prefix.to_vec();
+            key.extend_from_slice(b"::");
+            key.extend_from_slice(&trade_id.to_le_bytes());
+            sp_io::offchain::local_storage_set(
+                sp_core::offchain::StorageKind::PERSISTENT,
+                &key,
+                &codec::Encode::encode(&current_block),
+            );
         }
 
         /// OCW: 预检 AwaitingPayment 交易是否已有 USDT 到账

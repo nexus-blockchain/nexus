@@ -90,7 +90,8 @@ type BalanceOf<T> =
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
-	use frame_support::traits::{Currency as CurrencyT, Imbalance, ReservableCurrency};
+	use pallet_trading_common::DepositCalculator;
+	use frame_support::traits::{ConstBool, Currency as CurrencyT, Imbalance, ReservableCurrency};
 
 	const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
 
@@ -106,9 +107,14 @@ pub mod pallet {
 		/// 最大活跃节点数
 		#[pallet::constant]
 		type MaxActiveNodes: Get<u32>;
-		/// 最小质押额
+		/// 最小质押额（NEX 兜底值）
 		#[pallet::constant]
 		type MinStake: Get<BalanceOf<Self>>;
+		/// 最小质押 USDT 目标值（精度 10^6，如 50_000_000 = 50 USDT）
+		#[pallet::constant]
+		type MinStakeUsd: Get<u64>;
+		/// 动态 USDT→NEX 换算器
+		type DepositCalculator: pallet_trading_common::DepositCalculator<BalanceOf<Self>>;
 		/// 退出冷却期 (区块数)
 		#[pallet::constant]
 		type ExitCooldownPeriod: Get<BlockNumberFor<Self>>;
@@ -218,6 +224,14 @@ pub mod pallet {
 	#[pallet::storage]
 	pub type ReporterRewardPct<T: Config> = StorageValue<_, u32, ValueQuery>;
 
+	/// P15: 共识开关 (false=跳过奖励分发, 仅保留结算+uptime+Era推进)
+	#[pallet::storage]
+	pub type ConsensusEnabled<T: Config> = StorageValue<_, bool, ValueQuery, ConstBool<true>>;
+
+	/// P15: 允许单源 TEE 降级 (true=单个 TEE 节点仍获权重; false=需多个 TEE 节点才分发)
+	#[pallet::storage]
+	pub type AllowSingleSourceFallback<T: Config> = StorageValue<_, bool, ValueQuery, ConstBool<true>>;
+
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
@@ -253,6 +267,8 @@ pub mod pallet {
 		NodeForceReinstated { node_id: NodeId },
 		/// P13: Era 被手动触发结束
 		EraForceEnded { era: u64 },
+		/// P15: 共识配置已更新
+		ConsensusConfigUpdated { consensus_enabled: bool, allow_single_source_fallback: bool },
 	}
 
 	// ========================================================================
@@ -394,7 +410,7 @@ pub mod pallet {
 			let who = ensure_signed(origin)?;
 			ensure!(!Nodes::<T>::contains_key(&node_id), Error::<T>::NodeAlreadyRegistered);
 			ensure!(!OperatorNodes::<T>::contains_key(&who), Error::<T>::NodeAlreadyRegistered);
-			ensure!(stake >= T::MinStake::get(), Error::<T>::InsufficientStake);
+			ensure!(stake >= Self::calculate_min_stake(), Error::<T>::InsufficientStake);
 
 			T::Currency::reserve(&who, stake)?;
 
@@ -751,7 +767,7 @@ pub mod pallet {
 				let node = maybe_node.as_mut().ok_or(Error::<T>::NodeNotFound)?;
 				ensure!(node.operator == who, Error::<T>::NotOperator);
 				ensure!(node.status == NodeStatus::Suspended, Error::<T>::NodeNotSuspended);
-				ensure!(node.stake >= T::MinStake::get(), Error::<T>::InsufficientStake);
+				ensure!(node.stake >= Self::calculate_min_stake(), Error::<T>::InsufficientStake);
 				node.status = NodeStatus::Active;
 				Ok(())
 			})?;
@@ -1020,11 +1036,47 @@ pub mod pallet {
 			Self::deposit_event(Event::EraForceEnded { era });
 			Ok(())
 		}
+
+		// ====================================================================
+		// P15: 共识配置开关
+		// ====================================================================
+
+		/// 治理设置共识配置 (root)
+		///
+		/// - `consensus_enabled`: false 时跳过奖励分发 (保留结算+uptime+Era推进)
+		/// - `allow_single_source_fallback`: false 时需要多个 TEE 节点才分发奖励
+		#[pallet::call_index(25)]
+		#[pallet::weight(T::WeightInfo::set_consensus_config())]
+		pub fn set_consensus_config(
+			origin: OriginFor<T>,
+			consensus_enabled: bool,
+			allow_single_source_fallback: bool,
+		) -> DispatchResult {
+			ensure_root(origin)?;
+			ConsensusEnabled::<T>::put(consensus_enabled);
+			AllowSingleSourceFallback::<T>::put(allow_single_source_fallback);
+			Self::deposit_event(Event::ConsensusConfigUpdated {
+				consensus_enabled,
+				allow_single_source_fallback,
+			});
+			Ok(())
+		}
 	}
 
 	// ========================================================================
 	// Internal Functions
 	// ========================================================================
+
+	/// 动态质押门槛计算
+	impl<T: Config> Pallet<T> {
+		/// 计算最低质押额（USDT 目标 → NEX 换算，无价格时回退兜底值）
+		pub fn calculate_min_stake() -> BalanceOf<T> {
+			T::DepositCalculator::calculate_deposit(
+				T::MinStakeUsd::get(),
+				T::MinStake::get(),
+			)
+		}
+	}
 
 	impl<T: Config> Pallet<T> {
 		/// 🆕 防膨胀: 清理过期 ProcessedSequences
@@ -1083,6 +1135,19 @@ pub mod pallet {
 			let subscription_income_u128 = settlement.total_income;
 			let treasury_share_u128 = settlement.treasury_share;
 
+			// ★ P15: consensus_enabled=false 时跳过奖励分发
+			if !ConsensusEnabled::<T>::get() {
+				T::PeerUptimeRecorder::record_era_uptime(era);
+				CurrentEra::<T>::put(era.saturating_add(1));
+				EraStartBlock::<T>::put(now);
+				T::RewardDistributor::prune_old_eras(era);
+				Self::deposit_event(Event::EraCompleted {
+					era,
+					total_distributed: BalanceOf::<T>::default(),
+				});
+				return;
+			}
+
 			if node_count == 0 {
 				// M5-R1: 无节点时仍执行 uptime 快照和 era 清理
 				T::PeerUptimeRecorder::record_era_uptime(era);
@@ -1101,6 +1166,7 @@ pub mod pallet {
 
 			// M1-fix: 合并 TEE 检查 + 权重计算为单次循环, 避免双重 Nodes::get()
 			let mut weights: alloc::vec::Vec<(NodeId, u128)> = alloc::vec::Vec::new();
+			let mut tee_flags: alloc::vec::Vec<bool> = alloc::vec::Vec::new();
 			for node_id in active_nodes.iter() {
 				if let Some(mut node) = Nodes::<T>::get(node_id) {
 					// 5. 检查 TEE 证明有效性, 过期则降级
@@ -1121,8 +1187,22 @@ pub mod pallet {
 						}
 					}
 					// 6. 计算节点权重 (使用已更新的 node)
+					tee_flags.push(node.is_tee_node);
 					let w = Self::compute_node_weight(&node, node_id);
 					weights.push((*node_id, w));
+				}
+			}
+
+			// ★ P15: allow_single_source_fallback=false 时, 需要多个 TEE 节点交叉验证
+			// 单源 TEE 不可信 → 将 TEE 节点降级为基础权重 (不影响非 TEE 节点)
+			if !AllowSingleSourceFallback::<T>::get() {
+				let tee_count = tee_flags.iter().filter(|&&is_tee| is_tee).count();
+				if tee_count < 2 {
+					for (i, w) in weights.iter_mut().enumerate() {
+						if i < tee_flags.len() && tee_flags[i] {
+							w.1 = BASE_NODE_WEIGHT; // TEE 降级为基础权重
+						}
+					}
 				}
 			}
 
@@ -1153,15 +1233,20 @@ pub mod pallet {
 			Self::deposit_event(Event::EraCompleted { era, total_distributed });
 		}
 
-		/// 计算节点权重 (非 TEE 节点返回 0, 不参与 Era 奖励分配)
+		/// 计算节点权重
 		///
-		/// TEE 节点: base × tee_factor / 10000
-		/// SGX 双证明节点: base × (tee_factor + sgx_bonus) / 10000
+		/// 所有活跃节点获得基础权重 BASE_NODE_WEIGHT, TEE 节点在此基础上
+		/// 乘以 tee_factor 获得额外激励, SGX 双证明再叠加 sgx_bonus.
+		///
+		/// - 非 TEE 节点: base
+		/// - TEE 节点: base × tee_factor / 10000
+		/// - SGX 双证明节点: base × (tee_factor + sgx_bonus) / 10000
 		fn compute_node_weight(node: &ProjectNode<T>, node_id: &NodeId) -> u128 {
-			if !node.is_tee_node {
-				return 0u128;
-			}
 			let base = BASE_NODE_WEIGHT;
+
+			if !node.is_tee_node {
+				return base;
+			}
 
 			let tee_multiplier = {
 				let m = TeeRewardMultiplier::<T>::get();
@@ -1205,6 +1290,16 @@ pub mod pallet {
 			let now = frame_system::Pallet::<T>::block_number();
 			let elapsed = now.saturating_sub(era_start);
 			era_length.saturating_sub(elapsed)
+		}
+
+		/// P15: 查询共识是否启用
+		pub fn is_consensus_enabled() -> bool {
+			ConsensusEnabled::<T>::get()
+		}
+
+		/// P15: 查询是否允许单源降级
+		pub fn is_single_source_fallback_allowed() -> bool {
+			AllowSingleSourceFallback::<T>::get()
 		}
 	}
 

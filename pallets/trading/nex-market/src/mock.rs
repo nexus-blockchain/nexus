@@ -50,6 +50,8 @@ impl pallet_nex_market::Config for Test {
     type RewardSource = RewardSourceId;
     type BuyerDepositRate = ConstU16<1000>;            // 10%
     type MinBuyerDeposit = ConstU128<{ 10_000_000_000_000 }>; // 10 NEX
+    type MinBuyerDepositUsd = ConstU64<1_000_000>;               // 1 USDT
+    type DepositCalculator = ();
     type DepositForfeitRate = ConstU16<10000>;         // 100%
     type UsdtToNexRate = ConstU64<{ 10_000_000_000 }>; // 1 USDT = 10 NEX
     type TreasuryAccount = TreasuryAccountId;

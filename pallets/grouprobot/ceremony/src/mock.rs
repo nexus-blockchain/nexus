@@ -97,7 +97,6 @@ parameter_types! {
 }
 
 impl pallet_grouprobot_ceremony::Config for Test {
-	type RuntimeEvent = RuntimeEvent;
 	type MaxParticipants = frame_support::traits::ConstU32<5>;
 	type MaxCeremonyHistory = frame_support::traits::ConstU32<10>;
 	type CeremonyValidityBlocks = CeremonyValidityBlocks;

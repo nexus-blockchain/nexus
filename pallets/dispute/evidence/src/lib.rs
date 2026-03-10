@@ -31,6 +31,7 @@ pub mod cid_validator;
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
+    use pallet_trading_common::DepositCalculator;
     use crate::{
         private_content::{EncryptedKeyBundles, UserPublicKey},
         weights::WeightInfo,
@@ -249,9 +250,13 @@ pub mod pallet {
         /// 押金货币（用于证据提交押金，防垃圾攻击）
         type Currency: ReservableCurrency<Self::AccountId>;
 
-        /// 每条证据提交所需押金，撤回/归档时退还，force_remove 时没收
+        /// 每条证据提交所需押金（NEX 兜底值，无价格时回退）
         #[pallet::constant]
         type EvidenceDeposit: Get<BalanceOf<Self>>;
+
+        /// 证据押金 USDT 目标值（精度 10^6，如 500_000 = 0.5 USDT）
+        #[pallet::constant]
+        type EvidenceDepositUsd: Get<u64>;
 
         /// 承诺揭示截止期限（区块数）。commit_hash 后超过此期限未 reveal 则自动清理释放配额
         /// 默认 100_800 ≈ 7天 (6s/block)
@@ -280,9 +285,16 @@ pub mod pallet {
         #[pallet::constant]
         type ArchiveDelayBlocks: Get<u32>;
 
-        /// 每条私密内容提交所需押金（防垃圾攻击，与 EvidenceDeposit 对齐）
+        /// 每条私密内容提交所需押金（NEX 兜底值）
         #[pallet::constant]
         type PrivateContentDeposit: Get<BalanceOf<Self>>;
+
+        /// 私密内容押金 USDT 目标值（精度 10^6，如 500_000 = 0.5 USDT）
+        #[pallet::constant]
+        type PrivateContentDepositUsd: Get<u64>;
+
+        /// 动态 USDT→NEX 换算器
+        type DepositCalculator: pallet_trading_common::DepositCalculator<BalanceOf<Self>>;
 
         /// 访问请求 TTL（区块数，过期后 on_idle 自动清理）
         /// 默认 201_600 ≈ 14天 (6s/block)
@@ -863,8 +875,8 @@ pub mod pallet {
                 Error::<T>::InvalidCidFormat
             );
 
-            // P0-#6: 预留押金
-            let deposit = T::EvidenceDeposit::get();
+            // P0-#6: 预留押金（动态 USDT→NEX 换算）
+            let deposit = Self::calculate_evidence_deposit();
             T::Currency::reserve(&who, deposit)
                 .map_err(|_| Error::<T>::InsufficientDeposit)?;
 
@@ -948,8 +960,8 @@ pub mod pallet {
             let cnt = EvidenceCountByNs::<T>::get((ns, subject_id));
             ensure!(cnt < T::MaxPerSubjectNs::get(), Error::<T>::TooManyForSubject);
 
-            // P0-#6: 预留押金
-            let deposit = T::EvidenceDeposit::get();
+            // P0-#6: 预留押金（动态 USDT→NEX 换算）
+            let deposit = Self::calculate_evidence_deposit();
             T::Currency::reserve(&who, deposit)
                 .map_err(|_| Error::<T>::InsufficientDeposit)?;
 
@@ -1162,8 +1174,8 @@ pub mod pallet {
             let now = <frame_system::Pallet<T>>::block_number();
             Self::touch_window(&who, now)?;
 
-            // P1修复: 预留押金
-            let pc_deposit = T::PrivateContentDeposit::get();
+            // P1修复: 预留押金（动态 USDT→NEX 换算）
+            let pc_deposit = Self::calculate_private_content_deposit();
             T::Currency::reserve(&who, pc_deposit)
                 .map_err(|_| Error::<T>::InsufficientDeposit)?;
 
@@ -1489,7 +1501,7 @@ pub mod pallet {
             let now = <frame_system::Pallet<T>>::block_number();
             Self::touch_window(&who, now)?;
 
-            let deposit = T::EvidenceDeposit::get();
+            let deposit = Self::calculate_evidence_deposit();
             T::Currency::reserve(&who, deposit)
                 .map_err(|_| Error::<T>::InsufficientDeposit)?;
 
@@ -2224,8 +2236,8 @@ pub mod pallet {
                 ensure!(CidHashIndex::<T>::get(h).is_none(), Error::<T>::DuplicateCidGlobal);
             }
 
-            // 预留押金
-            let deposit = T::EvidenceDeposit::get();
+            // 预留押金（动态 USDT→NEX 换算）
+            let deposit = Self::calculate_evidence_deposit();
             T::Currency::reserve(&who, deposit)
                 .map_err(|_| Error::<T>::InsufficientDeposit)?;
 
@@ -2270,6 +2282,25 @@ pub mod pallet {
                 id, ns, domain, target_id, content_type, owner: who,
             });
             Ok(())
+        }
+    }
+
+    /// 动态押金计算（USDT 目标值 → NEX 换算）
+    impl<T: Config> Pallet<T> {
+        /// 计算证据押金：按 USDT 目标动态换算，无价格时回退兜底值
+        pub fn calculate_evidence_deposit() -> BalanceOf<T> {
+            T::DepositCalculator::calculate_deposit(
+                T::EvidenceDepositUsd::get(),
+                T::EvidenceDeposit::get(),
+            )
+        }
+
+        /// 计算私密内容押金：按 USDT 目标动态换算，无价格时回退兜底值
+        pub fn calculate_private_content_deposit() -> BalanceOf<T> {
+            T::DepositCalculator::calculate_deposit(
+                T::PrivateContentDepositUsd::get(),
+                T::PrivateContentDeposit::get(),
+            )
         }
     }
 

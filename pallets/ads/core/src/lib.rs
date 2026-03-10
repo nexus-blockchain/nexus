@@ -124,6 +124,7 @@ pub enum ReceiptStatus {
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
+	use pallet_trading_common::DepositCalculator;
 	use frame_support::traits::{Currency, ReservableCurrency, ExistenceRequirement};
 
 	const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -195,9 +196,16 @@ pub mod pallet {
 		/// 收入分配策略 (适配层实现)
 		type RevenueDistributor: RevenueDistributor<Self::AccountId, BalanceOf<Self>>;
 
-		/// 私有广告注册费用
+		/// 私有广告注册费用（NEX 兜底值）
 		#[pallet::constant]
 		type PrivateAdRegistrationFee: Get<BalanceOf<Self>>;
+
+		/// 私有广告注册费 USDT 目标值（精度 10^6，如 500_000 = 0.5 USDT）
+		#[pallet::constant]
+		type PrivateAdRegistrationFeeUsd: Get<u64>;
+
+		/// 动态 USDT→NEX 换算器
+		type DepositCalculator: pallet_trading_common::DepositCalculator<BalanceOf<Self>>;
 
 		/// 结算激励 (基点, e.g. 10 = 0.1%)
 		#[pallet::constant]
@@ -1759,8 +1767,8 @@ pub mod pallet {
 				.ok_or(Error::<T>::NotPlacementAdmin)?;
 			ensure!(admin == who, Error::<T>::NotPlacementAdmin);
 
-			let fee = T::PrivateAdRegistrationFee::get()
-				.saturating_mul(count.into());
+			let unit_fee = Self::calculate_registration_fee();
+			let fee = unit_fee.saturating_mul(count.into());
 			if !fee.is_zero() {
 				let treasury = T::TreasuryAccount::get();
 				T::Currency::transfer(
@@ -2505,6 +2513,17 @@ pub mod pallet {
 	// Helper Functions
 	// ========================================================================
 
+	/// 动态费用计算
+	impl<T: Config> Pallet<T> {
+		/// 计算私有广告注册费（USDT 目标 → NEX 换算，无价格时回退兜底值）
+		fn calculate_registration_fee() -> BalanceOf<T> {
+			T::DepositCalculator::calculate_deposit(
+				T::PrivateAdRegistrationFeeUsd::get(),
+				T::PrivateAdRegistrationFee::get(),
+			)
+		}
+	}
+
 	impl<T: Config> Pallet<T> {
 		/// 结算核心逻辑 — settle_era_ads 和 force_settle_era_ads 共用
 		///
@@ -2755,7 +2774,7 @@ pub mod pallet {
 			day.try_into().unwrap_or(u32::MAX)
 		}
 
-		fn index_add_active(campaign_id: u64, delivery_types: u8) {
+		pub(crate) fn index_add_active(campaign_id: u64, delivery_types: u8) {
 			ActiveApprovedCampaigns::<T>::mutate(|list| {
 				if !list.contains(&campaign_id) {
 					if list.try_push(campaign_id).is_err() {

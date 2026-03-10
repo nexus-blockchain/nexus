@@ -195,7 +195,6 @@ impl pallet_storage_lifecycle::OnArchiveHandler for MockOnArchiveHandler {
 }
 
 impl pallet_storage_lifecycle::pallet::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type L1ArchiveDelay = L1ArchiveDelay;
     type L2ArchiveDelay = L2ArchiveDelay;
     type PurgeDelay = PurgeDelay;

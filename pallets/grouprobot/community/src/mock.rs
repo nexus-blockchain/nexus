@@ -64,7 +64,6 @@ impl BotRegistryProvider<u64> for MockBotRegistry {
 }
 
 impl pallet_grouprobot_community::Config for Test {
-	type RuntimeEvent = RuntimeEvent;
 	type MaxLogsPerCommunity = frame_support::traits::ConstU32<10>;
 	type ReputationCooldown = frame_support::traits::ConstU64<5>;
 	type MaxReputationDelta = frame_support::traits::ConstU32<100>;
@@ -73,6 +72,8 @@ impl pallet_grouprobot_community::Config for Test {
 	type WeightInfo = ();
 	type BotRegistry = MockBotRegistry;
 	type Subscription = MockSubscription;
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = ();
 }
 
 pub const OWNER: u64 = 1;

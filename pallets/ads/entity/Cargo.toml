@@ -15,6 +15,8 @@ codec = { features = ["derive"], workspace = true }
 scale-info = { features = ["derive"], workspace = true }
 pallet-ads-primitives = { path = "../primitives", default-features = false }
 pallet-entity-common = { path = "../../entity/common", default-features = false }
+# 动态 USDT→NEX 换算
+pallet-trading-common = { workspace = true, default-features = false }
 
 # Substrate
 frame-support = { workspace = true }
@@ -34,10 +36,12 @@ std = [
 	"scale-info/std",
 	"pallet-ads-primitives/std",
 	"pallet-entity-common/std",
+	"pallet-trading-common/std",
 	"frame-support/std",
 	"frame-system/std",
 	"sp-runtime/std",
 	"sp-core/std",
+	"frame-benchmarking?/std",
 ]
 try-runtime = [
 	"frame-support/try-runtime",

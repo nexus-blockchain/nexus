@@ -5,6 +5,8 @@
 import { ApiPromise, WsProvider } from '@polkadot/api';
 import { KeyringPair } from '@polkadot/keyring/types';
 import { SubmittableExtrinsic } from '@polkadot/api/types';
+import { blake2AsHex } from '@polkadot/util-crypto';
+import { hexToU8a } from '@polkadot/util';
 import { defaultConfig } from './config.js';
 
 let apiInstance: ApiPromise | null = null;
@@ -152,7 +154,14 @@ async function signAndSendWithRetry(
     let extIdx: number | undefined = txIndex;
     let extIdxSource = 'callback';
     if (extIdx === undefined || extIdx === null) {
-      // Heuristic: highest extrinsic index = our user tx (inherents have lower indices)
+      const blockMatchedIdx = await findExtrinsicIndexByHash(api, blockHash, txHash);
+      if (blockMatchedIdx !== undefined) {
+        extIdx = blockMatchedIdx;
+        extIdxSource = 'block-hash-match';
+      }
+    }
+    if (extIdx === undefined || extIdx === null) {
+      // Last-resort fallback for runtimes that don't expose txIndex and where raw block lookup fails.
       let maxIdx = -1;
       for (const record of allEvents) {
         if (record.phase.isApplyExtrinsic) {
@@ -231,6 +240,42 @@ async function signAndSendWithRetry(
       error: `[warn] cannot fetch block events: ${fetchErr.message}`,
     };
   }
+}
+
+async function findExtrinsicIndexByHash(
+  api: ApiPromise,
+  blockHash: string,
+  txHash: string,
+): Promise<number | undefined> {
+  try {
+    const rawBlock = await getRawBlock(api, blockHash);
+    const extrinsics = rawBlock?.block?.extrinsics;
+    if (!Array.isArray(extrinsics)) {
+      return undefined;
+    }
+
+    for (let index = 0; index < extrinsics.length; index++) {
+      const extrinsicHex = extrinsics[index];
+      if (typeof extrinsicHex !== 'string') continue;
+      const extrinsicHash = blake2AsHex(hexToU8a(extrinsicHex), 256);
+      if (extrinsicHash === txHash) {
+        return index;
+      }
+    }
+  } catch {
+    // Fall back to the legacy heuristic if the raw block RPC is unavailable.
+  }
+
+  return undefined;
+}
+
+async function getRawBlock(api: ApiPromise, blockHash: string): Promise<any> {
+  const provider = (api as any)?._rpcCore?.provider;
+  if (!provider || typeof provider.send !== 'function') {
+    throw new Error('Provider.send is not available for raw chain_getBlock');
+  }
+
+  return await provider.send('chain_getBlock', [blockHash]);
 }
 
 async function getEventsAtBlock(api: ApiPromise, blockHash: string): Promise<any[]> {

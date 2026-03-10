@@ -11,9 +11,12 @@
 
 use super::*;
 use frame_benchmarking::v2::*;
+use frame_support::traits::Get;
 use frame_support::BoundedVec;
 use frame_system::RawOrigin;
 use pallet::*;
+use sp_runtime::traits::Zero;
+use sp_runtime::Saturating;
 
 fn make_level_ratios<T: Config>(count: u32) -> BoundedVec<(u8, u16), T::MaxPoolRewardLevels> {
     let per_level = 10000u16 / (count as u16);

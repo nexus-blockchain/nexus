@@ -126,7 +126,6 @@ impl RevenueDistributor<u64, u128> for MockRevenueDistributor {
 }
 
 impl pallet_ads_core::Config for Test {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type MaxAdTextLength = ConstU32<280>;
 	type MaxAdUrlLength = ConstU32<256>;
@@ -145,6 +144,8 @@ impl pallet_ads_core::Config for Test {
 	type PlacementAdmin = MockPlacementAdmin;
 	type RevenueDistributor = MockRevenueDistributor;
 	type PrivateAdRegistrationFee = ConstU128<1_000_000_000_000>;
+	type PrivateAdRegistrationFeeUsd = ConstU64<500_000>;
+	type DepositCalculator = ();
 	type SettlementIncentiveBps = ConstU32<10>;
 	type MaxCampaignsPerAdvertiser = ConstU32<100>;
 	type MaxTargetsPerCampaign = ConstU32<20>;

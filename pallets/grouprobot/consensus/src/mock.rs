@@ -250,6 +250,8 @@ impl pallet_grouprobot_consensus::Config for Test {
 	type WeightInfo = ();
 	type MaxActiveNodes = frame_support::traits::ConstU32<10>;
 	type MinStake = MinStake;
+	type MinStakeUsd = frame_support::traits::ConstU64<50_000_000>;
+	type DepositCalculator = ();
 	type ExitCooldownPeriod = ExitCooldown;
 	type EraLength = EraLength;
 	type InflationPerEra = InflationPerEra;

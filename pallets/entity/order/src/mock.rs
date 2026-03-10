@@ -795,7 +795,6 @@ parameter_types! {
 }
 
 impl pallet_entity_order::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type Escrow = MockEscrow;
     type ShopProvider = MockShopProvider;

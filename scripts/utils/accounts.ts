@@ -1,7 +1,8 @@
 import { Keyring } from '@polkadot/keyring';
 import { KeyringPair } from '@polkadot/keyring/types';
+import { NEXUS_SS58_FORMAT } from './ss58.js';
 
-const keyring = new Keyring({ type: 'sr25519' });
+const keyring = new Keyring({ type: 'sr25519', ss58Format: NEXUS_SS58_FORMAT });
 
 export const ALICE_URI = '//Alice';
 export const BOB_URI = '//Bob';

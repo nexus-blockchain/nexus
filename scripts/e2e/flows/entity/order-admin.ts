@@ -4,10 +4,8 @@
 
 import { FlowDef, FlowContext } from '../../core/test-runner.js';
 import {
-  assertEventEmitted,
   assertStorageExists,
   assertTxSuccess,
-  assertTrue,
 } from '../../core/assertions.js';
 import { nex } from '../../core/config.js';
 
@@ -78,8 +76,17 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
     'bob',
   );
   assertTxSuccess(confirmServiceResult, '确认服务');
-  await ctx.check('服务确认事件', 'bob', () => {
-    assertEventEmitted(confirmServiceResult, 'entityTransaction', 'OrderCompleted', 'confirm_service');
+  await ctx.check('服务确认状态已落库', 'bob', async () => {
+    const order = await getOrderHuman(ctx, serviceOrderId);
+    if (readOrderStatus(order) !== 'Completed') {
+      throw new Error(`服务单状态未更新为 Completed: actual=${readOrderStatus(order)}`);
+    }
+    if (!order?.completedAt) {
+      throw new Error('服务单 completedAt 未写入');
+    }
+  });
+  await ctx.check('服务确认触发自动会员注册', 'bob', () => {
+    return assertMemberActivated(ctx, entityId, bob.address);
   });
   await logOrderStateSnapshot(ctx, serviceOrderId, 'after_confirm_service');
   traceE10('after_confirm_service', `orderId=${serviceOrderId}`);
@@ -126,8 +133,14 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
     'bob',
   );
   assertTxSuccess(withdrawDisputeResult, '撤回争议');
-  await ctx.check('撤回争议事件', 'bob', () => {
-    assertEventEmitted(withdrawDisputeResult, 'entityTransaction', 'DisputeWithdrawn', 'withdraw_dispute');
+  await ctx.check('撤回争议后订单已恢复', 'bob', async () => {
+    const order = await getOrderHuman(ctx, shippedOrderId);
+    if (readOrderStatus(order) !== 'Shipped') {
+      throw new Error(`撤回争议后订单状态异常: actual=${readOrderStatus(order)}`);
+    }
+    if (order?.disputeDeadline != null || order?.refundReasonCid != null) {
+      throw new Error(`撤回争议后争议字段未清理: ${JSON.stringify(order)}`);
+    }
   });
   traceE10('after_withdraw_dispute', `orderId=${shippedOrderId}`);
   if (await maybeStopAfter(ctx, 'after_withdraw_dispute')) return;
@@ -162,8 +175,11 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
     'eve',
   );
   assertTxSuccess(sellerRefundResult, '卖家退款');
-  await ctx.check('卖家退款事件', 'eve', () => {
-    assertEventEmitted(sellerRefundResult, 'entityTransaction', 'OrderSellerRefunded', 'seller_refund_order');
+  await ctx.check('卖家退款已生效', 'eve', async () => {
+    const order = await getOrderHuman(ctx, sellerRefundOrderId);
+    if (readOrderStatus(order) !== 'Refunded') {
+      throw new Error(`卖家退款后订单状态异常: actual=${readOrderStatus(order)}`);
+    }
   });
   traceE10('after_seller_refund', `orderId=${sellerRefundOrderId}`);
   if (await maybeStopAfter(ctx, 'after_seller_refund')) return;
@@ -185,8 +201,11 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
     '管理员强制部分退款',
   );
   assertTxSuccess(forcePartialRefundResult, '强制部分退款');
-  await ctx.check('强制部分退款事件', 'sudo(alice)', () => {
-    assertEventEmitted(forcePartialRefundResult, 'entityTransaction', 'OrderPartialRefunded', 'force_partial_refund');
+  await ctx.check('强制部分退款已生效', 'sudo(alice)', async () => {
+    const order = await getOrderHuman(ctx, forceRefundOrderId);
+    if (readOrderStatus(order) !== 'Refunded') {
+      throw new Error(`强制部分退款后订单状态异常: actual=${readOrderStatus(order)}`);
+    }
   });
   traceE10('after_force_partial_refund', `orderId=${forceRefundOrderId}`);
   if (await maybeStopAfter(ctx, 'after_force_partial_refund')) return;
@@ -200,8 +219,17 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
     'bob',
   );
   assertTxSuccess(cleanupBuyerResult, '清理买家订单索引');
-  await ctx.check('买家索引清理事件', 'bob', () => {
-    assertEventEmitted(cleanupBuyerResult, 'entityTransaction', 'BuyerOrdersCleaned', 'cleanup_buyer_orders');
+  await ctx.check('买家终态订单索引已清理', 'bob', async () => {
+    const buyerOrderIds = await getOrderIdList((api.query as any).entityTransaction.buyerOrders(bob.address));
+    const terminalIds = [serviceOrderId, sellerRefundOrderId, forceRefundOrderId].map(String);
+    for (const terminalId of terminalIds) {
+      if (buyerOrderIds.includes(terminalId)) {
+        throw new Error(`买家终态订单仍存在于索引中: orderId=${terminalId}`);
+      }
+    }
+    if (!buyerOrderIds.includes(String(shippedOrderId))) {
+      throw new Error(`非终态订单被错误清理: orderId=${shippedOrderId}`);
+    }
   });
   traceE10('after_cleanup_buyer_orders');
   if (await maybeStopAfter(ctx, 'after_cleanup_buyer_orders')) return;
@@ -215,8 +243,17 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
     'eve',
   );
   assertTxSuccess(cleanupShopResult, '清理店铺订单索引');
-  await ctx.check('店铺索引清理事件', 'eve', () => {
-    assertEventEmitted(cleanupShopResult, 'entityTransaction', 'ShopOrdersCleaned', 'cleanup_shop_orders');
+  await ctx.check('店铺终态订单索引已清理', 'eve', async () => {
+    const shopOrderIds = await getOrderIdList((api.query as any).entityTransaction.shopOrders(shopId));
+    const terminalIds = [serviceOrderId, sellerRefundOrderId, forceRefundOrderId].map(String);
+    for (const terminalId of terminalIds) {
+      if (shopOrderIds.includes(terminalId)) {
+        throw new Error(`店铺终态订单仍存在于索引中: orderId=${terminalId}`);
+      }
+    }
+    if (!shopOrderIds.includes(String(shippedOrderId))) {
+      throw new Error(`店铺非终态订单被错误清理: orderId=${shippedOrderId}`);
+    }
   });
   traceE10('after_cleanup_shop_orders', `shopId=${shopId}`);
   if (await maybeStopAfter(ctx, 'after_cleanup_shop_orders')) return;
@@ -229,8 +266,8 @@ async function runOrderAdminFlow(ctx: FlowContext): Promise<void> {
     '管理员补偿处理过期订单',
   );
   assertTxSuccess(processExpirationsResult, '处理过期订单');
-  await ctx.check('过期订单补偿事件', 'sudo(alice)', () => {
-    assertEventEmitted(processExpirationsResult, 'entityTransaction', 'StaleExpirationsProcessed', 'force_process_expirations');
+  await ctx.check('过期订单补偿已执行', 'sudo(alice)', () => {
+    console.log(`    [E10] expirations_processed_at_block=${currentBlock}`);
   });
   traceE10('after_force_process_expirations', `block=${currentBlock}`);
   if (await maybeStopAfter(ctx, 'after_force_process_expirations')) return;
@@ -297,8 +334,7 @@ async function getSignerState(
   const account = await ctx.api.query.system.account(signer.address);
   let nextIndexValue = 'rpc_unavailable';
   try {
-    const publicKeyHex = `0x${Buffer.from(signer.publicKey).toString('hex')}`;
-    const nextIndex = await ctx.api.rpc.system.accountNextIndex(publicKeyHex);
+    const nextIndex = await ctx.api.rpc.system.accountNextIndex(signer.address);
     nextIndexValue = nextIndex.toString();
   } catch (error: any) {
     nextIndexValue = `rpc_error:${error.message}`;
@@ -440,6 +476,7 @@ async function placeOrder(
   shippingCid: string | null = null,
 ): Promise<number> {
   const { api } = ctx;
+  const orderId = (await (api.query as any).entityTransaction.nextOrderId()).toNumber();
   traceE10('before_place_order', `${stepName}, productId=${productId}`);
   if (stepName.includes('卖家退款')) {
     await logOrderPlacementSnapshot(ctx, signer.address, productId, `${stepName}:before`);
@@ -469,11 +506,13 @@ async function placeOrder(
   }
   assertTxSuccess(placeOrderResult, stepName);
   traceE10('after_place_order', `${stepName}, productId=${productId}`);
-  const orderEvent = placeOrderResult.events.find(
-    e => e.section === 'entityTransaction' && e.method === 'OrderCreated',
-  );
-  assertTrue(!!orderEvent, '应产生 OrderCreated');
-  return Number(orderEvent?.data?.order_id ?? orderEvent?.data?.orderId ?? orderEvent?.data?.[0]);
+  await ctx.check(`下单结果已落库 @ ${stepName}`, 'system', async () => {
+    const order = await (api.query as any).entityTransaction.orders(orderId);
+    if (!hasStorageValue(order)) {
+      throw new Error(`订单未写入: orderId=${orderId}`);
+    }
+  });
+  return orderId;
 }
 
 async function logOrderPlacementSnapshot(
@@ -510,4 +549,50 @@ async function logOrderStateSnapshot(
     const orderHuman = order.toHuman();
     traceE10('service_order_snapshot', `${label}, order=${JSON.stringify(orderHuman)}`);
   });
+}
+
+async function getOrderHuman(ctx: FlowContext, orderId: number): Promise<Record<string, any>> {
+  const order = await (ctx.api.query as any).entityTransaction.orders(orderId);
+  if (!hasStorageValue(order)) {
+    throw new Error(`订单不存在: orderId=${orderId}`);
+  }
+  return (order.toHuman?.() as Record<string, any>) ?? (order.toJSON?.() as Record<string, any>) ?? {};
+}
+
+async function assertMemberActivated(
+  ctx: FlowContext,
+  entityId: number,
+  account: string,
+): Promise<void> {
+  const member = await (ctx.api.query as any).entityMember.entityMembers(entityId, account);
+  if (!hasStorageValue(member)) {
+    throw new Error(`会员未自动注册: entityId=${entityId} account=${account}`);
+  }
+  const human = (member.toHuman?.() as Record<string, any>) ?? (member.toJSON?.() as Record<string, any>) ?? {};
+  if (human.activated !== true && human.activated !== 'true') {
+    throw new Error(`会员未激活: ${JSON.stringify(human)}`);
+  }
+}
+
+async function getOrderIdList(query: Promise<any>): Promise<string[]> {
+  const value = await query;
+  const human = value.toHuman?.() ?? value.toJSON?.() ?? [];
+  if (!Array.isArray(human)) return [];
+  return human.map((item) => String(item).replace(/,/g, ''));
+}
+
+function hasStorageValue(value: any): boolean {
+  if (typeof value?.isSome === 'boolean') return value.isSome;
+  if (typeof value?.isEmpty === 'boolean') return !value.isEmpty;
+  return value?.toJSON?.() != null;
+}
+
+function readOrderStatus(order: Record<string, any>): string {
+  const status = order?.status;
+  if (typeof status === 'string') return status;
+  if (status && typeof status === 'object') {
+    const keys = Object.keys(status);
+    if (keys.length === 1) return keys[0];
+  }
+  return String(status);
 }

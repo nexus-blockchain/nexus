@@ -193,7 +193,6 @@ parameter_types! {
 }
 
 impl pallet_commission_level_diff::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type MemberProvider = MockMemberProvider;
     type EntityProvider = MockEntityProvider;

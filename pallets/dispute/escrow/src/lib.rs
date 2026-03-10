@@ -15,6 +15,9 @@ mod mock;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
@@ -289,7 +292,7 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
-        fn account() -> T::AccountId {
+        pub(crate) fn account() -> T::AccountId {
             T::EscrowPalletId::get().into_account_truncating()
         }
         /// 函数级中文注释：断言未暂停。

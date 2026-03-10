@@ -427,7 +427,9 @@ impl pallet_nex_market::Config for Runtime {
 	type VerificationReward = ConstU128<{ UNIT / 10 }>;     // 0.1 NEX
 	type RewardSource = NexMarketRewardSource;
 	type BuyerDepositRate = ConstU16<1000>;                  // 10%
-	type MinBuyerDeposit = ConstU128<{ 10 * UNIT }>;         // 10 NEX
+	type MinBuyerDeposit = ConstU128<{ UNIT / 100 }>;               // 0.01 NEX 兜底（仅防零）
+	type MinBuyerDepositUsd = ConstU64<300_000>;                     // 0.3 USDT（1 USDT × 30%）
+	type DepositCalculator = pallet_trading_common::DepositCalculatorImpl<TradingPricingProvider, Balance>;
 	type DepositForfeitRate = ConstU16<10000>;               // 100%
 	type UsdtToNexRate = ConstU64<10_000_000_000>;            // 1 USDT = 10 NEX
 	type TreasuryAccount = NexMarketTreasuryAccount;
@@ -614,14 +616,17 @@ impl pallet_dispute_evidence::Config for Runtime {
 	type WeightInfo = pallet_dispute_evidence::weights::SubstrateWeight<Runtime>;
 	type StoragePin = pallet_storage_service::Pallet<Runtime>;
 	type Currency = Balances;
-	type EvidenceDeposit = ConstU128<{ UNIT / 100 }>; // 0.01 NEX 押金
+	type EvidenceDeposit = ConstU128<{ UNIT / 100 }>;               // 0.01 NEX 兜底（仅防零）
+	type EvidenceDepositUsd = ConstU64<150_000>;                     // 0.15 USDT（0.5 USDT × 30%）
 	type CommitRevealDeadline = ConstU32<100_800>; // ~7天 (6s/block)
 	type MaxLinksPerEvidence = ConstU32<100>;
 	type MaxSupplements = ConstU32<100>;
 	type MaxPendingRequestsPerContent = ConstU32<50>;
 	type ArchiveTtlBlocks = ConstU32<2_592_000>; // ~180天
 	type ArchiveDelayBlocks = ConstU32<1_296_000>; // ~90天
-	type PrivateContentDeposit = ConstU128<{ UNIT / 100 }>; // 0.01 NEX
+	type PrivateContentDeposit = ConstU128<{ UNIT / 100 }>;         // 0.01 NEX 兜底（仅防零）
+	type PrivateContentDepositUsd = ConstU64<150_000>;               // 0.15 USDT（0.5 USDT × 30%）
+	type DepositCalculator = pallet_trading_common::DepositCalculatorImpl<TradingPricingProvider, Balance>;
 	type AccessRequestTtlBlocks = ConstU32<201_600>; // ~14天 (6s/block)
 	type MaxReasonLen = ConstU32<256>;
 }
@@ -1140,8 +1145,10 @@ impl pallet_contracts::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type RuntimeCall = RuntimeCall;
 
-	/// 合约调用栈深度限制
-	type CallStack = [pallet_contracts::Frame<Self>; 23];
+	/// 合约调用栈深度限制（depth = size + 1 = 6）
+	/// 受 integrity_test 约束：(MaxCodeLen*68 + 2MB) * depth + 2MB < runtime_memory/2
+	/// 参考 Astar/Shiden 配置；depth 6 足够覆盖绝大多数 ink! 合约调用场景
+	type CallStack = [pallet_contracts::Frame<Self>; 5];
 
 	/// 合约存储押金（每字节）
 	type DepositPerByte = ConstU128<{ UNIT / 1000 }>;
@@ -1166,8 +1173,9 @@ impl pallet_contracts::Config for Runtime {
 	/// 地址生成器
 	type AddressGenerator = pallet_contracts::DefaultAddressGenerator;
 
-	/// 最大代码长度
-	type MaxCodeLen = ConstU32<{ 256 * 1024 }>;
+	/// 最大代码长度（受 CallStack depth 约束，depth=6 时上限 ~125KB）
+	/// 123KB 参考 Astar 配置，足够部署复杂 ink! 合约
+	type MaxCodeLen = ConstU32<{ 123 * 1024 }>;
 	/// 最大存储键长度
 	type MaxStorageKeyLen = ConstU32<128>;
 
@@ -1251,7 +1259,19 @@ impl pallet_assets::Config for Runtime {
 	type ReserveData = ();
 	type Holder = ();
 	#[cfg(feature = "runtime-benchmarks")]
-	type BenchmarkHelper = ();
+	type BenchmarkHelper = AssetsBenchHelper;
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+pub struct AssetsBenchHelper;
+#[cfg(feature = "runtime-benchmarks")]
+impl pallet_assets::BenchmarkHelper<codec::Compact<u64>, ()> for AssetsBenchHelper {
+	fn create_asset_id_parameter(id: u32) -> codec::Compact<u64> {
+		codec::Compact(id as u64)
+	}
+	fn create_reserve_id_parameter(_id: u32) -> () {
+		()
+	}
 }
 
 // ============================================================================
@@ -1971,20 +1991,20 @@ parameter_types! {
 	pub const GrAttestationValidityBlocks: BlockNumber = 43_200;
 	/// 证明过期扫描间隔: 每 100 区块 (~10 分钟)
 	pub const GrAttestationCheckInterval: BlockNumber = 100;
-	/// 节点最低质押: 1000 NEX
-	pub const GrMinNodeStake: Balance = 1000 * UNIT;
+	/// 节点最低质押 NEX 兜底: 0.01 NEX（仅防零）
+	pub const GrMinNodeStake: Balance = UNIT / 100;
 	/// 节点退出冷却期: 1 天
 	pub const GrExitCooldown: BlockNumber = DAYS;
 	/// Era 长度: 1 天
 	pub const GrEraLength: BlockNumber = DAYS;
 	/// 每 Era 通胀铸币: 100 NEX (Phase 0)
 	pub const GrInflationPerEra: Balance = 100 * UNIT;
-	/// Basic 层级每 Era 费用: ~0.33 NEX/天
-	pub const GrBasicFeePerEra: Balance = 10 * UNIT / 30;
-	/// Pro 层级每 Era 费用: 1 NEX/天
-	pub const GrProFeePerEra: Balance = 30 * UNIT / 30;
-	/// Enterprise 层级每 Era 费用: ~3.33 NEX/天
-	pub const GrEnterpriseFeePerEra: Balance = 100 * UNIT / 30;
+	/// Basic 层级每 Era 费用 NEX 兜底: 0.01 NEX（仅防零）
+	pub const GrBasicFeePerEra: Balance = UNIT / 100;
+	/// Pro 层级每 Era 费用 NEX 兜底: 0.01 NEX（仅防零）
+	pub const GrProFeePerEra: Balance = UNIT / 100;
+	/// Enterprise 层级每 Era 费用 NEX 兜底: 0.01 NEX（仅防零）
+	pub const GrEnterpriseFeePerEra: Balance = UNIT / 100;
 	/// 仪式有效期: 180 天
 	pub const GrCeremonyValidityBlocks: BlockNumber = 180 * DAYS;
 	/// 仪式检查间隔: 每 1000 区块 (~100 分钟)
@@ -2060,6 +2080,8 @@ impl pallet_grouprobot_consensus::Config for Runtime {
 	type WeightInfo = pallet_grouprobot_consensus::weights::SubstrateWeight<Runtime>;
 	type MaxActiveNodes = ConstU32<100>;
 	type MinStake = GrMinNodeStake;
+	type MinStakeUsd = ConstU64<15_000_000>;                        // 15 USDT（50 USDT × 30%）
+	type DepositCalculator = pallet_trading_common::DepositCalculatorImpl<TradingPricingProvider, Balance>;
 	type ExitCooldownPeriod = GrExitCooldown;
 	type EraLength = GrEraLength;
 	type InflationPerEra = GrInflationPerEra;
@@ -2097,7 +2119,13 @@ impl pallet_grouprobot_consensus::BenchmarkHelper<Runtime> for GrConsensusBenchH
 			public_key: [0u8; 32],
 			status: BotStatus::Active,
 			registered_at: now,
-			node_type: NodeType::TdxNode,
+			node_type: NodeType::TeeNode {
+				mrtd: [0u8; 48],
+				mrenclave: None,
+				tdx_attested_at: u64::from(now),
+				sgx_attested_at: None,
+				expires_at: u64::from(now) + 100_000u64,
+			},
 			community_count: 0,
 		});
 		// 写入 AttestationRecordV2 (TEE 证明)
@@ -2110,7 +2138,7 @@ impl pallet_grouprobot_consensus::BenchmarkHelper<Runtime> for GrConsensusBenchH
 			tee_type: TeeType::Tdx,
 			attester: owner.clone(),
 			attested_at: now,
-			expires_at: now + 100_000u32.into(),
+			expires_at: now + 100_000u32,
 			is_dual_attestation: false,
 			quote_verified: true,
 			dcap_level: 3,
@@ -2164,13 +2192,12 @@ impl pallet_grouprobot_consensus::BenchmarkHelper<Runtime> for GrConsensusBenchH
 		h
 	}
 
-	fn sign_message(node_seed: u32, msg: &[u8]) -> ([u8; 32], [u8; 64]) {
-		use sp_core::Pair as _;
-		let s = alloc::format!("//Node{}", node_seed);
-		let pair = sp_core::ed25519::Pair::from_string(&s, None).expect("valid seed");
+	fn sign_message(_node_seed: u32, msg: &[u8]) -> ([u8; 32], [u8; 64]) {
 		let msg_hash = sp_core::blake2_256(msg);
-		let sig = pair.sign(&msg_hash);
-		(msg_hash, sig.0)
+		// Benchmark helper: produce deterministic dummy signature
+		let mut sig = [0u8; 64];
+		sig[..32].copy_from_slice(&msg_hash);
+		(msg_hash, sig)
 	}
 }
 
@@ -2194,8 +2221,12 @@ impl pallet_grouprobot_subscription::Config for Runtime {
 	type Currency = Balances;
 	type BotRegistry = GrBotRegistryBridge;
 	type BasicFeePerEra = GrBasicFeePerEra;
+	type BasicFeePerEraUsd = ConstU64<10_000>;                      // ≈0.01 USDT/天（1 USDT/月 × 30% / 30天）
 	type ProFeePerEra = GrProFeePerEra;
+	type ProFeePerEraUsd = ConstU64<20_000>;                        // ≈0.02 USDT/天（2 USDT/月 × 30% / 30天）
 	type EnterpriseFeePerEra = GrEnterpriseFeePerEra;
+	type EnterpriseFeePerEraUsd = ConstU64<50_000>;                 // ≈0.05 USDT/天（5 USDT/月 × 30% / 30天）
+	type DepositCalculator = pallet_trading_common::DepositCalculatorImpl<TradingPricingProvider, Balance>;
 	type TreasuryAccount = TreasuryAccountId;
 	type RewardPoolAccount = RewardPoolAccountId;
 	type MaxSubscriptionSettlePerEra = ConstU32<200>;
@@ -2208,6 +2239,8 @@ impl pallet_grouprobot_subscription::Config for Runtime {
 	type AdEnterpriseThreshold = ConstU32<11>;
 	type MaxUnderdeliveryEras = ConstU8<3>;
 	type WeightInfo = pallet_grouprobot_subscription::weights::SubstrateWeight<Runtime>;
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = ();
 }
 
 /// NodeConsensus Bridge: 从 consensus pallet 读取节点信息
@@ -2243,6 +2276,8 @@ impl pallet_grouprobot_community::Config for Runtime {
 	type WeightInfo = pallet_grouprobot_community::weights::SubstrateWeight<Runtime>;
 	type BotRegistry = GrBotRegistryBridge;
 	type Subscription = pallet_grouprobot_subscription::Pallet<Runtime>;
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = ();
 }
 
 impl pallet_grouprobot_ceremony::Config for Runtime {
@@ -2280,8 +2315,8 @@ parameter_types! {
 	pub const AdsMinBidPerMille: Balance = UNIT / 1000;
 	/// 最低 CPC 出价: 0.0005 NEX
 	pub const AdsMinBidPerClick: Balance = UNIT / 2000;
-	/// 私有广告注册费: 1 NEX
-	pub const AdsPrivateAdRegistrationFee: Balance = UNIT;
+	/// 私有广告注册费 NEX 兜底: 0.01 NEX（仅防零）
+	pub const AdsPrivateAdRegistrationFee: Balance = UNIT / 100;
 }
 
 impl pallet_ads_core::pallet::Config for Runtime {
@@ -2304,6 +2339,8 @@ impl pallet_ads_core::pallet::Config for Runtime {
 	type PlacementAdmin = pallet_ads_router::AdsRouter<Runtime>;
 	type RevenueDistributor = pallet_ads_router::AdsRouter<Runtime>;
 	type PrivateAdRegistrationFee = AdsPrivateAdRegistrationFee;
+	type PrivateAdRegistrationFeeUsd = ConstU64<150_000>;            // 0.15 USDT（0.5 USDT × 30%）
+	type DepositCalculator = pallet_trading_common::DepositCalculatorImpl<TradingPricingProvider, Balance>;
 	type SettlementIncentiveBps = ConstU32<10>; // 0.1%
 	type MaxCampaignsPerAdvertiser = ConstU32<100>;
 	type MaxTargetsPerCampaign = ConstU32<20>;
@@ -2340,7 +2377,9 @@ impl pallet_ads_entity::pallet::Config for Runtime {
 	type ShopProvider = pallet_entity_shop::Pallet<Runtime>;
 	type TreasuryAccount = TreasuryAccountId;
 	type PlatformAdShareBps = ConstU16<2000>;          // 平台 20%
-	type AdPlacementDeposit = AdsPrivateAdRegistrationFee; // 1 NEX (复用)
+	type AdPlacementDeposit = ConstU128<{ UNIT / 100 }>;              // 0.01 NEX 兜底（仅防零）
+	type AdPlacementDepositUsd = ConstU64<300_000>;                    // 0.3 USDT（1 USDT × 30%）
+	type DepositCalculator = pallet_trading_common::DepositCalculatorImpl<TradingPricingProvider, Balance>;
 	type MaxPlacementsPerEntity = ConstU32<20>;
 	type DefaultDailyImpressionCap = ConstU32<10_000>;
 	type BlocksPerDay = ConstU32<14_400>;             // 24h @ 6s/block

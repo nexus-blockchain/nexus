@@ -32,7 +32,6 @@ import { commissionFlow } from './flows/entity/commission.js';
 import { tokenGovernanceFlow } from './flows/entity/token-governance.js';
 import { kycFlow } from './flows/entity/kyc.js';
 import { tokenSaleFlow } from './flows/entity/token-sale.js';
-import { entityMarketFlow } from './flows/entity/entity-market.js';
 import { entityDisclosureFlow } from './flows/entity/entity-disclosure.js';
 import { orderAdminFlow } from './flows/entity/order-admin.js';
 import { tokenGovernanceAdminFlow } from './flows/entity/token-governance-admin.js';
@@ -76,7 +75,6 @@ const PHASE2_FLOWS: FlowDef[] = [
   tokenGovernanceFlow,    // E5: Token+治理
   kycFlow,                // E6: KYC 认证
   tokenSaleFlow,          // E7: 代币发售
-  entityMarketFlow,       // E8: 实体市场
   entityDisclosureFlow,   // E9: 信息披露
   orderAdminFlow,         // E10: 订单治理/维护
   tokenGovernanceAdminFlow, // E11: Token/Governance 管理
@@ -127,7 +125,6 @@ const FLOW_MAP: Record<string, FlowDef> = {
   E5: tokenGovernanceFlow,
   E6: kycFlow,
   E7: tokenSaleFlow,
-  E8: entityMarketFlow,
   E9: entityDisclosureFlow,
   E10: orderAdminFlow,
   E11: tokenGovernanceAdminFlow,

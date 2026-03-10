@@ -278,7 +278,6 @@ parameter_types! {
 }
 
 impl pallet_entity_product::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type EntityProvider = MockEntityProvider;
     type ShopProvider = MockShopProvider;

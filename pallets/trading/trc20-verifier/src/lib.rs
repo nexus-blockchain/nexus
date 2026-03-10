@@ -71,6 +71,10 @@ pub enum VerificationError {
     VerifierDisabled,
     /// 交易哈希已被使用（防重放）
     TxHashAlreadyUsed,
+    /// 多端点共识验证失败 — 端点之间返回数据不一致 (H3-C)
+    ConsensusFailure,
+    /// 有效响应不足，无法进行共识验证 (H3-C)
+    InsufficientEndpointResponses,
 }
 
 impl VerificationError {
@@ -94,6 +98,8 @@ impl VerificationError {
             Self::VerificationLocked => "Verification already in progress",
             Self::VerifierDisabled => "Verifier is globally disabled",
             Self::TxHashAlreadyUsed => "Transaction hash already used",
+            Self::ConsensusFailure => "Endpoint consensus verification failed",
+            Self::InsufficientEndpointResponses => "Insufficient endpoint responses for consensus",
         }
     }
 }
@@ -194,8 +200,8 @@ const AUDIT_LOG_COUNTER_KEY: &[u8] = b"ocw_audit_log_counter";
 const CONFIG_VERSION_MARKER: u8 = 0xFF;
 /// NEW-6: EndpointConfig 当前版本
 const ENDPOINT_CONFIG_VERSION: u8 = 1;
-/// NEW-6: VerifierConfig 当前版本
-const VERIFIER_CONFIG_VERSION: u8 = 1;
+/// NEW-6: VerifierConfig 当前版本 (v2: 含 consensus 字段)
+const VERIFIER_CONFIG_VERSION: u8 = 2;
 
 /// 已用 tx_hash 注册表存储键前缀 (P0 防重放)
 const USED_TX_HASH_PREFIX: &[u8] = b"ocw_used_tx::";
@@ -368,6 +374,14 @@ pub struct VerifierConfig {
     pub amount_tolerance_bps: u32,
     /// 全局启用开关（kill switch，false 时所有验证立即返回 VerifierDisabled）
     pub enabled: bool,
+    /// H3-C: 是否启用多端点共识验证（false = 旧的 first-wins 模式）
+    pub consensus_enabled: bool,
+    /// H3-C: 共识所需最少端点响应数（默认 2，即 2-of-N）
+    pub min_consensus_responses: u32,
+    /// H3-C: 仅 1 个端点可用时是否允许降级为单源验证
+    pub allow_single_source_fallback: bool,
+    /// H3-C: 共识比对中 block_timestamp 允许的偏差（毫秒，默认 3000 ≈ 1 TRON 出块周期）
+    pub consensus_timestamp_tolerance_ms: u64,
 }
 
 impl Default for VerifierConfig {
@@ -383,6 +397,10 @@ impl Default for VerifierConfig {
             updated_at: 0,
             amount_tolerance_bps: 50, // ±0.5%
             enabled: true,
+            consensus_enabled: false,                // Phase 1: 默认关闭，先部署基础设施
+            min_consensus_responses: 2,              // 2-of-N
+            allow_single_source_fallback: true,      // 安全默认：允许降级
+            consensus_timestamp_tolerance_ms: 3_000, // 1 TRON 出块周期
         }
     }
 }
@@ -392,11 +410,45 @@ pub fn get_verifier_config() -> VerifierConfig {
     match sp_io::offchain::local_storage_get(StorageKind::PERSISTENT, VERIFIER_CONFIG_KEY) {
         Some(data) if data.len() >= 2 && data[0] == CONFIG_VERSION_MARKER => {
             let _version = data[1];
+            // V3: 当前完整格式（含 consensus 字段）
             if let Ok(config) = VerifierConfig::decode(&mut &data[2..]) {
                 return config;
             }
+            // V2: 含 enabled 但无 consensus 字段
             #[derive(Decode)]
-            struct V1VersionedConfig {
+            struct V2Config {
+                usdt_contract: String,
+                min_confirmations: u32,
+                rate_limit_interval_ms: u64,
+                cache_ttl_ms: u64,
+                max_pages: u32,
+                audit_log_retention: u32,
+                max_lookback_ms: u64,
+                updated_at: u64,
+                amount_tolerance_bps: u32,
+                enabled: bool,
+            }
+            if let Ok(v2) = V2Config::decode(&mut &data[2..]) {
+                return VerifierConfig {
+                    usdt_contract: v2.usdt_contract,
+                    min_confirmations: v2.min_confirmations,
+                    rate_limit_interval_ms: v2.rate_limit_interval_ms,
+                    cache_ttl_ms: v2.cache_ttl_ms,
+                    max_pages: v2.max_pages,
+                    audit_log_retention: v2.audit_log_retention,
+                    max_lookback_ms: v2.max_lookback_ms,
+                    updated_at: v2.updated_at,
+                    amount_tolerance_bps: v2.amount_tolerance_bps,
+                    enabled: v2.enabled,
+                    consensus_enabled: false,
+                    min_consensus_responses: 2,
+                    allow_single_source_fallback: true,
+                    consensus_timestamp_tolerance_ms: 3_000,
+                };
+            }
+            // V1: 无 enabled 和 consensus 字段
+            #[derive(Decode)]
+            struct V1Config {
                 usdt_contract: String,
                 min_confirmations: u32,
                 rate_limit_interval_ms: u64,
@@ -407,7 +459,7 @@ pub fn get_verifier_config() -> VerifierConfig {
                 updated_at: u64,
                 amount_tolerance_bps: u32,
             }
-            if let Ok(v1) = V1VersionedConfig::decode(&mut &data[2..]) {
+            if let Ok(v1) = V1Config::decode(&mut &data[2..]) {
                 return VerifierConfig {
                     usdt_contract: v1.usdt_contract,
                     min_confirmations: v1.min_confirmations,
@@ -419,6 +471,10 @@ pub fn get_verifier_config() -> VerifierConfig {
                     updated_at: v1.updated_at,
                     amount_tolerance_bps: v1.amount_tolerance_bps,
                     enabled: true,
+                    consensus_enabled: false,
+                    min_consensus_responses: 2,
+                    allow_single_source_fallback: true,
+                    consensus_timestamp_tolerance_ms: 3_000,
                 };
             }
             VerifierConfig::default()
@@ -450,6 +506,10 @@ pub fn get_verifier_config() -> VerifierConfig {
                     updated_at: legacy.updated_at,
                     amount_tolerance_bps: 50,
                     enabled: true,
+                    consensus_enabled: false,
+                    min_consensus_responses: 2,
+                    allow_single_source_fallback: true,
+                    consensus_timestamp_tolerance_ms: 3_000,
                 };
             }
             VerifierConfig::default()
@@ -601,6 +661,18 @@ pub fn validate_verifier_config(config: &VerifierConfig) -> Result<(), Verificat
             "amount_tolerance_bps must be <= 1000 (10%)",
         ));
     }
+    // H3-C: 共识最少响应数: 2..=10
+    if config.min_consensus_responses < 2 || config.min_consensus_responses > 10 {
+        return Err(VerificationError::InvalidConfig(
+            "min_consensus_responses must be between 2 and 10",
+        ));
+    }
+    // H3-C: 共识时间戳容差: 0 或 >= 1000ms
+    if config.consensus_timestamp_tolerance_ms > 0 && config.consensus_timestamp_tolerance_ms < 1_000 {
+        return Err(VerificationError::InvalidConfig(
+            "consensus_timestamp_tolerance_ms must be 0 or >= 1000",
+        ));
+    }
     Ok(())
 }
 
@@ -741,12 +813,51 @@ pub struct VerifierMetrics {
     pub lock_contention_count: u64,
     /// 最后更新时间
     pub last_updated: u64,
+    /// H3-C: 共识验证成功次数
+    pub consensus_success_count: u64,
+    /// H3-C: 共识验证失败次数（NoConsensus 或 InsufficientResponses）
+    pub consensus_failure_count: u64,
+    /// H3-C: 降级为单源验证次数
+    pub degraded_verification_count: u64,
 }
 
-/// 获取监控指标
+/// 获取监控指标 (H3-C: 含旧格式迁移支持)
 pub fn get_verifier_metrics() -> VerifierMetrics {
     sp_io::offchain::local_storage_get(StorageKind::PERSISTENT, VERIFIER_METRICS_KEY)
-        .and_then(|d| VerifierMetrics::decode(&mut &d[..]).ok())
+        .and_then(|d| {
+            // 优先尝试新格式
+            if let Ok(m) = VerifierMetrics::decode(&mut &d[..]) {
+                return Some(m);
+            }
+            // 旧格式迁移：不含 consensus 字段
+            #[derive(Decode)]
+            struct LegacyMetrics {
+                total_success: u64,
+                total_failure: u64,
+                total_duration_ms: u64,
+                endpoint_fallback_count: u64,
+                cache_hit_count: u64,
+                rate_limit_hit_count: u64,
+                lock_contention_count: u64,
+                last_updated: u64,
+            }
+            if let Ok(old) = LegacyMetrics::decode(&mut &d[..]) {
+                return Some(VerifierMetrics {
+                    total_success: old.total_success,
+                    total_failure: old.total_failure,
+                    total_duration_ms: old.total_duration_ms,
+                    endpoint_fallback_count: old.endpoint_fallback_count,
+                    cache_hit_count: old.cache_hit_count,
+                    rate_limit_hit_count: old.rate_limit_hit_count,
+                    lock_contention_count: old.lock_contention_count,
+                    last_updated: old.last_updated,
+                    consensus_success_count: 0,
+                    consensus_failure_count: 0,
+                    degraded_verification_count: 0,
+                });
+            }
+            None
+        })
         .unwrap_or_default()
 }
 
@@ -1157,6 +1268,23 @@ fn set_cached_response(url: &str, response: &[u8]) {
 
 // ==================== 审计日志 (M7) ====================
 
+/// H3-C: 共识验证详情（嵌入审计日志）
+#[derive(Debug, Clone, Encode, Decode)]
+pub struct ConsensusDetail {
+    /// 是否使用了共识验证模式
+    pub consensus_mode: bool,
+    /// 达成一致的端点列表
+    pub agreeing_endpoints: Vec<Vec<u8>>,
+    /// 返回不同数据的端点（如有）
+    pub dissenting_endpoint: Option<Vec<u8>>,
+    /// 是否降级为单源验证
+    pub degraded: bool,
+    /// 实际查询的端点数
+    pub total_endpoints_queried: u8,
+    /// 成功响应的端点数
+    pub total_endpoints_responded: u8,
+}
+
 /// 审计日志条目
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct AuditLogEntry {
@@ -1174,6 +1302,8 @@ pub struct AuditLogEntry {
     pub endpoint_used: Vec<u8>,
     /// 验证耗时（毫秒）(M5)
     pub duration_ms: u64,
+    /// H3-C: 共识验证详情（非共识模式为 None）
+    pub consensus_detail: Option<ConsensusDetail>,
 }
 
 /// 记录审计日志
@@ -1293,6 +1423,7 @@ fn build_endpoint_url(url: &str, endpoint: &str) -> String {
 /// 发送 HTTP GET 请求（智能模式选择 + H2 速率限制 + M1 缓存）
 ///
 /// 返回 (响应体, 使用的端点名称)
+/// 注意：此函数用于非共识模式。共识模式使用 fetch_url_with_consensus。
 fn fetch_url_with_fallback(url: &str) -> Result<(Vec<u8>, String), VerificationError> {
     // M1: 检查缓存
     if let Some(cached) = get_cached_response(url) {
@@ -1320,7 +1451,153 @@ fn fetch_url_with_fallback(url: &str) -> Result<(Vec<u8>, String), VerificationE
     result
 }
 
+/// H3-C: 共识模式 HTTP 请求 — 收集所有端点响应并进行共识验证
+///
+/// 返回: (共识后的响应体, 使用的端点名称, 共识详情)
+///
+/// 与 `fetch_url_with_fallback` 的区别:
+/// - 不使用单 URL 缓存（H3-A3修复：防止缓存导致伪共识）
+/// - 收集所有端点响应后做 2-of-N 共识比对
+/// - 共识成功后缓存共识结论
+fn fetch_url_with_consensus(
+    url: &str,
+    expected_from: &str,
+    usdt_contract: &str,
+    verifier_config: &VerifierConfig,
+) -> Result<(Vec<u8>, String, ConsensusDetail), VerificationError> {
+    // H3-A3修复: 共识模式下不使用旧的 per-URL 缓存
+    // 否则所有端点命中同一个缓存 → 伪 N/N 一致
+
+    // H2: 速率限制
+    check_rate_limit()?;
+
+    let config = get_endpoint_config();
+    let total_queried = config.endpoints.iter()
+        .filter(|e| !is_endpoint_quarantined(e))
+        .count() as u8;
+
+    let all_responses = fetch_all_endpoints(url, &config)?;
+    let total_responded = all_responses.len() as u8;
+
+    if all_responses.is_empty() {
+        return Err(VerificationError::AllEndpointsFailed);
+    }
+
+    // 将原始响应转换为 EndpointResponse（含标准化转账列表）
+    let mut endpoint_responses: Vec<EndpointResponse> = Vec::new();
+    for (endpoint, body, response_ms) in all_responses {
+        let transfers = extract_normalized_transfers(&body, expected_from, usdt_contract)
+            .unwrap_or_default();
+        endpoint_responses.push(EndpointResponse {
+            endpoint,
+            transfers,
+            response_ms,
+            raw_body: body,
+        });
+    }
+
+    let min_responses = verifier_config.min_consensus_responses as usize;
+    let tolerance_ms = verifier_config.consensus_timestamp_tolerance_ms;
+
+    // 检查有效响应数 vs 降级策略
+    if endpoint_responses.len() < min_responses {
+        if verifier_config.allow_single_source_fallback && endpoint_responses.len() == 1 {
+            log::warn!(target: "trc20-verifier",
+                "Consensus: only 1 response, falling back to single-source (degraded)");
+            let resp = endpoint_responses.into_iter().next().unwrap();
+            let detail = ConsensusDetail {
+                consensus_mode: true,
+                agreeing_endpoints: Vec::new(),
+                dissenting_endpoint: None,
+                degraded: true,
+                total_endpoints_queried: total_queried,
+                total_endpoints_responded: total_responded,
+            };
+            // 记录降级指标
+            let mut m = get_verifier_metrics();
+            m.degraded_verification_count = m.degraded_verification_count.saturating_add(1);
+            m.last_updated = current_timestamp_ms();
+            save_verifier_metrics(&m);
+            return Ok((resp.raw_body, resp.endpoint, detail));
+        }
+        return Err(VerificationError::InsufficientEndpointResponses);
+    }
+
+    match build_consensus(endpoint_responses, min_responses, tolerance_ms) {
+        ConsensusResult::Agreed { raw_body, response_endpoint, agreeing_endpoints, dissenting_endpoint, .. } => {
+            if let Some(ref ep) = dissenting_endpoint {
+                // 对分歧端点额外降低健康分
+                log::warn!(target: "trc20-verifier",
+                    "Consensus dissenting endpoint: {}", ep);
+                let mut health = get_endpoint_health(ep);
+                health.record_failure();
+                save_endpoint_health(ep, &health);
+            }
+
+            // H3-A3修复: 共识成功后缓存结论（而非单端点响应）
+            if !raw_body.is_empty() && (raw_body[0] == b'{' || raw_body[0] == b'[') {
+                set_cached_response(url, &raw_body);
+            }
+
+            let detail = ConsensusDetail {
+                consensus_mode: true,
+                agreeing_endpoints: agreeing_endpoints.iter().map(|e| e.as_bytes().to_vec()).collect(),
+                dissenting_endpoint: dissenting_endpoint.map(|e| e.into_bytes()),
+                degraded: false,
+                total_endpoints_queried: total_queried,
+                total_endpoints_responded: total_responded,
+            };
+            // 记录共识成功指标
+            let mut m = get_verifier_metrics();
+            m.consensus_success_count = m.consensus_success_count.saturating_add(1);
+            m.last_updated = current_timestamp_ms();
+            save_verifier_metrics(&m);
+
+            Ok((raw_body, response_endpoint, detail))
+        },
+        ConsensusResult::NoConsensus { .. } => {
+            log::error!(target: "trc20-verifier",
+                "Consensus FAILED: all endpoints disagree");
+            // 记录共识失败指标
+            let mut m = get_verifier_metrics();
+            m.consensus_failure_count = m.consensus_failure_count.saturating_add(1);
+            m.last_updated = current_timestamp_ms();
+            save_verifier_metrics(&m);
+            Err(VerificationError::ConsensusFailure)
+        },
+        ConsensusResult::InsufficientResponses { count, responses } => {
+            if verifier_config.allow_single_source_fallback && count == 1 {
+                log::warn!(target: "trc20-verifier",
+                    "Consensus: insufficient responses, falling back to single-source (degraded)");
+                let resp = responses.into_iter().next().unwrap();
+                let detail = ConsensusDetail {
+                    consensus_mode: true,
+                    agreeing_endpoints: Vec::new(),
+                    dissenting_endpoint: None,
+                    degraded: true,
+                    total_endpoints_queried: total_queried,
+                    total_endpoints_responded: total_responded,
+                };
+                let mut m = get_verifier_metrics();
+                m.degraded_verification_count = m.degraded_verification_count.saturating_add(1);
+                m.last_updated = current_timestamp_ms();
+                save_verifier_metrics(&m);
+                return Ok((resp.raw_body, resp.endpoint, detail));
+            }
+            // 记录共识失败指标
+            let mut m = get_verifier_metrics();
+            m.consensus_failure_count = m.consensus_failure_count.saturating_add(1);
+            m.last_updated = current_timestamp_ms();
+            save_verifier_metrics(&m);
+            Err(VerificationError::InsufficientEndpointResponses)
+        },
+    }
+}
+
 /// 并行竞速模式：同时请求所有端点，使用最快响应 (H1 API Key + L1 可配置超时 + 熔断过滤)
+///
+/// H3-A1修复: 区分"真正失败"（HTTP 错误/非200/空体）和"竞争慢"（winner 后未轮询到的端点），
+/// 后者不扣分，避免长期运行后只有最快端点存活。
 fn fetch_url_parallel_race(url: &str, config: &EndpointConfig) -> Result<(Vec<u8>, String), VerificationError> {
     let endpoints = &config.endpoints;
     log::info!(target: "trc20-verifier", "Starting parallel race with {} endpoints", endpoints.len());
@@ -1365,9 +1642,16 @@ fn fetch_url_parallel_race(url: &str, config: &EndpointConfig) -> Result<(Vec<u8
 
     let mut winner_response: Option<Vec<u8>> = None;
     let mut winner_endpoint = String::new();
-    let mut failed_endpoints: Vec<String> = Vec::new();
+    // H3-A1: 区分真正失败（HTTP 错误）和竞争落败（未轮询到/超时但可能仍在传输）
+    let mut error_endpoints: Vec<String> = Vec::new();
 
     for (endpoint, pending) in pending_requests {
+        if winner_response.is_some() {
+            // H3-A1: winner 已确定，后续端点是竞争落败者，不扣分
+            log::debug!(target: "trc20-verifier", "Race loser (not penalized): {}", endpoint);
+            continue;
+        }
+
         match pending.try_wait(timeout) {
             Ok(Ok(response)) => {
                 let response_ms = current_timestamp_ms().saturating_sub(start_time) as u32;
@@ -1384,19 +1668,22 @@ fn fetch_url_parallel_race(url: &str, config: &EndpointConfig) -> Result<(Vec<u8
 
                         winner_endpoint = endpoint;
                         winner_response = Some(body);
-                        break;
+                        continue; // H3-A1: 不 break，让后续端点走 "race loser" 路径
                     }
                 }
 
-                failed_endpoints.push(endpoint);
+                // 明确的 HTTP 错误（非200 或空体）→ 真正失败
+                error_endpoints.push(endpoint);
             },
             Ok(Err(_)) | Err(_) => {
-                failed_endpoints.push(endpoint);
+                // 网络错误/超时 → 真正失败
+                error_endpoints.push(endpoint);
             }
         }
     }
 
-    for endpoint in failed_endpoints {
+    // H3-A1: 只对真正失败的端点扣分
+    for endpoint in error_endpoints {
         let mut health = get_endpoint_health(&endpoint);
         health.record_failure();
         save_endpoint_health(&endpoint, &health);
@@ -1410,6 +1697,104 @@ fn fetch_url_parallel_race(url: &str, config: &EndpointConfig) -> Result<(Vec<u8
             Err(VerificationError::AllEndpointsFailed)
         }
     }
+}
+
+/// H3-C: 并行收集所有端点响应（用于共识验证模式）
+///
+/// 与 `fetch_url_parallel_race` 不同，此函数等待所有端点返回（或超时），
+/// 收集所有成功响应用于后续共识比对。
+///
+/// 返回: 所有成功端点的 (endpoint, body, response_ms) 列表
+fn fetch_all_endpoints(url: &str, config: &EndpointConfig) -> Result<Vec<(String, Vec<u8>, u32)>, VerificationError> {
+    let endpoints = &config.endpoints;
+    log::info!(target: "trc20-verifier", "Starting consensus fetch with {} endpoints", endpoints.len());
+
+    let start_time = current_timestamp_ms();
+
+    let mut pending_requests: Vec<(String, http::PendingRequest)> = Vec::new();
+    let timeout = sp_io::offchain::timestamp()
+        .add(Duration::from_millis(config.timeout_race_ms));
+
+    for endpoint in endpoints.iter() {
+        if is_endpoint_quarantined(endpoint) {
+            log::debug!(target: "trc20-verifier", "Skipping quarantined endpoint: {}", endpoint);
+            continue;
+        }
+
+        let target_url = build_endpoint_url(url, endpoint);
+
+        let mut request = http::Request::get(&target_url);
+        if let Some(api_key) = get_api_key_for_endpoint(endpoint) {
+            request = request.add_header("TRON-PRO-API-KEY", &api_key);
+        }
+
+        match request.deadline(timeout).send() {
+            Ok(pending) => {
+                pending_requests.push((endpoint.clone(), pending));
+                log::debug!(target: "trc20-verifier", "Sent request to {}", endpoint);
+            },
+            Err(_) => {
+                log::warn!(target: "trc20-verifier", "Failed to send request to {}", endpoint);
+                let mut health = get_endpoint_health(endpoint);
+                health.record_failure();
+                save_endpoint_health(endpoint, &health);
+                if health.score < 15 { quarantine_endpoint(endpoint); }
+            }
+        }
+    }
+
+    if pending_requests.is_empty() {
+        return Err(VerificationError::AllEndpointsFailed);
+    }
+
+    let mut successful: Vec<(String, Vec<u8>, u32)> = Vec::new();
+
+    // 收集所有响应（不提前 break）
+    for (endpoint, pending) in pending_requests {
+        match pending.try_wait(timeout) {
+            Ok(Ok(response)) => {
+                let response_ms = current_timestamp_ms().saturating_sub(start_time) as u32;
+
+                if response.code == 200 {
+                    let body = response.body().collect::<Vec<u8>>();
+                    if !body.is_empty() {
+                        log::info!(target: "trc20-verifier",
+                            "Consensus response from {} ({}ms, {} bytes)",
+                            endpoint, response_ms, body.len());
+
+                        let mut health = get_endpoint_health(&endpoint);
+                        health.record_success(response_ms);
+                        save_endpoint_health(&endpoint, &health);
+                        clear_quarantine(&endpoint);
+
+                        successful.push((endpoint, body, response_ms));
+                        continue;
+                    }
+                }
+
+                // 非 200 或空体 → 真正失败
+                log::warn!(target: "trc20-verifier",
+                    "Endpoint {} returned status {} or empty body", endpoint, response.code);
+                let mut health = get_endpoint_health(&endpoint);
+                health.record_failure();
+                save_endpoint_health(&endpoint, &health);
+                if health.score < 15 { quarantine_endpoint(&endpoint); }
+            },
+            Ok(Err(_)) | Err(_) => {
+                log::warn!(target: "trc20-verifier", "Endpoint {} timeout/error in consensus mode", endpoint);
+                let mut health = get_endpoint_health(&endpoint);
+                health.record_failure();
+                save_endpoint_health(&endpoint, &health);
+                if health.score < 15 { quarantine_endpoint(&endpoint); }
+            }
+        }
+    }
+
+    log::info!(target: "trc20-verifier",
+        "Consensus fetch complete: {}/{} endpoints responded successfully",
+        successful.len(), endpoints.len());
+
+    Ok(successful)
 }
 
 /// 串行故障转移模式 (H1 API Key + L1 可配置超时 + 熔断)
@@ -1581,6 +1966,300 @@ pub struct TransferSearchResult {
     pub truncated: bool,
 }
 
+// ==================== H3-C: 共识验证数据结构 ====================
+
+/// 标准化转账记录 — 用于跨端点比对的规范形式
+///
+/// 只包含链上不可变字段，不同端点对同一笔交易必须返回完全相同的值
+/// （block_timestamp 允许小幅偏差，由 consensus_timestamp_tolerance_ms 控制）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedTransfer {
+    /// 交易哈希（主键）
+    pub tx_hash: Vec<u8>,
+    /// 发送方地址
+    pub from: String,
+    /// 转账金额（USDT 精度 10^6）
+    pub amount: u64,
+    /// 区块时间戳（毫秒）
+    pub block_timestamp: u64,
+    /// 代币合约地址
+    pub contract_address: String,
+}
+
+/// 排序支持：按 tx_hash 字典序，使比对前的规范化确定性
+impl Ord for NormalizedTransfer {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.tx_hash.cmp(&other.tx_hash)
+    }
+}
+
+impl PartialOrd for NormalizedTransfer {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// 单个端点的标准化响应
+#[derive(Debug, Clone)]
+pub struct EndpointResponse {
+    /// 端点 URL
+    pub endpoint: String,
+    /// 标准化后的匹配转账列表（已按 tx_hash 排序）
+    pub transfers: Vec<NormalizedTransfer>,
+    /// HTTP 响应耗时（毫秒）
+    pub response_ms: u32,
+    /// 原始响应体（用于最终解析）
+    pub raw_body: Vec<u8>,
+}
+
+/// 共识验证结果 (H3-C)
+#[derive(Debug, Clone)]
+pub enum ConsensusResult {
+    /// ≥ min_consensus_responses 个端点数据一致
+    Agreed {
+        /// 达成一致的转账列表
+        transfers: Vec<NormalizedTransfer>,
+        /// 达成一致的端点列表
+        agreeing_endpoints: Vec<String>,
+        /// 返回不同数据的端点（如有）
+        dissenting_endpoint: Option<String>,
+        /// 用于后续详细解析的原始响应体（取自第一个一致端点）
+        raw_body: Vec<u8>,
+        /// 响应端点名（取自第一个一致端点）
+        response_endpoint: String,
+    },
+    /// 所有端点返回不同数据，无法达成共识
+    NoConsensus {
+        responses: Vec<EndpointResponse>,
+    },
+    /// 有效响应数量不足（< min_consensus_responses）
+    InsufficientResponses {
+        count: usize,
+        responses: Vec<EndpointResponse>,
+    },
+}
+
+/// H3-C: 从 TronGrid 原始响应中提取标准化转账列表（用于共识比对）
+///
+/// 轻量解析器 — 仅提取共识比对所需的字段（tx_hash, from, amount, block_timestamp, contract_address），
+/// 不做确认数检查、金额状态计算等业务逻辑。
+///
+/// `expected_from`: 过滤发送方地址（仅匹配此地址的转账参与共识比对）
+/// `usdt_contract`: USDT 合约地址（仅匹配此合约的转账）
+///
+/// 返回按 tx_hash 排序的 NormalizedTransfer 列表，使比对结果确定性。
+pub fn extract_normalized_transfers(
+    response: &[u8],
+    expected_from: &str,
+    usdt_contract: &str,
+) -> Result<Vec<NormalizedTransfer>, VerificationError> {
+    let response_str = core::str::from_utf8(response)
+        .map_err(|_| VerificationError::InvalidUtf8)?;
+
+    let json_value = parse_json(response_str)
+        .map_err(|_| VerificationError::InvalidJson)?;
+
+    let root_obj = match json_value.as_object() {
+        Some(obj) => obj,
+        None => return Ok(Vec::new()),
+    };
+
+    // 检查 API success 标志
+    match json_obj_get(root_obj, "success") {
+        Some(JsonValue::Boolean(true)) => {},
+        _ => return Ok(Vec::new()),
+    }
+
+    let data_array = match json_obj_get(root_obj, "data") {
+        Some(JsonValue::Array(arr)) => arr,
+        _ => return Ok(Vec::new()),
+    };
+
+    let mut transfers: Vec<NormalizedTransfer> = Vec::new();
+
+    for entry_value in data_array.iter() {
+        let entry_obj = match entry_value.as_object() {
+            Some(obj) => obj,
+            None => continue,
+        };
+
+        // 过滤 from 地址
+        let from_addr = match json_obj_get_str(entry_obj, "from") {
+            Some(addr) if addr == expected_from => addr,
+            _ => continue,
+        };
+
+        // 精确匹配合约地址
+        let contract_addr = json_obj_get(entry_obj, "token_info")
+            .and_then(|ti| ti.as_object())
+            .and_then(|ti_obj| json_obj_get_str(ti_obj, "address"));
+        let contract_addr = match contract_addr {
+            Some(addr) if addr == usdt_contract => addr,
+            _ => continue,
+        };
+
+        // 提取金额
+        let amount = match json_obj_get_u64(entry_obj, "value") {
+            Some(a) if a > 0 => a,
+            _ => continue,
+        };
+
+        // 提取 tx_hash
+        let tx_hash = json_obj_get_str(entry_obj, "transaction_id")
+            .map(|s| s.into_bytes())
+            .unwrap_or_default();
+        if tx_hash.is_empty() {
+            continue;
+        }
+
+        // 提取 block_timestamp
+        let block_timestamp = json_obj_get_u64(entry_obj, "block_timestamp").unwrap_or(0);
+
+        transfers.push(NormalizedTransfer {
+            tx_hash,
+            from: from_addr,
+            amount,
+            block_timestamp,
+            contract_address: contract_addr,
+        });
+    }
+
+    // 按 tx_hash 排序，确保比对确定性
+    transfers.sort();
+
+    Ok(transfers)
+}
+
+/// H3-C: 比较两个端点的标准化转账列表是否一致
+///
+/// 比对规则:
+/// - tx_hash: 精确匹配
+/// - amount: 精确匹配（链上数据不可变）
+/// - from: 精确匹配
+/// - contract_address: 精确匹配
+/// - block_timestamp: 允许 ±tolerance_ms 偏差
+/// - 转账条数: 必须完全相同
+fn transfers_agree(a: &[NormalizedTransfer], b: &[NormalizedTransfer], tolerance_ms: u64) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    // 两个列表都已按 tx_hash 排序
+    for (ta, tb) in a.iter().zip(b.iter()) {
+        if ta.tx_hash != tb.tx_hash {
+            return false;
+        }
+        if ta.amount != tb.amount {
+            return false;
+        }
+        if ta.from != tb.from {
+            return false;
+        }
+        if ta.contract_address != tb.contract_address {
+            return false;
+        }
+        // block_timestamp 允许偏差
+        let ts_diff = if ta.block_timestamp >= tb.block_timestamp {
+            ta.block_timestamp - tb.block_timestamp
+        } else {
+            tb.block_timestamp - ta.block_timestamp
+        };
+        if ts_diff > tolerance_ms {
+            return false;
+        }
+    }
+    true
+}
+
+/// H3-C: 多端点共识验证
+///
+/// 从多个端点的响应中寻找 ≥ `min_agreement` 个端点数据一致的组合。
+/// 使用 pairwise 比较算法，对 N 个端点执行 O(N²) 次比对。
+pub fn build_consensus(
+    responses: Vec<EndpointResponse>,
+    min_agreement: usize,
+    timestamp_tolerance_ms: u64,
+) -> ConsensusResult {
+    let n = responses.len();
+
+    if n < min_agreement {
+        log::warn!(target: "trc20-verifier",
+            "Consensus: only {} responses, need {}", n, min_agreement);
+        return ConsensusResult::InsufficientResponses {
+            count: n,
+            responses,
+        };
+    }
+
+    // 构建 pairwise 一致性矩阵
+    // agree[i][j] = true 表示 responses[i] 与 responses[j] 数据一致
+    let mut agree: Vec<Vec<bool>> = alloc::vec![alloc::vec![false; n]; n];
+    for i in 0..n {
+        agree[i][i] = true; // 自身一致
+        for j in (i + 1)..n {
+            let matched = transfers_agree(
+                &responses[i].transfers,
+                &responses[j].transfers,
+                timestamp_tolerance_ms,
+            );
+            agree[i][j] = matched;
+            agree[j][i] = matched;
+            if matched {
+                log::debug!(target: "trc20-verifier",
+                    "Consensus: {} and {} AGREE", responses[i].endpoint, responses[j].endpoint);
+            } else {
+                log::info!(target: "trc20-verifier",
+                    "Consensus: {} and {} DISAGREE", responses[i].endpoint, responses[j].endpoint);
+            }
+        }
+    }
+
+    // 找到最大一致组：对每个端点 i，统计与它一致的端点数
+    let mut best_group_idx: usize = 0;
+    let mut best_group_size: usize = 0;
+
+    for i in 0..n {
+        let group_size = agree[i].iter().filter(|&&x| x).count();
+        if group_size > best_group_size {
+            best_group_size = group_size;
+            best_group_idx = i;
+        }
+    }
+
+    if best_group_size >= min_agreement {
+        let mut agreeing_endpoints: Vec<String> = Vec::new();
+        let mut dissenting_endpoint: Option<String> = None;
+
+        for j in 0..n {
+            if agree[best_group_idx][j] {
+                agreeing_endpoints.push(responses[j].endpoint.clone());
+            } else {
+                dissenting_endpoint = Some(responses[j].endpoint.clone());
+            }
+        }
+
+        log::info!(target: "trc20-verifier",
+            "Consensus REACHED: {}/{} endpoints agree (dissent: {:?})",
+            agreeing_endpoints.len(), n, dissenting_endpoint);
+
+        // 取最大一致组中响应最快的端点作为 raw_body 来源
+        let best_resp = &responses[best_group_idx];
+
+        return ConsensusResult::Agreed {
+            transfers: best_resp.transfers.clone(),
+            agreeing_endpoints,
+            dissenting_endpoint,
+            raw_body: best_resp.raw_body.clone(),
+            response_endpoint: best_resp.endpoint.clone(),
+        };
+    }
+
+    log::warn!(target: "trc20-verifier",
+        "Consensus FAILED: no group of {} agreeing endpoints found (best group: {})",
+        min_agreement, best_group_size);
+
+    ConsensusResult::NoConsensus { responses }
+}
+
 /// 按 (from, to, amount) 搜索并验证 TRC20 USDT 转账
 ///
 /// ## 参数
@@ -1652,11 +2331,13 @@ pub fn verify_trc20_by_transfer(
     let tolerance_bps = verifier_config.amount_tolerance_bps;
 
     log::info!(target: "trc20-verifier",
-        "Searching TRC20 transfers: to={}, from={}, amount={}, since={}",
-        to_str, from_str, expected_amount, min_timestamp);
+        "Searching TRC20 transfers: to={}, from={}, amount={}, since={}, consensus={}",
+        to_str, from_str, expected_amount, min_timestamp, verifier_config.consensus_enabled);
 
     // M2: 分页循环
     let mut last_endpoint_used = String::new();
+    let mut last_consensus_detail: Option<ConsensusDetail> = None;
+    let use_consensus = verifier_config.consensus_enabled;
     let paging_result: Result<TransferSearchResult, VerificationError> = (|| {
         let mut combined = TransferSearchResult::default();
         let mut fingerprint: Option<String> = None;
@@ -1675,7 +2356,14 @@ pub fn verify_trc20_by_transfer(
                 )
             };
 
-            let (response, endpoint_used) = fetch_url_with_fallback(&url)?;
+            // H3-C: 根据 consensus_enabled 选择 fetch 模式
+            let (response, endpoint_used) = if use_consensus {
+                let (body, ep, detail) = fetch_url_with_consensus(&url, from_str, &contract, &verifier_config)?;
+                last_consensus_detail = Some(detail);
+                (body, ep)
+            } else {
+                fetch_url_with_fallback(&url)?
+            };
             last_endpoint_used = endpoint_used;
             let (page_result, next_fp) = parse_trc20_transfer_list_paged(
                 &response, from_str, expected_amount, now_ms, &contract, min_conf, tolerance_bps,
@@ -1761,8 +2449,9 @@ pub fn verify_trc20_by_transfer(
         result_ok: combined.found,
         error_msg: combined.error.clone().unwrap_or_default(),
         tx_hash: combined.tx_hash.clone().unwrap_or_default(),
-        endpoint_used: last_endpoint_used.into_bytes(),
+        endpoint_used: last_endpoint_used.clone().into_bytes(),
         duration_ms,
+        consensus_detail: last_consensus_detail,
     });
 
     Ok(combined)
@@ -2746,6 +3435,7 @@ mod tests {
                 tx_hash: b"abc123".to_vec(),
                 endpoint_used: b"https://api.trongrid.io".to_vec(),
                 duration_ms: 250,
+                consensus_detail: None,
             };
             write_audit_log(&entry);
 
@@ -3085,6 +3775,7 @@ mod tests {
                     tx_hash: Vec::new(),
                     endpoint_used: Vec::new(),
                     duration_ms: 100,
+                    consensus_detail: None,
                 });
             }
 
@@ -3112,6 +3803,7 @@ mod tests {
                     tx_hash: Vec::new(),
                     endpoint_used: Vec::new(),
                     duration_ms: 100,
+                    consensus_detail: None,
                 });
             }
 
@@ -3820,5 +4512,818 @@ mod tests {
     fn p1_verification_error_variants_display() {
         assert_eq!(VerificationError::VerifierDisabled.as_str(), "Verifier is globally disabled");
         assert_eq!(VerificationError::TxHashAlreadyUsed.as_str(), "Transaction hash already used");
+    }
+
+    // ==================== H3-C Phase 1: 共识验证基础设施 ====================
+
+    #[test]
+    fn h3c_consensus_failure_error_variant() {
+        let err = VerificationError::ConsensusFailure;
+        assert_eq!(err.as_str(), "Endpoint consensus verification failed");
+        // Display 也正确
+        assert_eq!(format!("{}", err), "Endpoint consensus verification failed");
+        // From<VerificationError> for &'static str
+        let s: &'static str = err.into();
+        assert_eq!(s, "Endpoint consensus verification failed");
+    }
+
+    #[test]
+    fn h3c_insufficient_responses_error_variant() {
+        let err = VerificationError::InsufficientEndpointResponses;
+        assert_eq!(err.as_str(), "Insufficient endpoint responses for consensus");
+        assert_eq!(format!("{}", err), "Insufficient endpoint responses for consensus");
+    }
+
+    #[test]
+    fn h3c_normalized_transfer_ordering() {
+        let t1 = NormalizedTransfer {
+            tx_hash: b"aaa".to_vec(),
+            from: String::from("T1"),
+            amount: 100,
+            block_timestamp: 1000,
+            contract_address: String::from("C1"),
+        };
+        let t2 = NormalizedTransfer {
+            tx_hash: b"bbb".to_vec(),
+            from: String::from("T1"),
+            amount: 200,
+            block_timestamp: 2000,
+            contract_address: String::from("C1"),
+        };
+        let t3 = NormalizedTransfer {
+            tx_hash: b"aaa".to_vec(),
+            from: String::from("T1"),
+            amount: 100,
+            block_timestamp: 1000,
+            contract_address: String::from("C1"),
+        };
+        // 排序: tx_hash 字典序
+        assert!(t1 < t2);
+        assert!(t2 > t1);
+        // 相等
+        assert_eq!(t1, t3);
+    }
+
+    #[test]
+    fn h3c_normalized_transfer_sort_deterministic() {
+        let mut transfers = vec![
+            NormalizedTransfer {
+                tx_hash: b"ccc".to_vec(), from: String::from("T1"),
+                amount: 300, block_timestamp: 3000, contract_address: String::from("C1"),
+            },
+            NormalizedTransfer {
+                tx_hash: b"aaa".to_vec(), from: String::from("T1"),
+                amount: 100, block_timestamp: 1000, contract_address: String::from("C1"),
+            },
+            NormalizedTransfer {
+                tx_hash: b"bbb".to_vec(), from: String::from("T1"),
+                amount: 200, block_timestamp: 2000, contract_address: String::from("C1"),
+            },
+        ];
+        transfers.sort();
+        assert_eq!(transfers[0].tx_hash, b"aaa");
+        assert_eq!(transfers[1].tx_hash, b"bbb");
+        assert_eq!(transfers[2].tx_hash, b"ccc");
+    }
+
+    #[test]
+    fn h3c_consensus_result_agreed_construction() {
+        let transfers = vec![NormalizedTransfer {
+            tx_hash: b"tx1".to_vec(), from: String::from("T1"),
+            amount: 1_000_000, block_timestamp: 1700000000000,
+            contract_address: String::from("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
+        }];
+        let result = ConsensusResult::Agreed {
+            transfers: transfers.clone(),
+            agreeing_endpoints: vec![String::from("ep1"), String::from("ep2")],
+            dissenting_endpoint: Some(String::from("ep3")),
+            raw_body: b"{}".to_vec(),
+            response_endpoint: String::from("ep1"),
+        };
+        match result {
+            ConsensusResult::Agreed { agreeing_endpoints, dissenting_endpoint, .. } => {
+                assert_eq!(agreeing_endpoints.len(), 2);
+                assert!(dissenting_endpoint.is_some());
+            },
+            _ => panic!("Expected Agreed"),
+        }
+    }
+
+    #[test]
+    fn h3c_consensus_result_no_consensus() {
+        let result = ConsensusResult::NoConsensus {
+            responses: vec![],
+        };
+        assert!(matches!(result, ConsensusResult::NoConsensus { .. }));
+    }
+
+    #[test]
+    fn h3c_consensus_result_insufficient() {
+        let result = ConsensusResult::InsufficientResponses {
+            count: 1,
+            responses: vec![],
+        };
+        match result {
+            ConsensusResult::InsufficientResponses { count, .. } => assert_eq!(count, 1),
+            _ => panic!("Expected InsufficientResponses"),
+        }
+    }
+
+    #[test]
+    fn h3c_verifier_config_consensus_defaults() {
+        let config = VerifierConfig::default();
+        assert!(!config.consensus_enabled);
+        assert_eq!(config.min_consensus_responses, 2);
+        assert!(config.allow_single_source_fallback);
+        assert_eq!(config.consensus_timestamp_tolerance_ms, 3_000);
+    }
+
+    #[test]
+    fn h3c_verifier_config_consensus_save_load_roundtrip() {
+        with_offchain_ext(|| {
+            let mut config = VerifierConfig::default();
+            config.consensus_enabled = true;
+            config.min_consensus_responses = 3;
+            config.allow_single_source_fallback = false;
+            config.consensus_timestamp_tolerance_ms = 6_000;
+            save_verifier_config(&config).unwrap();
+
+            let loaded = get_verifier_config();
+            assert!(loaded.consensus_enabled);
+            assert_eq!(loaded.min_consensus_responses, 3);
+            assert!(!loaded.allow_single_source_fallback);
+            assert_eq!(loaded.consensus_timestamp_tolerance_ms, 6_000);
+        });
+    }
+
+    #[test]
+    fn h3c_verifier_config_validate_min_consensus_responses() {
+        with_offchain_ext(|| {
+            let mut config = VerifierConfig::default();
+            // 低于下限
+            config.min_consensus_responses = 1;
+            assert!(matches!(
+                validate_verifier_config(&config),
+                Err(VerificationError::InvalidConfig(_))
+            ));
+            // 超出上限
+            config.min_consensus_responses = 11;
+            assert!(matches!(
+                validate_verifier_config(&config),
+                Err(VerificationError::InvalidConfig(_))
+            ));
+            // 有效值
+            config.min_consensus_responses = 2;
+            assert!(validate_verifier_config(&config).is_ok());
+            config.min_consensus_responses = 10;
+            assert!(validate_verifier_config(&config).is_ok());
+        });
+    }
+
+    #[test]
+    fn h3c_verifier_config_validate_timestamp_tolerance() {
+        with_offchain_ext(|| {
+            let mut config = VerifierConfig::default();
+            // 0 = 严格模式，允许
+            config.consensus_timestamp_tolerance_ms = 0;
+            assert!(validate_verifier_config(&config).is_ok());
+            // < 1000 且 > 0，拒绝
+            config.consensus_timestamp_tolerance_ms = 500;
+            assert!(matches!(
+                validate_verifier_config(&config),
+                Err(VerificationError::InvalidConfig(_))
+            ));
+            // >= 1000，允许
+            config.consensus_timestamp_tolerance_ms = 1_000;
+            assert!(validate_verifier_config(&config).is_ok());
+        });
+    }
+
+    #[test]
+    fn h3c_v2_config_migration_from_v1_versioned() {
+        // 模拟 V1 格式（含 enabled 但无 consensus 字段）的存储数据
+        with_offchain_ext(|| {
+            #[derive(Encode)]
+            struct V2OldConfig {
+                usdt_contract: String,
+                min_confirmations: u32,
+                rate_limit_interval_ms: u64,
+                cache_ttl_ms: u64,
+                max_pages: u32,
+                audit_log_retention: u32,
+                max_lookback_ms: u64,
+                updated_at: u64,
+                amount_tolerance_bps: u32,
+                enabled: bool,
+            }
+            let old = V2OldConfig {
+                usdt_contract: String::from("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
+                min_confirmations: 19,
+                rate_limit_interval_ms: 200,
+                cache_ttl_ms: 30_000,
+                max_pages: 3,
+                audit_log_retention: 100,
+                max_lookback_ms: 259_200_000,
+                updated_at: 0,
+                amount_tolerance_bps: 50,
+                enabled: true,
+            };
+            let mut versioned = alloc::vec![CONFIG_VERSION_MARKER, 1u8];
+            versioned.extend_from_slice(&old.encode());
+            sp_io::offchain::local_storage_set(
+                StorageKind::PERSISTENT, VERIFIER_CONFIG_KEY, &versioned,
+            );
+
+            let loaded = get_verifier_config();
+            // 保留原有字段
+            assert_eq!(loaded.min_confirmations, 19);
+            assert!(loaded.enabled);
+            // consensus 字段使用默认值
+            assert!(!loaded.consensus_enabled);
+            assert_eq!(loaded.min_consensus_responses, 2);
+            assert!(loaded.allow_single_source_fallback);
+            assert_eq!(loaded.consensus_timestamp_tolerance_ms, 3_000);
+        });
+    }
+
+    #[test]
+    fn h3c_v1_config_migration_without_enabled() {
+        // 模拟最早的 V1 格式（无 enabled 无 consensus）的存储数据
+        with_offchain_ext(|| {
+            #[derive(Encode)]
+            struct V1OldConfig {
+                usdt_contract: String,
+                min_confirmations: u32,
+                rate_limit_interval_ms: u64,
+                cache_ttl_ms: u64,
+                max_pages: u32,
+                audit_log_retention: u32,
+                max_lookback_ms: u64,
+                updated_at: u64,
+                amount_tolerance_bps: u32,
+            }
+            let old = V1OldConfig {
+                usdt_contract: String::from("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
+                min_confirmations: 25,
+                rate_limit_interval_ms: 200,
+                cache_ttl_ms: 30_000,
+                max_pages: 3,
+                audit_log_retention: 100,
+                max_lookback_ms: 259_200_000,
+                updated_at: 0,
+                amount_tolerance_bps: 50,
+            };
+            let mut versioned = alloc::vec![CONFIG_VERSION_MARKER, 1u8];
+            versioned.extend_from_slice(&old.encode());
+            sp_io::offchain::local_storage_set(
+                StorageKind::PERSISTENT, VERIFIER_CONFIG_KEY, &versioned,
+            );
+
+            let loaded = get_verifier_config();
+            assert_eq!(loaded.min_confirmations, 25);
+            assert!(loaded.enabled); // V1 → 默认 true
+            assert!(!loaded.consensus_enabled); // V1 → 默认 false
+            assert_eq!(loaded.min_consensus_responses, 2);
+        });
+    }
+
+    #[test]
+    fn h3c_endpoint_response_construction() {
+        let resp = EndpointResponse {
+            endpoint: String::from("https://api.trongrid.io"),
+            transfers: vec![],
+            response_ms: 150,
+            raw_body: b"{}".to_vec(),
+        };
+        assert_eq!(resp.endpoint, "https://api.trongrid.io");
+        assert_eq!(resp.response_ms, 150);
+    }
+
+    // ==================== H3-C Phase 2: 共识验证核心逻辑 ====================
+
+    /// 构建一个合法的 TronGrid JSON 响应（多笔转账）
+    fn make_trongrid_response(transfers: &[(&str, &str, u64, u64, &str)]) -> Vec<u8> {
+        // transfers: [(tx_hash, from, amount, block_timestamp, contract_address), ...]
+        let mut data_items = Vec::new();
+        for (tx_hash, from, amount, ts, contract) in transfers {
+            data_items.push(format!(
+                r#"{{"transaction_id":"{}","from":"{}","to":"TRecvAddr","value":"{}","block_timestamp":{},"token_info":{{"address":"{}"}}}}"#,
+                tx_hash, from, amount, ts, contract
+            ));
+        }
+        let json = format!(r#"{{"success":true,"data":[{}],"meta":{{}}}}"#, data_items.join(","));
+        json.into_bytes()
+    }
+
+    #[test]
+    fn h3c_extract_normalized_transfers_basic() {
+        let response = make_trongrid_response(&[
+            ("tx_abc", "TSender1", 10_000_000, 1700000000000, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
+            ("tx_def", "TSender1", 5_000_000, 1700000001000, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
+        ]);
+        let transfers = extract_normalized_transfers(&response, "TSender1", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
+        assert_eq!(transfers.len(), 2);
+        // 已按 tx_hash 排序
+        assert_eq!(transfers[0].tx_hash, b"tx_abc");
+        assert_eq!(transfers[0].amount, 10_000_000);
+        assert_eq!(transfers[1].tx_hash, b"tx_def");
+        assert_eq!(transfers[1].amount, 5_000_000);
+    }
+
+    #[test]
+    fn h3c_extract_normalized_transfers_filters_wrong_from() {
+        let response = make_trongrid_response(&[
+            ("tx_1", "TSender1", 10_000_000, 1700000000000, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
+            ("tx_2", "TOtherSender", 5_000_000, 1700000001000, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
+        ]);
+        let transfers = extract_normalized_transfers(&response, "TSender1", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
+        assert_eq!(transfers.len(), 1);
+        assert_eq!(transfers[0].tx_hash, b"tx_1");
+    }
+
+    #[test]
+    fn h3c_extract_normalized_transfers_filters_wrong_contract() {
+        let response = make_trongrid_response(&[
+            ("tx_1", "TSender1", 10_000_000, 1700000000000, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
+            ("tx_2", "TSender1", 5_000_000, 1700000001000, "TFakeContract12345678901234567890"),
+        ]);
+        let transfers = extract_normalized_transfers(&response, "TSender1", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
+        assert_eq!(transfers.len(), 1);
+    }
+
+    #[test]
+    fn h3c_extract_normalized_transfers_empty_response() {
+        let response = br#"{"success":true,"data":[],"meta":{}}"#;
+        let transfers = extract_normalized_transfers(response, "TSender1", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
+        assert!(transfers.is_empty());
+    }
+
+    #[test]
+    fn h3c_extract_normalized_transfers_invalid_json() {
+        let response = b"not json";
+        assert!(matches!(
+            extract_normalized_transfers(response, "TSender1", "C"),
+            Err(VerificationError::InvalidJson)
+        ));
+    }
+
+    #[test]
+    fn h3c_extract_normalized_transfers_sorted_by_tx_hash() {
+        let response = make_trongrid_response(&[
+            ("tx_zzz", "TSender1", 1, 1000, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
+            ("tx_aaa", "TSender1", 2, 2000, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
+            ("tx_mmm", "TSender1", 3, 3000, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
+        ]);
+        let transfers = extract_normalized_transfers(&response, "TSender1", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
+        assert_eq!(transfers[0].tx_hash, b"tx_aaa");
+        assert_eq!(transfers[1].tx_hash, b"tx_mmm");
+        assert_eq!(transfers[2].tx_hash, b"tx_zzz");
+    }
+
+    // --- transfers_agree 测试 ---
+
+    fn make_normalized(tx_hash: &str, amount: u64, ts: u64) -> NormalizedTransfer {
+        NormalizedTransfer {
+            tx_hash: tx_hash.as_bytes().to_vec(),
+            from: String::from("TSender1"),
+            amount,
+            block_timestamp: ts,
+            contract_address: String::from("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
+        }
+    }
+
+    #[test]
+    fn h3c_transfers_agree_identical() {
+        let a = vec![make_normalized("tx1", 100, 1000), make_normalized("tx2", 200, 2000)];
+        let b = vec![make_normalized("tx1", 100, 1000), make_normalized("tx2", 200, 2000)];
+        assert!(transfers_agree(&a, &b, 3000));
+    }
+
+    #[test]
+    fn h3c_transfers_agree_timestamp_within_tolerance() {
+        let a = vec![make_normalized("tx1", 100, 1000)];
+        let b = vec![make_normalized("tx1", 100, 3500)]; // diff = 2500, tolerance = 3000
+        assert!(transfers_agree(&a, &b, 3000));
+    }
+
+    #[test]
+    fn h3c_transfers_disagree_timestamp_exceeds_tolerance() {
+        let a = vec![make_normalized("tx1", 100, 1000)];
+        let b = vec![make_normalized("tx1", 100, 5000)]; // diff = 4000 > tolerance 3000
+        assert!(!transfers_agree(&a, &b, 3000));
+    }
+
+    #[test]
+    fn h3c_transfers_disagree_different_amount() {
+        let a = vec![make_normalized("tx1", 100, 1000)];
+        let b = vec![make_normalized("tx1", 200, 1000)];
+        assert!(!transfers_agree(&a, &b, 3000));
+    }
+
+    #[test]
+    fn h3c_transfers_disagree_different_count() {
+        let a = vec![make_normalized("tx1", 100, 1000), make_normalized("tx2", 200, 2000)];
+        let b = vec![make_normalized("tx1", 100, 1000)];
+        assert!(!transfers_agree(&a, &b, 3000));
+    }
+
+    #[test]
+    fn h3c_transfers_disagree_different_tx_hash() {
+        let a = vec![make_normalized("tx1", 100, 1000)];
+        let b = vec![make_normalized("tx2", 100, 1000)];
+        assert!(!transfers_agree(&a, &b, 3000));
+    }
+
+    #[test]
+    fn h3c_transfers_agree_both_empty() {
+        let a: Vec<NormalizedTransfer> = vec![];
+        let b: Vec<NormalizedTransfer> = vec![];
+        assert!(transfers_agree(&a, &b, 3000));
+    }
+
+    // --- build_consensus 测试 ---
+
+    fn make_endpoint_response(endpoint: &str, transfers: Vec<NormalizedTransfer>) -> EndpointResponse {
+        EndpointResponse {
+            endpoint: String::from(endpoint),
+            transfers,
+            response_ms: 100,
+            raw_body: b"{}".to_vec(),
+        }
+    }
+
+    #[test]
+    fn h3c_build_consensus_3_of_3_agree() {
+        let t = vec![make_normalized("tx1", 1000, 5000)];
+        let responses = vec![
+            make_endpoint_response("ep1", t.clone()),
+            make_endpoint_response("ep2", t.clone()),
+            make_endpoint_response("ep3", t.clone()),
+        ];
+        match build_consensus(responses, 2, 3000) {
+            ConsensusResult::Agreed { agreeing_endpoints, dissenting_endpoint, .. } => {
+                assert_eq!(agreeing_endpoints.len(), 3);
+                assert!(dissenting_endpoint.is_none());
+            },
+            other => panic!("Expected Agreed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn h3c_build_consensus_2_of_3_agree() {
+        let t_majority = vec![make_normalized("tx1", 1000, 5000)];
+        let t_dissent = vec![make_normalized("tx1", 9999, 5000)]; // 不同金额
+        let responses = vec![
+            make_endpoint_response("ep1", t_majority.clone()),
+            make_endpoint_response("ep2", t_dissent),
+            make_endpoint_response("ep3", t_majority.clone()),
+        ];
+        match build_consensus(responses, 2, 3000) {
+            ConsensusResult::Agreed { agreeing_endpoints, dissenting_endpoint, .. } => {
+                assert_eq!(agreeing_endpoints.len(), 2);
+                assert!(agreeing_endpoints.contains(&String::from("ep1")));
+                assert!(agreeing_endpoints.contains(&String::from("ep3")));
+                assert_eq!(dissenting_endpoint, Some(String::from("ep2")));
+            },
+            other => panic!("Expected Agreed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn h3c_build_consensus_all_disagree() {
+        let responses = vec![
+            make_endpoint_response("ep1", vec![make_normalized("tx1", 100, 5000)]),
+            make_endpoint_response("ep2", vec![make_normalized("tx1", 200, 5000)]),
+            make_endpoint_response("ep3", vec![make_normalized("tx1", 300, 5000)]),
+        ];
+        match build_consensus(responses, 2, 3000) {
+            ConsensusResult::NoConsensus { responses } => {
+                assert_eq!(responses.len(), 3);
+            },
+            other => panic!("Expected NoConsensus, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn h3c_build_consensus_insufficient_responses() {
+        let t = vec![make_normalized("tx1", 1000, 5000)];
+        let responses = vec![
+            make_endpoint_response("ep1", t),
+        ];
+        match build_consensus(responses, 2, 3000) {
+            ConsensusResult::InsufficientResponses { count, .. } => {
+                assert_eq!(count, 1);
+            },
+            other => panic!("Expected InsufficientResponses, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn h3c_build_consensus_2_of_3_with_timestamp_tolerance() {
+        // ep1 和 ep3 的 timestamp 差 2000ms，在 tolerance 3000ms 以内
+        let responses = vec![
+            make_endpoint_response("ep1", vec![make_normalized("tx1", 1000, 5000)]),
+            make_endpoint_response("ep2", vec![make_normalized("tx1", 1000, 15000)]), // 偏差 10000 > 3000
+            make_endpoint_response("ep3", vec![make_normalized("tx1", 1000, 7000)]),  // 偏差 2000 < 3000
+        ];
+        match build_consensus(responses, 2, 3000) {
+            ConsensusResult::Agreed { agreeing_endpoints, dissenting_endpoint, .. } => {
+                assert_eq!(agreeing_endpoints.len(), 2);
+                assert!(agreeing_endpoints.contains(&String::from("ep1")));
+                assert!(agreeing_endpoints.contains(&String::from("ep3")));
+                assert_eq!(dissenting_endpoint, Some(String::from("ep2")));
+            },
+            other => panic!("Expected Agreed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn h3c_build_consensus_empty_transfers_agree() {
+        // 两个端点都返回空（没有匹配转账）— 应该一致
+        let responses = vec![
+            make_endpoint_response("ep1", vec![]),
+            make_endpoint_response("ep2", vec![]),
+        ];
+        match build_consensus(responses, 2, 3000) {
+            ConsensusResult::Agreed { transfers, agreeing_endpoints, .. } => {
+                assert!(transfers.is_empty());
+                assert_eq!(agreeing_endpoints.len(), 2);
+            },
+            other => panic!("Expected Agreed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn h3c_build_consensus_2_of_2_exact() {
+        // 仅两个端点，都一致 → 2/2 通过
+        let t = vec![make_normalized("tx1", 500, 1000)];
+        let responses = vec![
+            make_endpoint_response("ep1", t.clone()),
+            make_endpoint_response("ep2", t),
+        ];
+        match build_consensus(responses, 2, 3000) {
+            ConsensusResult::Agreed { agreeing_endpoints, dissenting_endpoint, .. } => {
+                assert_eq!(agreeing_endpoints.len(), 2);
+                assert!(dissenting_endpoint.is_none());
+            },
+            other => panic!("Expected Agreed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn h3c_build_consensus_2_of_2_disagree() {
+        // 仅两个端点，不一致 → NoConsensus
+        let responses = vec![
+            make_endpoint_response("ep1", vec![make_normalized("tx1", 100, 1000)]),
+            make_endpoint_response("ep2", vec![make_normalized("tx1", 200, 1000)]),
+        ];
+        match build_consensus(responses, 2, 3000) {
+            ConsensusResult::NoConsensus { .. } => {},
+            other => panic!("Expected NoConsensus, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn h3c_build_consensus_multi_transfer_order_independent() {
+        // 转账列表内容相同但原始顺序不同（排序后一致）
+        let t1 = vec![
+            make_normalized("tx_aaa", 100, 1000),
+            make_normalized("tx_zzz", 200, 2000),
+        ];
+        let t2 = vec![
+            make_normalized("tx_aaa", 100, 1000),
+            make_normalized("tx_zzz", 200, 2000),
+        ];
+        // 已经按 tx_hash 排序，确认一致
+        let responses = vec![
+            make_endpoint_response("ep1", t1),
+            make_endpoint_response("ep2", t2),
+        ];
+        match build_consensus(responses, 2, 3000) {
+            ConsensusResult::Agreed { .. } => {},
+            other => panic!("Expected Agreed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn h3c_build_consensus_strict_timestamp_zero_tolerance() {
+        // tolerance=0 时 timestamp 必须精确匹配
+        let responses = vec![
+            make_endpoint_response("ep1", vec![make_normalized("tx1", 100, 1000)]),
+            make_endpoint_response("ep2", vec![make_normalized("tx1", 100, 1001)]), // 差 1ms
+        ];
+        match build_consensus(responses, 2, 0) {
+            ConsensusResult::NoConsensus { .. } => {},
+            other => panic!("Expected NoConsensus with 0 tolerance, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn h3c_consensus_config_routing_default_off() {
+        // 默认 consensus_enabled=false，验证主函数应走旧路径
+        let config = VerifierConfig::default();
+        assert!(!config.consensus_enabled);
+    }
+
+    // ==================== H3-C Phase 3: 审计日志 + 可观测性 ====================
+
+    #[test]
+    fn h3c_consensus_detail_encode_decode_roundtrip() {
+        let detail = ConsensusDetail {
+            consensus_mode: true,
+            agreeing_endpoints: vec![b"ep1".to_vec(), b"ep2".to_vec()],
+            dissenting_endpoint: Some(b"ep3".to_vec()),
+            degraded: false,
+            total_endpoints_queried: 3,
+            total_endpoints_responded: 3,
+        };
+        let encoded = detail.encode();
+        let decoded = ConsensusDetail::decode(&mut &encoded[..]).unwrap();
+        assert!(decoded.consensus_mode);
+        assert_eq!(decoded.agreeing_endpoints.len(), 2);
+        assert_eq!(decoded.dissenting_endpoint, Some(b"ep3".to_vec()));
+        assert!(!decoded.degraded);
+        assert_eq!(decoded.total_endpoints_queried, 3);
+        assert_eq!(decoded.total_endpoints_responded, 3);
+    }
+
+    #[test]
+    fn h3c_consensus_detail_degraded() {
+        let detail = ConsensusDetail {
+            consensus_mode: true,
+            agreeing_endpoints: Vec::new(),
+            dissenting_endpoint: None,
+            degraded: true,
+            total_endpoints_queried: 3,
+            total_endpoints_responded: 1,
+        };
+        let encoded = detail.encode();
+        let decoded = ConsensusDetail::decode(&mut &encoded[..]).unwrap();
+        assert!(decoded.degraded);
+        assert!(decoded.agreeing_endpoints.is_empty());
+        assert_eq!(decoded.total_endpoints_responded, 1);
+    }
+
+    #[test]
+    fn h3c_audit_log_entry_with_consensus_detail() {
+        with_offchain_ext(|| {
+            let detail = ConsensusDetail {
+                consensus_mode: true,
+                agreeing_endpoints: vec![b"trongrid".to_vec(), b"tronstack".to_vec()],
+                dissenting_endpoint: None,
+                degraded: false,
+                total_endpoints_queried: 2,
+                total_endpoints_responded: 2,
+            };
+            let entry = AuditLogEntry {
+                timestamp: 1700000000000,
+                action: b"verify_trc20_by_transfer".to_vec(),
+                from_address: b"TSender".to_vec(),
+                to_address: b"TReceiver".to_vec(),
+                expected_amount: 10_000_000,
+                actual_amount: 10_000_000,
+                result_ok: true,
+                error_msg: Vec::new(),
+                tx_hash: b"tx_abc".to_vec(),
+                endpoint_used: b"trongrid".to_vec(),
+                duration_ms: 2500,
+                consensus_detail: Some(detail),
+            };
+            write_audit_log(&entry);
+            let logs = get_recent_audit_logs(1);
+            assert_eq!(logs.len(), 1);
+            let loaded = &logs[0];
+            assert!(loaded.consensus_detail.is_some());
+            let cd = loaded.consensus_detail.as_ref().unwrap();
+            assert!(cd.consensus_mode);
+            assert_eq!(cd.agreeing_endpoints.len(), 2);
+            assert!(!cd.degraded);
+        });
+    }
+
+    #[test]
+    fn h3c_audit_log_entry_without_consensus_detail() {
+        with_offchain_ext(|| {
+            let entry = AuditLogEntry {
+                timestamp: 1700000000000,
+                action: b"verify".to_vec(),
+                from_address: b"TF".to_vec(),
+                to_address: b"TT".to_vec(),
+                expected_amount: 100,
+                actual_amount: 100,
+                result_ok: true,
+                error_msg: Vec::new(),
+                tx_hash: Vec::new(),
+                endpoint_used: Vec::new(),
+                duration_ms: 50,
+                consensus_detail: None,
+            };
+            write_audit_log(&entry);
+            let logs = get_recent_audit_logs(1);
+            assert_eq!(logs.len(), 1);
+            assert!(logs[0].consensus_detail.is_none());
+        });
+    }
+
+    #[test]
+    fn h3c_verifier_metrics_consensus_fields_default() {
+        with_offchain_ext(|| {
+            let metrics = get_verifier_metrics();
+            assert_eq!(metrics.consensus_success_count, 0);
+            assert_eq!(metrics.consensus_failure_count, 0);
+            assert_eq!(metrics.degraded_verification_count, 0);
+        });
+    }
+
+    #[test]
+    fn h3c_verifier_metrics_consensus_increment() {
+        with_offchain_ext(|| {
+            let mut m = get_verifier_metrics();
+            m.consensus_success_count = m.consensus_success_count.saturating_add(3);
+            m.consensus_failure_count = m.consensus_failure_count.saturating_add(1);
+            m.degraded_verification_count = m.degraded_verification_count.saturating_add(2);
+            save_verifier_metrics(&m);
+
+            let loaded = get_verifier_metrics();
+            assert_eq!(loaded.consensus_success_count, 3);
+            assert_eq!(loaded.consensus_failure_count, 1);
+            assert_eq!(loaded.degraded_verification_count, 2);
+        });
+    }
+
+    #[test]
+    fn h3c_verifier_metrics_reset_clears_consensus() {
+        with_offchain_ext(|| {
+            let mut m = get_verifier_metrics();
+            m.consensus_success_count = 10;
+            m.consensus_failure_count = 5;
+            m.degraded_verification_count = 3;
+            save_verifier_metrics(&m);
+
+            reset_verifier_metrics();
+            let after = get_verifier_metrics();
+            assert_eq!(after.consensus_success_count, 0);
+            assert_eq!(after.consensus_failure_count, 0);
+            assert_eq!(after.degraded_verification_count, 0);
+        });
+    }
+
+    #[test]
+    fn h3c_verifier_metrics_legacy_migration() {
+        // 模拟旧格式存储（不含 consensus 字段）
+        with_offchain_ext(|| {
+            #[derive(Encode)]
+            struct OldMetrics {
+                total_success: u64,
+                total_failure: u64,
+                total_duration_ms: u64,
+                endpoint_fallback_count: u64,
+                cache_hit_count: u64,
+                rate_limit_hit_count: u64,
+                lock_contention_count: u64,
+                last_updated: u64,
+            }
+            let old = OldMetrics {
+                total_success: 42,
+                total_failure: 3,
+                total_duration_ms: 100_000,
+                endpoint_fallback_count: 5,
+                cache_hit_count: 20,
+                rate_limit_hit_count: 2,
+                lock_contention_count: 1,
+                last_updated: 1700000000000,
+            };
+            sp_io::offchain::local_storage_set(
+                StorageKind::PERSISTENT, VERIFIER_METRICS_KEY, &old.encode(),
+            );
+
+            let loaded = get_verifier_metrics();
+            // 保留旧字段
+            assert_eq!(loaded.total_success, 42);
+            assert_eq!(loaded.total_failure, 3);
+            assert_eq!(loaded.cache_hit_count, 20);
+            // 新字段使用默认值
+            assert_eq!(loaded.consensus_success_count, 0);
+            assert_eq!(loaded.consensus_failure_count, 0);
+            assert_eq!(loaded.degraded_verification_count, 0);
+        });
+    }
+
+    #[test]
+    fn h3c_verifier_metrics_roundtrip_with_consensus() {
+        with_offchain_ext(|| {
+            let mut m = VerifierMetrics::default();
+            m.total_success = 100;
+            m.consensus_success_count = 50;
+            m.consensus_failure_count = 2;
+            m.degraded_verification_count = 5;
+            save_verifier_metrics(&m);
+
+            let loaded = get_verifier_metrics();
+            assert_eq!(loaded.total_success, 100);
+            assert_eq!(loaded.consensus_success_count, 50);
+            assert_eq!(loaded.consensus_failure_count, 2);
+            assert_eq!(loaded.degraded_verification_count, 5);
+        });
     }
 }

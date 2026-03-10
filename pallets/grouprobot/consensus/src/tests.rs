@@ -269,9 +269,9 @@ fn era_end_no_nodes_just_advances_era() {
 }
 
 #[test]
-fn era_end_non_tee_gets_zero_weight() {
+fn era_end_non_tee_gets_base_weight() {
 	new_test_ext().execute_with(|| {
-		// Non-TEE node
+		// Non-TEE node — now gets base weight and earns inflation rewards
 		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
 
 		set_mock_settle_income(0);
@@ -279,12 +279,10 @@ fn era_end_non_tee_gets_zero_weight() {
 
 		advance_to(52);
 
-		// Non-TEE node weight = 0, so distributor gets zero-weight entries
+		// Non-TEE node has base weight, gets full inflation (sole active node)
 		let rewards = get_distributed_rewards();
-		// All rewards are 0 since weight is 0
-		for (_, amount) in &rewards {
-			assert_eq!(*amount, 0, "Non-TEE node should get 0 rewards");
-		}
+		assert!(!rewards.is_empty(), "Non-TEE node should receive rewards");
+		assert_eq!(rewards[0].1, 1000, "Sole node gets full InflationPerEra");
 	});
 }
 
@@ -1497,5 +1495,268 @@ fn replace_operator_preserves_stake_on_success() {
 
 		// Node stake unchanged
 		assert_eq!(Nodes::<Test>::get(node_id(1)).unwrap().stake, 500);
+	});
+}
+
+// ============================================================================
+// P15: consensus_enabled + allow_single_source_fallback
+// ============================================================================
+
+#[test]
+fn p15_set_consensus_config_works() {
+	new_test_ext().execute_with(|| {
+		// Default values
+		assert!(GroupRobotConsensus::is_consensus_enabled());
+		assert!(GroupRobotConsensus::is_single_source_fallback_allowed());
+
+		// Root can set
+		assert_ok!(GroupRobotConsensus::set_consensus_config(
+			RuntimeOrigin::root(), false, false
+		));
+		assert!(!GroupRobotConsensus::is_consensus_enabled());
+		assert!(!GroupRobotConsensus::is_single_source_fallback_allowed());
+
+		// Non-root fails
+		assert_noop!(
+			GroupRobotConsensus::set_consensus_config(
+				RuntimeOrigin::signed(OPERATOR), true, true
+			),
+			sp_runtime::DispatchError::BadOrigin
+		);
+
+		// Root can restore
+		assert_ok!(GroupRobotConsensus::set_consensus_config(
+			RuntimeOrigin::root(), true, true
+		));
+		assert!(GroupRobotConsensus::is_consensus_enabled());
+		assert!(GroupRobotConsensus::is_single_source_fallback_allowed());
+	});
+}
+
+#[test]
+fn p15_consensus_disabled_skips_reward_distribution() {
+	new_test_ext().execute_with(|| {
+		// Register a TEE node so rewards would normally distribute
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_ok!(GroupRobotConsensus::verify_node_tee(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), bot_hash(10)
+		));
+		set_mock_settle_income(100);
+		clear_distributed_rewards();
+
+		// Disable consensus
+		assert_ok!(GroupRobotConsensus::set_consensus_config(
+			RuntimeOrigin::root(), false, true
+		));
+
+		let era_before = GroupRobotConsensus::current_era();
+
+		// Trigger era end
+		assert_ok!(GroupRobotConsensus::force_era_end(RuntimeOrigin::root()));
+
+		// Era should have advanced
+		assert_eq!(GroupRobotConsensus::current_era(), era_before + 1);
+
+		// But no rewards distributed
+		let rewards = get_distributed_rewards();
+		assert!(rewards.is_empty(), "consensus_enabled=false should skip reward distribution");
+
+		// Uptime should still be recorded
+		let uptime_eras = get_recorded_uptime_eras();
+		assert!(uptime_eras.contains(&era_before));
+	});
+}
+
+#[test]
+fn p15_consensus_disabled_still_settles_subscriptions() {
+	new_test_ext().execute_with(|| {
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		set_mock_settle_income(500);
+		clear_distributed_rewards();
+
+		// Disable consensus
+		assert_ok!(GroupRobotConsensus::set_consensus_config(
+			RuntimeOrigin::root(), false, true
+		));
+
+		let era_before = GroupRobotConsensus::current_era();
+
+		// Force era end — settlement happens (MockSubscriptionSettler::settle_era called)
+		// and era advances, but no reward distribution
+		assert_ok!(GroupRobotConsensus::force_era_end(RuntimeOrigin::root()));
+		assert_eq!(GroupRobotConsensus::current_era(), era_before + 1);
+
+		// No rewards (consensus disabled)
+		assert!(get_distributed_rewards().is_empty());
+	});
+}
+
+#[test]
+fn p15_single_source_fallback_false_requires_multiple_tee() {
+	new_test_ext().execute_with(|| {
+		// Register only 1 TEE node
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_ok!(GroupRobotConsensus::verify_node_tee(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), bot_hash(10)
+		));
+		set_mock_settle_income(0);
+		clear_distributed_rewards();
+
+		// Disable single source fallback
+		assert_ok!(GroupRobotConsensus::set_consensus_config(
+			RuntimeOrigin::root(), true, false
+		));
+
+		// Trigger era end
+		assert_ok!(GroupRobotConsensus::force_era_end(RuntimeOrigin::root()));
+
+		// Single TEE node → TEE bonus stripped, demoted to base weight
+		// Still gets base reward (sole active node gets full inflation)
+		let rewards = get_distributed_rewards();
+		assert!(!rewards.is_empty(), "Demoted TEE node still gets base reward");
+		assert_eq!(rewards[0].1, 1000, "Demoted to base weight, sole node gets full inflation");
+	});
+}
+
+#[test]
+fn p15_single_source_fallback_true_allows_single_tee() {
+	new_test_ext().execute_with(|| {
+		// Register 1 TEE node
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_ok!(GroupRobotConsensus::verify_node_tee(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), bot_hash(10)
+		));
+		set_mock_settle_income(0);
+		clear_distributed_rewards();
+
+		// Default: allow_single_source_fallback=true
+		assert!(GroupRobotConsensus::is_single_source_fallback_allowed());
+
+		// Trigger era end
+		assert_ok!(GroupRobotConsensus::force_era_end(RuntimeOrigin::root()));
+
+		// Single TEE node should get rewards
+		let rewards = get_distributed_rewards();
+		assert!(!rewards.is_empty(), "Single TEE node with fallback=true should get rewards");
+		assert!(rewards[0].1 > 0, "Reward amount should be > 0");
+	});
+}
+
+#[test]
+fn p15_single_source_fallback_with_multiple_tee_works() {
+	new_test_ext().execute_with(|| {
+		// Register 2 TEE nodes
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_ok!(GroupRobotConsensus::verify_node_tee(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), bot_hash(10)
+		));
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR2), node_id(2), 200));
+		assert_ok!(GroupRobotConsensus::verify_node_tee(
+			RuntimeOrigin::signed(OPERATOR2), node_id(2), bot_hash(11)
+		));
+		set_mock_settle_income(0);
+		clear_distributed_rewards();
+
+		// Disable single source fallback — but we have 2 TEE nodes, so it's fine
+		assert_ok!(GroupRobotConsensus::set_consensus_config(
+			RuntimeOrigin::root(), true, false
+		));
+
+		// Trigger era end
+		assert_ok!(GroupRobotConsensus::force_era_end(RuntimeOrigin::root()));
+
+		// Both nodes should get rewards
+		let rewards = get_distributed_rewards();
+		assert_eq!(rewards.len(), 2, "Two TEE nodes should both get rewards");
+		assert!(rewards[0].1 > 0);
+		assert!(rewards[1].1 > 0);
+	});
+}
+
+#[test]
+fn p15_fallback_false_demotes_tee_but_non_tee_unaffected() {
+	new_test_ext().execute_with(|| {
+		// 1 TEE node + 1 non-TEE node
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_ok!(GroupRobotConsensus::verify_node_tee(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), bot_hash(10)
+		));
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR2), node_id(2), 200));
+		// node 2 is non-TEE
+
+		set_mock_settle_income(0);
+		clear_distributed_rewards();
+
+		// Disable single source fallback → single TEE demoted to base weight
+		assert_ok!(GroupRobotConsensus::set_consensus_config(
+			RuntimeOrigin::root(), true, false
+		));
+
+		assert_ok!(GroupRobotConsensus::force_era_end(RuntimeOrigin::root()));
+
+		// Both nodes get equal base weight → equal share of inflation
+		let rewards = get_distributed_rewards();
+		assert_eq!(rewards.len(), 2, "Both nodes should get rewards");
+		// Both have same base weight → equal split of 1000 → 500 each
+		assert_eq!(rewards[0].1, rewards[1].1, "TEE demoted to base = same as non-TEE");
+		assert_eq!(rewards[0].1, 500);
+	});
+}
+
+#[test]
+fn non_tee_and_tee_mixed_weight_distribution() {
+	new_test_ext().execute_with(|| {
+		// 1 TEE node (weight = base × 1.0 = 500,000) + 1 non-TEE node (weight = base = 500,000)
+		// Default TeeRewardMultiplier = 0 → treated as 10,000 = 1.0x → same weight
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_ok!(GroupRobotConsensus::verify_node_tee(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), bot_hash(10)
+		));
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR2), node_id(2), 200));
+
+		set_mock_settle_income(0);
+		clear_distributed_rewards();
+
+		// With default TeeRewardMultiplier=0 (=1x), TEE weight = non-TEE weight
+		assert_ok!(GroupRobotConsensus::force_era_end(RuntimeOrigin::root()));
+
+		let rewards = get_distributed_rewards();
+		assert_eq!(rewards.len(), 2);
+		// bot_hash(10) has_dual_attestation=true but SgxEnclaveBonus=0 → no bonus
+		// Both nodes: equal weight → equal share
+		assert_eq!(rewards[0].1, 500);
+		assert_eq!(rewards[1].1, 500);
+	});
+}
+
+#[test]
+fn tee_multiplier_gives_tee_higher_share() {
+	new_test_ext().execute_with(|| {
+		// Set TEE multiplier to 2x (20000 basis points)
+		assert_ok!(GroupRobotConsensus::set_tee_reward_params(RuntimeOrigin::root(), 20_000, 0));
+
+		// 1 TEE node (weight = 500,000 × 20000 / 10000 = 1,000,000)
+		// 1 non-TEE node (weight = 500,000)
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR), node_id(1), 200));
+		assert_ok!(GroupRobotConsensus::verify_node_tee(
+			RuntimeOrigin::signed(OPERATOR), node_id(1), bot_hash(10)
+		));
+		assert_ok!(GroupRobotConsensus::register_node(RuntimeOrigin::signed(OPERATOR2), node_id(2), 200));
+
+		set_mock_settle_income(0);
+		clear_distributed_rewards();
+
+		assert_ok!(GroupRobotConsensus::force_era_end(RuntimeOrigin::root()));
+
+		// total_weight = 1,000,000 + 500,000 = 1,500,000
+		// TEE: 1000 × 1,000,000 / 1,500,000 = 666
+		// non-TEE: 1000 × 500,000 / 1,500,000 = 333
+		let rewards = get_distributed_rewards();
+		assert_eq!(rewards.len(), 2);
+		let tee_reward = rewards.iter().find(|(nid, _)| *nid == node_id(1)).unwrap().1;
+		let non_tee_reward = rewards.iter().find(|(nid, _)| *nid == node_id(2)).unwrap().1;
+		assert_eq!(tee_reward, 666, "TEE node gets 2/3 of inflation with 2x multiplier");
+		assert_eq!(non_tee_reward, 333, "Non-TEE node gets 1/3 of inflation");
+		assert!(tee_reward > non_tee_reward, "TEE should earn more than non-TEE");
 	});
 }

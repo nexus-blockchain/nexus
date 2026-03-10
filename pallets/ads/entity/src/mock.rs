@@ -180,6 +180,8 @@ impl pallet_ads_entity::Config for Test {
 	type TreasuryAccount = TreasuryAccount;
 	type PlatformAdShareBps = ConstU16<2000>;       // 20%
 	type AdPlacementDeposit = ConstU128<100>;        // 100 units
+	type AdPlacementDepositUsd = ConstU64<1_000_000>;
+	type DepositCalculator = ();
 	type MaxPlacementsPerEntity = ConstU32<10>;
 	type DefaultDailyImpressionCap = ConstU32<1000>;
 	type BlocksPerDay = ConstU32<14400>;

@@ -24,6 +24,9 @@ mod mock;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+
 use codec::{Decode, Encode, MaxEncodedLen};
 use frame_support::pallet_prelude::*;
 use frame_system::pallet_prelude::*;
@@ -155,6 +158,10 @@ pub mod pallet {
 		type BotRegistry: BotRegistryProvider<Self::AccountId>;
 		/// 订阅层级查询 (tier gate)
 		type Subscription: SubscriptionProvider;
+
+		/// Benchmark helper for external-pallet state setup and Ed25519 signing.
+		#[cfg(feature = "runtime-benchmarks")]
+		type BenchmarkHelper: crate::benchmarking::BenchmarkHelper<Self::AccountId>;
 	}
 
 	/// L1-R3: Config 参数完整性校验

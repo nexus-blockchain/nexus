@@ -12,6 +12,7 @@ use super::*;
 #[allow(unused)]
 use crate::Pallet as AdsEntity;
 use frame_benchmarking::v2::*;
+use frame_support::traits::ReservableCurrency;
 use frame_system::RawOrigin;
 use pallet_ads_primitives::*;
 

@@ -1,6 +1,6 @@
 use frame_support::{
 	derive_impl, parameter_types,
-	traits::{ConstU16, ConstU32, ConstU128},
+	traits::{ConstU16, ConstU32, ConstU64, ConstU128},
 };
 use pallet_grouprobot_primitives::*;
 use sp_runtime::{BuildStorage, DispatchError};
@@ -166,6 +166,8 @@ impl pallet_ads_entity::Config for Test {
 	type TreasuryAccount = TreasuryAccount;
 	type PlatformAdShareBps = ConstU16<2000>;
 	type AdPlacementDeposit = ConstU128<100>;
+	type AdPlacementDepositUsd = ConstU64<1_000_000>;
+	type DepositCalculator = ();
 	type MaxPlacementsPerEntity = ConstU32<10>;
 	type DefaultDailyImpressionCap = ConstU32<1000>;
 	type BlocksPerDay = ConstU32<14400>;

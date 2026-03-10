@@ -9,6 +9,7 @@
 #![cfg(feature = "runtime-benchmarks")]
 
 use super::*;
+use sp_std::vec::Vec;
 use frame_benchmarking::v2::*;
 use frame_system::RawOrigin;
 use pallet::*;

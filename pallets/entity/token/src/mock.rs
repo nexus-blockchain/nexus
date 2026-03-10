@@ -210,7 +210,6 @@ parameter_types! {
 }
 
 impl pallet_entity_token::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type AssetId = u64;
     type AssetBalance = u128;
     type Assets = Assets;

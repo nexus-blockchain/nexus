@@ -11,6 +11,49 @@ import { xxhashAsU8a } from '@polkadot/util-crypto';
 import { u8aToHex } from '@polkadot/util';
 import { sudoSend } from '../core/chain-state.js';
 
+function getStorageValueKeyHex(pallet: string, item: string): string {
+  const key1 = xxhashAsU8a(pallet, 128);
+  const key2 = xxhashAsU8a(item, 128);
+  return u8aToHex(new Uint8Array([...key1, ...key2]));
+}
+
+async function ensureReasonableTwapAccumulator(
+  api: ApiPromise,
+  sudoAccount: KeyringPair,
+  priceU64: bigint = 100_000n,
+): Promise<void> {
+  const minReasonablePriceU64 = 100_000n;
+  const existing = await (api.query as any).nexMarket.twapAccumulatorStore();
+  const raw = existing?.toJSON?.() as Record<string, unknown> | null | undefined;
+  if (!raw) {
+    return;
+  }
+
+  const lastPrice = BigInt(String(raw.lastPrice ?? 0));
+  if (lastPrice >= minReasonablePriceU64) {
+    console.log(`  ✓ TWAP 累积器价格正常: ${existing.toHuman()?.lastPrice ?? lastPrice.toString()}`);
+    return;
+  }
+
+  const storageKey = getStorageValueKeyHex('NexMarket', 'TwapAccumulatorStore');
+  console.log(`  ℹ TWAP 累积器价格异常偏低，清理污染数据: ${lastPrice} -> fallback LastTradePrice=${priceU64}`);
+  const killStorageTx = api.tx.system.killStorage([storageKey]);
+  const result = await sudoSend(api, killStorageTx, sudoAccount, 'killStorage(TwapAccumulatorStore)');
+
+  if (!result.success) {
+    console.warn(`  ⚠ 清理 TWAP 累积器失败: ${result.error}`);
+    return;
+  }
+
+  const verify = await (api.query as any).nexMarket.twapAccumulatorStore();
+  const verifyRaw = verify?.toJSON?.();
+  if (verifyRaw == null) {
+    console.log('  ✓ TWAP 累积器已清理，将回退到 LastTradePrice');
+  } else {
+    console.warn(`  ⚠ TWAP 累积器仍存在: ${JSON.stringify(verifyRaw)}`);
+  }
+}
+
 /**
  * 通过 sudo(system.setStorage) 直接写入 LastTradePrice。
  * nexMarket.setInitialPrice 需要 MarketAdminOrigin (council),
@@ -19,8 +62,9 @@ import { sudoSend } from '../core/chain-state.js';
 async function ensureInitialPrice(
   api: ApiPromise,
   sudoAccount: KeyringPair,
-  priceU64: bigint = 10_000_000_000n, // 默认 1 USDT ≈ 10 NEX
+  priceU64: bigint = 100_000n, // 默认 1 NEX = 0.1 USDT（100 USDT ≈ 1000 NEX）
 ): Promise<void> {
+  const minReasonablePriceU64 = 100_000n;
   // 检查是否已有价格
   const existing = await (api.query as any).nexMarket.lastTradePrice();
   const hasPrice = existing && (
@@ -28,14 +72,16 @@ async function ensureInitialPrice(
     (existing.isSome === undefined && existing.toString() !== '0' && existing.toString() !== '')
   );
   if (hasPrice) {
-    console.log(`  ✓ 价格已存在: ${existing.toHuman()}`);
-    return;
+    const raw = BigInt(existing.toString());
+    if (raw >= minReasonablePriceU64) {
+      console.log(`  ✓ 价格已存在: ${existing.toHuman()}`);
+      return;
+    }
+    console.log(`  ℹ 价格异常偏低，重置 LastTradePrice: ${existing.toHuman()} -> ${priceU64}`);
   }
 
   // 计算 storage key: twox128("NexMarket") ++ twox128("LastTradePrice")
-  const key1 = xxhashAsU8a('NexMarket', 128);
-  const key2 = xxhashAsU8a('LastTradePrice', 128);
-  const storageKey = u8aToHex(new Uint8Array([...key1, ...key2]));
+  const storageKey = getStorageValueKeyHex('NexMarket', 'LastTradePrice');
 
   // 编码 u64 LE
   const buf = new Uint8Array(8);
@@ -64,5 +110,6 @@ export async function bootstrapDevChain(
   sudoAccount: KeyringPair,
 ): Promise<void> {
   console.log('🔧 引导开发链状态...');
+  await ensureReasonableTwapAccumulator(api, sudoAccount);
   await ensureInitialPrice(api, sudoAccount);
 }

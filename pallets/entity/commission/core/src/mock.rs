@@ -288,7 +288,6 @@ parameter_types! {
 }
 
 impl pallet_commission_core::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type WeightInfo = ();
     type ShopProvider = MockShopProvider;

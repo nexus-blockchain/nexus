@@ -219,7 +219,6 @@ impl frame_support::traits::Get<u16> for MaxTotalReferralRate {
 }
 
 impl pallet_commission_referral::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type MemberProvider = MockMemberProvider;
     type EntityProvider = MockEntityProvider;

@@ -19,6 +19,8 @@ pallet-entity-common = { path = "../../common", default-features = false }
 pallet-commission-common = { path = "../common", default-features = false }
 
 frame-benchmarking = { workspace = true, optional = true }
+pallet-balances = { workspace = true, optional = true }
+sp-io = { workspace = true, optional = true }
 
 [dev-dependencies]
 pallet-balances = { workspace = true, features = ["std"] }
@@ -37,6 +39,8 @@ std = [
     "pallet-entity-common/std",
     "pallet-commission-common/std",
     "frame-benchmarking?/std",
+    "pallet-balances?/std",
+    "sp-io?/std",
 ]
 runtime-benchmarks = [
     "frame-support/runtime-benchmarks",
@@ -45,6 +49,8 @@ runtime-benchmarks = [
     "sp-runtime/runtime-benchmarks",
     "pallet-entity-common/runtime-benchmarks",
     "pallet-commission-common/runtime-benchmarks",
+    "pallet-balances/runtime-benchmarks",
+    "sp-io",
 ]
 try-runtime = [
     "frame-support/try-runtime",

@@ -1,15 +1,15 @@
 {
-  "generatedAt": "2026-03-09T02:32:01.891Z",
+  "generatedAt": "2026-03-10T13:22:29.391Z",
   "repoRoot": "/home/xiaodong/桌面/nexus",
   "summary": {
     "runtimePallets": 34,
     "localCallablePallets": 34,
-    "extrinsics": 741,
+    "extrinsics": 744,
     "withUnitTests": 33,
     "byStatus": {
       "implemented": 236,
-      "planned": 402,
-      "unplanned": 103,
+      "planned": 397,
+      "unplanned": 111,
       "not_in_runtime": 0
     }
   },
@@ -264,7 +264,7 @@
       "inRuntime": true,
       "sourceFile": "pallets/grouprobot/consensus/src/lib.rs",
       "hasUnitTests": true,
-      "extrinsicCount": 20
+      "extrinsicCount": 21
     },
     {
       "pallet": "pallet-grouprobot-registry",
@@ -300,7 +300,7 @@
       "inRuntime": true,
       "sourceFile": "pallets/trading/nex-market/src/lib.rs",
       "hasUnitTests": true,
-      "extrinsicCount": 33
+      "extrinsicCount": 35
     },
     {
       "pallet": "pallet-storage-lifecycle",
@@ -1053,8 +1053,7 @@
       ],
       "flowFiles": [
         "scripts/e2e/flows/entity/commission.ts",
-        "scripts/e2e/flows/entity/order-lifecycle.ts",
-        "scripts/e2e/flows/grouprobot/ads-core-preferences.ts"
+        "scripts/e2e/flows/entity/order-lifecycle.ts"
       ],
       "status": "implemented"
     },
@@ -1085,10 +1084,8 @@
       "extrinsic": "auto_confirm_receipt",
       "camelName": "autoConfirmReceipt",
       "planFiles": [],
-      "flowFiles": [
-        "scripts/e2e/flows/grouprobot/ads-core-preferences.ts"
-      ],
-      "status": "implemented"
+      "flowFiles": [],
+      "status": "unplanned"
     },
     {
       "pallet": "pallet-ads-core",
@@ -1385,8 +1382,7 @@
         "NEXUS_TEST_PLAN_PART3.md"
       ],
       "flowFiles": [
-        "scripts/e2e/flows/grouprobot/ad-campaign.ts",
-        "scripts/e2e/flows/grouprobot/ads-core-preferences.ts"
+        "scripts/e2e/flows/grouprobot/ad-campaign.ts"
       ],
       "status": "implemented"
     },
@@ -1565,8 +1561,10 @@
       "planFiles": [
         "NEXUS_TEST_PLAN_PART3.md"
       ],
-      "flowFiles": [],
-      "status": "planned"
+      "flowFiles": [
+        "scripts/e2e/flows/grouprobot/ads-core-preferences.ts"
+      ],
+      "status": "implemented"
     },
     {
       "pallet": "pallet-ads-grouprobot",
@@ -3654,10 +3652,8 @@
       "extrinsic": "resolve_appeal",
       "camelName": "resolveAppeal",
       "planFiles": [],
-      "flowFiles": [
-        "scripts/e2e/flows/dispute/arbitration-appeal.ts"
-      ],
-      "status": "implemented"
+      "flowFiles": [],
+      "status": "unplanned"
     },
     {
       "pallet": "pallet-dispute-escrow",
@@ -3684,6 +3680,7 @@
         "scripts/e2e/flows/grouprobot/ads-core-preferences.ts",
         "scripts/e2e/flows/grouprobot/community.ts",
         "scripts/e2e/flows/grouprobot/node-consensus.ts",
+        "scripts/e2e/flows/storage/storage-billing-dispute.ts",
         "scripts/e2e/flows/storage/storage-service.ts"
       ],
       "status": "implemented"
@@ -5608,7 +5605,6 @@
         "NEXUS_TEST_PLAN_PART2.md"
       ],
       "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts",
         "scripts/e2e/flows/trading/nex-market-admin.ts",
         "scripts/e2e/flows/trading/nex-market.ts",
         "scripts/e2e/flows/trading/p2p-buy.ts"
@@ -5629,7 +5625,6 @@
         "NEXUS_TEST_PLAN_PART2.md"
       ],
       "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts",
         "scripts/e2e/flows/trading/nex-market.ts",
         "scripts/e2e/flows/trading/p2p-sell.ts"
       ],
@@ -5648,10 +5643,8 @@
       "planFiles": [
         "NEXUS_TEST_PLAN_PART2.md"
       ],
-      "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts"
-      ],
-      "status": "implemented"
+      "flowFiles": [],
+      "status": "planned"
     },
     {
       "pallet": "pallet-entity-market",
@@ -5668,7 +5661,6 @@
         "NEXUS_TEST_PLAN_PART2.md"
       ],
       "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts",
         "scripts/e2e/flows/entity/order-lifecycle.ts",
         "scripts/e2e/flows/trading/nex-market-admin.ts",
         "scripts/e2e/flows/trading/nex-market.ts",
@@ -5688,10 +5680,8 @@
       "extrinsic": "configure_market",
       "camelName": "configureMarket",
       "planFiles": [],
-      "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts"
-      ],
-      "status": "implemented"
+      "flowFiles": [],
+      "status": "unplanned"
     },
     {
       "pallet": "pallet-entity-market",
@@ -5704,10 +5694,8 @@
       "extrinsic": "market_buy",
       "camelName": "marketBuy",
       "planFiles": [],
-      "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts"
-      ],
-      "status": "implemented"
+      "flowFiles": [],
+      "status": "unplanned"
     },
     {
       "pallet": "pallet-entity-market",
@@ -5720,10 +5708,8 @@
       "extrinsic": "market_sell",
       "camelName": "marketSell",
       "planFiles": [],
-      "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts"
-      ],
-      "status": "implemented"
+      "flowFiles": [],
+      "status": "unplanned"
     },
     {
       "pallet": "pallet-entity-market",
@@ -5739,7 +5725,6 @@
         "NEXUS_TEST_PLAN_PART2.md"
       ],
       "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts",
         "scripts/e2e/flows/trading/maker-lifecycle.ts",
         "scripts/e2e/flows/trading/nex-market-admin.ts",
         "scripts/e2e/flows/trading/nex-market.ts"
@@ -5760,7 +5745,6 @@
         "NEXUS_TEST_PLAN_PART2.md"
       ],
       "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts",
         "scripts/e2e/flows/trading/maker-lifecycle.ts",
         "scripts/e2e/flows/trading/nex-market.ts"
       ],
@@ -5780,9 +5764,7 @@
         "NEXUS_TEST_PLAN_PART2.md"
       ],
       "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts",
         "scripts/e2e/flows/trading/maker-lifecycle.ts",
-        "scripts/e2e/flows/trading/nex-market-admin.ts",
         "scripts/e2e/flows/trading/nex-market.ts"
       ],
       "status": "implemented"
@@ -6544,6 +6526,7 @@
         "NEXUS_TEST_PLAN.md"
       ],
       "flowFiles": [
+        "scripts/e2e/flows/dispute/arbitration-appeal.ts",
         "scripts/e2e/flows/entity/commission.ts",
         "scripts/e2e/flows/entity/order-admin.ts",
         "scripts/e2e/flows/entity/order-lifecycle.ts"
@@ -6565,7 +6548,6 @@
         "NEXUS_TEST_PLAN_PART2.md"
       ],
       "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts",
         "scripts/e2e/flows/entity/order-lifecycle.ts",
         "scripts/e2e/flows/trading/nex-market-admin.ts",
         "scripts/e2e/flows/trading/nex-market.ts",
@@ -6610,8 +6592,7 @@
       ],
       "flowFiles": [
         "scripts/e2e/flows/entity/commission.ts",
-        "scripts/e2e/flows/entity/order-lifecycle.ts",
-        "scripts/e2e/flows/grouprobot/ads-core-preferences.ts"
+        "scripts/e2e/flows/entity/order-lifecycle.ts"
       ],
       "status": "implemented"
     },
@@ -6945,6 +6926,7 @@
         "NEXUS_TEST_PLAN.md"
       ],
       "flowFiles": [
+        "scripts/e2e/flows/dispute/arbitration-appeal.ts",
         "scripts/e2e/flows/entity/commission.ts",
         "scripts/e2e/flows/entity/order-admin.ts",
         "scripts/e2e/flows/entity/order-lifecycle.ts"
@@ -6981,6 +6963,7 @@
         "NEXUS_TEST_PLAN.md"
       ],
       "flowFiles": [
+        "scripts/e2e/flows/dispute/arbitration-appeal.ts",
         "scripts/e2e/flows/entity/commission.ts",
         "scripts/e2e/flows/entity/order-admin.ts",
         "scripts/e2e/flows/entity/order-lifecycle.ts"
@@ -7113,11 +7096,12 @@
         "NEXUS_TEST_PLAN.md"
       ],
       "flowFiles": [
+        "scripts/e2e/flows/dispute/arbitration-appeal.ts",
         "scripts/e2e/flows/entity/commission.ts",
         "scripts/e2e/flows/entity/entity-disclosure.ts",
-        "scripts/e2e/flows/entity/entity-market.ts",
         "scripts/e2e/flows/entity/entity-shop.ts",
         "scripts/e2e/flows/entity/member-referral.ts",
+        "scripts/e2e/flows/entity/order-admin.ts",
         "scripts/e2e/flows/entity/order-lifecycle.ts",
         "scripts/e2e/flows/entity/token-governance-admin.ts",
         "scripts/e2e/flows/entity/token-governance.ts",
@@ -7613,7 +7597,7 @@
         "NEXUS_TEST_PLAN.md"
       ],
       "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts",
+        "scripts/e2e/flows/entity/entity-shop.ts",
         "scripts/e2e/flows/entity/token-governance-admin.ts",
         "scripts/e2e/flows/entity/token-governance.ts",
         "scripts/e2e/flows/entity/token-sale.ts"
@@ -7681,8 +7665,11 @@
       "planFiles": [
         "NEXUS_TEST_PLAN.md"
       ],
-      "flowFiles": [],
-      "status": "planned"
+      "flowFiles": [
+        "scripts/e2e/flows/dispute/arbitration-appeal.ts",
+        "scripts/e2e/flows/entity/order-admin.ts"
+      ],
+      "status": "implemented"
     },
     {
       "pallet": "pallet-entity-shop",
@@ -7825,8 +7812,10 @@
       "planFiles": [
         "NEXUS_TEST_PLAN.md"
       ],
-      "flowFiles": [],
-      "status": "planned"
+      "flowFiles": [
+        "scripts/e2e/flows/entity/entity-shop.ts"
+      ],
+      "status": "implemented"
     },
     {
       "pallet": "pallet-entity-shop",
@@ -8098,7 +8087,6 @@
         "NEXUS_TEST_PLAN.md"
       ],
       "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts",
         "scripts/e2e/flows/entity/token-governance-admin.ts",
         "scripts/e2e/flows/entity/token-governance.ts",
         "scripts/e2e/flows/entity/token-sale.ts"
@@ -8135,7 +8123,6 @@
         "NEXUS_TEST_PLAN.md"
       ],
       "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts",
         "scripts/e2e/flows/entity/token-governance-admin.ts",
         "scripts/e2e/flows/entity/token-governance.ts",
         "scripts/e2e/flows/entity/token-sale.ts"
@@ -8156,6 +8143,7 @@
         "NEXUS_TEST_PLAN.md"
       ],
       "flowFiles": [
+        "scripts/e2e/flows/entity/token-governance-admin.ts",
         "scripts/e2e/flows/entity/token-governance.ts"
       ],
       "status": "implemented"
@@ -8399,8 +8387,10 @@
       "planFiles": [
         "NEXUS_TEST_PLAN.md"
       ],
-      "flowFiles": [],
-      "status": "planned"
+      "flowFiles": [
+        "scripts/e2e/flows/entity/token-governance-admin.ts"
+      ],
+      "status": "implemented"
     },
     {
       "pallet": "pallet-entity-token",
@@ -8415,8 +8405,10 @@
       "planFiles": [
         "NEXUS_TEST_PLAN.md"
       ],
-      "flowFiles": [],
-      "status": "planned"
+      "flowFiles": [
+        "scripts/e2e/flows/entity/token-governance-admin.ts"
+      ],
+      "status": "implemented"
     },
     {
       "pallet": "pallet-entity-token",
@@ -8447,8 +8439,10 @@
       "planFiles": [
         "NEXUS_TEST_PLAN.md"
       ],
-      "flowFiles": [],
-      "status": "planned"
+      "flowFiles": [
+        "scripts/e2e/flows/entity/token-governance-admin.ts"
+      ],
+      "status": "implemented"
     },
     {
       "pallet": "pallet-entity-token",
@@ -9827,6 +9821,20 @@
       "status": "planned"
     },
     {
+      "pallet": "pallet-grouprobot-consensus",
+      "runtimeAlias": "GroupRobotConsensus",
+      "runtimeIndex": 151,
+      "inRuntime": true,
+      "sourceFile": "pallets/grouprobot/consensus/src/lib.rs",
+      "hasUnitTests": true,
+      "callIndex": 25,
+      "extrinsic": "set_consensus_config",
+      "camelName": "setConsensusConfig",
+      "planFiles": [],
+      "flowFiles": [],
+      "status": "unplanned"
+    },
+    {
       "pallet": "pallet-grouprobot-registry",
       "runtimeAlias": "GroupRobotRegistry",
       "runtimeIndex": 150,
@@ -10236,6 +10244,7 @@
         "NEXUS_TEST_PLAN_PART3.md"
       ],
       "flowFiles": [
+        "scripts/e2e/flows/storage/storage-billing-dispute.ts",
         "scripts/e2e/flows/storage/storage-service.ts"
       ],
       "status": "implemented"
@@ -11084,7 +11093,6 @@
         "NEXUS_TEST_PLAN_PART2.md"
       ],
       "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts",
         "scripts/e2e/flows/trading/nex-market-admin.ts",
         "scripts/e2e/flows/trading/nex-market.ts",
         "scripts/e2e/flows/trading/p2p-buy.ts"
@@ -11105,7 +11113,6 @@
         "NEXUS_TEST_PLAN_PART2.md"
       ],
       "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts",
         "scripts/e2e/flows/trading/nex-market.ts",
         "scripts/e2e/flows/trading/p2p-sell.ts"
       ],
@@ -11126,7 +11133,6 @@
         "NEXUS_TEST_PLAN_PART2.md"
       ],
       "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts",
         "scripts/e2e/flows/entity/order-lifecycle.ts",
         "scripts/e2e/flows/trading/nex-market-admin.ts",
         "scripts/e2e/flows/trading/nex-market.ts",
@@ -11257,7 +11263,6 @@
         "NEXUS_TEST_PLAN_PART2.md"
       ],
       "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts",
         "scripts/e2e/flows/trading/maker-lifecycle.ts",
         "scripts/e2e/flows/trading/nex-market-admin.ts",
         "scripts/e2e/flows/trading/nex-market.ts"
@@ -11278,9 +11283,7 @@
         "NEXUS_TEST_PLAN_PART2.md"
       ],
       "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts",
         "scripts/e2e/flows/trading/maker-lifecycle.ts",
-        "scripts/e2e/flows/trading/nex-market-admin.ts",
         "scripts/e2e/flows/trading/nex-market.ts"
       ],
       "status": "implemented"
@@ -11299,7 +11302,6 @@
         "NEXUS_TEST_PLAN_PART2.md"
       ],
       "flowFiles": [
-        "scripts/e2e/flows/entity/entity-market.ts",
         "scripts/e2e/flows/trading/maker-lifecycle.ts",
         "scripts/e2e/flows/trading/nex-market.ts"
       ],
@@ -11650,6 +11652,34 @@
       "status": "implemented"
     },
     {
+      "pallet": "pallet-nex-market",
+      "runtimeAlias": "NexMarket",
+      "runtimeIndex": 56,
+      "inRuntime": true,
+      "sourceFile": "pallets/trading/nex-market/src/lib.rs",
+      "hasUnitTests": true,
+      "callIndex": 34,
+      "extrinsic": "set_ocw_authorities",
+      "camelName": "setOcwAuthorities",
+      "planFiles": [],
+      "flowFiles": [],
+      "status": "unplanned"
+    },
+    {
+      "pallet": "pallet-nex-market",
+      "runtimeAlias": "NexMarket",
+      "runtimeIndex": 56,
+      "inRuntime": true,
+      "sourceFile": "pallets/trading/nex-market/src/lib.rs",
+      "hasUnitTests": true,
+      "callIndex": 35,
+      "extrinsic": "set_seed_tron_address",
+      "camelName": "setSeedTronAddress",
+      "planFiles": [],
+      "flowFiles": [],
+      "status": "unplanned"
+    },
+    {
       "pallet": "pallet-storage-lifecycle",
       "runtimeAlias": "StorageLifecycle",
       "runtimeIndex": 65,
@@ -11861,6 +11891,7 @@
         "NEXUS_TEST_PLAN_PART3.md"
       ],
       "flowFiles": [
+        "scripts/e2e/flows/storage/storage-billing-dispute.ts",
         "scripts/e2e/flows/storage/storage-service.ts"
       ],
       "status": "implemented"
@@ -12153,6 +12184,7 @@
         "NEXUS_TEST_PLAN_PART3.md"
       ],
       "flowFiles": [
+        "scripts/e2e/flows/storage/storage-billing-dispute.ts",
         "scripts/e2e/flows/storage/storage-service.ts"
       ],
       "status": "implemented"

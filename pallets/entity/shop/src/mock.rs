@@ -157,7 +157,6 @@ parameter_types! {
 }
 
 impl pallet_entity_shop::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type EntityProvider = MockEntityProvider;
     type MaxShopNameLength = MaxShopNameLength;

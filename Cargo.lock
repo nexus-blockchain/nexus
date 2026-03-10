@@ -6365,6 +6365,7 @@ dependencies = [
  "log",
  "pallet-ads-primitives",
  "pallet-balances",
+ "pallet-trading-common",
  "parity-scale-codec",
  "scale-info",
  "sp-api",
@@ -6383,6 +6384,7 @@ dependencies = [
  "pallet-ads-primitives",
  "pallet-balances",
  "pallet-entity-common",
+ "pallet-trading-common",
  "parity-scale-codec",
  "scale-info",
  "sp-core",
@@ -6817,6 +6819,7 @@ dependencies = [
 name = "pallet-dispute-escrow"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -6840,6 +6843,7 @@ dependencies = [
  "pallet-crypto-common",
  "pallet-storage-lifecycle",
  "pallet-storage-service",
+ "pallet-trading-common",
  "parity-scale-codec",
  "scale-info",
  "sp-api",
@@ -7130,6 +7134,7 @@ dependencies = [
 name = "pallet-grouprobot-community"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "pallet-grouprobot-primitives",
@@ -7149,6 +7154,7 @@ dependencies = [
  "frame-system",
  "pallet-balances",
  "pallet-grouprobot-primitives",
+ "pallet-trading-common",
  "parity-scale-codec",
  "scale-info",
  "sp-core",
@@ -7211,6 +7217,7 @@ dependencies = [
  "log",
  "pallet-balances",
  "pallet-grouprobot-primitives",
+ "pallet-trading-common",
  "parity-scale-codec",
  "scale-info",
  "sp-io",
@@ -7384,6 +7391,7 @@ dependencies = [
 name = "pallet-storage-service"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "hex",

@@ -22,7 +22,10 @@
     "agent:entity": "tsx e2e/nexus-test-agent.ts --group entity",
     "agent:grouprobot": "tsx e2e/nexus-test-agent.ts --group grouprobot",
     "agent:wave1": "node --import tsx e2e/nexus-test-agent.ts --mode e2e --flow T5 E10 E11 D3 A1 S2",
-    "agent:p0": "tsx e2e/nexus-test-agent.ts --mode coverage --priority P0"
+    "agent:p0": "tsx e2e/nexus-test-agent.ts --mode coverage --priority P0",
+    "stress": "tsx e2e/stress-test.ts",
+    "stress:light": "tsx e2e/stress-test.ts --total 50 --concurrency 5",
+    "stress:heavy": "tsx e2e/stress-test.ts --total 500 --concurrency 20"
   },
   "dependencies": {
     "@polkadot/api": "^12.0.0",

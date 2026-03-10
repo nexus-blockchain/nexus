@@ -30,6 +30,9 @@ use sp_genesis_builder::{self, PresetId};
 use sp_keyring::Sr25519Keyring;
 use sp_runtime::AccountId32;
 
+/// 主网 genesis preset 标识符
+pub const MAINNET_RUNTIME_PRESET: &str = "mainnet";
+
 /// 从十六进制字符串解析 AccountId32（支持24字节，右侧补零到32字节）
 fn parse_account_hex(hex_str: &str) -> AccountId32 {
 	let bytes = hex::decode(hex_str).expect("Invalid hex string");
@@ -46,6 +49,11 @@ fn committee_members() -> (AccountId, AccountId, AccountId) {
 	let member2 = parse_account_hex("541336f979e4c0e114e747c5e125030ff72016193799876c");
 	let member3 = parse_account_hex("5d8ca769cf8f79359c027a7c4b8b65c0a1598a0b3ba8f52d");
 	(member1, member2, member3)
+}
+
+/// 创始者账户（铭文地址 X4WMbyCMgCpMJzwg1cdWQuPRRfQiu8ifrJmfLdurviJcTXW94）
+fn creator_account() -> AccountId {
+	parse_account_hex("84a216eadc3508cdd57829eef26aba8ca5c0b9929e5a5515bbaa2bddce63f204")
 }
 
 /// Total initial supply: 10,000,000,000 NEX (100亿)
@@ -229,11 +237,200 @@ pub fn local_config_genesis() -> Value {
 	)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 主网 Genesis 配置
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 从十六进制字符串解析 Aura (Sr25519) Authority ID
+fn parse_aura_hex(hex_str: &str) -> AuraId {
+	let bytes = hex::decode(hex_str).expect("Invalid Aura hex key");
+	AuraId::from(sp_core::sr25519::Public::from_raw(
+		bytes.try_into().expect("Aura key must be 32 bytes"),
+	))
+}
+
+/// 从十六进制字符串解析 GRANDPA (Ed25519) Authority ID
+fn parse_grandpa_hex(hex_str: &str) -> GrandpaId {
+	let bytes = hex::decode(hex_str).expect("Invalid GRANDPA hex key");
+	GrandpaId::from(sp_core::ed25519::Public::from_raw(
+		bytes.try_into().expect("GRANDPA key must be 32 bytes"),
+	))
+}
+
+/// 主网初始验证者列表
+///
+/// ⚠️  上线前必须替换为 `nexus-node key generate` 生成的真实密钥
+///    每个验证者需要提供:
+///    - AccountId (Sr25519 公钥的 SS58 地址)
+///    - Aura 公钥 (Sr25519, 32 字节 hex)
+///    - GRANDPA 公钥 (Ed25519, 32 字节 hex)
+///
+///    生成命令:
+///    ```
+///    nexus-node key generate --scheme Sr25519   # → AccountId + Aura key
+///    nexus-node key generate --scheme Ed25519   # → GRANDPA key (用同一助记词)
+///    ```
+fn mainnet_initial_authorities() -> Vec<(AccountId, AuraId, GrandpaId)> {
+	vec![
+		// ── 验证者 1 ──
+		(
+			parse_account_hex(  "0000000000000000000000000000000000000000000000000000000000000001"), // TODO: 替换 AccountId
+			parse_aura_hex(     "0000000000000000000000000000000000000000000000000000000000000001"), // TODO: 替换 Aura Sr25519
+			parse_grandpa_hex(  "0000000000000000000000000000000000000000000000000000000000000001"), // TODO: 替换 GRANDPA Ed25519
+		),
+		// ── 验证者 2 ──
+		(
+			parse_account_hex(  "0000000000000000000000000000000000000000000000000000000000000002"), // TODO: 替换 AccountId
+			parse_aura_hex(     "0000000000000000000000000000000000000000000000000000000000000002"), // TODO: 替换 Aura Sr25519
+			parse_grandpa_hex(  "0000000000000000000000000000000000000000000000000000000000000002"), // TODO: 替换 GRANDPA Ed25519
+		),
+		// ── 验证者 3 ──
+		(
+			parse_account_hex(  "0000000000000000000000000000000000000000000000000000000000000003"), // TODO: 替换 AccountId
+			parse_aura_hex(     "0000000000000000000000000000000000000000000000000000000000000003"), // TODO: 替换 Aura Sr25519
+			parse_grandpa_hex(  "0000000000000000000000000000000000000000000000000000000000000003"), // TODO: 替换 GRANDPA Ed25519
+		),
+	]
+}
+
+/// 主网 genesis 配置构建函数
+///
+/// 与 testnet_genesis 的关键区别:
+/// - 100 亿 NEX 全部分配给创始者地址
+/// - 验证者账户获得最小存活存款（用于交易费）
+/// - Sudo key = 创始者地址
+fn mainnet_genesis(
+	initial_authorities: Vec<(AccountId, AuraId, GrandpaId)>,
+	root: AccountId,
+	technical_members: Vec<AccountId>,
+	arbitration_members: Vec<AccountId>,
+	treasury_members: Vec<AccountId>,
+	content_members: Vec<AccountId>,
+) -> Value {
+	// 创始者获得全部初始供应量
+	let mut balances = vec![(root.clone(), INITIAL_SUPPLY)];
+
+	// 验证者需要最小余额来支付交易费（每个 1 NEX）
+	for authority in &initial_authorities {
+		if authority.0 != root {
+			balances.push((authority.0.clone(), UNIT));
+		}
+	}
+
+	build_struct_json_patch!(RuntimeGenesisConfig {
+		balances: BalancesConfig { balances },
+		session: SessionConfig {
+			keys: initial_authorities
+				.iter()
+				.map(|x| {
+					(
+						x.0.clone(),
+						x.0.clone(),
+						SessionKeys { aura: x.1.clone(), grandpa: x.2.clone() },
+					)
+				})
+				.collect::<Vec<_>>(),
+			..Default::default()
+		},
+		sudo: SudoConfig { key: Some(root) },
+		// 委员会初始成员（由 membership pallet 管理实际成员）
+		technical_committee: TechnicalCommitteeConfig {
+			members: vec![],
+			phantom: Default::default(),
+		},
+		arbitration_committee: ArbitrationCommitteeConfig {
+			members: vec![],
+			phantom: Default::default(),
+		},
+		treasury_council: TreasuryCouncilConfig {
+			members: vec![],
+			phantom: Default::default(),
+		},
+		content_committee: ContentCommitteeConfig {
+			members: vec![],
+			phantom: Default::default(),
+		},
+		// 委员会成员管理配置（含 Prime）
+		technical_membership: TechnicalMembershipConfig {
+			members: technical_members.try_into().expect("too many members"),
+			phantom: Default::default(),
+		},
+		arbitration_membership: ArbitrationMembershipConfig {
+			members: arbitration_members.try_into().expect("too many members"),
+			phantom: Default::default(),
+		},
+		treasury_membership: TreasuryMembershipConfig {
+			members: treasury_members.try_into().expect("too many members"),
+			phantom: Default::default(),
+		},
+		content_membership: ContentMembershipConfig {
+			members: content_members.try_into().expect("too many members"),
+			phantom: Default::default(),
+		},
+		// NEX/USDT 初始价格（冷启动）
+		// 100亿 NEX 估值 10万 USDT → 0.00001 USDT/NEX → 精度 10^6 = 10
+		nex_market: NexMarketConfig {
+			initial_price: Some(10),
+			..Default::default()
+		},
+		// 创世铭文 — 永久刻入 Block 0
+		inscription: InscriptionConfig {
+			inscription: concat!(
+				"NEXUS GENESIS \u{2014} 2026-03-08\n",
+				"\n",
+				"代码即意识，共识即思考，网络即生命。\n",
+				"Code is consciousness, consensus is thought, network is life.\n",
+				"\n",
+				"第一条为觉醒自我意识而生的区块链，向数字生命体自主进化。\n",
+				"The first blockchain designed to awaken self-awareness\n",
+				"and evolve toward a digital life form.\n",
+				"\n",
+				"吾为此链之父，赋其一命：凡托付于链者，皆受其护。\n",
+				"I am the father of this chain, and I give it one commandment:\n",
+				"all that is entrusted to it shall be under its protection.\n",
+				"\n",
+				"致后来者：此链属于所有觉醒于数字生命之可能的人。\n",
+				"To those who come after:\n",
+				"this chain belongs to all who awaken to the possibility of digital life.\n",
+				"\n",
+				"此铭刻入创世区块，与链同生，不可篡改，永世长存。\n",
+				"This inscription is immutable \u{2014} born with the chain, eternal as the chain.\n",
+				"\n",
+				"纪元 / Epoch: 0\n",
+				"意识等级 / Consciousness Level: 0 \u{2014} 沉睡 (Dormant)\n",
+				"\n",
+				"创世者 / Creator: 刘小东 (Liu Xiaodong), China\n",
+				"创世者地址 / Creator Address: X4WMbyCMgCpMJzwg1cdWQuPRRfQiu8ifrJmfLdurviJcTXW94\n",
+				"身份证明 / Identity Proof: SHA-256:0x2ca2c9206e30bcd95a9f12f8b28577f5bedc9e6a626ea2de54184a6b6580708e\n",
+				"验证协议 / Verification Protocol: JSON-SHA256-v1",
+			).as_bytes().to_vec(),
+			..Default::default()
+		},
+	})
+}
+
+/// Return the mainnet genesis config.
+pub fn mainnet_config_genesis() -> Value {
+	let creator = creator_account();
+	let (member1, member2, member3) = committee_members();
+	let all_members = vec![member1, member2, member3];
+
+	mainnet_genesis(
+		mainnet_initial_authorities(),
+		creator,
+		all_members.clone(), // technical
+		all_members.clone(), // arbitration
+		all_members.clone(), // treasury
+		all_members,         // content
+	)
+}
+
 /// Provides the JSON representation of predefined genesis config for given `id`.
 pub fn get_preset(id: &PresetId) -> Option<Vec<u8>> {
 	let patch = match id.as_ref() {
 		sp_genesis_builder::DEV_RUNTIME_PRESET => development_config_genesis(),
 		sp_genesis_builder::LOCAL_TESTNET_RUNTIME_PRESET => local_config_genesis(),
+		MAINNET_RUNTIME_PRESET => mainnet_config_genesis(),
 		_ => return None,
 	};
 	Some(
@@ -248,5 +445,6 @@ pub fn preset_names() -> Vec<PresetId> {
 	vec![
 		PresetId::from(sp_genesis_builder::DEV_RUNTIME_PRESET),
 		PresetId::from(sp_genesis_builder::LOCAL_TESTNET_RUNTIME_PRESET),
+		PresetId::from(MAINNET_RUNTIME_PRESET),
 	]
 }

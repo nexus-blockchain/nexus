@@ -225,20 +225,46 @@ runtime-benchmarks = [
 	"pallet-collective-membership/runtime-benchmarks",
 	"pallet-timestamp/runtime-benchmarks",
 	"pallet-transaction-payment/runtime-benchmarks",
-	# Contracts pallet benchmarks
 	"pallet-contracts/runtime-benchmarks",
-	# Trading pallets benchmarks
-	"pallet-nex-market/runtime-benchmarks",
-	# Escrow, Referral pallets benchmarks
-	# Evidence pallet benchmarks
-	"pallet-dispute-evidence/runtime-benchmarks",
-	# Arbitration pallet benchmarks
-	"pallet-dispute-arbitration/runtime-benchmarks",
+	"pallet-assets/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",
-	# Entity pallets benchmarks
+	# Trading
+	"pallet-nex-market/runtime-benchmarks",
+	# Dispute
+	"pallet-dispute-escrow/runtime-benchmarks",
+	"pallet-dispute-evidence/runtime-benchmarks",
+	"pallet-dispute-arbitration/runtime-benchmarks",
+	# Storage
+	"pallet-storage-service/runtime-benchmarks",
+	"pallet-storage-lifecycle/runtime-benchmarks",
+	# Entity
+	"pallet-entity-registry/runtime-benchmarks",
+	"pallet-entity-shop/runtime-benchmarks",
 	"pallet-entity-product/runtime-benchmarks",
-	# Commission pallets benchmarks
-	"pallet-commission-common/runtime-benchmarks",
+	"pallet-entity-order/runtime-benchmarks",
+	"pallet-entity-review/runtime-benchmarks",
+	"pallet-entity-token/runtime-benchmarks",
+	"pallet-entity-governance/runtime-benchmarks",
+	"pallet-entity-market/runtime-benchmarks",
+	"pallet-entity-disclosure/runtime-benchmarks",
+	"pallet-entity-kyc/runtime-benchmarks",
+	"pallet-entity-tokensale/runtime-benchmarks",
+	# Commission
+	"pallet-commission-core/runtime-benchmarks",
+	"pallet-commission-pool-reward/runtime-benchmarks",
+	"pallet-commission-team/runtime-benchmarks",
+	"pallet-commission-level-diff/runtime-benchmarks",
+	# GroupRobot
+	"pallet-grouprobot-registry/runtime-benchmarks",
+	"pallet-grouprobot-consensus/runtime-benchmarks",
+	"pallet-grouprobot-community/runtime-benchmarks",
+	"pallet-grouprobot-ceremony/runtime-benchmarks",
+	"pallet-grouprobot-subscription/runtime-benchmarks",
+	"pallet-grouprobot-rewards/runtime-benchmarks",
+	# Ads
+	"pallet-ads-core/runtime-benchmarks",
+	"pallet-ads-entity/runtime-benchmarks",
+	"pallet-ads-grouprobot/runtime-benchmarks",
 ]
 
 try-runtime = [

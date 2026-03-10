@@ -63,6 +63,7 @@ type BalanceOf<T> =
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
+	use pallet_trading_common::DepositCalculator;
 	use frame_support::traits::{Currency, ReservableCurrency, ExistenceRequirement, StorageVersion};
 
 	/// Current storage version.
@@ -79,15 +80,26 @@ pub mod pallet {
 		type WeightInfo: WeightInfo;
 		/// Bot 注册查询
 		type BotRegistry: BotRegistryProvider<Self::AccountId>;
-		/// Basic 层级每 Era 费用
+		/// Basic 层级每 Era 费用（NEX 兜底值）
 		#[pallet::constant]
 		type BasicFeePerEra: Get<BalanceOf<Self>>;
-		/// Pro 层级每 Era 费用
+		/// Basic 层级每 Era 费用 USDT 目标值（精度 10^6）
+		#[pallet::constant]
+		type BasicFeePerEraUsd: Get<u64>;
+		/// Pro 层级每 Era 费用（NEX 兜底值）
 		#[pallet::constant]
 		type ProFeePerEra: Get<BalanceOf<Self>>;
-		/// Enterprise 层级每 Era 费用
+		/// Pro 层级每 Era 费用 USDT 目标值（精度 10^6）
+		#[pallet::constant]
+		type ProFeePerEraUsd: Get<u64>;
+		/// Enterprise 层级每 Era 费用（NEX 兜底值）
 		#[pallet::constant]
 		type EnterpriseFeePerEra: Get<BalanceOf<Self>>;
+		/// Enterprise 层级每 Era 费用 USDT 目标值（精度 10^6）
+		#[pallet::constant]
+		type EnterpriseFeePerEraUsd: Get<u64>;
+		/// 动态 USDT→NEX 换算器
+		type DepositCalculator: pallet_trading_common::DepositCalculator<BalanceOf<Self>>;
 		/// 国库账户 (订阅费 10% 转入)
 		type TreasuryAccount: Get<Self::AccountId>;
 		/// 奖励池账户 (订阅费 80% 节点份额转入)
@@ -118,6 +130,10 @@ pub mod pallet {
 		/// 连续未达标最大 Era 数 (超过则降级为 Free)
 		#[pallet::constant]
 		type MaxUnderdeliveryEras: Get<u8>;
+
+		/// Benchmark helper for external-pallet state setup.
+		#[cfg(feature = "runtime-benchmarks")]
+		type BenchmarkHelper: crate::benchmarking::BenchmarkHelper<Self::AccountId>;
 	}
 
 	// ========================================================================
@@ -908,16 +924,25 @@ pub mod pallet {
 	// ========================================================================
 
 	impl<T: Config> Pallet<T> {
-		/// 获取层级费用 (优先使用治理覆盖值, 否则回退 Config 常量)
+		/// 获取层级费用 (优先使用治理覆盖值, 否则动态 USDT→NEX 换算)
 		pub fn tier_fee(tier: &SubscriptionTier) -> BalanceOf<T> {
 			if let Some(override_fee) = TierFeeOverrides::<T>::get(tier) {
 				return override_fee;
 			}
 			match tier {
 				SubscriptionTier::Free => BalanceOf::<T>::zero(),
-				SubscriptionTier::Basic => T::BasicFeePerEra::get(),
-				SubscriptionTier::Pro => T::ProFeePerEra::get(),
-				SubscriptionTier::Enterprise => T::EnterpriseFeePerEra::get(),
+				SubscriptionTier::Basic => T::DepositCalculator::calculate_deposit(
+					T::BasicFeePerEraUsd::get(),
+					T::BasicFeePerEra::get(),
+				),
+				SubscriptionTier::Pro => T::DepositCalculator::calculate_deposit(
+					T::ProFeePerEraUsd::get(),
+					T::ProFeePerEra::get(),
+				),
+				SubscriptionTier::Enterprise => T::DepositCalculator::calculate_deposit(
+					T::EnterpriseFeePerEraUsd::get(),
+					T::EnterpriseFeePerEra::get(),
+				),
 			}
 		}
 

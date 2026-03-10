@@ -12,7 +12,7 @@
 
 import { cryptoWaitReady } from '@polkadot/util-crypto';
 import { getApi, disconnectApi } from './utils/api.js';
-import { getAlice, logAccount } from './utils/accounts.js';
+import { getAlice, getBob, getCharlie, getDave, getEve, logAccount } from './utils/accounts.js';
 import { 
   signAndSend, 
   logSection, 
@@ -28,6 +28,13 @@ import * as path from 'path';
 await cryptoWaitReady();
 
 const DEFAULT_AMOUNT = 1000000000; // 默认每个账户转 1000000000 NEX
+const FUNDERS = {
+  alice: getAlice,
+  bob: getBob,
+  charlie: getCharlie,
+  dave: getDave,
+  eve: getEve,
+};
 
 function parseAddressesFromFile(filePath: string): string[] {
   const content = fs.readFileSync(filePath, 'utf-8');
@@ -38,7 +45,7 @@ function parseAddressesFromFile(filePath: string): string[] {
     const trimmed = line.trim();
     if (trimmed.startsWith('地址:')) {
       const address = trimmed.replace('地址:', '').trim();
-      if (address.startsWith('5') && address.length >= 47) {
+      if ((address.startsWith('5') || address.startsWith('X')) && address.length >= 47) {
         addresses.push(address);
       }
     }
@@ -50,9 +57,16 @@ function parseAddressesFromFile(filePath: string): string[] {
 async function main() {
   const args = process.argv.slice(2);
   const amount = args[0] ? parseFloat(args[0]) : DEFAULT_AMOUNT;
+  const funderName = (args[1] ?? 'alice').toLowerCase() as keyof typeof FUNDERS;
   
   if (isNaN(amount) || amount <= 0) {
     logError('金额必须是正数');
+    return;
+  }
+
+  if (!FUNDERS[funderName]) {
+    logError(`未知发送账户: ${funderName}`);
+    console.log('可用发送账户: alice, bob, charlie, dave, eve');
     return;
   }
   
@@ -91,13 +105,13 @@ async function main() {
   logStep(2, '连接到链');
   
   const api = await getApi();
-  const alice = getAlice();
+  const funder = FUNDERS[funderName]();
   
-  logAccount('Alice (发送方)', alice);
+  logAccount(`${funderName} (发送方)`, funder);
   
-  // 查询 Alice 余额
-  const aliceBalance = await api.query.system.account(alice.address);
-  console.log(`   Alice 余额: ${formatNex(aliceBalance.data.free.toString())}`);
+  // 查询发送方余额
+  const funderBalance = await api.query.system.account(funder.address);
+  console.log(`   ${funderName} 余额: ${formatNex(funderBalance.data.free.toString())}`);
   
   const totalAmount = amount * addresses.length;
   console.log(`   计划转账总额: ${totalAmount} NEX (每账户 ${amount} NEX)`);
@@ -110,25 +124,41 @@ async function main() {
   const amountWei = toNexWei(amount);
   let successCount = 0;
   let failCount = 0;
-  
-  for (let i = 0; i < addresses.length; i++) {
-    const address = addresses[i];
-    console.log(`\n   [${i + 1}/${addresses.length}] 转账给: ${address.slice(0, 16)}...`);
-    
-    try {
-      const transferTx = api.tx.balances.transferKeepAlive(address, amountWei);
-      const result = await signAndSend(api, transferTx, alice, `转账给账户 ${i + 1}`);
-      
-      if (result.success) {
-        successCount++;
-        console.log(`   ✅ 成功`);
-      } else {
+  const utility = (api.tx as any).utility;
+
+  if (utility?.batchAll) {
+    const batchTx = utility.batchAll(
+      addresses.map((address) => api.tx.balances.transferKeepAlive(address, amountWei))
+    );
+    const batchResult = await signAndSend(api, batchTx, funder, `批量转账给 ${addresses.length} 个账户`);
+    successCount = batchResult.success ? addresses.length : 0;
+    failCount = batchResult.success ? 0 : addresses.length;
+
+    if (!batchResult.success) {
+      console.log(`   ❌ 批量转账失败: ${batchResult.error}`);
+    }
+  } else {
+    console.log('   ℹ 当前链未启用 utility.batchAll，回退为逐笔转账');
+
+    for (let i = 0; i < addresses.length; i++) {
+      const address = addresses[i];
+      console.log(`\n   [${i + 1}/${addresses.length}] 转账给: ${address.slice(0, 16)}...`);
+
+      try {
+        const transferTx = api.tx.balances.transferKeepAlive(address, amountWei);
+        const result = await signAndSend(api, transferTx, funder, `转账给账户 ${i + 1}`);
+
+        if (result.success) {
+          successCount++;
+          console.log(`   ✅ 成功`);
+        } else {
+          failCount++;
+          console.log(`   ❌ 失败: ${result.error}`);
+        }
+      } catch (error: any) {
         failCount++;
-        console.log(`   ❌ 失败: ${result.error}`);
+        console.log(`   ❌ 异常: ${error.message}`);
       }
-    } catch (error: any) {
-      failCount++;
-      console.log(`   ❌ 异常: ${error.message}`);
     }
   }
   
@@ -152,9 +182,9 @@ async function main() {
     }
   }
   
-  // 查询 Alice 新余额
-  const newAliceBalance = await api.query.system.account(alice.address);
-  console.log(`\n   Alice 新余额: ${formatNex(newAliceBalance.data.free.toString())}`);
+  // 查询发送方新余额
+  const newFunderBalance = await api.query.system.account(funder.address);
+  console.log(`\n   ${funderName} 新余额: ${formatNex(newFunderBalance.data.free.toString())}`);
   
   logSection('完成');
   

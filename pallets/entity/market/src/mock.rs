@@ -263,7 +263,6 @@ parameter_types! {
 }
 
 impl pallet_entity_market::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type Balance = u128;
     type TokenBalance = u128;

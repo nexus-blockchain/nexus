@@ -6,6 +6,7 @@
 #![cfg(feature = "runtime-benchmarks")]
 
 use super::*;
+use alloc::{vec, vec::Vec};
 use frame_benchmarking::v2::*;
 use frame_support::BoundedVec;
 use frame_support::traits::fungibles::{Create, Mutate, metadata::Mutate as MetadataMutate};
@@ -193,6 +194,8 @@ mod benchmarks {
             let acct: T::AccountId = account("recipient", i, 0);
             recipients.push((acct, per_amount));
         }
+        let recipients: BoundedVec<(T::AccountId, T::AssetBalance), T::MaxDividendRecipients> =
+            recipients.try_into().expect("recipients fit");
         let total: T::AssetBalance = (r as u128 * 100u128).into();
 
         #[extrinsic_call]

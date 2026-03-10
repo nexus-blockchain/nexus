@@ -143,6 +143,7 @@ impl pallet_entity_disclosure::Config for Test {
     type MaxInsiderTransactionHistory = ConstU32<20>;
     type EmergencyBlackoutMultiplier = EmergencyBlackoutMultiplier;
     type OnDisclosureViolation = ();
+    type WeightInfo = ();
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

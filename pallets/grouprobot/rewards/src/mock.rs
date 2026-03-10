@@ -67,7 +67,6 @@ parameter_types! {
 }
 
 impl pallet_grouprobot_rewards::Config for Test {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type NodeConsensus = MockNodeConsensus;
 	type BotRegistry = MockBotRegistry;

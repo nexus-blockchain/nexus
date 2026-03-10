@@ -31,7 +31,7 @@ import { getFreeBalance } from '../../core/chain-state.js';
 
 export const entityShopFlow: FlowDef = {
   name: 'Flow-E1: 实体→店铺创建',
-  description: '创建实体 → 自动 Primary Shop → 更新 → 暂停/恢复 → 关闭',
+  description: '创建实体 → 自动 Primary Shop → 更新 → 暂停/恢复 → 建店/提现错误路径 → 关闭',
   fn: entityShop,
 };
 
@@ -54,6 +54,7 @@ async function entityShop(ctx: FlowContext): Promise<void> {
   );
   const createResult = await ctx.send(createTx, eve, '创建实体 (Merchant)', 'eve');
   assertTxSuccess(createResult, '创建实体');
+  const primaryShopId = await readPrimaryShopId(api, entityId);
 
   // --------------- Step 2: 验证实体 + Primary Shop ---------------
   await ctx.check('验证实体已创建', 'eve', async () => {
@@ -122,6 +123,22 @@ async function entityShop(ctx: FlowContext): Promise<void> {
     );
   });
 
+  const suspendedCreateShopTx = (api.tx as any).entityShop.createShop(
+    entityId,
+    'Suspended Shop',
+    'OnlineStore',
+    0,
+  );
+  const suspendedCreateShopResult = await ctx.send(
+    suspendedCreateShopTx,
+    eve,
+    '[错误路径] 实体暂停时创建 Shop',
+    'eve',
+  );
+  await ctx.check('实体暂停时创建 Shop 应失败', 'eve', () => {
+    assertTxFailed(suspendedCreateShopResult, 'EntityNotActive', '暂停实体创建 shop');
+  });
+
   // --------------- Step 7: Sudo 恢复实体 ---------------
   const resumeTx = (api.tx as any).entityRegistry.resumeEntity(entityId);
   const resumeResult = await ctx.sudo(resumeTx, '恢复实体');
@@ -133,6 +150,19 @@ async function entityShop(ctx: FlowContext): Promise<void> {
       api, 'entityRegistry', 'entities', [entityId],
       'status', 'Active', '实体状态应恢复为 Active',
     );
+  });
+
+  const overWithdrawResult = await ctx.send(
+    (api.tx as any).entityShop.withdrawOperatingFund(
+      primaryShopId,
+      '1000000000000000000000000000',
+    ),
+    eve,
+    '[错误路径] 超额提取 Shop 运营资金',
+    'eve',
+  );
+  await ctx.check('超额提取 Shop 运营资金应失败', 'eve', () => {
+    assertTxFailed(overWithdrawResult, 'InsufficientOperatingFund', '超额提取运营资金');
   });
 
   // --------------- Step 9: 错误路径 — 非所有者更新 ---------------
@@ -178,6 +208,14 @@ async function entityShop(ctx: FlowContext): Promise<void> {
   // --------------- 汇总 ---------------
   await ctx.check('Entity→Shop 流程汇总', 'system', () => {
     console.log(`    实体 #${entityId}: Created(Active) → Updated → Suspended → Active → PendingClose → Closed ✓`);
-    console.log(`    错误路径: 非所有者更新 ✗, 空名称创建 ✗ ✓`);
+    console.log(`    错误路径: 暂停实体建店 ✗, 超额提取运营金 ✗, 非所有者更新 ✗, 空名称创建 ✗ ✓`);
   });
+}
+
+async function readPrimaryShopId(api: FlowContext['api'], entityId: number): Promise<number> {
+  const primaryShop = await (api.query as any).entityShop.entityPrimaryShop(entityId);
+  const raw = primaryShop?.toJSON?.() ?? primaryShop?.toString?.();
+  const shopId = Number(raw);
+  assertTrue(Number.isFinite(shopId) && shopId > 0, `实体 #${entityId} 应自动创建 Primary Shop`);
+  return shopId;
 }

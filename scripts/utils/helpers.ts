@@ -17,57 +17,121 @@ export async function signAndSend(
   description: string
 ): Promise<TxResult> {
   console.log(`\n📤 发送交易: ${description}`);
-  
+
+  const txHash = tx.hash.toHex();
+
   return new Promise((resolve) => {
-    tx.signAndSend(signer, ({ status, events, dispatchError }) => {
+    tx.signAndSend(signer, async ({ status, events: callbackEvents, dispatchError, txIndex }) => {
       if (status.isInBlock) {
         console.log(`📦 已入块: ${status.asInBlock.toHex()}`);
       }
-      
-      if (status.isFinalized) {
-        const blockHash = status.asFinalized.toHex();
-        console.log(`✅ 已确认: ${blockHash}`);
-        
-        if (dispatchError) {
-          let errorMessage = 'Unknown error';
-          if (dispatchError.isModule) {
-            const decoded = api.registry.findMetaError(dispatchError.asModule);
-            errorMessage = `${decoded.section}.${decoded.name}: ${decoded.docs.join(' ')}`;
-          } else {
-            errorMessage = dispatchError.toString();
-          }
+
+      if (!status.isFinalized) {
+        return;
+      }
+
+      const blockHash = status.asFinalized.toHex();
+      console.log(`✅ 已确认: ${blockHash}`);
+
+      if (dispatchError) {
+        const errorMessage = decodeDispatchError(api, dispatchError);
+        console.log(`❌ 交易失败: ${errorMessage}`);
+        resolve({
+          success: false,
+          blockHash,
+          txHash,
+          error: errorMessage,
+        });
+        return;
+      }
+
+      try {
+        const callbackTxIndex = txIndex ?? callbackEvents?.find(
+          ({ phase }) => phase.isApplyExtrinsic,
+        )?.phase.asApplyExtrinsic.toNumber();
+
+        const finalizedEvents = await withTimeout(
+          getExtrinsicEvents(api, blockHash, callbackTxIndex),
+          15_000,
+          `Timeout while fetching finalized events for ${description}`,
+        );
+
+        const failedEvent = finalizedEvents.find(
+          ({ event }) => event.section === 'system' && event.method === 'ExtrinsicFailed',
+        );
+
+        if (failedEvent) {
+          const errorMessage = decodeExtrinsicFailedEvent(api, failedEvent.event.data[0]);
           console.log(`❌ 交易失败: ${errorMessage}`);
           resolve({
             success: false,
             blockHash,
+            txHash,
             error: errorMessage,
           });
-        } else {
-          const relevantEvents = events
-            .filter(({ event }) => 
-              !event.section.includes('system') && 
-              !event.section.includes('transactionPayment')
-            )
-            .map(({ event }) => ({
-              section: event.section,
-              method: event.method,
-              data: event.data.toHuman(),
-            }));
-          
-          if (relevantEvents.length > 0) {
-            console.log('📋 事件:');
-            relevantEvents.forEach(e => {
-              console.log(`   - ${e.section}.${e.method}:`, e.data);
-            });
-          }
-          
-          resolve({
-            success: true,
-            blockHash,
-            txHash: tx.hash.toHex(),
-            events: relevantEvents,
+          return;
+        }
+
+        const relevantEvents = finalizedEvents
+          .filter(({ event }) =>
+            event.section !== 'system' &&
+            event.section !== 'transactionPayment'
+          )
+          .map(({ event }) => ({
+            section: event.section,
+            method: event.method,
+            data: event.data.toHuman(),
+          }));
+
+        if (relevantEvents.length > 0) {
+          console.log('📋 事件:');
+          relevantEvents.forEach(e => {
+            console.log(`   - ${e.section}.${e.method}:`, e.data);
           });
         }
+
+        resolve({
+          success: true,
+          blockHash,
+          txHash,
+          events: relevantEvents,
+        });
+      } catch (error: any) {
+        console.log(`⚠️  无法读取最终区块事件: ${error.message}`);
+
+        const failedEvent = callbackEvents?.find(
+          ({ event }) => event.section === 'system' && event.method === 'ExtrinsicFailed',
+        );
+        if (failedEvent) {
+          const errorMessage = decodeExtrinsicFailedEvent(api, failedEvent.event.data[0]);
+          console.log(`❌ 交易失败: ${errorMessage}`);
+          resolve({
+            success: false,
+            blockHash,
+            txHash,
+            error: errorMessage,
+          });
+          return;
+        }
+
+        const relevantCallbackEvents = (callbackEvents ?? [])
+          .filter(({ event }) =>
+            event.section !== 'system' &&
+            event.section !== 'transactionPayment'
+          )
+          .map(({ event }) => ({
+            section: event.section,
+            method: event.method,
+            data: event.data.toHuman(),
+          }));
+
+        resolve({
+          success: true,
+          blockHash,
+          txHash,
+          error: `[warn] cannot fetch block events: ${error.message}`,
+          events: relevantCallbackEvents,
+        });
       }
     }).catch((error) => {
       console.log(`❌ 发送失败: ${error.message}`);
@@ -76,6 +140,89 @@ export async function signAndSend(
         error: error.message,
       });
     });
+  });
+}
+
+function decodeDispatchError(api: ApiPromise, dispatchError: any): string {
+  if (dispatchError?.isModule) {
+    const decoded = api.registry.findMetaError(dispatchError.asModule);
+    return `${decoded.section}.${decoded.name}: ${decoded.docs.join(' ')}`;
+  }
+
+  return dispatchError?.toString?.() ?? 'Unknown error';
+}
+
+function decodeExtrinsicFailedEvent(api: ApiPromise, dispatchError: any): string {
+  try {
+    if (dispatchError?.isModule) {
+      const decoded = api.registry.findMetaError(dispatchError.asModule);
+      return `${decoded.section}.${decoded.name}: ${decoded.docs.join(' ')}`;
+    }
+
+    if (dispatchError?.toHuman) {
+      return JSON.stringify(dispatchError.toHuman());
+    }
+
+    return dispatchError?.toString?.() ?? 'Unknown dispatch error';
+  } catch {
+    return dispatchError?.toString?.() ?? 'Unknown dispatch error';
+  }
+}
+
+async function getExtrinsicEvents(
+  api: ApiPromise,
+  blockHash: string,
+  txIndex?: number,
+): Promise<any[]> {
+  const allEvents = await getEventsAtBlock(api, blockHash);
+  let extrinsicIndex = txIndex;
+
+  if (extrinsicIndex === undefined || extrinsicIndex === null) {
+    let maxIndex = -1;
+    for (const record of allEvents) {
+      if (record.phase.isApplyExtrinsic) {
+        const index = record.phase.asApplyExtrinsic.toNumber();
+        if (index > maxIndex) {
+          maxIndex = index;
+        }
+      }
+    }
+
+    extrinsicIndex = maxIndex >= 0 ? maxIndex : undefined;
+  }
+
+  if (extrinsicIndex === undefined || extrinsicIndex === null) {
+    throw new Error('Cannot determine extrinsic index in finalized block');
+  }
+
+  return allEvents.filter((record: any) =>
+    record.phase.isApplyExtrinsic && record.phase.asApplyExtrinsic.eq(extrinsicIndex),
+  );
+}
+
+async function getEventsAtBlock(api: ApiPromise, blockHash: string): Promise<any[]> {
+  const eventsQuery = (api.query as any)?.system?.events;
+  if (eventsQuery?.at) {
+    return await eventsQuery.at(blockHash) as unknown as any[];
+  }
+
+  const apiAt = await api.at(blockHash);
+  return await apiAt.query.system.events() as unknown as any[];
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    );
   });
 }
 

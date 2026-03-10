@@ -262,7 +262,6 @@ frame_support::parameter_types! {
 }
 
 impl pallet::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type MemberProvider = MockMemberProvider;
     type EntityProvider = MockEntityProvider;

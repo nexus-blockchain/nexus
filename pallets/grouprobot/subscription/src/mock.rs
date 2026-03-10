@@ -92,13 +92,16 @@ parameter_types! {
 }
 
 impl pallet_grouprobot_subscription::Config for Test {
-	type RuntimeEvent = RuntimeEvent;
 	type Currency = Balances;
 	type WeightInfo = ();
 	type BotRegistry = MockBotRegistry;
 	type BasicFeePerEra = BasicFee;
+	type BasicFeePerEraUsd = frame_support::traits::ConstU64<33_333>;
 	type ProFeePerEra = ProFee;
+	type ProFeePerEraUsd = frame_support::traits::ConstU64<66_667>;
 	type EnterpriseFeePerEra = EnterpriseFee;
+	type EnterpriseFeePerEraUsd = frame_support::traits::ConstU64<166_667>;
+	type DepositCalculator = ();
 	type TreasuryAccount = TreasuryAcct;
 	type RewardPoolAccount = RewardPoolAcct;
 	type MaxSubscriptionSettlePerEra = MaxSubSettle;
@@ -110,6 +113,8 @@ impl pallet_grouprobot_subscription::Config for Test {
 	type AdProThreshold = AdProThreshold;
 	type AdEnterpriseThreshold = AdEnterpriseThreshold;
 	type MaxUnderdeliveryEras = MaxUnderdeliveryEras;
+	#[cfg(feature = "runtime-benchmarks")]
+	type BenchmarkHelper = ();
 }
 
 pub const OWNER: u64 = 1;

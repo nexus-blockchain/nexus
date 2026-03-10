@@ -137,27 +137,21 @@ mod benchmarks {
     #[benchmark]
     fn renew_pin() {
         let (cid_hash, owner) = setup_pinned_cid::<T>(2);
-        let cid = pallet::CidRegistry::<T>::get(cid_hash)
-            .map(|b| b.to_vec())
-            .unwrap_or_else(|| alloc::vec![b'Q', b'm', 2, 2, 2]);
         pallet::PinTierConfig::<T>::insert(PinTier::Standard, TierConfig::default());
 
         #[extrinsic_call]
-        _(RawOrigin::Signed(owner), cid, 1u32);
+        _(RawOrigin::Signed(owner), cid_hash, 1u32);
     }
 
     #[benchmark]
     fn upgrade_pin_tier() {
         let (cid_hash, owner) = setup_pinned_cid::<T>(3);
-        let cid = pallet::CidRegistry::<T>::get(cid_hash)
-            .map(|b| b.to_vec())
-            .unwrap_or_else(|| alloc::vec![b'Q', b'm', 3, 3, 3]);
         pallet::PinTierConfig::<T>::insert(PinTier::Standard, TierConfig::default());
         pallet::PinTierConfig::<T>::insert(PinTier::Critical, TierConfig::critical_default());
         let _op = setup_operator::<T>(10);
 
         #[extrinsic_call]
-        _(RawOrigin::Signed(owner), cid, PinTier::Critical);
+        _(RawOrigin::Signed(owner), cid_hash, PinTier::Critical);
     }
 
     #[benchmark]
@@ -187,12 +181,14 @@ mod benchmarks {
     #[benchmark]
     fn join_operator() {
         let caller: T::AccountId = whitelisted_caller();
-        let capacity: u64 = 1000;
-        let bond: BalanceOf<T> = 10000u32.into();
-        let endpoint: Vec<u8> = b"https://ipfs.example.com".to_vec();
+        let peer_id: BoundedVec<u8, T::MaxPeerIdLen> =
+            BoundedVec::try_from(alloc::vec![1u8; 16]).unwrap();
+        let capacity: u32 = 1000;
+        let endpoint_hash = T::Hashing::hash(b"https://ipfs.example.com");
+        let bond: BalanceOf<T> = T::MinOperatorBond::get();
 
         #[extrinsic_call]
-        _(RawOrigin::Signed(caller), capacity, bond, endpoint);
+        _(RawOrigin::Signed(caller), peer_id, capacity, endpoint_hash, None, bond);
     }
 
     #[benchmark]
@@ -209,7 +205,7 @@ mod benchmarks {
         pallet::Operators::<T>::insert(&caller, info);
 
         #[extrinsic_call]
-        _(RawOrigin::Signed(caller), None, None);
+        _(RawOrigin::Signed(caller), None, None, None, None);
     }
 
     #[benchmark]
@@ -338,19 +334,19 @@ mod benchmarks {
 
     #[benchmark]
     fn mark_pinned() {
-        let cid: Vec<u8> = b"QmCID".to_vec();
+        let cid_hash = T::Hashing::hash(b"QmCID");
 
         #[extrinsic_call]
-        _(RawOrigin::Root, cid);
+        _(RawOrigin::Root, cid_hash, 1u32);
     }
 
     #[benchmark]
     fn mark_pin_failed() {
-        let cid: Vec<u8> = b"QmCID".to_vec();
+        let cid_hash = T::Hashing::hash(b"QmCID");
         let error_code: u16 = 1;
 
         #[extrinsic_call]
-        _(RawOrigin::Root, cid, error_code);
+        _(RawOrigin::Root, cid_hash, error_code);
     }
 
     // ========== 治理接口 ==========
@@ -445,7 +441,7 @@ mod benchmarks {
         let domain = b"benchmark-domain".to_vec();
 
         #[extrinsic_call]
-        _(RawOrigin::Root, domain, true, 0u8, 98u8);
+        _(RawOrigin::Root, domain, 0u8, PinTier::Standard, true);
     }
 
     #[benchmark]
@@ -456,7 +452,7 @@ mod benchmarks {
         pallet::RegisteredDomains::<T>::insert(&domain_bounded, types::DomainConfig::default());
 
         #[extrinsic_call]
-        _(RawOrigin::Root, domain, Some(false), Some(1u8));
+        _(RawOrigin::Root, domain, Some(false), Some(PinTier::Standard), Some(1u8));
     }
 
     #[benchmark]
@@ -555,10 +551,8 @@ mod benchmarks {
         let operator = setup_operator::<T>(1);
         let cid_hash = T::Hashing::hash(&[0xEE, 0xFF]);
         pallet::PendingPins::<T>::insert(cid_hash, (operator.clone(), 1u32, 0u64, 1024u64, BalanceOf::<T>::from(0u32)));
-        let core_ops: BoundedVec<T::AccountId, frame_support::traits::ConstU32<8>> =
-            BoundedVec::try_from(alloc::vec![operator.clone()]).unwrap();
-        let community_ops: BoundedVec<T::AccountId, frame_support::traits::ConstU32<8>> =
-            BoundedVec::default();
+        let core_ops: Vec<T::AccountId> = alloc::vec![operator.clone()];
+        let community_ops: Vec<T::AccountId> = alloc::vec![];
 
         #[extrinsic_call]
         _(RawOrigin::None, cid_hash, core_ops, community_ops);

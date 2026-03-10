@@ -221,7 +221,6 @@ parameter_types! {
 }
 
 impl pallet_entity_tokensale::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type AssetId = u64;
     type EntityProvider = MockEntityProvider;

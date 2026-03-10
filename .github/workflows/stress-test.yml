@@ -1,0 +1,92 @@
+name: Stress Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      total:
+        description: 'Total transactions to submit'
+        required: false
+        default: '100'
+      concurrency:
+        description: 'Concurrent transactions in flight'
+        required: false
+        default: '10'
+      tx_type:
+        description: 'Transaction type'
+        required: false
+        default: 'mixed'
+        type: choice
+        options:
+          - mixed
+          - remark
+          - transfer
+
+concurrency:
+  group: stress-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stress-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/free-disk-space
+      - uses: ./.github/actions/ubuntu-dependencies
+
+      - name: Build node in release mode
+        run: cargo build --package nexus-node --release
+        timeout-minutes: 90
+
+      - name: Start dev node
+        run: |
+          ./target/release/nexus-node --dev 2>&1 | tee node.log &
+          echo "NODE_PID=$!" >> "$GITHUB_ENV"
+          until curl -s '127.0.0.1:9944'; do sleep 3; done
+          echo "Node is up and accepting connections"
+        shell: bash
+        timeout-minutes: 5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+        working-directory: scripts
+
+      - name: Run stress test
+        run: |
+          npx tsx e2e/stress-test.ts \
+            --total "${{ inputs.total }}" \
+            --concurrency "${{ inputs.concurrency }}" \
+            --type "${{ inputs.tx_type }}"
+        working-directory: scripts
+        env:
+          WS_URL: ws://127.0.0.1:9944
+        timeout-minutes: 30
+
+      - name: Stop dev node
+        if: always()
+        run: |
+          if [ -n "$NODE_PID" ]; then
+            kill "$NODE_PID" 2>/dev/null || true
+          fi
+
+      - name: Upload stress test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-test-report
+          path: scripts/stress-report-*.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload node log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-test-node-log
+          path: node.log
+          retention-days: 7

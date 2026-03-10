@@ -12,7 +12,7 @@ use frame_support::{
 use frame_system::pallet_prelude::*;
 // （已下线）移除对 memo-endowment 的接口依赖
 use alloc::string::String;
-use codec::Encode;
+use codec::{Decode, Encode};
 use serde_json::Value as JsonValue;
 use sp_core::crypto::KeyTypeId;
 use sp_runtime::{
@@ -5419,7 +5419,7 @@ pub mod pallet {
         /// - 周期性扫描 `PendingPins`，对每个 `cid_hash` 调用 ipfs-cluster API 进行 Pin；
         /// - 成功则提交 `mark_pinned`，失败则提交 `mark_pin_failed`；
         /// - HTTP 令牌与集群端点从本地 offchain storage 读取，避免上链泄露。
-        fn offchain_worker(_n: BlockNumberFor<T>) {
+        fn offchain_worker(n: BlockNumberFor<T>) {
             // 读取本地配置（示例键）："/memo/ipfs/cluster_endpoint" 与 "/memo/ipfs/token"
             let endpoint: alloc::string::String = sp_io::offchain::local_storage_get(
                 StorageKind::PERSISTENT,
@@ -5436,14 +5436,17 @@ pub mod pallet {
                 <PendingPins<T>>::iter().next()
             {
                 // ⭐ P2: 通过 unsigned extrinsic 提交分配（替代 OCW 直写）
-                if LayeredPinAssignments::<T>::get(&cid_hash).is_none() {
+                // 防重复：检查是否在最近 5 个区块内已提交过
+                if LayeredPinAssignments::<T>::get(&cid_hash).is_none()
+                    && !Self::ocw_recently_submitted(b"ocw-assign", &cid_hash.encode(), n, 5u32.into())
+                {
                     let tier = CidTier::<T>::get(&cid_hash);
                     let subject_type = SubjectType::Custom(Default::default());
-                    
+
                     if let Ok(selection) = Self::select_operators_by_layer(subject_type, tier.clone()) {
                         let core_ops = selection.core_operators.to_vec();
                         let community_ops = selection.community_operators.to_vec();
-                        
+
                         // 提交 unsigned extrinsic（通过共识持久化）
                         let call = Call::<T>::ocw_submit_assignments {
                             cid_hash,
@@ -5451,21 +5454,28 @@ pub mod pallet {
                             community_operators: community_ops,
                         };
                         let xt = T::create_bare(call.into());
-                        let _ = frame_system::offchain::SubmitTransaction::<T, Call<T>>::submit_transaction(xt);
+                        if frame_system::offchain::SubmitTransaction::<T, Call<T>>::submit_transaction(xt).is_ok() {
+                            Self::ocw_set_last_submitted(b"ocw-assign", &cid_hash.encode(), n);
+                        }
                     }
                 }
                 // 发起 Pin 请求
                 let _ = Self::submit_pin_request(&endpoint, &token, cid_hash);
                 // ⭐ P2: 通过 unsigned extrinsic 更新 Pin 状态（替代直写 PinStateOf）
+                // 防重复：检查是否在最近 5 个区块内已提交过
                 if let Some(assign) = PinAssignments::<T>::get(&cid_hash) {
                     if let Some(first_op) = assign.first() {
-                        let call = Call::<T>::ocw_mark_pinned {
-                            operator: first_op.clone(),
-                            cid_hash,
-                            replicas: 1,
-                        };
-                        let xt = T::create_bare(call.into());
-                        let _ = frame_system::offchain::SubmitTransaction::<T, Call<T>>::submit_transaction(xt);
+                        if !Self::ocw_recently_submitted(b"ocw-pin", &cid_hash.encode(), n, 5u32.into()) {
+                            let call = Call::<T>::ocw_mark_pinned {
+                                operator: first_op.clone(),
+                                cid_hash,
+                                replicas: 1,
+                            };
+                            let xt = T::create_bare(call.into());
+                            if frame_system::offchain::SubmitTransaction::<T, Call<T>>::submit_transaction(xt).is_ok() {
+                                Self::ocw_set_last_submitted(b"ocw-pin", &cid_hash.encode(), n);
+                            }
+                        }
                     }
                 }
             }
@@ -5537,14 +5547,20 @@ pub mod pallet {
                                             .any(|p| p.as_slice() == info.peer_id.as_slice());
                                         let success = PinSuccess::<T>::get(&cid_hash, op_acc);
                                         // 仅在状态变化时提交（幂等，避免无意义交易）
-                                        if present != success {
+                                        // 防重复：检查是否在最近 3 个区块内已提交过
+                                        let health_key_data = (cid_hash, op_acc).encode();
+                                        if present != success
+                                            && !Self::ocw_recently_submitted(b"ocw-health", &health_key_data, n, 3u32.into())
+                                        {
                                             let call = Call::<T>::ocw_report_health {
                                                 cid_hash,
                                                 operator: op_acc.clone(),
                                                 is_pinned: present,
                                             };
                                             let xt = T::create_bare(call.into());
-                                            let _ = frame_system::offchain::SubmitTransaction::<T, Call<T>>::submit_transaction(xt);
+                                            if frame_system::offchain::SubmitTransaction::<T, Call<T>>::submit_transaction(xt).is_ok() {
+                                                Self::ocw_set_last_submitted(b"ocw-health", &health_key_data, n);
+                                            }
                                         }
                                     }
                                 }
@@ -5593,14 +5609,19 @@ pub mod pallet {
                             // 再 Pin（带退避）
                             let _ = Self::submit_pin_request(&endpoint, &token, cid_hash);
                             // ⭐ P2: 通过 unsigned extrinsic 触发状态重评估
+                            // 防重复：复用 ocw-pin 锁（同一 cid_hash 不重复提交）
                             if let Some(first_op) = assign.first() {
-                                let call = Call::<T>::ocw_mark_pinned {
-                                    operator: first_op.clone(),
-                                    cid_hash,
-                                    replicas: 1,
-                                };
-                                let xt = T::create_bare(call.into());
-                                let _ = frame_system::offchain::SubmitTransaction::<T, Call<T>>::submit_transaction(xt);
+                                if !Self::ocw_recently_submitted(b"ocw-pin", &cid_hash.encode(), n, 5u32.into()) {
+                                    let call = Call::<T>::ocw_mark_pinned {
+                                        operator: first_op.clone(),
+                                        cid_hash,
+                                        replicas: 1,
+                                    };
+                                    let xt = T::create_bare(call.into());
+                                    if frame_system::offchain::SubmitTransaction::<T, Call<T>>::submit_transaction(xt).is_ok() {
+                                        Self::ocw_set_last_submitted(b"ocw-pin", &cid_hash.encode(), n);
+                                    }
+                                }
                             }
                             pinning = pinning.saturating_add(1);
                         } else {
@@ -6717,6 +6738,43 @@ pub mod pallet {
             }
         }
 
+        // ========================= OCW 防重复提交辅助函数 =========================
+
+        /// 检查某类 OCW 交易是否在最近 `cooldown` 个区块内已提交过。
+        /// 使用 offchain local storage 持久化记录上次提交的区块号。
+        fn ocw_recently_submitted(
+            prefix: &[u8],
+            item_key: &[u8],
+            current_block: BlockNumberFor<T>,
+            cooldown: BlockNumberFor<T>,
+        ) -> bool {
+            let mut key = prefix.to_vec();
+            key.extend_from_slice(b"::");
+            key.extend_from_slice(item_key);
+            if let Some(bytes) = sp_io::offchain::local_storage_get(StorageKind::PERSISTENT, &key) {
+                if let Ok(last_block) = <BlockNumberFor<T> as codec::Decode>::decode(&mut &bytes[..]) {
+                    return current_block.saturating_sub(last_block) < cooldown;
+                }
+            }
+            false
+        }
+
+        /// 记录某类 OCW 交易的最近提交区块号。
+        fn ocw_set_last_submitted(
+            prefix: &[u8],
+            item_key: &[u8],
+            current_block: BlockNumberFor<T>,
+        ) {
+            let mut key = prefix.to_vec();
+            key.extend_from_slice(b"::");
+            key.extend_from_slice(item_key);
+            sp_io::offchain::local_storage_set(
+                StorageKind::PERSISTENT,
+                &key,
+                &codec::Encode::encode(&current_block),
+            );
+        }
+
         /// 函数级详细中文注释：通过 OCW 发送 HTTP POST /pins 请求到 ipfs-cluster
         /// - 仅示例：构造最小 JSON 体，包含 `cid` 字段（此处我们只有 `cid_hash`，生产应由 OCW 从密文解出 CID）。
         /// - 返回：若 HTTP 状态为 2xx 则认为提交成功，随后发起 `mark_pinned` 外部交易。
@@ -6896,7 +6954,8 @@ impl<T: Config> CidLockManager<T::Hash, BlockNumberFor<T>> for Pallet<T> {
 #[cfg(test)]
 mod tests;
 
-// ============================================================================
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
 // 公共IPFS网络简化PIN管理实现（无隐私约束版本）
 // ============================================================================
 

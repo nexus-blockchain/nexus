@@ -2,10 +2,11 @@
 
 use super::*;
 use frame_benchmarking::v2::*;
+use frame_support::traits::Get;
+use frame_support::BoundedVec;
 use frame_system::RawOrigin;
 use pallet::*;
 use types::*;
-use frame_support::BoundedVec;
 
 fn seed_complaint<T: Config>(id: u64, status: ComplaintStatus) {
     let complainant: T::AccountId = frame_benchmarking::account("complainant", 0, 0);

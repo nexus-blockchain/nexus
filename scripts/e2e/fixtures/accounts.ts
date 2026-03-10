@@ -7,8 +7,9 @@ import { KeyringPair } from '@polkadot/keyring/types';
 import { ApiPromise } from '@polkadot/api';
 import { signAndSend } from '../core/chain-state.js';
 import { nex } from '../core/config.js';
+import { NEXUS_SS58_FORMAT } from '../../utils/ss58.js';
 
-const keyring = new Keyring({ type: 'sr25519' });
+const keyring = new Keyring({ type: 'sr25519', ss58Format: NEXUS_SS58_FORMAT });
 
 /** 开发链预置账户 */
 export function getDevAccounts() {

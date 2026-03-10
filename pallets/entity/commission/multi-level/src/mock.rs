@@ -194,7 +194,6 @@ parameter_types! {
 }
 
 impl pallet_commission_multi_level::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type MemberProvider = MockMemberProvider;
     type EntityProvider = MockEntityProvider;
     type MaxMultiLevels = MaxMultiLevels;

@@ -14,6 +14,8 @@ targets = ["x86_64-unknown-linux-gnu"]
 codec = { features = ["derive"], workspace = true }
 scale-info = { features = ["derive"], workspace = true }
 pallet-grouprobot-primitives = { path = "../primitives", default-features = false }
+# 动态 USDT→NEX 换算
+pallet-trading-common = { workspace = true, default-features = false }
 
 # Substrate
 frame-support = { workspace = true }
@@ -32,6 +34,7 @@ std = [
 	"codec/std",
 	"scale-info/std",
 	"pallet-grouprobot-primitives/std",
+	"pallet-trading-common/std",
 	"frame-support/std",
 	"frame-system/std",
 	"frame-benchmarking?/std",

@@ -25,6 +25,8 @@ pallet-storage-service = { workspace = true, default-features = false }
 pallet-storage-lifecycle = { workspace = true, default-features = false }
 # 函数级中文注释：media-utils依赖用于承诺哈希计算和CID验证
 media-utils = { workspace = true, default-features = false }
+# 动态 USDT→NEX 换算（DepositCalculator trait）
+pallet-trading-common = { workspace = true, default-features = false }
 
 [dev-dependencies]
 sp-io = { workspace = true }
@@ -48,6 +50,7 @@ std = [
   "pallet-storage-service/std",
   "pallet-storage-lifecycle/std",
   "media-utils/std",
+  "pallet-trading-common/std",
 ]
 
 # 启用运行时基准

@@ -1,5 +1,5 @@
 use crate as pallet_commission_single_line;
-use frame_support::{derive_impl, parameter_types};
+use frame_support::{derive_impl, parameter_types, traits::ConstU32};
 use pallet_commission_common::MemberCommissionStatsData;
 use sp_runtime::BuildStorage;
 use std::cell::RefCell;
@@ -212,7 +212,6 @@ parameter_types! {
 }
 
 impl pallet_commission_single_line::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type StatsProvider = MockStatsProvider;
     type MemberLevelProvider = MockMemberLevelProvider;

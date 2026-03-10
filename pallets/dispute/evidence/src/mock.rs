@@ -129,6 +129,7 @@ impl pallet_dispute_evidence::pallet::Config for Test {
     type StoragePin = MockStoragePin;
     type Currency = Balances;
     type EvidenceDeposit = EvidenceDeposit;
+    type EvidenceDepositUsd = ConstU64<500_000>;
     type CommitRevealDeadline = CommitRevealDeadline;
     type MaxLinksPerEvidence = ConstU32<50>;
     type MaxSupplements = ConstU32<100>;
@@ -136,6 +137,8 @@ impl pallet_dispute_evidence::pallet::Config for Test {
     type ArchiveTtlBlocks = ConstU32<1000>;
     type ArchiveDelayBlocks = ConstU32<50>;
     type PrivateContentDeposit = EvidenceDeposit; // reuse same amount for tests
+    type PrivateContentDepositUsd = ConstU64<500_000>;
+    type DepositCalculator = ();
     type AccessRequestTtlBlocks = ConstU64<200>;
     type MaxReasonLen = ConstU32<256>;
 }

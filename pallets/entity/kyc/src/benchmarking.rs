@@ -2,6 +2,7 @@
 #![cfg(feature = "runtime-benchmarks")]
 
 use super::*;
+use alloc::vec::Vec;
 use frame_benchmarking::v2::*;
 use frame_support::{pallet_prelude::ConstU32, traits::Get, BoundedVec};
 use frame_system::RawOrigin;

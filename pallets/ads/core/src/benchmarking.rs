@@ -10,7 +10,7 @@ use frame_benchmarking::v2::*;
 use frame_support::BoundedVec;
 use frame_system::RawOrigin;
 use pallet::*;
-use frame_support::traits::{Currency, Get};
+use frame_support::traits::{Currency, Get, ReservableCurrency};
 use sp_runtime::traits::Bounded;
 use sp_runtime::Saturating;
 use pallet_ads_primitives::*;

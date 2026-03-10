@@ -70,3 +70,19 @@ pub fn local_chain_spec() -> Result<ChainSpec, String> {
 	.with_properties(chain_properties())
 	.build())
 }
+
+pub fn mainnet_chain_spec() -> Result<ChainSpec, String> {
+	Ok(ChainSpec::builder(
+		WASM_BINARY.ok_or_else(|| "Wasm binary not available".to_string())?,
+		None,
+	)
+	.with_name("Nexus")
+	.with_id("nexus")
+	.with_chain_type(ChainType::Live)
+	.with_protocol_id("nexus")
+	.with_genesis_config_preset_name(nexus_runtime::genesis_config_presets::MAINNET_RUNTIME_PRESET)
+	.with_properties(chain_properties())
+	// TODO: 上线前添加 bootnodes
+	// .with_boot_nodes(vec![...])
+	.build())
+}

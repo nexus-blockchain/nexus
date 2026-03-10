@@ -42,6 +42,46 @@ pub fn set_entity_owner(entity_id: u64, owner: u64) {
     ENTITY_OWNERS.with(|o| o.borrow_mut().insert(entity_id, owner));
 }
 
+pub fn set_entity_admin(entity_id: u64, account: u64, permissions: u32) {
+    ENTITY_ADMINS.with(|a| a.borrow_mut().insert((entity_id, account), permissions));
+}
+
+pub fn set_referrer(entity_id: u64, account: u64, referrer: u64) {
+    REFERRERS.with(|r| r.borrow_mut().insert((entity_id, account), referrer));
+}
+
+pub fn set_member_stats(entity_id: u64, account: u64, direct: u32, team_size: u32, total_spent: u128) {
+    MEMBER_STATS.with(|s| s.borrow_mut().insert((entity_id, account), (direct, team_size, total_spent)));
+}
+
+pub fn set_member_spent_usdt(entity_id: u64, account: u64, spent: u64) {
+    MEMBER_SPENT_USDT.with(|s| s.borrow_mut().insert((entity_id, account), spent));
+}
+
+pub fn ban_member(entity_id: u64, account: u64) {
+    BANNED_MEMBERS.with(|b| b.borrow_mut().insert((entity_id, account)));
+}
+
+pub fn set_unactivated(entity_id: u64, account: u64) {
+    UNACTIVATED_MEMBERS.with(|u| u.borrow_mut().insert((entity_id, account)));
+}
+
+pub fn set_entity_locked(entity_id: u64) {
+    ENTITY_LOCKED.with(|l| l.borrow_mut().insert(entity_id));
+}
+
+pub fn set_entity_inactive(entity_id: u64) {
+    ENTITY_INACTIVE.with(|s| s.borrow_mut().insert(entity_id));
+}
+
+pub fn set_non_member(entity_id: u64, account: u64) {
+    NON_MEMBERS.with(|n| n.borrow_mut().insert((entity_id, account)));
+}
+
+pub fn set_frozen_member(entity_id: u64, account: u64) {
+    FROZEN_MEMBERS.with(|f| f.borrow_mut().insert((entity_id, account)));
+}
+
 // ============================================================================
 // MockMemberProvider
 // ============================================================================
@@ -148,7 +188,6 @@ parameter_types! {
 }
 
 impl pallet_commission_team::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type MemberProvider = MockMemberProvider;
     type EntityProvider = MockEntityProvider;

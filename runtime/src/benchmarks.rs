@@ -31,7 +31,45 @@ frame_benchmarking::define_benchmarks!(
 	[pallet_timestamp, Timestamp]
 	[pallet_sudo, Sudo]
 
-	[pallet_entity_product, EntityProduct]
+	// Trading
 	[pallet_nex_market, NexMarket]
+
+	// Dispute
+	[pallet_dispute_escrow, Escrow]
+	[pallet_dispute_evidence, Evidence]
+	[pallet_dispute_arbitration, Arbitration]
+
+	// Storage
+	[pallet_storage_service, StorageService]
+	[pallet_storage_lifecycle, StorageLifecycle]
+
+	// Entity
+	[pallet_entity_registry, EntityRegistry]
+	[pallet_entity_shop, EntityShop]
+	[pallet_entity_order, EntityTransaction]
+	[pallet_entity_review, EntityReview]
+	[pallet_entity_governance, EntityGovernance]
+	[pallet_entity_market, EntityMarket]
+	[pallet_entity_product, EntityProduct]
+	[pallet_entity_token, EntityToken]
+	[pallet_entity_disclosure, EntityDisclosure]
+	[pallet_entity_kyc, EntityKyc]
+	[pallet_entity_tokensale, EntityTokenSale]
+
+	// Commission
+	[pallet_commission_core, CommissionCore]
+	[pallet_commission_pool_reward, CommissionPoolReward]
+
+	// GroupRobot
+	[pallet_grouprobot_registry, GroupRobotRegistry]
 	[pallet_grouprobot_consensus, GroupRobotConsensus]
+	[pallet_grouprobot_community, GroupRobotCommunity]
+	[pallet_grouprobot_ceremony, GroupRobotCeremony]
+	[pallet_grouprobot_rewards, GroupRobotRewards]
+	[pallet_grouprobot_subscription, GroupRobotSubscription]
+
+	// Ads
+	[pallet_ads_core, AdsCore]
+	[pallet_ads_entity, AdsEntity]
+	[pallet_ads_grouprobot, AdsGroupRobot]
 );

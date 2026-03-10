@@ -109,6 +109,7 @@ pub struct AdPlacementInfo<T: Config> {
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
+	use pallet_trading_common::DepositCalculator;
 	use frame_support::traits::ReservableCurrency;
 
 	const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -139,9 +140,16 @@ pub mod pallet {
 		#[pallet::constant]
 		type PlatformAdShareBps: Get<u16>;
 
-		/// 注册广告位所需最低保证金
+		/// 注册广告位所需最低保证金（NEX 兜底值）
 		#[pallet::constant]
 		type AdPlacementDeposit: Get<BalanceOf<Self>>;
+
+		/// 广告位押金 USDT 目标值（精度 10^6，如 1_000_000 = 1 USDT）
+		#[pallet::constant]
+		type AdPlacementDepositUsd: Get<u64>;
+
+		/// 动态 USDT→NEX 换算器
+		type DepositCalculator: pallet_trading_common::DepositCalculator<BalanceOf<Self>>;
 
 		/// 每个 Entity 最大广告位数
 		#[pallet::constant]
@@ -363,7 +371,7 @@ pub mod pallet {
 			);
 
 			// 保证金
-			let deposit = T::AdPlacementDeposit::get();
+			let deposit = Self::calculate_placement_deposit();
 			if !deposit.is_zero() {
 				T::Currency::reserve(&who, deposit)?;
 			}
@@ -434,7 +442,7 @@ pub mod pallet {
 				Error::<T>::MaxPlacementsReached
 			);
 
-			let deposit = T::AdPlacementDeposit::get();
+			let deposit = Self::calculate_placement_deposit();
 			if !deposit.is_zero() {
 				T::Currency::reserve(&who, deposit)?;
 			}
@@ -674,6 +682,17 @@ pub mod pallet {
 	// ========================================================================
 	// Helper functions
 	// ========================================================================
+
+	/// 动态押金计算
+	impl<T: Config> Pallet<T> {
+		/// 计算广告位押金（USDT 目标 → NEX 换算，无价格时回退兜底值）
+		fn calculate_placement_deposit() -> BalanceOf<T> {
+			T::DepositCalculator::calculate_deposit(
+				T::AdPlacementDepositUsd::get(),
+				T::AdPlacementDeposit::get(),
+			)
+		}
+	}
 
 	impl<T: Config> Pallet<T> {
 		/// 百分比计算 (基点)
