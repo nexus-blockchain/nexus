@@ -331,12 +331,7 @@ impl<T: Config> Pallet<T> {
         }
         EntitySales::<T>::remove(entity_id);
 
-        // M2 审计修复: 清理推荐关系（释放推荐人的 MaxReferralsPerReferrer 配额）
-        if let Some(referrer) = EntityReferrer::<T>::take(entity_id) {
-            ReferrerEntities::<T>::mutate(&referrer, |entities| {
-                entities.retain(|&id| id != entity_id);
-            });
-        }
+        // 审计修复: 不再清理推荐关系 — close 保留 referrer，reopen 后自动恢复
 
         T::OnEntityStatusChange::on_entity_closed(entity_id);
 

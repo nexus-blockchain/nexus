@@ -425,6 +425,8 @@ pub mod pallet {
         NotOrderParticipant,
         /// 代付人订单索引已满
         PayerOrdersFull,
+        /// 会员未绑定推荐人（REFERRAL_REQUIRED 策略下不允许下单）
+        ReferrerRequired,
     }
 
     // ==================== Hooks ====================
@@ -1095,6 +1097,15 @@ pub mod pallet {
                 !T::MemberProvider::is_banned(entity_id, &buyer),
                 Error::<T>::BuyerBanned
             );
+
+            // REFERRAL_REQUIRED 策略：已注册但无推荐人的会员不允许下单
+            // 防止"先入会/先消费，再绑定上级"绕过推荐链
+            if T::MemberProvider::is_member(entity_id, &buyer)
+                && T::MemberProvider::requires_referral(entity_id)
+                && T::MemberProvider::get_referrer(entity_id, &buyer).is_none()
+            {
+                return Err(Error::<T>::ReferrerRequired.into());
+            }
 
             let buyer_level = T::MemberProvider::get_effective_level(entity_id, &buyer);
 

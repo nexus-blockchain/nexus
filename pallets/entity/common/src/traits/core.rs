@@ -62,6 +62,17 @@ pub trait EntityProvider<AccountId> {
         false
     }
 
+    /// 设置 Entity 的 Primary Shop ID（由 Shop pallet 调用）
+    fn set_primary_shop_id(entity_id: u64, shop_id: u64) {
+        let _ = (entity_id, shop_id);
+    }
+
+    /// 获取 Entity 的 Primary Shop ID（0 = 无主店）
+    fn get_primary_shop_id(entity_id: u64) -> u64 {
+        let _ = entity_id;
+        0
+    }
+
     /// 获取 Entity 下所有 Shop IDs
     fn entity_shops(entity_id: u64) -> sp_std::vec::Vec<u64> {
         let _ = entity_id;

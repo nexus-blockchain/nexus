@@ -18,6 +18,7 @@ sp-std = { workspace = true }
 sp-io = { workspace = true }
 sp-core = { workspace = true }
 log = { workspace = true }
+sp-api = { workspace = true }
 pallet-entity-common = { workspace = true }
 
 [dev-dependencies]
@@ -35,6 +36,7 @@ std = [
 	"sp-std/std",
 	"sp-io/std",
 	"sp-core/std",
+	"sp-api/std",
 	"log/std",
 	"pallet-entity-common/std",
 	"pallet-balances/std",

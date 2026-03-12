@@ -261,6 +261,14 @@ pub trait MemberProvider<AccountId> {
         0
     }
 
+    /// 查询 Entity 是否启用了 REFERRAL_REQUIRED 策略
+    ///
+    /// 启用后：已注册但无推荐人的会员不能下单，也不能被他人绑定为推荐人。
+    fn requires_referral(entity_id: u64) -> bool {
+        let _ = entity_id;
+        false
+    }
+
     /// F7: 获取已完成的成功订单数（排除取消/退款的订单）
     fn completed_order_count(entity_id: u64, account: &AccountId) -> u32 {
         let _ = (entity_id, account);

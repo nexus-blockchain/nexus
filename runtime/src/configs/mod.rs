@@ -1354,6 +1354,7 @@ impl pallet_entity_shop::Config for Runtime {
 	type StoragePin = pallet_storage_service::Pallet<Runtime>;
 	type ProductProvider = EntityProduct;
 	type PointsCleanup = crate::EntityLoyalty;
+	type OrderProvider = EntityTransaction;
 	type WeightInfo = pallet_entity_shop::weights::SubstrateWeight<Runtime>;
 }
 

@@ -569,12 +569,6 @@ pub mod pallet {
             admin: T::AccountId,
         },
         // ========== Phase 5 新增事件 ==========
-        /// Primary Shop 已变更
-        PrimaryShopChanged {
-            entity_id: u64,
-            old_shop_id: u64,
-            new_shop_id: u64,
-        },
         /// Owner 主动暂停实体
         EntityOwnerPaused {
             entity_id: u64,
@@ -603,6 +597,12 @@ pub mod pallet {
         CloseRequestAutoExecuted {
             entity_id: u64,
             fund_refunded: BalanceOf<T>,
+        },
+        /// 治理强制重绑推荐人（审计纠错）
+        EntityReferrerForceRebound {
+            entity_id: u64,
+            old_referrer: Option<T::AccountId>,
+            new_referrer: T::AccountId,
         },
     }
 
@@ -679,10 +679,6 @@ pub mod pallet {
         /// 调用者不是此实体的管理员
         NotAdminCaller,
         // ========== Phase 5 新增错误 ==========
-        /// Shop 不属于此 Entity
-        ShopNotInEntity,
-        /// 已是当前 Primary Shop
-        AlreadyPrimaryShop,
         /// Entity 已被 Owner 暂停
         AlreadyOwnerPaused,
         /// Entity 未被 Owner 暂停
@@ -931,17 +927,7 @@ pub mod pallet {
             Self::do_resign_admin(who, entity_id)
         }
 
-        /// 设置 Primary Shop（owner 或 ENTITY_MANAGE admin）
-        #[pallet::call_index(22)]
-        #[pallet::weight(T::WeightInfo::set_primary_shop())]
-        pub fn set_primary_shop(
-            origin: OriginFor<T>,
-            entity_id: u64,
-            shop_id: u64,
-        ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-            Self::do_set_primary_shop(who, entity_id, shop_id)
-        }
+        // call_index(22) 已移除: set_primary_shop（统一由 shop pallet 管理）
 
         /// Owner 主动暂停实体
         #[pallet::call_index(23)]
@@ -985,6 +971,18 @@ pub mod pallet {
         pub fn execute_close_timeout(origin: OriginFor<T>, entity_id: u64) -> DispatchResult {
             ensure_signed(origin)?;
             Self::do_execute_close_timeout(entity_id)
+        }
+
+        /// 治理强制重绑推荐人（审计纠错，可修正错误绑定或为无推荐人的实体补绑）
+        #[pallet::call_index(28)]
+        #[pallet::weight(T::WeightInfo::force_rebind_referrer())]
+        pub fn force_rebind_referrer(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            new_referrer: T::AccountId,
+        ) -> DispatchResult {
+            T::GovernanceOrigin::ensure_origin(origin)?;
+            Self::do_force_rebind_referrer(entity_id, new_referrer)
         }
     }
 }

@@ -169,12 +169,7 @@ impl<T: Config> Pallet<T> {
         // M2-R12: 清理销售数据（banned 实体不应保留统计）
         EntitySales::<T>::remove(entity_id);
 
-        // M2 审计修复: 清理推荐关系（释放推荐人的 MaxReferralsPerReferrer 配额）
-        if let Some(referrer) = EntityReferrer::<T>::take(entity_id) {
-            ReferrerEntities::<T>::mutate(&referrer, |entities| {
-                entities.retain(|&id| id != entity_id);
-            });
-        }
+        // 审计修复: 不再清理推荐关系 — ban 保留 referrer，unban 后自动恢复
 
         if entity.status == EntityStatus::Active {
             EntityStats::<T>::mutate(|stats| {
@@ -355,6 +350,42 @@ impl<T: Config> Pallet<T> {
         Self::finalize_pending_close_restore(entity_id, restore_to_active);
 
         Self::deposit_event(Event::CloseRequestRejected { entity_id });
+        Ok(())
+    }
+
+    /// 治理强制重绑推荐人（纠错机制：清旧推荐关系、建新推荐关系）
+    ///
+    /// 设计决策：不限制 Entity 状态。治理可对任何状态的 Entity 强制重绑推荐人，
+    /// 包括 Banned 和 Closed（审计纠错不受业务状态限制）。
+    pub(crate) fn do_force_rebind_referrer(
+        entity_id: u64,
+        new_referrer: T::AccountId,
+    ) -> sp_runtime::DispatchResult {
+        let entity = Entities::<T>::get(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+
+        // 不能推荐自己
+        ensure!(new_referrer != entity.owner, Error::<T>::SelfReferral);
+
+        // 清除旧推荐关系（如果有）
+        let old_referrer = EntityReferrer::<T>::take(entity_id);
+        if let Some(ref old_ref) = old_referrer {
+            ReferrerEntities::<T>::mutate(old_ref, |entities| {
+                entities.retain(|&id| id != entity_id);
+            });
+        }
+
+        // 建立新推荐关系
+        EntityReferrer::<T>::insert(entity_id, &new_referrer);
+        ReferrerEntities::<T>::try_mutate(&new_referrer, |entities| -> Result<(), sp_runtime::DispatchError> {
+            entities.try_push(entity_id).map_err(|_| Error::<T>::ReferrerIndexFull)?;
+            Ok(())
+        })?;
+
+        Self::deposit_event(Event::EntityReferrerForceRebound {
+            entity_id,
+            old_referrer,
+            new_referrer,
+        });
         Ok(())
     }
 }

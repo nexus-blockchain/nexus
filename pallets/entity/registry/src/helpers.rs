@@ -10,10 +10,11 @@ use frame_support::{
     traits::{Currency, ExistenceRequirement, Get},
     BoundedVec,
 };
+use frame_system::pallet_prelude::BlockNumberFor;
 use pallet_entity_common::{AdminPermission, EntityStatus, EntityType, GovernanceMode, GovernanceProvider, OnEntityStatusChange, OrderProvider, TokenSaleProvider, DisputeQueryProvider, MarketProvider, PricingProvider};
 use pallet_storage_service::{StoragePin, PinTier};
 use sp_runtime::{
-    traits::{AccountIdConversion, Zero},
+    traits::{AccountIdConversion, Zero, Saturating},
     SaturatedConversion,
 };
 
@@ -536,5 +537,24 @@ impl<T: Config> Pallet<T> {
         entity.admins.iter()
             .find(|(a, _)| a == account)
             .map(|(_, perm)| *perm)
+    }
+
+    /// 查询关闭申请信息（PendingClose 状态下的超时进度）
+    pub fn api_get_close_request_info(entity_id: u64) -> Option<crate::runtime_api::CloseRequestInfo<BlockNumberFor<T>>> {
+        let request_at = EntityCloseRequests::<T>::get(entity_id)?;
+        let timeout = T::CloseRequestTimeout::get();
+        let executable_at = request_at.saturating_add(timeout);
+        let now = <frame_system::Pallet<T>>::block_number();
+        let remaining_blocks = if now >= executable_at {
+            Zero::zero()
+        } else {
+            executable_at - now
+        };
+        Some(crate::runtime_api::CloseRequestInfo {
+            request_at,
+            timeout,
+            remaining_blocks,
+            executable_at,
+        })
     }
 }

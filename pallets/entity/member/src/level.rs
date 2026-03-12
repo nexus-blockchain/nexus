@@ -119,7 +119,7 @@ impl<T: Config> Pallet<T> {
         // M9 审计修复: 验证 custom_level_id 对应的等级仍然存在
         // 等级可能被 remove_custom_level 删除，此时回退到基于消费的计算
         if let Some(system) = EntityLevelSystems::<T>::get(entity_id) {
-            if system.use_custom && (member.custom_level_id as usize) >= system.levels.len() {
+            if system.use_custom && member.custom_level_id > 0 && ((member.custom_level_id - 1) as usize) >= system.levels.len() {
                 return Self::calculate_custom_level_by_entity(entity_id, member.total_spent);
             }
         }
@@ -216,7 +216,7 @@ impl<T: Config> Pallet<T> {
                 ensure!(threshold_u64 > last.threshold, Error::<T>::InvalidThreshold);
             }
 
-            let level_id = system.levels.len() as u8;
+            let level_id = (system.levels.len() + 1) as u8;
 
             let level = CustomLevel {
                 id: level_id,
@@ -243,22 +243,22 @@ impl<T: Config> Pallet<T> {
         ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
         EntityLevelSystems::<T>::try_mutate(entity_id, |maybe_system| -> DispatchResult {
             let system = maybe_system.as_mut().ok_or(Error::<T>::LevelSystemNotInitialized)?;
-            ensure!((level_id as usize) < system.levels.len(), Error::<T>::LevelNotFound);
+            ensure!(level_id > 0 && ((level_id - 1) as usize) < system.levels.len(), Error::<T>::LevelNotFound);
 
             if let Some(new_threshold_u128) = threshold {
                 let new_threshold: u64 = new_threshold_u128.try_into()
                     .map_err(|_| Error::<T>::Overflow)?;
-                if level_id > 0 {
-                    if let Some(prev) = system.levels.get((level_id - 1) as usize) {
+                if level_id > 1 {
+                    if let Some(prev) = system.levels.get((level_id - 2) as usize) {
                         ensure!(new_threshold > prev.threshold, Error::<T>::InvalidThreshold);
                     }
                 }
-                if let Some(next) = system.levels.get((level_id + 1) as usize) {
+                if let Some(next) = system.levels.get(level_id as usize) {
                     ensure!(new_threshold < next.threshold, Error::<T>::InvalidThreshold);
                 }
             }
 
-            let level = system.levels.get_mut(level_id as usize)
+            let level = system.levels.get_mut((level_id - 1) as usize)
                 .ok_or(Error::<T>::LevelNotFound)?;
 
             if let Some(new_threshold_u128) = threshold {
@@ -290,7 +290,7 @@ impl<T: Config> Pallet<T> {
         EntityLevelSystems::<T>::try_mutate(entity_id, |maybe_system| -> DispatchResult {
             let system = maybe_system.as_mut().ok_or(Error::<T>::LevelSystemNotInitialized)?;
             ensure!(
-                level_id as usize == system.levels.len().saturating_sub(1),
+                level_id > 0 && (level_id - 1) as usize == system.levels.len().saturating_sub(1),
                 Error::<T>::InvalidLevelId
             );
             // H1 审计修复: 检查该等级是否还有会员

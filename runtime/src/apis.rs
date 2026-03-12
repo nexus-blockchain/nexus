@@ -43,8 +43,8 @@ use sp_version::RuntimeVersion;
 
 // Local module imports
 use super::{
-	AccountId, Aura, Balance, Block, Evidence, Executive, Grandpa, Historical, InherentDataExt, Nonce, Runtime,
-	RuntimeCall, RuntimeGenesisConfig, SessionKeys, StorageService, NexMarket, CommissionPoolReward, EntityRegistry, Arbitration, System, TransactionPayment, VERSION,
+	AccountId, Aura, Balance, Block, BlockNumber, Evidence, Executive, Grandpa, Historical, InherentDataExt, Nonce, Runtime,
+	RuntimeCall, RuntimeGenesisConfig, SessionKeys, StorageService, NexMarket, CommissionPoolReward, EntityRegistry, Arbitration, EntityMarket, System, TransactionPayment, VERSION,
 };
 
 impl_runtime_apis! {
@@ -323,6 +323,18 @@ impl_runtime_apis! {
 		fn get_members_paginated(entity_id: u64, page_size: u32, page_index: u32) -> pallet_entity_member::runtime_api::PaginatedMembersResult<AccountId> {
 			pallet_entity_member::Pallet::<Runtime>::get_members_paginated(entity_id, page_size, page_index)
 		}
+
+		fn get_upline_chain(entity_id: u64, account: AccountId, max_depth: u32) -> pallet_entity_member::runtime_api::UplineChainResult<AccountId> {
+			pallet_entity_member::Pallet::<Runtime>::get_upline_chain(entity_id, &account, max_depth)
+		}
+
+		fn get_referral_tree(entity_id: u64, account: AccountId, depth: u32) -> pallet_entity_member::runtime_api::ReferralTreeNode<AccountId> {
+			pallet_entity_member::Pallet::<Runtime>::get_referral_tree(entity_id, &account, depth)
+		}
+
+		fn get_referrals_by_generation(entity_id: u64, account: AccountId, generation: u32, page_size: u32, page_index: u32) -> pallet_entity_member::runtime_api::PaginatedGenerationResult<AccountId> {
+			pallet_entity_member::Pallet::<Runtime>::get_referrals_by_generation(entity_id, &account, generation, page_size, page_index)
+		}
 	}
 
 	impl pallet_commission_core::runtime_api::CommissionDashboardApi<Block, AccountId, Balance, u128> for Runtime {
@@ -465,7 +477,7 @@ impl_runtime_apis! {
 		}
 	}
 
-	impl pallet_entity_registry::runtime_api::EntityRegistryApi<Block, AccountId, Balance> for Runtime {
+	impl pallet_entity_registry::runtime_api::EntityRegistryApi<Block, AccountId, Balance, BlockNumber> for Runtime {
 		fn get_entity(entity_id: u64) -> Option<pallet_entity_registry::runtime_api::EntityInfo<AccountId, Balance>> {
 			EntityRegistry::api_get_entity(entity_id)
 		}
@@ -512,6 +524,10 @@ impl_runtime_apis! {
 
 		fn check_admin_permission(entity_id: u64, account: AccountId) -> Option<u32> {
 			EntityRegistry::api_check_admin_permission(entity_id, &account)
+		}
+
+		fn get_close_request_info(entity_id: u64) -> Option<pallet_entity_registry::runtime_api::CloseRequestInfo<BlockNumber>> {
+			EntityRegistry::api_get_close_request_info(entity_id)
 		}
 	}
 
@@ -570,6 +586,80 @@ impl_runtime_apis! {
 
 		fn get_user_public_key(account: AccountId) -> Option<pallet_dispute_evidence::runtime_api::PublicKeyInfo> {
 			Evidence::api_get_user_public_key(&account)
+		}
+	}
+
+	impl pallet_entity_market::runtime_api::EntityMarketApi<Block, AccountId, Balance, Balance> for Runtime {
+		fn get_sell_orders(entity_id: u64) -> Vec<pallet_entity_market::runtime_api::OrderInfo<AccountId, Balance, Balance>> {
+			EntityMarket::api_get_sell_orders(entity_id)
+		}
+
+		fn get_buy_orders(entity_id: u64) -> Vec<pallet_entity_market::runtime_api::OrderInfo<AccountId, Balance, Balance>> {
+			EntityMarket::api_get_buy_orders(entity_id)
+		}
+
+		fn get_user_orders(user: AccountId) -> Vec<pallet_entity_market::runtime_api::OrderInfo<AccountId, Balance, Balance>> {
+			EntityMarket::api_get_user_orders(&user)
+		}
+
+		fn get_order(order_id: u64) -> Option<pallet_entity_market::runtime_api::OrderInfo<AccountId, Balance, Balance>> {
+			EntityMarket::api_get_order(order_id)
+		}
+
+		fn get_order_book_depth(entity_id: u64, max_depth: u32) -> pallet_entity_market::runtime_api::OrderBookDepthInfo<Balance, Balance> {
+			EntityMarket::api_get_order_book_depth(entity_id, max_depth)
+		}
+
+		fn get_best_prices(entity_id: u64) -> (Option<Balance>, Option<Balance>) {
+			EntityMarket::api_get_best_prices(entity_id)
+		}
+
+		fn get_spread(entity_id: u64) -> Option<Balance> {
+			EntityMarket::api_get_spread(entity_id)
+		}
+
+		fn get_market_summary(entity_id: u64) -> pallet_entity_market::runtime_api::MarketSummaryInfo<Balance, Balance> {
+			EntityMarket::api_get_market_summary(entity_id)
+		}
+
+		fn get_order_book_snapshot(entity_id: u64) -> (Vec<(Balance, Balance)>, Vec<(Balance, Balance)>) {
+			EntityMarket::api_get_order_book_snapshot(entity_id)
+		}
+
+		fn get_user_trade_history(user: AccountId, page: u32, page_size: u32) -> Vec<pallet_entity_market::runtime_api::TradeInfo<AccountId, Balance, Balance>> {
+			EntityMarket::api_get_user_trade_history(&user, page, page_size)
+		}
+
+		fn get_entity_trade_history(entity_id: u64, page: u32, page_size: u32) -> Vec<pallet_entity_market::runtime_api::TradeInfo<AccountId, Balance, Balance>> {
+			EntityMarket::api_get_entity_trade_history(entity_id, page, page_size)
+		}
+
+		fn get_user_order_history(user: AccountId, page: u32, page_size: u32) -> Vec<pallet_entity_market::runtime_api::OrderInfo<AccountId, Balance, Balance>> {
+			EntityMarket::api_get_user_order_history(&user, page, page_size)
+		}
+
+		fn get_daily_stats(entity_id: u64) -> pallet_entity_market::runtime_api::DailyStatsInfo<Balance> {
+			EntityMarket::api_get_daily_stats(entity_id)
+		}
+
+		fn get_global_stats() -> pallet_entity_market::runtime_api::MarketStatsInfo {
+			EntityMarket::api_get_global_stats()
+		}
+
+		fn get_market_status(entity_id: u64) -> u8 {
+			EntityMarket::api_get_market_status(entity_id)
+		}
+
+		fn get_market_config(entity_id: u64) -> Option<pallet_entity_market::runtime_api::MarketConfigInfo> {
+			EntityMarket::api_get_market_config(entity_id)
+		}
+
+		fn get_kyc_requirement(entity_id: u64) -> u8 {
+			EntityMarket::api_get_kyc_requirement(entity_id)
+		}
+
+		fn get_twap_info(entity_id: u64) -> pallet_entity_market::runtime_api::TwapInfo<Balance> {
+			EntityMarket::api_get_twap_info(entity_id)
 		}
 	}
 }

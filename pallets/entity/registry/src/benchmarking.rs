@@ -1,7 +1,7 @@
 //! Benchmarking for pallet-entity-registry.
 //!
 //! Uses `frame_benchmarking::v2` macro style.
-//! All 24 active extrinsics are benchmarked.
+//! All 23 active extrinsics are benchmarked.
 //!
 //! Signed extrinsics that depend on mock providers (PricingProvider, ShopProvider)
 //! use seed helpers to pre-populate storage directly, bypassing `create_entity`.
@@ -491,19 +491,7 @@ mod benches {
         assert!(!e.admins.iter().any(|(a, _)| a == &admin));
     }
 
-    // ==================== call_index(22): set_primary_shop ====================
-    #[benchmark]
-    fn set_primary_shop() {
-        let entity_id: u64 = 9999;
-        let owner = seed_entity_with_shops::<T>(entity_id, 2);
-        // primary_shop_id = 1, 要切换到 2
-
-        #[extrinsic_call]
-        _(RawOrigin::Signed(owner), entity_id, 2u64);
-
-        let e = Entities::<T>::get(entity_id).unwrap();
-        assert_eq!(e.primary_shop_id, 2);
-    }
+    // call_index(22) 已移除: set_primary_shop（统一由 shop pallet 管理）
 
     // ==================== call_index(23): self_pause_entity ====================
     #[benchmark]
@@ -579,6 +567,28 @@ mod benches {
 
         let e = Entities::<T>::get(entity_id).unwrap();
         assert_eq!(e.status, EntityStatus::Closed);
+    }
+
+    // ==================== call_index(28): force_rebind_referrer ====================
+    #[benchmark]
+    fn force_rebind_referrer() {
+        let entity_id: u64 = 9999;
+        seed_entity::<T>(entity_id);
+        // 设置初始推荐人
+        let old_referrer = funded_account::<T>("old_referrer", 1);
+        EntityReferrer::<T>::insert(entity_id, &old_referrer);
+        let _ = ReferrerEntities::<T>::try_mutate(&old_referrer, |entities| {
+            entities.try_push(entity_id)
+        });
+        // 创建新推荐人
+        let new_referrer = funded_account::<T>("new_referrer", 2);
+
+        #[extrinsic_call]
+        _(RawOrigin::Root, entity_id, new_referrer.clone());
+
+        assert_eq!(EntityReferrer::<T>::get(entity_id), Some(new_referrer.clone()));
+        assert!(ReferrerEntities::<T>::get(&new_referrer).contains(&entity_id));
+        assert!(!ReferrerEntities::<T>::get(&old_referrer).contains(&entity_id));
     }
 
     impl_benchmark_test_suite!(

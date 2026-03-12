@@ -2382,60 +2382,7 @@ fn b2_admin_can_top_up_fund() {
     });
 }
 
-// ==================== Phase 5: set_primary_shop (b3) ====================
-
-#[test]
-fn b3_set_primary_shop_works() {
-    new_test_ext().execute_with(|| {
-        let id = create_default_entity(ALICE);
-        // Register shops via EntityProvider
-        assert_ok!(<EntityRegistry as EntityProvider<u64>>::register_shop(id, 100));
-        assert_ok!(<EntityRegistry as EntityProvider<u64>>::register_shop(id, 200));
-        // primary_shop_id should be the first registered (100) since entity had 0
-        assert_eq!(Entities::<Test>::get(id).unwrap().primary_shop_id, 100);
-
-        // Set primary to 200
-        assert_ok!(EntityRegistry::set_primary_shop(RuntimeOrigin::signed(ALICE), id, 200));
-        assert_eq!(Entities::<Test>::get(id).unwrap().primary_shop_id, 200);
-    });
-}
-
-#[test]
-fn b3_set_primary_shop_fails_not_in_entity() {
-    new_test_ext().execute_with(|| {
-        let id = create_default_entity(ALICE);
-        assert_noop!(
-            EntityRegistry::set_primary_shop(RuntimeOrigin::signed(ALICE), id, 999),
-            Error::<Test>::ShopNotInEntity
-        );
-    });
-}
-
-#[test]
-fn b3_set_primary_shop_fails_already_primary() {
-    new_test_ext().execute_with(|| {
-        let id = create_default_entity(ALICE);
-        assert_ok!(<EntityRegistry as EntityProvider<u64>>::register_shop(id, 100));
-        assert_noop!(
-            EntityRegistry::set_primary_shop(RuntimeOrigin::signed(ALICE), id, 100),
-            Error::<Test>::AlreadyPrimaryShop
-        );
-    });
-}
-
-#[test]
-fn b3_set_primary_shop_admin_with_entity_manage() {
-    new_test_ext().execute_with(|| {
-        let id = create_default_entity(ALICE);
-        assert_ok!(<EntityRegistry as EntityProvider<u64>>::register_shop(id, 100));
-        assert_ok!(<EntityRegistry as EntityProvider<u64>>::register_shop(id, 200));
-        assert_ok!(EntityRegistry::add_admin(
-            RuntimeOrigin::signed(ALICE), id, BOB, AdminPermission::ENTITY_MANAGE,
-        ));
-        assert_ok!(EntityRegistry::set_primary_shop(RuntimeOrigin::signed(BOB), id, 200));
-        assert_eq!(Entities::<Test>::get(id).unwrap().primary_shop_id, 200);
-    });
-}
+// Phase 5: set_primary_shop 已移除（统一由 shop pallet 管理）
 
 // ==================== Phase 5: self_pause/resume (b4) ====================
 
@@ -3748,5 +3695,259 @@ fn close_succeeds_after_dependencies_cleared() {
         assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
         let entity = Entities::<Test>::get(id).unwrap();
         assert_eq!(entity.status, EntityStatus::PendingClose);
+    });
+}
+
+// ==================== 审计修复测试 ====================
+
+// Fix 2: top_up_fund 在 governance lock 下仍可执行
+#[test]
+fn top_up_fund_works_under_governance_lock() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        let before = EntityRegistry::get_entity_fund_balance(id);
+        // 设置 governance lock
+        set_entity_locked(id);
+        let amount = 1_000_000_000_000u128; // 1 token
+        assert_ok!(EntityRegistry::top_up_fund(RuntimeOrigin::signed(ALICE), id, amount));
+        let after = EntityRegistry::get_entity_fund_balance(id);
+        assert_eq!(after, before + amount);
+    });
+}
+
+// Fix 2: top_up_fund 在 Banned + governance lock 下仍可执行（解除 ban→unban 死结）
+#[test]
+fn top_up_fund_works_banned_and_locked() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        // Ban 实体（没收资金）
+        assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, true, None));
+        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Banned);
+        // 设置 governance lock
+        set_entity_locked(id);
+        // 充值仍然可以执行
+        let amount = 1_000_000_000_000u128;
+        assert_ok!(EntityRegistry::top_up_fund(RuntimeOrigin::signed(ALICE), id, amount));
+        let balance = EntityRegistry::get_entity_fund_balance(id);
+        assert!(balance >= amount);
+    });
+}
+
+// Fix 3: ban 后推荐关系保留
+#[test]
+fn ban_preserves_referrer() {
+    new_test_ext().execute_with(|| {
+        // BOB 先创建一个 entity 作为 referrer 资格
+        create_default_entity(BOB);
+        // ALICE 创建 entity 并绑定 BOB 为推荐人
+        let id = create_default_entity(ALICE);
+        assert_ok!(EntityRegistry::bind_entity_referrer(RuntimeOrigin::signed(ALICE), id, BOB));
+        assert_eq!(EntityReferrer::<Test>::get(id), Some(BOB));
+        assert!(ReferrerEntities::<Test>::get(BOB).contains(&id));
+
+        // Ban 实体
+        assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false, None));
+        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Banned);
+
+        // 推荐关系仍然保留
+        assert_eq!(EntityReferrer::<Test>::get(id), Some(BOB));
+        assert!(ReferrerEntities::<Test>::get(BOB).contains(&id));
+    });
+}
+
+// Fix 3: unban 后推荐关系仍在
+#[test]
+fn unban_preserves_referrer() {
+    new_test_ext().execute_with(|| {
+        create_default_entity(BOB);
+        let id = create_default_entity(ALICE);
+        assert_ok!(EntityRegistry::bind_entity_referrer(RuntimeOrigin::signed(ALICE), id, BOB));
+
+        // Ban（不没收资金，以便 unban 时资金校验通过）
+        assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false, None));
+
+        // 充值以满足 unban 的资金要求
+        let amount = 1_000_000_000_000u128;
+        assert_ok!(EntityRegistry::top_up_fund(RuntimeOrigin::signed(ALICE), id, amount));
+
+        // Unban
+        assert_ok!(EntityRegistry::unban_entity(RuntimeOrigin::root(), id));
+        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Active);
+
+        // 推荐关系仍然保留
+        assert_eq!(EntityReferrer::<Test>::get(id), Some(BOB));
+        assert!(ReferrerEntities::<Test>::get(BOB).contains(&id));
+    });
+}
+
+// Fix 3: close 后推荐关系保留
+#[test]
+fn close_preserves_referrer() {
+    new_test_ext().execute_with(|| {
+        create_default_entity(BOB);
+        let id = create_default_entity(ALICE);
+        assert_ok!(EntityRegistry::bind_entity_referrer(RuntimeOrigin::signed(ALICE), id, BOB));
+
+        // 关闭实体
+        close_entity_via_timeout(ALICE, id);
+        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Closed);
+
+        // 推荐关系仍然保留
+        assert_eq!(EntityReferrer::<Test>::get(id), Some(BOB));
+        assert!(ReferrerEntities::<Test>::get(BOB).contains(&id));
+    });
+}
+
+// Fix 3: reopen 后推荐关系仍在
+#[test]
+fn reopen_preserves_referrer() {
+    new_test_ext().execute_with(|| {
+        create_default_entity(BOB);
+        let id = create_default_entity(ALICE);
+        assert_ok!(EntityRegistry::bind_entity_referrer(RuntimeOrigin::signed(ALICE), id, BOB));
+
+        close_entity_via_timeout(ALICE, id);
+
+        // Reopen
+        assert_ok!(EntityRegistry::reopen_entity(RuntimeOrigin::signed(ALICE), id));
+        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Active);
+
+        // 推荐关系保留
+        assert_eq!(EntityReferrer::<Test>::get(id), Some(BOB));
+        assert!(ReferrerEntities::<Test>::get(BOB).contains(&id));
+    });
+}
+
+// Fix 3: Banned 状态不能 bind_entity_referrer
+#[test]
+fn bind_entity_referrer_fails_when_banned() {
+    new_test_ext().execute_with(|| {
+        create_default_entity(BOB);
+        let id = create_default_entity(ALICE);
+        // Ban 实体
+        assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false, None));
+        // 尝试绑定推荐人，应该失败
+        assert_noop!(
+            EntityRegistry::bind_entity_referrer(RuntimeOrigin::signed(ALICE), id, BOB),
+            Error::<Test>::InvalidEntityStatus
+        );
+    });
+}
+
+// Fix 3: Closed 状态不能 bind_entity_referrer
+#[test]
+fn bind_entity_referrer_fails_when_closed() {
+    new_test_ext().execute_with(|| {
+        create_default_entity(BOB);
+        let id = create_default_entity(ALICE);
+        // Close 实体
+        close_entity_via_timeout(ALICE, id);
+        // 尝试绑定推荐人，应该失败
+        assert_noop!(
+            EntityRegistry::bind_entity_referrer(RuntimeOrigin::signed(ALICE), id, BOB),
+            Error::<Test>::InvalidEntityStatus
+        );
+    });
+}
+
+// Fix 4: force_rebind_referrer 治理纠错（替换已有推荐人）
+#[test]
+fn force_rebind_referrer_works() {
+    new_test_ext().execute_with(|| {
+        create_default_entity(BOB);
+        create_default_entity(CHARLIE);
+        let id = create_default_entity(ALICE);
+        // 绑定 BOB 为推荐人
+        assert_ok!(EntityRegistry::bind_entity_referrer(RuntimeOrigin::signed(ALICE), id, BOB));
+        assert_eq!(EntityReferrer::<Test>::get(id), Some(BOB));
+
+        // 治理强制重绑到 CHARLIE
+        assert_ok!(EntityRegistry::force_rebind_referrer(RuntimeOrigin::root(), id, CHARLIE));
+        assert_eq!(EntityReferrer::<Test>::get(id), Some(CHARLIE));
+        // BOB 的反向索引已清除
+        assert!(!ReferrerEntities::<Test>::get(BOB).contains(&id));
+        // CHARLIE 的反向索引已建立
+        assert!(ReferrerEntities::<Test>::get(CHARLIE).contains(&id));
+    });
+}
+
+// Fix 4: force_rebind_referrer 无旧推荐人时补绑
+#[test]
+fn force_rebind_referrer_works_no_old_referrer() {
+    new_test_ext().execute_with(|| {
+        create_default_entity(BOB);
+        let id = create_default_entity(ALICE);
+        // 没有旧推荐人
+        assert_eq!(EntityReferrer::<Test>::get(id), None);
+
+        // 治理补绑 BOB
+        assert_ok!(EntityRegistry::force_rebind_referrer(RuntimeOrigin::root(), id, BOB));
+        assert_eq!(EntityReferrer::<Test>::get(id), Some(BOB));
+        assert!(ReferrerEntities::<Test>::get(BOB).contains(&id));
+    });
+}
+
+// Fix 4: force_rebind_referrer 不能推荐自己
+#[test]
+fn force_rebind_referrer_fails_self_referral() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        assert_noop!(
+            EntityRegistry::force_rebind_referrer(RuntimeOrigin::root(), id, ALICE),
+            Error::<Test>::SelfReferral
+        );
+    });
+}
+
+// Fix 4: force_rebind_referrer 需要治理 Origin
+#[test]
+fn force_rebind_referrer_fails_not_governance() {
+    new_test_ext().execute_with(|| {
+        create_default_entity(BOB);
+        let id = create_default_entity(ALICE);
+        assert_noop!(
+            EntityRegistry::force_rebind_referrer(RuntimeOrigin::signed(ALICE), id, BOB),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+// Fix 4: force_rebind_referrer 可对 Banned 实体操作（审计纠错不受状态限制）
+#[test]
+fn force_rebind_referrer_works_on_banned_entity() {
+    new_test_ext().execute_with(|| {
+        create_default_entity(BOB);
+        let id = create_default_entity(ALICE);
+        assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false, None));
+        assert_ok!(EntityRegistry::force_rebind_referrer(RuntimeOrigin::root(), id, BOB));
+        assert_eq!(EntityReferrer::<Test>::get(id), Some(BOB));
+    });
+}
+
+// Fix 1: get_close_request_info API 返回正确数据
+#[test]
+fn api_get_close_request_info_works() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        // 未申请关闭时返回 None
+        assert_eq!(EntityRegistry::api_get_close_request_info(id), None);
+
+        // 申请关闭
+        assert_ok!(EntityRegistry::request_close_entity(RuntimeOrigin::signed(ALICE), id));
+        let info = EntityRegistry::api_get_close_request_info(id).unwrap();
+        assert_eq!(info.request_at, 1); // block_number = 1
+        assert_eq!(info.timeout, 100); // CloseRequestTimeout = 100
+        assert_eq!(info.executable_at, 101); // 1 + 100
+        assert_eq!(info.remaining_blocks, 100); // 101 - 1
+
+        // 推进一半
+        System::set_block_number(51);
+        let info = EntityRegistry::api_get_close_request_info(id).unwrap();
+        assert_eq!(info.remaining_blocks, 50); // 101 - 51
+
+        // 推进到超时后
+        System::set_block_number(200);
+        let info = EntityRegistry::api_get_close_request_info(id).unwrap();
+        assert_eq!(info.remaining_blocks, 0); // 已超时
     });
 }

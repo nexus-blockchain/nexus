@@ -116,6 +116,20 @@ impl<T: Config> EntityProvider<T::AccountId> for Pallet<T> {
         EntityShops::<T>::get(entity_id).into_inner()
     }
 
+    fn set_primary_shop_id(entity_id: u64, shop_id: u64) {
+        Entities::<T>::mutate(entity_id, |maybe_entity| {
+            if let Some(entity) = maybe_entity {
+                entity.primary_shop_id = shop_id;
+            }
+        });
+    }
+
+    fn get_primary_shop_id(entity_id: u64) -> u64 {
+        Entities::<T>::get(entity_id)
+            .map(|e| e.primary_shop_id)
+            .unwrap_or(0)
+    }
+
     // H4 修复: 实现 pause_entity/resume_entity（供治理模块调用）
     fn pause_entity(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
         let entity = Entities::<T>::get(entity_id).ok_or(Error::<T>::EntityNotFound)?;

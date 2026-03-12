@@ -38,12 +38,12 @@ pub trait WeightInfo {
     fn unverify_entity() -> Weight;
     fn cancel_close_request() -> Weight;
     fn resign_admin() -> Weight;
-    fn set_primary_shop() -> Weight;
     fn self_pause_entity() -> Weight;
     fn self_resume_entity() -> Weight;
     fn force_transfer_ownership() -> Weight;
     fn reject_close_request() -> Weight;
     fn execute_close_timeout() -> Weight;
+    fn force_rebind_referrer() -> Weight;
 }
 
 /// 默认权重实现（保守估计，生产前需 benchmark 替换）
@@ -106,9 +106,6 @@ impl WeightInfo for SubstrateWeight {
     fn resign_admin() -> Weight {
         Weight::from_parts(60_000_000, 4_000)
     }
-    fn set_primary_shop() -> Weight {
-        Weight::from_parts(60_000_000, 4_000)
-    }
     fn self_pause_entity() -> Weight {
         Weight::from_parts(80_000_000, 5_000)
     }
@@ -124,10 +121,10 @@ impl WeightInfo for SubstrateWeight {
     fn execute_close_timeout() -> Weight {
         Weight::from_parts(150_000_000, 8_000)
     }
+    fn force_rebind_referrer() -> Weight {
+        Weight::from_parts(80_000_000, 5_000)
+    }
 }
-
-
-/// 单元测试用零权重实现
 impl WeightInfo for () {
     fn create_entity() -> Weight { Weight::zero() }
     fn update_entity() -> Weight { Weight::zero() }
@@ -148,10 +145,10 @@ impl WeightInfo for () {
     fn unverify_entity() -> Weight { Weight::zero() }
     fn cancel_close_request() -> Weight { Weight::zero() }
     fn resign_admin() -> Weight { Weight::zero() }
-    fn set_primary_shop() -> Weight { Weight::zero() }
     fn self_pause_entity() -> Weight { Weight::zero() }
     fn self_resume_entity() -> Weight { Weight::zero() }
     fn force_transfer_ownership() -> Weight { Weight::zero() }
     fn reject_close_request() -> Weight { Weight::zero() }
     fn execute_close_timeout() -> Weight { Weight::zero() }
+    fn force_rebind_referrer() -> Weight { Weight::zero() }
 }

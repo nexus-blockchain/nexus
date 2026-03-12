@@ -12,12 +12,40 @@ fn bounded_cid(s: &[u8]) -> BoundedVec<u8, MaxCidLength> {
     BoundedVec::try_from(s.to_vec()).unwrap()
 }
 
+/// 查询 entity 的 primary shop id（统一从 mock EntityProvider 获取）
+fn primary_shop_id(entity_id: u64) -> u64 {
+    <MockEntityProvider as pallet_entity_common::EntityProvider<u64>>::get_primary_shop_id(entity_id)
+}
+
+/// 双向确认转让辅助函数：request + accept
+fn do_transfer(from_owner: u64, shop_id: u64, to_entity_id: u64, to_owner: u64, keep_managers: bool) {
+    assert_ok!(Shop::request_transfer_shop(RuntimeOrigin::signed(from_owner), shop_id, to_entity_id));
+    assert_ok!(Shop::accept_transfer_shop(RuntimeOrigin::signed(to_owner), shop_id, keep_managers));
+}
+
 /// 完整关闭流程：close_shop → 推进区块过宽限期 → finalize_close_shop
 fn close_and_finalize(who: u64, shop_id: u64) {
     assert_ok!(Shop::close_shop(RuntimeOrigin::signed(who), shop_id));
     let now = System::block_number();
     System::set_block_number(now + 11); // grace = 10
     assert_ok!(Shop::finalize_close_shop(RuntimeOrigin::signed(who), shop_id));
+}
+
+/// 为 entity 创建一个非 primary 的 shop（先确保有 primary，再创建第二个）
+/// 返回第二个 shop 的 ID
+fn create_non_primary_shop(owner: u64, entity_id: u64, name: &[u8], fund: u64) -> u64 {
+    // 确保 entity 有 primary shop（若没有则创建一个）
+    if primary_shop_id(entity_id) == 0 {
+        <Shop as ShopProvider<u64>>::create_primary_shop(
+            entity_id, b"Primary".to_vec(), ShopType::OnlineStore,
+        ).unwrap();
+    }
+    let id_before = Shop::next_shop_id();
+    assert_ok!(Shop::create_shop(
+        RuntimeOrigin::signed(owner), entity_id,
+        bounded_name(name), ShopType::OnlineStore, fund,
+    ));
+    id_before
 }
 
 // ============================================================================
@@ -275,24 +303,18 @@ fn pause_shop_fails_already_paused() {
 #[test]
 fn close_shop_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Shop::create_shop(
-            RuntimeOrigin::signed(1),
-            1,
-            bounded_name(b"Test Shop"),
-            ShopType::OnlineStore,
-            1000,
-        ));
+        let shop_id = create_non_primary_shop(1, 1, b"Test Shop", 1000);
 
         // Step 1: close_shop sets Closing
-        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
-        let shop = Shop::shops(1).unwrap();
+        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), shop_id));
+        let shop = Shop::shops(shop_id).unwrap();
         assert_eq!(shop.status, ShopOperatingStatus::Closing);
 
         // Step 2: finalize after grace period
         let now = System::block_number();
         System::set_block_number(now + 11);
-        assert_ok!(Shop::finalize_close_shop(RuntimeOrigin::signed(1), 1));
-        let shop = Shop::shops(1).unwrap();
+        assert_ok!(Shop::finalize_close_shop(RuntimeOrigin::signed(1), shop_id));
+        let shop = Shop::shops(shop_id).unwrap();
         assert_eq!(shop.status, ShopOperatingStatus::Closed);
     });
 }
@@ -316,7 +338,7 @@ fn create_primary_shop_works() {
         assert_eq!(shop.status, ShopOperatingStatus::Active);
 
         assert!(<Shop as ShopProvider<u64>>::is_primary_shop(shop_id));
-        assert_eq!(Shop::entity_primary_shop(1), Some(shop_id));
+        assert_eq!(primary_shop_id(1), shop_id);
     });
 }
 
@@ -339,16 +361,11 @@ fn cannot_close_primary_shop() {
 #[test]
 fn normal_shop_is_not_primary() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Shop::create_shop(
-            RuntimeOrigin::signed(1),
-            1,
-            bounded_name(b"Normal Shop"),
-            ShopType::OnlineStore,
-            1000,
-        ));
+        // First create a primary, then a normal shop
+        let shop_id = create_non_primary_shop(1, 1, b"Normal Shop", 1000);
 
-        assert!(!<Shop as ShopProvider<u64>>::is_primary_shop(1));
-        assert!(Shop::entity_primary_shop(1).is_none() || Shop::entity_primary_shop(1) != Some(1));
+        assert!(!<Shop as ShopProvider<u64>>::is_primary_shop(shop_id));
+        assert!(primary_shop_id(1) != shop_id);
     });
 }
 
@@ -1152,7 +1169,7 @@ fn update_shop_none_does_not_change_cid() {
 }
 
 // ============================================================================
-// F3: transfer_shop
+// F3: request_transfer_shop / accept_transfer_shop / cancel_transfer_shop
 // ============================================================================
 
 #[test]
@@ -1166,8 +1183,8 @@ fn f3_transfer_shop_works() {
 
         assert_eq!(Shop::shops(1).unwrap().entity_id, 1);
 
-        // Transfer to Entity 2
-        assert_ok!(Shop::transfer_shop(RuntimeOrigin::signed(1), 1, 2));
+        // request + accept transfer to Entity 2
+        do_transfer(1, 1, 2, 2, true);
 
         let shop = Shop::shops(1).unwrap();
         assert_eq!(shop.entity_id, 2);
@@ -1182,7 +1199,7 @@ fn f3_transfer_shop_rejects_primary() {
         assert_ok!(<Shop as ShopProvider<u64>>::create_primary_shop(1, b"Primary".to_vec(), ShopType::OnlineStore));
 
         assert_noop!(
-            Shop::transfer_shop(RuntimeOrigin::signed(1), 1, 2),
+            Shop::request_transfer_shop(RuntimeOrigin::signed(1), 1, 2),
             Error::<Test>::CannotTransferPrimaryShop
         );
     });
@@ -1197,7 +1214,7 @@ fn f3_transfer_shop_rejects_same_entity() {
         ));
 
         assert_noop!(
-            Shop::transfer_shop(RuntimeOrigin::signed(1), 1, 1),
+            Shop::request_transfer_shop(RuntimeOrigin::signed(1), 1, 1),
             Error::<Test>::SameEntity
         );
     });
@@ -1213,7 +1230,7 @@ fn f3_transfer_shop_rejects_non_owner() {
 
         // Account 2 is not owner of Entity 1
         assert_noop!(
-            Shop::transfer_shop(RuntimeOrigin::signed(2), 1, 2),
+            Shop::request_transfer_shop(RuntimeOrigin::signed(2), 1, 2),
             Error::<Test>::NotAuthorized
         );
     });
@@ -1229,7 +1246,7 @@ fn f3_transfer_shop_rejects_inactive_target() {
 
         // Entity 3 exists but is Suspended (not active)
         assert_noop!(
-            Shop::transfer_shop(RuntimeOrigin::signed(1), 1, 3),
+            Shop::request_transfer_shop(RuntimeOrigin::signed(1), 1, 3),
             Error::<Test>::EntityNotActive
         );
     });
@@ -1245,8 +1262,104 @@ fn f3_transfer_shop_rejects_closing() {
         assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
 
         assert_noop!(
-            Shop::transfer_shop(RuntimeOrigin::signed(1), 1, 2),
+            Shop::request_transfer_shop(RuntimeOrigin::signed(1), 1, 2),
             Error::<Test>::ShopAlreadyClosed
+        );
+    });
+}
+
+#[test]
+fn f3_accept_requires_target_owner() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Shop"), ShopType::OnlineStore, 500,
+        ));
+        assert_ok!(Shop::request_transfer_shop(RuntimeOrigin::signed(1), 1, 2));
+
+        // Account 1 is NOT owner of target entity 2
+        assert_noop!(
+            Shop::accept_transfer_shop(RuntimeOrigin::signed(1), 1, true),
+            Error::<Test>::NotAuthorized
+        );
+    });
+}
+
+#[test]
+fn f3_cancel_transfer_by_source() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Shop"), ShopType::OnlineStore, 500,
+        ));
+        assert_ok!(Shop::request_transfer_shop(RuntimeOrigin::signed(1), 1, 2));
+
+        // Source owner cancels
+        assert_ok!(Shop::cancel_transfer_shop(RuntimeOrigin::signed(1), 1));
+        assert!(crate::PendingTransfers::<Test>::get(1).is_none());
+    });
+}
+
+#[test]
+fn f3_cancel_transfer_by_target() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Shop"), ShopType::OnlineStore, 500,
+        ));
+        assert_ok!(Shop::request_transfer_shop(RuntimeOrigin::signed(1), 1, 2));
+
+        // Target owner cancels
+        assert_ok!(Shop::cancel_transfer_shop(RuntimeOrigin::signed(2), 1));
+        assert!(crate::PendingTransfers::<Test>::get(1).is_none());
+    });
+}
+
+#[test]
+fn f3_transfer_clears_managers_when_requested() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Shop"), ShopType::OnlineStore, 500,
+        ));
+        assert_ok!(Shop::add_manager(RuntimeOrigin::signed(1), 1, 4));
+        assert_eq!(Shop::shops(1).unwrap().managers.len(), 1);
+
+        // Transfer with keep_managers = false
+        do_transfer(1, 1, 2, 2, false);
+
+        assert_eq!(Shop::shops(1).unwrap().managers.len(), 0);
+    });
+}
+
+#[test]
+fn f3_transfer_rejects_active_orders() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Shop"), ShopType::OnlineStore, 500,
+        ));
+        set_shop_has_active_orders(1);
+
+        assert_noop!(
+            Shop::request_transfer_shop(RuntimeOrigin::signed(1), 1, 2),
+            Error::<Test>::HasActiveOrders
+        );
+    });
+}
+
+#[test]
+fn f3_duplicate_transfer_request_rejected() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Shop"), ShopType::OnlineStore, 500,
+        ));
+        assert_ok!(Shop::request_transfer_shop(RuntimeOrigin::signed(1), 1, 2));
+
+        assert_noop!(
+            Shop::request_transfer_shop(RuntimeOrigin::signed(1), 1, 2),
+            Error::<Test>::TransferAlreadyPending
         );
     });
 }
@@ -1266,11 +1379,11 @@ fn f4_set_primary_shop_works() {
             bounded_name(b"Secondary"), ShopType::OnlineStore, 500,
         ));
 
-        assert_eq!(Shop::entity_primary_shop(1), Some(1));
+        assert_eq!(primary_shop_id(1), 1);
 
         assert_ok!(Shop::set_primary_shop(RuntimeOrigin::signed(1), 1, 2));
 
-        assert_eq!(Shop::entity_primary_shop(1), Some(2));
+        assert_eq!(primary_shop_id(1), 2);
     });
 }
 
@@ -1317,6 +1430,24 @@ fn f4_set_primary_shop_rejects_wrong_entity() {
             Shop::set_primary_shop(RuntimeOrigin::signed(1), 1, 2),
             Error::<Test>::NotAuthorized
         );
+    });
+}
+
+#[test]
+fn f4_set_primary_shop_admin_with_entity_manage() {
+    new_test_ext().execute_with(|| {
+        // Create primary shop + second shop for Entity 1
+        assert_ok!(<Shop as ShopProvider<u64>>::create_primary_shop(1, b"Primary".to_vec(), ShopType::OnlineStore));
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Secondary"), ShopType::OnlineStore, 500,
+        ));
+
+        assert_eq!(primary_shop_id(1), 1);
+
+        // Account 10 is admin of Entity 1 in mock (is_entity_admin returns true)
+        assert_ok!(Shop::set_primary_shop(RuntimeOrigin::signed(10), 1, 2));
+        assert_eq!(primary_shop_id(1), 2);
     });
 }
 
@@ -1462,14 +1593,14 @@ fn m4_force_close_cleans_entity_primary_shop_index() {
             1, b"Primary Shop".to_vec(), ShopType::OnlineStore,
         ).unwrap();
 
-        // EntityPrimaryShop should be set
-        assert_eq!(Shop::entity_primary_shop(1), Some(shop_id));
+        // primary should be set
+        assert_eq!(primary_shop_id(1), shop_id);
 
         // force_close the primary shop
         assert_ok!(<Shop as ShopProvider<u64>>::force_close_shop(shop_id));
 
-        // M4: EntityPrimaryShop should be cleaned
-        assert!(Shop::entity_primary_shop(1).is_none());
+        // primary should be cleared (registry auto-reassigns to 0 when no shops left)
+        assert_eq!(primary_shop_id(1), 0);
     });
 }
 
@@ -1680,7 +1811,7 @@ fn transfer_shop_rejects_banned() {
         ));
         assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
         assert_noop!(
-            Shop::transfer_shop(RuntimeOrigin::signed(1), 1, 2),
+            Shop::request_transfer_shop(RuntimeOrigin::signed(1), 1, 2),
             Error::<Test>::ShopBanned
         );
     });
@@ -2218,7 +2349,7 @@ fn m1_close_shop_rejects_banned() {
     });
 }
 
-/// M3: transfer_shop 拒绝目标 Entity 已达 Shop 数量上限
+/// M3: request_transfer_shop 拒绝目标 Entity 已达 Shop 数量上限
 #[test]
 fn m3_transfer_shop_rejects_target_entity_at_limit() {
     new_test_ext().execute_with(|| {
@@ -2240,7 +2371,7 @@ fn m3_transfer_shop_rejects_target_entity_at_limit() {
 
         // Transfer entity 1's shop to entity 2 — should fail (entity 2 at limit)
         assert_noop!(
-            Shop::transfer_shop(RuntimeOrigin::signed(1), transfer_shop_id, 2),
+            Shop::request_transfer_shop(RuntimeOrigin::signed(1), transfer_shop_id, 2),
             Error::<Test>::ShopLimitReached
         );
     });
@@ -2263,7 +2394,7 @@ fn m3_transfer_shop_works_when_target_has_capacity() {
         ));
 
         // Transfer entity 1's shop to entity 2 — should succeed
-        assert_ok!(Shop::transfer_shop(RuntimeOrigin::signed(1), 2, 2));
+        do_transfer(1, 2, 2, 2, true);
         assert_eq!(Shop::shops(2).unwrap().entity_id, 2);
     });
 }
@@ -2372,5 +2503,178 @@ fn l3_trait_resume_shop_returns_shop_banned() {
             <Shop as ShopProvider<u64>>::resume_shop(1),
             Error::<Test>::ShopBanned
         );
+    });
+}
+
+// ============================================================================
+// Fix 2: Active orders block close_shop / finalize_close_shop
+// ============================================================================
+
+#[test]
+fn close_shop_rejects_active_orders() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        set_shop_has_active_orders(1);
+
+        assert_noop!(
+            Shop::close_shop(RuntimeOrigin::signed(1), 1),
+            Error::<Test>::HasActiveOrders
+        );
+
+        // After clearing orders, close should succeed
+        clear_shop_active_orders(1);
+        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
+    });
+}
+
+#[test]
+fn finalize_close_rejects_active_orders() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        assert_ok!(Shop::close_shop(RuntimeOrigin::signed(1), 1));
+
+        // Advance past grace period
+        System::set_block_number(System::block_number() + 11);
+
+        // Add active orders during grace period
+        set_shop_has_active_orders(1);
+
+        assert_noop!(
+            Shop::finalize_close_shop(RuntimeOrigin::signed(1), 1),
+            Error::<Test>::HasActiveOrders
+        );
+
+        // Clear orders, finalize should succeed
+        clear_shop_active_orders(1);
+        assert_ok!(Shop::finalize_close_shop(RuntimeOrigin::signed(1), 1));
+    });
+}
+
+// ============================================================================
+// Fix 8: governance_close_shop / governance_set_shop_type
+// ============================================================================
+
+#[test]
+fn governance_close_shop_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        assert_ok!(<Shop as ShopProvider<u64>>::governance_close_shop(1));
+
+        assert_eq!(Shop::shops(1).unwrap().status, ShopOperatingStatus::Closed);
+    });
+}
+
+#[test]
+fn governance_close_shop_rejects_already_closed() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        close_and_finalize(1, 1);
+
+        assert_noop!(
+            <Shop as ShopProvider<u64>>::governance_close_shop(1),
+            Error::<Test>::ShopAlreadyClosed
+        );
+    });
+}
+
+#[test]
+fn governance_set_shop_type_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        assert_ok!(<Shop as ShopProvider<u64>>::governance_set_shop_type(1, ShopType::PhysicalStore));
+        assert_eq!(Shop::shops(1).unwrap().shop_type, ShopType::PhysicalStore);
+    });
+}
+
+#[test]
+fn governance_set_shop_type_rejects_same_type() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+
+        assert_noop!(
+            <Shop as ShopProvider<u64>>::governance_set_shop_type(1, ShopType::OnlineStore),
+            Error::<Test>::ShopTypeSame
+        );
+    });
+}
+
+#[test]
+fn governance_set_shop_type_rejects_closed() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        close_and_finalize(1, 1);
+
+        assert_noop!(
+            <Shop as ShopProvider<u64>>::governance_set_shop_type(1, ShopType::PhysicalStore),
+            Error::<Test>::ShopAlreadyClosed
+        );
+    });
+}
+
+#[test]
+fn governance_set_shop_type_rejects_banned() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Test Shop"), ShopType::OnlineStore, 1000,
+        ));
+        assert_ok!(Shop::ban_shop(RuntimeOrigin::root(), 1, bounded_cid(b"violation")));
+
+        assert_noop!(
+            <Shop as ShopProvider<u64>>::governance_set_shop_type(1, ShopType::PhysicalStore),
+            Error::<Test>::ShopBanned
+        );
+    });
+}
+
+// ============================================================================
+// Fix 3: Primary shop single source of truth
+// ============================================================================
+
+#[test]
+fn primary_shop_uses_single_source_of_truth() {
+    new_test_ext().execute_with(|| {
+        // Create primary shop
+        let shop_id = <Shop as ShopProvider<u64>>::create_primary_shop(
+            1, b"Primary".to_vec(), ShopType::OnlineStore,
+        ).unwrap();
+
+        // Both is_primary_shop and get_primary_shop_id should agree
+        assert!(<Shop as ShopProvider<u64>>::is_primary_shop(shop_id));
+        assert_eq!(primary_shop_id(1), shop_id);
+
+        // Create second shop, change primary
+        assert_ok!(Shop::create_shop(
+            RuntimeOrigin::signed(1), 1,
+            bounded_name(b"Secondary"), ShopType::OnlineStore, 500,
+        ));
+        assert_ok!(Shop::set_primary_shop(RuntimeOrigin::signed(1), 1, 2));
+
+        assert!(!<Shop as ShopProvider<u64>>::is_primary_shop(shop_id));
+        assert!(<Shop as ShopProvider<u64>>::is_primary_shop(2));
+        assert_eq!(primary_shop_id(1), 2);
     });
 }

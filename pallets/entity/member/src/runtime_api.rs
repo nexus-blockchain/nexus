@@ -3,6 +3,9 @@
 //! 提供以下接口：
 //! - `get_member_info`: 会员仪表盘数据（等级/消费/推荐/过期/升级历史）
 //! - `get_referral_team`: 批量返回直推列表 + 各下线的等级/消费概览（支持 1-2 层深度）
+//! - `get_upline_chain`: 上行链路，从指定会员向上追溯到根节点的完整推荐路径
+//! - `get_referral_tree`: 深层下行树，递归展开推荐子树（支持 1-10 层深度）
+//! - `get_referrals_by_generation`: 按代分页查询，获取指定会员第 N 代下级
 
 use codec::{Codec, Decode, Encode};
 use scale_info::TypeInfo;
@@ -127,6 +130,95 @@ pub struct EntityMemberOverview {
     pub banned_count: u32,
 }
 
+// ============================================================================
+// 推荐链路可视化 DTO
+// ============================================================================
+
+/// 上行链路节点
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+pub struct UplineNode<AccountId> {
+    /// 会员账户
+    pub account: AccountId,
+    /// 有效等级 ID
+    pub level_id: u8,
+    /// 团队总人数
+    pub team_size: u32,
+    /// 加入时间（区块号）
+    pub joined_at: u64,
+}
+
+/// 上行链路查询结果
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+pub struct UplineChainResult<AccountId> {
+    /// 路径: [account, referrer, grand_referrer, ..., root]
+    pub chain: Vec<UplineNode<AccountId>>,
+    /// 是否因 max_depth 截断（true = 链路可能更长）
+    pub truncated: bool,
+    /// 链路总深度（= chain.len()）
+    pub depth: u32,
+}
+
+/// 下行推荐树节点（递归结构）
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+pub struct ReferralTreeNode<AccountId> {
+    /// 会员账户
+    pub account: AccountId,
+    /// 有效等级 ID
+    pub level_id: u8,
+    /// 直推人数
+    pub direct_referrals: u32,
+    /// 团队总人数
+    pub team_size: u32,
+    /// 累计消费（USDT 精度 10^6）
+    pub total_spent: u64,
+    /// 加入时间（区块号）
+    pub joined_at: u64,
+    /// 是否被封禁
+    pub is_banned: bool,
+    /// 子节点（depth > 0 时递归展开）
+    pub children: Vec<ReferralTreeNode<AccountId>>,
+    /// 是否还有未展开的子节点（子节点数超过展开上限或深度已耗尽）
+    pub has_more_children: bool,
+}
+
+/// 按代查询的会员信息
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+pub struct GenerationMemberInfo<AccountId> {
+    /// 会员账户
+    pub account: AccountId,
+    /// 有效等级 ID
+    pub level_id: u8,
+    /// 直推人数
+    pub direct_referrals: u32,
+    /// 团队总人数
+    pub team_size: u32,
+    /// 累计消费（USDT 精度 10^6）
+    pub total_spent: u64,
+    /// 加入时间（区块号）
+    pub joined_at: u64,
+    /// 是否被封禁
+    pub is_banned: bool,
+    /// 该成员的直接推荐人（上一代中的某位）
+    pub referrer: AccountId,
+}
+
+/// 按代分页查询结果
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+pub struct PaginatedGenerationResult<AccountId> {
+    /// 查询的代数
+    pub generation: u32,
+    /// 该代会员列表
+    pub members: Vec<GenerationMemberInfo<AccountId>>,
+    /// 该代总会员数
+    pub total_count: u32,
+    /// 每页数量
+    pub page_size: u32,
+    /// 当前页码（0-based）
+    pub page_index: u32,
+    /// 是否还有更多数据
+    pub has_more: bool,
+}
+
 sp_api::decl_runtime_apis! {
     /// 会员 Runtime API
     ///
@@ -176,5 +268,40 @@ sp_api::decl_runtime_apis! {
         /// ### 返回
         /// - 分页会员列表、总数、是否有更多
         fn get_members_paginated(entity_id: u64, page_size: u32, page_index: u32) -> PaginatedMembersResult<AccountId>;
+
+        /// 获取上行推荐链路（从指定会员向上追溯到根节点）
+        ///
+        /// ### 参数
+        /// - `entity_id`: 实体 ID
+        /// - `account`: 起始会员账户
+        /// - `max_depth`: 最大追溯深度（上限 100）
+        ///
+        /// ### 返回
+        /// - 完整上行路径 [account → referrer → ... → root]，是否截断，总深度
+        fn get_upline_chain(entity_id: u64, account: AccountId, max_depth: u32) -> UplineChainResult<AccountId>;
+
+        /// 获取深层下行推荐树（递归展开子树）
+        ///
+        /// ### 参数
+        /// - `entity_id`: 实体 ID
+        /// - `account`: 根节点会员账户
+        /// - `depth`: 展开深度（1~10，超出范围自动 clamp）
+        ///
+        /// ### 返回
+        /// - 以 account 为根的推荐树，含递归子节点
+        fn get_referral_tree(entity_id: u64, account: AccountId, depth: u32) -> ReferralTreeNode<AccountId>;
+
+        /// 按代分页查询（获取指定会员第 N 代下级）
+        ///
+        /// ### 参数
+        /// - `entity_id`: 实体 ID
+        /// - `account`: 起始会员账户
+        /// - `generation`: 代数（1 = 直推，2 = 间推，...，上限 20）
+        /// - `page_size`: 每页数量（上限 100）
+        /// - `page_index`: 页码（0-based）
+        ///
+        /// ### 返回
+        /// - 该代的分页会员列表
+        fn get_referrals_by_generation(entity_id: u64, account: AccountId, generation: u32, page_size: u32, page_index: u32) -> PaginatedGenerationResult<AccountId>;
     }
 }

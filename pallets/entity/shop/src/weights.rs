@@ -32,6 +32,8 @@ pub trait WeightInfo {
     fn withdraw_operating_fund() -> Weight;
     fn finalize_close_shop() -> Weight;
     fn transfer_shop() -> Weight;
+    fn accept_transfer_shop() -> Weight;
+    fn cancel_transfer_shop() -> Weight;
     fn set_primary_shop() -> Weight;
     fn force_pause_shop() -> Weight;
     fn force_close_shop() -> Weight;
@@ -110,6 +112,16 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(5))
             .saturating_add(T::DbWeight::get().writes(4))
     }
+    fn accept_transfer_shop() -> Weight {
+        Weight::from_parts(250_000_000, 8_000)
+            .saturating_add(T::DbWeight::get().reads(6))
+            .saturating_add(T::DbWeight::get().writes(5))
+    }
+    fn cancel_transfer_shop() -> Weight {
+        Weight::from_parts(75_000_000, 3_000)
+            .saturating_add(T::DbWeight::get().reads(2))
+            .saturating_add(T::DbWeight::get().writes(1))
+    }
     fn set_primary_shop() -> Weight {
         Weight::from_parts(100_000_000, 4_000)
             .saturating_add(T::DbWeight::get().reads(3))
@@ -166,6 +178,8 @@ impl WeightInfo for () {
     fn withdraw_operating_fund() -> Weight { Weight::from_parts(150_000_000, 5_000) }
     fn finalize_close_shop() -> Weight { Weight::from_parts(350_000_000, 15_000) }
     fn transfer_shop() -> Weight { Weight::from_parts(200_000_000, 7_000) }
+    fn accept_transfer_shop() -> Weight { Weight::from_parts(250_000_000, 8_000) }
+    fn cancel_transfer_shop() -> Weight { Weight::from_parts(75_000_000, 3_000) }
     fn set_primary_shop() -> Weight { Weight::from_parts(100_000_000, 4_000) }
     fn force_pause_shop() -> Weight { Weight::from_parts(50_000_000, 3_000) }
     fn force_close_shop() -> Weight { Weight::from_parts(350_000_000, 15_000) }

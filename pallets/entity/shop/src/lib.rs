@@ -49,7 +49,7 @@ pub mod pallet {
     use frame_system::pallet_prelude::*;
     use pallet_entity_common::{
         CommissionFundGuard, EffectiveShopStatus, EntityProvider, EntityStatus,
-        PointsCleanup, ProductProvider, ShopOperatingStatus, ShopProvider, ShopType,
+        OrderProvider, PointsCleanup, ProductProvider, ShopOperatingStatus, ShopProvider, ShopType,
     };
     use pallet_storage_service::{StoragePin, PinTier};
     use sp_runtime::{
@@ -120,6 +120,22 @@ pub mod pallet {
         <T as Config>::MaxManagers,
     >;
 
+    /// 转让请求（双向确认模式）
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    pub struct PendingShopTransfer<BlockNumber> {
+        /// 源 Entity ID
+        pub from_entity_id: u64,
+        /// 目标 Entity ID
+        pub to_entity_id: u64,
+        /// 是否继承原有 managers（目标方可在 accept 时覆盖）
+        pub keep_managers: bool,
+        /// 请求创建区块
+        pub requested_at: BlockNumber,
+    }
+
+    /// PendingShopTransfer 类型别名
+    pub type PendingShopTransferOf<T> = PendingShopTransfer<BlockNumberFor<T>>;
+
     #[pallet::config]
     pub trait Config: frame_system::Config<RuntimeEvent: From<Event<Self>>> {
         /// 货币类型
@@ -167,6 +183,9 @@ pub mod pallet {
 
         /// 积分清理接口（Shop 关闭时委托 loyalty 模块清理）
         type PointsCleanup: pallet_entity_common::PointsCleanup;
+
+        /// 订单查询接口（用于 close/transfer 前检查活跃订单）
+        type OrderProvider: OrderProvider<Self::AccountId, BalanceOf<Self>>;
 
         /// Weight 信息（由 benchmark 生成）
         type WeightInfo: WeightInfo;
@@ -233,10 +252,8 @@ pub mod pallet {
     #[pallet::getter(fn shop_closing_at)]
     pub type ShopClosingAt<T: Config> = StorageMap<_, Blake2_128Concat, u64, BlockNumberFor<T>>;
 
-    /// Entity 主 Shop 索引 entity_id -> primary_shop_id
-    #[pallet::storage]
-    #[pallet::getter(fn entity_primary_shop)]
-    pub type EntityPrimaryShop<T: Config> = StorageMap<_, Blake2_128Concat, u64, u64>;
+    // EntityPrimaryShop 已移除：主店由 registry Entity.primary_shop_id 唯一管理
+    // 通过 T::EntityProvider::get_primary_shop_id(entity_id) 查询
 
     /// 封禁前的 Shop 状态（用于解封时恢复）shop_id -> ShopOperatingStatus
     #[pallet::storage]
@@ -245,6 +262,10 @@ pub mod pallet {
     /// 封禁原因 shop_id -> reason
     #[pallet::storage]
     pub type ShopBanReason<T: Config> = StorageMap<_, Blake2_128Concat, u64, BoundedVec<u8, T::MaxCidLength>>;
+
+    /// 待确认的转让请求 shop_id -> PendingShopTransfer
+    #[pallet::storage]
+    pub type PendingTransfers<T: Config> = StorageMap<_, Blake2_128Concat, u64, PendingShopTransferOf<T>>;
 
     // ========================================================================
     // Events
@@ -292,6 +313,10 @@ pub mod pallet {
         ShopCloseFinalized { shop_id: u64 },
         /// Shop 转让
         ShopTransferred { shop_id: u64, from_entity_id: u64, to_entity_id: u64 },
+        /// Shop 转让请求发起
+        ShopTransferRequested { shop_id: u64, from_entity_id: u64, to_entity_id: u64 },
+        /// Shop 转让请求被取消
+        ShopTransferCancelled { shop_id: u64 },
         /// 主 Shop 变更
         PrimaryShopChanged { entity_id: u64, old_shop_id: u64, new_shop_id: u64 },
         /// Shop 被强制暂停（Root）
@@ -384,6 +409,12 @@ pub mod pallet {
         ShopNotBanned,
         /// 调用者不是该 Shop 的管理员
         NotManager,
+        /// Shop 存在活跃订单（关闭/转让前须结清）
+        HasActiveOrders,
+        /// 已有待确认的转让请求
+        TransferAlreadyPending,
+        /// 无待确认的转让请求
+        NoTransferPending,
     }
 
     // ========================================================================
@@ -720,7 +751,7 @@ pub mod pallet {
                 ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
                 
                 ensure!(
-                    EntityPrimaryShop::<T>::get(shop.entity_id) != Some(shop_id),
+                    T::EntityProvider::get_primary_shop_id(shop.entity_id) != shop_id,
                     Error::<T>::CannotClosePrimaryShop
                 );
                 
@@ -729,6 +760,12 @@ pub mod pallet {
                 ensure!(shop.status != ShopOperatingStatus::Closing, Error::<T>::ShopAlreadyClosing);
                 // M1: 封禁状态仅 Root 可通过 unban_shop 解封，owner 不可通过 close 绕过封禁
                 ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
+
+                // 活跃订单检查：存在未终结订单时不允许进入关闭流程
+                ensure!(
+                    !T::OrderProvider::has_active_orders_for_shop(shop_id),
+                    Error::<T>::HasActiveOrders
+                );
                 
                 shop.status = ShopOperatingStatus::Closing;
                 
@@ -764,6 +801,12 @@ pub mod pallet {
                 let now = <frame_system::Pallet<T>>::block_number();
                 let grace = T::ShopClosingGracePeriod::get();
                 ensure!(now >= closing_at.saturating_add(grace), Error::<T>::ClosingGracePeriodNotElapsed);
+
+                // 二次检查：宽限期内可能有已存在的订单仍在进行
+                ensure!(
+                    !T::OrderProvider::has_active_orders_for_shop(shop_id),
+                    Error::<T>::HasActiveOrders
+                );
 
                 Self::do_close_shop_cleanup(shop, shop_id);
 
@@ -834,64 +877,167 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 转让 Shop 到另一个 Entity
+        /// 发起 Shop 转让请求（源 Entity owner 调用）
         ///
-        /// 仅 Entity owner 可调用。主 Shop 不可转让。
-        /// Shop 运营资金随 Shop 账户自动转移。
+        /// 创建一个待确认的转让请求。目标 Entity owner 需调用 accept_transfer_shop 接收。
+        /// 转让前检查活跃订单。主 Shop 不可转让。
         #[pallet::call_index(19)]
         #[pallet::weight(T::WeightInfo::transfer_shop())]
-        pub fn transfer_shop(
+        pub fn request_transfer_shop(
             origin: OriginFor<T>,
             shop_id: u64,
             to_entity_id: u64,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
+            // 不得有未处理的转让请求
+            ensure!(!PendingTransfers::<T>::contains_key(shop_id), Error::<T>::TransferAlreadyPending);
+
+            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
+            let from_entity_id = shop.entity_id;
+
+            // 仅 Entity owner 可发起转让
+            let owner = T::EntityProvider::entity_owner(from_entity_id)
+                .ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(who == owner, Error::<T>::NotAuthorized);
+            ensure!(!T::EntityProvider::is_entity_locked(from_entity_id), Error::<T>::EntityLocked);
+
+            ensure!(
+                T::EntityProvider::get_primary_shop_id(from_entity_id) != shop_id,
+                Error::<T>::CannotTransferPrimaryShop
+            );
+            ensure!(from_entity_id != to_entity_id, Error::<T>::SameEntity);
+            ensure!(!shop.status.is_closed_or_closing(), Error::<T>::ShopAlreadyClosed);
+            ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
+
+            // 活跃订单检查
+            ensure!(
+                !T::OrderProvider::has_active_orders_for_shop(shop_id),
+                Error::<T>::HasActiveOrders
+            );
+
+            // 目标 Entity 必须存在且激活
+            ensure!(T::EntityProvider::entity_exists(to_entity_id), Error::<T>::EntityNotFound);
+            ensure!(T::EntityProvider::is_entity_active(to_entity_id), Error::<T>::EntityNotActive);
+
+            // 检查目标 Entity 的 Shop 数量上限
+            let target_shops = T::EntityProvider::entity_shops(to_entity_id);
+            ensure!(
+                (target_shops.len() as u32) < T::MaxShopsPerEntity::get(),
+                Error::<T>::ShopLimitReached
+            );
+
+            let now = <frame_system::Pallet<T>>::block_number();
+            PendingTransfers::<T>::insert(shop_id, PendingShopTransfer {
+                from_entity_id,
+                to_entity_id,
+                keep_managers: true,
+                requested_at: now,
+            });
+
+            Self::deposit_event(Event::ShopTransferRequested {
+                shop_id,
+                from_entity_id,
+                to_entity_id,
+            });
+            Ok(())
+        }
+
+        /// 接受 Shop 转让（目标 Entity owner 调用）
+        ///
+        /// 目标方可选择是否保留原有 managers。
+        #[pallet::call_index(33)]
+        #[pallet::weight(T::WeightInfo::transfer_shop())]
+        pub fn accept_transfer_shop(
+            origin: OriginFor<T>,
+            shop_id: u64,
+            keep_managers: bool,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let pending = PendingTransfers::<T>::get(shop_id)
+                .ok_or(Error::<T>::NoTransferPending)?;
+
+            // 仅目标 Entity owner 可接受
+            let target_owner = T::EntityProvider::entity_owner(pending.to_entity_id)
+                .ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(who == target_owner, Error::<T>::NotAuthorized);
+            ensure!(!T::EntityProvider::is_entity_locked(pending.to_entity_id), Error::<T>::EntityLocked);
+
+            // 重新验证目标方条件（可能在请求后变化）
+            ensure!(T::EntityProvider::is_entity_active(pending.to_entity_id), Error::<T>::EntityNotActive);
+            let target_shops = T::EntityProvider::entity_shops(pending.to_entity_id);
+            ensure!(
+                (target_shops.len() as u32) < T::MaxShopsPerEntity::get(),
+                Error::<T>::ShopLimitReached
+            );
+
+            // 重新验证源方条件
             Shops::<T>::try_mutate(shop_id, |maybe_shop| -> DispatchResult {
                 let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
-                let from_entity_id = shop.entity_id;
-
-                // 仅 Entity owner 可转让
-                let owner = T::EntityProvider::entity_owner(from_entity_id)
-                    .ok_or(Error::<T>::EntityNotFound)?;
-                ensure!(who == owner, Error::<T>::NotAuthorized);
-                ensure!(!T::EntityProvider::is_entity_locked(from_entity_id), Error::<T>::EntityLocked);
-
-                ensure!(
-                    EntityPrimaryShop::<T>::get(from_entity_id) != Some(shop_id),
-                    Error::<T>::CannotTransferPrimaryShop
-                );
-                ensure!(from_entity_id != to_entity_id, Error::<T>::SameEntity);
+                ensure!(shop.entity_id == pending.from_entity_id, Error::<T>::InvalidConfig);
                 ensure!(!shop.status.is_closed_or_closing(), Error::<T>::ShopAlreadyClosed);
-                // P0-H2: 封禁的 Shop 不可转让
                 ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
 
-                // 目标 Entity 必须存在且激活
-                ensure!(T::EntityProvider::entity_exists(to_entity_id), Error::<T>::EntityNotFound);
-                ensure!(T::EntityProvider::is_entity_active(to_entity_id), Error::<T>::EntityNotActive);
-
-                // M3: 检查目标 Entity 的 Shop 数量上限
-                let target_shops = T::EntityProvider::entity_shops(to_entity_id);
+                // 再次检查活跃订单
                 ensure!(
-                    (target_shops.len() as u32) < T::MaxShopsPerEntity::get(),
-                    Error::<T>::ShopLimitReached
+                    !T::OrderProvider::has_active_orders_for_shop(shop_id),
+                    Error::<T>::HasActiveOrders
                 );
 
-                // 注销原 Entity 关联，注册到新 Entity
-                T::EntityProvider::unregister_shop(from_entity_id, shop_id)?;
-                T::EntityProvider::register_shop(to_entity_id, shop_id)?;
+                // 执行转让
+                T::EntityProvider::unregister_shop(pending.from_entity_id, shop_id)?;
+                T::EntityProvider::register_shop(pending.to_entity_id, shop_id)?;
 
-                shop.entity_id = to_entity_id;
-                ShopEntity::<T>::insert(shop_id, to_entity_id);
+                shop.entity_id = pending.to_entity_id;
+                ShopEntity::<T>::insert(shop_id, pending.to_entity_id);
 
-                Self::deposit_event(Event::ShopTransferred { shop_id, from_entity_id, to_entity_id });
+                // 目标方选择是否保留 managers
+                if !keep_managers {
+                    shop.managers = BoundedVec::default();
+                }
+
+                PendingTransfers::<T>::remove(shop_id);
+
+                Self::deposit_event(Event::ShopTransferred {
+                    shop_id,
+                    from_entity_id: pending.from_entity_id,
+                    to_entity_id: pending.to_entity_id,
+                });
                 Ok(())
             })
         }
 
+        /// 取消 Shop 转让请求（源 Entity owner 或目标 Entity owner 均可调用）
+        #[pallet::call_index(34)]
+        #[pallet::weight(T::WeightInfo::cancel_close_shop())]
+        pub fn cancel_transfer_shop(
+            origin: OriginFor<T>,
+            shop_id: u64,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let pending = PendingTransfers::<T>::get(shop_id)
+                .ok_or(Error::<T>::NoTransferPending)?;
+
+            // 源方或目标方 owner 均可取消
+            let from_owner = T::EntityProvider::entity_owner(pending.from_entity_id);
+            let to_owner = T::EntityProvider::entity_owner(pending.to_entity_id);
+            ensure!(
+                from_owner.as_ref() == Some(&who) || to_owner.as_ref() == Some(&who),
+                Error::<T>::NotAuthorized
+            );
+
+            PendingTransfers::<T>::remove(shop_id);
+
+            Self::deposit_event(Event::ShopTransferCancelled { shop_id });
+            Ok(())
+        }
+
         /// 更换 Entity 的主 Shop
         ///
-        /// 仅 Entity owner 可调用。新主 Shop 必须属于同一 Entity 且处于活跃状态。
+        /// Entity owner 或拥有 ENTITY_MANAGE 权限的 admin 可调用。
+        /// 新主 Shop 必须属于同一 Entity 且处于活跃状态。
         #[pallet::call_index(20)]
         #[pallet::weight(T::WeightInfo::set_primary_shop())]
         pub fn set_primary_shop(
@@ -903,19 +1049,26 @@ pub mod pallet {
 
             let owner = T::EntityProvider::entity_owner(entity_id)
                 .ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(who == owner, Error::<T>::NotAuthorized);
+            ensure!(
+                who == owner || T::EntityProvider::is_entity_admin(
+                    entity_id, &who, pallet_entity_common::AdminPermission::ENTITY_MANAGE,
+                ),
+                Error::<T>::NotAuthorized
+            );
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             let new_shop = Shops::<T>::get(new_primary_shop_id).ok_or(Error::<T>::ShopNotFound)?;
             ensure!(new_shop.entity_id == entity_id, Error::<T>::NotAuthorized);
             ensure!(!new_shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
             ensure!(
-                EntityPrimaryShop::<T>::get(entity_id) != Some(new_primary_shop_id),
+                T::EntityProvider::get_primary_shop_id(entity_id) != new_primary_shop_id,
                 Error::<T>::InvalidConfig
             );
 
-            let old_primary_id = EntityPrimaryShop::<T>::get(entity_id).unwrap_or(0);
-            EntityPrimaryShop::<T>::insert(entity_id, new_primary_shop_id);
+            let old_primary_id = T::EntityProvider::get_primary_shop_id(entity_id);
+
+            // Registry 是主店 source of truth
+            T::EntityProvider::set_primary_shop_id(entity_id, new_primary_shop_id);
 
             Self::deposit_event(Event::PrimaryShopChanged {
                 entity_id,
@@ -1194,12 +1347,11 @@ pub mod pallet {
             }
             ShopEntity::<T>::remove(shop_id);
 
-            if EntityPrimaryShop::<T>::get(shop.entity_id) == Some(shop_id) {
-                EntityPrimaryShop::<T>::remove(shop.entity_id);
-            }
+            // 主店由 registry unregister_shop 自动重新指定，无需 shop 侧清理
 
             ShopStatusBeforeBan::<T>::remove(shop_id);
             ShopBanReason::<T>::remove(shop_id);
+            PendingTransfers::<T>::remove(shop_id);
 
             // 委托 loyalty 模块清理积分数据
             T::PointsCleanup::cleanup_shop_points(shop_id);
@@ -1322,13 +1474,16 @@ pub mod pallet {
 
             Shops::<T>::insert(shop_id, shop);
             ShopEntity::<T>::insert(shop_id, entity_id);
-            if is_primary {
-                EntityPrimaryShop::<T>::insert(entity_id, shop_id);
-            }
             NextShopId::<T>::put(shop_id.checked_add(1).ok_or(Error::<T>::ShopIdOverflow)?);
 
             // 回写 Entity 的 shop_ids（维护双向一致性）
             T::EntityProvider::register_shop(entity_id, shop_id)?;
+
+            // 主店由 registry register_shop 自动处理（第一个 shop 自动成为 primary）
+            // 若 is_primary=true 且不是第一个 shop，显式设置
+            if is_primary {
+                T::EntityProvider::set_primary_shop_id(entity_id, shop_id);
+            }
 
             Self::deposit_event(Event::ShopCreated {
                 shop_id,
@@ -1556,8 +1711,7 @@ pub mod pallet {
 
         fn is_primary_shop(shop_id: u64) -> bool {
             ShopEntity::<T>::get(shop_id)
-                .and_then(|entity_id| EntityPrimaryShop::<T>::get(entity_id))
-                .map(|primary_id| primary_id == shop_id)
+                .map(|entity_id| T::EntityProvider::get_primary_shop_id(entity_id) == shop_id)
                 .unwrap_or(false)
         }
 
@@ -1603,6 +1757,31 @@ pub mod pallet {
                 ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
 
                 Self::do_close_shop_cleanup(shop, shop_id);
+                Ok(())
+            })
+        }
+
+        fn governance_close_shop(shop_id: u64) -> Result<(), DispatchError> {
+            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> Result<(), DispatchError> {
+                let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+                ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
+
+                Self::do_close_shop_cleanup(shop, shop_id);
+                Ok(())
+            })
+        }
+
+        fn governance_set_shop_type(shop_id: u64, new_type: ShopType) -> Result<(), DispatchError> {
+            Shops::<T>::try_mutate(shop_id, |maybe_shop| -> Result<(), DispatchError> {
+                let shop = maybe_shop.as_mut().ok_or(Error::<T>::ShopNotFound)?;
+                ensure!(!shop.status.is_closed_or_closing(), Error::<T>::ShopAlreadyClosed);
+                ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
+                ensure!(shop.shop_type != new_type, Error::<T>::ShopTypeSame);
+
+                let old_type = shop.shop_type;
+                shop.shop_type = new_type;
+
+                Self::deposit_event(Event::ShopTypeChanged { shop_id, old_type, new_type });
                 Ok(())
             })
         }

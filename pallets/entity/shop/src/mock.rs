@@ -38,6 +38,8 @@ thread_local! {
     static ENTITY_LOCKED: RefCell<BTreeSet<u64>> = RefCell::new(BTreeSet::new());
     static ENTITY_SHOPS: RefCell<alloc::collections::BTreeMap<u64, alloc::vec::Vec<u64>>> = RefCell::new(alloc::collections::BTreeMap::new());
     static ENTITY_SUSPENDED: RefCell<BTreeSet<u64>> = RefCell::new(BTreeSet::new());
+    static ENTITY_PRIMARY_SHOP: RefCell<alloc::collections::BTreeMap<u64, u64>> = RefCell::new(alloc::collections::BTreeMap::new());
+    static SHOPS_WITH_ACTIVE_ORDERS: RefCell<BTreeSet<u64>> = RefCell::new(BTreeSet::new());
 }
 
 pub fn set_entity_locked(entity_id: u64) {
@@ -46,6 +48,14 @@ pub fn set_entity_locked(entity_id: u64) {
 
 pub fn set_entity_suspended(entity_id: u64) {
     ENTITY_SUSPENDED.with(|s| s.borrow_mut().insert(entity_id));
+}
+
+pub fn set_shop_has_active_orders(shop_id: u64) {
+    SHOPS_WITH_ACTIVE_ORDERS.with(|s| s.borrow_mut().insert(shop_id));
+}
+
+pub fn clear_shop_active_orders(shop_id: u64) {
+    SHOPS_WITH_ACTIVE_ORDERS.with(|s| s.borrow_mut().remove(&shop_id));
 }
 
 pub struct MockEntityProvider;
@@ -102,7 +112,13 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
 
     fn register_shop(entity_id: u64, shop_id: u64) -> Result<(), sp_runtime::DispatchError> {
         ENTITY_SHOPS.with(|s| {
-            s.borrow_mut().entry(entity_id).or_default().push(shop_id);
+            let mut map = s.borrow_mut();
+            let shops = map.entry(entity_id).or_default();
+            let is_first = shops.is_empty();
+            shops.push(shop_id);
+            if is_first {
+                ENTITY_PRIMARY_SHOP.with(|p| p.borrow_mut().insert(entity_id, shop_id));
+            }
         });
         Ok(())
     }
@@ -111,9 +127,28 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
         ENTITY_SHOPS.with(|s| {
             if let Some(shops) = s.borrow_mut().get_mut(&entity_id) {
                 shops.retain(|&id| id != shop_id);
+                // 若移除的是 primary，自动重选
+                ENTITY_PRIMARY_SHOP.with(|p| {
+                    let mut map = p.borrow_mut();
+                    if map.get(&entity_id) == Some(&shop_id) {
+                        if let Some(&first) = shops.first() {
+                            map.insert(entity_id, first);
+                        } else {
+                            map.remove(&entity_id);
+                        }
+                    }
+                });
             }
         });
         Ok(())
+    }
+
+    fn set_primary_shop_id(entity_id: u64, shop_id: u64) {
+        ENTITY_PRIMARY_SHOP.with(|p| p.borrow_mut().insert(entity_id, shop_id));
+    }
+
+    fn get_primary_shop_id(entity_id: u64) -> u64 {
+        ENTITY_PRIMARY_SHOP.with(|p| p.borrow().get(&entity_id).copied().unwrap_or(0))
     }
 }
 
@@ -130,6 +165,21 @@ impl pallet_entity_common::ProductProvider<u64, u64> for MockProductProvider {
     fn deduct_stock(_: u64, _: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
     fn restore_stock(_: u64, _: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
     fn add_sold_count(_: u64, _: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+}
+
+pub struct MockOrderProvider;
+impl pallet_entity_common::OrderProvider<u64, u64> for MockOrderProvider {
+    fn order_exists(_: u64) -> bool { false }
+    fn order_buyer(_: u64) -> Option<u64> { None }
+    fn order_seller(_: u64) -> Option<u64> { None }
+    fn order_amount(_: u64) -> Option<u64> { None }
+    fn order_shop_id(_: u64) -> Option<u64> { None }
+    fn is_order_completed(_: u64) -> bool { false }
+    fn is_order_disputed(_: u64) -> bool { false }
+    fn can_dispute(_: u64, _: &u64) -> bool { false }
+    fn has_active_orders_for_shop(shop_id: u64) -> bool {
+        SHOPS_WITH_ACTIVE_ORDERS.with(|s| s.borrow().contains(&shop_id))
+    }
 }
 
 pub struct MockStoragePin;
@@ -171,6 +221,7 @@ impl pallet_entity_shop::Config for Test {
     type StoragePin = MockStoragePin;
     type ProductProvider = MockProductProvider;
     type PointsCleanup = MockPointsCleanup;
+    type OrderProvider = MockOrderProvider;
     type WeightInfo = ();
 }
 

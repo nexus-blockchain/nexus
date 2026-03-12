@@ -249,7 +249,7 @@ impl<T: Config> Pallet<T> {
             let member = maybe_member.as_mut().ok_or(Error::<T>::NotMember)?;
 
             // H7 审计修复: 验证目标等级仍然存在（等级可能在规则创建后被删除）
-            if level_system.use_custom && (target_level_id as usize) >= level_system.levels.len() {
+            if level_system.use_custom && target_level_id > 0 && ((target_level_id - 1) as usize) >= level_system.levels.len() {
                 return Ok(());
             }
 

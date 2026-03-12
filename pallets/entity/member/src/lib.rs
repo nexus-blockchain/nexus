@@ -949,6 +949,8 @@ pub mod pallet {
         AlreadyActivated,
         /// 会员未激活
         NotActivated,
+        /// 推荐人自身未绑定上级（REFERRAL_REQUIRED 策略下不允许作为推荐人）
+        ReferrerNotBound,
     }
 
     // ============================================================================
@@ -1072,6 +1074,9 @@ pub mod pallet {
                 Error::<T>::CircularReferral
             );
 
+            // REFERRAL_REQUIRED: 推荐人自身必须已绑定上级（owner 豁免）
+            Self::ensure_referrer_bound(entity_id, &referrer)?;
+
             // 绑定推荐人
             EntityMembers::<T>::mutate(entity_id, &who, |maybe_member| {
                 if let Some(ref mut m) = maybe_member {
@@ -1170,7 +1175,7 @@ pub mod pallet {
                     ensure!(threshold > last.threshold, Error::<T>::InvalidThreshold);
                 }
 
-                let level_id = system.levels.len() as u8;
+                let level_id = (system.levels.len() + 1) as u8;
 
                 let level = CustomLevel {
                     id: level_id,
@@ -1220,24 +1225,24 @@ pub mod pallet {
             EntityLevelSystems::<T>::try_mutate(entity_id, |maybe_system| -> DispatchResult {
                 let system = maybe_system.as_mut().ok_or(Error::<T>::LevelSystemNotInitialized)?;
 
-                ensure!((level_id as usize) < system.levels.len(), Error::<T>::LevelNotFound);
+                ensure!(level_id > 0 && ((level_id - 1) as usize) < system.levels.len(), Error::<T>::LevelNotFound);
 
                 // 验证阈值（先检查，再修改）
                 if let Some(new_threshold) = threshold {
                     // 必须大于前一等级
-                    if level_id > 0 {
-                        if let Some(prev) = system.levels.get((level_id - 1) as usize) {
+                    if level_id > 1 {
+                        if let Some(prev) = system.levels.get((level_id - 2) as usize) {
                             ensure!(new_threshold > prev.threshold, Error::<T>::InvalidThreshold);
                         }
                     }
                     // 必须小于后一等级
-                    if let Some(next) = system.levels.get((level_id + 1) as usize) {
+                    if let Some(next) = system.levels.get(level_id as usize) {
                         ensure!(new_threshold < next.threshold, Error::<T>::InvalidThreshold);
                     }
                 }
 
                 // 现在安全地获取可变引用并修改
-                let level = system.levels.get_mut(level_id as usize)
+                let level = system.levels.get_mut((level_id - 1) as usize)
                     .ok_or(Error::<T>::LevelNotFound)?;
 
                 if let Some(new_threshold) = threshold {
@@ -1286,7 +1291,7 @@ pub mod pallet {
 
                 // 只能删除最后一个等级
                 ensure!(
-                    level_id as usize == system.levels.len().saturating_sub(1),
+                    level_id > 0 && (level_id - 1) as usize == system.levels.len().saturating_sub(1),
                     Error::<T>::InvalidLevelId
                 );
 
@@ -1345,7 +1350,7 @@ pub mod pallet {
             );
 
             ensure!(
-                (target_level_id as usize) < system.levels.len(),
+                target_level_id == 0 || ((target_level_id - 1) as usize) < system.levels.len(),
                 Error::<T>::InvalidLevelId
             );
 
@@ -1501,7 +1506,7 @@ pub mod pallet {
             let level_system = EntityLevelSystems::<T>::get(entity_id)
                 .ok_or(Error::<T>::LevelSystemNotInitialized)?;
             ensure!(
-                (target_level_id as usize) < level_system.levels.len(),
+                target_level_id > 0 && ((target_level_id - 1) as usize) < level_system.levels.len(),
                 Error::<T>::InvalidTargetLevel
             );
 
@@ -2106,8 +2111,8 @@ pub mod pallet {
 
             // 检查是否所有会员均为 level 0
             // 只要有非零等级的会员计数 > 0，就不允许重置
-            for level_id in 1..system.levels.len() {
-                let count = LevelMemberCount::<T>::get(entity_id, level_id as u8);
+            for level in system.levels.iter() {
+                let count = LevelMemberCount::<T>::get(entity_id, level.id);
                 ensure!(count == 0, Error::<T>::LevelSystemHasNonZeroMembers);
             }
 
@@ -2341,6 +2346,10 @@ impl<T: pallet::Config> MemberProvider<T::AccountId> for pallet::Pallet<T> {
 
     fn member_count(entity_id: u64) -> u32 {
         pallet::MemberCount::<T>::get(entity_id)
+    }
+
+    fn requires_referral(entity_id: u64) -> bool {
+        pallet::EntityMemberPolicy::<T>::get(entity_id).requires_referral()
     }
 
     fn is_banned(entity_id: u64, account: &T::AccountId) -> bool {

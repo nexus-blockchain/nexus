@@ -41,14 +41,28 @@ pub struct EntityFundInfo<Balance> {
     pub warning_threshold: Balance,
 }
 
+/// 关闭申请信息（Runtime API 返回值）
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+pub struct CloseRequestInfo<BlockNumber> {
+    /// 申请时间（区块号）
+    pub request_at: BlockNumber,
+    /// 超时区块数
+    pub timeout: BlockNumber,
+    /// 剩余区块数（0 表示已超时）
+    pub remaining_blocks: BlockNumber,
+    /// 可执行的区块号
+    pub executable_at: BlockNumber,
+}
+
 sp_api::decl_runtime_apis! {
     /// Entity Registry Runtime API
     ///
     /// 供前端查询实体信息、资金状态、验证列表
-    pub trait EntityRegistryApi<AccountId, Balance>
+    pub trait EntityRegistryApi<AccountId, Balance, BlockNumber>
     where
         AccountId: Codec,
         Balance: Codec,
+        BlockNumber: Codec,
     {
         /// 查询实体详情
         fn get_entity(entity_id: u64) -> Option<EntityInfo<AccountId, Balance>>;
@@ -85,5 +99,8 @@ sp_api::decl_runtime_apis! {
 
         /// 查询账户在实体中的权限（owner 返回 ALL_DEFINED，admin 返回权限位，非成员返回 None）
         fn check_admin_permission(entity_id: u64, account: AccountId) -> Option<u32>;
+
+        /// 查询关闭申请信息（PendingClose 状态下的超时进度）
+        fn get_close_request_info(entity_id: u64) -> Option<CloseRequestInfo<BlockNumber>>;
     }
 }

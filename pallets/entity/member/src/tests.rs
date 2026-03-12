@@ -362,7 +362,7 @@ fn add_custom_level_works() {
 
         let system = EntityLevelSystems::<Test>::get(ENTITY_1).unwrap();
         assert_eq!(system.levels.len(), 1);
-        assert_eq!(system.levels[0].id, 0);
+        assert_eq!(system.levels[0].id, 1);
         assert_eq!(system.levels[0].threshold, 1000);
     });
 }
@@ -466,13 +466,13 @@ fn remove_custom_level_only_last() {
 
         // Can't remove first level
         assert_noop!(
-            MemberPallet::remove_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, 0),
+            MemberPallet::remove_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, 1),
             Error::<Test>::InvalidLevelId
         );
 
         // Can remove last
         assert_ok!(MemberPallet::remove_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, 1,
+            RuntimeOrigin::signed(OWNER), SHOP_1, 2,
         ));
     });
 }
@@ -494,7 +494,7 @@ fn manual_set_member_level_works() {
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
 
         assert_ok!(MemberPallet::manual_set_member_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 0,
+            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1,
         ));
     });
 }
@@ -508,7 +508,7 @@ fn manual_upgrade_rejects_auto_mode() {
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
 
         assert_noop!(
-            MemberPallet::manual_set_member_level(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 0),
+            MemberPallet::manual_set_member_level(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1),
             Error::<Test>::ManualUpgradeNotSupported
         );
     });
@@ -547,7 +547,7 @@ fn upgrade_rule_system_lifecycle() {
             SHOP_1,
             name,
             UpgradeTrigger::TotalSpent { threshold: 1000u64 },
-            0,
+            1,
             None,
             1,
             false,
@@ -595,7 +595,7 @@ fn update_spent_auto_upgrades_custom_level() {
         assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 600u64));
 
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
-        assert_eq!(member.custom_level_id, 0); // VIP1 = level_id 0
+        assert_eq!(member.custom_level_id, 1); // VIP1 = level_id 1
     });
 }
 
@@ -655,8 +655,8 @@ fn governance_add_custom_level_auto_assigns_id() {
 
         let system = EntityLevelSystems::<Test>::get(ENTITY_1).unwrap();
         assert_eq!(system.levels.len(), 2);
-        assert_eq!(system.levels[0].id, 0);
-        assert_eq!(system.levels[1].id, 1);
+        assert_eq!(system.levels[0].id, 1);
+        assert_eq!(system.levels[1].id, 2);
     });
 }
 
@@ -686,7 +686,7 @@ fn governance_update_custom_level_validates_basis_points() {
 
         assert_noop!(
             MemberPallet::governance_update_custom_level(
-                ENTITY_1, 0, None, None, Some(10001), None,
+                ENTITY_1, 1, None, None, Some(10001), None,
             ),
             Error::<Test>::InvalidBasisPoints
         );
@@ -809,7 +809,7 @@ fn h4_add_upgrade_rule_rejects_invalid_target_level() {
         let rule_name: BoundedVec<u8, frame_support::traits::ConstU32<64>> =
             b"BadRule".to_vec().try_into().unwrap();
 
-        // target_level_id=5 不存在（只有 level 0）
+        // target_level_id=5 不存在（只有 level 1）
         assert_noop!(
             MemberPallet::add_upgrade_rule(
                 RuntimeOrigin::signed(OWNER), SHOP_1, rule_name.clone(),
@@ -819,13 +819,13 @@ fn h4_add_upgrade_rule_rejects_invalid_target_level() {
             Error::<Test>::InvalidTargetLevel
         );
 
-        // target_level_id=0 存在，应该成功
+        // target_level_id=1 存在，应该成功
         let valid_name: BoundedVec<u8, frame_support::traits::ConstU32<64>> =
             b"GoodRule".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, valid_name,
             UpgradeTrigger::TotalSpent { threshold: 1000 },
-            0, None, 1, false, None,
+            1, None, 1, false, None,
         ));
     });
 }
@@ -905,15 +905,15 @@ fn h6_custom_level_id_respects_expiry() {
             RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u64, 0, 0,
         ));
 
-        // Register member and manually upgrade to VIP2 (level_id=1)
+        // Register member and manually upgrade to VIP2 (level_id=2)
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
         assert_ok!(MemberPallet::manual_set_member_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1,
+            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 2,
         ));
 
-        // Verify stored level is 1
+        // Verify stored level is 2
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
-        assert_eq!(member.custom_level_id, 1);
+        assert_eq!(member.custom_level_id, 2);
 
         // Set expiry in the past
         MemberLevelExpiry::<Test>::insert(ENTITY_1, &ALICE, 1u64);
@@ -946,7 +946,7 @@ fn h7_apply_upgrade_skips_deleted_level() {
             RuntimeOrigin::signed(OWNER), SHOP_1, name2, 200u64, 0, 0,
         ));
 
-        // Create rule targeting VIP2 (level_id=1)
+        // Create rule targeting VIP2 (level_id=2)
         assert_ok!(MemberPallet::init_upgrade_rule_system(
             RuntimeOrigin::signed(OWNER), SHOP_1, ConflictStrategy::HighestLevel,
         ));
@@ -955,7 +955,7 @@ fn h7_apply_upgrade_skips_deleted_level() {
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, rule_name,
             UpgradeTrigger::TotalSpent { threshold: 100 },
-            1, // target VIP2
+            2, // target VIP2
             None, 1, false, None,
         ));
 
@@ -963,7 +963,7 @@ fn h7_apply_upgrade_skips_deleted_level() {
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
 
         // Delete VIP2 (the target level)
-        assert_ok!(MemberPallet::remove_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, 1));
+        assert_ok!(MemberPallet::remove_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, 2));
 
         // Spend enough to trigger rule
         assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 150u64));
@@ -973,8 +973,8 @@ fn h7_apply_upgrade_skips_deleted_level() {
 
         // Member should NOT have been upgraded to deleted level
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
-        // auto_upgrade via update_spent sets to VIP1 (level 0, threshold 100, spent 150)
-        assert_eq!(member.custom_level_id, 0);
+        // auto_upgrade via update_spent sets to VIP1 (level 1, threshold 100, spent 150)
+        assert_eq!(member.custom_level_id, 1);
     });
 }
 
@@ -1005,16 +1005,16 @@ fn h10_stackable_rule_cannot_downgrade() {
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, rule_name,
             UpgradeTrigger::TotalSpent { threshold: 50 },
-            0, // target VIP1
+            1, // target VIP1
             Some(100), 1, true, None,
         ));
 
-        // Register member and manually upgrade to VIP2 (level_id=1)
+        // Register member and manually upgrade to VIP2 (level_id=2)
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
         assert_ok!(MemberPallet::manual_set_member_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1,
+            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 2,
         ));
-        assert_eq!(MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap().custom_level_id, 1);
+        assert_eq!(MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap().custom_level_id, 2);
 
         // Spend enough to trigger the stackable rule targeting VIP1
         assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 200u64));
@@ -1022,7 +1022,7 @@ fn h10_stackable_rule_cannot_downgrade() {
 
         // H10: Member should NOT be downgraded from VIP2 to VIP1
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
-        assert_eq!(member.custom_level_id, 1, "stackable rule must not downgrade");
+        assert_eq!(member.custom_level_id, 2, "stackable rule must not downgrade");
     });
 }
 
@@ -1053,7 +1053,7 @@ fn h12_auto_upgrade_preserves_active_rule_upgrade() {
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, rule_name,
             UpgradeTrigger::PurchaseProduct { product_id: 42 },
-            1, // target VIP2
+            2, // target VIP2
             Some(100), // 100-block duration
             1, false, None,
         ));
@@ -1061,23 +1061,23 @@ fn h12_auto_upgrade_preserves_active_rule_upgrade() {
         // Register and spend enough for VIP1 only (>500, <2000)
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
         assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 600u64));
-        assert_eq!(MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap().custom_level_id, 0); // VIP1
+        assert_eq!(MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap().custom_level_id, 1); // VIP1
 
         // Trigger rule: upgrade to VIP2 with expiry at block 101
         assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 42, 600u64));
-        assert_eq!(MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap().custom_level_id, 1); // VIP2
+        assert_eq!(MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap().custom_level_id, 2); // VIP2
         assert_eq!(MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE), Some(101));
 
         // H12: Another order/update_spent should NOT overwrite VIP2 back to VIP1
         assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u64));
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
-        assert_eq!(member.custom_level_id, 1, "auto-upgrade must not overwrite active rule upgrade");
+        assert_eq!(member.custom_level_id, 2, "auto-upgrade must not overwrite active rule upgrade");
 
         // After expiry, auto-upgrade should recalculate
         System::set_block_number(102);
         assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 10u64));
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
-        assert_eq!(member.custom_level_id, 0, "after expiry, auto-upgrade should recalculate to VIP1");
+        assert_eq!(member.custom_level_id, 1, "after expiry, auto-upgrade should recalculate to VIP1");
     });
 }
 
@@ -1099,7 +1099,7 @@ fn m14_stackable_preserves_permanent_upgrade() {
             RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u64, 0, 0,
         ));
 
-        // Create stackable rule targeting VIP1 (level 0) with 50-block duration
+        // Create stackable rule targeting VIP1 (level 1) with 50-block duration
         assert_ok!(MemberPallet::init_upgrade_rule_system(
             RuntimeOrigin::signed(OWNER), SHOP_1, ConflictStrategy::HighestLevel,
         ));
@@ -1108,20 +1108,23 @@ fn m14_stackable_preserves_permanent_upgrade() {
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, rule_name,
             UpgradeTrigger::TotalSpent { threshold: 50 },
-            0, // target VIP1 (level 0)
+            1, // target VIP1 (level 1)
             Some(50), // 50-block duration
             1, true, None,
         ));
 
-        // Register member (starts at level 0, permanent, no expiry)
+        // Register member and manually upgrade to VIP1 (level 1, permanent, no expiry)
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
+        assert_ok!(MemberPallet::manual_set_member_level(
+            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1,
+        ));
         assert!(MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE).is_none());
 
-        // Trigger stackable rule targeting same level (0 == 0)
+        // Trigger stackable rule targeting same level (1 == 1)
         assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u64));
         assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u64));
 
-        // I4 fix: member already holds level 0 permanently (no expiry).
+        // I4 fix: member already holds level 1 permanently (no expiry).
         // Stackable rule targeting same level must NOT demote permanent to timed.
         let expiry = MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE);
         assert_eq!(expiry, None, "permanent level must not be demoted to timed by stackable rule");
@@ -1133,7 +1136,7 @@ fn m14_stackable_preserves_permanent_upgrade() {
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, rule_name2,
             UpgradeTrigger::TotalSpent { threshold: 80 },
-            1, // target VIP2 (level 1) — higher than current level 0
+            2, // target VIP2 (level 2) — higher than current level 1
             Some(50), // 50-block duration
             2, true, None,
         ));
@@ -1141,7 +1144,7 @@ fn m14_stackable_preserves_permanent_upgrade() {
         let expiry = MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE);
         assert_eq!(expiry, Some(51), "first-time stackable upgrade to higher level should set now + duration");
         let member = MemberPallet::entity_members(ENTITY_1, ALICE).unwrap();
-        assert_eq!(member.custom_level_id, 1, "should have been upgraded to VIP2");
+        assert_eq!(member.custom_level_id, 2, "should have been upgraded to VIP2");
     });
 }
 
@@ -1176,7 +1179,7 @@ fn m18_order_count_tracked_when_rule_system_disabled() {
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, rule_name,
             UpgradeTrigger::OrderCount { count: 4 },
-            0, None, 1, false, None,
+            1, None, 1, false, None,
         ));
 
         // 4th order should trigger the rule (3 previous + 1 new)
@@ -1201,7 +1204,7 @@ fn h8_add_upgrade_rule_requires_level_system() {
             MemberPallet::add_upgrade_rule(
                 RuntimeOrigin::signed(OWNER), SHOP_1, rule_name,
                 UpgradeTrigger::TotalSpent { threshold: 1000 },
-                0, None, 1, false, None,
+                1, None, 1, false, None,
             ),
             Error::<Test>::LevelSystemNotInitialized
         );
@@ -1235,7 +1238,7 @@ fn m7_governance_update_custom_level_name_too_long() {
         let long_name = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567"; // 33 bytes
         assert_noop!(
             MemberPallet::governance_update_custom_level(
-                ENTITY_1, 0, Some(long_name.as_slice()), None, None, None,
+                ENTITY_1, 1, Some(long_name.as_slice()), None, None, None,
             ),
             Error::<Test>::NameTooLong
         );
@@ -1267,32 +1270,32 @@ fn p4_update_spent_corrects_expired_level() {
         // 注册会员
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
 
-        // 手动设置等级为 VIP2 (level_id=1)，设置过期时间为 block 10
+        // 手动设置等级为 VIP2 (level_id=2)，设置过期时间为 block 10
         crate::EntityMembers::<Test>::mutate(ENTITY_1, ALICE, |m| {
             if let Some(ref mut member) = m {
-                member.custom_level_id = 1; // VIP2
+                member.custom_level_id = 2; // VIP2
                 member.total_spent = 600;   // 只够 VIP1 (>500, <2000)
             }
         });
         crate::MemberLevelExpiry::<Test>::insert(ENTITY_1, ALICE, 10u64);
 
-        // 当前 block=1，未过期 → custom_level_id 仍为 1
+        // 当前 block=1，未过期 → custom_level_id 仍为 2
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
-        assert_eq!(member.custom_level_id, 1);
+        assert_eq!(member.custom_level_id, 2);
 
         // 推进到 block 11（过期后）
         System::set_block_number(11);
 
         // S1 修复: get_effective_level 现在是写穿模式 — 检测到过期时立即修正存储
-        assert_eq!(MemberPallet::get_effective_level(SHOP_1, &ALICE), 0);
+        assert_eq!(MemberPallet::get_effective_level(SHOP_1, &ALICE), 1);
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
-        assert_eq!(member.custom_level_id, 0); // S1: 存储已被写穿修正
+        assert_eq!(member.custom_level_id, 1); // S1: 存储已被写穿修正
         assert!(crate::MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE).is_none());
 
         // update_spent 不再需要额外修正（已由 get_effective_level 完成）
         assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 10u64));
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
-        assert_eq!(member.custom_level_id, 0);
+        assert_eq!(member.custom_level_id, 1);
     });
 }
 
@@ -1312,7 +1315,7 @@ fn p4_update_spent_emits_expired_event() {
 
         crate::EntityMembers::<Test>::mutate(ENTITY_1, ALICE, |m| {
             if let Some(ref mut member) = m {
-                member.custom_level_id = 0; // VIP1
+                member.custom_level_id = 1; // VIP1
                 member.total_spent = 100;   // 不够 VIP1 (需 500)
             }
         });
@@ -1325,8 +1328,7 @@ fn p4_update_spent_emits_expired_event() {
         assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 10u64));
 
         // 过期后 recalculated=0 (消费 110 < 500 → 无等级即 0)
-        // 但 member.custom_level_id 已是 0，所以不会 emit MemberLevelExpired
-        // 因为 recalculated == member.custom_level_id
+        // member.custom_level_id 是 1，recalculated 是 0，会 emit MemberLevelExpired
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
         assert_eq!(member.custom_level_id, 0);
         // 过期记录应已清除（即使等级未变）
@@ -1351,7 +1353,7 @@ fn p4_non_expired_level_not_touched() {
         // 设置 VIP1，过期在 block 100（远未到期）
         crate::EntityMembers::<Test>::mutate(ENTITY_1, ALICE, |m| {
             if let Some(ref mut member) = m {
-                member.custom_level_id = 0;
+                member.custom_level_id = 1;
                 member.total_spent = 0; // 消费不够，但有手动升级
             }
         });
@@ -1362,7 +1364,7 @@ fn p4_non_expired_level_not_touched() {
 
         // 等级和过期记录都不应改变
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
-        assert_eq!(member.custom_level_id, 0);
+        assert_eq!(member.custom_level_id, 1);
         assert_eq!(crate::MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE), Some(100));
     });
 }
@@ -1527,21 +1529,21 @@ fn h13_manual_upgrade_clears_stale_expiry() {
         // Register member
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
 
-        // Simulate rule-based upgrade to VIP2 (level_id=1) with expiry at block 100
+        // Simulate rule-based upgrade to VIP2 (level_id=2) with expiry at block 100
         crate::EntityMembers::<Test>::mutate(ENTITY_1, ALICE, |m| {
             if let Some(ref mut member) = m {
-                member.custom_level_id = 1;
+                member.custom_level_id = 2;
                 member.total_spent = 200; // enough for VIP1, not VIP2
             }
         });
         crate::LevelMemberCount::<Test>::mutate(ENTITY_1, 0u8, |c| *c = c.saturating_sub(1));
-        crate::LevelMemberCount::<Test>::mutate(ENTITY_1, 1u8, |c| *c = c.saturating_add(1));
+        crate::LevelMemberCount::<Test>::mutate(ENTITY_1, 2u8, |c| *c = c.saturating_add(1));
         crate::MemberLevelExpiry::<Test>::insert(ENTITY_1, ALICE, 100u64);
 
-        // At block 50, owner manually upgrades to VIP3 (level_id=2) — permanent
+        // At block 50, owner manually upgrades to VIP3 (level_id=3) — permanent
         System::set_block_number(50);
         assert_ok!(MemberPallet::manual_set_member_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 2,
+            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 3,
         ));
 
         // H13: MemberLevelExpiry should be cleared by manual upgrade
@@ -1555,7 +1557,7 @@ fn h13_manual_upgrade_clears_stale_expiry() {
         assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 10u64));
 
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
-        assert_eq!(member.custom_level_id, 2, "VIP3 must persist after old expiry passes");
+        assert_eq!(member.custom_level_id, 3, "VIP3 must persist after old expiry passes");
     });
 }
 
@@ -1582,12 +1584,12 @@ fn h13_manual_upgrade_without_prior_expiry_works() {
         assert!(crate::MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE).is_none());
 
         assert_ok!(MemberPallet::manual_set_member_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1,
+            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 2,
         ));
 
         // Still no expiry
         assert!(crate::MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE).is_none());
-        assert_eq!(MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap().custom_level_id, 1);
+        assert_eq!(MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap().custom_level_id, 2);
     });
 }
 
@@ -1660,26 +1662,26 @@ fn m9_effective_level_falls_back_when_level_deleted() {
             RuntimeOrigin::signed(OWNER), SHOP_1, name2, 500u64, 0, 0,
         ));
 
-        // Register member, manually set to VIP2 (level_id=1)
+        // Register member, manually set to VIP2 (level_id=2)
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
         crate::EntityMembers::<Test>::mutate(ENTITY_1, ALICE, |m| {
             if let Some(ref mut member) = m {
-                member.custom_level_id = 1;
+                member.custom_level_id = 2;
                 member.total_spent = 200; // enough for VIP1 only
             }
         });
 
-        // Verify effective level is 1 before deletion
-        assert_eq!(MemberPallet::get_effective_level_by_entity(ENTITY_1, &ALICE), 1);
+        // Verify effective level is 2 before deletion
+        assert_eq!(MemberPallet::get_effective_level_by_entity(ENTITY_1, &ALICE), 2);
 
         // Delete VIP2 (last level)
         assert_ok!(MemberPallet::remove_custom_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, 1,
+            RuntimeOrigin::signed(OWNER), SHOP_1, 2,
         ));
 
-        // M9: effective level should fall back via calculate (total_spent=200 >= 100 → VIP1=0)
+        // M9: effective level should fall back via calculate (total_spent=200 >= 100 → VIP1=1)
         let effective = MemberPallet::get_effective_level_by_entity(ENTITY_1, &ALICE);
-        assert_eq!(effective, 0, "deleted level should fall back to spending-based calculation");
+        assert_eq!(effective, 1, "deleted level should fall back to spending-based calculation");
     });
 }
 
@@ -1698,12 +1700,12 @@ fn m9_effective_level_valid_level_unchanged() {
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
         crate::EntityMembers::<Test>::mutate(ENTITY_1, ALICE, |m| {
             if let Some(ref mut member) = m {
-                member.custom_level_id = 0;
+                member.custom_level_id = 1;
             }
         });
 
-        // Level 0 (VIP1) still exists — should return as-is
-        assert_eq!(MemberPallet::get_effective_level_by_entity(ENTITY_1, &ALICE), 0);
+        // Level 1 (VIP1) still exists — should return as-is
+        assert_eq!(MemberPallet::get_effective_level_by_entity(ENTITY_1, &ALICE), 1);
     });
 }
 
@@ -1714,7 +1716,7 @@ fn m9_effective_level_valid_level_unchanged() {
 #[test]
 fn m10_referral_count_trigger_fires_on_registration() {
     new_test_ext().execute_with(|| {
-        // Setup: 2 custom levels, upgrade rule: ReferralCount >= 2 → VIP2 (level_id=1)
+        // Setup: 2 custom levels, upgrade rule: ReferralCount >= 2 → VIP2 (level_id=2)
         assert_ok!(MemberPallet::init_level_system(
             RuntimeOrigin::signed(OWNER), SHOP_1, true, LevelUpgradeMode::AutoUpgrade,
         ));
@@ -1736,7 +1738,7 @@ fn m10_referral_count_trigger_fires_on_registration() {
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, rule_name,
             UpgradeTrigger::ReferralCount { count: 2 },
-            1, None, 1, false, None,
+            2, None, 1, false, None,
         ));
 
         // Register ALICE as referrer
@@ -1749,8 +1751,8 @@ fn m10_referral_count_trigger_fires_on_registration() {
 
         // Second referral: CHARLIE → ALICE. direct_referrals=2, triggers upgrade to VIP2
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(CHARLIE), SHOP_1, Some(ALICE)));
-        assert_eq!(MemberPallet::get_effective_level_by_entity(ENTITY_1, &ALICE), 1,
-            "M10: referral count trigger should fire on registration, upgrading to VIP2 (level_id=1)");
+        assert_eq!(MemberPallet::get_effective_level_by_entity(ENTITY_1, &ALICE), 2,
+            "M10: referral count trigger should fire on registration, upgrading to VIP2 (level_id=2)");
 
         // Verify event was emitted
         let events = System::events();
@@ -1771,7 +1773,7 @@ fn m10_referral_count_trigger_fires_on_registration() {
 #[test]
 fn m10_referral_trigger_does_not_fire_below_threshold() {
     new_test_ext().execute_with(|| {
-        // Setup: 2 custom levels, upgrade rule: ReferralCount >= 3 → VIP2 (level_id=1)
+        // Setup: 2 custom levels, upgrade rule: ReferralCount >= 3 → VIP2 (level_id=2)
         assert_ok!(MemberPallet::init_level_system(
             RuntimeOrigin::signed(OWNER), SHOP_1, true, LevelUpgradeMode::AutoUpgrade,
         ));
@@ -1793,7 +1795,7 @@ fn m10_referral_trigger_does_not_fire_below_threshold() {
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, rule_name,
             UpgradeTrigger::ReferralCount { count: 3 },
-            1, None, 1, false, None,
+            2, None, 1, false, None,
         ));
 
         // Register ALICE + 2 referrals (below threshold of 3)
@@ -1816,7 +1818,7 @@ fn m10_referral_trigger_does_not_fire_below_threshold() {
 #[test]
 fn m10_bind_referrer_triggers_referral_upgrade() {
     new_test_ext().execute_with(|| {
-        // Setup: 2 custom levels, upgrade rule: ReferralCount >= 1 → VIP2 (level_id=1)
+        // Setup: 2 custom levels, upgrade rule: ReferralCount >= 1 → VIP2 (level_id=2)
         assert_ok!(MemberPallet::init_level_system(
             RuntimeOrigin::signed(OWNER), SHOP_1, true, LevelUpgradeMode::AutoUpgrade,
         ));
@@ -1838,7 +1840,7 @@ fn m10_bind_referrer_triggers_referral_upgrade() {
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, rule_name,
             UpgradeTrigger::ReferralCount { count: 1 },
-            1, None, 1, false, None,
+            2, None, 1, false, None,
         ));
 
         // Register both without referrer
@@ -1894,15 +1896,15 @@ fn h1_remove_custom_level_rejects_when_level_has_members() {
             RuntimeOrigin::signed(OWNER), SHOP_1, name2, 1000u64, 0, 0,
         ));
 
-        // Register ALICE and manually upgrade to VIP2 (level_id=1)
+        // Register ALICE and manually upgrade to VIP2 (level_id=2)
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
         assert_ok!(MemberPallet::manual_set_member_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1,
+            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 2,
         ));
 
         // Try to remove VIP2 — should fail because ALICE is at that level
         assert_noop!(
-            MemberPallet::remove_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, 1),
+            MemberPallet::remove_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, 2),
             crate::Error::<Test>::LevelHasMembers
         );
 
@@ -1912,7 +1914,7 @@ fn h1_remove_custom_level_rejects_when_level_has_members() {
         ));
 
         // Now removal should succeed
-        assert_ok!(MemberPallet::remove_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, 1));
+        assert_ok!(MemberPallet::remove_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, 2));
     });
 }
 
@@ -1928,8 +1930,8 @@ fn h1_remove_empty_level_succeeds() {
             RuntimeOrigin::signed(OWNER), SHOP_1, name, 500u64, 0, 0,
         ));
 
-        // No members at level 0 (custom) — removal succeeds
-        assert_ok!(MemberPallet::remove_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, 0));
+        // No members at level 1 (custom) — removal succeeds
+        assert_ok!(MemberPallet::remove_custom_level(RuntimeOrigin::signed(OWNER), SHOP_1, 1));
     });
 }
 
@@ -1965,7 +1967,7 @@ fn m1_add_upgrade_rule_overflow_rejected() {
             MemberPallet::add_upgrade_rule(
                 RuntimeOrigin::signed(OWNER), SHOP_1, rule_name,
                 UpgradeTrigger::ReferralCount { count: 1 },
-                0, None, 1, false, None,
+                1, None, 1, false, None,
             ),
             crate::Error::<Test>::RuleIdOverflow
         );
@@ -2156,17 +2158,17 @@ fn r6_l3_conflict_strategy_highest_priority() {
             RuntimeOrigin::signed(OWNER), SHOP_1, ConflictStrategy::HighestPriority,
         ));
 
-        // Rule 1: TotalSpent >= 50 → VIP3 (level 2), priority=1
+        // Rule 1: TotalSpent >= 50 → VIP3 (level 3), priority=1
         let rn1: BoundedVec<u8, frame_support::traits::ConstU32<64>> = b"LowPri".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, rn1,
-            UpgradeTrigger::TotalSpent { threshold: 50 }, 2, None, 1, false, None,
+            UpgradeTrigger::TotalSpent { threshold: 50 }, 3, None, 1, false, None,
         ));
-        // Rule 2: TotalSpent >= 50 → VIP1 (level 0), priority=10
+        // Rule 2: TotalSpent >= 50 → VIP1 (level 1), priority=10
         let rn2: BoundedVec<u8, frame_support::traits::ConstU32<64>> = b"HighPri".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, rn2,
-            UpgradeTrigger::TotalSpent { threshold: 50 }, 0, None, 10, false, None,
+            UpgradeTrigger::TotalSpent { threshold: 50 }, 1, None, 10, false, None,
         ));
 
         // Register and spend
@@ -2174,9 +2176,9 @@ fn r6_l3_conflict_strategy_highest_priority() {
         assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u64));
         assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u64));
 
-        // HighestPriority: rule with priority=10 wins → VIP1 (level 0)
+        // HighestPriority: rule with priority=10 wins → VIP1 (level 1)
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
-        assert_eq!(member.custom_level_id, 0, "HighestPriority should select priority=10 rule → VIP1");
+        assert_eq!(member.custom_level_id, 1, "HighestPriority should select priority=10 rule → VIP1");
     });
 }
 
@@ -2201,22 +2203,22 @@ fn r6_l3_conflict_strategy_longest_duration() {
         let rn1: BoundedVec<u8, frame_support::traits::ConstU32<64>> = b"Short".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, rn1,
-            UpgradeTrigger::TotalSpent { threshold: 50 }, 0, Some(10u64), 1, false, None,
+            UpgradeTrigger::TotalSpent { threshold: 50 }, 1, Some(10u64), 1, false, None,
         ));
         // Rule 2: TotalSpent >= 50 → VIP2, duration=None (permanent)
         let rn2: BoundedVec<u8, frame_support::traits::ConstU32<64>> = b"Perm".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, rn2,
-            UpgradeTrigger::TotalSpent { threshold: 50 }, 1, None, 1, false, None,
+            UpgradeTrigger::TotalSpent { threshold: 50 }, 2, None, 1, false, None,
         ));
 
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
         assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u64));
         assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u64));
 
-        // LongestDuration: None (permanent) > Some(10) → VIP2 (level 1)
+        // LongestDuration: None (permanent) > Some(10) → VIP2 (level 2)
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
-        assert_eq!(member.custom_level_id, 1, "LongestDuration should prefer permanent rule");
+        assert_eq!(member.custom_level_id, 2, "LongestDuration should prefer permanent rule");
         assert!(MemberLevelExpiry::<Test>::get(ENTITY_1, ALICE).is_none(), "permanent rule = no expiry");
     });
 }
@@ -2242,22 +2244,22 @@ fn r6_l3_conflict_strategy_first_match() {
         let rn1: BoundedVec<u8, frame_support::traits::ConstU32<64>> = b"First".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, rn1,
-            UpgradeTrigger::TotalSpent { threshold: 50 }, 0, None, 1, false, None,
+            UpgradeTrigger::TotalSpent { threshold: 50 }, 1, None, 1, false, None,
         ));
         // Rule 2 (added second): TotalSpent >= 50 → VIP2
         let rn2: BoundedVec<u8, frame_support::traits::ConstU32<64>> = b"Second".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, rn2,
-            UpgradeTrigger::TotalSpent { threshold: 50 }, 1, None, 1, false, None,
+            UpgradeTrigger::TotalSpent { threshold: 50 }, 2, None, 1, false, None,
         ));
 
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
         assert_ok!(MemberPallet::update_spent(SHOP_1, &ALICE, 100u64));
         assert_ok!(MemberPallet::check_order_upgrade_rules(SHOP_1, &ALICE, 0, 100u64));
 
-        // FirstMatch: first rule wins → VIP1 (level 0)
+        // FirstMatch: first rule wins → VIP1 (level 1)
         let member = MemberPallet::get_member_by_shop(SHOP_1, &ALICE).unwrap();
-        assert_eq!(member.custom_level_id, 0, "FirstMatch should select the first matching rule → VIP1");
+        assert_eq!(member.custom_level_id, 1, "FirstMatch should select the first matching rule → VIP1");
     });
 }
 
@@ -3039,15 +3041,15 @@ fn kyc_upgrade_required_blocks_auto_upgrade() {
         ));
 
         // 未通过 KYC → apply_upgrade 静默跳过（不升级）
-        assert_ok!(MemberPallet::apply_upgrade_for_test(ENTITY_1, &ALICE, 0, 1, None, false));
+        assert_ok!(MemberPallet::apply_upgrade_for_test(ENTITY_1, &ALICE, 0, 2, None, false));
         let member = EntityMembers::<Test>::get(ENTITY_1, ALICE).unwrap();
         assert_eq!(member.custom_level_id, 0); // 未升级
 
         // 通过 KYC 后 → 升级成功
         set_kyc_passed(ENTITY_1, ALICE);
-        assert_ok!(MemberPallet::apply_upgrade_for_test(ENTITY_1, &ALICE, 0, 1, None, false));
+        assert_ok!(MemberPallet::apply_upgrade_for_test(ENTITY_1, &ALICE, 0, 2, None, false));
         let member = EntityMembers::<Test>::get(ENTITY_1, ALICE).unwrap();
-        assert_eq!(member.custom_level_id, 1); // 已升级
+        assert_eq!(member.custom_level_id, 2); // 已升级
     });
 }
 
@@ -3080,7 +3082,7 @@ fn kyc_upgrade_required_blocks_manual_upgrade() {
         // 未通过 KYC → 手动升级失败
         assert_noop!(
             MemberPallet::manual_set_member_level(
-                RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1,
+                RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 2,
             ),
             Error::<Test>::KycRequiredForUpgrade
         );
@@ -3088,10 +3090,10 @@ fn kyc_upgrade_required_blocks_manual_upgrade() {
         // 通过 KYC 后 → 手动升级成功
         set_kyc_passed(ENTITY_1, ALICE);
         assert_ok!(MemberPallet::manual_set_member_level(
-            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1,
+            RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 2,
         ));
         let member = EntityMembers::<Test>::get(ENTITY_1, ALICE).unwrap();
-        assert_eq!(member.custom_level_id, 1);
+        assert_eq!(member.custom_level_id, 2);
     });
 }
 
@@ -3186,7 +3188,7 @@ fn banned_member_auto_upgrade_silently_skipped() {
         assert_ok!(MemberPallet::ban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, None));
 
         // 尝试 apply_upgrade → 静默跳过
-        assert_ok!(MemberPallet::apply_upgrade_for_test(ENTITY_1, &ALICE, 1, 1, None, false));
+        assert_ok!(MemberPallet::apply_upgrade_for_test(ENTITY_1, &ALICE, 1, 2, None, false));
         let m = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
         assert_eq!(m.custom_level_id, 0); // 未升级
     });
@@ -3216,15 +3218,15 @@ fn banned_member_manual_upgrade_fails() {
 
         // 手动升级 → 显式错误
         assert_noop!(
-            MemberPallet::manual_set_member_level(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1),
+            MemberPallet::manual_set_member_level(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 2),
             Error::<Test>::MemberIsBanned
         );
 
         // 解封后可以升级
         assert_ok!(MemberPallet::unban_member(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE));
-        assert_ok!(MemberPallet::manual_set_member_level(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 1));
+        assert_ok!(MemberPallet::manual_set_member_level(RuntimeOrigin::signed(OWNER), SHOP_1, ALICE, 2));
         let m = EntityMembers::<Test>::get(ENTITY_1, &ALICE).unwrap();
-        assert_eq!(m.custom_level_id, 1);
+        assert_eq!(m.custom_level_id, 2);
     });
 }
 
@@ -3462,7 +3464,7 @@ fn h1_apply_upgrade_skips_when_level_system_absent() {
         // 注册会员
         assert_ok!(MemberPallet::register_member(RuntimeOrigin::signed(ALICE), SHOP_1, None));
 
-        // 初始化升级规则系统，规则目标 level_id=1 (VIP2)
+        // 初始化升级规则系统，规则目标 level_id=2 (VIP2)
         assert_ok!(MemberPallet::init_upgrade_rule_system(
             RuntimeOrigin::signed(OWNER), SHOP_1, ConflictStrategy::HighestLevel,
         ));
@@ -3470,7 +3472,7 @@ fn h1_apply_upgrade_skips_when_level_system_absent() {
             b"Buy100".to_vec().try_into().unwrap();
         assert_ok!(MemberPallet::add_upgrade_rule(
             RuntimeOrigin::signed(OWNER), SHOP_1, rule_name,
-            UpgradeTrigger::SingleOrder { threshold: 50 }, 1, None, 1, false, None,
+            UpgradeTrigger::SingleOrder { threshold: 50 }, 2, None, 1, false, None,
         ));
 
         // 重置等级系统（但升级规则系统仍在）

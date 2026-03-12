@@ -1,6 +1,6 @@
 //! Owner 操作模块
 //!
-//! 包含充值、升级实体类型、绑定推荐人、撤销关闭申请、设置 Primary Shop、
+//! 包含充值、升级实体类型、绑定推荐人、撤销关闭申请、
 //! Owner 主动暂停/恢复等。
 
 use crate::pallet::*;
@@ -24,7 +24,8 @@ impl<T: Config> Pallet<T> {
             entity.owner == who || entity.admins.iter().any(|(a, perm)| a == &who && (perm & AdminPermission::ENTITY_MANAGE) != 0),
             Error::<T>::NotEntityOwner
         );
-        ensure!(!T::GovernanceProvider::is_governance_locked(entity_id), Error::<T>::EntityLocked);
+        // 审计修复: 移除 governance lock 检查 — 充值是纯资金注入，不改变任何配置，
+        // 不应被 lock 限制。现有代码已允许 Banned 状态充值，lock 检查制造 ban→unban 死结。
         // 允许 Banned 状态充值，以便治理方后续 unban；仅禁止 Closed
         ensure!(
             entity.status != EntityStatus::Closed,
@@ -143,6 +144,12 @@ impl<T: Config> Pallet<T> {
         let entity = Entities::<T>::get(entity_id).ok_or(Error::<T>::EntityNotFound)?;
         ensure!(entity.owner == who, Error::<T>::NotEntityOwner);
         ensure!(!T::GovernanceProvider::is_governance_locked(entity_id), Error::<T>::EntityLocked);
+        // 审计修复: 明确拒绝 Banned/Closed 终态（ban/close 不再清除推荐关系，
+        // 终态实体不应绑定新推荐人）
+        ensure!(
+            !matches!(entity.status, EntityStatus::Banned | EntityStatus::Closed),
+            Error::<T>::InvalidEntityStatus
+        );
         ensure!(entity.status == EntityStatus::Active, Error::<T>::EntityNotActive);
 
         // 不能已有推荐人
@@ -187,41 +194,6 @@ impl<T: Config> Pallet<T> {
 
         Self::deposit_event(Event::CloseRequestCancelled { entity_id });
         Ok(())
-    }
-
-    /// 设置 Primary Shop（owner 或 ENTITY_MANAGE admin）
-    pub(crate) fn do_set_primary_shop(
-        who: T::AccountId,
-        entity_id: u64,
-        shop_id: u64,
-    ) -> sp_runtime::DispatchResult {
-        Entities::<T>::try_mutate(entity_id, |maybe_entity| -> sp_runtime::DispatchResult {
-            let entity = maybe_entity.as_mut().ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(
-                entity.owner == who || entity.admins.iter().any(|(a, perm)| a == &who && (perm & AdminPermission::ENTITY_MANAGE) != 0),
-                Error::<T>::NotEntityOwner
-            );
-            ensure!(!T::GovernanceProvider::is_governance_locked(entity_id), Error::<T>::EntityLocked);
-            Self::ensure_entity_operable(&entity.status)?;
-
-            // 幂等检查
-            ensure!(entity.primary_shop_id != shop_id, Error::<T>::AlreadyPrimaryShop);
-
-            // Shop 必须属于此 Entity
-            let shops = EntityShops::<T>::get(entity_id);
-            ensure!(shops.contains(&shop_id), Error::<T>::ShopNotInEntity);
-
-            let old_shop_id = entity.primary_shop_id;
-            entity.primary_shop_id = shop_id;
-
-            Self::deposit_event(Event::PrimaryShopChanged {
-                entity_id,
-                old_shop_id,
-                new_shop_id: shop_id,
-            });
-
-            Ok(())
-        })
     }
 
     /// Owner 主动暂停实体
