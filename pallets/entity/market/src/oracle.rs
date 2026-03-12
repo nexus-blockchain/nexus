@@ -1,0 +1,345 @@
+//! TWAP 价格预言机：累积器更新、TWAP 计算、价格偏离检查、熔断机制
+
+use crate::pallet::*;
+use frame_support::pallet_prelude::*;
+use sp_runtime::traits::{Saturating, Zero};
+use sp_runtime::SaturatedConversion;
+
+impl<T: Config> Pallet<T> {
+    // ==================== Phase 5: TWAP 价格预言机内部函数 ====================
+
+    /// 更新 TWAP 累积器（每次成交时调用）
+    /// P1 安全修复: 添加异常价格过滤，防止价格操纵
+    fn update_twap_accumulator(entity_id: u64, trade_price: BalanceOf<T>) {
+        let current_block: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
+
+        TwapAccumulators::<T>::mutate(entity_id, |maybe_acc| {
+            let acc = maybe_acc.get_or_insert_with(|| TwapAccumulator {
+                current_cumulative: 0,
+                current_block,
+                last_price: trade_price,
+                trade_count: 0,
+                hour_snapshot: PriceSnapshot { cumulative_price: 0, block_number: current_block },
+                day_snapshot: PriceSnapshot { cumulative_price: 0, block_number: current_block },
+                week_snapshot: PriceSnapshot { cumulative_price: 0, block_number: current_block },
+                last_hour_update: current_block,
+                last_day_update: current_block,
+                last_week_update: current_block,
+            });
+
+            // P1: 异常价格过滤 - 如果价格偏离上次价格超过 100%，使用加权平均
+            let filtered_price = if acc.trade_count > 0 && !acc.last_price.is_zero() {
+                let last_price_u128: u128 = acc.last_price.into();
+                let trade_price_u128: u128 = trade_price.into();
+                let max_deviation = last_price_u128; // 100% 偏离
+
+                let deviation = if trade_price_u128 > last_price_u128 {
+                    trade_price_u128.saturating_sub(last_price_u128)
+                } else {
+                    last_price_u128.saturating_sub(trade_price_u128)
+                };
+
+                if deviation > max_deviation {
+                    // 异常价格: 限制价格变动幅度为上次价格的 50%
+                    // 如果新价格过高，使用 last_price * 1.5
+                    // 如果新价格过低，使用 last_price * 0.5
+                    if trade_price_u128 > last_price_u128 {
+                        // 价格上涨过快，限制为 +50%
+                        acc.last_price.saturating_mul(3u32.into()) / 2u32.into()
+                    } else {
+                        // 价格下跌过快，限制为 -50%
+                        acc.last_price / 2u32.into()
+                    }
+                } else {
+                    trade_price
+                }
+            } else {
+                trade_price
+            };
+
+            // 计算自上次更新以来经过的区块数
+            let blocks_elapsed = current_block.saturating_sub(acc.current_block);
+
+            // 更新累积价格: cumulative += last_price × blocks_elapsed
+            if blocks_elapsed > 0 {
+                let price_u128: u128 = acc.last_price.into();
+                acc.current_cumulative = acc.current_cumulative
+                    .saturating_add(price_u128.saturating_mul(blocks_elapsed as u128));
+            }
+
+            // 更新当前状态（使用过滤后的价格）
+            acc.current_block = current_block;
+            acc.last_price = filtered_price;
+            acc.trade_count = acc.trade_count.saturating_add(1);
+
+            // 滚动更新快照
+            let blocks_per_hour = T::BlocksPerHour::get();
+            let blocks_per_day = T::BlocksPerDay::get();
+            let _blocks_per_week = T::BlocksPerWeek::get();
+
+            // 更新 1小时快照（每 10 分钟更新一次，即 blocks_per_hour / 6）
+            let hour_update_interval = blocks_per_hour / 6;
+            if current_block.saturating_sub(acc.last_hour_update) >= hour_update_interval {
+                acc.hour_snapshot = PriceSnapshot {
+                    cumulative_price: acc.current_cumulative,
+                    block_number: current_block,
+                };
+                acc.last_hour_update = current_block;
+            }
+
+            // 更新 24小时快照（每小时更新一次）
+            if current_block.saturating_sub(acc.last_day_update) >= blocks_per_hour {
+                acc.day_snapshot = PriceSnapshot {
+                    cumulative_price: acc.current_cumulative,
+                    block_number: current_block,
+                };
+                acc.last_day_update = current_block;
+            }
+
+            // 更新 7天快照（每天更新一次）
+            if current_block.saturating_sub(acc.last_week_update) >= blocks_per_day {
+                acc.week_snapshot = PriceSnapshot {
+                    cumulative_price: acc.current_cumulative,
+                    block_number: current_block,
+                };
+                acc.last_week_update = current_block;
+            }
+        });
+    }
+
+    /// 计算指定周期的 TWAP
+    pub fn calculate_twap(entity_id: u64, period: TwapPeriod) -> Option<BalanceOf<T>> {
+        let acc = TwapAccumulators::<T>::get(entity_id)?;
+        let current_block: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
+
+        // 获取对应周期的快照
+        let snapshot = match period {
+            TwapPeriod::OneHour => &acc.hour_snapshot,
+            TwapPeriod::OneDay => &acc.day_snapshot,
+            TwapPeriod::OneWeek => &acc.week_snapshot,
+        };
+
+        // 计算当前累积价格（包含自上次更新以来的部分）
+        let blocks_since_update = current_block.saturating_sub(acc.current_block);
+        let price_u128: u128 = acc.last_price.into();
+        let current_cumulative = acc.current_cumulative
+            .saturating_add(price_u128.saturating_mul(blocks_since_update as u128));
+
+        // 计算区块差
+        let block_diff = current_block.saturating_sub(snapshot.block_number);
+        if block_diff == 0 {
+            return Some(acc.last_price);
+        }
+
+        // 计算累积价格差
+        let cumulative_diff = current_cumulative.saturating_sub(snapshot.cumulative_price);
+
+        // TWAP = 累积价格差 / 区块差
+        let twap_u128 = cumulative_diff / (block_diff as u128);
+
+        Some(twap_u128.into())
+    }
+
+    /// 检查价格是否偏离参考价格过大
+    ///
+    /// 参考价格优先级：
+    /// 1. 如果三周期 TWAP 数据都充足，使用 1小时 TWAP
+    /// 2. 如果 TWAP 数据不足但有初始价格，使用实体所有者设定的初始价格
+    /// 3. 如果都没有，跳过检查
+    ///
+    /// 三周期 TWAP 充足条件：
+    /// - 成交量 >= min_trades_for_twap
+    /// - 1小时快照已更新（距离当前 >= 1小时）
+    /// - 24小时快照已更新（距离当前 >= 24小时）
+    /// - 7天快照已更新（距离当前 >= 7天）
+    pub fn check_price_deviation(
+        entity_id: u64,
+        price: BalanceOf<T>,
+    ) -> Result<(), Error<T>> {
+        // 获取价格保护配置
+        let config = PriceProtection::<T>::get(entity_id).unwrap_or_default();
+
+        // 如果未启用价格保护，直接通过
+        if !config.enabled {
+            return Ok(());
+        }
+
+        // 检查熔断状态
+        let current_block: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
+        if config.circuit_breaker_active {
+            if current_block < config.circuit_breaker_until {
+                return Err(Error::<T>::MarketCircuitBreakerActive);
+            }
+            // 审计修复 S2-R11: 到期后自动清理存储
+            PriceProtection::<T>::mutate(entity_id, |maybe_config| {
+                if let Some(c) = maybe_config {
+                    c.circuit_breaker_active = false;
+                    c.circuit_breaker_until = 0;
+                }
+            });
+            Self::deposit_event(Event::CircuitBreakerLifted { entity_id });
+        }
+
+        // 获取参考价格
+        let reference_price: Option<BalanceOf<T>> = {
+            // 获取 TWAP 累积器
+            let acc = TwapAccumulators::<T>::get(entity_id);
+
+            match acc {
+                Some(ref a) if Self::is_twap_data_sufficient(a, current_block, &config) => {
+                    // 三周期 TWAP 数据充足，使用 1小时 TWAP
+                    Self::calculate_twap(entity_id, TwapPeriod::OneHour)
+                }
+                _ => {
+                    // TWAP 数据不足，使用实体所有者设定的初始价格
+                    config.initial_price
+                }
+            }
+        };
+
+        // 如果没有参考价格，跳过检查
+        let ref_price = match reference_price {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
+        // 计算偏离度 (基点)
+        let price_u128: u128 = price.into();
+        let ref_price_u128: u128 = ref_price.into();
+
+        if ref_price_u128 == 0 {
+            return Ok(());
+        }
+
+        let deviation_bps = if price_u128 > ref_price_u128 {
+            ((price_u128 - ref_price_u128) * 10000 / ref_price_u128).min(u16::MAX as u128) as u16
+        } else {
+            ((ref_price_u128 - price_u128) * 10000 / ref_price_u128).min(u16::MAX as u128) as u16
+        };
+
+        // 检查是否超过最大偏离
+        if deviation_bps > config.max_price_deviation {
+            return Err(Error::<T>::PriceDeviationTooHigh);
+        }
+
+        Ok(())
+    }
+
+    /// 检查三周期 TWAP 数据是否充足
+    ///
+    /// 条件：
+    /// 1. 成交量 >= min_trades_for_twap
+    /// 2. 1小时快照已有足够历史（当前区块 - 快照区块 >= BlocksPerHour）
+    /// 3. 24小时快照已有足够历史（当前区块 - 快照区块 >= BlocksPerDay）
+    /// 4. 7天快照已有足够历史（当前区块 - 快照区块 >= BlocksPerWeek）
+    fn is_twap_data_sufficient(
+        acc: &TwapAccumulator<BalanceOf<T>>,
+        current_block: u32,
+        config: &PriceProtectionConfig<BalanceOf<T>>,
+    ) -> bool {
+        // 检查成交量
+        if acc.trade_count < config.min_trades_for_twap {
+            return false;
+        }
+
+        let blocks_per_hour = T::BlocksPerHour::get();
+        let blocks_per_day = T::BlocksPerDay::get();
+        let blocks_per_week = T::BlocksPerWeek::get();
+
+        // 检查 1小时快照是否有足够历史
+        let hour_history = current_block.saturating_sub(acc.hour_snapshot.block_number);
+        if hour_history < blocks_per_hour {
+            return false;
+        }
+
+        // 检查 24小时快照是否有足够历史
+        let day_history = current_block.saturating_sub(acc.day_snapshot.block_number);
+        if day_history < blocks_per_day {
+            return false;
+        }
+
+        // 检查 7天快照是否有足够历史
+        let week_history = current_block.saturating_sub(acc.week_snapshot.block_number);
+        if week_history < blocks_per_week {
+            return false;
+        }
+
+        true
+    }
+
+    /// 检查并触发熔断机制
+    fn check_circuit_breaker(entity_id: u64, current_price: BalanceOf<T>) {
+        let config = match PriceProtection::<T>::get(entity_id) {
+            Some(c) => c,
+            None => return,
+        };
+
+        if !config.enabled {
+            return;
+        }
+
+        // 使用 7天 TWAP 判断熔断
+        let twap_7d = match Self::calculate_twap(entity_id, TwapPeriod::OneWeek) {
+            Some(t) => t,
+            None => return,
+        };
+
+        let price_u128: u128 = current_price.into();
+        let twap_u128: u128 = twap_7d.into();
+
+        if twap_u128 == 0 {
+            return;
+        }
+
+        let deviation_bps = if price_u128 > twap_u128 {
+            ((price_u128 - twap_u128) * 10000 / twap_u128).min(u16::MAX as u128) as u16
+        } else {
+            ((twap_u128 - price_u128) * 10000 / twap_u128).min(u16::MAX as u128) as u16
+        };
+
+        // 如果偏离超过熔断阈值，触发熔断
+        if deviation_bps > config.circuit_breaker_threshold {
+            let current_block: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();
+            let until_block = current_block.saturating_add(T::CircuitBreakerDuration::get());
+
+            PriceProtection::<T>::mutate(entity_id, |maybe_config| {
+                if let Some(c) = maybe_config {
+                    c.circuit_breaker_active = true;
+                    c.circuit_breaker_until = until_block;
+                }
+            });
+
+            Self::deposit_event(Event::CircuitBreakerTriggered {
+                entity_id,
+                current_price,
+                twap_7d,
+                deviation_bps,
+                until_block,
+            });
+        }
+    }
+
+    /// 在成交后更新 TWAP 并检查熔断
+    pub(crate) fn on_trade_completed(entity_id: u64, trade_price: BalanceOf<T>) {
+        // 更新 TWAP 累积器
+        Self::update_twap_accumulator(entity_id, trade_price);
+
+        // 更新最新成交价
+        Self::update_last_trade_price(entity_id, trade_price);
+
+        // L1: 发出 TwapUpdated 事件
+        let twap_1h = Self::calculate_twap(entity_id, TwapPeriod::OneHour);
+        let twap_24h = Self::calculate_twap(entity_id, TwapPeriod::OneDay);
+        let twap_7d = Self::calculate_twap(entity_id, TwapPeriod::OneWeek);
+        Self::deposit_event(Event::TwapUpdated {
+            entity_id,
+            new_price: trade_price,
+            twap_1h,
+            twap_24h,
+            twap_7d,
+        });
+
+        // 检查熔断
+        Self::check_circuit_breaker(entity_id, trade_price);
+    }
+}

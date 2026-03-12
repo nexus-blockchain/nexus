@@ -539,9 +539,9 @@ impl pallet_entity_common::EntityTokenProvider<u64, u64> for MockEntityToken {
     fn available_balance(_: u64, _: &u64) -> u64 { 0 }
 }
 
-// ==================== Mock ShoppingBalanceProvider ====================
+// ==================== Mock Loyalty (LoyaltyReadPort + LoyaltyWritePort) ====================
 
-pub struct MockShoppingBalanceProvider;
+pub struct MockLoyalty;
 
 thread_local! {
     static SHOPPING_BALANCES: RefCell<HashMap<(u64, u64), u64>> = RefCell::new(HashMap::new());
@@ -552,9 +552,43 @@ pub fn set_shopping_balance(entity_id: u64, account: u64, amount: u64) {
     SHOPPING_BALANCES.with(|b| b.borrow_mut().insert((entity_id, account), amount));
 }
 
-impl pallet_entity_common::ShoppingBalanceProvider<u64, u64> for MockShoppingBalanceProvider {
+impl pallet_entity_common::LoyaltyReadPort<u64, u64> for MockLoyalty {
+    fn is_token_enabled(entity_id: u64) -> bool {
+        TOKEN_ENABLED.with(|e| e.borrow().get(&entity_id).copied().unwrap_or(false))
+    }
+
+    fn token_discount_balance(entity_id: u64, who: &u64) -> u64 {
+        TOKEN_BALANCES.with(|b| b.borrow().get(&(entity_id, *who)).copied().unwrap_or(0))
+    }
+
     fn shopping_balance(entity_id: u64, account: &u64) -> u64 {
         SHOPPING_BALANCES.with(|b| *b.borrow().get(&(entity_id, *account)).unwrap_or(&0))
+    }
+
+    fn shopping_total(_entity_id: u64) -> u64 {
+        0
+    }
+}
+
+impl pallet_entity_common::LoyaltyWritePort<u64, u64> for MockLoyalty {
+    fn redeem_for_discount(entity_id: u64, who: &u64, tokens: u64) -> Result<u64, sp_runtime::DispatchError> {
+        let discount = REDEEM_DISCOUNT.with(|d| {
+            d.borrow().get(&(entity_id, *who)).copied().unwrap_or(0)
+        });
+        if discount > 0 {
+            TOKEN_BALANCES.with(|b| {
+                let mut map = b.borrow_mut();
+                let bal = map.get(&(entity_id, *who)).copied().unwrap_or(0);
+                if bal < tokens {
+                    return Err(sp_runtime::DispatchError::Other("InsufficientTokenBalance"));
+                }
+                map.insert((entity_id, *who), bal - tokens);
+                Ok(())
+            })?;
+            Ok(discount)
+        } else {
+            Ok(0)
+        }
     }
 
     fn consume_shopping_balance(entity_id: u64, account: &u64, amount: u64) -> Result<(), sp_runtime::DispatchError> {
@@ -565,44 +599,91 @@ impl pallet_entity_common::ShoppingBalanceProvider<u64, u64> for MockShoppingBal
                 return Err(sp_runtime::DispatchError::Other("InsufficientShoppingBalance"));
             }
             *balance -= amount;
-            // Simulate: transfer NEX from Entity to buyer (in real impl, commission-core does this)
-            // For tests, we just credit the buyer's balance conceptually
             Ok(())
         })
     }
+
+    fn reward_on_purchase(_entity_id: u64, _who: &u64, _purchase_amount: u64) -> Result<u64, sp_runtime::DispatchError> {
+        Ok(0)
+    }
+
+    fn credit_shopping_balance(_entity_id: u64, _who: &u64, _amount: u64) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
 }
 
-// ==================== Mock CommissionHandler ====================
+// ==================== Mock OnOrderCompleted (Phase 5.3) ====================
 
-pub struct MockCommissionHandler;
+pub struct MockOnOrderCompleted;
 
 thread_local! {
+    static COMPLETED_HOOK_CALLS: RefCell<Vec<(u64, u64, u64)>> = RefCell::new(Vec::new());
+    // (order_id, entity_id, shop_id) — 记录 Hook 调用以便测试验证
+}
+
+#[allow(dead_code)]
+pub fn get_completed_hook_calls() -> Vec<(u64, u64, u64)> {
+    COMPLETED_HOOK_CALLS.with(|c| c.borrow().clone())
+}
+
+impl pallet_entity_common::OnOrderCompleted<u64, u64> for MockOnOrderCompleted {
+    fn on_completed(info: &pallet_entity_common::OrderCompletionInfo<u64, u64>) {
+        COMPLETED_HOOK_CALLS.with(|c| c.borrow_mut().push((info.order_id, info.entity_id, info.shop_id)));
+        // Simulate member side-effects for backward-compatible test verification:
+        MEMBER_REGISTERED.with(|r| r.borrow_mut().push((info.entity_id, info.buyer)));
+        MEMBER_SPENT.with(|s| s.borrow_mut().push((info.entity_id, info.buyer, info.amount_usdt)));
+    }
+}
+
+// ==================== Mock OnOrderCancelled (Phase 5.3) ====================
+
+pub struct MockOnOrderCancelled;
+
+thread_local! {
+    static CANCELLED_HOOK_CALLS: RefCell<Vec<(u64, u64)>> = RefCell::new(Vec::new());
+    // (order_id, entity_id)
+}
+
+#[allow(dead_code)]
+pub fn get_cancelled_hook_calls() -> Vec<(u64, u64)> {
+    CANCELLED_HOOK_CALLS.with(|c| c.borrow().clone())
+}
+
+impl pallet_entity_common::OnOrderCancelled for MockOnOrderCancelled {
+    fn on_cancelled(info: &pallet_entity_common::OrderCancellationInfo) {
+        CANCELLED_HOOK_CALLS.with(|c| c.borrow_mut().push((info.order_id, info.entity_id)));
+        // Backward-compatible tracking for tests that check CANCELLED_ORDERS / TOKEN_CANCELLED_ORDERS
+        match info.payment_asset {
+            pallet_entity_common::PaymentAsset::Native => {
+                CANCELLED_ORDERS.with(|c| c.borrow_mut().push(info.order_id));
+            },
+            pallet_entity_common::PaymentAsset::EntityToken => {
+                TOKEN_CANCELLED_ORDERS.with(|c| c.borrow_mut().push(info.order_id));
+            },
+        }
+    }
+}
+
+// ==================== Mock TokenFeeConfig (Phase 5.3) ====================
+
+pub struct MockTokenFeeConfig;
+
+impl pallet_entity_common::TokenFeeConfigPort<u64> for MockTokenFeeConfig {
+    fn token_platform_fee_rate(entity_id: u64) -> u16 {
+        TOKEN_FEE_RATES.with(|r| *r.borrow().get(&entity_id).unwrap_or(&0))
+    }
+    fn entity_account(entity_id: u64) -> u64 { entity_id + 9000 }
+}
+
+// Backward-compatible tracking thread_locals (used by new Hook mocks + old test assertions)
+thread_local! {
     static CANCELLED_ORDERS: RefCell<Vec<u64>> = RefCell::new(Vec::new());
+    static TOKEN_CANCELLED_ORDERS: RefCell<Vec<u64>> = RefCell::new(Vec::new());
+    static TOKEN_FEE_RATES: RefCell<HashMap<u64, u16>> = RefCell::new(HashMap::new());
 }
 
 pub fn get_cancelled_orders() -> Vec<u64> {
     CANCELLED_ORDERS.with(|c| c.borrow().clone())
-}
-
-impl pallet_entity_common::OrderCommissionHandler<u64, u64> for MockCommissionHandler {
-    fn on_order_completed(_entity_id: u64, _shop_id: u64, _order_id: u64, _buyer: &u64, _amount: u64, _platform_fee: u64) -> Result<(), sp_runtime::DispatchError> {
-        Ok(())
-    }
-
-    fn on_order_cancelled(order_id: u64) -> Result<(), sp_runtime::DispatchError> {
-        CANCELLED_ORDERS.with(|c| c.borrow_mut().push(order_id));
-        Ok(())
-    }
-}
-
-// ==================== Mock TokenCommissionHandler ====================
-
-pub struct MockTokenCommissionHandler;
-
-thread_local! {
-    static TOKEN_CANCELLED_ORDERS: RefCell<Vec<u64>> = RefCell::new(Vec::new());
-    static TOKEN_COMPLETED_ORDERS: RefCell<Vec<(u64, u64, u64, u64, u128, u128)>> = RefCell::new(Vec::new());
-    static TOKEN_FEE_RATES: RefCell<HashMap<u64, u16>> = RefCell::new(HashMap::new());
 }
 
 #[allow(dead_code)]
@@ -613,29 +694,6 @@ pub fn set_token_fee_rate(entity_id: u64, rate: u16) {
 #[allow(dead_code)]
 pub fn get_token_cancelled_orders() -> Vec<u64> {
     TOKEN_CANCELLED_ORDERS.with(|c| c.borrow().clone())
-}
-
-#[allow(dead_code)]
-pub fn get_token_completed_orders() -> Vec<(u64, u64, u64, u64, u128, u128)> {
-    TOKEN_COMPLETED_ORDERS.with(|c| c.borrow().clone())
-}
-
-impl pallet_entity_common::TokenOrderCommissionHandler<u64> for MockTokenCommissionHandler {
-    fn on_token_order_completed(entity_id: u64, shop_id: u64, order_id: u64, buyer: &u64, token_amount: u128, token_platform_fee: u128) -> Result<(), sp_runtime::DispatchError> {
-        TOKEN_COMPLETED_ORDERS.with(|c| c.borrow_mut().push((entity_id, shop_id, order_id, *buyer, token_amount, token_platform_fee)));
-        Ok(())
-    }
-
-    fn on_token_order_cancelled(order_id: u64) -> Result<(), sp_runtime::DispatchError> {
-        TOKEN_CANCELLED_ORDERS.with(|c| c.borrow_mut().push(order_id));
-        Ok(())
-    }
-
-    fn token_platform_fee_rate(entity_id: u64) -> u16 {
-        TOKEN_FEE_RATES.with(|r| *r.borrow().get(&entity_id).unwrap_or(&0))
-    }
-
-    fn entity_account(entity_id: u64) -> u64 { entity_id + 9000 }
 }
 
 // ==================== Mock PricingProvider ====================
@@ -782,6 +840,7 @@ pub fn get_member_spent() -> Vec<(u64, u64, u64)> {
 
 pub const BUYER: u64 = 1;
 pub const BUYER2: u64 = 2;
+pub const PAYER: u64 = 3;
 pub const SELLER: u64 = 10;
 pub const SELLER2: u64 = 20;
 pub const SHOP_1: u64 = 1;
@@ -807,14 +866,16 @@ impl pallet_entity_order::Config for Test {
     type ServiceConfirmTimeout = ConstU64<150>;
     type DisputeTimeout = ConstU64<300>;
     type ConfirmExtension = ConstU64<100>;
-    type CommissionHandler = MockCommissionHandler;
-    type TokenCommissionHandler = MockTokenCommissionHandler;
-    type ShoppingBalance = MockShoppingBalanceProvider;
+    type OnOrderCompleted = MockOnOrderCompleted;
+    type OnOrderCancelled = MockOnOrderCancelled;
+    type TokenFeeConfig = MockTokenFeeConfig;
+    type Loyalty = MockLoyalty;
     type PricingProvider = MockPricingProvider;
     type TokenPriceProvider = MockTokenPriceProvider;
     type MemberProvider = MockMemberProvider;
     type MaxCidLength = ConstU32<64>;
     type MaxBuyerOrders = ConstU32<1000>;
+    type MaxPayerOrders = ConstU32<1000>;
     type MaxShopOrders = ConstU32<10000>;
     type MaxExpiryQueueSize = ConstU32<500>;
     type WeightInfo = ();
@@ -831,6 +892,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         balances: vec![
             (BUYER, 100_000),
             (BUYER2, 100_000),
+            (PAYER, 100_000),
             (SELLER, 100_000),
             (SELLER2, 100_000),
         ],
@@ -854,7 +916,8 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         REDEEM_DISCOUNT.with(|d| d.borrow_mut().clear());
         CANCELLED_ORDERS.with(|c| c.borrow_mut().clear());
         TOKEN_CANCELLED_ORDERS.with(|c| c.borrow_mut().clear());
-        TOKEN_COMPLETED_ORDERS.with(|c| c.borrow_mut().clear());
+        COMPLETED_HOOK_CALLS.with(|c| c.borrow_mut().clear());
+        CANCELLED_HOOK_CALLS.with(|c| c.borrow_mut().clear());
         TOKEN_ENABLED.with(|e| e.borrow_mut().clear());
         TOKEN_BALANCES.with(|b| b.borrow_mut().clear());
         TOKEN_RESERVED.with(|r| r.borrow_mut().clear());

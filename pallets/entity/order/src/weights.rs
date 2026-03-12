@@ -43,6 +43,8 @@ pub trait WeightInfo {
     fn force_partial_refund() -> Weight;
     fn withdraw_dispute() -> Weight;
     fn force_process_expirations() -> Weight;
+    fn place_order_for() -> Weight;
+    fn cleanup_payer_orders() -> Weight;
 }
 
 /// 基于 DB read/write 分析的权重估算（pre-benchmark）。
@@ -267,6 +269,20 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(501))
             .saturating_add(T::DbWeight::get().writes(501))
     }
+
+    /// place_order_for: same as place_order + PayerOrders write
+    fn place_order_for() -> Weight {
+        Weight::from_parts(130_000_000, 18_000)
+            .saturating_add(T::DbWeight::get().reads(14))
+            .saturating_add(T::DbWeight::get().writes(10))
+    }
+
+    /// cleanup_payer_orders: same pattern as cleanup_buyer_orders
+    fn cleanup_payer_orders() -> Weight {
+        Weight::from_parts(80_000_000, 8_000)
+            .saturating_add(T::DbWeight::get().reads(101))
+            .saturating_add(T::DbWeight::get().writes(1))
+    }
 }
 
 /// 单元测试用零权重实现
@@ -294,4 +310,6 @@ impl WeightInfo for () {
     fn force_partial_refund() -> Weight { Weight::zero() }
     fn withdraw_dispute() -> Weight { Weight::zero() }
     fn force_process_expirations() -> Weight { Weight::zero() }
+    fn place_order_for() -> Weight { Weight::zero() }
+    fn cleanup_payer_orders() -> Weight { Weight::zero() }
 }

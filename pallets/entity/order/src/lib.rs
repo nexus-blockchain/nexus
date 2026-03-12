@@ -33,6 +33,8 @@ mod benchmarking;
 pub mod weights;
 pub use weights::WeightInfo;
 
+mod dispute;
+
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
@@ -45,7 +47,7 @@ pub mod pallet {
     use frame_system::pallet_prelude::*;
     use frame_system::ensure_root;
     use pallet_dispute_escrow::pallet::Escrow as EscrowTrait;
-    use pallet_entity_common::{OrderStatus, OrderCommissionHandler, OrderProvider, PaymentAsset, PricingProvider, ProductCategory, ProductProvider, ProductStatus, ProductVisibility, EntityTokenProvider, EntityTokenPriceProvider, MemberProvider, ShopProvider, ShoppingBalanceProvider, TokenOrderCommissionHandler};
+    use pallet_entity_common::{OrderStatus, OrderProvider, PaymentAsset, PricingProvider, ProductCategory, ProductProvider, ProductStatus, ProductVisibility, AssetLedgerPort, EntityTokenPriceProvider, LoyaltyReadPort, LoyaltyWritePort, MemberProvider, ShopProvider, OnOrderCompleted, OnOrderCancelled, OrderCompletionInfo, OrderCancellationInfo, TokenFeeConfigPort};
     use sp_runtime::{traits::{Saturating, Zero}, SaturatedConversion};
 
     /// 货币余额类型别名
@@ -63,6 +65,8 @@ pub mod pallet {
         pub product_id: u64,
         pub buyer: AccountId,
         pub seller: AccountId,
+        /// 代付人（第三方付款时为 Some，自付时为 None）
+        pub payer: Option<AccountId>,
         pub quantity: u32,
         pub unit_price: Balance,
         /// 实际支付金额（积分/购物余额/会员折扣后）
@@ -158,8 +162,8 @@ pub mod pallet {
         /// 商品查询接口
         type ProductProvider: ProductProvider<Self::AccountId, BalanceOf<Self>>;
 
-        /// 实体代币接口
-        type EntityToken: EntityTokenProvider<Self::AccountId, BalanceOf<Self>>;
+        /// 实体代币资产账本接口（reserve/unreserve/repatriate）
+        type EntityToken: AssetLedgerPort<Self::AccountId, BalanceOf<Self>>;
 
         /// 平台账户
         #[pallet::constant]
@@ -186,14 +190,17 @@ pub mod pallet {
         #[pallet::constant]
         type ConfirmExtension: Get<BlockNumberFor<Self>>;
 
-        /// 佣金处理接口（订单完成时触发返佣）
-        type CommissionHandler: OrderCommissionHandler<Self::AccountId, BalanceOf<Self>>;
+        /// 佣金处理接口（订单完成时触发返佣） → Phase 5.3: 迁入 OnOrderCompleted Hook
+        type OnOrderCompleted: OnOrderCompleted<Self::AccountId, BalanceOf<Self>>;
 
-        /// 购物余额接口（下单时抵扣复购余额）
-        type ShoppingBalance: ShoppingBalanceProvider<Self::AccountId, BalanceOf<Self>>;
+        /// 订单取消 Hook（取消/退款时清理佣金等）
+        type OnOrderCancelled: OnOrderCancelled;
 
-        /// Token 佣金处理接口（Entity Token 订单完成时触发 Token 返佣）
-        type TokenCommissionHandler: TokenOrderCommissionHandler<Self::AccountId>;
+        /// 激励系统接口（Token 折扣 + 购物余额 + 奖励）
+        type Loyalty: LoyaltyWritePort<Self::AccountId, BalanceOf<Self>>;
+
+        /// Token 平台费率 + Entity 账户查询接口（从 TokenCommissionHandler 剥离）
+        type TokenFeeConfig: TokenFeeConfigPort<Self::AccountId>;
 
         /// NEX/USDT 定价接口（用于将 NEX 金额转换为 USDT 以更新会员消费统计）
         type PricingProvider: PricingProvider;
@@ -211,6 +218,10 @@ pub mod pallet {
         /// 每买家最大订单索引数
         #[pallet::constant]
         type MaxBuyerOrders: Get<u32>;
+
+        /// 每代付人最大订单索引数
+        #[pallet::constant]
+        type MaxPayerOrders: Get<u32>;
 
         /// 每店铺最大订单索引数
         #[pallet::constant]
@@ -262,6 +273,17 @@ pub mod pallet {
         ValueQuery,
     >;
 
+    /// 代付人订单索引
+    #[pallet::storage]
+    #[pallet::getter(fn payer_orders)]
+    pub type PayerOrders<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        T::AccountId,
+        BoundedVec<u64, T::MaxPayerOrders>,
+        ValueQuery,
+    >;
+
     /// 店铺订单索引
     #[pallet::storage]
     #[pallet::getter(fn shop_orders)]
@@ -303,6 +325,7 @@ pub mod pallet {
             entity_id: u64,
             buyer: T::AccountId,
             seller: T::AccountId,
+            payer: Option<T::AccountId>,
             amount: BalanceOf<T>,
             payment_asset: PaymentAsset,
             token_amount: u128,
@@ -325,6 +348,7 @@ pub mod pallet {
         ServiceCompleted { order_id: u64 },
         PlatformFeeRateUpdated { old_rate: u16, new_rate: u16 },
         BuyerOrdersCleaned { buyer: T::AccountId, removed: u32 },
+        PayerOrdersCleaned { payer: T::AccountId, removed: u32 },
         RefundRejected { order_id: u64, reason_cid: Vec<u8> },
         OrderSellerCancelled { order_id: u64, amount: BalanceOf<T>, token_amount: u128, reason_cid: Vec<u8> },
         OrderForceRefunded { order_id: u64, reason_cid: Option<Vec<u8>> },
@@ -395,6 +419,12 @@ pub mod pallet {
         SubscriptionNotSupported,
         /// 店铺未激活（存在但处于暂停/关闭状态）
         ShopInactive,
+        /// 代付人不能是卖家
+        PayerCannotBeSeller,
+        /// 非订单参与者（buyer/payer）
+        NotOrderParticipant,
+        /// 代付人订单索引已满
+        PayerOrdersFull,
     }
 
     // ==================== Hooks ====================
@@ -432,231 +462,7 @@ pub mod pallet {
             referrer: Option<T::AccountId>,
         ) -> DispatchResult {
             let buyer = ensure_signed(origin)?;
-
-            ensure!(quantity > 0, Error::<T>::InvalidQuantity);
-
-            // M2-fix: 一次 storage read 获取商品全部下单所需字段（替代 9 次独立查询）
-            let product_info = T::ProductProvider::get_product_info(product_id)
-                .ok_or(Error::<T>::ProductNotFound)?;
-            ensure!(
-                product_info.status == ProductStatus::OnSale,
-                Error::<T>::ProductNotOnSale
-            );
-            let shop_id = product_info.shop_id;
-            let price = product_info.price;
-
-            if product_info.min_order_quantity > 0 {
-                ensure!(quantity >= product_info.min_order_quantity, Error::<T>::QuantityBelowMinimum);
-            }
-            if product_info.max_order_quantity > 0 {
-                ensure!(quantity <= product_info.max_order_quantity, Error::<T>::QuantityAboveMaximum);
-            }
-
-            ensure!(T::ShopProvider::shop_exists(shop_id), Error::<T>::ShopNotFound);
-            ensure!(T::ShopProvider::is_shop_active(shop_id), Error::<T>::ShopInactive);
-            let seller = T::ShopProvider::shop_owner(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(seller != buyer, Error::<T>::CannotBuyOwnProduct);
-
-            let entity_id = T::ShopProvider::shop_entity_id(shop_id)
-                .ok_or(Error::<T>::ShopNotFound)?;
-
-            // M2-R11: referrer 不能是买家自己或卖家
-            if let Some(ref r) = referrer {
-                ensure!(*r != buyer, Error::<T>::InvalidReferrer);
-                ensure!(*r != seller, Error::<T>::InvalidReferrer);
-            }
-
-            // P1: 封禁检查
-            ensure!(
-                !T::MemberProvider::is_banned(entity_id, &buyer),
-                Error::<T>::BuyerBanned
-            );
-
-            // L3-R11: 统一获取 buyer_level，可见性校验和折扣计算复用
-            let buyer_level = T::MemberProvider::get_effective_level(entity_id, &buyer);
-
-            match product_info.visibility {
-                ProductVisibility::Public => {},
-                ProductVisibility::MembersOnly => {
-                    ensure!(
-                        T::MemberProvider::is_member(entity_id, &buyer),
-                        Error::<T>::ProductMembersOnly
-                    );
-                },
-                ProductVisibility::LevelGated(required_level) => {
-                    ensure!(
-                        T::MemberProvider::is_member(entity_id, &buyer),
-                        Error::<T>::ProductMembersOnly
-                    );
-                    ensure!(
-                        buyer_level >= required_level,
-                        Error::<T>::MemberLevelInsufficient
-                    );
-                },
-            }
-
-            // stock == 0 表示无限库存
-            if product_info.stock > 0 {
-                ensure!(product_info.stock >= quantity, Error::<T>::InsufficientStock);
-            }
-
-            let total_amount = price.checked_mul(&quantity.into())
-                .ok_or(Error::<T>::Overflow)?;
-
-            let resolved_payment_asset = payment_asset.unwrap_or(PaymentAsset::Native);
-
-            let mut final_amount = total_amount;
-            if buyer_level > 0 {
-                let discount_bps: u32 = T::MemberProvider::get_level_discount(entity_id, buyer_level).into();
-                if discount_bps > 0 && discount_bps < 10000 {
-                    let discount = final_amount.saturating_mul(discount_bps.into()) / 10000u32.into();
-                    final_amount = final_amount.saturating_sub(discount);
-                }
-            }
-
-            // 积分/购物余额抵扣（仅 Native）
-            if resolved_payment_asset == PaymentAsset::Native {
-                if let Some(tokens) = use_tokens {
-                    if !tokens.is_zero() && T::EntityToken::is_token_enabled(entity_id) {
-                        let discount = T::EntityToken::redeem_for_discount(entity_id, &buyer, tokens)?;
-                        final_amount = final_amount.saturating_sub(discount);
-                    }
-                }
-                if let Some(shopping_amount) = use_shopping_balance {
-                    if !shopping_amount.is_zero() {
-                        ensure!(shopping_amount <= final_amount, Error::<T>::InvalidAmount);
-                        T::ShoppingBalance::consume_shopping_balance(entity_id, &buyer, shopping_amount)?;
-                        final_amount = final_amount.saturating_sub(shopping_amount);
-                    }
-                }
-            }
-
-            ensure!(!final_amount.is_zero(), Error::<T>::InvalidAmount);
-
-            let platform_fee = match resolved_payment_asset {
-                PaymentAsset::Native => {
-                    final_amount
-                        .saturating_mul(PlatformFeeRate::<T>::get().into())
-                        / 10000u32.into()
-                },
-                PaymentAsset::EntityToken => Zero::zero(),
-            };
-
-            let shipping_cid: Option<BoundedVec<u8, T::MaxCidLength>> = shipping_cid
-                .map(|c| c.try_into().map_err(|_| Error::<T>::CidTooLong))
-                .transpose()?;
-
-            let bounded_note_cid: Option<BoundedVec<u8, T::MaxCidLength>> = note_cid
-                .map(|c| c.try_into().map_err(|_| Error::<T>::CidTooLong))
-                .transpose()?;
-
-            let product_category = product_info.category;
-
-            ensure!(
-                product_category != ProductCategory::Subscription,
-                Error::<T>::SubscriptionNotSupported
-            );
-
-            let requires_shipping = Self::category_requires_shipping(&product_category);
-
-            if requires_shipping {
-                ensure!(shipping_cid.is_some(), Error::<T>::ShippingCidRequired);
-            }
-
-            let order_id = NextOrderId::<T>::get();
-            let now = <frame_system::Pallet<T>>::block_number();
-
-            let token_payment_amount: u128 = match resolved_payment_asset {
-                PaymentAsset::Native => {
-                    T::Escrow::lock_from(&buyer, order_id, final_amount)?;
-                    0u128
-                },
-                PaymentAsset::EntityToken => {
-                    ensure!(T::EntityToken::is_token_enabled(entity_id), Error::<T>::EntityTokenNotEnabled);
-                    let buyer_token_balance = T::EntityToken::token_balance(entity_id, &buyer);
-                    ensure!(buyer_token_balance >= final_amount, Error::<T>::InsufficientTokenBalance);
-                    T::EntityToken::reserve(entity_id, &buyer, final_amount)?;
-                    final_amount.saturated_into::<u128>()
-                },
-            };
-
-            T::ProductProvider::deduct_stock(product_id, quantity)?;
-            T::ProductProvider::add_sold_count(product_id, quantity)?;
-
-            let initial_status = if product_category == ProductCategory::Digital {
-                OrderStatus::Completed
-            } else {
-                OrderStatus::Paid
-            };
-
-            let order = Order {
-                id: order_id,
-                entity_id,
-                shop_id,
-                product_id,
-                buyer: buyer.clone(),
-                seller: seller.clone(),
-                quantity,
-                unit_price: price,
-                total_amount: final_amount,
-                platform_fee,
-                product_category,
-                shipping_cid,
-                tracking_cid: None,
-                status: initial_status,
-                created_at: now,
-                shipped_at: None,
-                completed_at: if product_category == ProductCategory::Digital { Some(now) } else { None },
-                service_started_at: None,
-                service_completed_at: None,
-                payment_asset: resolved_payment_asset,
-                token_payment_amount,
-                confirm_extended: false,
-                dispute_rejected: false,
-                dispute_deadline: None,
-                note_cid: bounded_note_cid,
-                refund_reason_cid: None,
-            };
-
-            Orders::<T>::insert(order_id, &order);
-            BuyerOrders::<T>::try_mutate(&buyer, |ids| ids.try_push(order_id))
-                .map_err(|_| Error::<T>::Overflow)?;
-            ShopOrders::<T>::try_mutate(shop_id, |ids| ids.try_push(order_id))
-                .map_err(|_| Error::<T>::Overflow)?;
-            let next_id = order_id.checked_add(1).ok_or(Error::<T>::Overflow)?;
-            NextOrderId::<T>::put(next_id);
-
-            if product_category != ProductCategory::Digital {
-                let expiry_block = now.saturating_add(T::ShipTimeout::get());
-                ExpiryQueue::<T>::try_mutate(expiry_block, |ids| {
-                    ids.try_push(order_id).map_err(|_| Error::<T>::ExpiryQueueFull)
-                })?;
-            }
-
-            // P2: 存储推荐人（完成时用于 auto_register）
-            if let Some(ref r) = referrer {
-                OrderReferrer::<T>::insert(order_id, r);
-            }
-
-            OrderStats::<T>::mutate(|stats| {
-                stats.total_orders = stats.total_orders.saturating_add(1);
-            });
-
-            Self::deposit_event(Event::OrderCreated {
-                order_id,
-                entity_id,
-                buyer: buyer.clone(),
-                seller: seller.clone(),
-                amount: final_amount,
-                payment_asset: resolved_payment_asset,
-                token_amount: token_payment_amount,
-            });
-
-            if product_category == ProductCategory::Digital {
-                Self::do_complete_order(order_id, &order)?;
-            }
-
-            Ok(())
+            Self::do_place_order(buyer, None, product_id, quantity, shipping_cid, use_tokens, use_shopping_balance, payment_asset, note_cid, referrer)
         }
 
         /// 取消订单（数字商品不可取消）
@@ -666,7 +472,7 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
 
             let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
-            ensure!(order.buyer == who, Error::<T>::NotOrderBuyer);
+            ensure!(Self::is_order_participant(&order, &who), Error::<T>::NotOrderParticipant);
             ensure!(
                 order.product_category != ProductCategory::Digital,
                 Error::<T>::DigitalProductCannotCancel
@@ -754,41 +560,7 @@ pub mod pallet {
             reason_cid: Vec<u8>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-
-            let bounded_reason = Self::validate_reason_cid(reason_cid)?;
-
-            let now = <frame_system::Pallet<T>>::block_number();
-            let expiry_block = now.saturating_add(T::DisputeTimeout::get());
-
-            let payment_asset = Orders::<T>::try_mutate(order_id, |maybe_order| -> Result<PaymentAsset, DispatchError> {
-                let order = maybe_order.as_mut().ok_or(Error::<T>::OrderNotFound)?;
-                ensure!(order.buyer == who, Error::<T>::NotOrderBuyer);
-                ensure!(
-                    order.product_category != ProductCategory::Digital,
-                    Error::<T>::DigitalProductCannotRefund
-                );
-                ensure!(
-                    order.status == OrderStatus::Paid || order.status == OrderStatus::Shipped,
-                    Error::<T>::InvalidOrderStatus
-                );
-
-                let asset = order.payment_asset.clone();
-                order.status = OrderStatus::Disputed;
-                order.refund_reason_cid = Some(bounded_reason);
-                order.dispute_deadline = Some(expiry_block);
-                Ok(asset)
-            })?;
-
-            ExpiryQueue::<T>::try_mutate(expiry_block, |ids| {
-                ids.try_push(order_id).map_err(|_| Error::<T>::ExpiryQueueFull)
-            })?;
-
-            if payment_asset == PaymentAsset::Native {
-                T::Escrow::set_disputed(order_id)?;
-            }
-
-            Self::deposit_event(Event::OrderDisputed { order_id });
-            Ok(())
+            Self::do_request_refund(who, order_id, reason_cid)
         }
 
         /// 同意退款（卖家）
@@ -796,23 +568,7 @@ pub mod pallet {
         #[pallet::weight(T::WeightInfo::approve_refund())]
         pub fn approve_refund(origin: OriginFor<T>, order_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
-
-            let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
-            ensure!(order.seller == who, Error::<T>::NotOrderSeller);
-            ensure!(order.status == OrderStatus::Disputed, Error::<T>::InvalidOrderStatus);
-
-            if order.payment_asset == PaymentAsset::Native {
-                T::Escrow::set_resolved(order_id)?;
-            }
-
-            Self::do_cancel_or_refund(&order, order_id, OrderStatus::Refunded)?;
-
-            Self::deposit_event(Event::OrderRefunded {
-                order_id,
-                amount: order.total_amount,
-                token_amount: order.token_payment_amount,
-            });
-            Ok(())
+            Self::do_approve_refund(who, order_id)
         }
 
         /// 开始服务（卖家，服务类订单）
@@ -960,38 +716,7 @@ pub mod pallet {
             reason_cid: Vec<u8>,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-
-            let bounded_reason = Self::validate_reason_cid(reason_cid)?;
-
-            let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
-            ensure!(order.seller == who, Error::<T>::NotOrderSeller);
-            ensure!(order.status == OrderStatus::Disputed, Error::<T>::InvalidOrderStatus);
-            ensure!(!order.dispute_rejected, Error::<T>::DisputeAlreadyRejected);
-
-            let now = <frame_system::Pallet<T>>::block_number();
-            let expiry_block = now.saturating_add(T::DisputeTimeout::get());
-
-            // H4: 清理 request_refund 创建的旧超时条目
-            if let Some(old_deadline) = order.dispute_deadline {
-                ExpiryQueue::<T>::mutate(old_deadline, |ids| {
-                    ids.retain(|&id| id != order_id);
-                });
-            }
-
-            // H3-fix: ExpiryQueue 写入先于 Orders 更新，确保队列满时不会产生不一致状态
-            ExpiryQueue::<T>::try_mutate(expiry_block, |ids| {
-                ids.try_push(order_id).map_err(|_| Error::<T>::ExpiryQueueFull)
-            })?;
-
-            Orders::<T>::mutate(order_id, |maybe_order| {
-                if let Some(o) = maybe_order {
-                    o.dispute_rejected = true;
-                    o.dispute_deadline = Some(expiry_block);
-                }
-            });
-
-            Self::deposit_event(Event::RefundRejected { order_id, reason_cid: bounded_reason.into_inner() });
-            Ok(())
+            Self::do_reject_refund(who, order_id, reason_cid)
         }
 
         /// 卖家主动取消订单（仅 Paid 状态，非数字商品）
@@ -1032,29 +757,7 @@ pub mod pallet {
         #[pallet::weight(T::WeightInfo::force_refund())]
         pub fn force_refund(origin: OriginFor<T>, order_id: u64, reason_cid: Option<Vec<u8>>) -> DispatchResult {
             ensure_root(origin)?;
-
-            let reason = Self::validate_optional_reason_cid(&reason_cid)?;
-
-            let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
-            ensure!(
-                matches!(order.status, OrderStatus::Paid | OrderStatus::Shipped | OrderStatus::Disputed),
-                Error::<T>::CannotForceOrder
-            );
-
-            // M4-fix: 传播 set_resolved 错误，避免后续 transfer_from_escrow 因 disputed 状态失败
-            if order.status == OrderStatus::Disputed && order.payment_asset == PaymentAsset::Native {
-                T::Escrow::set_resolved(order_id)?;
-            }
-
-            Self::do_cancel_or_refund(&order, order_id, OrderStatus::Refunded)?;
-
-            Self::deposit_event(Event::OrderForceRefunded { order_id, reason_cid: reason });
-            Self::deposit_event(Event::OrderRefunded {
-                order_id,
-                amount: order.total_amount,
-                token_amount: order.token_payment_amount,
-            });
-            Ok(())
+            Self::do_force_refund(order_id, reason_cid)
         }
 
         /// 管理员强制完成订单（Root / 治理）
@@ -1062,23 +765,7 @@ pub mod pallet {
         #[pallet::weight(T::WeightInfo::force_complete())]
         pub fn force_complete(origin: OriginFor<T>, order_id: u64, reason_cid: Option<Vec<u8>>) -> DispatchResult {
             ensure_root(origin)?;
-
-            let reason = Self::validate_optional_reason_cid(&reason_cid)?;
-
-            let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
-            ensure!(
-                matches!(order.status, OrderStatus::Paid | OrderStatus::Shipped | OrderStatus::Disputed),
-                Error::<T>::CannotForceOrder
-            );
-
-            // M4-fix: 传播 set_resolved 错误
-            if order.status == OrderStatus::Disputed && order.payment_asset == PaymentAsset::Native {
-                T::Escrow::set_resolved(order_id)?;
-            }
-
-            Self::do_complete_order(order_id, &order)?;
-            Self::deposit_event(Event::OrderForceCompleted { order_id, reason_cid: reason });
-            Ok(())
+            Self::do_force_complete(order_id, reason_cid)
         }
 
         /// 买家修改收货地址（仅 Paid 状态，发货前）
@@ -1256,39 +943,7 @@ pub mod pallet {
             reason_cid: Option<Vec<u8>>,
         ) -> DispatchResult {
             ensure_root(origin)?;
-
-            ensure!(refund_bps >= 1 && refund_bps <= 9999, Error::<T>::InvalidRefundBps);
-            let reason = Self::validate_optional_reason_cid(&reason_cid)?;
-
-            let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
-            ensure!(
-                order.payment_asset == PaymentAsset::Native,
-                Error::<T>::PartialRefundNotSupported
-            );
-            ensure!(
-                matches!(order.status, OrderStatus::Paid | OrderStatus::Shipped | OrderStatus::Disputed),
-                Error::<T>::CannotForceOrder
-            );
-
-            if order.status == OrderStatus::Disputed {
-                let _ = T::Escrow::set_resolved(order_id);
-            }
-
-            let release_bps = 10000u16.saturating_sub(refund_bps);
-            T::Escrow::split_partial(order_id, &order.seller, &order.buyer, release_bps)?;
-
-            Self::cancel_commission_by_asset(&order, order_id);
-
-            Orders::<T>::mutate(order_id, |maybe_order| {
-                if let Some(o) = maybe_order {
-                    o.status = OrderStatus::Refunded;
-                }
-            });
-
-            OrderReferrer::<T>::remove(order_id);
-
-            Self::deposit_event(Event::OrderPartialRefunded { order_id, refund_bps, reason_cid: reason });
-            Ok(())
+            Self::do_force_partial_refund(order_id, refund_bps, reason_cid)
         }
 
         /// 买家撤回争议（仅卖家尚未拒绝时可用）
@@ -1298,56 +953,7 @@ pub mod pallet {
         #[pallet::weight(T::WeightInfo::withdraw_dispute())]
         pub fn withdraw_dispute(origin: OriginFor<T>, order_id: u64) -> DispatchResult {
             let who = ensure_signed(origin)?;
-
-            let order = Orders::<T>::get(order_id).ok_or(Error::<T>::OrderNotFound)?;
-            ensure!(order.buyer == who, Error::<T>::NotOrderBuyer);
-            ensure!(order.status == OrderStatus::Disputed, Error::<T>::InvalidOrderStatus);
-            ensure!(!order.dispute_rejected, Error::<T>::DisputeAlreadyRejected);
-
-            let restored_status = if order.shipped_at.is_some() {
-                OrderStatus::Shipped
-            } else {
-                OrderStatus::Paid
-            };
-
-            if order.payment_asset == PaymentAsset::Native {
-                T::Escrow::set_resolved(order_id)?;
-            }
-
-            // 清理争议超时队列条目
-            if let Some(deadline) = order.dispute_deadline {
-                ExpiryQueue::<T>::mutate(deadline, |ids| {
-                    ids.retain(|&id| id != order_id);
-                });
-            }
-
-            let now = <frame_system::Pallet<T>>::block_number();
-            let new_expiry = match restored_status {
-                OrderStatus::Shipped => {
-                    if Self::is_service_like(&order.product_category) {
-                        now.saturating_add(T::ServiceConfirmTimeout::get())
-                    } else {
-                        now.saturating_add(T::ConfirmTimeout::get())
-                    }
-                },
-                _ => now.saturating_add(T::ShipTimeout::get()),
-            };
-
-            ExpiryQueue::<T>::try_mutate(new_expiry, |ids| {
-                ids.try_push(order_id).map_err(|_| Error::<T>::ExpiryQueueFull)
-            })?;
-
-            Orders::<T>::mutate(order_id, |maybe_order| {
-                if let Some(o) = maybe_order {
-                    o.status = restored_status;
-                    o.dispute_deadline = None;
-                    o.dispute_rejected = false;
-                    o.refund_reason_cid = None;
-                }
-            });
-
-            Self::deposit_event(Event::DisputeWithdrawn { order_id });
-            Ok(())
+            Self::do_withdraw_dispute(who, order_id)
         }
 
         /// 管理员手动处理指定区块的过期订单（解决 C1 孤立条目问题）
@@ -1374,28 +980,336 @@ pub mod pallet {
             });
             Ok(())
         }
+
+        /// 代付下单：payer 签名为 buyer 付款
+        #[pallet::call_index(23)]
+        #[pallet::weight(T::WeightInfo::place_order_for())]
+        pub fn place_order_for(
+            origin: OriginFor<T>,
+            buyer: T::AccountId,
+            product_id: u64,
+            quantity: u32,
+            shipping_cid: Option<Vec<u8>>,
+            use_tokens: Option<BalanceOf<T>>,
+            use_shopping_balance: Option<BalanceOf<T>>,
+            payment_asset: Option<PaymentAsset>,
+            note_cid: Option<Vec<u8>>,
+            referrer: Option<T::AccountId>,
+        ) -> DispatchResult {
+            let payer = ensure_signed(origin)?;
+            Self::do_place_order(buyer, Some(payer), product_id, quantity, shipping_cid, use_tokens, use_shopping_balance, payment_asset, note_cid, referrer)
+        }
+
+        /// 清理代付人订单索引（移除已终态的订单 ID，释放 BoundedVec 容量）
+        #[pallet::call_index(24)]
+        #[pallet::weight(T::WeightInfo::cleanup_payer_orders())]
+        pub fn cleanup_payer_orders(origin: OriginFor<T>) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let orders = PayerOrders::<T>::get(&who);
+            let before = orders.len() as u32;
+
+            let retained: Vec<u64> = orders.iter().copied().filter(|&oid| {
+                Orders::<T>::get(oid)
+                    .map(|o| !matches!(o.status, OrderStatus::Completed | OrderStatus::Cancelled | OrderStatus::Refunded))
+                    .unwrap_or(false)
+            }).collect();
+
+            let after = retained.len() as u32;
+            let removed = before.saturating_sub(after);
+            ensure!(removed > 0, Error::<T>::NothingToClean);
+
+            let bounded: BoundedVec<u64, T::MaxPayerOrders> = retained
+                .try_into()
+                .expect("retained is subset of original bounded vec");
+            PayerOrders::<T>::insert(&who, bounded);
+
+            Self::deposit_event(Event::PayerOrdersCleaned { payer: who, removed });
+            Ok(())
+        }
     }
 
     // ==================== 内部函数 ====================
 
     impl<T: Config> Pallet<T> {
+        /// 获取实际资金账户：有代付人用代付人，否则用买家
+        pub(crate) fn fund_account(order: &OrderOf<T>) -> &T::AccountId {
+            order.payer.as_ref().unwrap_or(&order.buyer)
+        }
+
+        /// 是否为订单参与者（buyer 或 payer）
+        pub(crate) fn is_order_participant(order: &OrderOf<T>, who: &T::AccountId) -> bool {
+            order.buyer == *who || order.payer.as_ref() == Some(who)
+        }
+
+        /// 下单核心逻辑（place_order 和 place_order_for 共用）
+        fn do_place_order(
+            buyer: T::AccountId,
+            payer: Option<T::AccountId>,
+            product_id: u64,
+            quantity: u32,
+            shipping_cid: Option<Vec<u8>>,
+            use_tokens: Option<BalanceOf<T>>,
+            use_shopping_balance: Option<BalanceOf<T>>,
+            payment_asset: Option<PaymentAsset>,
+            note_cid: Option<Vec<u8>>,
+            referrer: Option<T::AccountId>,
+        ) -> DispatchResult {
+            ensure!(quantity > 0, Error::<T>::InvalidQuantity);
+
+            // actual_payer: 实际出资账户
+            let actual_payer = payer.as_ref().unwrap_or(&buyer);
+
+            let product_info = T::ProductProvider::get_product_info(product_id)
+                .ok_or(Error::<T>::ProductNotFound)?;
+            ensure!(
+                product_info.status == ProductStatus::OnSale,
+                Error::<T>::ProductNotOnSale
+            );
+            let shop_id = product_info.shop_id;
+            let price = product_info.price;
+
+            if product_info.min_order_quantity > 0 {
+                ensure!(quantity >= product_info.min_order_quantity, Error::<T>::QuantityBelowMinimum);
+            }
+            if product_info.max_order_quantity > 0 {
+                ensure!(quantity <= product_info.max_order_quantity, Error::<T>::QuantityAboveMaximum);
+            }
+
+            ensure!(T::ShopProvider::shop_exists(shop_id), Error::<T>::ShopNotFound);
+            ensure!(T::ShopProvider::is_shop_active(shop_id), Error::<T>::ShopInactive);
+            let seller = T::ShopProvider::shop_owner(shop_id).ok_or(Error::<T>::ShopNotFound)?;
+            ensure!(seller != buyer, Error::<T>::CannotBuyOwnProduct);
+            // 代付人不能是卖家
+            ensure!(*actual_payer != seller, Error::<T>::PayerCannotBeSeller);
+
+            let entity_id = T::ShopProvider::shop_entity_id(shop_id)
+                .ok_or(Error::<T>::ShopNotFound)?;
+
+            if let Some(ref r) = referrer {
+                ensure!(*r != buyer, Error::<T>::InvalidReferrer);
+                ensure!(*r != seller, Error::<T>::InvalidReferrer);
+            }
+
+            ensure!(
+                !T::MemberProvider::is_banned(entity_id, &buyer),
+                Error::<T>::BuyerBanned
+            );
+
+            let buyer_level = T::MemberProvider::get_effective_level(entity_id, &buyer);
+
+            match product_info.visibility {
+                ProductVisibility::Public => {},
+                ProductVisibility::MembersOnly => {
+                    ensure!(
+                        T::MemberProvider::is_member(entity_id, &buyer),
+                        Error::<T>::ProductMembersOnly
+                    );
+                },
+                ProductVisibility::LevelGated(required_level) => {
+                    ensure!(
+                        T::MemberProvider::is_member(entity_id, &buyer),
+                        Error::<T>::ProductMembersOnly
+                    );
+                    ensure!(
+                        buyer_level >= required_level,
+                        Error::<T>::MemberLevelInsufficient
+                    );
+                },
+            }
+
+            if product_info.stock > 0 {
+                ensure!(product_info.stock >= quantity, Error::<T>::InsufficientStock);
+            }
+
+            let total_amount = price.checked_mul(&quantity.into())
+                .ok_or(Error::<T>::Overflow)?;
+
+            let resolved_payment_asset = payment_asset.unwrap_or(PaymentAsset::Native);
+
+            let mut final_amount = total_amount;
+            if buyer_level > 0 {
+                let discount_bps: u32 = T::MemberProvider::get_level_discount(entity_id, buyer_level).into();
+                if discount_bps > 0 && discount_bps < 10000 {
+                    let discount = final_amount.saturating_mul(discount_bps.into()) / 10000u32.into();
+                    final_amount = final_amount.saturating_sub(discount);
+                }
+            }
+
+            // 积分/购物余额抵扣（仅 Native，基于 buyer 的权益）
+            if resolved_payment_asset == PaymentAsset::Native {
+                if let Some(tokens) = use_tokens {
+                    if !tokens.is_zero() && T::Loyalty::is_token_enabled(entity_id) {
+                        let discount = T::Loyalty::redeem_for_discount(entity_id, &buyer, tokens)?;
+                        final_amount = final_amount.saturating_sub(discount);
+                    }
+                }
+                if let Some(shopping_amount) = use_shopping_balance {
+                    if !shopping_amount.is_zero() {
+                        ensure!(shopping_amount <= final_amount, Error::<T>::InvalidAmount);
+                        T::Loyalty::consume_shopping_balance(entity_id, &buyer, shopping_amount)?;
+                        final_amount = final_amount.saturating_sub(shopping_amount);
+                    }
+                }
+            }
+
+            ensure!(!final_amount.is_zero(), Error::<T>::InvalidAmount);
+
+            let platform_fee = match resolved_payment_asset {
+                PaymentAsset::Native => {
+                    final_amount
+                        .saturating_mul(PlatformFeeRate::<T>::get().into())
+                        / 10000u32.into()
+                },
+                PaymentAsset::EntityToken => Zero::zero(),
+            };
+
+            let shipping_cid: Option<BoundedVec<u8, T::MaxCidLength>> = shipping_cid
+                .map(|c| c.try_into().map_err(|_| Error::<T>::CidTooLong))
+                .transpose()?;
+
+            let bounded_note_cid: Option<BoundedVec<u8, T::MaxCidLength>> = note_cid
+                .map(|c| c.try_into().map_err(|_| Error::<T>::CidTooLong))
+                .transpose()?;
+
+            let product_category = product_info.category;
+
+            ensure!(
+                product_category != ProductCategory::Subscription,
+                Error::<T>::SubscriptionNotSupported
+            );
+
+            let requires_shipping = Self::category_requires_shipping(&product_category);
+
+            if requires_shipping {
+                ensure!(shipping_cid.is_some(), Error::<T>::ShippingCidRequired);
+            }
+
+            let order_id = NextOrderId::<T>::get();
+            let now = <frame_system::Pallet<T>>::block_number();
+
+            // 资金锁定：从 actual_payer 扣款
+            let token_payment_amount: u128 = match resolved_payment_asset {
+                PaymentAsset::Native => {
+                    T::Escrow::lock_from(actual_payer, order_id, final_amount)?;
+                    0u128
+                },
+                PaymentAsset::EntityToken => {
+                    ensure!(T::EntityToken::is_token_enabled(entity_id), Error::<T>::EntityTokenNotEnabled);
+                    let payer_token_balance = T::EntityToken::token_balance(entity_id, actual_payer);
+                    ensure!(payer_token_balance >= final_amount, Error::<T>::InsufficientTokenBalance);
+                    T::EntityToken::reserve(entity_id, actual_payer, final_amount)?;
+                    final_amount.saturated_into::<u128>()
+                },
+            };
+
+            T::ProductProvider::deduct_stock(product_id, quantity)?;
+            T::ProductProvider::add_sold_count(product_id, quantity)?;
+
+            let initial_status = if product_category == ProductCategory::Digital {
+                OrderStatus::Completed
+            } else {
+                OrderStatus::Paid
+            };
+
+            // payer==buyer 退化为 None
+            let stored_payer = payer.filter(|p| *p != buyer);
+
+            let order = Order {
+                id: order_id,
+                entity_id,
+                shop_id,
+                product_id,
+                buyer: buyer.clone(),
+                seller: seller.clone(),
+                payer: stored_payer.clone(),
+                quantity,
+                unit_price: price,
+                total_amount: final_amount,
+                platform_fee,
+                product_category,
+                shipping_cid,
+                tracking_cid: None,
+                status: initial_status,
+                created_at: now,
+                shipped_at: None,
+                completed_at: if product_category == ProductCategory::Digital { Some(now) } else { None },
+                service_started_at: None,
+                service_completed_at: None,
+                payment_asset: resolved_payment_asset,
+                token_payment_amount,
+                confirm_extended: false,
+                dispute_rejected: false,
+                dispute_deadline: None,
+                note_cid: bounded_note_cid,
+                refund_reason_cid: None,
+            };
+
+            Orders::<T>::insert(order_id, &order);
+            BuyerOrders::<T>::try_mutate(&buyer, |ids| ids.try_push(order_id))
+                .map_err(|_| Error::<T>::Overflow)?;
+            ShopOrders::<T>::try_mutate(shop_id, |ids| ids.try_push(order_id))
+                .map_err(|_| Error::<T>::Overflow)?;
+
+            // 代付人订单索引
+            if let Some(ref p) = stored_payer {
+                PayerOrders::<T>::try_mutate(p, |ids| ids.try_push(order_id))
+                    .map_err(|_| Error::<T>::PayerOrdersFull)?;
+            }
+
+            let next_id = order_id.checked_add(1).ok_or(Error::<T>::Overflow)?;
+            NextOrderId::<T>::put(next_id);
+
+            if product_category != ProductCategory::Digital {
+                let expiry_block = now.saturating_add(T::ShipTimeout::get());
+                ExpiryQueue::<T>::try_mutate(expiry_block, |ids| {
+                    ids.try_push(order_id).map_err(|_| Error::<T>::ExpiryQueueFull)
+                })?;
+            }
+
+            if let Some(ref r) = referrer {
+                OrderReferrer::<T>::insert(order_id, r);
+            }
+
+            OrderStats::<T>::mutate(|stats| {
+                stats.total_orders = stats.total_orders.saturating_add(1);
+            });
+
+            Self::deposit_event(Event::OrderCreated {
+                order_id,
+                entity_id,
+                buyer: buyer.clone(),
+                seller: seller.clone(),
+                payer: stored_payer.clone(),
+                amount: final_amount,
+                payment_asset: resolved_payment_asset,
+                token_amount: token_payment_amount,
+            });
+
+            if product_category == ProductCategory::Digital {
+                Self::do_complete_order(order_id, &order)?;
+            }
+
+            Ok(())
+        }
+
         /// 商品类别是否需要物流
         fn category_requires_shipping(cat: &ProductCategory) -> bool {
             matches!(cat, ProductCategory::Physical | ProductCategory::Bundle | ProductCategory::Other)
         }
 
         /// 是否为服务类/订阅类（共享 start_service/complete_service/confirm_service 流程）
-        fn is_service_like(cat: &ProductCategory) -> bool {
+        pub(crate) fn is_service_like(cat: &ProductCategory) -> bool {
             matches!(cat, ProductCategory::Service | ProductCategory::Subscription)
         }
 
-        fn validate_reason_cid(cid: Vec<u8>) -> Result<BoundedVec<u8, T::MaxCidLength>, DispatchError> {
+        pub(crate) fn validate_reason_cid(cid: Vec<u8>) -> Result<BoundedVec<u8, T::MaxCidLength>, DispatchError> {
             ensure!(!cid.is_empty(), Error::<T>::EmptyReasonCid);
             let bounded: BoundedVec<u8, T::MaxCidLength> = cid.try_into().map_err(|_| Error::<T>::CidTooLong)?;
             Ok(bounded)
         }
 
-        fn validate_optional_reason_cid(cid: &Option<Vec<u8>>) -> Result<Option<Vec<u8>>, DispatchError> {
+        pub(crate) fn validate_optional_reason_cid(cid: &Option<Vec<u8>>) -> Result<Option<Vec<u8>>, DispatchError> {
             if let Some(c) = cid {
                 ensure!(!c.is_empty(), Error::<T>::EmptyReasonCid);
                 let _: BoundedVec<u8, T::MaxCidLength> = c.clone().try_into().map_err(|_| Error::<T>::CidTooLong)?;
@@ -1403,12 +1317,12 @@ pub mod pallet {
             Ok(cid.clone())
         }
 
-        fn do_cancel_or_refund(order: &OrderOf<T>, order_id: u64, final_status: OrderStatus) -> DispatchResult {
+        pub(crate) fn do_cancel_or_refund(order: &OrderOf<T>, order_id: u64, final_status: OrderStatus) -> DispatchResult {
             Self::refund_by_asset(order, order_id)?;
             if T::ProductProvider::restore_stock(order.product_id, order.quantity).is_err() {
                 Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::StockRestore });
             }
-            Self::cancel_commission_by_asset(order, order_id);
+            Self::notify_order_cancelled(order, order_id);
             Orders::<T>::mutate(order_id, |maybe_order| {
                 if let Some(o) = maybe_order {
                     o.status = final_status;
@@ -1418,15 +1332,16 @@ pub mod pallet {
             Ok(())
         }
 
-        fn do_complete_order(order_id: u64, order: &OrderOf<T>) -> DispatchResult {
+        pub(crate) fn do_complete_order(order_id: u64, order: &OrderOf<T>) -> DispatchResult {
             let seller_amount = order.total_amount.saturating_sub(order.platform_fee);
             let entity_id = order.entity_id;
+            let fund_acct = Self::fund_account(order);
 
             let token_platform_fee: u128 = match order.payment_asset {
                 PaymentAsset::Native => 0u128,
                 PaymentAsset::EntityToken => {
                     let ta: u128 = order.token_payment_amount;
-                    let tfr = T::TokenCommissionHandler::token_platform_fee_rate(entity_id) as u128;
+                    let tfr = T::TokenFeeConfig::token_platform_fee_rate(entity_id) as u128;
                     // M3-R8: 防御性上限 — 费率不超过 10000 bps (100%)，防止外部错误配置导致卖家收入为 0
                     let safe_rate = tfr.min(10000u128);
                     ta.saturating_mul(safe_rate) / 10000u128
@@ -1450,15 +1365,15 @@ pub mod pallet {
                     // 卖家获得扣除平台费后的金额
                     let seller_token: BalanceOf<T> = token_seller_amount.saturated_into();
                     T::EntityToken::repatriate_reserved(
-                        entity_id, &order.buyer, &order.seller, seller_token,
+                        entity_id, fund_acct, &order.seller, seller_token,
                     )?;
 
                     // M1-fix: 平台费转入 entity_account，失败时发事件而非静默吞错
                     if token_platform_fee > 0 {
-                        let entity_account = T::TokenCommissionHandler::entity_account(entity_id);
+                        let entity_account = T::TokenFeeConfig::entity_account(entity_id);
                         let fee_token: BalanceOf<T> = token_platform_fee.saturated_into();
                         if T::EntityToken::repatriate_reserved(
-                            entity_id, &order.buyer, &entity_account, fee_token,
+                            entity_id, fund_acct, &entity_account, fee_token,
                         ).is_err() {
                             Self::deposit_event(Event::OrderOperationFailed {
                                 order_id,
@@ -1478,121 +1393,42 @@ pub mod pallet {
                 }
             });
 
-            // 自动注册买家为会员 + 更新消费金额（best-effort）
-            // auto_register: 首次购买时注册会员（PURCHASE_REQUIRED 策略触发点）
-            // update_spent: 更新消费金额 + 激活待激活会员 + 触发等级升级
+            // Phase 5.3: 预计算 Hook 所需数据，然后委托给 Hook 链
+            let amount_usdt = Self::calculate_amount_usdt(order);
             let referrer = OrderReferrer::<T>::take(order_id);
-            if T::MemberProvider::auto_register(entity_id, &order.buyer, referrer).is_err() {
-                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::MemberAutoRegister });
-            }
-            // H1-R5-fix: Token 订单未花费 NEX，不应将 token 数量当作 NEX 做 USDT 转换
-            let amount_usdt: u64 = match order.payment_asset {
-                PaymentAsset::Native => {
-                    // NEX → USDT 转换: price 精度 10^6, NEX 精度 10^12
-                    // amount_usdt (6 dec) = amount_nex (12 dec) * price (6 dec) / 10^12
-                    let amount_nex: u128 = order.total_amount.saturated_into();
-                    let nex_price: u128 = T::PricingProvider::get_nex_usdt_price() as u128;
-                    amount_nex.saturating_mul(nex_price)
-                        .checked_div(1_000_000_000_000u128)
-                        .unwrap_or(0) as u64
-                },
-                PaymentAsset::EntityToken => {
-                    // F2-fix: Token → NEX → USDT 间接换算
-                    // 仅在 Token 价格可靠（confidence ≥ 30）时换算，否则安全降级为 0
-                    if T::TokenPriceProvider::is_token_price_reliable(entity_id) {
-                        if let Some(token_nex_price) = T::TokenPriceProvider::get_token_price(entity_id) {
-                            let nex_usdt: u128 = T::PricingProvider::get_nex_usdt_price() as u128;
-                            if nex_usdt > 0 {
-                                let token_nex_u128: u128 = token_nex_price.saturated_into();
-                                // amount_usdt = token_amount × (NEX/Token) × (USDT/NEX) / 10^12
-                                // M1-audit: checked_mul 防止三路乘法溢出（saturating_mul + as u64 会产生垃圾值）
-                                order.token_payment_amount
-                                    .checked_mul(token_nex_u128)
-                                    .and_then(|v| v.checked_mul(nex_usdt))
-                                    .and_then(|v| v.checked_div(1_000_000_000_000u128))
-                                    .unwrap_or(0) as u64
-                            } else { 0u64 }
-                        } else { 0u64 }
-                    } else {
-                        0u64
-                    }
-                },
+
+            let token_seller_received: u128 = match order.payment_asset {
+                PaymentAsset::Native => 0u128,
+                PaymentAsset::EntityToken => order.token_payment_amount.saturating_sub(token_platform_fee),
             };
-            if T::MemberProvider::update_spent(
+            let nex_seller_received: BalanceOf<T> = match order.payment_asset {
+                PaymentAsset::Native => seller_amount,
+                PaymentAsset::EntityToken => Zero::zero(),
+            };
+
+            let info = OrderCompletionInfo {
+                order_id,
                 entity_id,
-                &order.buyer,
+                shop_id: order.shop_id,
+                product_id: order.product_id,
+                buyer: order.buyer.clone(),
+                seller: order.seller.clone(),
+                payer: order.payer.clone(),
+                quantity: order.quantity,
+                payment_asset: order.payment_asset,
+                nex_total_amount: order.total_amount,
+                nex_platform_fee: order.platform_fee,
+                nex_seller_received,
+                token_payment_amount: order.token_payment_amount,
+                token_platform_fee,
+                token_seller_received,
+                referrer,
                 amount_usdt,
-            ).is_err() {
-                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::MemberUpdate });
-            }
-
-            // 触发升级规则引擎（best-effort，失败发事件）
-            // update_spent 先执行，确保 total_spent 已含本单；规则引擎读取最新 member 快照
-            if T::MemberProvider::check_order_upgrade_rules(
-                entity_id,
-                &order.buyer,
-                order.product_id,
-                amount_usdt,
-            ).is_err() {
-                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::UpgradeRuleCheck });
-            }
-
-            // H2-fix: 更新店铺统计 — Token 订单使用 token_payment_amount，NEX 订单使用 seller_amount
-            let shop_stats_amount: u128 = match order.payment_asset {
-                PaymentAsset::Native => seller_amount.saturated_into(),
-                PaymentAsset::EntityToken => order.token_payment_amount,
+                product_category: order.product_category,
             };
-            if T::ShopProvider::update_shop_stats(
-                order.shop_id,
-                shop_stats_amount,
-                1,
-            ).is_err() {
-                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::ShopStatsUpdate });
-            }
+            T::OnOrderCompleted::on_completed(&info);
 
-            // 触发佣金计算（best-effort，失败发事件）
-            // 根据支付资产类型分支：Native → NEX 佣金，EntityToken → Token 佣金
-            match order.payment_asset {
-                PaymentAsset::Native => {
-                    if T::CommissionHandler::on_order_completed(
-                        entity_id,
-                        order.shop_id,
-                        order_id,
-                        &order.buyer,
-                        order.total_amount,
-                        order.platform_fee,
-                    ).is_err() {
-                        Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionComplete });
-                    }
-                },
-                PaymentAsset::EntityToken => {
-                    if T::TokenCommissionHandler::on_token_order_completed(
-                        entity_id,
-                        order.shop_id,
-                        order_id,
-                        &order.buyer,
-                        order.token_payment_amount,
-                        token_platform_fee,
-                    ).is_err() {
-                        Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionComplete });
-                    }
-                },
-            }
-
-            // M3-fix: 发放购物积分奖励 — Token 订单使用 token_payment_amount 转换为 Balance
-            let reward_amount: BalanceOf<T> = match order.payment_asset {
-                PaymentAsset::Native => order.total_amount,
-                PaymentAsset::EntityToken => order.token_payment_amount.saturated_into(),
-            };
-            if T::EntityToken::reward_on_purchase(
-                entity_id,
-                &order.buyer,
-                reward_amount,
-            ).is_err() {
-                Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::TokenReward });
-            }
-
-            // M2-R5-fix + M2-R8-fix: NEX/Token 统计分别追踪
+            // 内部统计更新（不是外部副作用，保留在 order 内）
             OrderStats::<T>::mutate(|stats| {
                 stats.completed_orders = stats.completed_orders.saturating_add(1);
                 match order.payment_asset {
@@ -1607,15 +1443,6 @@ pub mod pallet {
                 }
             });
 
-            // M1-R7-fix: Token 订单卖家 NEX 收入为 0，seller_received 应反映实际 NEX 收入
-            let token_seller_received: u128 = match order.payment_asset {
-                PaymentAsset::Native => 0u128,
-                PaymentAsset::EntityToken => order.token_payment_amount.saturating_sub(token_platform_fee),
-            };
-            let nex_seller_received: BalanceOf<T> = match order.payment_asset {
-                PaymentAsset::Native => seller_amount,
-                PaymentAsset::EntityToken => Zero::zero(),
-            };
             Self::deposit_event(Event::OrderCompleted {
                 order_id,
                 seller_received: nex_seller_received,
@@ -1625,31 +1452,60 @@ pub mod pallet {
             Ok(())
         }
 
-        /// 根据支付资产类型取消佣金（best-effort，失败发事件）
-        fn cancel_commission_by_asset(order: &OrderOf<T>, order_id: u64) {
+        /// 预计算 USDT 等值金额（供 Hook 链使用）
+        fn calculate_amount_usdt(order: &OrderOf<T>) -> u64 {
             match order.payment_asset {
                 PaymentAsset::Native => {
-                    if T::CommissionHandler::on_order_cancelled(order_id).is_err() {
-                        Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionCancel });
-                    }
+                    // NEX → USDT 转换: price 精度 10^6, NEX 精度 10^12
+                    let amount_nex: u128 = order.total_amount.saturated_into();
+                    let nex_price: u128 = T::PricingProvider::get_nex_usdt_price() as u128;
+                    amount_nex.saturating_mul(nex_price)
+                        .checked_div(1_000_000_000_000u128)
+                        .unwrap_or(0) as u64
                 },
                 PaymentAsset::EntityToken => {
-                    if T::TokenCommissionHandler::on_token_order_cancelled(order_id).is_err() {
-                        Self::deposit_event(Event::OrderOperationFailed { order_id, operation: OrderOperation::CommissionCancel });
+                    // F2-fix: Token → NEX → USDT 间接换算
+                    let entity_id = order.entity_id;
+                    if T::TokenPriceProvider::is_token_price_reliable(entity_id) {
+                        if let Some(token_nex_price) = T::TokenPriceProvider::get_token_price(entity_id) {
+                            let nex_usdt: u128 = T::PricingProvider::get_nex_usdt_price() as u128;
+                            if nex_usdt > 0 {
+                                let token_nex_u128: u128 = token_nex_price.saturated_into();
+                                order.token_payment_amount
+                                    .checked_mul(token_nex_u128)
+                                    .and_then(|v| v.checked_mul(nex_usdt))
+                                    .and_then(|v| v.checked_div(1_000_000_000_000u128))
+                                    .unwrap_or(0) as u64
+                            } else { 0u64 }
+                        } else { 0u64 }
+                    } else {
+                        0u64
                     }
                 },
             }
         }
 
+        /// Phase 5.3: 通知订单取消 Hook（替代 cancel_commission_by_asset）
+        pub(crate) fn notify_order_cancelled(order: &OrderOf<T>, order_id: u64) {
+            let info = OrderCancellationInfo {
+                order_id,
+                entity_id: order.entity_id,
+                shop_id: order.shop_id,
+                payment_asset: order.payment_asset,
+            };
+            T::OnOrderCancelled::on_cancelled(&info);
+        }
+
         /// 根据支付资产类型退款（Token 用 unreserve，NEX 用 Escrow refund）
         /// 返回 Ok(()) 表示成功，Err 表示 NEX escrow 退款失败
         fn refund_by_asset(order: &OrderOf<T>, order_id: u64) -> DispatchResult {
+            let fund_acct = Self::fund_account(order);
             match order.payment_asset {
                 PaymentAsset::Native => {
-                    T::Escrow::refund_all(order_id, &order.buyer)?;
+                    T::Escrow::refund_all(order_id, fund_acct)?;
                 },
                 PaymentAsset::EntityToken => {
-                    T::EntityToken::unreserve(order.entity_id, &order.buyer, order.total_amount);
+                    T::EntityToken::unreserve(order.entity_id, fund_acct, order.total_amount);
                 },
             }
             Ok(())
@@ -1805,9 +1661,9 @@ pub mod pallet {
         fn can_dispute(order_id: u64, who: &T::AccountId) -> bool {
             Orders::<T>::get(order_id)
                 .map(|o| {
-                    let is_buyer = o.buyer == *who;
+                    let is_participant = Self::is_order_participant(&o, who);
                     let status_ok = matches!(o.status, OrderStatus::Paid | OrderStatus::Shipped);
-                    is_buyer && status_ok
+                    is_participant && status_ok
                 })
                 .unwrap_or(false)
         }
@@ -1856,6 +1712,26 @@ pub mod pallet {
             Orders::<T>::get(order_id)
                 .and_then(|o| o.shipped_at)
                 .map(|b| b.try_into().unwrap_or(u64::MAX))
+        }
+
+        fn has_active_orders_for_shop(shop_id: u64) -> bool {
+            ShopOrders::<T>::get(shop_id).iter().any(|&order_id| {
+                Orders::<T>::get(order_id)
+                    .map(|o| !matches!(o.status,
+                        OrderStatus::Completed | OrderStatus::Cancelled |
+                        OrderStatus::Refunded | OrderStatus::Expired |
+                        OrderStatus::PartiallyRefunded
+                    ))
+                    .unwrap_or(false)
+            })
+        }
+
+        fn order_payer(order_id: u64) -> Option<T::AccountId> {
+            Orders::<T>::get(order_id).and_then(|o| o.payer)
+        }
+
+        fn order_fund_account(order_id: u64) -> Option<T::AccountId> {
+            Orders::<T>::get(order_id).map(|o| o.payer.unwrap_or(o.buyer))
         }
     }
 }

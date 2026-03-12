@@ -1,10 +1,8 @@
 //! Mock runtime for pallet-entity-shop tests
 
 use crate as pallet_entity_shop;
-use frame_support::{
-    derive_impl, parameter_types,
-    traits::{ConstU32, ConstU64},
-};
+use frame_support::derive_impl;
+use frame_support::parameter_types;
 use sp_runtime::BuildStorage;
 
 type Block = frame_system::mocking::MockBlock<Test>;
@@ -148,12 +146,15 @@ parameter_types! {
     pub const MaxShopNameLength: u32 = 64;
     pub const MaxCidLength: u32 = 64;
     pub const MaxManagers: u32 = 10;
-    pub const MaxPointsNameLength: u32 = 32;
-    pub const MaxPointsSymbolLength: u32 = 8;
     pub const MinOperatingBalance: u64 = 100;
     pub const WarningThreshold: u64 = 200;
     pub const ShopClosingGracePeriod: u64 = 10;
     pub const MaxShopsPerEntity: u32 = 5;
+}
+
+pub struct MockPointsCleanup;
+impl pallet_entity_common::PointsCleanup for MockPointsCleanup {
+    fn cleanup_shop_points(_shop_id: u64) {}
 }
 
 impl pallet_entity_shop::Config for Test {
@@ -162,8 +163,6 @@ impl pallet_entity_shop::Config for Test {
     type MaxShopNameLength = MaxShopNameLength;
     type MaxCidLength = MaxCidLength;
     type MaxManagers = MaxManagers;
-    type MaxPointsNameLength = MaxPointsNameLength;
-    type MaxPointsSymbolLength = MaxPointsSymbolLength;
     type MinOperatingBalance = MinOperatingBalance;
     type WarningThreshold = WarningThreshold;
     type CommissionFundGuard = ();
@@ -171,6 +170,7 @@ impl pallet_entity_shop::Config for Test {
     type MaxShopsPerEntity = MaxShopsPerEntity;
     type StoragePin = MockStoragePin;
     type ProductProvider = MockProductProvider;
+    type PointsCleanup = MockPointsCleanup;
     type WeightInfo = ();
 }
 

@@ -322,7 +322,7 @@ pub enum RejectionReason {
 
 > v2 新增 `TimedOut` 变体，`timeout_pending_kyc` 专用，替代此前使用的 `Other`。
 
-## 6. Storage（10 项）
+## 6. Storage（11 项）
 
 | 存储项 | 类型 | 作用域 | 说明 |
 |--------|------|--------|------|
@@ -336,6 +336,7 @@ pub enum RejectionReason {
 | `KycHistory` | `DoubleMap<u64, AccountId → BoundedVec<HistoryEntry>>` | per-entity | 操作历史（环形缓冲区） |
 | `PendingKycCount` | `Map<u64 → u32>` | per-entity | 待审核 KYC 数量（含升级请求） |
 | `ApprovedKycCount` | `Map<u64 → u32>` | per-entity | 已批准 KYC 数量 |
+| `ProviderAuthorizedEntities` | `Map<AccountId → BoundedVec<u64>>` | 全局 | Provider 被授权的 Entity 列表（remove_provider 清理用） |
 
 ## 7. Config 配置
 

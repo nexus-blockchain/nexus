@@ -150,9 +150,9 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     /// Storage: `MemberTokenLastWithdrawn` (r:1 w:1)
     /// Storage: `GlobalMinTokenRepurchaseRate` (r:1 w:0)
     /// Storage: `TokenPendingTotal` (r:1 w:1)
-    /// Storage: `TokenShoppingTotal` (r:1 w:1)
+    /// Storage: `LoyaltyToken::token_shopping_total` (r:1 w:1) [via Port]
     /// Storage: `UnallocatedTokenPool` (r:1 w:0)
-    /// Storage: `MemberTokenShoppingBalance` (r:1 w:1)
+    /// Storage: `LoyaltyToken::token_shopping_balance` (r:1 w:1) [via Port]
     /// Storage: `MemberTokenWithdrawalHistory` (r:1 w:1)
     /// Storage: `EntityTokenAccountedBalance` (r:1 w:1)
     /// Storage: `TokenTransferProvider::token_balance_of` (r:1 w:0)
@@ -199,7 +199,7 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     /// Storage: `PoolRewardDisabledAt` (r:1 w:0)
     /// Storage: `CommissionConfigs` (r:1 w:0)
     /// Storage: `TokenPendingTotal` (r:1 w:0)
-    /// Storage: `TokenShoppingTotal` (r:1 w:0)
+    /// Storage: `LoyaltyToken::token_shopping_total` (r:1 w:0) [via Port]
     /// Storage: `TokenTransferProvider::token_balance_of` (r:1 w:0)
     fn withdraw_entity_token_funds() -> Weight {
         Weight::from_parts(65_127_000, 5_120)

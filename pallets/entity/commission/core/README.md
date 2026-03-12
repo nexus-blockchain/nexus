@@ -14,7 +14,7 @@
 - **平台费分配**：招商人 `ReferrerShareBps%` + 国库/留存（无招商人时 100% 进国库）
 - **插件化分佣**：5 个 NEX 插件 + 5 个 Token 插件并行计算，剩余沉入资金池
 - **创建人收益**：从 Pool B 佣金预算中优先扣除创建人份额
-- **提现系统**：四种提现模式 × 三层约束模型 × 自愿复购奖励 × 指定复购目标
+- **提现系统**：四种提现模式 x 三层约束模型 x 自愿复购奖励 x 指定复购目标
 - **偿付安全**：提现前验证 Entity 账户可覆盖所有 pending + shopping + pool 承诺
 - **治理控制**：全局暂停、Entity 级暂停、全局佣金率上限、全局最低复购比例、Root 紧急操作
 - **KYC 守卫**：`ParticipationGuard` trait 在提现和购物余额消费前检查参与权
@@ -22,43 +22,105 @@
 
 ---
 
-## 2. 架构
+## 2. 代码结构
+
+核心引擎代码拆分为四个文件，按职责分治：
 
 ```
-订单模块 ──→ CommissionProvider::process_commission()          (NEX)
-         ──→ TokenCommissionProvider::process_token_commission() (Token)
-                          ↓
-              ┌─ 池 A：平台费无条件分配 ──────────────────────┐
-              │  NEX:  有招商人 → ReferrerShareBps% 给招商人  │
-              │                  剩余 → 国库                  │
-              │        无招商人 → 100% 国库                   │
-              │  Token: 有招商人 → ReferrerShareBps% 给招商人  │
-              │         剩余 → UnallocatedTokenPool（留存）    │
-              └───────────────────────────────────────────────┘
-                          ↓
-              ┌─ 池 B：会员返佣（卖家货款 × max_commission_rate）┐
-              │  0. CreatorReward（创建人收益，优先扣除）         │
-              │  1. ReferralPlugin.calculate()                  │
-              │  2. MultiLevelPlugin.calculate()                │
-              │  3. LevelDiffPlugin.calculate()                 │
-              │  4. SingleLinePlugin.calculate()                │
-              │  5. TeamPlugin.calculate()                      │
-              │      ↓ 剩余                                    │
-              │  POOL_REWARD 模式 → 沉淀池                     │
-              └────────────────────────────────────────────────┘
-                          ↓
-              credit_commission / credit_token_commission → 记账
-                          ↓
-              settle_order_commission → Pending→Withdrawn（订单完结）
-                          ↓
-              withdraw_commission / withdraw_token_commission → 提现 + 分级复购
-                          ↓
-              archive_order_records → 释放存储
+commission/core/src/
+├── lib.rs          ← Config + Storage + Extrinsics + Trait 实现（主框架）
+├── engine.rs       ← 佣金计算引擎：调度 + 记账 + 取消 + 结算
+├── settlement.rs   ← 购物余额结算：NEX 委托 Loyalty、Token 直接管理
+├── withdraw.rs     ← 提现分配计算 + 权限校验 + Token sweep 辅助
+├── runtime_api.rs  ← Runtime API 定义
+├── weights.rs      ← 基准测试权重
+├── benchmarking.rs ← 基准测试骨架
+├── mock.rs         ← 测试 mock
+└── tests.rs        ← 单元测试
+```
+
+### engine.rs — 佣金计算引擎
+
+| 函数 | 说明 |
+|------|------|
+| `process_commission` | NEX 佣金调度引擎（双来源：池 A 平台费 + 池 B 卖家货款 -> 5 插件分配 -> 沉淀池） |
+| `credit_commission` | NEX 佣金记账（Records / Stats / PendingTotal / LastCredited / OrderIds） |
+| `process_token_commission` | Token 佣金调度引擎（含 sweep + 可用额度检查） |
+| `credit_token_commission` | Token 佣金纯记账（不转账，Token 在 entity_account 托管直到提现） |
+| `cancel_commission` | 取消 NEX 佣金（先转账后更新记录；含 Token 取消） |
+| `do_cancel_token_commission` | 取消 Token 佣金（退还 Pool B 沉淀 + Pool A 留存） |
+| `do_settle_order_records` | 订单完结：Pending -> Withdrawn，释放 PendingTotal |
+
+### settlement.rs — 购物余额结算
+
+NEX 购物余额已完全迁移至 Loyalty 模块，本文件通过 `T::Loyalty`（`LoyaltyWritePort`）委托操作。Token 购物余额仍由 commission-core 直接管理。
+
+| 函数 | 说明 |
+|------|------|
+| `do_use_shopping_balance` | 委托 `T::Loyalty::consume_shopping_balance`（纯记账，已废弃，仅保留 trait 兼容） |
+| `do_consume_shopping_balance` | 委托 `T::Loyalty::consume_shopping_balance`（记账 + NEX 转账，含 KYC 检查） |
+| `do_consume_token_shopping_balance` | Token 购物余额消费（扣减记账 + Token 从 Entity 转入会员钱包，含 ParticipationGuard 检查） |
+
+**NEX vs Token 购物余额归属：**
+
+| 资产 | 存储位置 | 操作方式 |
+|------|---------|---------|
+| NEX `MemberShoppingBalance` / `ShopShoppingTotal` | **Loyalty 模块** | 通过 `T::Loyalty`（`LoyaltyWritePort`）委托 |
+| Token `MemberTokenShoppingBalance` / `TokenShoppingTotal` | **commission-core** | 直接读写本地 Storage |
+
+### withdraw.rs — 提现计算与辅助
+
+| 函数 | 说明 |
+|------|------|
+| `calc_withdrawal_split` | NEX 提现/复购/奖励分配计算（三层约束模型） |
+| `calc_token_withdrawal_split` | Token 提现分配计算（与 NEX 对称，独立配置） |
+| `is_pool_reward_locked` | 沉淀池锁定判断（POOL_REWARD 开启或 cooldown 未满） |
+| `ensure_owner_or_admin` | 验证 Entity Owner 或 Admin(COMMISSION_MANAGE) 权限 |
+| `ensure_entity_owner` | 验证 Entity Owner（仅 Owner，用于资金提取） |
+| `sweep_token_free_balance` | 检测 entity_account 外部 Token 转入，归集到沉淀池 |
+
+---
+
+## 3. 架构
+
+```
+订单模块 ──> CommissionProvider::process_commission()          (NEX)
+         ──> TokenCommissionProvider::process_token_commission() (Token)
+                          |
+              +─ 池 A：平台费无条件分配 ──────────────────────+
+              |  NEX:  有招商人 -> ReferrerShareBps% 给招商人  |
+              |                  剩余 -> 国库                  |
+              |        无招商人 -> 100% 国库                   |
+              |  Token: 有招商人 -> ReferrerShareBps% 给招商人  |
+              |         剩余 -> UnallocatedTokenPool（留存）    |
+              +───────────────────────────────────────────────+
+                          |
+              +─ 池 B：会员返佣（卖家货款 x max_commission_rate）+
+              |  0. CreatorReward（创建人收益，优先扣除）         |
+              |  1. ReferralPlugin.calculate()                  |
+              |  2. MultiLevelPlugin.calculate()                |
+              |  3. LevelDiffPlugin.calculate()                 |
+              |  4. SingleLinePlugin.calculate()                |
+              |  5. TeamPlugin.calculate()                      |
+              |      | 剩余                                    |
+              |  POOL_REWARD 模式 -> 沉淀池                     |
+              +────────────────────────────────────────────────+
+                          |
+              credit_commission / credit_token_commission -> 记账
+                          |
+              settle_order_commission -> Pending->Withdrawn（订单完结）
+                          |
+              withdraw_commission / withdraw_token_commission -> 提现 + 分级复购
+                  |                                                    |
+                  |  NEX 复购 -> T::Loyalty::credit_shopping_balance   |
+                  |  Token 复购 -> MemberTokenShoppingBalance（本地）    |
+                          |
+              archive_order_records -> 释放存储
 ```
 
 ---
 
-## 3. 平台费分配
+## 4. 平台费分配
 
 ### NEX 平台费
 
@@ -66,7 +128,7 @@
 
 | 场景 | 招商人（Referrer） | 国库（Treasury） |
 |------|---------------------|------------------|
-| 有招商人 | `platform_fee × ReferrerShareBps / 10000` | 剩余 |
+| 有招商人 | `platform_fee x ReferrerShareBps / 10000` | 剩余 |
 | 无招商人 | 0 | 100% |
 
 - `ReferrerShareBps` 为全局 runtime 常量（典型值 5000 = 50%），不可按 Entity 修改
@@ -76,13 +138,13 @@
 ### Token 平台费
 
 - Token 平台费率由 `TokenPlatformFeeRate` 全局存储控制（默认 100 bps = 1%）
-- 有招商人：`token_platform_fee × ReferrerShareBps / 10000` → 招商人 Token 佣金
+- 有招商人：`token_platform_fee x ReferrerShareBps / 10000` -> 招商人 Token 佣金
 - 剩余部分（Pool A 留存）计入 `UnallocatedTokenPool`，通过 `OrderTokenPlatformRetention` 记录
 - 取消时：Pool A 留存从 `UnallocatedTokenPool` 中扣回
 
 ---
 
-## 4. 提现系统
+## 5. 提现系统
 
 ### 四种提现模式
 
@@ -97,20 +159,20 @@
 
 ```
 Governance 底线（GlobalMinRepurchaseRate，强制）
-    ↓ max()
+    | max()
 Entity 模式设定（FullWithdrawal / FixedRate / LevelBased / MemberChoice）
-    ↓ max()
+    | max()
 会员选择（MemberChoice 模式下的 requested_rate）
-    ↓
-最终复购比率（final_repurchase_rate，≤ 10000）
+    |
+最终复购比率（final_repurchase_rate，<= 10000）
 ```
 
 ### 自愿多复购奖励
 
-超出强制最低线的部分 × `voluntary_bonus_rate` 额外计入购物余额：
+超出强制最低线的部分 x `voluntary_bonus_rate` 额外计入购物余额：
 
 ```
-bonus = (repurchase - mandatory_repurchase) × voluntary_bonus_rate / 10000
+bonus = (repurchase - mandatory_repurchase) x voluntary_bonus_rate / 10000
 ```
 
 ### 指定复购目标
@@ -131,8 +193,10 @@ bonus = (repurchase - mandatory_repurchase) × voluntary_bonus_rate / 10000
 提现前验证 Entity 账户有足够资金覆盖所有承诺：
 
 ```
-entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + repurchase + bonus)
+entity_balance - withdrawal >= (old_pending - total_amount) + Loyalty::shopping_total(entity_id) + repurchase + bonus
 ```
+
+注意：NEX 购物余额总量通过 `T::Loyalty::shopping_total()` 从 Loyalty 模块读取，不再由 commission-core 直接存储。
 
 ### 购物余额使用规则
 
@@ -140,34 +204,30 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 
 | 路径 | 行为 | 状态 |
 |------|------|------|
-| 下单抵扣（`ShoppingBalanceProvider::consume`） | NEX 从 Entity 转入 Escrow | ✅ |
-| 直接提现（`use_shopping_balance` extrinsic） | — | ❌ 已禁用 |
-| 纯记账（`CommissionProvider::use_shopping_balance`） | 仅扣减记账 | ✅ |
+| 下单抵扣（`ShoppingBalanceProvider::consume`） | NEX 从 Entity 转入 Escrow | 可用 |
+| 直接提现（`use_shopping_balance` extrinsic） | — | 已禁用 |
+| 纯记账（`CommissionProvider::use_shopping_balance`） | 委托 T::Loyalty | 可用 |
 
 ---
 
-## 5. Config
+## 6. Config
 
-### 关联类型（27 项）
+### 关联类型（33 项）
 
 | 类型 | trait 约束 | 说明 |
 |------|-----------|------|
 | `Currency` | `Currency<AccountId>` | NEX 货币 |
+| `WeightInfo` | `WeightInfo` | 权重信息 |
 | `ShopProvider` | `ShopProvider<AccountId>` | 店铺查询 |
 | `EntityProvider` | `EntityProvider<AccountId>` | Entity 查询 |
 | `GovernanceProvider` | `GovernanceProvider` | 治理查询（R8: locked+None 单调递减豁免） |
 | `MemberProvider` | `MemberProvider<AccountId>` | 会员查询 |
-| `EntityReferrerProvider` | `EntityReferrerProvider<AccountId>` | 招商推荐人查询 |
 | `ReferralPlugin` | `CommissionPlugin` | NEX 推荐链插件 |
 | `MultiLevelPlugin` | `CommissionPlugin` | NEX 多级分销插件 |
 | `LevelDiffPlugin` | `CommissionPlugin` | NEX 等级极差插件 |
 | `SingleLinePlugin` | `CommissionPlugin` | NEX 单线收益插件 |
 | `TeamPlugin` | `CommissionPlugin` | NEX 团队业绩插件 |
-| `TokenReferralPlugin` | `TokenCommissionPlugin` | Token 推荐链插件 |
-| `TokenMultiLevelPlugin` | `TokenCommissionPlugin` | Token 多级分销插件 |
-| `TokenLevelDiffPlugin` | `TokenCommissionPlugin` | Token 等级极差插件 |
-| `TokenSingleLinePlugin` | `TokenCommissionPlugin` | Token 单线收益插件 |
-| `TokenTeamPlugin` | `TokenCommissionPlugin` | Token 团队业绩插件 |
+| `EntityReferrerProvider` | `EntityReferrerProvider<AccountId>` | 招商推荐人查询 |
 | `ReferralWriter` | `ReferralPlanWriter` | 推荐链方案写入器 |
 | `MultiLevelWriter` | `MultiLevelPlanWriter` | 多级分销方案写入器 |
 | `LevelDiffWriter` | `LevelDiffPlanWriter` | 等级极差方案写入器 |
@@ -175,9 +235,20 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 | `PoolRewardWriter` | `PoolRewardPlanWriter` | 沉淀池奖励方案写入器 |
 | `PlatformAccount` | `Get<AccountId>` | 平台账户 |
 | `TreasuryAccount` | `Get<AccountId>` | 国库账户 |
-| `TokenBalance` | `FullCodec + AtLeast32BitUnsigned + ...` | Entity Token 余额类型 |
-| `TokenTransferProvider` | `TokenTransferProvider<AccountId, TokenBalance>` | Token 转账接口 |
 | `ParticipationGuard` | `ParticipationGuard<AccountId>` | KYC/合规参与权守卫 |
+| `TokenBalance` | `FullCodec + AtLeast32BitUnsigned + ...` | Entity Token 余额类型 |
+| `TokenReferralPlugin` | `TokenCommissionPlugin` | Token 推荐链插件 |
+| `TokenMultiLevelPlugin` | `TokenCommissionPlugin` | Token 多级分销插件 |
+| `TokenLevelDiffPlugin` | `TokenCommissionPlugin` | Token 等级极差插件 |
+| `TokenSingleLinePlugin` | `TokenCommissionPlugin` | Token 单线收益插件 |
+| `TokenTeamPlugin` | `TokenCommissionPlugin` | Token 团队业绩插件 |
+| `TokenTransferProvider` | `TokenTransferProvider<AccountId, TokenBalance>` | Token 转账接口 |
+| `MultiLevelQuery` | `MultiLevelQueryProvider` | 多级分销查询（供 Runtime API） |
+| `TeamQuery` | `TeamQueryProvider` | 团队业绩查询（供 Runtime API） |
+| `SingleLineQuery` | `SingleLineQueryProvider` | 单线收益查询（供 Runtime API） |
+| `PoolRewardQuery` | `PoolRewardQueryProvider` | 沉淀池奖励查询（供 Runtime API） |
+| `ReferralQuery` | `ReferralQueryProvider` | 推荐链返佣查询（供 Runtime API） |
+| `Loyalty` | `LoyaltyWritePort<AccountId, Balance>` | **Loyalty 模块接口（NEX 购物余额读写委托）** |
 
 ### 常量（6 项）
 
@@ -192,7 +263,7 @@ entity_balance - withdrawal ≥ (old_pending - total_amount) + (old_shopping + r
 
 ---
 
-## 6. 核心结构体
+## 7. 核心结构体
 
 ### CoreCommissionConfig
 
@@ -233,7 +304,7 @@ pub struct CommissionRecord<AccountId, Balance, BlockNumber> {
     pub amount: Balance,
     pub commission_type: CommissionType,
     pub level: u8,
-    pub status: CommissionStatus,   // Pending → Withdrawn → (archive)
+    pub status: CommissionStatus,   // Pending -> Withdrawn -> (archive)
     pub created_at: BlockNumber,
 }
 ```
@@ -285,9 +356,11 @@ pub struct MemberCommissionStatsData<Balance> {
 
 ---
 
-## 7. Storage（39 项）
+## 8. Storage（37 项）
 
-### NEX 存储（13 项）
+> NEX 购物余额存储（`MemberShoppingBalance`、`ShopShoppingTotal`）已迁移至 Loyalty 模块，commission-core 通过 `T::Loyalty` Port 读写。
+
+### NEX 存储（11 项）
 
 | 存储项 | 类型 | Key | Value | Query |
 |--------|------|-----|-------|-------|
@@ -296,9 +369,7 @@ pub struct MemberCommissionStatsData<Balance> {
 | `OrderCommissionRecords` | `StorageMap` | `order_id` | `BoundedVec<CommissionRecord>` | ValueQuery |
 | `ShopCommissionTotals` | `StorageMap` | `entity_id` | `(Balance, u64)` | ValueQuery |
 | `ShopPendingTotal` | `StorageMap` | `entity_id` | `Balance` | ValueQuery |
-| `ShopShoppingTotal` | `StorageMap` | `entity_id` | `Balance` | ValueQuery |
 | `WithdrawalConfigs` | `StorageMap` | `entity_id` | `EntityWithdrawalConfig` | OptionQuery |
-| `MemberShoppingBalance` | `StorageDoubleMap` | `entity_id, AccountId` | `Balance` | ValueQuery |
 | `MemberLastCredited` | `StorageDoubleMap` | `entity_id, AccountId` | `BlockNumber` | ValueQuery |
 | `GlobalMinRepurchaseRate` | `StorageMap` | `entity_id` | `u16` | ValueQuery |
 | `OrderTreasuryTransfer` | `StorageMap` | `order_id` | `Balance` | ValueQuery |
@@ -315,7 +386,7 @@ pub struct MemberCommissionStatsData<Balance> {
 | `UnallocatedTokenPool` | `StorageMap` | `entity_id` | `TokenBalance` | ValueQuery |
 | `OrderTokenUnallocated` | `StorageMap` | `order_id` | `(u64, u64, TokenBalance)` | ValueQuery |
 | `OrderTokenPlatformRetention` | `StorageMap` | `order_id` | `(u64, TokenBalance)` | ValueQuery |
-| `TokenPlatformFeeRate` | `StorageValue` | — | `u16` | ValueQuery (默认 100) |
+| `TokenPlatformFeeRate` | `StorageValue` | -- | `u16` | ValueQuery (默认 100) |
 | `MemberTokenShoppingBalance` | `StorageDoubleMap` | `entity_id, AccountId` | `TokenBalance` | ValueQuery |
 | `TokenShoppingTotal` | `StorageMap` | `entity_id` | `TokenBalance` | ValueQuery |
 | `TokenWithdrawalConfigs` | `StorageMap` | `entity_id` | `EntityWithdrawalConfig` | OptionQuery |
@@ -331,7 +402,7 @@ pub struct MemberCommissionStatsData<Balance> {
 | `PoolRewardDisabledAt` | `StorageMap` | `entity_id` | `BlockNumber` | OptionQuery |
 | `GlobalMaxCommissionRate` | `StorageMap` | `entity_id` | `u16` | ValueQuery |
 | `GlobalMaxTokenCommissionRate` | `StorageMap` | `entity_id` | `u16` | ValueQuery |
-| `GlobalCommissionPaused` | `StorageValue` | — | `bool` | ValueQuery |
+| `GlobalCommissionPaused` | `StorageValue` | -- | `bool` | ValueQuery |
 | `WithdrawalPaused` | `StorageMap` | `entity_id` | `bool` | ValueQuery |
 | `MinWithdrawalInterval` | `StorageMap` | `entity_id` | `u32` | ValueQuery |
 | `MemberCommissionOrderIds` | `StorageDoubleMap` | `entity_id, AccountId` | `BoundedVec<u64>` | ValueQuery |
@@ -343,14 +414,14 @@ pub struct MemberCommissionStatsData<Balance> {
 
 ---
 
-## 8. Extrinsics（28 项）
+## 9. Extrinsics（28 项）
 
 ### 配置管理
 
 | idx | 方法 | 权限 | 说明 |
 |-----|------|------|------|
 | 0 | `set_commission_modes` | Owner/Admin | 设置返佣模式位标志；跟踪 POOL_REWARD 开关 |
-| 1 | `set_commission_rate` | Owner/Admin | 设置 `max_commission_rate`（≤10000，受全局 NEX + Token 上限约束） |
+| 1 | `set_commission_rate` | Owner/Admin | 设置 `max_commission_rate`（<=10000，受全局 NEX + Token 上限约束） |
 | 2 | `enable_commission` | Owner/Admin | 启用/禁用返佣；跟踪 POOL_REWARD 实际激活状态 |
 | 14 | `set_creator_reward_rate` | Owner/Admin | 设置创建人收益比例（上限 5000 bps）；R8: None+Locked 仅允许降低 |
 | 17 | `set_withdrawal_cooldown` | Owner/Admin | 设置 NEX/Token 独立提现冻结期 |
@@ -373,8 +444,8 @@ pub struct MemberCommissionStatsData<Balance> {
 |-----|------|------|------|
 | 3 | `withdraw_commission` | 会员 | 提取 NEX 返佣（四种模式 + 指定复购目标 + 偿付安全检查） |
 | 8 | `withdraw_token_commission` | 会员 | 提取 Token 佣金（独立 `token_withdrawal_cooldown`） |
-| 5 | `use_shopping_balance` | — | **[已禁用]** → `ShoppingBalanceWithdrawalDisabled` |
-| 6 | `init_commission_plan` | — | **[已禁用]** → `CommissionPlanDisabled` |
+| 5 | `use_shopping_balance` | -- | **[已禁用]** -> `ShoppingBalanceWithdrawalDisabled` |
+| 6 | `init_commission_plan` | -- | **[已禁用]** -> `CommissionPlanDisabled` |
 
 ### 资金管理
 
@@ -402,7 +473,7 @@ pub struct MemberCommissionStatsData<Balance> {
 
 ---
 
-## 9. Events（43 项）
+## 10. Events（43 项）
 
 ### NEX 事件
 
@@ -411,9 +482,9 @@ pub struct MemberCommissionStatsData<Balance> {
 | `CommissionConfigUpdated` | `entity_id` |
 | `CommissionModesUpdated` | `entity_id, modes` |
 | `CommissionDistributed` | `entity_id, order_id, beneficiary, amount, commission_type, level` |
-| `CommissionWithdrawn` | `entity_id, account, amount` — **[已废弃]** |
+| `CommissionWithdrawn` | `entity_id, account, amount` -- **[已废弃]** |
 | `CommissionCancelled` | `order_id, refund_succeeded, refund_failed` |
-| `CommissionPlanRemoved` | `entity_id` — **[已废弃]** |
+| `CommissionPlanRemoved` | `entity_id` -- **[已废弃]** |
 | `WithdrawalCooldownNotMet` | `entity_id, account, earliest_block` |
 | `TieredWithdrawal` | `entity_id, account, repurchase_target, withdrawn_amount, repurchase_amount, bonus_amount` |
 | `WithdrawalConfigUpdated` | `entity_id` |
@@ -432,7 +503,7 @@ pub struct MemberCommissionStatsData<Balance> {
 | 事件 | 字段 |
 |------|------|
 | `TokenCommissionDistributed` | `entity_id, order_id, beneficiary, amount, commission_type, level` |
-| `TokenCommissionWithdrawn` | `entity_id, account, amount` — **[已废弃]** |
+| `TokenCommissionWithdrawn` | `entity_id, account, amount` -- **[已废弃]** |
 | `TokenCommissionCancelled` | `order_id, cancelled_count` |
 | `TokenTieredWithdrawal` | `entity_id, account, repurchase_target, withdrawn_amount, repurchase_amount, bonus_amount` |
 | `TokenWithdrawalConfigUpdated` | `entity_id` |
@@ -464,7 +535,7 @@ pub struct MemberCommissionStatsData<Balance> {
 
 ---
 
-## 10. Errors（42 项）
+## 11. Errors（42 项）
 
 | 错误 | 说明 |
 |------|------|
@@ -478,7 +549,7 @@ pub struct MemberCommissionStatsData<Balance> {
 | `RecordsFull` | 订单返佣记录达上限 |
 | `Overflow` | 数值溢出 |
 | `WithdrawalConfigNotEnabled` | 提现配置未启用 |
-| `InvalidWithdrawalConfig` | 无效提现配置（tier 比率之和 ≠ 10000 / bonus_rate > 10000 / 模式参数越界） |
+| `InvalidWithdrawalConfig` | 无效提现配置（tier 比率之和 != 10000 / bonus_rate > 10000 / 模式参数越界） |
 | `InsufficientShoppingBalance` | 购物余额不足 |
 | `WithdrawalCooldownNotMet` | 提现冻结期未满 |
 | `NotDirectReferral` | 复购目标不是出资人的直推下线 |
@@ -513,7 +584,7 @@ pub struct MemberCommissionStatsData<Balance> {
 
 ---
 
-## 11. Trait 实现
+## 12. Trait 实现
 
 ### CommissionProvider（15 方法）
 
@@ -524,8 +595,8 @@ pub struct MemberCommissionStatsData<Balance> {
 | `process_commission` | 处理订单 NEX 返佣（双来源调度） |
 | `cancel_commission` | 取消订单 NEX 返佣 |
 | `pending_commission` | 查询会员待提取 NEX 佣金 |
-| `shopping_balance` | 查询会员购物余额 |
-| `use_shopping_balance` | 使用购物余额（纯记账） |
+| `shopping_balance` | 查询会员购物余额（委托 `T::Loyalty::shopping_balance`） |
+| `use_shopping_balance` | 使用购物余额（委托 `T::Loyalty::consume_shopping_balance`） |
 | `set_commission_modes` | 设置返佣模式（含 POOL_REWARD 跟踪） |
 | `set_direct_reward_rate` | 设置直推奖励比率 |
 | `set_level_diff_config` | 设置等级极差配置 |
@@ -534,8 +605,8 @@ pub struct MemberCommissionStatsData<Balance> {
 | `set_repeat_purchase_config` | 设置复购奖励配置 |
 | `set_withdrawal_config_by_governance` | Governance 设置提现配置 |
 | `set_min_repurchase_rate` | 设置全局最低复购比例 |
-| `set_creator_reward_rate` | 设置创建人收益比例（≤ 5000） |
-| `settle_order_commission` | 订单完结时结算佣金（Pending → Withdrawn） |
+| `set_creator_reward_rate` | 设置创建人收益比例（<= 5000） |
+| `settle_order_commission` | 订单完结时结算佣金（Pending -> Withdrawn） |
 
 ### TokenCommissionProvider（4 方法）
 
@@ -561,82 +632,70 @@ pub struct MemberCommissionStatsData<Balance> {
 
 ---
 
-## 12. 内部函数
-
-### NEX 管线
-
-| 函数 | 说明 |
-|------|------|
-| `process_commission` | 双来源调度引擎（平台费 + 卖家货款 → 插件分配 → 沉淀池） |
-| `credit_commission` | 记录并发放 NEX 返佣（Records / Stats / PendingTotal / LastCredited / OrderIds） |
-| `cancel_commission` | 取消订单 NEX 返佣（先转账后更新记录；含 Token 取消） |
-| `calc_withdrawal_split` | 计算 NEX 提现/复购/奖励分配（三层约束模型） |
-| `do_use_shopping_balance` | NEX 购物余额纯记账 |
-| `do_consume_shopping_balance` | 消费 NEX 购物余额（记账 + 转账，含 ParticipationGuard 检查） |
-| `do_settle_order_records` | 订单完结：Pending → Withdrawn，释放 PendingTotal |
-
-### Token 管线
-
-| 函数 | 说明 |
-|------|------|
-| `process_token_commission` | Token 双源调度引擎（含 sweep + 可用额度检查） |
-| `credit_token_commission` | Token 佣金纯记账（不转账，Token 托管在 entity_account） |
-| `do_cancel_token_commission` | 取消 Token 佣金（退还 Pool B 沉淀 + Pool A 留存） |
-| `calc_token_withdrawal_split` | 计算 Token 提现/复购/奖励分配（与 NEX 对称） |
-| `do_consume_token_shopping_balance` | 消费 Token 购物余额（记账 + Token 转账） |
-| `sweep_token_free_balance` | 检测 entity_account 外部 Token 转入，更新 EntityTokenAccountedBalance |
-
-### 辅助函数
-
-| 函数 | 说明 |
-|------|------|
-| `ensure_owner_or_admin` | 验证 Entity Owner 或 Admin(COMMISSION_MANAGE) 权限 |
-| `ensure_entity_owner` | 验证 Entity Owner（仅 Owner，用于资金提取） |
-| `is_pool_reward_locked` | 判断沉淀池是否因 POOL_REWARD 状态或 cooldown 而锁定 |
-
----
-
 ## 13. 资金流向
 
 ### NEX 资金流
 
 ```
-池 A（平台费 → 国库 + 招商人）：
-  平台账户 ──transfer──→ 国库（treasury_portion）
-  平台账户 ──transfer──→ Entity 账户（referrer_quota → credit_commission）
-  取消: Entity → 平台账户 | 国库 → 平台账户
+池 A（平台费 -> 国库 + 招商人）：
+  平台账户 ──transfer──> 国库（treasury_portion）
+  平台账户 ──transfer──> Entity 账户（referrer_quota -> credit_commission）
+  取消: Entity -> 平台账户 | 国库 -> 平台账户
 
-池 B（卖家货款 → 会员返佣 + 沉淀池）：
-  seller ──transfer──→ Entity 账户（插件分配 + POOL_REWARD 剩余）
-  取消: Entity → seller（仅转账成功的记录标记取消）
+池 B（卖家货款 -> 会员返佣 + 沉淀池）：
+  seller ──transfer──> Entity 账户（插件分配 + POOL_REWARD 剩余）
+  取消: Entity -> seller（仅转账成功的记录标记取消）
 
 提现：
-  Entity ──transfer(KeepAlive)──→ 会员钱包（提现部分）
-  复购 + 奖励 → MemberShoppingBalance（记账，资金留在 Entity）
+  Entity ──transfer(KeepAlive)──> 会员钱包（提现部分）
+  复购 + 奖励 -> T::Loyalty::credit_shopping_balance（Loyalty 记账，资金留在 Entity）
 ```
 
 ### Token 资金流
 
 ```
-池 A（Token 平台费 → 招商人 + 留存）：
-  token_platform_fee sweep → EntityTokenAccountedBalance
-  referrer_quota → credit_token_commission（纯记账）
-  pool_a_retention → UnallocatedTokenPool（记账）
+池 A（Token 平台费 -> 招商人 + 留存）：
+  token_platform_fee sweep -> EntityTokenAccountedBalance
+  referrer_quota -> credit_token_commission（纯记账）
+  pool_a_retention -> UnallocatedTokenPool（记账）
   取消: pool_a_retention 从 UnallocatedTokenPool 扣回
 
-池 B（Entity Token → 会员返佣 + 沉淀池）：
-  entity_token_balance - committed → 可用额度 → 插件分配（纯记账）
-  剩余 → UnallocatedTokenPool（POOL_REWARD 模式）
-  取消: token_transfer Entity → seller
+池 B（Entity Token -> 会员返佣 + 沉淀池）：
+  entity_token_balance - committed -> 可用额度 -> 插件分配（纯记账）
+  剩余 -> UnallocatedTokenPool（POOL_REWARD 模式）
+  取消: token_transfer Entity -> seller
 
 提现：
-  Entity ──token_transfer──→ 会员钱包（提现部分）
-  复购 + 奖励 → MemberTokenShoppingBalance（记账）
+  Entity ──token_transfer──> 会员钱包（提现部分）
+  复购 + 奖励 -> MemberTokenShoppingBalance（记账）
 ```
 
 ---
 
-## 14. ParticipationGuard Trait
+## 14. Loyalty 集成
+
+### 背景
+
+Phase 2 模块边界重构将 NEX 购物余额存储从 commission-core 迁移至独立的 Loyalty 模块。commission-core 不再直接持有 `MemberShoppingBalance` 和 `ShopShoppingTotal` 两项 NEX 存储。
+
+### 接口
+
+Config 新增 `type Loyalty: LoyaltyWritePort<AccountId, Balance>`，提供以下能力：
+
+| 方法 | 说明 | 调用位置 |
+|------|------|---------|
+| `shopping_balance(entity_id, account)` | 查询 NEX 购物余额 | CommissionProvider trait、偿付安全检查 |
+| `shopping_total(entity_id)` | 查询 Entity 级 NEX 购物余额总量 | 偿付安全检查（withdraw_entity_funds） |
+| `credit_shopping_balance(entity_id, account, amount)` | 增加 NEX 购物余额 | 提现复购（withdraw_commission） |
+| `consume_shopping_balance(entity_id, account, amount)` | 消费 NEX 购物余额 | settlement.rs 委托调用 |
+
+### Token 购物余额
+
+Token 购物余额（`MemberTokenShoppingBalance`、`TokenShoppingTotal`）仍由 commission-core 直接管理，未迁移。Token 侧的记账、消费、偿付安全检查均使用本地存储。
+
+---
+
+## 15. ParticipationGuard Trait
 
 KYC/合规检查的泛型接口，在 `withdraw_commission` 和 `do_consume_shopping_balance` 中调用：
 
@@ -651,18 +710,18 @@ impl<AccountId> ParticipationGuard<AccountId> for () {
 ```
 
 Runtime 通过 `KycParticipationGuard` 桥接 `pallet-entity-kyc::can_participate_in_entity`：
-- Entity 未配置 `EntityRequirements` 或 `mandatory=false` → 允许所有
-- Entity 配置 `mandatory=true` → 检查账户 KYC 状态、级别、国家、风险评分、过期
+- Entity 未配置 `EntityRequirements` 或 `mandatory=false` -> 允许所有
+- Entity 配置 `mandatory=true` -> 检查账户 KYC 状态、级别、国家、风险评分、过期
 
 ---
 
-## 15. 审计修复记录
+## 16. 审计修复记录
 
 ### 安全审计
 
 | 编号 | 级别 | 修复位置 | 说明 |
 |------|------|----------|------|
-| C1 | Critical | `withdraw_commission` | 偿付安全检查计入 repurchase + bonus 对 ShopShoppingTotal 的增量 |
+| C1 | Critical | `withdraw_commission` | 偿付安全检查计入 repurchase + bonus 对购物余额总量的增量 |
 | H1 | High | `withdraw_commission` | WithdrawalConfig 未启用时拒绝；auto_register 后验证 target 会员状态 |
 | H2 | High | `cancel_commission` | 先尝试转账，成功后才取消记录 |
 | H3 | High | `withdraw_*` / `do_consume_*` | 引入 ParticipationGuard 检查 Entity KYC 参与要求 |
@@ -691,41 +750,41 @@ Runtime 通过 `KycParticipationGuard` 桥接 `pallet-entity-kyc::can_participat
 
 | ID | 级别 | 修复内容 |
 |----|------|----------|
-| BUG-1 | Critical | `settle_order_commission` — Pending → Withdrawn 生命周期，使 archive 可正常归档 |
-| BUG-2 | High | `set_commission_rate` — 同时校验 GlobalMaxTokenCommissionRate |
-| BUG-3 | High | `force_enable_entity_commission` — 与 force_disable 对称的 Root 恢复路径 |
+| BUG-1 | Critical | `settle_order_commission` -- Pending -> Withdrawn 生命周期，使 archive 可正常归档 |
+| BUG-2 | High | `set_commission_rate` -- 同时校验 GlobalMaxTokenCommissionRate |
+| BUG-3 | High | `force_enable_entity_commission` -- 与 force_disable 对称的 Root 恢复路径 |
 | BUG-4 | Medium | 标记 `CommissionWithdrawn` / `TokenCommissionWithdrawn` 事件为已废弃 |
-| MISSING-2 | High | `retry_cancel_commission` — Root 重试失败退款 |
-| MISSING-3 | Medium | `set_min_withdrawal_interval` + `MemberLastWithdrawn` — 基于时间的提现频率限制 |
-| R-1 | — | 标记 `CommissionStatus::Distributed` 为已废弃 |
-| R-4 | — | 标记 `MemberNotActivated` 错误为已废弃 |
-| R-11 | — | `set_commission_modes` 消除 `CommissionConfigs` 双重存储读取 |
-| MISSING-1 | — | 添加 `benchmarking.rs` 基准测试骨架框架 |
+| MISSING-2 | High | `retry_cancel_commission` -- Root 重试失败退款 |
+| MISSING-3 | Medium | `set_min_withdrawal_interval` + `MemberLastWithdrawn` -- 基于时间的提现频率限制 |
+| R-1 | -- | 标记 `CommissionStatus::Distributed` 为已废弃 |
+| R-4 | -- | 标记 `MemberNotActivated` 错误为已废弃 |
+| R-11 | -- | `set_commission_modes` 消除 `CommissionConfigs` 双重存储读取 |
+| MISSING-1 | -- | 添加 `benchmarking.rs` 基准测试骨架框架 |
 
 ### 功能扩展
 
 | 编号 | 说明 |
 |------|------|
-| F1 | Admin 权限支持 — `ensure_owner_or_admin` + `COMMISSION_MANAGE` 权限位 |
-| F2 | `set_withdrawal_cooldown` — NEX/Token 冻结期独立配置 |
-| F3 | Token 独立冻结期 — `token_withdrawal_cooldown` 字段 |
+| F1 | Admin 权限支持 -- `ensure_owner_or_admin` + `COMMISSION_MANAGE` 权限位 |
+| F2 | `set_withdrawal_cooldown` -- NEX/Token 冻结期独立配置 |
+| F3 | Token 独立冻结期 -- `token_withdrawal_cooldown` 字段 |
 | F4 | `clear_commission_config` / `clear_withdrawal_config` / `clear_token_withdrawal_config` |
-| F6 | `MaxWithdrawalRecords` — 每会员提现记录上限 |
-| F7 | `MaxMemberOrderIds` — 每会员佣金关联订单 ID 上限 |
-| F13 | `set_global_min_repurchase_rate` — NEX 全局最低复购比例 |
-| F14 | `force_disable_entity_commission` — Root 紧急禁用 |
-| F15 | `GlobalMaxCommissionRate` — 治理佣金率上限 |
-| F16 | `GlobalMaxTokenCommissionRate` — Token 佣金率上限 |
-| F17 | `GlobalCommissionPaused` — 全局紧急暂停 |
-| F18 | `WithdrawalPaused` — Entity 级提现暂停 |
-| F19 | `MemberCommissionOrderIds` — 佣金关联订单 ID 索引 |
-| F20 | `MemberWithdrawalHistory` — 提现历史 |
-| F21 | `archive_order_records` — 归档已完结订单释放存储 |
-| R8 | `set_creator_reward_rate` — 无币实体（None+Locked）单调递减豁免 |
+| F6 | `MaxWithdrawalRecords` -- 每会员提现记录上限 |
+| F7 | `MaxMemberOrderIds` -- 每会员佣金关联订单 ID 上限 |
+| F13 | `set_global_min_repurchase_rate` -- NEX 全局最低复购比例 |
+| F14 | `force_disable_entity_commission` -- Root 紧急禁用 |
+| F15 | `GlobalMaxCommissionRate` -- 治理佣金率上限 |
+| F16 | `GlobalMaxTokenCommissionRate` -- Token 佣金率上限 |
+| F17 | `GlobalCommissionPaused` -- 全局紧急暂停 |
+| F18 | `WithdrawalPaused` -- Entity 级提现暂停 |
+| F19 | `MemberCommissionOrderIds` -- 佣金关联订单 ID 索引 |
+| F20 | `MemberWithdrawalHistory` -- 提现历史 |
+| F21 | `archive_order_records` -- 归档已完结订单释放存储 |
+| R8 | `set_creator_reward_rate` -- 无币实体（None+Locked）单调递减豁免 |
 
 ---
 
-## 16. 测试覆盖
+## 17. 测试覆盖
 
 208 个测试（`cargo test -p pallet-commission-core`），覆盖领域：
 
@@ -743,9 +802,9 @@ Runtime 通过 `KycParticipationGuard` 桥接 `pallet-entity-kyc::can_participat
 | F2-F4 | 独立冻结期 / 配置清除 |
 | F13-F18 | 全局最低复购 / Root 禁用 / 佣金率上限 / 全局暂停 / Entity 暂停 |
 | F19-F21 | 订单 ID 索引 / 提现历史 / 订单记录归档 |
-| BUG-1 settle | Pending→Withdrawn / 保留 Cancelled / settle+archive 链路 / Token 结算 |
+| BUG-1 settle | Pending->Withdrawn / 保留 Cancelled / settle+archive 链路 / Token 结算 |
 | BUG-2 | Token 全局上限阻止 / 双上限取小值 |
-| BUG-3 | force_enable 禁用→启用→幂等 / 非 Root 拒绝 |
+| BUG-3 | force_enable 禁用->启用->幂等 / 非 Root 拒绝 |
 | MISSING-2 | retry_cancel 幂等 / 非 Root 拒绝 |
 | MISSING-3 | 设置间隔 / 权限校验 / NEX+Token 频率限制 |
 | R8 | None+Locked 允许降低 / 禁止增加 / FullDAO+Locked 全部禁止 |
@@ -754,7 +813,7 @@ Runtime 通过 `KycParticipationGuard` 桥接 `pallet-entity-kyc::can_participat
 
 ---
 
-## 17. 依赖
+## 18. 依赖
 
 ```toml
 [dependencies]

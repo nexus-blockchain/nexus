@@ -252,3 +252,15 @@ impl<T: Config> EntityFunding<T::AccountId, BalanceOf<T>> for Pallet<T> {
         }
     }
 }
+
+// ============================================================================
+// EntityTreasuryPort 实现
+// ============================================================================
+
+impl<T: Config> pallet_entity_common::EntityTreasuryPort for Pallet<T> {
+    fn treasury_balance(entity_id: u64) -> u128 {
+        let treasury_account = Self::entity_treasury_account(entity_id);
+        let balance = T::Currency::free_balance(&treasury_account);
+        SaturatedConversion::saturated_into(balance)
+    }
+}

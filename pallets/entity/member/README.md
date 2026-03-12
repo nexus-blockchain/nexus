@@ -172,6 +172,9 @@ impl pallet_entity_member::Config for Runtime {
 | `EntityMemberStatsPolicy` | `entity_id` | `MemberStatsPolicy` | 统计策略 |
 | `PendingMembers` | `(entity_id, account)` | `(Option<AccountId>, BlockNumber)` | 待审批队列 |
 | `BannedMemberCount` | `entity_id` | `u32` | 封禁会员数（O(1) 计数器） |
+| `PendingTeamSizeUpdates` | `u32` (update_id) | `TeamSizeUpdate` | 延迟团队人数更新队列 |
+| `NextPendingUpdateId` | — | `u32` | 下一个延迟更新 ID |
+| `ProcessedPendingUpdateId` | — | `u32` | 已处理的延迟更新 ID |
 
 ## 注册策略（MemberRegistrationPolicy）
 

@@ -49,7 +49,7 @@ pub mod pallet {
     use frame_system::pallet_prelude::*;
     use pallet_entity_common::{
         CommissionFundGuard, EffectiveShopStatus, EntityProvider, EntityStatus,
-        ProductProvider, ShopOperatingStatus, ShopProvider, ShopType,
+        PointsCleanup, ProductProvider, ShopOperatingStatus, ShopProvider, ShopType,
     };
     use pallet_storage_service::{StoragePin, PinTier};
     use sp_runtime::{
@@ -62,35 +62,9 @@ pub mod pallet {
     /// Shop 派生账户 PalletId
     const SHOP_PALLET_ID: PalletId = PalletId(*b"et/shop_");
 
-    /// 单次 clear_prefix 最大清理条目数，防止超出区块权重
-    /// 500 条足以覆盖绝大多数 Shop 的积分用户数，同时保证不超出区块限制
-    const POINTS_CLEANUP_LIMIT: u32 = 500;
-
     /// 货币余额类型别名
     pub type BalanceOf<T> =
         <<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
-
-    /// Shop 积分配置
-    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
-    #[scale_info(skip_type_params(MaxNameLen, MaxSymbolLen))]
-    pub struct PointsConfig<MaxNameLen: Get<u32>, MaxSymbolLen: Get<u32>> {
-        /// 积分名称
-        pub name: BoundedVec<u8, MaxNameLen>,
-        /// 积分符号
-        pub symbol: BoundedVec<u8, MaxSymbolLen>,
-        /// 购物返积分比例（基点，500 = 5%）
-        pub reward_rate: u16,
-        /// 积分兑换比例（基点，1000 = 10%）
-        pub exchange_rate: u16,
-        /// 积分是否可转让
-        pub transferable: bool,
-    }
-
-    /// 积分配置类型别名
-    pub type PointsConfigOf<T> = PointsConfig<
-        <T as Config>::MaxPointsNameLength,
-        <T as Config>::MaxPointsSymbolLength,
-    >;
 
     /// Shop 结构体
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
@@ -166,14 +140,6 @@ pub mod pallet {
         #[pallet::constant]
         type MaxManagers: Get<u32>;
 
-        /// 积分名称最大长度
-        #[pallet::constant]
-        type MaxPointsNameLength: Get<u32>;
-
-        /// 积分符号最大长度
-        #[pallet::constant]
-        type MaxPointsSymbolLength: Get<u32>;
-
         /// 最低运营余额（低于此值 Shop 暂停）
         #[pallet::constant]
         type MinOperatingBalance: Get<BalanceOf<Self>>;
@@ -198,6 +164,9 @@ pub mod pallet {
 
         /// Product 提供者（用于 Shop 关闭时级联 unpin Product CID）
         type ProductProvider: ProductProvider<Self::AccountId, BalanceOf<Self>>;
+
+        /// 积分清理接口（Shop 关闭时委托 loyalty 模块清理）
+        type PointsCleanup: pallet_entity_common::PointsCleanup;
 
         /// Weight 信息（由 benchmark 生成）
         type WeightInfo: WeightInfo;
@@ -264,47 +233,6 @@ pub mod pallet {
     #[pallet::getter(fn shop_closing_at)]
     pub type ShopClosingAt<T: Config> = StorageMap<_, Blake2_128Concat, u64, BlockNumberFor<T>>;
 
-    /// Shop 积分配置 shop_id -> PointsConfig
-    #[pallet::storage]
-    #[pallet::getter(fn shop_points_config)]
-    pub type ShopPointsConfigs<T: Config> = StorageMap<_, Blake2_128Concat, u64, PointsConfigOf<T>>;
-
-    /// Shop 积分余额 (shop_id, account) -> balance
-    #[pallet::storage]
-    #[pallet::getter(fn shop_points_balance)]
-    pub type ShopPointsBalances<T: Config> = StorageDoubleMap<
-        _,
-        Blake2_128Concat, u64,
-        Blake2_128Concat, T::AccountId,
-        BalanceOf<T>,
-        ValueQuery,
-    >;
-
-    /// Shop 积分总供应量 shop_id -> total_supply
-    #[pallet::storage]
-    #[pallet::getter(fn shop_points_total_supply)]
-    pub type ShopPointsTotalSupply<T: Config> = StorageMap<_, Blake2_128Concat, u64, BalanceOf<T>, ValueQuery>;
-
-    /// Shop 积分有效期（区块数，0=永不过期）shop_id -> ttl_blocks
-    #[pallet::storage]
-    #[pallet::getter(fn shop_points_ttl)]
-    pub type ShopPointsTtl<T: Config> = StorageMap<_, Blake2_128Concat, u64, BlockNumberFor<T>, ValueQuery>;
-
-    /// 用户积分到期时间 (shop_id, account) -> expires_at_block
-    #[pallet::storage]
-    #[pallet::getter(fn shop_points_expires_at)]
-    pub type ShopPointsExpiresAt<T: Config> = StorageDoubleMap<
-        _,
-        Blake2_128Concat, u64,
-        Blake2_128Concat, T::AccountId,
-        BlockNumberFor<T>,
-    >;
-
-    /// Shop 积分总量上限 shop_id -> max_supply（0=无上限）
-    #[pallet::storage]
-    #[pallet::getter(fn shop_points_max_supply)]
-    pub type ShopPointsMaxSupply<T: Config> = StorageMap<_, Blake2_128Concat, u64, BalanceOf<T>, ValueQuery>;
-
     /// Entity 主 Shop 索引 entity_id -> primary_shop_id
     #[pallet::storage]
     #[pallet::getter(fn entity_primary_shop)]
@@ -350,16 +278,6 @@ pub mod pallet {
         ShopClosed { shop_id: u64 },
         /// Shop 位置更新
         ShopLocationUpdated { shop_id: u64, location: Option<(i64, i64)> },
-        /// Shop 积分启用
-        ShopPointsEnabled { shop_id: u64, name: BoundedVec<u8, T::MaxPointsNameLength> },
-        /// Shop 积分禁用
-        ShopPointsDisabled { shop_id: u64 },
-        /// Shop 积分发放
-        PointsIssued { shop_id: u64, to: T::AccountId, amount: BalanceOf<T> },
-        /// Shop 积分销毁
-        PointsBurned { shop_id: u64, from: T::AccountId, amount: BalanceOf<T> },
-        /// Shop 积分转移
-        PointsTransferred { shop_id: u64, from: T::AccountId, to: T::AccountId, amount: BalanceOf<T> },
         /// 资金预警
         FundWarning { shop_id: u64, balance: BalanceOf<T> },
         /// 资金耗尽
@@ -368,32 +286,22 @@ pub mod pallet {
         OperatingFundWithdrawn { shop_id: u64, to: T::AccountId, amount: BalanceOf<T>, new_balance: BalanceOf<T> },
         /// Shop 关闭时资金退还
         ShopClosedFundRefunded { shop_id: u64, to: T::AccountId, amount: BalanceOf<T> },
-        /// 积分配置更新
-        PointsConfigUpdated { shop_id: u64 },
         /// Shop 进入关闭宽限期
         ShopClosing { shop_id: u64, grace_until: BlockNumberFor<T> },
         /// Shop 关闭完成（宽限期满）
         ShopCloseFinalized { shop_id: u64 },
-        /// 积分兑换
-        PointsRedeemed { shop_id: u64, who: T::AccountId, points_burned: BalanceOf<T>, payout: BalanceOf<T> },
         /// Shop 转让
         ShopTransferred { shop_id: u64, from_entity_id: u64, to_entity_id: u64 },
         /// 主 Shop 变更
         PrimaryShopChanged { entity_id: u64, old_shop_id: u64, new_shop_id: u64 },
         /// Shop 被强制暂停（Root）
         ShopForcePaused { shop_id: u64 },
-        /// 积分有效期设置
-        PointsTtlSet { shop_id: u64, ttl_blocks: BlockNumberFor<T> },
-        /// 积分过期清除
-        PointsExpired { shop_id: u64, account: T::AccountId, amount: BalanceOf<T> },
         /// Shop 被 Root 强制关闭
         ShopForceClosedByRoot { shop_id: u64 },
         /// Shop 类型变更
         ShopTypeChanged { shop_id: u64, old_type: ShopType, new_type: ShopType },
         /// Shop 关闭撤回
         ShopClosingCancelled { shop_id: u64 },
-        /// 积分总量上限设置
-        PointsMaxSupplySet { shop_id: u64, max_supply: BalanceOf<T> },
         /// Manager 自我辞职
         ManagerResigned { shop_id: u64, manager: T::AccountId },
         /// Shop 被封禁（Root）
@@ -436,14 +344,6 @@ pub mod pallet {
         ShopNotPaused,
         /// Shop 已关闭
         ShopAlreadyClosed,
-        /// 积分未启用
-        PointsNotEnabled,
-        /// 积分已启用
-        PointsAlreadyEnabled,
-        /// 积分不可转让
-        PointsNotTransferable,
-        /// 积分余额不足
-        InsufficientPointsBalance,
         /// 无效的位置信息
         InvalidLocation,
         /// 无效的配置
@@ -460,8 +360,6 @@ pub mod pallet {
         EmptyCid,
         /// 充值金额为零
         ZeroFundAmount,
-        /// 积分名称不能为空
-        PointsNameEmpty,
         /// Shop 已在关闭中（宽限期内）
         ShopAlreadyClosing,
         /// 关闭宽限期未满
@@ -472,14 +370,8 @@ pub mod pallet {
         CannotTransferPrimaryShop,
         /// 不能转让给同一 Entity
         SameEntity,
-        /// 积分未过期（无法清除）
-        PointsNotExpired,
-        /// 兑换金额为零（积分数量太小）
-        RedeemPayoutZero,
         /// Shop 类型未变更
         ShopTypeSame,
-        /// 积分总量超过上限
-        PointsMaxSupplyExceeded,
         /// 实体已被全局锁定，所有配置操作不可用
         EntityLocked,
         /// Entity 的 Shop 数量已达上限
@@ -805,52 +697,6 @@ pub mod pallet {
             })
         }
 
-        /// 启用 Shop 积分
-        #[pallet::call_index(8)]
-        #[pallet::weight(T::WeightInfo::enable_points())]
-        pub fn enable_points(
-            origin: OriginFor<T>,
-            shop_id: u64,
-            name: BoundedVec<u8, T::MaxPointsNameLength>,
-            symbol: BoundedVec<u8, T::MaxPointsSymbolLength>,
-            reward_rate: u16,
-            exchange_rate: u16,
-            transferable: bool,
-        ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-            
-            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-            
-            // 检查权限
-            ensure!(Self::can_manage_shop(&shop, &who), Error::<T>::NotAuthorized);
-            ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
-            ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
-            ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
-            
-            // 检查是否已启用
-            ensure!(!ShopPointsConfigs::<T>::contains_key(shop_id), Error::<T>::PointsAlreadyEnabled);
-            
-            // L2: 积分名称和符号不能为空（使用专用错误码）
-            ensure!(!name.is_empty(), Error::<T>::PointsNameEmpty);
-            ensure!(!symbol.is_empty(), Error::<T>::InvalidConfig);
-
-            // 验证配置
-            ensure!(reward_rate <= 10000 && exchange_rate <= 10000, Error::<T>::InvalidConfig);
-            
-            let config = PointsConfig {
-                name: name.clone(),
-                symbol,
-                reward_rate,
-                exchange_rate,
-                transferable,
-            };
-            
-            ShopPointsConfigs::<T>::insert(shop_id, config);
-            
-            Self::deposit_event(Event::ShopPointsEnabled { shop_id, name });
-            Ok(())
-        }
-
         /// 关闭 Shop（进入宽限期）
         ///
         /// 将 Shop 状态设为 Closing，开始宽限期倒计时。
@@ -926,126 +772,6 @@ pub mod pallet {
             })
         }
 
-        /// 禁用 Shop 积分
-        #[pallet::call_index(10)]
-        #[pallet::weight(T::WeightInfo::disable_points())]
-        pub fn disable_points(
-            origin: OriginFor<T>,
-            shop_id: u64,
-        ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-
-            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(Self::can_manage_shop(&shop, &who), Error::<T>::NotAuthorized);
-            ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
-            ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
-            // M3: 关闭中/封禁的 Shop 不可禁用积分
-            ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
-            ensure!(ShopPointsConfigs::<T>::contains_key(shop_id), Error::<T>::PointsNotEnabled);
-
-            ShopPointsConfigs::<T>::remove(shop_id);
-            // H2: 清理积分余额和总供应量，避免残留数据
-            // 使用有界限制防止单次调用超出区块权重
-            let _ = ShopPointsBalances::<T>::clear_prefix(shop_id, POINTS_CLEANUP_LIMIT, None);
-            ShopPointsTotalSupply::<T>::remove(shop_id);
-            // M1: 清理 TTL 相关存储
-            ShopPointsTtl::<T>::remove(shop_id);
-            let _ = ShopPointsExpiresAt::<T>::clear_prefix(shop_id, POINTS_CLEANUP_LIMIT, None);
-            // 清理积分总量上限
-            ShopPointsMaxSupply::<T>::remove(shop_id);
-
-            Self::deposit_event(Event::ShopPointsDisabled { shop_id });
-            Ok(())
-        }
-
-        /// 更新积分配置
-        #[pallet::call_index(11)]
-        #[pallet::weight(T::WeightInfo::update_points_config())]
-        pub fn update_points_config(
-            origin: OriginFor<T>,
-            shop_id: u64,
-            reward_rate: Option<u16>,
-            exchange_rate: Option<u16>,
-            transferable: Option<bool>,
-        ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-
-            // L2-R3: 至少需要修改一个字段
-            ensure!(
-                reward_rate.is_some() || exchange_rate.is_some() || transferable.is_some(),
-                Error::<T>::InvalidConfig
-            );
-
-            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(Self::can_manage_shop(&shop, &who), Error::<T>::NotAuthorized);
-            ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
-            ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
-            ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
-
-            ShopPointsConfigs::<T>::try_mutate(shop_id, |maybe_config| -> DispatchResult {
-                let config = maybe_config.as_mut().ok_or(Error::<T>::PointsNotEnabled)?;
-
-                if let Some(rate) = reward_rate {
-                    ensure!(rate <= 10000, Error::<T>::InvalidConfig);
-                    config.reward_rate = rate;
-                }
-                if let Some(rate) = exchange_rate {
-                    ensure!(rate <= 10000, Error::<T>::InvalidConfig);
-                    config.exchange_rate = rate;
-                }
-                if let Some(t) = transferable {
-                    config.transferable = t;
-                }
-
-                Self::deposit_event(Event::PointsConfigUpdated { shop_id });
-                Ok(())
-            })
-        }
-
-        /// 转移 Shop 积分（用户之间）
-        #[pallet::call_index(12)]
-        #[pallet::weight(T::WeightInfo::transfer_points())]
-        pub fn transfer_points(
-            origin: OriginFor<T>,
-            shop_id: u64,
-            to: T::AccountId,
-            amount: BalanceOf<T>,
-        ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-
-            ensure!(!amount.is_zero(), Error::<T>::InsufficientPointsBalance);
-            ensure!(who != to, Error::<T>::SameEntity);
-
-            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
-            // M4: 封禁状态不可转移积分
-            ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
-
-            let config = ShopPointsConfigs::<T>::get(shop_id)
-                .ok_or(Error::<T>::PointsNotEnabled)?;
-            ensure!(config.transferable, Error::<T>::PointsNotTransferable);
-
-            // 懒过期检查
-            Self::check_points_expiry(shop_id, &who);
-
-            let from_balance = ShopPointsBalances::<T>::get(shop_id, &who);
-            ensure!(from_balance >= amount, Error::<T>::InsufficientPointsBalance);
-
-            ShopPointsBalances::<T>::mutate(shop_id, &who, |b| *b = b.saturating_sub(amount));
-            ShopPointsBalances::<T>::mutate(shop_id, &to, |b| *b = b.saturating_add(amount));
-
-            // M2: 延长接收方积分有效期（防止通过转账绕过 TTL）
-            Self::maybe_extend_points_expiry(shop_id, &to);
-
-            Self::deposit_event(Event::PointsTransferred {
-                shop_id,
-                from: who,
-                to,
-                amount,
-            });
-            Ok(())
-        }
-
         /// 提取运营资金
         ///
         /// 仅 Entity owner 可调用，将 shop_account 中的运营资金提取到个人账户。
@@ -1105,124 +831,6 @@ pub mod pallet {
                 amount,
                 new_balance,
             });
-            Ok(())
-        }
-
-        /// Manager 直接发放积分
-        #[pallet::call_index(16)]
-        #[pallet::weight(T::WeightInfo::manager_issue_points())]
-        pub fn manager_issue_points(
-            origin: OriginFor<T>,
-            shop_id: u64,
-            to: T::AccountId,
-            amount: BalanceOf<T>,
-        ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-            ensure!(!amount.is_zero(), Error::<T>::InsufficientPointsBalance);
-
-            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(Self::can_manage_shop(&shop, &who), Error::<T>::NotAuthorized);
-            ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
-            ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
-            ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
-            ensure!(ShopPointsConfigs::<T>::contains_key(shop_id), Error::<T>::PointsNotEnabled);
-
-            // 积分总量上限检查
-            Self::check_points_max_supply(shop_id, amount)?;
-
-            ShopPointsBalances::<T>::mutate(shop_id, &to, |b| *b = b.saturating_add(amount));
-            ShopPointsTotalSupply::<T>::mutate(shop_id, |s| *s = s.saturating_add(amount));
-
-            Self::maybe_extend_points_expiry(shop_id, &to);
-
-            Self::deposit_event(Event::PointsIssued { shop_id, to, amount });
-            Ok(())
-        }
-
-        /// Manager 直接销毁积分
-        #[pallet::call_index(17)]
-        #[pallet::weight(T::WeightInfo::manager_burn_points())]
-        pub fn manager_burn_points(
-            origin: OriginFor<T>,
-            shop_id: u64,
-            from: T::AccountId,
-            amount: BalanceOf<T>,
-        ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-            ensure!(!amount.is_zero(), Error::<T>::InsufficientPointsBalance);
-
-            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(Self::can_manage_shop(&shop, &who), Error::<T>::NotAuthorized);
-            ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
-            ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
-            // M4: 已关闭不可销毁（Closing 宽限期内允许），封禁不可销毁
-            ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
-            ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
-            ensure!(ShopPointsConfigs::<T>::contains_key(shop_id), Error::<T>::PointsNotEnabled);
-
-            // 懒过期检查
-            Self::check_points_expiry(shop_id, &from);
-
-            let balance = ShopPointsBalances::<T>::get(shop_id, &from);
-            ensure!(balance >= amount, Error::<T>::InsufficientPointsBalance);
-
-            ShopPointsBalances::<T>::mutate(shop_id, &from, |b| *b = b.saturating_sub(amount));
-            ShopPointsTotalSupply::<T>::mutate(shop_id, |s| *s = s.saturating_sub(amount));
-
-            Self::deposit_event(Event::PointsBurned { shop_id, from, amount });
-            Ok(())
-        }
-
-        /// 用户兑换积分为货币
-        ///
-        /// 按 exchange_rate（基点）计算：payout = amount * exchange_rate / 10000
-        /// 货币从 Shop 运营资金账户支出。
-        #[pallet::call_index(18)]
-        #[pallet::weight(T::WeightInfo::redeem_points())]
-        pub fn redeem_points(
-            origin: OriginFor<T>,
-            shop_id: u64,
-            amount: BalanceOf<T>,
-        ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-            ensure!(!amount.is_zero(), Error::<T>::InsufficientPointsBalance);
-
-            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
-            // M4: 封禁状态不可兑换积分
-            ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
-
-            let config = ShopPointsConfigs::<T>::get(shop_id)
-                .ok_or(Error::<T>::PointsNotEnabled)?;
-            ensure!(config.exchange_rate > 0, Error::<T>::InvalidConfig);
-
-            // 懒过期检查
-            Self::check_points_expiry(shop_id, &who);
-
-            let balance = ShopPointsBalances::<T>::get(shop_id, &who);
-            ensure!(balance >= amount, Error::<T>::InsufficientPointsBalance);
-
-            // 计算兑换金额
-            let rate: BalanceOf<T> = (config.exchange_rate as u128).saturated_into();
-            let divisor: BalanceOf<T> = 10000u128.saturated_into();
-            let payout = amount.saturating_mul(rate) / divisor;
-            ensure!(!payout.is_zero(), Error::<T>::RedeemPayoutZero);
-
-            // H1: 佣金保护 — 不得侵占已承诺的佣金资金
-            let shop_account = Self::shop_account_id(shop_id);
-            let balance = T::Currency::free_balance(&shop_account);
-            let protected: BalanceOf<T> = T::CommissionFundGuard::protected_funds(shop.entity_id).saturated_into();
-            let available = balance.saturating_sub(protected);
-            ensure!(available >= payout, Error::<T>::InsufficientOperatingFund);
-
-            // 从 Shop 运营账户转给用户
-            T::Currency::transfer(&shop_account, &who, payout, ExistenceRequirement::AllowDeath)?;
-
-            // 销毁积分
-            ShopPointsBalances::<T>::mutate(shop_id, &who, |b| *b = b.saturating_sub(amount));
-            ShopPointsTotalSupply::<T>::mutate(shop_id, |s| *s = s.saturating_sub(amount));
-
-            Self::deposit_event(Event::PointsRedeemed { shop_id, who, points_burned: amount, payout });
             Ok(())
         }
 
@@ -1341,70 +949,6 @@ pub mod pallet {
             })
         }
 
-        /// 设置 Shop 积分有效期（TTL）
-        ///
-        /// ttl_blocks = 0 表示永不过期（移除 TTL 限制）。
-        /// 新 TTL 仅影响后续发放的积分。
-        #[pallet::call_index(22)]
-        #[pallet::weight(T::WeightInfo::set_points_ttl())]
-        pub fn set_points_ttl(
-            origin: OriginFor<T>,
-            shop_id: u64,
-            ttl_blocks: BlockNumberFor<T>,
-        ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-
-            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(Self::can_manage_shop(&shop, &who), Error::<T>::NotAuthorized);
-            ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
-            ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
-            ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
-            ensure!(ShopPointsConfigs::<T>::contains_key(shop_id), Error::<T>::PointsNotEnabled);
-
-            if ttl_blocks.is_zero() {
-                ShopPointsTtl::<T>::remove(shop_id);
-            } else {
-                ShopPointsTtl::<T>::insert(shop_id, ttl_blocks);
-            }
-
-            Self::deposit_event(Event::PointsTtlSet { shop_id, ttl_blocks });
-            Ok(())
-        }
-
-        /// 清除过期积分
-        ///
-        /// 任何人可调用。仅当积分确实已过期时才执行清除。
-        #[pallet::call_index(23)]
-        #[pallet::weight(T::WeightInfo::expire_points())]
-        pub fn expire_points(
-            origin: OriginFor<T>,
-            shop_id: u64,
-            account: T::AccountId,
-        ) -> DispatchResult {
-            ensure_signed(origin)?;
-
-            ensure!(Shops::<T>::contains_key(shop_id), Error::<T>::ShopNotFound);
-
-            let expiry = ShopPointsExpiresAt::<T>::get(shop_id, &account)
-                .ok_or(Error::<T>::PointsNotExpired)?;
-
-            let now = <frame_system::Pallet<T>>::block_number();
-            ensure!(now > expiry, Error::<T>::PointsNotExpired);
-
-            let expired_amount = ShopPointsBalances::<T>::take(shop_id, &account);
-            if !expired_amount.is_zero() {
-                ShopPointsTotalSupply::<T>::mutate(shop_id, |s| *s = s.saturating_sub(expired_amount));
-                Self::deposit_event(Event::PointsExpired {
-                    shop_id,
-                    account: account.clone(),
-                    amount: expired_amount,
-                });
-            }
-            ShopPointsExpiresAt::<T>::remove(shop_id, &account);
-
-            Ok(())
-        }
-
         /// Root 强制关闭 Shop
         ///
         /// 跳过宽限期，立即关闭并清理。委托给 ShopProvider::force_close_shop。
@@ -1492,41 +1036,6 @@ pub mod pallet {
                 Self::deposit_event(Event::ShopClosingCancelled { shop_id });
                 Ok(())
             })
-        }
-
-        /// 设置积分总量上限
-        ///
-        /// max_supply = 0 表示无上限。已有供应量超过新上限时拒绝。
-        #[pallet::call_index(29)]
-        #[pallet::weight(T::WeightInfo::set_points_max_supply())]
-        pub fn set_points_max_supply(
-            origin: OriginFor<T>,
-            shop_id: u64,
-            max_supply: BalanceOf<T>,
-        ) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-
-            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(Self::can_manage_shop(&shop, &who), Error::<T>::NotAuthorized);
-            ensure!(!T::EntityProvider::is_entity_locked(shop.entity_id), Error::<T>::EntityLocked);
-            ensure!(T::EntityProvider::is_entity_active(shop.entity_id), Error::<T>::EntityNotActive);
-            ensure!(!shop.status.is_terminal_or_banned(), Error::<T>::ShopAlreadyClosed);
-            ensure!(ShopPointsConfigs::<T>::contains_key(shop_id), Error::<T>::PointsNotEnabled);
-
-            // 如果设置上限，当前供应量不得超过
-            if !max_supply.is_zero() {
-                let current_supply = ShopPointsTotalSupply::<T>::get(shop_id);
-                ensure!(current_supply <= max_supply, Error::<T>::PointsMaxSupplyExceeded);
-            }
-
-            if max_supply.is_zero() {
-                ShopPointsMaxSupply::<T>::remove(shop_id);
-            } else {
-                ShopPointsMaxSupply::<T>::insert(shop_id, max_supply);
-            }
-
-            Self::deposit_event(Event::PointsMaxSupplySet { shop_id, max_supply });
-            Ok(())
         }
 
         /// Manager 自我辞职
@@ -1692,12 +1201,8 @@ pub mod pallet {
             ShopStatusBeforeBan::<T>::remove(shop_id);
             ShopBanReason::<T>::remove(shop_id);
 
-            ShopPointsConfigs::<T>::remove(shop_id);
-            let _ = ShopPointsBalances::<T>::clear_prefix(shop_id, POINTS_CLEANUP_LIMIT, None);
-            ShopPointsTotalSupply::<T>::remove(shop_id);
-            ShopPointsTtl::<T>::remove(shop_id);
-            let _ = ShopPointsExpiresAt::<T>::clear_prefix(shop_id, POINTS_CLEANUP_LIMIT, None);
-            ShopPointsMaxSupply::<T>::remove(shop_id);
+            // 委托 loyalty 模块清理积分数据
+            T::PointsCleanup::cleanup_shop_points(shop_id);
 
             let shop_account = Self::shop_account_id(shop_id);
             let remaining = T::Currency::free_balance(&shop_account);
@@ -1783,117 +1288,6 @@ pub mod pallet {
             Self::ipfs_unpin_optional(caller, &shop.policies_cid);
         }
 
-        /// 检查并清除过期积分（懒过期）
-        fn check_points_expiry(shop_id: u64, account: &T::AccountId) {
-            if let Some(expiry) = ShopPointsExpiresAt::<T>::get(shop_id, account) {
-                let now = <frame_system::Pallet<T>>::block_number();
-                if now > expiry {
-                    let expired = ShopPointsBalances::<T>::take(shop_id, account);
-                    if !expired.is_zero() {
-                        ShopPointsTotalSupply::<T>::mutate(shop_id, |s| *s = s.saturating_sub(expired));
-                        Self::deposit_event(Event::PointsExpired {
-                            shop_id,
-                            account: account.clone(),
-                            amount: expired,
-                        });
-                    }
-                    ShopPointsExpiresAt::<T>::remove(shop_id, account);
-                }
-            }
-        }
-
-        /// 检查积分发行是否超过总量上限
-        fn check_points_max_supply(shop_id: u64, amount: BalanceOf<T>) -> DispatchResult {
-            let max_supply = ShopPointsMaxSupply::<T>::get(shop_id);
-            if !max_supply.is_zero() {
-                let current = ShopPointsTotalSupply::<T>::get(shop_id);
-                ensure!(current.saturating_add(amount) <= max_supply, Error::<T>::PointsMaxSupplyExceeded);
-            }
-            Ok(())
-        }
-
-        /// 延长积分有效期（发放积分时调用）
-        fn maybe_extend_points_expiry(shop_id: u64, account: &T::AccountId) {
-            let ttl = ShopPointsTtl::<T>::get(shop_id);
-            if !ttl.is_zero() {
-                let now = <frame_system::Pallet<T>>::block_number();
-                let new_expiry = now.saturating_add(ttl);
-                // 取当前到期时间和新到期时间的较大值（滑动窗口延长）
-                let final_expiry = match ShopPointsExpiresAt::<T>::get(shop_id, account) {
-                    Some(current) if current > new_expiry => current,
-                    _ => new_expiry,
-                };
-                ShopPointsExpiresAt::<T>::insert(shop_id, account, final_expiry);
-            }
-        }
-
-        /// 发放积分（供外部模块调用，如订单完成后返积分）
-        pub fn issue_points(
-            shop_id: u64,
-            to: &T::AccountId,
-            amount: BalanceOf<T>,
-        ) -> DispatchResult {
-            ensure!(!amount.is_zero(), Error::<T>::InsufficientPointsBalance);
-            // M5: 已关闭/关闭中的 Shop 不可发放积分
-            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(!shop.status.is_closed_or_closing(), Error::<T>::ShopAlreadyClosed);
-            // M4: 封禁状态不可发放积分
-            ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
-            ensure!(
-                ShopPointsConfigs::<T>::contains_key(shop_id),
-                Error::<T>::PointsNotEnabled
-            );
-
-            // 积分总量上限检查
-            Self::check_points_max_supply(shop_id, amount)?;
-
-            ShopPointsBalances::<T>::mutate(shop_id, to, |b| *b = b.saturating_add(amount));
-            ShopPointsTotalSupply::<T>::mutate(shop_id, |s| *s = s.saturating_add(amount));
-
-            Self::maybe_extend_points_expiry(shop_id, to);
-
-            Self::deposit_event(Event::PointsIssued {
-                shop_id,
-                to: to.clone(),
-                amount,
-            });
-            Ok(())
-        }
-
-        /// 销毁积分（供外部模块调用，如积分兑换消费）
-        pub fn burn_points(
-            shop_id: u64,
-            from: &T::AccountId,
-            amount: BalanceOf<T>,
-        ) -> DispatchResult {
-            ensure!(!amount.is_zero(), Error::<T>::InsufficientPointsBalance);
-            // M5: 已关闭的 Shop 不可销毁积分（Closing 孽限期内允许销毁）
-            let shop = Shops::<T>::get(shop_id).ok_or(Error::<T>::ShopNotFound)?;
-            ensure!(shop.status != ShopOperatingStatus::Closed, Error::<T>::ShopAlreadyClosed);
-            // M4: 封禁状态不可销毁积分
-            ensure!(!shop.status.is_banned(), Error::<T>::ShopBanned);
-            ensure!(
-                ShopPointsConfigs::<T>::contains_key(shop_id),
-                Error::<T>::PointsNotEnabled
-            );
-
-            // 懒过期检查
-            Self::check_points_expiry(shop_id, from);
-
-            let balance = ShopPointsBalances::<T>::get(shop_id, from);
-            ensure!(balance >= amount, Error::<T>::InsufficientPointsBalance);
-
-            ShopPointsBalances::<T>::mutate(shop_id, from, |b| *b = b.saturating_sub(amount));
-            ShopPointsTotalSupply::<T>::mutate(shop_id, |s| *s = s.saturating_sub(amount));
-
-            Self::deposit_event(Event::PointsBurned {
-                shop_id,
-                from: from.clone(),
-                amount,
-            });
-            Ok(())
-        }
-
         fn do_create_shop_inner(
             entity_id: u64,
             name: BoundedVec<u8, T::MaxShopNameLength>,
@@ -1958,35 +1352,6 @@ pub mod pallet {
         pub fn get_operating_balance(shop_id: u64) -> BalanceOf<T> {
             let shop_account = Self::shop_account_id(shop_id);
             T::Currency::free_balance(&shop_account)
-        }
-
-        // ================================================================
-        // 积分查询 Runtime API 辅助方法
-        // ================================================================
-
-        /// 查询用户在指定 Shop 的积分余额
-        pub fn get_points_balance(shop_id: u64, account: &T::AccountId) -> BalanceOf<T> {
-            ShopPointsBalances::<T>::get(shop_id, account)
-        }
-
-        /// 查询 Shop 积分总供应量
-        pub fn get_points_total_supply(shop_id: u64) -> BalanceOf<T> {
-            ShopPointsTotalSupply::<T>::get(shop_id)
-        }
-
-        /// 查询 Shop 积分配置
-        pub fn get_points_config(shop_id: u64) -> Option<PointsConfigOf<T>> {
-            ShopPointsConfigs::<T>::get(shop_id)
-        }
-
-        /// 查询用户积分到期区块
-        pub fn get_points_expiry(shop_id: u64, account: &T::AccountId) -> Option<BlockNumberFor<T>> {
-            ShopPointsExpiresAt::<T>::get(shop_id, account)
-        }
-
-        /// 查询 Shop 积分总量上限
-        pub fn get_points_max_supply(shop_id: u64) -> BalanceOf<T> {
-            ShopPointsMaxSupply::<T>::get(shop_id)
         }
     }
 

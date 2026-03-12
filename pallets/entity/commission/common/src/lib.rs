@@ -394,6 +394,16 @@ pub trait MultiLevelPlanWriter {
     ) -> Result<(), DispatchError>;
     /// 清除多级分销配置
     fn clear_multi_level_config(entity_id: u64) -> Result<(), DispatchError>;
+    /// 暂停多级分销（治理调用）
+    fn governance_pause(entity_id: u64) -> Result<(), DispatchError> {
+        let _ = entity_id;
+        Ok(())
+    }
+    /// 恢复多级分销（治理调用）
+    fn governance_resume(entity_id: u64) -> Result<(), DispatchError> {
+        let _ = entity_id;
+        Ok(())
+    }
 }
 
 /// 空 MultiLevelPlanWriter 实现
@@ -426,6 +436,16 @@ pub trait TeamPlanWriter<Balance> {
     fn set_team_config(entity_id: u64, tiers: Vec<(u128, u32, u16)>, max_depth: u8, allow_stacking: bool, threshold_mode: u8) -> Result<(), DispatchError>;
     /// 清除团队业绩配置
     fn clear_config(entity_id: u64) -> Result<(), DispatchError>;
+    /// 暂停团队业绩返佣（治理调用）
+    fn governance_pause(entity_id: u64) -> Result<(), DispatchError> {
+        let _ = entity_id;
+        Ok(())
+    }
+    /// 恢复团队业绩返佣（治理调用）
+    fn governance_resume(entity_id: u64) -> Result<(), DispatchError> {
+        let _ = entity_id;
+        Ok(())
+    }
 }
 
 /// 空 TeamPlanWriter 实现

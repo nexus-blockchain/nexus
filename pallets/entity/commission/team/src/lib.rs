@@ -1012,6 +1012,29 @@ impl<T: pallet::Config> pallet_commission_common::TeamPlanWriter<pallet::Balance
         }
         Ok(())
     }
+
+    fn governance_pause(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
+        if !pallet::TeamPerformanceEnabled::<T>::get(entity_id) {
+            return Ok(()); // 已暂停，幂等操作
+        }
+        pallet::TeamPerformanceEnabled::<T>::insert(entity_id, false);
+        pallet::Pallet::<T>::deposit_event(pallet::Event::TeamPerformancePaused { entity_id });
+        Ok(())
+    }
+
+    fn governance_resume(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
+        // 仅在配置存在时才允许恢复
+        frame_support::ensure!(
+            pallet::TeamPerformanceConfigs::<T>::contains_key(entity_id),
+            sp_runtime::DispatchError::Other("TeamConfigNotFound")
+        );
+        if pallet::TeamPerformanceEnabled::<T>::get(entity_id) {
+            return Ok(()); // 已启用，幂等操作
+        }
+        pallet::TeamPerformanceEnabled::<T>::insert(entity_id, true);
+        pallet::Pallet::<T>::deposit_event(pallet::Event::TeamPerformanceResumed { entity_id });
+        Ok(())
+    }
 }
 
 // ============================================================================

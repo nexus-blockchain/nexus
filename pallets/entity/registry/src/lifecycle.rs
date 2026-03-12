@@ -244,6 +244,9 @@ impl<T: Config> Pallet<T> {
 
     /// 申请关闭实体（需治理审批）
     pub(crate) fn do_request_close_entity(who: T::AccountId, entity_id: u64) -> sp_runtime::DispatchResult {
+        // 关闭前置依赖校验：存在活跃业务时拒绝关闭
+        Self::ensure_no_active_dependencies(entity_id)?;
+
         let was_active = Entities::<T>::try_mutate(entity_id, |maybe_entity| -> Result<bool, sp_runtime::DispatchError> {
             let entity = maybe_entity.as_mut().ok_or(Error::<T>::EntityNotFound)?;
             ensure!(entity.owner == who, Error::<T>::NotEntityOwner);
@@ -431,6 +434,9 @@ impl<T: Config> Pallet<T> {
 
         let entity = Entities::<T>::get(entity_id).ok_or(Error::<T>::EntityNotFound)?;
         ensure!(entity.status == EntityStatus::PendingClose, Error::<T>::InvalidEntityStatus);
+
+        // 关闭前置依赖校验：超时执行前再次检查，防止申请后新增业务依赖
+        Self::ensure_no_active_dependencies(entity_id)?;
 
         let fund_refunded = Self::do_finalize_close(entity_id, entity);
 

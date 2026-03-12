@@ -231,6 +231,18 @@ pub mod pallet {
         /// Entity 状态变更级联通知（暂停/封禁/关闭/恢复时通知下游模块）
         type OnEntityStatusChange: pallet_entity_common::OnEntityStatusChange;
 
+        /// 订单查询提供者（用于关闭前置检查）
+        type OrderProvider: pallet_entity_common::OrderProvider<Self::AccountId, BalanceOf<Self>>;
+
+        /// 代币发售查询提供者（用于关闭前置检查）
+        type TokenSaleProvider: pallet_entity_common::TokenSaleProvider<BalanceOf<Self>>;
+
+        /// 争议查询提供者（用于关闭前置检查）
+        type DisputeQueryProvider: pallet_entity_common::DisputeQueryProvider<Self::AccountId>;
+
+        /// 市场交易查询提供者（用于关闭前置检查）
+        type MarketProvider: pallet_entity_common::MarketProvider<Self::AccountId, BalanceOf<Self>>;
+
         /// 权重信息（由 benchmark 生成，或使用默认占位值）
         type WeightInfo: WeightInfo;
     }
@@ -684,6 +696,16 @@ pub mod pallet {
         NameAlreadyTaken,
         /// 关闭申请尚未超时
         CloseRequestNotExpired,
+        /// 存在活跃治理提案，不允许关闭
+        HasActiveProposals,
+        /// 存在未完成订单，不允许关闭
+        HasActiveOrders,
+        /// 存在活跃争议，不允许关闭
+        HasActiveDisputes,
+        /// 存在活跃代币发售，不允许关闭
+        HasActiveTokenSale,
+        /// 存在活跃市场交易，不允许关闭
+        HasActiveMarket,
     }
 
     // ==================== Extrinsics ====================

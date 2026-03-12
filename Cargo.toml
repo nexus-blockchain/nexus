@@ -39,6 +39,7 @@ members = [
     "pallets/entity/disclosure",
     "pallets/entity/kyc",
     "pallets/entity/tokensale",
+    "pallets/entity/loyalty",
 # Common libraries (共享工具库，非 pallet)
     "common/crypto",
     "common/media",
@@ -104,6 +105,7 @@ pallet-entity-review = { path = "./pallets/entity/review", default-features = fa
 pallet-entity-disclosure = { path = "./pallets/entity/disclosure", default-features = false }
 pallet-entity-kyc = { path = "./pallets/entity/kyc", default-features = false }
 pallet-entity-tokensale = { path = "./pallets/entity/tokensale", default-features = false }
+pallet-entity-loyalty = { path = "./pallets/entity/loyalty", default-features = false }
 # Ads pallets (通用广告系统)
 pallet-ads-primitives = { path = "./pallets/ads/primitives", default-features = false }
 pallet-ads-core = { path = "./pallets/ads/core", default-features = false }

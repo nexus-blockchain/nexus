@@ -304,7 +304,7 @@ nexus/
 | **IDE / AI** | `.idea/`、`.vscode/`、`.cursor/`、`.claude/` 等 |
 | **环境与密钥** | `.env`、`*.pem`、`*.key`、`secrets/` |
 | **构建与缓存** | `build/`、`out/`、`dist/`、`coverage/` |
-| **脚本与测试** | `scripts/test-accounts.json`、`scripts/e2e-reports/` |
+| **脚本与测试** | `scripts/*.log`、`scripts/reports/` |
 | **基础设施** | `*.tfstate`、`.terraform/`、`kubeconfig` |
 | **其他** | `telegram/`、`my-chain-state/`、`grouprobot/.env`、`media-utils/output/` |
 
@@ -348,7 +348,7 @@ cargo test -p pallet-ads-core
 cd grouprobot && cargo test
 
 # E2E 集成测试（需先启动开发链）
-cd scripts && npx ts-node e2e/run-e2e.ts
+cd scripts && npm run e2e
 ```
 
 ### Docker 部署

@@ -25,7 +25,8 @@
 
 // Substrate and Polkadot dependencies
 use sp_runtime::{traits::AccountIdConversion, generic};
-use crate::{UncheckedExtrinsic, EntityGovernance, EntityMarket, SessionKeys};
+use crate::{UncheckedExtrinsic, EntityGovernance, EntityMarket, SessionKeys,
+	CommissionCore, CommissionSingleLine, EntityLoyalty};
 use frame_support::{
 	derive_impl, parameter_types,
 	traits::{ConstBool, ConstU128, ConstU16, ConstU32, ConstU64, ConstU8, VariantCountOf},
@@ -48,7 +49,7 @@ use super::{
 	EXISTENTIAL_DEPOSIT, SLOT_DURATION, VERSION, UNIT, MINUTES, HOURS, DAYS,
 	TechnicalCommittee, ArbitrationCommittee, TreasuryCouncil, ContentCommittee,
 	// Entity types (原 ShareMall)
-	Assets, Escrow, EntityRegistry, EntityShop, EntityProduct, EntityTransaction, EntityToken, EntityKyc, EntityDisclosure,
+	Assets, Escrow, EntityRegistry, EntityShop, EntityProduct, EntityTransaction, EntityToken, EntityKyc, EntityDisclosure, EntityTokenSale,
 };
 
 const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
@@ -1332,6 +1333,10 @@ impl pallet_entity_registry::Config for Runtime {
 	type MaxReferralsPerReferrer = ConstU32<1000>;
 	type StoragePin = pallet_storage_service::Pallet<Runtime>;
 	type OnEntityStatusChange = EntityDisclosure;
+	type OrderProvider = EntityTransaction;
+	type TokenSaleProvider = EntityTokenSale;
+	type DisputeQueryProvider = pallet_entity_common::NullDisputeQueryProvider;
+	type MarketProvider = pallet_entity_common::NullMarketProvider;
 	type WeightInfo = pallet_entity_registry::SubstrateWeight;
 }
 
@@ -1341,8 +1346,6 @@ impl pallet_entity_shop::Config for Runtime {
 	type MaxShopNameLength = ConstU32<64>;
 	type MaxCidLength = ConstU32<64>;
 	type MaxManagers = ConstU32<10>;
-	type MaxPointsNameLength = ConstU32<32>;
-	type MaxPointsSymbolLength = ConstU32<8>;
 	type MinOperatingBalance = ConstU128<{ UNIT / 10 }>;
 	type WarningThreshold = ConstU128<{ UNIT }>;
 	type CommissionFundGuard = crate::CommissionCore;
@@ -1350,6 +1353,7 @@ impl pallet_entity_shop::Config for Runtime {
 	type MaxShopsPerEntity = ConstU32<16>;
 	type StoragePin = pallet_storage_service::Pallet<Runtime>;
 	type ProductProvider = EntityProduct;
+	type PointsCleanup = crate::EntityLoyalty;
 	type WeightInfo = pallet_entity_shop::weights::SubstrateWeight<Runtime>;
 }
 
@@ -1381,14 +1385,21 @@ impl pallet_entity_order::Config for Runtime {
 	type ServiceConfirmTimeout = ConstU32<{ 7 * 24 * 600 }>;  // 7 天
 	type DisputeTimeout = ConstU32<{ 14 * 24 * 600 }>;  // 14 天
 	type ConfirmExtension = ConstU32<{ 7 * 24 * 600 }>;  // 7 天
-	type CommissionHandler = OrderCommissionBridge;
-	type TokenCommissionHandler = TokenOrderCommissionBridge;
-	type ShoppingBalance = ShoppingBalanceBridge;
+	type OnOrderCompleted = (
+		OrderMemberHook,
+		OrderShopStatsHook,
+		OrderCommissionHook,
+		OrderLoyaltyHook,
+	);
+	type OnOrderCancelled = OrderCancelHook;
+	type TokenFeeConfig = TokenFeeConfigBridge;
+	type Loyalty = LoyaltyBridge;
 	type MemberProvider = EntityMemberProvider;
 	type PricingProvider = EntityPricingProvider;
 	type TokenPriceProvider = EntityMarket;
 	type MaxCidLength = ConstU32<64>;
 	type MaxBuyerOrders = ConstU32<1000>;
+	type MaxPayerOrders = ConstU32<1000>;
 	type MaxShopOrders = ConstU32<10000>;
 	type MaxExpiryQueueSize = ConstU32<500>;
 	type WeightInfo = pallet_entity_order::weights::SubstrateWeight<Runtime>;
@@ -1587,50 +1598,96 @@ impl pallet_entity_commission::MemberProvider<AccountId> for MemberProviderBridg
 	}
 }
 
-/// 桥接：OrderCommissionHandler → CommissionProvider（供 Transaction 模块调用）
-pub struct OrderCommissionBridge;
-impl pallet_entity_common::OrderCommissionHandler<AccountId, Balance> for OrderCommissionBridge {
-	fn on_order_completed(
-		entity_id: u64,
-		shop_id: u64,
-		order_id: u64,
-		buyer: &AccountId,
-		order_amount: Balance,
-		platform_fee: Balance,
-	) -> Result<(), sp_runtime::DispatchError> {
-		// available_pool = order_amount - platform_fee（卖家实际所得），commission 内部会按 max_commission_rate、source 和账户余额封顶
-		let available_pool = order_amount.saturating_sub(platform_fee);
-		<pallet_commission_core::Pallet<Runtime> as pallet_commission_common::CommissionProvider<AccountId, Balance>>::process_commission(
-			entity_id, shop_id, order_id, buyer, order_amount, available_pool, platform_fee,
-		)
-	}
-	fn on_order_cancelled(order_id: u64) -> Result<(), sp_runtime::DispatchError> {
-		<pallet_commission_core::Pallet<Runtime> as pallet_commission_common::CommissionProvider<AccountId, Balance>>::cancel_commission(order_id)
+/// Hook: 会员自动注册 + 消费更新 + 升级检查（Phase 5.3）
+pub struct OrderMemberHook;
+impl pallet_entity_common::OnOrderCompleted<AccountId, Balance> for OrderMemberHook {
+	fn on_completed(info: &pallet_entity_common::OrderCompletionInfo<AccountId, Balance>) {
+		let _ = pallet_entity_member::Pallet::<Runtime>::auto_register_by_entity(
+			info.entity_id, &info.buyer, info.referrer.clone(), true,
+		);
+		let _ = pallet_entity_member::Pallet::<Runtime>::update_spent_by_entity(
+			info.entity_id, &info.buyer, info.amount_usdt,
+		);
+		let _ = pallet_entity_member::Pallet::<Runtime>::check_order_upgrade_rules_by_entity(
+			info.entity_id, &info.buyer, info.product_id, info.amount_usdt,
+		);
 	}
 }
 
-/// 桥接：TokenOrderCommissionHandler → TokenCommissionProvider（供 Transaction 模块 Token 订单调用）
-pub struct TokenOrderCommissionBridge;
-impl pallet_entity_common::TokenOrderCommissionHandler<AccountId> for TokenOrderCommissionBridge {
-	fn on_token_order_completed(
-		entity_id: u64,
-		shop_id: u64,
-		order_id: u64,
-		buyer: &AccountId,
-		token_amount: u128,
-		token_platform_fee: u128,
-	) -> Result<(), sp_runtime::DispatchError> {
+/// Hook: Shop 统计更新（Phase 5.3）
+pub struct OrderShopStatsHook;
+impl pallet_entity_common::OnOrderCompleted<AccountId, Balance> for OrderShopStatsHook {
+	fn on_completed(info: &pallet_entity_common::OrderCompletionInfo<AccountId, Balance>) {
 		use sp_runtime::SaturatedConversion;
-		let token_balance: <Runtime as pallet_commission_core::Config>::TokenBalance = token_amount.saturated_into();
-		let fee_balance: <Runtime as pallet_commission_core::Config>::TokenBalance = token_platform_fee.saturated_into();
-		let available_pool = token_balance.saturating_sub(fee_balance);
-		<pallet_commission_core::Pallet<Runtime> as pallet_commission_common::TokenCommissionProvider<AccountId, <Runtime as pallet_commission_core::Config>::TokenBalance>>::process_token_commission(
-			entity_id, shop_id, order_id, buyer, token_balance, available_pool, fee_balance,
-		)
+		let amount: u128 = match info.payment_asset {
+			pallet_entity_common::PaymentAsset::Native => info.nex_seller_received.saturated_into(),
+			pallet_entity_common::PaymentAsset::EntityToken => info.token_payment_amount,
+		};
+		let _ = <EntityShop as pallet_entity_common::ShopProvider<AccountId>>::update_shop_stats(
+			info.shop_id, amount, 1,
+		);
 	}
-	fn on_token_order_cancelled(order_id: u64) -> Result<(), sp_runtime::DispatchError> {
-		<pallet_commission_core::Pallet<Runtime> as pallet_commission_common::TokenCommissionProvider<AccountId, <Runtime as pallet_commission_core::Config>::TokenBalance>>::cancel_token_commission(order_id)
+}
+
+/// Hook: NEX/Token 佣金分发（Phase 5.3）
+pub struct OrderCommissionHook;
+impl pallet_entity_common::OnOrderCompleted<AccountId, Balance> for OrderCommissionHook {
+	fn on_completed(info: &pallet_entity_common::OrderCompletionInfo<AccountId, Balance>) {
+		use sp_runtime::SaturatedConversion;
+		match info.payment_asset {
+			pallet_entity_common::PaymentAsset::Native => {
+				let available_pool = info.nex_total_amount.saturating_sub(info.nex_platform_fee);
+				let _ = <pallet_commission_core::Pallet<Runtime> as pallet_commission_common::CommissionProvider<AccountId, Balance>>::process_commission(
+					info.entity_id, info.shop_id, info.order_id, &info.buyer,
+					info.nex_total_amount, available_pool, info.nex_platform_fee,
+				);
+			},
+			pallet_entity_common::PaymentAsset::EntityToken => {
+				let token_balance: <Runtime as pallet_commission_core::Config>::TokenBalance = info.token_payment_amount.saturated_into();
+				let fee_balance: <Runtime as pallet_commission_core::Config>::TokenBalance = info.token_platform_fee.saturated_into();
+				let available_pool = token_balance.saturating_sub(fee_balance);
+				let _ = <pallet_commission_core::Pallet<Runtime> as pallet_commission_common::TokenCommissionProvider<AccountId, <Runtime as pallet_commission_core::Config>::TokenBalance>>::process_token_commission(
+					info.entity_id, info.shop_id, info.order_id, &info.buyer,
+					token_balance, available_pool, fee_balance,
+				);
+			},
+		}
 	}
+}
+
+/// Hook: 积分奖励（Phase 5.3）
+pub struct OrderLoyaltyHook;
+impl pallet_entity_common::OnOrderCompleted<AccountId, Balance> for OrderLoyaltyHook {
+	fn on_completed(info: &pallet_entity_common::OrderCompletionInfo<AccountId, Balance>) {
+		use sp_runtime::SaturatedConversion;
+		let amount: Balance = match info.payment_asset {
+			pallet_entity_common::PaymentAsset::Native => info.nex_total_amount,
+			pallet_entity_common::PaymentAsset::EntityToken => info.token_payment_amount.saturated_into(),
+		};
+		let _ = <LoyaltyBridge as pallet_entity_common::LoyaltyWritePort<AccountId, Balance>>::reward_on_purchase(
+			info.entity_id, &info.buyer, amount,
+		);
+	}
+}
+
+/// Hook: 取消佣金（Phase 5.3）
+pub struct OrderCancelHook;
+impl pallet_entity_common::OnOrderCancelled for OrderCancelHook {
+	fn on_cancelled(info: &pallet_entity_common::OrderCancellationInfo) {
+		match info.payment_asset {
+			pallet_entity_common::PaymentAsset::Native => {
+				let _ = <pallet_commission_core::Pallet<Runtime> as pallet_commission_common::CommissionProvider<AccountId, Balance>>::cancel_commission(info.order_id);
+			},
+			pallet_entity_common::PaymentAsset::EntityToken => {
+				let _ = <pallet_commission_core::Pallet<Runtime> as pallet_commission_common::TokenCommissionProvider<AccountId, <Runtime as pallet_commission_core::Config>::TokenBalance>>::cancel_token_commission(info.order_id);
+			},
+		}
+	}
+}
+
+/// 查询 Bridge: Token 平台费率 + Entity 账户（Phase 5.3）
+pub struct TokenFeeConfigBridge;
+impl pallet_entity_common::TokenFeeConfigPort<AccountId> for TokenFeeConfigBridge {
 	fn token_platform_fee_rate(entity_id: u64) -> u16 {
 		<pallet_commission_core::Pallet<Runtime> as pallet_commission_common::TokenCommissionProvider<AccountId, <Runtime as pallet_commission_core::Config>::TokenBalance>>::token_platform_fee_rate(entity_id)
 	}
@@ -1658,14 +1715,61 @@ impl pallet_commission_common::TokenTransferProvider<AccountId, u128> for TokenT
 	}
 }
 
-/// 桥接：购物余额 → CommissionCore（供 Transaction 模块下单时抵扣购物余额）
+/// 桥接：购物余额 → Loyalty 模块（供 Transaction 模块下单时抵扣购物余额）
 pub struct ShoppingBalanceBridge;
 impl pallet_entity_common::ShoppingBalanceProvider<AccountId, Balance> for ShoppingBalanceBridge {
 	fn shopping_balance(entity_id: u64, account: &AccountId) -> Balance {
-		pallet_commission_core::MemberShoppingBalance::<Runtime>::get(entity_id, account)
+		pallet_entity_loyalty::MemberShoppingBalance::<Runtime>::get(entity_id, account)
 	}
 	fn consume_shopping_balance(entity_id: u64, account: &AccountId, amount: Balance) -> Result<(), sp_runtime::DispatchError> {
-		pallet_commission_core::Pallet::<Runtime>::do_consume_shopping_balance(entity_id, account, amount)
+		pallet_entity_loyalty::Pallet::<Runtime>::do_consume_shopping_balance(entity_id, account, amount)
+	}
+}
+
+/// 桥接：LoyaltyBridge — 将 Loyalty 模块 + EntityToken 实现连接到 LoyaltyWritePort trait
+pub struct LoyaltyBridge;
+impl pallet_entity_common::LoyaltyReadPort<AccountId, Balance> for LoyaltyBridge {
+	fn is_token_enabled(entity_id: u64) -> bool {
+		<EntityToken as pallet_entity_common::EntityTokenProvider<AccountId, Balance>>::is_token_enabled(entity_id)
+	}
+	fn token_discount_balance(entity_id: u64, who: &AccountId) -> Balance {
+		<EntityToken as pallet_entity_common::EntityTokenProvider<AccountId, Balance>>::token_balance(entity_id, who)
+	}
+	fn shopping_balance(entity_id: u64, account: &AccountId) -> Balance {
+		pallet_entity_loyalty::MemberShoppingBalance::<Runtime>::get(entity_id, account)
+	}
+	fn shopping_total(entity_id: u64) -> Balance {
+		pallet_entity_loyalty::ShopShoppingTotal::<Runtime>::get(entity_id)
+	}
+}
+impl pallet_entity_common::LoyaltyWritePort<AccountId, Balance> for LoyaltyBridge {
+	fn redeem_for_discount(entity_id: u64, who: &AccountId, tokens: Balance) -> Result<Balance, sp_runtime::DispatchError> {
+		<EntityToken as pallet_entity_common::EntityTokenProvider<AccountId, Balance>>::redeem_for_discount(entity_id, who, tokens)
+	}
+	fn consume_shopping_balance(entity_id: u64, account: &AccountId, amount: Balance) -> Result<(), sp_runtime::DispatchError> {
+		pallet_entity_loyalty::Pallet::<Runtime>::do_consume_shopping_balance(entity_id, account, amount)
+	}
+	fn reward_on_purchase(entity_id: u64, who: &AccountId, purchase_amount: Balance) -> Result<Balance, sp_runtime::DispatchError> {
+		<EntityToken as pallet_entity_common::EntityTokenProvider<AccountId, Balance>>::reward_on_purchase(entity_id, who, purchase_amount)
+	}
+	fn credit_shopping_balance(entity_id: u64, who: &AccountId, amount: Balance) -> Result<(), sp_runtime::DispatchError> {
+		pallet_entity_loyalty::Pallet::<Runtime>::do_credit_shopping_balance(entity_id, who, amount)
+	}
+}
+impl pallet_entity_common::LoyaltyTokenReadPort<AccountId, u128> for LoyaltyBridge {
+	fn token_shopping_balance(entity_id: u64, who: &AccountId) -> u128 {
+		pallet_entity_loyalty::MemberTokenShoppingBalance::<Runtime>::get(entity_id, who)
+	}
+	fn token_shopping_total(entity_id: u64) -> u128 {
+		pallet_entity_loyalty::TokenShoppingTotal::<Runtime>::get(entity_id)
+	}
+}
+impl pallet_entity_common::LoyaltyTokenWritePort<AccountId, u128> for LoyaltyBridge {
+	fn credit_token_shopping_balance(entity_id: u64, who: &AccountId, amount: u128) -> Result<(), sp_runtime::DispatchError> {
+		pallet_entity_loyalty::Pallet::<Runtime>::do_credit_token_shopping_balance(entity_id, who, amount)
+	}
+	fn consume_token_shopping_balance(entity_id: u64, account: &AccountId, amount: u128) -> Result<(), sp_runtime::DispatchError> {
+		pallet_entity_loyalty::Pallet::<Runtime>::do_consume_token_shopping_balance(entity_id, account, amount)
 	}
 }
 pub type EntityMemberProvider = MemberProviderBridge;
@@ -1694,6 +1798,15 @@ impl pallet_entity_governance::Config for Runtime {
 	type TeamWriter = pallet_commission_team::Pallet<Runtime>;
 	type ProductProvider = pallet_entity_product::Pallet<Runtime>;
 	type DisclosureProvider = pallet_entity_disclosure::Pallet<Runtime>;
+	// Phase 4.2 → Phase 5.2: 领域治理执行 Port（已接线到各 pallet 实现）
+	type MarketGovernance = EntityMarket;
+	type CommissionGovernance = CommissionCore;
+	type SingleLineGovernance = CommissionSingleLine;
+	type KycGovernance = EntityKyc;
+	type ShopGovernance = EntityLoyalty;
+	type TokenGovernance = EntityToken;
+	// Phase 4.3: 资金保护
+	type TreasuryPort = EntityRegistry;
 	type ProposalCooldown = ConstU32<{ 1 * DAYS }>; // 1天冷却期
 	type EmergencyOrigin = RootOrTechnicalMajority;
 	type MaxVotingPeriod = ConstU32<{ 30 * DAYS }>; // 最大投票期30天
@@ -1784,6 +1897,8 @@ impl pallet_commission_core::Config for Runtime {
 	type ReferralQuery = crate::CommissionReferral;
 	type WeightInfo = pallet_commission_core::weights::SubstrateWeight<Runtime>;
 	type GovernanceProvider = EntityGovernance;
+	type Loyalty = LoyaltyBridge;
+	type LoyaltyToken = LoyaltyBridge;
 }
 
 impl pallet_commission_referral::Config for Runtime {
@@ -1980,6 +2095,20 @@ impl pallet_entity_tokensale::Config for Runtime {
 	type RefundGracePeriod = ConstU32<{ 7 * DAYS }>;
 	type MaxBatchRefund = ConstU32<100>;
 	type WeightInfo = pallet_entity_tokensale::weights::SubstrateWeight<Runtime>;
+}
+
+impl pallet_entity_loyalty::Config for Runtime {
+	type Currency = Balances;
+	type ShopProvider = EntityShop;
+	type EntityProvider = EntityRegistry;
+	type TokenProvider = EntityTokenProvider;
+	type CommissionFundGuard = crate::CommissionCore;
+	type ParticipationGuard = KycParticipationGuard;
+	type TokenBalance = u128;
+	type TokenTransferProvider = TokenTransferProviderBridge;
+	type MaxPointsNameLength = ConstU32<32>;
+	type MaxPointsSymbolLength = ConstU32<8>;
+	type WeightInfo = pallet_entity_loyalty::weights::SubstrateWeight<Runtime>;
 }
 
 // ============================================================================

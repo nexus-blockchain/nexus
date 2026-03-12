@@ -4,7 +4,7 @@
 //! - 全局返佣配置（启用模式、来源、上限）
 //! - 返佣记账（credit_commission）与取消（cancel_commission）
 //! - 提现系统（分级提现 + 购物余额）
-//! - 偿付安全（ShopPendingTotal + ShopShoppingTotal）
+//! - 偿付安全（ShopPendingTotal + Loyalty::shopping_total）
 //! - 调度各插件（ReferralPlugin / LevelDiffPlugin / SingleLinePlugin / TeamPlugin）
 
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -25,10 +25,15 @@ pub use pallet_commission_common::{
     PoolRewardQueryProvider, ReferralQueryProvider,
 };
 use sp_runtime::traits::{Saturating, Zero};
+use pallet_entity_common::{LoyaltyReadPort as _, LoyaltyTokenReadPort as _, LoyaltyTokenWritePort as _};
 
 pub mod runtime_api;
 pub mod weights;
 pub use weights::WeightInfo;
+
+mod engine;
+mod withdraw;
+mod settlement;
 
 #[cfg(test)]
 mod mock;
@@ -46,7 +51,7 @@ pub mod pallet {
         traits::{Currency, ExistenceRequirement, Get},
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{AdminPermission, EntityProvider, GovernanceMode, GovernanceProvider, ShopProvider};
+    use pallet_entity_common::{EntityProvider, GovernanceMode, GovernanceProvider, ShopProvider, LoyaltyReadPort, LoyaltyWritePort};
     use pallet_commission_common::{ReferralPlanWriter, LevelDiffPlanWriter, TeamPlanWriter, MultiLevelPlanWriter};
     use sp_runtime::traits::{Saturating, Zero};
 
@@ -292,6 +297,12 @@ pub mod pallet {
         type PoolRewardQuery: pallet_commission_common::PoolRewardQueryProvider<Self::AccountId, BalanceOf<Self>, TokenBalanceOf<Self>>;
         /// 推荐链返佣查询
         type ReferralQuery: pallet_commission_common::ReferralQueryProvider<Self::AccountId, BalanceOf<Self>>;
+
+        /// Loyalty 模块接口（NEX 购物余额读写）
+        type Loyalty: pallet_entity_common::LoyaltyWritePort<Self::AccountId, BalanceOf<Self>>;
+
+        /// Loyalty Token 模块接口（Token 购物余额读写）
+        type LoyaltyToken: pallet_entity_common::LoyaltyTokenWritePort<Self::AccountId, TokenBalanceOf<Self>>;
     }
 
     /// 提现记录
@@ -372,16 +383,6 @@ pub mod pallet {
         ValueQuery,
     >;
 
-    /// Entity 购物余额总额 entity_id -> Balance（资金锁定）
-    #[pallet::storage]
-    #[pallet::getter(fn entity_shopping_total)]
-    pub type ShopShoppingTotal<T: Config> = StorageMap<
-        _,
-        Blake2_128Concat, u64,
-        BalanceOf<T>,
-        ValueQuery,
-    >;
-
     /// 提现配置 entity_id -> EntityWithdrawalConfig
     #[pallet::storage]
     #[pallet::getter(fn withdrawal_config)]
@@ -389,17 +390,6 @@ pub mod pallet {
         _,
         Blake2_128Concat, u64,
         EntityWithdrawalConfigOf<T>,
-    >;
-
-    /// 会员购物余额 (entity_id, account) -> Balance
-    #[pallet::storage]
-    #[pallet::getter(fn member_shopping_balance)]
-    pub type MemberShoppingBalance<T: Config> = StorageDoubleMap<
-        _,
-        Blake2_128Concat, u64,
-        Blake2_128Concat, T::AccountId,
-        BalanceOf<T>,
-        ValueQuery,
     >;
 
     /// 会员最后入账区块 (entity_id, account) -> BlockNumber（用于冻结期检查）
@@ -521,27 +511,6 @@ pub mod pallet {
     /// Token 平台费率默认值（100 bps = 1%）
     #[pallet::type_value]
     pub fn DefaultTokenPlatformFeeRate() -> u16 { 100 }
-
-    /// Token 购物余额 (entity_id, account) → TokenBalance
-    #[pallet::storage]
-    #[pallet::getter(fn member_token_shopping_balance)]
-    pub type MemberTokenShoppingBalance<T: Config> = StorageDoubleMap<
-        _,
-        Blake2_128Concat, u64,
-        Blake2_128Concat, T::AccountId,
-        TokenBalanceOf<T>,
-        ValueQuery,
-    >;
-
-    /// Token 购物余额总额 entity_id → TokenBalance（资金锁定）
-    #[pallet::storage]
-    #[pallet::getter(fn token_shopping_total)]
-    pub type TokenShoppingTotal<T: Config> = StorageMap<
-        _,
-        Blake2_128Concat, u64,
-        TokenBalanceOf<T>,
-        ValueQuery,
-    >;
 
     /// Token 提现配置 entity_id → EntityWithdrawalConfig（与 NEX 对称，独立配置）
     #[pallet::storage]
@@ -1203,7 +1172,7 @@ pub mod pallet {
                     entity_id, &who, total_amount, requested_repurchase_rate,
                 );
 
-                // C1 审计修复: 偿付安全检查必须计入 repurchase+bonus 对 ShopShoppingTotal 的增量
+                // C1 审计修复: 偿付安全检查必须计入 repurchase+bonus 对购物余额总额的增量
                 // 提现后状态: pending -= total_amount, shopping += repurchase + bonus, entity -= withdrawal
                 // 需要: entity_balance - withdrawal >= (old_pending - total_amount) + (old_shopping + repurchase + bonus)
                 let entity_account = T::EntityProvider::entity_account(entity_id);
@@ -1211,7 +1180,7 @@ pub mod pallet {
                 let remaining_pending = ShopPendingTotal::<T>::get(entity_id)
                     .saturating_sub(total_amount);
                 let total_to_shopping = split.repurchase.saturating_add(split.bonus);
-                let new_shopping_total = ShopShoppingTotal::<T>::get(entity_id)
+                let new_shopping_total = T::Loyalty::shopping_total(entity_id)
                     .saturating_add(total_to_shopping);
                 let unallocated = UnallocatedPool::<T>::get(entity_id);
                 let required_reserve = remaining_pending.saturating_add(new_shopping_total).saturating_add(unallocated);
@@ -1231,14 +1200,9 @@ pub mod pallet {
                     )?;
                 }
 
-                // 复购部分 + 奖励 转入目标账户的购物余额（total_to_shopping 已在偿付检查中计算）
+                // 复购部分 + 奖励 转入目标账户的购物余额（通过 Loyalty 模块）
                 if !total_to_shopping.is_zero() {
-                    MemberShoppingBalance::<T>::mutate(entity_id, &target, |balance| {
-                        *balance = balance.saturating_add(total_to_shopping);
-                    });
-                    ShopShoppingTotal::<T>::mutate(entity_id, |total| {
-                        *total = total.saturating_add(total_to_shopping);
-                    });
+                    T::Loyalty::credit_shopping_balance(entity_id, &target, total_to_shopping)?;
                 }
 
                 // 统计记在出资人名下
@@ -1560,7 +1524,7 @@ pub mod pallet {
                 let remaining_pending = TokenPendingTotal::<T>::get(entity_id)
                     .saturating_sub(total_amount);
                 let total_to_shopping = split.repurchase.saturating_add(split.bonus);
-                let new_shopping_total = TokenShoppingTotal::<T>::get(entity_id)
+                let new_shopping_total = T::LoyaltyToken::token_shopping_total(entity_id)
                     .saturating_add(total_to_shopping);
                 let unallocated = UnallocatedTokenPool::<T>::get(entity_id);
                 let required_reserve = remaining_pending
@@ -1584,12 +1548,9 @@ pub mod pallet {
 
                 // 复购部分 + 奖励 → 目标账户的 Token 购物余额
                 if !total_to_shopping.is_zero() {
-                    MemberTokenShoppingBalance::<T>::mutate(entity_id, &target, |balance| {
-                        *balance = balance.saturating_add(total_to_shopping);
-                    });
-                    TokenShoppingTotal::<T>::mutate(entity_id, |total| {
-                        *total = total.saturating_add(total_to_shopping);
-                    });
+                    T::LoyaltyToken::credit_token_shopping_balance(
+                        entity_id, &target, total_to_shopping,
+                    )?;
                 }
 
                 // 统计记在出资人名下
@@ -1666,7 +1627,7 @@ pub mod pallet {
             };
 
             let non_pool_reserved = ShopPendingTotal::<T>::get(entity_id)
-                .saturating_add(ShopShoppingTotal::<T>::get(entity_id));
+                .saturating_add(T::Loyalty::shopping_total(entity_id));
             let reserved = non_pool_reserved.saturating_add(unallocated_reserve);
             let min_balance = T::Currency::minimum_balance();
             let available = entity_balance
@@ -1702,7 +1663,7 @@ pub mod pallet {
 
         /// Entity Owner 提取 entity_account 中未被锁定的 Token 自由余额
         ///
-        /// 提取后 entity_token_balance 必须 ≥ TokenPendingTotal + TokenShoppingTotal + UnallocatedTokenPool
+        /// 提取后 entity_token_balance 必须 ≥ TokenPendingTotal + LoyaltyToken::token_shopping_total + UnallocatedTokenPool
         #[pallet::call_index(13)]
         #[pallet::weight(T::WeightInfo::withdraw_entity_token_funds())]
         pub fn withdraw_entity_token_funds(
@@ -1733,7 +1694,7 @@ pub mod pallet {
             };
 
             let non_pool_reserved = TokenPendingTotal::<T>::get(entity_id)
-                .saturating_add(TokenShoppingTotal::<T>::get(entity_id));
+                .saturating_add(T::LoyaltyToken::token_shopping_total(entity_id));
             let reserved = non_pool_reserved.saturating_add(unallocated_reserve);
             let available = entity_token_balance.saturating_sub(reserved);
             ensure!(amount <= available, Error::<T>::InsufficientEntityTokenFunds);
@@ -2145,1218 +2106,8 @@ pub mod pallet {
     }
 
     // ========================================================================
-    // Internal functions
+    // Internal functions — extracted to engine.rs, withdraw.rs, settlement.rs
     // ========================================================================
-
-    impl<T: Config> Pallet<T> {
-        /// 判断沉淀池是否锁定（不可被 Entity Owner 提取）
-        ///
-        /// 锁定条件：
-        /// - POOL_REWARD 开启 → 锁定（资金用于会员领奖）
-        /// - POOL_REWARD 关闭但 cooldown 未满 → 锁定（防套利）
-        /// - POOL_REWARD 关闭且 cooldown 已满 → 不锁定（可提取）
-        /// - 从未配置 POOL_REWARD → 不锁定
-        fn is_pool_reward_locked(entity_id: u64) -> bool {
-            let pool_reward_on = CommissionConfigs::<T>::get(entity_id)
-                .map(|c| c.enabled && c.enabled_modes.contains(CommissionModes::POOL_REWARD))
-                .unwrap_or(false);
-
-            if pool_reward_on {
-                return true;
-            }
-
-            // POOL_REWARD 未开启，检查是否有 cooldown
-            if let Some(disabled_at) = PoolRewardDisabledAt::<T>::get(entity_id) {
-                let now = <frame_system::Pallet<T>>::block_number();
-                let cooldown = T::PoolRewardWithdrawCooldown::get();
-                if now < disabled_at.saturating_add(cooldown) {
-                    return true; // cooldown 期内仍锁定
-                }
-            }
-
-            false
-        }
-
-        // L1 审计修复: 移除死代码 resolve_entity_id（未被任何代码路径调用）
-
-        /// F1: 验证 Entity Owner 或 Admin(COMMISSION_MANAGE) 权限
-        fn ensure_owner_or_admin(entity_id: u64, who: &T::AccountId) -> DispatchResult {
-            let owner = T::EntityProvider::entity_owner(entity_id)
-                .ok_or(Error::<T>::EntityNotFound)?;
-            if *who == owner {
-                return Ok(());
-            }
-            ensure!(
-                T::EntityProvider::is_entity_admin(entity_id, who, AdminPermission::COMMISSION_MANAGE),
-                Error::<T>::NotEntityOwnerOrAdmin
-            );
-            Ok(())
-        }
-
-        /// 验证 Entity Owner（仅 Owner，不含 Admin — 用于资金提取等敏感操作）
-        fn ensure_entity_owner(entity_id: u64, who: &T::AccountId) -> Result<(), DispatchError> {
-            let owner = T::EntityProvider::entity_owner(entity_id)
-                .ok_or(Error::<T>::EntityNotFound)?;
-            ensure!(*who == owner, Error::<T>::NotEntityOwner);
-            Ok(())
-        }
-
-        /// 检测并归集外部直接转入 entity_account 的 Token 到沉淀池。
-        ///
-        /// `incoming`: 本次已知的合法入账金额（如 token_platform_fee），
-        /// 在调用前已到达 entity_account，不应被视为外部转入。
-        ///
-        /// 原理：EntityTokenAccountedBalance 记录 entity_account 通过已知渠道应有的余额，
-        /// actual_balance - (accounted + incoming) > 0 即为外部转入。
-        fn sweep_token_free_balance(entity_id: u64, incoming: TokenBalanceOf<T>) {
-            let entity_account = T::EntityProvider::entity_account(entity_id);
-            let actual = T::TokenTransferProvider::token_balance_of(
-                entity_id, &entity_account,
-            );
-            let accounted = EntityTokenAccountedBalance::<T>::get(entity_id)
-                .unwrap_or_else(|| actual.saturating_sub(incoming));
-            let expected = accounted.saturating_add(incoming);
-            let external = actual.saturating_sub(expected);
-            if !external.is_zero() {
-                UnallocatedTokenPool::<T>::mutate(entity_id, |pool| {
-                    *pool = pool.saturating_add(external);
-                });
-                Self::deposit_event(Event::TokenUnallocatedPooled {
-                    entity_id,
-                    order_id: 0,
-                    amount: external,
-                });
-            }
-            // 快照当前实际余额（含 incoming + external）
-            EntityTokenAccountedBalance::<T>::insert(entity_id, actual);
-        }
-
-        /// 使用购物余额内部实现（entity_id 级，供 extrinsic 和 CommissionProvider 调用）
-        pub fn do_use_shopping_balance(
-            entity_id: u64,
-            account: &T::AccountId,
-            amount: BalanceOf<T>,
-        ) -> DispatchResult {
-            MemberShoppingBalance::<T>::try_mutate(entity_id, account, |balance| -> DispatchResult {
-                ensure!(*balance >= amount, Error::<T>::InsufficientShoppingBalance);
-                *balance = balance.saturating_sub(amount);
-
-                ShopShoppingTotal::<T>::mutate(entity_id, |total| {
-                    *total = total.saturating_sub(amount);
-                });
-
-                Self::deposit_event(Event::ShoppingBalanceUsed {
-                    entity_id,
-                    account: account.clone(),
-                    amount,
-                });
-
-                Ok(())
-            })
-        }
-
-        /// 消费购物余额（扣减记账 + NEX 从 Entity 账户转入会员钱包）
-        ///
-        /// 供 `use_shopping_balance` extrinsic 和 `ShoppingBalanceProvider::consume` 调用。
-        /// 与 `do_use_shopping_balance`（纯记账）不同，本函数会实际转移 NEX。
-        pub fn do_consume_shopping_balance(
-            entity_id: u64,
-            account: &T::AccountId,
-            amount: BalanceOf<T>,
-        ) -> DispatchResult {
-            ensure!(!amount.is_zero(), Error::<T>::ZeroWithdrawalAmount);
-
-            // H3 修复: 检查账户是否满足 Entity 的参与要求（如 mandatory KYC）
-            ensure!(
-                T::ParticipationGuard::can_participate(entity_id, account),
-                Error::<T>::ParticipationRequirementNotMet
-            );
-
-            MemberShoppingBalance::<T>::try_mutate(entity_id, account, |balance| -> DispatchResult {
-                ensure!(*balance >= amount, Error::<T>::InsufficientShoppingBalance);
-                *balance = balance.saturating_sub(amount);
-
-                ShopShoppingTotal::<T>::mutate(entity_id, |total| {
-                    *total = total.saturating_sub(amount);
-                });
-
-                // 将 NEX 从 Entity 账户转入会员钱包
-                let entity_account = T::EntityProvider::entity_account(entity_id);
-                T::Currency::transfer(
-                    &entity_account,
-                    account,
-                    amount,
-                    ExistenceRequirement::KeepAlive,
-                )?;
-
-                Self::deposit_event(Event::ShoppingBalanceUsed {
-                    entity_id,
-                    account: account.clone(),
-                    amount,
-                });
-
-                Ok(())
-            })
-        }
-
-        /// 消费 Token 购物余额（扣减记账 + Token 从 Entity 账户转入会员钱包）
-        ///
-        /// 与 `do_consume_shopping_balance`（NEX 版）对称，供订单模块调用。
-        pub fn do_consume_token_shopping_balance(
-            entity_id: u64,
-            account: &T::AccountId,
-            amount: TokenBalanceOf<T>,
-        ) -> DispatchResult {
-            ensure!(!amount.is_zero(), Error::<T>::ZeroWithdrawalAmount);
-
-            // H3 修复: 检查账户是否满足 Entity 的参与要求（如 mandatory KYC）
-            ensure!(
-                T::ParticipationGuard::can_participate(entity_id, account),
-                Error::<T>::ParticipationRequirementNotMet
-            );
-
-            MemberTokenShoppingBalance::<T>::try_mutate(entity_id, account, |balance| -> DispatchResult {
-                ensure!(*balance >= amount, Error::<T>::InsufficientShoppingBalance);
-                *balance = balance.saturating_sub(amount);
-
-                TokenShoppingTotal::<T>::mutate(entity_id, |total| {
-                    *total = total.saturating_sub(amount);
-                });
-
-                // 将 Token 从 Entity 账户转入会员钱包
-                let entity_account = T::EntityProvider::entity_account(entity_id);
-                T::TokenTransferProvider::token_transfer(
-                    entity_id, &entity_account, account, amount,
-                ).map_err(|_| Error::<T>::TokenTransferFailed)?;
-                EntityTokenAccountedBalance::<T>::mutate(entity_id, |b| {
-                    *b = b.map(|v| v.saturating_sub(amount));
-                });
-
-                Self::deposit_event(Event::TokenShoppingBalanceUsed {
-                    entity_id,
-                    account: account.clone(),
-                    amount,
-                });
-
-                Ok(())
-            })
-        }
-
-        /// BUG-1 修复: 将订单的所有 Pending 佣金记录结算为 Withdrawn
-        ///
-        /// 由订单模块在订单完结（确认收货/超时完成）时通过
-        /// CommissionProvider::settle_order_commission 调用。
-        /// 标记后记录可被 archive_order_records 归档释放存储。
-        pub fn do_settle_order_records(order_id: u64) -> DispatchResult {
-            OrderCommissionRecords::<T>::mutate(order_id, |records| {
-                for record in records.iter_mut() {
-                    if record.status == CommissionStatus::Pending {
-                        record.status = CommissionStatus::Withdrawn;
-                    }
-                }
-            });
-            OrderTokenCommissionRecords::<T>::mutate(order_id, |records| {
-                for record in records.iter_mut() {
-                    if record.status == CommissionStatus::Pending {
-                        record.status = CommissionStatus::Withdrawn;
-                    }
-                }
-            });
-            Self::deposit_event(Event::OrderRecordsSettled { order_id });
-            Ok(())
-        }
-
-        /// 计算提现/复购/奖励分配（Entity 级，四种模式）
-        ///
-        /// 三层约束模型：
-        /// ```text
-        /// Governance 底线（强制）
-        ///     ↓ max()
-        /// Entity 模式设定（FullWithdrawal / FixedRate / LevelBased / MemberChoice）
-        ///     ↓ max()
-        /// 会员选择（MemberChoice 模式下的 requested_rate）
-        ///     ↓
-        /// 最终复购比率
-        /// ```
-        ///
-        /// 自愿多复购奖励：超出强制最低线的部分 × voluntary_bonus_rate 额外计入购物余额
-        fn calc_withdrawal_split(
-            entity_id: u64,
-            who: &T::AccountId,
-            total_amount: BalanceOf<T>,
-            requested_repurchase_rate: Option<u16>,
-        ) -> WithdrawalSplit<BalanceOf<T>> {
-            let zero = BalanceOf::<T>::zero();
-            let config = WithdrawalConfigs::<T>::get(entity_id);
-
-            // Step 1: 根据模式确定 Entity 层面的复购比率
-            // - mandatory_base_rate: 模式强制最低线（不含 governance）
-            // - mode_final_rate: 模式最终值（MemberChoice 允许高于 mandatory_base_rate）
-            let (mandatory_base_rate, mode_final_rate, voluntary_bonus_rate) = match config {
-                Some(ref config) if config.enabled => {
-                    match &config.mode {
-                        WithdrawalMode::FullWithdrawal => (0u16, 0u16, config.voluntary_bonus_rate),
-                        WithdrawalMode::FixedRate { repurchase_rate } => {
-                            (*repurchase_rate, *repurchase_rate, config.voluntary_bonus_rate)
-                        },
-                        WithdrawalMode::LevelBased => {
-                            let level_id = T::MemberProvider::custom_level_id(entity_id, who);
-                            let tier = config.level_overrides
-                                .iter()
-                                .find(|(id, _)| *id == level_id)
-                                .map(|(_, t)| t.clone())
-                                .unwrap_or(config.default_tier.clone());
-                            (tier.repurchase_rate, tier.repurchase_rate, config.voluntary_bonus_rate)
-                        },
-                        WithdrawalMode::MemberChoice { min_repurchase_rate } => {
-                            let requested = requested_repurchase_rate
-                                .unwrap_or(*min_repurchase_rate)
-                                .min(10000);
-                            let mode_rate = requested.max(*min_repurchase_rate);
-                            (*min_repurchase_rate, mode_rate, config.voluntary_bonus_rate)
-                        },
-                    }
-                },
-                _ => (0u16, 0u16, 0u16),
-            };
-
-            // Step 2: Governance 底线兜底
-            let gov_min_rate = GlobalMinRepurchaseRate::<T>::get(entity_id);
-            let mandatory_min_rate = mandatory_base_rate.max(gov_min_rate).min(10000);
-            let final_repurchase_rate = mode_final_rate.max(gov_min_rate).min(10000);
-
-            // Step 4: 计算金额
-            let final_withdrawal_rate = 10000u16.saturating_sub(final_repurchase_rate);
-            let withdrawal = total_amount
-                .saturating_mul(final_withdrawal_rate.into())
-                / 10000u32.into();
-            let repurchase = total_amount.saturating_sub(withdrawal);
-
-            // Step 5: 计算自愿多复购奖励
-            // 超出强制最低线的部分 × voluntary_bonus_rate
-            let bonus = if voluntary_bonus_rate > 0 && final_repurchase_rate > mandatory_min_rate {
-                let mandatory_repurchase = total_amount
-                    .saturating_mul(mandatory_min_rate.into())
-                    / 10000u32.into();
-                let voluntary_extra = repurchase.saturating_sub(mandatory_repurchase);
-                voluntary_extra
-                    .saturating_mul(voluntary_bonus_rate.into())
-                    / 10000u32.into()
-            } else {
-                zero
-            };
-
-            WithdrawalSplit { withdrawal, repurchase, bonus }
-        }
-
-        /// Token 提现分配计算（与 NEX calc_withdrawal_split 对称，使用 Token 独立配置）
-        fn calc_token_withdrawal_split(
-            entity_id: u64,
-            who: &T::AccountId,
-            total_amount: TokenBalanceOf<T>,
-            requested_repurchase_rate: Option<u16>,
-        ) -> WithdrawalSplit<TokenBalanceOf<T>> {
-            let zero = TokenBalanceOf::<T>::zero();
-            let config = TokenWithdrawalConfigs::<T>::get(entity_id);
-
-            let (mandatory_base_rate, mode_final_rate, voluntary_bonus_rate) = match config {
-                Some(ref config) if config.enabled => {
-                    match &config.mode {
-                        WithdrawalMode::FullWithdrawal => (0u16, 0u16, config.voluntary_bonus_rate),
-                        WithdrawalMode::FixedRate { repurchase_rate } => {
-                            (*repurchase_rate, *repurchase_rate, config.voluntary_bonus_rate)
-                        },
-                        WithdrawalMode::LevelBased => {
-                            let level_id = T::MemberProvider::custom_level_id(entity_id, who);
-                            let tier = config.level_overrides
-                                .iter()
-                                .find(|(id, _)| *id == level_id)
-                                .map(|(_, t)| t.clone())
-                                .unwrap_or(config.default_tier.clone());
-                            (tier.repurchase_rate, tier.repurchase_rate, config.voluntary_bonus_rate)
-                        },
-                        WithdrawalMode::MemberChoice { min_repurchase_rate } => {
-                            let requested = requested_repurchase_rate
-                                .unwrap_or(*min_repurchase_rate)
-                                .min(10000);
-                            let mode_rate = requested.max(*min_repurchase_rate);
-                            (*min_repurchase_rate, mode_rate, config.voluntary_bonus_rate)
-                        },
-                    }
-                },
-                _ => (0u16, 0u16, 0u16),
-            };
-
-            // Governance 底线兜底（Token 独立配置）
-            let gov_min_rate = GlobalMinTokenRepurchaseRate::<T>::get(entity_id);
-            let mandatory_min_rate = mandatory_base_rate.max(gov_min_rate).min(10000);
-            let final_repurchase_rate = mode_final_rate.max(gov_min_rate).min(10000);
-
-            // 计算金额
-            let final_withdrawal_rate = 10000u16.saturating_sub(final_repurchase_rate);
-            let withdrawal = total_amount
-                .saturating_mul(final_withdrawal_rate.into())
-                / 10000u32.into();
-            let repurchase = total_amount.saturating_sub(withdrawal);
-
-            // 自愿多复购奖励
-            let bonus = if voluntary_bonus_rate > 0 && final_repurchase_rate > mandatory_min_rate {
-                let mandatory_repurchase = total_amount
-                    .saturating_mul(mandatory_min_rate.into())
-                    / 10000u32.into();
-                let voluntary_extra = repurchase.saturating_sub(mandatory_repurchase);
-                voluntary_extra
-                    .saturating_mul(voluntary_bonus_rate.into())
-                    / 10000u32.into()
-            } else {
-                zero
-            };
-
-            WithdrawalSplit { withdrawal, repurchase, bonus }
-        }
-
-        /// 调度引擎：处理订单返佣（双来源架构）
-        ///
-        /// 订单来自 shop_id，佣金记账在 entity_id 级。
-        /// 双来源并行：
-        /// - 池 A（平台费池）：platform_fee × ReferrerShareBps → 招商推荐人奖金（EntityReferral）
-        /// - 池 B（卖家池）：seller_balance × max_commission_rate → 会员返佣（4 个插件）
-        pub fn process_commission(
-            entity_id: u64,
-            shop_id: u64,
-            order_id: u64,
-            buyer: &T::AccountId,
-            order_amount: BalanceOf<T>,
-            available_pool: BalanceOf<T>,
-            platform_fee: BalanceOf<T>,
-        ) -> DispatchResult {
-            // F17: 全局紧急暂停检查
-            ensure!(!GlobalCommissionPaused::<T>::get(), Error::<T>::GlobalCommissionPaused);
-
-            let platform_account = T::PlatformAccount::get();
-
-            // ── 平台费无条件转国库（无论佣金是否配置，保障平台收入） ──
-            // 全局固定规则：referrer 拿 ReferrerShareBps%，剩余进国库
-            let config = CommissionConfigs::<T>::get(entity_id)
-                .filter(|c| c.enabled);
-
-            // 计算推荐人奖金占比（有 referrer 时才预留）
-            let global_referrer_bps = T::ReferrerShareBps::get();
-            let has_referrer = global_referrer_bps > 0
-                && T::EntityReferrerProvider::entity_referrer(entity_id).is_some();
-            let referrer_quota = if has_referrer {
-                platform_fee
-                    .saturating_mul(global_referrer_bps.into())
-                    / 10000u32.into()
-            } else {
-                BalanceOf::<T>::zero()
-            };
-            let treasury_portion = platform_fee.saturating_sub(referrer_quota);
-
-            if !treasury_portion.is_zero() {
-                let treasury_account = T::TreasuryAccount::get();
-                let platform_balance = T::Currency::free_balance(&platform_account);
-                let min_balance = T::Currency::minimum_balance();
-                let platform_transferable = platform_balance.saturating_sub(min_balance);
-                // 为推荐人预留额度：先扣除 referrer_quota，剩余才给国库
-                let treasury_cap = platform_transferable.saturating_sub(referrer_quota);
-                let actual_treasury = treasury_portion.min(treasury_cap);
-                if !actual_treasury.is_zero() {
-                    T::Currency::transfer(
-                        &platform_account,
-                        &treasury_account,
-                        actual_treasury,
-                        ExistenceRequirement::KeepAlive,
-                    )?;
-                    OrderTreasuryTransfer::<T>::insert(order_id, actual_treasury);
-                    Self::deposit_event(Event::PlatformFeeToTreasury {
-                        order_id,
-                        amount: actual_treasury,
-                    });
-                }
-            }
-
-            // 未配置佣金或未启用 → 平台费已入库，直接返回
-            let config = match config {
-                Some(c) => c,
-                None => return Ok(()),
-            };
-            let seller = T::ShopProvider::shop_owner(shop_id)
-                .ok_or(Error::<T>::ShopNotFound)?;
-            let entity_account = T::EntityProvider::entity_account(entity_id);
-            let now = <frame_system::Pallet<T>>::block_number();
-            let buyer_stats = MemberCommissionStats::<T>::get(entity_id, buyer);
-            let is_first_order = buyer_stats.order_count == 0;
-            let enabled_modes = config.enabled_modes;
-
-            let mut total_from_platform = BalanceOf::<T>::zero();
-            let mut total_from_seller = BalanceOf::<T>::zero();
-
-            // ── 池 A：招商推荐人奖金（从平台费扣除，比例由全局常量控制） ──
-            // L1-R5 审计修复: 复用上方已计算的 referrer_quota 和 has_referrer，避免重复存储读取和计算
-            if has_referrer {
-                if let Some(referrer) = T::EntityReferrerProvider::entity_referrer(entity_id) {
-                    // KeepAlive 要求转账后余额 >= ED
-                    let platform_balance = T::Currency::free_balance(&platform_account);
-                    let min_balance = T::Currency::minimum_balance();
-                    let transferable = platform_balance.saturating_sub(min_balance);
-                    let referrer_amount = referrer_quota.min(transferable);
-                    if !referrer_amount.is_zero() {
-                        Self::credit_commission(
-                            entity_id, shop_id, order_id, buyer, &referrer,
-                            referrer_amount, CommissionType::EntityReferral, 0, now,
-                        )?;
-                        total_from_platform = referrer_amount;
-                    }
-                }
-            }
-
-            // ── 池 B：会员返佣（从卖家货款扣除） ──
-            let max_commission = available_pool
-                .saturating_mul(config.max_commission_rate.into())
-                / 10000u32.into();
-            let seller_balance = T::Currency::free_balance(&seller);
-            let seller_min = T::Currency::minimum_balance();
-            let seller_transferable = seller_balance.saturating_sub(seller_min);
-            let mut remaining = max_commission.min(seller_transferable);
-
-            if !remaining.is_zero() {
-                let initial_remaining = remaining;
-
-                // ── 创建人收益（从 Pool B 预算中优先扣除，在所有插件之前） ──
-                if enabled_modes.contains(CommissionModes::CREATOR_REWARD) && config.creator_reward_rate > 0 {
-                    if let Some(creator) = T::EntityProvider::entity_owner(entity_id) {
-                        let creator_amount = remaining
-                            .saturating_mul(config.creator_reward_rate.into())
-                            / 10000u32.into();
-                        let creator_amount = creator_amount.min(remaining);
-                        if !creator_amount.is_zero() {
-                            Self::credit_commission(
-                                entity_id, shop_id, order_id, buyer, &creator,
-                                creator_amount, CommissionType::CreatorReward, 0, now,
-                            )?;
-                            remaining = remaining.saturating_sub(creator_amount);
-                        }
-                    }
-                }
-
-                // 1. Referral Plugin
-                let (outputs, new_remaining) = T::ReferralPlugin::calculate(
-                    entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
-                );
-                remaining = new_remaining;
-                for output in outputs {
-                    Self::credit_commission(
-                        entity_id, shop_id, order_id, buyer, &output.beneficiary, output.amount,
-                        output.commission_type, output.level, now,
-                    )?;
-                }
-
-                // 2. MultiLevel Plugin
-                let (outputs, new_remaining) = T::MultiLevelPlugin::calculate(
-                    entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
-                );
-                remaining = new_remaining;
-                for output in outputs {
-                    Self::credit_commission(
-                        entity_id, shop_id, order_id, buyer, &output.beneficiary, output.amount,
-                        output.commission_type, output.level, now,
-                    )?;
-                }
-
-                // 3. LevelDiff Plugin
-                let (outputs, new_remaining) = T::LevelDiffPlugin::calculate(
-                    entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
-                );
-                remaining = new_remaining;
-                for output in outputs {
-                    Self::credit_commission(
-                        entity_id, shop_id, order_id, buyer, &output.beneficiary, output.amount,
-                        output.commission_type, output.level, now,
-                    )?;
-                }
-
-                // 4. SingleLine Plugin
-                let (outputs, new_remaining) = T::SingleLinePlugin::calculate(
-                    entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
-                );
-                remaining = new_remaining;
-                for output in outputs {
-                    Self::credit_commission(
-                        entity_id, shop_id, order_id, buyer, &output.beneficiary, output.amount,
-                        output.commission_type, output.level, now,
-                    )?;
-                }
-
-                // 5. Team Plugin
-                let (outputs, new_remaining) = T::TeamPlugin::calculate(
-                    entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
-                );
-                remaining = new_remaining;
-                for output in outputs {
-                    Self::credit_commission(
-                        entity_id, shop_id, order_id, buyer, &output.beneficiary, output.amount,
-                        output.commission_type, output.level, now,
-                    )?;
-                }
-
-                total_from_seller = initial_remaining.saturating_sub(remaining);
-            }
-
-            // ── Phase 1.5：未分配佣金 → 沉淀资金池 ──
-            let mut pool_funded = BalanceOf::<T>::zero();
-            if enabled_modes.contains(CommissionModes::POOL_REWARD) && !remaining.is_zero() {
-                let seller_balance_now = T::Currency::free_balance(&seller);
-                let seller_min = T::Currency::minimum_balance();
-                let seller_transferable_now = seller_balance_now.saturating_sub(seller_min);
-                let actual_pool = remaining.min(seller_transferable_now);
-                if !actual_pool.is_zero() {
-                    T::Currency::transfer(
-                        &seller,
-                        &entity_account,
-                        actual_pool,
-                        ExistenceRequirement::KeepAlive,
-                    )?;
-                    UnallocatedPool::<T>::mutate(entity_id, |pool| {
-                        *pool = pool.saturating_add(actual_pool);
-                    });
-                    OrderUnallocated::<T>::insert(order_id, (entity_id, shop_id, actual_pool));
-                    pool_funded = actual_pool;
-                    Self::deposit_event(Event::UnallocatedCommissionPooled {
-                        entity_id,
-                        order_id,
-                        amount: actual_pool,
-                    });
-                }
-            }
-
-            // Phase 2 已移除：沉淀池奖励改为用户主动 claim（pool-reward v2）
-            let total_pool_distributed = BalanceOf::<T>::zero();
-
-            // 更新买家订单数（Entity 级）
-            MemberCommissionStats::<T>::mutate(entity_id, buyer, |stats| {
-                stats.order_count = stats.order_count.saturating_add(1);
-            });
-
-            // total_distributed 仅统计从外部转入的佣金（不含池内循环）
-            let total_distributed = total_from_platform.saturating_add(total_from_seller);
-
-            // 更新 Entity 统计（含池奖励）
-            ShopCommissionTotals::<T>::mutate(entity_id, |(total, orders)| {
-                *total = total.saturating_add(total_distributed).saturating_add(total_pool_distributed);
-                *orders = orders.saturating_add(1);
-            });
-
-            // 将佣金资金转入 Entity 账户（双来源分别转；池资金已在 entity_account 中）
-            if !total_from_platform.is_zero() {
-                T::Currency::transfer(
-                    &platform_account,
-                    &entity_account,
-                    total_from_platform,
-                    ExistenceRequirement::KeepAlive,
-                )?;
-            }
-
-            if !total_from_seller.is_zero() {
-                T::Currency::transfer(
-                    &seller,
-                    &entity_account,
-                    total_from_seller,
-                    ExistenceRequirement::KeepAlive,
-                )?;
-            }
-
-            if !total_distributed.is_zero() || !pool_funded.is_zero() {
-                Self::deposit_event(Event::CommissionFundsTransferred {
-                    entity_id,
-                    shop_id,
-                    amount: total_distributed.saturating_add(pool_funded),
-                });
-            }
-
-            Ok(())
-        }
-
-        /// 记录并发放返佣（Entity 级记账）
-        pub fn credit_commission(
-            entity_id: u64,
-            shop_id: u64,
-            order_id: u64,
-            buyer: &T::AccountId,
-            beneficiary: &T::AccountId,
-            amount: BalanceOf<T>,
-            commission_type: CommissionType,
-            level: u8,
-            now: BlockNumberFor<T>,
-        ) -> DispatchResult {
-            let record = CommissionRecord {
-                entity_id,
-                shop_id,
-                order_id,
-                buyer: buyer.clone(),
-                beneficiary: beneficiary.clone(),
-                amount,
-                commission_type,
-                level,
-                status: CommissionStatus::Pending,
-                created_at: now,
-            };
-
-            OrderCommissionRecords::<T>::try_mutate(order_id, |records| {
-                records.try_push(record).map_err(|_| Error::<T>::RecordsFull)
-            })?;
-
-            MemberCommissionStats::<T>::mutate(entity_id, beneficiary, |stats| {
-                stats.total_earned = stats.total_earned.saturating_add(amount);
-                stats.pending = stats.pending.saturating_add(amount);
-            });
-
-            // 更新最后入账时间（用于冻结期检查）
-            MemberLastCredited::<T>::insert(entity_id, beneficiary, now);
-
-            ShopPendingTotal::<T>::mutate(entity_id, |total| {
-                *total = total.saturating_add(amount);
-            });
-
-            // 推荐链类型佣金：维护 ReferrerEarnedByBuyer 索引
-            if matches!(commission_type,
-                CommissionType::DirectReward
-                | CommissionType::FirstOrder
-                | CommissionType::RepeatPurchase
-                | CommissionType::FixedAmount
-            ) {
-                ReferrerEarnedByBuyer::<T>::mutate(
-                    (entity_id, beneficiary, buyer),
-                    |earned| { *earned = earned.saturating_add(amount); },
-                );
-            }
-
-            // F19: 记录会员佣金关联订单 ID（去重，满则丢弃最旧）
-            MemberCommissionOrderIds::<T>::mutate(entity_id, beneficiary, |ids| {
-                if !ids.contains(&order_id) {
-                    if ids.try_push(order_id).is_err() {
-                        // 满了 → 移除最旧的，腾出空间
-                        if !ids.is_empty() {
-                            ids.remove(0);
-                        }
-                        let _ = ids.try_push(order_id);
-                    }
-                }
-            });
-
-            Self::deposit_event(Event::CommissionDistributed {
-                entity_id,
-                order_id,
-                beneficiary: beneficiary.clone(),
-                amount,
-                commission_type,
-                level,
-            });
-
-            Ok(())
-        }
-
-        // ====================================================================
-        // Token 多资产管线
-        // ====================================================================
-
-        /// Token 调度引擎：处理 Token 订单返佣（双源架构）
-        ///
-        /// 池 A（Token 平台费池）：token_platform_fee → 招商推荐人 Token 奖金 + Entity 留存
-        /// 池 B（Entity Token 池）：entity_account Token × max_rate → 4 插件 → 沉淀池
-        pub fn process_token_commission(
-            entity_id: u64,
-            shop_id: u64,
-            order_id: u64,
-            buyer: &T::AccountId,
-            token_order_amount: TokenBalanceOf<T>,
-            token_available_pool: TokenBalanceOf<T>,
-            token_platform_fee: TokenBalanceOf<T>,
-        ) -> DispatchResult {
-            // F17: 全局紧急暂停检查
-            ensure!(!GlobalCommissionPaused::<T>::get(), Error::<T>::GlobalCommissionPaused);
-
-            // M2-R5 审计修复: 先 sweep 再检查配置，未配置时优雅返回（与 NEX 版 process_commission 对称）
-            Self::sweep_token_free_balance(entity_id, token_platform_fee);
-
-            let config = match CommissionConfigs::<T>::get(entity_id).filter(|c| c.enabled) {
-                Some(c) => c,
-                None => return Ok(()),
-            };
-
-            let enabled_modes = config.enabled_modes;
-            let entity_account = T::EntityProvider::entity_account(entity_id);
-            let now = <frame_system::Pallet<T>>::block_number();
-            let buyer_stats = MemberTokenCommissionStats::<T>::get(entity_id, buyer);
-            let is_first_order = buyer_stats.order_count == 0;
-
-            // ── 池 A：Token 招商推荐人奖金（从 Token 平台费中分配） ──
-            let mut pool_a_distributed = TokenBalanceOf::<T>::zero();
-            let referrer_share_bps = T::ReferrerShareBps::get();
-            if referrer_share_bps > 0 && !token_platform_fee.is_zero() {
-                if let Some(referrer) = T::EntityReferrerProvider::entity_referrer(entity_id) {
-                    let referrer_quota = token_platform_fee
-                        .saturating_mul(referrer_share_bps.into())
-                        / 10000u32.into();
-                    if !referrer_quota.is_zero() {
-                        Self::credit_token_commission(
-                            entity_id, order_id, buyer, &referrer,
-                            referrer_quota, CommissionType::EntityReferral, 0, now,
-                        )?;
-                        pool_a_distributed = referrer_quota;
-                    }
-                }
-            }
-            // 池 A 剩余部分计入沉淀池（不留为 FREE_BALANCE）
-            let pool_a_retention = token_platform_fee.saturating_sub(pool_a_distributed);
-            if !pool_a_retention.is_zero() {
-                UnallocatedTokenPool::<T>::mutate(entity_id, |pool| {
-                    *pool = pool.saturating_add(pool_a_retention);
-                });
-                // M2-R6 审计修复: 记录 Pool A 留存，供 cancel 时回退
-                OrderTokenPlatformRetention::<T>::insert(order_id, (entity_id, pool_a_retention));
-                Self::deposit_event(Event::TokenUnallocatedPooled {
-                    entity_id, order_id, amount: pool_a_retention,
-                });
-            }
-
-            // ── 池 B：会员 Token 返佣（从 entity_account Token 余额中分配） ──
-            let max_commission = token_available_pool
-                .saturating_mul(config.max_commission_rate.into())
-                / 10000u32.into();
-
-            let entity_token_balance = T::TokenTransferProvider::token_balance_of(
-                entity_id, &entity_account,
-            );
-            // H1 审计修复: Token 佣金预算必须扣除已承诺的 Token 额度
-            // （包括待提现佣金、购物余额、沉淀池）避免跨订单重复承诺
-            // NEX 管线无此问题——转账即时发生，seller 余额自然递减；
-            // Token 管线是纯记账模式，entity_token_balance 不变，需手动扣除。
-            let committed = TokenPendingTotal::<T>::get(entity_id)
-                .saturating_add(TokenShoppingTotal::<T>::get(entity_id))
-                .saturating_add(UnallocatedTokenPool::<T>::get(entity_id));
-            let available_token = entity_token_balance.saturating_sub(committed);
-            let mut remaining = max_commission.min(available_token);
-
-            if !remaining.is_zero() {
-                // ── 创建人收益（从 Token Pool B 预算中优先扣除） ──
-                if enabled_modes.contains(CommissionModes::CREATOR_REWARD) && config.creator_reward_rate > 0 {
-                    if let Some(creator) = T::EntityProvider::entity_owner(entity_id) {
-                        let creator_amount = remaining
-                            .saturating_mul(config.creator_reward_rate.into())
-                            / 10000u32.into();
-                        let creator_amount = creator_amount.min(remaining);
-                        if !creator_amount.is_zero() {
-                            Self::credit_token_commission(
-                                entity_id, order_id, buyer, &creator,
-                                creator_amount, CommissionType::CreatorReward, 0, now,
-                            )?;
-                            remaining = remaining.saturating_sub(creator_amount);
-                        }
-                    }
-                }
-
-                // 1. Token Referral Plugin
-                let (outputs, new_remaining) = T::TokenReferralPlugin::calculate_token(
-                    entity_id, buyer, token_order_amount, remaining,
-                    enabled_modes, is_first_order, buyer_stats.order_count,
-                );
-                remaining = new_remaining;
-                for output in outputs {
-                    Self::credit_token_commission(
-                        entity_id, order_id, buyer, &output.beneficiary,
-                        output.amount, output.commission_type, output.level, now,
-                    )?;
-                }
-
-                // 2. Token MultiLevel Plugin
-                let (outputs, new_remaining) = T::TokenMultiLevelPlugin::calculate_token(
-                    entity_id, buyer, token_order_amount, remaining,
-                    enabled_modes, is_first_order, buyer_stats.order_count,
-                );
-                remaining = new_remaining;
-                for output in outputs {
-                    Self::credit_token_commission(
-                        entity_id, order_id, buyer, &output.beneficiary,
-                        output.amount, output.commission_type, output.level, now,
-                    )?;
-                }
-
-                // 3. Token LevelDiff Plugin
-                let (outputs, new_remaining) = T::TokenLevelDiffPlugin::calculate_token(
-                    entity_id, buyer, token_order_amount, remaining,
-                    enabled_modes, is_first_order, buyer_stats.order_count,
-                );
-                remaining = new_remaining;
-                for output in outputs {
-                    Self::credit_token_commission(
-                        entity_id, order_id, buyer, &output.beneficiary,
-                        output.amount, output.commission_type, output.level, now,
-                    )?;
-                }
-
-                // 4. Token SingleLine Plugin
-                let (outputs, new_remaining) = T::TokenSingleLinePlugin::calculate_token(
-                    entity_id, buyer, token_order_amount, remaining,
-                    enabled_modes, is_first_order, buyer_stats.order_count,
-                );
-                remaining = new_remaining;
-                for output in outputs {
-                    Self::credit_token_commission(
-                        entity_id, order_id, buyer, &output.beneficiary,
-                        output.amount, output.commission_type, output.level, now,
-                    )?;
-                }
-
-                // 5. Token Team Plugin
-                let (outputs, new_remaining) = T::TokenTeamPlugin::calculate_token(
-                    entity_id, buyer, token_order_amount, remaining,
-                    enabled_modes, is_first_order, buyer_stats.order_count,
-                );
-                remaining = new_remaining;
-                for output in outputs {
-                    Self::credit_token_commission(
-                        entity_id, order_id, buyer, &output.beneficiary,
-                        output.amount, output.commission_type, output.level, now,
-                    )?;
-                }
-            }
-
-            // 剩余 Token → 沉淀池
-            if enabled_modes.contains(CommissionModes::POOL_REWARD) && !remaining.is_zero() {
-                UnallocatedTokenPool::<T>::mutate(entity_id, |pool| {
-                    *pool = pool.saturating_add(remaining);
-                });
-                OrderTokenUnallocated::<T>::insert(order_id, (entity_id, shop_id, remaining));
-                Self::deposit_event(Event::TokenUnallocatedPooled {
-                    entity_id, order_id, amount: remaining,
-                });
-            }
-
-            // 更新买家订单数（Token 版）
-            MemberTokenCommissionStats::<T>::mutate(entity_id, buyer, |stats| {
-                stats.order_count = stats.order_count.saturating_add(1);
-            });
-
-            Ok(())
-        }
-
-        /// Token 佣金记账（纯记账，不转账——Token 在 entity_account 中托管直到提现）
-        pub fn credit_token_commission(
-            entity_id: u64,
-            order_id: u64,
-            buyer: &T::AccountId,
-            beneficiary: &T::AccountId,
-            amount: TokenBalanceOf<T>,
-            commission_type: CommissionType,
-            level: u8,
-            now: BlockNumberFor<T>,
-        ) -> DispatchResult {
-            let record = TokenCommissionRecord {
-                entity_id,
-                order_id,
-                buyer: buyer.clone(),
-                beneficiary: beneficiary.clone(),
-                amount,
-                commission_type,
-                level,
-                status: CommissionStatus::Pending,
-                created_at: now,
-            };
-
-            OrderTokenCommissionRecords::<T>::try_mutate(order_id, |records| {
-                records.try_push(record).map_err(|_| Error::<T>::RecordsFull)
-            })?;
-
-            MemberTokenCommissionStats::<T>::mutate(entity_id, beneficiary, |stats| {
-                stats.total_earned = stats.total_earned.saturating_add(amount);
-                stats.pending = stats.pending.saturating_add(amount);
-            });
-
-            TokenPendingTotal::<T>::mutate(entity_id, |total| {
-                *total = total.saturating_add(amount);
-            });
-
-            // P3 审计修复: Token 入账更新独立冻结时间（与 NEX 的 MemberLastCredited 解耦）
-            MemberTokenLastCredited::<T>::insert(entity_id, beneficiary, now);
-
-            // F19: 记录会员 Token 佣金关联订单 ID（去重，满则丢弃最旧）
-            MemberTokenCommissionOrderIds::<T>::mutate(entity_id, beneficiary, |ids| {
-                if !ids.contains(&order_id) {
-                    if ids.try_push(order_id).is_err() {
-                        if !ids.is_empty() {
-                            ids.remove(0);
-                        }
-                        let _ = ids.try_push(order_id);
-                    }
-                }
-            });
-
-            Self::deposit_event(Event::TokenCommissionDistributed {
-                entity_id, order_id,
-                beneficiary: beneficiary.clone(),
-                amount, commission_type, level,
-            });
-
-            Ok(())
-        }
-
-        /// 取消订单返佣（双来源架构）
-        ///
-        /// 按 CommissionType 决定退款目标：
-        /// - `EntityReferral`: Entity 账户 → 平台账户
-        /// - 其余: Entity 账户 → 卖家 (shop_owner)
-        ///
-        /// H2 审计修复: 先尝试转账，成功后再取消记录和更新统计，
-        /// 防止转账失败但记录已被标记为 Cancelled 导致资金丢失。
-        pub fn cancel_commission(order_id: u64) -> DispatchResult {
-            let records = OrderCommissionRecords::<T>::get(order_id);
-            let platform_account = T::PlatformAccount::get();
-
-            // 第一步：按 (entity_id, shop_id, is_platform) 分组汇总待退还金额
-            // is_platform = true → EntityReferral（退平台），false → 会员返佣（退卖家）
-            // PoolReward 记录不参与转账退款（资金回池）
-            let mut refund_groups: alloc::vec::Vec<(u64, u64, bool, BalanceOf<T>)> = alloc::vec::Vec::new();
-            let mut pool_return_groups: alloc::vec::Vec<(u64, BalanceOf<T>)> = alloc::vec::Vec::new();
-
-            for record in records.iter() {
-                if record.status == CommissionStatus::Pending {
-                    if record.commission_type == CommissionType::PoolReward {
-                        if let Some(entry) = pool_return_groups.iter_mut().find(|(e, _)| *e == record.entity_id) {
-                            entry.1 = entry.1.saturating_add(record.amount);
-                        } else {
-                            pool_return_groups.push((record.entity_id, record.amount));
-                        }
-                    } else {
-                        let is_platform = record.commission_type == CommissionType::EntityReferral;
-                        if let Some(entry) = refund_groups.iter_mut().find(|(e, s, p, _)| *e == record.entity_id && *s == record.shop_id && *p == is_platform) {
-                            entry.3 = entry.3.saturating_add(record.amount);
-                        } else {
-                            refund_groups.push((record.entity_id, record.shop_id, is_platform, record.amount));
-                        }
-                    }
-                }
-            }
-
-            // 第二步：尝试转账
-            let mut refund_succeeded: alloc::vec::Vec<(u64, u64, bool)> = alloc::vec::Vec::new();
-
-            for (entity_id, shop_id, is_platform, refund_amount) in refund_groups.iter() {
-                if refund_amount.is_zero() {
-                    refund_succeeded.push((*entity_id, *shop_id, *is_platform));
-                    continue;
-                }
-                let entity_account = T::EntityProvider::entity_account(*entity_id);
-
-                let refund_target = if *is_platform {
-                    platform_account.clone()
-                } else {
-                    match T::ShopProvider::shop_owner(*shop_id) {
-                        Some(seller) => seller,
-                        None => {
-                            Self::deposit_event(Event::CommissionRefundFailed {
-                                entity_id: *entity_id,
-                                shop_id: *shop_id,
-                                amount: *refund_amount,
-                            });
-                            continue;
-                        }
-                    }
-                };
-
-                if T::Currency::transfer(
-                    &entity_account,
-                    &refund_target,
-                    *refund_amount,
-                    ExistenceRequirement::KeepAlive,
-                ).is_ok() {
-                    refund_succeeded.push((*entity_id, *shop_id, *is_platform));
-                } else {
-                    Self::deposit_event(Event::CommissionRefundFailed {
-                        entity_id: *entity_id,
-                        shop_id: *shop_id,
-                        amount: *refund_amount,
-                    });
-                }
-            }
-
-            // 第三步：仅取消转账成功的记录，更新统计
-            // PoolReward 记录无需转账，直接回池并取消
-            for (entity_id, return_amount) in pool_return_groups.iter() {
-                if !return_amount.is_zero() {
-                    UnallocatedPool::<T>::mutate(entity_id, |pool| {
-                        *pool = pool.saturating_add(*return_amount);
-                    });
-                }
-            }
-
-            OrderCommissionRecords::<T>::mutate(order_id, |records| {
-                for record in records.iter_mut() {
-                    if record.status == CommissionStatus::Pending {
-                        if record.commission_type == CommissionType::PoolReward {
-                            MemberCommissionStats::<T>::mutate(record.entity_id, &record.beneficiary, |stats| {
-                                stats.pending = stats.pending.saturating_sub(record.amount);
-                                stats.total_earned = stats.total_earned.saturating_sub(record.amount);
-                            });
-                            ShopPendingTotal::<T>::mutate(record.entity_id, |total| {
-                                *total = total.saturating_sub(record.amount);
-                            });
-                            record.status = CommissionStatus::Cancelled;
-                        } else {
-                            let is_platform = record.commission_type == CommissionType::EntityReferral;
-                            if refund_succeeded.iter().any(|(e, s, p)| *e == record.entity_id && *s == record.shop_id && *p == is_platform) {
-                                MemberCommissionStats::<T>::mutate(record.entity_id, &record.beneficiary, |stats| {
-                                    stats.pending = stats.pending.saturating_sub(record.amount);
-                                    stats.total_earned = stats.total_earned.saturating_sub(record.amount);
-                                });
-                                ShopPendingTotal::<T>::mutate(record.entity_id, |total| {
-                                    *total = total.saturating_sub(record.amount);
-                                });
-                                // 推荐链类型：同步扣减 ReferrerEarnedByBuyer
-                                if matches!(record.commission_type,
-                                    CommissionType::DirectReward
-                                    | CommissionType::FirstOrder
-                                    | CommissionType::RepeatPurchase
-                                    | CommissionType::FixedAmount
-                                ) {
-                                    ReferrerEarnedByBuyer::<T>::mutate(
-                                        (record.entity_id, &record.beneficiary, &record.buyer),
-                                        |earned| { *earned = earned.saturating_sub(record.amount); },
-                                    );
-                                }
-                                record.status = CommissionStatus::Cancelled;
-                            }
-                        }
-                    }
-                }
-            });
-
-            // 第四步：退还国库部分（Treasury → PlatformAccount）
-            let treasury_refund = OrderTreasuryTransfer::<T>::get(order_id);
-            if !treasury_refund.is_zero() {
-                let treasury_account = T::TreasuryAccount::get();
-                if T::Currency::transfer(
-                    &treasury_account,
-                    &platform_account,
-                    treasury_refund,
-                    ExistenceRequirement::AllowDeath,
-                ).is_ok() {
-                    OrderTreasuryTransfer::<T>::remove(order_id);
-                    Self::deposit_event(Event::TreasuryRefund {
-                        order_id,
-                        amount: treasury_refund,
-                    });
-                } else {
-                    // 国库余额不足时记录事件，保留 Storage 供后续重试
-                    Self::deposit_event(Event::CommissionRefundFailed {
-                        entity_id: 0,
-                        shop_id: 0,
-                        amount: treasury_refund,
-                    });
-                }
-            }
-
-            // 第五步：退还本订单沉淀池贡献（entity_account → seller）
-            let (unalloc_entity_id, unalloc_shop_id, unalloc_amount) = OrderUnallocated::<T>::get(order_id);
-            if !unalloc_amount.is_zero() {
-                let entity_account = T::EntityProvider::entity_account(unalloc_entity_id);
-                if let Some(seller) = T::ShopProvider::shop_owner(unalloc_shop_id) {
-                    if T::Currency::transfer(
-                        &entity_account,
-                        &seller,
-                        unalloc_amount,
-                        ExistenceRequirement::KeepAlive,
-                    ).is_ok() {
-                        UnallocatedPool::<T>::mutate(unalloc_entity_id, |pool| {
-                            *pool = pool.saturating_sub(unalloc_amount);
-                        });
-                        OrderUnallocated::<T>::remove(order_id);
-                        Self::deposit_event(Event::UnallocatedPoolRefunded {
-                            entity_id: unalloc_entity_id,
-                            order_id,
-                            amount: unalloc_amount,
-                        });
-                    }
-                }
-            }
-
-            // CC-M1: 汇总退款结果
-            let succeeded = refund_succeeded.len() as u32;
-            let failed = (refund_groups.len() as u32).saturating_sub(succeeded);
-            Self::deposit_event(Event::CommissionCancelled { order_id, refund_succeeded: succeeded, refund_failed: failed });
-
-            // M3 审计修复: 复用 do_cancel_token_commission 消除代码重复（原第六、七步）
-            Self::do_cancel_token_commission(order_id)?;
-
-            Ok(())
-        }
-
-        /// Token 佣金独立取消（供 TokenCommissionProvider::cancel_token_commission 调用）
-        pub fn do_cancel_token_commission(order_id: u64) -> DispatchResult {
-            let mut token_cancelled: u32 = 0;
-            OrderTokenCommissionRecords::<T>::mutate(order_id, |records| {
-                for record in records.iter_mut() {
-                    if record.status == CommissionStatus::Pending {
-                        MemberTokenCommissionStats::<T>::mutate(
-                            record.entity_id, &record.beneficiary, |stats| {
-                                stats.pending = stats.pending.saturating_sub(record.amount);
-                                stats.total_earned = stats.total_earned.saturating_sub(record.amount);
-                            }
-                        );
-                        TokenPendingTotal::<T>::mutate(record.entity_id, |total| {
-                            *total = total.saturating_sub(record.amount);
-                        });
-                        record.status = CommissionStatus::Cancelled;
-                        token_cancelled = token_cancelled.saturating_add(1);
-                    }
-                }
-            });
-
-            // H2 审计修复: 退还 Token 沉淀池 — 仅在转账成功时扣减池余额
-            let (te_id, ts_id, t_amount) = OrderTokenUnallocated::<T>::get(order_id);
-            if !t_amount.is_zero() {
-                let mut refund_ok = false;
-                let entity_account = T::EntityProvider::entity_account(te_id);
-                if let Some(seller) = T::ShopProvider::shop_owner(ts_id) {
-                    if T::TokenTransferProvider::token_transfer(
-                        te_id, &entity_account, &seller, t_amount,
-                    ).is_ok() {
-                        refund_ok = true;
-                    }
-                }
-                if refund_ok {
-                    UnallocatedTokenPool::<T>::mutate(te_id, |pool| {
-                        *pool = pool.saturating_sub(t_amount);
-                    });
-                    EntityTokenAccountedBalance::<T>::mutate(te_id, |b| {
-                        *b = b.map(|v| v.saturating_sub(t_amount));
-                    });
-                    OrderTokenUnallocated::<T>::remove(order_id);
-                    Self::deposit_event(Event::TokenUnallocatedPoolRefunded {
-                        entity_id: te_id, order_id, amount: t_amount,
-                    });
-                }
-            }
-
-            // M2-R6 审计修复: 回退 Pool A 留存（token_platform_fee 中未分配给 referrer 的部分）
-            // 与 NEX cancel 退还 OrderTreasuryTransfer 对称
-            let (retention_entity_id, retention_amount) = OrderTokenPlatformRetention::<T>::get(order_id);
-            if !retention_amount.is_zero() {
-                UnallocatedTokenPool::<T>::mutate(retention_entity_id, |pool| {
-                    *pool = pool.saturating_sub(retention_amount);
-                });
-                OrderTokenPlatformRetention::<T>::remove(order_id);
-            }
-
-            if token_cancelled > 0 {
-                Self::deposit_event(Event::TokenCommissionCancelled {
-                    order_id, cancelled_count: token_cancelled,
-                });
-            }
-
-            Ok(())
-        }
-    }
 
     // ========================================================================
     // Hooks (#11: Storage 版本与迁移钩子)
@@ -3384,23 +2135,17 @@ pub mod pallet {
             use frame_support::ensure;
 
             // INV-1: 每个 entity 的 MemberCommissionStats.pending 之和 = ShopPendingTotal
-            // INV-2: 每个 entity 的 MemberShoppingBalance 之和 = ShopShoppingTotal
+            // INV-2: [已迁移至 Loyalty 模块] NEX 购物余额一致性不再由 commission 检查
             // INV-3: Token 侧对称不变量
             //
             // 注意: 遍历 DoubleMap 在 try-runtime 中是可接受的（仅在升级检查时运行）
 
-            // 收集所有 entity_id（从 ShopPendingTotal 和 ShopShoppingTotal 的 key）
+            // 收集所有 entity_id（从 ShopPendingTotal 和 Token Storage 的 key）
             let mut entity_ids = alloc::collections::BTreeSet::new();
             for (eid, _) in ShopPendingTotal::<T>::iter() {
                 entity_ids.insert(eid);
             }
-            for (eid, _) in ShopShoppingTotal::<T>::iter() {
-                entity_ids.insert(eid);
-            }
             for (eid, _) in TokenPendingTotal::<T>::iter() {
-                entity_ids.insert(eid);
-            }
-            for (eid, _) in TokenShoppingTotal::<T>::iter() {
                 entity_ids.insert(eid);
             }
 
@@ -3418,18 +2163,7 @@ pub mod pallet {
                     )
                 );
 
-                // INV-2: NEX shopping 一致性
-                let stored_shopping = ShopShoppingTotal::<T>::get(entity_id);
-                let mut sum_shopping = BalanceOf::<T>::zero();
-                for (_, bal) in MemberShoppingBalance::<T>::iter_prefix(entity_id) {
-                    sum_shopping = sum_shopping.saturating_add(bal);
-                }
-                ensure!(
-                    sum_shopping == stored_shopping,
-                    sp_runtime::TryRuntimeError::Other(
-                        "INV-2: sum(MemberShoppingBalance) != ShopShoppingTotal"
-                    )
-                );
+                // INV-2: [已迁移] NEX shopping 一致性由 Loyalty 模块负责
 
                 // INV-3: Token pending 一致性
                 let stored_token_pending = TokenPendingTotal::<T>::get(entity_id);
@@ -3444,18 +2178,7 @@ pub mod pallet {
                     )
                 );
 
-                // INV-4: Token shopping 一致性
-                let stored_token_shopping = TokenShoppingTotal::<T>::get(entity_id);
-                let mut sum_token_shopping = TokenBalanceOf::<T>::zero();
-                for (_, bal) in MemberTokenShoppingBalance::<T>::iter_prefix(entity_id) {
-                    sum_token_shopping = sum_token_shopping.saturating_add(bal);
-                }
-                ensure!(
-                    sum_token_shopping == stored_token_shopping,
-                    sp_runtime::TryRuntimeError::Other(
-                        "INV-4: sum(MemberTokenShoppingBalance) != TokenShoppingTotal"
-                    )
-                );
+                // INV-4: [已迁移] Token shopping 一致性由 Loyalty 模块负责
             }
 
             // INV-5: GlobalCommissionPaused 布尔一致性（总是 valid）
@@ -3646,7 +2369,7 @@ impl<T: pallet::Config> CommissionProvider<T::AccountId, pallet::BalanceOf<T>> f
     }
 
     fn shopping_balance(entity_id: u64, account: &T::AccountId) -> pallet::BalanceOf<T> {
-        pallet::MemberShoppingBalance::<T>::get(entity_id, account)
+        T::Loyalty::shopping_balance(entity_id, account)
     }
 
     fn use_shopping_balance(entity_id: u64, account: &T::AccountId, amount: pallet::BalanceOf<T>) -> sp_runtime::DispatchResult {
@@ -3821,8 +2544,8 @@ impl<T: pallet::Config> pallet::Pallet<T> {
         Some(runtime_api::MemberCommissionDashboard {
             nex_stats,
             token_stats,
-            nex_shopping_balance: pallet::MemberShoppingBalance::<T>::get(entity_id, account),
-            token_shopping_balance: pallet::MemberTokenShoppingBalance::<T>::get(entity_id, account),
+            nex_shopping_balance: T::Loyalty::shopping_balance(entity_id, account),
+            token_shopping_balance: T::LoyaltyToken::token_shopping_balance(entity_id, account),
             multi_level_progress,
             multi_level_stats,
             team_tier,
@@ -3948,13 +2671,100 @@ impl<T: pallet::Config> pallet::Pallet<T> {
             pending_total_token: pallet::TokenPendingTotal::<T>::get(entity_id),
             unallocated_pool_nex: pallet::UnallocatedPool::<T>::get(entity_id),
             unallocated_pool_token: pallet::UnallocatedTokenPool::<T>::get(entity_id),
-            shopping_total_nex: pallet::ShopShoppingTotal::<T>::get(entity_id),
-            shopping_total_token: pallet::TokenShoppingTotal::<T>::get(entity_id),
+            shopping_total_nex: T::Loyalty::shopping_total(entity_id),
+            shopping_total_token: T::LoyaltyToken::token_shopping_total(entity_id),
             multi_level_paused: T::MultiLevelQuery::is_paused(entity_id),
             single_line_enabled: T::SingleLineQuery::is_enabled(entity_id),
             team_status: (team_exists, team_enabled),
             pool_reward_paused: T::PoolRewardQuery::is_paused(entity_id),
             withdrawal_paused: pallet::WithdrawalPaused::<T>::get(entity_id),
         }
+    }
+}
+
+// ============================================================================
+// CommissionGovernancePort 实现
+// ============================================================================
+
+impl<T: pallet::Config> pallet_entity_common::CommissionGovernancePort<pallet::BalanceOf<T>>
+    for pallet::Pallet<T>
+{
+    fn governance_set_withdrawal_cooldown(
+        entity_id: u64,
+        nex_cooldown: u32,
+        token_cooldown: u32,
+    ) -> Result<(), sp_runtime::DispatchError> {
+        pallet::CommissionConfigs::<T>::mutate(entity_id, |maybe| {
+            let config = maybe.get_or_insert_with(pallet::CoreCommissionConfig::default);
+            config.withdrawal_cooldown = nex_cooldown;
+            config.token_withdrawal_cooldown = token_cooldown;
+        });
+        Ok(())
+    }
+
+    fn governance_set_token_withdrawal(
+        entity_id: u64,
+        enabled: bool,
+    ) -> Result<(), sp_runtime::DispatchError> {
+        // Token 提现启用/禁用通过 WithdrawalConfig 控制
+        if let Some(mut wc) = pallet::TokenWithdrawalConfigs::<T>::get(entity_id) {
+            wc.enabled = enabled;
+            pallet::TokenWithdrawalConfigs::<T>::insert(entity_id, wc);
+        }
+        Ok(())
+    }
+
+    fn governance_set_withdrawal_pause(
+        entity_id: u64,
+        paused: bool,
+    ) -> Result<(), sp_runtime::DispatchError> {
+        pallet::WithdrawalPaused::<T>::insert(entity_id, paused);
+        pallet::Pallet::<T>::deposit_event(pallet::Event::WithdrawalPauseToggled { entity_id, paused });
+        Ok(())
+    }
+
+    fn governance_set_referrer_guard(
+        _entity_id: u64,
+        _min_referrer_spent: pallet::BalanceOf<T>,
+        _min_referrer_orders: u32,
+    ) -> Result<(), sp_runtime::DispatchError> {
+        // 推荐人资格门槛：当前由 engine.rs 的硬编码逻辑控制
+        // 未来需新增 ReferrerGuardConfig 存储项
+        Ok(())
+    }
+
+    fn governance_set_commission_cap(
+        _entity_id: u64,
+        _max_per_order: pallet::BalanceOf<T>,
+        _max_total_earned: pallet::BalanceOf<T>,
+    ) -> Result<(), sp_runtime::DispatchError> {
+        // 佣金上限：当前通过 max_commission_rate 控制
+        // 精细化的 per-order/total-earned 上限需新增存储项
+        Ok(())
+    }
+
+    fn governance_set_referral_validity(
+        _entity_id: u64,
+        _validity_blocks: u32,
+        _valid_orders: u32,
+    ) -> Result<(), sp_runtime::DispatchError> {
+        // 推荐有效期：当前无独立存储，需新增 ReferralValidityConfig
+        Ok(())
+    }
+
+    fn governance_pause_multi_level(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
+        T::MultiLevelWriter::governance_pause(entity_id)
+    }
+
+    fn governance_resume_multi_level(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
+        T::MultiLevelWriter::governance_resume(entity_id)
+    }
+
+    fn governance_pause_team_performance(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
+        T::TeamWriter::governance_pause(entity_id)
+    }
+
+    fn governance_resume_team_performance(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
+        T::TeamWriter::governance_resume(entity_id)
     }
 }

@@ -1863,4 +1863,54 @@ pub mod pallet {
                 .unwrap_or(0)
         }
     }
+
+    // ========================================================================
+    // KycGovernancePort 实现
+    // ========================================================================
+
+    impl<T: Config> pallet_entity_common::KycGovernancePort for Pallet<T> {
+        fn governance_set_kyc_requirement(
+            entity_id: u64,
+            min_level: u8,
+            mandatory: bool,
+            grace_period: u32,
+        ) -> Result<(), sp_runtime::DispatchError> {
+            let min_level = KycLevel::try_from_u8(min_level)
+                .ok_or(sp_runtime::DispatchError::Other("InvalidKycLevel"))?;
+
+            let requirement = EntityKycRequirement {
+                min_level,
+                mandatory,
+                grace_period,
+                allow_high_risk_countries: false,
+                max_risk_score: 100,
+            };
+
+            EntityRequirements::<T>::insert(entity_id, requirement);
+
+            Self::deposit_event(Event::EntityRequirementSet {
+                entity_id,
+                min_level,
+            });
+            Ok(())
+        }
+
+        fn governance_authorize_kyc_provider(
+            _entity_id: u64,
+            _provider_id: u64,
+        ) -> Result<(), sp_runtime::DispatchError> {
+            // provider_id 为 u64 但 KYC 模块使用 AccountId 索引 Provider
+            // 治理提案通过后由管理员通过 authorize_provider extrinsic 执行
+            Ok(())
+        }
+
+        fn governance_deauthorize_kyc_provider(
+            _entity_id: u64,
+            _provider_id: u64,
+        ) -> Result<(), sp_runtime::DispatchError> {
+            // provider_id 为 u64 但 KYC 模块使用 AccountId 索引 Provider
+            // 治理提案通过后由管理员通过 deauthorize_provider extrinsic 执行
+            Ok(())
+        }
+    }
 }

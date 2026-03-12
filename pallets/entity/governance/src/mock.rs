@@ -349,6 +349,15 @@ impl pallet_entity_governance::Config for Test {
     type DisclosureProvider = MockDisclosureProvider;
     type MultiLevelWriter = ();
     type TeamWriter = ();
+    // Phase 4.2: 领域治理执行 Port（使用空实现）
+    type MarketGovernance = ();
+    type CommissionGovernance = ();
+    type SingleLineGovernance = ();
+    type KycGovernance = ();
+    type ShopGovernance = ();
+    type TokenGovernance = ();
+    // Phase 4.3: 资金保护
+    type TreasuryPort = ();
     type WeightInfo = ();
     type ProposalCooldown = ProposalCooldown;
     type EmergencyOrigin = frame_system::EnsureRoot<u64>;

@@ -1,31 +1,14 @@
 {
   "name": "nexus-test-scripts",
-  "version": "2.0.0",
-  "description": "Nexus chain test scripts + E2E testing framework",
+  "version": "3.0.0",
+  "description": "Nexus runtime smoke and contract tests",
   "type": "module",
   "scripts": {
-    "e2e": "tsx e2e/run-e2e.ts",
-    "e2e:phase1": "tsx e2e/run-e2e.ts --phase 1",
-    "e2e:phase2": "tsx e2e/run-e2e.ts --phase 2",
-    "e2e:phase3": "tsx e2e/run-e2e.ts --phase 3",
-    "e2e:trading": "tsx e2e/run-e2e.ts --flow T1 T2 T3 T4 T5",
-    "e2e:entity": "tsx e2e/run-e2e.ts --flow E1 E2 E3 E4 E5 E6 E7 E8 E9 E10 E11",
-    "e2e:dispute": "tsx e2e/run-e2e.ts --flow D1 D2 D3",
-    "e2e:grouprobot": "tsx e2e/run-e2e.ts --flow G1 G2 G3 A1 G4 G5 G6 G7",
-    "e2e:storage": "tsx e2e/run-e2e.ts --flow S1 S2",
-    "coverage": "tsx e2e/test-coverage-check.ts",
-    "inventory": "node --import tsx e2e/generate-extrinsic-inventory.ts",
-    "agent": "tsx e2e/nexus-test-agent.ts",
-    "agent:cargo": "tsx e2e/nexus-test-agent.ts --mode cargo",
-    "agent:e2e": "tsx e2e/nexus-test-agent.ts --mode e2e",
-    "agent:coverage": "tsx e2e/nexus-test-agent.ts --mode coverage",
-    "agent:entity": "tsx e2e/nexus-test-agent.ts --group entity",
-    "agent:grouprobot": "tsx e2e/nexus-test-agent.ts --group grouprobot",
-    "agent:wave1": "node --import tsx e2e/nexus-test-agent.ts --mode e2e --flow T5 E10 E11 D3 A1 S2",
-    "agent:p0": "tsx e2e/nexus-test-agent.ts --mode coverage --priority P0",
-    "stress": "tsx e2e/stress-test.ts",
-    "stress:light": "tsx e2e/stress-test.ts --total 50 --concurrency 5",
-    "stress:heavy": "tsx e2e/stress-test.ts --total 500 --concurrency 20"
+    "e2e": "tsx e2e/run.ts",
+    "e2e:list": "tsx e2e/run.ts --list",
+    "e2e:contracts": "tsx e2e/run.ts --suite runtime-contracts",
+    "e2e:smoke": "tsx e2e/run.ts --suite chain-health entity-lifecycle nex-market-smoke",
+    "e2e:typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@polkadot/api": "^12.0.0",
@@ -34,8 +17,8 @@
     "@polkadot/util-crypto": "^12.0.0"
   },
   "devDependencies": {
+    "@types/node": "^20.0.0",
     "tsx": "^4.7.0",
-    "typescript": "^5.3.0",
-    "@types/node": "^20.0.0"
+    "typescript": "^5.3.0"
   }
 }

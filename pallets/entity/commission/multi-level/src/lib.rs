@@ -1417,6 +1417,28 @@ impl<T: pallet::Config> pallet_commission_common::MultiLevelPlanWriter for palle
         }
         Ok(())
     }
+
+    fn governance_pause(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
+        if pallet::GlobalPaused::<T>::get(entity_id) {
+            return Ok(()); // 已暂停，幂等操作
+        }
+        pallet::GlobalPaused::<T>::insert(entity_id, true);
+        Self::deposit_event(pallet::Event::MultiLevelPaused { entity_id });
+        let gov_who = T::EntityProvider::entity_account(entity_id);
+        Self::record_change_log(entity_id, &gov_who, pallet::ConfigChangeType::Pause);
+        Ok(())
+    }
+
+    fn governance_resume(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
+        if !pallet::GlobalPaused::<T>::get(entity_id) {
+            return Ok(()); // 未暂停，幂等操作
+        }
+        pallet::GlobalPaused::<T>::remove(entity_id);
+        Self::deposit_event(pallet::Event::MultiLevelResumed { entity_id });
+        let gov_who = T::EntityProvider::entity_account(entity_id);
+        Self::record_change_log(entity_id, &gov_who, pallet::ConfigChangeType::Resume);
+        Ok(())
+    }
 }
 
 // ============================================================================

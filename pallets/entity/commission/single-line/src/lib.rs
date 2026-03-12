@@ -1124,3 +1124,57 @@ impl<T: pallet::Config> pallet_commission_common::SingleLineQueryProvider<T::Acc
         Self::single_line_length(entity_id)
     }
 }
+
+// ============================================================================
+// SingleLineGovernancePort 实现
+// ============================================================================
+
+impl<T: pallet::Config> pallet_entity_common::SingleLineGovernancePort for pallet::Pallet<T> {
+    fn governance_set_single_line_config(
+        entity_id: u64,
+        upline_rate: u16,
+        downline_rate: u16,
+        base_upline_levels: u8,
+        base_downline_levels: u8,
+        max_upline_levels: u8,
+        max_downline_levels: u8,
+    ) -> Result<(), sp_runtime::DispatchError> {
+        Self::validate_config(upline_rate, downline_rate, base_upline_levels, base_downline_levels, max_upline_levels, max_downline_levels)?;
+
+        let config = pallet::SingleLineConfig {
+            upline_rate,
+            downline_rate,
+            base_upline_levels,
+            base_downline_levels,
+            level_increment_threshold: sp_runtime::traits::Zero::zero(),
+            max_upline_levels,
+            max_downline_levels,
+        };
+        pallet::SingleLineConfigs::<T>::insert(entity_id, &config);
+        Self::record_change_log(entity_id, &config);
+        Self::deposit_event(pallet::Event::SingleLineConfigUpdated {
+            entity_id, upline_rate, downline_rate,
+            base_upline_levels, base_downline_levels,
+            max_upline_levels, max_downline_levels,
+        });
+        Ok(())
+    }
+
+    fn governance_pause_single_line(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
+        if !pallet::SingleLineEnabled::<T>::get(entity_id) {
+            return Ok(()); // 已暂停，幂等操作
+        }
+        pallet::SingleLineEnabled::<T>::insert(entity_id, false);
+        Self::deposit_event(pallet::Event::SingleLinePaused { entity_id });
+        Ok(())
+    }
+
+    fn governance_resume_single_line(entity_id: u64) -> Result<(), sp_runtime::DispatchError> {
+        if pallet::SingleLineEnabled::<T>::get(entity_id) {
+            return Ok(()); // 已启用，幂等操作
+        }
+        pallet::SingleLineEnabled::<T>::insert(entity_id, true);
+        Self::deposit_event(pallet::Event::SingleLineResumed { entity_id });
+        Ok(())
+    }
+}

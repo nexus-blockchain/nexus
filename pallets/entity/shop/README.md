@@ -4,18 +4,20 @@
 
 ## 概述
 
-`pallet-entity-shop` 管理 Entity（组织）下属的业务经营单元 —— Shop。每个 Entity 可拥有多个 Shop（受 `MaxShopsPerEntity` 约束），每个 Shop 拥有独立的运营资金账户（`PalletId` 派生）、管理员列表、积分系统和生命周期状态。
+`pallet-entity-shop` 管理 Entity（组织）下属的业务经营单元 -- Shop。每个 Entity 可拥有多个 Shop（受 `MaxShopsPerEntity` 约束），每个 Shop 拥有独立的运营资金账户（`PalletId` 派生）、管理员列表和生命周期状态。
+
+> **积分系统已迁移**: Shop 积分（Points）相关的存储、Extrinsics 和事件已迁移至 `pallet-entity-loyalty` 模块。Shop 关闭时通过 `PointsCleanup` trait 委托 loyalty 模块清理积分数据。
 
 ```
 Entity (组织层)                    Shop (业务层)
-───────────────────                ───────────────────
-• 所有权 / 治理                    • 日常运营
-• 代币发行 / 分红                  • 商品管理 → entity-product
-• KYC / 合规                       • 订单处理 → entity-order
-• 组织金库                         • 运营资金 → shop_account (派生)
-• 管理员权限                       • 门店管理员
-       │                                  │
-       └── register_shop(entity_id) ──────┘
+-------------------                -------------------
+  所有权 / 治理                      日常运营
+  代币发行 / 分红                    商品管理 -> entity-product
+  KYC / 合规                         订单处理 -> entity-order
+  组织金库                           运营资金 -> shop_account (派生)
+  管理员权限                         门店管理员
+       |                                  |
+       +-- register_shop(entity_id) ------+
            unregister_shop(close)
 ```
 
@@ -23,56 +25,56 @@ Entity (组织层)                    Shop (业务层)
 
 | 角色 | 来源 | 能力范围 |
 |------|------|----------|
-| Entity Owner | `EntityProvider::entity_owner` | 全部操作：创建/关闭/转让/提取资金/管理员增删/设主店 |
-| Entity Admin | `EntityProvider::is_entity_admin` (SHOP_MANAGE) | 管理类操作：更新信息/充值/暂停恢复/积分管理/位置设置 |
+| Entity Owner | `EntityProvider::entity_owner` | 全部操作：创建/关闭/转让/提取资金/管理员增删/设主店/变更类型 |
+| Entity Admin | `EntityProvider::is_entity_admin` (SHOP_MANAGE) | 管理类操作：更新信息/充值/暂停恢复/位置设置 |
 | Shop Manager | `Shop.managers` 列表 | 同 Entity Admin |
-| 普通用户 | 已签名账户 | 积分转移/兑换/过期清除 |
+| 普通用户 | 已签名账户 | `finalize_close_shop`（宽限期满后任何人可调用） |
 | Root | `ensure_root` | 强制暂停/强制关闭/封禁/解封 |
 
-> **Manager 权限** = Entity Owner ∪ Entity Admin ∪ Shop Managers
+> **Manager 权限** = Entity Owner + Entity Admin + Shop Managers
 
 ## 状态机
 
 ```
                 fund_operating (余额恢复)
-                      ┌────────────┐
-                      ▼            │
-  create_shop → Active ──── FundDepleted
-                  │ ▲
-         pause    │ │ resume (需余额 ≥ MinOperatingBalance)
-                  ▼ │
+                      +------------+
+                      v            |
+  create_shop -> Active ---- FundDepleted
+                  | ^
+         pause    | | resume (需余额 >= MinOperatingBalance)
+                  v |
                 Paused
-                  │
-         close    │                  ban (Root, 需 reason)
-                  ▼                       ▼
-             Closing ─── finalize ──→ Closed (终态)
-                  ▲                       ▲
-     cancel_close │                force_close (Root)
-                  │
-                任何非终态 ── ban_shop ──→ Banned ── unban_shop ──→ 恢复原状态
+                  |
+         close    |                  ban (Root, 需 reason)
+                  v                       v
+             Closing --- finalize --> Closed (终态)
+                  ^                       ^
+     cancel_close |                force_close (Root)
+                  |
+                任何非终态 -- ban_shop --> Banned -- unban_shop --> 恢复原状态
 ```
 
 | 状态 | `is_operational` | `can_resume` | `is_terminal_or_banned` |
 |------|:----------------:|:------------:|:-----------------------:|
-| `Active` | ✅ | — | ❌ |
-| `Paused` | ❌ | ✅ (`resume_shop`) | ❌ |
-| `FundDepleted` | ❌ | ✅ (`fund_operating` 余额达标自动恢复) | ❌ |
-| `Closing` | ❌ | ✅ (`cancel_close_shop`) | ❌ |
-| `Closed` | ❌ | ❌ | ✅ |
-| `Banned` | ❌ | ✅ (`unban_shop`, 仅 Root) | ✅ |
+| `Active` | Yes | -- | No |
+| `Paused` | No | Yes (`resume_shop`) | No |
+| `FundDepleted` | No | Yes (`fund_operating` 余额达标自动恢复) | No |
+| `Closing` | No | Yes (`cancel_close_shop`) | No |
+| `Closed` | No | No | Yes |
+| `Banned` | No | Yes (`unban_shop`, 仅 Root) | Yes |
 
 ### EffectiveShopStatus
 
 聚合 Entity 状态与 Shop 自身状态，供外部模块判断实际可用性：
 
-| Entity 状态 × Shop 状态 | Effective |
+| Entity 状态 x Shop 状态 | Effective |
 |--------------------------|-----------|
-| Active × Active | `Active` |
-| Active × Paused | `PausedBySelf` |
-| Suspended × * | `PausedByEntity` |
-| Pending × * | `EntityNotReady` |
-| Active × Closed | `Closed` |
-| Active × Banned | `Banned` |
+| Active x Active | `Active` |
+| Active x Paused | `PausedBySelf` |
+| Suspended x * | `PausedByEntity` |
+| Pending x * | `EntityNotReady` |
+| Active x Closed | `Closed` |
+| Active x Banned | `Banned` |
 
 ## 数据结构
 
@@ -88,7 +90,7 @@ pub struct Shop<AccountId, Balance, BlockNumber, MaxNameLen, MaxCidLen, MaxManag
     pub shop_type: ShopType,
     pub status: ShopOperatingStatus,
     pub managers: BoundedVec<AccountId, MaxManagers>,
-    pub location: Option<(i64, i64)>,              // 经纬度 × 10^6
+    pub location: Option<(i64, i64)>,              // 经纬度 x 10^6
     pub address_cid: Option<BoundedVec<u8, MaxCidLen>>,
     pub business_hours_cid: Option<BoundedVec<u8, MaxCidLen>>,
     pub policies_cid: Option<BoundedVec<u8, MaxCidLen>>,
@@ -96,8 +98,8 @@ pub struct Shop<AccountId, Balance, BlockNumber, MaxNameLen, MaxCidLen, MaxManag
     pub product_count: u32,
     pub total_sales: Balance,
     pub total_orders: u32,
-    pub rating: u16,         // 0–500 → 0.0–5.0
-    pub rating_total: u64,   // 累计 rating × 100
+    pub rating: u16,         // 0-500 -> 0.0-5.0
+    pub rating_total: u64,   // 累计 rating x 100
     pub rating_count: u32,
 }
 ```
@@ -114,19 +116,7 @@ pub struct Shop<AccountId, Balance, BlockNumber, MaxNameLen, MaxCidLen, MaxManag
 | `Popup` | 快闪店/临时店 |
 | `Virtual` | 虚拟店铺（纯服务） |
 
-### PointsConfig
-
-```rust
-pub struct PointsConfig<MaxNameLen, MaxSymbolLen> {
-    pub name: BoundedVec<u8, MaxNameLen>,
-    pub symbol: BoundedVec<u8, MaxSymbolLen>,
-    pub reward_rate: u16,     // bps, 500 = 5%
-    pub exchange_rate: u16,   // bps, 1000 = 10%
-    pub transferable: bool,
-}
-```
-
-## Extrinsics
+## Extrinsics（19 个）
 
 | # | 函数签名 | 权限 | 说明 |
 |:-:|----------|:----:|------|
@@ -135,28 +125,18 @@ pub struct PointsConfig<MaxNameLen, MaxSymbolLen> {
 | 2 | `add_manager(shop_id, manager)` | Owner | 添加管理员 |
 | 3 | `remove_manager(shop_id, manager)` | Owner | 移除管理员 |
 | 4 | `fund_operating(shop_id, amount)` | Manager | 充值运营资金 |
-| 5 | `pause_shop(shop_id)` | Manager | 暂停（仅 Active → Paused） |
-| 6 | `resume_shop(shop_id)` | Manager | 恢复（需余额 ≥ MinOperatingBalance） |
+| 5 | `pause_shop(shop_id)` | Manager | 暂停（仅 Active -> Paused） |
+| 6 | `resume_shop(shop_id)` | Manager | 恢复（需余额 >= MinOperatingBalance） |
 | 7 | `set_location(shop_id, location?, address_cid??)` | Manager | 设置地理位置 |
-| 8 | `enable_points(shop_id, name, symbol, reward_rate, exchange_rate, transferable)` | Manager | 启用积分系统 |
-| 9 | `close_shop(shop_id)` | Owner | 发起关闭（→ Closing 宽限期） |
-| 10 | `disable_points(shop_id)` | Manager | 禁用积分（清理所有余额） |
-| 11 | `update_points_config(shop_id, reward_rate?, exchange_rate?, transferable?)` | Manager | 更新积分参数 |
-| 12 | `transfer_points(shop_id, to, amount)` | 用户 | 转移积分（需 transferable） |
+| 9 | `close_shop(shop_id)` | Owner | 发起关闭（-> Closing 宽限期） |
 | 13 | `withdraw_operating_fund(shop_id, amount)` | Owner | 提取运营资金 |
 | 15 | `finalize_close_shop(shop_id)` | 任何人 | 宽限期满后执行最终清理 |
-| 16 | `manager_issue_points(shop_id, to, amount)` | Manager | 直接发放积分 |
-| 17 | `manager_burn_points(shop_id, from, amount)` | Manager | 直接销毁积分 |
-| 18 | `redeem_points(shop_id, amount)` | 用户 | 积分兑换货币 |
 | 19 | `transfer_shop(shop_id, to_entity_id)` | Owner | 转让 Shop 至另一 Entity |
 | 20 | `set_primary_shop(entity_id, shop_id)` | Owner | 变更 Entity 主 Shop |
 | 21 | `force_pause_shop(shop_id)` | Root | 强制暂停 |
-| 22 | `set_points_ttl(shop_id, ttl_blocks)` | Manager | 设置积分有效期（0=永不过期） |
-| 23 | `expire_points(shop_id, account)` | 任何人 | 清除过期积分 |
 | 24 | `force_close_shop(shop_id)` | Root | 强制关闭（跳过宽限期） |
 | 27 | `set_shop_type(shop_id, shop_type)` | Owner | 变更 Shop 类型 |
-| 28 | `cancel_close_shop(shop_id)` | Owner | 撤回关闭（Closing → Active/FundDepleted） |
-| 29 | `set_points_max_supply(shop_id, max_supply)` | Manager | 设置积分总量上限（0=无上限） |
+| 28 | `cancel_close_shop(shop_id)` | Owner | 撤回关闭（Closing -> Active/FundDepleted） |
 | 30 | `resign_manager(shop_id)` | 自身 Manager | 自我辞职 |
 | 31 | `ban_shop(shop_id, reason)` | Root | 封禁（需提供原因） |
 | 32 | `unban_shop(shop_id)` | Root | 解封（恢复封禁前状态） |
@@ -169,27 +149,21 @@ pub struct PointsConfig<MaxNameLen, MaxSymbolLen> {
 |----|------|
 | `None` | 不修改 |
 | `Some(None)` | 清除（unpin 旧 CID） |
-| `Some(Some(cid))` | 设置新值（unpin 旧 → pin 新） |
+| `Some(Some(cid))` | 设置新值（unpin 旧 -> pin 新） |
 
-## Storage
+## Storage（7 项）
 
 | 存储项 | 类型 | 说明 |
 |--------|------|------|
 | `Shops` | `Map<u64, Shop>` | Shop 主数据 |
-| `ShopEntity` | `Map<u64, u64>` | shop_id → entity_id 反向索引 |
+| `ShopEntity` | `Map<u64, u64>` | shop_id -> entity_id 反向索引 |
 | `NextShopId` | `Value<u64>` | 自增 ID（初始 1） |
-| `EntityPrimaryShop` | `Map<u64, u64>` | entity_id → primary_shop_id |
+| `EntityPrimaryShop` | `Map<u64, u64>` | entity_id -> primary_shop_id |
 | `ShopClosingAt` | `Map<u64, BlockNumber>` | 关闭发起时间 |
 | `ShopStatusBeforeBan` | `Map<u64, ShopOperatingStatus>` | 封禁前状态（解封时恢复） |
 | `ShopBanReason` | `Map<u64, BoundedVec<u8>>` | 封禁原因 |
-| `ShopPointsConfigs` | `Map<u64, PointsConfig>` | 积分配置 |
-| `ShopPointsBalances` | `DoubleMap<u64, AccountId, Balance>` | 积分余额 |
-| `ShopPointsTotalSupply` | `Map<u64, Balance>` | 积分总供应量 |
-| `ShopPointsMaxSupply` | `Map<u64, Balance>` | 积分总量上限 |
-| `ShopPointsTtl` | `Map<u64, BlockNumber>` | 积分有效期（块数） |
-| `ShopPointsExpiresAt` | `DoubleMap<u64, AccountId, BlockNumber>` | 用户积分到期时间 |
 
-## Events
+## Events（22 个）
 
 | 事件 | 字段 |
 |------|------|
@@ -218,18 +192,8 @@ pub struct PointsConfig<MaxNameLen, MaxSymbolLen> {
 | `ShopUnbannedByRoot` | shop_id, restored_status |
 | `FundWarning` | shop_id, balance |
 | `FundDepleted` | shop_id |
-| `ShopPointsEnabled` | shop_id, name |
-| `ShopPointsDisabled` | shop_id |
-| `PointsConfigUpdated` | shop_id |
-| `PointsIssued` | shop_id, to, amount |
-| `PointsBurned` | shop_id, from, amount |
-| `PointsTransferred` | shop_id, from, to, amount |
-| `PointsRedeemed` | shop_id, who, points_burned, payout |
-| `PointsTtlSet` | shop_id, ttl_blocks |
-| `PointsExpired` | shop_id, account, amount |
-| `PointsMaxSupplySet` | shop_id, max_supply |
 
-## Errors
+## Errors（27 个）
 
 | 错误 | 触发场景 |
 |------|----------|
@@ -255,16 +219,8 @@ pub struct PointsConfig<MaxNameLen, MaxSymbolLen> {
 | `ClosingGracePeriodNotElapsed` | 宽限期未满 |
 | `ShopBanned` | Shop 已被封禁 |
 | `ShopNotBanned` | Shop 未被封禁（unban 需 Banned） |
-| `PointsNotEnabled` | 积分未启用 |
-| `PointsAlreadyEnabled` | 积分已启用 |
-| `PointsNotTransferable` | 积分不可转让 |
-| `InsufficientPointsBalance` | 积分余额不足 |
-| `PointsNameEmpty` | 积分名称为空 |
-| `PointsNotExpired` | 积分未过期（expire_points 需过期） |
-| `PointsMaxSupplyExceeded` | 超过积分总量上限 |
-| `RedeemPayoutZero` | 兑换金额为零（积分数量过小） |
 | `InvalidLocation` | 经纬度超出范围 |
-| `InvalidConfig` | 配置参数无效（rate > 10000、全 None 更新等） |
+| `InvalidConfig` | 配置参数无效（全 None 更新等） |
 | `InvalidRating` | 评分超出 1-5 范围 |
 | `CannotClosePrimaryShop` | 不可关闭主 Shop |
 | `CannotTransferPrimaryShop` | 不可转让主 Shop |
@@ -272,7 +228,7 @@ pub struct PointsConfig<MaxNameLen, MaxSymbolLen> {
 | `ZeroWithdrawAmount` | 提取金额为零 |
 | `ZeroFundAmount` | 充值金额为零 |
 | `ShopIdOverflow` | Shop ID 溢出 |
-| `SameEntity` | 目标 Entity 与源相同 / 积分自转账 |
+| `SameEntity` | 目标 Entity 与源相同 |
 | `ShopTypeSame` | Shop 类型未变更 |
 | `ShopLimitReached` | Entity 的 Shop 数量已达上限 |
 
@@ -280,21 +236,20 @@ pub struct PointsConfig<MaxNameLen, MaxSymbolLen> {
 
 ```rust
 impl pallet_entity_shop::Config for Runtime {
-    type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
     type EntityProvider = EntityRegistry;
     type MaxShopNameLength = ConstU32<64>;
     type MaxCidLength = ConstU32<64>;
     type MaxManagers = ConstU32<10>;
-    type MaxPointsNameLength = ConstU32<32>;
-    type MaxPointsSymbolLength = ConstU32<8>;
-    type MinOperatingBalance = MinOperatingBalance;
-    type WarningThreshold = WarningThreshold;
+    type MinOperatingBalance = ConstU128<{ UNIT / 10 }>;
+    type WarningThreshold = ConstU128<{ UNIT }>;
     type CommissionFundGuard = CommissionCore;
-    type ShopClosingGracePeriod = ShopClosingGracePeriod;
-    type MaxShopsPerEntity = ConstU32<5>;
-    type StoragePin = StorageService;
+    type ShopClosingGracePeriod = ConstU32<100800>;  // 7 days @ 6s/block
+    type MaxShopsPerEntity = ConstU32<16>;
+    type StoragePin = pallet_storage_service::Pallet<Runtime>;
     type ProductProvider = EntityProduct;
+    type PointsCleanup = EntityLoyalty;               // 委托 loyalty 模块清理积分
+    type WeightInfo = pallet_entity_shop::weights::SubstrateWeight<Runtime>;
 }
 ```
 
@@ -324,6 +279,7 @@ pub trait ShopProvider<AccountId> {
     fn effective_status(shop_id: u64) -> Option<EffectiveShopStatus>;
     fn update_shop_stats(shop_id: u64, sales: u128, orders: u32) -> DispatchResult;
     fn update_shop_rating(shop_id: u64, rating: u8) -> DispatchResult;
+    fn revert_shop_rating(shop_id: u64, old_rating: u8, new_rating: Option<u8>) -> DispatchResult;
     fn deduct_operating_fund(shop_id: u64, amount: u128) -> DispatchResult;
     fn operating_balance(shop_id: u64) -> u128;
     fn create_primary_shop(entity_id: u64, name: Vec<u8>, shop_type: ShopType) -> Result<u64, DispatchError>;
@@ -342,14 +298,7 @@ pub trait ShopProvider<AccountId> {
 impl<T: Config> Pallet<T> {
     pub fn shop_account_id(shop_id: u64) -> T::AccountId;
     pub fn can_manage_shop(shop: &Shop, account: &AccountId) -> bool;
-    pub fn issue_points(shop_id: u64, to: &AccountId, amount: Balance) -> DispatchResult;
-    pub fn burn_points(shop_id: u64, from: &AccountId, amount: Balance) -> DispatchResult;
     pub fn get_operating_balance(shop_id: u64) -> Balance;
-    pub fn get_points_balance(shop_id: u64, account: &AccountId) -> Balance;
-    pub fn get_points_total_supply(shop_id: u64) -> Balance;
-    pub fn get_points_config(shop_id: u64) -> Option<PointsConfig>;
-    pub fn get_points_expiry(shop_id: u64, account: &AccountId) -> Option<BlockNumber>;
-    pub fn get_points_max_supply(shop_id: u64) -> Balance;
 }
 ```
 
@@ -357,36 +306,29 @@ impl<T: Config> Pallet<T> {
 
 ### 状态守卫
 
-- **is_terminal_or_banned**: `add_manager`, `remove_manager`, `update_shop`, `enable_points`, `disable_points`, `update_points_config`, `set_location`, `set_shop_type`, `set_points_ttl`, `set_points_max_supply`, `manager_issue_points`, `set_primary_shop` (目标 Shop)
-- **is_banned 单独检查**: `withdraw_operating_fund`, `transfer_shop`, `fund_operating`, `close_shop`, `resume_shop`, `transfer_points`, `redeem_points`, `manager_burn_points`, `deduct_operating_fund` (trait), `resume_shop` (trait)
-- **is_entity_active**: `create_shop`, `update_shop`, `add_manager`, `fund_operating`, `set_location`, `enable_points`, `disable_points`, `update_points_config`, `set_shop_type`, `set_points_ttl`, `set_points_max_supply`, `manager_issue_points`, `manager_burn_points`, `transfer_shop` (目标 Entity)
+- **is_terminal_or_banned**: `add_manager`, `remove_manager`, `update_shop`, `set_location`, `set_shop_type`, `set_primary_shop` (目标 Shop)
+- **is_banned 单独检查**: `withdraw_operating_fund`, `transfer_shop`, `fund_operating`, `close_shop`, `resume_shop`
+- **is_entity_active**: `create_shop`, `update_shop`, `add_manager`, `fund_operating`, `set_location`, `set_shop_type`, `transfer_shop` (目标 Entity)
 - **is_entity_locked**: 所有 Owner/Manager 权限的 extrinsics
 
 ### 资金保护
 
-- **佣金保护**: `withdraw_operating_fund`, `deduct_operating_fund`, `redeem_points` 均扣除 `CommissionFundGuard::protected_funds()` 后再检查可用余额
+- **佣金保护**: `withdraw_operating_fund` 和 `deduct_operating_fund`（trait）均扣除 `CommissionFundGuard::protected_funds()` 后再检查可用余额
 - **最低余额**: 活跃 Shop 提取运营资金后余额不得低于 `MinOperatingBalance`；已关闭 Shop 可全额提取
 - **资金预警**: `deduct_operating_fund` 余额低于 `WarningThreshold` 时发射 `FundWarning`；低于 `MinOperatingBalance` 时自动切换为 `FundDepleted`
-
-### 积分安全
-
-- **TTL 防绕过**: `transfer_points` 延长接收方有效期（滑动窗口取最大值）
-- **懒过期**: `transfer_points`, `manager_burn_points`, `redeem_points` 在操作前检查并清除过期积分
-- **总量上限**: `issue_points`, `manager_issue_points` 检查 `ShopPointsMaxSupply`
-- **评分校验**: `update_shop_rating` 严格限制 1-5 范围
 
 ### 关闭清理 (do_close_shop_cleanup)
 
 `finalize_close_shop` 和 `force_close_shop` 共用统一清理逻辑：
 
 1. Unpin Shop 所有 CID（logo, description, address, business_hours, policies）
-2. 级联 unpin 关联 Product CID
+2. 级联移除关联 Product（退还押金 + unpin CID + 清理存储）
 3. 设置状态为 `Closed`
 4. 移除关闭计时器
 5. 注销 Entity 关联 + 清理 `ShopEntity` 索引
 6. 清理主 Shop 索引（若当前 Shop 是主 Shop）
 7. 清理封禁相关存储（`ShopStatusBeforeBan`, `ShopBanReason`）
-8. 清理全部积分数据（config, balances, total_supply, ttl, expires_at, max_supply）
+8. 委托 `T::PointsCleanup::cleanup_shop_points()` 清理积分数据
 9. 退还剩余运营资金至 Entity Owner
 
 ### 主 Shop 保护
@@ -395,6 +337,11 @@ impl<T: Config> Pallet<T> {
 - `close_shop`, `transfer_shop` 拒绝操作主 Shop
 - 关闭清理时自动移除主 Shop 索引
 
+### 封禁联动
+
+- `ban_shop` 封禁时自动调用 `ProductProvider::force_delist_all_shop_products()` 下架全部在售商品
+- `unban_shop` 恢复封禁前状态（Active/Paused/FundDepleted）
+
 ## 外部依赖
 
 | Trait | 提供方 | 用途 |
@@ -402,11 +349,11 @@ impl<T: Config> Pallet<T> {
 | `EntityProvider<AccountId>` | pallet-entity-registry | Entity 存在性/状态/权限/注册注销 |
 | `CommissionFundGuard` | pallet-commission-core | 查询已承诺佣金资金 |
 | `StoragePin<AccountId>` | pallet-storage-service | IPFS CID pin/unpin |
-| `ProductProvider<AccountId, Balance>` | pallet-entity-product | 关闭时级联 unpin Product CID |
+| `ProductProvider<AccountId, Balance>` | pallet-entity-product | 关闭时级联移除 Product / 封禁时下架商品 |
+| `PointsCleanup` | pallet-entity-loyalty | Shop 关闭时清理积分数据 |
 
 ## 已知局限
 
 | 项目 | 说明 |
 |------|------|
 | Weight | 使用基于 DB 读写次数的保守估计权重，待实际 benchmark 运行后替换为精确值 |
-| clear_prefix | `disable_points` 和 `do_close_shop_cleanup` 使用 `POINTS_CLEANUP_LIMIT`（500）限制单次清理条目数，超过此数量的积分用户需多次调用 |

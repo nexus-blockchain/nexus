@@ -40,6 +40,14 @@ thread_local! {
     static ENTITY_INACTIVE: RefCell<std::collections::BTreeSet<u64>> = RefCell::new(std::collections::BTreeSet::new());
     /// R8: Mock governance mode per entity (None=0, FullDAO=1)
     static GOVERNANCE_MODES: RefCell<BTreeMap<u64, u8>> = RefCell::new(BTreeMap::new());
+    /// Mock NEX 购物余额: (entity_id, account) → balance
+    static LOYALTY_SHOPPING_BALANCES: RefCell<BTreeMap<(u64, u64), u128>> = RefCell::new(BTreeMap::new());
+    /// Mock NEX 购物余额总额: entity_id → balance
+    static LOYALTY_SHOPPING_TOTALS: RefCell<BTreeMap<u64, u128>> = RefCell::new(BTreeMap::new());
+    /// Mock Token 购物余额: (entity_id, account) → balance
+    static LOYALTY_TOKEN_SHOPPING_BALANCES: RefCell<BTreeMap<(u64, u64), u128>> = RefCell::new(BTreeMap::new());
+    /// Mock Token 购物余额总额: entity_id → balance
+    static LOYALTY_TOKEN_SHOPPING_TOTALS: RefCell<BTreeMap<u64, u128>> = RefCell::new(BTreeMap::new());
 }
 
 pub fn setup_default() {
@@ -94,6 +102,10 @@ pub fn clear_thread_locals() {
     ENTITY_LOCKED.with(|m| m.borrow_mut().clear());
     ENTITY_INACTIVE.with(|m| m.borrow_mut().clear());
     GOVERNANCE_MODES.with(|m| m.borrow_mut().clear());
+    LOYALTY_SHOPPING_BALANCES.with(|m| m.borrow_mut().clear());
+    LOYALTY_SHOPPING_TOTALS.with(|m| m.borrow_mut().clear());
+    LOYALTY_TOKEN_SHOPPING_BALANCES.with(|m| m.borrow_mut().clear());
+    LOYALTY_TOKEN_SHOPPING_TOTALS.with(|m| m.borrow_mut().clear());
 }
 
 /// 设置 Mock Token 余额
@@ -257,6 +269,180 @@ impl pallet_commission_common::TokenTransferProvider<u64, u128> for MockTokenTra
 }
 
 // ============================================================================
+// Mock LoyaltyProvider (NEX 购物余额)
+// ============================================================================
+
+pub struct MockLoyaltyProvider;
+
+/// 设置 Mock 购物余额
+pub fn set_loyalty_shopping_balance(entity_id: u64, account: u64, balance: u128) {
+    LOYALTY_SHOPPING_BALANCES.with(|m| m.borrow_mut().insert((entity_id, account), balance));
+}
+
+/// 读取 Mock 购物余额
+pub fn get_loyalty_shopping_balance(entity_id: u64, account: u64) -> u128 {
+    LOYALTY_SHOPPING_BALANCES.with(|m| m.borrow().get(&(entity_id, account)).copied().unwrap_or(0))
+}
+
+/// 设置 Mock 购物余额总额
+pub fn set_loyalty_shopping_total(entity_id: u64, total: u128) {
+    LOYALTY_SHOPPING_TOTALS.with(|m| m.borrow_mut().insert(entity_id, total));
+}
+
+/// 读取 Mock 购物余额总额
+pub fn get_loyalty_shopping_total(entity_id: u64) -> u128 {
+    LOYALTY_SHOPPING_TOTALS.with(|m| m.borrow().get(&entity_id).copied().unwrap_or(0))
+}
+
+impl pallet_entity_common::LoyaltyReadPort<u64, u128> for MockLoyaltyProvider {
+    fn is_token_enabled(_entity_id: u64) -> bool { false }
+    fn token_discount_balance(_: u64, _: &u64) -> u128 { 0 }
+    fn shopping_balance(entity_id: u64, who: &u64) -> u128 {
+        LOYALTY_SHOPPING_BALANCES.with(|m| m.borrow().get(&(entity_id, *who)).copied().unwrap_or(0))
+    }
+    fn shopping_total(entity_id: u64) -> u128 {
+        LOYALTY_SHOPPING_TOTALS.with(|m| m.borrow().get(&entity_id).copied().unwrap_or(0))
+    }
+}
+
+impl pallet_entity_common::LoyaltyWritePort<u64, u128> for MockLoyaltyProvider {
+    fn redeem_for_discount(_: u64, _: &u64, _: u128) -> Result<u128, sp_runtime::DispatchError> {
+        Ok(0)
+    }
+    fn consume_shopping_balance(entity_id: u64, account: &u64, amount: u128) -> Result<(), sp_runtime::DispatchError> {
+        // KYC 检查
+        if KYC_BLOCKED.with(|s| s.borrow().contains(&(entity_id, *account))) {
+            return Err(sp_runtime::DispatchError::Other("ParticipationRequirementNotMet"));
+        }
+        LOYALTY_SHOPPING_BALANCES.with(|m| {
+            let mut map = m.borrow_mut();
+            let balance = map.get(&(entity_id, *account)).copied().unwrap_or(0);
+            if balance < amount {
+                return Err(sp_runtime::DispatchError::Other("InsufficientShoppingBalance"));
+            }
+            map.insert((entity_id, *account), balance - amount);
+            Ok(())
+        })?;
+        LOYALTY_SHOPPING_TOTALS.with(|m| {
+            let mut map = m.borrow_mut();
+            let total = map.get(&entity_id).copied().unwrap_or(0);
+            map.insert(entity_id, total.saturating_sub(amount));
+        });
+        // NEX 转账: entity_account → account
+        let entity_account = entity_id + 9000;
+        let entity_balance = <pallet_balances::Pallet<Test> as frame_support::traits::Currency<u64>>::free_balance(&entity_account);
+        if entity_balance >= amount {
+            let _ = <pallet_balances::Pallet<Test> as frame_support::traits::Currency<u64>>::transfer(
+                &entity_account,
+                account,
+                amount,
+                frame_support::traits::ExistenceRequirement::KeepAlive,
+            );
+        }
+        Ok(())
+    }
+    fn reward_on_purchase(_: u64, _: &u64, _: u128) -> Result<u128, sp_runtime::DispatchError> {
+        Ok(0)
+    }
+    fn credit_shopping_balance(entity_id: u64, who: &u64, amount: u128) -> Result<(), sp_runtime::DispatchError> {
+        if amount == 0 {
+            return Ok(());
+        }
+        LOYALTY_SHOPPING_BALANCES.with(|m| {
+            let mut map = m.borrow_mut();
+            let balance = map.get(&(entity_id, *who)).copied().unwrap_or(0);
+            map.insert((entity_id, *who), balance + amount);
+        });
+        LOYALTY_SHOPPING_TOTALS.with(|m| {
+            let mut map = m.borrow_mut();
+            let total = map.get(&entity_id).copied().unwrap_or(0);
+            map.insert(entity_id, total + amount);
+        });
+        Ok(())
+    }
+}
+
+/// 设置 Mock Token 购物余额
+pub fn set_loyalty_token_shopping_balance(entity_id: u64, account: u64, balance: u128) {
+    LOYALTY_TOKEN_SHOPPING_BALANCES.with(|m| m.borrow_mut().insert((entity_id, account), balance));
+}
+
+/// 读取 Mock Token 购物余额
+pub fn get_loyalty_token_shopping_balance(entity_id: u64, account: u64) -> u128 {
+    LOYALTY_TOKEN_SHOPPING_BALANCES.with(|m| m.borrow().get(&(entity_id, account)).copied().unwrap_or(0))
+}
+
+/// 设置 Mock Token 购物余额总额
+pub fn set_loyalty_token_shopping_total(entity_id: u64, total: u128) {
+    LOYALTY_TOKEN_SHOPPING_TOTALS.with(|m| m.borrow_mut().insert(entity_id, total));
+}
+
+/// 读取 Mock Token 购物余额总额
+pub fn get_loyalty_token_shopping_total(entity_id: u64) -> u128 {
+    LOYALTY_TOKEN_SHOPPING_TOTALS.with(|m| m.borrow().get(&entity_id).copied().unwrap_or(0))
+}
+
+impl pallet_entity_common::LoyaltyTokenReadPort<u64, u128> for MockLoyaltyProvider {
+    fn token_shopping_balance(entity_id: u64, who: &u64) -> u128 {
+        LOYALTY_TOKEN_SHOPPING_BALANCES.with(|m| m.borrow().get(&(entity_id, *who)).copied().unwrap_or(0))
+    }
+    fn token_shopping_total(entity_id: u64) -> u128 {
+        LOYALTY_TOKEN_SHOPPING_TOTALS.with(|m| m.borrow().get(&entity_id).copied().unwrap_or(0))
+    }
+}
+
+impl pallet_entity_common::LoyaltyTokenWritePort<u64, u128> for MockLoyaltyProvider {
+    fn credit_token_shopping_balance(entity_id: u64, who: &u64, amount: u128) -> Result<(), sp_runtime::DispatchError> {
+        if amount == 0 {
+            return Ok(());
+        }
+        LOYALTY_TOKEN_SHOPPING_BALANCES.with(|m| {
+            let mut map = m.borrow_mut();
+            let balance = map.get(&(entity_id, *who)).copied().unwrap_or(0);
+            map.insert((entity_id, *who), balance + amount);
+        });
+        LOYALTY_TOKEN_SHOPPING_TOTALS.with(|m| {
+            let mut map = m.borrow_mut();
+            let total = map.get(&entity_id).copied().unwrap_or(0);
+            map.insert(entity_id, total + amount);
+        });
+        Ok(())
+    }
+    fn consume_token_shopping_balance(entity_id: u64, account: &u64, amount: u128) -> Result<(), sp_runtime::DispatchError> {
+        // KYC 检查
+        if KYC_BLOCKED.with(|s| s.borrow().contains(&(entity_id, *account))) {
+            return Err(sp_runtime::DispatchError::Other("ParticipationRequirementNotMet"));
+        }
+        LOYALTY_TOKEN_SHOPPING_BALANCES.with(|m| {
+            let mut map = m.borrow_mut();
+            let balance = map.get(&(entity_id, *account)).copied().unwrap_or(0);
+            if balance < amount {
+                return Err(sp_runtime::DispatchError::Other("InsufficientShoppingBalance"));
+            }
+            map.insert((entity_id, *account), balance - amount);
+            Ok(())
+        })?;
+        LOYALTY_TOKEN_SHOPPING_TOTALS.with(|m| {
+            let mut map = m.borrow_mut();
+            let total = map.get(&entity_id).copied().unwrap_or(0);
+            map.insert(entity_id, total.saturating_sub(amount));
+        });
+        // Token 转账: entity_account → account
+        let entity_account = entity_id + 9000;
+        TOKEN_BALANCES.with(|m| {
+            let mut map = m.borrow_mut();
+            let from_balance = map.get(&(entity_id, entity_account)).copied().unwrap_or(0);
+            if from_balance >= amount {
+                map.insert((entity_id, entity_account), from_balance - amount);
+                let to_balance = map.get(&(entity_id, *account)).copied().unwrap_or(0);
+                map.insert((entity_id, *account), to_balance + amount);
+            }
+        });
+        Ok(())
+    }
+}
+
+// ============================================================================
 // Mock Runtime
 // ============================================================================
 
@@ -326,6 +512,8 @@ impl pallet_commission_core::Config for Test {
     type SingleLineQuery = ();
     type PoolRewardQuery = ();
     type ReferralQuery = ();
+    type Loyalty = MockLoyaltyProvider;
+    type LoyaltyToken = MockLoyaltyProvider;
 }
 
 // ============================================================================

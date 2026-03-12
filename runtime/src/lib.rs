@@ -377,6 +377,9 @@ mod runtime {
 	#[runtime::pallet_index(132)]
 	pub type EntityTokenSale = pallet_entity_tokensale;
 
+	#[runtime::pallet_index(139)]
+	pub type EntityLoyalty = pallet_entity_loyalty;
+
 	// ============================================================================
 	// GroupRobot Pallets
 	// ============================================================================

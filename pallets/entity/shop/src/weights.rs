@@ -28,25 +28,15 @@ pub trait WeightInfo {
     fn pause_shop() -> Weight;
     fn resume_shop() -> Weight;
     fn set_location() -> Weight;
-    fn enable_points() -> Weight;
     fn close_shop() -> Weight;
-    fn disable_points() -> Weight;
-    fn update_points_config() -> Weight;
-    fn transfer_points() -> Weight;
     fn withdraw_operating_fund() -> Weight;
     fn finalize_close_shop() -> Weight;
-    fn manager_issue_points() -> Weight;
-    fn manager_burn_points() -> Weight;
-    fn redeem_points() -> Weight;
     fn transfer_shop() -> Weight;
     fn set_primary_shop() -> Weight;
     fn force_pause_shop() -> Weight;
-    fn set_points_ttl() -> Weight;
-    fn expire_points() -> Weight;
     fn force_close_shop() -> Weight;
     fn set_shop_type() -> Weight;
     fn cancel_close_shop() -> Weight;
-    fn set_points_max_supply() -> Weight;
     fn resign_manager() -> Weight;
     fn ban_shop() -> Weight;
     fn unban_shop() -> Weight;
@@ -60,181 +50,101 @@ pub trait WeightInfo {
 /// - PoV：每个 storage item ≈ 1KB
 pub struct SubstrateWeight<T>(PhantomData<T>);
 impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
-    // create_shop: 3R + 3W (entity check, shop insert, next_id, entity_register, transfer)
     fn create_shop() -> Weight {
         Weight::from_parts(175_000_000, 6_000)
             .saturating_add(T::DbWeight::get().reads(4))
             .saturating_add(T::DbWeight::get().writes(4))
     }
-    // update_shop: 2R + 1W (shop read, entity check, shop write) + IPFS ops
     fn update_shop() -> Weight {
         Weight::from_parts(125_000_000, 5_000)
             .saturating_add(T::DbWeight::get().reads(2))
             .saturating_add(T::DbWeight::get().writes(1))
     }
-    // add_manager: 2R + 1W
     fn add_manager() -> Weight {
         Weight::from_parts(100_000_000, 4_000)
             .saturating_add(T::DbWeight::get().reads(2))
             .saturating_add(T::DbWeight::get().writes(1))
     }
-    // remove_manager: 2R + 1W
     fn remove_manager() -> Weight {
         Weight::from_parts(100_000_000, 4_000)
             .saturating_add(T::DbWeight::get().reads(2))
             .saturating_add(T::DbWeight::get().writes(1))
     }
-    // fund_operating: 2R + 2W (shop, entity check, transfer, shop update)
     fn fund_operating() -> Weight {
         Weight::from_parts(150_000_000, 5_000)
             .saturating_add(T::DbWeight::get().reads(3))
             .saturating_add(T::DbWeight::get().writes(2))
     }
-    // pause_shop: 2R + 1W
     fn pause_shop() -> Weight {
         Weight::from_parts(75_000_000, 4_000)
             .saturating_add(T::DbWeight::get().reads(2))
             .saturating_add(T::DbWeight::get().writes(1))
     }
-    // resume_shop: 3R + 1W (shop, entity, balance check)
     fn resume_shop() -> Weight {
         Weight::from_parts(100_000_000, 4_000)
             .saturating_add(T::DbWeight::get().reads(3))
             .saturating_add(T::DbWeight::get().writes(1))
     }
-    // set_location: 2R + 1W + IPFS
     fn set_location() -> Weight {
         Weight::from_parts(100_000_000, 4_000)
             .saturating_add(T::DbWeight::get().reads(2))
             .saturating_add(T::DbWeight::get().writes(1))
     }
-    // enable_points: 3R + 1W
-    fn enable_points() -> Weight {
-        Weight::from_parts(100_000_000, 4_000)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(1))
-    }
-    // close_shop: 3R + 2W (shop, entity, primary check, shop update, closing_at)
     fn close_shop() -> Weight {
         Weight::from_parts(100_000_000, 5_000)
             .saturating_add(T::DbWeight::get().reads(3))
             .saturating_add(T::DbWeight::get().writes(2))
     }
-    // disable_points: 3R + 6W (shop, entity, config, clear balances, clear expiry, supply, ttl, max)
-    fn disable_points() -> Weight {
-        Weight::from_parts(200_000_000, 10_000)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(6))
-    }
-    // update_points_config: 3R + 1W
-    fn update_points_config() -> Weight {
-        Weight::from_parts(100_000_000, 4_000)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(1))
-    }
-    // transfer_points: 3R + 3W (shop, config, 2x balance, expiry check, expiry extend)
-    fn transfer_points() -> Weight {
-        Weight::from_parts(125_000_000, 6_000)
-            .saturating_add(T::DbWeight::get().reads(4))
-            .saturating_add(T::DbWeight::get().writes(3))
-    }
-    // withdraw_operating_fund: 3R + 1W (shop, entity, balance, commission, transfer)
     fn withdraw_operating_fund() -> Weight {
         Weight::from_parts(150_000_000, 5_000)
             .saturating_add(T::DbWeight::get().reads(4))
             .saturating_add(T::DbWeight::get().writes(2))
     }
-    // finalize_close_shop: heavy — cleanup all shop data
     fn finalize_close_shop() -> Weight {
         Weight::from_parts(350_000_000, 15_000)
             .saturating_add(T::DbWeight::get().reads(5))
             .saturating_add(T::DbWeight::get().writes(12))
     }
-    // manager_issue_points: 3R + 2W
-    fn manager_issue_points() -> Weight {
-        Weight::from_parts(100_000_000, 5_000)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(3))
-    }
-    // manager_burn_points: 3R + 2W
-    fn manager_burn_points() -> Weight {
-        Weight::from_parts(100_000_000, 5_000)
-            .saturating_add(T::DbWeight::get().reads(4))
-            .saturating_add(T::DbWeight::get().writes(2))
-    }
-    // redeem_points: 4R + 3W (shop, config, balance, commission, transfer, burn)
-    fn redeem_points() -> Weight {
-        Weight::from_parts(175_000_000, 7_000)
-            .saturating_add(T::DbWeight::get().reads(5))
-            .saturating_add(T::DbWeight::get().writes(3))
-    }
-    // transfer_shop: 4R + 4W (shop, entity x2, unregister, register, update)
     fn transfer_shop() -> Weight {
         Weight::from_parts(200_000_000, 7_000)
             .saturating_add(T::DbWeight::get().reads(5))
             .saturating_add(T::DbWeight::get().writes(4))
     }
-    // set_primary_shop: 3R + 1W
     fn set_primary_shop() -> Weight {
         Weight::from_parts(100_000_000, 4_000)
             .saturating_add(T::DbWeight::get().reads(3))
             .saturating_add(T::DbWeight::get().writes(1))
     }
-    // force_pause_shop: 1R + 1W
     fn force_pause_shop() -> Weight {
         Weight::from_parts(50_000_000, 3_000)
             .saturating_add(T::DbWeight::get().reads(1))
             .saturating_add(T::DbWeight::get().writes(1))
     }
-    // set_points_ttl: 3R + 1W
-    fn set_points_ttl() -> Weight {
-        Weight::from_parts(75_000_000, 4_000)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(1))
-    }
-    // expire_points: 3R + 3W
-    fn expire_points() -> Weight {
-        Weight::from_parts(100_000_000, 5_000)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(3))
-    }
-    // force_close_shop: heavy — same as finalize
     fn force_close_shop() -> Weight {
         Weight::from_parts(350_000_000, 15_000)
             .saturating_add(T::DbWeight::get().reads(5))
             .saturating_add(T::DbWeight::get().writes(12))
     }
-    // set_shop_type: 2R + 1W
     fn set_shop_type() -> Weight {
         Weight::from_parts(75_000_000, 4_000)
             .saturating_add(T::DbWeight::get().reads(2))
             .saturating_add(T::DbWeight::get().writes(1))
     }
-    // cancel_close_shop: 3R + 2W
     fn cancel_close_shop() -> Weight {
         Weight::from_parts(100_000_000, 5_000)
             .saturating_add(T::DbWeight::get().reads(3))
             .saturating_add(T::DbWeight::get().writes(2))
     }
-    // set_points_max_supply: 3R + 1W
-    fn set_points_max_supply() -> Weight {
-        Weight::from_parts(75_000_000, 4_000)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(1))
-    }
-    // resign_manager: 1R + 1W
     fn resign_manager() -> Weight {
         Weight::from_parts(75_000_000, 3_000)
             .saturating_add(T::DbWeight::get().reads(1))
             .saturating_add(T::DbWeight::get().writes(1))
     }
-    // ban_shop: 1R + 3W (shop, status_before_ban, ban_reason, delist products)
     fn ban_shop() -> Weight {
         Weight::from_parts(125_000_000, 5_000)
             .saturating_add(T::DbWeight::get().reads(1))
             .saturating_add(T::DbWeight::get().writes(3))
     }
-    // unban_shop: 1R + 3W (shop, remove status_before_ban, remove ban_reason)
     fn unban_shop() -> Weight {
         Weight::from_parts(100_000_000, 4_000)
             .saturating_add(T::DbWeight::get().reads(1))
@@ -252,25 +162,15 @@ impl WeightInfo for () {
     fn pause_shop() -> Weight { Weight::from_parts(75_000_000, 4_000) }
     fn resume_shop() -> Weight { Weight::from_parts(100_000_000, 4_000) }
     fn set_location() -> Weight { Weight::from_parts(100_000_000, 4_000) }
-    fn enable_points() -> Weight { Weight::from_parts(100_000_000, 4_000) }
     fn close_shop() -> Weight { Weight::from_parts(100_000_000, 5_000) }
-    fn disable_points() -> Weight { Weight::from_parts(200_000_000, 10_000) }
-    fn update_points_config() -> Weight { Weight::from_parts(100_000_000, 4_000) }
-    fn transfer_points() -> Weight { Weight::from_parts(125_000_000, 6_000) }
     fn withdraw_operating_fund() -> Weight { Weight::from_parts(150_000_000, 5_000) }
     fn finalize_close_shop() -> Weight { Weight::from_parts(350_000_000, 15_000) }
-    fn manager_issue_points() -> Weight { Weight::from_parts(100_000_000, 5_000) }
-    fn manager_burn_points() -> Weight { Weight::from_parts(100_000_000, 5_000) }
-    fn redeem_points() -> Weight { Weight::from_parts(175_000_000, 7_000) }
     fn transfer_shop() -> Weight { Weight::from_parts(200_000_000, 7_000) }
     fn set_primary_shop() -> Weight { Weight::from_parts(100_000_000, 4_000) }
     fn force_pause_shop() -> Weight { Weight::from_parts(50_000_000, 3_000) }
-    fn set_points_ttl() -> Weight { Weight::from_parts(75_000_000, 4_000) }
-    fn expire_points() -> Weight { Weight::from_parts(100_000_000, 5_000) }
     fn force_close_shop() -> Weight { Weight::from_parts(350_000_000, 15_000) }
     fn set_shop_type() -> Weight { Weight::from_parts(75_000_000, 4_000) }
     fn cancel_close_shop() -> Weight { Weight::from_parts(100_000_000, 5_000) }
-    fn set_points_max_supply() -> Weight { Weight::from_parts(75_000_000, 4_000) }
     fn resign_manager() -> Weight { Weight::from_parts(75_000_000, 3_000) }
     fn ban_shop() -> Weight { Weight::from_parts(125_000_000, 5_000) }
     fn unban_shop() -> Weight { Weight::from_parts(100_000_000, 4_000) }

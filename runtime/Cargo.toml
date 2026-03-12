@@ -74,6 +74,7 @@ pallet-entity-review = { workspace = true }
 pallet-entity-disclosure = { workspace = true }
 pallet-entity-kyc = { workspace = true }
 pallet-entity-tokensale = { workspace = true }
+pallet-entity-loyalty = { workspace = true }
 # GroupRobot pallets
 pallet-grouprobot-primitives = { workspace = true }
 pallet-grouprobot-registry = { workspace = true, features = ["dcap-verify"] }
@@ -175,6 +176,7 @@ std = [
 	"pallet-entity-disclosure/std",
 	"pallet-entity-kyc/std",
 	"pallet-entity-tokensale/std",
+	"pallet-entity-loyalty/std",
 	# GroupRobot pallets std
 	"pallet-grouprobot-primitives/std",
 	"pallet-grouprobot-registry/std",

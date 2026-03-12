@@ -49,7 +49,15 @@ pub mod pallet {
         BoundedVec,
     };
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{DisclosureProvider, GovernanceMode, EntityProvider, EntityTokenProvider, ProductProvider, ShopProvider};
+    use pallet_entity_common::{
+        DisclosureProvider, GovernanceMode, EntityProvider, EntityTokenProvider,
+        ProductProvider, ShopProvider,
+        // Phase 4.2: 领域治理执行 Port
+        MarketGovernancePort, CommissionGovernancePort, SingleLineGovernancePort,
+        KycGovernancePort, ShopGovernancePort, TokenGovernancePort,
+        // Phase 4.3: 资金查询
+        EntityTreasuryPort,
+    };
     use pallet_entity_commission::{CommissionProvider, MemberProvider, MultiLevelPlanWriter, TeamPlanWriter};
     use sp_runtime::traits::{Saturating, Zero};
     use sp_runtime::SaturatedConversion;
@@ -96,6 +104,65 @@ pub mod pallet {
         Abstain,
     }
 
+    /// 资金预警类型
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    pub enum FundAlertType {
+        /// 金库余额低于最低阈值
+        TreasuryBelowThreshold,
+        /// 单笔支出超过限额
+        SingleSpendExceeded,
+        /// 每日累计支出超过限额
+        DailySpendExceeded,
+    }
+
+    /// 资金保护配置
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+    pub struct FundProtectionConfig<Balance: Default> {
+        /// 最低金库余额阈值（低于此值触发预警，0 = 禁用）
+        pub min_treasury_threshold: Balance,
+        /// 单笔最大支出限额（超出触发预警，0 = 不限）
+        pub max_single_spend: Balance,
+        /// 每日最大支出限额（0 = 不限）
+        pub max_daily_spend: Balance,
+    }
+
+    /// 资金保护配置类型别名
+    pub type FundProtectionConfigOf<T> = FundProtectionConfig<BalanceOf<T>>;
+
+    /// 提案领域分组
+    ///
+    /// Phase 4.1: 将 87 种提案按业务领域归类，供前端展示、查询过滤和权限策略使用。
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    pub enum ProposalDomain {
+        /// 商品管理（价格、上下架、库存、可见性）
+        Product,
+        /// 店铺运营（名称、描述、暂停/恢复、关闭、类型、政策、积分）
+        Shop,
+        /// 代币经济（配置、增发、销毁、空投、分红、供应量、类型、转账限制、黑名单）
+        Token,
+        /// 财务管理（金库支出、手续费、收益分配、退款政策）
+        Treasury,
+        /// 治理参数（投票期、法定人数、门槛、延迟、阈值、否决权）
+        Governance,
+        /// 返佣配置（模式、直推、多级、极差、固定、首单、复购、费率、开关、提现）
+        Commission,
+        /// 会员管理（等级、升级模式、注册策略、统计策略）
+        Member,
+        /// 披露合规（级别、违规重置、内部人、处罚）
+        Disclosure,
+        /// DAO 紧急权限（暂停开关、批量取消开关）
+        Emergency,
+        /// 社区（活动、规则建议、通用提案）
+        Community,
+        /// 市场交易（配置、暂停/恢复/关闭、价格保护、KYC、熔断）
+        Market,
+        /// 单线收益（配置、暂停/恢复）
+        SingleLine,
+        /// KYC 管理（等级要求、提供者授权）
+        Kyc,
+        /// 资金保护（阈值、预警规则）
+        FundProtection,
+    }
 
     /// 提案类型（纯代币投票）
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
@@ -355,6 +422,140 @@ pub mod pallet {
         DisclosureInsiderManage { account_cid: BoundedVec<u8, ConstU32<64>>, add: bool },
         /// 处罚级别变更 (0=Warning,1=Restricted,2=Suspended,3=Delisted)
         DisclosurePenaltyChange { level: u8 },
+
+        // ==================== Phase 4.3: 资金保护类 ====================
+        /// 资金保护配置变更（阈值、预警规则）
+        FundProtectionChange {
+            /// 最低金库余额阈值（低于此值触发预警，0 = 禁用）
+            min_treasury_threshold: Balance,
+            /// 单笔最大支出限额（超出需额外提案确认，0 = 不限）
+            max_single_spend: Balance,
+            /// 每日最大支出限额（0 = 不限）
+            max_daily_spend: Balance,
+        },
+    }
+
+    impl<Balance> ProposalType<Balance> {
+        /// 返回提案所属的业务领域分组
+        pub fn domain(&self) -> ProposalDomain {
+            match self {
+                // 商品管理
+                Self::PriceChange { .. }
+                | Self::ProductListing { .. }
+                | Self::ProductDelisting { .. }
+                | Self::InventoryAdjustment { .. }
+                | Self::ProductVisibilityChange { .. } => ProposalDomain::Product,
+
+                // 店铺运营
+                Self::Promotion { .. }
+                | Self::ShopNameChange { .. }
+                | Self::ShopDescriptionChange { .. }
+                | Self::ShopPause { .. }
+                | Self::ShopResume { .. }
+                | Self::ShopClose { .. }
+                | Self::ShopTypeChange { .. }
+                | Self::ShopPoliciesChange { .. }
+                | Self::PointsConfigChange { .. }
+                | Self::PointsToggle { .. } => ProposalDomain::Shop,
+
+                // 代币经济
+                Self::TokenConfigChange { .. }
+                | Self::TokenMint { .. }
+                | Self::TokenBurn { .. }
+                | Self::AirdropDistribution { .. }
+                | Self::Dividend { .. }
+                | Self::TokenMaxSupplyChange { .. }
+                | Self::TokenTypeChange { .. }
+                | Self::TransferRestrictionChange { .. }
+                | Self::TokenBlacklistManage { .. } => ProposalDomain::Token,
+
+                // 财务管理
+                Self::TreasurySpend { .. }
+                | Self::FeeAdjustment { .. }
+                | Self::RevenueShare { .. }
+                | Self::RefundPolicy { .. } => ProposalDomain::Treasury,
+
+                // 治理参数
+                Self::VotingPeriodChange { .. }
+                | Self::QuorumChange { .. }
+                | Self::ProposalThresholdChange { .. }
+                | Self::ExecutionDelayChange { .. }
+                | Self::PassThresholdChange { .. }
+                | Self::AdminVetoToggle { .. } => ProposalDomain::Governance,
+
+                // 返佣配置
+                Self::CommissionModesChange { .. }
+                | Self::DirectRewardChange { .. }
+                | Self::MultiLevelChange { .. }
+                | Self::LevelDiffChange { .. }
+                | Self::FixedAmountChange { .. }
+                | Self::FirstOrderChange { .. }
+                | Self::RepeatPurchaseChange { .. }
+                | Self::WithdrawalConfigChange { .. }
+                | Self::MinRepurchaseRateChange { .. }
+                | Self::CommissionRateChange { .. }
+                | Self::CommissionToggle { .. }
+                | Self::CreatorRewardRateChange { .. }
+                | Self::WithdrawalCooldownChange { .. }
+                | Self::TokenWithdrawalConfigChange { .. }
+                | Self::WithdrawalPauseToggle { .. }
+                | Self::ReferrerGuardChange { .. }
+                | Self::CommissionCapChange { .. }
+                | Self::ReferralValidityChange { .. }
+                | Self::MultiLevelPause
+                | Self::MultiLevelResume
+                | Self::TeamPerformanceChange { .. }
+                | Self::TeamPerformancePause
+                | Self::TeamPerformanceResume => ProposalDomain::Commission,
+
+                // 会员管理
+                Self::AddCustomLevel { .. }
+                | Self::UpdateCustomLevel { .. }
+                | Self::RemoveCustomLevel { .. }
+                | Self::SetUpgradeMode { .. }
+                | Self::EnableCustomLevels { .. }
+                | Self::MemberPolicyChange { .. }
+                | Self::UpgradeRuleToggle { .. }
+                | Self::MemberStatsPolicyChange { .. } => ProposalDomain::Member,
+
+                // 披露合规
+                Self::DisclosureLevelChange { .. }
+                | Self::DisclosureResetViolations
+                | Self::DisclosureInsiderManage { .. }
+                | Self::DisclosurePenaltyChange { .. } => ProposalDomain::Disclosure,
+
+                // DAO 紧急权限
+                Self::EmergencyPauseToggle { .. }
+                | Self::BatchCancelToggle { .. } => ProposalDomain::Emergency,
+
+                // 社区
+                Self::CommunityEvent { .. }
+                | Self::RuleSuggestion { .. }
+                | Self::General { .. } => ProposalDomain::Community,
+
+                // 市场交易
+                Self::MarketConfigChange { .. }
+                | Self::MarketPause
+                | Self::MarketResume
+                | Self::MarketClose
+                | Self::PriceProtectionChange { .. }
+                | Self::MarketKycChange { .. }
+                | Self::CircuitBreakerLift => ProposalDomain::Market,
+
+                // 单线收益
+                Self::SingleLineConfigChange { .. }
+                | Self::SingleLinePause
+                | Self::SingleLineResume => ProposalDomain::SingleLine,
+
+                // KYC 管理
+                Self::KycRequirementChange { .. }
+                | Self::KycProviderAuthorize { .. }
+                | Self::KycProviderDeauthorize { .. } => ProposalDomain::Kyc,
+
+                // 资金保护
+                Self::FundProtectionChange { .. } => ProposalDomain::FundProtection,
+            }
+        }
     }
 
     /// 提案
@@ -568,6 +769,29 @@ pub mod pallet {
 
         /// F10: 披露服务接口（治理提案执行披露配置变更）
         type DisclosureProvider: pallet_entity_common::DisclosureProvider<Self::AccountId>;
+
+        // ========== Phase 4.2: 领域治理执行 Port ==========
+
+        /// 市场治理执行接口
+        type MarketGovernance: MarketGovernancePort<Self::Balance>;
+
+        /// 返佣治理扩展执行接口
+        type CommissionGovernance: CommissionGovernancePort<Self::Balance>;
+
+        /// 单线收益治理执行接口
+        type SingleLineGovernance: SingleLineGovernancePort;
+
+        /// KYC 治理执行接口
+        type KycGovernance: KycGovernancePort;
+
+        /// 店铺治理扩展执行接口
+        type ShopGovernance: ShopGovernancePort;
+
+        /// 代币治理扩展执行接口
+        type TokenGovernance: TokenGovernancePort<Self::AccountId>;
+
+        /// Phase 4.3: Entity 资金库查询（资金保护规则用）
+        type TreasuryPort: EntityTreasuryPort;
 
         /// P2: 提案创建冷却期（区块数，同一用户在同一实体连续创建提案的最小间隔，0 = 禁用）
         #[pallet::constant]
@@ -957,6 +1181,30 @@ pub mod pallet {
         ValueQuery,
     >;
 
+    // ========== Phase 4.3: 资金保护 ==========
+
+    /// 资金保护配置 (entity_id → FundProtectionConfig)
+    #[pallet::storage]
+    #[pallet::getter(fn fund_protection_configs)]
+    pub type FundProtectionConfigs<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // entity_id
+        FundProtectionConfigOf<T>,
+    >;
+
+    /// 每日支出追踪 (entity_id → (day_number, accumulated_spend))
+    ///
+    /// day_number = block_number / BLOCKS_PER_DAY，用于按日重置累计支出。
+    #[pallet::storage]
+    pub type DailySpendTracker<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // entity_id
+        (u32, BalanceOf<T>),  // (day_number, accumulated_spend)
+        ValueQuery,
+    >;
+
     // ==================== 事件 ==
 
     #[pallet::event]
@@ -968,6 +1216,8 @@ pub mod pallet {
             entity_id: u64,
             proposer: T::AccountId,
             title: Vec<u8>,
+            /// Phase 4.1: 提案所属领域
+            domain: ProposalDomain,
         },
         /// 已投票
         Voted {
@@ -1077,6 +1327,20 @@ pub mod pallet {
         /// P2: 紧急恢复 — 治理暂停被强制解除
         GovernanceForceResumed {
             entity_id: u64,
+        },
+        /// Phase 4.1: 资金保护配置已更新
+        FundProtectionUpdated {
+            entity_id: u64,
+            min_treasury_threshold: BalanceOf<T>,
+            max_single_spend: BalanceOf<T>,
+            max_daily_spend: BalanceOf<T>,
+        },
+        /// Phase 4.3: 资金预警（金库余额低于阈值或单笔支出超限）
+        FundProtectionAlert {
+            entity_id: u64,
+            alert_type: FundAlertType,
+            current_value: BalanceOf<T>,
+            threshold: BalanceOf<T>,
         },
     }
 
@@ -1310,6 +1574,9 @@ pub mod pallet {
                 snapshot_total_supply: total_supply,
             };
 
+            // Phase 4.1: 计算提案领域分组
+            let domain = proposal.proposal_type.domain();
+
             // 保存
             Proposals::<T>::insert(proposal_id, proposal);
             entity_proposals.try_push(proposal_id).map_err(|_| Error::<T>::TooManyActiveProposals)?;
@@ -1326,6 +1593,7 @@ pub mod pallet {
                 entity_id,
                 proposer: who,
                 title,
+                domain,
             });
 
             Ok(())
@@ -2335,6 +2603,19 @@ pub mod pallet {
                     ensure!(*nex_cooldown > 0 || *token_cooldown > 0, Error::<T>::InvalidParameter);
                 },
 
+                // ==================== Phase 4.3: 资金保护类参数校验 ====================
+                ProposalType::FundProtectionChange { min_treasury_threshold, max_single_spend, max_daily_spend } => {
+                    // 至少设置一项规则
+                    ensure!(
+                        !min_treasury_threshold.is_zero() || !max_single_spend.is_zero() || !max_daily_spend.is_zero(),
+                        Error::<T>::InvalidParameter
+                    );
+                    // max_daily_spend 必须 >= max_single_spend（如果都设置了）
+                    if !max_daily_spend.is_zero() && !max_single_spend.is_zero() {
+                        ensure!(*max_daily_spend >= *max_single_spend, Error::<T>::InvalidParameter);
+                    }
+                },
+
                 _ => {},
             }
             Ok(())
@@ -2617,6 +2898,8 @@ pub mod pallet {
 
                 // ==================== 财务管理类 ====================
                 ProposalType::TreasurySpend { amount, recipient_cid, reason_cid } => {
+                    // Phase 4.3: 资金保护检查（预警但不阻断）
+                    Self::check_fund_protection(entity_id, *amount);
                     Self::deposit_event(Event::ProposalExecutionNote {
                         proposal_id: proposal.id,
                         note: "TreasurySpend approved, requires off-chain execution".into(),
@@ -2785,21 +3068,6 @@ pub mod pallet {
                         *threshold_mode,
                     )
                 },
-                ProposalType::TeamPerformancePause => {
-                    // 暂停团队业绩返佣（通过事件记录，实际暂停由 TeamPerformanceEnabled 存储控制）
-                    Self::deposit_event(Event::ProposalExecutionNote {
-                        proposal_id: proposal.id,
-                        note: "TeamPerformancePause: requires extrinsic execution by owner/admin".into(),
-                    });
-                    Ok(())
-                },
-                ProposalType::TeamPerformanceResume => {
-                    Self::deposit_event(Event::ProposalExecutionNote {
-                        proposal_id: proposal.id,
-                        note: "TeamPerformanceResume: requires extrinsic execution by owner/admin".into(),
-                    });
-                    Ok(())
-                },
 
                 // ==================== 披露管理类（F10）====================
                 ProposalType::DisclosureLevelChange { level, insider_trading_control, blackout_period_after } => {
@@ -2899,26 +3167,80 @@ pub mod pallet {
                     T::DisclosureProvider::governance_set_penalty_level(entity_id, *level)
                 },
 
-                // ==================== R10: off-chain 执行类（Provider 尚未就绪，保持事件记录）====================
-                ProposalType::MarketConfigChange { .. } => Self::emit_offchain_note(proposal.id, "MarketConfigChange approved"),
-                ProposalType::MarketPause => Self::emit_offchain_note(proposal.id, "MarketPause approved"),
-                ProposalType::MarketResume => Self::emit_offchain_note(proposal.id, "MarketResume approved"),
-                ProposalType::MarketClose => Self::emit_offchain_note(proposal.id, "MarketClose approved — IRREVERSIBLE"),
-                ProposalType::PriceProtectionChange { .. } => Self::emit_offchain_note(proposal.id, "PriceProtectionChange approved"),
-                ProposalType::MarketKycChange { .. } => Self::emit_offchain_note(proposal.id, "MarketKycChange approved"),
-                ProposalType::CircuitBreakerLift => Self::emit_offchain_note(proposal.id, "CircuitBreakerLift approved"),
-                ProposalType::SingleLineConfigChange { .. } => Self::emit_offchain_note(proposal.id, "SingleLineConfigChange approved"),
-                ProposalType::SingleLinePause => Self::emit_offchain_note(proposal.id, "SingleLinePause approved"),
-                ProposalType::SingleLineResume => Self::emit_offchain_note(proposal.id, "SingleLineResume approved"),
-                ProposalType::TokenBlacklistManage { .. } => Self::emit_offchain_note(proposal.id, "TokenBlacklistManage approved"),
-                ProposalType::WithdrawalCooldownChange { .. } => Self::emit_offchain_note(proposal.id, "WithdrawalCooldownChange approved"),
-                ProposalType::TokenWithdrawalConfigChange { .. } => Self::emit_offchain_note(proposal.id, "TokenWithdrawalConfigChange approved"),
-                ProposalType::WithdrawalPauseToggle { .. } => Self::emit_offchain_note(proposal.id, "WithdrawalPauseToggle approved"),
-                ProposalType::ReferrerGuardChange { .. } => Self::emit_offchain_note(proposal.id, "ReferrerGuardChange approved"),
-                ProposalType::CommissionCapChange { .. } => Self::emit_offchain_note(proposal.id, "CommissionCapChange approved"),
-                ProposalType::ReferralValidityChange { .. } => Self::emit_offchain_note(proposal.id, "ReferralValidityChange approved"),
-                ProposalType::MultiLevelPause => Self::emit_offchain_note(proposal.id, "MultiLevelPause approved"),
-                ProposalType::MultiLevelResume => Self::emit_offchain_note(proposal.id, "MultiLevelResume approved"),
+                // ==================== Phase 4.2: 链上执行（通过 XxxGovernancePort）====================
+
+                // -- 市场管理类 --
+                ProposalType::MarketConfigChange { min_order_amount, order_ttl } => {
+                    T::MarketGovernance::governance_set_market_config(entity_id, *min_order_amount, *order_ttl)
+                },
+                ProposalType::MarketPause => {
+                    T::MarketGovernance::governance_pause_market(entity_id)
+                },
+                ProposalType::MarketResume => {
+                    T::MarketGovernance::governance_resume_market(entity_id)
+                },
+                ProposalType::MarketClose => {
+                    T::MarketGovernance::governance_close_market(entity_id)
+                },
+                ProposalType::PriceProtectionChange { max_price_deviation, max_slippage, circuit_breaker_threshold, min_trades_for_twap } => {
+                    T::MarketGovernance::governance_set_price_protection(entity_id, *max_price_deviation, *max_slippage, *circuit_breaker_threshold, *min_trades_for_twap)
+                },
+                ProposalType::MarketKycChange { min_kyc_level } => {
+                    T::MarketGovernance::governance_set_market_kyc(entity_id, *min_kyc_level)
+                },
+                ProposalType::CircuitBreakerLift => {
+                    T::MarketGovernance::governance_lift_circuit_breaker(entity_id)
+                },
+
+                // -- 单线收益类 --
+                ProposalType::SingleLineConfigChange { upline_rate, downline_rate, base_upline_levels, base_downline_levels, max_upline_levels, max_downline_levels } => {
+                    T::SingleLineGovernance::governance_set_single_line_config(entity_id, *upline_rate, *downline_rate, *base_upline_levels, *base_downline_levels, *max_upline_levels, *max_downline_levels)
+                },
+                ProposalType::SingleLinePause => {
+                    T::SingleLineGovernance::governance_pause_single_line(entity_id)
+                },
+                ProposalType::SingleLineResume => {
+                    T::SingleLineGovernance::governance_resume_single_line(entity_id)
+                },
+
+                // -- 代币扩展类 --
+                ProposalType::TokenBlacklistManage { account_cid, add } => {
+                    T::TokenGovernance::governance_manage_blacklist(entity_id, account_cid.as_slice(), *add)
+                },
+
+                // -- 返佣扩展类 --
+                ProposalType::WithdrawalCooldownChange { nex_cooldown, token_cooldown } => {
+                    T::CommissionGovernance::governance_set_withdrawal_cooldown(entity_id, *nex_cooldown, *token_cooldown)
+                },
+                ProposalType::TokenWithdrawalConfigChange { enabled } => {
+                    T::CommissionGovernance::governance_set_token_withdrawal(entity_id, *enabled)
+                },
+                ProposalType::WithdrawalPauseToggle { paused } => {
+                    T::CommissionGovernance::governance_set_withdrawal_pause(entity_id, *paused)
+                },
+                ProposalType::ReferrerGuardChange { min_referrer_spent, min_referrer_orders } => {
+                    T::CommissionGovernance::governance_set_referrer_guard(entity_id, *min_referrer_spent, *min_referrer_orders)
+                },
+                ProposalType::CommissionCapChange { max_per_order, max_total_earned } => {
+                    T::CommissionGovernance::governance_set_commission_cap(entity_id, *max_per_order, *max_total_earned)
+                },
+                ProposalType::ReferralValidityChange { validity_blocks, valid_orders } => {
+                    T::CommissionGovernance::governance_set_referral_validity(entity_id, *validity_blocks, *valid_orders)
+                },
+                ProposalType::MultiLevelPause => {
+                    T::CommissionGovernance::governance_pause_multi_level(entity_id)
+                },
+                ProposalType::MultiLevelResume => {
+                    T::CommissionGovernance::governance_resume_multi_level(entity_id)
+                },
+                ProposalType::TeamPerformancePause => {
+                    T::CommissionGovernance::governance_pause_team_performance(entity_id)
+                },
+                ProposalType::TeamPerformanceResume => {
+                    T::CommissionGovernance::governance_resume_team_performance(entity_id)
+                },
+
+                // -- 会员管理类 --
                 ProposalType::MemberPolicyChange { policy } => {
                     T::MemberProvider::set_registration_policy(entity_id, *policy)
                 },
@@ -2926,18 +3248,105 @@ pub mod pallet {
                     T::MemberProvider::set_upgrade_rule_system_enabled(entity_id, *enabled)
                 },
                 ProposalType::MemberStatsPolicyChange { qualified_only, .. } => {
-                    // qualified_only=true → 排除复购赠与 (bits=0)
-                    // qualified_only=false → 包含复购赠与 (bits=0b11)
                     let policy_bits: u8 = if *qualified_only { 0 } else { 0b0000_0011 };
                     T::MemberProvider::set_stats_policy(entity_id, policy_bits)
                 },
-                ProposalType::KycRequirementChange { .. } => Self::emit_offchain_note(proposal.id, "KycRequirementChange approved"),
-                ProposalType::KycProviderAuthorize { .. } => Self::emit_offchain_note(proposal.id, "KycProviderAuthorize approved"),
-                ProposalType::KycProviderDeauthorize { .. } => Self::emit_offchain_note(proposal.id, "KycProviderDeauthorize approved"),
-                ProposalType::PointsConfigChange { .. } => Self::emit_offchain_note(proposal.id, "PointsConfigChange approved"),
-                ProposalType::PointsToggle { .. } => Self::emit_offchain_note(proposal.id, "PointsToggle approved"),
-                ProposalType::ShopPoliciesChange { .. } => Self::emit_offchain_note(proposal.id, "ShopPoliciesChange approved"),
+
+                // -- KYC 管理类 --
+                ProposalType::KycRequirementChange { min_level, mandatory, grace_period } => {
+                    T::KycGovernance::governance_set_kyc_requirement(entity_id, *min_level, *mandatory, *grace_period)
+                },
+                ProposalType::KycProviderAuthorize { provider_id } => {
+                    T::KycGovernance::governance_authorize_kyc_provider(entity_id, *provider_id)
+                },
+                ProposalType::KycProviderDeauthorize { provider_id } => {
+                    T::KycGovernance::governance_deauthorize_kyc_provider(entity_id, *provider_id)
+                },
+
+                // -- 店铺扩展类 --
+                ProposalType::PointsConfigChange { reward_rate, exchange_rate, transferable } => {
+                    T::ShopGovernance::governance_set_points_config(entity_id, *reward_rate, *exchange_rate, *transferable)
+                },
+                ProposalType::PointsToggle { enabled } => {
+                    T::ShopGovernance::governance_toggle_points(entity_id, *enabled)
+                },
+                ProposalType::ShopPoliciesChange { policies_cid } => {
+                    T::ShopGovernance::governance_set_shop_policies(entity_id, policies_cid.as_slice())
+                },
+
+                // -- 披露链下类（仍需 CID 链下解析）--
                 ProposalType::DisclosureInsiderManage { .. } => Self::emit_offchain_note(proposal.id, "DisclosureInsiderManage approved"),
+
+                // ==================== Phase 4.3: 资金保护 ====================
+                ProposalType::FundProtectionChange { min_treasury_threshold, max_single_spend, max_daily_spend } => {
+                    FundProtectionConfigs::<T>::insert(entity_id, FundProtectionConfig {
+                        min_treasury_threshold: *min_treasury_threshold,
+                        max_single_spend: *max_single_spend,
+                        max_daily_spend: *max_daily_spend,
+                    });
+                    Self::deposit_event(Event::FundProtectionUpdated {
+                        entity_id,
+                        min_treasury_threshold: *min_treasury_threshold,
+                        max_single_spend: *max_single_spend,
+                        max_daily_spend: *max_daily_spend,
+                    });
+                    Ok(())
+                },
+            }
+        }
+
+        /// Phase 4.3: 资金保护检查（在 TreasurySpend 等提案执行前调用）
+        ///
+        /// 不阻断执行，仅发出预警事件。
+        fn check_fund_protection(entity_id: u64, spend_amount: BalanceOf<T>) {
+            if let Some(config) = FundProtectionConfigs::<T>::get(entity_id) {
+                // 检查金库余额阈值
+                if !config.min_treasury_threshold.is_zero() {
+                    let treasury_balance: BalanceOf<T> = T::TreasuryPort::treasury_balance(entity_id).saturated_into();
+                    if treasury_balance < config.min_treasury_threshold {
+                        Self::deposit_event(Event::FundProtectionAlert {
+                            entity_id,
+                            alert_type: FundAlertType::TreasuryBelowThreshold,
+                            current_value: treasury_balance,
+                            threshold: config.min_treasury_threshold,
+                        });
+                    }
+                }
+
+                // 检查单笔支出限额
+                if !config.max_single_spend.is_zero() && spend_amount > config.max_single_spend {
+                    Self::deposit_event(Event::FundProtectionAlert {
+                        entity_id,
+                        alert_type: FundAlertType::SingleSpendExceeded,
+                        current_value: spend_amount,
+                        threshold: config.max_single_spend,
+                    });
+                }
+
+                // 检查每日累计支出限额
+                if !config.max_daily_spend.is_zero() {
+                    let now = <frame_system::Pallet<T>>::block_number();
+                    // 按 14400 blocks/day 估算 (6s 出块)
+                    let day_number: u32 = now.saturated_into::<u32>() / 14400u32;
+                    let (tracked_day, tracked_amount) = DailySpendTracker::<T>::get(entity_id);
+
+                    let new_amount = if tracked_day == day_number {
+                        tracked_amount.saturating_add(spend_amount)
+                    } else {
+                        spend_amount
+                    };
+
+                    DailySpendTracker::<T>::insert(entity_id, (day_number, new_amount));
+
+                    if new_amount > config.max_daily_spend {
+                        Self::deposit_event(Event::FundProtectionAlert {
+                            entity_id,
+                            alert_type: FundAlertType::DailySpendExceeded,
+                            current_value: new_amount,
+                            threshold: config.max_daily_spend,
+                        });
+                    }
+                }
             }
         }
     }

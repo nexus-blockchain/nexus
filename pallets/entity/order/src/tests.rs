@@ -142,7 +142,7 @@ fn cancel_order_fails_not_buyer() {
 
         assert_noop!(
             Transaction::cancel_order(RuntimeOrigin::signed(BUYER2), 1),
-            Error::<Test>::NotOrderBuyer
+            Error::<Test>::NotOrderParticipant
         );
     });
 }
@@ -770,10 +770,10 @@ fn token_place_order_digital_auto_completes() {
         assert_eq!(get_token_reserved(ENTITY_1, BUYER), 0);
         assert_eq!(get_token_balance(ENTITY_1, SELLER), 50);
 
-        // TokenCommissionHandler::on_token_order_completed was called
-        let completed = get_token_completed_orders();
+        // OnOrderCompleted hook was called
+        let completed = get_completed_hook_calls();
         assert_eq!(completed.len(), 1);
-        assert_eq!(completed[0], (ENTITY_1, SHOP_1, 1, BUYER, 50, 0));
+        assert_eq!(completed[0], (1, ENTITY_1, SHOP_1));
     });
 }
 
@@ -829,10 +829,10 @@ fn token_confirm_receipt_transfers_to_seller() {
         assert_eq!(get_token_reserved(ENTITY_1, BUYER), 0);
         assert_eq!(get_token_balance(ENTITY_1, SELLER), 100);
 
-        // TokenCommissionHandler called
-        let completed = get_token_completed_orders();
+        // OnOrderCompleted hook called
+        let completed = get_completed_hook_calls();
         assert_eq!(completed.len(), 1);
-        assert_eq!(completed[0], (ENTITY_1, SHOP_1, 1, BUYER, 100, 0));
+        assert_eq!(completed[0], (1, ENTITY_1, SHOP_1));
     });
 }
 
@@ -3835,7 +3835,7 @@ fn r13_withdraw_dispute_fails_not_buyer() {
 
         assert_noop!(
             Transaction::withdraw_dispute(RuntimeOrigin::signed(SELLER), 1),
-            Error::<Test>::NotOrderBuyer
+            Error::<Test>::NotOrderParticipant
         );
     });
 }
@@ -3945,5 +3945,488 @@ fn r13_withdraw_dispute_token_order() {
 
         assert_ok!(Transaction::withdraw_dispute(RuntimeOrigin::signed(BUYER), 1));
         assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Paid);
+    });
+}
+
+// ==================== 代付功能 (Proxy-Pay) Tests ====================
+
+// ---- 代付基础 (6 tests) ----
+
+#[test]
+fn proxy_pay_nex_basic_works() {
+    new_test_ext().execute_with(|| {
+        // PAYER 为 BUYER 代付 Physical 商品
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER),
+            BUYER,
+            1, // physical, price 100
+            1,
+            Some(b"addr".to_vec()),
+            None, None, None, None, None,
+        ));
+
+        let order = Transaction::orders(1).expect("order should exist");
+        assert_eq!(order.buyer, BUYER);
+        assert_eq!(order.seller, SELLER);
+        assert_eq!(order.payer, Some(PAYER));
+        assert_eq!(order.total_amount, 100);
+        assert_eq!(order.status, OrderStatus::Paid);
+    });
+}
+
+#[test]
+fn proxy_pay_token_basic_works() {
+    new_test_ext().execute_with(|| {
+        set_token_enabled(1, true);
+        set_token_balance(1, PAYER, 500);
+
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER),
+            BUYER,
+            1,
+            1,
+            Some(b"addr".to_vec()),
+            None, None,
+            Some(pallet_entity_common::PaymentAsset::EntityToken),
+            None, None,
+        ));
+
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.payer, Some(PAYER));
+        assert_eq!(order.payment_asset, pallet_entity_common::PaymentAsset::EntityToken);
+        assert_eq!(order.token_payment_amount, 100);
+    });
+}
+
+#[test]
+fn proxy_pay_insufficient_balance_fails() {
+    new_test_ext().execute_with(|| {
+        // Product 1 stock is only 10, set it higher so stock check passes
+        set_product_stock(1, 2000);
+        // Product 1 price=100, qty=1001 = 100_100 > PAYER's 100_000
+        assert_noop!(
+            Transaction::place_order_for(
+                RuntimeOrigin::signed(PAYER),
+                BUYER,
+                1,
+                1001,
+                Some(b"addr".to_vec()),
+                None, None, None, None, None,
+            ),
+            sp_runtime::DispatchError::Token(sp_runtime::TokenError::FundsUnavailable)
+        );
+    });
+}
+
+#[test]
+fn proxy_pay_payer_is_seller_fails() {
+    new_test_ext().execute_with(|| {
+        // SELLER pays for BUYER → PayerCannotBeSeller
+        assert_noop!(
+            Transaction::place_order_for(
+                RuntimeOrigin::signed(SELLER),
+                BUYER,
+                1,
+                1,
+                Some(b"addr".to_vec()),
+                None, None, None, None, None,
+            ),
+            Error::<Test>::PayerCannotBeSeller
+        );
+    });
+}
+
+#[test]
+fn proxy_pay_buyer_discount_payer_pays_remainder() {
+    new_test_ext().execute_with(|| {
+        // Set buyer as member with level discount
+        set_member(1, BUYER, true);
+        set_member_level(1, BUYER, 2);
+        set_level_discount(1, 2, 1000); // 10% discount
+
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER),
+            BUYER,
+            1,
+            1,
+            Some(b"addr".to_vec()),
+            None, None, None, None, None,
+        ));
+
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.total_amount, 90); // 100 - 10% = 90
+        assert_eq!(order.payer, Some(PAYER));
+    });
+}
+
+#[test]
+fn proxy_pay_degenerate_payer_equals_buyer() {
+    new_test_ext().execute_with(|| {
+        // payer == buyer → stored_payer = None (degenerate case)
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(BUYER),
+            BUYER,
+            1,
+            1,
+            Some(b"addr".to_vec()),
+            None, None, None, None, None,
+        ));
+
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.payer, None); // degenerate: no separate payer stored
+        assert_eq!(order.buyer, BUYER);
+    });
+}
+
+// ---- 代付退款 (6 tests) ----
+
+#[test]
+fn proxy_pay_buyer_can_cancel() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+
+        // buyer can cancel
+        assert_ok!(Transaction::cancel_order(RuntimeOrigin::signed(BUYER), 1));
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Cancelled);
+    });
+}
+
+#[test]
+fn proxy_pay_payer_can_cancel() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+
+        // payer can cancel
+        assert_ok!(Transaction::cancel_order(RuntimeOrigin::signed(PAYER), 1));
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Cancelled);
+    });
+}
+
+#[test]
+fn proxy_pay_seller_approve_refund() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+
+        // buyer requests refund
+        assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Disputed);
+
+        // seller approves
+        assert_ok!(Transaction::approve_refund(RuntimeOrigin::signed(SELLER), 1));
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Refunded);
+    });
+}
+
+#[test]
+fn proxy_pay_ship_timeout_auto_refund() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+
+        // Advance past ShipTimeout (100 blocks)
+        run_to_block(102);
+
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Refunded);
+    });
+}
+
+#[test]
+fn proxy_pay_dispute_timeout_auto_refund() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+
+        // Ship the order
+        assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
+
+        // Payer requests refund
+        assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(PAYER), 1, b"reason".to_vec()));
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Disputed);
+
+        // Advance past dispute timeout (300 blocks from dispute)
+        let now = System::block_number();
+        run_to_block((now + 301) as u32);
+
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Refunded);
+    });
+}
+
+#[test]
+fn proxy_pay_partial_refund() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+
+        assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
+
+        // Force partial refund (root)
+        assert_ok!(Transaction::force_partial_refund(
+            RuntimeOrigin::root(), 1, 5000, None
+        ));
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Refunded);
+    });
+}
+
+// ---- 代付结算 (4 tests) ----
+
+#[test]
+fn proxy_pay_nex_complete_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+
+        assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
+        assert_ok!(Transaction::confirm_receipt(RuntimeOrigin::signed(BUYER), 1));
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Completed);
+    });
+}
+
+#[test]
+fn proxy_pay_token_complete_works() {
+    new_test_ext().execute_with(|| {
+        set_token_enabled(1, true);
+        set_token_balance(1, PAYER, 500);
+
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None,
+            Some(pallet_entity_common::PaymentAsset::EntityToken),
+            None, None,
+        ));
+
+        assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
+        assert_ok!(Transaction::confirm_receipt(RuntimeOrigin::signed(BUYER), 1));
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Completed);
+    });
+}
+
+#[test]
+fn proxy_pay_auto_confirm_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+
+        assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
+
+        // Advance past ConfirmTimeout (200 blocks)
+        let now = System::block_number();
+        run_to_block((now + 201) as u32);
+
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Completed);
+    });
+}
+
+#[test]
+fn proxy_pay_digital_auto_completes() {
+    new_test_ext().execute_with(|| {
+        // Product 2 = Digital, auto-completes
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 2, 1,
+            None, None, None, None, None, None,
+        ));
+
+        let order = Transaction::orders(1).unwrap();
+        assert_eq!(order.status, OrderStatus::Completed);
+        assert_eq!(order.payer, Some(PAYER));
+    });
+}
+
+// ---- 代付权限 (6 tests) ----
+
+#[test]
+fn proxy_pay_payer_cannot_confirm() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+
+        assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
+
+        // Payer cannot confirm receipt (buyer-only)
+        assert_noop!(
+            Transaction::confirm_receipt(RuntimeOrigin::signed(PAYER), 1),
+            Error::<Test>::NotOrderBuyer
+        );
+    });
+}
+
+#[test]
+fn proxy_pay_payer_cannot_extend_timeout() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+
+        assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
+
+        // Payer cannot extend confirm timeout (buyer-only)
+        assert_noop!(
+            Transaction::extend_confirm_timeout(RuntimeOrigin::signed(PAYER), 1),
+            Error::<Test>::NotOrderBuyer
+        );
+    });
+}
+
+#[test]
+fn proxy_pay_payer_cannot_update_shipping() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+
+        // Payer cannot update shipping address (buyer-only)
+        assert_noop!(
+            Transaction::update_shipping_address(RuntimeOrigin::signed(PAYER), 1, b"new_addr".to_vec()),
+            Error::<Test>::NotOrderBuyer
+        );
+    });
+}
+
+#[test]
+fn proxy_pay_third_party_cannot_cancel() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+
+        // Third party (BUYER2) cannot cancel
+        assert_noop!(
+            Transaction::cancel_order(RuntimeOrigin::signed(BUYER2), 1),
+            Error::<Test>::NotOrderParticipant
+        );
+    });
+}
+
+#[test]
+fn proxy_pay_buyer_can_request_refund() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+
+        assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
+
+        // Buyer can request refund
+        assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(BUYER), 1, b"reason".to_vec()));
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Disputed);
+    });
+}
+
+#[test]
+fn proxy_pay_payer_can_request_refund() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+
+        assert_ok!(Transaction::ship_order(RuntimeOrigin::signed(SELLER), 1, b"track".to_vec()));
+
+        // Payer can request refund
+        assert_ok!(Transaction::request_refund(RuntimeOrigin::signed(PAYER), 1, b"reason".to_vec()));
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Disputed);
+    });
+}
+
+// ---- 索引与清理 (5 tests) ----
+
+#[test]
+fn proxy_pay_buyer_orders_contains_order() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+
+        assert!(Transaction::buyer_orders(BUYER).contains(&1));
+    });
+}
+
+#[test]
+fn proxy_pay_payer_orders_contains_order() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+
+        assert!(Transaction::payer_orders(PAYER).contains(&1));
+    });
+}
+
+#[test]
+fn proxy_pay_degenerate_no_payer_orders() {
+    new_test_ext().execute_with(|| {
+        // payer == buyer → no PayerOrders entry
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(BUYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+
+        assert!(Transaction::payer_orders(BUYER).is_empty());
+    });
+}
+
+#[test]
+fn proxy_pay_payer_orders_multiple() {
+    new_test_ext().execute_with(|| {
+        for i in 0..5 {
+            let product_id = if i % 2 == 0 { 1 } else { 3 };
+            let shipping = if product_id == 1 { Some(b"addr".to_vec()) } else { None };
+            assert_ok!(Transaction::place_order_for(
+                RuntimeOrigin::signed(PAYER), BUYER,
+                product_id, 1, shipping, None, None, None, None, None,
+            ));
+        }
+        assert_eq!(Transaction::payer_orders(PAYER).len(), 5);
+    });
+}
+
+#[test]
+fn proxy_pay_cleanup_payer_orders_works() {
+    new_test_ext().execute_with(|| {
+        // Place 2 proxy-pay orders
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 1, 1,
+            Some(b"addr".to_vec()), None, None, None, None, None,
+        ));
+        assert_ok!(Transaction::place_order_for(
+            RuntimeOrigin::signed(PAYER), BUYER, 3, 1,
+            None, None, None, None, None, None,
+        ));
+
+        assert_eq!(Transaction::payer_orders(PAYER).len(), 2);
+
+        // Cancel both
+        assert_ok!(Transaction::cancel_order(RuntimeOrigin::signed(BUYER), 1));
+        assert_ok!(Transaction::cancel_order(RuntimeOrigin::signed(BUYER), 2));
+
+        // Cleanup
+        assert_ok!(Transaction::cleanup_payer_orders(RuntimeOrigin::signed(PAYER)));
+        assert_eq!(Transaction::payer_orders(PAYER).len(), 0);
     });
 }

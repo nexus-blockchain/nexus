@@ -25,8 +25,9 @@ impl<T: Config> Pallet<T> {
             Error::<T>::NotEntityOwner
         );
         ensure!(!T::GovernanceProvider::is_governance_locked(entity_id), Error::<T>::EntityLocked);
+        // 允许 Banned 状态充值，以便治理方后续 unban；仅禁止 Closed
         ensure!(
-            entity.status != EntityStatus::Closed && entity.status != EntityStatus::Banned,
+            entity.status != EntityStatus::Closed,
             Error::<T>::InvalidEntityStatus
         );
         // M1: 充值金额不能为零

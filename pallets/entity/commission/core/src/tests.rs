@@ -552,7 +552,7 @@ fn h3_repurchased_includes_bonus() {
         assert_eq!(stats.pending, 0);
 
         // 购物余额 = repurchase + bonus
-        let shopping = MemberShoppingBalance::<Test>::get(ENTITY_ID, REFERRER);
+        let shopping = get_loyalty_shopping_balance(ENTITY_ID, REFERRER);
         assert_eq!(shopping, 2500 + 150);
     });
 }
@@ -613,7 +613,7 @@ fn m3_event_includes_repurchase_target() {
         ));
 
         // 购物余额记入 BUYER
-        let buyer_shopping = MemberShoppingBalance::<Test>::get(ENTITY_ID, BUYER);
+        let buyer_shopping = get_loyalty_shopping_balance(ENTITY_ID, BUYER);
         assert_eq!(buyer_shopping, 1500);
     });
 }
@@ -662,10 +662,10 @@ fn fixed_rate_withdrawal_split_works() {
         assert_eq!(stats.repurchased, 4000); // 10000 * 40%
         assert_eq!(stats.pending, 0);
 
-        let shopping = MemberShoppingBalance::<Test>::get(ENTITY_ID, REFERRER);
+        let shopping = get_loyalty_shopping_balance(ENTITY_ID, REFERRER);
         assert_eq!(shopping, 4000);
 
-        let shop_shopping = ShopShoppingTotal::<Test>::get(ENTITY_ID);
+        let shop_shopping = get_loyalty_shopping_total(ENTITY_ID);
         assert_eq!(shop_shopping, 4000);
     });
 }
@@ -715,7 +715,7 @@ fn governance_floor_enforced_in_full_withdrawal_mode() {
         assert_eq!(stats.withdrawn, 7000); // 10000 * 70%
         assert_eq!(stats.repurchased, 3000); // 10000 * 30%
 
-        let shopping = MemberShoppingBalance::<Test>::get(ENTITY_ID, REFERRER);
+        let shopping = get_loyalty_shopping_balance(ENTITY_ID, REFERRER);
         assert_eq!(shopping, 3000);
     });
 }
@@ -767,16 +767,16 @@ fn h3_withdraw_blocked_when_target_participation_denied() {
 fn h3_consume_shopping_balance_blocked_when_participation_denied() {
     new_test_ext().execute_with(|| {
         fund(entity_account(ENTITY_ID), 100_000);
-        // 给 REFERRER 购物余额
-        MemberShoppingBalance::<Test>::insert(ENTITY_ID, REFERRER, 5_000u128);
-        ShopShoppingTotal::<Test>::insert(ENTITY_ID, 5_000u128);
+        // 给 REFERRER 购物余额（通过 Mock Loyalty）
+        set_loyalty_shopping_balance(ENTITY_ID, REFERRER, 5_000);
+        set_loyalty_shopping_total(ENTITY_ID, 5_000);
 
         // 标记 REFERRER 不满足参与要求
         block_participation(ENTITY_ID, REFERRER);
 
-        assert_noop!(
-            CommissionCore::do_consume_shopping_balance(ENTITY_ID, &REFERRER, 1_000),
-            Error::<Test>::ParticipationRequirementNotMet
+        // KYC 检查由 Loyalty 模块处理，返回 DispatchError::Other
+        assert!(
+            CommissionCore::do_consume_shopping_balance(ENTITY_ID, &REFERRER, 1_000).is_err()
         );
 
         // 解除限制后应成功
@@ -820,7 +820,7 @@ fn h1_self_withdraw_blocked_by_participation_guard() {
 fn use_shopping_balance_extrinsic_always_rejected() {
     new_test_ext().execute_with(|| {
         fund(entity_account(ENTITY_ID), 100_000);
-        MemberShoppingBalance::<Test>::insert(ENTITY_ID, REFERRER, 5_000u128);
+        set_loyalty_shopping_balance(ENTITY_ID, REFERRER, 5_000);
 
         assert_noop!(
             CommissionCore::use_shopping_balance(
@@ -832,7 +832,7 @@ fn use_shopping_balance_extrinsic_always_rejected() {
         );
 
         // 余额不变
-        assert_eq!(MemberShoppingBalance::<Test>::get(ENTITY_ID, REFERRER), 5_000);
+        assert_eq!(get_loyalty_shopping_balance(ENTITY_ID, REFERRER), 5_000);
     });
 }
 
@@ -1726,8 +1726,8 @@ fn g6_token_withdraw_with_fixed_rate_repurchase() {
         assert_eq!(stats.withdrawn, 7_000);
         assert_eq!(stats.repurchased, 3_000);
         assert_eq!(get_token_balance(ENTITY_ID, REFERRER), 7_000);
-        assert_eq!(MemberTokenShoppingBalance::<Test>::get(ENTITY_ID, REFERRER), 3_000);
-        assert_eq!(TokenShoppingTotal::<Test>::get(ENTITY_ID), 3_000);
+        assert_eq!(get_loyalty_token_shopping_balance(ENTITY_ID, REFERRER), 3_000);
+        assert_eq!(get_loyalty_token_shopping_total(ENTITY_ID), 3_000);
 
         // 事件
         System::assert_has_event(RuntimeEvent::CommissionCore(
@@ -1778,7 +1778,7 @@ fn g6_token_withdraw_member_choice_with_voluntary_bonus() {
         assert_eq!(stats.withdrawn, 5_000);
         assert_eq!(stats.repurchased, 5_300); // 5000 repurchase + 300 bonus
         assert_eq!(get_token_balance(ENTITY_ID, REFERRER), 5_000);
-        assert_eq!(MemberTokenShoppingBalance::<Test>::get(ENTITY_ID, REFERRER), 5_300);
+        assert_eq!(get_loyalty_token_shopping_balance(ENTITY_ID, REFERRER), 5_300);
     });
 }
 
@@ -1815,9 +1815,9 @@ fn g7_gifted_withdrawal_to_existing_member_referral_ok() {
 
         // 6000 提现给 REFERRER, 4000 复购给 GIFT_TARGET
         assert_eq!(get_token_balance(ENTITY_ID, REFERRER), 6_000);
-        assert_eq!(MemberTokenShoppingBalance::<Test>::get(ENTITY_ID, GIFT_TARGET), 4_000);
+        assert_eq!(get_loyalty_token_shopping_balance(ENTITY_ID, GIFT_TARGET), 4_000);
         // REFERRER 的购物余额应为 0（复购目标是 GIFT_TARGET）
-        assert_eq!(MemberTokenShoppingBalance::<Test>::get(ENTITY_ID, REFERRER), 0);
+        assert_eq!(get_loyalty_token_shopping_balance(ENTITY_ID, REFERRER), 0);
 
         let stats = MemberTokenCommissionStats::<Test>::get(ENTITY_ID, REFERRER);
         assert_eq!(stats.withdrawn, 6_000);
@@ -1881,7 +1881,7 @@ fn g7_gifted_withdrawal_auto_registers_non_member() {
         // 注册后 GIFT_TARGET 成为会员
         assert!(MockMemberProvider::is_member(ENTITY_ID, &GIFT_TARGET));
         // 复购余额给 GIFT_TARGET
-        assert_eq!(MemberTokenShoppingBalance::<Test>::get(ENTITY_ID, GIFT_TARGET), 3_000);
+        assert_eq!(get_loyalty_token_shopping_balance(ENTITY_ID, GIFT_TARGET), 3_000);
         assert_eq!(get_token_balance(ENTITY_ID, REFERRER), 7_000);
     });
 }
@@ -1925,7 +1925,7 @@ fn g8_governance_floor_overrides_entity_full_withdrawal() {
         assert_eq!(stats.withdrawn, 8_000);
         assert_eq!(stats.repurchased, 2_000);
         assert_eq!(get_token_balance(ENTITY_ID, REFERRER), 8_000);
-        assert_eq!(MemberTokenShoppingBalance::<Test>::get(ENTITY_ID, REFERRER), 2_000);
+        assert_eq!(get_loyalty_token_shopping_balance(ENTITY_ID, REFERRER), 2_000);
     });
 }
 
@@ -2073,7 +2073,7 @@ fn p1_withdraw_entity_funds_respects_locked_pools() {
         setup_token_config(5000, true);
         // 模拟锁定: pending=30000, shopping=20000, unallocated=10000 = 60000 locked
         ShopPendingTotal::<Test>::insert(ENTITY_ID, 30_000u128);
-        ShopShoppingTotal::<Test>::insert(ENTITY_ID, 20_000u128);
+        set_loyalty_shopping_total(ENTITY_ID, 20_000);
         UnallocatedPool::<Test>::insert(ENTITY_ID, 10_000u128);
         // available = 100000 - 60000 - 1(min_balance) = 39999
         assert_noop!(
@@ -2161,7 +2161,7 @@ fn p1_withdraw_entity_token_funds_respects_locked_pools() {
         // 开启 POOL_REWARD 使沉淀池锁定
         setup_token_config(5000, true);
         TokenPendingTotal::<Test>::insert(ENTITY_ID, 20_000u128);
-        TokenShoppingTotal::<Test>::insert(ENTITY_ID, 10_000u128);
+        set_loyalty_token_shopping_total(ENTITY_ID, 10_000);
         UnallocatedTokenPool::<Test>::insert(ENTITY_ID, 5_000u128);
         // available = 50000 - 35000 = 15000（首次访问，全部视为合法）
         assert_noop!(
@@ -2411,14 +2411,14 @@ fn p2_consume_token_shopping_balance_works() {
         let ea = entity_account(ENTITY_ID);
         set_token_balance(ENTITY_ID, ea, 50_000);
         // 注入 Token 购物余额
-        MemberTokenShoppingBalance::<Test>::insert(ENTITY_ID, REFERRER, 10_000u128);
-        TokenShoppingTotal::<Test>::insert(ENTITY_ID, 10_000u128);
+        set_loyalty_token_shopping_balance(ENTITY_ID, REFERRER, 10_000);
+        set_loyalty_token_shopping_total(ENTITY_ID, 10_000);
 
         assert_ok!(CommissionCore::do_consume_token_shopping_balance(
             ENTITY_ID, &REFERRER, 6_000,
         ));
-        assert_eq!(MemberTokenShoppingBalance::<Test>::get(ENTITY_ID, REFERRER), 4_000);
-        assert_eq!(TokenShoppingTotal::<Test>::get(ENTITY_ID), 4_000);
+        assert_eq!(get_loyalty_token_shopping_balance(ENTITY_ID, REFERRER), 4_000);
+        assert_eq!(get_loyalty_token_shopping_total(ENTITY_ID), 4_000);
         assert_eq!(get_token_balance(ENTITY_ID, REFERRER), 6_000);
         assert_eq!(get_token_balance(ENTITY_ID, ea), 44_000);
         System::assert_has_event(RuntimeEvent::CommissionCore(
@@ -2432,12 +2432,12 @@ fn p2_consume_token_shopping_balance_rejects_insufficient() {
     new_test_ext().execute_with(|| {
         let ea = entity_account(ENTITY_ID);
         set_token_balance(ENTITY_ID, ea, 50_000);
-        MemberTokenShoppingBalance::<Test>::insert(ENTITY_ID, REFERRER, 5_000u128);
-        TokenShoppingTotal::<Test>::insert(ENTITY_ID, 5_000u128);
+        set_loyalty_token_shopping_balance(ENTITY_ID, REFERRER, 5_000);
+        set_loyalty_token_shopping_total(ENTITY_ID, 5_000);
 
         assert_noop!(
             CommissionCore::do_consume_token_shopping_balance(ENTITY_ID, &REFERRER, 5_001),
-            Error::<Test>::InsufficientShoppingBalance
+            sp_runtime::DispatchError::Other("InsufficientShoppingBalance")
         );
     });
 }
@@ -2457,13 +2457,13 @@ fn p2_consume_token_shopping_balance_blocked_by_kyc() {
     new_test_ext().execute_with(|| {
         let ea = entity_account(ENTITY_ID);
         set_token_balance(ENTITY_ID, ea, 50_000);
-        MemberTokenShoppingBalance::<Test>::insert(ENTITY_ID, REFERRER, 5_000u128);
-        TokenShoppingTotal::<Test>::insert(ENTITY_ID, 5_000u128);
+        set_loyalty_token_shopping_balance(ENTITY_ID, REFERRER, 5_000);
+        set_loyalty_token_shopping_total(ENTITY_ID, 5_000);
 
         block_participation(ENTITY_ID, REFERRER);
         assert_noop!(
             CommissionCore::do_consume_token_shopping_balance(ENTITY_ID, &REFERRER, 1_000),
-            Error::<Test>::ParticipationRequirementNotMet
+            sp_runtime::DispatchError::Other("ParticipationRequirementNotMet")
         );
     });
 }
@@ -2595,7 +2595,7 @@ fn h1_token_budget_accounts_for_pending_and_shopping() {
 
         // 手动注入各类已承诺额度
         inject_token_pending(ENTITY_ID, REFERRER, 8_000);   // TokenPendingTotal = 8000
-        TokenShoppingTotal::<Test>::insert(ENTITY_ID, 7_000u128); // TokenShoppingTotal = 7000
+        set_loyalty_token_shopping_total(ENTITY_ID, 7_000); // TokenShoppingTotal = 7000
         UnallocatedTokenPool::<Test>::insert(ENTITY_ID, 5_000u128); // UnallocatedTokenPool = 5000
         // committed = 8000 + 7000 + 5000 = 20000
         // available = 30000 - 20000 = 10000

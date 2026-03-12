@@ -6016,6 +6016,7 @@ dependencies = [
  "pallet-entity-disclosure",
  "pallet-entity-governance",
  "pallet-entity-kyc",
+ "pallet-entity-loyalty",
  "pallet-entity-market",
  "pallet-entity-member",
  "pallet-entity-order",
@@ -6924,6 +6925,25 @@ dependencies = [
  "sp-core",
  "sp-io",
  "sp-runtime",
+]
+
+[[package]]
+name = "pallet-entity-loyalty"
+version = "0.1.0"
+dependencies = [
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
+ "log",
+ "pallet-balances",
+ "pallet-commission-common",
+ "pallet-entity-common",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+ "sp-std",
 ]
 
 [[package]]

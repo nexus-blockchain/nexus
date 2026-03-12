@@ -2298,3 +2298,24 @@ impl<T: Config> EntityTokenProvider<T::AccountId, T::AssetBalance> for Pallet<T>
         Ok(())
     }
 }
+
+// ============================================================================
+// TokenGovernancePort 实现
+// ============================================================================
+
+impl<T: Config> pallet_entity_common::TokenGovernancePort<T::AccountId> for Pallet<T> {
+    fn governance_manage_blacklist(
+        entity_id: u64,
+        _account_cid: &[u8],
+        _add: bool,
+    ) -> Result<(), sp_runtime::DispatchError> {
+        // account_cid 是 IPFS CID，指向链下的账户列表数据
+        // 链上无法解析 CID 为具体 AccountId，此操作需 off-chain 执行
+        // 治理提案通过即表示 DAO 批准了黑名单变更，实际执行由管理员完成
+        frame_support::ensure!(
+            pallet::EntityTokenConfigs::<T>::contains_key(entity_id),
+            sp_runtime::DispatchError::Other("TokenNotEnabled")
+        );
+        Ok(())
+    }
+}

@@ -10,7 +10,7 @@ use frame_support::{
     traits::{Currency, ExistenceRequirement, Get},
     BoundedVec,
 };
-use pallet_entity_common::{AdminPermission, EntityStatus, EntityType, GovernanceMode, OnEntityStatusChange, PricingProvider};
+use pallet_entity_common::{AdminPermission, EntityStatus, EntityType, GovernanceMode, GovernanceProvider, OnEntityStatusChange, OrderProvider, TokenSaleProvider, DisputeQueryProvider, MarketProvider, PricingProvider};
 use pallet_storage_service::{StoragePin, PinTier};
 use sp_runtime::{
     traits::{AccountIdConversion, Zero},
@@ -352,6 +352,37 @@ impl<T: Config> Pallet<T> {
         ensure!(
             !matches!(status, EntityStatus::Banned | EntityStatus::Closed),
             Error::<T>::InvalidEntityStatus
+        );
+        Ok(())
+    }
+
+    // ==================== 关闭前置依赖校验 ====================
+
+    /// 检查实体是否存在活跃业务依赖（活跃提案、订单、争议、代币发售、市场交易）
+    ///
+    /// 在 `do_request_close_entity` 和 `do_execute_close_timeout` 中调用，
+    /// 防止实体在有未完结业务时被关闭。
+    pub(crate) fn ensure_no_active_dependencies(entity_id: u64) -> sp_runtime::DispatchResult {
+        ensure!(
+            !T::GovernanceProvider::has_active_proposals(entity_id),
+            Error::<T>::HasActiveProposals
+        );
+        ensure!(
+            !T::TokenSaleProvider::has_active_sale(entity_id),
+            Error::<T>::HasActiveTokenSale
+        );
+        ensure!(
+            !T::MarketProvider::has_active_market(entity_id),
+            Error::<T>::HasActiveMarket
+        );
+        // 遍历 Entity 所有 Shop 检查活跃订单
+        let has_active_orders = EntityShops::<T>::get(entity_id)
+            .iter()
+            .any(|&sid| T::OrderProvider::has_active_orders_for_shop(sid));
+        ensure!(!has_active_orders, Error::<T>::HasActiveOrders);
+        ensure!(
+            !T::DisputeQueryProvider::has_active_disputes_for_entity(entity_id),
+            Error::<T>::HasActiveDisputes
         );
         Ok(())
     }
