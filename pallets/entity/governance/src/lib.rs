@@ -420,7 +420,7 @@ pub mod pallet {
         // ==================== R10: 披露扩展类 ====================
         /// 内部人管理（添加/移除）
         DisclosureInsiderManage { account_cid: BoundedVec<u8, ConstU32<64>>, add: bool },
-        /// 处罚级别变更 (0=Warning,1=Restricted,2=Suspended,3=Delisted)
+        /// 处罚级别变更 (0=None/重置, 1=Warning, 2=Restricted, 3=Suspended, 4=Delisted)
         DisclosurePenaltyChange { level: u8 },
 
         // ==================== Phase 4.3: 资金保护类 ====================
@@ -2590,8 +2590,9 @@ pub mod pallet {
                 },
 
                 // ==================== R10: 披露扩展类 ====================
+                // A-5: 允许级别 0-4 (0=None/重置, 1=Warning, 2=Restricted, 3=Suspended, 4=Delisted)
                 ProposalType::DisclosurePenaltyChange { level } => {
-                    ensure!(*level <= 3, Error::<T>::InvalidParameter);
+                    ensure!(*level <= 4, Error::<T>::InvalidParameter);
                 },
 
                 // ==================== BUG-5 修复: off-chain 执行类参数校验 ====================

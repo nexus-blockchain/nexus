@@ -5989,6 +5989,7 @@ dependencies = [
  "frame-system-rpc-runtime-api",
  "frame-try-runtime",
  "hex",
+ "log",
  "pallet-ads-core",
  "pallet-ads-entity",
  "pallet-ads-grouprobot",

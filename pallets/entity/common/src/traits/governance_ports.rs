@@ -28,15 +28,15 @@ pub trait MarketGovernancePort<Balance> {
     fn governance_lift_circuit_breaker(entity_id: u64) -> Result<(), DispatchError>;
 }
 
-/// 空 MarketGovernancePort 实现
+/// 空 MarketGovernancePort 实现（fail-closed: 未接线时拒绝执行）
 impl<Balance> MarketGovernancePort<Balance> for () {
-    fn governance_set_market_config(_: u64, _: Balance, _: u32) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_pause_market(_: u64) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_resume_market(_: u64) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_close_market(_: u64) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_set_price_protection(_: u64, _: u16, _: u16, _: u16, _: u32) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_set_market_kyc(_: u64, _: u8) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_lift_circuit_breaker(_: u64) -> Result<(), DispatchError> { Ok(()) }
+    fn governance_set_market_config(_: u64, _: Balance, _: u32) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_pause_market(_: u64) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_resume_market(_: u64) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_close_market(_: u64) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_set_price_protection(_: u64, _: u16, _: u16, _: u16, _: u32) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_set_market_kyc(_: u64, _: u8) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_lift_circuit_breaker(_: u64) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
 }
 
 /// 返佣治理执行接口（补充 CommissionProvider 中缺失的治理方法）
@@ -65,18 +65,18 @@ pub trait CommissionGovernancePort<Balance> {
     fn governance_resume_team_performance(entity_id: u64) -> Result<(), DispatchError>;
 }
 
-/// 空 CommissionGovernancePort 实现
+/// 空 CommissionGovernancePort 实现（fail-closed: 未接线时拒绝执行）
 impl<Balance> CommissionGovernancePort<Balance> for () {
-    fn governance_set_withdrawal_cooldown(_: u64, _: u32, _: u32) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_set_token_withdrawal(_: u64, _: bool) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_set_withdrawal_pause(_: u64, _: bool) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_set_referrer_guard(_: u64, _: Balance, _: u32) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_set_commission_cap(_: u64, _: Balance, _: Balance) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_set_referral_validity(_: u64, _: u32, _: u32) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_pause_multi_level(_: u64) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_resume_multi_level(_: u64) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_pause_team_performance(_: u64) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_resume_team_performance(_: u64) -> Result<(), DispatchError> { Ok(()) }
+    fn governance_set_withdrawal_cooldown(_: u64, _: u32, _: u32) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_set_token_withdrawal(_: u64, _: bool) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_set_withdrawal_pause(_: u64, _: bool) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_set_referrer_guard(_: u64, _: Balance, _: u32) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_set_commission_cap(_: u64, _: Balance, _: Balance) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_set_referral_validity(_: u64, _: u32, _: u32) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_pause_multi_level(_: u64) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_resume_multi_level(_: u64) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_pause_team_performance(_: u64) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_resume_team_performance(_: u64) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
 }
 
 /// 单线收益治理执行接口
@@ -89,11 +89,11 @@ pub trait SingleLineGovernancePort {
     fn governance_resume_single_line(entity_id: u64) -> Result<(), DispatchError>;
 }
 
-/// 空 SingleLineGovernancePort 实现
+/// 空 SingleLineGovernancePort 实现（fail-closed: 未接线时拒绝执行）
 impl SingleLineGovernancePort for () {
-    fn governance_set_single_line_config(_: u64, _: u16, _: u16, _: u8, _: u8, _: u8, _: u8) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_pause_single_line(_: u64) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_resume_single_line(_: u64) -> Result<(), DispatchError> { Ok(()) }
+    fn governance_set_single_line_config(_: u64, _: u16, _: u16, _: u8, _: u8, _: u8, _: u8) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_pause_single_line(_: u64) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_resume_single_line(_: u64) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
 }
 
 /// KYC 治理执行接口
@@ -106,11 +106,11 @@ pub trait KycGovernancePort {
     fn governance_deauthorize_kyc_provider(entity_id: u64, provider_id: u64) -> Result<(), DispatchError>;
 }
 
-/// 空 KycGovernancePort 实现
+/// 空 KycGovernancePort 实现（fail-closed: 未接线时拒绝执行）
 impl KycGovernancePort for () {
-    fn governance_set_kyc_requirement(_: u64, _: u8, _: bool, _: u32) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_authorize_kyc_provider(_: u64, _: u64) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_deauthorize_kyc_provider(_: u64, _: u64) -> Result<(), DispatchError> { Ok(()) }
+    fn governance_set_kyc_requirement(_: u64, _: u8, _: bool, _: u32) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_authorize_kyc_provider(_: u64, _: u64) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_deauthorize_kyc_provider(_: u64, _: u64) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
 }
 
 /// 店铺治理扩展执行接口（补充 ShopProvider 中缺失的治理方法）
@@ -123,11 +123,11 @@ pub trait ShopGovernancePort {
     fn governance_set_shop_policies(entity_id: u64, policies_cid: &[u8]) -> Result<(), DispatchError>;
 }
 
-/// 空 ShopGovernancePort 实现
+/// 空 ShopGovernancePort 实现（fail-closed: 未接线时拒绝执行）
 impl ShopGovernancePort for () {
-    fn governance_set_points_config(_: u64, _: u16, _: u16, _: bool) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_toggle_points(_: u64, _: bool) -> Result<(), DispatchError> { Ok(()) }
-    fn governance_set_shop_policies(_: u64, _: &[u8]) -> Result<(), DispatchError> { Ok(()) }
+    fn governance_set_points_config(_: u64, _: u16, _: u16, _: bool) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_toggle_points(_: u64, _: bool) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
+    fn governance_set_shop_policies(_: u64, _: &[u8]) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
 }
 
 /// 代币治理扩展执行接口（补充 EntityTokenProvider 中缺失的治理方法）
@@ -136,7 +136,7 @@ pub trait TokenGovernancePort<AccountId> {
     fn governance_manage_blacklist(entity_id: u64, account_cid: &[u8], add: bool) -> Result<(), DispatchError>;
 }
 
-/// 空 TokenGovernancePort 实现
+/// 空 TokenGovernancePort 实现（fail-closed: 未接线时拒绝执行）
 impl<AccountId> TokenGovernancePort<AccountId> for () {
-    fn governance_manage_blacklist(_: u64, _: &[u8], _: bool) -> Result<(), DispatchError> { Ok(()) }
+    fn governance_manage_blacklist(_: u64, _: &[u8], _: bool) -> Result<(), DispatchError> { Err(DispatchError::Other("not implemented")) }
 }

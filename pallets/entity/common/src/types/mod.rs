@@ -405,7 +405,7 @@ impl MemberRegistrationPolicy {
 
 impl Default for MemberRegistrationPolicy {
     fn default() -> Self {
-        Self::OPEN
+        Self(Self::PURCHASE_REQUIRED | Self::REFERRAL_REQUIRED)
     }
 }
 
@@ -915,6 +915,9 @@ pub struct OrderCompletionInfo<AccountId, Balance> {
     pub token_payment_amount: u128,
     pub token_platform_fee: u128,
     pub token_seller_received: u128,
+    /// P0-5 审计修复: Token 平台费是否实际转账成功
+    /// false 时 commission hook 应传 0 作为 fee，避免"账面有承诺、实际没钱"
+    pub token_platform_fee_paid: bool,
     // 会员相关
     pub referrer: Option<AccountId>,
     pub amount_usdt: u64,

@@ -2364,6 +2364,12 @@ impl<T: pallet::Config> MemberProvider<T::AccountId> for pallet::Pallet<T> {
             .unwrap_or(false)
     }
 
+    fn is_member_active(entity_id: u64, account: &T::AccountId) -> bool {
+        pallet::EntityMembers::<T>::get(entity_id, account)
+            .map(|m| m.banned_at.is_none() && m.activated)
+            .unwrap_or(false)
+    }
+
     fn last_active_at(entity_id: u64, account: &T::AccountId) -> u64 {
         pallet::EntityMembers::<T>::get(entity_id, account)
             .map(|m| sp_runtime::SaturatedConversion::saturated_into(m.last_active_at))

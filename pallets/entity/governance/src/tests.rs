@@ -4281,14 +4281,21 @@ fn r10_disclosure_extension_proposals_validate() {
             },
             b"Add insider".to_vec(), None,
         ));
+        // A-5: level 5 is invalid (0-4 are valid)
         assert_noop!(
             EntityGovernance::create_proposal(
                 RuntimeOrigin::signed(ALICE), SHOP_ID,
-                ProposalType::DisclosurePenaltyChange { level: 4 },
+                ProposalType::DisclosurePenaltyChange { level: 5 },
                 b"Bad".to_vec(), None,
             ),
             Error::<Test>::InvalidParameter
         );
+        // Level 4 (Delisted) is now valid
+        assert_ok!(EntityGovernance::create_proposal(
+            RuntimeOrigin::signed(ALICE), SHOP_ID,
+            ProposalType::DisclosurePenaltyChange { level: 4 },
+            b"Delist".to_vec(), None,
+        ));
         assert_ok!(EntityGovernance::create_proposal(
             RuntimeOrigin::signed(ALICE), SHOP_ID,
             ProposalType::DisclosurePenaltyChange { level: 2 },

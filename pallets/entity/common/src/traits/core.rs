@@ -480,7 +480,7 @@ pub trait ProductProvider<AccountId, Balance> {
     /// 设置商品可见性（治理提案执行）
     fn governance_set_visibility(product_id: u64, visibility: ProductVisibility) -> Result<(), DispatchError> {
         let _ = (product_id, visibility);
-        Ok(())
+        Err(DispatchError::Other("not implemented"))
     }
 }
 

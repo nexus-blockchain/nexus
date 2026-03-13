@@ -203,7 +203,7 @@ mod benchmarks {
                 amount: 1000u32.into(),
                 commission_type: CommissionType::DirectReward,
                 level: 0,
-                status: CommissionStatus::Withdrawn,
+                status: CommissionStatus::Settled,
                 created_at: 1u32.into(),
             });
         });

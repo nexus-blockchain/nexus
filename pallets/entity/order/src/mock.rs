@@ -610,6 +610,12 @@ impl pallet_entity_common::LoyaltyWritePort<u64, u64> for MockLoyalty {
     fn credit_shopping_balance(_entity_id: u64, _who: &u64, _amount: u64) -> Result<(), sp_runtime::DispatchError> {
         Ok(())
     }
+    fn rollback_shopping_balance(_: u64, _: &u64, _: u64) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
+    fn rollback_token_discount(_: u64, _: &u64, _: u64) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
 }
 
 // ==================== Mock OnOrderCompleted (Phase 5.3) ====================

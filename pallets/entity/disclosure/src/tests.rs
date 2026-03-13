@@ -453,7 +453,7 @@ fn calculate_next_disclosure_intervals() {
         assert_eq!(Pallet::<Test>::calculate_next_disclosure(DisclosureLevel::Basic, now), 1100);
         assert_eq!(Pallet::<Test>::calculate_next_disclosure(DisclosureLevel::Standard, now), 600);
         assert_eq!(Pallet::<Test>::calculate_next_disclosure(DisclosureLevel::Enhanced, now), 200);
-        assert_eq!(Pallet::<Test>::calculate_next_disclosure(DisclosureLevel::Full, now), 100); // +0
+        assert_eq!(Pallet::<Test>::calculate_next_disclosure(DisclosureLevel::Full, now), u64::MAX); // max_value, never overdue
     });
 }
 
@@ -1979,9 +1979,9 @@ fn m1r3_cleanup_disclosure_history_frees_slot() {
             Error::<Test>::HistoryFull
         );
 
-        // 清理 — 任何人可调用
+        // C-2: 清理需要管理员权限
         assert_ok!(EntityDisclosure::cleanup_disclosure_history(
-            RuntimeOrigin::signed(ALICE), ENTITY_ID, 0,
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 0,
         ));
 
         // 现在可以发布新的
@@ -2007,9 +2007,10 @@ fn m1r3_cleanup_disclosure_history_rejects_published() {
             b"QmContent".to_vec(), None,
         ));
 
+        // C-2: 使用管理员权限调用，但 Published 状态被拒绝
         assert_noop!(
             EntityDisclosure::cleanup_disclosure_history(
-                RuntimeOrigin::signed(ALICE), ENTITY_ID, 0,
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, 0,
             ),
             Error::<Test>::DisclosureNotTerminal
         );
@@ -2033,7 +2034,7 @@ fn m1r3_cleanup_disclosure_history_accepts_corrected() {
 
         assert_eq!(Disclosures::<Test>::get(0).unwrap().status, DisclosureStatus::Corrected);
         assert_ok!(EntityDisclosure::cleanup_disclosure_history(
-            RuntimeOrigin::signed(ALICE), ENTITY_ID, 0,
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 0,
         ));
         // 索引中不再包含 0
         assert!(!EntityDisclosures::<Test>::get(ENTITY_ID).contains(&0));
@@ -2080,7 +2081,7 @@ fn m1r3_cleanup_announcement_history_frees_slot() {
 
         // 清理撤回的公告
         assert_ok!(EntityDisclosure::cleanup_announcement_history(
-            RuntimeOrigin::signed(ALICE), ENTITY_ID, 0,
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 0,
         ));
 
         // 现在可以发布
@@ -2102,9 +2103,10 @@ fn m1r3_cleanup_announcement_history_rejects_active() {
             b"Title".to_vec(), b"QmCid".to_vec(), None,
         ));
 
+        // C-2: 使用管理员权限调用，但 Active 状态被拒绝
         assert_noop!(
             EntityDisclosure::cleanup_announcement_history(
-                RuntimeOrigin::signed(ALICE), ENTITY_ID, 0,
+                RuntimeOrigin::signed(OWNER), ENTITY_ID, 0,
             ),
             Error::<Test>::AnnouncementNotTerminal
         );
@@ -2127,7 +2129,7 @@ fn m1r3_cleanup_announcement_history_accepts_expired() {
 
         assert_eq!(Announcements::<Test>::get(0).unwrap().status, AnnouncementStatus::Expired);
         assert_ok!(EntityDisclosure::cleanup_announcement_history(
-            RuntimeOrigin::signed(ALICE), ENTITY_ID, 0,
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 0,
         ));
         assert!(!EntityAnnouncements::<Test>::get(ENTITY_ID).contains(&0));
     });
@@ -2253,13 +2255,21 @@ fn p0a7_report_blackout_trading_violation() {
             RuntimeOrigin::signed(OWNER), ENTITY_ID, 50u64,
         ));
 
+        // C-1: BlackoutTrading now creates a Pending report (not instant violation)
         assert_ok!(EntityDisclosure::report_disclosure_violation(
             RuntimeOrigin::signed(ALICE), ENTITY_ID,
             ViolationType::BlackoutTrading,
         ));
 
+        // violation_count should NOT have incremented (pending report)
         let config = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
-        assert_eq!(config.violation_count, 1);
+        assert_eq!(config.violation_count, 0);
+
+        // ViolationReport should exist as Pending
+        let report = ViolationReports::<Test>::get(0).unwrap();
+        assert_eq!(report.entity_id, ENTITY_ID);
+        assert_eq!(report.violation_type, ViolationType::BlackoutTrading);
+        assert_eq!(report.status, ViolationReportStatus::Pending);
     });
 }
 
@@ -2988,10 +2998,10 @@ fn m1r3_cleanup_disclosure_history_rejects_wrong_entity() {
             RuntimeOrigin::signed(OWNER), 0,
         ));
 
-        // 用错误的 entity_id 清理
+        // C-2: 用 ENTITY_ID_2 的管理员清理 ENTITY_ID 的记录 → 仍应失败
         assert_noop!(
             EntityDisclosure::cleanup_disclosure_history(
-                RuntimeOrigin::signed(ALICE), ENTITY_ID_2, 0,
+                RuntimeOrigin::signed(OWNER_2), ENTITY_ID_2, 0,
             ),
             Error::<Test>::DisclosureNotFound
         );
@@ -3073,7 +3083,7 @@ fn entity_locked_allows_cleanup_disclosure_history() {
         // 锁定后仍可清理
         set_entity_locked(ENTITY_ID);
         assert_ok!(EntityDisclosure::cleanup_disclosure_history(
-            RuntimeOrigin::signed(ALICE), ENTITY_ID, 0,
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 0,
         ));
     });
 }
@@ -4704,5 +4714,634 @@ fn v06_cleanup_entity_disclosure_clears_new_storage() {
         assert!(FiscalYearConfigs::<Test>::get(ENTITY_ID).is_none());
         assert_eq!(EntityPenalties::<Test>::get(ENTITY_ID), PenaltyLevel::None);
         assert!(PausedDeadlines::<Test>::get(ENTITY_ID).is_none());
+    });
+}
+
+// ==================== Batch A Tests ====================
+
+// A-1: Full level never overdue
+#[test]
+fn a1_full_level_never_overdue() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Full, false, 0u64,
+        ));
+
+        // Advance many blocks
+        advance_blocks(999_999);
+
+        // Full level should never be overdue
+        assert!(!Pallet::<Test>::is_disclosure_overdue(ENTITY_ID));
+
+        // LateDisclosure report should fail
+        assert_noop!(
+            EntityDisclosure::report_disclosure_violation(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID,
+                ViolationType::LateDisclosure,
+            ),
+            Error::<Test>::DisclosureNotOverdue
+        );
+    });
+}
+
+// A-2: Paused entity not overdue
+#[test]
+fn a2_paused_entity_not_overdue() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Enhanced, false, 0u64,
+        ));
+
+        // Advance past deadline
+        advance_blocks(200);
+
+        // Should be overdue
+        assert!(Pallet::<Test>::is_disclosure_overdue(ENTITY_ID));
+
+        // Pause the deadline
+        PausedDeadlines::<Test>::insert(ENTITY_ID, (1u64, 100u64));
+
+        // Should no longer be overdue
+        assert!(!Pallet::<Test>::is_disclosure_overdue(ENTITY_ID));
+
+        // LateDisclosure report should fail with DeadlineAlreadyPaused
+        assert_noop!(
+            EntityDisclosure::report_disclosure_violation(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID,
+                ViolationType::LateDisclosure,
+            ),
+            Error::<Test>::DeadlineAlreadyPaused
+        );
+    });
+}
+
+// A-2: BlackoutTrading NOT blocked by pause
+#[test]
+fn a2_blackout_trading_not_blocked_by_pause() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 100u64,
+        ));
+        assert_ok!(EntityDisclosure::start_blackout(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 50u64,
+        ));
+
+        // Pause the deadline
+        PausedDeadlines::<Test>::insert(ENTITY_ID, (1u64, 100u64));
+
+        // BlackoutTrading should still work (creates pending report)
+        assert_ok!(EntityDisclosure::report_disclosure_violation(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            ViolationType::BlackoutTrading,
+        ));
+        assert!(ViolationReports::<Test>::get(0).is_some());
+    });
+}
+
+// A-3: Reconfigure same level doesn't push deadline
+#[test]
+fn a3_reconfigure_same_level_no_deadline_push() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+        let first_deadline = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap().next_required_disclosure;
+
+        // Advance some blocks
+        advance_blocks(200);
+
+        // Reconfigure at same level
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+        let second_deadline = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap().next_required_disclosure;
+
+        // Deadline should not have been pushed later
+        assert!(second_deadline <= first_deadline);
+    });
+}
+
+// A-3: Upgrade level picks earlier deadline
+#[test]
+fn a3_upgrade_picks_earlier_deadline() {
+    new_test_ext().execute_with(|| {
+        // Configure at Basic (1000 block interval)
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Basic, false, 0u64,
+        ));
+        let basic_deadline = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap().next_required_disclosure;
+
+        // Upgrade to Enhanced (100 block interval) — should pick the earlier of the two
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Enhanced, false, 0u64,
+        ));
+        let enhanced_deadline = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap().next_required_disclosure;
+
+        // Enhanced deadline (now + 100) < Basic deadline (1 + 1000), so picks enhanced
+        assert!(enhanced_deadline <= basic_deadline);
+    });
+}
+
+// A-3: Root rebase works
+#[test]
+fn a3_root_rebase_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+        let old_deadline = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap().next_required_disclosure;
+
+        advance_blocks(300);
+
+        // Root rebase resets deadline from current block
+        assert_ok!(EntityDisclosure::force_rebase_disclosure_deadline(
+            RuntimeOrigin::root(), ENTITY_ID,
+        ));
+        let new_deadline = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap().next_required_disclosure;
+
+        // New deadline should be from current block (301 + 500 = 801)
+        assert!(new_deadline > old_deadline);
+    });
+}
+
+// A-3: Non-root rebase fails
+#[test]
+fn a3_non_root_rebase_fails() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+
+        assert_noop!(
+            EntityDisclosure::force_rebase_disclosure_deadline(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+// A-4: Expired cooldown rejects transaction report
+#[test]
+fn a4_expired_cooldown_rejects_transaction_report() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 50u64,
+        ));
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Admin,
+        ));
+
+        // Remove insider (starts cooldown)
+        assert_ok!(EntityDisclosure::remove_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE,
+        ));
+
+        // Advance past cooldown period (50 blocks)
+        advance_blocks(60);
+
+        // Expired cooldown — should reject
+        assert_noop!(
+            EntityDisclosure::report_insider_transaction(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID,
+                InsiderTransactionType::Buy, 100, 10u64,
+            ),
+            Error::<Test>::NotInsider
+        );
+    });
+}
+
+// A-4: Active cooldown allows transaction report
+#[test]
+fn a4_active_cooldown_allows_transaction_report() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 50u64,
+        ));
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Admin,
+        ));
+
+        // Remove insider (starts cooldown at block 1 + 50 = 51)
+        assert_ok!(EntityDisclosure::remove_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE,
+        ));
+
+        // Still within cooldown
+        advance_blocks(10);
+
+        assert_ok!(EntityDisclosure::report_insider_transaction(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            InsiderTransactionType::Buy, 100, 5u64,
+        ));
+    });
+}
+
+// A-5: governance_set_penalty_level works
+#[test]
+fn a5_governance_set_penalty_works() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::DisclosureProvider;
+
+        assert_ok!(<EntityDisclosure as DisclosureProvider<u64>>::governance_set_penalty_level(ENTITY_ID, 2));
+        assert_eq!(EntityPenalties::<Test>::get(ENTITY_ID), PenaltyLevel::Restricted);
+
+        // Reset with level 0
+        assert_ok!(<EntityDisclosure as DisclosureProvider<u64>>::governance_set_penalty_level(ENTITY_ID, 0));
+        assert_eq!(EntityPenalties::<Test>::get(ENTITY_ID), PenaltyLevel::None);
+    });
+}
+
+// A-5: level 5 returns InvalidPenaltyLevel
+#[test]
+fn a5_governance_set_penalty_level_5_fails() {
+    new_test_ext().execute_with(|| {
+        use pallet_entity_common::DisclosureProvider;
+
+        assert_noop!(
+            <EntityDisclosure as DisclosureProvider<u64>>::governance_set_penalty_level(ENTITY_ID, 5),
+            Error::<Test>::InvalidPenaltyLevel
+        );
+    });
+}
+
+// ==================== Batch B Tests ====================
+
+// B-1: publish_disclosure fails when approval required
+#[test]
+fn b1_publish_fails_when_approval_required() {
+    new_test_ext().execute_with(|| {
+        // Configure approval requirements
+        assert_ok!(EntityDisclosure::configure_approval_requirements(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 1, 0xFF,
+        ));
+
+        // Direct publish should fail
+        assert_noop!(
+            EntityDisclosure::publish_disclosure(
+                RuntimeOrigin::signed(OWNER), ENTITY_ID,
+                DisclosureType::AnnualReport,
+                b"QmContent".to_vec(), None,
+            ),
+            Error::<Test>::ApprovalRequiredUseDraftFlow
+        );
+    });
+}
+
+// B-1: update_draft clears approvals
+#[test]
+fn b1_update_draft_clears_approvals() {
+    new_test_ext().execute_with(|| {
+        // Create a draft
+        assert_ok!(EntityDisclosure::create_draft_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmDraft".to_vec(), None,
+        ));
+
+        // Set up some approval state
+        DisclosureApprovalCounts::<Test>::insert(0u64, 2u32);
+
+        // Update the draft
+        assert_ok!(EntityDisclosure::update_draft(
+            RuntimeOrigin::signed(OWNER), 0,
+            b"QmUpdated".to_vec(), None,
+        ));
+
+        // Approvals should be cleared
+        assert_eq!(DisclosureApprovalCounts::<Test>::get(0u64), 0);
+        // DraftRevisions should have incremented
+        assert_eq!(DraftRevisions::<Test>::get(0u64), 1);
+    });
+}
+
+// B-1: emergency disclosure requires owner
+#[test]
+fn b1_emergency_requires_owner() {
+    new_test_ext().execute_with(|| {
+        set_admin(ENTITY_ID, ADMIN);
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+
+        // Admin (not owner) should be rejected
+        assert_noop!(
+            EntityDisclosure::publish_emergency_disclosure(
+                RuntimeOrigin::signed(ADMIN), ENTITY_ID,
+                DisclosureType::MaterialEvent,
+                b"QmEmergency".to_vec(), None,
+            ),
+            Error::<Test>::NotAdmin
+        );
+
+        // Owner should succeed
+        assert_ok!(EntityDisclosure::publish_emergency_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::MaterialEvent,
+            b"QmEmergency".to_vec(), None,
+        ));
+    });
+}
+
+// B-1: emergency sets Pending audit status
+#[test]
+fn b1_emergency_sets_pending_audit() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+
+        assert_ok!(EntityDisclosure::publish_emergency_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::MaterialEvent,
+            b"QmEmergency".to_vec(), None,
+        ));
+
+        let meta = DisclosureMetadataStore::<Test>::get(0).unwrap();
+        assert!(meta.is_emergency);
+        assert_eq!(meta.audit_status, AuditStatus::Pending);
+    });
+}
+
+// B-2: metadata merge preserves emergency flag
+#[test]
+fn b2_metadata_merge_preserves_emergency() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+        assert_ok!(EntityDisclosure::publish_emergency_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::MaterialEvent,
+            b"QmEmergency".to_vec(), None,
+        ));
+
+        // Set metadata (should not overwrite is_emergency)
+        assert_ok!(EntityDisclosure::set_disclosure_metadata(
+            RuntimeOrigin::signed(OWNER), 0,
+            Some(100u64), Some(200u64), false,
+        ));
+
+        let meta = DisclosureMetadataStore::<Test>::get(0).unwrap();
+        assert!(meta.is_emergency); // Preserved!
+        assert_eq!(meta.period_start, Some(100));
+        assert_eq!(meta.period_end, Some(200));
+    });
+}
+
+// B-2: metadata merge preserves approved audit status
+#[test]
+fn b2_metadata_merge_preserves_approved_audit() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmContent".to_vec(), None,
+        ));
+
+        // Set metadata with audit required
+        assert_ok!(EntityDisclosure::set_disclosure_metadata(
+            RuntimeOrigin::signed(OWNER), 0,
+            None, None, true,
+        ));
+        assert_eq!(DisclosureMetadataStore::<Test>::get(0).unwrap().audit_status, AuditStatus::Pending);
+
+        // Approve the audit
+        assert_ok!(EntityDisclosure::add_insider(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, ALICE, InsiderRole::Auditor,
+        ));
+        assert_ok!(EntityDisclosure::audit_disclosure(
+            RuntimeOrigin::signed(ALICE), 0, true,
+        ));
+        assert_eq!(DisclosureMetadataStore::<Test>::get(0).unwrap().audit_status, AuditStatus::Approved);
+
+        // Re-set metadata — should preserve Approved status
+        assert_ok!(EntityDisclosure::set_disclosure_metadata(
+            RuntimeOrigin::signed(OWNER), 0,
+            Some(100u64), Some(200u64), true,
+        ));
+        assert_eq!(DisclosureMetadataStore::<Test>::get(0).unwrap().audit_status, AuditStatus::Approved);
+    });
+}
+
+// ==================== Batch C Tests ====================
+
+// C-1: LateDisclosure still instant
+#[test]
+fn c1_late_disclosure_still_instant() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Enhanced, false, 0u64,
+        ));
+        advance_blocks(200);
+
+        assert_ok!(EntityDisclosure::report_disclosure_violation(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            ViolationType::LateDisclosure,
+        ));
+
+        // Should have incremented violation_count immediately
+        let config = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(config.violation_count, 1);
+    });
+}
+
+// C-1: BlackoutTrading creates pending report
+#[test]
+fn c1_blackout_creates_pending_report() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 100u64,
+        ));
+        assert_ok!(EntityDisclosure::start_blackout(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 50u64,
+        ));
+
+        assert_ok!(EntityDisclosure::report_disclosure_violation(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            ViolationType::BlackoutTrading,
+        ));
+
+        // Violation count should NOT have changed
+        let config = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(config.violation_count, 0);
+
+        // Report should be Pending
+        let report = ViolationReports::<Test>::get(0).unwrap();
+        assert_eq!(report.status, ViolationReportStatus::Pending);
+        assert_eq!(report.violation_type, ViolationType::BlackoutTrading);
+    });
+}
+
+// C-1: confirm_violation_report increments count
+#[test]
+fn c1_confirm_increments_count() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 100u64,
+        ));
+        assert_ok!(EntityDisclosure::start_blackout(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 50u64,
+        ));
+        assert_ok!(EntityDisclosure::report_disclosure_violation(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            ViolationType::BlackoutTrading,
+        ));
+
+        // Confirm the report
+        assert_ok!(EntityDisclosure::confirm_violation_report(
+            RuntimeOrigin::root(), 0,
+        ));
+
+        // Now violation count should have incremented
+        let config = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(config.violation_count, 1);
+
+        // Report should be Confirmed
+        let report = ViolationReports::<Test>::get(0).unwrap();
+        assert_eq!(report.status, ViolationReportStatus::Confirmed);
+    });
+}
+
+// C-1: reject_violation_report doesn't increment count
+#[test]
+fn c1_reject_does_not_increment() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 100u64,
+        ));
+        assert_ok!(EntityDisclosure::start_blackout(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 50u64,
+        ));
+        assert_ok!(EntityDisclosure::report_disclosure_violation(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            ViolationType::BlackoutTrading,
+        ));
+
+        // Reject the report
+        assert_ok!(EntityDisclosure::reject_violation_report(
+            RuntimeOrigin::root(), 0,
+        ));
+
+        // Violation count should NOT have changed
+        let config = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
+        assert_eq!(config.violation_count, 0);
+
+        // Report should be Rejected
+        let report = ViolationReports::<Test>::get(0).unwrap();
+        assert_eq!(report.status, ViolationReportStatus::Rejected);
+    });
+}
+
+// C-1: confirm non-pending fails
+#[test]
+fn c1_confirm_non_pending_fails() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, true, 100u64,
+        ));
+        assert_ok!(EntityDisclosure::start_blackout(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 50u64,
+        ));
+        assert_ok!(EntityDisclosure::report_disclosure_violation(
+            RuntimeOrigin::signed(ALICE), ENTITY_ID,
+            ViolationType::BlackoutTrading,
+        ));
+
+        // Confirm first
+        assert_ok!(EntityDisclosure::confirm_violation_report(
+            RuntimeOrigin::root(), 0,
+        ));
+
+        // Second confirm should fail
+        assert_noop!(
+            EntityDisclosure::confirm_violation_report(
+                RuntimeOrigin::root(), 0,
+            ),
+            Error::<Test>::ViolationReportNotPending
+        );
+    });
+}
+
+// C-2: non-admin cleanup rejected
+#[test]
+fn c2_non_admin_cleanup_rejected() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmContent".to_vec(), None,
+        ));
+        assert_ok!(EntityDisclosure::withdraw_disclosure(
+            RuntimeOrigin::signed(OWNER), 0,
+        ));
+
+        // ALICE is not admin
+        assert_noop!(
+            EntityDisclosure::cleanup_disclosure_history(
+                RuntimeOrigin::signed(ALICE), ENTITY_ID, 0,
+            ),
+            Error::<Test>::NotAdmin
+        );
+
+        // OWNER (admin) should work
+        assert_ok!(EntityDisclosure::cleanup_disclosure_history(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID, 0,
+        ));
+    });
+}
+
+// ==================== Batch E Tests ====================
+
+// E-1: Withdraw restores disclosure obligation
+#[test]
+fn e1_withdraw_restores_obligation() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EntityDisclosure::configure_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureLevel::Standard, false, 0u64,
+        ));
+
+        // Publish a disclosure — this satisfies the current period
+        assert_ok!(EntityDisclosure::publish_disclosure(
+            RuntimeOrigin::signed(OWNER), ENTITY_ID,
+            DisclosureType::AnnualReport,
+            b"QmContent".to_vec(), None,
+        ));
+
+        let config_after_publish = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
+        // Deadline should be pushed to future (now=1, so 1+500=501)
+        assert!(config_after_publish.next_required_disclosure > 1);
+
+        advance_blocks(5);
+
+        // Withdraw the disclosure
+        assert_ok!(EntityDisclosure::withdraw_disclosure(
+            RuntimeOrigin::signed(OWNER), 0,
+        ));
+
+        let config_after_withdraw = DisclosureConfigs::<Test>::get(ENTITY_ID).unwrap();
+        // Deadline should be set to a short grace period from now
+        // now=6, grace=min(1000/4, 100)=100, so deadline=106
+        assert!(config_after_withdraw.next_required_disclosure < config_after_publish.next_required_disclosure);
     });
 }

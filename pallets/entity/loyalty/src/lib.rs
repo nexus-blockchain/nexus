@@ -23,6 +23,25 @@ pub use pallet::*;
 pub mod weights;
 pub use weights::WeightInfo;
 
+#[cfg(test)]
+mod mock;
+#[cfg(test)]
+mod tests;
+
+/// 积分清理阶段（游标式分批清理）
+#[derive(
+    codec::Encode, codec::Decode, codec::DecodeWithMemTracking,
+    Clone, PartialEq, Eq,
+    scale_info::TypeInfo, codec::MaxEncodedLen,
+    sp_runtime::RuntimeDebug,
+)]
+pub enum CleanupPhase {
+    /// 正在清理 ShopPointsBalances
+    ClearingBalances,
+    /// 正在清理 ShopPointsExpiresAt
+    ClearingExpiry,
+}
+
 #[frame_support::pallet]
 pub mod pallet {
     use frame_support::{
@@ -42,6 +61,7 @@ pub mod pallet {
     };
 
     use crate::WeightInfo;
+    use crate::CleanupPhase;
 
     /// 单次 clear_prefix 最大清理条目数，防止超出区块权重
     const POINTS_CLEANUP_LIMIT: u32 = 500;
@@ -232,6 +252,14 @@ pub mod pallet {
         ValueQuery,
     >;
 
+    /// 积分清理游标 shop_id → CleanupPhase（分批清理进度）
+    #[pallet::storage]
+    pub type PointsCleanupCursor<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat, u64,
+        CleanupPhase,
+    >;
+
     // ========================================================================
     // Events
     // ========================================================================
@@ -293,6 +321,12 @@ pub mod pallet {
             account: T::AccountId,
             amount: TokenBalanceOf<T>,
         },
+        /// 购物余额回滚（订单取消/退款）
+        ShoppingBalanceRolledBack {
+            entity_id: u64,
+            account: T::AccountId,
+            amount: BalanceOf<T>,
+        },
     }
 
     // ========================================================================
@@ -341,6 +375,8 @@ pub mod pallet {
         ZeroAmount,
         /// 不满足参与要求（KYC）
         ParticipationRequirementNotMet,
+        /// 没有正在进行的积分清理任务
+        NoCleanupInProgress,
     }
 
     // ========================================================================
@@ -786,6 +822,24 @@ pub mod pallet {
             Self::deposit_event(Event::PointsMaxSupplySet { shop_id, max_supply });
             Ok(())
         }
+
+        /// 继续未完成的积分清理（任何人可调用，分批推进）
+        #[pallet::call_index(10)]
+        #[pallet::weight(T::WeightInfo::disable_points())]
+        pub fn continue_cleanup(
+            origin: OriginFor<T>,
+            shop_id: u64,
+        ) -> DispatchResult {
+            let _who = ensure_signed(origin)?;
+
+            ensure!(
+                PointsCleanupCursor::<T>::contains_key(shop_id),
+                Error::<T>::NoCleanupInProgress
+            );
+
+            Self::run_cleanup_step(shop_id);
+            Ok(())
+        }
     }
 
     // ========================================================================
@@ -950,11 +1004,66 @@ pub mod pallet {
         /// 清理某个 Shop 的全部积分数据（Shop 关闭时由 shop 模块调用）
         pub fn cleanup_shop_points(shop_id: u64) {
             ShopPointsConfigs::<T>::remove(shop_id);
-            let _ = ShopPointsBalances::<T>::clear_prefix(shop_id, POINTS_CLEANUP_LIMIT, None);
+
+            // 分批清理 balances
+            let bal_result = ShopPointsBalances::<T>::clear_prefix(shop_id, POINTS_CLEANUP_LIMIT, None);
+            if bal_result.maybe_cursor.is_some() {
+                // 未清完，设置游标
+                PointsCleanupCursor::<T>::insert(shop_id, CleanupPhase::ClearingBalances);
+                return;
+            }
+
+            // 分批清理 expiry
+            let exp_result = ShopPointsExpiresAt::<T>::clear_prefix(shop_id, POINTS_CLEANUP_LIMIT, None);
+            if exp_result.maybe_cursor.is_some() {
+                PointsCleanupCursor::<T>::insert(shop_id, CleanupPhase::ClearingExpiry);
+                return;
+            }
+
+            // 全部清完，清理 metadata
             ShopPointsTotalSupply::<T>::remove(shop_id);
             ShopPointsTtl::<T>::remove(shop_id);
-            let _ = ShopPointsExpiresAt::<T>::clear_prefix(shop_id, POINTS_CLEANUP_LIMIT, None);
             ShopPointsMaxSupply::<T>::remove(shop_id);
+        }
+
+        /// 执行一步游标清理
+        fn run_cleanup_step(shop_id: u64) {
+            let phase = match PointsCleanupCursor::<T>::get(shop_id) {
+                Some(p) => p,
+                None => return,
+            };
+
+            match phase {
+                CleanupPhase::ClearingBalances => {
+                    let result = ShopPointsBalances::<T>::clear_prefix(shop_id, POINTS_CLEANUP_LIMIT, None);
+                    if result.maybe_cursor.is_some() {
+                        return; // 仍未清完
+                    }
+                    // balances 清完，转到 expiry 阶段
+                    let exp_result = ShopPointsExpiresAt::<T>::clear_prefix(shop_id, POINTS_CLEANUP_LIMIT, None);
+                    if exp_result.maybe_cursor.is_some() {
+                        PointsCleanupCursor::<T>::insert(shop_id, CleanupPhase::ClearingExpiry);
+                        return;
+                    }
+                    // 全部清完
+                    Self::finish_cleanup(shop_id);
+                }
+                CleanupPhase::ClearingExpiry => {
+                    let result = ShopPointsExpiresAt::<T>::clear_prefix(shop_id, POINTS_CLEANUP_LIMIT, None);
+                    if result.maybe_cursor.is_some() {
+                        return; // 仍未清完
+                    }
+                    Self::finish_cleanup(shop_id);
+                }
+            }
+        }
+
+        /// 清理完成，删除游标和 metadata
+        fn finish_cleanup(shop_id: u64) {
+            ShopPointsTotalSupply::<T>::remove(shop_id);
+            ShopPointsTtl::<T>::remove(shop_id);
+            ShopPointsMaxSupply::<T>::remove(shop_id);
+            PointsCleanupCursor::<T>::remove(shop_id);
         }
 
         // ---- 积分查询 Runtime API 辅助方法 ----
@@ -1080,6 +1189,42 @@ pub mod pallet {
             });
 
             Self::deposit_event(Event::ShoppingBalanceCredited {
+                entity_id,
+                account: account.clone(),
+                amount,
+            });
+
+            Ok(())
+        }
+
+        /// 回滚购物余额（订单取消/退款时，NEX 从 buyer → entity，记账余额恢复）
+        pub fn do_rollback_shopping_balance(
+            entity_id: u64,
+            account: &T::AccountId,
+            amount: BalanceOf<T>,
+        ) -> DispatchResult {
+            if amount.is_zero() {
+                return Ok(());
+            }
+
+            // NEX 从 buyer 转回 entity 账户
+            let entity_account = T::EntityProvider::entity_account(entity_id);
+            T::Currency::transfer(
+                account,
+                &entity_account,
+                amount,
+                ExistenceRequirement::KeepAlive,
+            )?;
+
+            // 恢复记账余额
+            MemberShoppingBalance::<T>::mutate(entity_id, account, |balance| {
+                *balance = balance.saturating_add(amount);
+            });
+            ShopShoppingTotal::<T>::mutate(entity_id, |total| {
+                *total = total.saturating_add(amount);
+            });
+
+            Self::deposit_event(Event::ShoppingBalanceRolledBack {
                 entity_id,
                 account: account.clone(),
                 amount,
@@ -1224,6 +1369,22 @@ pub mod pallet {
             amount: BalanceOf<T>,
         ) -> Result<(), DispatchError> {
             Self::do_credit_shopping_balance(entity_id, who, amount)
+        }
+
+        fn rollback_shopping_balance(
+            entity_id: u64,
+            who: &T::AccountId,
+            amount: BalanceOf<T>,
+        ) -> Result<(), DispatchError> {
+            Self::do_rollback_shopping_balance(entity_id, who, amount)
+        }
+
+        fn rollback_token_discount(
+            entity_id: u64,
+            who: &T::AccountId,
+            tokens: BalanceOf<T>,
+        ) -> Result<(), DispatchError> {
+            T::TokenProvider::refund_discount_tokens(entity_id, who, tokens)
         }
     }
 

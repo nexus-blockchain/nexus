@@ -220,6 +220,13 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         .build_storage()
         .unwrap();
     let mut ext = sp_io::TestExternalities::new(t);
-    ext.execute_with(|| System::set_block_number(1));
+    ext.execute_with(|| {
+        System::set_block_number(1);
+        // 测试环境默认使用 OPEN 策略，各测试按需覆盖
+        pallet_entity_member::EntityMemberPolicy::<Test>::insert(
+            ENTITY_1,
+            pallet_entity_common::MemberRegistrationPolicy::OPEN,
+        );
+    });
     ext
 }

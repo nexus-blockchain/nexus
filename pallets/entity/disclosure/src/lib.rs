@@ -51,7 +51,7 @@ pub mod pallet {
         AdminPermission, DisclosureProvider, EntityProvider, EntityStatus,
         OnDisclosureViolation, OnEntityStatusChange,
     };
-    use sp_runtime::traits::{Saturating, Zero};
+    use sp_runtime::traits::{Saturating, Zero, Bounded};
     use sp_runtime::SaturatedConversion;
 
     // Re-export DisclosureLevel from pallet-entity-common
@@ -399,6 +399,30 @@ pub mod pallet {
 
     pub type FiscalYearConfigOf<T> = FiscalYearConfig<BlockNumberFor<T>>;
 
+    /// C-1: 违规报告状态
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+    pub enum ViolationReportStatus {
+        #[default]
+        Pending,
+        Confirmed,
+        Rejected,
+    }
+
+    /// C-1: 违规报告记录
+    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    pub struct ViolationReport<AccountId, BlockNumber> {
+        pub entity_id: u64,
+        pub violation_type: ViolationType,
+        pub reporter: AccountId,
+        pub reported_at: BlockNumber,
+        pub status: ViolationReportStatus,
+    }
+
+    pub type ViolationReportOf<T> = ViolationReport<
+        <T as frame_system::Config>::AccountId,
+        BlockNumberFor<T>,
+    >;
+
     /// 内幕人员记录类型别名
     pub type InsiderRecordOf<T> = InsiderRecord<
         <T as frame_system::Config>::AccountId,
@@ -722,6 +746,29 @@ pub mod pallet {
         DisclosureMetadataOf<T>,
     >;
 
+    /// B-1: 草稿修订号 disclosure_id → revision
+    #[pallet::storage]
+    pub type DraftRevisions<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // disclosure_id
+        u32,
+        ValueQuery,
+    >;
+
+    /// C-1: 下一个违规报告 ID
+    #[pallet::storage]
+    pub type NextViolationReportId<T: Config> = StorageValue<_, u64, ValueQuery>;
+
+    /// C-1: 违规报告存储
+    #[pallet::storage]
+    pub type ViolationReports<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        u64,  // report_id
+        ViolationReportOf<T>,
+    >;
+
     // ==================== 事件 ====================
 
     #[pallet::event]
@@ -954,6 +1001,20 @@ pub mod pallet {
             entity_id: u64,
             account: T::AccountId,
         },
+        /// A-3: 截止时间已重置（Root 强制）
+        DeadlineRebased {
+            entity_id: u64,
+        },
+        /// B-1: 草稿更新后审批已清除
+        ApprovalsClearedOnDraftUpdate {
+            disclosure_id: u64,
+            new_revision: u32,
+        },
+        /// E-1: 撤回披露后义务已恢复
+        DisclosureObligationRestored {
+            entity_id: u64,
+            new_deadline: BlockNumberFor<T>,
+        },
     }
 
     /// 违规类型
@@ -1094,6 +1155,12 @@ pub mod pallet {
         ZeroFiscalYearLength,
         /// 大股东已在内幕人员列表中
         MajorHolderAlreadyRegistered,
+        /// B-1: 审批要求已配置，请使用草稿流程
+        ApprovalRequiredUseDraftFlow,
+        /// C-1: 违规报告不存在
+        ViolationReportNotFound,
+        /// C-1: 违规报告不是待处理状态
+        ViolationReportNotPending,
     }
 
     // ==================== Hooks ====================
@@ -1248,7 +1315,12 @@ pub mod pallet {
             }
 
             let now = <frame_system::Pallet<T>>::block_number();
-            let next_required = Self::calculate_next_disclosure(level, now);
+            // A-3: 使用保护性截止时间计算，防止通过重新配置推迟截止
+            let next_required = Self::recompute_deadline_preserving_schedule(
+                existing.as_ref().map(|c| c.next_required_disclosure),
+                level,
+                now,
+            );
 
             // D-L1 审计修复: 保留已有 violation_count 和 last_disclosure，防止通过重新配置清除
             let existing_violations = existing.as_ref().map(|c| c.violation_count).unwrap_or(0);
@@ -1292,13 +1364,20 @@ pub mod pallet {
             );
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
+            // B-1: 如果配置了审批要求，直接发布被阻止，必须使用草稿流程
+            if let Some(ac) = ApprovalConfigs::<T>::get(entity_id) {
+                if ac.required_approvals > 0 {
+                    return Err(Error::<T>::ApprovalRequiredUseDraftFlow.into());
+                }
+            }
+
             // F3: 验证披露类型是否允许在当前级别下使用
             Self::validate_disclosure_type(entity_id, disclosure_type)?;
 
             // H2: 内容 CID 不能为空
             ensure!(!content_cid.is_empty(), Error::<T>::EmptyCid);
 
-            let content_bounded: BoundedVec<u8, T::MaxCidLength> = 
+            let content_bounded: BoundedVec<u8, T::MaxCidLength> =
                 content_cid.try_into().map_err(|_| Error::<T>::CidTooLong)?;
             // M3: summary_cid 不能为空字符串
             if let Some(ref s) = summary_cid {
@@ -1461,6 +1540,18 @@ pub mod pallet {
                 Ok(())
             })?;
 
+            // B-1: 草稿更新后清除所有审批，递增修订号
+            let _ = DisclosureApprovals::<T>::clear_prefix(disclosure_id, u32::MAX, None);
+            DisclosureApprovalCounts::<T>::remove(disclosure_id);
+            let new_revision = DraftRevisions::<T>::mutate(disclosure_id, |rev| {
+                *rev = rev.saturating_add(1);
+                *rev
+            });
+            Self::deposit_event(Event::ApprovalsClearedOnDraftUpdate {
+                disclosure_id,
+                new_revision,
+            });
+
             Self::deposit_event(Event::DraftUpdated { disclosure_id });
             Ok(())
         }
@@ -1598,11 +1689,32 @@ pub mod pallet {
                 ensure!(record.status == DisclosureStatus::Published, Error::<T>::InvalidDisclosureStatus);
                 
                 record.status = DisclosureStatus::Withdrawn;
-                
+
+                let entity_id = record.entity_id;
+                let disclosed_at = record.disclosed_at;
+
                 Self::deposit_event(Event::DisclosureWithdrawn {
                     disclosure_id,
-                    entity_id: record.entity_id,
+                    entity_id,
                 });
+
+                // E-1: 如果被撤回的披露是满足当前周期的那次，恢复披露义务
+                DisclosureConfigs::<T>::mutate(entity_id, |maybe_config| {
+                    if let Some(config) = maybe_config {
+                        if config.last_disclosure == disclosed_at {
+                            let now = <frame_system::Pallet<T>>::block_number();
+                            // 给予短期宽限（使用 BasicDisclosureInterval 的 1/4 或 100 区块，取较小值）
+                            let grace = (T::BasicDisclosureInterval::get() / 4u32.into()).min(100u32.into());
+                            let new_deadline = now.saturating_add(grace);
+                            config.next_required_disclosure = new_deadline;
+                            Pallet::<T>::deposit_event(Event::DisclosureObligationRestored {
+                                entity_id,
+                                new_deadline,
+                            });
+                        }
+                    }
+                });
+
                 Ok(())
             })
         }
@@ -2273,9 +2385,14 @@ pub mod pallet {
             ensure!(blackout_after <= max_blackout, Error::<T>::BlackoutExceedsMax);
 
             let now = <frame_system::Pallet<T>>::block_number();
-            let next_required = Self::calculate_next_disclosure(level, now);
-
+            // A-3: 使用保护性截止时间计算，防止通过重新配置推迟截止
             let existing = DisclosureConfigs::<T>::get(entity_id);
+            let next_required = Self::recompute_deadline_preserving_schedule(
+                existing.as_ref().map(|c| c.next_required_disclosure),
+                level,
+                now,
+            );
+
             let existing_violations = existing.as_ref().map(|c| c.violation_count).unwrap_or(0);
             let existing_last = existing.as_ref().map(|c| c.last_disclosure).unwrap_or_else(Zero::zero);
 
@@ -2306,7 +2423,7 @@ pub mod pallet {
             entity_id: u64,
             violation_type: ViolationType,
         ) -> DispatchResult {
-            ensure_signed(origin)?;
+            let who = ensure_signed(origin)?;
 
             // 验证实体存在
             T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
@@ -2315,55 +2432,84 @@ pub mod pallet {
             let config = DisclosureConfigs::<T>::get(entity_id)
                 .ok_or(Error::<T>::DisclosureNotConfigured)?;
 
+            let now = <frame_system::Pallet<T>>::block_number();
+
             // 根据违规类型检查条件
             match violation_type {
                 ViolationType::LateDisclosure => {
-                    let now = <frame_system::Pallet<T>>::block_number();
+                    // A-2: 暂停截止时间的实体不可报告逾期违规
+                    ensure!(!PausedDeadlines::<T>::contains_key(entity_id), Error::<T>::DeadlineAlreadyPaused);
                     ensure!(now > config.next_required_disclosure, Error::<T>::DisclosureNotOverdue);
+
+                    // LateDisclosure: 即时生效，防止同一周期重复举报
+                    let snapshot = config.next_required_disclosure;
+                    ensure!(
+                        !ViolationRecords::<T>::get(entity_id, snapshot),
+                        Error::<T>::ViolationAlreadyRecorded
+                    );
+
+                    // 递增 violation_count
+                    DisclosureConfigs::<T>::mutate(entity_id, |maybe_config| {
+                        if let Some(c) = maybe_config {
+                            c.violation_count = c.violation_count.saturating_add(1);
+                        }
+                    });
+
+                    // 标记本周期已举报
+                    ViolationRecords::<T>::insert(entity_id, snapshot, true);
+
+                    let new_count = DisclosureConfigs::<T>::get(entity_id)
+                        .map(|c| c.violation_count)
+                        .unwrap_or(0);
+
+                    // F6: 检查是否达到高风险阈值
+                    Self::check_violation_threshold(entity_id, new_count);
+
+                    Self::deposit_event(Event::DisclosureViolation {
+                        entity_id,
+                        violation_type,
+                        violation_count: new_count,
+                    });
                 },
                 ViolationType::BlackoutTrading => {
-                    // 黑窗口期交易违规需要链下证据，此处仅验证当前确实在黑窗口期内
+                    // C-1: 黑窗口期交易违规 → 创建 Pending 报告，需 Root 确认
                     ensure!(Self::is_in_blackout(entity_id), Error::<T>::BlackoutNotFound);
+
+                    let report_id = NextViolationReportId::<T>::get();
+                    let report = ViolationReport {
+                        entity_id,
+                        violation_type,
+                        reporter: who,
+                        reported_at: now,
+                        status: ViolationReportStatus::Pending,
+                    };
+                    ViolationReports::<T>::insert(report_id, report);
+                    NextViolationReportId::<T>::put(
+                        report_id.checked_add(1).ok_or(Error::<T>::IdOverflow)?
+                    );
                 },
                 ViolationType::UndisclosedMaterialEvent => {
-                    // 未披露重大事件需要链下证据，此处仅验证配置存在
-                    // 实际验证由治理流程或链下 worker 补充
+                    // C-1: 未披露重大事件 → 创建 Pending 报告，需 Root 确认
+
+                    let report_id = NextViolationReportId::<T>::get();
+                    let report = ViolationReport {
+                        entity_id,
+                        violation_type,
+                        reporter: who,
+                        reported_at: now,
+                        status: ViolationReportStatus::Pending,
+                    };
+                    ViolationReports::<T>::insert(report_id, report);
+                    NextViolationReportId::<T>::put(
+                        report_id.checked_add(1).ok_or(Error::<T>::IdOverflow)?
+                    );
                 },
             }
 
-            // 防止同一周期重复举报
-            let snapshot = config.next_required_disclosure;
-            ensure!(
-                !ViolationRecords::<T>::get(entity_id, snapshot),
-                Error::<T>::ViolationAlreadyRecorded
-            );
-
-            // 递增 violation_count
-            DisclosureConfigs::<T>::mutate(entity_id, |maybe_config| {
-                if let Some(c) = maybe_config {
-                    c.violation_count = c.violation_count.saturating_add(1);
-                }
-            });
-
-            // 标记本周期已举报
-            ViolationRecords::<T>::insert(entity_id, snapshot, true);
-
-            let new_count = DisclosureConfigs::<T>::get(entity_id)
-                .map(|c| c.violation_count)
-                .unwrap_or(0);
-
-            // F6: 检查是否达到高风险阈值
-            Self::check_violation_threshold(entity_id, new_count);
-
-            Self::deposit_event(Event::DisclosureViolation {
-                entity_id,
-                violation_type,
-                violation_count: new_count,
-            });
             Ok(())
         }
 
-        /// M1-R3: 清理已终结的披露历史索引（任何人可调用）
+        /// M1-R3: 清理已终结的披露历史索引（C-2: 需要管理员权限）
         ///
         /// 从 `EntityDisclosures` 移除 Withdrawn 或 Corrected 状态的披露 ID，
         /// 释放 BoundedVec 容量供新披露使用。披露记录本身保留供审计。
@@ -2374,7 +2520,14 @@ pub mod pallet {
             entity_id: u64,
             disclosure_id: u64,
         ) -> DispatchResult {
-            ensure_signed(origin)?;
+            let who = ensure_signed(origin)?;
+
+            // C-2: 需要管理员权限
+            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                Error::<T>::NotAdmin
+            );
 
             let record = Disclosures::<T>::get(disclosure_id)
                 .ok_or(Error::<T>::DisclosureNotFound)?;
@@ -2397,7 +2550,7 @@ pub mod pallet {
             Ok(())
         }
 
-        /// M1-R3: 清理已终结的公告历史索引（任何人可调用）
+        /// M1-R3: 清理已终结的公告历史索引（C-2: 需要管理员权限）
         ///
         /// 从 `EntityAnnouncements` 移除 Withdrawn 或 Expired 状态的公告 ID，
         /// 释放 BoundedVec 容量供新公告使用。公告记录本身保留供审计。
@@ -2408,7 +2561,14 @@ pub mod pallet {
             entity_id: u64,
             announcement_id: u64,
         ) -> DispatchResult {
-            ensure_signed(origin)?;
+            let who = ensure_signed(origin)?;
+
+            // C-2: 需要管理员权限
+            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(
+                T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
+                Error::<T>::NotAdmin
+            );
 
             let record = Announcements::<T>::get(announcement_id)
                 .ok_or(Error::<T>::AnnouncementNotFound)?;
@@ -2760,12 +2920,10 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+            // B-1: 紧急披露仅限实体所有者
+            let owner = T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
             ensure!(T::EntityProvider::is_entity_active(entity_id), Error::<T>::EntityNotActive);
-            ensure!(
-                T::EntityProvider::is_entity_admin(entity_id, &who, AdminPermission::DISCLOSURE_MANAGE),
-                Error::<T>::NotAdmin
-            );
+            ensure!(who == owner, Error::<T>::NotAdmin);
             ensure!(!T::EntityProvider::is_entity_locked(entity_id), Error::<T>::EntityLocked);
 
             Self::validate_disclosure_type(entity_id, disclosure_type)?;
@@ -2805,11 +2963,11 @@ pub mod pallet {
                 Ok(())
             })?;
 
-            // 存储紧急元数据
+            // 存储紧急元数据（B-1: 紧急披露设为 Pending 审计状态）
             DisclosureMetadataStore::<T>::insert(disclosure_id, DisclosureMetadata {
                 period_start: None,
                 period_end: None,
-                audit_status: AuditStatus::NotRequired,
+                audit_status: AuditStatus::Pending,
                 is_emergency: true,
             });
 
@@ -2857,12 +3015,15 @@ pub mod pallet {
 
             T::EntityProvider::entity_owner(entity_id).ok_or(Error::<T>::EntityNotFound)?;
 
-            // 必须是内幕人员或在冷静期内
-            let is_current = Self::is_insider(entity_id, &who);
-            let in_cooldown = RemovedInsiders::<T>::contains_key(entity_id, &who);
-            ensure!(is_current || in_cooldown, Error::<T>::NotInsider);
-
             let now = <frame_system::Pallet<T>>::block_number();
+
+            // A-4: 必须是内幕人员或在有效冷静期内（检查过期时间）
+            let is_current = Self::is_insider(entity_id, &who);
+            let in_cooldown = match RemovedInsiders::<T>::get(entity_id, &who) {
+                Some(until) => now <= until,
+                None => false,
+            };
+            ensure!(is_current || in_cooldown, Error::<T>::NotInsider);
 
             let report = InsiderTransactionReport {
                 account: who.clone(),
@@ -3028,13 +3189,41 @@ pub mod pallet {
                 ensure!(start < end, Error::<T>::InvalidReportingPeriod);
             }
 
-            let audit_status = if requires_audit { AuditStatus::Pending } else { AuditStatus::NotRequired };
+            // B-2: 合并更新元数据，不覆盖 is_emergency 和已有的 Approved/Rejected 审计状态
+            let existing_meta = DisclosureMetadataStore::<T>::get(disclosure_id);
+            let (merged_emergency, merged_audit) = match existing_meta {
+                Some(ref meta) => {
+                    // 不覆盖已设置的 is_emergency
+                    let emergency = meta.is_emergency;
+                    // 不重置已完成的审计状态 (Approved/Rejected)
+                    let audit = if requires_audit {
+                        match meta.audit_status {
+                            AuditStatus::Approved | AuditStatus::Rejected => meta.audit_status,
+                            _ => AuditStatus::Pending,
+                        }
+                    } else {
+                        match meta.audit_status {
+                            AuditStatus::Approved | AuditStatus::Rejected => meta.audit_status,
+                            _ => AuditStatus::NotRequired,
+                        }
+                    };
+                    (emergency, audit)
+                },
+                None => {
+                    let audit = if requires_audit { AuditStatus::Pending } else { AuditStatus::NotRequired };
+                    (false, audit)
+                },
+            };
+
+            // 合并 period 字段：仅在显式提供时更新
+            let merged_start = period_start.or_else(|| existing_meta.as_ref().and_then(|m| m.period_start));
+            let merged_end = period_end.or_else(|| existing_meta.as_ref().and_then(|m| m.period_end));
 
             DisclosureMetadataStore::<T>::insert(disclosure_id, DisclosureMetadata {
-                period_start,
-                period_end,
-                audit_status,
-                is_emergency: false,
+                period_start: merged_start,
+                period_end: merged_end,
+                audit_status: merged_audit,
+                is_emergency: merged_emergency,
             });
 
             Ok(())
@@ -3086,6 +3275,83 @@ pub mod pallet {
             }
             Ok(())
         }
+
+        /// A-3: Root 强制重置披露截止时间（绕过保护性计算）
+        #[pallet::call_index(39)]
+        #[pallet::weight(T::WeightInfo::force_rebase_disclosure_deadline())]
+        pub fn force_rebase_disclosure_deadline(
+            origin: OriginFor<T>,
+            entity_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            DisclosureConfigs::<T>::try_mutate(entity_id, |maybe_config| -> DispatchResult {
+                let config = maybe_config.as_mut().ok_or(Error::<T>::DisclosureNotConfigured)?;
+                let now = <frame_system::Pallet<T>>::block_number();
+                config.next_required_disclosure = Self::calculate_next_disclosure(config.level, now);
+                Ok(())
+            })?;
+
+            Self::deposit_event(Event::DeadlineRebased { entity_id });
+            Ok(())
+        }
+
+        /// C-1: 确认违规报告（Root 专用）
+        #[pallet::call_index(40)]
+        #[pallet::weight(T::WeightInfo::confirm_violation_report())]
+        pub fn confirm_violation_report(
+            origin: OriginFor<T>,
+            report_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            ViolationReports::<T>::try_mutate(report_id, |maybe_report| -> DispatchResult {
+                let report = maybe_report.as_mut().ok_or(Error::<T>::ViolationReportNotFound)?;
+                ensure!(report.status == ViolationReportStatus::Pending, Error::<T>::ViolationReportNotPending);
+
+                report.status = ViolationReportStatus::Confirmed;
+                let entity_id = report.entity_id;
+                let violation_type = report.violation_type;
+
+                // 确认后递增违规计数
+                DisclosureConfigs::<T>::mutate(entity_id, |maybe_config| {
+                    if let Some(c) = maybe_config {
+                        c.violation_count = c.violation_count.saturating_add(1);
+                    }
+                });
+
+                let new_count = DisclosureConfigs::<T>::get(entity_id)
+                    .map(|c| c.violation_count)
+                    .unwrap_or(0);
+
+                Self::check_violation_threshold(entity_id, new_count);
+
+                Self::deposit_event(Event::DisclosureViolation {
+                    entity_id,
+                    violation_type,
+                    violation_count: new_count,
+                });
+                Ok(())
+            })
+        }
+
+        /// C-1: 拒绝违规报告（Root 专用）
+        #[pallet::call_index(41)]
+        #[pallet::weight(T::WeightInfo::reject_violation_report())]
+        pub fn reject_violation_report(
+            origin: OriginFor<T>,
+            report_id: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            ViolationReports::<T>::try_mutate(report_id, |maybe_report| -> DispatchResult {
+                let report = maybe_report.as_mut().ok_or(Error::<T>::ViolationReportNotFound)?;
+                ensure!(report.status == ViolationReportStatus::Pending, Error::<T>::ViolationReportNotPending);
+
+                report.status = ViolationReportStatus::Rejected;
+                Ok(())
+            })
+        }
     }
 
     // ==================== 辅助函数 ====================
@@ -3097,9 +3363,25 @@ pub mod pallet {
                 DisclosureLevel::Basic => T::BasicDisclosureInterval::get(),
                 DisclosureLevel::Standard => T::StandardDisclosureInterval::get(),
                 DisclosureLevel::Enhanced => T::EnhancedDisclosureInterval::get(),
-                DisclosureLevel::Full => BlockNumberFor::<T>::zero(), // 实时，无固定间隔
+                DisclosureLevel::Full => BlockNumberFor::<T>::max_value(), // 实时：无固定间隔，设为最大值避免立即逾期
             };
             now.saturating_add(interval)
+        }
+
+        /// A-3: 重新计算截止时间，保护已有排期不被推迟
+        ///
+        /// - 首次配置（existing_deadline 为 None）：使用新计算的截止时间
+        /// - 重新配置：取 min(旧截止, 新截止)，确保不会推迟
+        fn recompute_deadline_preserving_schedule(
+            existing_deadline: Option<BlockNumberFor<T>>,
+            new_level: DisclosureLevel,
+            now: BlockNumberFor<T>,
+        ) -> BlockNumberFor<T> {
+            let new_deadline = Self::calculate_next_disclosure(new_level, now);
+            match existing_deadline {
+                Some(old_deadline) => old_deadline.min(new_deadline),
+                None => new_deadline,
+            }
         }
 
         /// M1-deep: 设置或延长黑窗口期（不缩短已有的结束时间）
@@ -3168,6 +3450,10 @@ pub mod pallet {
 
         /// 检查披露是否逾期
         pub fn is_disclosure_overdue(entity_id: u64) -> bool {
+            // A-2: 暂停的实体不算逾期
+            if PausedDeadlines::<T>::contains_key(entity_id) {
+                return false;
+            }
             if let Some(config) = DisclosureConfigs::<T>::get(entity_id) {
                 let now = <frame_system::Pallet<T>>::block_number();
                 now > config.next_required_disclosure
@@ -3430,9 +3716,14 @@ pub mod pallet {
                 Error::<T>::BlackoutExceedsMax
             );
             let now = <frame_system::Pallet<T>>::block_number();
-            let next_required = Pallet::<T>::calculate_next_disclosure(level, now);
-
+            // A-3: 使用保护性截止时间计算，防止通过重新配置推迟截止
             let existing = DisclosureConfigs::<T>::get(entity_id);
+            let next_required = Pallet::<T>::recompute_deadline_preserving_schedule(
+                existing.as_ref().map(|c| c.next_required_disclosure),
+                level,
+                now,
+            );
+
             let existing_violations = existing.as_ref().map(|c| c.violation_count).unwrap_or(0);
             let existing_last = existing.as_ref().map(|c| c.last_disclosure).unwrap_or_else(Zero::zero);
 
@@ -3485,6 +3776,25 @@ pub mod pallet {
 
         fn is_penalty_active(entity_id: u64) -> bool {
             EntityPenalties::<T>::get(entity_id) >= PenaltyLevel::Restricted
+        }
+
+        fn governance_set_penalty_level(entity_id: u64, level: u8) -> sp_runtime::DispatchResult {
+            frame_support::ensure!(level <= 4, Error::<T>::InvalidPenaltyLevel);
+            let new_penalty = PenaltyLevel::from_u8(level);
+            let old_penalty = EntityPenalties::<T>::get(entity_id);
+            if new_penalty == PenaltyLevel::None {
+                EntityPenalties::<T>::remove(entity_id);
+            } else {
+                EntityPenalties::<T>::insert(entity_id, new_penalty);
+            }
+            if new_penalty != old_penalty {
+                Pallet::<T>::deposit_event(Event::PenaltyEscalated {
+                    entity_id,
+                    old_level: old_penalty,
+                    new_level: new_penalty,
+                });
+            }
+            Ok(())
         }
     }
 

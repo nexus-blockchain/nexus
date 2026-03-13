@@ -1631,6 +1631,9 @@ impl pallet_entity_common::OnOrderCompleted<AccountId, Balance> for OrderShopSta
 }
 
 /// Hook: NEX/Token 佣金分发（Phase 5.3）
+/// P0-1 审计修复: 不再用 let _ = 吞错误，改为记录 log::error 以便链上追踪
+/// P0-5 审计修复: Token 平台费转账失败时传 0 避免"账面有承诺、实际没钱"
+/// BUG-1 审计修复: 佣金处理后调用 settle_order_commission 结算记录
 pub struct OrderCommissionHook;
 impl pallet_entity_common::OnOrderCompleted<AccountId, Balance> for OrderCommissionHook {
 	fn on_completed(info: &pallet_entity_common::OrderCompletionInfo<AccountId, Balance>) {
@@ -1638,20 +1641,42 @@ impl pallet_entity_common::OnOrderCompleted<AccountId, Balance> for OrderCommiss
 		match info.payment_asset {
 			pallet_entity_common::PaymentAsset::Native => {
 				let available_pool = info.nex_total_amount.saturating_sub(info.nex_platform_fee);
-				let _ = <pallet_commission_core::Pallet<Runtime> as pallet_commission_common::CommissionProvider<AccountId, Balance>>::process_commission(
+				if let Err(e) = <pallet_commission_core::Pallet<Runtime> as pallet_commission_common::CommissionProvider<AccountId, Balance>>::process_commission(
 					info.entity_id, info.shop_id, info.order_id, &info.buyer,
 					info.nex_total_amount, available_pool, info.nex_platform_fee,
-				);
+				) {
+					log::error!(
+						target: "runtime::commission",
+						"process_commission failed for order {}: {:?}",
+						info.order_id, e,
+					);
+				}
 			},
 			pallet_entity_common::PaymentAsset::EntityToken => {
 				let token_balance: <Runtime as pallet_commission_core::Config>::TokenBalance = info.token_payment_amount.saturated_into();
-				let fee_balance: <Runtime as pallet_commission_core::Config>::TokenBalance = info.token_platform_fee.saturated_into();
+				// P0-5: 平台费转账失败时用 0，避免虚记佣金
+				let actual_fee: u128 = if info.token_platform_fee_paid { info.token_platform_fee } else { 0 };
+				let fee_balance: <Runtime as pallet_commission_core::Config>::TokenBalance = actual_fee.saturated_into();
 				let available_pool = token_balance.saturating_sub(fee_balance);
-				let _ = <pallet_commission_core::Pallet<Runtime> as pallet_commission_common::TokenCommissionProvider<AccountId, <Runtime as pallet_commission_core::Config>::TokenBalance>>::process_token_commission(
+				if let Err(e) = <pallet_commission_core::Pallet<Runtime> as pallet_commission_common::TokenCommissionProvider<AccountId, <Runtime as pallet_commission_core::Config>::TokenBalance>>::process_token_commission(
 					info.entity_id, info.shop_id, info.order_id, &info.buyer,
 					token_balance, available_pool, fee_balance,
-				);
+				) {
+					log::error!(
+						target: "runtime::commission",
+						"process_token_commission failed for order {}: {:?}",
+						info.order_id, e,
+					);
+				}
 			},
+		}
+		// BUG-1 审计修复: 佣金处理后立即结算记录（Pending → Withdrawn）
+		if let Err(e) = <pallet_commission_core::Pallet<Runtime> as pallet_commission_common::CommissionProvider<AccountId, Balance>>::settle_order_commission(info.order_id) {
+			log::error!(
+				target: "runtime::commission",
+				"settle_order_commission failed for order {}: {:?}",
+				info.order_id, e,
+			);
 		}
 	}
 }
@@ -1672,15 +1697,28 @@ impl pallet_entity_common::OnOrderCompleted<AccountId, Balance> for OrderLoyalty
 }
 
 /// Hook: 取消佣金（Phase 5.3）
+/// P0-1 审计修复: 不再用 let _ = 吞错误
 pub struct OrderCancelHook;
 impl pallet_entity_common::OnOrderCancelled for OrderCancelHook {
 	fn on_cancelled(info: &pallet_entity_common::OrderCancellationInfo) {
 		match info.payment_asset {
 			pallet_entity_common::PaymentAsset::Native => {
-				let _ = <pallet_commission_core::Pallet<Runtime> as pallet_commission_common::CommissionProvider<AccountId, Balance>>::cancel_commission(info.order_id);
+				if let Err(e) = <pallet_commission_core::Pallet<Runtime> as pallet_commission_common::CommissionProvider<AccountId, Balance>>::cancel_commission(info.order_id) {
+					log::error!(
+						target: "runtime::commission",
+						"cancel_commission failed for order {}: {:?}",
+						info.order_id, e,
+					);
+				}
 			},
 			pallet_entity_common::PaymentAsset::EntityToken => {
-				let _ = <pallet_commission_core::Pallet<Runtime> as pallet_commission_common::TokenCommissionProvider<AccountId, <Runtime as pallet_commission_core::Config>::TokenBalance>>::cancel_token_commission(info.order_id);
+				if let Err(e) = <pallet_commission_core::Pallet<Runtime> as pallet_commission_common::TokenCommissionProvider<AccountId, <Runtime as pallet_commission_core::Config>::TokenBalance>>::cancel_token_commission(info.order_id) {
+					log::error!(
+						target: "runtime::commission",
+						"cancel_token_commission failed for order {}: {:?}",
+						info.order_id, e,
+					);
+				}
 			},
 		}
 	}
@@ -1755,6 +1793,12 @@ impl pallet_entity_common::LoyaltyWritePort<AccountId, Balance> for LoyaltyBridg
 	}
 	fn credit_shopping_balance(entity_id: u64, who: &AccountId, amount: Balance) -> Result<(), sp_runtime::DispatchError> {
 		pallet_entity_loyalty::Pallet::<Runtime>::do_credit_shopping_balance(entity_id, who, amount)
+	}
+	fn rollback_shopping_balance(entity_id: u64, who: &AccountId, amount: Balance) -> Result<(), sp_runtime::DispatchError> {
+		pallet_entity_loyalty::Pallet::<Runtime>::do_rollback_shopping_balance(entity_id, who, amount)
+	}
+	fn rollback_token_discount(entity_id: u64, who: &AccountId, tokens: Balance) -> Result<(), sp_runtime::DispatchError> {
+		<EntityToken as pallet_entity_common::EntityTokenProvider<AccountId, Balance>>::refund_discount_tokens(entity_id, who, tokens)
 	}
 }
 impl pallet_entity_common::LoyaltyTokenReadPort<AccountId, u128> for LoyaltyBridge {
@@ -2052,8 +2096,16 @@ impl pallet_entity_disclosure::Config for Runtime {
 	type MaxApprovers = ConstU32<10>;
 	type MaxInsiderTransactionHistory = ConstU32<50>;
 	type EmergencyBlackoutMultiplier = ConstU32<3>;
-	type OnDisclosureViolation = ();
+	type OnDisclosureViolation = DisclosureViolationHandler;
 	type WeightInfo = pallet_entity_disclosure::weights::SubstrateWeight<Runtime>;
+}
+
+/// D-2: 披露违规处理器（当前为空实现，未来可触发实体暂停）
+pub struct DisclosureViolationHandler;
+impl pallet_entity_common::OnDisclosureViolation for DisclosureViolationHandler {
+	fn on_violation_threshold_reached(_entity_id: u64, _violation_count: u32, _penalty_level: u8) {
+		// 当前为空实现；未来可触发实体自动暂停等措施
+	}
 }
 
 impl pallet_entity_kyc::Config for Runtime {

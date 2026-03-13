@@ -630,6 +630,8 @@ pub mod pallet {
         NoPendingDividendsToCancel,
         /// 授权额度不足
         InsufficientAllowance,
+        /// D-1: 实体处于披露处罚状态（Restricted 及以上），交易受限
+        DisclosurePenaltyRestricted,
     }
 
     // ==================== Extrinsics ====================
@@ -865,6 +867,11 @@ pub mod pallet {
             ensure!(
                 T::DisclosureProvider::can_insider_trade(entity_id, &who),
                 Error::<T>::InsiderTradingRestricted
+            );
+            // D-1: 披露处罚限制
+            ensure!(
+                !T::DisclosureProvider::is_penalty_active(entity_id),
+                Error::<T>::DisclosurePenaltyRestricted
             );
 
             // H4: 检查可用余额（扣除锁仓和预留）
@@ -1772,6 +1779,11 @@ pub mod pallet {
                 T::DisclosureProvider::can_insider_trade(entity_id, &owner),
                 Error::<T>::InsiderTradingRestricted
             );
+            // D-1: 披露处罚限制
+            ensure!(
+                !T::DisclosureProvider::is_penalty_active(entity_id),
+                Error::<T>::DisclosurePenaltyRestricted
+            );
 
             // 检查可用余额
             Self::ensure_available_balance(entity_id, &owner, amount)?;
@@ -2297,11 +2309,63 @@ impl<T: Config> EntityTokenProvider<T::AccountId, T::AssetBalance> for Pallet<T>
         });
         Ok(())
     }
-}
 
-// ============================================================================
-// TokenGovernancePort 实现
-// ============================================================================
+    fn governance_set_max_supply(entity_id: u64, new_max_supply: T::AssetBalance) -> Result<(), sp_runtime::DispatchError> {
+        EntityTokenConfigs::<T>::try_mutate(entity_id, |maybe_config| -> Result<(), sp_runtime::DispatchError> {
+            let config = maybe_config.as_mut().ok_or(Error::<T>::TokenNotEnabled)?;
+            if !new_max_supply.is_zero() {
+                let current_supply = Self::get_total_supply(entity_id);
+                let pending = TotalPendingDividends::<T>::get(entity_id);
+                frame_support::ensure!(
+                    current_supply.saturating_add(pending) <= new_max_supply,
+                    Error::<T>::ExceedsMaxSupply
+                );
+            }
+            config.max_supply = new_max_supply;
+            Ok(())
+        })?;
+        Self::deposit_event(pallet::Event::TokenConfigUpdated { entity_id });
+        Ok(())
+    }
+
+    fn governance_set_token_type(entity_id: u64, new_type: TokenType) -> Result<(), sp_runtime::DispatchError> {
+        let old_type = EntityTokenConfigs::<T>::try_mutate(entity_id, |maybe_config| -> Result<TokenType, sp_runtime::DispatchError> {
+            let config = maybe_config.as_mut().ok_or(Error::<T>::TokenNotEnabled)?;
+            let old = config.token_type;
+            frame_support::ensure!(old != new_type, Error::<T>::SameTokenType);
+            config.token_type = new_type;
+            config.transferable = new_type.is_transferable_by_default();
+            config.transfer_restriction = new_type.default_transfer_restriction();
+            config.min_receiver_kyc = new_type.required_kyc_level().1;
+            Ok(old)
+        })?;
+        Self::deposit_event(pallet::Event::TokenTypeChanged {
+            entity_id,
+            old_type,
+            new_type,
+        });
+        Ok(())
+    }
+
+    fn governance_set_transfer_restriction(entity_id: u64, restriction: u8, min_receiver_kyc: u8) -> Result<(), sp_runtime::DispatchError> {
+        use pallet_entity_common::TransferRestrictionMode;
+        let mode = TransferRestrictionMode::try_from_u8(restriction)
+            .ok_or(sp_runtime::DispatchError::Other("InvalidRestrictionMode"))?;
+        let clamped_kyc = min_receiver_kyc.min(4);
+        EntityTokenConfigs::<T>::try_mutate(entity_id, |maybe_config| -> Result<(), sp_runtime::DispatchError> {
+            let config = maybe_config.as_mut().ok_or(Error::<T>::TokenNotEnabled)?;
+            config.transfer_restriction = mode;
+            config.min_receiver_kyc = clamped_kyc;
+            Ok(())
+        })?;
+        Self::deposit_event(pallet::Event::TransferRestrictionSet {
+            entity_id,
+            mode,
+            min_receiver_kyc: clamped_kyc,
+        });
+        Ok(())
+    }
+}
 
 impl<T: Config> pallet_entity_common::TokenGovernancePort<T::AccountId> for Pallet<T> {
     fn governance_manage_blacklist(

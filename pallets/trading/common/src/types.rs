@@ -52,19 +52,19 @@ pub type TronTxHash = BoundedVec<u8, ConstU32<64>>;
 )]
 pub enum UsdtTradeStatus {
     /// 等待买家支付 USDT
-    AwaitingPayment,
+    AwaitingPayment,        // 0
     /// 等待 OCW 验证
-    AwaitingVerification,
-    /// 已完成
-    Completed,
-    /// 争议中
-    Disputed,
-    /// 已取消
-    Cancelled,
-    /// 已退款（超时）
-    Refunded,
+    AwaitingVerification,   // 1
     /// 少付等待补付（补付窗口内）
-    UnderpaidPending,
+    UnderpaidPending,       // 2 — 保持 nex-market 现有编码
+    /// 已完成
+    Completed,              // 3
+    /// 已退款（超时）
+    Refunded,               // 4
+    /// 争议中（新增，尾部追加不影响现有编码）
+    Disputed,               // 5
+    /// 已取消（新增，尾部追加不影响现有编码）
+    Cancelled,              // 6
 }
 
 /// 买家保证金状态（entity-market / nex-market 共享）

@@ -17,8 +17,20 @@ use sp_runtime::DispatchError;
 // ============================================================================
 
 /// 返佣模式位标志（可多选）
-#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
 pub struct CommissionModes(pub u16);
+
+impl Default for CommissionModes {
+    fn default() -> Self {
+        // 默认启用：单线（上线+下线）、多级分佣、奖金池
+        Self(
+            Self::SINGLE_LINE_UPLINE
+                | Self::SINGLE_LINE_DOWNLINE
+                | Self::MULTI_LEVEL
+                | Self::POOL_REWARD,
+        )
+    }
+}
 
 impl CommissionModes {
     pub const NONE: u16 = 0b0000_0000;
@@ -53,7 +65,13 @@ impl CommissionModes {
         self.0 & !Self::ALL_VALID == 0
     }
 
+    /// P1-1 审计修复: 检查是否包含 flag 中的**全部**位
     pub fn contains(&self, flag: u16) -> bool {
+        self.0 & flag == flag
+    }
+
+    /// P1-1 审计修复: 检查是否与 flag 有**任意**位交集
+    pub fn intersects(&self, flag: u16) -> bool {
         self.0 & flag != 0
     }
 
@@ -94,8 +112,8 @@ pub enum CommissionStatus {
     Pending,
     /// [已废弃] 保留以维持 SCALE 编码索引稳定，生产代码从未使用此状态
     Distributed,
-    /// 订单已完结，佣金已结算（由 settle_order_commission 设置）
-    Withdrawn,
+    /// P1-3 审计修复: 原 Withdrawn，实际含义为"订单已结算，可归档"（由 settle_order_commission 设置）
+    Settled,
     Cancelled,
 }
 
@@ -162,11 +180,11 @@ impl WithdrawalTierConfig {
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
 pub enum WithdrawalMode {
     /// 全额提现：不强制复购（Governance 底线仍生效）
-    #[default]
     FullWithdrawal,
     /// 固定比率：所有会员统一复购比率
     FixedRate { repurchase_rate: u16 },
     /// 按等级自动决定：通过 default_tier + level_overrides 查表
+    #[default]
     LevelBased,
     /// 会员自选：会员提现时指定复购比率，不低于 min_repurchase_rate
     MemberChoice { min_repurchase_rate: u16 },
@@ -816,9 +834,17 @@ mod tests {
     // ---- CommissionModes ----
 
     #[test]
-    fn modes_default_is_none() {
+    fn modes_default_enables_three_plugins() {
         let m = CommissionModes::default();
-        assert_eq!(m.0, CommissionModes::NONE);
+        assert!(m.contains(CommissionModes::SINGLE_LINE_UPLINE));
+        assert!(m.contains(CommissionModes::SINGLE_LINE_DOWNLINE));
+        assert!(m.contains(CommissionModes::MULTI_LEVEL));
+        assert!(m.contains(CommissionModes::POOL_REWARD));
+        // 其余模式默认关闭
+        assert!(!m.contains(CommissionModes::DIRECT_REWARD));
+        assert!(!m.contains(CommissionModes::TEAM_PERFORMANCE));
+        assert!(!m.contains(CommissionModes::LEVEL_DIFF));
+        assert!(!m.contains(CommissionModes::CREATOR_REWARD));
         assert!(m.is_valid());
     }
 
@@ -877,7 +903,7 @@ mod tests {
 
     #[test]
     fn modes_insert_and_remove() {
-        let mut m = CommissionModes::default();
+        let mut m = CommissionModes(CommissionModes::NONE);
         assert!(!m.contains(CommissionModes::MULTI_LEVEL));
 
         m.insert(CommissionModes::MULTI_LEVEL);

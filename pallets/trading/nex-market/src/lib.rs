@@ -57,6 +57,7 @@ pub mod pallet {
     use frame_support::{
         pallet_prelude::*,
         traits::{Currency, EnsureOrigin, ExistenceRequirement, ReservableCurrency},
+        transactional,
         BoundedVec,
     };
     use frame_system::pallet_prelude::*;
@@ -99,34 +100,11 @@ pub mod pallet {
         Expired,
     }
 
-    /// USDT 交易状态
-    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
-    pub enum UsdtTradeStatus {
-        /// 等待买家支付 USDT
-        AwaitingPayment,
-        /// 等待 OCW 验证
-        AwaitingVerification,
-        /// 少付等待补付（50%-99.5%，买家可在窗口内补足差额）
-        UnderpaidPending,
-        /// 已完成
-        Completed,
-        /// 已退款（超时）
-        Refunded,
-    }
+    // USDT 交易状态 — 统一使用 pallet-trading-common 定义
+    pub use pallet_trading_common::UsdtTradeStatus;
 
-    /// 买家保证金状态
-    #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug, Default)]
-    pub enum BuyerDepositStatus {
-        /// 无保证金
-        #[default]
-        None,
-        /// 已锁定
-        Locked,
-        /// 已退还
-        Released,
-        /// 已没收
-        Forfeited,
-    }
+    // 买家保证金状态 — 统一使用 pallet-trading-common 定义
+    pub use pallet_trading_common::BuyerDepositStatus;
 
     // 付款金额验证结果（从 pallet-trading-common 导入）
     pub use pallet_trading_common::PaymentVerificationResult;
@@ -167,11 +145,16 @@ pub mod pallet {
         pub counter_party: Option<T::AccountId>,
     }
 
-    /// TRON 地址类型（34 字节 Base58）
-    pub type TronAddress = BoundedVec<u8, ConstU32<34>>;
+    // TRON 地址类型 — 统一使用 pallet-trading-common 定义
+    pub use pallet_trading_common::TronAddress;
 
-    /// 🆕 C3: TRON 交易哈希类型（64 hex 字符 = 64 字节 UTF-8，128 安全余量）
-    pub type TxHash = BoundedVec<u8, ConstU32<128>>;
+    // TRON 交易哈希类型 — 统一使用 pallet-trading-common 定义
+    pub use pallet_trading_common::TxHash;
+
+    /// B1: 单次提交允许的最大 tx_hash 数量
+    pub type MaxTxHashesPerSubmit = ConstU32<20>;
+    /// B1: 多 tx_hash 向量类型
+    pub type TxHashVec = BoundedVec<TxHash, MaxTxHashesPerSubmit>;
 
 
     /// 订单
@@ -1689,6 +1672,7 @@ pub mod pallet {
         /// buyer_tron_address 已在挂单/预锁定阶段提供，此处仅触发验证流程。
         #[pallet::call_index(5)]
         #[pallet::weight(T::WeightInfo::confirm_payment())]
+        #[transactional]
         pub fn confirm_payment(
             origin: OriginFor<T>,
             trade_id: u64,
@@ -1868,14 +1852,15 @@ pub mod pallet {
         /// - Underpaid (50%-99.5%): 进入 UnderpaidPending 补付窗口
         /// - SeverelyUnderpaid (<50%) / Invalid: 直接存储结果，终裁
         ///
-        /// 🆕 C3: tx_hash 用于防重放。同一 TRON 交易不能验证多笔订单。
+        /// 🆕 C3: tx_hashes 用于防重放。同一 TRON 交易不能验证多笔订单。
+        /// B1: 支持多 tx_hash（一笔订单可由多笔链上转账支付）
         #[pallet::call_index(7)]
         #[pallet::weight(T::WeightInfo::submit_ocw_result())]
         pub fn submit_ocw_result(
             origin: OriginFor<T>,
             trade_id: u64,
             actual_amount: u64,
-            tx_hash: Option<TxHash>,
+            tx_hashes: TxHashVec,
             authority: T::AuthorityId,
             signature: <T::AuthorityId as RuntimeAppPublic>::Signature,
         ) -> DispatchResult {
@@ -1884,15 +1869,17 @@ pub mod pallet {
             // 验证 OCW 授权签名
             Self::verify_ocw_signature(
                 &authority, &signature,
-                &(trade_id, actual_amount, tx_hash.clone()).encode(),
+                &(trade_id, actual_amount, tx_hashes.clone()).encode(),
             )?;
 
             let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
             ensure!(trade.status == UsdtTradeStatus::AwaitingVerification, Error::<T>::InvalidTradeStatus);
 
-            // C3: tx_hash 必填，防止绕过重放保护
-            let hash = tx_hash.ok_or(Error::<T>::TxHashRequired)?;
-            ensure!(!UsedTxHashes::<T>::contains_key(&hash), Error::<T>::TxHashAlreadyUsed);
+            // B1: tx_hashes 不能为空，且每个 hash 都不能已被使用
+            ensure!(!tx_hashes.is_empty(), Error::<T>::TxHashRequired);
+            for hash in tx_hashes.iter() {
+                ensure!(!UsedTxHashes::<T>::contains_key(hash), Error::<T>::TxHashAlreadyUsed);
+            }
 
             let verification_result = Self::calculate_payment_verification_result(
                 trade.usdt_amount, actual_amount,
@@ -1948,9 +1935,12 @@ pub mod pallet {
                 }
             }
 
+            // B1: 记录所有已使用的 tx_hash（防重放）
             {
                 let now = <frame_system::Pallet<T>>::block_number();
-                UsedTxHashes::<T>::insert(hash, (trade_id, now));
+                for hash in tx_hashes.iter() {
+                    UsedTxHashes::<T>::insert(hash, (trade_id, now));
+                }
             }
 
             Ok(())
@@ -2162,14 +2152,15 @@ pub mod pallet {
         /// 但买家忘记调用 confirm_payment 时，sidecar 可调用此函数
         /// 一步完成：确认付款 + 存储验证结果。
         ///
-        /// 🆕 C3: tx_hash 用于防重放。
+        /// 🆕 C3: tx_hashes 用于防重放。
+        /// B1: 支持多 tx_hash。
         #[pallet::call_index(15)]
         #[pallet::weight(T::WeightInfo::auto_confirm_payment())]
         pub fn auto_confirm_payment(
             origin: OriginFor<T>,
             trade_id: u64,
             actual_amount: u64,
-            tx_hash: Option<TxHash>,
+            tx_hashes: TxHashVec,
             authority: T::AuthorityId,
             signature: <T::AuthorityId as RuntimeAppPublic>::Signature,
         ) -> DispatchResult {
@@ -2178,16 +2169,18 @@ pub mod pallet {
             // 验证 OCW 授权签名
             Self::verify_ocw_signature(
                 &authority, &signature,
-                &(trade_id, actual_amount, tx_hash.clone()).encode(),
+                &(trade_id, actual_amount, tx_hashes.clone()).encode(),
             )?;
 
             let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
             ensure!(trade.status == UsdtTradeStatus::AwaitingPayment, Error::<T>::InvalidTradeStatus);
             ensure!(trade.buyer_tron_address.is_some(), Error::<T>::InvalidTronAddress);
 
-            // C3: tx_hash 必填，防止绕过重放保护
-            let hash = tx_hash.ok_or(Error::<T>::TxHashRequired)?;
-            ensure!(!UsedTxHashes::<T>::contains_key(&hash), Error::<T>::TxHashAlreadyUsed);
+            // B1: tx_hashes 不能为空，且每个 hash 都不能已被使用
+            ensure!(!tx_hashes.is_empty(), Error::<T>::TxHashRequired);
+            for hash in tx_hashes.iter() {
+                ensure!(!UsedTxHashes::<T>::contains_key(hash), Error::<T>::TxHashAlreadyUsed);
+            }
 
             let verification_result = Self::calculate_payment_verification_result(
                 trade.usdt_amount, actual_amount,
@@ -2244,11 +2237,13 @@ pub mod pallet {
                 }
             }
 
-            // C3: 记录已使用的 tx_hash（防重放）
+            // B1: 记录所有已使用的 tx_hash（防重放）
             // M7: 同时记录插入区块号，用于 TTL 清理
             {
                 let now = <frame_system::Pallet<T>>::block_number();
-                UsedTxHashes::<T>::insert(hash, (trade_id, now));
+                for hash in tx_hashes.iter() {
+                    UsedTxHashes::<T>::insert(hash, (trade_id, now));
+                }
             }
 
             Ok(())
@@ -2258,12 +2253,14 @@ pub mod pallet {
         ///
         /// 补付窗口内，OCW 持续扫描 TronGrid，发现新转账则更新金额。
         /// 若累计金额达到 99.5%，直接升级为 Exact 结算。
+        /// B2: 增加 new_tx_hashes 参数（允许为空 — 仅金额增长、无新 hash 的情况）
         #[pallet::call_index(16)]
         #[pallet::weight(T::WeightInfo::submit_underpaid_update())]
         pub fn submit_underpaid_update(
             origin: OriginFor<T>,
             trade_id: u64,
             new_actual_amount: u64,
+            new_tx_hashes: TxHashVec,
             authority: T::AuthorityId,
             signature: <T::AuthorityId as RuntimeAppPublic>::Signature,
         ) -> DispatchResult {
@@ -2272,11 +2269,16 @@ pub mod pallet {
             // 验证 OCW 授权签名
             Self::verify_ocw_signature(
                 &authority, &signature,
-                &(trade_id, new_actual_amount).encode(),
+                &(trade_id, new_actual_amount, new_tx_hashes.clone()).encode(),
             )?;
 
             let mut trade = UsdtTrades::<T>::get(trade_id).ok_or(Error::<T>::UsdtTradeNotFound)?;
             ensure!(trade.status == UsdtTradeStatus::UnderpaidPending, Error::<T>::NotUnderpaidPending);
+
+            // B2: 验证所有新 tx_hash 未被使用
+            for hash in new_tx_hashes.iter() {
+                ensure!(!UsedTxHashes::<T>::contains_key(hash), Error::<T>::TxHashAlreadyUsed);
+            }
 
             let previous_amount = OcwVerificationResults::<T>::get(trade_id)
                 .map(|(_, amt)| amt).unwrap_or(0);
@@ -2296,6 +2298,14 @@ pub mod pallet {
             Self::deposit_event(Event::UnderpaidAmountUpdated {
                 trade_id, previous_amount, new_amount: new_actual_amount,
             });
+
+            // B2: 记录新 tx_hash
+            {
+                let now = <frame_system::Pallet<T>>::block_number();
+                for hash in new_tx_hashes.iter() {
+                    UsedTxHashes::<T>::insert(hash, (trade_id, now));
+                }
+            }
 
             // R1: 补齐后直接结算（无需二次触发）
             if matches!(new_result, PaymentVerificationResult::Exact | PaymentVerificationResult::Overpaid) {
@@ -2840,16 +2850,19 @@ pub mod pallet {
                     T::Currency::unreserve(&who, diff);
                 }
             } else {
-                // C1: 买单修改数量 → 重算保证金差额
-                let nex_u128_old: u128 = old_amount.saturated_into();
-                let old_usdt = u64::try_from(nex_u128_old
+                // C1: 买单修改数量 → 基于剩余未成交量重算保证金
+                let old_unfilled = old_amount.saturating_sub(order.filled_amount);
+                let new_unfilled = new_amount.saturating_sub(order.filled_amount);
+
+                let old_unfilled_u128: u128 = old_unfilled.saturated_into();
+                let old_usdt = u64::try_from(old_unfilled_u128
                     .saturating_mul(order.usdt_price as u128)
                     .saturating_div(1_000_000_000_000u128))
                     .map_err(|_| Error::<T>::ArithmeticOverflow)?;
                 let old_deposit = Self::calculate_buyer_deposit(old_usdt);
 
-                let nex_u128_new: u128 = new_amount.saturated_into();
-                let new_usdt = u64::try_from(nex_u128_new
+                let new_unfilled_u128: u128 = new_unfilled.saturated_into();
+                let new_usdt = u64::try_from(new_unfilled_u128
                     .saturating_mul(order.usdt_price as u128)
                     .saturating_div(1_000_000_000_000u128))
                     .map_err(|_| Error::<T>::ArithmeticOverflow)?;
@@ -2973,7 +2986,7 @@ pub mod pallet {
 
         fn validate_unsigned(source: TransactionSource, call: &Self::Call) -> TransactionValidity {
             match call {
-                Call::submit_ocw_result { trade_id, actual_amount, tx_hash, authority, signature } => {
+                Call::submit_ocw_result { trade_id, actual_amount, tx_hashes, authority, signature } => {
                     let trade = match UsdtTrades::<T>::get(trade_id) {
                         Some(t) => t,
                         None => return InvalidTransaction::Custom(10).into(),
@@ -2984,13 +2997,14 @@ pub mod pallet {
                     if OcwVerificationResults::<T>::contains_key(trade_id) {
                         return InvalidTransaction::Custom(12).into();
                     }
-                    // C3: tx_hash 必填 + 重放检查
-                    match tx_hash {
-                        None => return InvalidTransaction::Custom(13).into(),
-                        Some(ref hash) if UsedTxHashes::<T>::contains_key(hash) => {
+                    // B1: tx_hashes 必须非空，且每个 hash 不能已被使用
+                    if tx_hashes.is_empty() {
+                        return InvalidTransaction::Custom(13).into();
+                    }
+                    for hash in tx_hashes.iter() {
+                        if UsedTxHashes::<T>::contains_key(hash) {
                             return InvalidTransaction::Custom(13).into();
                         }
-                        _ => {}
                     }
                     // 🆕 C4: actual_amount 安全边界检查
                     // 拒绝明显伪造的金额（超过预期 10 倍）防止恶意强制 Overpaid
@@ -3011,7 +3025,7 @@ pub mod pallet {
                         if !authorities.contains(authority) {
                             return InvalidTransaction::Custom(15).into();
                         }
-                        let payload = (trade_id, actual_amount, tx_hash.clone()).encode();
+                        let payload = (trade_id, actual_amount, tx_hashes.clone()).encode();
                         if !authority.verify(&payload, signature) {
                             return InvalidTransaction::Custom(16).into();
                         }
@@ -3029,7 +3043,7 @@ pub mod pallet {
                         .propagate(false)
                         .build()
                 },
-                Call::auto_confirm_payment { trade_id, actual_amount, tx_hash, authority, signature } => {
+                Call::auto_confirm_payment { trade_id, actual_amount, tx_hashes, authority, signature } => {
                     let trade = match UsdtTrades::<T>::get(trade_id) {
                         Some(t) => t,
                         None => return InvalidTransaction::Custom(20).into(),
@@ -3040,13 +3054,14 @@ pub mod pallet {
                     if trade.buyer_tron_address.is_none() {
                         return InvalidTransaction::Custom(22).into();
                     }
-                    // C3: tx_hash 必填 + 重放检查
-                    match tx_hash {
-                        None => return InvalidTransaction::Custom(23).into(),
-                        Some(ref hash) if UsedTxHashes::<T>::contains_key(hash) => {
+                    // B1: tx_hashes 必须非空，且每个 hash 不能已被使用
+                    if tx_hashes.is_empty() {
+                        return InvalidTransaction::Custom(23).into();
+                    }
+                    for hash in tx_hashes.iter() {
+                        if UsedTxHashes::<T>::contains_key(hash) {
                             return InvalidTransaction::Custom(23).into();
                         }
-                        _ => {}
                     }
                     // 🆕 C4: actual_amount 安全边界检查
                     let amount_cap = trade.usdt_amount.saturating_mul(10);
@@ -3066,7 +3081,7 @@ pub mod pallet {
                         if !authorities.contains(authority) {
                             return InvalidTransaction::Custom(25).into();
                         }
-                        let payload = (trade_id, actual_amount, tx_hash.clone()).encode();
+                        let payload = (trade_id, actual_amount, tx_hashes.clone()).encode();
                         if !authority.verify(&payload, signature) {
                             return InvalidTransaction::Custom(26).into();
                         }
@@ -3084,7 +3099,7 @@ pub mod pallet {
                         .propagate(false)
                         .build()
                 },
-                Call::submit_underpaid_update { trade_id, new_actual_amount, authority, signature } => {
+                Call::submit_underpaid_update { trade_id, new_actual_amount, new_tx_hashes, authority, signature } => {
                     let trade = match UsdtTrades::<T>::get(trade_id) {
                         Some(t) => t,
                         None => return InvalidTransaction::Custom(30).into(),
@@ -3103,6 +3118,12 @@ pub mod pallet {
                     if *new_actual_amount <= previous_amount {
                         return InvalidTransaction::Custom(33).into();
                     }
+                    // B2: 每个新 tx_hash 重放检查
+                    for hash in new_tx_hashes.iter() {
+                        if UsedTxHashes::<T>::contains_key(hash) {
+                            return InvalidTransaction::Custom(37).into();
+                        }
+                    }
                     // 安全：拒绝 External 来源，防止任意用户注入伪造补付金额
                     if matches!(source, TransactionSource::External) {
                         return InvalidTransaction::BadSigner.into();
@@ -3116,7 +3137,7 @@ pub mod pallet {
                         if !authorities.contains(authority) {
                             return InvalidTransaction::Custom(34).into();
                         }
-                        let payload = (trade_id, new_actual_amount).encode();
+                        let payload = (trade_id, new_actual_amount, new_tx_hashes.clone()).encode();
                         if !authority.verify(&payload, signature) {
                             return InvalidTransaction::Custom(35).into();
                         }
@@ -3172,54 +3193,62 @@ pub mod pallet {
             deposit_waived: bool,
             min_fill_amount: BalanceOf<T>,
         ) -> Result<u64, DispatchError> {
-            let order_id = NextOrderId::<T>::get();
-            ensure!(order_id < u64::MAX, Error::<T>::ArithmeticOverflow);
-            NextOrderId::<T>::put(order_id.saturating_add(1));
+            frame_support::storage::with_transaction(|| {
+                let result = (|| -> Result<u64, DispatchError> {
+                    let order_id = NextOrderId::<T>::get();
+                    ensure!(order_id < u64::MAX, Error::<T>::ArithmeticOverflow);
+                    NextOrderId::<T>::put(order_id.saturating_add(1));
 
-            let now = <frame_system::Pallet<T>>::block_number();
-            let ttl: u32 = T::DefaultOrderTTL::get();
-            let expires_at = now.saturating_add(ttl.into());
+                    let now = <frame_system::Pallet<T>>::block_number();
+                    let ttl: u32 = T::DefaultOrderTTL::get();
+                    let expires_at = now.saturating_add(ttl.into());
 
-            let order = Order {
-                order_id,
-                maker: maker.clone(),
-                side,
-                nex_amount,
-                filled_amount: Zero::zero(),
-                usdt_price,
-                tron_address,
-                status: OrderStatus::Open,
-                created_at: now,
-                expires_at,
-                buyer_deposit,
-                deposit_waived,
-                min_fill_amount,
-            };
+                    let order = Order {
+                        order_id,
+                        maker: maker.clone(),
+                        side,
+                        nex_amount,
+                        filled_amount: Zero::zero(),
+                        usdt_price,
+                        tron_address,
+                        status: OrderStatus::Open,
+                        created_at: now,
+                        expires_at,
+                        buyer_deposit,
+                        deposit_waived,
+                        min_fill_amount,
+                    };
 
-            Orders::<T>::insert(order_id, order);
+                    Orders::<T>::insert(order_id, order);
 
-            match side {
-                OrderSide::Sell => {
-                    SellOrders::<T>::try_mutate(|orders| {
-                        orders.try_push(order_id).map_err(|_| Error::<T>::OrderBookFull)
+                    match side {
+                        OrderSide::Sell => {
+                            SellOrders::<T>::try_mutate(|orders| {
+                                orders.try_push(order_id).map_err(|_| Error::<T>::OrderBookFull)
+                            })?;
+                        }
+                        OrderSide::Buy => {
+                            BuyOrders::<T>::try_mutate(|orders| {
+                                orders.try_push(order_id).map_err(|_| Error::<T>::OrderBookFull)
+                            })?;
+                        }
+                    }
+
+                    UserOrders::<T>::try_mutate(&maker, |orders| {
+                        orders.try_push(order_id).map_err(|_| Error::<T>::UserOrdersFull)
                     })?;
+
+                    MarketStatsStore::<T>::mutate(|stats| {
+                        stats.total_orders = stats.total_orders.saturating_add(1);
+                    });
+
+                    Ok(order_id)
+                })();
+                match result {
+                    Ok(v) => frame_support::storage::TransactionOutcome::Commit(Ok(v)),
+                    Err(e) => frame_support::storage::TransactionOutcome::Rollback(Err(e)),
                 }
-                OrderSide::Buy => {
-                    BuyOrders::<T>::try_mutate(|orders| {
-                        orders.try_push(order_id).map_err(|_| Error::<T>::OrderBookFull)
-                    })?;
-                }
-            }
-
-            UserOrders::<T>::try_mutate(&maker, |orders| {
-                orders.try_push(order_id).map_err(|_| Error::<T>::UserOrdersFull)
-            })?;
-
-            MarketStatsStore::<T>::mutate(|stats| {
-                stats.total_orders = stats.total_orders.saturating_add(1);
-            });
-
-            Ok(order_id)
+            })
         }
 
         /// 创建 USDT 交易（标准超时）
@@ -3251,62 +3280,70 @@ pub mod pallet {
             buyer_deposit: BalanceOf<T>,
             waived_deposit: bool,
         ) -> Result<u64, DispatchError> {
-            let trade_id = NextUsdtTradeId::<T>::get();
-            ensure!(trade_id < u64::MAX, Error::<T>::ArithmeticOverflow);
-            NextUsdtTradeId::<T>::put(trade_id.saturating_add(1));
+            frame_support::storage::with_transaction(|| {
+                let result = (|| -> Result<u64, DispatchError> {
+                    let trade_id = NextUsdtTradeId::<T>::get();
+                    ensure!(trade_id < u64::MAX, Error::<T>::ArithmeticOverflow);
+                    NextUsdtTradeId::<T>::put(trade_id.saturating_add(1));
 
-            let now = <frame_system::Pallet<T>>::block_number();
-            // 免保证金交易使用短超时，普通交易使用标准超时
-            let timeout: u32 = if waived_deposit {
-                T::FirstOrderTimeout::get()
-            } else {
-                T::UsdtTimeout::get()
-            };
-            let timeout_at = now.saturating_add(timeout.into());
+                    let now = <frame_system::Pallet<T>>::block_number();
+                    // 免保证金交易使用短超时，普通交易使用标准超时
+                    let timeout: u32 = if waived_deposit {
+                        T::FirstOrderTimeout::get()
+                    } else {
+                        T::UsdtTimeout::get()
+                    };
+                    let timeout_at = now.saturating_add(timeout.into());
 
-            let deposit_status = if buyer_deposit.is_zero() {
-                BuyerDepositStatus::None
-            } else {
-                BuyerDepositStatus::Locked
-            };
+                    let deposit_status = if buyer_deposit.is_zero() {
+                        BuyerDepositStatus::None
+                    } else {
+                        BuyerDepositStatus::Locked
+                    };
 
-            let trade = UsdtTrade {
-                trade_id, order_id, seller, buyer,
-                nex_amount, usdt_amount, seller_tron_address,
-                buyer_tron_address,
-                status: UsdtTradeStatus::AwaitingPayment,
-                created_at: now, timeout_at,
-                buyer_deposit, deposit_status,
-                first_verified_at: None,
-                first_actual_amount: None,
-                underpaid_deadline: None,
-                completed_at: None,
-                payment_confirmed: false,
-            };
+                    let trade = UsdtTrade {
+                        trade_id, order_id, seller, buyer,
+                        nex_amount, usdt_amount, seller_tron_address,
+                        buyer_tron_address,
+                        status: UsdtTradeStatus::AwaitingPayment,
+                        created_at: now, timeout_at,
+                        buyer_deposit, deposit_status,
+                        first_verified_at: None,
+                        first_actual_amount: None,
+                        underpaid_deadline: None,
+                        completed_at: None,
+                        payment_confirmed: false,
+                    };
 
-            UsdtTrades::<T>::insert(trade_id, &trade);
+                    UsdtTrades::<T>::insert(trade_id, &trade);
 
-            // 加入待付款跟踪队列
-            AwaitingPaymentTrades::<T>::try_mutate(|list| {
-                list.try_push(trade_id).map_err(|_| Error::<T>::AwaitingPaymentQueueFull)
-            })?;
+                    // 加入待付款跟踪队列
+                    AwaitingPaymentTrades::<T>::try_mutate(|list| {
+                        list.try_push(trade_id).map_err(|_| Error::<T>::AwaitingPaymentQueueFull)
+                    })?;
 
-            // #2/#12: 用户交易索引
-            UserTrades::<T>::try_mutate(&trade.seller, |list| {
-                list.try_push(trade_id).map_err(|_| Error::<T>::UserTradesFull)
-            })?;
-            if trade.seller != trade.buyer {
-                UserTrades::<T>::try_mutate(&trade.buyer, |list| {
-                    list.try_push(trade_id).map_err(|_| Error::<T>::UserTradesFull)
-                })?;
-            }
+                    // #2/#12: 用户交易索引
+                    UserTrades::<T>::try_mutate(&trade.seller, |list| {
+                        list.try_push(trade_id).map_err(|_| Error::<T>::UserTradesFull)
+                    })?;
+                    if trade.seller != trade.buyer {
+                        UserTrades::<T>::try_mutate(&trade.buyer, |list| {
+                            list.try_push(trade_id).map_err(|_| Error::<T>::UserTradesFull)
+                        })?;
+                    }
 
-            // #5: 订单-交易索引
-            OrderTrades::<T>::try_mutate(order_id, |list| {
-                list.try_push(trade_id).map_err(|_| Error::<T>::OrderTradesFull)
-            })?;
+                    // #5: 订单-交易索引
+                    OrderTrades::<T>::try_mutate(order_id, |list| {
+                        list.try_push(trade_id).map_err(|_| Error::<T>::OrderTradesFull)
+                    })?;
 
-            Ok(trade_id)
+                    Ok(trade_id)
+                })();
+                match result {
+                    Ok(v) => frame_support::storage::TransactionOutcome::Commit(Ok(v)),
+                    Err(e) => frame_support::storage::TransactionOutcome::Rollback(Err(e)),
+                }
+            })
         }
 
         /// 计算买家保证金（使用动态汇率）
@@ -3513,7 +3550,11 @@ pub mod pallet {
                     T::Currency::unreserve(&trade.buyer, refund);
                 }
 
-                trade.deposit_status = BuyerDepositStatus::Forfeited;
+                trade.deposit_status = if forfeit_rate >= 10000 {
+                    BuyerDepositStatus::Forfeited
+                } else {
+                    BuyerDepositStatus::PartiallyForfeited
+                };
             }
 
             trade.status = if actual_amount > 0 {
@@ -3577,7 +3618,11 @@ pub mod pallet {
                 T::Currency::unreserve(&trade.buyer, refund);
             }
 
-            trade.deposit_status = BuyerDepositStatus::Forfeited;
+            trade.deposit_status = if forfeit_rate >= 10000 {
+                BuyerDepositStatus::Forfeited
+            } else {
+                BuyerDepositStatus::PartiallyForfeited
+            };
 
             Self::deposit_event(Event::BuyerDepositForfeited {
                 trade_id, buyer: trade.buyer.clone(),
@@ -4052,6 +4097,18 @@ pub mod pallet {
             Self::check_circuit_breaker(trade_price);
         }
 
+        /// 根据交易创建区块估算创建时间戳(ms)，并额外向前留 30 分钟余量
+        fn estimate_trade_created_ms(trade_created_at: BlockNumberFor<T>) -> u64 {
+            let now_ms = sp_io::offchain::timestamp().unix_millis();
+            let current_block: u64 = <frame_system::Pallet<T>>::block_number().saturated_into();
+            let created_block: u64 = trade_created_at.saturated_into();
+            let blocks_since = current_block.saturating_sub(created_block);
+            let elapsed_ms = blocks_since.saturating_mul(6_000); // 6s per block
+            let estimated_created_ms = now_ms.saturating_sub(elapsed_ms);
+            // 向前多留 30 分钟余量（应对出块时间波动）
+            estimated_created_ms.saturating_sub(30 * 60 * 1000)
+        }
+
         /// OCW: 处理验证（按 from/to/amount 匹配 TRON 链上转账）
         ///
         /// 调用 pallet-trading-trc20-verifier 查询 TronGrid API，
@@ -4063,11 +4120,10 @@ pub mod pallet {
                 "Verifying trade {} by (from={} bytes, to={} bytes, amount={})",
                 trade_id, buyer_tron.len(), seller_tron.len(), trade.usdt_amount);
 
-            // 搜索起始时间：保守回溯 24 小时
-            let now_ms = sp_io::offchain::timestamp().unix_millis();
-            let min_timestamp = now_ms.saturating_sub(24 * 3600 * 1000);
+            // 搜索起始时间：锚定交易创建区块，向前留余量
+            let min_timestamp = Self::estimate_trade_created_ms(trade.created_at);
 
-            let (actual_amount, tx_hash_bytes) = match pallet_trading_trc20_verifier::verify_trc20_by_transfer(
+            let (actual_amount, all_tx_hashes) = match pallet_trading_trc20_verifier::verify_trc20_by_transfer(
                 buyer_tron, seller_tron, trade.usdt_amount, min_timestamp,
             ) {
                 Ok(result) => {
@@ -4075,12 +4131,18 @@ pub mod pallet {
                         log::info!(target: "nex-market-ocw",
                             "Trade {} verified: actual_amount={:?}, status={:?}",
                             trade_id, result.actual_amount, result.amount_status);
-                        (result.actual_amount.unwrap_or(0), result.tx_hash)
+                        // B1: 收集所有匹配转账的 tx_hash
+                        let hashes: Vec<Vec<u8>> = result.matched_transfers
+                            .iter()
+                            .filter(|t| !t.tx_hash.is_empty())
+                            .map(|t| t.tx_hash.clone())
+                            .collect();
+                        (result.actual_amount.unwrap_or(0), hashes)
                     } else {
                         log::warn!(target: "nex-market-ocw",
                             "Trade {} verification: no matching transfer found (error={:?})",
                             trade_id, result.error);
-                        (0, None)
+                        (0, Vec::new())
                     }
                 }
                 Err(e) => {
@@ -4093,10 +4155,9 @@ pub mod pallet {
 
             // 将验证结果写入 offchain local storage
             // 外部服务（sidecar）读取后调用 submit_ocw_result
-            // 🆕 C3: 包含 tx_hash 用于防重放
+            // B1: 存储所有 tx_hash 列表
             let key = Self::ocw_result_key(trade_id);
-            let tx_hash_for_storage: Vec<u8> = tx_hash_bytes.unwrap_or_default();
-            let value = (true, actual_amount, tx_hash_for_storage);
+            let value = (true, actual_amount, all_tx_hashes);
             sp_io::offchain::local_storage_set(
                 sp_core::offchain::StorageKind::PERSISTENT,
                 &key,
@@ -4163,8 +4224,7 @@ pub mod pallet {
                 "Auto-checking AwaitingPayment trade {} (amount={})",
                 trade_id, trade.usdt_amount);
 
-            let now_ms = sp_io::offchain::timestamp().unix_millis();
-            let min_timestamp = now_ms.saturating_sub(24 * 3600 * 1000);
+            let min_timestamp = Self::estimate_trade_created_ms(trade.created_at);
 
             match pallet_trading_trc20_verifier::verify_trc20_by_transfer(
                 buyer_tron, seller_tron, trade.usdt_amount, min_timestamp,
@@ -4177,10 +4237,14 @@ pub mod pallet {
                             trade_id, actual_amount);
 
                         // 写入 offchain storage，sidecar 调用 auto_confirm_payment
-                        // 🆕 C3: 包含 tx_hash 用于防重放
+                        // B1: 存储所有 tx_hash 列表
                         let key = Self::ocw_auto_confirm_key(trade_id);
-                        let tx_hash_for_storage: Vec<u8> = result.tx_hash.unwrap_or_default();
-                        let value = (true, actual_amount, tx_hash_for_storage);
+                        let all_tx_hashes: Vec<Vec<u8>> = result.matched_transfers
+                            .iter()
+                            .filter(|t| !t.tx_hash.is_empty())
+                            .map(|t| t.tx_hash.clone())
+                            .collect();
+                        let value = (true, actual_amount, all_tx_hashes);
                         sp_io::offchain::local_storage_set(
                             sp_core::offchain::StorageKind::PERSISTENT,
                             &key,
@@ -4213,8 +4277,9 @@ pub mod pallet {
                 "Checking underpaid topup for trade {} (expected={})",
                 trade_id, trade.usdt_amount);
 
-            let now_ms = sp_io::offchain::timestamp().unix_millis();
-            let min_timestamp = now_ms.saturating_sub(48 * 3600 * 1000); // 回溯 48 小时
+            // 使用 first_verified_at（如果有的话），否则 created_at
+            let anchor_block = trade.first_verified_at.unwrap_or(trade.created_at);
+            let min_timestamp = Self::estimate_trade_created_ms(anchor_block);
 
             match pallet_trading_trc20_verifier::verify_trc20_by_transfer(
                 buyer_tron, seller_tron, trade.usdt_amount, min_timestamp,
@@ -4223,8 +4288,14 @@ pub mod pallet {
                     let actual_amount = result.actual_amount.unwrap_or(0);
                     if actual_amount > 0 {
                         // 写入 offchain storage，sidecar 调用 submit_underpaid_update
+                        // B2: 存储所有 tx_hash 列表
                         let key = Self::ocw_underpaid_key(trade_id);
-                        let value = (true, actual_amount);
+                        let all_tx_hashes: Vec<Vec<u8>> = result.matched_transfers
+                            .iter()
+                            .filter(|t| !t.tx_hash.is_empty())
+                            .map(|t| t.tx_hash.clone())
+                            .collect();
+                        let value = (true, actual_amount, all_tx_hashes);
                         sp_io::offchain::local_storage_set(
                             sp_core::offchain::StorageKind::PERSISTENT,
                             &key,
@@ -4521,9 +4592,11 @@ impl<T: Config> Pallet<T> {
             status: match t.status {
                 UsdtTradeStatus::AwaitingPayment => 0,
                 UsdtTradeStatus::AwaitingVerification => 1,
-                UsdtTradeStatus::Completed => 2,
-                UsdtTradeStatus::Refunded => 3,
-                UsdtTradeStatus::UnderpaidPending => 4,
+                UsdtTradeStatus::UnderpaidPending => 2,
+                UsdtTradeStatus::Completed => 3,
+                UsdtTradeStatus::Refunded => 4,
+                UsdtTradeStatus::Disputed => 5,
+                UsdtTradeStatus::Cancelled => 6,
             },
             created_at: t.created_at.saturated_into(),
             timeout_at: t.timeout_at.saturated_into(),
@@ -4533,6 +4606,7 @@ impl<T: Config> Pallet<T> {
                 BuyerDepositStatus::Locked => 1,
                 BuyerDepositStatus::Released => 2,
                 BuyerDepositStatus::Forfeited => 3,
+                BuyerDepositStatus::PartiallyForfeited => 4,
             },
             underpaid_deadline: t.underpaid_deadline.map(|d| d.saturated_into()),
             completed_at: t.completed_at.map(|d| d.saturated_into()),

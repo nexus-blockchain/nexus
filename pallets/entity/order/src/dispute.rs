@@ -204,7 +204,7 @@ impl<T: Config> Pallet<T> {
 
         Orders::<T>::mutate(order_id, |maybe_order| {
             if let Some(o) = maybe_order {
-                o.status = OrderStatus::Refunded;
+                o.status = OrderStatus::PartiallyRefunded;
             }
         });
 

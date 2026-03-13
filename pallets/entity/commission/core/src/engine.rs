@@ -31,14 +31,14 @@ impl<T: Config> Pallet<T> {
         OrderCommissionRecords::<T>::mutate(order_id, |records| {
             for record in records.iter_mut() {
                 if record.status == CommissionStatus::Pending {
-                    record.status = CommissionStatus::Withdrawn;
+                    record.status = CommissionStatus::Settled;
                 }
             }
         });
         OrderTokenCommissionRecords::<T>::mutate(order_id, |records| {
             for record in records.iter_mut() {
                 if record.status == CommissionStatus::Pending {
-                    record.status = CommissionStatus::Withdrawn;
+                    record.status = CommissionStatus::Settled;
                 }
             }
         });
@@ -63,6 +63,8 @@ impl<T: Config> Pallet<T> {
     ) -> DispatchResult {
         // F17: 全局紧急暂停检查
         ensure!(!GlobalCommissionPaused::<T>::get(), Error::<T>::GlobalCommissionPaused);
+        // P0-2 审计修复: 幂等保护，防止同一订单重复处理佣金
+        ensure!(!OrderCommissionProcessed::<T>::get(order_id), Error::<T>::OrderAlreadyProcessed);
 
         let platform_account = T::PlatformAccount::get();
 
@@ -120,6 +122,14 @@ impl<T: Config> Pallet<T> {
         let is_first_order = buyer_stats.order_count == 0;
         let enabled_modes = config.enabled_modes;
 
+        // P0-9 审计修复: 先递增 order_count，再传给插件
+        // 原代码在所有插件执行完才 +1，导致 RepeatPurchase 的 min_orders 判断偏差
+        // （第 N 笔订单看到的 order_count 是 N-1）
+        let current_order_count = buyer_stats.order_count.saturating_add(1);
+        MemberCommissionStats::<T>::mutate(entity_id, buyer, |stats| {
+            stats.order_count = current_order_count;
+        });
+
         let mut total_from_platform = BalanceOf::<T>::zero();
         let mut total_from_seller = BalanceOf::<T>::zero();
 
@@ -173,8 +183,11 @@ impl<T: Config> Pallet<T> {
 
             // 1. Referral Plugin
             let (outputs, new_remaining) = T::ReferralPlugin::calculate(
-                entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
+                entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, current_order_count,
             );
+            // P1-2 审计修复: 插件不变量校验
+            let outputs_sum = outputs.iter().fold(BalanceOf::<T>::zero(), |acc, o| acc.saturating_add(o.amount));
+            ensure!(outputs_sum.saturating_add(new_remaining) == remaining, Error::<T>::PluginOutputInvariantViolation);
             remaining = new_remaining;
             for output in outputs {
                 Self::credit_commission(
@@ -185,8 +198,10 @@ impl<T: Config> Pallet<T> {
 
             // 2. MultiLevel Plugin
             let (outputs, new_remaining) = T::MultiLevelPlugin::calculate(
-                entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
+                entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, current_order_count,
             );
+            let outputs_sum = outputs.iter().fold(BalanceOf::<T>::zero(), |acc, o| acc.saturating_add(o.amount));
+            ensure!(outputs_sum.saturating_add(new_remaining) == remaining, Error::<T>::PluginOutputInvariantViolation);
             remaining = new_remaining;
             for output in outputs {
                 Self::credit_commission(
@@ -197,8 +212,10 @@ impl<T: Config> Pallet<T> {
 
             // 3. LevelDiff Plugin
             let (outputs, new_remaining) = T::LevelDiffPlugin::calculate(
-                entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
+                entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, current_order_count,
             );
+            let outputs_sum = outputs.iter().fold(BalanceOf::<T>::zero(), |acc, o| acc.saturating_add(o.amount));
+            ensure!(outputs_sum.saturating_add(new_remaining) == remaining, Error::<T>::PluginOutputInvariantViolation);
             remaining = new_remaining;
             for output in outputs {
                 Self::credit_commission(
@@ -209,8 +226,10 @@ impl<T: Config> Pallet<T> {
 
             // 4. SingleLine Plugin
             let (outputs, new_remaining) = T::SingleLinePlugin::calculate(
-                entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
+                entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, current_order_count,
             );
+            let outputs_sum = outputs.iter().fold(BalanceOf::<T>::zero(), |acc, o| acc.saturating_add(o.amount));
+            ensure!(outputs_sum.saturating_add(new_remaining) == remaining, Error::<T>::PluginOutputInvariantViolation);
             remaining = new_remaining;
             for output in outputs {
                 Self::credit_commission(
@@ -221,8 +240,10 @@ impl<T: Config> Pallet<T> {
 
             // 5. Team Plugin
             let (outputs, new_remaining) = T::TeamPlugin::calculate(
-                entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, buyer_stats.order_count,
+                entity_id, buyer, order_amount, remaining, enabled_modes, is_first_order, current_order_count,
             );
+            let outputs_sum = outputs.iter().fold(BalanceOf::<T>::zero(), |acc, o| acc.saturating_add(o.amount));
+            ensure!(outputs_sum.saturating_add(new_remaining) == remaining, Error::<T>::PluginOutputInvariantViolation);
             remaining = new_remaining;
             for output in outputs {
                 Self::credit_commission(
@@ -264,10 +285,7 @@ impl<T: Config> Pallet<T> {
         // Phase 2 已移除：沉淀池奖励改为用户主动 claim（pool-reward v2）
         let total_pool_distributed = BalanceOf::<T>::zero();
 
-        // 更新买家订单数（Entity 级）
-        MemberCommissionStats::<T>::mutate(entity_id, buyer, |stats| {
-            stats.order_count = stats.order_count.saturating_add(1);
-        });
+        // P0-9: order_count 已在插件执行前递增（见上方），此处不再重复
 
         // total_distributed 仅统计从外部转入的佣金（不含池内循环）
         let total_distributed = total_from_platform.saturating_add(total_from_seller);
@@ -304,6 +322,9 @@ impl<T: Config> Pallet<T> {
                 amount: total_distributed.saturating_add(pool_funded),
             });
         }
+
+        // P0-2 审计修复: 标记订单 NEX 佣金已处理
+        OrderCommissionProcessed::<T>::insert(order_id, true);
 
         Ok(())
     }
@@ -406,6 +427,8 @@ impl<T: Config> Pallet<T> {
     ) -> DispatchResult {
         // F17: 全局紧急暂停检查
         ensure!(!GlobalCommissionPaused::<T>::get(), Error::<T>::GlobalCommissionPaused);
+        // P0-2 审计修复: Token 幂等保护，防止同一订单重复处理
+        ensure!(!OrderTokenCommissionProcessed::<T>::get(order_id), Error::<T>::OrderAlreadyProcessed);
 
         // M2-R5 审计修复: 先 sweep 再检查配置，未配置时优雅返回（与 NEX 版 process_commission 对称）
         Self::sweep_token_free_balance(entity_id, token_platform_fee);
@@ -420,6 +443,12 @@ impl<T: Config> Pallet<T> {
         let now = <frame_system::Pallet<T>>::block_number();
         let buyer_stats = MemberTokenCommissionStats::<T>::get(entity_id, buyer);
         let is_first_order = buyer_stats.order_count == 0;
+
+        // P0-9 审计修复: Token 管线同样先递增 order_count 再传给插件
+        let current_token_order_count = buyer_stats.order_count.saturating_add(1);
+        MemberTokenCommissionStats::<T>::mutate(entity_id, buyer, |stats| {
+            stats.order_count = current_token_order_count;
+        });
 
         // ── 池 A：Token 招商推荐人奖金（从 Token 平台费中分配） ──
         let mut pool_a_distributed = TokenBalanceOf::<T>::zero();
@@ -490,8 +519,11 @@ impl<T: Config> Pallet<T> {
             // 1. Token Referral Plugin
             let (outputs, new_remaining) = T::TokenReferralPlugin::calculate_token(
                 entity_id, buyer, token_order_amount, remaining,
-                enabled_modes, is_first_order, buyer_stats.order_count,
+                enabled_modes, is_first_order, current_token_order_count,
             );
+            // P1-2 审计修复: Token 插件不变量校验
+            let outputs_sum = outputs.iter().fold(TokenBalanceOf::<T>::zero(), |acc, o| acc.saturating_add(o.amount));
+            ensure!(outputs_sum.saturating_add(new_remaining) == remaining, Error::<T>::PluginOutputInvariantViolation);
             remaining = new_remaining;
             for output in outputs {
                 Self::credit_token_commission(
@@ -503,8 +535,10 @@ impl<T: Config> Pallet<T> {
             // 2. Token MultiLevel Plugin
             let (outputs, new_remaining) = T::TokenMultiLevelPlugin::calculate_token(
                 entity_id, buyer, token_order_amount, remaining,
-                enabled_modes, is_first_order, buyer_stats.order_count,
+                enabled_modes, is_first_order, current_token_order_count,
             );
+            let outputs_sum = outputs.iter().fold(TokenBalanceOf::<T>::zero(), |acc, o| acc.saturating_add(o.amount));
+            ensure!(outputs_sum.saturating_add(new_remaining) == remaining, Error::<T>::PluginOutputInvariantViolation);
             remaining = new_remaining;
             for output in outputs {
                 Self::credit_token_commission(
@@ -516,8 +550,10 @@ impl<T: Config> Pallet<T> {
             // 3. Token LevelDiff Plugin
             let (outputs, new_remaining) = T::TokenLevelDiffPlugin::calculate_token(
                 entity_id, buyer, token_order_amount, remaining,
-                enabled_modes, is_first_order, buyer_stats.order_count,
+                enabled_modes, is_first_order, current_token_order_count,
             );
+            let outputs_sum = outputs.iter().fold(TokenBalanceOf::<T>::zero(), |acc, o| acc.saturating_add(o.amount));
+            ensure!(outputs_sum.saturating_add(new_remaining) == remaining, Error::<T>::PluginOutputInvariantViolation);
             remaining = new_remaining;
             for output in outputs {
                 Self::credit_token_commission(
@@ -529,8 +565,10 @@ impl<T: Config> Pallet<T> {
             // 4. Token SingleLine Plugin
             let (outputs, new_remaining) = T::TokenSingleLinePlugin::calculate_token(
                 entity_id, buyer, token_order_amount, remaining,
-                enabled_modes, is_first_order, buyer_stats.order_count,
+                enabled_modes, is_first_order, current_token_order_count,
             );
+            let outputs_sum = outputs.iter().fold(TokenBalanceOf::<T>::zero(), |acc, o| acc.saturating_add(o.amount));
+            ensure!(outputs_sum.saturating_add(new_remaining) == remaining, Error::<T>::PluginOutputInvariantViolation);
             remaining = new_remaining;
             for output in outputs {
                 Self::credit_token_commission(
@@ -542,8 +580,10 @@ impl<T: Config> Pallet<T> {
             // 5. Token Team Plugin
             let (outputs, new_remaining) = T::TokenTeamPlugin::calculate_token(
                 entity_id, buyer, token_order_amount, remaining,
-                enabled_modes, is_first_order, buyer_stats.order_count,
+                enabled_modes, is_first_order, current_token_order_count,
             );
+            let outputs_sum = outputs.iter().fold(TokenBalanceOf::<T>::zero(), |acc, o| acc.saturating_add(o.amount));
+            ensure!(outputs_sum.saturating_add(new_remaining) == remaining, Error::<T>::PluginOutputInvariantViolation);
             remaining = new_remaining;
             for output in outputs {
                 Self::credit_token_commission(
@@ -564,10 +604,10 @@ impl<T: Config> Pallet<T> {
             });
         }
 
-        // 更新买家订单数（Token 版）
-        MemberTokenCommissionStats::<T>::mutate(entity_id, buyer, |stats| {
-            stats.order_count = stats.order_count.saturating_add(1);
-        });
+        // P0-9: Token order_count 已在插件执行前递增（见上方），此处不再重复
+
+        // P0-2 审计修复: 标记订单 Token 佣金已处理
+        OrderTokenCommissionProcessed::<T>::insert(order_id, true);
 
         Ok(())
     }
@@ -816,8 +856,19 @@ impl<T: Config> Pallet<T> {
         let failed = (refund_groups.len() as u32).saturating_sub(succeeded);
         Self::deposit_event(Event::CommissionCancelled { order_id, refund_succeeded: succeeded, refund_failed: failed });
 
+        // P0-3 审计修复: 取消订单时回滚 buyer 的 order_count，防止复购计数被取消订单污染
+        if let Some(first) = records.first() {
+            MemberCommissionStats::<T>::mutate(first.entity_id, &first.buyer, |stats| {
+                stats.order_count = stats.order_count.saturating_sub(1);
+            });
+        }
+
         // M3 审计修复: 复用 do_cancel_token_commission 消除代码重复（原第六、七步）
         Self::do_cancel_token_commission(order_id)?;
+
+        // P0-2 审计修复: 取消订单时清除幂等标记（允许后续重新处理，如有需要）
+        OrderCommissionProcessed::<T>::remove(order_id);
+        OrderTokenCommissionProcessed::<T>::remove(order_id);
 
         Ok(())
     }

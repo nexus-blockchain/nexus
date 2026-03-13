@@ -2964,7 +2964,7 @@ fn r11_partial_refund_works() {
         ));
 
         let order = Transaction::orders(1).unwrap();
-        assert_eq!(order.status, OrderStatus::Refunded);
+        assert_eq!(order.status, OrderStatus::PartiallyRefunded);
 
         let events = System::events();
         assert!(events.iter().any(|e| matches!(
@@ -2992,7 +2992,7 @@ fn r11_partial_refund_no_stock_restore() {
         ));
 
         let order = Transaction::orders(1).unwrap();
-        assert_eq!(order.status, OrderStatus::Refunded);
+        assert_eq!(order.status, OrderStatus::PartiallyRefunded);
     });
 }
 
@@ -4178,7 +4178,7 @@ fn proxy_pay_partial_refund() {
         assert_ok!(Transaction::force_partial_refund(
             RuntimeOrigin::root(), 1, 5000, None
         ));
-        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::Refunded);
+        assert_eq!(Transaction::orders(1).unwrap().status, OrderStatus::PartiallyRefunded);
     });
 }
 

@@ -360,6 +360,12 @@ impl pallet_entity_common::LoyaltyWritePort<u64, u128> for MockLoyaltyProvider {
         });
         Ok(())
     }
+    fn rollback_shopping_balance(_: u64, _: &u64, _: u128) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
+    fn rollback_token_discount(_: u64, _: &u64, _: u128) -> Result<(), sp_runtime::DispatchError> {
+        Ok(())
+    }
 }
 
 /// 设置 Mock Token 购物余额

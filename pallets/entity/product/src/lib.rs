@@ -1663,5 +1663,15 @@ pub mod pallet {
                 Ok(())
             })
         }
+
+        fn governance_set_visibility(product_id: u64, visibility: pallet_entity_common::ProductVisibility) -> Result<(), sp_runtime::DispatchError> {
+            Products::<T>::try_mutate(product_id, |maybe_product| -> Result<(), sp_runtime::DispatchError> {
+                let product = maybe_product.as_mut().ok_or(Error::<T>::ProductNotFound)?;
+                product.visibility = visibility;
+                product.updated_at = <frame_system::Pallet<T>>::block_number();
+                Self::deposit_event(Event::ProductUpdated { product_id });
+                Ok(())
+            })
+        }
     }
 }

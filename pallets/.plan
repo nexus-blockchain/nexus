@@ -1,0 +1,158 @@
+# P0 修复方案：KYC Governance 假成功 + 静默覆盖风控配置
+
+## 问题回顾
+
+### BUG-5 (P0): Governance 授权/取消授权 Provider 是假成功
+- `governance_authorize_kyc_provider` / `governance_deauthorize_kyc_provider` 直接返回 `Ok(())`
+- 根本原因：governance 用 `provider_id: u64`，而 KYC 用 `AccountId` 索引 Provider
+- 治理提案"执行成功"但链上状态没变
+
+### BUG-6 (P0): Governance 改 requirement 覆盖风险配置
+- `governance_set_kyc_requirement` 只接收 3 字段 (min_level, mandatory, grace_period)
+- 缺失的 `allow_high_risk_countries` 硬编码 false，`max_risk_score` 硬编码 100
+- 如果实体原本有更严格的配置，会被悄悄放宽
+
+---
+
+## 修复方案
+
+### Step 1: BUG-6 — governance_set_kyc_requirement 改为 merge 语义
+
+**文件:** `kyc/src/lib.rs` L1871-1896
+
+改动：governance 写入时先读取现有 requirement，只修改传入的 3 个字段，保留原有的
+`allow_high_risk_countries` 和 `max_risk_score`。如果没有现有配置，才使用安全默认值。
+
+```rust
+fn governance_set_kyc_requirement(
+    entity_id: u64,
+    min_level: u8,
+    mandatory: bool,
+    grace_period: u32,
+) -> Result<(), sp_runtime::DispatchError> {
+    let min_level = KycLevel::try_from_u8(min_level)
+        .ok_or(sp_runtime::DispatchError::Other("InvalidKycLevel"))?;
+
+    // merge: 保留现有 allow_high_risk_countries / max_risk_score
+    let existing = EntityRequirements::<T>::get(entity_id);
+    let requirement = EntityKycRequirement {
+        min_level,
+        mandatory,
+        grace_period,
+        allow_high_risk_countries: existing.as_ref().map(|r| r.allow_high_risk_countries).unwrap_or(false),
+        max_risk_score: existing.as_ref().map(|r| r.max_risk_score).unwrap_or(100),
+    };
+
+    EntityRequirements::<T>::insert(entity_id, requirement);
+    Self::deposit_event(Event::EntityRequirementSet { entity_id, min_level });
+    Ok(())
+}
+```
+
+### Step 2: BUG-5 — provider authorize/deauthorize 类型修正
+
+**根本问题分析：**
+- KYC 模块的 `Providers` 表以 `AccountId` 为 key
+- 治理提案中 `provider_id` 类型是 `u64`，完全不匹配
+- 没有 u64 → AccountId 的映射表
+
+**方案选择：**
+
+**方案 A: 改 trait 签名 + ProposalType，使用 AccountId 编码 (Vec<u8>)**
+- 改 `KycGovernancePort` trait 的 provider 相关方法参数为 `Vec<u8>` (AccountId 编码)
+- 改 `ProposalType::KycProviderAuthorize/Deauthorize` 的 `provider_id` 字段为 `BoundedVec<u8, ConstU32<64>>`
+- KYC 实现端解码 `Vec<u8>` → `AccountId`，然后走 authorize/deauthorize 逻辑
+
+**方案 B: 让 governance trait 使用泛型 AccountId**
+- 改 `KycGovernancePort` 为 `KycGovernancePort<AccountId>`
+- 改 `ProposalType` 的两个 variant 字段类型为 `T::AccountId`
+- 最干净但涉及 ProposalType 泛型变化，影响范围较大
+
+**方案 C (推荐): Governance 端存 AccountId，Port 传 AccountId 编码**
+- `KycGovernancePort` 接受 `&[u8]` (AccountId encoded bytes)
+- `ProposalType` 中改为 `BoundedVec<u8, ConstU32<64>>`
+- KYC 端实现真正的解码 + 授权/取消授权逻辑
+- 好处：不需要给 KycGovernancePort 加泛型，ProposalType 也不需要改泛型
+
+**改动文件清单 (方案 C):**
+
+1. **`common/src/traits/governance_ports.rs`**
+   - `KycGovernancePort` 两个 provider 方法参数 `provider_id: u64` → `provider_account: &[u8]`
+   - `()` 空实现同步
+
+2. **`governance/src/lib.rs`**
+   - `ProposalType` enum:
+     - `KycProviderAuthorize { provider_id: u64 }` → `KycProviderAuthorize { provider_account: BoundedVec<u8, ConstU32<64>> }`
+     - `KycProviderDeauthorize { provider_id: u64 }` → `KycProviderDeauthorize { provider_account: BoundedVec<u8, ConstU32<64>> }`
+   - `execute_proposal` 调用处同步
+   - `domain()` 方法如果有 match arm 也要同步
+
+3. **`kyc/src/lib.rs`**
+   - `governance_authorize_kyc_provider` 实现：解码 AccountId → 调用真实授权逻辑
+   - `governance_deauthorize_kyc_provider` 实现：解码 AccountId → 调用真实取消授权逻辑
+
+4. **`runtime/src/configs/mod.rs`** — 无需改动 (type KycGovernance = EntityKyc 不变)
+
+### Step 3: KYC 端实现真实的 governance authorize/deauthorize
+
+```rust
+fn governance_authorize_kyc_provider(
+    entity_id: u64,
+    provider_account: &[u8],
+) -> Result<(), sp_runtime::DispatchError> {
+    let account = T::AccountId::decode(&mut &provider_account[..])
+        .map_err(|_| sp_runtime::DispatchError::Other("InvalidProviderAccount"))?;
+
+    ensure!(Providers::<T>::contains_key(&account),
+        sp_runtime::DispatchError::Other("ProviderNotFound"));
+    ensure!(!EntityAuthorizedProviders::<T>::contains_key(entity_id, &account),
+        sp_runtime::DispatchError::Other("ProviderAlreadyAuthorized"));
+
+    EntityAuthorizedProviders::<T>::insert(entity_id, &account, ());
+
+    ProviderAuthorizedEntities::<T>::try_mutate(&account, |entities| -> Result<(), sp_runtime::DispatchError> {
+        entities.try_push(entity_id)
+            .map_err(|_| sp_runtime::DispatchError::Other("MaxEntitiesReached"))?;
+        Ok(())
+    })?;
+
+    Self::deposit_event(Event::ProviderAuthorized {
+        entity_id,
+        provider: account,
+    });
+    Ok(())
+}
+
+fn governance_deauthorize_kyc_provider(
+    entity_id: u64,
+    provider_account: &[u8],
+) -> Result<(), sp_runtime::DispatchError> {
+    let account = T::AccountId::decode(&mut &provider_account[..])
+        .map_err(|_| sp_runtime::DispatchError::Other("InvalidProviderAccount"))?;
+
+    ensure!(EntityAuthorizedProviders::<T>::contains_key(entity_id, &account),
+        sp_runtime::DispatchError::Other("ProviderNotAuthorized"));
+
+    EntityAuthorizedProviders::<T>::remove(entity_id, &account);
+
+    ProviderAuthorizedEntities::<T>::mutate(&account, |entities| {
+        entities.retain(|&eid| eid != entity_id);
+    });
+
+    Self::deposit_event(Event::ProviderDeauthorized {
+        entity_id,
+        provider: account,
+    });
+    Ok(())
+}
+```
+
+---
+
+## 实施顺序
+
+1. `common/src/traits/governance_ports.rs` — 改 trait + 空实现
+2. `governance/src/lib.rs` — 改 ProposalType + execute_proposal 调用
+3. `kyc/src/lib.rs` — 改 governance_set_kyc_requirement (merge 语义) + 实现真实 authorize/deauthorize
+4. 编译验证
+5. 如果有 governance 相关测试，同步更新

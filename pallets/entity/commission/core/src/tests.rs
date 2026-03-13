@@ -4281,14 +4281,17 @@ fn f2_member_commission_order_ids_deduplicates() {
         set_entity_referrer(ENTITY_ID, REFERRER);
         setup_config(10000);
 
-        // 同一订单多次佣金不重复
+        // 首次处理成功
         assert_ok!(CommissionCore::process_commission(
             ENTITY_ID, SHOP_ID, 7010, &BUYER, 100_000, 100_000, 10_000,
         ));
-        // 再来一个不同的订单
-        assert_ok!(CommissionCore::process_commission(
-            ENTITY_ID, SHOP_ID, 7010, &BUYER, 100_000, 100_000, 10_000,
-        ));
+        // P0-2 审计修复: 同一订单重复处理应被拒绝
+        assert_noop!(
+            CommissionCore::process_commission(
+                ENTITY_ID, SHOP_ID, 7010, &BUYER, 100_000, 100_000, 10_000,
+            ),
+            Error::<Test>::OrderAlreadyProcessed
+        );
 
         let ids = MemberCommissionOrderIds::<Test>::get(ENTITY_ID, REFERRER);
         // order 7010 应只出现一次
@@ -4359,7 +4362,7 @@ fn f10_archive_order_records_works() {
                 amount: 1000,
                 commission_type: CommissionType::DirectReward,
                 level: 0,
-                status: CommissionStatus::Withdrawn,
+                status: CommissionStatus::Settled,
                 created_at: 1u64,
             });
         });
@@ -5015,7 +5018,7 @@ fn bug1_settle_order_records_transitions_pending_to_withdrawn() {
 
         let records = OrderCommissionRecords::<Test>::get(7001u64);
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].status, CommissionStatus::Withdrawn);
+        assert_eq!(records[0].status, CommissionStatus::Settled);
     });
 }
 
@@ -5053,7 +5056,7 @@ fn bug1_settle_preserves_cancelled_records() {
 
         let records = OrderCommissionRecords::<Test>::get(7002u64);
         assert_eq!(records[0].status, CommissionStatus::Cancelled);
-        assert_eq!(records[1].status, CommissionStatus::Withdrawn);
+        assert_eq!(records[1].status, CommissionStatus::Settled);
     });
 }
 
@@ -5106,7 +5109,7 @@ fn bug1_settle_token_records_works() {
         assert_ok!(CommissionCore::do_settle_order_records(7004));
 
         let records = OrderTokenCommissionRecords::<Test>::get(7004u64);
-        assert_eq!(records[0].status, CommissionStatus::Withdrawn);
+        assert_eq!(records[0].status, CommissionStatus::Settled);
     });
 }
 
@@ -5131,7 +5134,7 @@ fn bug1_trait_settle_order_commission_works() {
         assert_ok!(<CommissionCore as pallet_commission_common::CommissionProvider<u64, u128>>::settle_order_commission(7005));
 
         let records = OrderCommissionRecords::<Test>::get(7005u64);
-        assert_eq!(records[0].status, CommissionStatus::Withdrawn);
+        assert_eq!(records[0].status, CommissionStatus::Settled);
     });
 }
 

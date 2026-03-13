@@ -119,19 +119,29 @@ pub trait EntityTokenProvider<AccountId, Balance: Default> {
     /// 设置代币最大供应量（治理提案执行）
     fn governance_set_max_supply(entity_id: u64, new_max_supply: Balance) -> Result<(), DispatchError> {
         let _ = (entity_id, new_max_supply);
-        Ok(())
+        Err(DispatchError::Other("not implemented"))
     }
 
     /// 设置代币类型（治理提案执行）
     fn governance_set_token_type(entity_id: u64, new_type: TokenType) -> Result<(), DispatchError> {
         let _ = (entity_id, new_type);
-        Ok(())
+        Err(DispatchError::Other("not implemented"))
     }
 
     /// 设置转账限制模式（治理提案执行）
     fn governance_set_transfer_restriction(entity_id: u64, restriction: u8, min_receiver_kyc: u8) -> Result<(), DispatchError> {
         let _ = (entity_id, restriction, min_receiver_kyc);
-        Ok(())
+        Err(DispatchError::Other("not implemented"))
+    }
+
+    /// 退还已扣减的 Token 折扣（订单取消/退款时，将 Token 返还 buyer）
+    fn refund_discount_tokens(
+        entity_id: u64,
+        buyer: &AccountId,
+        tokens: Balance,
+    ) -> Result<(), DispatchError> {
+        let _ = (entity_id, buyer, tokens);
+        Err(DispatchError::Other("not implemented"))
     }
 }
 
@@ -166,6 +176,9 @@ impl<AccountId, Balance: Default> EntityTokenProvider<AccountId, Balance> for Nu
         Default::default()
     }
     fn governance_burn(_: u64, _: Balance) -> Result<(), DispatchError> {
+        Ok(())
+    }
+    fn refund_discount_tokens(_: u64, _: &AccountId, _: Balance) -> Result<(), DispatchError> {
         Ok(())
     }
     fn available_balance(_: u64, _: &AccountId) -> Balance {

@@ -215,7 +215,7 @@ const QUARANTINE_PREFIX: &[u8] = b"ocw_quarantine::";
 // ==================== 端点健康评分系统 ====================
 
 /// 端点健康状态
-#[derive(Debug, Clone, Encode, Decode, Default)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub struct EndpointHealth {
     /// 成功次数
     pub success_count: u32,
@@ -227,6 +227,19 @@ pub struct EndpointHealth {
     pub score: u32,
     /// 最后更新时间戳
     pub last_updated: u64,
+}
+
+/// D3: 默认分数为 50（中等），而非 0
+impl Default for EndpointHealth {
+    fn default() -> Self {
+        Self {
+            success_count: 0,
+            failure_count: 0,
+            avg_response_ms: 0,
+            score: 50,
+            last_updated: 0,
+        }
+    }
 }
 
 impl EndpointHealth {
@@ -1462,6 +1475,7 @@ fn fetch_url_with_fallback(url: &str) -> Result<(Vec<u8>, String), VerificationE
 fn fetch_url_with_consensus(
     url: &str,
     expected_from: &str,
+    expected_to: &str,
     usdt_contract: &str,
     verifier_config: &VerifierConfig,
 ) -> Result<(Vec<u8>, String, ConsensusDetail), VerificationError> {
@@ -1484,16 +1498,27 @@ fn fetch_url_with_consensus(
     }
 
     // 将原始响应转换为 EndpointResponse（含标准化转账列表）
+    // C1: 坏响应返回 Err，跳过不参与共识
     let mut endpoint_responses: Vec<EndpointResponse> = Vec::new();
     for (endpoint, body, response_ms) in all_responses {
-        let transfers = extract_normalized_transfers(&body, expected_from, usdt_contract)
-            .unwrap_or_default();
-        endpoint_responses.push(EndpointResponse {
-            endpoint,
-            transfers,
-            response_ms,
-            raw_body: body,
-        });
+        match extract_normalized_transfers(&body, expected_from, expected_to, usdt_contract) {
+            Ok(transfers) => {
+                endpoint_responses.push(EndpointResponse {
+                    endpoint,
+                    transfers,
+                    response_ms,
+                    raw_body: body,
+                });
+            }
+            Err(e) => {
+                log::warn!(target: "trc20-verifier",
+                    "C1: Skipping bad response from {}: {}", endpoint, e);
+                // 记录失败，但不加入共识
+                let mut health = get_endpoint_health(&endpoint);
+                health.record_failure();
+                save_endpoint_health(&endpoint, &health);
+            }
+        }
     }
 
     let min_responses = verifier_config.min_consensus_responses as usize;
@@ -1978,6 +2003,8 @@ pub struct NormalizedTransfer {
     pub tx_hash: Vec<u8>,
     /// 发送方地址
     pub from: String,
+    /// 接收方地址 (A1)
+    pub to: String,
     /// 转账金额（USDT 精度 10^6）
     pub amount: u64,
     /// 区块时间戳（毫秒）
@@ -2041,16 +2068,18 @@ pub enum ConsensusResult {
 
 /// H3-C: 从 TronGrid 原始响应中提取标准化转账列表（用于共识比对）
 ///
-/// 轻量解析器 — 仅提取共识比对所需的字段（tx_hash, from, amount, block_timestamp, contract_address），
+/// 轻量解析器 — 仅提取共识比对所需的字段（tx_hash, from, to, amount, block_timestamp, contract_address），
 /// 不做确认数检查、金额状态计算等业务逻辑。
 ///
 /// `expected_from`: 过滤发送方地址（仅匹配此地址的转账参与共识比对）
+/// `expected_to`: A1 — 过滤接收方地址（仅匹配此地址的转账参与共识比对，空字符串跳过）
 /// `usdt_contract`: USDT 合约地址（仅匹配此合约的转账）
 ///
 /// 返回按 tx_hash 排序的 NormalizedTransfer 列表，使比对结果确定性。
 pub fn extract_normalized_transfers(
     response: &[u8],
     expected_from: &str,
+    expected_to: &str,
     usdt_contract: &str,
 ) -> Result<Vec<NormalizedTransfer>, VerificationError> {
     let response_str = core::str::from_utf8(response)
@@ -2061,18 +2090,21 @@ pub fn extract_normalized_transfers(
 
     let root_obj = match json_value.as_object() {
         Some(obj) => obj,
-        None => return Ok(Vec::new()),
+        // C1: 坏响应不参与共识 — 返回 Err 而非空 Vec
+        None => return Err(VerificationError::InvalidJson),
     };
 
     // 检查 API success 标志
     match json_obj_get(root_obj, "success") {
         Some(JsonValue::Boolean(true)) => {},
-        _ => return Ok(Vec::new()),
+        // C1: success != true 的响应不参与共识
+        _ => return Err(VerificationError::InvalidJson),
     }
 
     let data_array = match json_obj_get(root_obj, "data") {
         Some(JsonValue::Array(arr)) => arr,
-        _ => return Ok(Vec::new()),
+        // C1: 缺少 data 数组的响应不参与共识
+        _ => return Err(VerificationError::InvalidJson),
     };
 
     let mut transfers: Vec<NormalizedTransfer> = Vec::new();
@@ -2088,6 +2120,12 @@ pub fn extract_normalized_transfers(
             Some(addr) if addr == expected_from => addr,
             _ => continue,
         };
+
+        // A1: 客户端校验 to 地址（防御恶意端点绕过 only_to=true）
+        let to_addr = json_obj_get_str(entry_obj, "to").unwrap_or_default();
+        if !expected_to.is_empty() && to_addr != expected_to {
+            continue;
+        }
 
         // 精确匹配合约地址
         let contract_addr = json_obj_get(entry_obj, "token_info")
@@ -2118,6 +2156,7 @@ pub fn extract_normalized_transfers(
         transfers.push(NormalizedTransfer {
             tx_hash,
             from: from_addr,
+            to: to_addr,
             amount,
             block_timestamp,
             contract_address: contract_addr,
@@ -2152,6 +2191,9 @@ fn transfers_agree(a: &[NormalizedTransfer], b: &[NormalizedTransfer], tolerance
             return false;
         }
         if ta.from != tb.from {
+            return false;
+        }
+        if ta.to != tb.to {
             return false;
         }
         if ta.contract_address != tb.contract_address {
@@ -2358,7 +2400,7 @@ pub fn verify_trc20_by_transfer(
 
             // H3-C: 根据 consensus_enabled 选择 fetch 模式
             let (response, endpoint_used) = if use_consensus {
-                let (body, ep, detail) = fetch_url_with_consensus(&url, from_str, &contract, &verifier_config)?;
+                let (body, ep, detail) = fetch_url_with_consensus(&url, from_str, to_str, &contract, &verifier_config)?;
                 last_consensus_detail = Some(detail);
                 (body, ep)
             } else {
@@ -2366,10 +2408,27 @@ pub fn verify_trc20_by_transfer(
             };
             last_endpoint_used = endpoint_used;
             let (page_result, next_fp) = parse_trc20_transfer_list_paged(
-                &response, from_str, expected_amount, now_ms, &contract, min_conf, tolerance_bps,
+                &response, from_str, to_str, expected_amount, now_ms, &contract, min_conf, tolerance_bps, min_timestamp,
             )?;
 
             merge_transfer_results(&mut combined, &page_result, expected_amount, tolerance_bps);
+
+            // D1: 循环内过滤已用 tx_hash，防止误判 Exact 后提前 break
+            combined.matched_transfers.retain(|t| !is_tx_hash_used(&t.tx_hash));
+            if combined.matched_transfers.is_empty() {
+                combined.found = false;
+                combined.actual_amount = None;
+                combined.amount_status = AmountStatus::Unknown;
+            } else {
+                let filtered_total: u64 = combined.matched_transfers.iter().map(|t| t.amount).sum();
+                combined.actual_amount = Some(filtered_total);
+                combined.amount_status = calculate_amount_status(expected_amount, filtered_total, tolerance_bps);
+                if let Some(max_t) = combined.matched_transfers.iter().max_by_key(|t| t.amount) {
+                    combined.tx_hash = Some(max_t.tx_hash.clone());
+                    combined.block_timestamp = Some(max_t.block_timestamp);
+                    combined.estimated_confirmations = max_t.estimated_confirmations;
+                }
+            }
 
             page += 1;
 
@@ -2502,7 +2561,10 @@ fn merge_transfer_results(combined: &mut TransferSearchResult, page: &TransferSe
         }
     }
 
-    if !combined.found {
+    if combined.found {
+        // D2: 后续页匹配后清除早期页的错误信息
+        combined.error = None;
+    } else {
         combined.error = page.error.clone();
         combined.amount_status = page.amount_status.clone();
     }
@@ -2520,23 +2582,27 @@ pub fn parse_trc20_transfer_list(
     let min_conf = effective_min_confirmations(&config);
     let tolerance_bps = config.amount_tolerance_bps;
     let (result, _) = parse_trc20_transfer_list_paged(
-        response, expected_from, expected_amount, now_ms, &contract, min_conf, tolerance_bps,
+        response, expected_from, "", expected_amount, now_ms, &contract, min_conf, tolerance_bps, 0,
     )?;
     Ok(result)
 }
 
 /// 解析 TronGrid TRC20 转账列表响应（带分页支持）
 /// NEW-3: 接受 min_confirmations + tolerance_bps 避免内部重复读取配置
+/// A1: expected_to 客户端校验 to 地址（防御恶意端点绕过 only_to=true）
+/// A2: min_timestamp 客户端校验 block_timestamp 下界
 ///
 /// 返回: (TransferSearchResult, Option<next_fingerprint>)
 fn parse_trc20_transfer_list_paged(
     response: &[u8],
     expected_from: &str,
+    expected_to: &str,
     expected_amount: u64,
     now_ms: u64,
     usdt_contract: &str,
     min_confirmations: u32,
     tolerance_bps: u32,
+    min_timestamp: u64,
 ) -> Result<(TransferSearchResult, Option<String>), VerificationError> {
     let response_str = core::str::from_utf8(response)
         .map_err(|_| VerificationError::InvalidUtf8)?;
@@ -2604,44 +2670,64 @@ fn parse_trc20_transfer_list_paged(
             continue;
         }
 
+        // A1: 客户端校验 to 地址（防御恶意端点绕过 only_to=true）
+        if !expected_to.is_empty() {
+            let to_addr = json_obj_get_str(entry_obj, "to");
+            if to_addr.as_deref() != Some(expected_to) {
+                continue;
+            }
+        }
+
+        // A3: 缺失 tx_hash 的转账不计入总额
+        let tx_hash_str = json_obj_get_str(entry_obj, "transaction_id");
+        if tx_hash_str.as_ref().map_or(true, |s| s.is_empty()) {
+            continue;
+        }
+
+        // A4: block_timestamp 必填
+        let block_ts = match json_obj_get_u64(entry_obj, "block_timestamp") {
+            Some(ts) => ts,
+            None => continue,
+        };
+        // A2: 客户端校验 block_timestamp >= min_timestamp
+        if min_timestamp > 0 && block_ts < min_timestamp {
+            continue;
+        }
+
         // 确认数近似检查 (now_ms=0 跳过)
         let mut est_conf: Option<u32> = None;
         if now_ms > 0 {
-            if let Some(ts) = json_obj_get_u64(entry_obj, "block_timestamp") {
-                let age_ms = now_ms.saturating_sub(ts);
-                let min_age_ms = (min_conf as u64).saturating_mul(3000).saturating_mul(2);
-                if ts > 0 && age_ms < min_age_ms {
-                    log::warn!(target: "trc20-verifier",
-                        "Skipping too-recent transfer (ts={}, age={}ms < {}ms)",
-                        ts, age_ms, min_age_ms);
-                    continue;
-                }
-                // L4: 估计确认数 (TRON 约 3s/block)
-                // M2-R2: 使用 .min() 防止极端 age_ms 值截断 u32
-                est_conf = Some((age_ms / 3000).min(u32::MAX as u64) as u32);
+            let age_ms = now_ms.saturating_sub(block_ts);
+            let min_age_ms = (min_conf as u64).saturating_mul(3000).saturating_mul(2);
+            if block_ts > 0 && age_ms < min_age_ms {
+                log::warn!(target: "trc20-verifier",
+                    "Skipping too-recent transfer (ts={}, age={}ms < {}ms)",
+                    block_ts, age_ms, min_age_ms);
+                continue;
             }
+            // L4: 估计确认数 (TRON 约 3s/block)
+            // M2-R2: 使用 .min() 防止极端 age_ms 值截断 u32
+            est_conf = Some((age_ms / 3000).min(u32::MAX as u64) as u32);
         }
 
         if let Some(amount) = json_obj_get_u64(entry_obj, "value") {
             if amount > 0 {
                 total_matched_amount = total_matched_amount.saturating_add(amount);
 
-                let tx_hash_bytes = json_obj_get_str(entry_obj, "transaction_id")
-                    .map(|s| s.into_bytes());
-                let ts = json_obj_get_u64(entry_obj, "block_timestamp");
+                let tx_hash_bytes = tx_hash_str.map(|s| s.into_bytes());
 
                 // M6+NEW-4: 记录每笔匹配转账明细 (含确认数估计)
                 result.matched_transfers.push(MatchedTransfer {
                     tx_hash: tx_hash_bytes.clone().unwrap_or_default(),
                     amount,
-                    block_timestamp: ts.unwrap_or(0),
+                    block_timestamp: block_ts,
                     estimated_confirmations: est_conf,
                 });
 
                 if best_tx_hash.is_none() || amount > max_single_amount {
                     max_single_amount = amount;
                     best_tx_hash = tx_hash_bytes;
-                    best_timestamp = ts;
+                    best_timestamp = Some(block_ts);
                     result.estimated_confirmations = est_conf;
                 }
 
@@ -4539,6 +4625,7 @@ mod tests {
         let t1 = NormalizedTransfer {
             tx_hash: b"aaa".to_vec(),
             from: String::from("T1"),
+            to: String::from("T2"),
             amount: 100,
             block_timestamp: 1000,
             contract_address: String::from("C1"),
@@ -4546,6 +4633,7 @@ mod tests {
         let t2 = NormalizedTransfer {
             tx_hash: b"bbb".to_vec(),
             from: String::from("T1"),
+            to: String::from("T2"),
             amount: 200,
             block_timestamp: 2000,
             contract_address: String::from("C1"),
@@ -4553,6 +4641,7 @@ mod tests {
         let t3 = NormalizedTransfer {
             tx_hash: b"aaa".to_vec(),
             from: String::from("T1"),
+            to: String::from("T2"),
             amount: 100,
             block_timestamp: 1000,
             contract_address: String::from("C1"),
@@ -4568,15 +4657,15 @@ mod tests {
     fn h3c_normalized_transfer_sort_deterministic() {
         let mut transfers = vec![
             NormalizedTransfer {
-                tx_hash: b"ccc".to_vec(), from: String::from("T1"),
+                tx_hash: b"ccc".to_vec(), from: String::from("T1"), to: String::from("T2"),
                 amount: 300, block_timestamp: 3000, contract_address: String::from("C1"),
             },
             NormalizedTransfer {
-                tx_hash: b"aaa".to_vec(), from: String::from("T1"),
+                tx_hash: b"aaa".to_vec(), from: String::from("T1"), to: String::from("T2"),
                 amount: 100, block_timestamp: 1000, contract_address: String::from("C1"),
             },
             NormalizedTransfer {
-                tx_hash: b"bbb".to_vec(), from: String::from("T1"),
+                tx_hash: b"bbb".to_vec(), from: String::from("T1"), to: String::from("T2"),
                 amount: 200, block_timestamp: 2000, contract_address: String::from("C1"),
             },
         ];
@@ -4589,7 +4678,7 @@ mod tests {
     #[test]
     fn h3c_consensus_result_agreed_construction() {
         let transfers = vec![NormalizedTransfer {
-            tx_hash: b"tx1".to_vec(), from: String::from("T1"),
+            tx_hash: b"tx1".to_vec(), from: String::from("T1"), to: String::from("T2"),
             amount: 1_000_000, block_timestamp: 1700000000000,
             contract_address: String::from("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
         }];
@@ -4821,7 +4910,7 @@ mod tests {
             ("tx_abc", "TSender1", 10_000_000, 1700000000000, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
             ("tx_def", "TSender1", 5_000_000, 1700000001000, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
         ]);
-        let transfers = extract_normalized_transfers(&response, "TSender1", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
+        let transfers = extract_normalized_transfers(&response, "TSender1", "", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
         assert_eq!(transfers.len(), 2);
         // 已按 tx_hash 排序
         assert_eq!(transfers[0].tx_hash, b"tx_abc");
@@ -4836,7 +4925,7 @@ mod tests {
             ("tx_1", "TSender1", 10_000_000, 1700000000000, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
             ("tx_2", "TOtherSender", 5_000_000, 1700000001000, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
         ]);
-        let transfers = extract_normalized_transfers(&response, "TSender1", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
+        let transfers = extract_normalized_transfers(&response, "TSender1", "", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
         assert_eq!(transfers.len(), 1);
         assert_eq!(transfers[0].tx_hash, b"tx_1");
     }
@@ -4847,14 +4936,14 @@ mod tests {
             ("tx_1", "TSender1", 10_000_000, 1700000000000, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
             ("tx_2", "TSender1", 5_000_000, 1700000001000, "TFakeContract12345678901234567890"),
         ]);
-        let transfers = extract_normalized_transfers(&response, "TSender1", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
+        let transfers = extract_normalized_transfers(&response, "TSender1", "", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
         assert_eq!(transfers.len(), 1);
     }
 
     #[test]
     fn h3c_extract_normalized_transfers_empty_response() {
         let response = br#"{"success":true,"data":[],"meta":{}}"#;
-        let transfers = extract_normalized_transfers(response, "TSender1", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
+        let transfers = extract_normalized_transfers(response, "TSender1", "", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
         assert!(transfers.is_empty());
     }
 
@@ -4862,7 +4951,7 @@ mod tests {
     fn h3c_extract_normalized_transfers_invalid_json() {
         let response = b"not json";
         assert!(matches!(
-            extract_normalized_transfers(response, "TSender1", "C"),
+            extract_normalized_transfers(response, "TSender1", "", "C"),
             Err(VerificationError::InvalidJson)
         ));
     }
@@ -4874,7 +4963,7 @@ mod tests {
             ("tx_aaa", "TSender1", 2, 2000, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
             ("tx_mmm", "TSender1", 3, 3000, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
         ]);
-        let transfers = extract_normalized_transfers(&response, "TSender1", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
+        let transfers = extract_normalized_transfers(&response, "TSender1", "", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
         assert_eq!(transfers[0].tx_hash, b"tx_aaa");
         assert_eq!(transfers[1].tx_hash, b"tx_mmm");
         assert_eq!(transfers[2].tx_hash, b"tx_zzz");
@@ -4886,6 +4975,7 @@ mod tests {
         NormalizedTransfer {
             tx_hash: tx_hash.as_bytes().to_vec(),
             from: String::from("TSender1"),
+            to: String::from("TReceiver1"),
             amount,
             block_timestamp: ts,
             contract_address: String::from("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
@@ -5325,5 +5415,219 @@ mod tests {
             assert_eq!(loaded.consensus_failure_count, 2);
             assert_eq!(loaded.degraded_verification_count, 5);
         });
+    }
+
+    // ==================== P0 修复: 阶段 1 测试 (A1-A4) ====================
+
+    #[test]
+    fn test_a1_to_mismatch_skipped() {
+        with_offchain_ext(|| {
+            // to 地址是 "TSellerYYY" 但 expected_to 是 "TDifferentSeller"
+            let response = br#"{"data":[{"transaction_id":"abc123","from":"TBuyerXXX","to":"TSellerYYY","value":"10000000","block_timestamp":1700000000000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
+            let config = get_verifier_config();
+            let contract = effective_usdt_contract(&config);
+            let min_conf = effective_min_confirmations(&config);
+            let (result, _) = parse_trc20_transfer_list_paged(
+                response, "TBuyerXXX", "TDifferentSeller", 10_000_000, 0, &contract, min_conf, config.amount_tolerance_bps, 0,
+            ).unwrap();
+            assert!(!result.found);
+            assert_eq!(result.amount_status, AmountStatus::Invalid);
+        });
+    }
+
+    #[test]
+    fn test_a1_to_match_accepted() {
+        with_offchain_ext(|| {
+            let response = br#"{"data":[{"transaction_id":"abc123","from":"TBuyerXXX","to":"TSellerYYY","value":"10000000","block_timestamp":1700000000000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
+            let config = get_verifier_config();
+            let contract = effective_usdt_contract(&config);
+            let min_conf = effective_min_confirmations(&config);
+            let (result, _) = parse_trc20_transfer_list_paged(
+                response, "TBuyerXXX", "TSellerYYY", 10_000_000, 0, &contract, min_conf, config.amount_tolerance_bps, 0,
+            ).unwrap();
+            assert!(result.found);
+            assert_eq!(result.actual_amount, Some(10_000_000));
+        });
+    }
+
+    #[test]
+    fn test_a1_empty_expected_to_skips_check() {
+        with_offchain_ext(|| {
+            // expected_to = "" means no to-address filter
+            let response = br#"{"data":[{"transaction_id":"abc123","from":"TBuyerXXX","to":"TAnyAddress","value":"10000000","block_timestamp":1700000000000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
+            let config = get_verifier_config();
+            let contract = effective_usdt_contract(&config);
+            let min_conf = effective_min_confirmations(&config);
+            let (result, _) = parse_trc20_transfer_list_paged(
+                response, "TBuyerXXX", "", 10_000_000, 0, &contract, min_conf, config.amount_tolerance_bps, 0,
+            ).unwrap();
+            assert!(result.found);
+        });
+    }
+
+    #[test]
+    fn test_a2_old_timestamp_skipped() {
+        with_offchain_ext(|| {
+            // block_timestamp = 1000, min_timestamp = 2000 → skipped
+            let response = br#"{"data":[{"transaction_id":"abc123","from":"TBuyerXXX","to":"TSeller","value":"10000000","block_timestamp":1000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
+            let config = get_verifier_config();
+            let contract = effective_usdt_contract(&config);
+            let min_conf = effective_min_confirmations(&config);
+            let (result, _) = parse_trc20_transfer_list_paged(
+                response, "TBuyerXXX", "", 10_000_000, 0, &contract, min_conf, config.amount_tolerance_bps, 2000,
+            ).unwrap();
+            assert!(!result.found);
+        });
+    }
+
+    #[test]
+    fn test_a2_recent_timestamp_accepted() {
+        with_offchain_ext(|| {
+            // block_timestamp = 3000, min_timestamp = 2000 → accepted
+            let response = br#"{"data":[{"transaction_id":"abc123","from":"TBuyerXXX","to":"TSeller","value":"10000000","block_timestamp":3000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
+            let config = get_verifier_config();
+            let contract = effective_usdt_contract(&config);
+            let min_conf = effective_min_confirmations(&config);
+            let (result, _) = parse_trc20_transfer_list_paged(
+                response, "TBuyerXXX", "", 10_000_000, 0, &contract, min_conf, config.amount_tolerance_bps, 2000,
+            ).unwrap();
+            assert!(result.found);
+        });
+    }
+
+    #[test]
+    fn test_a3_missing_txhash_skipped() {
+        with_offchain_ext(|| {
+            // No transaction_id field → skipped
+            let response = br#"{"data":[{"from":"TBuyerXXX","to":"TSeller","value":"10000000","block_timestamp":1700000000000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
+            let config = get_verifier_config();
+            let contract = effective_usdt_contract(&config);
+            let min_conf = effective_min_confirmations(&config);
+            let (result, _) = parse_trc20_transfer_list_paged(
+                response, "TBuyerXXX", "", 10_000_000, 0, &contract, min_conf, config.amount_tolerance_bps, 0,
+            ).unwrap();
+            assert!(!result.found);
+        });
+    }
+
+    #[test]
+    fn test_a3_empty_txhash_skipped() {
+        with_offchain_ext(|| {
+            // Empty transaction_id → skipped
+            let response = br#"{"data":[{"transaction_id":"","from":"TBuyerXXX","to":"TSeller","value":"10000000","block_timestamp":1700000000000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
+            let config = get_verifier_config();
+            let contract = effective_usdt_contract(&config);
+            let min_conf = effective_min_confirmations(&config);
+            let (result, _) = parse_trc20_transfer_list_paged(
+                response, "TBuyerXXX", "", 10_000_000, 0, &contract, min_conf, config.amount_tolerance_bps, 0,
+            ).unwrap();
+            assert!(!result.found);
+        });
+    }
+
+    #[test]
+    fn test_a4_missing_timestamp_skipped() {
+        with_offchain_ext(|| {
+            // No block_timestamp field → skipped
+            let response = br#"{"data":[{"transaction_id":"abc123","from":"TBuyerXXX","to":"TSeller","value":"10000000","token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
+            let config = get_verifier_config();
+            let contract = effective_usdt_contract(&config);
+            let min_conf = effective_min_confirmations(&config);
+            let (result, _) = parse_trc20_transfer_list_paged(
+                response, "TBuyerXXX", "", 10_000_000, 0, &contract, min_conf, config.amount_tolerance_bps, 0,
+            ).unwrap();
+            assert!(!result.found);
+        });
+    }
+
+    // ==================== P0 修复: 阶段 1 extract_normalized_transfers A1 测试 ====================
+
+    #[test]
+    fn test_a1_extract_normalized_filters_wrong_to() {
+        let response = make_trongrid_response(&[
+            ("tx_1", "TSender1", 10_000_000, 1700000000000, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
+        ]);
+        // make_trongrid_response generates to="TRecvAddr", filter expects "TWrongRecv"
+        let transfers = extract_normalized_transfers(&response, "TSender1", "TWrongRecv", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
+        assert!(transfers.is_empty());
+    }
+
+    #[test]
+    fn test_a1_extract_normalized_to_field_populated() {
+        let response = make_trongrid_response(&[
+            ("tx_1", "TSender1", 10_000_000, 1700000000000, "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"),
+        ]);
+        let transfers = extract_normalized_transfers(&response, "TSender1", "TRecvAddr", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
+        assert_eq!(transfers.len(), 1);
+        assert_eq!(transfers[0].to, "TRecvAddr");
+    }
+
+    // ==================== P0 修复: 阶段 2 测试 (C1, D1-D3) ====================
+
+    #[test]
+    fn test_c1_bad_response_returns_err_not_object() {
+        // Not a JSON object → Err
+        let response = br#"[1,2,3]"#;
+        assert!(matches!(
+            extract_normalized_transfers(response, "TSender1", "", "C1"),
+            Err(VerificationError::InvalidJson)
+        ));
+    }
+
+    #[test]
+    fn test_c1_bad_response_returns_err_success_false() {
+        // success:false → Err
+        let response = br#"{"success":false,"error":"rate limit"}"#;
+        assert!(matches!(
+            extract_normalized_transfers(response, "TSender1", "", "C1"),
+            Err(VerificationError::InvalidJson)
+        ));
+    }
+
+    #[test]
+    fn test_c1_bad_response_returns_err_no_data() {
+        // No data array → Err
+        let response = br#"{"success":true}"#;
+        assert!(matches!(
+            extract_normalized_transfers(response, "TSender1", "", "C1"),
+            Err(VerificationError::InvalidJson)
+        ));
+    }
+
+    #[test]
+    fn test_d2_error_cleared_on_match() {
+        with_offchain_ext(|| {
+            // Page 1: no match → error set
+            let response1 = br#"{"data":[{"transaction_id":"tx1","from":"TWrong","to":"TSeller","value":"10000000","block_timestamp":1700000000000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
+            let config = get_verifier_config();
+            let contract = effective_usdt_contract(&config);
+            let min_conf = effective_min_confirmations(&config);
+            let (page1, _) = parse_trc20_transfer_list_paged(
+                response1, "TBuyer", "", 10_000_000, 0, &contract, min_conf, config.amount_tolerance_bps, 0,
+            ).unwrap();
+            assert!(page1.error.is_some());
+
+            // Page 2: has match
+            let response2 = br#"{"data":[{"transaction_id":"tx2","from":"TBuyer","to":"TSeller","value":"10000000","block_timestamp":1700000000000,"token_info":{"address":"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}}],"success":true}"#;
+            let (page2, _) = parse_trc20_transfer_list_paged(
+                response2, "TBuyer", "", 10_000_000, 0, &contract, min_conf, config.amount_tolerance_bps, 0,
+            ).unwrap();
+
+            let mut combined = TransferSearchResult::default();
+            merge_transfer_results(&mut combined, &page1, 10_000_000, config.amount_tolerance_bps);
+            assert!(combined.error.is_some()); // error from page 1
+
+            merge_transfer_results(&mut combined, &page2, 10_000_000, config.amount_tolerance_bps);
+            assert!(combined.found);
+            assert!(combined.error.is_none()); // D2: error cleared after match
+        });
+    }
+
+    #[test]
+    fn test_d3_default_health_score_is_50() {
+        let health = EndpointHealth::default();
+        assert_eq!(health.score, 50);
+        assert_eq!(health.success_count, 0);
+        assert_eq!(health.failure_count, 0);
     }
 }

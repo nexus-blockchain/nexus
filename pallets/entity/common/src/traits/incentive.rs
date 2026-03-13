@@ -420,6 +420,20 @@ pub trait LoyaltyWritePort<AccountId, Balance>: LoyaltyReadPort<AccountId, Balan
         who: &AccountId,
         amount: Balance,
     ) -> Result<(), DispatchError>;
+
+    /// 回滚购物余额（订单取消/退款时，NEX 从 buyer → entity，记账余额恢复）
+    fn rollback_shopping_balance(
+        entity_id: u64,
+        who: &AccountId,
+        amount: Balance,
+    ) -> Result<(), DispatchError>;
+
+    /// 回滚 Token 折扣（订单取消/退款时，将已扣减的 Token 退还 buyer）
+    fn rollback_token_discount(
+        entity_id: u64,
+        who: &AccountId,
+        tokens: Balance,
+    ) -> Result<(), DispatchError>;
 }
 
 // ============================================================================
@@ -481,6 +495,12 @@ impl<AccountId, Balance: Default> LoyaltyWritePort<AccountId, Balance> for NullL
         Ok(Default::default())
     }
     fn credit_shopping_balance(_: u64, _: &AccountId, _: Balance) -> Result<(), DispatchError> {
+        Ok(())
+    }
+    fn rollback_shopping_balance(_: u64, _: &AccountId, _: Balance) -> Result<(), DispatchError> {
+        Ok(())
+    }
+    fn rollback_token_discount(_: u64, _: &AccountId, _: Balance) -> Result<(), DispatchError> {
         Ok(())
     }
 }

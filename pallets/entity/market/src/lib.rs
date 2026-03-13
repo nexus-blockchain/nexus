@@ -988,6 +988,8 @@ pub mod pallet {
         InitialPriceAlreadySet,
         /// 审计修复 L1-R8: 市场未暂停（resume_market 对称性检查）
         MarketNotPaused,
+        /// D-1: 实体处于披露处罚状态（Restricted 及以上），交易受限
+        DisclosurePenaltyRestricted,
     }
 
     // ==================== Extrinsics ====================
@@ -1020,6 +1022,11 @@ pub mod pallet {
             ensure!(
                 T::DisclosureProvider::can_insider_trade(entity_id, &who),
                 Error::<T>::InsiderTradingRestricted
+            );
+            // D-1: 披露处罚限制
+            ensure!(
+                !T::DisclosureProvider::is_penalty_active(entity_id),
+                Error::<T>::DisclosurePenaltyRestricted
             );
 
             // 验证参数
@@ -1101,6 +1108,11 @@ pub mod pallet {
             ensure!(
                 T::DisclosureProvider::can_insider_trade(entity_id, &who),
                 Error::<T>::InsiderTradingRestricted
+            );
+            // D-1: 披露处罚限制
+            ensure!(
+                !T::DisclosureProvider::is_penalty_active(entity_id),
+                Error::<T>::DisclosurePenaltyRestricted
             );
 
             // 验证参数
@@ -1209,6 +1221,11 @@ pub mod pallet {
             ensure!(
                 T::DisclosureProvider::can_insider_trade(order.entity_id, &who),
                 Error::<T>::InsiderTradingRestricted
+            );
+            // D-1: 披露处罚限制
+            ensure!(
+                !T::DisclosureProvider::is_penalty_active(order.entity_id),
+                Error::<T>::DisclosurePenaltyRestricted
             );
 
             // 计算可成交数量
@@ -1609,6 +1626,11 @@ pub mod pallet {
                 T::DisclosureProvider::can_insider_trade(entity_id, &who),
                 Error::<T>::InsiderTradingRestricted
             );
+            // D-1: 披露处罚限制
+            ensure!(
+                !T::DisclosureProvider::is_penalty_active(entity_id),
+                Error::<T>::DisclosurePenaltyRestricted
+            );
 
             // 验证参数
             ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);
@@ -1674,6 +1696,11 @@ pub mod pallet {
             ensure!(
                 T::DisclosureProvider::can_insider_trade(entity_id, &who),
                 Error::<T>::InsiderTradingRestricted
+            );
+            // D-1: 披露处罚限制
+            ensure!(
+                !T::DisclosureProvider::is_penalty_active(entity_id),
+                Error::<T>::DisclosurePenaltyRestricted
             );
 
             // 验证参数
@@ -1998,6 +2025,11 @@ pub mod pallet {
                 T::DisclosureProvider::can_insider_trade(order.entity_id, &who),
                 Error::<T>::InsiderTradingRestricted
             );
+            // D-1: 披露处罚限制
+            ensure!(
+                !T::DisclosureProvider::is_penalty_active(order.entity_id),
+                Error::<T>::DisclosurePenaltyRestricted
+            );
 
             // 审计修复 M2-R6: 修改后数量不得低于最小订单量
             let config = MarketConfigs::<T>::get(order.entity_id).unwrap_or_default();
@@ -2244,6 +2276,11 @@ pub mod pallet {
                 T::DisclosureProvider::can_insider_trade(entity_id, &who),
                 Error::<T>::InsiderTradingRestricted
             );
+            // D-1: 披露处罚限制
+            ensure!(
+                !T::DisclosureProvider::is_penalty_active(entity_id),
+                Error::<T>::DisclosurePenaltyRestricted
+            );
             ensure!(!price.is_zero(), Error::<T>::ZeroPrice);
             ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);
             let config = MarketConfigs::<T>::get(entity_id).unwrap_or_default();
@@ -2319,6 +2356,11 @@ pub mod pallet {
             ensure!(
                 T::DisclosureProvider::can_insider_trade(entity_id, &who),
                 Error::<T>::InsiderTradingRestricted
+            );
+            // D-1: 披露处罚限制
+            ensure!(
+                !T::DisclosureProvider::is_penalty_active(entity_id),
+                Error::<T>::DisclosurePenaltyRestricted
             );
             ensure!(!price.is_zero(), Error::<T>::ZeroPrice);
             ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);
@@ -2398,6 +2440,11 @@ pub mod pallet {
             ensure!(
                 T::DisclosureProvider::can_insider_trade(entity_id, &who),
                 Error::<T>::InsiderTradingRestricted
+            );
+            // D-1: 披露处罚限制
+            ensure!(
+                !T::DisclosureProvider::is_penalty_active(entity_id),
+                Error::<T>::DisclosurePenaltyRestricted
             );
             ensure!(!price.is_zero(), Error::<T>::ZeroPrice);
             ensure!(!token_amount.is_zero(), Error::<T>::AmountTooSmall);

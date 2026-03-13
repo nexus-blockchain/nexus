@@ -1359,6 +1359,9 @@ pub mod pallet {
                 },
             };
 
+            // P0-5 审计修复: 跟踪 Token 平台费实际到账状态
+            let mut token_fee_paid = true;
+
             match order.payment_asset {
                 PaymentAsset::Native => {
                     // NEX 支付：从托管释放资金给卖家
@@ -1380,12 +1383,14 @@ pub mod pallet {
                     )?;
 
                     // M1-fix: 平台费转入 entity_account，失败时发事件而非静默吞错
+                    // P0-5 审计修复: 跟踪实际到账状态，传递给 Hook 链
                     if token_platform_fee > 0 {
                         let entity_account = T::TokenFeeConfig::entity_account(entity_id);
                         let fee_token: BalanceOf<T> = token_platform_fee.saturated_into();
                         if T::EntityToken::repatriate_reserved(
                             entity_id, fund_acct, &entity_account, fee_token,
                         ).is_err() {
+                            token_fee_paid = false;
                             Self::deposit_event(Event::OrderOperationFailed {
                                 order_id,
                                 operation: OrderOperation::TokenPlatformFee,
@@ -1433,6 +1438,7 @@ pub mod pallet {
                 token_payment_amount: order.token_payment_amount,
                 token_platform_fee,
                 token_seller_received,
+                token_platform_fee_paid: token_fee_paid,
                 referrer,
                 amount_usdt,
                 product_category: order.product_category,

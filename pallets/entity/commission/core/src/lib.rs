@@ -687,6 +687,24 @@ pub mod pallet {
         ValueQuery,
     >;
 
+    /// P0-2 审计修复: 订单佣金幂等保护（order_id → bool），防止同一订单重复处理
+    #[pallet::storage]
+    pub type OrderCommissionProcessed<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat, u64,
+        bool,
+        ValueQuery,
+    >;
+
+    /// P0-2 审计修复: Token 订单佣金幂等保护
+    #[pallet::storage]
+    pub type OrderTokenCommissionProcessed<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat, u64,
+        bool,
+        ValueQuery,
+    >;
+
     // ========================================================================
     // Events
     // ========================================================================
@@ -872,6 +890,10 @@ pub mod pallet {
         CommissionForceEnabled { entity_id: u64 },
         /// MISSING-3: 最小提现间隔已更新
         MinWithdrawalIntervalUpdated { entity_id: u64, interval: u32 },
+        /// P0-1 审计修复: 治理提案设置佣金率
+        GovernanceCommissionRateSet { entity_id: u64, rate: u16 },
+        /// P0-1 审计修复: 治理提案切换佣金开关
+        GovernanceCommissionToggled { entity_id: u64, enabled: bool },
     }
 
     // ========================================================================
@@ -952,6 +974,10 @@ pub mod pallet {
         OrderRecordsNotFinalized,
         /// MISSING-3: 提现间隔未满足（距上次提现间隔不足 MinWithdrawalInterval）
         WithdrawalIntervalNotMet,
+        /// P0-2 审计修复: 同一订单不可重复处理佣金
+        OrderAlreadyProcessed,
+        /// P1-2 审计修复: 插件返回的 outputs 总额 + new_remaining ≠ old_remaining
+        PluginOutputInvariantViolation,
     }
 
     // ========================================================================
@@ -1112,30 +1138,8 @@ pub mod pallet {
                 ensure!(stats.pending >= total_amount, Error::<T>::InsufficientCommission);
                 ensure!(!total_amount.is_zero(), Error::<T>::ZeroWithdrawalAmount);
 
-                // 如果目标不是自己，校验推荐关系
-                if target != who {
-                    if T::MemberProvider::is_member(entity_id, &target) {
-                        // 已是会员 → 推荐人必须是出资人
-                        let referrer = T::MemberProvider::get_referrer(entity_id, &target);
-                        ensure!(referrer.as_ref() == Some(&who), Error::<T>::NotDirectReferral);
-                    } else {
-                        // 非会员 → 自动注册，推荐人 = 出资人（复购赠与 → qualified=false）
-                        T::MemberProvider::auto_register_qualified(entity_id, &target, Some(who.clone()), false)
-                            .map_err(|_| Error::<T>::AutoRegisterFailed)?;
-                        // H1 修复: 注册后验证 target 是否已成为正式会员
-                        // APPROVAL_REQUIRED 策略下 auto_register 返回 Ok 但 target 仅进入 PendingMembers
-                        ensure!(
-                            T::MemberProvider::is_member(entity_id, &target),
-                            Error::<T>::TargetNotApprovedMember
-                        );
-                    }
-
-                    // H3 修复: 检查 target 是否满足 Entity 的参与要求（如 mandatory KYC）
-                    ensure!(
-                        T::ParticipationGuard::can_participate(entity_id, &target),
-                        Error::<T>::TargetParticipationDenied
-                    );
-                }
+                // P0-8 审计修复: 先做全部校验（cooldown/interval/config），再做可能产生副作用的注册
+                // 原顺序：先 auto_register → 后 cooldown 检查，导致失败提现可能白创建会员
 
                 // H1 审计修复: 提现前检查 WithdrawalConfig 是否启用
                 // 未启用时 calc_withdrawal_split 返回 0% 复购，会绕过 Governance 底线
@@ -1165,6 +1169,31 @@ pub mod pallet {
                         ensure!(now >= last_withdrawn.saturating_add(interval),
                             Error::<T>::WithdrawalIntervalNotMet);
                     }
+                }
+
+                // 校验通过后，如果目标不是自己，校验推荐关系 + 注册
+                if target != who {
+                    if T::MemberProvider::is_member(entity_id, &target) {
+                        // 已是会员 → 推荐人必须是出资人
+                        let referrer = T::MemberProvider::get_referrer(entity_id, &target);
+                        ensure!(referrer.as_ref() == Some(&who), Error::<T>::NotDirectReferral);
+                    } else {
+                        // 非会员 → 自动注册，推荐人 = 出资人（复购赠与 → qualified=false）
+                        T::MemberProvider::auto_register_qualified(entity_id, &target, Some(who.clone()), false)
+                            .map_err(|_| Error::<T>::AutoRegisterFailed)?;
+                        // H1 修复: 注册后验证 target 是否已成为正式会员
+                        // APPROVAL_REQUIRED 策略下 auto_register 返回 Ok 但 target 仅进入 PendingMembers
+                        ensure!(
+                            T::MemberProvider::is_member(entity_id, &target),
+                            Error::<T>::TargetNotApprovedMember
+                        );
+                    }
+
+                    // H3 修复: 检查 target 是否满足 Entity 的参与要求（如 mandatory KYC）
+                    ensure!(
+                        T::ParticipationGuard::can_participate(entity_id, &target),
+                        Error::<T>::TargetParticipationDenied
+                    );
                 }
 
                 // 计算提现/复购/奖励分配
@@ -2017,7 +2046,7 @@ pub mod pallet {
             // 所有 NEX 记录必须已完结
             for record in nex_records.iter() {
                 ensure!(
-                    record.status == CommissionStatus::Withdrawn || record.status == CommissionStatus::Cancelled,
+                    record.status == CommissionStatus::Settled || record.status == CommissionStatus::Cancelled,
                     Error::<T>::OrderRecordsNotFinalized
                 );
             }
@@ -2025,7 +2054,7 @@ pub mod pallet {
             // 所有 Token 记录必须已完结
             for record in token_records.iter() {
                 ensure!(
-                    record.status == CommissionStatus::Withdrawn || record.status == CommissionStatus::Cancelled,
+                    record.status == CommissionStatus::Settled || record.status == CommissionStatus::Cancelled,
                     Error::<T>::OrderRecordsNotFinalized
                 );
             }
@@ -2395,6 +2424,35 @@ impl<T: pallet::Config> CommissionProvider<T::AccountId, pallet::BalanceOf<T>> f
 
     fn settle_order_commission(order_id: u64) -> sp_runtime::DispatchResult {
         pallet::Pallet::<T>::do_settle_order_records(order_id)
+    }
+
+    // P0-1 审计修复: 治理提案真实执行（不再 no-op）
+    fn governance_set_commission_rate(entity_id: u64, rate: u16) -> sp_runtime::DispatchResult {
+        frame_support::ensure!(rate <= 10000, sp_runtime::DispatchError::Other("InvalidRate"));
+        let global_max = pallet::GlobalMaxCommissionRate::<T>::get(entity_id);
+        if global_max > 0 {
+            frame_support::ensure!(rate <= global_max, sp_runtime::DispatchError::Other("ExceedsGlobalMax"));
+        }
+        pallet::CommissionConfigs::<T>::mutate(entity_id, |maybe| {
+            let config = maybe.get_or_insert_with(pallet::CoreCommissionConfig::default);
+            config.max_commission_rate = rate;
+        });
+        pallet::Pallet::<T>::deposit_event(pallet::Event::GovernanceCommissionRateSet { entity_id, rate });
+        Ok(())
+    }
+
+    fn governance_toggle_commission(entity_id: u64, enabled: bool) -> sp_runtime::DispatchResult {
+        pallet::CommissionConfigs::<T>::mutate(entity_id, |maybe| {
+            let config = maybe.get_or_insert_with(pallet::CoreCommissionConfig::default);
+            config.enabled = enabled;
+        });
+        // H4: 同步 PoolRewardDisabledAt 状态
+        if !enabled {
+            let now = <frame_system::Pallet<T>>::block_number();
+            pallet::PoolRewardDisabledAt::<T>::insert(entity_id, now);
+        }
+        pallet::Pallet::<T>::deposit_event(pallet::Event::GovernanceCommissionToggled { entity_id, enabled });
+        Ok(())
     }
 }
 

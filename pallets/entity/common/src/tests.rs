@@ -163,11 +163,11 @@ fn effective_shop_status_is_entity_caused() {
 // ============================================================================
 
 #[test]
-fn member_policy_open_by_default() {
+fn member_policy_default_purchase_and_referral() {
     let policy = MemberRegistrationPolicy::default();
-    assert!(policy.is_open());
-    assert!(!policy.requires_purchase());
-    assert!(!policy.requires_referral());
+    assert!(!policy.is_open());
+    assert!(policy.requires_purchase());
+    assert!(policy.requires_referral());
     assert!(!policy.requires_approval());
 }
 

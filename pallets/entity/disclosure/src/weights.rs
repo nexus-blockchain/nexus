@@ -59,6 +59,9 @@ pub trait WeightInfo {
     fn cleanup_expired_cooldowns(n: u32) -> Weight;
     fn set_disclosure_metadata() -> Weight;
     fn audit_disclosure() -> Weight;
+    fn force_rebase_disclosure_deadline() -> Weight;
+    fn confirm_violation_report() -> Weight;
+    fn reject_violation_report() -> Weight;
 }
 
 /// Weight functions for `pallet_entity_disclosure` based on worst-case DB access analysis.
@@ -396,6 +399,30 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(3))
             .saturating_add(T::DbWeight::get().writes(1))
     }
+
+    // force_rebase_disclosure_deadline: 2 reads (DisclosureConfigs, entity_owner)
+    //   + 1 write (DisclosureConfigs)
+    fn force_rebase_disclosure_deadline() -> Weight {
+        Weight::from_parts(20_000_000, 3_000)
+            .saturating_add(T::DbWeight::get().reads(2))
+            .saturating_add(T::DbWeight::get().writes(1))
+    }
+
+    // confirm_violation_report: 2 reads (ViolationReports, DisclosureConfigs)
+    //   + 2 writes (ViolationReports, DisclosureConfigs)
+    fn confirm_violation_report() -> Weight {
+        Weight::from_parts(25_000_000, 4_000)
+            .saturating_add(T::DbWeight::get().reads(2))
+            .saturating_add(T::DbWeight::get().writes(2))
+    }
+
+    // reject_violation_report: 1 read (ViolationReports)
+    //   + 1 write (ViolationReports)
+    fn reject_violation_report() -> Weight {
+        Weight::from_parts(20_000_000, 3_000)
+            .saturating_add(T::DbWeight::get().reads(1))
+            .saturating_add(T::DbWeight::get().writes(1))
+    }
 }
 
 /// For testing — uses RocksDbWeight defaults
@@ -607,6 +634,21 @@ impl WeightInfo for () {
     fn audit_disclosure() -> Weight {
         Weight::from_parts(25_000_000, 4_000)
             .saturating_add(RocksDbWeight::get().reads(3))
+            .saturating_add(RocksDbWeight::get().writes(1))
+    }
+    fn force_rebase_disclosure_deadline() -> Weight {
+        Weight::from_parts(20_000_000, 3_000)
+            .saturating_add(RocksDbWeight::get().reads(2))
+            .saturating_add(RocksDbWeight::get().writes(1))
+    }
+    fn confirm_violation_report() -> Weight {
+        Weight::from_parts(25_000_000, 4_000)
+            .saturating_add(RocksDbWeight::get().reads(2))
+            .saturating_add(RocksDbWeight::get().writes(2))
+    }
+    fn reject_violation_report() -> Weight {
+        Weight::from_parts(20_000_000, 3_000)
+            .saturating_add(RocksDbWeight::get().reads(1))
             .saturating_add(RocksDbWeight::get().writes(1))
     }
 }
