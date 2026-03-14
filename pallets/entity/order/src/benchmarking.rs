@@ -60,6 +60,9 @@ fn seed_order<T: Config>(
         unit_price: amount,
         total_amount: amount,
         platform_fee: fee,
+        usdt_total: 0,
+        nex_usdt_rate: 0,
+        token_nex_rate: 0,
         product_category: category,
         shipping_cid: Some(bounded_cid.clone()),
         tracking_cid: if shipped_at.is_some() { Some(bounded_cid.clone()) } else { None },
@@ -76,6 +79,7 @@ fn seed_order<T: Config>(
         dispute_deadline: None,
         note_cid: None,
         refund_reason_cid: None,
+        payer: None,
     };
 
     Orders::<T>::insert(order_id, order);
@@ -183,6 +187,8 @@ mod benches {
             None,           // payment_asset
             None,           // note_cid
             None,           // referrer
+            None,           // max_nex_amount
+            None,           // max_token_amount
         );
 
         assert!(Orders::<T>::contains_key(1u64));

@@ -990,6 +990,8 @@ pub mod pallet {
         MarketNotPaused,
         /// D-1: 实体处于披露处罚状态（Restricted 及以上），交易受限
         DisclosurePenaltyRestricted,
+        /// 市场尚未设置价格锚点（需先调用 set_initial_price）
+        InitialPriceNotSet,
     }
 
     // ==================== Extrinsics ====================

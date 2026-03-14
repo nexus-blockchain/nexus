@@ -1012,16 +1012,15 @@ fn null_disclosure_provider_returns_defaults() {
 
 #[test]
 fn null_product_provider_returns_defaults() {
-    assert!(!<NullProductProvider as ProductProvider<u64, u128>>::product_exists(1));
-    assert!(!<NullProductProvider as ProductProvider<u64, u128>>::is_product_on_sale(1));
-    assert_eq!(<NullProductProvider as ProductProvider<u64, u128>>::product_shop_id(1), None);
-    assert_eq!(<NullProductProvider as ProductProvider<u64, u128>>::product_price(1), None);
-    assert_eq!(<NullProductProvider as ProductProvider<u64, u128>>::product_stock(1), None);
-    assert_eq!(<NullProductProvider as ProductProvider<u64, u128>>::product_category(1), None);
+    assert!(!<NullProductProvider as ProductProvider<u64>>::product_exists(1));
+    assert!(!<NullProductProvider as ProductProvider<u64>>::is_product_on_sale(1));
+    assert_eq!(<NullProductProvider as ProductProvider<u64>>::product_shop_id(1), None);
+    assert_eq!(<NullProductProvider as ProductProvider<u64>>::product_stock(1), None);
+    assert_eq!(<NullProductProvider as ProductProvider<u64>>::product_category(1), None);
     // trait default methods
-    assert_eq!(<NullProductProvider as ProductProvider<u64, u128>>::product_status(1), None);
-    assert_eq!(<NullProductProvider as ProductProvider<u64, u128>>::product_owner(1), None);
-    assert!(<NullProductProvider as ProductProvider<u64, u128>>::shop_product_ids(1).is_empty());
+    assert_eq!(<NullProductProvider as ProductProvider<u64>>::product_status(1), None);
+    assert_eq!(<NullProductProvider as ProductProvider<u64>>::product_owner(1), None);
+    assert!(<NullProductProvider as ProductProvider<u64>>::shop_product_ids(1).is_empty());
 }
 
 // ============================================================================

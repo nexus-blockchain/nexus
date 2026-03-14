@@ -1919,6 +1919,86 @@ fn h1_r5_fok_order_respects_price_deviation() {
     });
 }
 
+// ==================== 价格锚点强制检查测试 ====================
+
+/// 无价格锚点时所有交易入口应被拒绝
+#[test]
+fn trading_blocked_without_price_anchor() {
+    ExtBuilder::build().execute_with(|| {
+        // 仅开市场，不设 initial_price
+        assert_ok!(EntityMarket::configure_market(
+            RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
+            true, 1, 1000,
+        ));
+
+        // 限价卖单 → InitialPriceNotSet
+        assert_noop!(
+            EntityMarket::place_sell_order(RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100),
+            Error::<Test>::InitialPriceNotSet
+        );
+
+        // 限价买单 → InitialPriceNotSet
+        assert_noop!(
+            EntityMarket::place_buy_order(RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100),
+            Error::<Test>::InitialPriceNotSet
+        );
+
+        // 市价买单 → InitialPriceNotSet
+        assert_noop!(
+            EntityMarket::market_buy(RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 999999),
+            Error::<Test>::InitialPriceNotSet
+        );
+
+        // 市价卖单 → InitialPriceNotSet
+        assert_noop!(
+            EntityMarket::market_sell(RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 0),
+            Error::<Test>::InitialPriceNotSet
+        );
+
+        // IOC → InitialPriceNotSet
+        assert_noop!(
+            EntityMarket::place_ioc_order(RuntimeOrigin::signed(ALICE), ENTITY_ID, OrderSide::Buy, 1000, 100),
+            Error::<Test>::InitialPriceNotSet
+        );
+
+        // FOK → InitialPriceNotSet
+        assert_noop!(
+            EntityMarket::place_fok_order(RuntimeOrigin::signed(ALICE), ENTITY_ID, OrderSide::Sell, 1000, 100),
+            Error::<Test>::InitialPriceNotSet
+        );
+
+        // PostOnly → InitialPriceNotSet
+        assert_noop!(
+            EntityMarket::place_post_only_order(RuntimeOrigin::signed(ALICE), ENTITY_ID, OrderSide::Sell, 1000, 100),
+            Error::<Test>::InitialPriceNotSet
+        );
+
+        // 设置价格锚点后应能交易
+        assert_ok!(EntityMarket::set_initial_price(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID, 100));
+        assert_ok!(EntityMarket::configure_price_protection(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID, false, 2000, 500, 5000, 100));
+        assert_ok!(EntityMarket::place_sell_order(RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100));
+        assert_ok!(EntityMarket::place_buy_order(RuntimeOrigin::signed(BOB), ENTITY_ID, 500, 100));
+    });
+}
+
+/// 有真实成交后即使无 initial_price 也满足价格锚点（LastTradePrice 优先）
+#[test]
+fn last_trade_price_satisfies_price_anchor() {
+    ExtBuilder::build().execute_with(|| {
+        configure_market_enabled(ENTITY_ID);
+
+        // 创造一笔成交
+        assert_ok!(EntityMarket::place_sell_order(RuntimeOrigin::signed(ALICE), ENTITY_ID, 1000, 100));
+        assert_ok!(EntityMarket::take_order(RuntimeOrigin::signed(BOB), 0, None));
+
+        // 清除 PriceProtection（模拟无 initial_price）
+        PriceProtection::<Test>::remove(ENTITY_ID);
+
+        // 有 LastTradePrice → 仍可交易
+        assert_ok!(EntityMarket::place_sell_order(RuntimeOrigin::signed(ALICE), ENTITY_ID, 500, 100));
+    });
+}
+
 /// M1-R5: batch_cancel_orders 后订单应出现在用户历史中
 #[test]
 fn m1_r5_batch_cancel_adds_to_order_history() {
@@ -2175,6 +2255,8 @@ fn m2_r6_modify_order_rejects_below_min_amount() {
             RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
             true, 10, 1000,
         ));
+        assert_ok!(EntityMarket::set_initial_price(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID, 100));
+        assert_ok!(EntityMarket::configure_price_protection(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID, false, 2000, 500, 5000, 100));
 
         // ALICE 挂卖单: 100 Token @ 100
         assert_ok!(EntityMarket::place_sell_order(
@@ -2322,7 +2404,7 @@ fn h2_r7_market_buy_rejected_during_circuit_breaker() {
             min_trades_for_twap: 100,
             circuit_breaker_active: true,
             circuit_breaker_until: 1000,
-            initial_price: None,
+            initial_price: Some(100),
         });
 
         // 市价买单应被熔断器拒绝
@@ -2355,7 +2437,7 @@ fn h2_r7_market_sell_rejected_during_circuit_breaker() {
             min_trades_for_twap: 100,
             circuit_breaker_active: true,
             circuit_breaker_until: 1000,
-            initial_price: None,
+            initial_price: Some(100),
         });
 
         // 市价卖单应被熔断器拒绝
@@ -2388,7 +2470,7 @@ fn h2_r7_take_order_rejected_during_circuit_breaker() {
             min_trades_for_twap: 100,
             circuit_breaker_active: true,
             circuit_breaker_until: 1000,
-            initial_price: None,
+            initial_price: Some(100),
         });
 
         // take_order 应被熔断器拒绝
@@ -2421,7 +2503,7 @@ fn h2_r7_market_buy_works_after_circuit_breaker_expires() {
             min_trades_for_twap: 100,
             circuit_breaker_active: true,
             circuit_breaker_until: 50,
-            initial_price: None,
+            initial_price: Some(100),
         });
 
         // 推进到熔断到期后
@@ -2741,6 +2823,8 @@ fn h1_r10_ioc_order_rejects_below_min_amount() {
             RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
             true, 100, 1000,
         ));
+        assert_ok!(EntityMarket::set_initial_price(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID, 100));
+        assert_ok!(EntityMarket::configure_price_protection(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID, false, 2000, 500, 5000, 100));
 
         // IOC 订单数量 50 < 100 → 应失败
         assert_noop!(
@@ -2765,6 +2849,8 @@ fn h1_r10_fok_order_rejects_below_min_amount() {
             RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
             true, 100, 1000,
         ));
+        assert_ok!(EntityMarket::set_initial_price(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID, 100));
+        assert_ok!(EntityMarket::configure_price_protection(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID, false, 2000, 500, 5000, 100));
 
         assert_noop!(
             EntityMarket::place_fok_order(
@@ -2783,6 +2869,8 @@ fn h1_r10_post_only_order_rejects_below_min_amount() {
             RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
             true, 100, 1000,
         ));
+        assert_ok!(EntityMarket::set_initial_price(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID, 100));
+        assert_ok!(EntityMarket::configure_price_protection(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID, false, 2000, 500, 5000, 100));
 
         assert_noop!(
             EntityMarket::place_post_only_order(
@@ -2931,7 +3019,7 @@ fn h4_r10_force_lift_circuit_breaker_works() {
             min_trades_for_twap: 100,
             circuit_breaker_active: true,
             circuit_breaker_until: 99999,
-            initial_price: None,
+            initial_price: Some(100),
         });
 
         // 熔断期间 take_order 应失败
@@ -3091,7 +3179,7 @@ fn s2_r11_circuit_breaker_auto_cleanup_on_expiry() {
             min_trades_for_twap: 100,
             circuit_breaker_active: true,
             circuit_breaker_until: 500,
-            initial_price: None,
+            initial_price: Some(100),
         });
 
         // 区块 100: 熔断中
@@ -3120,6 +3208,8 @@ fn s3_r11_market_buy_rejects_below_min_amount() {
             RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
             true, 100, 1000,
         ));
+        assert_ok!(EntityMarket::set_initial_price(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID, 100));
+        assert_ok!(EntityMarket::configure_price_protection(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID, false, 2000, 500, 5000, 100));
 
         // 先挂卖单
         assert_ok!(EntityMarket::place_sell_order(
@@ -3145,6 +3235,8 @@ fn s3_r11_market_sell_rejects_below_min_amount() {
             RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID,
             true, 100, 1000,
         ));
+        assert_ok!(EntityMarket::set_initial_price(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID, 100));
+        assert_ok!(EntityMarket::configure_price_protection(RuntimeOrigin::signed(ENTITY_OWNER), ENTITY_ID, false, 2000, 500, 5000, 100));
 
         // 先挂买单
         assert_ok!(EntityMarket::place_buy_order(

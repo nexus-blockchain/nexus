@@ -1,5 +1,5 @@
-import { ApiPromise } from '@polkadot/api';
-import { KeyringPair } from '@polkadot/keyring/types';
+import type { ApiPromise } from '@polkadot/api';
+import type { KeyringPair } from '@polkadot/keyring/types';
 
 export interface DevActors {
   alice: KeyringPair;
@@ -26,6 +26,7 @@ export interface SuiteContext {
   step<T>(name: string, fn: () => Promise<T> | T): Promise<T>;
   note(message: string): void;
   ensureFunds(minNex?: number): Promise<void>;
+  ensureFundsFor(actorNames: string[], minNex?: number): Promise<void>;
   readMarketPrice(): Promise<number>;
 }
 

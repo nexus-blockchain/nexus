@@ -206,6 +206,10 @@ impl<T: Config> EntityProvider<T::AccountId> for Pallet<T> {
             .unwrap_or_default()
     }
 
+    fn payment_config(entity_id: u64) -> pallet_entity_common::PaymentConfig {
+        EntityPaymentConfigs::<T>::get(entity_id)
+    }
+
     // C2: 治理 pallet 同步调用 — 更新 Entity.governance_mode 字段
     // M2: 添加状态校验，拒绝对 Banned/Closed 实体的修改
     fn set_governance_mode(entity_id: u64, mode: GovernanceMode) -> Result<(), sp_runtime::DispatchError> {

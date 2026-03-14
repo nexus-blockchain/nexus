@@ -155,11 +155,10 @@ impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
 // ==================== Mock StoragePin ====================
 
 pub struct MockProductProvider;
-impl pallet_entity_common::ProductProvider<u64, u64> for MockProductProvider {
+impl pallet_entity_common::ProductProvider<u64> for MockProductProvider {
     fn product_exists(_: u64) -> bool { false }
     fn is_product_on_sale(_: u64) -> bool { false }
     fn product_shop_id(_: u64) -> Option<u64> { None }
-    fn product_price(_: u64) -> Option<u64> { None }
     fn product_stock(_: u64) -> Option<u32> { None }
     fn product_category(_: u64) -> Option<pallet_entity_common::ProductCategory> { None }
     fn deduct_stock(_: u64, _: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }

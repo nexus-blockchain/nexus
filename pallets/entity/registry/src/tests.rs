@@ -325,6 +325,85 @@ fn top_up_fund_works_for_banned_entity() {
     });
 }
 
+// ==================== donate_to_entity ====================
+
+#[test]
+fn donate_to_entity_works_from_anyone() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        let before = EntityRegistry::get_entity_fund_balance(id);
+        let amount = 5_000_000_000_000u128;
+        // BOB（非 owner）可以捐赠
+        assert_ok!(EntityRegistry::donate_to_entity(RuntimeOrigin::signed(BOB), id, amount));
+        assert_eq!(EntityRegistry::get_entity_fund_balance(id), before + amount);
+    });
+}
+
+#[test]
+fn donate_to_entity_restores_low_fund_suspended() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        // 模拟资金不足暂停（非治理暂停）
+        Entities::<Test>::mutate(id, |e| {
+            if let Some(e) = e { e.status = EntityStatus::Suspended; }
+        });
+        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Suspended);
+
+        // 捐赠足够资金 → 自动恢复
+        assert_ok!(EntityRegistry::donate_to_entity(RuntimeOrigin::signed(BOB), id, 500_000_000_000_000));
+        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Active);
+    });
+}
+
+#[test]
+fn donate_to_entity_does_not_restore_governance_suspended() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        // 治理暂停
+        assert_ok!(EntityRegistry::suspend_entity(RuntimeOrigin::root(), id, None));
+        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Suspended);
+
+        // 捐赠大量资金 → 仍为 Suspended（治理暂停不可通过捐赠恢复）
+        assert_ok!(EntityRegistry::donate_to_entity(RuntimeOrigin::signed(BOB), id, 500_000_000_000_000));
+        assert_eq!(Entities::<Test>::get(id).unwrap().status, EntityStatus::Suspended);
+    });
+}
+
+#[test]
+fn donate_to_entity_fails_closed() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        close_entity_via_timeout(ALICE, id);
+        assert_noop!(
+            EntityRegistry::donate_to_entity(RuntimeOrigin::signed(BOB), id, 100),
+            Error::<Test>::InvalidEntityStatus
+        );
+    });
+}
+
+#[test]
+fn donate_to_entity_fails_zero_amount() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        assert_noop!(
+            EntityRegistry::donate_to_entity(RuntimeOrigin::signed(BOB), id, 0),
+            Error::<Test>::ZeroAmount
+        );
+    });
+}
+
+#[test]
+fn donate_to_entity_works_for_banned() {
+    new_test_ext().execute_with(|| {
+        let id = create_default_entity(ALICE);
+        assert_ok!(EntityRegistry::ban_entity(RuntimeOrigin::root(), id, false, None));
+        // 任何人可向 Banned 实体捐赠（为后续 unban 做准备）
+        assert_ok!(EntityRegistry::donate_to_entity(RuntimeOrigin::signed(CHARLIE), id, EXPECTED_INITIAL_FUND));
+        let treasury = EntityRegistry::entity_treasury_account(id);
+        assert!(Balances::free_balance(&treasury) >= EXPECTED_INITIAL_FUND);
+    });
+}
+
 // ==================== reopen_entity 直接激活 ====================
 
 #[test]

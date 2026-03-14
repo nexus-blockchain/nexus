@@ -1,4 +1,4 @@
-import { assertCallShape, assertEvent, assertPallet, assertStorage } from '../framework/metadata.js';
+import { assertCallShape, assertEvent, assertPallet, assertStorage, assertStorageAny } from '../framework/metadata.js';
 import { TestSuite } from '../framework/types.js';
 
 const REQUIRED_CALLS: Array<{ pallet: string; call: string; args: string[] }> = [
@@ -11,20 +11,23 @@ const REQUIRED_CALLS: Array<{ pallet: string; call: string; args: string[] }> = 
   { pallet: 'entityRegistry', call: 'updateEntity', args: ['entityId', 'name', 'logoCid', 'descriptionCid', 'metadataUri', 'contactCid'] },
   { pallet: 'entityRegistry', call: 'suspendEntity', args: ['entityId', 'reason'] },
   { pallet: 'entityRegistry', call: 'resumeEntity', args: ['entityId'] },
-  { pallet: 'entityRegistry', call: 'setPrimaryShop', args: ['entityId', 'shopId'] },
   { pallet: 'entityShop', call: 'createShop', args: ['entityId', 'name', 'shopType', 'initialFund'] },
+  { pallet: 'entityShop', call: 'setPrimaryShop', args: ['entityId', 'newPrimaryShopId'] },
   { pallet: 'entityShop', call: 'withdrawOperatingFund', args: ['shopId', 'amount'] },
 ];
 
 const REQUIRED_STORAGE: Array<{ pallet: string; storage: string }> = [
   { pallet: 'nexMarket', storage: 'orders' },
   { pallet: 'nexMarket', storage: 'userOrders' },
-  { pallet: 'nexMarket', storage: 'priceProtection' },
   { pallet: 'entityRegistry', storage: 'entities' },
-  { pallet: 'entityRegistry', storage: 'userEntities' },
-  { pallet: 'entityRegistry', storage: 'entityShopIds' },
+  { pallet: 'entityRegistry', storage: 'userEntity' },
+  { pallet: 'entityRegistry', storage: 'entityShops' },
   { pallet: 'entityShop', storage: 'shops' },
-  { pallet: 'entityShop', storage: 'entityPrimaryShop' },
+  { pallet: 'entityShop', storage: 'shopEntity' },
+];
+
+const REQUIRED_STORAGE_ALIASES: Array<{ pallet: string; storageOptions: string[] }> = [
+  { pallet: 'nexMarket', storageOptions: ['priceProtection', 'priceProtectionStore'] },
 ];
 
 const REQUIRED_EVENTS: Array<{ pallet: string; event: string }> = [
@@ -61,6 +64,9 @@ export const runtimeContractsSuite: TestSuite = {
     await ctx.step('critical storage accessors exist', async () => {
       for (const item of REQUIRED_STORAGE) {
         assertStorage(ctx.api, item.pallet, item.storage);
+      }
+      for (const item of REQUIRED_STORAGE_ALIASES) {
+        assertStorageAny(ctx.api, item.pallet, item.storageOptions);
       }
     });
 

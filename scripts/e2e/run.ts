@@ -1,10 +1,9 @@
 #!/usr/bin/env tsx
 
-import { getDevActors } from './framework/accounts.js';
 import { connectApi, disconnectApi } from './framework/api.js';
 import { runSuites } from './framework/runner.js';
 import { TestSuite } from './framework/types.js';
-import { ALL_SUITES, SUITE_MAP } from './suites/index.js';
+import { ALL_SUITES, DEFAULT_SUITES, SUITE_MAP } from './suites/index.js';
 
 interface CliSelection {
   listOnly: boolean;
@@ -19,7 +18,7 @@ function parseArgs(argv: string[]): CliSelection {
 
   const suiteIndex = argv.indexOf('--suite');
   if (suiteIndex === -1) {
-    return { listOnly: false, suites: ALL_SUITES, label: 'all' };
+    return { listOnly: false, suites: DEFAULT_SUITES, label: 'default' };
   }
 
   const requested = argv.slice(suiteIndex + 1).filter((arg) => !arg.startsWith('--'));
@@ -40,6 +39,7 @@ function parseArgs(argv: string[]): CliSelection {
 
 async function main(): Promise<void> {
   const selection = parseArgs(process.argv.slice(2));
+  const traceBootstrap = process.env.E2E_TRACE_BOOTSTRAP === '1';
 
   if (selection.listOnly) {
     for (const suite of ALL_SUITES) {
@@ -50,9 +50,21 @@ async function main(): Promise<void> {
 
   console.log(`Running suites: ${selection.label}`);
 
+  if (traceBootstrap) {
+    console.log('[bootstrap] connecting api');
+  }
   const api = await connectApi();
   try {
-    const allPassed = await runSuites(api, getDevActors(), selection.suites);
+    if (traceBootstrap) {
+      console.log('[bootstrap] api connected');
+      console.log('[bootstrap] loading actors');
+    }
+    const { getDevActors } = await import('./framework/accounts.js');
+    const actors = await getDevActors();
+    if (traceBootstrap) {
+      console.log('[bootstrap] actors ready');
+    }
+    const allPassed = await runSuites(api, actors, selection.suites);
     process.exitCode = allPassed ? 0 : 1;
   } finally {
     await disconnectApi(api);

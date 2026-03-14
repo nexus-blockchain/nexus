@@ -11,8 +11,7 @@ fn create_default_product() {
         b"QmName".to_vec(),
         b"QmImages".to_vec(),
         b"QmDetail".to_vec(),
-        1_000_000_000_000u128,
-        0,        // usdt_price
+        100_000,  // usdt_price (100 USDT * 10^3 as minimal)
         100,
         ProductCategory::Physical,
         0,        // sort_weight
@@ -35,7 +34,6 @@ fn create_product_works() {
             b"QmName".to_vec(),
             b"QmImages".to_vec(),
             b"QmDetail".to_vec(),
-            1_000_000_000_000u128,
             500_000,     // usdt_price
             100,
             ProductCategory::Physical,
@@ -50,7 +48,6 @@ fn create_product_works() {
         let product = Products::<Test>::get(0).expect("product should exist");
         assert_eq!(product.id, 0);
         assert_eq!(product.shop_id, 1);
-        assert_eq!(product.price, 1_000_000_000_000u128);
         assert_eq!(product.usdt_price, 500_000);
         assert_eq!(product.stock, 100);
         assert_eq!(product.status, ProductStatus::Draft);
@@ -82,7 +79,7 @@ fn create_product_fails_zero_price() {
             EntityProduct::create_product(
                 RuntimeOrigin::signed(1), 1,
                 b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-                0u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+                0, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
             ),
             Error::<Test>::InvalidPrice
         );
@@ -96,7 +93,7 @@ fn create_product_fails_shop_not_found() {
             EntityProduct::create_product(
                 RuntimeOrigin::signed(1), 999,
                 b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-                1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+                100_000, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
             ),
             Error::<Test>::ShopNotFound
         );
@@ -110,7 +107,7 @@ fn create_product_fails_shop_not_active() {
             EntityProduct::create_product(
                 RuntimeOrigin::signed(2), 2,
                 b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-                1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+                100_000, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
             ),
             Error::<Test>::ShopNotActive
         );
@@ -124,7 +121,7 @@ fn create_product_fails_not_authorized() {
             EntityProduct::create_product(
                 RuntimeOrigin::signed(5), 1,  // 账户 5 无任何权限
                 b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-                1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+                100_000, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
             ),
             Error::<Test>::NotAuthorized
         );
@@ -139,7 +136,7 @@ fn create_product_fails_cid_too_long() {
             EntityProduct::create_product(
                 RuntimeOrigin::signed(1), 1,
                 long_cid, b"QmImages".to_vec(), b"QmDetail".to_vec(),
-                1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+                100_000, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
             ),
             Error::<Test>::CidTooLong
         );
@@ -153,14 +150,14 @@ fn create_product_fails_max_products_reached() {
             assert_ok!(EntityProduct::create_product(
                 RuntimeOrigin::signed(1), 1,
                 b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-                1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+                100_000, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
             ));
         }
         assert_noop!(
             EntityProduct::create_product(
                 RuntimeOrigin::signed(1), 1,
                 b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-                1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+                100_000, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
             ),
             Error::<Test>::MaxProductsReached
         );
@@ -173,7 +170,7 @@ fn create_product_infinite_stock() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000u128, 0, 0, ProductCategory::Digital, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+            100_000, 0, ProductCategory::Digital, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
         ));
 
         let product = Products::<Test>::get(0).unwrap();
@@ -193,7 +190,6 @@ fn update_product_works() {
             Some(b"QmNewName".to_vec()),
             None,
             None,
-            Some(2_000_000_000_000u128),
             Some(500_000u64),
             Some(200),
             Some(ProductCategory::Digital),
@@ -205,7 +201,6 @@ fn update_product_works() {
 
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.name_cid.to_vec(), b"QmNewName".to_vec());
-        assert_eq!(product.price, 2_000_000_000_000u128);
         assert_eq!(product.usdt_price, 500_000);
         assert_eq!(product.stock, 200);
         assert_eq!(product.category, ProductCategory::Digital);
@@ -227,7 +222,7 @@ fn update_product_fails_not_authorized() {
                 RuntimeOrigin::signed(5), // 无权限
                 0,
                 Some(b"QmNew".to_vec()),
-                None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None,
                 None, None, None,
             ),
             Error::<Test>::NotAuthorized
@@ -245,7 +240,7 @@ fn update_product_soldout_to_onsale_on_restock() {
 
         // 通过 ProductProvider 扣减全部库存 → SoldOut
         use pallet_entity_common::ProductProvider;
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 100));
 
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.status, ProductStatus::SoldOut);
@@ -257,7 +252,7 @@ fn update_product_soldout_to_onsale_on_restock() {
         assert_ok!(EntityProduct::update_product(
             RuntimeOrigin::signed(1),
             0,
-            None, None, None, None, None,
+            None, None, None, None,
             Some(50),                       // 补货 50
             None, None, None, None,
             None, None, None,
@@ -311,7 +306,7 @@ fn publish_product_fails_sold_out_cannot_publish() {
 
         // 扣完库存 → SoldOut
         use pallet_entity_common::ProductProvider;
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 100));
 
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.status, ProductStatus::SoldOut);
@@ -410,7 +405,7 @@ fn unpublish_soldout_product_works() {
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
         use pallet_entity_common::ProductProvider;
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 100));
         assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::SoldOut);
 
         // C4: SoldOut 可以下架，但不减 on_sale_products（已被 deduct_stock 减过）
@@ -475,7 +470,7 @@ fn delete_product_fails_sold_out() {
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
         use pallet_entity_common::ProductProvider;
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 100));
 
         assert_noop!(
             EntityProduct::delete_product(RuntimeOrigin::signed(1), 0),
@@ -506,25 +501,25 @@ fn product_provider_basic_queries() {
         create_default_product();
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
-        assert!(<EntityProduct as ProductProvider<u64, u128>>::product_exists(0));
-        assert!(!<EntityProduct as ProductProvider<u64, u128>>::product_exists(999));
+        assert!(<EntityProduct as ProductProvider<u64>>::product_exists(0));
+        assert!(!<EntityProduct as ProductProvider<u64>>::product_exists(999));
 
-        assert!(<EntityProduct as ProductProvider<u64, u128>>::is_product_on_sale(0));
+        assert!(<EntityProduct as ProductProvider<u64>>::is_product_on_sale(0));
 
         assert_eq!(
-            <EntityProduct as ProductProvider<u64, u128>>::product_shop_id(0),
+            <EntityProduct as ProductProvider<u64>>::product_shop_id(0),
             Some(1)
         );
         assert_eq!(
-            <EntityProduct as ProductProvider<u64, u128>>::product_price(0),
-            Some(1_000_000_000_000u128)
+            <EntityProduct as ProductProvider<u64>>::product_usdt_price(0),
+            Some(100_000)
         );
         assert_eq!(
-            <EntityProduct as ProductProvider<u64, u128>>::product_stock(0),
+            <EntityProduct as ProductProvider<u64>>::product_stock(0),
             Some(100)
         );
         assert_eq!(
-            <EntityProduct as ProductProvider<u64, u128>>::product_category(0),
+            <EntityProduct as ProductProvider<u64>>::product_category(0),
             Some(ProductCategory::Physical)
         );
     });
@@ -538,7 +533,7 @@ fn deduct_stock_works() {
         create_default_product();
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 30));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 30));
 
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.stock, 70);
@@ -554,7 +549,7 @@ fn deduct_stock_to_zero_becomes_sold_out() {
         create_default_product();
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 100));
 
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.stock, 0);
@@ -575,7 +570,7 @@ fn deduct_stock_fails_insufficient() {
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
         assert_noop!(
-            <EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 101),
+            <EntityProduct as ProductProvider<u64>>::deduct_stock(0, 101),
             Error::<Test>::InsufficientStock
         );
     });
@@ -590,14 +585,14 @@ fn deduct_stock_infinite_stock_no_change() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000u128, 0, 0, ProductCategory::Digital, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+            100_000, 0, ProductCategory::Digital, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
         ));
 
         // 上架后测试
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
         // deduct_stock 对无限库存不起作用
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 999));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 999));
 
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.stock, 0); // 仍然是 0
@@ -612,10 +607,10 @@ fn restore_stock_works() {
 
         create_default_product();
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 100));
 
         // SoldOut 后恢复库存
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::restore_stock(0, 50));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::restore_stock(0, 50));
 
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.stock, 50);
@@ -635,14 +630,14 @@ fn restore_stock_infinite_no_change() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000u128, 0, 0, ProductCategory::Digital, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+            100_000, 0, ProductCategory::Digital, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
         ));
 
         // 上架后测试
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
         // 无限库存 restore 不起作用
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::restore_stock(0, 50));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::restore_stock(0, 50));
 
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.stock, 0); // 仍然是 0（无限库存）
@@ -656,8 +651,8 @@ fn add_sold_count_works() {
 
         create_default_product();
 
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::add_sold_count(0, 5));
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::add_sold_count(0, 3));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::add_sold_count(0, 5));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::add_sold_count(0, 3));
 
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.sold_count, 8);
@@ -748,11 +743,11 @@ fn on_sale_products_stats_consistency() {
         assert_eq!(ProductStats::<Test>::get().on_sale_products, 3);
 
         // 商品 0: 售罄 (M4: on_sale -1)
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 100));
         assert_eq!(ProductStats::<Test>::get().on_sale_products, 2);
 
         // 商品 0: 恢复库存 (M4: on_sale +1)
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::restore_stock(0, 10));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::restore_stock(0, 10));
         assert_eq!(ProductStats::<Test>::get().on_sale_products, 3);
 
         // 商品 1: 下架 (on_sale -1)
@@ -760,7 +755,7 @@ fn on_sale_products_stats_consistency() {
         assert_eq!(ProductStats::<Test>::get().on_sale_products, 2);
 
         // 商品 2: 扣光 → SoldOut → 下架 (on_sale 不变，因为 deduct 已减过)
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(2, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(2, 100));
         assert_eq!(ProductStats::<Test>::get().on_sale_products, 1);
         assert_ok!(EntityProduct::unpublish_product(RuntimeOrigin::signed(1), 2));
         assert_eq!(ProductStats::<Test>::get().on_sale_products, 1); // SoldOut 下架不减
@@ -784,14 +779,14 @@ fn update_product_fails_zero_price() {
     new_test_ext().execute_with(|| {
         create_default_product();
 
-        // M4: 更新价格为 0 应失败
+        // M4: 更新 USDT 价格为 0 应失败
         assert_noop!(
             EntityProduct::update_product(
                 RuntimeOrigin::signed(1),
                 0,
                 None, None, None,
-                Some(0u128),  // price = 0
-                None, None, None, None, None, None,
+                Some(0u64),
+                None, None, None, None, None,
                 None, None, None,
             ),
             Error::<Test>::InvalidPrice
@@ -828,7 +823,7 @@ fn h1_update_product_restock_fails_shop_not_active() {
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
         // 扣光库存 → SoldOut
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 100));
         assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::SoldOut);
 
         // Shop 变为不激活
@@ -839,7 +834,7 @@ fn h1_update_product_restock_fails_shop_not_active() {
             EntityProduct::update_product(
                 RuntimeOrigin::signed(1),
                 0,
-                None, None, None, None, None,
+                None, None, None, None,
                 Some(50), // 补货
                 None, None, None, None,
                 None, None, None,
@@ -859,13 +854,13 @@ fn h1_update_product_restock_works_when_shop_active() {
 
         create_default_product();
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 100));
 
         // Shop 激活状态下补货应成功
         assert_ok!(EntityProduct::update_product(
             RuntimeOrigin::signed(1),
             0,
-            None, None, None, None, None,
+            None, None, None, None,
             Some(50),
             None, None, None, None,
             None, None, None,
@@ -887,7 +882,7 @@ fn h2_create_product_rejects_empty_name_cid() {
                 RuntimeOrigin::signed(1), 1,
                 vec![],  // 空 name_cid
                 b"QmImages".to_vec(), b"QmDetail".to_vec(),
-                1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+                100_000, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
             ),
             Error::<Test>::EmptyCid
         );
@@ -904,7 +899,7 @@ fn h2_update_product_rejects_empty_name_cid() {
                 RuntimeOrigin::signed(1),
                 0,
                 Some(vec![]),  // 空 name_cid
-                None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None,
                 None, None, None,
             ),
             Error::<Test>::EmptyCid
@@ -927,7 +922,7 @@ fn m2_deduct_stock_emits_stock_updated_event() {
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
         System::reset_events();
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 30));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 30));
 
         let events = System::events();
         let found = events.iter().any(|record| {
@@ -947,10 +942,10 @@ fn m2_restore_stock_emits_stock_updated_event() {
 
         create_default_product();
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 100));
 
         System::reset_events();
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::restore_stock(0, 25));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::restore_stock(0, 25));
 
         let events = System::events();
         let found = events.iter().any(|record| {
@@ -972,7 +967,7 @@ fn deduct_stock_rejects_draft_product() {
 
         create_default_product(); // status = Draft
         assert_noop!(
-            <EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 10),
+            <EntityProduct as ProductProvider<u64>>::deduct_stock(0, 10),
             Error::<Test>::InvalidProductStatus
         );
     });
@@ -988,7 +983,7 @@ fn deduct_stock_rejects_offshelf_product() {
         assert_ok!(EntityProduct::unpublish_product(RuntimeOrigin::signed(1), 0));
         // status = OffShelf
         assert_noop!(
-            <EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 10),
+            <EntityProduct as ProductProvider<u64>>::deduct_stock(0, 10),
             Error::<Test>::InvalidProductStatus
         );
     });
@@ -1002,12 +997,12 @@ fn deduct_stock_rejects_soldout_product() {
         create_default_product();
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
         // 扣完库存使其 SoldOut
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 100));
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.status, ProductStatus::SoldOut);
         // 再次扣减应失败
         assert_noop!(
-            <EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 1),
+            <EntityProduct as ProductProvider<u64>>::deduct_stock(0, 1),
             Error::<Test>::InvalidProductStatus
         );
     });
@@ -1020,7 +1015,7 @@ fn restore_stock_rejects_draft_product() {
 
         create_default_product(); // status = Draft
         assert_noop!(
-            <EntityProduct as ProductProvider<u64, u128>>::restore_stock(0, 10),
+            <EntityProduct as ProductProvider<u64>>::restore_stock(0, 10),
             Error::<Test>::InvalidProductStatus
         );
     });
@@ -1033,10 +1028,10 @@ fn restore_stock_works_for_offshelf_product() {
 
         create_default_product();
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 50));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 50));
         assert_ok!(EntityProduct::unpublish_product(RuntimeOrigin::signed(1), 0));
         // OffShelf 状态下恢复库存应成功，但不改变状态
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::restore_stock(0, 50));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::restore_stock(0, 50));
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.status, ProductStatus::OffShelf);
         assert_eq!(product.stock, 100);
@@ -1050,11 +1045,11 @@ fn restore_stock_soldout_to_onsale() {
 
         create_default_product();
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 100));
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.status, ProductStatus::SoldOut);
         // 恢复库存应将 SoldOut -> OnSale
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::restore_stock(0, 25));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::restore_stock(0, 25));
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.status, ProductStatus::OnSale);
         assert_eq!(product.stock, 25);
@@ -1086,7 +1081,7 @@ fn h1_restore_stock_works_for_offshelf_soldout_product() {
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
         // 全部售出 → SoldOut
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 100));
         assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::SoldOut);
 
         // 店主下架 → OffShelf (stock=0)
@@ -1096,7 +1091,7 @@ fn h1_restore_stock_works_for_offshelf_soldout_product() {
         assert_eq!(product.stock, 0);
 
         // H1: 订单取消恢复库存 — 之前此处会静默丢弃
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::restore_stock(0, 30));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::restore_stock(0, 30));
 
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.stock, 30);
@@ -1115,7 +1110,7 @@ fn h2_add_sold_count_emits_sold_count_updated_event() {
         create_default_product();
 
         System::reset_events();
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::add_sold_count(0, 5));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::add_sold_count(0, 5));
 
         let events = System::events();
         // 应发出 SoldCountUpdated 而非 StockUpdated
@@ -1150,7 +1145,7 @@ fn m1_update_product_rejects_zero_stock_while_on_sale() {
             EntityProduct::update_product(
                 RuntimeOrigin::signed(1),
                 0,
-                None, None, None, None, None,
+                None, None, None, None,
                 Some(0), // stock=0 on OnSale
                 None, None, None, None,
                 None, None, None,
@@ -1172,7 +1167,7 @@ fn m1_update_product_allows_zero_stock_on_draft() {
         assert_ok!(EntityProduct::update_product(
             RuntimeOrigin::signed(1),
             0,
-            None, None, None, None, None,
+            None, None, None, None,
             Some(0),
             None, None, None, None,
             None, None, None,
@@ -1192,7 +1187,7 @@ fn m2_create_product_rejects_empty_images_cid() {
                 b"QmName".to_vec(),
                 vec![],  // 空 images_cid
                 b"QmDetail".to_vec(),
-                1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+                100_000, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
             ),
             Error::<Test>::EmptyCid
         );
@@ -1207,7 +1202,7 @@ fn m2_create_product_rejects_empty_detail_cid() {
                 RuntimeOrigin::signed(1), 1,
                 b"QmName".to_vec(), b"QmImages".to_vec(),
                 vec![],  // 空 detail_cid
-                1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+                100_000, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
             ),
             Error::<Test>::EmptyCid
         );
@@ -1225,7 +1220,7 @@ fn m2_update_product_rejects_empty_images_cid() {
                 0,
                 None,
                 Some(vec![]),  // 空 images_cid
-                None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None,
                 None, None, None,
             ),
             Error::<Test>::EmptyCid
@@ -1244,7 +1239,7 @@ fn m2_update_product_rejects_empty_detail_cid() {
                 0,
                 None, None,
                 Some(vec![]),  // 空 detail_cid
-                None, None, None, None, None, None, None,
+                None, None, None, None, None, None,
                 None, None, None,
             ),
             Error::<Test>::EmptyCid
@@ -1284,7 +1279,7 @@ fn ipfs_update_product_unpins_old_pins_new() {
             Some(b"QmNewName".to_vec()),
             None,
             Some(b"QmNewDetail".to_vec()),
-            None, None, None, None, None, None, None,
+            None, None, None, None, None, None,
             None, None, None,
         ));
 
@@ -1314,8 +1309,7 @@ fn ipfs_update_product_unchanged_fields_no_pin() {
             RuntimeOrigin::signed(1),
             0,
             None, None, None,
-            Some(2_000u128),
-            None,
+            Some(200_000u64),
             Some(50),
             None, None, None, None,
             None, None, None,
@@ -1351,7 +1345,7 @@ fn ipfs_pin_failure_does_not_block_create() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000_000_000_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+            100_000, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
         ));
 
         // 商品应正常存在
@@ -1413,26 +1407,26 @@ fn h2_restore_stock_soldout_inactive_shop_stays_soldout() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"Qm1".to_vec(), b"Qm2".to_vec(), b"Qm3".to_vec(),
-            100_000_000_000_000u128, 0, 10, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+            100_000, 10, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
         ));
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
         // 扣减全部库存 → SoldOut
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 10));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 10));
         assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::SoldOut);
 
         // 关闭 Shop
         set_shop_active(1, false);
 
         // H2: restore_stock 应增加库存但不恢复 OnSale（Shop 未激活）
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::restore_stock(0, 5));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::restore_stock(0, 5));
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.stock, 5);
         assert_eq!(product.status, ProductStatus::SoldOut); // 仍为 SoldOut
 
         // 恢复 Shop → 再次 restore_stock，SoldOut + Shop active → OnSale
         set_shop_active(1, true);
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::restore_stock(0, 3));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::restore_stock(0, 3));
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.stock, 8);
         assert_eq!(product.status, ProductStatus::OnSale); // Shop 激活时恢复 OnSale
@@ -1459,7 +1453,7 @@ fn m2_create_product_fails_insufficient_balance_with_ed() {
             EntityProduct::create_product(
                 RuntimeOrigin::signed(1), 1,
                 b"Qm1".to_vec(), b"Qm2".to_vec(), b"Qm3".to_vec(),
-                100_000_000_000_000u128, 0, 10, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+                100_000, 10, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
             ),
             Error::<Test>::InsufficientShopFund
         );
@@ -1475,13 +1469,13 @@ fn m3_restore_stock_overflow_rejected() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"Qm1".to_vec(), b"Qm2".to_vec(), b"Qm3".to_vec(),
-            100_000_000_000_000u128, 0, 10, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+            100_000, 10, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
         ));
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
         // M3: restore_stock u32::MAX 溢出应报错
         assert_noop!(
-            <EntityProduct as ProductProvider<u64, u128>>::restore_stock(0, u32::MAX),
+            <EntityProduct as ProductProvider<u64>>::restore_stock(0, u32::MAX),
             Error::<Test>::StockOverflow
         );
         // 库存应未变
@@ -1500,7 +1494,7 @@ fn admin_can_create_product() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(3), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+            100_000, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
         ));
 
         let product = Products::<Test>::get(0).unwrap();
@@ -1517,7 +1511,7 @@ fn admin_can_update_product() {
         assert_ok!(EntityProduct::update_product(
             RuntimeOrigin::signed(3), 0,
             Some(b"QmAdminName".to_vec()),
-            None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None,
             None, None, None,
         ));
 
@@ -1561,7 +1555,7 @@ fn admin_without_shop_manage_cannot_create() {
             EntityProduct::create_product(
                 RuntimeOrigin::signed(3), 1,
                 b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-                1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+                100_000, 100, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
             ),
             Error::<Test>::NotAuthorized
         );
@@ -1578,7 +1572,7 @@ fn manager_can_create_product() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(4), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000u128, 0, 50, ProductCategory::Digital, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+            100_000, 50, ProductCategory::Digital, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
         ));
 
         assert!(Products::<Test>::get(0).is_some());
@@ -1738,18 +1732,18 @@ fn product_provider_status_query() {
 
         create_default_product();
         assert_eq!(
-            <EntityProduct as ProductProvider<u64, u128>>::product_status(0),
+            <EntityProduct as ProductProvider<u64>>::product_status(0),
             Some(ProductStatus::Draft)
         );
 
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
         assert_eq!(
-            <EntityProduct as ProductProvider<u64, u128>>::product_status(0),
+            <EntityProduct as ProductProvider<u64>>::product_status(0),
             Some(ProductStatus::OnSale)
         );
 
         assert_eq!(
-            <EntityProduct as ProductProvider<u64, u128>>::product_status(999),
+            <EntityProduct as ProductProvider<u64>>::product_status(999),
             None
         );
     });
@@ -1763,15 +1757,15 @@ fn product_provider_usdt_price_query() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"Qm1".to_vec(), b"Qm2".to_vec(), b"Qm3".to_vec(),
-            1_000u128, 500_000, 10, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
+            500_000, 10, ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
         ));
 
         assert_eq!(
-            <EntityProduct as ProductProvider<u64, u128>>::product_usdt_price(0),
+            <EntityProduct as ProductProvider<u64>>::product_usdt_price(0),
             Some(500_000)
         );
         assert_eq!(
-            <EntityProduct as ProductProvider<u64, u128>>::product_usdt_price(999),
+            <EntityProduct as ProductProvider<u64>>::product_usdt_price(999),
             None
         );
     });
@@ -1785,11 +1779,11 @@ fn product_provider_owner_query() {
         create_default_product();
         // shop 1 的 owner 是账户 1
         assert_eq!(
-            <EntityProduct as ProductProvider<u64, u128>>::product_owner(0),
+            <EntityProduct as ProductProvider<u64>>::product_owner(0),
             Some(1)
         );
         assert_eq!(
-            <EntityProduct as ProductProvider<u64, u128>>::product_owner(999),
+            <EntityProduct as ProductProvider<u64>>::product_owner(999),
             None
         );
     });
@@ -1803,10 +1797,10 @@ fn product_provider_shop_product_ids_query() {
         create_default_product(); // product 0
         create_default_product(); // product 1
 
-        let ids = <EntityProduct as ProductProvider<u64, u128>>::shop_product_ids(1);
+        let ids = <EntityProduct as ProductProvider<u64>>::shop_product_ids(1);
         assert_eq!(ids, vec![0, 1]);
 
-        let empty = <EntityProduct as ProductProvider<u64, u128>>::shop_product_ids(999);
+        let empty = <EntityProduct as ProductProvider<u64>>::shop_product_ids(999);
         assert!(empty.is_empty());
     });
 }
@@ -1821,7 +1815,7 @@ fn entity_locked_rejects_create_product() {
             EntityProduct::create_product(
                 RuntimeOrigin::signed(1), 1,
                 b"QmName".to_vec(), b"QmImg".to_vec(), b"QmDet".to_vec(),
-                1_000_000_000_000u128, 0, 100,
+                100_000, 100,
                 ProductCategory::Physical, 0, vec![], vec![], 1, 0, ProductVisibility::Public,
             ),
             Error::<Test>::EntityLocked
@@ -1837,7 +1831,7 @@ fn entity_locked_rejects_update_product() {
         assert_noop!(
             EntityProduct::update_product(
                 RuntimeOrigin::signed(1), 0,
-                Some(b"QmNew".to_vec()), None, None, None, None, None, None, None, None, None,
+                Some(b"QmNew".to_vec()), None, None, None, None, None, None, None, None,
                 None, None, None,
             ),
             Error::<Test>::EntityLocked
@@ -1890,7 +1884,7 @@ fn create_product_with_order_quantity_limits() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![],
+            100_000, 100, ProductCategory::Physical, 0, vec![], vec![],
             5,   // min_order_quantity
             20,  // max_order_quantity
             ProductVisibility::Public,
@@ -1910,7 +1904,7 @@ fn create_product_fails_invalid_order_quantity() {
             EntityProduct::create_product(
                 RuntimeOrigin::signed(1), 1,
                 b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-                1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![],
+                100_000, 100, ProductCategory::Physical, 0, vec![], vec![],
                 10,  // min_order_quantity
                 5,   // max_order_quantity < min
                 ProductVisibility::Public,
@@ -1927,7 +1921,7 @@ fn create_product_allows_zero_max_order_quantity() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![],
+            100_000, 100, ProductCategory::Physical, 0, vec![], vec![],
             10,  // min_order_quantity
             0,   // max_order_quantity = unlimited
             ProductVisibility::Public,
@@ -1946,7 +1940,7 @@ fn update_product_order_quantity_limits() {
 
         assert_ok!(EntityProduct::update_product(
             RuntimeOrigin::signed(1), 0,
-            None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None,
             Some(3),   // min_order_quantity
             Some(50),  // max_order_quantity
             None,
@@ -1967,7 +1961,7 @@ fn update_product_fails_invalid_order_quantity() {
         assert_noop!(
             EntityProduct::update_product(
                 RuntimeOrigin::signed(1), 0,
-                None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None,
                 Some(20),  // min
                 Some(5),   // max < min
                 None,
@@ -1985,7 +1979,7 @@ fn create_product_with_visibility() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![],
+            100_000, 100, ProductCategory::Physical, 0, vec![], vec![],
             1, 0,
             ProductVisibility::MembersOnly,
         ));
@@ -2001,7 +1995,7 @@ fn create_product_with_level_gated_visibility() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![],
+            100_000, 100, ProductCategory::Physical, 0, vec![], vec![],
             1, 0,
             ProductVisibility::LevelGated(3),
         ));
@@ -2018,7 +2012,7 @@ fn update_product_visibility() {
 
         assert_ok!(EntityProduct::update_product(
             RuntimeOrigin::signed(1), 0,
-            None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None,
             None, None,
             Some(ProductVisibility::MembersOnly),
         ));
@@ -2038,17 +2032,17 @@ fn product_provider_visibility_query() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![],
+            100_000, 100, ProductCategory::Physical, 0, vec![], vec![],
             1, 0,
             ProductVisibility::LevelGated(5),
         ));
 
         assert_eq!(
-            <EntityProduct as ProductProvider<u64, u128>>::product_visibility(0),
+            <EntityProduct as ProductProvider<u64>>::product_visibility(0),
             Some(ProductVisibility::LevelGated(5))
         );
         assert_eq!(
-            <EntityProduct as ProductProvider<u64, u128>>::product_visibility(999),
+            <EntityProduct as ProductProvider<u64>>::product_visibility(999),
             None
         );
     });
@@ -2062,21 +2056,21 @@ fn product_provider_order_quantity_queries() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000u128, 0, 100, ProductCategory::Physical, 0, vec![], vec![],
+            100_000, 100, ProductCategory::Physical, 0, vec![], vec![],
             2, 50,
             ProductVisibility::Public,
         ));
 
         assert_eq!(
-            <EntityProduct as ProductProvider<u64, u128>>::product_min_order_quantity(0),
+            <EntityProduct as ProductProvider<u64>>::product_min_order_quantity(0),
             Some(2)
         );
         assert_eq!(
-            <EntityProduct as ProductProvider<u64, u128>>::product_max_order_quantity(0),
+            <EntityProduct as ProductProvider<u64>>::product_max_order_quantity(0),
             Some(50)
         );
         assert_eq!(
-            <EntityProduct as ProductProvider<u64, u128>>::product_min_order_quantity(999),
+            <EntityProduct as ProductProvider<u64>>::product_min_order_quantity(999),
             None
         );
     });
@@ -2091,10 +2085,10 @@ fn governance_update_price_works() {
 
         create_default_product();
 
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::update_price(0, 5_000u128));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::update_usdt_price(0, 200_000));
 
         let product = Products::<Test>::get(0).unwrap();
-        assert_eq!(product.price, 5_000u128);
+        assert_eq!(product.usdt_price, 200_000);
     });
 }
 
@@ -2106,7 +2100,7 @@ fn governance_update_price_rejects_zero() {
         create_default_product();
 
         assert_noop!(
-            <EntityProduct as ProductProvider<u64, u128>>::update_price(0, 0u128),
+            <EntityProduct as ProductProvider<u64>>::update_usdt_price(0, 0),
             Error::<Test>::InvalidPrice
         );
     });
@@ -2118,7 +2112,7 @@ fn governance_update_price_rejects_nonexistent() {
         use pallet_entity_common::ProductProvider;
 
         assert_noop!(
-            <EntityProduct as ProductProvider<u64, u128>>::update_price(999, 100u128),
+            <EntityProduct as ProductProvider<u64>>::update_usdt_price(999, 100_000),
             Error::<Test>::ProductNotFound
         );
     });
@@ -2133,7 +2127,7 @@ fn governance_set_inventory_works() {
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
         // 设置库存为 200
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::set_inventory(0, 200));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::set_inventory(0, 200));
 
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.stock, 200);
@@ -2150,7 +2144,7 @@ fn governance_set_inventory_zero_causes_soldout() {
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
         // set_inventory(0) 应触发 SoldOut
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::set_inventory(0, 0));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::set_inventory(0, 0));
 
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.stock, 0);
@@ -2170,11 +2164,11 @@ fn governance_set_inventory_restores_soldout_to_onsale() {
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
         // 扣光库存 → SoldOut
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 100));
         assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::SoldOut);
 
         // set_inventory 恢复库存 → OnSale
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::set_inventory(0, 50));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::set_inventory(0, 50));
 
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.stock, 50);
@@ -2315,11 +2309,11 @@ fn h2_delist_product_works_for_soldout() {
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
         // 扣光库存 → SoldOut
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 100));
         assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::SoldOut);
 
         // H2: delist_product 应能下架 SoldOut 商品
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::delist_product(0));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::delist_product(0));
 
         let product = Products::<Test>::get(0).unwrap();
         assert_eq!(product.status, ProductStatus::OffShelf);
@@ -2335,7 +2329,7 @@ fn h2_delist_product_onsale_decrements_stats() {
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
         assert_eq!(ProductStats::<Test>::get().on_sale_products, 1);
 
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::delist_product(0));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::delist_product(0));
 
         assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::OffShelf);
         assert_eq!(ProductStats::<Test>::get().on_sale_products, 0);
@@ -2349,12 +2343,12 @@ fn h2_delist_product_soldout_no_stat_change() {
 
         create_default_product();
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 100));
         // SoldOut 时 on_sale 已经被减为 0
         assert_eq!(ProductStats::<Test>::get().on_sale_products, 0);
 
         // H2: delist SoldOut 不应再减 on_sale_products（避免下溢）
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::delist_product(0));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::delist_product(0));
         assert_eq!(ProductStats::<Test>::get().on_sale_products, 0);
     });
 }
@@ -2366,7 +2360,7 @@ fn h2_delist_product_draft_noop() {
 
         create_default_product(); // Draft
         // delist Draft 应静默成功（不改变状态）
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::delist_product(0));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::delist_product(0));
         assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::Draft);
     });
 }
@@ -2422,7 +2416,7 @@ fn m3_delete_product_unpins_tags_and_sku_cids() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000_000_000_000u128, 0, 100, ProductCategory::Physical, 0,
+            100_000, 100, ProductCategory::Physical, 0,
             b"QmTags".to_vec(),
             b"QmSku".to_vec(),
             1, 0, ProductVisibility::Public,
@@ -2463,7 +2457,7 @@ fn m2_batch_delete_unpins_tags_and_sku_cids() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000_000_000_000u128, 0, 100, ProductCategory::Physical, 0,
+            100_000, 100, ProductCategory::Physical, 0,
             b"QmTags".to_vec(),
             b"QmSku".to_vec(),
             1, 0, ProductVisibility::Public,
@@ -2492,7 +2486,7 @@ fn create_product_pins_tags_and_sku_cids() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000_000_000_000u128, 0, 100, ProductCategory::Physical, 0,
+            100_000, 100, ProductCategory::Physical, 0,
             b"QmTags".to_vec(),
             b"QmSku".to_vec(),
             1, 0, ProductVisibility::Public,
@@ -2523,7 +2517,7 @@ fn update_product_tags_cid_pins_and_unpins() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000_000_000_000u128, 0, 100, ProductCategory::Physical, 0,
+            100_000, 100, ProductCategory::Physical, 0,
             b"QmOldTags".to_vec(),
             vec![],
             1, 0, ProductVisibility::Public,
@@ -2532,7 +2526,7 @@ fn update_product_tags_cid_pins_and_unpins() {
 
         assert_ok!(EntityProduct::update_product(
             RuntimeOrigin::signed(1), 0,
-            None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None,
             Some(b"QmNewTags".to_vec()),
             None, None, None, None,
         ));
@@ -2550,7 +2544,7 @@ fn update_product_sku_cid_pins_and_unpins() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000_000_000_000u128, 0, 100, ProductCategory::Physical, 0,
+            100_000, 100, ProductCategory::Physical, 0,
             vec![],
             b"QmOldSku".to_vec(),
             1, 0, ProductVisibility::Public,
@@ -2559,7 +2553,7 @@ fn update_product_sku_cid_pins_and_unpins() {
 
         assert_ok!(EntityProduct::update_product(
             RuntimeOrigin::signed(1), 0,
-            None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None,
             None,
             Some(b"QmNewSku".to_vec()),
             None, None, None,
@@ -2578,7 +2572,7 @@ fn update_product_clear_tags_unpins_only() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000_000_000_000u128, 0, 100, ProductCategory::Physical, 0,
+            100_000, 100, ProductCategory::Physical, 0,
             b"QmTags".to_vec(),
             vec![],
             1, 0, ProductVisibility::Public,
@@ -2587,7 +2581,7 @@ fn update_product_clear_tags_unpins_only() {
 
         assert_ok!(EntityProduct::update_product(
             RuntimeOrigin::signed(1), 0,
-            None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None,
             Some(vec![]),
             None, None, None, None,
         ));
@@ -2628,7 +2622,7 @@ fn force_delete_product_soldout() {
 
         create_default_product();
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(0, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(0, 100));
         assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::SoldOut);
 
         assert_ok!(EntityProduct::force_delete_product(
@@ -2719,7 +2713,7 @@ fn force_delete_product_unpins_all_cids() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000_000_000_000u128, 0, 100, ProductCategory::Physical, 0,
+            100_000, 100, ProductCategory::Physical, 0,
             b"QmTags".to_vec(), b"QmSku".to_vec(),
             1, 0, ProductVisibility::Public,
         ));
@@ -2746,7 +2740,7 @@ fn create_product_rejects_subscription_category() {
             EntityProduct::create_product(
                 RuntimeOrigin::signed(1), 1,
                 b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-                1_000u128, 0, 100, ProductCategory::Subscription, 0, vec![], vec![],
+                100_000, 100, ProductCategory::Subscription, 0, vec![], vec![],
                 1, 0, ProductVisibility::Public,
             ),
             Error::<Test>::CategoryNotSupported
@@ -2761,7 +2755,7 @@ fn create_product_rejects_bundle_category() {
             EntityProduct::create_product(
                 RuntimeOrigin::signed(1), 1,
                 b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-                1_000u128, 0, 100, ProductCategory::Bundle, 0, vec![], vec![],
+                100_000, 100, ProductCategory::Bundle, 0, vec![], vec![],
                 1, 0, ProductVisibility::Public,
             ),
             Error::<Test>::CategoryNotSupported
@@ -2777,7 +2771,7 @@ fn update_product_rejects_subscription_category() {
         assert_noop!(
             EntityProduct::update_product(
                 RuntimeOrigin::signed(1), 0,
-                None, None, None, None, None, None,
+                None, None, None, None, None,
                 Some(ProductCategory::Subscription),
                 None, None, None, None, None, None,
             ),
@@ -2797,7 +2791,7 @@ fn update_product_rejects_category_change_on_sale() {
         assert_noop!(
             EntityProduct::update_product(
                 RuntimeOrigin::signed(1), 0,
-                None, None, None, None, None, None,
+                None, None, None, None, None,
                 Some(ProductCategory::Digital),
                 None, None, None, None, None, None,
             ),
@@ -2814,7 +2808,7 @@ fn update_product_allows_category_change_on_draft() {
 
         assert_ok!(EntityProduct::update_product(
             RuntimeOrigin::signed(1), 0,
-            None, None, None, None, None, None,
+            None, None, None, None, None,
             Some(ProductCategory::Digital),
             None, None, None, None, None, None,
         ));
@@ -2831,7 +2825,7 @@ fn update_product_allows_category_change_on_offshelf() {
 
         assert_ok!(EntityProduct::update_product(
             RuntimeOrigin::signed(1), 0,
-            None, None, None, None, None, None,
+            None, None, None, None, None,
             Some(ProductCategory::Service),
             None, None, None, None, None, None,
         ));
@@ -2849,7 +2843,7 @@ fn update_product_rejects_no_changes() {
         assert_noop!(
             EntityProduct::update_product(
                 RuntimeOrigin::signed(1), 0,
-                None, None, None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None, None,
                 None, None, None,
             ),
             Error::<Test>::NoChangesProvided
@@ -2867,17 +2861,16 @@ fn product_provider_get_product_info_works() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000u128, 500_000, 100, ProductCategory::Physical, 0, vec![], vec![],
+            500_000, 100, ProductCategory::Physical, 0, vec![], vec![],
             2, 50,
             ProductVisibility::LevelGated(3),
         ));
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
-        let info = <EntityProduct as ProductProvider<u64, u128>>::get_product_info(0);
+        let info = <EntityProduct as ProductProvider<u64>>::get_product_info(0);
         assert!(info.is_some());
         let info = info.unwrap();
         assert_eq!(info.shop_id, 1);
-        assert_eq!(info.price, 1_000u128);
         assert_eq!(info.usdt_price, 500_000);
         assert_eq!(info.stock, 100);
         assert_eq!(info.status, ProductStatus::OnSale);
@@ -2892,7 +2885,7 @@ fn product_provider_get_product_info_works() {
 fn product_provider_get_product_info_returns_none_for_nonexistent() {
     new_test_ext().execute_with(|| {
         use pallet_entity_common::ProductProvider;
-        assert!(<EntityProduct as ProductProvider<u64, u128>>::get_product_info(999).is_none());
+        assert!(<EntityProduct as ProductProvider<u64>>::get_product_info(999).is_none());
     });
 }
 
@@ -2928,7 +2921,7 @@ fn delist_product_offshelf_is_noop() {
         assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::OffShelf);
 
         System::reset_events();
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::delist_product(0));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::delist_product(0));
 
         assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::OffShelf);
         let status_events: Vec<_> = System::events().into_iter().filter(|e| {
@@ -2947,7 +2940,7 @@ fn m1_delist_product_onsale_emits_status_event() {
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 0));
 
         System::reset_events();
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::delist_product(0));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::delist_product(0));
 
         let found = System::events().iter().any(|record| {
             matches!(
@@ -2972,7 +2965,7 @@ fn l2_update_product_same_cid_no_pin_unpin() {
         assert_ok!(EntityProduct::update_product(
             RuntimeOrigin::signed(1), 0,
             Some(b"QmName".to_vec()),
-            None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None,
             None, None, None,
         ));
 
@@ -2994,7 +2987,7 @@ fn h2_update_product_cid_failure_no_orphan_unpin() {
                 RuntimeOrigin::signed(1), 0,
                 Some(b"QmNewName".to_vec()),
                 Some(long_cid),
-                None, None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None,
                 None, None, None,
             ),
             Error::<Test>::CidTooLong
@@ -3022,8 +3015,8 @@ fn v12_update_product_fails_shop_not_active() {
             EntityProduct::update_product(
                 RuntimeOrigin::signed(1), 0,
                 None, None, None,
-                Some(2_000u128), // 仅改价格
-                None, None, None, None, None, None,
+                Some(200_000u64), // 仅改价格
+                None, None, None, None, None,
                 None, None, None,
             ),
             Error::<Test>::ShopNotActive
@@ -3038,7 +3031,7 @@ fn v12_create_product_fails_min_order_exceeds_stock() {
             EntityProduct::create_product(
                 RuntimeOrigin::signed(1), 1,
                 b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-                1_000u128, 0,
+                100_000,
                 5,  // stock = 5
                 ProductCategory::Physical, 0, vec![], vec![],
                 10, // min_order_quantity = 10 > stock
@@ -3056,7 +3049,7 @@ fn v12_create_product_ok_min_order_equals_stock() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000u128, 0,
+            100_000,
             10,  // stock = 10
             ProductCategory::Physical, 0, vec![], vec![],
             10,  // min = 10 == stock
@@ -3072,7 +3065,7 @@ fn v12_create_product_ok_infinite_stock_with_min() {
         assert_ok!(EntityProduct::create_product(
             RuntimeOrigin::signed(1), 1,
             b"QmName".to_vec(), b"QmImages".to_vec(), b"QmDetail".to_vec(),
-            1_000u128, 0,
+            100_000,
             0,   // infinite stock
             ProductCategory::Physical, 0, vec![], vec![],
             100, // any min is fine with infinite stock
@@ -3090,7 +3083,7 @@ fn v12_update_product_fails_min_order_exceeds_stock() {
         assert_noop!(
             EntityProduct::update_product(
                 RuntimeOrigin::signed(1), 0,
-                None, None, None, None, None,
+                None, None, None, None,
                 Some(5), // lower stock to 5
                 None, None, None, None,
                 Some(10), // raise min to 10 > new stock
@@ -3110,8 +3103,8 @@ fn v12_update_product_ok_no_stock_min_change() {
         assert_ok!(EntityProduct::update_product(
             RuntimeOrigin::signed(1), 0,
             None, None, None,
-            Some(2_000u128),
-            None, None, None, None, None, None,
+            Some(200_000u64),
+            None, None, None, None, None,
             None, None, None,
         ));
     });
@@ -3137,7 +3130,7 @@ fn v12_force_remove_all_shop_products_works() {
         let pallet_balance_before = Balances::free_balance(EntityProduct::pallet_account());
 
         // Force remove all
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::force_remove_all_shop_products(1));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::force_remove_all_shop_products(1));
 
         // All products removed
         assert!(Products::<Test>::get(0).is_none());
@@ -3181,7 +3174,7 @@ fn v12_force_remove_empty_shop_is_noop() {
         use pallet_entity_common::ProductProvider;
 
         // No products in shop 1
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::force_remove_all_shop_products(1));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::force_remove_all_shop_products(1));
 
         // No event emitted
         let found = System::events().iter().any(|record| {
@@ -3203,7 +3196,7 @@ fn v12_force_delist_all_shop_products_works() {
 
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 1));
         assert_ok!(EntityProduct::publish_product(RuntimeOrigin::signed(1), 2));
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::deduct_stock(2, 100));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::deduct_stock(2, 100));
 
         assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::Draft);
         assert_eq!(Products::<Test>::get(1).unwrap().status, ProductStatus::OnSale);
@@ -3211,7 +3204,7 @@ fn v12_force_delist_all_shop_products_works() {
         assert_eq!(ProductStats::<Test>::get().on_sale_products, 1);
 
         // Force delist all
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::force_delist_all_shop_products(1));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::force_delist_all_shop_products(1));
 
         // OnSale → OffShelf, SoldOut → OffShelf, Draft unchanged
         assert_eq!(Products::<Test>::get(0).unwrap().status, ProductStatus::Draft);
@@ -3247,7 +3240,7 @@ fn v12_force_delist_all_no_active_products_is_noop() {
         create_default_product();
 
         System::reset_events();
-        assert_ok!(<EntityProduct as ProductProvider<u64, u128>>::force_delist_all_shop_products(1));
+        assert_ok!(<EntityProduct as ProductProvider<u64>>::force_delist_all_shop_products(1));
 
         let found = System::events().iter().any(|record| {
             matches!(record.event, RuntimeEvent::EntityProduct(Event::ShopProductsDelisted { .. }))

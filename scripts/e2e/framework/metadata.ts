@@ -1,4 +1,4 @@
-import { ApiPromise } from '@polkadot/api';
+import type { ApiPromise } from '@polkadot/api';
 import { assert, assertEqual } from './assert.js';
 import { normalizeIdentifier } from './codec.js';
 
@@ -36,6 +36,14 @@ export function assertStorage(api: ApiPromise, pallet: string, storage: string):
   const palletQuery = (api.query as any)[pallet];
   assert(palletQuery != null, `Missing query pallet: ${pallet}`);
   assert(palletQuery[storage] != null, `Missing storage accessor: ${pallet}.${storage}`);
+}
+
+export function assertStorageAny(api: ApiPromise, pallet: string, storageOptions: string[]): void {
+  const palletQuery = (api.query as any)[pallet];
+  assert(palletQuery != null, `Missing query pallet: ${pallet}`);
+
+  const matched = storageOptions.find((storage) => palletQuery[storage] != null);
+  assert(matched != null, `Missing storage accessor: ${pallet}.${storageOptions.join(' | ')}`);
 }
 
 export function assertEvent(api: ApiPromise, pallet: string, event: string): void {

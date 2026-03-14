@@ -1,5 +1,6 @@
 use crate as pallet_entity_market;
 use frame_support::{
+    assert_ok,
     derive_impl,
     parameter_types,
     traits::{ConstU16, ConstU32, ConstU64},
@@ -334,13 +335,21 @@ impl ExtBuilder {
     }
 }
 
-/// 配置市场（启用 NEX）
+/// 配置市场（启用 NEX）并设置初始价格锚点
 pub fn configure_market_enabled(entity_id: u64) {
+    let owner = if entity_id == ENTITY_ID { ENTITY_OWNER } else { ENTITY_OWNER_2 };
     assert!(EntityMarket::configure_market(
-        RuntimeOrigin::signed(if entity_id == ENTITY_ID { ENTITY_OWNER } else { ENTITY_OWNER_2 }),
+        RuntimeOrigin::signed(owner),
         entity_id,
         true,  // nex_enabled
         1,     // min_order_amount
         1000,  // order_ttl
     ).is_ok());
+    assert_ok!(EntityMarket::set_initial_price(
+        RuntimeOrigin::signed(owner), entity_id, 100
+    ));
+    // 关闭价格保护，保持与原测试行为一致（需要价格保护的测试会自行配置）
+    assert_ok!(EntityMarket::configure_price_protection(
+        RuntimeOrigin::signed(owner), entity_id, false, 2000, 500, 5000, 100
+    ));
 }

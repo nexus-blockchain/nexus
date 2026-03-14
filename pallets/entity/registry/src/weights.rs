@@ -44,6 +44,7 @@ pub trait WeightInfo {
     fn reject_close_request() -> Weight;
     fn execute_close_timeout() -> Weight;
     fn force_rebind_referrer() -> Weight;
+    fn set_payment_config() -> Weight;
 }
 
 /// 默认权重实现（保守估计，生产前需 benchmark 替换）
@@ -124,6 +125,9 @@ impl WeightInfo for SubstrateWeight {
     fn force_rebind_referrer() -> Weight {
         Weight::from_parts(80_000_000, 5_000)
     }
+    fn set_payment_config() -> Weight {
+        Weight::from_parts(50_000_000, 3_000)
+    }
 }
 impl WeightInfo for () {
     fn create_entity() -> Weight { Weight::zero() }
@@ -151,4 +155,5 @@ impl WeightInfo for () {
     fn reject_close_request() -> Weight { Weight::zero() }
     fn execute_close_timeout() -> Weight { Weight::zero() }
     fn force_rebind_referrer() -> Weight { Weight::zero() }
+    fn set_payment_config() -> Weight { Weight::zero() }
 }

@@ -12,6 +12,60 @@ use pallet_entity_common::{AdminPermission, EntityStatus, EntityType, Governance
 use sp_runtime::traits::Zero;
 
 impl<T: Config> Pallet<T> {
+    /// 外部捐赠/注资（任何人可调用，资金充足时触发自动恢复）
+    pub(crate) fn do_donate_to_entity(
+        who: T::AccountId,
+        entity_id: u64,
+        amount: BalanceOf<T>,
+    ) -> sp_runtime::DispatchResult {
+        let entity = Entities::<T>::get(entity_id).ok_or(Error::<T>::EntityNotFound)?;
+        // 仅禁止向已关闭的实体捐赠
+        ensure!(
+            entity.status != EntityStatus::Closed,
+            Error::<T>::InvalidEntityStatus
+        );
+        ensure!(!amount.is_zero(), Error::<T>::ZeroAmount);
+
+        let treasury_account = Self::entity_treasury_account(entity_id);
+
+        T::Currency::transfer(
+            &who,
+            &treasury_account,
+            amount,
+            ExistenceRequirement::KeepAlive,
+        )?;
+
+        let new_balance = T::Currency::free_balance(&treasury_account);
+        let min_balance = T::MinOperatingBalance::get();
+
+        // 仅资金不足暂停可自动恢复；治理暂停/Owner 主动暂停需要显式恢复
+        if entity.status == EntityStatus::Suspended
+            && new_balance >= min_balance
+            && !GovernanceSuspended::<T>::get(entity_id)
+            && !OwnerPaused::<T>::get(entity_id)
+        {
+            Entities::<T>::mutate(entity_id, |s| {
+                if let Some(e) = s {
+                    e.status = EntityStatus::Active;
+                }
+            });
+            EntityStats::<T>::mutate(|stats| {
+                stats.active_entities = stats.active_entities.saturating_add(1);
+            });
+            T::OnEntityStatusChange::on_entity_resumed(entity_id);
+            Self::deposit_event(Event::EntityResumedAfterFunding { entity_id });
+        }
+
+        Self::deposit_event(Event::DonationReceived {
+            entity_id,
+            donor: who,
+            amount,
+            new_balance,
+        });
+
+        Ok(())
+    }
+
     /// 充值金库资金
     pub(crate) fn do_top_up_fund(
         who: T::AccountId,

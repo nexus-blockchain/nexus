@@ -47,7 +47,7 @@ pub mod pallet {
     use frame_system::pallet_prelude::*;
     use frame_system::ensure_root;
     use pallet_dispute_escrow::pallet::Escrow as EscrowTrait;
-    use pallet_entity_common::{OrderStatus, OrderProvider, PaymentAsset, PricingProvider, ProductCategory, ProductProvider, ProductStatus, ProductVisibility, AssetLedgerPort, EntityTokenPriceProvider, LoyaltyReadPort, LoyaltyWritePort, MemberProvider, ShopProvider, OnOrderCompleted, OnOrderCancelled, OrderCompletionInfo, OrderCancellationInfo, TokenFeeConfigPort};
+    use pallet_entity_common::{EntityProvider, OrderStatus, OrderProvider, PaymentAsset, PricingProvider, ProductCategory, ProductProvider, ProductStatus, ProductVisibility, AssetLedgerPort, EntityTokenPriceProvider, LoyaltyReadPort, LoyaltyWritePort, MemberProvider, ShopProvider, OnOrderCompleted, OnOrderCancelled, OrderCompletionInfo, OrderCancellationInfo, TokenFeeConfigPort};
     use sp_runtime::{traits::{Saturating, Zero}, SaturatedConversion};
 
     /// 货币余额类型别名
@@ -68,10 +68,17 @@ pub mod pallet {
         /// 代付人（第三方付款时为 Some，自付时为 None）
         pub payer: Option<AccountId>,
         pub quantity: u32,
+        /// NEX 单价快照（USDT → NEX 换算后）
         pub unit_price: Balance,
-        /// 实际支付金额（积分/购物余额/会员折扣后）
+        /// 实际支付金额（积分/购物余额/会员折扣后，NEX 计价）
         pub total_amount: Balance,
         pub platform_fee: Balance,
+        /// USDT 总价快照（折扣后，精度 10^6）
+        pub usdt_total: u64,
+        /// 下单时 NEX/USDT 汇率快照（精度 10^6）
+        pub nex_usdt_rate: u64,
+        /// 下单时 Token/NEX 汇率快照（精度 10^12，Native 支付为 0）
+        pub token_nex_rate: u128,
         /// 商品类别（决定订单流程，是否需要物流由此推导）
         pub product_category: ProductCategory,
         pub shipping_cid: Option<BoundedVec<u8, MaxCidLen>>,
@@ -160,7 +167,10 @@ pub mod pallet {
         type ShopProvider: ShopProvider<Self::AccountId>;
 
         /// 商品查询接口
-        type ProductProvider: ProductProvider<Self::AccountId, BalanceOf<Self>>;
+        type ProductProvider: ProductProvider<Self::AccountId>;
+
+        /// 实体查询接口（用于查询支付通道配置）
+        type EntityProvider: pallet_entity_common::EntityProvider<Self::AccountId>;
 
         /// 实体代币资产账本接口（reserve/unreserve/repatriate）
         type EntityToken: AssetLedgerPort<Self::AccountId, BalanceOf<Self>>;
@@ -235,7 +245,7 @@ pub mod pallet {
         type WeightInfo: WeightInfo;
     }
 
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -329,6 +339,8 @@ pub mod pallet {
             amount: BalanceOf<T>,
             payment_asset: PaymentAsset,
             token_amount: u128,
+            usdt_total: u64,
+            nex_usdt_rate: u64,
         },
         OrderShipped { order_id: u64 },
         OrderCompleted {
@@ -427,6 +439,18 @@ pub mod pallet {
         PayerOrdersFull,
         /// 会员未绑定推荐人（REFERRAL_REQUIRED 策略下不允许下单）
         ReferrerRequired,
+        /// USDT 价格未设置
+        UsdtPriceNotSet,
+        /// NEX/USDT 价格不可用
+        NexPriceUnavailable,
+        /// Token 价格不可用
+        TokenPriceUnavailable,
+        /// NEX 滑点超限
+        NexSlippageExceeded,
+        /// Token 滑点超限
+        TokenSlippageExceeded,
+        /// 支付通道未启用
+        PaymentChannelDisabled,
     }
 
     // ==================== Hooks ====================
@@ -462,9 +486,11 @@ pub mod pallet {
             payment_asset: Option<PaymentAsset>,
             note_cid: Option<Vec<u8>>,
             referrer: Option<T::AccountId>,
+            max_nex_amount: Option<BalanceOf<T>>,
+            max_token_amount: Option<u128>,
         ) -> DispatchResult {
             let buyer = ensure_signed(origin)?;
-            Self::do_place_order(buyer, None, product_id, quantity, shipping_cid, use_tokens, use_shopping_balance, payment_asset, note_cid, referrer)
+            Self::do_place_order(buyer, None, product_id, quantity, shipping_cid, use_tokens, use_shopping_balance, payment_asset, note_cid, referrer, max_nex_amount, max_token_amount)
         }
 
         /// 取消订单（数字商品不可取消）
@@ -997,9 +1023,11 @@ pub mod pallet {
             payment_asset: Option<PaymentAsset>,
             note_cid: Option<Vec<u8>>,
             referrer: Option<T::AccountId>,
+            max_nex_amount: Option<BalanceOf<T>>,
+            max_token_amount: Option<u128>,
         ) -> DispatchResult {
             let payer = ensure_signed(origin)?;
-            Self::do_place_order(buyer, Some(payer), product_id, quantity, shipping_cid, use_tokens, use_shopping_balance, payment_asset, note_cid, referrer)
+            Self::do_place_order(buyer, Some(payer), product_id, quantity, shipping_cid, use_tokens, use_shopping_balance, payment_asset, note_cid, referrer, max_nex_amount, max_token_amount)
         }
 
         /// 清理代付人订单索引（移除已终态的订单 ID，释放 BoundedVec 容量）
@@ -1056,6 +1084,8 @@ pub mod pallet {
             payment_asset: Option<PaymentAsset>,
             note_cid: Option<Vec<u8>>,
             referrer: Option<T::AccountId>,
+            max_nex_amount: Option<BalanceOf<T>>,
+            max_token_amount: Option<u128>,
         ) -> DispatchResult {
             ensure!(quantity > 0, Error::<T>::InvalidQuantity);
 
@@ -1069,7 +1099,10 @@ pub mod pallet {
                 Error::<T>::ProductNotOnSale
             );
             let shop_id = product_info.shop_id;
-            let price = product_info.price;
+
+            // ① USDT 价格必须已设置
+            let usdt_price = product_info.usdt_price;
+            ensure!(usdt_price > 0, Error::<T>::UsdtPriceNotSet);
 
             if product_info.min_order_quantity > 0 {
                 ensure!(quantity >= product_info.min_order_quantity, Error::<T>::QuantityBelowMinimum);
@@ -1099,7 +1132,6 @@ pub mod pallet {
             );
 
             // REFERRAL_REQUIRED 策略：已注册但无推荐人的会员不允许下单
-            // 防止"先入会/先消费，再绑定上级"绕过推荐链
             if T::MemberProvider::is_member(entity_id, &buyer)
                 && T::MemberProvider::requires_referral(entity_id)
                 && T::MemberProvider::get_referrer(entity_id, &buyer).is_none()
@@ -1133,21 +1165,58 @@ pub mod pallet {
                 ensure!(product_info.stock >= quantity, Error::<T>::InsufficientStock);
             }
 
-            let total_amount = price.checked_mul(&quantity.into())
+            // ② USDT 总价 = usdt_price * quantity
+            let usdt_total = usdt_price.checked_mul(quantity as u64)
                 .ok_or(Error::<T>::Overflow)?;
 
-            let resolved_payment_asset = payment_asset.unwrap_or(PaymentAsset::Native);
+            // ③ 获取 NEX/USDT 汇率（精度 10^6）
+            let nex_usdt_price = T::PricingProvider::get_nex_usdt_price();
+            ensure!(nex_usdt_price > 0, Error::<T>::NexPriceUnavailable);
+            ensure!(!T::PricingProvider::is_price_stale(), Error::<T>::NexPriceUnavailable);
 
-            let mut final_amount = total_amount;
+            // ④ 会员折扣在 USDT 层
+            let mut discounted_usdt = usdt_total;
             if buyer_level > 0 {
                 let discount_bps: u32 = T::MemberProvider::get_level_discount(entity_id, buyer_level).into();
                 if discount_bps > 0 && discount_bps < 10000 {
-                    let discount = final_amount.saturating_mul(discount_bps.into()) / 10000u32.into();
-                    final_amount = final_amount.saturating_sub(discount);
+                    let discount = (discounted_usdt as u128)
+                        .saturating_mul(discount_bps as u128) / 10000u128;
+                    discounted_usdt = discounted_usdt.saturating_sub(discount as u64);
                 }
             }
 
-            // 积分/购物余额抵扣（仅 Native，基于 buyer 的权益）
+            // ⑤ USDT → NEX: nex_amount = discounted_usdt * 10^12 / nex_usdt_price
+            // (discounted_usdt 精度 10^6, nex_usdt_price 精度 10^6, NEX 精度 10^12)
+            let nex_amount_u128 = (discounted_usdt as u128)
+                .checked_mul(1_000_000_000_000u128) // 10^12
+                .ok_or(Error::<T>::Overflow)?
+                .checked_div(nex_usdt_price as u128)
+                .ok_or(Error::<T>::Overflow)?;
+            let nex_amount: BalanceOf<T> = nex_amount_u128.try_into()
+                .map_err(|_| Error::<T>::Overflow)?;
+
+            // ⑥ 检查 PaymentConfig 通道是否开启
+            let resolved_payment_asset = payment_asset.unwrap_or(PaymentAsset::Native);
+            let payment_config = T::EntityProvider::payment_config(entity_id);
+            match resolved_payment_asset {
+                PaymentAsset::Native => {
+                    ensure!(payment_config.native_enabled, Error::<T>::PaymentChannelDisabled);
+                },
+                PaymentAsset::EntityToken => {
+                    ensure!(payment_config.token_enabled, Error::<T>::PaymentChannelDisabled);
+                },
+            }
+
+            // NEX 单价快照
+            let unit_price_nex: BalanceOf<T> = if quantity > 0 {
+                nex_amount / quantity.into()
+            } else {
+                Zero::zero()
+            };
+
+            let mut final_amount = nex_amount;
+
+            // ⑦ 积分/购物余额抵扣（仅 Native，基于 buyer 的权益）
             if resolved_payment_asset == PaymentAsset::Native {
                 if let Some(tokens) = use_tokens {
                     if !tokens.is_zero() && T::Loyalty::is_token_enabled(entity_id) {
@@ -1199,20 +1268,51 @@ pub mod pallet {
             let order_id = NextOrderId::<T>::get();
             let now = <frame_system::Pallet<T>>::block_number();
 
-            // 资金锁定：从 actual_payer 扣款
-            let token_payment_amount: u128 = match resolved_payment_asset {
+            // ⑧ 资金锁定 + 滑点检查
+            let token_payment_amount: u128;
+            let token_nex_rate: u128;
+
+            match resolved_payment_asset {
                 PaymentAsset::Native => {
+                    // 滑点检查
+                    if let Some(max_nex) = max_nex_amount {
+                        ensure!(final_amount <= max_nex, Error::<T>::NexSlippageExceeded);
+                    }
                     T::Escrow::lock_from(actual_payer, order_id, final_amount)?;
-                    0u128
+                    token_payment_amount = 0u128;
+                    token_nex_rate = 0u128;
                 },
                 PaymentAsset::EntityToken => {
                     ensure!(T::EntityToken::is_token_enabled(entity_id), Error::<T>::EntityTokenNotEnabled);
+
+                    // Token/NEX 汇率
+                    let token_nex_price = T::TokenPriceProvider::get_token_price(entity_id)
+                        .ok_or(Error::<T>::TokenPriceUnavailable)?;
+                    let token_nex_price_u128: u128 = token_nex_price.saturated_into();
+                    ensure!(token_nex_price_u128 > 0, Error::<T>::TokenPriceUnavailable);
+                    ensure!(T::TokenPriceProvider::is_token_price_reliable(entity_id), Error::<T>::TokenPriceUnavailable);
+
+                    // token_amount = nex_amount * 10^12 / token_nex_price
+                    let token_amount_u128 = (final_amount.saturated_into::<u128>())
+                        .checked_mul(1_000_000_000_000u128)
+                        .ok_or(Error::<T>::Overflow)?
+                        .checked_div(token_nex_price_u128)
+                        .ok_or(Error::<T>::Overflow)?;
+                    let token_amount: BalanceOf<T> = token_amount_u128.try_into()
+                        .map_err(|_| Error::<T>::Overflow)?;
+
+                    // 滑点检查
+                    if let Some(max_token) = max_token_amount {
+                        ensure!(token_amount_u128 <= max_token, Error::<T>::TokenSlippageExceeded);
+                    }
+
                     let payer_token_balance = T::EntityToken::token_balance(entity_id, actual_payer);
-                    ensure!(payer_token_balance >= final_amount, Error::<T>::InsufficientTokenBalance);
-                    T::EntityToken::reserve(entity_id, actual_payer, final_amount)?;
-                    final_amount.saturated_into::<u128>()
+                    ensure!(payer_token_balance >= token_amount, Error::<T>::InsufficientTokenBalance);
+                    T::EntityToken::reserve(entity_id, actual_payer, token_amount)?;
+                    token_payment_amount = token_amount_u128;
+                    token_nex_rate = token_nex_price_u128;
                 },
-            };
+            }
 
             T::ProductProvider::deduct_stock(product_id, quantity)?;
             T::ProductProvider::add_sold_count(product_id, quantity)?;
@@ -1235,9 +1335,12 @@ pub mod pallet {
                 seller: seller.clone(),
                 payer: stored_payer.clone(),
                 quantity,
-                unit_price: price,
+                unit_price: unit_price_nex,
                 total_amount: final_amount,
                 platform_fee,
+                usdt_total: discounted_usdt,
+                nex_usdt_rate: nex_usdt_price,
+                token_nex_rate,
                 product_category,
                 shipping_cid,
                 tracking_cid: None,
@@ -1295,6 +1398,8 @@ pub mod pallet {
                 amount: final_amount,
                 payment_asset: resolved_payment_asset,
                 token_amount: token_payment_amount,
+                usdt_total: discounted_usdt,
+                nex_usdt_rate: nex_usdt_price,
             });
 
             if product_category == ProductCategory::Digital {
@@ -1471,9 +1576,13 @@ pub mod pallet {
 
         /// 预计算 USDT 等值金额（供 Hook 链使用）
         fn calculate_amount_usdt(order: &OrderOf<T>) -> u64 {
+            // 新版订单已在下单时快照 usdt_total，直接返回
+            if order.usdt_total > 0 {
+                return order.usdt_total;
+            }
+            // 兼容旧订单（usdt_total == 0 的存量数据）
             match order.payment_asset {
                 PaymentAsset::Native => {
-                    // NEX → USDT 转换: price 精度 10^6, NEX 精度 10^12
                     let amount_nex: u128 = order.total_amount.saturated_into();
                     let nex_price: u128 = T::PricingProvider::get_nex_usdt_price() as u128;
                     amount_nex.saturating_mul(nex_price)
@@ -1481,7 +1590,6 @@ pub mod pallet {
                         .unwrap_or(0) as u64
                 },
                 PaymentAsset::EntityToken => {
-                    // F2-fix: Token → NEX → USDT 间接换算
                     let entity_id = order.entity_id;
                     if T::TokenPriceProvider::is_token_price_reliable(entity_id) {
                         if let Some(token_nex_price) = T::TokenPriceProvider::get_token_price(entity_id) {

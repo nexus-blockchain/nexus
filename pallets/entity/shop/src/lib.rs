@@ -179,7 +179,7 @@ pub mod pallet {
         type StoragePin: StoragePin<Self::AccountId>;
 
         /// Product 提供者（用于 Shop 关闭时级联 unpin Product CID）
-        type ProductProvider: ProductProvider<Self::AccountId, BalanceOf<Self>>;
+        type ProductProvider: ProductProvider<Self::AccountId>;
 
         /// 积分清理接口（Shop 关闭时委托 loyalty 模块清理）
         type PointsCleanup: pallet_entity_common::PointsCleanup;

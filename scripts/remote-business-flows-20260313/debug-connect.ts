@@ -1,0 +1,14 @@
+console.log('start');
+process.env.WS_URL='wss://202.140.140.202';
+process.env.NODE_TLS_REJECT_UNAUTHORIZED='0';
+const apiMod = await import('../e2e/framework/api.js');
+console.log('after api import');
+await import('../e2e/framework/accounts.js');
+console.log('after accounts import');
+await import('../e2e/framework/codec.js');
+console.log('after codec import');
+const api = await apiMod.connectApi(process.env.WS_URL);
+console.log('after connect');
+console.log('api ready', api.runtimeVersion.specName.toString(), api.runtimeVersion.specVersion.toString());
+await apiMod.disconnectApi(api);
+console.log('done');

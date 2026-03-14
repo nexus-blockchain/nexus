@@ -168,8 +168,8 @@ pub mod pallet {
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     pub enum ProposalType<Balance> {
         // ==================== 商品管理类 ====================
-        /// 商品价格调整
-        PriceChange { product_id: u64, new_price: Balance },
+        /// 商品 USDT 价格调整
+        PriceChange { product_id: u64, new_usdt_price: u64 },
         /// 新商品上架
         ProductListing { product_cid: BoundedVec<u8, ConstU32<64>> },
         /// 商品下架
@@ -759,7 +759,7 @@ pub mod pallet {
         type TimeWeightMaxMultiplier: Get<u32>;
 
         /// F3: 商品查询接口（治理提案执行 PriceChange/InventoryAdjustment）
-        type ProductProvider: pallet_entity_common::ProductProvider<Self::AccountId, Self::Balance>;
+        type ProductProvider: pallet_entity_common::ProductProvider<Self::AccountId>;
 
         /// F8: 多级分销写入接口（治理提案执行时调用）
         type MultiLevelWriter: MultiLevelPlanWriter;
@@ -2359,8 +2359,8 @@ pub mod pallet {
         fn validate_proposal_type(entity_id: u64, pt: &ProposalType<BalanceOf<T>>) -> DispatchResult {
             match pt {
                 // ==================== 商品管理类 — F2 前置校验 ====================
-                ProposalType::PriceChange { product_id, new_price } => {
-                    ensure!(!new_price.is_zero(), Error::<T>::InvalidParameter);
+                ProposalType::PriceChange { product_id, new_usdt_price } => {
+                    ensure!(*new_usdt_price > 0, Error::<T>::InvalidParameter);
                     Self::validate_product_belongs_to_entity(entity_id, *product_id)?;
                 },
                 ProposalType::ProductDelisting { product_id } => {
@@ -2797,9 +2797,9 @@ pub mod pallet {
             
             match &proposal.proposal_type {
                 // ==================== 商品管理类 ====================
-                ProposalType::PriceChange { product_id, new_price } => {
-                    // F3: 价格变更通过 ProductProvider 链上执行
-                    T::ProductProvider::update_price(*product_id, *new_price)
+                ProposalType::PriceChange { product_id, new_usdt_price } => {
+                    // F3: USDT 价格变更通过 ProductProvider 链上执行
+                    T::ProductProvider::update_usdt_price(*product_id, *new_usdt_price)
                 },
                 ProposalType::ProductListing { product_cid } => {
                     // 商品上架需要链下解析 CID，记录提案已执行

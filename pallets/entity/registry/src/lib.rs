@@ -60,7 +60,7 @@ pub mod pallet {
     };
     use sp_runtime::traits::ConstU32;
     use frame_system::pallet_prelude::*;
-    use pallet_entity_common::{EntityStatus, EntityType, GovernanceMode, PricingProvider};
+    use pallet_entity_common::{EntityProvider, EntityStatus, EntityType, GovernanceMode, PricingProvider};
     use pallet_storage_service::StoragePin;
 
     /// 实体金库派生账户 PalletId
@@ -247,7 +247,7 @@ pub mod pallet {
         type WeightInfo: WeightInfo;
     }
 
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(2);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -417,6 +417,10 @@ pub mod pallet {
     #[pallet::getter(fn suspension_reason)]
     pub type SuspensionReasons<T: Config> = StorageMap<_, Blake2_128Concat, u64, BoundedVec<u8, ConstU32<256>>>;
 
+    /// Entity 级支付通道配置（entity_id -> PaymentConfig）
+    #[pallet::storage]
+    pub type EntityPaymentConfigs<T: Config> = StorageMap<_, Blake2_128Concat, u64, pallet_entity_common::PaymentConfig, ValueQuery>;
+
 
     // ==================== 事件 ====================
 
@@ -442,6 +446,13 @@ pub mod pallet {
         /// 运营资金已充值
         FundToppedUp {
             entity_id: u64,
+            amount: BalanceOf<T>,
+            new_balance: BalanceOf<T>,
+        },
+        /// 外部捐赠/注资
+        DonationReceived {
+            entity_id: u64,
+            donor: T::AccountId,
             amount: BalanceOf<T>,
             new_balance: BalanceOf<T>,
         },
@@ -604,6 +615,12 @@ pub mod pallet {
             old_referrer: Option<T::AccountId>,
             new_referrer: T::AccountId,
         },
+        /// 支付通道配置已更新
+        PaymentConfigUpdated {
+            entity_id: u64,
+            native_enabled: bool,
+            token_enabled: bool,
+        },
     }
 
     // ==================== 错误 ====================
@@ -702,6 +719,8 @@ pub mod pallet {
         HasActiveTokenSale,
         /// 存在活跃市场交易，不允许关闭
         HasActiveMarket,
+        /// 支付通道配置无效（至少启用一个通道）
+        InvalidPaymentConfig,
     }
 
     // ==================== Extrinsics ====================
@@ -983,6 +1002,56 @@ pub mod pallet {
         ) -> DispatchResult {
             T::GovernanceOrigin::ensure_origin(origin)?;
             Self::do_force_rebind_referrer(entity_id, new_referrer)
+        }
+
+        /// 设置 Entity 支付通道配置
+        ///
+        /// 权限：Owner 或 Admin(ENTITY_MANAGE)
+        #[pallet::call_index(29)]
+        #[pallet::weight(T::WeightInfo::set_payment_config())]
+        pub fn set_payment_config(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            native_enabled: bool,
+            token_enabled: bool,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            let entity = Entities::<T>::get(entity_id)
+                .ok_or(Error::<T>::EntityNotFound)?;
+            ensure!(entity.status == EntityStatus::Active, Error::<T>::EntityNotActive);
+
+            // 权限: Owner 或 Admin(ENTITY_MANAGE)
+            let is_owner = entity.owner == who;
+            let is_admin = <Self as EntityProvider<T::AccountId>>::is_entity_admin(entity_id, &who, pallet_entity_common::AdminPermission::ENTITY_MANAGE);
+            ensure!(is_owner || is_admin, Error::<T>::NotEntityOwner);
+
+            // 至少启用一个通道
+            ensure!(native_enabled || token_enabled, Error::<T>::InvalidPaymentConfig);
+
+            EntityPaymentConfigs::<T>::insert(entity_id, pallet_entity_common::PaymentConfig {
+                native_enabled,
+                token_enabled,
+            });
+
+            Self::deposit_event(Event::PaymentConfigUpdated {
+                entity_id,
+                native_enabled,
+                token_enabled,
+            });
+            Ok(())
+        }
+
+        /// 外部捐赠/注资（任何人可调用，不触发自动恢复）
+        #[pallet::call_index(30)]
+        #[pallet::weight(T::WeightInfo::top_up_fund())]
+        pub fn donate_to_entity(
+            origin: OriginFor<T>,
+            entity_id: u64,
+            amount: BalanceOf<T>,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::do_donate_to_entity(who, entity_id, amount)
         }
     }
 }

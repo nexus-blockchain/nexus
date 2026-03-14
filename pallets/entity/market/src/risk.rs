@@ -26,6 +26,9 @@ impl<T: Config> Pallet<T> {
         ensure!(config.nex_enabled, Error::<T>::MarketNotEnabled);
         ensure!(!config.paused, Error::<T>::MarketPaused);
 
+        // 价格锚点检查：必须有 LastTradePrice 或 initial_price
+        Self::ensure_price_anchor_exists(entity_id)?;
+
         Ok(())
     }
 
@@ -58,6 +61,21 @@ impl<T: Config> Pallet<T> {
             let user_level = T::KycProvider::kyc_level(entity_id, who);
             ensure!(user_level >= min_level, Error::<T>::InsufficientKycLevel);
         }
+        Ok(())
+    }
+
+    /// 价格锚点检查：市场必须有参考价格才能交易
+    /// 优先级: LastTradePrice（真实成交）→ initial_price（owner 设定）
+    pub(crate) fn ensure_price_anchor_exists(entity_id: u64) -> DispatchResult {
+        if LastTradePrice::<T>::get(entity_id).is_some() {
+            return Ok(());
+        }
+        ensure!(
+            PriceProtection::<T>::get(entity_id)
+                .and_then(|c| c.initial_price)
+                .is_some(),
+            Error::<T>::InitialPriceNotSet
+        );
         Ok(())
     }
 }

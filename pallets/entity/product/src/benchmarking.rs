@@ -55,7 +55,6 @@ fn seed_product<T: Config>(
         name_cid: bounded_cid.clone(),
         images_cid: bounded_cid.clone(),
         detail_cid: bounded_cid.clone(),
-        price: 1_000_000_000_000u64.try_into().unwrap_or(1u32.into()),
         usdt_price: 1_000_000,
         stock: 100,
         sold_count: 0,
@@ -128,7 +127,6 @@ fn seed_products_batch<T: Config>(
             name_cid: bounded_cid.clone(),
             images_cid: bounded_cid.clone(),
             detail_cid: bounded_cid.clone(),
-            price: 1_000_000_000_000u64.try_into().unwrap_or(1u32.into()),
             usdt_price: 1_000_000,
             stock: 100,
             sold_count: 0,
@@ -191,7 +189,6 @@ mod benches {
             cid.clone(),       // name_cid
             cid.clone(),       // images_cid
             cid.clone(),       // detail_cid
-            1_000_000_000_000u64.try_into().unwrap_or(1u32.into()), // price
             1_000_000u64,      // usdt_price
             100u32,            // stock
             ProductCategory::Physical,
@@ -223,7 +220,6 @@ mod benches {
             Some(new_cid.clone()),  // name_cid
             Some(new_cid.clone()),  // images_cid
             Some(new_cid.clone()),  // detail_cid
-            Some(2_000_000_000_000u64.try_into().unwrap_or(2u32.into())), // price
             Some(2_000_000u64),     // usdt_price
             Some(200u32),           // stock
             Some(ProductCategory::Physical),

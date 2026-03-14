@@ -140,6 +140,9 @@ scripts/node_modules/
 scripts/e2e-report-*.json
 scripts/e2e-reports/
 scripts/*.log
+scripts/reports/
+scripts/remote-business-flows-*/artifacts/
+scripts/tmp-connect-file*.ts
 
 # =========================
 # Website (Next.js)

@@ -1379,6 +1379,7 @@ impl pallet_entity_order::Config for Runtime {
 	type Escrow = Escrow;
 	type ShopProvider = EntityShop;
 	type ProductProvider = EntityProduct;
+	type EntityProvider = EntityRegistry;
 	type EntityToken = EntityToken;
 	type PlatformAccount = EntityPlatformAccount;
 	type ShipTimeout = EntityShipTimeout;

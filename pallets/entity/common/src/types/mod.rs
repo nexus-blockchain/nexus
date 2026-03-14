@@ -932,3 +932,24 @@ pub struct OrderCancellationInfo {
     pub shop_id: u64,
     pub payment_asset: super::traits::core::PaymentAsset,
 }
+
+// ============================================================================
+// PaymentConfig — Entity 级支付通道配置
+// ============================================================================
+
+/// Entity 级支付通道配置
+///
+/// 控制 Entity 下的店铺订单可使用哪些支付通道。
+#[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+pub struct PaymentConfig {
+    /// 是否启用 NEX 原生代币支付
+    pub native_enabled: bool,
+    /// 是否启用 Entity Token 支付
+    pub token_enabled: bool,
+}
+
+impl Default for PaymentConfig {
+    fn default() -> Self {
+        Self { native_enabled: true, token_enabled: false }
+    }
+}

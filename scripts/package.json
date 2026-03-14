@@ -4,17 +4,28 @@
   "description": "Nexus runtime smoke and contract tests",
   "type": "module",
   "scripts": {
-    "e2e": "tsx e2e/run.ts",
-    "e2e:list": "tsx e2e/run.ts --list",
-    "e2e:contracts": "tsx e2e/run.ts --suite runtime-contracts",
-    "e2e:smoke": "tsx e2e/run.ts --suite chain-health entity-lifecycle nex-market-smoke",
-    "e2e:typecheck": "tsc --noEmit"
+    "e2e": "node --import tsx e2e/run.ts",
+    "e2e:list": "node --import tsx e2e/run.ts --list",
+    "e2e:contracts": "node --import tsx e2e/run.ts --suite runtime-contracts",
+    "e2e:smoke": "node --import tsx e2e/run.ts --suite chain-health entity-lifecycle nex-market-smoke",
+    "e2e:phase1": "node --import tsx e2e/run.ts --suite phase1-service-order-lifecycle phase1-third-party-payment-order phase1-token-payment-token-commission phase1-buy-order-acceptance-flow phase1-spend-driven-level-upgrade phase1-shop-closing-guard-cancel",
+    "e2e:remote": "node --import tsx e2e/remote.ts",
+    "e2e:remote:list": "node --import tsx e2e/remote.ts --list",
+    "e2e:remote:contracts": "node --import tsx e2e/remote.ts --suite runtime-contracts",
+    "e2e:remote:inspect": "node --import tsx e2e/inspect-remote.ts",
+    "e2e:remote:debug-connect": "node --import tsx remote-business-flows-20260313/debug-connect.ts",
+    "e2e:remote:debug-transfer": "node --import tsx e2e/debug-transfer-remote.ts",
+    "e2e:remote:smoke:write": "node --import tsx e2e/remote.ts --suite entity-lifecycle nex-market-smoke",
+    "e2e:remote:business-flows": "bash remote-business-flows-20260313/run-remote-business-flows.sh",
+    "e2e:remote:business-flows:list": "bash remote-business-flows-20260313/run-remote-business-flows.sh --list",
+    "e2e:typecheck": "tsc --noEmit",
+    "query:genesis-inscription": "POLKADOTJS_DISABLE_ESM_CJS_WARNING=1 node query-genesis-inscription.js"
   },
   "dependencies": {
-    "@polkadot/api": "^12.0.0",
-    "@polkadot/keyring": "^12.0.0",
-    "@polkadot/util": "^12.0.0",
-    "@polkadot/util-crypto": "^12.0.0"
+    "@polkadot/api": "^16.5.4",
+    "@polkadot/keyring": "^14.0.1",
+    "@polkadot/util": "^14.0.1",
+    "@polkadot/util-crypto": "^14.0.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

@@ -152,8 +152,8 @@ thread_local! {
     static RESERVED_BALANCES: RefCell<HashMap<(u64, u64), u128>> = RefCell::new(HashMap::new());
     // F5: 可配置实体活跃状态
     static ENTITY_ACTIVE: RefCell<HashMap<u64, bool>> = RefCell::new(HashMap::new());
-    // F3: Mock 商品存储
-    static PRODUCT_PRICES: RefCell<HashMap<u64, u128>> = RefCell::new(HashMap::new());
+    // F3: Mock 商品存储（USDT price u64）
+    static PRODUCT_PRICES: RefCell<HashMap<u64, u64>> = RefCell::new(HashMap::new());
     static PRODUCT_STOCKS: RefCell<HashMap<u64, u32>> = RefCell::new(HashMap::new());
 }
 
@@ -178,8 +178,8 @@ pub fn set_entity_active(entity_id: u64, active: bool) {
     ENTITY_ACTIVE.with(|e| e.borrow_mut().insert(entity_id, active));
 }
 
-/// F3: 设置商品价格
-pub fn set_product_price(product_id: u64, price: u128) {
+/// F3: 设置商品 USDT 价格
+pub fn set_product_price(product_id: u64, price: u64) {
     PRODUCT_PRICES.with(|p| p.borrow_mut().insert(product_id, price));
 }
 
@@ -188,7 +188,7 @@ pub fn set_product_stock(product_id: u64, stock: u32) {
     PRODUCT_STOCKS.with(|p| p.borrow_mut().insert(product_id, stock));
 }
 
-pub fn get_product_price(product_id: u64) -> Option<u128> {
+pub fn get_product_price(product_id: u64) -> Option<u64> {
     PRODUCT_PRICES.with(|p| p.borrow().get(&product_id).copied())
 }
 
@@ -264,7 +264,7 @@ impl DisclosureProvider<u64> for MockDisclosureProvider {
 // ==================== Mock ProductProvider ====================
 
 pub struct MockProductProvider;
-impl ProductProvider<u64, u128> for MockProductProvider {
+impl ProductProvider<u64> for MockProductProvider {
     fn product_exists(product_id: u64) -> bool {
         PRODUCT_PRICES.with(|p| p.borrow().contains_key(&product_id))
     }
@@ -274,9 +274,6 @@ impl ProductProvider<u64, u128> for MockProductProvider {
     fn product_shop_id(product_id: u64) -> Option<u64> {
         if Self::product_exists(product_id) { Some(SHOP_ID) } else { None }
     }
-    fn product_price(product_id: u64) -> Option<u128> {
-        get_product_price(product_id)
-    }
     fn product_stock(product_id: u64) -> Option<u32> {
         get_product_stock(product_id)
     }
@@ -284,11 +281,11 @@ impl ProductProvider<u64, u128> for MockProductProvider {
     fn deduct_stock(_: u64, _: u32) -> Result<(), DispatchError> { Ok(()) }
     fn restore_stock(_: u64, _: u32) -> Result<(), DispatchError> { Ok(()) }
     fn add_sold_count(_: u64, _: u32) -> Result<(), DispatchError> { Ok(()) }
-    fn update_price(product_id: u64, new_price: u128) -> Result<(), DispatchError> {
-        if new_price == 0 {
+    fn update_usdt_price(product_id: u64, new_usdt_price: u64) -> Result<(), DispatchError> {
+        if new_usdt_price == 0 {
             return Err(DispatchError::Other("PriceCannotBeZero"));
         }
-        PRODUCT_PRICES.with(|p| p.borrow_mut().insert(product_id, new_price));
+        PRODUCT_PRICES.with(|p| p.borrow_mut().insert(product_id, new_usdt_price));
         Ok(())
     }
     fn set_inventory(product_id: u64, new_inventory: u32) -> Result<(), DispatchError> {

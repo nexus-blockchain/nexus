@@ -273,12 +273,14 @@ pub fn set_redeem_discount(entity_id: u64, account: u64, discount: u64) {
     REDEEM_DISCOUNT.with(|d| d.borrow_mut().insert((entity_id, account), discount));
 }
 
-/// Product IDs:
-/// 1 = Physical, shop 1, price 100, stock 10
-/// 2 = Digital, shop 1, price 50
-/// 3 = Service, shop 1, price 200, stock 5
-/// 4 = Other, shop 2, price 150, stock 20
-impl pallet_entity_common::ProductProvider<u64, u64> for MockProductProvider {
+/// Product IDs (usdt_price uses raw integer matching old NEX price for test simplicity):
+/// 1 = Physical, shop 1, usdt_price 100, stock 10
+/// 2 = Digital, shop 1, usdt_price 50
+/// 3 = Service, shop 1, usdt_price 200, stock 5
+/// 4 = Other, shop 2, usdt_price 150, stock 20
+///
+/// With nex_usdt_price = 10^12, conversion: nex = usdt_price * 10^12 / 10^12 = usdt_price
+impl pallet_entity_common::ProductProvider<u64> for MockProductProvider {
     fn product_exists(product_id: u64) -> bool {
         product_id >= 1 && product_id <= 4
     }
@@ -291,16 +293,6 @@ impl pallet_entity_common::ProductProvider<u64, u64> for MockProductProvider {
         match product_id {
             1 | 2 | 3 => Some(SHOP_1),
             4 => Some(SHOP_2),
-            _ => None,
-        }
-    }
-
-    fn product_price(product_id: u64) -> Option<u64> {
-        match product_id {
-            1 => Some(100),
-            2 => Some(50),
-            3 => Some(200),
-            4 => Some(150),
             _ => None,
         }
     }
@@ -367,7 +359,7 @@ impl pallet_entity_common::ProductProvider<u64, u64> for MockProductProvider {
         PRODUCT_MAX_QTY.with(|q| q.borrow().get(&product_id).copied())
     }
 
-    fn get_product_info(product_id: u64) -> Option<pallet_entity_common::ProductQueryInfo<u64>> {
+    fn get_product_info(product_id: u64) -> Option<pallet_entity_common::ProductQueryInfo> {
         if product_id < 1 || product_id > 4 { return None; }
         let default_stock: u32 = match product_id {
             1 => 10, 2 => 0, 3 => 5, 4 => 20, _ => 0,
@@ -391,8 +383,13 @@ impl pallet_entity_common::ProductProvider<u64, u64> for MockProductProvider {
         });
         Some(pallet_entity_common::ProductQueryInfo {
             shop_id: match product_id { 1 | 2 | 3 => SHOP_1, 4 => SHOP_2, _ => 0 },
-            price: match product_id { 1 => 100, 2 => 50, 3 => 200, 4 => 150, _ => 0 },
-            usdt_price: 0,
+            usdt_price: match product_id {
+                1 => 100,  // 100 (maps to 100 NEX in test)
+                2 => 50,   // 50
+                3 => 200,  // 200
+                4 => 150,  // 150
+                _ => 0,
+            },
             stock,
             status,
             category: match product_id {
@@ -702,14 +699,30 @@ pub fn get_token_cancelled_orders() -> Vec<u64> {
     TOKEN_CANCELLED_ORDERS.with(|c| c.borrow().clone())
 }
 
+// ==================== Mock EntityProvider ====================
+
+pub struct MockEntityProvider;
+
+impl pallet_entity_common::EntityProvider<u64> for MockEntityProvider {
+    fn entity_exists(entity_id: u64) -> bool { entity_id == 1 || entity_id == 2 }
+    fn is_entity_active(entity_id: u64) -> bool { entity_id == 1 || entity_id == 2 }
+    fn entity_status(_: u64) -> Option<pallet_entity_common::EntityStatus> { Some(pallet_entity_common::EntityStatus::Active) }
+    fn entity_owner(_: u64) -> Option<u64> { Some(SELLER) }
+    fn entity_account(_: u64) -> u64 { 200 }
+    fn update_entity_stats(_: u64, _: u128, _: u32) -> Result<(), sp_runtime::DispatchError> { Ok(()) }
+    fn payment_config(_entity_id: u64) -> pallet_entity_common::PaymentConfig {
+        pallet_entity_common::PaymentConfig { native_enabled: true, token_enabled: true }
+    }
+}
+
 // ==================== Mock PricingProvider ====================
 
 pub struct MockPricingProvider;
 
 impl pallet_entity_common::PricingProvider for MockPricingProvider {
     fn get_nex_usdt_price() -> u64 {
-        // 测试价格: 1 USDT/NEX (精度 10^6)
-        1_000_000
+        // 测试价格: nex_usdt_price = 10^12，使得 nex = usdt_price * 10^12 / 10^12 = usdt_price
+        1_000_000_000_000
     }
 }
 
@@ -864,6 +877,7 @@ impl pallet_entity_order::Config for Test {
     type Escrow = MockEscrow;
     type ShopProvider = MockShopProvider;
     type ProductProvider = MockProductProvider;
+    type EntityProvider = MockEntityProvider;
     type EntityToken = MockEntityToken;
     type PlatformAccount = PlatformAccount;
 

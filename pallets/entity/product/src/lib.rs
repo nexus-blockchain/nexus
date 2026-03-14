@@ -67,7 +67,7 @@ pub mod pallet {
     /// 商品信息
     #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
     #[scale_info(skip_type_params(MaxCidLen))]
-    pub struct Product<Balance, BlockNumber, MaxCidLen: Get<u32>> {
+    pub struct Product<BlockNumber, MaxCidLen: Get<u32>> {
         /// 商品 ID
         pub id: u64,
         /// 所属店铺 ID
@@ -78,9 +78,7 @@ pub mod pallet {
         pub images_cid: BoundedVec<u8, MaxCidLen>,
         /// 商品详情 IPFS CID
         pub detail_cid: BoundedVec<u8, MaxCidLen>,
-        /// 单价（NEX）
-        pub price: Balance,
-        /// USDT 价格（精度 10^6，0 表示未设置）
+        /// USDT 价格（精度 10^6，必须 > 0）
         pub usdt_price: u64,
         /// 库存数量（0 表示无限）
         pub stock: u32,
@@ -110,7 +108,6 @@ pub mod pallet {
 
     /// 商品类型别名
     pub type ProductOf<T> = Product<
-        BalanceOf<T>,
         BlockNumberFor<T>,
         <T as Config>::MaxCidLength,
     >;
@@ -175,7 +172,7 @@ pub mod pallet {
         type WeightInfo: WeightInfo;
     }
 
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(2);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -411,7 +408,6 @@ pub mod pallet {
             name_cid: Vec<u8>,
             images_cid: Vec<u8>,
             detail_cid: Vec<u8>,
-            price: BalanceOf<T>,
             usdt_price: u64,
             stock: u32,
             category: ProductCategory,
@@ -424,8 +420,8 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // H4: 商品价格不能为零
-            ensure!(!price.is_zero(), Error::<T>::InvalidPrice);
+            // H4: USDT 价格必须 > 0
+            ensure!(usdt_price > 0, Error::<T>::InvalidPrice);
 
             // 购买数量限制校验：max > 0 时必须 >= min
             if max_order_quantity > 0 && min_order_quantity > 0 {
@@ -500,7 +496,6 @@ pub mod pallet {
                 name_cid,
                 images_cid,
                 detail_cid,
-                price,
                 usdt_price,
                 stock,
                 sold_count: 0,
@@ -572,7 +567,6 @@ pub mod pallet {
             name_cid: Option<Vec<u8>>,
             images_cid: Option<Vec<u8>>,
             detail_cid: Option<Vec<u8>>,
-            price: Option<BalanceOf<T>>,
             usdt_price: Option<u64>,
             stock: Option<u32>,
             category: Option<ProductCategory>,
@@ -586,7 +580,7 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
 
             let has_any_change = name_cid.is_some() || images_cid.is_some() || detail_cid.is_some()
-                || price.is_some() || usdt_price.is_some() || stock.is_some()
+                || usdt_price.is_some() || stock.is_some()
                 || category.is_some() || sort_weight.is_some() || tags_cid.is_some()
                 || sku_cid.is_some() || min_order_quantity.is_some()
                 || max_order_quantity.is_some() || visibility.is_some();
@@ -639,11 +633,8 @@ pub mod pallet {
                         product.detail_cid = new_cid;
                     }
                 }
-                if let Some(p) = price {
-                    ensure!(!p.is_zero(), Error::<T>::InvalidPrice);
-                    product.price = p;
-                }
                 if let Some(u) = usdt_price {
+                    ensure!(u > 0, Error::<T>::InvalidPrice);
                     product.usdt_price = u;
                 }
                 if let Some(s) = stock {
@@ -1344,7 +1335,7 @@ pub mod pallet {
 
     // ==================== ProductProvider 实现 ====================
 
-    impl<T: Config> ProductProvider<T::AccountId, BalanceOf<T>> for Pallet<T> {
+    impl<T: Config> ProductProvider<T::AccountId> for Pallet<T> {
         fn product_exists(product_id: u64) -> bool {
             Products::<T>::contains_key(product_id)
         }
@@ -1357,10 +1348,6 @@ pub mod pallet {
 
         fn product_shop_id(product_id: u64) -> Option<u64> {
             Products::<T>::get(product_id).map(|p| p.shop_id)
-        }
-
-        fn product_price(product_id: u64) -> Option<BalanceOf<T>> {
-            Products::<T>::get(product_id).map(|p| p.price)
         }
 
         fn product_stock(product_id: u64) -> Option<u32> {
@@ -1446,10 +1433,9 @@ pub mod pallet {
             Products::<T>::get(product_id).map(|p| p.usdt_price)
         }
 
-        fn get_product_info(product_id: u64) -> Option<pallet_entity_common::ProductQueryInfo<BalanceOf<T>>> {
+        fn get_product_info(product_id: u64) -> Option<pallet_entity_common::ProductQueryInfo> {
             Products::<T>::get(product_id).map(|p| pallet_entity_common::ProductQueryInfo {
                 shop_id: p.shop_id,
-                price: p.price,
                 usdt_price: p.usdt_price,
                 stock: p.stock,
                 status: p.status,
@@ -1595,11 +1581,11 @@ pub mod pallet {
 
         // ==================== 治理调用实现 ====================
 
-        fn update_price(product_id: u64, new_price: BalanceOf<T>) -> Result<(), sp_runtime::DispatchError> {
+        fn update_usdt_price(product_id: u64, new_usdt_price: u64) -> Result<(), sp_runtime::DispatchError> {
             Products::<T>::try_mutate(product_id, |maybe_product| -> Result<(), sp_runtime::DispatchError> {
                 let product = maybe_product.as_mut().ok_or(Error::<T>::ProductNotFound)?;
-                ensure!(!new_price.is_zero(), Error::<T>::InvalidPrice);
-                product.price = new_price;
+                ensure!(new_usdt_price > 0, Error::<T>::InvalidPrice);
+                product.usdt_price = new_usdt_price;
                 product.updated_at = <frame_system::Pallet<T>>::block_number();
                 Self::deposit_event(Event::ProductUpdated { product_id });
                 Ok(())

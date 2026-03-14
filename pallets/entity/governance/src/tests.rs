@@ -11,7 +11,7 @@ fn proposal_type_general() -> ProposalType<u128> {
 }
 
 fn proposal_type_price_change() -> ProposalType<u128> {
-    ProposalType::PriceChange { product_id: 1, new_price: 500 }
+    ProposalType::PriceChange { product_id: 1, new_usdt_price: 500_000 }
 }
 
 // ==================== 创建提案 ====================
@@ -3005,7 +3005,7 @@ fn f3_price_change_executes_on_chain() {
         assert_ok!(EntityGovernance::create_proposal(
             RuntimeOrigin::signed(ALICE),
             SHOP_ID,
-            ProposalType::PriceChange { product_id: 1, new_price: 500 },
+            ProposalType::PriceChange { product_id: 1, new_usdt_price: 500_000 },
             b"Price change".to_vec(),
             None,
         ));
@@ -3015,8 +3015,8 @@ fn f3_price_change_executes_on_chain() {
         advance_blocks(51);
         assert_ok!(EntityGovernance::execute_proposal(RuntimeOrigin::signed(ALICE), 0));
 
-        // Verify price was updated
-        assert_eq!(get_product_price(1), Some(500));
+        // Verify USDT price was updated
+        assert_eq!(get_product_price(1), Some(500_000));
     });
 }
 
@@ -4312,7 +4312,7 @@ fn r11_s1_nonexistent_product_rejected() {
         assert_noop!(
             EntityGovernance::create_proposal(
                 RuntimeOrigin::signed(ALICE), SHOP_ID,
-                ProposalType::PriceChange { product_id: 999, new_price: 100 },
+                ProposalType::PriceChange { product_id: 999, new_usdt_price: 100_000 },
                 b"Ghost product".to_vec(), None,
             ),
             Error::<Test>::InvalidParameter

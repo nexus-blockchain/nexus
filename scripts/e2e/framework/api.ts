@@ -1,7 +1,7 @@
 import { ApiPromise, WsProvider } from '@polkadot/api';
-import { SubmittableExtrinsic } from '@polkadot/api/types';
-import { KeyringPair } from '@polkadot/keyring/types';
-import { EventRecord } from '@polkadot/types/interfaces';
+import type { SubmittableExtrinsic } from '@polkadot/api/types';
+import type { KeyringPair } from '@polkadot/keyring/types';
+import type { EventRecord } from '@polkadot/types/interfaces';
 import { codecToJson } from './codec.js';
 import { ChainSnapshot } from './types.js';
 
@@ -52,8 +52,16 @@ function decodeDispatchError(api: ApiPromise, dispatchError: any): string {
 }
 
 export async function connectApi(wsUrl: string = process.env.WS_URL ?? 'ws://127.0.0.1:9944'): Promise<ApiPromise> {
+  const traceLog = process.env.E2E_LOG_STDERR === '1' ? console.error : console.log;
+  if (process.env.E2E_TRACE_CONNECT === '1') {
+    traceLog(`[connect] opening ${wsUrl}`);
+  }
   const provider = new WsProvider(wsUrl);
-  return ApiPromise.create({ provider });
+  const api = await ApiPromise.create({ provider });
+  if (process.env.E2E_TRACE_CONNECT === '1') {
+    traceLog(`[connect] ready ${wsUrl} spec=${api.runtimeVersion.specName.toString()} v${api.runtimeVersion.specVersion.toString()}`);
+  }
+  return api;
 }
 
 export async function disconnectApi(api: ApiPromise): Promise<void> {
@@ -84,12 +92,28 @@ export async function submitTx(
 ): Promise<TxReceipt> {
   const txHash = tx.hash.toHex();
   const timeoutMs = Number(process.env.E2E_TX_TIMEOUT_MS ?? 90_000);
+  const traceTx = process.env.E2E_TRACE_TX === '1';
+  const traceLog = process.env.E2E_LOG_STDERR === '1' ? console.error : console.log;
 
-  const inclusion = await new Promise<{ blockHash: string; txIndex?: number } | { error: string }>((resolve) => {
+  if (traceTx) {
+    traceLog(`[tx:${label}] submit signer=${signer.address} hash=${txHash}`);
+  }
+
+  const inclusion = await new Promise<
+    | { blockHash: string; txIndex?: number; events: EventRecord[]; dispatchError?: unknown }
+    | { error: string }
+  >((resolve) => {
     let settled = false;
     let unsubscribe: undefined | (() => void);
+    let latestResult:
+      | { blockHash: string; txIndex?: number; events: EventRecord[]; dispatchError?: unknown }
+      | undefined;
 
-    const finish = (result: { blockHash: string; txIndex?: number } | { error: string }) => {
+    const finish = (
+      result:
+        | { blockHash: string; txIndex?: number; events: EventRecord[]; dispatchError?: unknown }
+        | { error: string },
+    ) => {
       if (settled) {
         return;
       }
@@ -110,12 +134,37 @@ export async function submitTx(
     }, timeoutMs);
 
     tx.signAndSend(signer, (result: any) => {
+      if (traceTx) {
+        const status = result.status?.type ?? 'Unknown';
+        const txIndex = toNumberMaybe(result.txIndex);
+        const eventCount = Array.from(result.events ?? []).length;
+        const dispatchError = result.dispatchError
+          ? decodeDispatchError(api, result.dispatchError)
+          : undefined;
+        traceLog(
+          `[tx:${label}] status=${status} txIndex=${txIndex ?? 'n/a'} events=${eventCount}${dispatchError ? ` error=${dispatchError}` : ''}`,
+        );
+      }
+
+      if (result.status?.isInBlock || result.status?.isFinalized) {
+        latestResult = {
+          blockHash: result.status.isFinalized
+            ? result.status.asFinalized.toHex()
+            : result.status.asInBlock.toHex(),
+          txIndex: toNumberMaybe(result.txIndex),
+          events: Array.from(result.events ?? []) as EventRecord[],
+          dispatchError: result.dispatchError,
+        };
+      }
+
       if (!result.status?.isFinalized) {
         return;
       }
-      finish({
+      finish(latestResult ?? {
         blockHash: result.status.asFinalized.toHex(),
         txIndex: toNumberMaybe(result.txIndex),
+        events: Array.from(result.events ?? []) as EventRecord[],
+        dispatchError: result.dispatchError,
       });
     }).then((unsub) => {
       unsubscribe = unsub;
@@ -141,32 +190,23 @@ export async function submitTx(
     };
   }
 
-  const { blockHash } = inclusion;
-  const [signedBlock, allEventsCodec] = await Promise.all([
-    api.rpc.chain.getBlock(blockHash),
-    api.query.system.events.at(blockHash),
-  ]);
-  const allEvents = Array.from(allEventsCodec as unknown as Iterable<EventRecord>);
+  const { blockHash, events: resultEvents, dispatchError } = inclusion;
+  const extrinsicIndex = inclusion.txIndex;
+  let records = resultEvents;
 
-  let extrinsicIndex = inclusion.txIndex;
-  if (extrinsicIndex == null) {
-    extrinsicIndex = signedBlock.block.extrinsics.findIndex((extrinsic) => extrinsic.hash.toHex() === txHash);
-    if (extrinsicIndex < 0) {
-      extrinsicIndex = undefined;
-    }
+  if (records.length === 0 && extrinsicIndex != null) {
+    const allEventsCodec = await api.query.system.events.at(blockHash);
+    const allEvents = Array.from(allEventsCodec as unknown as Iterable<EventRecord>);
+    records = allEvents.filter((record) =>
+      record.phase.isApplyExtrinsic && record.phase.asApplyExtrinsic.toNumber() === extrinsicIndex,
+    );
   }
-
-  const records = extrinsicIndex == null
-    ? []
-    : allEvents.filter((record) =>
-        record.phase.isApplyExtrinsic && record.phase.asApplyExtrinsic.toNumber() === extrinsicIndex,
-      );
 
   const failed = records.find(
     (record) => record.event.section === 'system' && record.event.method === 'ExtrinsicFailed',
   );
 
-  if (failed) {
+  if (dispatchError || failed) {
     return {
       label,
       success: false,
@@ -174,7 +214,7 @@ export async function submitTx(
       blockHash,
       extrinsicIndex,
       events: [],
-      error: decodeDispatchError(api, failed.event.data[0]),
+      error: decodeDispatchError(api, dispatchError ?? failed?.event.data[0]),
     };
   }
 

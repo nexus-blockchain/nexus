@@ -1,5 +1,5 @@
-import { ApiPromise } from '@polkadot/api';
-import { ensureFundedActors, readPreferredMarketPrice } from './bootstrap.js';
+import type { ApiPromise } from '@polkadot/api';
+import { ensureFundedActors, ensureNamedActorsFunded, readPreferredMarketPrice } from './bootstrap.js';
 import { captureChainSnapshot } from './api.js';
 import { DevActors, SuiteContext, TestSuite } from './types.js';
 
@@ -10,19 +10,27 @@ function asErrorMessage(error: unknown): string {
   return String(error);
 }
 
+function emit(message: string): void {
+  if (process.env.E2E_LOG_STDERR === '1') {
+    console.error(message);
+    return;
+  }
+  console.log(message);
+}
+
 export async function runSuites(api: ApiPromise, actors: DevActors, suites: TestSuite[]): Promise<boolean> {
   const chain = await captureChainSnapshot(api);
   let allPassed = true;
   let passedSuites = 0;
 
-  console.log(`Chain: ${chain.chain} (${chain.specName} v${chain.specVersion})`);
+  emit(`Chain: ${chain.chain} (${chain.specName} v${chain.specVersion})`);
 
   for (const suite of suites) {
     let suitePassed = true;
     let stepCount = 0;
 
-    console.log(`\n• ${suite.title} [${suite.id}]`);
-    console.log(`  ${suite.description}`);
+    emit(`\n• ${suite.title} [${suite.id}]`);
+    emit(`  ${suite.description}`);
 
     const ctx: SuiteContext = {
       api,
@@ -34,16 +42,17 @@ export async function runSuites(api: ApiPromise, actors: DevActors, suites: Test
 
         try {
           const result = await fn();
-          console.log(`  ✓ ${name} (${Date.now() - startedAt}ms)`);
+          emit(`  ✓ ${name} (${Date.now() - startedAt}ms)`);
           return result;
         } catch (error) {
           suitePassed = false;
-          console.log(`  ✗ ${name} (${Date.now() - startedAt}ms) — ${asErrorMessage(error)}`);
+          emit(`  ✗ ${name} (${Date.now() - startedAt}ms) — ${asErrorMessage(error)}`);
           throw error;
         }
       },
-      note: (message) => console.log(`  - ${message}`),
+      note: (message) => emit(`  - ${message}`),
       ensureFunds: (minNex: number = 25_000) => ensureFundedActors(api, actors, minNex),
+      ensureFundsFor: (actorNames: string[], minNex: number = 25_000) => ensureNamedActorsFunded(api, actors, actorNames, minNex),
       readMarketPrice: () => readPreferredMarketPrice(api),
     };
 
@@ -51,17 +60,17 @@ export async function runSuites(api: ApiPromise, actors: DevActors, suites: Test
       await suite.run(ctx);
       if (suitePassed) {
         passedSuites += 1;
-        console.log(`  ✓ suite passed (${stepCount} step${stepCount === 1 ? '' : 's'})`);
+        emit(`  ✓ suite passed (${stepCount} step${stepCount === 1 ? '' : 's'})`);
       } else {
         allPassed = false;
       }
     } catch (error) {
       allPassed = false;
-      console.log(`  ! suite failed — ${asErrorMessage(error)}`);
+      emit(`  ! suite failed — ${asErrorMessage(error)}`);
     }
   }
 
   const failedSuites = suites.length - passedSuites;
-  console.log(`\nCompleted ${suites.length} suite(s): ${passedSuites} passed, ${failedSuites} failed`);
+  emit(`\nCompleted ${suites.length} suite(s): ${passedSuites} passed, ${failedSuites} failed`);
   return allPassed;
 }

@@ -152,6 +152,12 @@ pub trait EntityProvider<AccountId> {
         let _ = entity_id;
         sp_std::vec::Vec::new()
     }
+
+    /// 获取实体支付通道配置
+    fn payment_config(entity_id: u64) -> PaymentConfig {
+        let _ = entity_id;
+        PaymentConfig::default()
+    }
 }
 
 /// 空实体提供者（测试用）
@@ -344,9 +350,8 @@ impl<AccountId: Default> ShopProvider<AccountId> for NullShopProvider {
 
 /// 商品聚合查询信息（单次存储读取返回下单所需全部字段）
 #[derive(Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
-pub struct ProductQueryInfo<Balance> {
+pub struct ProductQueryInfo {
     pub shop_id: u64,
-    pub price: Balance,
     pub usdt_price: u64,
     pub stock: u32,
     pub status: ProductStatus,
@@ -359,7 +364,7 @@ pub struct ProductQueryInfo<Balance> {
 /// 商品查询接口
 ///
 /// 供 order 模块查询和更新商品信息
-pub trait ProductProvider<AccountId, Balance> {
+pub trait ProductProvider<AccountId> {
     /// 检查商品是否存在
     fn product_exists(product_id: u64) -> bool;
 
@@ -368,9 +373,6 @@ pub trait ProductProvider<AccountId, Balance> {
 
     /// 获取商品所属店铺
     fn product_shop_id(product_id: u64) -> Option<u64>;
-
-    /// 获取商品价格
-    fn product_price(product_id: u64) -> Option<Balance>;
 
     /// 获取商品库存
     fn product_stock(product_id: u64) -> Option<u32>;
@@ -432,16 +434,16 @@ pub trait ProductProvider<AccountId, Balance> {
     }
 
     /// 聚合查询：一次存储读取返回下单所需全部字段
-    fn get_product_info(product_id: u64) -> Option<ProductQueryInfo<Balance>> {
+    fn get_product_info(product_id: u64) -> Option<ProductQueryInfo> {
         let _ = product_id;
         None
     }
 
     // ==================== 治理调用接口 ====================
 
-    /// 更新商品价格（治理调用）
-    fn update_price(product_id: u64, new_price: Balance) -> Result<(), DispatchError> {
-        let _ = (product_id, new_price);
+    /// 更新商品 USDT 价格（治理调用）
+    fn update_usdt_price(product_id: u64, new_usdt_price: u64) -> Result<(), DispatchError> {
+        let _ = (product_id, new_usdt_price);
         Ok(())
     }
 
@@ -487,11 +489,10 @@ pub trait ProductProvider<AccountId, Balance> {
 /// 空商品提供者（测试用）
 pub struct NullProductProvider;
 
-impl<AccountId, Balance> ProductProvider<AccountId, Balance> for NullProductProvider {
+impl<AccountId> ProductProvider<AccountId> for NullProductProvider {
     fn product_exists(_product_id: u64) -> bool { false }
     fn is_product_on_sale(_product_id: u64) -> bool { false }
     fn product_shop_id(_product_id: u64) -> Option<u64> { None }
-    fn product_price(_product_id: u64) -> Option<Balance> { None }
     fn product_stock(_product_id: u64) -> Option<u32> { None }
     fn product_category(_product_id: u64) -> Option<ProductCategory> { None }
     fn deduct_stock(_product_id: u64, _quantity: u32) -> Result<(), DispatchError> { Ok(()) }
