@@ -1,0 +1,86 @@
+name: E2E Full
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: 'Phase to run (1, 2, 3, or all)'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - '1'
+          - '2'
+          - '3'
+
+concurrency:
+  group: e2e-full-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-full:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/free-disk-space
+      - uses: ./.github/actions/ubuntu-dependencies
+
+      - name: Build node in release mode
+        run: cargo build --package nexus-node --release
+        timeout-minutes: 90
+
+      - name: Start dev node
+        run: |
+          ./target/release/nexus-node --dev 2>&1 | tee node.log &
+          echo "NODE_PID=$!" >> "$GITHUB_ENV"
+          until curl -s '127.0.0.1:9944'; do sleep 3; done
+          echo "Node is up and accepting connections"
+        shell: bash
+        timeout-minutes: 5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install E2E dependencies
+        run: npm install
+        working-directory: scripts
+
+      - name: Run E2E tests
+        run: |
+          if [ "${{ inputs.phase }}" = "all" ]; then
+            npx tsx e2e/run-e2e.ts
+          else
+            npx tsx e2e/run-e2e.ts --phase "${{ inputs.phase }}"
+          fi
+        working-directory: scripts
+        env:
+          WS_URL: ws://127.0.0.1:9944
+        timeout-minutes: 45
+
+      - name: Stop dev node
+        if: always()
+        run: |
+          if [ -n "$NODE_PID" ]; then
+            kill "$NODE_PID" 2>/dev/null || true
+          fi
+
+      - name: Upload E2E report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-full-report
+          path: scripts/e2e-report-*.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload node log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-log
+          path: node.log
+          retention-days: 14

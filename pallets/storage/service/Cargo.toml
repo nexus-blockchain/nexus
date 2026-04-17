@@ -1,0 +1,66 @@
+[package]
+name = "pallet-storage-service"
+version = "0.1.0"
+license = "MIT-0"
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+codec = { workspace = true, features = ["derive"] }
+scale-info = { workspace = true, features = ["derive"], default-features = false }
+frame-benchmarking = { workspace = true, optional = true }
+frame-support = { workspace = true }
+frame-system = { workspace = true }
+sp-runtime = { workspace = true }
+sp-std = { workspace = true }
+sp-core = { workspace = true }
+sp-io = { workspace = true }
+sp-offchain = { workspace = true }
+sp-application-crypto = { workspace = true }
+sp-api = { workspace = true }
+pallet-balances = { workspace = true }
+pallet-trading-common = { path = "../../trading/common", default-features = false }
+## endowment 下线：移除依赖
+## pallet-memo-endowment = { path = "../memo-endowment", default-features = false }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+serde_json = { workspace = true, default-features = false, features = ["alloc"] }
+# 在 no_std 环境下需要启用 alloc 特性以使用 `hex::encode` 等返回 String 的 API。
+# - 运行时（no_std）使用 alloc，无需 std；
+# - std 特性仍然通过 features.std 中的 "hex/std" 启用以获得更好的集成。
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+log = { workspace = true }
+
+[features]
+default = ["std"]
+try-runtime = []
+runtime-benchmarks = [
+    "frame-benchmarking/runtime-benchmarks",
+    "frame-support/runtime-benchmarks",
+    "frame-system/runtime-benchmarks",
+    "sp-runtime/runtime-benchmarks",
+]
+std = [
+    "codec/std",
+    "scale-info/std",
+    "frame-benchmarking?/std",
+    "frame-support/std",
+    "frame-system/std",
+    "sp-runtime/std",
+    "sp-std/std",
+    "sp-core/std",
+    "sp-io/std",
+    "sp-application-crypto/std",
+    "sp-offchain/std",
+    "sp-api/std",
+    "pallet-balances/std",
+    "pallet-trading-common/std",
+    # endowment 下线：移除 std 特性
+    "serde/std",
+    "serde_json/std",
+    "hex/std",
+]
+
+

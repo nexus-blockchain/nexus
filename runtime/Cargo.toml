@@ -1,0 +1,322 @@
+[package]
+name = "nexus-runtime"
+description = "Nexus blockchain runtime built with Substrate, part of Polkadot Sdk."
+version = "0.1.0"
+license = "Unlicense"
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+edition.workspace = true
+publish = false
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[dependencies]
+codec = { features = ["derive"], workspace = true }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+log = { workspace = true }
+frame-benchmarking = { optional = true, workspace = true }
+frame-executive = { workspace = true }
+frame-metadata-hash-extension = { workspace = true }
+frame-support = { features = ["experimental", "tuples-96"], workspace = true }
+frame-election-provider-support = { workspace = true }
+frame-system-benchmarking = { optional = true, workspace = true }
+frame-system-rpc-runtime-api = { workspace = true }
+frame-system = { workspace = true }
+frame-try-runtime = { optional = true, workspace = true }
+pallet-babe = { workspace = true }
+pallet-balances = { workspace = true }
+pallet-grandpa = { workspace = true }
+pallet-session = { workspace = true }
+pallet-offences = { workspace = true }
+pallet-staking = { workspace = true }
+pallet-authorship = { workspace = true }
+pallet-sudo = { workspace = true }
+pallet-collective = { workspace = true }
+pallet-collective-membership = { workspace = true }
+pallet-timestamp = { workspace = true }
+pallet-transaction-payment-rpc-runtime-api = { workspace = true }
+pallet-transaction-payment = { workspace = true }
+# Contracts pallet
+pallet-contracts = { workspace = true }
+# Trading pallets
+pallet-trading-common = { workspace = true }
+pallet-nex-market = { workspace = true }
+# Escrow, Referral, IPFS pallets
+pallet-dispute-escrow = { workspace = true }
+pallet-storage-service = { workspace = true }
+# Evidence pallet
+pallet-dispute-evidence = { workspace = true }
+# Arbitration pallet
+pallet-dispute-arbitration = { workspace = true }
+# Storage lifecycle pallet
+pallet-storage-lifecycle = { workspace = true }
+# Assets pallet
+pallet-assets = { workspace = true }
+# Entity pallets (原 ShareMall，已重构)
+pallet-entity-common = { workspace = true }
+pallet-entity-registry = { workspace = true }
+pallet-entity-shop = { workspace = true }
+pallet-entity-token = { workspace = true }
+pallet-entity-governance = { workspace = true }
+pallet-entity-member = { workspace = true }
+pallet-commission-common = { workspace = true }
+pallet-commission-core = { workspace = true }
+pallet-commission-referral = { workspace = true }
+pallet-commission-multi-level = { workspace = true }
+pallet-commission-level-diff = { workspace = true }
+pallet-commission-single-line = { workspace = true }
+pallet-commission-team = { workspace = true }
+pallet-commission-pool-reward = { workspace = true }
+pallet-entity-commission = { workspace = true }
+pallet-entity-product = { workspace = true }
+pallet-entity-order = { workspace = true }
+pallet-entity-market = { workspace = true }
+pallet-entity-review = { workspace = true }
+pallet-entity-disclosure = { workspace = true }
+pallet-entity-kyc = { workspace = true }
+pallet-entity-tokensale = { workspace = true }
+pallet-entity-loyalty = { workspace = true }
+# GroupRobot pallets
+pallet-grouprobot-primitives = { workspace = true }
+pallet-grouprobot-registry = { workspace = true, features = ["dcap-verify"] }
+pallet-grouprobot-consensus = { workspace = true }
+pallet-grouprobot-subscription = { workspace = true }
+pallet-grouprobot-rewards = { workspace = true }
+pallet-grouprobot-community = { workspace = true }
+pallet-grouprobot-ceremony = { workspace = true }
+# Ads pallets (modular advertising engine)
+pallet-ads-primitives = { workspace = true }
+pallet-ads-core = { workspace = true }
+pallet-ads-grouprobot = { workspace = true }
+pallet-ads-entity = { workspace = true }
+pallet-ads-router = { workspace = true }
+# Inscription pallet (创世铭文)
+pallet-inscription = { workspace = true }
+scale-info = { features = ["derive", "serde"], workspace = true }
+serde_json = { workspace = true, default-features = false, features = ["alloc"] }
+sp-api = { workspace = true }
+sp-block-builder = { workspace = true }
+sp-consensus-babe = { features = ["serde"], workspace = true }
+sp-consensus-grandpa = { features = ["serde"], workspace = true }
+sp-core = { features = ["serde"], workspace = true }
+sp-genesis-builder = { workspace = true }
+sp-inherents = { workspace = true }
+sp-keyring = { workspace = true }
+sp-offchain = { workspace = true }
+sp-runtime = { features = ["serde"], workspace = true }
+sp-session = { workspace = true }
+sp-staking = { workspace = true }
+sp-storage = { workspace = true }
+sp-transaction-pool = { workspace = true }
+sp-version = { features = ["serde"], workspace = true }
+
+[build-dependencies]
+substrate-wasm-builder = { optional = true, workspace = true, default-features = true }
+
+[features]
+default = ["std"]
+std = [
+	"codec/std",
+	"hex/std",
+	"log/std",
+	"frame-benchmarking?/std",
+	"frame-executive/std",
+	"frame-metadata-hash-extension/std",
+	"frame-support/std",
+	"frame-election-provider-support/std",
+	"frame-system-benchmarking?/std",
+	"frame-system-rpc-runtime-api/std",
+	"frame-system/std",
+	"frame-try-runtime?/std",
+	"pallet-babe/std",
+	"pallet-balances/std",
+	"pallet-grandpa/std",
+	"pallet-session/std",
+	"pallet-offences/std",
+	"pallet-staking/std",
+	"pallet-authorship/std",
+	"pallet-sudo/std",
+	"pallet-collective/std",
+	"pallet-collective-membership/std",
+	"pallet-timestamp/std",
+	"pallet-transaction-payment-rpc-runtime-api/std",
+	"pallet-transaction-payment/std",
+	# Contracts pallet std
+	"pallet-contracts/std",
+	# Trading pallets std
+	"pallet-trading-common/std",
+	"pallet-nex-market/std",
+	# Escrow, Referral, IPFS pallets std
+	"pallet-dispute-escrow/std",
+	"pallet-storage-service/std",
+	# Evidence pallet std
+	"pallet-dispute-evidence/std",
+	# Arbitration pallet std
+	"pallet-dispute-arbitration/std",
+	# Storage lifecycle pallet std
+	"pallet-storage-lifecycle/std",
+	# Assets pallet std
+	"pallet-assets/std",
+	# Entity pallets std
+	"pallet-entity-common/std",
+	"pallet-entity-registry/std",
+	"pallet-entity-shop/std",
+	"pallet-entity-token/std",
+	"pallet-entity-governance/std",
+	"pallet-entity-member/std",
+	"pallet-commission-common/std",
+	"pallet-commission-core/std",
+	"pallet-commission-referral/std",
+	"pallet-commission-multi-level/std",
+	"pallet-commission-level-diff/std",
+	"pallet-commission-single-line/std",
+	"pallet-commission-team/std",
+	"pallet-commission-pool-reward/std",
+	"pallet-entity-commission/std",
+	"pallet-entity-product/std",
+	"pallet-entity-order/std",
+	"pallet-entity-market/std",
+	"pallet-entity-review/std",
+	"pallet-entity-disclosure/std",
+	"pallet-entity-kyc/std",
+	"pallet-entity-tokensale/std",
+	"pallet-entity-loyalty/std",
+	# GroupRobot pallets std
+	"pallet-grouprobot-primitives/std",
+	"pallet-grouprobot-registry/std",
+	"pallet-grouprobot-consensus/std",
+	"pallet-grouprobot-subscription/std",
+	"pallet-grouprobot-rewards/std",
+	"pallet-grouprobot-community/std",
+	"pallet-grouprobot-ceremony/std",
+	# Ads pallets std
+	"pallet-ads-primitives/std",
+	"pallet-ads-core/std",
+	"pallet-ads-grouprobot/std",
+	"pallet-ads-entity/std",
+	"pallet-ads-router/std",
+	# Inscription pallet std
+	"pallet-inscription/std",
+	"scale-info/std",
+	"serde_json/std",
+	"sp-api/std",
+	"sp-block-builder/std",
+	"sp-consensus-babe/std",
+	"sp-consensus-grandpa/std",
+	"sp-core/std",
+	"sp-genesis-builder/std",
+	"sp-inherents/std",
+	"sp-keyring/std",
+	"sp-offchain/std",
+	"sp-runtime/std",
+	"sp-session/std",
+	"sp-staking/std",
+	"sp-storage/std",
+	"sp-transaction-pool/std",
+	"sp-version/std",
+	"substrate-wasm-builder",
+]
+
+runtime-benchmarks = [
+	"frame-benchmarking/runtime-benchmarks",
+	"frame-support/runtime-benchmarks",
+	"frame-system-benchmarking/runtime-benchmarks",
+	"frame-system/runtime-benchmarks",
+	"pallet-balances/runtime-benchmarks",
+	"pallet-grandpa/runtime-benchmarks",
+	"pallet-babe/runtime-benchmarks",
+	"pallet-staking/runtime-benchmarks",
+	"pallet-session/runtime-benchmarks",
+	"pallet-offences/runtime-benchmarks",
+	"pallet-sudo/runtime-benchmarks",
+	"pallet-collective/runtime-benchmarks",
+	"pallet-collective-membership/runtime-benchmarks",
+	"pallet-timestamp/runtime-benchmarks",
+	"pallet-transaction-payment/runtime-benchmarks",
+	"pallet-contracts/runtime-benchmarks",
+	"pallet-assets/runtime-benchmarks",
+	"sp-runtime/runtime-benchmarks",
+	# Trading
+	"pallet-nex-market/runtime-benchmarks",
+	# Dispute
+	"pallet-dispute-escrow/runtime-benchmarks",
+	"pallet-dispute-evidence/runtime-benchmarks",
+	"pallet-dispute-arbitration/runtime-benchmarks",
+	# Storage
+	"pallet-storage-service/runtime-benchmarks",
+	"pallet-storage-lifecycle/runtime-benchmarks",
+	# Entity
+	"pallet-entity-registry/runtime-benchmarks",
+	"pallet-entity-shop/runtime-benchmarks",
+	"pallet-entity-product/runtime-benchmarks",
+	"pallet-entity-order/runtime-benchmarks",
+	"pallet-entity-review/runtime-benchmarks",
+	"pallet-entity-token/runtime-benchmarks",
+	"pallet-entity-governance/runtime-benchmarks",
+	"pallet-entity-market/runtime-benchmarks",
+	"pallet-entity-disclosure/runtime-benchmarks",
+	"pallet-entity-kyc/runtime-benchmarks",
+	"pallet-entity-tokensale/runtime-benchmarks",
+	# Commission
+	"pallet-commission-core/runtime-benchmarks",
+	"pallet-commission-pool-reward/runtime-benchmarks",
+	"pallet-commission-team/runtime-benchmarks",
+	"pallet-commission-level-diff/runtime-benchmarks",
+	# GroupRobot
+	"pallet-grouprobot-registry/runtime-benchmarks",
+	"pallet-grouprobot-consensus/runtime-benchmarks",
+	"pallet-grouprobot-community/runtime-benchmarks",
+	"pallet-grouprobot-ceremony/runtime-benchmarks",
+	"pallet-grouprobot-subscription/runtime-benchmarks",
+	"pallet-grouprobot-rewards/runtime-benchmarks",
+	# Ads
+	"pallet-ads-core/runtime-benchmarks",
+	"pallet-ads-entity/runtime-benchmarks",
+	"pallet-ads-grouprobot/runtime-benchmarks",
+]
+
+try-runtime = [
+	"frame-executive/try-runtime",
+	"frame-support/try-runtime",
+	"frame-system/try-runtime",
+	"frame-try-runtime/try-runtime",
+	"pallet-babe/try-runtime",
+	"pallet-balances/try-runtime",
+	"pallet-grandpa/try-runtime",
+	"pallet-session/try-runtime",
+	"pallet-offences/try-runtime",
+	"pallet-staking/try-runtime",
+	"pallet-authorship/try-runtime",
+	"pallet-sudo/try-runtime",
+	"pallet-collective/try-runtime",
+	"pallet-collective-membership/try-runtime",
+	"pallet-timestamp/try-runtime",
+	"pallet-transaction-payment/try-runtime",
+	# Contracts pallet try-runtime
+	"pallet-contracts/try-runtime",
+	# Trading pallets try-runtime
+	"pallet-nex-market/try-runtime",
+	# Escrow, Referral pallets try-runtime
+	# Evidence pallet try-runtime
+	"pallet-dispute-evidence/try-runtime",
+	# Arbitration pallet try-runtime
+	# Note: pallet-dispute-arbitration does not have try-runtime feature
+	"sp-runtime/try-runtime",
+	# Commission pallets try-runtime
+	"pallet-commission-common/try-runtime",
+]
+
+# Enable the metadata hash generation.
+#
+# This is hidden behind a feature because it increases the compile time.
+# The wasm binary needs to be compiled twice, once to fetch the metadata,
+# generate the metadata hash and then a second time with the
+# `RUNTIME_METADATA_HASH` environment variable set for the `CheckMetadataHash`
+# extension.
+metadata-hash = ["substrate-wasm-builder/metadata-hash"]
+
+# A convenience feature for enabling things when doing a build
+# for an on-chain release.
+on-chain-release-build = ["metadata-hash", "sp-api/disable-logging"]

@@ -1,0 +1,62 @@
+[package]
+name = "pallet-dispute-arbitration"
+version = "0.2.1"
+license = "MIT-0"
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+codec = { workspace = true, features = ["derive"] }
+scale-info = { workspace = true, features = ["derive"], default-features = false }
+frame-support = { workspace = true }
+frame-system = { workspace = true }
+sp-api = { workspace = true }
+sp-runtime = { workspace = true }
+log = { workspace = true }
+sp-core = { workspace = true }
+frame-benchmarking = { workspace = true, optional = true }
+sp-arithmetic = { workspace = true }
+pallet-dispute-escrow = { path = "../escrow", default-features = false }
+pallet-storage-service = { workspace = true }
+pallet-storage-lifecycle = { workspace = true }
+pallet-trading-common = { workspace = true }
+
+[dev-dependencies]
+sp-io = { workspace = true }
+sp-core = { workspace = true }
+pallet-balances = { workspace = true }
+
+[features]
+default = ["std"]
+std = [
+    "codec/std",
+    "scale-info/std",
+    "frame-support/std",
+    "frame-system/std",
+    "sp-api/std",
+    "sp-runtime/std",
+    "log/std",
+    "sp-core/std",
+    "frame-benchmarking?/std",
+    "sp-arithmetic/std",
+    "pallet-dispute-escrow/std",
+    "pallet-storage-service/std",
+    "pallet-storage-lifecycle/std",
+    "pallet-trading-common/std",
+]
+runtime-benchmarks = [
+    "frame-benchmarking/runtime-benchmarks",
+    "frame-support/runtime-benchmarks",
+    "frame-system/runtime-benchmarks",
+    "sp-runtime/runtime-benchmarks",
+]
+
+try-runtime = [
+  "frame-support/try-runtime",
+  "frame-system/try-runtime",
+]
+
+

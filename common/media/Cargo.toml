@@ -1,0 +1,35 @@
+[package]
+name = "media-utils"
+version = "0.1.0"
+edition = "2021"
+authors = ["Nexus Team"]
+description = "Common media processing utilities for Nexus blockchain"
+license = "MIT"
+
+[dependencies]
+# Substrate primitives
+codec = { workspace = true, features = ["derive"] }
+scale-info = { workspace = true, features = ["derive"] }
+sp-core = { workspace = true }
+sp-runtime = { workspace = true }
+sp-std = { workspace = true }
+
+# Frame support (用于BoundedVec等类型)
+frame-support = { workspace = true }
+
+# Hex编码(可选)
+hex = { workspace = true, optional = true }
+
+[features]
+default = ["std"]
+std = [
+    "codec/std",
+    "scale-info/std",
+    "sp-core/std",
+    "sp-runtime/std",
+    "sp-std/std",
+    "frame-support/std",
+]
+
+[dev-dependencies]
+# 测试依赖可以后续添加

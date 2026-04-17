@@ -1,0 +1,272 @@
+# =========================
+# Rust / Cargo
+# =========================
+target/
+# Cargo.lock - 保留用于可重现构建
+**/*.rs.bk
+*.pdb
+*.rlib
+
+# =========================
+# Substrate / Polkadot SDK
+# =========================
+# Chain data
+chains/
+*.db
+*.rocksdb
+data/
+
+# Runtime WASM artifacts (generated)
+*.compact.wasm
+*.compact.compressed.wasm
+
+# Substrate node data
+node-data/
+spec/
+
+# =========================
+# Node.js / npm
+# =========================
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+.npm/
+.yarn/
+
+# =========================
+# Frontend (Next.js)
+# =========================
+frontend/
+# =========================
+# IDE / Editor
+# =========================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-*
+
+# AI Assistants
+.claude/
+.kiro/
+.windsurf/
+.cursor/
+.aider*
+.continue/
+
+# =========================
+# OS Generated
+# =========================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# =========================
+# Environment & Secrets
+# =========================
+.env
+.env.local
+.env.*.local
+!.env.example
+*.pem
+*.key
+*.crt
+secrets/
+
+# =========================
+# Build & Cache
+# =========================
+*.o
+*.a
+*.so
+*.dylib
+build/
+out/
+dist/
+
+# =========================
+# Testing & Coverage
+# =========================
+coverage/
+*.lcov
+.nyc_output/
+test-results/
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# =========================
+# Nix / Flake
+# =========================
+result
+result-*
+.direnv/
+
+# =========================
+# Media Utils
+# =========================
+media-utils/output/
+media-utils/temp/
+
+# =========================
+# GroupRobot Bot (standalone binary, repo root only — not pallets/*/grouprobot)
+# =========================
+/grouprobot/
+
+# =========================
+# Chain State (Local Dev)
+# =========================
+my-chain-state/
+
+# =========================
+# Scripts
+# =========================
+scripts/
+
+docs/
+
+
+# =========================
+# Website (Next.js)
+# =========================
+website/
+
+# =========================
+# Frontend (Next.js) - 额外规则
+# =========================
+frontend/*.tsbuildinfo
+frontend/.eslintcache
+frontend/.vercel
+
+# =========================
+# Telegram (Bot 测试数据)
+# =========================
+telegram/
+
+# =========================
+# Misc
+# =========================
+*.bak
+*.tmp
+*.temp
+*.orig
+*.backup
+
+# Crash dumps
+crash-*.log
+hs_err_pid*
+
+# Profiling
+*.prof
+*.trace
+perf.data*
+flamegraph.svg
+
+# =========================
+# Rust 额外规则
+# =========================
+# Incremental compilation
+**/incremental/
+# Benchmark outputs
+criterion/
+# Cargo registry cache (if present)
+.cargo/registry/
+.cargo/git/
+# rustfmt backup
+*.rs.bk
+# rust-analyzer
+rust-project.json
+
+# =========================
+# Substrate 额外规则
+# =========================
+# Genesis files (may contain secrets)
+genesis.json
+chain_spec.json
+# Keystore
+keystore/
+# Network keys
+network/
+
+# =========================
+# Docker
+# =========================
+docker-compose.override.yml
+.docker/
+
+# =========================
+# Terraform / Infrastructure
+# =========================
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfvars
+
+# =========================
+# Kubernetes
+# =========================
+kubeconfig
+*.kubeconfig
+secrets.yaml
+
+# =========================
+# Database
+# =========================
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# =========================
+# Archives
+# =========================
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# =========================
+# Large Binary Files
+# =========================
+*.wasm
+!runtime/src/**/*.wasm
+*.bin
+*.exe
+
+# =========================
+# Workspace Artifacts
+# =========================
+# Benchmark results
+benchmarks/
+# Documentation build
+docs/_build/
+docs/target/
+# Release artifacts
+releases/
+*.deb
+*.rpm
+*.AppImage
+
+website/
+
+nexus-entity-dapp/
+
+my-chain-state/
+
+nexus-community-dapp
