@@ -10,11 +10,11 @@
 use codec::{Codec, Decode, Encode};
 use pallet_commission_common::CommissionType;
 use scale_info::TypeInfo;
-use sp_runtime::RuntimeDebug;
+use Debug;
 use sp_std::vec::Vec;
 
 /// 会员在消费单链中的位置与邻位信息
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct SingleLineMemberPositionInfo<AccountId> {
     pub position: u32,
     pub queue_length: u32,
@@ -25,7 +25,7 @@ pub struct SingleLineMemberPositionInfo<AccountId> {
 }
 
 /// 会员单链分佣记录视图
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct SingleLinePayoutRecordView<AccountId, Balance> {
     pub order_id: u64,
     pub buyer: AccountId,
@@ -36,7 +36,7 @@ pub struct SingleLinePayoutRecordView<AccountId, Balance> {
 }
 
 /// 会员单链汇总视图
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug, Default)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug, Default)]
 pub struct SingleLineMemberSummaryView<Balance> {
     pub total_earned_as_upline: Balance,
     pub total_earned_as_downline: Balance,
@@ -45,7 +45,7 @@ pub struct SingleLineMemberSummaryView<Balance> {
 }
 
 /// 单链预览输出视图
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct SingleLinePreviewOutput<AccountId, Balance> {
     pub beneficiary: AccountId,
     pub amount: Balance,
@@ -54,7 +54,7 @@ pub struct SingleLinePreviewOutput<AccountId, Balance> {
 }
 
 /// 会员消费单链详情视图
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct SingleLineMemberView<AccountId, Balance> {
     pub position_info: Option<SingleLineMemberPositionInfo<AccountId>>,
     pub is_enabled: bool,
@@ -63,7 +63,7 @@ pub struct SingleLineMemberView<AccountId, Balance> {
 }
 
 /// Entity 维度的消费单链统计视图
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug, Default)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug, Default)]
 pub struct SingleLineEntityStatsView {
     pub total_orders: u32,
     pub total_upline_payouts: u32,
@@ -71,7 +71,7 @@ pub struct SingleLineEntityStatsView {
 }
 
 /// Entity 维度的消费单链总览
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct SingleLineOverview {
     pub is_enabled: bool,
     pub queue_length: u32,

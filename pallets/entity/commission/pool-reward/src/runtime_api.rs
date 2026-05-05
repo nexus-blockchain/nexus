@@ -6,14 +6,14 @@
 
 use codec::{Codec, Decode, Encode};
 use scale_info::TypeInfo;
-use sp_runtime::RuntimeDebug;
+use Debug;
 use sp_std::vec::Vec;
 
 // ============================================================================
 // 共享 DTO
 // ============================================================================
 
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub enum CapBehaviorInfo {
     Fixed,
     UnlockByTeam {
@@ -25,14 +25,14 @@ pub enum CapBehaviorInfo {
     },
 }
 
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct LevelRuleSummaryInfo {
     pub level_id: u8,
     pub base_cap_percent: u16,
     pub cap_behavior: CapBehaviorInfo,
 }
 
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct AdminLevelRuleInfo {
     pub level_id: u8,
     pub base_cap_percent: u16,
@@ -41,7 +41,7 @@ pub struct AdminLevelRuleInfo {
     pub capped_member_count: u32,
 }
 
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct MemberStatsInfo {
     pub direct_count: u32,
     pub team_count: u32,
@@ -50,7 +50,7 @@ pub struct MemberStatsInfo {
     pub cap_basis_spent_usdt: u128,
 }
 
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct MemberCapInfo<Balance> {
     pub cumulative_claimed_usdt: u128,
     pub current_cap_usdt: u128,
@@ -69,7 +69,7 @@ pub struct MemberCapInfo<Balance> {
 }
 
 /// 等级领取进度
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct LevelProgressInfo<Balance> {
     pub level_id: u8,
     pub ratio_bps: u16,
@@ -79,7 +79,7 @@ pub struct LevelProgressInfo<Balance> {
 }
 
 /// 领取记录（区块号统一为 u64）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct ClaimRecordInfo<Balance, TokenBalance> {
     pub round_id: u64,
     pub amount: Balance,
@@ -89,7 +89,7 @@ pub struct ClaimRecordInfo<Balance, TokenBalance> {
 }
 
 /// 轮次详情
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct RoundDetailInfo<Balance, TokenBalance> {
     pub round_id: u64,
     pub start_block: u64,
@@ -107,7 +107,7 @@ pub struct RoundDetailInfo<Balance, TokenBalance> {
 }
 
 /// 已完成轮次摘要
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct CompletedRoundInfo<Balance, TokenBalance> {
     pub round_id: u64,
     pub start_block: u64,
@@ -126,7 +126,7 @@ pub struct CompletedRoundInfo<Balance, TokenBalance> {
 }
 
 /// 轮次资金来源汇总
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug, Default)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug, Default)]
 pub struct FundingSummaryInfo {
     pub nex_commission_remainder: u128,
     pub token_platform_fee_retention: u128,
@@ -136,7 +136,7 @@ pub struct FundingSummaryInfo {
 }
 
 /// 待生效配置变更
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct PendingConfigInfo {
     pub level_rules: Vec<(u8, u16)>,
     pub level_rule_details: Vec<LevelRuleSummaryInfo>,
@@ -149,7 +149,7 @@ pub struct PendingConfigInfo {
 // ============================================================================
 
 /// 会员沉淀池详情视图
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct PoolRewardMemberView<Balance, TokenBalance> {
     pub round_duration: u64,
     pub token_pool_enabled: bool,
@@ -185,7 +185,7 @@ pub struct PoolRewardMemberView<Balance, TokenBalance> {
 // ============================================================================
 
 /// 管理者沉淀池总览视图
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct PoolRewardAdminView<Balance, TokenBalance> {
     pub level_rules: Vec<(u8, u16)>,
     pub level_rule_details: Vec<AdminLevelRuleInfo>,

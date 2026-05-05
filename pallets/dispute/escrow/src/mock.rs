@@ -49,11 +49,18 @@ impl pallet_dispute_escrow::pallet::ExpiryPolicy<u64, u64> for TestExpiryPolicy 
     }
 }
 
+pub struct EscrowAdminMembers;
+impl frame_support::traits::SortedMembers<u64> for EscrowAdminMembers {
+    fn sorted_members() -> Vec<u64> {
+        vec![99]
+    }
+}
+
 impl pallet_dispute_escrow::Config for Test {
     type Currency = Balances;
     type EscrowPalletId = EscrowPalletId;
     type AuthorizedOrigin = frame_system::EnsureSigned<u64>;
-    type AdminOrigin = frame_system::EnsureRoot<u64>;
+    type AdminOrigin = frame_support::traits::EitherOfDiverse<frame_system::EnsureRoot<u64>, frame_system::EnsureSignedBy<EscrowAdminMembers, u64>>;
     type MaxExpiringPerBlock = ConstU32<10>;
     type MaxSplitEntries = ConstU32<10>;
     type ExpiryPolicy = TestExpiryPolicy;

@@ -1,6 +1,6 @@
 use crate as pallet_storage_lifecycle;
 use crate::ArchiveLevel;
-use frame_support::{derive_impl, parameter_types};
+use frame_support::{derive_impl, parameter_types, traits::{EitherOfDiverse, SortedMembers}};
 use sp_runtime::BuildStorage;
 
 type Block = frame_system::mocking::MockBlock<Test>;
@@ -23,6 +23,7 @@ parameter_types! {
     pub const PurgeDelay: u32 = 300;
     pub const EnablePurge: bool = true;
     pub const MaxBatchSize: u32 = 10;
+    pub const GovernanceAccount: u64 = 99;
 }
 
 use std::cell::RefCell;
@@ -201,6 +202,13 @@ impl pallet_storage_lifecycle::OnArchiveHandler for MockOnArchiveHandler {
     }
 }
 
+pub struct GovernanceMembers;
+impl SortedMembers<u64> for GovernanceMembers {
+    fn sorted_members() -> Vec<u64> {
+        vec![99]
+    }
+}
+
 impl pallet_storage_lifecycle::pallet::Config for Test {
     type L1ArchiveDelay = L1ArchiveDelay;
     type L2ArchiveDelay = L2ArchiveDelay;
@@ -210,6 +218,7 @@ impl pallet_storage_lifecycle::pallet::Config for Test {
     type StorageArchiver = MockStorageArchiver;
     type OnArchive = MockOnArchiveHandler;
     type DataOwnerProvider = ();
+    type GovernanceOrigin = EitherOfDiverse<frame_system::EnsureRoot<u64>, frame_system::EnsureSignedBy<GovernanceMembers, u64>>;
     type WeightInfo = pallet_storage_lifecycle::SubstrateWeight<Test>;
 }
 

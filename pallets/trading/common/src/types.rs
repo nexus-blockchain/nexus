@@ -6,6 +6,7 @@
 //! - v0.1.0 (2026-01-18): 初始版本，从 OTC/Swap/Maker 模块提取
 
 use frame_support::{pallet_prelude::ConstU32, BoundedVec};
+use sp_runtime::Debug;
 
 /// 函数级详细中文注释：TRON 地址类型（固定 34 字节）
 ///
@@ -54,7 +55,7 @@ pub type TronTxHash = BoundedVec<u8, ConstU32<64>>;
     Eq,
     scale_info::TypeInfo,
     frame_support::pallet_prelude::MaxEncodedLen,
-    sp_runtime::RuntimeDebug,
+    Debug,
 )]
 pub enum UsdtTradeStatus {
     /// 等待买家支付 USDT
@@ -84,7 +85,7 @@ pub enum UsdtTradeStatus {
     Eq,
     scale_info::TypeInfo,
     frame_support::pallet_prelude::MaxEncodedLen,
-    sp_runtime::RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum BuyerDepositStatus {
@@ -120,7 +121,7 @@ pub enum BuyerDepositStatus {
     Eq,
     scale_info::TypeInfo,
     frame_support::pallet_prelude::MaxEncodedLen,
-    sp_runtime::RuntimeDebug,
+    Debug,
 )]
 pub enum PaymentVerificationResult {
     /// 验证通过（≥99.5%）

@@ -53,7 +53,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxCidLen))]
     pub struct MallReview<AccountId, BlockNumber, MaxCidLen: Get<u32>> {
@@ -84,7 +84,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxCidLen))]
     pub struct ReviewReply<AccountId, BlockNumber, MaxCidLen: Get<u32>> {

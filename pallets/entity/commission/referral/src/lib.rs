@@ -45,7 +45,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct DirectRewardConfig {
@@ -62,7 +62,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct FixedAmountConfig<Balance> {
         pub amount: Balance,
@@ -86,7 +86,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct FirstOrderConfig<Balance> {
         pub amount: Balance,
@@ -114,7 +114,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct RepeatPurchaseConfig {
@@ -132,7 +132,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct ReferrerGuardConfig {
@@ -152,7 +152,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct CommissionCapConfig<Balance> {
         /// 单笔返佣上限（0=无限制）
@@ -180,7 +180,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub enum ReferralConfigMode {
         DirectReward,
@@ -201,7 +201,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct ReferralConfig<Balance> {
         pub direct_reward: DirectRewardConfig,

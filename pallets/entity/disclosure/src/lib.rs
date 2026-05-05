@@ -77,7 +77,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum DisclosureType {
@@ -122,7 +122,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum DisclosureStatus {
@@ -148,7 +148,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxCidLen))]
     pub struct DisclosureRecord<AccountId, BlockNumber, MaxCidLen: Get<u32>> {
@@ -198,7 +198,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct DisclosureConfig<BlockNumber> {
@@ -235,7 +235,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct InsiderRecord<AccountId, BlockNumber> {
         /// 内幕人员账户
@@ -256,7 +256,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct InsiderRoleChangeRecord<BlockNumber> {
         /// 旧角色（None 表示初始添加）
@@ -280,7 +280,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum AnnouncementCategory {
@@ -314,7 +314,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum AnnouncementStatus {
@@ -337,7 +337,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxCidLen, MaxTitleLen))]
     pub struct AnnouncementRecord<
@@ -387,7 +387,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum InsiderRole {
@@ -417,7 +417,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum AuditStatus {
@@ -441,7 +441,7 @@ pub mod pallet {
         Ord,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum PenaltyLevel {
@@ -500,7 +500,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum InsiderTransactionType {
@@ -522,7 +522,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct InsiderTransactionReport<AccountId, BlockNumber> {
         pub account: AccountId,
@@ -545,7 +545,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct ApprovalConfig {
         /// 发布前所需审批人数
@@ -586,7 +586,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct DisclosureMetadata<BlockNumber: Default> {
@@ -608,7 +608,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct FiscalYearConfig<BlockNumber> {
         /// 财务年度起始区块
@@ -630,7 +630,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum ViolationReportStatus {
@@ -650,7 +650,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct ViolationReport<AccountId, BlockNumber> {
         pub entity_id: u64,
@@ -1223,7 +1223,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub enum ViolationType {
         /// 逾期披露

@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use frame_support::{pallet_prelude::*, BoundedVec};
 use scale_info::TypeInfo;
-use sp_runtime::RuntimeDebug;
+use Debug;
 
 // ============================================================================
 // Subject 相关类型（CID归属管理）
@@ -47,7 +47,7 @@ use sp_runtime::RuntimeDebug;
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -140,7 +140,7 @@ impl<A, B> EntityFunding<A, B> for () {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -180,7 +180,7 @@ pub struct SubjectInfo {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -249,7 +249,7 @@ impl Default for DomainConfig {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -290,7 +290,7 @@ impl Default for PinTier {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -369,7 +369,7 @@ impl TierConfig {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -404,7 +404,7 @@ pub struct HealthCheckTask<BlockNumber> {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -447,7 +447,7 @@ impl Default for HealthStatus {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
     Default,
@@ -491,7 +491,7 @@ pub struct GlobalHealthStats<BlockNumber> {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -534,7 +534,7 @@ pub struct DomainStats {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -570,7 +570,7 @@ pub struct BillingTask<BlockNumber, Balance> {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -612,7 +612,7 @@ impl<BlockNumber> Default for GraceStatus<BlockNumber> {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -641,7 +641,7 @@ impl Default for ChargeLayer {
 /// 结果说明：
 /// - Success：扣费成功，记录使用的层级
 /// - EnterGrace：进入宽限期，记录过期时间
-#[derive(Clone, Encode, Decode, Eq, PartialEq, RuntimeDebug, TypeInfo)]
+#[derive(Clone, Encode, Decode, Eq, PartialEq, Debug, TypeInfo)]
 #[scale_info(skip_type_params(BlockNumber))]
 pub enum ChargeResult<BlockNumber> {
     /// 扣费成功
@@ -672,7 +672,7 @@ pub enum ChargeResult<BlockNumber> {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -702,7 +702,7 @@ pub enum UnpinReason {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -731,7 +731,7 @@ impl Default for OperatorLayer {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -836,7 +836,7 @@ pub struct LayeredOperatorSelection<AccountId> {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -883,7 +883,7 @@ pub struct LayeredPinAssignment<AccountId> {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -986,7 +986,7 @@ pub struct OperatorMetrics<Balance: MaxEncodedLen, BlockNumber: MaxEncodedLen> {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -1027,7 +1027,7 @@ impl<BlockNumber: Default> Default for SimpleNodeStats<BlockNumber> {
     DecodeWithMemTracking,
     Eq,
     PartialEq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]

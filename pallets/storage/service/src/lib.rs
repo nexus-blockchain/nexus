@@ -205,7 +205,7 @@ pub mod pallet {
     /// - `created_at`：创建时间（区块号）。
     /// - `last_activity`: latest activity block.
     /// - `last_activity`：最后活动时间（区块号）。
-    #[derive(Clone, Encode, Decode, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+    #[derive(Clone, Encode, Decode, Eq, PartialEq, Debug, TypeInfo, MaxEncodedLen)]
     #[scale_info(skip_type_params(BlockNumber))]
     pub struct PinMetadata<BlockNumber> {
         pub replicas: u32,

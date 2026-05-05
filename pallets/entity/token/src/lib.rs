@@ -84,7 +84,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct LockEntry<Balance, BlockNumber> {
         pub amount: Balance,
@@ -102,7 +102,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct EntityTokenConfig<Balance, BlockNumber> {
         /// 是否已启用通证

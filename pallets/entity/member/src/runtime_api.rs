@@ -9,11 +9,11 @@
 
 use codec::{Codec, Decode, Encode};
 use scale_info::TypeInfo;
-use sp_runtime::RuntimeDebug;
+use Debug;
 use sp_std::vec::Vec;
 
 /// 升级记录（Runtime API 返回用，区块号统一为 u64）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct UpgradeRecordInfo {
     /// 触发的规则 ID
     pub rule_id: u32,
@@ -28,7 +28,7 @@ pub struct UpgradeRecordInfo {
 }
 
 /// 会员仪表盘信息（聚合查询）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct MemberDashboardInfo<AccountId> {
     /// 推荐人
     pub referrer: Option<AccountId>,
@@ -65,7 +65,7 @@ pub struct MemberDashboardInfo<AccountId> {
 }
 
 /// 团队成员概览信息
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct TeamMemberInfo<AccountId> {
     /// 会员账户
     pub account: AccountId,
@@ -88,7 +88,7 @@ pub struct TeamMemberInfo<AccountId> {
 }
 
 /// O1: 分页会员列表项
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct PaginatedMemberInfo<AccountId> {
     /// 会员账户
     pub account: AccountId,
@@ -109,7 +109,7 @@ pub struct PaginatedMemberInfo<AccountId> {
 }
 
 /// O1: 分页查询结果
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct PaginatedMembersResult<AccountId> {
     /// 会员列表
     pub members: Vec<PaginatedMemberInfo<AccountId>>,
@@ -120,7 +120,7 @@ pub struct PaginatedMembersResult<AccountId> {
 }
 
 /// Entity 会员总览信息（Owner 视角）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct EntityMemberOverview {
     /// 会员总数
     pub total_members: u32,
@@ -137,7 +137,7 @@ pub struct EntityMemberOverview {
 // ============================================================================
 
 /// 上行链路节点
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct UplineNode<AccountId> {
     /// 会员账户
     pub account: AccountId,
@@ -150,7 +150,7 @@ pub struct UplineNode<AccountId> {
 }
 
 /// 上行链路查询结果
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct UplineChainResult<AccountId> {
     /// 路径: [account, referrer, grand_referrer, ..., root]
     pub chain: Vec<UplineNode<AccountId>>,
@@ -161,7 +161,7 @@ pub struct UplineChainResult<AccountId> {
 }
 
 /// 下行推荐树节点（递归结构）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct ReferralTreeNode<AccountId> {
     /// 会员账户
     pub account: AccountId,
@@ -184,7 +184,7 @@ pub struct ReferralTreeNode<AccountId> {
 }
 
 /// 按代查询的会员信息
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct GenerationMemberInfo<AccountId> {
     /// 会员账户
     pub account: AccountId,
@@ -205,7 +205,7 @@ pub struct GenerationMemberInfo<AccountId> {
 }
 
 /// 按代分页查询结果
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct PaginatedGenerationResult<AccountId> {
     /// 查询的代数
     pub generation: u32,

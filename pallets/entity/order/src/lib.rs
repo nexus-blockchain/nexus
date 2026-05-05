@@ -83,7 +83,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxCidLen))]
     pub struct Order<AccountId, Balance, BlockNumber, MaxCidLen: Get<u32>> {
@@ -175,7 +175,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct OrderStatistics<Balance: Default> {
@@ -210,7 +210,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub enum OrderOperation {
         /// Escrow refund.

@@ -89,7 +89,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum LevelUpgradeMode {
@@ -109,7 +109,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct CustomLevel {
         /// 等级 ID（0, 1, 2, ...）
@@ -141,7 +141,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxLevels))]
     pub struct EntityLevelSystem<MaxLevels: Get<u32>> {
@@ -181,7 +181,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum ConflictStrategy {
@@ -202,7 +202,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub enum UpgradeTrigger {
         /// 购买特定产品
@@ -229,7 +229,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct UpgradeRule<BlockNumber> {
         /// 规则 ID
@@ -267,7 +267,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxRules))]
     pub struct EntityUpgradeRuleSystem<BlockNumber, MaxRules: Get<u32>> {
@@ -306,7 +306,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct UpgradeRecord<BlockNumber> {
         /// 触发的规则 ID
@@ -334,7 +334,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct EntityMember<AccountId, BlockNumber> {
         /// 推荐人（上级）
@@ -447,7 +447,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct TeamSizeUpdate<AccountId> {
         /// 实体 ID

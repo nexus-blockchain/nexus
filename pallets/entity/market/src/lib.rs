@@ -75,7 +75,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub enum OrderSide {
         /// 买单（用 NEX 买 Token）
@@ -96,7 +96,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum OrderType {
@@ -125,7 +125,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub enum OrderStatus {
         /// 挂单中
@@ -151,7 +151,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(T))]
     pub struct TradeOrder<T: Config> {
@@ -202,7 +202,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct MarketConfig {
@@ -231,7 +231,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct MarketStats {
@@ -255,7 +255,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct PriceLevel<Balance, TokenBalance> {
@@ -268,7 +268,7 @@ pub mod pallet {
     }
 
     /// 订单簿深度（买卖盘）
-    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+    #[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
     pub struct OrderBookDepth<Balance, TokenBalance> {
         /// 实体 ID
         pub entity_id: u64,
@@ -296,7 +296,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct MarketSummary<Balance, TokenBalance> {
@@ -324,7 +324,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct PriceSnapshot {
@@ -344,7 +344,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct TwapAccumulator<Balance> {
@@ -373,7 +373,7 @@ pub mod pallet {
     }
 
     /// TWAP 周期类型
-    #[derive(Encode, Decode, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, RuntimeDebug)]
+    #[derive(Encode, Decode, Clone, Copy, PartialEq, Eq, TypeInfo, MaxEncodedLen, Debug)]
     pub enum TwapPeriod {
         /// 1小时（600 区块，假设 6秒/区块）
         OneHour,
@@ -393,7 +393,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct PriceProtectionConfig<Balance> {
         /// 是否启用价格保护
@@ -441,7 +441,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(T))]
     pub struct TradeRecord<T: Config> {
@@ -479,7 +479,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct DailyStats<Balance> {
@@ -512,7 +512,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum MarketStatus {

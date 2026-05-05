@@ -57,7 +57,7 @@ mod tests;
     Eq,
     scale_info::TypeInfo,
     codec::MaxEncodedLen,
-    sp_runtime::RuntimeDebug,
+    Debug,
 )]
 pub enum CleanupPhase {
     /// 正在清理 ShopPointsBalances
@@ -108,7 +108,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxNameLen, MaxSymbolLen))]
     pub struct PointsConfig<MaxNameLen: Get<u32>, MaxSymbolLen: Get<u32>> {

@@ -26,11 +26,14 @@
 // Substrate and Polkadot dependencies
 use crate::{
     CommissionCore, CommissionSingleLine, EntityGovernance, EntityLoyalty, EntityMarket,
-    SessionKeys, UncheckedExtrinsic,
+    OriginCaller, Preimage, SessionKeys, UncheckedExtrinsic,
 };
 use frame_support::{
     derive_impl, parameter_types,
-    traits::{ConstBool, ConstU128, ConstU16, ConstU32, ConstU64, ConstU8, VariantCountOf},
+    traits::{
+        ConstBool, ConstU128, ConstU16, ConstU32, ConstU64, ConstU8, LinearStoragePrice,
+        VariantCountOf,
+    },
     weights::{
         constants::{RocksDbWeight, WEIGHT_REF_TIME_PER_SECOND},
         IdentityFee, Weight,
@@ -43,7 +46,7 @@ use frame_system::{
 use frame_election_provider_support::{onchain, SequentialPhragmen};
 use pallet_transaction_payment::{FungibleAdapter, Multiplier, TargetedFeeAdjustment};
 use sp_runtime::{generic, traits::AccountIdConversion};
-use sp_runtime::{FixedPointNumber, Perbill};
+use sp_runtime::{transaction_validity::TransactionPriority, FixedPointNumber, Perbill};
 use sp_version::RuntimeVersion;
 
 // Local module imports
@@ -105,7 +108,12 @@ parameter_types! {
         Weight::from_parts(2u64 * WEIGHT_REF_TIME_PER_SECOND, u64::MAX),
         NORMAL_DISPATCH_RATIO,
     );
-    pub RuntimeBlockLength: BlockLength = BlockLength::max_with_normal_ratio(5 * 1024 * 1024, NORMAL_DISPATCH_RATIO);
+    pub RuntimeBlockLength: BlockLength = BlockLength::builder()
+        .max_length(5 * 1024 * 1024)
+        .modify_max_length_for_class(frame_support::dispatch::DispatchClass::Normal, |m| {
+            *m = NORMAL_DISPATCH_RATIO * 5 * 1024 * 1024;
+        })
+        .build();
     pub const SS58Prefix: u16 = 273;
 }
 
@@ -150,12 +158,21 @@ parameter_types! {
     /// Report longevity for equivocation proofs: BondingDuration * SessionsPerEra * EpochDuration.
     /// Equivocation 举报有效期 = 解绑周期 × 每 era 的 session 数 × epoch 长度。
     pub const ReportLongevity: u64 = 28 * 6 * 4 * HOURS as u64;
+    /// Base unsigned transaction priority for im-online heartbeats.
+    /// im-online 心跳 unsigned 交易基础优先级。
+    pub const ImOnlineUnsignedPriority: TransactionPriority = TransactionPriority::MAX / 2;
     /// Maximum number of authorities (validators).
     /// 最大验证者数量。
     pub const MaxAuthorities: u32 = 100;
     /// Maximum nominators considered per validator for Grandpa/BABE protocol.
     /// Grandpa/BABE 协议中每个验证者考虑的最大提名者数量。
     pub const MaxNominators: u32 = 256;
+    /// Maximum heartbeat keys tracked per session.
+    /// 每个 session 跟踪的最大心跳 key 数。
+    pub const MaxImOnlineKeys: u32 = 10_000;
+    /// Maximum peer entries carried in received heartbeats.
+    /// 心跳中允许记录的最大 peer 条目数。
+    pub const MaxPeerInHeartbeats: u32 = 10_000;
 }
 
 impl pallet_babe::Config for Runtime {
@@ -253,6 +270,18 @@ impl pallet_offences::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type IdentificationTuple = pallet_session::historical::IdentificationTuple<Runtime>;
     type OnOffenceHandler = Staking;
+}
+
+impl pallet_im_online::Config for Runtime {
+    type AuthorityId = pallet_im_online::sr25519::AuthorityId;
+    type MaxKeys = MaxImOnlineKeys;
+    type MaxPeerInHeartbeats = MaxPeerInHeartbeats;
+    type RuntimeEvent = RuntimeEvent;
+    type ValidatorSet = Historical;
+    type NextSessionRotation = Babe;
+    type ReportUnresponsiveness = Offences;
+    type UnsignedPriority = ImOnlineUnsignedPriority;
+    type WeightInfo = pallet_im_online::weights::SubstrateWeight<Runtime>;
 }
 
 impl pallet_grandpa::Config for Runtime {
@@ -482,6 +511,41 @@ impl pallet_sudo::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type RuntimeCall = RuntimeCall;
     type WeightInfo = pallet_sudo::weights::SubstrateWeight<Runtime>;
+}
+
+parameter_types! {
+    pub storage PreimageBaseDeposit: Balance = 0;
+    pub storage PreimageByteDeposit: Balance = 0;
+    pub const PreimageHoldReason: RuntimeHoldReason = RuntimeHoldReason::Preimage(pallet_preimage::HoldReason::Preimage);
+    pub storage MaximumSchedulerWeight: Weight =
+        Perbill::from_percent(80) * RuntimeBlockWeights::get().max_block;
+}
+
+impl pallet_preimage::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type WeightInfo = pallet_preimage::weights::SubstrateWeight<Runtime>;
+    type Currency = Balances;
+    type ManagerOrigin = RootOrTechnicalMajority;
+    type Consideration = frame_support::traits::fungible::HoldConsideration<
+        AccountId,
+        Balances,
+        PreimageHoldReason,
+        LinearStoragePrice<PreimageBaseDeposit, PreimageByteDeposit, Balance>,
+    >;
+}
+
+impl pallet_scheduler::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type RuntimeOrigin = RuntimeOrigin;
+    type PalletsOrigin = OriginCaller;
+    type RuntimeCall = RuntimeCall;
+    type MaximumWeight = MaximumSchedulerWeight;
+    type ScheduleOrigin = RootOrTechnicalMajority;
+    type OriginPrivilegeCmp = frame_support::traits::EqualPrivilegeOnly;
+    type MaxScheduledPerBlock = ConstU32<50>;
+    type WeightInfo = pallet_scheduler::weights::SubstrateWeight<Runtime>;
+    type Preimages = Preimage;
+    type BlockNumberProvider = frame_system::Pallet<Self>;
 }
 
 /// Governance origin type aliases for replacing EnsureRoot post-Sudo removal
@@ -831,6 +895,18 @@ impl frame_system::offchain::CreateBare<pallet_nex_market::pallet::Call<Runtime>
     }
 }
 
+// OCW unsigned transaction support for pallet-im-online (heartbeat)
+impl frame_system::offchain::CreateTransactionBase<pallet_im_online::Call<Runtime>> for Runtime {
+    type Extrinsic = UncheckedExtrinsic;
+    type RuntimeCall = RuntimeCall;
+}
+
+impl frame_system::offchain::CreateBare<pallet_im_online::Call<Runtime>> for Runtime {
+    fn create_bare(call: Self::RuntimeCall) -> Self::Extrinsic {
+        generic::UncheckedExtrinsic::new_bare(call)
+    }
+}
+
 impl pallet_storage_service::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type Currency = Balances;
@@ -929,6 +1005,7 @@ impl pallet_dispute_evidence::Config for Runtime {
     type DepositCalculator =
         pallet_trading_common::DepositCalculatorImpl<TradingPricingProvider, Balance>;
     type AccessRequestTtlBlocks = ConstU32<201_600>; // ~14天 (6s/block)
+    type GovernanceOrigin = RootOrTechnicalMajority;
     type MaxReasonLen = ConstU32<256>;
 }
 
@@ -1443,6 +1520,7 @@ impl pallet_storage_lifecycle::Config for Runtime {
     type StorageArchiver = StorageServiceArchiver;
     type OnArchive = ();
     type DataOwnerProvider = StorageServiceOwnerProvider;
+    type GovernanceOrigin = RootOrTechnicalMajority;
     type WeightInfo = pallet_storage_lifecycle::weights::SubstrateWeight<Runtime>;
 }
 

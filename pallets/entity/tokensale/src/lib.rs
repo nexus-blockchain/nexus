@@ -116,7 +116,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum SaleMode {
@@ -145,7 +145,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum RoundStatus {
@@ -175,7 +175,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum VestingType {
@@ -200,7 +200,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct VestingConfig<BlockNumber> {
@@ -227,7 +227,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct PaymentConfig<AssetId, Balance> {
         /// 支付资产 ID（None = 原生代币 NEX）
@@ -252,7 +252,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct SaleRound<AccountId, Balance, BlockNumber> {
         /// 轮次 ID
@@ -317,7 +317,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct Subscription<AccountId, Balance, BlockNumber, AssetId> {
         /// 认购者

@@ -55,6 +55,7 @@ impl_opaque_keys! {
     pub struct SessionKeys {
         pub babe: Babe,
         pub grandpa: Grandpa,
+        pub im_online: ImOnline,
     }
 }
 
@@ -235,21 +236,30 @@ mod runtime {
     pub type Sudo = pallet_sudo;
 
     #[runtime::pallet_index(7)]
-    pub type Authorship = pallet_authorship;
+    pub type Preimage = pallet_preimage;
 
     #[runtime::pallet_index(8)]
-    pub type Session = pallet_session;
+    pub type Scheduler = pallet_scheduler;
 
     #[runtime::pallet_index(9)]
-    pub type Historical = pallet_session::historical;
+    pub type Authorship = pallet_authorship;
 
     #[runtime::pallet_index(10)]
-    pub type Offences = pallet_offences;
-
-    #[runtime::pallet_index(12)]
-    pub type Staking = pallet_staking;
+    pub type Session = pallet_session;
 
     #[runtime::pallet_index(11)]
+    pub type Historical = pallet_session::historical;
+
+    #[runtime::pallet_index(12)]
+    pub type Offences = pallet_offences;
+
+    #[runtime::pallet_index(13)]
+    pub type ImOnline = pallet_im_online;
+
+    #[runtime::pallet_index(14)]
+    pub type Staking = pallet_staking;
+
+    #[runtime::pallet_index(15)]
     pub type Inscription = pallet_inscription;
 
     // ============================================================================

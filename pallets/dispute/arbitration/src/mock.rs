@@ -1,5 +1,5 @@
 use crate as pallet_dispute_arbitration;
-use frame_support::{derive_impl, parameter_types, traits::ConstU32, PalletId};
+use frame_support::{derive_impl, parameter_types, traits::{ConstU32, EitherOfDiverse, SortedMembers}, PalletId};
 use sp_runtime::{traits::IdentityLookup, BuildStorage};
 
 type Block = frame_system::mocking::MockBlock<Test>;
@@ -249,6 +249,14 @@ parameter_types! {
     pub const AppealWindowBlocks: u64 = 50;
     pub const AutoEscalateBlocks: u64 = 200;
     pub const MaxActivePerUser: u32 = 50;
+    pub const ArbitrationGovernanceAccount: u64 = 99;
+}
+
+pub struct ArbitrationGovernanceMembers;
+impl SortedMembers<u64> for ArbitrationGovernanceMembers {
+    fn sorted_members() -> Vec<u64> {
+        vec![99]
+    }
 }
 
 impl pallet_dispute_arbitration::pallet::Config for Test {
@@ -257,7 +265,7 @@ impl pallet_dispute_arbitration::pallet::Config for Test {
     type Escrow = MockEscrow;
     type WeightInfo = ();
     type Router = MockRouter;
-    type DecisionOrigin = frame_system::EnsureRoot<u64>;
+    type DecisionOrigin = EitherOfDiverse<frame_system::EnsureRoot<u64>, frame_system::EnsureSignedBy<ArbitrationGovernanceMembers, u64>>;
     type Fungible = Balances;
     type RuntimeHoldReason = RuntimeHoldReason;
     type DepositRatioBps = DepositRatioBps;

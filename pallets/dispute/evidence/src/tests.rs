@@ -202,6 +202,95 @@ fn commit_sets_content_type_correctly() {
     });
 }
 
+#[test]
+fn force_remove_evidence_accepts_governance_account() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EvidencePallet::commit(
+            RuntimeOrigin::signed(1),
+            NS,
+            1,
+            100,
+            imgs_n(&[1]),
+            empty_vids(),
+            empty_docs(),
+            None
+        ));
+
+        assert_ok!(EvidencePallet::force_remove_evidence(
+            RuntimeOrigin::signed(99),
+            0,
+            None,
+        ));
+        assert_eq!(EvidenceStatuses::<Test>::get(0), EvidenceStatus::Removed);
+    });
+}
+
+#[test]
+fn force_remove_evidence_rejects_non_governance_signed() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EvidencePallet::commit(
+            RuntimeOrigin::signed(1),
+            NS,
+            1,
+            100,
+            imgs_n(&[1]),
+            empty_vids(),
+            empty_docs(),
+            None
+        ));
+
+        assert_noop!(
+            EvidencePallet::force_remove_evidence(RuntimeOrigin::signed(2), 0, None),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn force_archive_evidence_accepts_governance_account() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EvidencePallet::commit(
+            RuntimeOrigin::signed(1),
+            NS,
+            1,
+            100,
+            imgs_n(&[1]),
+            empty_vids(),
+            empty_docs(),
+            None
+        ));
+
+        assert_ok!(EvidencePallet::force_archive_evidence(
+            RuntimeOrigin::signed(99),
+            0,
+            None,
+        ));
+        assert!(ArchivedEvidences::<Test>::contains_key(0));
+        assert!(!Evidences::<Test>::contains_key(0));
+    });
+}
+
+#[test]
+fn force_archive_evidence_rejects_non_governance_signed() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EvidencePallet::commit(
+            RuntimeOrigin::signed(1),
+            NS,
+            1,
+            100,
+            imgs_n(&[1]),
+            empty_vids(),
+            empty_docs(),
+            None
+        ));
+
+        assert_noop!(
+            EvidencePallet::force_archive_evidence(RuntimeOrigin::signed(2), 0, None),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
 // ==================== commit_hash (call_index 1) ====================
 
 #[test]

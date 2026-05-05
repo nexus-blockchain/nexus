@@ -52,7 +52,7 @@ use sp_std::marker::PhantomData;
     Copy,
     PartialEq,
     Eq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -206,7 +206,7 @@ impl<AccountId> DataOwnerProvider<AccountId> for () {
     Clone,
     PartialEq,
     Eq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -237,7 +237,7 @@ pub struct ArchiveConfig {
     Clone,
     PartialEq,
     Eq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -282,7 +282,7 @@ pub use weights::SubstrateWeight;
     Clone,
     PartialEq,
     Eq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -351,6 +351,10 @@ pub mod pallet {
         /// 数据所有权查询（用户权限分层），用于 `extend_active_period` /
         /// `restore_from_archive` 的签名用户鉴权
         type DataOwnerProvider: DataOwnerProvider<Self::AccountId>;
+
+        /// Governance origin for archive policy management.
+        /// 归档策略治理 Origin。
+        type GovernanceOrigin: EnsureOrigin<Self::RuntimeOrigin>;
 
         /// Weight provider.
         /// 权重信息（O4）
@@ -783,7 +787,7 @@ pub mod pallet {
         #[pallet::call_index(0)]
         #[pallet::weight(T::WeightInfo::set_archive_config())]
         pub fn set_archive_config(origin: OriginFor<T>, config: ArchiveConfig) -> DispatchResult {
-            ensure_root(origin)?;
+            T::GovernanceOrigin::ensure_origin(origin)?;
             ensure!(
                 config.l1_delay > 0 && config.l2_delay > 0 && config.max_batch_size > 0,
                 Error::<T>::InvalidConfig
@@ -813,7 +817,7 @@ pub mod pallet {
         #[pallet::call_index(1)]
         #[pallet::weight(T::WeightInfo::pause_archival())]
         pub fn pause_archival(origin: OriginFor<T>) -> DispatchResult {
-            ensure_root(origin)?;
+            T::GovernanceOrigin::ensure_origin(origin)?;
             ensure!(
                 !ArchivalPaused::<T>::get(),
                 Error::<T>::ArchivalAlreadyPaused
@@ -827,7 +831,7 @@ pub mod pallet {
         #[pallet::call_index(2)]
         #[pallet::weight(T::WeightInfo::resume_archival())]
         pub fn resume_archival(origin: OriginFor<T>) -> DispatchResult {
-            ensure_root(origin)?;
+            T::GovernanceOrigin::ensure_origin(origin)?;
             ensure!(ArchivalPaused::<T>::get(), Error::<T>::ArchivalNotPaused);
             ArchivalPaused::<T>::put(false);
             Self::deposit_event(Event::ArchivalResumedEvent);
@@ -842,7 +846,7 @@ pub mod pallet {
             data_type: BoundedVec<u8, ConstU32<32>>,
             policy: ArchivePolicy,
         ) -> DispatchResult {
-            ensure_root(origin)?;
+            T::GovernanceOrigin::ensure_origin(origin)?;
             ensure!(
                 policy.l1_delay > 0 && policy.l2_delay > 0,
                 Error::<T>::InvalidConfig
@@ -877,7 +881,7 @@ pub mod pallet {
             data_ids: BoundedVec<u64, ConstU32<100>>,
             target_level: u8,
         ) -> DispatchResult {
-            ensure_root(origin)?;
+            T::GovernanceOrigin::ensure_origin(origin)?;
             let level = ArchiveLevel::from_u8(target_level);
             ensure!(
                 !matches!(level, ArchiveLevel::Active),
@@ -928,7 +932,7 @@ pub mod pallet {
             data_type: BoundedVec<u8, ConstU32<32>>,
             data_id: u64,
         ) -> DispatchResult {
-            ensure_root(origin)?;
+            T::GovernanceOrigin::ensure_origin(origin)?;
             ensure!(
                 !PurgeProtected::<T>::get(&data_type, data_id),
                 Error::<T>::AlreadyProtected
@@ -950,7 +954,7 @@ pub mod pallet {
             data_type: BoundedVec<u8, ConstU32<32>>,
             data_id: u64,
         ) -> DispatchResult {
-            ensure_root(origin)?;
+            T::GovernanceOrigin::ensure_origin(origin)?;
             ensure!(
                 PurgeProtected::<T>::get(&data_type, data_id),
                 Error::<T>::NotProtected
@@ -1114,7 +1118,7 @@ pub mod pallet {
     Clone,
     PartialEq,
     Eq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
     Default,

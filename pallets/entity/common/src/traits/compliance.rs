@@ -25,7 +25,7 @@ use super::super::types::*;
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
     PartialOrd,
     Ord,

@@ -92,7 +92,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxLevels))]
     pub struct PoolRewardConfig<MaxLevels: Get<u32>, BlockNumber> {
@@ -113,7 +113,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct LevelQuotaSnapshot {
         pub level_id: u8,
@@ -130,7 +130,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxLevels))]
     pub struct RoundInfo<MaxLevels: Get<u32>, Balance, TokenBalance, BlockNumber> {
@@ -164,7 +164,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct ClaimRecord<Balance, TokenBalance, BlockNumber> {
         pub round_id: u64,
@@ -185,7 +185,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxLevels))]
     pub struct CompletedRoundSummary<MaxLevels: Get<u32>, Balance, TokenBalance, BlockNumber> {
@@ -222,7 +222,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct DistributionStats<Balance: Default, TokenBalance: Default> {
@@ -244,7 +244,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct PoolFundingRecord {
         pub source: pallet_commission_common::FundingSource,
@@ -264,7 +264,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct RoundFundingSummary {
@@ -290,7 +290,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxLevels))]
     pub struct PendingConfigChange<MaxLevels: Get<u32>, BlockNumber> {

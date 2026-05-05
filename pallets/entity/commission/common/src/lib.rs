@@ -28,7 +28,7 @@ use sp_runtime::DispatchError;
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub struct CommissionModes(pub u16);
 
@@ -110,7 +110,7 @@ impl CommissionModes {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub enum CommissionType {
     DirectReward,
@@ -138,7 +138,7 @@ pub enum CommissionType {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum CommissionStatus {
@@ -165,7 +165,7 @@ pub enum CommissionStatus {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub struct CommissionRecord<AccountId, Balance, BlockNumber> {
     pub entity_id: u64,
@@ -190,7 +190,7 @@ pub struct CommissionRecord<AccountId, Balance, BlockNumber> {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub struct MemberCommissionStatsData<Balance> {
@@ -215,7 +215,7 @@ pub struct MemberCommissionStatsData<Balance> {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub struct WithdrawalTierConfig {
     pub withdrawal_rate: u16,
@@ -251,7 +251,7 @@ impl WithdrawalTierConfig {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum WithdrawalMode {
@@ -287,7 +287,7 @@ pub enum WithdrawalMode {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub struct RepurchaseConfig {
     /// 最低复购套餐金额（USDT，精度 10^6）
@@ -317,7 +317,7 @@ pub struct RepurchaseConfig {
 // ============================================================================
 
 /// 单条返佣输出（插件计算结果）
-#[derive(Clone, PartialEq, Eq, RuntimeDebug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CommissionOutput<AccountId, Balance> {
     pub beneficiary: AccountId,
     pub amount: Balance,
@@ -946,7 +946,7 @@ impl<AccountId> PluginStatsRollback<AccountId> for () {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub struct TokenCommissionRecord<AccountId, TokenBalance, BlockNumber> {
     pub entity_id: u64,
@@ -970,7 +970,7 @@ pub struct TokenCommissionRecord<AccountId, TokenBalance, BlockNumber> {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub struct MemberTokenCommissionStatsData<TokenBalance> {
@@ -1131,7 +1131,7 @@ pub trait MultiLevelQueryProvider<AccountId> {
 }
 
 /// 激活进度（Runtime API 可编解码版本，不依赖 Config）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct MultiLevelActivationInfo {
     pub level: u16,
     pub activated: bool,
@@ -1148,7 +1148,7 @@ pub struct MultiLevelActivationInfo {
 }
 
 /// 多级佣金会员统计
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug, Default)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug, Default)]
 pub struct MultiLevelMemberStats {
     pub total_earned: u128,
     pub total_orders: u32,
@@ -1183,7 +1183,7 @@ pub trait TeamQueryProvider<AccountId, Balance> {
 }
 
 /// 团队阶梯快照
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct TeamTierInfo<Balance> {
     pub tier_index: u8,
     pub rate: u16,
@@ -1292,7 +1292,7 @@ impl<AccountId, Balance: Default> ReferralQueryProvider<AccountId, Balance> for 
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub enum FundingSource {
     /// NEX 订单佣金剩余 → 沉淀池

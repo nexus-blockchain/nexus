@@ -1,6 +1,6 @@
 use codec::{Decode, Encode, MaxEncodedLen};
-use frame_support::pallet_prelude::*;
 use scale_info::TypeInfo;
+use sp_runtime::Debug;
 
 /// 分页请求参数
 #[derive(
@@ -13,7 +13,7 @@ use scale_info::TypeInfo;
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub struct PageRequest {
     /// 起始偏移量（0-indexed）
@@ -48,7 +48,7 @@ impl PageRequest {
 
 /// 分页响应
 #[derive(
-    Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug,
+    Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, Debug,
 )]
 pub struct PageResponse<T> {
     /// 当前页数据

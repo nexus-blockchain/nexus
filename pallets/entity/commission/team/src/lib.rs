@@ -63,7 +63,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct TeamPerformanceTier<Balance> {
@@ -86,7 +86,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub enum SalesThresholdMode {
         /// 使用总消费（u128，来自 MemberProvider::get_member_stats().spend.total_spent）
@@ -111,7 +111,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxTiers))]
     pub struct TeamPerformanceConfig<Balance, MaxTiers: Get<u32>> {

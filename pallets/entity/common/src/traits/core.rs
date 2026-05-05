@@ -430,7 +430,7 @@ impl<AccountId: Default> ShopProvider<AccountId> for NullShopProvider {
 
 /// 商品聚合查询信息（单次存储读取返回下单所需全部字段）
 #[derive(
-    Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug,
+    Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, Debug,
 )]
 pub struct ProductQueryInfo {
     pub shop_id: u64,
@@ -616,7 +616,7 @@ impl<AccountId> ProductProvider<AccountId> for NullProductProvider {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum PaymentAsset {
@@ -634,7 +634,7 @@ pub enum PaymentAsset {
 // ============================================================================
 
 /// 订单聚合查询信息（一次 storage read 获取常用字段）
-#[derive(Clone, PartialEq, Eq, RuntimeDebug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct OrderQueryInfo<AccountId, Balance> {
     pub order_id: u64,
     pub entity_id: u64,

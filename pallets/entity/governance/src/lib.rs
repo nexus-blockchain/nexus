@@ -100,7 +100,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub enum ProposalStatus {
         /// 投票中
@@ -139,7 +139,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum VoteType {
@@ -164,7 +164,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub enum FundAlertType {
         /// 金库余额低于最低阈值
@@ -186,7 +186,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct FundProtectionConfig<Balance: Default> {
@@ -220,7 +220,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub enum ProposalDomain {
         /// 商品管理（价格、上下架、库存、可见性）
@@ -271,7 +271,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub enum ProposalType<AccountId, Balance> {
         // ==================== 商品管理类 ====================
@@ -802,7 +802,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(T))]
     pub struct Proposal<T: Config> {
@@ -857,7 +857,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct VoteRecord<AccountId, Balance, BlockNumber> {
         /// 投票者
@@ -892,7 +892,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct GovernanceConfig<BlockNumber> {
         /// 治理模式

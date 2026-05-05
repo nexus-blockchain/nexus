@@ -86,7 +86,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxCidLen))]
     pub struct Product<BlockNumber, MaxCidLen: Get<u32>> {
@@ -143,7 +143,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct ProductStatistics {
@@ -281,7 +281,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct ProductDepositInfo<AccountId, Balance> {
         /// 所属店铺 ID
@@ -353,7 +353,7 @@ pub mod pallet {
 
     /// 批量操作类型
     #[derive(
-        Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug,
+        Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, Debug,
     )]
     pub enum BatchOperation {
         Publish,

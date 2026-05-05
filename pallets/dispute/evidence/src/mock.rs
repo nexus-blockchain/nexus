@@ -1,7 +1,7 @@
 use crate as pallet_dispute_evidence;
 use frame_support::{
     derive_impl, parameter_types,
-    traits::{ConstU128, ConstU32, ConstU64},
+    traits::{ConstU128, ConstU32, ConstU64, EitherOfDiverse, SortedMembers},
     PalletId,
 };
 use sp_runtime::{traits::IdentityLookup, BuildStorage};
@@ -100,6 +100,14 @@ parameter_types! {
     pub const WindowBlocks: u64 = 100;
     pub const EvidenceDeposit: u128 = 10;
     pub const CommitRevealDeadline: u64 = 500;
+    pub const GovernanceAccount: u64 = 99;
+}
+
+pub struct GovernanceMembers;
+impl SortedMembers<u64> for GovernanceMembers {
+    fn sorted_members() -> Vec<u64> {
+        vec![99]
+    }
 }
 
 impl pallet_dispute_evidence::pallet::Config for Test {
@@ -136,6 +144,7 @@ impl pallet_dispute_evidence::pallet::Config for Test {
     type PrivateContentDepositUsd = ConstU64<500_000>;
     type DepositCalculator = ();
     type AccessRequestTtlBlocks = ConstU64<200>;
+    type GovernanceOrigin = EitherOfDiverse<frame_system::EnsureRoot<u64>, frame_system::EnsureSignedBy<GovernanceMembers, u64>>;
     type MaxReasonLen = ConstU32<256>;
 }
 

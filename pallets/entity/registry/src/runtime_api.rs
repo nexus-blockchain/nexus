@@ -10,13 +10,13 @@
 use codec::{Codec, Decode, Encode};
 use pallet_entity_common::{EntityStatus, EntityType, GovernanceMode};
 use scale_info::TypeInfo;
-use sp_runtime::RuntimeDebug;
+use Debug;
 
 extern crate alloc;
 use alloc::vec::Vec;
 
 /// 实体信息摘要（Runtime API 返回值）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct EntityInfo<AccountId, Balance> {
     pub id: u64,
     pub owner: AccountId,
@@ -34,7 +34,7 @@ pub struct EntityInfo<AccountId, Balance> {
 }
 
 /// 实体资金信息（Runtime API 返回值）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct EntityFundInfo<Balance> {
     pub balance: Balance,
     pub health: u8,
@@ -43,7 +43,7 @@ pub struct EntityFundInfo<Balance> {
 }
 
 /// 关闭申请信息（Runtime API 返回值）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct CloseRequestInfo<BlockNumber> {
     /// 申请时间（区块号）
     pub request_at: BlockNumber,
@@ -60,7 +60,7 @@ pub struct CloseRequestInfo<BlockNumber> {
 // ============================================================================
 
 /// 已承诺资金分项明细
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug, Default)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug, Default)]
 pub struct ProtectedFundsBreakdown<Balance> {
     /// 待提取佣金总额（NEX）— 会员已赚取但未提现的佣金
     pub pending_commission: Balance,
@@ -73,7 +73,7 @@ pub struct ProtectedFundsBreakdown<Balance> {
 }
 
 /// 资金保护规则（来自治理配置）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct FundProtectionRules<Balance> {
     /// 最低金库余额阈值（低于此值发出 TreasuryBelowThreshold 告警，0 = 禁用）
     pub min_treasury_threshold: Balance,
@@ -88,7 +88,7 @@ pub struct FundProtectionRules<Balance> {
 }
 
 /// 资金健康度
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct FundHealthStatus<Balance> {
     /// 健康等级: 0=Critical, 1=Warning, 2=Healthy
     pub level: u8,
@@ -103,7 +103,7 @@ pub struct FundHealthStatus<Balance> {
 }
 
 /// Entity 资金全景（前端一次 RPC 获取完整资金视图）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct EntityFundsView<Balance> {
     /// 金库总余额（Entity 派生账户 free_balance）
     pub treasury_balance: Balance,

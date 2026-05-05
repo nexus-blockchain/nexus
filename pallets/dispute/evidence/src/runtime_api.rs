@@ -2,7 +2,7 @@
 
 use codec::{Codec, Decode, Encode};
 use scale_info::TypeInfo;
-use sp_runtime::RuntimeDebug;
+use Debug;
 use sp_std::vec::Vec;
 
 // ============================================================================
@@ -10,7 +10,7 @@ use sp_std::vec::Vec;
 // ============================================================================
 
 /// 证据摘要（列表页用）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct EvidenceSummary<AccountId> {
     pub id: u64,
     pub domain: u8,
@@ -29,7 +29,7 @@ pub struct EvidenceSummary<AccountId> {
 }
 
 /// 证据详情（详情页用，含完整关系）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct EvidenceDetail<AccountId, Balance> {
     pub summary: EvidenceSummary<AccountId>,
     pub ns: Option<[u8; 8]>,
@@ -39,7 +39,7 @@ pub struct EvidenceDetail<AccountId, Balance> {
 }
 
 /// 证据分页结果
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct EvidencePage<AccountId> {
     pub items: Vec<EvidenceSummary<AccountId>>,
     pub total: u32,
@@ -50,7 +50,7 @@ pub struct EvidencePage<AccountId> {
 // ============================================================================
 
 /// 私密内容元数据（公开查询，不含密钥）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct PrivateContentMeta<AccountId> {
     pub content_id: u64,
     pub ns: [u8; 8],
@@ -67,7 +67,7 @@ pub struct PrivateContentMeta<AccountId> {
 }
 
 /// 解密包（仅授权用户可获取）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct DecryptionPackage {
     pub cid: Vec<u8>,
     pub content_hash: [u8; 32],
@@ -76,14 +76,14 @@ pub struct DecryptionPackage {
 }
 
 /// 访问请求条目
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct AccessRequestEntry<AccountId> {
     pub requester: AccountId,
     pub requested_at: u64,
 }
 
 /// 用户公钥信息
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct PublicKeyInfo {
     pub key_data: Vec<u8>,
     /// 0=Rsa2048, 1=Ed25519, 2=EcdsaP256

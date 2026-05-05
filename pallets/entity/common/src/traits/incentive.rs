@@ -147,7 +147,7 @@ impl<Balance> TokenSaleProvider<Balance> for NullTokenSaleProvider {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub struct VestingSchedule {
     /// 锁仓总量

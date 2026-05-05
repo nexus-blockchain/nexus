@@ -76,7 +76,7 @@ pub mod pallet {
         Ord,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     /// KYC level.
@@ -100,7 +100,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     /// KYC status.
@@ -125,7 +125,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     /// Rejection reason.
     /// 拒绝原因。
@@ -174,7 +174,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxNameLen))]
     pub struct KycProvider<MaxNameLen: Get<u32>> {
@@ -195,7 +195,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxCidLen))]
     pub struct KycRecord<AccountId, BlockNumber, MaxCidLen: Get<u32>> {
@@ -228,7 +228,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub enum KycAction {
         Submitted,
@@ -253,7 +253,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct KycHistoryEntry<BlockNumber> {
         pub action: KycAction,
@@ -285,7 +285,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct EntityKycRequirement {
@@ -306,7 +306,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxCidLen))]
     pub struct KycUpgradeRequest<BlockNumber, MaxCidLen: Get<u32>> {

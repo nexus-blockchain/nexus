@@ -1635,6 +1635,25 @@ fn p0_11_governance_force_unpin_works() {
             b"illegal content".to_vec(),
         ));
 
+        // 再次插入后，普通 signed 仍应被拒绝
+        crate::PinMeta::<Test>::insert(
+            cid_hash,
+            crate::pallet::PinMetadata {
+                size: 1024,
+                replicas: 2,
+                created_at: 1u64,
+                last_activity: 1u64,
+            },
+        );
+        assert_noop!(
+            crate::Pallet::<Test>::governance_force_unpin(
+                RuntimeOrigin::signed(1),
+                cid.clone(),
+                b"violation".to_vec(),
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+
         // 验证：PinBilling state=2（已标记过期）或 MarkedForUnpin事件已发出
         // 通过事件验证
         let events = frame_system::Pallet::<Test>::events();

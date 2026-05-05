@@ -12,7 +12,7 @@
 
 use codec::{Codec, Decode, Encode};
 use scale_info::TypeInfo;
-use sp_runtime::RuntimeDebug;
+use Debug;
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 // ==================== DTO 数据结构 ====================
 
 /// 订单信息（Runtime API 返回值）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct OrderInfo<AccountId, Balance, TokenBalance> {
     pub order_id: u64,
     pub entity_id: u64,
@@ -36,7 +36,7 @@ pub struct OrderInfo<AccountId, Balance, TokenBalance> {
 }
 
 /// 成交记录（Runtime API 返回值）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct TradeInfo<AccountId, Balance, TokenBalance> {
     pub trade_id: u64,
     pub order_id: u64,
@@ -51,7 +51,7 @@ pub struct TradeInfo<AccountId, Balance, TokenBalance> {
 }
 
 /// 价格档位（Runtime API 返回值）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct PriceLevelInfo<Balance, TokenBalance> {
     pub price: Balance,
     pub total_amount: TokenBalance,
@@ -59,7 +59,7 @@ pub struct PriceLevelInfo<Balance, TokenBalance> {
 }
 
 /// 订单簿深度（Runtime API 返回值）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct OrderBookDepthInfo<Balance, TokenBalance> {
     pub entity_id: u64,
     pub asks: Vec<PriceLevelInfo<Balance, TokenBalance>>,
@@ -71,7 +71,7 @@ pub struct OrderBookDepthInfo<Balance, TokenBalance> {
 }
 
 /// 市场摘要（Runtime API 返回值）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct MarketSummaryInfo<Balance, TokenBalance> {
     pub best_ask: Option<Balance>,
     pub best_bid: Option<Balance>,
@@ -81,7 +81,7 @@ pub struct MarketSummaryInfo<Balance, TokenBalance> {
 }
 
 /// 日统计（Runtime API 返回值）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct DailyStatsInfo<Balance> {
     pub open_price: Balance,
     pub high_price: Balance,
@@ -93,7 +93,7 @@ pub struct DailyStatsInfo<Balance> {
 }
 
 /// 全局/实体统计（Runtime API 返回值）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct MarketStatsInfo {
     pub total_orders: u64,
     pub total_trades: u64,
@@ -101,7 +101,7 @@ pub struct MarketStatsInfo {
 }
 
 /// 市场配置（Runtime API 返回值）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct MarketConfigInfo {
     pub nex_enabled: bool,
     pub min_order_amount: u128,
@@ -110,7 +110,7 @@ pub struct MarketConfigInfo {
 }
 
 /// TWAP 信息（Runtime API 返回值）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct TwapInfo<Balance> {
     pub twap_1h: Option<Balance>,
     pub twap_24h: Option<Balance>,

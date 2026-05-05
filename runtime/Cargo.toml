@@ -33,6 +33,9 @@ pallet-offences = { workspace = true }
 pallet-staking = { workspace = true }
 pallet-authorship = { workspace = true }
 pallet-sudo = { workspace = true }
+pallet-preimage = { workspace = true }
+pallet-scheduler = { workspace = true }
+pallet-im-online = { workspace = true }
 pallet-collective = { workspace = true }
 pallet-collective-membership = { workspace = true }
 pallet-timestamp = { workspace = true }
@@ -138,6 +141,9 @@ std = [
 	"pallet-staking/std",
 	"pallet-authorship/std",
 	"pallet-sudo/std",
+	"pallet-preimage/std",
+	"pallet-scheduler/std",
+	"pallet-im-online/std",
 	"pallet-collective/std",
 	"pallet-collective-membership/std",
 	"pallet-timestamp/std",
@@ -231,6 +237,9 @@ runtime-benchmarks = [
 	"pallet-session/runtime-benchmarks",
 	"pallet-offences/runtime-benchmarks",
 	"pallet-sudo/runtime-benchmarks",
+	"pallet-preimage/runtime-benchmarks",
+	"pallet-scheduler/runtime-benchmarks",
+	"pallet-im-online/runtime-benchmarks",
 	"pallet-collective/runtime-benchmarks",
 	"pallet-collective-membership/runtime-benchmarks",
 	"pallet-timestamp/runtime-benchmarks",
@@ -290,6 +299,9 @@ try-runtime = [
 	"pallet-staking/try-runtime",
 	"pallet-authorship/try-runtime",
 	"pallet-sudo/try-runtime",
+	"pallet-preimage/try-runtime",
+	"pallet-scheduler/try-runtime",
+	"pallet-im-online/try-runtime",
 	"pallet-collective/try-runtime",
 	"pallet-collective-membership/try-runtime",
 	"pallet-timestamp/try-runtime",

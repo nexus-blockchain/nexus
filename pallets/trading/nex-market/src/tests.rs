@@ -64,6 +64,54 @@ fn setup_seed_price() {
     assert_ok!(NexMarket::set_initial_price(RuntimeOrigin::root(), 500_000));
 }
 
+#[test]
+fn set_initial_price_accepts_governance_account() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(NexMarket::set_initial_price(RuntimeOrigin::signed(99), 500_000));
+        assert_eq!(NexMarket::last_trade_price(), Some(500_000));
+    });
+}
+
+#[test]
+fn set_initial_price_rejects_non_governance_signed() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            NexMarket::set_initial_price(RuntimeOrigin::signed(ALICE), 500_000),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn configure_price_protection_accepts_governance_account() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(NexMarket::configure_price_protection(
+            RuntimeOrigin::signed(99),
+            true,
+            1000,
+            2000,
+            3,
+        ));
+        assert!(NexMarket::price_protection().unwrap().enabled);
+    });
+}
+
+#[test]
+fn configure_price_protection_rejects_non_governance_signed() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            NexMarket::configure_price_protection(
+                RuntimeOrigin::signed(ALICE),
+                true,
+                1000,
+                2000,
+                3,
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
 // ==================== 卖单测试 ====================
 
 #[test]

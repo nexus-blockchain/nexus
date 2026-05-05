@@ -304,6 +304,43 @@ fn g1_set_archive_config_rejects_invalid() {
 }
 
 #[test]
+fn g1_set_archive_config_accepts_governance_account() {
+    new_test_ext().execute_with(|| {
+        let config = ArchiveConfig {
+            l1_delay: 55,
+            l2_delay: 155,
+            purge_delay: 255,
+            purge_enabled: false,
+            max_batch_size: 25,
+        };
+        assert_ok!(StorageLifecycle::set_archive_config(
+            RawOrigin::Signed(99).into(),
+            config.clone(),
+        ));
+        let effective = pallet::Pallet::<Test>::effective_config();
+        assert_eq!(effective.l1_delay, 55);
+        assert_eq!(effective.max_batch_size, 25);
+    });
+}
+
+#[test]
+fn g1_set_archive_config_rejects_non_governance_signed() {
+    new_test_ext().execute_with(|| {
+        let config = ArchiveConfig {
+            l1_delay: 50,
+            l2_delay: 150,
+            purge_delay: 250,
+            purge_enabled: true,
+            max_batch_size: 20,
+        };
+        assert_noop!(
+            StorageLifecycle::set_archive_config(RawOrigin::Signed(1).into(), config),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
 fn g1_set_archive_config_requires_root() {
     new_test_ext().execute_with(|| {
         let config = ArchiveConfig {

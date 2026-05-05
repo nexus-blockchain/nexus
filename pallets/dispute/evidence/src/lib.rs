@@ -360,6 +360,10 @@ pub mod pallet {
         #[pallet::constant]
         type AccessRequestTtlBlocks: Get<BlockNumberFor<Self>>;
 
+        /// Governance origin for force-removal and force-archive operations.
+        /// 强制移除与强制归档治理 Origin。
+        type GovernanceOrigin: EnsureOrigin<Self::RuntimeOrigin>;
+
         /// 密封/强制操作原因最大长度
         #[pallet::constant]
         type MaxReasonLen: Get<u32>;
@@ -2051,7 +2055,7 @@ pub mod pallet {
             evidence_id: u64,
             reason: Option<BoundedVec<u8, T::MaxReasonLen>>,
         ) -> DispatchResult {
-            ensure_root(origin)?;
+            T::GovernanceOrigin::ensure_origin(origin)?;
 
             let ev = Evidences::<T>::get(evidence_id).ok_or(Error::<T>::NotFound)?;
 
@@ -2264,7 +2268,7 @@ pub mod pallet {
             evidence_id: u64,
             reason: Option<BoundedVec<u8, T::MaxReasonLen>>,
         ) -> DispatchResult {
-            ensure_root(origin)?;
+            T::GovernanceOrigin::ensure_origin(origin)?;
 
             let ev = Evidences::<T>::get(evidence_id).ok_or(Error::<T>::NotFound)?;
             let now: u32 = <frame_system::Pallet<T>>::block_number().saturated_into();

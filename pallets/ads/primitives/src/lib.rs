@@ -17,8 +17,8 @@
 //! （GroupRobot 的 TEE 节点、Entity 的 Shop）分离，使核心广告引擎可跨适配层复用。
 
 use codec::{Decode, Encode, MaxEncodedLen};
-use frame_support::pallet_prelude::*;
 use scale_info::TypeInfo;
+use sp_runtime::Debug;
 
 // ============================================================================
 // Type Aliases
@@ -38,7 +38,7 @@ pub type PlacementId = [u8; 32];
     codec::DecodeWithMemTracking,
     Clone,
     Copy,
-    RuntimeDebug,
+    Debug,
     PartialEq,
     Eq,
     TypeInfo,
@@ -70,7 +70,7 @@ impl Default for CampaignStatus {
     codec::DecodeWithMemTracking,
     Clone,
     Copy,
-    RuntimeDebug,
+    Debug,
     PartialEq,
     Eq,
     TypeInfo,
@@ -97,7 +97,7 @@ impl Default for AdReviewStatus {
     codec::DecodeWithMemTracking,
     Clone,
     Copy,
-    RuntimeDebug,
+    Debug,
     PartialEq,
     Eq,
     TypeInfo,
@@ -127,7 +127,7 @@ impl Default for CampaignType {
     codec::DecodeWithMemTracking,
     Clone,
     Copy,
-    RuntimeDebug,
+    Debug,
     PartialEq,
     Eq,
     TypeInfo,
@@ -169,7 +169,7 @@ impl Default for PlacementStatus {
     Decode,
     codec::DecodeWithMemTracking,
     Clone,
-    RuntimeDebug,
+    Debug,
     PartialEq,
     Eq,
     TypeInfo,
@@ -253,7 +253,7 @@ pub trait ClickVerifier<AccountId> {
 }
 
 /// 路由层错误 — 适配层不支持的操作
-#[derive(RuntimeDebug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdsRouterError {
     /// 该广告位路径不支持 CPC (点击计费) 模式
     CpcNotSupportedForPath,
@@ -311,7 +311,7 @@ impl<AccountId> PlacementAdminProvider<AccountId> for () {
 
 /// Revenue breakdown.
 /// 收入分配明细。
-#[derive(RuntimeDebug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevenueBreakdown<Balance> {
     /// Withdrawable share for the placement side (community / entity owner).
     /// 广告位方可提取份额（社区 / Entity Owner）

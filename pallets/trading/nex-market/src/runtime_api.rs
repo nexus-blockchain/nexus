@@ -2,11 +2,11 @@
 
 use codec::{Codec, Decode, Encode};
 use scale_info::TypeInfo;
-use sp_runtime::RuntimeDebug;
+use Debug;
 use sp_std::vec::Vec;
 
 /// 订单摘要（Runtime API 返回用，不含泛型 BlockNumber）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct OrderInfo<AccountId, Balance> {
     pub order_id: u64,
     /// 0 = Sell, 1 = Buy
@@ -23,7 +23,7 @@ pub struct OrderInfo<AccountId, Balance> {
 }
 
 /// 交易摘要（Runtime API 返回用）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct TradeInfo<AccountId, Balance> {
     pub trade_id: u64,
     pub order_id: u64,
@@ -49,7 +49,7 @@ pub struct TradeInfo<AccountId, Balance> {
 }
 
 /// 市场统计摘要
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct MarketSummary {
     pub best_ask: Option<u64>,
     pub best_bid: Option<u64>,
@@ -60,14 +60,14 @@ pub struct MarketSummary {
 }
 
 /// 深度图条目
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct DepthEntry<Balance> {
     pub price: u64,
     pub amount: Balance,
 }
 
 /// Indexer 节点详情（Runtime API 返回用）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct IndexerInfoView<AccountId, Balance> {
     pub account: AccountId,
     /// 端点 URL（UTF-8）
@@ -89,7 +89,7 @@ pub struct IndexerInfoView<AccountId, Balance> {
 }
 
 /// Indexer 网络汇总信息
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct IndexerNetworkSummary<Balance> {
     /// 注册 Indexer 总数（含暂停）
     pub total_count: u32,

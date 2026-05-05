@@ -31,7 +31,7 @@ pub mod domains {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub enum ComplaintType {
     // entity/order — 商城订单争议
@@ -138,7 +138,7 @@ impl ComplaintType {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum ComplaintStatus {
@@ -188,7 +188,7 @@ impl ComplaintStatus {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub struct ArchivedComplaint {
@@ -210,7 +210,7 @@ pub struct ArchivedComplaint {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub struct DomainStatistics {
@@ -231,7 +231,7 @@ pub struct DomainStatistics {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub struct ArchivedDispute {
@@ -253,7 +253,7 @@ pub struct ArchivedDispute {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub struct ArbitrationPermanentStats {
@@ -272,7 +272,7 @@ pub struct ArbitrationPermanentStats {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub struct TwoWayDepositRecord<AccountId, Balance, BlockNumber> {
     pub initiator: AccountId,

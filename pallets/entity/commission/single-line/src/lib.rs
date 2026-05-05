@@ -63,7 +63,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub enum ReachMode {
@@ -88,7 +88,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct SingleLineConfig<Balance> {
@@ -111,7 +111,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct LevelBasedLevels {
         pub upline_levels: u8,
@@ -127,7 +127,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct PendingConfigChange<Balance, BlockNumber> {
         pub upline_rate: u16,
@@ -150,7 +150,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct ConfigChangeLogEntry<Balance, BlockNumber> {
         pub block_number: BlockNumber,
@@ -173,7 +173,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct EntitySingleLineStatsData {
@@ -196,7 +196,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub enum PayoutDirection {
         /// 我是买家的上线，买家下单时我作为上线获得佣金
@@ -215,7 +215,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct SingleLinePayoutRecord<AccountId, Balance> {
         /// 触发分佣的订单 ID
@@ -242,7 +242,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
         Default,
     )]
     pub struct MemberSingleLineSummary<Balance: Default> {

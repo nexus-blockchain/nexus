@@ -3,8 +3,8 @@
 //! All types previously defined in lib.rs, now organized into this submodule.
 
 use codec::{Decode, Encode, MaxEncodedLen};
-use frame_support::pallet_prelude::*;
 use scale_info::TypeInfo;
+use sp_runtime::Debug;
 
 /// Pool reward cap behavior shared across governance/commission layers
 #[derive(
@@ -16,7 +16,7 @@ use scale_info::TypeInfo;
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub enum PoolRewardCapBehavior {
     Fixed,
@@ -37,7 +37,7 @@ pub enum PoolRewardCapBehavior {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub struct PoolRewardLevelClaimRule {
     pub base_cap_percent: u16,
@@ -61,7 +61,7 @@ pub struct PoolRewardLevelClaimRule {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum EntityType {
@@ -173,7 +173,7 @@ impl EntityType {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum GovernanceMode {
@@ -207,7 +207,7 @@ pub enum GovernanceMode {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum EntityStatus {
@@ -258,7 +258,7 @@ impl EntityStatus {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub enum EffectiveShopStatus {
     /// 正常营业
@@ -341,7 +341,7 @@ impl EffectiveShopStatus {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum ShopType {
@@ -402,7 +402,7 @@ impl ShopType {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum ShopOperatingStatus {
@@ -472,7 +472,7 @@ impl ShopOperatingStatus {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub struct MemberRegistrationPolicy(pub u8);
 
@@ -558,7 +558,7 @@ impl Default for MemberRegistrationPolicy {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum TokenType {
@@ -642,7 +642,7 @@ impl TokenType {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum TransferRestrictionMode {
@@ -688,7 +688,7 @@ impl TransferRestrictionMode {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub struct DividendConfig<Balance, BlockNumber> {
@@ -721,7 +721,7 @@ pub struct DividendConfig<Balance, BlockNumber> {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub struct DividendState<Balance, BlockNumber> {
@@ -750,7 +750,7 @@ pub struct DividendState<Balance, BlockNumber> {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum ProductStatus {
@@ -776,7 +776,7 @@ pub enum ProductStatus {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum ProductVisibility {
@@ -800,7 +800,7 @@ pub enum ProductVisibility {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum ProductCategory {
@@ -837,7 +837,7 @@ pub enum ProductCategory {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum OrderStatus {
@@ -882,7 +882,7 @@ pub enum OrderStatus {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum MemberStatus {
@@ -938,7 +938,7 @@ impl MemberStatus {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum DisputeStatus {
@@ -987,7 +987,7 @@ impl DisputeStatus {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub enum DisputeResolution {
     /// 投诉方胜诉（全额退款）
@@ -1048,7 +1048,7 @@ impl DisputeResolution {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
     Default,
 )]
 pub enum TokenSaleStatus {
@@ -1142,7 +1142,7 @@ pub mod AdminPermission {
 /// 包含完成订单后所有副作用所需的上下文信息，
 /// 避免 Hook 实现方反向查询 Order 存储。
 #[derive(
-    Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug,
+    Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, Debug,
 )]
 pub struct OrderCompletionInfo<AccountId, Balance> {
     pub order_id: u64,
@@ -1179,7 +1179,7 @@ pub struct OrderCompletionInfo<AccountId, Balance> {
 
 /// 订单取消信息（传递给 OnOrderCancelled Hook 链）
 #[derive(
-    Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug,
+    Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, TypeInfo, Debug,
 )]
 pub struct OrderCancellationInfo {
     pub order_id: u64,
@@ -1205,7 +1205,7 @@ pub struct OrderCancellationInfo {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub struct PaymentConfig {
     /// 是否启用 NEX 原生代币支付

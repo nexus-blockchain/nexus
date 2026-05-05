@@ -28,7 +28,7 @@ use sp_runtime::SaturatedConversion;
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub enum CreditChangeReason {
     /// 交易完成
@@ -53,7 +53,7 @@ pub enum CreditChangeReason {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub struct BuyerCreditProfile<BlockNumber: codec::Codec + MaxEncodedLen> {
     /// 信用分（初始 500, 范围 0-1000）

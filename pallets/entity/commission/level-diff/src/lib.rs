@@ -46,7 +46,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxLevels))]
     pub struct CustomLevelDiffConfig<MaxLevels: Get<u32>> {

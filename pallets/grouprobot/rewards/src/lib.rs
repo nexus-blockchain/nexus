@@ -46,7 +46,7 @@ use sp_runtime::traits::{Saturating, UniqueSaturatedInto, Zero};
     Decode,
     codec::DecodeWithMemTracking,
     Clone,
-    RuntimeDebug,
+    Debug,
     PartialEq,
     Eq,
     TypeInfo,
@@ -63,7 +63,7 @@ pub struct EraRewardInfo<Balance> {
 
 /// Node reward summary for queries.
 /// 节点奖励摘要（查询用）。
-#[derive(Encode, Decode, Clone, RuntimeDebug, PartialEq, Eq, TypeInfo)]
+#[derive(Encode, Decode, Clone, Debug, PartialEq, Eq, TypeInfo)]
 pub struct NodeRewardSummary<Balance> {
     pub pending: Balance,
     pub total_earned: Balance,

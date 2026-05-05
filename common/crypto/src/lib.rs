@@ -31,11 +31,11 @@ extern crate alloc;
 use alloc::vec::Vec;
 use codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use frame_support::{
-    pallet_prelude::*, BoundedVec, CloneNoBound, EqNoBound, PartialEqNoBound, RuntimeDebugNoBound,
+    pallet_prelude::*, BoundedVec, CloneNoBound, DebugNoBound, EqNoBound, PartialEqNoBound,
 };
 use scale_info::TypeInfo;
 use sp_core::{ConstU32, H256};
-use sp_runtime::RuntimeDebug;
+use sp_runtime::Debug;
 
 // ============================================================
 // EncryptionMethod — 替代原始 u8
@@ -50,7 +50,7 @@ use sp_runtime::RuntimeDebug;
     Copy,
     PartialEq,
     Eq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -111,7 +111,7 @@ impl EncryptionMethod {
     Copy,
     PartialEq,
     Eq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -173,7 +173,7 @@ impl KeyType {
     CloneNoBound,
     PartialEqNoBound,
     EqNoBound,
-    RuntimeDebugNoBound,
+    DebugNoBound,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -265,7 +265,7 @@ impl<
     Copy,
     PartialEq,
     Eq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -324,7 +324,7 @@ impl ContentStatus {
     CloneNoBound,
     PartialEqNoBound,
     EqNoBound,
-    RuntimeDebugNoBound,
+    DebugNoBound,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -383,7 +383,7 @@ pub struct PrivateContent<
     CloneNoBound,
     PartialEqNoBound,
     EqNoBound,
-    RuntimeDebugNoBound,
+    DebugNoBound,
     TypeInfo,
     MaxEncodedLen,
 )]
@@ -418,7 +418,7 @@ pub struct UserPublicKey<
     Clone,
     PartialEq,
     Eq,
-    RuntimeDebug,
+    Debug,
     TypeInfo,
     MaxEncodedLen,
 )]

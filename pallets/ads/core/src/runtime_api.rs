@@ -7,13 +7,13 @@
 use codec::{Codec, Decode, Encode};
 use pallet_ads_primitives::PlacementId;
 use scale_info::TypeInfo;
-use sp_runtime::RuntimeDebug;
+use Debug;
 
 extern crate alloc;
 use alloc::vec::Vec;
 
 /// Campaign 摘要 (列表查询用)
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct CampaignSummary<AccountId, Balance> {
     pub campaign_id: u64,
     pub advertiser: AccountId,
@@ -32,7 +32,7 @@ pub struct CampaignSummary<AccountId, Balance> {
 }
 
 /// Campaign 详情 (单条查询用)
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct CampaignDetail<AccountId, Balance> {
     pub campaign_id: u64,
     pub advertiser: AccountId,

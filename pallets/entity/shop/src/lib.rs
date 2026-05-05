@@ -90,7 +90,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxNameLen, MaxCidLen, MaxManagers))]
     pub struct Shop<
@@ -162,7 +162,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct PendingShopTransfer<BlockNumber> {
         /// 源 Entity ID

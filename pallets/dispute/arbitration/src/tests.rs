@@ -162,6 +162,42 @@ fn arbitrate_requires_root() {
     });
 }
 
+#[test]
+fn arbitrate_accepts_governance_account() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::dispute_with_two_way_deposit(
+            RuntimeOrigin::signed(1),
+            DOMAIN,
+            1,
+            42,
+        ));
+        assert_ok!(Arbitration::arbitrate(
+            RuntimeOrigin::signed(99),
+            DOMAIN,
+            1,
+            0,
+            None,
+        ));
+        assert!(Disputed::<Test>::get(DOMAIN, 1).is_none());
+    });
+}
+
+#[test]
+fn arbitrate_rejects_non_governance_signed() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Arbitration::dispute_with_two_way_deposit(
+            RuntimeOrigin::signed(1),
+            DOMAIN,
+            1,
+            42,
+        ));
+        assert_noop!(
+            Arbitration::arbitrate(RuntimeOrigin::signed(1), DOMAIN, 1, 0, None,),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
 // ==================== append_evidence_id (call_index 3) ====================
 
 #[test]

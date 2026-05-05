@@ -27,6 +27,7 @@ use frame_support::build_struct_json_patch;
 use serde_json::Value;
 use sp_consensus_babe::AuthorityId as BabeId;
 use sp_consensus_grandpa::AuthorityId as GrandpaId;
+use pallet_im_online::sr25519::AuthorityId as ImOnlineId;
 use sp_genesis_builder::{self, PresetId};
 use sp_keyring::Sr25519Keyring;
 use sp_runtime::{AccountId32, Perbill};
@@ -62,7 +63,7 @@ const INITIAL_SUPPLY: u128 = 10_000_000_000 * UNIT;
 
 // Returns the genesis config presets populated with given parameters.
 fn testnet_genesis(
-    initial_authorities: Vec<(AccountId, BabeId, GrandpaId)>,
+    initial_authorities: Vec<(AccountId, BabeId, GrandpaId, ImOnlineId)>,
     endowed_accounts: Vec<AccountId>,
     _prime: Option<AccountId>,
     root: AccountId,
@@ -87,7 +88,7 @@ fn testnet_genesis(
 					(
 						x.0.clone(),
 						x.0.clone(),
-						SessionKeys { babe: x.1.clone(), grandpa: x.2.clone() },
+						SessionKeys { babe: x.1.clone(), grandpa: x.2.clone(), im_online: x.3.clone() },
 					)
 				})
 				.collect::<Vec<_>>(),
@@ -95,11 +96,11 @@ fn testnet_genesis(
 		},
 		staking: StakingConfig {
 			validator_count: initial_authorities.len() as u32,
-			minimum_validator_count: 1,
+			minimum_validator_count: initial_authorities.len().saturating_sub(1) as u32,
 			stakers: initial_authorities.iter().map(|x| {
 				(x.0.clone(), x.0.clone(), 10_000 * UNIT, pallet_staking::StakerStatus::Validator)
 			}).collect(),
-			invulnerables: initial_authorities.iter().map(|x| x.0.clone()).collect(),
+			invulnerables: vec![],
 			slash_reward_fraction: Perbill::from_percent(10),
 			min_nominator_bond: 100 * UNIT,
 			min_validator_bond: 1_000 * UNIT,
@@ -193,6 +194,7 @@ pub fn development_config_genesis() -> Value {
         alice.clone(),
         sp_keyring::Sr25519Keyring::Alice.public().into(),
         sp_keyring::Ed25519Keyring::Alice.public().into(),
+        sp_keyring::Sr25519Keyring::Alice.public().into(),
     )];
 
     // 创始者保留大部分初始供应量，同时为 dev validator Alice 预留足够质押余额
@@ -207,11 +209,11 @@ pub fn development_config_genesis() -> Value {
 		session: SessionConfig {
 			keys: initial_authorities
 				.iter()
-				.map(|x: &(AccountId, BabeId, GrandpaId)| {
+				.map(|x: &(AccountId, BabeId, GrandpaId, ImOnlineId)| {
 					(
 						x.0.clone(),
 						x.0.clone(),
-						SessionKeys { babe: x.1.clone(), grandpa: x.2.clone() },
+						SessionKeys { babe: x.1.clone(), grandpa: x.2.clone(), im_online: x.3.clone() },
 					)
 				})
 				.collect::<Vec<_>>(),
@@ -322,11 +324,13 @@ pub fn local_config_genesis() -> Value {
                 Sr25519Keyring::Alice.to_account_id(),
                 sp_keyring::Sr25519Keyring::Alice.public().into(),
                 sp_keyring::Ed25519Keyring::Alice.public().into(),
+                sp_keyring::Sr25519Keyring::Alice.public().into(),
             ),
             (
                 Sr25519Keyring::Bob.to_account_id(),
                 sp_keyring::Sr25519Keyring::Bob.public().into(),
                 sp_keyring::Ed25519Keyring::Bob.public().into(),
+                sp_keyring::Sr25519Keyring::Bob.public().into(),
             ),
         ],
         endowed,
@@ -359,6 +363,14 @@ fn parse_grandpa_hex(hex_str: &str) -> GrandpaId {
     ))
 }
 
+/// 从十六进制字符串解析 ImOnline (Sr25519) Authority ID
+fn parse_im_online_hex(hex_str: &str) -> ImOnlineId {
+    let bytes = hex::decode(hex_str).expect("Invalid ImOnline hex key");
+    ImOnlineId::from(sp_core::sr25519::Public::from_raw(
+        bytes.try_into().expect("ImOnline key must be 32 bytes"),
+    ))
+}
+
 /// 主网初始验证者列表
 ///
 /// ⚠️  上线前必须替换为 `nexus-node key generate` 生成的真实密钥
@@ -372,31 +384,48 @@ fn parse_grandpa_hex(hex_str: &str) -> GrandpaId {
 ///    nexus-node key generate --scheme Sr25519   # → AccountId + BABE key
 ///    nexus-node key generate --scheme Ed25519   # → GRANDPA key (用同一助记词)
 ///    ```
-fn mainnet_initial_authorities() -> Vec<(AccountId, BabeId, GrandpaId)> {
+fn mainnet_initial_authorities() -> Vec<(AccountId, BabeId, GrandpaId, ImOnlineId)> {
     let authorities = vec![
         // ── 验证者 1 ──
         (
-            parse_account_hex("98a61401fdff428661ecfd7a536ac318c4d6e79cce0504b3bb74e7b32396f024"),
-            parse_babe_hex("98a61401fdff428661ecfd7a536ac318c4d6e79cce0504b3bb74e7b32396f024"),
-            parse_grandpa_hex("46ae7f266a998f344e65db0403f00afe9b8483af0a131bf3df57aa1337771bcf"),
+            parse_account_hex("e8ac13b0ff525f1d0e1a0f320af6a2635b935d8fe4e1dae9f9d47f4b10b65b27"),
+            parse_babe_hex("e8ac13b0ff525f1d0e1a0f320af6a2635b935d8fe4e1dae9f9d47f4b10b65b27"),
+            parse_grandpa_hex("cf53266dc93b8c60523204ac6e17575bc2038addc39e90a6708ac80d770a0806"),
+            parse_im_online_hex("e8ac13b0ff525f1d0e1a0f320af6a2635b935d8fe4e1dae9f9d47f4b10b65b27"),
         ),
         // ── 验证者 2 ──
         (
-            parse_account_hex("d6c52b1733e67a2adc2ad61a1acc25bd93e4d891448a6be6ab6eb6c6309b8a57"),
-            parse_babe_hex("d6c52b1733e67a2adc2ad61a1acc25bd93e4d891448a6be6ab6eb6c6309b8a57"),
-            parse_grandpa_hex("8ca129dc49a067488b550514de61c75c6b074e90ad97e25362aaa4560b28b060"),
+            parse_account_hex("3670c80b2cdfe4f56a0b9c5b68fe148dbb2e84ab85597f05a2ac0d2c23af0a1b"),
+            parse_babe_hex("3670c80b2cdfe4f56a0b9c5b68fe148dbb2e84ab85597f05a2ac0d2c23af0a1b"),
+            parse_grandpa_hex("13ae6fac4ea723c0850dc13cdf6beb22c630fd9a125bc98ab643dbc4af336f4d"),
+            parse_im_online_hex("3670c80b2cdfe4f56a0b9c5b68fe148dbb2e84ab85597f05a2ac0d2c23af0a1b"),
         ),
         // ── 验证者 3 ──
         (
-            parse_account_hex("765e9f62799b105a1baade1fd49987f2d59c8f6430cfe8f67046a15bbed41b1e"),
-            parse_babe_hex("765e9f62799b105a1baade1fd49987f2d59c8f6430cfe8f67046a15bbed41b1e"),
-            parse_grandpa_hex("f11914faab8cbbece9f46378fac46df17ef09350035557c3d6a4dd5a16f8d6f5"),
+            parse_account_hex("a8b7e6cb0a0544ae24d94868c075ac1680a9f1b87dfc9429026dc9e85f360564"),
+            parse_babe_hex("a8b7e6cb0a0544ae24d94868c075ac1680a9f1b87dfc9429026dc9e85f360564"),
+            parse_grandpa_hex("88443ec1c215fe7544cb886c6e9b89bb4d410eb503b8d6581b37ead565adde8b"),
+            parse_im_online_hex("a8b7e6cb0a0544ae24d94868c075ac1680a9f1b87dfc9429026dc9e85f360564"),
+        ),
+        // ── 验证者 4 ──
+        (
+            parse_account_hex("06b29c9ac78bab319ccdfd6d02241fc75e10e25f65ace0a625dd009680b16333"),
+            parse_babe_hex("06b29c9ac78bab319ccdfd6d02241fc75e10e25f65ace0a625dd009680b16333"),
+            parse_grandpa_hex("b09afc359a0d14e95617c02d2ee5ead14ab33a16af213c860996acd64ce5b144"),
+            parse_im_online_hex("06b29c9ac78bab319ccdfd6d02241fc75e10e25f65ace0a625dd009680b16333"),
+        ),
+        // ── 验证者 5 ──
+        (
+            parse_account_hex("c231d8e99e618ce8f7d8e966850a9fd376031cc5e2caad3a7126af24b6b71756"),
+            parse_babe_hex("c231d8e99e618ce8f7d8e966850a9fd376031cc5e2caad3a7126af24b6b71756"),
+            parse_grandpa_hex("626b724f2367bc618b0c46179e7a603c9fde0f530dd2ac31f58a962c323b505e"),
+            parse_im_online_hex("c231d8e99e618ce8f7d8e966850a9fd376031cc5e2caad3a7126af24b6b71756"),
         ),
     ];
 
     // Safety: prevent launching mainnet with placeholder keys.
     // 安全检查：防止使用占位密钥启动主网。
-    for (i, (account, _babe, _grandpa)) in authorities.iter().enumerate() {
+    for (i, (account, _babe, _grandpa, _im_online)) in authorities.iter().enumerate() {
         let raw: &[u8; 32] = account.as_ref();
         assert!(
             raw.iter().take(30).any(|b| *b != 0),
@@ -415,7 +444,7 @@ fn mainnet_initial_authorities() -> Vec<(AccountId, BabeId, GrandpaId)> {
 /// - 验证者账户获得最小存活存款（用于交易费）
 /// - Sudo key = 创始者地址
 fn mainnet_genesis(
-    initial_authorities: Vec<(AccountId, BabeId, GrandpaId)>,
+    initial_authorities: Vec<(AccountId, BabeId, GrandpaId, ImOnlineId)>,
     root: AccountId,
     technical_members: Vec<AccountId>,
     arbitration_members: Vec<AccountId>,
@@ -448,7 +477,7 @@ fn mainnet_genesis(
 					(
 						x.0.clone(),
 						x.0.clone(),
-						SessionKeys { babe: x.1.clone(), grandpa: x.2.clone() },
+						SessionKeys { babe: x.1.clone(), grandpa: x.2.clone(), im_online: x.3.clone() },
 					)
 				})
 				.collect::<Vec<_>>(),

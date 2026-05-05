@@ -327,7 +327,7 @@ impl PricingProvider for NullPricingProvider {
     Eq,
     TypeInfo,
     MaxEncodedLen,
-    RuntimeDebug,
+    Debug,
 )]
 pub enum PriceReliability {
     /// 价格可靠（TWAP 可用 + 足够交易量）

@@ -8,12 +8,12 @@
 use crate::types::{ComplaintStatus, ComplaintType};
 use codec::{Codec, Decode, Encode};
 use scale_info::TypeInfo;
-use sp_runtime::RuntimeDebug;
+use Debug;
 
 extern crate alloc;
 use alloc::vec::Vec;
 
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct ComplaintSummary<AccountId, Balance> {
     pub id: u64,
     pub domain: [u8; 8],
@@ -27,7 +27,7 @@ pub struct ComplaintSummary<AccountId, Balance> {
     pub updated_at: u64,
 }
 
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct ComplaintDetail<AccountId, Balance> {
     pub id: u64,
     pub domain: [u8; 8],

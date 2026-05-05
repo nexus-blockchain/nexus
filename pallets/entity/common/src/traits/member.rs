@@ -299,7 +299,7 @@ impl<AccountId, Balance: Default> ShoppingBalanceProvider<AccountId, Balance> fo
 
 /// 会员等级信息（无泛型，适合跨模块 trait 返回）
 #[derive(
-    Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, RuntimeDebug, TypeInfo,
+    Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, Debug, TypeInfo,
 )]
 pub struct MemberLevelInfo {
     /// 等级 ID
@@ -317,7 +317,7 @@ pub struct MemberLevelInfo {
 /// Member spend stats with explicit semantics.
 /// 显式语义的会员消费统计。
 #[derive(
-    Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, RuntimeDebug, TypeInfo,
+    Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, Debug, TypeInfo,
 )]
 pub struct MemberSpendStats {
     /// 累计总消费（USDT 精度 10^6）
@@ -329,7 +329,7 @@ pub struct MemberSpendStats {
 /// Member aggregate stats with named fields.
 /// 使用命名字段的会员聚合统计。
 #[derive(
-    Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, RuntimeDebug, TypeInfo,
+    Encode, Decode, codec::DecodeWithMemTracking, Clone, PartialEq, Eq, Debug, TypeInfo,
 )]
 pub struct MemberStats {
     /// 直推人数

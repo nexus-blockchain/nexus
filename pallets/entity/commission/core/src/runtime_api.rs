@@ -9,7 +9,7 @@
 use alloc::vec::Vec;
 use codec::{Codec, Decode, Encode};
 use scale_info::TypeInfo;
-use sp_runtime::RuntimeDebug;
+use Debug;
 
 pub use pallet_commission_common::{MultiLevelActivationInfo, MultiLevelMemberStats, TeamTierInfo};
 
@@ -18,7 +18,7 @@ pub use pallet_commission_common::{MultiLevelActivationInfo, MultiLevelMemberSta
 // ============================================================================
 
 /// NEX 佣金统计
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug, Default)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug, Default)]
 pub struct NexCommissionStats<Balance> {
     pub total_earned: Balance,
     pub pending: Balance,
@@ -28,7 +28,7 @@ pub struct NexCommissionStats<Balance> {
 }
 
 /// Token 佣金统计
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug, Default)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug, Default)]
 pub struct TokenCommissionStats<TokenBalance> {
     pub total_earned: TokenBalance,
     pub pending: TokenBalance,
@@ -38,7 +38,7 @@ pub struct TokenCommissionStats<TokenBalance> {
 }
 
 /// 单线收益快照
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct SingleLineSnapshot {
     pub position: Option<u32>,
     pub upline_levels: Option<u8>,
@@ -48,7 +48,7 @@ pub struct SingleLineSnapshot {
 }
 
 /// 沉淀池快照
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct PoolRewardSnapshot<Balance, TokenBalance> {
     pub claimable_nex: Balance,
     pub claimable_token: TokenBalance,
@@ -57,7 +57,7 @@ pub struct PoolRewardSnapshot<Balance, TokenBalance> {
 }
 
 /// 推荐返佣快照
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct ReferralSnapshot<Balance> {
     pub total_earned: Balance,
     pub cap_max_per_order: Option<Balance>,
@@ -65,7 +65,7 @@ pub struct ReferralSnapshot<Balance> {
 }
 
 /// 会员佣金仪表盘（聚合所有子模块数据）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct MemberCommissionDashboard<Balance, TokenBalance> {
     pub nex_stats: NexCommissionStats<Balance>,
     pub token_stats: TokenCommissionStats<TokenBalance>,
@@ -89,7 +89,7 @@ pub struct MemberCommissionDashboard<Balance, TokenBalance> {
 // ============================================================================
 
 /// 直推返佣信息
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct DirectReferralInfo<Balance> {
     pub referral_total_earned: Balance,
     pub cap_max_per_order: Option<Balance>,
@@ -102,7 +102,7 @@ pub struct DirectReferralInfo<Balance> {
 // ============================================================================
 
 /// 团队业绩信息
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct TeamPerformanceInfo<Balance> {
     pub team_size: u32,
     pub direct_referrals: u32,
@@ -117,7 +117,7 @@ pub struct TeamPerformanceInfo<Balance> {
 // ============================================================================
 
 /// Entity 佣金总览（Owner 视角）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct EntityCommissionOverview<Balance, TokenBalance> {
     pub enabled_modes: u16,
     pub max_commission_rate: u16,
@@ -140,7 +140,7 @@ pub struct EntityCommissionOverview<Balance, TokenBalance> {
 // ============================================================================
 
 /// 单个直推会员详情
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct DirectReferralMember<AccountId, Balance> {
     pub account: AccountId,
     /// 有效等级 ID
@@ -164,7 +164,7 @@ pub struct DirectReferralMember<AccountId, Balance> {
 }
 
 /// 直推会员详情列表
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct DirectReferralDetails<AccountId, Balance> {
     /// 直推会员列表
     pub referrals: Vec<DirectReferralMember<AccountId, Balance>>,
@@ -183,7 +183,7 @@ pub struct DirectReferralDetails<AccountId, Balance> {
 // ============================================================================
 
 /// 提现记录视图（供 Runtime API 返回）
-#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, Eq, TypeInfo, Debug)]
 pub struct WithdrawalRecordView<Balance> {
     /// 提现总额（withdrawal + repurchase + bonus）
     pub total_amount: Balance,

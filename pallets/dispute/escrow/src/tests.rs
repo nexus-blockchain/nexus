@@ -191,14 +191,14 @@ fn apply_decision_partial_bps_sets_closed() {
 #[test]
 fn paused_blocks_operations() {
     new_test_ext().execute_with(|| {
-        assert_ok!(EscrowPallet::set_pause(RuntimeOrigin::root(), true));
+        assert_ok!(EscrowPallet::set_pause(RuntimeOrigin::signed(99), true));
 
         assert_noop!(
             EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500),
             Error::<Test>::GloballyPaused
         );
 
-        assert_ok!(EscrowPallet::set_pause(RuntimeOrigin::root(), false));
+        assert_ok!(EscrowPallet::set_pause(RuntimeOrigin::signed(99), false));
         assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
     });
 }
@@ -346,6 +346,40 @@ fn on_initialize_skips_disputed() {
 
         assert_eq!(Locked::<Test>::get(100), 500);
         assert_eq!(LockStateOf::<Test>::get(100), 1u8);
+    });
+}
+
+#[test]
+fn set_pause_accepts_admin_governance_account() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::set_pause(RuntimeOrigin::signed(99), true));
+        assert!(crate::Paused::<Test>::get());
+    });
+}
+
+#[test]
+fn force_release_accepts_admin_governance_account() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_ok!(EscrowPallet::force_release(
+            RuntimeOrigin::signed(99),
+            100,
+            2,
+        ));
+        assert_eq!(Locked::<Test>::get(100), 0);
+    });
+}
+
+#[test]
+fn force_refund_accepts_admin_governance_account() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(EscrowPallet::lock(RuntimeOrigin::signed(1), 100, 1, 500));
+        assert_ok!(EscrowPallet::force_refund(
+            RuntimeOrigin::signed(99),
+            100,
+            1,
+        ));
+        assert_eq!(Locked::<Test>::get(100), 0);
     });
 }
 
@@ -707,12 +741,12 @@ fn f6_force_refund_requires_admin() {
 #[test]
 fn f7_set_pause_emits_event() {
     new_test_ext().execute_with(|| {
-        assert_ok!(EscrowPallet::set_pause(RuntimeOrigin::root(), true));
+        assert_ok!(EscrowPallet::set_pause(RuntimeOrigin::signed(99), true));
         System::assert_has_event(
             crate::pallet::Event::<Test>::PauseToggled { paused: true }.into(),
         );
 
-        assert_ok!(EscrowPallet::set_pause(RuntimeOrigin::root(), false));
+        assert_ok!(EscrowPallet::set_pause(RuntimeOrigin::signed(99), false));
         System::assert_has_event(
             crate::pallet::Event::<Test>::PauseToggled { paused: false }.into(),
         );

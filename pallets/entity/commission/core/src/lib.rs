@@ -114,7 +114,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct PluginBudgetCaps {
         /// 推荐返佣上限（DirectReward/FirstOrder/RepeatPurchase/FixedAmount）
@@ -157,7 +157,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct CoreCommissionConfig {
         /// 启用的返佣模式（位标志）
@@ -219,7 +219,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     #[scale_info(skip_type_params(MaxLevels))]
     pub struct EntityWithdrawalConfig<MaxLevels: Get<u32>> {
@@ -472,7 +472,7 @@ pub mod pallet {
         Eq,
         TypeInfo,
         MaxEncodedLen,
-        RuntimeDebug,
+        Debug,
     )]
     pub struct WithdrawalRecord<Balance, BlockNumber> {
         /// 提现总额（withdrawal + repurchase + bonus）
