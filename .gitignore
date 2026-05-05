@@ -1,46 +1,31 @@
-# =========================
 # Rust / Cargo
-# =========================
-target/
-# Cargo.lock - 保留用于可重现构建
+/target/
 **/*.rs.bk
 *.pdb
 *.rlib
 
-# =========================
-# Substrate / Polkadot SDK
-# =========================
-# Chain data
-chains/
+# Substrate / local chain data
+/chains/
+/data/
+/node-data/
+/spec/
 *.db
 *.rocksdb
-data/
-
-# Runtime WASM artifacts (generated)
 *.compact.wasm
 *.compact.compressed.wasm
+/genesis.json
+/chain_spec.json
+/keystore/
+/network/
+/my-chain-state/
 
-# Substrate node data
-node-data/
-spec/
-
-# =========================
-# Node.js / npm
-# =========================
-node_modules/
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
+# Node.js / package managers
+/node_modules/
 .npm/
 .yarn/
+pnpm-lock.yaml
 
-# =========================
-# Frontend (Next.js)
-# =========================
-frontend/
-# =========================
 # IDE / Editor
-# =========================
 .idea/
 .vscode/
 *.swp
@@ -48,17 +33,16 @@ frontend/
 *~
 *.sublime-*
 
-# AI Assistants
+# AI assistants local config
 .claude/
 .kiro/
 .windsurf/
 .cursor/
 .aider*
 .continue/
+**/.plan
 
-# =========================
-# OS Generated
-# =========================
+# OS generated
 .DS_Store
 .DS_Store?
 ._*
@@ -68,9 +52,7 @@ ehthumbs.db
 Thumbs.db
 desktop.ini
 
-# =========================
-# Environment & Secrets
-# =========================
+# Environment & secrets
 .env
 .env.local
 .env.*.local
@@ -78,96 +60,66 @@ desktop.ini
 *.pem
 *.key
 *.crt
-secrets/
+/secrets/
 
-# =========================
-# Build & Cache
-# =========================
+# Build / cache artifacts
 *.o
 *.a
 *.so
 *.dylib
-build/
-out/
-dist/
+/build/
+/out/
+/dist/
+**/incremental/
+/rust-project.json
+.cargo/registry/
+.cargo/git/
 
-# =========================
-# Testing & Coverage
-# =========================
-coverage/
+# Testing / coverage
+/coverage/
 *.lcov
 .nyc_output/
-test-results/
+/test-results/
+/criterion/
+/benchmarks/
 
-# =========================
-# Logs
-# =========================
+# Logs / crash dumps
 *.log
-logs/
+/logs/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+crash-*.log
+hs_err_pid*
 
-# =========================
-# Nix / Flake
-# =========================
-result
-result-*
+# Nix / direnv
+/result
+/result-*
 .direnv/
 
-# =========================
-# Media Utils
-# =========================
-media-utils/output/
-media-utils/temp/
+# Media utils generated files
+/media-utils/output/
+/media-utils/temp/
 
-# =========================
-# GroupRobot Bot (standalone binary, repo root only — not pallets/*/grouprobot)
-# =========================
-/grouprobot/
+# Frontend / website generated files (if these dirs are added later)
+/frontend/*.tsbuildinfo
+/frontend/.eslintcache
+/frontend/.vercel
+/.next/
 
-# =========================
-# Chain State (Local Dev)
-# =========================
-my-chain-state/
+# Standalone apps or local worktrees if added later
+/nexus-entity-dapp/
+/nexus-community-dapp/
 
-# =========================
-# Scripts
-# =========================
-scripts/
+# Telegram bot local data
+/telegram/
 
-docs/
-
-
-# =========================
-# Website (Next.js)
-# =========================
-website/
-
-# =========================
-# Frontend (Next.js) - 额外规则
-# =========================
-frontend/*.tsbuildinfo
-frontend/.eslintcache
-frontend/.vercel
-
-# =========================
-# Telegram (Bot 测试数据)
-# =========================
-telegram/
-
-# =========================
-# Misc
-# =========================
+# Misc temp files
 *.bak
 *.tmp
 *.temp
 *.orig
 *.backup
-
-# Crash dumps
-crash-*.log
-hs_err_pid*
 
 # Profiling
 *.prof
@@ -175,65 +127,25 @@ hs_err_pid*
 perf.data*
 flamegraph.svg
 
-# =========================
-# Rust 额外规则
-# =========================
-# Incremental compilation
-**/incremental/
-# Benchmark outputs
-criterion/
-# Cargo registry cache (if present)
-.cargo/registry/
-.cargo/git/
-# rustfmt backup
-*.rs.bk
-# rust-analyzer
-rust-project.json
-
-# =========================
-# Substrate 额外规则
-# =========================
-# Genesis files (may contain secrets)
-genesis.json
-chain_spec.json
-# Keystore
-keystore/
-# Network keys
-network/
-
-# =========================
-# Docker
-# =========================
-docker-compose.override.yml
+# Docker / infrastructure
+/docker-compose.override.yml
 .docker/
-
-# =========================
-# Terraform / Infrastructure
-# =========================
 *.tfstate
 *.tfstate.*
 .terraform/
 *.tfvars
-
-# =========================
-# Kubernetes
-# =========================
 kubeconfig
 *.kubeconfig
 secrets.yaml
 
-# =========================
-# Database
-# =========================
+# Database local files
 *.sqlite
 *.sqlite3
 *.db-journal
 *.db-wal
 *.db-shm
 
-# =========================
 # Archives
-# =========================
 *.zip
 *.tar
 *.tar.gz
@@ -241,32 +153,20 @@ secrets.yaml
 *.rar
 *.7z
 
-# =========================
-# Large Binary Files
-# =========================
+# Large binary artifacts
 *.wasm
 !runtime/src/**/*.wasm
 *.bin
 *.exe
 
-# =========================
-# Workspace Artifacts
-# =========================
-# Benchmark results
-benchmarks/
-# Documentation build
-docs/_build/
-docs/target/
-# Release artifacts
-releases/
+# Workspace artifacts
+/docs/_build/
+/docs/target/
+/releases/
 *.deb
 *.rpm
 *.AppImage
 
-website/
-
-nexus-entity-dapp/
-
-my-chain-state/
-
-nexus-community-dapp
+# Root-level personal Chinese markdown notes
+/[一-龥]*.md
+/*[一-龥]*.md
